@@ -7536,3 +7536,295 @@ func TestNomadImagePoll_UsesImageRevision(t *testing.T) {
 		t.Fatalf("timed out waiting for deploy_started event")
 	}
 }
+
+
+func TestGetRemoteImageRevision_ExtraErrorBranches(t *testing.T) {
+	t.Run("invalid image reference returns error", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{})
+		if _, err := d.GetRemoteImageRevision(context.Background(), "invalid ref with spaces"); err == nil {
+			t.Fatalf("expected error on invalid image ref, got nil")
+		}
+	})
+
+	t.Run("child manifest request fails with non-200", func(t *testing.T) {
+		indexJSON := `{
+			"schemaVersion": 2,
+			"mediaType": "application/vnd.oci.image.index.v1+json",
+			"manifests": [
+				{
+					"mediaType": "application/vnd.oci.image.manifest.v1+json",
+					"digest": "sha256:childdigest11111111111111111111111111111111111111111111111111111111",
+					"platform": { "architecture": "amd64", "os": "linux" }
+				}
+			]
+		}`
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.Path, "latest") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(indexJSON)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("child manifest not found")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if _, err := d.GetRemoteImageRevision(context.Background(), "ghcr.io/azylman/aerial-brain:latest"); err == nil {
+			t.Fatalf("expected error on child manifest 404, got nil")
+		}
+	})
+
+	t.Run("manifest missing config digest and annotations returns error", func(t *testing.T) {
+		manifestJSON := `{ "schemaVersion": 2 }`
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(manifestJSON)),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if _, err := d.GetRemoteImageRevision(context.Background(), "ghcr.io/azylman/aerial-brain:latest"); err == nil {
+			t.Fatalf("expected error on missing config digest, got nil")
+		}
+	})
+
+	t.Run("blob fetch non-200 returns error", func(t *testing.T) {
+		manifestJSON := `{
+			"schemaVersion": 2,
+			"config": { "digest": "sha256:blobdigest22222222222222222222222222222222222222222222222222222222" }
+		}`
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.Path, "/manifests/") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(manifestJSON)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusBadGateway,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("gateway error on blob")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if _, err := d.GetRemoteImageRevision(context.Background(), "ghcr.io/azylman/aerial-brain:latest"); err == nil {
+			t.Fatalf("expected error on blob 502, got nil")
+		}
+	})
+}
+
+func TestFetchRegistryWithAuth_ErrorBranches(t *testing.T) {
+	t.Run("existing bearer returns 401 and recovers via challenge", func(t *testing.T) {
+		step := 0
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					step++
+					if step == 1 {
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/redis:pull"`}},
+							Body:       ioNopCloser(strings.NewReader("stale token")),
+						}, nil
+					}
+					if req.URL.Host == "auth.docker.io" {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"access_token":"refreshed-token"}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("ok")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		resp, tok, err := d.fetchRegistryWithAuth(context.Background(), "https://registry-1.docker.io/v2/library/redis/manifests/latest", "registry-1.docker.io", "library/redis", "", "stale-bearer")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp != nil && resp.Body != nil {
+			defer resp.Body.Close()
+		}
+		if tok != "refreshed-token" {
+			t.Errorf("got token %q, want refreshed-token", tok)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+	})
+
+	t.Run("malformed Www-Authenticate header returns error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     http.Header{"Www-Authenticate": []string{"Basic realm=foo"}},
+						Body:       ioNopCloser(strings.NewReader("unauthorized")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if r, _, err := d.fetchRegistryWithAuth(context.Background(), "https://ghcr.io/v2/foo/manifests/latest", "ghcr.io", "foo", "", ""); err == nil {
+			if r != nil && r.Body != nil {
+				r.Body.Close()
+			}
+			t.Fatalf("expected error on malformed auth header, got nil")
+		}
+	})
+
+	t.Run("token request non-200 returns error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.Path, "manifests") {
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="https://ghcr.io/token",service="ghcr.io"`}},
+							Body:       ioNopCloser(strings.NewReader("unauthorized")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusForbidden,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("forbidden")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if r, _, err := d.fetchRegistryWithAuth(context.Background(), "https://ghcr.io/v2/foo/manifests/latest", "ghcr.io", "foo", "", ""); err == nil {
+			if r != nil && r.Body != nil {
+				r.Body.Close()
+			}
+			t.Fatalf("expected error on token 403, got nil")
+		}
+	})
+
+	t.Run("token request malformed JSON returns error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.Path, "manifests") {
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="https://ghcr.io/token",service="ghcr.io"`}},
+							Body:       ioNopCloser(strings.NewReader("unauthorized")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("{invalid-json")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if r, _, err := d.fetchRegistryWithAuth(context.Background(), "https://ghcr.io/v2/foo/manifests/latest", "ghcr.io", "foo", "", ""); err == nil {
+			if r != nil && r.Body != nil {
+				r.Body.Close()
+			}
+			t.Fatalf("expected error on malformed token json, got nil")
+		}
+	})
+
+	t.Run("token request empty token returns error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.Path, "manifests") {
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="https://ghcr.io/token",service="ghcr.io"`}},
+							Body:       ioNopCloser(strings.NewReader("unauthorized")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{"token":""}`)),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if r, _, err := d.fetchRegistryWithAuth(context.Background(), "https://ghcr.io/v2/foo/manifests/latest", "ghcr.io", "foo", "", ""); err == nil {
+			if r != nil && r.Body != nil {
+				r.Body.Close()
+			}
+			t.Fatalf("expected error on empty token, got nil")
+		}
+	})
+
+	t.Run("ghcr.io token request sets Basic Auth when PAT is present", func(t *testing.T) {
+		var basicAuthHeader string
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.Path, "manifests") {
+						if req.Header.Get("Authorization") == "Bearer dummy-ghcr-token" {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     make(http.Header),
+								Body:       ioNopCloser(strings.NewReader("ok")),
+							}, nil
+						}
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="https://ghcr.io/token",service="ghcr.io"`}},
+							Body:       ioNopCloser(strings.NewReader("unauthorized")),
+						}, nil
+					}
+					basicAuthHeader = req.Header.Get("Authorization")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{"token":"dummy-ghcr-token"}`)),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient, PAT: "my-secret-pat"})
+		resp, tok, err := d.fetchRegistryWithAuth(context.Background(), "https://ghcr.io/v2/azylman/aerial/manifests/latest", "ghcr.io", "azylman/aerial", "", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp != nil && resp.Body != nil {
+			defer resp.Body.Close()
+		}
+		if tok != "dummy-ghcr-token" {
+			t.Errorf("got token %q, want dummy-ghcr-token", tok)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if !strings.HasPrefix(basicAuthHeader, "Basic ") {
+			t.Errorf("expected Basic auth header on ghcr.io token request, got %q", basicAuthHeader)
+		}
+	})
+}

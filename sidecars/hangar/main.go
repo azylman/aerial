@@ -805,11 +805,11 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 
 // fetchRegistryWithAuth performs an HTTP request against a container registry, handling OAuth2/Bearer
 // token challenges automatically and reusing existingBearer if still valid.
-func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, method, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
+func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
 	var resp *http.Response
 
 	if existingBearer != "" {
-		req, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed creating authenticated request for %s: %w", targetURL, err)
 		}
@@ -827,7 +827,7 @@ func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, method, targetUR
 		}
 		closeWarn(resp.Body, "unauthorized response body with existing bearer")
 	} else {
-		req, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed creating probe request for %s: %w", targetURL, err)
 		}
@@ -904,7 +904,7 @@ func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, method, targetUR
 		return nil, "", fmt.Errorf("empty bearer token returned for %s", targetURL)
 	}
 
-	authReq, aErr := http.NewRequestWithContext(ctx, method, targetURL, nil)
+	authReq, aErr := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if aErr != nil {
 		return nil, "", fmt.Errorf("failed creating final authenticated request for %s: %w", targetURL, aErr)
 	}
@@ -930,7 +930,7 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 	}
 
 	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tagOrDigest)
-	resp, bearerToken, err := d.fetchRegistryWithAuth(ctx, http.MethodGet, manifestURL, registry, repository, acceptManifestHeaders, "")
+	resp, bearerToken, err := d.fetchRegistryWithAuth(ctx, manifestURL, registry, repository, acceptManifestHeaders, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch manifest for %s: %w", imageRef, err)
 	}
@@ -953,7 +953,7 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 		}
 
 		childURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, childDigest)
-		childResp, childToken, childErr := d.fetchRegistryWithAuth(ctx, http.MethodGet, childURL, registry, repository, acceptManifestHeaders, bearerToken)
+		childResp, childToken, childErr := d.fetchRegistryWithAuth(ctx, childURL, registry, repository, acceptManifestHeaders, bearerToken)
 		if childErr != nil {
 			return "", fmt.Errorf("failed to fetch child manifest %s for %s: %w", childDigest, imageRef, childErr)
 		}
@@ -988,7 +988,7 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 
 	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", registry, repository, configDigest)
 	const acceptBlobHeaders = "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json, application/octet-stream"
-	blobResp, _, blobErr := d.fetchRegistryWithAuth(ctx, http.MethodGet, blobURL, registry, repository, acceptBlobHeaders, bearerToken)
+	blobResp, _, blobErr := d.fetchRegistryWithAuth(ctx, blobURL, registry, repository, acceptBlobHeaders, bearerToken)
 	if blobErr != nil {
 		return "", fmt.Errorf("failed to fetch config blob %s for %s: %w", configDigest, imageRef, blobErr)
 	}
