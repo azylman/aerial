@@ -10,56 +10,125 @@ import (
 	"time"
 )
 
-func TestLoadConfig_TimezoneResolution(t *testing.T) {
-	// 1. Fallback when both DEFAULT_TIMEZONE and TZ are unset
-	cfg1, err := LoadConfigFromLookup(func(k string) string {
-		if k == "DATABASE_URL" {
-			return ":memory:"
-		}
-		return ""
-	})
-	if err != nil {
-		t.Fatalf("LoadConfigFromLookup failed: %v", err)
-	}
-	if cfg1.Timezone != DefaultTimezone {
-		t.Errorf("Expected fallback %q, got %q", DefaultTimezone, cfg1.Timezone)
+func TestLoadConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	yamlContent := `
+port: "4005"
+timezone: "America/Chicago"
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write test yaml: %v", err)
 	}
 
-	// 2. TZ environment variable fallback
-	cfg2, err := LoadConfigFromLookup(func(k string) string {
-		if k == "DATABASE_URL" {
-			return ":memory:"
-		}
-		if k == "TZ" {
-			return "America/Chicago"
-		}
-		return ""
-	})
+	// 1. Success case
+	cfg, err := LoadConfigFile(cfgPath, "postgres://user:pass@host:5432/db")
 	if err != nil {
-		t.Fatalf("LoadConfigFromLookup failed: %v", err)
+		t.Fatalf("LoadConfigFile failed: %v", err)
 	}
-	if cfg2.Timezone != "America/Chicago" {
-		t.Errorf("Expected TZ 'America/Chicago', got %q", cfg2.Timezone)
+	if cfg.Port != "4005" {
+		t.Errorf("expected port 4005, got %s", cfg.Port)
+	}
+	if cfg.Timezone != "America/Chicago" {
+		t.Errorf("expected timezone America/Chicago, got %s", cfg.Timezone)
+	}
+	if cfg.DatabaseURL != "postgres://user:pass@host:5432/db" {
+		t.Errorf("expected dbURL postgres://user:pass@host:5432/db, got %s", cfg.DatabaseURL)
 	}
 
-	// 3. DEFAULT_TIMEZONE environment variable takes highest precedence
-	cfg3, err := LoadConfigFromLookup(func(k string) string {
-		if k == "DATABASE_URL" {
-			return ":memory:"
-		}
-		if k == "DEFAULT_TIMEZONE" {
-			return "America/New_York"
-		}
-		if k == "TZ" {
-			return "America/Chicago"
-		}
-		return ""
-	})
-	if err != nil {
-		t.Fatalf("LoadConfigFromLookup failed: %v", err)
+	// 2. Missing file -> fail fast
+	if _, err := LoadConfigFile(filepath.Join(tmpDir, "nonexistent.yaml"), "postgres://..."); err == nil {
+		t.Error("expected error for nonexistent config file")
 	}
-	if cfg3.Timezone != "America/New_York" {
-		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", cfg3.Timezone)
+
+	// 3. Malformed YAML -> fail fast
+	malformedPath := filepath.Join(tmpDir, "malformed.yaml")
+	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0644)
+	if _, err := LoadConfigFile(malformedPath, "postgres://..."); err == nil {
+		t.Error("expected error for malformed YAML")
+	}
+
+	// 4. Missing port -> fail fast
+	noPortPath := filepath.Join(tmpDir, "no_port.yaml")
+	_ = os.WriteFile(noPortPath, []byte("timezone: \"America/Chicago\"\n"), 0644)
+	if _, err := LoadConfigFile(noPortPath, "postgres://..."); err == nil {
+		t.Error("expected error when port is missing")
+	}
+
+	// 5. Missing timezone -> fail fast
+	badPath := filepath.Join(tmpDir, "bad.yaml")
+	_ = os.WriteFile(badPath, []byte("port: \"4005\"\n"), 0644)
+	if _, err := LoadConfigFile(badPath, "postgres://..."); err == nil {
+		t.Error("expected error when timezone is missing")
+	}
+
+	// 6. Missing dbURL -> fail fast
+	if _, err := LoadConfigFile(cfgPath, ""); err == nil {
+		t.Error("expected error when dbURL is empty")
+	}
+
+	// 7. Empty path -> fail fast
+	if _, err := LoadConfigFile("", "postgres://..."); err == nil {
+		t.Error("expected error when path is empty")
+	}
+}
+
+func TestMain_Execution(t *testing.T) {
+	oldRun := runAppFn
+	oldExit := exitFn
+	oldPath := configPath
+	defer func() {
+		runAppFn = oldRun
+		exitFn = oldExit
+		configPath = oldPath
+	}()
+
+	tmpDir := t.TempDir()
+	testCfg := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\n"), 0644)
+	configPath = testCfg
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
+
+	// 1. Success path
+	runCalled := false
+	runAppFn = func(ctx context.Context, cfg *Config) error {
+		runCalled = true
+		return nil
+	}
+	main()
+	if !runCalled {
+		t.Error("expected runAppFn to be called")
+	}
+
+	// 2. Server closed error (should not trigger exitFn)
+	exitCalled := false
+	exitFn = func(format string, v ...interface{}) {
+		exitCalled = true
+	}
+	runAppFn = func(ctx context.Context, cfg *Config) error {
+		return http.ErrServerClosed
+	}
+	main()
+	if exitCalled {
+		t.Error("did not expect exitFn on http.ErrServerClosed")
+	}
+
+	// 3. Server generic failure (should trigger exitFn)
+	exitCalled = false
+	runAppFn = func(ctx context.Context, cfg *Config) error {
+		return context.DeadlineExceeded
+	}
+	main()
+	if !exitCalled {
+		t.Error("expected exitFn on server error")
+	}
+
+	// 4. Config loading failure (should trigger exitFn)
+	exitCalled = false
+	configPath = filepath.Join(tmpDir, "nonexistent.yaml")
+	main()
+	if !exitCalled {
+		t.Error("expected exitFn on config load error")
 	}
 }
 

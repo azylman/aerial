@@ -18,8 +18,8 @@ RUN npm install -g supergateway@^3.4.0 && \
 # Copy compiled mcp-nomad Go binary
 COPY --from=builder /go/bin/mcp-nomad /usr/local/bin/mcp-nomad
 
-ENV PORT=4006
-EXPOSE 4006
+# Copy entrypoint script
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["supergateway", "--host", "0.0.0.0", "--port", "4006", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/mcp", "--stateful", "--sessionTimeout", "60000", "--cors", "--stdio", "mcp-nomad -transport stdio"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]

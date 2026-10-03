@@ -36,13 +36,9 @@ job "infisical-mcp" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-infisical-mcp:latest"
         network_mode = "host"
-      }
-
-      env {
-        PORT                         = "4007"
-        INFISICAL_HOST_URL           = "http://infisical:8085"
-        INFISICAL_AUTH_METHOD        = "universal-auth"
-        INFISICAL_MASK_SECRET_VALUES = "false"
+        volumes = [
+          "/mnt/data/supervisor/share/aerial-config/services/mcp/infisical-mcp.yaml:/config/config.yaml:ro"
+        ]
       }
 
       template {

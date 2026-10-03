@@ -14,7 +14,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+// DefaultConfigPath is the canonical in-container configuration path.
+const DefaultConfigPath = "/config/config.yaml"
 
 // Config defines configuration settings for discord-mcp proxy and upstream server.
 type Config struct {
@@ -24,36 +29,55 @@ type Config struct {
 	AppPath      string
 }
 
-// DefaultConfig returns production default values for discord-mcp.
-func DefaultConfig() *Config {
-	return &Config{
-		Port:         "4001",
-		UpstreamPort: "4005",
-		NodeBin:      "node",
-		AppPath:      "build/app.js",
-	}
+// DiscordYAMLConfig defines the declarative file schema for /config/config.yaml.
+type DiscordYAMLConfig struct {
+	Port         string `yaml:"port"`
+	UpstreamPort string `yaml:"upstream_port"`
+	NodeBin      string `yaml:"node_bin"`
+	AppPath      string `yaml:"app_path"`
 }
 
-// NewConfigFromLookup populates Config using lookup with fallback to DefaultConfig.
-// Nil lookup is safely guarded.
-func NewConfigFromLookup(lookup func(string) string) *Config {
-	if lookup == nil {
-		return DefaultConfig()
+// LoadConfigFile loads and validates the YAML config from path.
+// Fails fast if the file is missing, malformed, or required fields are absent.
+func LoadConfigFile(path string) (*Config, error) {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return nil, fmt.Errorf("config: path cannot be empty")
 	}
-	cfg := DefaultConfig()
-	if p := strings.TrimSpace(lookup("PORT")); p != "" {
-		cfg.Port = p
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
-	if up := strings.TrimSpace(lookup("UPSTREAM_PORT")); up != "" {
-		cfg.UpstreamPort = up
+
+	var ycfg DiscordYAMLConfig
+	if err := yaml.Unmarshal(data, &ycfg); err != nil {
+		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
 	}
-	if nb := strings.TrimSpace(lookup("NODE_BIN")); nb != "" {
-		cfg.NodeBin = nb
+
+	port := strings.TrimSpace(ycfg.Port)
+	if port == "" {
+		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
-	if ap := strings.TrimSpace(lookup("APP_PATH")); ap != "" {
-		cfg.AppPath = ap
+	upstreamPort := strings.TrimSpace(ycfg.UpstreamPort)
+	if upstreamPort == "" {
+		return nil, fmt.Errorf("config: upstream_port is required in %s", cleanPath)
 	}
-	return cfg
+
+	nodeBin := strings.TrimSpace(ycfg.NodeBin)
+	if nodeBin == "" {
+		nodeBin = "node"
+	}
+	appPath := strings.TrimSpace(ycfg.AppPath)
+	if appPath == "" {
+		appPath = "build/app.js"
+	}
+
+	return &Config{
+		Port:         port,
+		UpstreamPort: upstreamPort,
+		NodeBin:      nodeBin,
+		AppPath:      appPath,
+	}, nil
 }
 
 // PollUpstream checks if upstream TCP port is accepting connections.
@@ -131,6 +155,7 @@ var (
 	runProxyApp        = RunProxyApp
 	exitFn             = log.Fatalf
 	onServerReady      func(addr string)
+	configPath         = DefaultConfigPath
 )
 
 // RunProxyApp starts the upstream node process and proxy server with graceful shutdown.
@@ -208,7 +233,10 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
-	cfg := NewConfigFromLookup(os.Getenv)
+	cfg, err := LoadConfigFile(configPath)
+	if err != nil {
+		exitFn("[Discord-MCP] Fatal configuration error: %v", err)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

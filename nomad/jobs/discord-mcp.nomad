@@ -36,11 +36,9 @@ job "discord-mcp" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-discord-mcp:latest"
         network_mode = "host"
-      }
-
-      env {
-        PORT          = "4001"
-        UPSTREAM_PORT = "4025"
+        volumes = [
+          "/mnt/data/supervisor/share/aerial-config/services/mcp/discord-mcp.yaml:/config/config.yaml:ro"
+        ]
       }
 
       template {

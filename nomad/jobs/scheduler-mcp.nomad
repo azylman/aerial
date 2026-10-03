@@ -36,12 +36,9 @@ job "scheduler-mcp" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-scheduler-mcp:latest"
         network_mode = "host"
-      }
-
-      env {
-        PORT             = "4005"
-        DEFAULT_TIMEZONE = "America/Los_Angeles"
-        TZ               = "America/Los_Angeles"
+        volumes = [
+          "/mnt/data/supervisor/share/aerial-config/services/mcp/scheduler-mcp.yaml:/config/config.yaml:ro"
+        ]
       }
 
       template {

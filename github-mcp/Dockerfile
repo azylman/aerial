@@ -13,8 +13,8 @@ RUN --mount=type=cache,target=/root/.npm \
 # Copy GitHub MCP server static binary
 COPY --from=src --link /server/github-mcp-server /usr/local/bin/github-mcp-server
 
-ENV PORT=4003
-EXPOSE 4003
+# Copy entrypoint script
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["supergateway", "--host", "0.0.0.0", "--port", "4003", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/mcp", "--stateful", "--sessionTimeout", "60000", "--cors", "--stdio", "github-mcp-server stdio"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]

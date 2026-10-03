@@ -65,21 +65,28 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	return nil
 }
 
+var (
+	configPath = DefaultConfigPath
+	runAppFn   = RunApp
+	exitFn     = log.Fatalf
+)
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
 
-	cfg, err := LoadConfig()
+	cfg, err := LoadConfigFile(configPath, os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatalf("Configuration error: %v", err)
+		exitFn("Fatal configuration error: %v", err)
+		return
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := RunApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("Server failure: %v", err)
+	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		exitFn("Server failure: %v", err)
 	}
 }
 
