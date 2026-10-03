@@ -366,6 +366,12 @@ func normalizeRepo(repo string) string {
 	return repo
 }
 
+// cleanRepoName strips the owner prefix (e.g. "azylman/") for concise Discord notifications.
+func cleanRepoName(repo string) string {
+	repo = strings.TrimSpace(repo)
+	return strings.TrimPrefix(repo, "azylman/")
+}
+
 // RegisteredPR holds basic identification for an active pull request.
 type RegisteredPR struct {
 	PRNumber int    `json:"pr_number"`
@@ -1630,19 +1636,16 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 
 	if evt.Event == "deploy_started" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
+		repoName := cleanRepoName(evt.Repo)
 		var msg string
-		if evt.Repo != "" && evt.PRNumber > 0 && evt.CommitSHA != "" {
-			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA)
-		} else if evt.Repo != "" && evt.PRNumber > 0 {
-			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s (PR #%d).", evt.JobName, evt.Repo, evt.PRNumber)
-		} else if evt.Repo != "" && evt.CommitSHA != "" {
-			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s (commit: %s).", evt.JobName, evt.Repo, evt.CommitSHA)
-		} else if evt.PRNumber > 0 && evt.CommitSHA != "" {
-			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s (PR #%d, commit: %s).", evt.JobName, evt.PRNumber, evt.CommitSHA)
-		} else if evt.Repo != "" {
-			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s.", evt.JobName, evt.Repo)
+		if repoName != "" && evt.PRNumber > 0 {
+			msg = fmt.Sprintf("(PR: #%d, repo: %s): Starting deploy for %s", evt.PRNumber, repoName, evt.JobName)
+		} else if repoName != "" {
+			msg = fmt.Sprintf("(repo: %s): Starting deploy for %s", repoName, evt.JobName)
+		} else if evt.PRNumber > 0 {
+			msg = fmt.Sprintf("(PR: #%d): Starting deploy for %s", evt.PRNumber, evt.JobName)
 		} else {
-			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s.", evt.JobName)
+			msg = fmt.Sprintf("Starting deploy for %s", evt.JobName)
 		}
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
 			ChannelID: targetID,
@@ -1714,9 +1717,16 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 	} else if evt.Event == "sync_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
-		msg := fmt.Sprintf("Git sync completed for %s (commit %s). Mounted rules, skills, and configs updated.", evt.Repo, evt.CommitSHA)
-		if evt.PRNumber > 0 {
-			msg = fmt.Sprintf("Git sync completed for %s (PR #%d, commit %s). Mounted rules, skills, and configs updated.", evt.Repo, evt.PRNumber, evt.CommitSHA)
+		repoName := cleanRepoName(evt.Repo)
+		var msg string
+		if repoName != "" && evt.PRNumber > 0 {
+			msg = fmt.Sprintf("(PR: #%d, repo: %s): Git file sync completed", evt.PRNumber, repoName)
+		} else if repoName != "" {
+			msg = fmt.Sprintf("(repo: %s): Git file sync completed", repoName)
+		} else if evt.PRNumber > 0 {
+			msg = fmt.Sprintf("(PR: #%d): Git file sync completed", evt.PRNumber)
+		} else {
+			msg = "Git file sync completed"
 		}
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
 			ChannelID: targetID,
@@ -2379,7 +2389,17 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
 
 					if IsValidDiscordSnowflake(res.TargetID) && s.dispatcher != nil {
-						msg := fmt.Sprintf("PR #%d on %s merged into main.", res.PRNumber, res.Repo)
+						repoName := cleanRepoName(res.Repo)
+						var msg string
+						if repoName != "" && res.PRNumber > 0 {
+							msg = fmt.Sprintf("(PR: #%d, repo: %s): Merged into main", res.PRNumber, repoName)
+						} else if res.PRNumber > 0 {
+							msg = fmt.Sprintf("(PR: #%d): Merged into main", res.PRNumber)
+						} else if repoName != "" {
+							msg = fmt.Sprintf("(repo: %s): Merged into main", repoName)
+						} else {
+							msg = "Merged into main"
+						}
 						if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
 							ChannelID: res.TargetID,
 							Content:   msg,

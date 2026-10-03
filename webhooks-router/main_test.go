@@ -2973,11 +2973,8 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 1 {
 		t.Fatalf("expected 1 direct message dispatch after deploy_started, got %d", len(dmCalls))
 	}
-	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "Continuous Delivery deployment started for job brain on azylman/aerial") {
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "(PR: #527, repo: aerial): Starting deploy for brain") {
 		t.Errorf("unexpected deploy_started direct message: %+v", dmCalls[0])
-	}
-	if !strings.Contains(dmCalls[0].Content, "PR #527") || !strings.Contains(dmCalls[0].Content, "commit: sha1234") {
-		t.Errorf("expected PR #527 and commit in message: %+v", dmCalls[0])
 	}
 	if len(mockDisp.PromptCalls()) != 0 {
 		t.Fatalf("expected 0 prompt calls on deploy_started, got %d", len(mockDisp.PromptCalls()))
@@ -3085,7 +3082,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 2 {
 		t.Fatalf("expected 2 direct message dispatches after sync_success, got %d", len(dmCalls))
 	}
-	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "Git sync completed") {
+	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "(repo: aerial-config): Git file sync completed") {
 		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[1])
 	}
 
@@ -3494,7 +3491,7 @@ func TestProcessGitHubEvent_PRMergedDirectMessage(t *testing.T) {
 		if dm.ChannelID != "1555405874565091380" {
 			t.Errorf("expected channelID 1555405874565091380, got %s", dm.ChannelID)
 		}
-		if !strings.Contains(dm.Content, "PR #542 on azylman/aerial merged into main.") {
+		if !strings.Contains(dm.Content, "(PR: #542, repo: aerial): Merged into main") {
 			t.Errorf("unexpected content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
@@ -3524,7 +3521,7 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 
 	select {
 	case dm := <-mockDisp.directMessageCh:
-		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "Git sync completed for azylman/aerial") {
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "(PR: #542, repo: aerial): Git file sync completed") {
 			t.Errorf("unexpected direct message content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
