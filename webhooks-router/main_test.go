@@ -3157,6 +3157,27 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(mockDisp.PromptCalls()) != 4 {
 		t.Fatalf("expected still 4 prompt dispatches after invalid target deploy_started, got %d", len(mockDisp.PromptCalls()))
 	}
+
+	// 8. sync_success with empty TargetID performs late resolution via ResolvePRBySHA and triggers direct message
+	mockReg.resolvePRNum = 241
+	mockReg.resolveTargetID = "1555405874565091380"
+	lateSyncEvt := HangarDeployEvent{
+		Event:     "sync_success",
+		Repo:      "azylman/aerial-config",
+		CommitSHA: "dccc646186d7bf7d17efa6cac6f730d17f66125b",
+		TargetID:  "",
+		PRNumber:  0,
+	}
+	srv.ProcessHangarEvent(ctx, lateSyncEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 6 {
+		t.Fatalf("expected 6 direct message dispatches after late resolved sync_success, got %d", len(dmCalls))
+	}
+	if dmCalls[5].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[5].Content, "🔄 **(PR: #241, repo: aerial-config)** Git file sync completed") {
+		t.Errorf("unexpected late resolved sync_success direct message: %+v", dmCalls[5])
+	}
 }
 
 func TestResolveWorkflowRunImages(t *testing.T) {

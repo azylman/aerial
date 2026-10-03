@@ -2429,24 +2429,22 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 	res := d.SyncRepo(ctx, repoPath)
 	if res.Error != "" {
-		if isSnowflake(req.TargetID) {
-			commitSHA := res.CurrentHead
-			if commitSHA == "" {
-				commitSHA = req.Commit
-			}
-			failEvt := HangarDeployEvent{
-				Event:     "sync_failed",
-				JobName:   "git-sync",
-				Repo:      req.Repo,
-				PRNumber:  req.PRNumber,
-				TargetID:  req.TargetID,
-				CommitSHA: commitSHA,
-				Status:    "failed",
-				Details:   res.Error,
-				Timestamp: time.Now().UTC(),
-			}
-			d.DispatchDeployEvent(failEvt)
+		commitSHA := res.CurrentHead
+		if commitSHA == "" {
+			commitSHA = req.Commit
 		}
+		failEvt := HangarDeployEvent{
+			Event:     "sync_failed",
+			JobName:   "git-sync",
+			Repo:      req.Repo,
+			PRNumber:  req.PRNumber,
+			TargetID:  req.TargetID,
+			CommitSHA: commitSHA,
+			Status:    "failed",
+			Details:   res.Error,
+			Timestamp: time.Now().UTC(),
+		}
+		d.DispatchDeployEvent(failEvt)
 		return GitPushEventResponse{
 			Status:  "error",
 			Repo:    req.Repo,
@@ -2462,24 +2460,22 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		Commit: res.CurrentHead,
 	}
 
-	if isSnowflake(req.TargetID) {
-		commitSHA := res.CurrentHead
-		if commitSHA == "" {
-			commitSHA = req.Commit
-		}
-		syncEvt := HangarDeployEvent{
-			Event:     "sync_success",
-			JobName:   "git-sync",
-			Repo:      req.Repo,
-			PRNumber:  req.PRNumber,
-			TargetID:  req.TargetID,
-			CommitSHA: commitSHA,
-			Status:    "success",
-			Details:   "git sync completed",
-			Timestamp: time.Now().UTC(),
-		}
-		d.DispatchDeployEvent(syncEvt)
+	commitSHA := res.CurrentHead
+	if commitSHA == "" {
+		commitSHA = req.Commit
 	}
+	syncEvt := HangarDeployEvent{
+		Event:     "sync_success",
+		JobName:   "git-sync",
+		Repo:      req.Repo,
+		PRNumber:  req.PRNumber,
+		TargetID:  req.TargetID,
+		CommitSHA: commitSHA,
+		Status:    "success",
+		Details:   "git sync completed",
+		Timestamp: time.Now().UTC(),
+	}
+	d.DispatchDeployEvent(syncEvt)
 
 	cleanRepo := strings.ToLower(filepath.Clean(repoPath))
 	isAerialConfig := strings.Contains(cleanRepo, "aerial-config")
