@@ -18,6 +18,7 @@ const (
 	ModeShare    Mode = "share"
 	ModeSchedule Mode = "schedule"
 	ModeBatch    Mode = "batch"
+	ModeSearch   Mode = "search"
 )
 
 // Config encapsulates CLI arguments and mode settings.
@@ -28,7 +29,7 @@ type Config struct {
 
 // HelpMessage returns the CLI usage documentation.
 func HelpMessage() string {
-	return "Usage: hook-guard [share|schedule|batch|all]"
+	return "Usage: hook-guard [share|schedule|batch|search|all]"
 }
 
 // ParseCLIConfig parses command line arguments and infers mode from executable name.
@@ -37,7 +38,7 @@ func ParseCLIConfig(args []string) Config {
 		Mode: ModeAll,
 	}
 
-	// 1. Detect mode from binary base name (supporting symlinks like share-guard, schedule-guard, batch-guard)
+	// 1. Detect mode from binary base name (supporting symlinks like share-guard, schedule-guard, batch-guard, search-guard)
 	if len(args) > 0 {
 		base := strings.ToLower(filepath.Base(args[0]))
 		if strings.Contains(base, "share") {
@@ -46,6 +47,8 @@ func ParseCLIConfig(args []string) Config {
 			cfg.Mode = ModeSchedule
 		} else if strings.Contains(base, "batch") {
 			cfg.Mode = ModeBatch
+		} else if strings.Contains(base, "search") {
+			cfg.Mode = ModeSearch
 		}
 	}
 
@@ -59,6 +62,8 @@ func ParseCLIConfig(args []string) Config {
 			cfg.Mode = ModeSchedule
 		case "batch", "batch-guard":
 			cfg.Mode = ModeBatch
+		case "search", "search-guard":
+			cfg.Mode = ModeSearch
 		case "all":
 			cfg.Mode = ModeAll
 		case "-h", "--help", "help":

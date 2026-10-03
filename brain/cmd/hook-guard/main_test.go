@@ -124,6 +124,27 @@ func TestRunCLI(t *testing.T) {
 			wantCode: 0,
 		},
 		{
+			name:     "search subcommand denies root search",
+			args:     []string{"hook-guard", "search"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -maxdepth 1"}}}`,
+			wantDeny: true,
+			wantCode: 0,
+		},
+		{
+			name:     "symlink search-guard base name",
+			args:     []string{"/usr/local/bin/search-guard"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find . -name '*.go'"}}}`,
+			wantDeny: true,
+			wantCode: 0,
+		},
+		{
+			name:     "search-guard alias arg",
+			args:     []string{"hook-guard", "search-guard"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find . -name '*.go'"}}}`,
+			wantDeny: true,
+			wantCode: 0,
+		},
+		{
 			name:     "share-guard alias arg",
 			args:     []string{"hook-guard", "share-guard"},
 			input:    `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/foo.go"}}}`,
