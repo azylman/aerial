@@ -364,15 +364,12 @@ All code and configuration changes across all repositories (`aerial`, `aerial-co
    /share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "feat(module): description"
    ```
    - Auto-detects target repository and owner from the scratch git remote.
-   - Pushes branch, arms native GitHub auto-merge (`SQUASH`), and schedules a one-shot follow-up check via `scheduler-mcp`.
+   - Pushes branch, arms native GitHub auto-merge (`SQUASH`), and registers the PR in PostgreSQL `pr_registry` for event-driven continuous delivery.
    - **TURN TERMINATION INVARIANT**: The submit command instructs the agent to end the turn immediately (`"turn_action": "end_turn"`). Synchronous foreground polling (`sleep` loops, repeated check inspection) and bypassing `aerial-pr.sh` via raw GitHub MCP tools (`create_pull_request`, `merge_pull_request`) are strictly prohibited.
-4. **Scheduled Wake-Up: PR Verification & Proactive Failure Remediation**:
-   ```bash
-   /share/aerial/scripts/aerial-pr.sh --repo <repo> check <pr_num>
-   ```
-   - **Nominal State (Auto-Merged)**: When CI passes, GitHub automatically merges the PR without manual intervention. Aerial verifies deployment and confirms status in plain prose strictly capped at 2 sentences max.
-   - **Pending State**: If checks are still running, inform the user and reschedule a follow-up check via `scheduler-mcp` (`schedule_once`).
-   - **Failure State (PROACTIVE FAILURE REMEDIATION)**: If CI fails, Aerial **must proactively fix the failure**:
+4. **Event-Driven Continuous Delivery & Proactive Failure Remediation**:
+   With the event-driven push GitOps architecture active:
+   - **Nominal State (Auto-Merged & Deployed)**: When CI passes, GitHub automatically merges the PR without manual intervention. When images finish building, Hangar deploys the job and `webhooks-router` posts deployment outcomes directly to the registered Discord thread. Zero scheduled polling or manual checks required.
+   - **Failure State (PROACTIVE FAILURE REMEDIATION)**: If CI fails, `webhooks-router` catches the GitHub webhook and immediately pushes a prompt turn to Brain targeting the registered Discord thread. Aerial **must proactively fix the failure**:
      1. Inspect failing GitHub check runs and diagnostic logs.
      2. Checkout the PR branch in an ephemeral scratch workspace:
         ```bash
@@ -382,9 +379,8 @@ All code and configuration changes across all repositories (`aerial`, `aerial-co
      3. Diagnose and resolve the issue (unit test failures, lint errors, coverage deficits, compilation issues).
      4. Verify locally (`./scripts/verify.sh --staged` or local package tests).
      5. Commit and push directly to the PR branch (`git push origin <branch>`).
-     6. Quietly reschedule a follow-up check via `scheduler-mcp` (`schedule_once`).
-     7. Auto-merge remains armed and will merge once CI turns green.
-     8. Never report a failure to the user without attempting remediation, unless an unrecoverable architectural conflict exists.
+     6. Auto-merge remains armed and will merge once CI turns green.
+     7. Never report a failure to the user without attempting remediation, unless an unrecoverable architectural conflict exists.
 
 ### 5.2 PR Submission, Description & Status Reporting Standards
 - **Mandatory PR Descriptions**: Pull Request descriptions are strictly mandatory under all circumstances. Submissions without a description will fail fast with exit code 1. Authors must provide a description via `PR_DESCRIPTION.md` in the scratch root (the recommended path for agents; automatically consumed and deleted before staging) or `--body-file <path>`.
@@ -397,7 +393,7 @@ All code and configuration changes across all repositories (`aerial`, `aerial-co
 ## 6. Operational Invariants
 
 All engineering operations must strictly adhere to the canonical invariants defined in `GEMINI.md` ("Core Invariants & Operational Rules"):
-• **Scheduling Invariant (Invariant 4)**: Persistent reminders and PR follow-ups exclusively via `scheduler-mcp`. The built-in ephemeral CLI `schedule` tool is strictly prohibited (causes print-mode drain and premature termination).
-• **Asynchronous PR Workflow (Invariant 6)**: Exclusively asynchronous submission via `scripts/aerial-pr.sh` across ALL repositories with automated follow-up scheduling and armed native auto-merge. Mandatory `PR_DESCRIPTION.md`. Zero-bypass pre-flight verification (`./scripts/verify.sh --staged`). Zero raw MCP PR tools; zero foreground CI polling loops (`sleep` loops). On scheduled wake-up, proactively remediate any failing builds. Response confirmations strictly capped at 2 sentences max in plain prose.
+• **Scheduling Invariant (Invariant 4)**: Persistent reminders exclusively via `scheduler-mcp`. The built-in ephemeral CLI `schedule` tool is strictly prohibited (causes print-mode drain and premature termination).
+• **Asynchronous PR Workflow (Invariant 6)**: Exclusively asynchronous submission via `scripts/aerial-pr.sh` across ALL repositories with armed native auto-merge and event-driven webhook notifications. Mandatory `PR_DESCRIPTION.md`. Zero-bypass pre-flight verification (`./scripts/verify.sh --staged`). Zero raw MCP PR tools; zero foreground CI polling loops (`sleep` loops); zero scheduled polling reminders. On CI failure wake-up prompt, proactively remediate any failing builds. Response confirmations strictly capped at 2 sentences max in plain prose.
 • **Hermetic Testing & Environment Boundaries (Invariants 7 & 15)**: Host-native test execution; zero arbitrary `time.Sleep`; zero in-container `docker compose` mutations.
 

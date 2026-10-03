@@ -4,7 +4,7 @@ set -euo pipefail
 # scripts/aerial-pr.sh - Unified Monorepo PR Automation & Continuous Integration Verifier
 # Safely clones repositories into ephemeral scratch space, enforces the universal
 # verification contract (scripts/verify.sh --staged), creates Pull Requests with auto-merge,
-# schedules follow-up checks via scheduler-mcp, and provides single-shot merge verification.
+# registers PRs for event-driven continuous delivery, and provides single-shot merge verification.
 
 REPO_OWNER="azylman"
 DEFAULT_REPO="aerial"
@@ -29,7 +29,6 @@ resolve_hangar_url() {
     echo "http://192.168.1.14:8087/sync"
 }
 SIDE_SYNC_URL="$(resolve_hangar_url)"
-DEFAULT_PR_CHECK_DELAY="2m"
 
 normalize_repo() {
     local r="${1:-}"
@@ -639,105 +638,13 @@ merge_pr() {
     exit 0
 }
 
-schedule_pr_followup() {
-    local pr_num="${1:-}"
-    local pr_url="${2:-}"
-    local target_id="${3:-}"
-    local delay="${4:-}"
-    local pr_title="${5:-}"
-
-    # Default to active thread/channel if target_id was not explicitly specified
-    if [ -z "$target_id" ]; then
-        target_id="${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-1542423172400291873}}}"
+resolve_target_id() {
+    local explicit="${1:-}"
+    if [ -n "$explicit" ]; then
+        echo "$explicit"
+        return
     fi
-
-    if [ -z "$delay" ]; then
-        delay="${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}"
-    fi
-
-    local script_name
-    script_name="$(basename "$0")"
-    local scheduler_url="${SCHEDULER_MCP_URL:-http://scheduler-mcp:8080/mcp}"
-    local prompt
-    prompt=$(cat <<EOF
-Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${pr_title}".
-1. Inspect CI status, PR state, and deployment state by running:
-   scripts/${script_name} --repo ${REPO_NAME} check ${pr_num}
-2. Note that native GitHub auto-merge is already enabled; if CI checks are green, GitHub merges automatically without manual merge intervention.
-3. If status is "pending":
-   Inform the user and reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}").
-4. If status is "merged" or "already_merged":
-   Report status in plain prose (maximum two sentences). Do NOT output markdown bullet lists, task checklists, or forward-looking promises.
-   - If deployment state is "done": confirm merge and completed deployment in 1–2 sentences.
-   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}") to track deployment to completion. If status was already merged, report only the deployment stage update.
-   - If deployment state is "failed": the two-sentence limit does NOT apply; report full failure details, error logs, and diagnostic context immediately.
-5. If status is "failed" or "conflict", or if checks fail:
-   - PROACTIVELY FIX THE FAILURE: do NOT stop or ask for user confirmation. Inspect failing checks/logs, check out the PR branch in an ephemeral scratch workspace (scripts/${script_name} init ${REPO_NAME}), diagnose and fix the build/test/lint issue locally (e.g. ./scripts/verify.sh --staged), push directly to the PR branch, and quietly reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}"). Auto-merge remains armed and will merge once CI is green.
-   - If the failure is a merge conflict or an unrecoverable architectural issue that persists after attempted remediation: the two-sentence limit does NOT apply; report full failure details, failing check names, and error logs to the user immediately.
-
-(Note: target_id "${target_id}" represents the active thread/channel for this conversation; never hardcode or generalize this ID across other threads or sessions.)
-EOF
-)
-
-    # Build JSON-RPC payload safely via jq
-    local rpc_payload
-    rpc_payload=$(jq -n \
-        --arg tool "schedule_once" \
-        --arg target_id "$target_id" \
-        --arg run_at "$delay" \
-        --arg prompt "$prompt" \
-        '{
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/call",
-            params: {
-                name: $tool,
-                arguments: {
-                    target_id: $target_id,
-                    run_at: $run_at,
-                    prompt: $prompt,
-                    effort: "low"
-                }
-            }
-        }')
-
-    # Execute curl with bounded network timeout and error suppression
-    local mcp_resp=""
-    mcp_resp=$(curl -s --connect-timeout 3 -m 10 -X POST \
-        -H "Content-Type: application/json" \
-        -d "$rpc_payload" \
-        "$scheduler_url" 2>/dev/null) || {
-        echo "⚠️ [aerial-pr] Warning: Unable to contact scheduler-mcp (${scheduler_url}). Follow-up event not scheduled." >&2
-        return 0
-    }
-
-    # Verify response is valid JSON before parsing
-    if ! echo "$mcp_resp" | jq -e . >/dev/null 2>&1; then
-        echo "⚠️ [aerial-pr] Warning: Invalid non-JSON response from scheduler-mcp. Skipping schedule registration." >&2
-        return 0
-    fi
-
-    # Check for tool-level error in JSON-RPC result
-    local is_err
-    is_err=$(echo "$mcp_resp" | jq -r '.result.isError // false' 2>/dev/null || true)
-    if [ "$is_err" = "true" ]; then
-        local err_msg
-        err_msg=$(echo "$mcp_resp" | jq -r '.result.content[0].text // "Unknown error"' 2>/dev/null || true)
-        echo "⚠️ [aerial-pr] Warning: scheduler-mcp returned tool error: ${err_msg}" >&2
-        return 0
-    fi
-
-    # Unpack nested MCP text content
-    local sched_id
-    sched_id=$(echo "$mcp_resp" | jq -r '(.result.content[0].text | fromjson? | .schedule_id) // empty' 2>/dev/null || true)
-
-    if [ -n "$sched_id" ]; then
-        echo "⏰ [aerial-pr] Scheduled one-shot follow-up check in ${delay} (Schedule ID: ${sched_id}, Target: ${target_id})." >&2
-        echo "$sched_id"
-    else
-        echo "⚠️ [aerial-pr] Warning: Scheduler MCP did not return a valid schedule ID." >&2
-    fi
-    return 0
+    echo "${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-1542423172400291873}}}"
 }
 
 enable_github_auto_merge() {
@@ -781,9 +688,7 @@ enable_github_auto_merge() {
 }
 
 submit_scratch() {
-    local target_id="${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-1542423172400291873}}}"
-    local check_delay=""
-    local no_schedule=0
+    local target_id="$(resolve_target_id)"
     local scratch_dir=""
     local commit_msg=""
     local pr_body=""
@@ -816,22 +721,6 @@ submit_scratch() {
             --target-id|--target|-t|--target-id=*|--target=*)
                 echo "ERROR: Target ID cannot be specified manually ($1 is removed). Target ID is strictly inherited from the active Discord environment (AERIAL_TARGET_ID / DISCORD_THREAD_ID)." >&2
                 exit 1
-                ;;
-            --delay|--run-at|-d)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a delay duration argument." >&2
-                    exit 1
-                fi
-                check_delay="$2"
-                shift 2
-                ;;
-            --delay=*|--run-at=*)
-                check_delay="${1#*=}"
-                shift 1
-                ;;
-            --no-schedule)
-                no_schedule=1
-                shift
                 ;;
             --body|-b)
                 if [ $# -lt 2 ]; then
@@ -937,23 +826,18 @@ submit_scratch() {
     fi
 
     local default_title="feat(core): automated update by Aerial"
-    local default_delay="2m"
     case "$REPO_NAME" in
         aerial)
             default_title="feat(core): automated update by Aerial"
-            default_delay="2m"
             ;;
         aerial-config)
             default_title="chore(config): automated configuration update by Aerial"
-            default_delay="1m"
             ;;
         aerial-sidecars)
             default_title="feat(sidecars): automated sidecars update by Aerial"
-            default_delay="2m"
             ;;
         *)
             default_title="feat(${REPO_NAME}): automated update by Aerial"
-            default_delay="2m"
             ;;
     esac
 
@@ -1132,21 +1016,15 @@ submit_scratch() {
         SCRATCH_DIR_CLEANUP=""
     fi
 
-    local sched_id=""
-    local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$default_delay}}"
-    if [ "$no_schedule" -eq 0 ]; then
-        sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$clean_title" | tail -n 1)
-    fi
-
     cat <<EOF >&2
 ================================================================================
 📝 [aerial-pr] Created Pull Request #${pr_num}: ${pr_url}
-⚡ [aerial-pr] Asynchronous submission active. Follow-up check scheduled via scheduler-mcp (${effective_delay}).
+⚡ [aerial-pr] Asynchronous submission active. Continuous delivery automated via GitHub push events.
 🛑 MANDATORY TURN ACTION: Do not poll CI in the foreground. End active execution turn now.
 ================================================================================
 EOF
 
-    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\",\"repo\":\"${REPO_NAME}\",\"turn_action\":\"end_turn\",\"message\":\"PR #${pr_num} submitted on ${REPO_OWNER}/${REPO_NAME}. Follow-up check scheduled. Do not poll CI in foreground; end active turn now.\"}"
+    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"repo\":\"${REPO_NAME}\",\"turn_action\":\"end_turn\",\"message\":\"PR #${pr_num} submitted on ${REPO_OWNER}/${REPO_NAME}. Continuous delivery automated via push events. End active turn now.\"}"
     return 0
 }
 
@@ -1169,7 +1047,7 @@ case "$cmd" in
         get_deploy_status "$@"
         ;;
     *)
-        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|check <pr_num>|deploy-status <pr_num|commit_sha>}" >&2
+        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|check <pr_num>|deploy-status <pr_num|commit_sha>}" >&2
         exit 1
         ;;
 esac
