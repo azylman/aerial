@@ -4215,3 +4215,17 @@ func TestConfig_CloneAndNilAccessors(t *testing.T) {
 	}
 }
 
+func TestConfigSearchPaths_Precedence(t *testing.T) {
+	if len(ConfigSearchPaths) == 0 {
+		t.Fatalf("expected non-empty ConfigSearchPaths")
+	}
+	if ConfigSearchPaths[0] != "/local/config.yaml" {
+		t.Errorf("expected /local/config.yaml to be first search path, got %q", ConfigSearchPaths[0])
+	}
+	for _, p := range ConfigSearchPaths {
+		if strings.Contains(p, ".lkgc") {
+			t.Errorf("expected no .lkgc paths in ConfigSearchPaths, found %q", p)
+		}
+	}
+}
+

@@ -140,11 +140,11 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/brain" }}
 {{ with nomadVar "nomad/jobs/brain" }}
-CONFIG_VERSION={{ or .CONFIG_VERSION "initial" }}
+{{ if .CONFIG_YAML }}{{ .CONFIG_YAML }}{{ end }}
 {{ end }}
 {{ end }}
 EOH
-        destination   = "local/config_version"
+        destination   = "local/config.yaml"
         change_mode   = "signal"
         change_signal = "SIGHUP"
       }

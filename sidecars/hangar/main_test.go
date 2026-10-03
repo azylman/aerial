@@ -1279,6 +1279,87 @@ func TestNotifyBrainReload(t *testing.T) {
 	dEmpty.notifyBrainReload()
 }
 
+func TestSyncBrainConfigToNomad(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// 1. Missing config.yaml -> nil (safe no-op)
+	emptyDir := t.TempDir()
+	d := &SyncDaemon{nomadAddr: "http://127.0.0.1:4646"}
+	if err := d.SyncBrainConfigToNomad(ctx, emptyDir); err != nil {
+		t.Fatalf("expected nil for missing config.yaml, got %v", err)
+	}
+
+	// 2. Unreadable config (directory instead of file) -> error
+	badDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(badDir, "config.yaml"), 0755); err != nil {
+		t.Fatalf("failed creating subfolder: %v", err)
+	}
+	if err := d.SyncBrainConfigToNomad(ctx, badDir); err == nil {
+		t.Fatalf("expected error reading directory as config.yaml, got nil")
+	}
+
+	// 3. Invalid YAML syntax -> error
+	invDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(invDir, "config.yaml"), []byte("invalid: yaml: [unclosed"), 0644)
+	if err := d.SyncBrainConfigToNomad(ctx, invDir); err == nil || !strings.Contains(err.Error(), "invalid YAML syntax") {
+		t.Fatalf("expected invalid YAML syntax error, got %v", err)
+	}
+
+	// 4. Semantic error: channels missing default -> error
+	semDir := t.TempDir()
+	semYAML := `
+channels:
+  other:
+    mode: "threads"
+`
+	_ = os.WriteFile(filepath.Join(semDir, "config.yaml"), []byte(semYAML), 0644)
+	if err := d.SyncBrainConfigToNomad(ctx, semDir); err == nil || !strings.Contains(err.Error(), "channels.default is required") {
+		t.Fatalf("expected semantic validation error, got %v", err)
+	}
+
+	// 5. Valid config but Nomad executor / addr disabled -> nil
+	validYAML := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`
+	valDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(valDir, "config.yaml"), []byte(validYAML), 0644)
+	dNoNomad := &SyncDaemon{nomadAddr: ""}
+	if err := dNoNomad.SyncBrainConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected nil for disabled nomadAddr, got %v", err)
+	}
+
+	// 6. Successful push to Nomad
+	var capturedArgs []string
+	dSuccess := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			capturedArgs = args
+			return []byte("var updated"), nil, nil
+		},
+	}
+	if err := dSuccess.SyncBrainConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success pushing to nomad, got %v", err)
+	}
+	if len(capturedArgs) < 4 || capturedArgs[0] != "var" || capturedArgs[1] != "put" || capturedArgs[2] != "nomad/jobs/brain" {
+		t.Errorf("unexpected nomad CLI args: %v", capturedArgs)
+	}
+
+	// 7. Nomad CLI failure -> error
+	dFail := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
+		},
+	}
+	if err := dFail.SyncBrainConfigToNomad(ctx, valDir); err == nil || !strings.Contains(err.Error(), "failed updating Nomad variable") {
+		t.Fatalf("expected Nomad update error, got %v", err)
+	}
+}
+
 func TestRepoLock_ThreadSafety(t *testing.T) {
 	daemon := NewDaemon(DaemonConfig{})
 
