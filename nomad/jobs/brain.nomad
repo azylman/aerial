@@ -136,6 +136,19 @@ EOH
         env         = true
       }
 
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/brain" }}
+{{ with nomadVar "nomad/jobs/brain" }}
+CONFIG_VERSION={{ or .CONFIG_VERSION "initial" }}
+{{ end }}
+{{ end }}
+EOH
+        destination   = "local/config_version"
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
+      }
+
       service {
         name     = "brain"
         port     = "http"

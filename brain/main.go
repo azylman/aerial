@@ -38,7 +38,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/azylman/aerial/brain/pkg/transcript"
-	"github.com/azylman/aerial/brain/pkg/watcher"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
@@ -1164,6 +1163,7 @@ type reloadConfigOptions struct {
 	skipEnvironmentSync bool
 	provisioner         *env.Provisioner
 	workerPool          *queue.WorkerPool
+	onReload            func(source string)
 }
 
 func WithDiscordSession(s *discordgo.Session) ReloadOption {
@@ -1196,6 +1196,12 @@ func WithWorkerPool(pool *queue.WorkerPool) ReloadOption {
 	}
 }
 
+func WithOnReloadCallback(fn func(source string)) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.onReload = fn
+	}
+}
+
 func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(source string) {
 	options := &reloadConfigOptions{
 		reloadSupplier: config.Reload,
@@ -1223,6 +1229,9 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 					if alertErr := delivery.SendSystemAlert(options.dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg); alertErr != nil {
 						log.Printf("[%s] Warning: Failed to send system alert for config reload failure: %v", source, alertErr)
 					}
+				}
+				if options.onReload != nil {
+					options.onReload(source)
 				}
 				return
 			}
@@ -1252,6 +1261,9 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 			if options.workerPool != nil {
 				options.workerPool.MarkDirty()
 			}
+			if options.onReload != nil {
+				options.onReload(source)
+			}
 		}
 	}
 }
@@ -1262,6 +1274,8 @@ type BrainAppOption func(*brainAppOptions)
 type brainAppOptions struct {
 	store          db.Store
 	processSpawner runner.DaemonSpawner
+	hupChan        <-chan os.Signal
+	onReload       func(source string)
 }
 
 // WithStore allows injecting a custom Store implementation (e.g. db.FakeStore for tests).
@@ -1275,6 +1289,20 @@ func WithStore(store db.Store) BrainAppOption {
 func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
 	return func(o *brainAppOptions) {
 		o.processSpawner = spawner
+	}
+}
+
+// WithHupChannel allows injecting a signal channel for testing SIGHUP reload behavior without POSIX signal broadcasts.
+func WithHupChannel(hupChan <-chan os.Signal) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.hupChan = hupChan
+	}
+}
+
+// WithOnReload allows injecting a callback invoked when configuration reload completes (useful for event-driven tests).
+func WithOnReload(fn func(source string)) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.onReload = fn
 	}
 }
 
@@ -1610,7 +1638,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		return fmt.Errorf("port is required")
 	}
 
-	homeDir := cur.GeminiHomeDir
 	provisioner := env.NewFromConfig(cfg)
 	if err := InitializeBrainEnvironment(ctx, cfg); err != nil {
 		log.Printf("Warning initializing brain environment: %v", err)
@@ -1806,47 +1833,47 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
+	var reloadOpts []ReloadOption
+	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
+	if appOpts.onReload != nil {
+		reloadOpts = append(reloadOpts, WithOnReloadCallback(appOpts.onReload))
+	}
+	reloadConfig := CreateReloadConfigFunc(cfg, reloadOpts...)
 
-	// Start background file watcher for atomic hot-reloading of prompts and skills
-	fileWatcher, err := watcher.NewWatcher(
-		watcher.WithCallback(func() {
-			reloadConfig("Hot-Reload")
-		}),
-	)
-	if err != nil {
-		log.Printf("Warning: failed to create file watcher: %v", err)
+	// Listen for SIGHUP to trigger atomic zero-downtime reloads and worker pool bouncing
+	var hupChan <-chan os.Signal
+	var stopHup func()
+	if appOpts.hupChan != nil {
+		hupChan = appOpts.hupChan
 	} else {
-		watchDirs := []string{
-			"/share/aerial-config",
-			"/share/aerial",
-			"/app/.agents/skills",
-			filepath.Join(homeDir, ".gemini", "config", "skills"),
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGHUP)
+		hupChan = ch
+		stopHup = func() {
+			signal.Stop(ch)
 		}
+	}
+	if stopHup != nil {
+		defer stopHup()
+	}
 
-		watcherCtx, watcherCancel := context.WithCancel(ctx)
-		defer watcherCancel()
-		var watcherWg sync.WaitGroup
-		watcherWg.Add(1)
-		go func() {
-			defer watcherWg.Done()
-			for _, dir := range watchDirs {
-				if _, err := os.Stat(dir); err == nil {
-					if addErr := fileWatcher.AddRecursive(dir); addErr != nil {
-						log.Printf("Warning: failed to watch %s: %v", dir, addErr)
-					}
+	hupCtx, hupCancel := context.WithCancel(ctx)
+	defer hupCancel()
+	go func() {
+		for {
+			select {
+			case <-hupCtx.Done():
+				return
+			case sig, ok := <-hupChan:
+				if !ok {
+					return
+				}
+				if sig == syscall.SIGHUP {
+					reloadConfig("SIGHUP")
 				}
 			}
-			fileWatcher.Start(watcherCtx)
-		}()
-		defer func() {
-			watcherCancel()
-			if err := fileWatcher.Close(); err != nil {
-				log.Printf("Warning closing file watcher: %v", err)
-			}
-			watcherWg.Wait()
-		}()
-	}
+		}
+	}()
 
 	// Start background scheduler monitor for due cron and one-shot routines
 	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithLLMFunc(ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")), scheduler.WithSessionRoots(sessionMgr.Roots()...))
