@@ -588,3 +588,135 @@ func TestCheckCommit_RelativeDirAndCleanHead(t *testing.T) {
 		t.Errorf("expected executedDir to contain joined path %q, got: %v", expectedDir, executedDirs)
 	}
 }
+
+func TestParsePatternPayload_CoverageGaps(t *testing.T) {
+	t.Parallel()
+
+	// 1. Whitespace only
+	if rules := parsePatternPayload([]byte("   \n\t  ")); len(rules) != 0 {
+		t.Errorf("expected 0 rules for whitespace payload, got: %d", len(rules))
+	}
+
+	// 2. Format 1 without category
+	f1 := parsePatternPayload([]byte(`[{"pattern": "abc\\d+"}]`))
+	if len(f1) != 1 || f1[0].Category != "CustomRule" {
+		t.Errorf("expected 1 rule with Category='CustomRule', got: %+v", f1)
+	}
+
+	// 3. Format 2: wrapper object {"patterns": [...]}
+	f2 := parsePatternPayload([]byte(`{"patterns": [{"category": "MyCat", "pattern": "xyz"}, {"pattern": "default_cat"}]}`))
+	if len(f2) != 2 {
+		t.Fatalf("expected 2 rules for Format 2, got: %d", len(f2))
+	}
+	if f2[0].Category != "MyCat" || f2[1].Category != "CustomRule" {
+		t.Errorf("unexpected categories in Format 2: %+v", f2)
+	}
+
+	// 4. Format 3: map[string]string
+	f3 := parsePatternPayload([]byte(`{"CatA": "patA", "CatB": "patB"}`))
+	if len(f3) != 2 {
+		t.Errorf("expected 2 rules for Format 3, got: %d", len(f3))
+	}
+}
+
+func TestGetActivePatterns_Coverage(t *testing.T) {
+	t.Setenv("AERIAL_COMMIT_GUARD_PATTERNS", `test_pat_\d+`)
+	patterns := GetActivePatterns()
+	if len(patterns) <= len(BuiltinPatterns) {
+		t.Errorf("expected GetActivePatterns to include custom patterns, got %d patterns", len(patterns))
+	}
+}
+
+func TestParseHunkLineNum_Coverage(t *testing.T) {
+	t.Parallel()
+
+	// Missing '+'
+	if n := parseHunkLineNum("@@ -1,5 @@"); n != 1 {
+		t.Errorf("expected 1 for missing +, got: %d", n)
+	}
+
+	// Non-integer
+	if n := parseHunkLineNum("@@ -1,5 +notanumber @@"); n != 1 {
+		t.Errorf("expected 1 for non-integer, got: %d", n)
+	}
+}
+
+func TestIsAerialConfig_WorktreeAndGitDir(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	gitDir := filepath.Join(tmp, "worktrees", "wt1")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte(`[remote "origin"]
+	url = https://github.com/azylman/aerial-config.git
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write .git file pointing to relative gitDir
+	if err := os.WriteFile(filepath.Join(tmp, ".git"), []byte("gitdir: worktrees/wt1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !IsAerialConfig(tmp, "") {
+		t.Errorf("expected IsAerialConfig=true for worktree pointing to aerial-config")
+	}
+}
+
+func TestCheckCommit_ColonToolNameAndAllCommit(t *testing.T) {
+	oldRunner := gitCmdRunner
+	defer func() { gitCmdRunner = oldRunner }()
+
+	unstagedChecked := false
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		for _, a := range args {
+			if a == "--cached" {
+				return "", nil
+			}
+		}
+		unstagedChecked = true
+		return "", nil
+	}
+
+	// Tool name with colon prefix and -a flag
+	dec := CheckCommit("default_api:run_command", ToolArgs{
+		CommandLine: "git commit -a -m 'all commit'",
+		Cwd:         "/workspace",
+	})
+	if dec.Decision != DecisionAllow {
+		t.Errorf("expected allow, got %s", dec.Decision)
+	}
+	if !unstagedChecked {
+		t.Errorf("expected unstaged diff check for -a commit")
+	}
+}
+
+func TestCheckCommit_UnbornBranchEmptyTreeFallback(t *testing.T) {
+	oldRunner := gitCmdRunner
+	defer func() { gitCmdRunner = oldRunner }()
+
+	emptyTreeCalled := false
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "diff" && args[1] == "HEAD" {
+			return "", os.ErrNotExist
+		}
+		if len(args) > 1 && args[0] == "diff" && args[1] == "4b825dc642cb6eb9a060e54bf8d69288fbee4904" {
+			emptyTreeCalled = true
+			return "", nil
+		}
+		return "", nil
+	}
+
+	dec := CheckCommit("run_command", ToolArgs{
+		CommandLine: "./scripts/aerial-pr.sh submit /tmp/scratch 'feat: test'",
+		Cwd:         "/workspace",
+	})
+	if dec.Decision != DecisionAllow {
+		t.Errorf("expected allow, got: %s", dec.Decision)
+	}
+	if !emptyTreeCalled {
+		t.Errorf("expected emptyTree fallback when HEAD errors")
+	}
+}
