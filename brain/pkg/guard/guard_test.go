@@ -426,6 +426,64 @@ func TestGuardFailOpen(t *testing.T) {
 	if d11.Decision != DecisionAllow {
 		t.Errorf("expected allow on find with maxdepth in search mode, got: %v", d11)
 	}
+
+	// Commit mode explicit
+	origGitRunner := gitCmdRunner
+	defer func() { gitCmdRunner = origGitRunner }()
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		for _, a := range args {
+			if a == "--cached" {
+				return "+token = \"ghp_111111111111111111111111111111111111\"\n", nil
+			}
+		}
+		return "", nil
+	}
+
+	commitDeny := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "git commit -m 'secret'", "Cwd": "/data"}
+		}
+	}`
+	d12 := runGuard(t, "commit", commitDeny)
+	if d12.Decision != DecisionDeny {
+		t.Errorf("expected deny on commit with secret in commit mode, got: %v", d12)
+	}
+
+	// Commit allowed in commit mode
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		return "+const clean = true\n", nil
+	}
+	commitAllow := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "git commit -m 'clean'", "Cwd": "/data"}
+		}
+	}`
+	d13 := runGuard(t, "commit", commitAllow)
+	if d13.Decision != DecisionAllow {
+		t.Errorf("expected allow on clean commit in commit mode, got: %v", d13)
+	}
+
+	// All mode where commit denies
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		for _, a := range args {
+			if a == "--cached" {
+				return "+token = \"ghp_111111111111111111111111111111111111\"\n", nil
+			}
+		}
+		return "", nil
+	}
+	allCommitDeny := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "git commit -m 'secret'", "Cwd": "/data"}
+		}
+	}`
+	d14 := runGuard(t, "all", allCommitDeny)
+	if d14.Decision != DecisionDeny {
+		t.Errorf("expected deny on commit with secret in all mode, got: %v", d14)
+	}
 }
 
 func TestGuardEdgeCases(t *testing.T) {

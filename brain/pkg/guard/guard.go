@@ -6,6 +6,18 @@ import (
 	"io"
 )
 
+// Mode represents the guard operating mode.
+type Mode string
+
+const (
+	ModeAll      Mode = "all"
+	ModeShare    Mode = "share"
+	ModeSchedule Mode = "schedule"
+	ModeBatch    Mode = "batch"
+	ModeSearch   Mode = "search"
+	ModeCommit   Mode = "commit"
+)
+
 // Process reads an Antigravity PreToolUse hook payload from r, evaluates guards per mode,
 // and writes the resulting Decision JSON to w.
 // Guaranteed fail-open: on unexpected error or panic, it outputs {"decision": "allow"}.
@@ -46,8 +58,10 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 		decision = CheckBatch(payload, args)
 	case "search":
 		decision = CheckSearch(payload.ToolCall.Name, args)
+	case "commit":
+		decision = CheckCommit(payload.ToolCall.Name, args)
 	default:
-		// "all" mode: evaluate share first, then schedule, then batch, then search
+		// "all" mode: evaluate share first, then schedule, then batch, then search, then commit
 		dShare := CheckShare(payload.ToolCall.Name, args)
 		if dShare.Decision == DecisionDeny {
 			decision = dShare
@@ -60,7 +74,12 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 				if dBatch.Decision == DecisionDeny {
 					decision = dBatch
 				} else {
-					decision = CheckSearch(payload.ToolCall.Name, args)
+					dSearch := CheckSearch(payload.ToolCall.Name, args)
+					if dSearch.Decision == DecisionDeny {
+						decision = dSearch
+					} else {
+						decision = CheckCommit(payload.ToolCall.Name, args)
+					}
 				}
 			}
 		}
