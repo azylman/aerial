@@ -36,11 +36,11 @@ job "github-mcp" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-github-mcp:latest"
         network_mode = "host"
+        volumes = [
+          "/mnt/data/supervisor/share/aerial-config/services/mcp/github-mcp.yaml:/config/config.yaml:ro"
+        ]
       }
 
-      env {
-        PORT = "4003"
-      }
 
       template {
         data = <<EOH

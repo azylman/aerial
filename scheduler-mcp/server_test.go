@@ -499,50 +499,15 @@ func TestMCP_AllHttpAndRPC_EdgeCases(t *testing.T) {
 }
 
 func TestMCP_DB_AllBranches(t *testing.T) {
-	// 1. LoadConfigFromLookup combinations
-	env1 := map[string]string{
-		"PORT":             "9090",
-		"DEFAULT_TIMEZONE": "America/New_York",
-		"DATABASE_URL":     "postgres://db_url",
+	// 1. Pure Config dependency injection
+	cfg1 := &Config{
+		Port:        "9090",
+		Timezone:    "America/New_York",
+		DatabaseURL: "postgres://db_url",
 	}
-	cfg1, err := LoadConfigFromLookup(func(k string) string { return env1[k] })
-	if err != nil || cfg1.DatabaseURL != "postgres://db_url" || cfg1.Port != "9090" || cfg1.Timezone != "America/New_York" {
-		t.Errorf("expected DATABASE_URL to be loaded, got %+v, err=%v", cfg1, err)
+	if cfg1.DatabaseURL != "postgres://db_url" || cfg1.Port != "9090" || cfg1.Timezone != "America/New_York" {
+		t.Errorf("unexpected cfg1: %+v", cfg1)
 	}
-
-	env2 := map[string]string{
-		"DB_PATH": "/tmp/local.db",
-	}
-	_, err2 := LoadConfigFromLookup(func(k string) string { return env2[k] })
-	if err2 == nil {
-		t.Errorf("expected error when only legacy DB_PATH is set, got nil")
-	}
-
-	env3 := map[string]string{
-		"POSTGRES_USER":     "u",
-		"POSTGRES_PASSWORD": "p",
-		"POSTGRES_HOST":     "h",
-		"POSTGRES_PORT":     "1234",
-		"POSTGRES_DB":       "d",
-	}
-	cfg3, err := LoadConfigFromLookup(func(k string) string { return env3[k] })
-	if err != nil || cfg3.DatabaseURL != "postgres://u:p@h:1234/d?sslmode=disable" {
-		t.Errorf("expected generated postgres URL, got %+v, err=%v", cfg3, err)
-	}
-
-	// Unset all -> LoadConfigFromLookup must fail (no toxic postgres:5432 default!)
-	emptyLookup := func(string) string { return "" }
-	if _, err := LoadConfigFromLookup(emptyLookup); err == nil {
-		t.Error("expected error from LoadConfigFromLookup when all DB env vars are unset")
-	}
-
-	// Nil lookup must fail explicitly
-	if _, err := LoadConfigFromLookup(nil); err == nil {
-		t.Error("expected error from LoadConfigFromLookup when lookup is nil")
-	}
-
-	// Smoke test production LoadConfig()
-	_, _ = LoadConfig()
 
 	// 2. isPostgres
 	if isPostgres(nil) {

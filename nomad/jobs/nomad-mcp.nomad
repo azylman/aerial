@@ -36,11 +36,9 @@ job "nomad-mcp" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-nomad-mcp:latest"
         network_mode = "host"
-      }
-
-      env {
-        PORT       = "4006"
-        NOMAD_ADDR = "http://127.0.0.1:4646"
+        volumes = [
+          "/mnt/data/supervisor/share/aerial-config/services/mcp/nomad-mcp.yaml:/config/config.yaml:ro"
+        ]
       }
 
       template {

@@ -4,79 +4,63 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
-const (
-	// DefaultTimezone is the fallback timezone when unspecified.
-	DefaultTimezone = "America/Los_Angeles"
-	// DefaultPort is the fallback HTTP server port when unspecified.
-	DefaultPort = "8080"
-)
+// DefaultConfigPath is the canonical in-container configuration path.
+const DefaultConfigPath = "/config/config.yaml"
+
+// DefaultTimezone is the fallback timezone for tool invocations when unspecified in tool payload.
+const DefaultTimezone = "America/Los_Angeles"
 
 // Config represents the runtime configuration for the scheduler MCP server.
 type Config struct {
 	DatabaseURL string
-	Timezone    string
-	Port        string
+	Timezone    string `yaml:"timezone"`
+	Port        string `yaml:"port"`
 }
 
+// SchedulerYAMLConfig defines the declarative file schema for /config/config.yaml.
+type SchedulerYAMLConfig struct {
+	Port     string `yaml:"port"`
+	Timezone string `yaml:"timezone"`
+}
 
-// LoadConfigFromLookup reads configuration using the provided environment lookup function.
-// Returns an error if lookup is nil or if no valid database connection string can be constructed.
-func LoadConfigFromLookup(lookup func(string) string) (*Config, error) {
-	if lookup == nil {
-		return nil, fmt.Errorf("config: lookup function cannot be nil")
+// LoadConfigFile loads and validates the YAML config from path.
+// Fails fast if the file is missing, malformed, or required fields are absent.
+func LoadConfigFile(path string, dbURL string) (*Config, error) {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return nil, fmt.Errorf("config: path cannot be empty")
+	}
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 
-	port := strings.TrimSpace(lookup("PORT"))
+	var ycfg SchedulerYAMLConfig
+	if err := yaml.Unmarshal(data, &ycfg); err != nil {
+		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
+	}
+
+	port := strings.TrimSpace(ycfg.Port)
 	if port == "" {
-		port = DefaultPort
+		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
-
-	tz := strings.TrimSpace(lookup("DEFAULT_TIMEZONE"))
+	tz := strings.TrimSpace(ycfg.Timezone)
 	if tz == "" {
-		tz = strings.TrimSpace(lookup("TZ"))
-	}
-	if tz == "" {
-		tz = DefaultTimezone
+		return nil, fmt.Errorf("config: timezone is required in %s", cleanPath)
 	}
 
-	dbURL := strings.TrimSpace(lookup("DATABASE_URL"))
-	if dbURL == "" {
-		dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
-		if dbHost != "" {
-			dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
-			if dbUser == "" {
-				dbUser = "aerial"
-			}
-			dbPass := strings.TrimSpace(lookup("POSTGRES_PASSWORD"))
-			if dbPass == "" {
-				dbPass = "aerial_secure_pass"
-			}
-			dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
-			if dbPort == "" {
-				dbPort = "5432"
-			}
-			dbName := strings.TrimSpace(lookup("POSTGRES_DB"))
-			if dbName == "" {
-				dbName = "aerial"
-			}
-			dbURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
-		}
-	}
-
-	if dbURL == "" {
-		return nil, fmt.Errorf("database connection string is required (set DATABASE_URL or POSTGRES_HOST)")
+	cleanDB := strings.TrimSpace(dbURL)
+	if cleanDB == "" {
+		return nil, fmt.Errorf("config: database connection string is required")
 	}
 
 	return &Config{
-		DatabaseURL: dbURL,
+		DatabaseURL: cleanDB,
 		Timezone:    tz,
 		Port:        port,
 	}, nil
-}
-
-// LoadConfig reads configuration from ambient environment variables.
-func LoadConfig() (*Config, error) {
-	return LoadConfigFromLookup(os.Getenv)
 }

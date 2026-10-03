@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -556,135 +557,70 @@ func TestRunProxyApp_ValidationErrors(t *testing.T) {
 	}
 }
 
-func TestNewConfigFromLookup_TableDriven(t *testing.T) {
-	testCases := []struct {
-		name     string
-		lookup   func(string) string
-		expected *Config
-	}{
-		{
-			name:     "nil lookup uses defaults",
-			lookup:   nil,
-			expected: DefaultConfig(),
-		},
-		{
-			name: "empty lookup uses defaults",
-			lookup: func(k string) string {
-				return ""
-			},
-			expected: DefaultConfig(),
-		},
-		{
-			name: "whitespace-only lookup values use defaults",
-			lookup: func(k string) string {
-				return "   "
-			},
-			expected: DefaultConfig(),
-		},
-		{
-			name: "override port only with trimming",
-			lookup: func(k string) string {
-				if k == "PORT" {
-					return "  5001  "
-				}
-				return ""
-			},
-			expected: &Config{
-				Port:         "5001",
-				UpstreamPort: "4005",
-				NodeBin:      "node",
-				AppPath:      "build/app.js",
-			},
-		},
-		{
-			name: "override upstream port only",
-			lookup: func(k string) string {
-				if k == "UPSTREAM_PORT" {
-					return "5005"
-				}
-				return ""
-			},
-			expected: &Config{
-				Port:         "4001",
-				UpstreamPort: "5005",
-				NodeBin:      "node",
-				AppPath:      "build/app.js",
-			},
-		},
-		{
-			name: "override node bin only",
-			lookup: func(k string) string {
-				if k == "NODE_BIN" {
-					return "/usr/local/bin/node"
-				}
-				return ""
-			},
-			expected: &Config{
-				Port:         "4001",
-				UpstreamPort: "4005",
-				NodeBin:      "/usr/local/bin/node",
-				AppPath:      "build/app.js",
-			},
-		},
-		{
-			name: "override app path only",
-			lookup: func(k string) string {
-				if k == "APP_PATH" {
-					return "dist/server.js"
-				}
-				return ""
-			},
-			expected: &Config{
-				Port:         "4001",
-				UpstreamPort: "4005",
-				NodeBin:      "node",
-				AppPath:      "dist/server.js",
-			},
-		},
-		{
-			name: "override all fields with trimming",
-			lookup: func(k string) string {
-				switch k {
-				case "PORT":
-					return " 9001 "
-				case "UPSTREAM_PORT":
-					return " 9005 "
-				case "NODE_BIN":
-					return " /opt/node/bin/node "
-				case "APP_PATH":
-					return " /opt/app/index.js "
-				default:
-					return ""
-				}
-			},
-			expected: &Config{
-				Port:         "9001",
-				UpstreamPort: "9005",
-				NodeBin:      "/opt/node/bin/node",
-				AppPath:      "/opt/app/index.js",
-			},
-		},
+func TestLoadConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	yamlContent := `
+port: "4001"
+upstream_port: "4025"
+node_bin: "/custom/node"
+app_path: "/custom/app.js"
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write test yaml: %v", err)
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := NewConfigFromLookup(tc.lookup)
-			if cfg == nil {
-				t.Fatal("expected non-nil config")
-			}
-			if cfg.Port != tc.expected.Port {
-				t.Errorf("expected Port %q, got %q", tc.expected.Port, cfg.Port)
-			}
-			if cfg.UpstreamPort != tc.expected.UpstreamPort {
-				t.Errorf("expected UpstreamPort %q, got %q", tc.expected.UpstreamPort, cfg.UpstreamPort)
-			}
-			if cfg.NodeBin != tc.expected.NodeBin {
-				t.Errorf("expected NodeBin %q, got %q", tc.expected.NodeBin, cfg.NodeBin)
-			}
-			if cfg.AppPath != tc.expected.AppPath {
-				t.Errorf("expected AppPath %q, got %q", tc.expected.AppPath, cfg.AppPath)
-			}
-		})
+	// 1. Success case with all fields
+	cfg, err := LoadConfigFile(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFile failed: %v", err)
+	}
+	if cfg.Port != "4001" {
+		t.Errorf("expected port 4001, got %s", cfg.Port)
+	}
+	if cfg.UpstreamPort != "4025" {
+		t.Errorf("expected upstream_port 4025, got %s", cfg.UpstreamPort)
+	}
+	if cfg.NodeBin != "/custom/node" {
+		t.Errorf("expected node_bin /custom/node, got %s", cfg.NodeBin)
+	}
+	if cfg.AppPath != "/custom/app.js" {
+		t.Errorf("expected app_path /custom/app.js, got %s", cfg.AppPath)
+	}
+
+	// 2. Success with minimal fields (node_bin and app_path defaulted)
+	minPath := filepath.Join(tmpDir, "min.yaml")
+	_ = os.WriteFile(minPath, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
+	cfgMin, err := LoadConfigFile(minPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFile min failed: %v", err)
+	}
+	if cfgMin.NodeBin != "node" || cfgMin.AppPath != "build/app.js" {
+		t.Errorf("unexpected defaults in min config: %+v", cfgMin)
+	}
+
+	// 3. Missing file -> fail fast
+	if _, err := LoadConfigFile(filepath.Join(tmpDir, "nonexistent.yaml")); err == nil {
+		t.Error("expected error for nonexistent file")
+	}
+
+	// 4. Missing required port -> fail fast
+	badPortPath := filepath.Join(tmpDir, "badport.yaml")
+	_ = os.WriteFile(badPortPath, []byte("upstream_port: \"4025\"\n"), 0644)
+	if _, err := LoadConfigFile(badPortPath); err == nil {
+		t.Error("expected error when port is missing")
+	}
+
+	// 5. Missing required upstream_port -> fail fast
+	badUpPath := filepath.Join(tmpDir, "badup.yaml")
+	_ = os.WriteFile(badUpPath, []byte("port: \"4001\"\n"), 0644)
+	if _, err := LoadConfigFile(badUpPath); err == nil {
+		t.Error("expected error when upstream_port is missing")
+	}
+
+	// 6. Empty path -> fail fast
+	if _, err := LoadConfigFile(""); err == nil {
+		t.Error("expected error when path is empty")
 	}
 }
 
@@ -811,10 +747,17 @@ func TestServeHTTP_UpstreamBodyReadError(t *testing.T) {
 func TestMain_Execution(t *testing.T) {
 	oldRun := runProxyApp
 	oldExit := exitFn
+	oldPath := configPath
 	defer func() {
 		runProxyApp = oldRun
 		exitFn = oldExit
+		configPath = oldPath
 	}()
+
+	tmpDir := t.TempDir()
+	testCfg := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(testCfg, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
+	configPath = testCfg
 
 	// 1. Success path
 	runCalled := false

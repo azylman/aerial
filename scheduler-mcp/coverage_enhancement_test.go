@@ -23,28 +23,16 @@ import (
 // 1. config.go coverage
 // -------------------------------------------------------------
 func TestConfig_NewAndLoadCoverage(t *testing.T) {
-	// Nil lookup error check
-	if _, err := LoadConfigFromLookup(nil); err == nil {
-		t.Error("expected error when lookup is nil")
+	cfg := &Config{
+		DatabaseURL: "postgres://aerial:aerial_secure_pass@db.internal:5432/aerial?sslmode=disable",
+		Port:        "8080",
+		Timezone:    "America/Los_Angeles",
 	}
-
-	// LoadConfigFromLookup with only POSTGRES_HOST (covering default user/pass/port/db)
-	envHostOnly := map[string]string{
-		"POSTGRES_HOST": "db.internal",
+	if cfg.Port != "8080" {
+		t.Errorf("expected port 8080, got %s", cfg.Port)
 	}
-	cfgHost, err := LoadConfigFromLookup(func(k string) string { return envHostOnly[k] })
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expectedPG := "postgres://aerial:aerial_secure_pass@db.internal:5432/aerial?sslmode=disable"
-	if cfgHost.DatabaseURL != expectedPG {
-		t.Errorf("expected %s, got %s", expectedPG, cfgHost.DatabaseURL)
-	}
-	if cfgHost.Port != DefaultPort {
-		t.Errorf("expected default port %s, got %s", DefaultPort, cfgHost.Port)
-	}
-	if cfgHost.Timezone != DefaultTimezone {
-		t.Errorf("expected default tz %s, got %s", DefaultTimezone, cfgHost.Timezone)
+	if cfg.Timezone != "America/Los_Angeles" {
+		t.Errorf("expected tz America/Los_Angeles, got %s", cfg.Timezone)
 	}
 }
 

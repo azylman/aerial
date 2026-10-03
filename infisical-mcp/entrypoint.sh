@@ -1,9 +1,35 @@
 #!/bin/sh
 set -e
 
+CONFIG_FILE="/config/config.yaml"
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "FATAL: $CONFIG_FILE is missing" >&2
+  exit 1
+fi
+
+PORT=$(grep -E '^[[:space:]]*port:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
+INF_HOST=$(grep -E '^[[:space:]]*infisical_host_url:' "$CONFIG_FILE" | sed -E 's/^[[:space:]]*infisical_host_url:[[:space:]]*//' | tr -d '"' | tr -d "'")
+AUTH_METHOD=$(grep -E '^[[:space:]]*auth_method:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
+MASK_SECRETS=$(grep -E '^[[:space:]]*mask_secret_values:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
+
+if [ -z "$PORT" ]; then
+  echo "FATAL: port is required in $CONFIG_FILE" >&2
+  exit 1
+fi
+if [ -z "$INF_HOST" ]; then
+  echo "FATAL: infisical_host_url is required in $CONFIG_FILE" >&2
+  exit 1
+fi
+
+export INFISICAL_HOST_URL="$INF_HOST"
+if [ -n "$AUTH_METHOD" ]; then
+  export INFISICAL_AUTH_METHOD="$AUTH_METHOD"
+fi
+if [ -n "$MASK_SECRETS" ]; then
+  export INFISICAL_MASK_SECRET_VALUES="$MASK_SECRETS"
+fi
+
 # Check if required Infisical credentials are present.
-# Can authenticate via INFISICAL_TOKEN (Token Auth)
-# OR INFISICAL_UNIVERSAL_AUTH_CLIENT_ID + INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET (Universal Auth).
 AUTH_CONFIGURED=false
 
 if [ -n "$INFISICAL_TOKEN" ]; then
@@ -13,10 +39,10 @@ elif [ -n "$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" ] && [ -n "$INFISICAL_UNIVERSAL_
 fi
 
 if [ "$AUTH_CONFIGURED" = "true" ]; then
-  echo "[infisical-mcp] Credentials detected. Starting supergateway with @infisical/mcp..."
+  echo "[infisical-mcp] Credentials detected. Starting supergateway with @infisical/mcp on port $PORT..."
   exec supergateway \
     --host 0.0.0.0 \
-    --port "${PORT:-4007}" \
+    --port "$PORT" \
     --outputTransport streamableHttp \
     --streamableHttpPath /mcp \
     --stateful \
@@ -25,11 +51,10 @@ if [ "$AUTH_CONFIGURED" = "true" ]; then
     --stdio "infisical-mcp"
 else
   echo "[infisical-mcp] Notice: Credentials not configured (missing INFISICAL_TOKEN or INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET)."
-  echo "[infisical-mcp] Running in standby healthcheck mode on port ${PORT:-4007} to prevent container restart loops."
-  # Start a lightweight Node.js HTTP server responding 200 OK to healthchecks and standby messages
+  echo "[infisical-mcp] Running in standby healthcheck mode on port $PORT to prevent container restart loops."
   exec node -e '
     const http = require("http");
-    const port = parseInt(process.env.PORT || "4007", 10);
+    const port = parseInt(process.env.TARGET_PORT || "'"$PORT"'", 10);
     const server = http.createServer((req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -44,7 +69,7 @@ else
         status: "standby",
         service: "infisical-mcp",
         configured: false,
-        message: "Infisical credentials not configured. Set INFISICAL_TOKEN or INFISICAL_UNIVERSAL_AUTH_CLIENT_ID and SECRET in .env"
+        message: "Infisical credentials not configured in secrets template"
       }));
     });
     server.listen(port, "0.0.0.0", () => {

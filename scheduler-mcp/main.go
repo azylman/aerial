@@ -70,9 +70,9 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
-	cfg, err := LoadConfig()
+	cfg, err := LoadConfigFile(DefaultConfigPath, os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatalf("Configuration error: %v", err)
+		log.Fatalf("Fatal configuration error: %v", err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

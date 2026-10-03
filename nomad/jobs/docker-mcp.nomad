@@ -37,13 +37,11 @@ job "docker-mcp" {
         image        = "ghcr.io/azylman/aerial-docker-mcp:latest"
         network_mode = "host"
         volumes = [
-          "/var/run/docker.sock:/var/run/docker.sock"
+          "/var/run/docker.sock:/var/run/docker.sock",
+          "/mnt/data/supervisor/share/aerial-config/services/mcp/docker-mcp.yaml:/config/config.yaml:ro"
         ]
       }
 
-      env {
-        PORT = "4002"
-      }
 
       service {
         name     = "docker-mcp"
