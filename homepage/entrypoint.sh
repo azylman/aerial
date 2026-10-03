@@ -17,6 +17,13 @@ fi
 # Start background configuration watcher to hot-reload on git syncs or config updates
 NODE_PATH=/app/node_modules node /app/core-homepage/prepare-config.js --watch &
 
+# Export variables from runtime.env if generated from declarative YAML
+if [ -f /config/runtime.env ]; then
+    set -a
+    . /config/runtime.env
+    set +a
+fi
+
 # Pass through arguments or default to server.js
 if [ $# -eq 0 ]; then
     set -- node server.js

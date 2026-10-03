@@ -45,13 +45,7 @@ job "homepage" {
       }
 
       env {
-        PORT                        = "3001"
-        HOMEPAGE_ALLOWED_HOSTS      = "*"
-        LOG_LEVEL                   = "info"
-        NODE_TLS_REJECT_UNAUTHORIZED = "0"
-        HOMEPAGE_VAR_UNIFI_URL      = "https://unifi.lan"
-        HOMEPAGE_VAR_UNIFI_USER     = "homeassistant"
-        HOMEPAGE_VAR_QNAP_USER      = "aerial"
+        CONFIG_PATH = "/share/aerial-config/services/homepage/homepage.yaml"
       }
 
       template {

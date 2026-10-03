@@ -43,11 +43,7 @@ job "dashboard" {
       }
 
       env {
-        PORT        = "8084"
-        BRAIN_URL   = "http://brain:8088"
-        HANGAR_URL  = "http://hangar:8087"
-        GITSYNC_URL = "http://hangar:8087"
-        GITHUB_REPO = "azylman/aerial"
+        CONFIG_PATH = "/share/aerial-config/services/dashboard/dashboard.yaml"
       }
 
       template {

@@ -197,6 +197,36 @@ function run(dirs = {}) {
     console.error(`[prepare-config] Warning: Copying extra files failed: ${err.message}`);
   }
 
+  // Generate runtime.env from declarative service configuration if present
+  try {
+    const serviceConfigPath = process.env.CONFIG_PATH ||
+      (fs.existsSync('/config/config.yaml') ? '/config/config.yaml' :
+       fs.existsSync('/share/aerial-config/services/homepage/homepage.yaml') ? '/share/aerial-config/services/homepage/homepage.yaml' : null);
+    if (serviceConfigPath && fs.existsSync(serviceConfigPath)) {
+      const raw = fs.readFileSync(serviceConfigPath, 'utf8');
+      const parsed = parseYaml(yaml, raw, serviceConfigPath);
+      if (parsed && typeof parsed === 'object') {
+        const envLines = [];
+        if (parsed.port) envLines.push(`PORT="${parsed.port}"`);
+        if (parsed.allowed_hosts) envLines.push(`HOMEPAGE_ALLOWED_HOSTS="${parsed.allowed_hosts}"`);
+        if (parsed.log_level) envLines.push(`LOG_LEVEL="${parsed.log_level}"`);
+        if (parsed.node_tls_reject_unauthorized !== undefined) {
+          envLines.push(`NODE_TLS_REJECT_UNAUTHORIZED="${parsed.node_tls_reject_unauthorized}"`);
+        }
+        if (parsed.unifi_url) envLines.push(`HOMEPAGE_VAR_UNIFI_URL="${parsed.unifi_url}"`);
+        if (parsed.unifi_user) envLines.push(`HOMEPAGE_VAR_UNIFI_USER="${parsed.unifi_user}"`);
+        if (parsed.qnap_user) envLines.push(`HOMEPAGE_VAR_QNAP_USER="${parsed.qnap_user}"`);
+
+        if (envLines.length > 0) {
+          writeAtomic(targetDir, 'runtime.env', envLines.join('\n') + '\n');
+          logEntries.push(`runtime.env: generated from ${serviceConfigPath}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[prepare-config] Error generating runtime.env: ${err.message}`);
+  }
+
   try {
     const summary = `Homepage Config Merge Summary - ${new Date().toISOString()}\n` +
       logEntries.map(e => ` • ${e}`).join('\n') + '\n';
