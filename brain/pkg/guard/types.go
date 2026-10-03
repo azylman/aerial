@@ -38,22 +38,22 @@ type ToolArgs struct {
 }
 
 // ParseArgs extracts ToolArgs from raw JSON message (handling both object and JSON-string representations).
-func ParseArgs(raw json.RawMessage) (ToolArgs, error) {
+func ParseArgs(raw json.RawMessage) ToolArgs {
 	var args ToolArgs
 	if len(raw) == 0 {
-		return args, nil
+		return args
 	}
 
 	// 1. Try direct object unmarshal
 	if err := json.Unmarshal(raw, &args); err == nil && (args.TargetFile != "" || args.CommandLine != "" || args.Cwd != "") {
-		return args, nil
+		return args
 	}
 
 	// 2. Try string containing JSON
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil && s != "" {
 		if err := json.Unmarshal([]byte(s), &args); err == nil {
-			return args, nil
+			return args
 		}
 	}
 
@@ -76,5 +76,5 @@ func ParseArgs(raw json.RawMessage) (ToolArgs, error) {
 		}
 	}
 
-	return args, nil
+	return args
 }

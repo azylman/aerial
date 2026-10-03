@@ -34,10 +34,7 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 		return writeAllow()
 	}
 
-	args, parseArgsErr := ParseArgs(payload.ToolCall.Args)
-	if parseArgsErr != nil {
-		return writeAllow()
-	}
+	args := ParseArgs(payload.ToolCall.Args)
 
 	var decision *Decision
 	switch mode {
@@ -53,10 +50,6 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 		} else {
 			decision = CheckSchedule(payload.ToolCall.Name, args)
 		}
-	}
-
-	if decision == nil {
-		return writeAllow()
 	}
 
 	return json.NewEncoder(w).Encode(decision)

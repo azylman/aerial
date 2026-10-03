@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -371,13 +373,13 @@ func TestGuardEdgeCases(t *testing.T) {
 	}
 
 	// 2. ParseArgs edge cases
-	argsNil, err := ParseArgs(nil)
-	if err != nil || argsNil.TargetFile != "" {
-		t.Errorf("expected empty args on nil raw, got: %+v, err: %v", argsNil, err)
+	argsNil := ParseArgs(nil)
+	if argsNil.TargetFile != "" {
+		t.Errorf("expected empty args on nil raw, got: %+v", argsNil)
 	}
-	argsEmpty, err := ParseArgs([]byte(""))
-	if err != nil || argsEmpty.TargetFile != "" {
-		t.Errorf("expected empty args on empty raw, got: %+v, err: %v", argsEmpty, err)
+	argsEmpty := ParseArgs([]byte(""))
+	if argsEmpty.TargetFile != "" {
+		t.Errorf("expected empty args on empty raw, got: %+v", argsEmpty)
 	}
 
 	// Fallback map parsing with lowercase keys and non-string skipping
@@ -387,10 +389,7 @@ func TestGuardEdgeCases(t *testing.T) {
 		"cwd": "/share/aerial",
 		"ignored_int": 42
 	}`)
-	argsMap, err := ParseArgs(mapJSON)
-	if err != nil {
-		t.Fatalf("unexpected error parsing mapJSON: %v", err)
-	}
+	argsMap := ParseArgs(mapJSON)
 	if argsMap.TargetFile != "/share/aerial/bar.go" || argsMap.CommandLine != "git status" || argsMap.Cwd != "/share/aerial" {
 		t.Errorf("unexpected argsMap values: %+v", argsMap)
 	}
@@ -454,9 +453,58 @@ func TestGuardEdgeCases(t *testing.T) {
 	}
 
 	// 7. ParseArgs with plain non-JSON string
-	argsPlainStr, err := ParseArgs([]byte(`"plain non-json string"`))
-	if err != nil || argsPlainStr.TargetFile != "" {
-		t.Errorf("expected empty args for plain non-json string, got: %+v, err: %v", argsPlainStr, err)
+	argsPlainStr := ParseArgs([]byte(`"plain non-json string"`))
+	if argsPlainStr.TargetFile != "" {
+		t.Errorf("expected empty args for plain non-json string, got: %+v", argsPlainStr)
+	}
+}
+
+func TestIsProtectedPath_HermeticWithSymlinks(t *testing.T) {
+	tempRoot := t.TempDir()
+	tempAerial := filepath.Join(tempRoot, "share", "aerial")
+	if err := os.MkdirAll(tempAerial, 0755); err != nil {
+		t.Fatalf("failed to create tempAerial: %v", err)
+	}
+	existingFile := filepath.Join(tempAerial, "existing.go")
+	if err := os.WriteFile(existingFile, []byte("package main"), 0644); err != nil {
+		t.Fatalf("failed to write existingFile: %v", err)
+	}
+
+	symlinkDir := filepath.Join(tempRoot, "link-to-aerial")
+	if err := os.Symlink(tempAerial, symlinkDir); err != nil {
+		t.Fatalf("failed to create symlinkDir: %v", err)
+	}
+
+	origPrefixes := ProtectedPrefixes
+	defer func() { ProtectedPrefixes = origPrefixes }()
+	ProtectedPrefixes = []string{tempAerial}
+
+	// 1. Exact match on prefix
+	if !IsProtectedPath(tempAerial) {
+		t.Errorf("expected tempAerial to be protected")
+	}
+
+	// 2. Existing file under prefix (direct EvalSymlinks success)
+	if !IsProtectedPath(existingFile) {
+		t.Errorf("expected existingFile to be protected")
+	}
+
+	// 3. Non-existent file under prefix (exercises parent EvalSymlinks loop)
+	newFile := filepath.Join(tempAerial, "nested", "new_file.go")
+	if !IsProtectedPath(newFile) {
+		t.Errorf("expected newFile under tempAerial to be protected")
+	}
+
+	// 4. File via symlinked directory
+	symlinkedFile := filepath.Join(symlinkDir, "new_file.go")
+	if !IsProtectedPath(symlinkedFile) {
+		t.Errorf("expected symlinkedFile to resolve to protected path")
+	}
+
+	// 5. Unrelated path
+	unrelated := filepath.Join(tempRoot, "other", "file.go")
+	if IsProtectedPath(unrelated) {
+		t.Errorf("expected unrelated path to not be protected")
 	}
 }
 
