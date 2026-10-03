@@ -1802,3 +1802,395 @@ func TestSortMatchedJobsHangarLast_TableDriven(t *testing.T) {
 		t.Fatalf("unexpected order after SortMatchedJobsHangarLast: %+v", matches)
 	}
 }
+
+func TestIsValidGitCommitSHA_TableDriven(t *testing.T) {
+	tests := []struct {
+		name string
+		sha  string
+		want bool
+	}{
+		{name: "valid 7-char short SHA", sha: "a1b2c3d", want: true},
+		{name: "valid 40-char full SHA", sha: "0123456789abcdef0123456789abcdef01234567", want: true},
+		{name: "valid uppercase hex", sha: "A1B2C3D4E5F67890", want: true},
+		{name: "valid mixed case hex", sha: "AbCdEf01234567", want: true},
+		{name: "invalid non-hex character", sha: "a1b2c3g", want: false},
+		{name: "invalid punctuation", sha: "a1b2c3-", want: false},
+		{name: "too short 6-chars", sha: "123456", want: false},
+		{name: "too short 1-char", sha: "a", want: false},
+		{name: "too long 41-chars", sha: "0123456789abcdef0123456789abcdef012345678", want: false},
+		{name: "empty string", sha: "", want: false},
+		{name: "whitespace only", sha: "       ", want: false},
+		{name: "spaces around valid SHA", sha: " a1b2c3d ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsValidGitCommitSHA(tt.sha)
+			if got != tt.want {
+				t.Errorf("IsValidGitCommitSHA(%q) = %v, want %v", tt.sha, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractRevisionFromAnnotations_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        string
+	}{
+		{
+			name: "org.opencontainers.image.revision",
+			annotations: map[string]string{
+				"org.opencontainers.image.revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			},
+			want: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		},
+		{
+			name: "aerial.commit_sha",
+			annotations: map[string]string{
+				"aerial.commit_sha": "0123456789abcdef0123456789abcdef01234567",
+			},
+			want: "0123456789abcdef0123456789abcdef01234567",
+		},
+		{
+			name: "org.label-schema.vcs-ref",
+			annotations: map[string]string{
+				"org.label-schema.vcs-ref": "abcdef0123456",
+			},
+			want: "abcdef0123456",
+		},
+		{
+			name: "precedence: OCI revision over aerial.commit_sha",
+			annotations: map[string]string{
+				"org.opencontainers.image.revision": "1111111111111111111111111111111111111111",
+				"aerial.commit_sha":                 "2222222222222222222222222222222222222222",
+			},
+			want: "1111111111111111111111111111111111111111",
+		},
+		{
+			name: "precedence: aerial.commit_sha over label-schema",
+			annotations: map[string]string{
+				"aerial.commit_sha":        "2222222222222222222222222222222222222222",
+				"org.label-schema.vcs-ref": "3333333333333333333333333333333333333333",
+			},
+			want: "2222222222222222222222222222222222222222",
+		},
+		{
+			name: "fallback to next key when earlier key has invalid SHA",
+			annotations: map[string]string{
+				"org.opencontainers.image.revision": "invalid-sha",
+				"aerial.commit_sha":                 "4444444444444444444444444444444444444444",
+			},
+			want: "4444444444444444444444444444444444444444",
+		},
+		{
+			name: "whitespace trimmed around valid SHA",
+			annotations: map[string]string{
+				"org.opencontainers.image.revision": "  5555555555555555555555555555555555555555  \n",
+			},
+			want: "5555555555555555555555555555555555555555",
+		},
+		{
+			name: "all keys invalid SHAs",
+			annotations: map[string]string{
+				"org.opencontainers.image.revision": "bad",
+				"aerial.commit_sha":                 "also-bad",
+			},
+			want: "",
+		},
+		{
+			name:        "empty annotations map",
+			annotations: map[string]string{},
+			want:        "",
+		},
+		{
+			name:        "nil annotations map",
+			annotations: nil,
+			want:        "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractRevisionFromAnnotations(tt.annotations)
+			if got != tt.want {
+				t.Errorf("ExtractRevisionFromAnnotations() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractRevisionFromConfigJSON_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		configJSON []byte
+		want       string
+	}{
+		{
+			name: "standard config.Labels with OCI revision",
+			configJSON: []byte(`{
+				"config": {
+					"Labels": {
+						"org.opencontainers.image.revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+					}
+				}
+			}`),
+			want: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		},
+		{
+			name: "standard config.Labels with aerial.commit_sha",
+			configJSON: []byte(`{
+				"config": {
+					"Labels": {
+						"aerial.commit_sha": "abcdef01234567"
+					}
+				}
+			}`),
+			want: "abcdef01234567",
+		},
+		{
+			name: "uppercase hex in config.Labels",
+			configJSON: []byte(`{
+				"config": {
+					"Labels": {
+						"org.opencontainers.image.revision": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"
+					}
+				}
+			}`),
+			want: "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2",
+		},
+		{
+			name: "root labels fallback",
+			configJSON: []byte(`{
+				"labels": {
+					"org.label-schema.vcs-ref": "9876543210fedcba"
+				}
+			}`),
+			want: "9876543210fedcba",
+		},
+		{
+			name: "missing labels in config",
+			configJSON: []byte(`{
+				"config": {
+					"Image": "sha256:12345"
+				}
+			}`),
+			want: "",
+		},
+		{
+			name:       "empty json object",
+			configJSON: []byte(`{}`),
+			want:       "",
+		},
+		{
+			name:       "malformed json",
+			configJSON: []byte(`not json`),
+			want:       "",
+		},
+		{
+			name:       "empty byte slice",
+			configJSON: []byte{},
+			want:       "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractRevisionFromConfigJSON(tt.configJSON)
+			if got != tt.want {
+				t.Errorf("ExtractRevisionFromConfigJSON() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractPlatformManifestDigest_TableDriven(t *testing.T) {
+	indexDoc := []byte(`{
+		"schemaVersion": 2,
+		"manifests": [
+			{
+				"digest": "sha256:arm64digest111111111111111111111111111111111111111111111111111111",
+				"platform": { "architecture": "arm64", "os": "linux" }
+			},
+			{
+				"digest": "sha256:amd64digest222222222222222222222222222222222222222222222222222222",
+				"platform": { "architecture": "amd64", "os": "linux" }
+			},
+			{
+				"digest": "sha256:windowsdigest3333333333333333333333333333333333333333333333333333",
+				"platform": { "architecture": "amd64", "os": "windows" }
+			}
+		]
+	}`)
+
+	tests := []struct {
+		name       string
+		indexJSON  []byte
+		targetOS   string
+		targetArch string
+		want       string
+	}{
+		{
+			name:       "matching linux/amd64",
+			indexJSON:  indexDoc,
+			targetOS:   "linux",
+			targetArch: "amd64",
+			want:       "sha256:amd64digest222222222222222222222222222222222222222222222222222222",
+		},
+		{
+			name:       "case-insensitive matching LINUX/AMD64",
+			indexJSON:  indexDoc,
+			targetOS:   "LINUX",
+			targetArch: "AMD64",
+			want:       "sha256:amd64digest222222222222222222222222222222222222222222222222222222",
+		},
+		{
+			name:       "fallback to first entry when platform not found",
+			indexJSON:  indexDoc,
+			targetOS:   "darwin",
+			targetArch: "arm64",
+			want:       "sha256:arm64digest111111111111111111111111111111111111111111111111111111",
+		},
+		{
+			name:       "fallback to first entry when OS/Arch empty",
+			indexJSON:  indexDoc,
+			targetOS:   "",
+			targetArch: "",
+			want:       "sha256:arm64digest111111111111111111111111111111111111111111111111111111",
+		},
+		{
+			name:       "empty manifests list",
+			indexJSON:  []byte(`{"manifests": []}`),
+			targetOS:   "linux",
+			targetArch: "amd64",
+			want:       "",
+		},
+		{
+			name:       "malformed JSON",
+			indexJSON:  []byte(`not json`),
+			targetOS:   "linux",
+			targetArch: "amd64",
+			want:       "",
+		},
+		{
+			name:       "empty input",
+			indexJSON:  []byte{},
+			targetOS:   "linux",
+			targetArch: "amd64",
+			want:       "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractPlatformManifestDigest(tt.indexJSON, tt.targetOS, tt.targetArch)
+			if got != tt.want {
+				t.Errorf("ExtractPlatformManifestDigest() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractConfigBlobDigest_TableDriven(t *testing.T) {
+	tests := []struct {
+		name         string
+		manifestJSON []byte
+		want         string
+	}{
+		{
+			name: "standard OCI manifest with config digest",
+			manifestJSON: []byte(`{
+				"schemaVersion": 2,
+				"config": {
+					"mediaType": "application/vnd.oci.image.config.v1+json",
+					"digest": "sha256:configblobdigest111111111111111111111111111111111111111111111111",
+					"size": 1234
+				}
+			}`),
+			want: "sha256:configblobdigest111111111111111111111111111111111111111111111111",
+		},
+		{
+			name: "missing config digest",
+			manifestJSON: []byte(`{
+				"schemaVersion": 2,
+				"config": {}
+			}`),
+			want: "",
+		},
+		{
+			name:         "empty JSON",
+			manifestJSON: []byte(`{}`),
+			want:         "",
+		},
+		{
+			name:         "malformed JSON",
+			manifestJSON: []byte(`invalid json`),
+			want:         "",
+		},
+		{
+			name:         "empty byte slice",
+			manifestJSON: []byte{},
+			want:         "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractConfigBlobDigest(tt.manifestJSON)
+			if got != tt.want {
+				t.Errorf("ExtractConfigBlobDigest() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractManifestAnnotations_TableDriven(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		json []byte
+		want map[string]string
+	}{
+		{
+			name: "empty input",
+			json: []byte{},
+			want: nil,
+		},
+		{
+			name: "invalid json",
+			json: []byte("not-json"),
+			want: nil,
+		},
+		{
+			name: "valid json with annotations",
+			json: []byte(`{"annotations":{"org.opencontainers.image.revision":"abcdef1234567890"}}`),
+			want: map[string]string{"org.opencontainers.image.revision": "abcdef1234567890"},
+		},
+		{
+			name: "valid json without annotations",
+			json: []byte(`{"schemaVersion": 2}`),
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ExtractManifestAnnotations(tc.json)
+			if tc.want == nil && got != nil {
+				t.Fatalf("expected nil, got %v", got)
+			}
+			if tc.want != nil {
+				if len(got) != len(tc.want) {
+					t.Fatalf("expected len %d, got %d", len(tc.want), len(got))
+				}
+				for k, v := range tc.want {
+					if got[k] != v {
+						t.Fatalf("for key %s, expected %s, got %s", k, v, got[k])
+					}
+				}
+			}
+		})
+	}
+}
+

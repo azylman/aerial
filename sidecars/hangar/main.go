@@ -803,6 +803,214 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 	return digest, nil
 }
 
+// fetchRegistryWithAuth performs an HTTP request against a container registry, handling OAuth2/Bearer
+// token challenges automatically and reusing existingBearer if still valid.
+func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
+	var resp *http.Response
+
+	if existingBearer != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed creating authenticated request for %s: %w", targetURL, err)
+		}
+		if acceptHeader != "" {
+			req.Header.Set("Accept", acceptHeader)
+		}
+		req.Header.Set("Authorization", "Bearer "+existingBearer)
+
+		resp, err = d.getRegistryClient().Do(req)
+		if err != nil {
+			return nil, "", fmt.Errorf("authenticated request failed for %s: %w", targetURL, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			return resp, existingBearer, nil
+		}
+		closeWarn(resp.Body, "unauthorized response body with existing bearer")
+	} else {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed creating probe request for %s: %w", targetURL, err)
+		}
+		if acceptHeader != "" {
+			req.Header.Set("Accept", acceptHeader)
+		}
+
+		resp, err = d.getRegistryClient().Do(req)
+		if err != nil {
+			return nil, "", fmt.Errorf("probe request failed for %s: %w", targetURL, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			return resp, "", nil
+		}
+		closeWarn(resp.Body, "unauthorized probe response body")
+	}
+
+	authHeader := resp.Header.Get("Www-Authenticate")
+	realm, service, scope, pErr := ParseWwwAuthenticate(authHeader)
+	if pErr != nil {
+		return nil, "", fmt.Errorf("failed parsing Www-Authenticate header for %s: %w", targetURL, pErr)
+	}
+	if scope == "" {
+		scope = fmt.Sprintf("repository:%s:pull", repository)
+	}
+
+	tokURL, uErr := url.Parse(realm)
+	if uErr != nil {
+		return nil, "", fmt.Errorf("failed parsing token realm %q: %w", realm, uErr)
+	}
+	q := tokURL.Query()
+	if service != "" {
+		q.Set("service", service)
+	}
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	tokURL.RawQuery = q.Encode()
+
+	tokReq, tErr := http.NewRequestWithContext(ctx, http.MethodGet, tokURL.String(), nil)
+	if tErr != nil {
+		return nil, "", fmt.Errorf("failed creating token request for %s: %w", targetURL, tErr)
+	}
+
+	if registry == "ghcr.io" && d != nil && strings.TrimSpace(d.pat) != "" {
+		username := ResolveRegistryUser("", os.Getenv)
+		tokReq.SetBasicAuth(username, d.pat)
+	}
+
+	tokResp, dErr := d.getRegistryClient().Do(tokReq)
+	if dErr != nil {
+		return nil, "", fmt.Errorf("token request failed for %s: %w", targetURL, dErr)
+	}
+	defer closeWarn(tokResp.Body, "token response body")
+
+	if tokResp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("token request for %s returned HTTP %d", targetURL, tokResp.StatusCode)
+	}
+
+	var tokPayload struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	decErr := json.NewDecoder(tokResp.Body).Decode(&tokPayload)
+	if decErr != nil {
+		return nil, "", fmt.Errorf("failed decoding token for %s: %w", targetURL, decErr)
+	}
+
+	token := tokPayload.Token
+	if token == "" {
+		token = tokPayload.AccessToken
+	}
+	if token == "" {
+		return nil, "", fmt.Errorf("empty bearer token returned for %s", targetURL)
+	}
+
+	authReq, aErr := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if aErr != nil {
+		return nil, "", fmt.Errorf("failed creating final authenticated request for %s: %w", targetURL, aErr)
+	}
+	if acceptHeader != "" {
+		authReq.Header.Set("Accept", acceptHeader)
+	}
+	authReq.Header.Set("Authorization", "Bearer "+token)
+
+	finalResp, fErr := d.getRegistryClient().Do(authReq)
+	if fErr != nil {
+		return nil, "", fmt.Errorf("authenticated request failed for %s: %w", targetURL, fErr)
+	}
+
+	return finalResp, token, nil
+}
+
+// GetRemoteImageRevision retrieves the git commit revision associated with an OCI/Docker container image
+// by inspecting manifest annotations or configuration blob labels.
+func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string) (string, error) {
+	registry, repository, tagOrDigest, err := ParseImageReference(imageRef)
+	if err != nil {
+		return "", fmt.Errorf("invalid image reference %q: %w", imageRef, err)
+	}
+
+	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tagOrDigest)
+	resp, bearerToken, err := d.fetchRegistryWithAuth(ctx, manifestURL, registry, repository, acceptManifestHeaders, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch manifest for %s: %w", imageRef, err)
+	}
+	defer closeWarn(resp.Body, "manifest response body")
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("manifest request for %s returned HTTP %d", imageRef, resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("failed to read manifest body for %s: %w", imageRef, err)
+	}
+
+	// Check if this is an OCI Image Index or Docker Manifest List
+	childDigest := ExtractPlatformManifestDigest(bodyBytes, "linux", "amd64")
+	if childDigest != "" {
+		if rev := ExtractRevisionFromAnnotations(ExtractManifestAnnotations(bodyBytes)); rev != "" {
+			return rev, nil
+		}
+
+		childURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, childDigest)
+		childResp, childToken, childErr := d.fetchRegistryWithAuth(ctx, childURL, registry, repository, acceptManifestHeaders, bearerToken)
+		if childErr != nil {
+			return "", fmt.Errorf("failed to fetch child manifest %s for %s: %w", childDigest, imageRef, childErr)
+		}
+		defer closeWarn(childResp.Body, "child manifest response body")
+
+		if childResp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("child manifest request for %s (%s) returned HTTP %d", imageRef, childDigest, childResp.StatusCode)
+		}
+
+		childBytes, readErr := io.ReadAll(io.LimitReader(childResp.Body, 1<<20))
+		if readErr != nil {
+			return "", fmt.Errorf("failed to read child manifest body for %s: %w", imageRef, readErr)
+		}
+
+		bodyBytes = childBytes
+		if childToken != "" {
+			bearerToken = childToken
+		}
+	}
+
+	// Single manifest processing:
+	// 1. Check annotations on manifest
+	if rev := ExtractRevisionFromAnnotations(ExtractManifestAnnotations(bodyBytes)); rev != "" {
+		return rev, nil
+	}
+
+	// 2. Extract config blob digest and fetch config blob
+	configDigest := ExtractConfigBlobDigest(bodyBytes)
+	if configDigest == "" {
+		return "", fmt.Errorf("no config digest or revision annotations found for %s", imageRef)
+	}
+
+	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", registry, repository, configDigest)
+	const acceptBlobHeaders = "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json, application/octet-stream"
+	blobResp, _, blobErr := d.fetchRegistryWithAuth(ctx, blobURL, registry, repository, acceptBlobHeaders, bearerToken)
+	if blobErr != nil {
+		return "", fmt.Errorf("failed to fetch config blob %s for %s: %w", configDigest, imageRef, blobErr)
+	}
+	defer closeWarn(blobResp.Body, "config blob response body")
+
+	if blobResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("config blob request for %s (%s) returned HTTP %d", imageRef, configDigest, blobResp.StatusCode)
+	}
+
+	blobBytes, readErr := io.ReadAll(io.LimitReader(blobResp.Body, 1<<20))
+	if readErr != nil {
+		return "", fmt.Errorf("failed to read config blob body for %s: %w", imageRef, readErr)
+	}
+
+	rev := ExtractRevisionFromConfigJSON(blobBytes)
+	if rev == "" {
+		return "", fmt.Errorf("no valid revision label found in config blob for %s", imageRef)
+	}
+
+	return rev, nil
+}
+
 // CheckAndReconcileNewImages checks if any Nomad jobs have newer images available in their registry,
 // and triggers an asynchronous, debounced reconciliation if new images are detected.
 func (d *SyncDaemon) CheckAndReconcileNewImages(ctx context.Context) error {
@@ -1357,15 +1565,27 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 						d.nomadKnownDigests[key] = remoteDigest
 						d.nomadDigestsMu.Unlock()
 
-						// Resolve repository HEAD commit SHA to link image rollout to PR
+						// Resolve commit SHA: first try reading remote container image OCI revision labels,
+						// falling back to local git repo HEAD if unavailable.
 						var headSHA string
-						if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
-							headSHA = strings.TrimSpace(string(headOut))
+						if rev, revErr := d.GetRemoteImageRevision(pollCtx, imgRef); revErr == nil && rev != "" {
+							headSHA = rev
+							log.Printf("[Hangar:NomadImagePoll] Resolved commit SHA %s from image labels for %s", headSHA, imgRef)
+						} else {
+							if revErr != nil {
+								log.Printf("[Hangar:NomadImagePoll] Notice: could not resolve revision from image %s: %v (falling back to git HEAD)", imgRef, revErr)
+							}
+							if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
+								headSHA = strings.TrimSpace(string(headOut))
+							}
 						}
 
-						repoName := filepath.Base(repo)
-						if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
-							repoName = "azylman/" + repoName
+						repoName := ImageSourceRepo(imgRef)
+						if repoName == "" {
+							repoName = filepath.Base(repo)
+							if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
+								repoName = "azylman/" + repoName
+							}
 						}
 
 						deployEvt := HangarDeployEvent{
