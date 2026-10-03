@@ -63,7 +63,6 @@ var (
 		"/share/aerial/AGENTS.md",
 		"/app/AGENTS.md",
 		"/data/AGENTS.md",
-		"/data/.AGENTS.md.lkgc",
 		"./AGENTS.local.md",
 		"./AGENTS.md",
 	}
@@ -75,7 +74,6 @@ var (
 		"/share/aerial/GEMINI.md",
 		"/app/GEMINI.md",
 		"/data/GEMINI.md",
-		"/data/.GEMINI.md.lkgc",
 		"./GEMINI.local.md",
 		"./GEMINI.md",
 	}

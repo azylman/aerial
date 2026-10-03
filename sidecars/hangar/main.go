@@ -1649,6 +1649,11 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 			status = "error"
 		} else if anyChanged {
 			status = "synced"
+			if d.configDir != "" {
+				if err := d.SyncBrainConfigToNomad(syncCtx, d.configDir); err != nil {
+					log.Printf("[Hangar:Periodic] Notice: SyncBrainConfigToNomad: %v", err)
+				}
+			}
 			go d.notifyBrainReload()
 		}
 		metrics.RecordSyncRequest("periodic", status)
@@ -1688,6 +1693,53 @@ func (d *SyncDaemon) notifyBrainReload() {
 	}
 	defer closeWarn(resp.Body, "brain reload response body")
 	log.Printf("[Hangar] Successfully dispatched internal reload trigger to Brain (%s)", brainURL)
+}
+
+// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML).
+func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string) error {
+	configPath := filepath.Join(configDir, "config.yaml")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read brain config at %s: %w", configPath, err)
+	}
+
+	var parsed struct {
+		Channels map[string]interface{} `yaml:"channels"`
+	}
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		return fmt.Errorf("invalid YAML syntax in %s: %w", configPath, err)
+	}
+	if parsed.Channels != nil {
+		hasDefault := false
+		for k := range parsed.Channels {
+			if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == "default" {
+				hasDefault = true
+				break
+			}
+		}
+		if !hasDefault {
+			return fmt.Errorf("semantic validation error in %s: channels.default is required", configPath)
+		}
+	}
+
+	nomadExec := d.getNomadExecutor()
+	if nomadExec == nil || d.nomadAddr == "" {
+		return nil
+	}
+
+	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	stdout, stderr, err := nomadExec(valCtx, "var", "put", "nomad/jobs/brain", "CONFIG_YAML=@"+configPath)
+	if err != nil {
+		combined := string(append(stdout, stderr...))
+		return fmt.Errorf("failed updating Nomad variable nomad/jobs/brain: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
+	}
+	log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/brain")
+	return nil
 }
 
 // StartPeriodicLoop runs the background ticker loop.
@@ -2354,6 +2406,10 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 			}
 		} else {
 			resp.Message = "configuration synced; no nomad job changes"
+		}
+
+		if err := d.SyncBrainConfigToNomad(ctx, repoPath); err != nil {
+			log.Printf("[Hangar:GitPush] Notice: SyncBrainConfigToNomad: %v", err)
 		}
 
 		go d.notifyBrainReload()

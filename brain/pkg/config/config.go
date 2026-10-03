@@ -28,11 +28,11 @@ var (
 )
 
 var ConfigSearchPaths = []string{
+	"/local/config.yaml",
 	"/share/aerial-config/config.yaml",
 	"/share/aerial-config/config.yml",
 	"/app/config.yaml",
 	"/share/aerial/config.yaml",
-	"/data/.config.yaml.lkgc",
 }
 
 var ChannelInstructionsDirs = []string{
@@ -1061,15 +1061,6 @@ func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config,
 
 		loadedPath = p
 		data = &parsed
-		target := filepath.Join(data.DataDir, ".config.yaml.lkgc")
-		if data.DataDir == "" {
-			target = "/data/.config.yaml.lkgc"
-		}
-		if p != target {
-			if writeErr := writeAtomicFile(target, string(rawData)); writeErr != nil {
-				log.Printf("[Config] Warning writing fallback configuration to %s: %v", target, writeErr)
-			}
-		}
 		break
 	}
 
