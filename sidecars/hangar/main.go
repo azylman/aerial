@@ -2323,7 +2323,7 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 						d.nomadKnownDigests[key] = remoteDigest
 						d.nomadDigestsMu.Unlock()
 
-						out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", jobName)
+						out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
 						if runErr != nil {
 							log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
 						} else {
@@ -3435,7 +3435,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		}
 
 		log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for job %s...", job.JobName)
-		outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-yes", "-reschedule", job.JobName)
+		outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", job.JobName)
 		if errRest != nil {
 			log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
 		}
