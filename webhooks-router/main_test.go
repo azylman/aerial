@@ -2973,7 +2973,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 1 {
 		t.Fatalf("expected 1 direct message dispatch after deploy_started, got %d", len(dmCalls))
 	}
-	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "(PR: #527, repo: aerial): Starting deploy for brain") {
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "**(PR: #527, repo: aerial)**: Starting deploy for brain") {
 		t.Errorf("unexpected deploy_started direct message: %+v", dmCalls[0])
 	}
 	if len(mockDisp.PromptCalls()) != 0 {
@@ -3010,7 +3010,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 		t.Fatalf("expected 1 direct message call on deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 
-	// 2. deploy_rollback with valid snowflake targetID triggers prompt with error details and directive (NOT direct message!)
+	// 2. deploy_rollback with valid snowflake targetID triggers direct message first, then prompt
 	longDetails := strings.Repeat("error detail line\n", 50)
 	rollbackEvt := HangarDeployEvent{
 		Event:     "deploy_rollback",
@@ -3038,12 +3038,16 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if !strings.Contains(pCalls[1].Prompt, "```") {
 		t.Errorf("expected codeblock in prompt: %s", pCalls[1].Prompt)
 	}
-	// direct message count should still be 1 (from deploy_started)
-	if len(mockDisp.DirectMessageCalls()) != 1 {
-		t.Fatalf("expected 1 direct message dispatch after rollback, got %d", len(mockDisp.DirectMessageCalls()))
+	// direct message count should now be 2 (deploy_started + deploy_rollback)
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 2 {
+		t.Fatalf("expected 2 direct message dispatches after rollback, got %d", len(dmCalls))
+	}
+	if !strings.Contains(dmCalls[1].Content, "**(PR: #529, repo: aerial)**: Deployment failed and rolled back for webhooks-router. Following up...") {
+		t.Errorf("unexpected rollback direct message: %+v", dmCalls[1])
 	}
 
-	// 3. deploy_failed with valid snowflake targetID triggers prompt
+	// 3. deploy_failed with valid snowflake targetID triggers direct message first, then prompt
 	failedEvt := HangarDeployEvent{
 		Event:     "deploy_failed",
 		JobName:   "hangar",
@@ -3067,6 +3071,13 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if !strings.Contains(pCalls[2].Prompt, "Please investigate and fix") {
 		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[2].Prompt)
 	}
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 3 {
+		t.Fatalf("expected 3 direct message dispatches after deploy_failed, got %d", len(dmCalls))
+	}
+	if !strings.Contains(dmCalls[2].Content, "**(PR: #530, repo: aerial)**: Deployment failed for hangar. Following up...") {
+		t.Errorf("unexpected deploy_failed direct message: %+v", dmCalls[2])
+	}
 
 	// 4. sync_success with valid snowflake targetID triggers direct message
 	syncSuccessEvt := HangarDeployEvent{
@@ -3079,14 +3090,14 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 	dmCalls = mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 2 {
-		t.Fatalf("expected 2 direct message dispatches after sync_success, got %d", len(dmCalls))
+	if len(dmCalls) != 4 {
+		t.Fatalf("expected 4 direct message dispatches after sync_success, got %d", len(dmCalls))
 	}
-	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "(repo: aerial-config): Git file sync completed") {
-		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[1])
+	if dmCalls[3].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[3].Content, "**(repo: aerial-config)**: Git file sync completed") {
+		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[3])
 	}
 
-	// 5. sync_failed with valid snowflake targetID triggers prompt
+	// 5. sync_failed with valid snowflake targetID triggers direct message first, then prompt
 	syncFailedEvt := HangarDeployEvent{
 		Event:     "sync_failed",
 		Repo:      "azylman/aerial-config",
@@ -3100,6 +3111,13 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	pCalls = mockDisp.PromptCalls()
 	if len(pCalls) != 4 {
 		t.Fatalf("expected 4 prompt dispatches after sync_failed, got %d", len(pCalls))
+	}
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 5 {
+		t.Fatalf("expected 5 direct message dispatches after sync_failed, got %d", len(dmCalls))
+	}
+	if dmCalls[4].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[4].Content, "**(repo: aerial-config)**: Git file sync failed. Following up...") {
+		t.Errorf("unexpected sync_failed direct message: %+v", dmCalls[4])
 	}
 	if pCalls[3].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[3].Prompt, "Git sync failed") {
 		t.Errorf("unexpected sync_failed prompt: %+v", pCalls[3])
@@ -3117,8 +3135,8 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, invalidTargetEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	if len(mockDisp.DirectMessageCalls()) != 2 {
-		t.Fatalf("expected still 2 direct message dispatches after invalid target deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
+	if len(mockDisp.DirectMessageCalls()) != 5 {
+		t.Fatalf("expected still 5 direct message dispatches after invalid target deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 	if len(mockDisp.PromptCalls()) != 4 {
 		t.Fatalf("expected still 4 prompt dispatches after invalid target deploy_success, got %d", len(mockDisp.PromptCalls()))
@@ -3133,8 +3151,8 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, invalidStartedEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	if len(mockDisp.DirectMessageCalls()) != 2 {
-		t.Fatalf("expected still 2 direct message dispatches after invalid target deploy_started, got %d", len(mockDisp.DirectMessageCalls()))
+	if len(mockDisp.DirectMessageCalls()) != 5 {
+		t.Fatalf("expected still 5 direct message dispatches after invalid target deploy_started, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 	if len(mockDisp.PromptCalls()) != 4 {
 		t.Fatalf("expected still 4 prompt dispatches after invalid target deploy_started, got %d", len(mockDisp.PromptCalls()))
@@ -3491,7 +3509,7 @@ func TestProcessGitHubEvent_PRMergedDirectMessage(t *testing.T) {
 		if dm.ChannelID != "1555405874565091380" {
 			t.Errorf("expected channelID 1555405874565091380, got %s", dm.ChannelID)
 		}
-		if !strings.Contains(dm.Content, "(PR: #542, repo: aerial): Merged into main") {
+		if !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)**: Merged into main") {
 			t.Errorf("unexpected content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
@@ -3521,14 +3539,14 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 
 	select {
 	case dm := <-mockDisp.directMessageCh:
-		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "(PR: #542, repo: aerial): Git file sync completed") {
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)**: Git file sync completed") {
 			t.Errorf("unexpected direct message content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for sync_success direct message")
 	}
 
-	// 2. sync_failed triggers prompt with directive and context
+	// 2. sync_failed triggers direct message first, then prompt with directive and context
 	syncFailedEvt := HangarDeployEvent{
 		Event:     "sync_failed",
 		Repo:      "azylman/aerial",
@@ -3539,6 +3557,15 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 		Details:   "merge conflict in rules/foo.md",
 	}
 	srv.ProcessHangarEvent(ctx, syncFailedEvt)
+
+	select {
+	case dm := <-mockDisp.directMessageCh:
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)**: Git file sync failed. Following up...") {
+			t.Errorf("unexpected fail direct message content: %s", dm.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sync_failed direct message")
+	}
 
 	select {
 	case p := <-mockDisp.promptCh:
@@ -3758,6 +3785,15 @@ func TestCheckOpenPRConflicts_Detected(t *testing.T) {
 	}
 
 	select {
+	case dm := <-mockDisp.directMessageCh:
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #543, repo: aerial)**: Merge conflict detected. Following up...") {
+			t.Errorf("unexpected conflict direct message content: %s", dm.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for conflict direct message dispatch")
+	}
+
+	select {
 	case prompt := <-mockDisp.promptCh:
 		if prompt.ChannelID != "1555405874565091380" {
 			t.Errorf("expected ChannelID 1555405874565091380, got %s", prompt.ChannelID)
@@ -3769,8 +3805,11 @@ func TestCheckOpenPRConflicts_Detected(t *testing.T) {
 		t.Fatal("timed out waiting for conflict prompt dispatch")
 	}
 
-	if len(mockDisp.DirectMessageCalls()) != 0 {
-		t.Errorf("expected 0 direct message calls on conflict, got %d", len(mockDisp.DirectMessageCalls()))
+	dmCalls := mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 1 {
+		t.Errorf("expected 1 direct message call on conflict, got %d", len(dmCalls))
+	} else if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "**(PR: #543, repo: aerial)**: Merge conflict detected. Following up...") {
+		t.Errorf("unexpected direct message content: %+v", dmCalls[0])
 	}
 }
 
@@ -3898,6 +3937,15 @@ func TestProcessGitHubEvent_AutoMergeDisabled(t *testing.T) {
 	}
 	if res.Action != "auto_merge_disabled" || res.PRNumber != 543 {
 		t.Errorf("unexpected event: %+v", res)
+	}
+
+	select {
+	case dm := <-mockDisp.directMessageCh:
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #543, repo: aerial)**: Merge conflict detected. Following up...") {
+			t.Errorf("unexpected auto_merge_disabled direct message: %s", dm.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for auto_merge_disabled direct message dispatch")
 	}
 
 	select {

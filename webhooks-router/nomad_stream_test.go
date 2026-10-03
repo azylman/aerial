@@ -286,8 +286,12 @@ func TestNomadStreamSubscriber_DeploymentFailure(t *testing.T) {
 	if !strings.Contains(pCalls[0].Prompt, "Please investigate and fix the deployment failure.") {
 		t.Errorf("expected directive in prompt: %s", pCalls[0].Prompt)
 	}
-	if len(mockDisp.DirectMessageCalls()) != 0 {
-		t.Fatalf("expected 0 direct message calls on failure, got %d", len(mockDisp.DirectMessageCalls()))
+	dmCalls := mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 1 {
+		t.Fatalf("expected 1 direct message call on failure, got %d", len(dmCalls))
+	}
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "**(PR: #553, repo: aerial)**: Nomad deployment failed for brain. Following up...") {
+		t.Errorf("unexpected direct message content: %+v", dmCalls[0])
 	}
 }
 
