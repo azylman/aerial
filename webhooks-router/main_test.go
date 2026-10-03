@@ -2973,7 +2973,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 1 {
 		t.Fatalf("expected 1 direct message dispatch after deploy_started, got %d", len(dmCalls))
 	}
-	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "**(PR: #527, repo: aerial)**: Starting deploy for brain") {
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "**(PR: #527, repo: aerial)** Starting deploy for brain") {
 		t.Errorf("unexpected deploy_started direct message: %+v", dmCalls[0])
 	}
 	if len(mockDisp.PromptCalls()) != 0 {
@@ -3043,7 +3043,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 2 {
 		t.Fatalf("expected 2 direct message dispatches after rollback, got %d", len(dmCalls))
 	}
-	if !strings.Contains(dmCalls[1].Content, "**(PR: #529, repo: aerial)**: Deployment failed and rolled back for webhooks-router. Following up...") {
+	if !strings.Contains(dmCalls[1].Content, "**(PR: #529, repo: aerial)** Deployment failed and rolled back for webhooks-router. Following up...") {
 		t.Errorf("unexpected rollback direct message: %+v", dmCalls[1])
 	}
 
@@ -3075,7 +3075,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 3 {
 		t.Fatalf("expected 3 direct message dispatches after deploy_failed, got %d", len(dmCalls))
 	}
-	if !strings.Contains(dmCalls[2].Content, "**(PR: #530, repo: aerial)**: Deployment failed for hangar. Following up...") {
+	if !strings.Contains(dmCalls[2].Content, "**(PR: #530, repo: aerial)** Deployment failed for hangar. Following up...") {
 		t.Errorf("unexpected deploy_failed direct message: %+v", dmCalls[2])
 	}
 
@@ -3093,7 +3093,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 4 {
 		t.Fatalf("expected 4 direct message dispatches after sync_success, got %d", len(dmCalls))
 	}
-	if dmCalls[3].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[3].Content, "**(repo: aerial-config)**: Git file sync completed") {
+	if dmCalls[3].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[3].Content, "**(repo: aerial-config)** Git file sync completed") {
 		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[3])
 	}
 
@@ -3116,7 +3116,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if len(dmCalls) != 5 {
 		t.Fatalf("expected 5 direct message dispatches after sync_failed, got %d", len(dmCalls))
 	}
-	if dmCalls[4].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[4].Content, "**(repo: aerial-config)**: Git file sync failed. Following up...") {
+	if dmCalls[4].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[4].Content, "**(repo: aerial-config)** Git file sync failed. Following up...") {
 		t.Errorf("unexpected sync_failed direct message: %+v", dmCalls[4])
 	}
 	if pCalls[3].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[3].Prompt, "Git sync failed") {
@@ -3509,7 +3509,7 @@ func TestProcessGitHubEvent_PRMergedDirectMessage(t *testing.T) {
 		if dm.ChannelID != "1555405874565091380" {
 			t.Errorf("expected channelID 1555405874565091380, got %s", dm.ChannelID)
 		}
-		if !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)**: Merged into main") {
+		if !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)** Merged into main") {
 			t.Errorf("unexpected content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
@@ -3539,7 +3539,7 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 
 	select {
 	case dm := <-mockDisp.directMessageCh:
-		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)**: Git file sync completed") {
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)** Git file sync completed") {
 			t.Errorf("unexpected direct message content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
@@ -3560,7 +3560,7 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 
 	select {
 	case dm := <-mockDisp.directMessageCh:
-		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)**: Git file sync failed. Following up...") {
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #542, repo: aerial)** Git file sync failed. Following up...") {
 			t.Errorf("unexpected fail direct message content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
@@ -3786,7 +3786,7 @@ func TestCheckOpenPRConflicts_Detected(t *testing.T) {
 
 	select {
 	case dm := <-mockDisp.directMessageCh:
-		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #543, repo: aerial)**: Merge conflict detected. Following up...") {
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #543, repo: aerial)** Merge conflict detected. Following up...") {
 			t.Errorf("unexpected conflict direct message content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
@@ -3808,7 +3808,7 @@ func TestCheckOpenPRConflicts_Detected(t *testing.T) {
 	dmCalls := mockDisp.DirectMessageCalls()
 	if len(dmCalls) != 1 {
 		t.Errorf("expected 1 direct message call on conflict, got %d", len(dmCalls))
-	} else if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "**(PR: #543, repo: aerial)**: Merge conflict detected. Following up...") {
+	} else if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "**(PR: #543, repo: aerial)** Merge conflict detected. Following up...") {
 		t.Errorf("unexpected direct message content: %+v", dmCalls[0])
 	}
 }
@@ -3941,7 +3941,7 @@ func TestProcessGitHubEvent_AutoMergeDisabled(t *testing.T) {
 
 	select {
 	case dm := <-mockDisp.directMessageCh:
-		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #543, repo: aerial)**: Merge conflict detected. Following up...") {
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "**(PR: #543, repo: aerial)** Merge conflict detected. Following up...") {
 			t.Errorf("unexpected auto_merge_disabled direct message: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
