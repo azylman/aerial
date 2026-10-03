@@ -105,6 +105,14 @@ func TestNomadStreamSubscriber_HeartbeatAndDeployment(t *testing.T) {
 
 	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(`[{"ID":"alloc-999","DesiredStatus":"run","ClientStatus":"running"}]`))
+			return
+		}
 		_, _ = w.Write([]byte(streamData))
 	}))
 	defer nomadServer.Close()
@@ -161,6 +169,14 @@ func TestNomadStreamSubscriber_AllocationRunning(t *testing.T) {
 
 	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(`[{"ID":"alloc-999","DesiredStatus":"run","ClientStatus":"running"}]`))
+			return
+		}
 		_, _ = w.Write([]byte(streamData))
 	}))
 	defer nomadServer.Close()
