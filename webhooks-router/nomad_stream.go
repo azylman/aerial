@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/riverqueue/river"
 )
 
 // NomadStreamPayload represents the top-level JSON envelope returned by Nomad's /v1/event/stream endpoint.
@@ -241,49 +243,95 @@ func (sub *NomadStreamSubscriber) processStreamLine(ctx context.Context, line []
 
 // handleNomadEvent dispatches an individual Nomad event to its corresponding handler.
 func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event NomadEvent) {
+	// Pre-filter noise in memory before hitting River or DB
 	switch event.Topic {
 	case "Deployment":
 		var depPayload NomadDeploymentEventPayload
 		if err := json.Unmarshal(event.Payload, &depPayload); err != nil {
 			return
 		}
-		dep := depPayload.Deployment
-		if strings.EqualFold(dep.Status, "successful") {
-			sub.server.HandleNomadJobSuccess(ctx, dep.JobID, dep.ID)
-		} else if strings.EqualFold(dep.Status, "failed") || strings.EqualFold(dep.Status, "cancelled") {
-			sub.server.HandleNomadJobFailure(ctx, dep.JobID, dep.ID, dep.Status, dep.StatusDescription)
+		status := depPayload.Deployment.Status
+		if !strings.EqualFold(status, "successful") && !strings.EqualFold(status, "failed") && !strings.EqualFold(status, "cancelled") {
+			return
 		}
-
 	case "Allocation":
 		var allocPayload NomadAllocationEventPayload
 		if err := json.Unmarshal(event.Payload, &allocPayload); err != nil {
 			return
 		}
 		alloc := allocPayload.Allocation
-		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" {
-			sub.server.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
+		if alloc.DesiredStatus != "run" || alloc.ClientStatus != "running" {
+			return
+		}
+	default:
+		// Drop unhandled topics immediately
+		return
+	}
+
+	if sub.server != nil && sub.server.riverClient != nil {
+		args := NomadEventArgs{
+			Topic:   event.Topic,
+			Type:    event.Type,
+			Payload: event.Payload,
+		}
+		if _, err := sub.server.riverClient.Insert(ctx, args, &river.InsertOpts{MaxAttempts: 5}); err != nil {
+			log.Printf("[webhooks-router] [nomad-stream] error inserting nomad event into river: %v", err)
+		}
+		return
+	}
+
+	if sub.server != nil {
+		if err := sub.server.ProcessNomadEvent(ctx, event.Topic, event.Type, event.Payload); err != nil {
+			log.Printf("[webhooks-router] [nomad-stream] error processing nomad event directly: %v", err)
 		}
 	}
 }
 
+// ProcessNomadEvent processes a filtered Nomad stream event synchronously.
+func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, rawPayload json.RawMessage) error {
+	switch topic {
+	case "Deployment":
+		var depPayload NomadDeploymentEventPayload
+		if err := json.Unmarshal(rawPayload, &depPayload); err != nil {
+			return fmt.Errorf("unmarshal nomad deployment payload: %w", err)
+		}
+		dep := depPayload.Deployment
+		if strings.EqualFold(dep.Status, "successful") {
+			return s.HandleNomadJobSuccess(ctx, dep.JobID, dep.ID)
+		} else if strings.EqualFold(dep.Status, "failed") || strings.EqualFold(dep.Status, "cancelled") {
+			return s.HandleNomadJobFailure(ctx, dep.JobID, dep.ID, dep.Status, dep.StatusDescription)
+		}
+	case "Allocation":
+		var allocPayload NomadAllocationEventPayload
+		if err := json.Unmarshal(rawPayload, &allocPayload); err != nil {
+			return fmt.Errorf("unmarshal nomad allocation payload: %w", err)
+		}
+		alloc := allocPayload.Allocation
+		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" {
+			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
+		}
+	}
+	return nil
+}
+
 // HandleNomadJobFailure processes a confirmed deployment failure or cancellation for a Nomad job.
-func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, status, statusDesc string) {
+func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, status, statusDesc string) error {
 	if s.registry == nil {
-		return
+		return nil
 	}
 
 	cleanJob := strings.TrimSpace(jobID)
 	if cleanJob == "" {
-		return
+		return nil
 	}
 
 	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployFailedByJob(ctx, cleanJob)
 	if err != nil {
 		log.Printf("[webhooks-router] [nomad] error transitioning job %s to deploy_failed: %v", cleanJob, err)
-		return
+		return err
 	}
 	if !updated {
-		return
+		return nil
 	}
 
 	log.Printf("[webhooks-router] [nomad] deployment failure confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s, status: %s)",
@@ -299,65 +347,47 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		lines = append(lines, "Please investigate and fix the deployment failure.")
 		prompt := strings.Join(lines, "\n")
 
-		go func(tID, p string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (nomad failure): %v", r)
-				}
-			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
-				ChannelID: tID,
-				Prompt:    p,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching failure prompt for %s: %v", cleanJob, err)
-			}
-		}(targetID, prompt)
+		if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
+			ChannelID: targetID,
+			Prompt:    prompt,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching failure prompt for %s: %v", cleanJob, err)
+			return fmt.Errorf("dispatch failure prompt for %s: %w", cleanJob, err)
+		}
 	}
+	return nil
 }
 
 // HandleNomadJobSuccess processes a confirmed successful deployment or running allocation for a Nomad job.
-func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID string) {
+func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID string) error {
 	if s.registry == nil {
-		return
+		return nil
 	}
 
 	cleanJob := strings.TrimSpace(jobID)
 	if cleanJob == "" {
-		return
+		return nil
 	}
 
 	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployedByJob(ctx, cleanJob)
 	if err != nil {
 		log.Printf("[webhooks-router] [nomad] error transitioning job %s to deployed: %v", cleanJob, err)
-		return
+		return err
 	}
 	if !updated {
-		return
+		return nil
 	}
 
 	log.Printf("[webhooks-router] [nomad] deployment confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s)",
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID)
 
 	if IsValidDiscordSnowflake(targetID) && s.dispatcher != nil {
-		msg := fmt.Sprintf("Deployment succeeded for job %s (PR #%d, commit %s).", cleanJob, prNumber, mergeSHA)
-		go func(tID, m string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (nomad stream): %v", r)
-				}
-			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
-				ChannelID: tID,
-				Content:   m,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching direct message for %s: %v", cleanJob, err)
-			}
-		}(targetID, msg)
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching deployment success prompt for %s: %v", cleanJob, err)
+			return err
+		}
 	}
+	return nil
 }
 
 // ReconcileActiveDeployments performs the startup sweep across all pending deployments in pr_registry.
@@ -380,7 +410,9 @@ func (s *RouterServer) ReconcileActiveDeployments(ctx context.Context) error {
 		jobs := extractJobsFromMetadata(p.Metadata)
 		for _, job := range jobs {
 			if s.isNomadJobHealthy(ctx, job) {
-				s.HandleNomadJobSuccess(ctx, job, "startup-sweep")
+				if err := s.HandleNomadJobSuccess(ctx, job, "startup-sweep"); err != nil {
+					log.Printf("[webhooks-router] [sweep] error handling nomad job success for %s: %v", job, err)
+				}
 			}
 		}
 	}
