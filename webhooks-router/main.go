@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +41,8 @@ type Config struct {
 	GitHubToken           string
 	GitHubAPIURL          string
 	PostgresURL           string
+	HangarURL             string
+	BrainURL              string
 }
 
 // LoadConfigFromEnv initializes configuration from environment variables.
@@ -105,6 +109,19 @@ func LoadConfigFromEnv() Config {
 		}
 	}
 
+	hangarURL := os.Getenv("HANGAR_URL")
+	if hangarURL == "" {
+		hangarURL = "http://127.0.0.1:8087"
+	}
+
+	brainURL := os.Getenv("BRAIN_INTERNAL_URL")
+	if brainURL == "" {
+		brainURL = os.Getenv("BRAIN_URL")
+	}
+	if brainURL == "" {
+		brainURL = "http://127.0.0.1:8088"
+	}
+
 	return Config{
 		Port:                  port,
 		InfisicalURL:          strings.TrimRight(infURL, "/"),
@@ -117,6 +134,8 @@ func LoadConfigFromEnv() Config {
 		GitHubToken:           ghToken,
 		GitHubAPIURL:          strings.TrimRight(ghAPI, "/"),
 		PostgresURL:           pgURL,
+		HangarURL:             strings.TrimRight(hangarURL, "/"),
+		BrainURL:              strings.TrimRight(brainURL, "/"),
 	}
 }
 
@@ -450,12 +469,273 @@ func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sh
 	return prNum, branch, targetID, nil
 }
 
+// Discord Snowflake validation
+var snowflakeRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
+
+func IsValidDiscordSnowflake(id string) bool {
+	return snowflakeRegex.MatchString(strings.TrimSpace(id))
+}
+
+type GitPushEventRequest struct {
+	Repo   string `json:"repo"`
+	Ref    string `json:"ref"`
+	Commit string `json:"commit"`
+}
+
+type ImageReadyEventRequest struct {
+	Image  string `json:"image"`
+	Digest string `json:"digest,omitempty"`
+}
+
+type PromptRequest struct {
+	ChannelID string `json:"channel_id"`
+	Prompt    string `json:"prompt"`
+}
+
+type DirectMessageRequest struct {
+	ChannelID string `json:"channel_id"`
+	Content   string `json:"content"`
+}
+
+type OutboundDispatcher interface {
+	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
+	DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) error
+	DispatchPrompt(ctx context.Context, req PromptRequest) error
+	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
+}
+
+type DefaultOutboundDispatcher struct {
+	hangarURL  string
+	brainURL   string
+	httpClient *http.Client
+	retryDelay time.Duration
+}
+
+func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	return &DefaultOutboundDispatcher{
+		hangarURL:  strings.TrimRight(hangarURL, "/"),
+		brainURL:   strings.TrimRight(brainURL, "/"),
+		httpClient: client,
+		retryDelay: 500 * time.Millisecond,
+	}
+}
+
+func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal git push request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/events/git_push", d.hangarURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create git push request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := d.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("git push request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("hangar git push returned status %d (read error: %w)", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("hangar git push returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) error {
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal image ready request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/events/image_ready", d.hangarURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create image ready request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := d.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("image ready request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("hangar image ready returned status %d (read error: %w)", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("hangar image ready returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
+	if !IsValidDiscordSnowflake(req.ChannelID) {
+		return fmt.Errorf("invalid discord snowflake channel id: %q", req.ChannelID)
+	}
+
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal prompt request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/prompt", d.brainURL)
+	delay := d.retryDelay
+	if delay <= 0 {
+		delay = 500 * time.Millisecond
+	}
+
+	const maxAttempts = 3
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return fmt.Errorf("create prompt request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := d.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = fmt.Errorf("prompt request failed (attempt %d/%d): %w", attempt, maxAttempts, err)
+			if attempt < maxAttempts {
+				select {
+				case <-time.After(delay):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return lastErr
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			respBody = []byte(fmt.Sprintf("error reading body: %v", readErr))
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("brain prompt returned status %d (attempt %d/%d): %s", resp.StatusCode, attempt, maxAttempts, string(respBody))
+			if attempt < maxAttempts {
+				select {
+				case <-time.After(delay):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return lastErr
+		}
+
+		// Non-5xx and non-2xx (e.g. 4xx client errors) - do not retry
+		return fmt.Errorf("brain prompt returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return lastErr
+}
+
+func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
+	if !IsValidDiscordSnowflake(req.ChannelID) {
+		return fmt.Errorf("invalid discord snowflake channel id: %q", req.ChannelID)
+	}
+
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal direct message request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/discord/message", d.brainURL)
+	delay := d.retryDelay
+	if delay <= 0 {
+		delay = 500 * time.Millisecond
+	}
+
+	const maxAttempts = 3
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return fmt.Errorf("create direct message request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := d.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = fmt.Errorf("direct message request failed (attempt %d/%d): %w", attempt, maxAttempts, err)
+			if attempt < maxAttempts {
+				select {
+				case <-time.After(delay):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return lastErr
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			respBody = []byte(fmt.Sprintf("error reading body: %v", readErr))
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("brain internal message returned status %d (attempt %d/%d): %s", resp.StatusCode, attempt, maxAttempts, string(respBody))
+			if attempt < maxAttempts {
+				select {
+				case <-time.After(delay):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return lastErr
+		}
+
+		// Non-5xx and non-2xx (e.g. 4xx client errors) - do not retry
+		return fmt.Errorf("brain internal message returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return lastErr
+}
+
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
 	cfg         Config
 	httpClient  *http.Client
 	riverClient RiverInserter
 	registry    PRRegistryUpdater
+	dispatcher  OutboundDispatcher
 	onProcessed func(event, delivery string)
 }
 
@@ -482,6 +762,16 @@ func (s *RouterServer) SetRiverClient(rc RiverInserter) {
 // SetRegistry assigns the PRRegistryUpdater instance to RouterServer.
 func (s *RouterServer) SetRegistry(reg PRRegistryUpdater) {
 	s.registry = reg
+}
+
+// SetDispatcher assigns the OutboundDispatcher instance to RouterServer.
+func (s *RouterServer) SetDispatcher(d OutboundDispatcher) {
+	s.dispatcher = d
+}
+
+// GetDispatcher returns the OutboundDispatcher configured on RouterServer.
+func (s *RouterServer) GetDispatcher() OutboundDispatcher {
+	return s.dispatcher
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -699,8 +989,121 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 	}
 
-	// STRICT INVARIANT: ZERO downstream dispatch to Brain or Discord!
+	if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+		targetID := evt.TargetID
+		msg := fmt.Sprintf("Deployment succeeded for job %s (PR #%d, commit %s).", evt.JobName, evt.PRNumber, evt.CommitSHA)
+		go func(tID, m string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (deploy_success): %v", r)
+				}
+			}()
+			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+				ChannelID: tID,
+				Content:   m,
+			}); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_success direct message: %v", err)
+			}
+		}(targetID, msg)
+	} else if evt.Event == "deploy_rollback" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+		targetID := evt.TargetID
+		details := evt.Details
+		runes := []rune(details)
+		if len(runes) > 500 {
+			details = string(runes[:500])
+		}
+		msg := fmt.Sprintf("Deployment failed and rolled back for job %s (PR #%d, commit %s): %s.", evt.JobName, evt.PRNumber, evt.CommitSHA, details)
+		go func(tID, m string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (deploy_rollback): %v", r)
+				}
+			}()
+			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+				ChannelID: tID,
+				Content:   m,
+			}); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_rollback direct message: %v", err)
+			}
+		}(targetID, msg)
+	} else if evt.Event == "deploy_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+		targetID := evt.TargetID
+		details := evt.Details
+		runes := []rune(details)
+		if len(runes) > 500 {
+			details = string(runes[:500])
+		}
+		msg := fmt.Sprintf("Deployment failed for job %s (PR #%d, commit %s): %s.", evt.JobName, evt.PRNumber, evt.CommitSHA, details)
+		go func(tID, m string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (deploy_failed): %v", r)
+				}
+			}()
+			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+				ChannelID: tID,
+				Content:   m,
+			}); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_failed direct message: %v", err)
+			}
+		}(targetID, msg)
+	}
+
 	return &evt
+}
+
+func (s *RouterServer) dispatchCIFailurePrompt(targetID, checkName, repo, headSHA string, prNum int) {
+	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+		return
+	}
+	prompt := fmt.Sprintf("CI check %q failed for PR #%d on %s (head: %s). Please diagnose and fix the failure.", checkName, prNum, repo, headSHA)
+	go func(tID, p string) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (ci_failed): %v", r)
+			}
+		}()
+		dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
+			ChannelID: tID,
+			Prompt:    p,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching ci_failed prompt: %v", err)
+		} else {
+			log.Printf("[webhooks-router] [dispatcher] successfully dispatched ci_failed prompt for PR #%d to %s", prNum, tID)
+		}
+	}(targetID, prompt)
+}
+
+func (s *RouterServer) dispatchGitPush(repo, ref, commit string) {
+	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) {
+		return
+	}
+	go func(rp, rf, cm string) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchGitPush: %v", r)
+			}
+		}()
+		dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.dispatcher.DispatchGitPush(dispCtx, GitPushEventRequest{
+			Repo:   rp,
+			Ref:    rf,
+			Commit: cm,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching git_push to hangar for %s: %v", rp, err)
+		} else {
+			log.Printf("[webhooks-router] [dispatcher] successfully dispatched git_push to hangar for %s (%s)", rp, cm)
+		}
+	}(repo, ref, commit)
 }
 
 // GitHub Webhook Payloads and Resolution Types
@@ -1011,6 +1414,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (check=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber)
 				}
 			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
@@ -1026,6 +1430,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (check=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
+					pr := res.PRNumber
+					if pr == 0 {
+						pr = prNum
+					}
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr)
 				}
 			}
 		}
@@ -1095,6 +1504,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (workflow=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber)
 				}
 			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
@@ -1110,6 +1520,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (workflow=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
+					pr := res.PRNumber
+					if pr == 0 {
+						pr = prNum
+					}
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr)
 				}
 			}
 		}
@@ -1174,6 +1589,8 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
 			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, delivery)
+
+		s.dispatchGitPush(res.Repo, p.Ref, res.HeadSHA)
 
 		if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
 			targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
@@ -1415,6 +1832,7 @@ func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName str
 // runServer runs the HTTP server with graceful shutdown and optional ready callback.
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
 	server := NewRouterServer(cfg, nil)
+	server.SetDispatcher(NewDefaultOutboundDispatcher(cfg.HangarURL, cfg.BrainURL, nil))
 
 	var riverClient *river.Client[pgx.Tx]
 	var dbPool *pgxpool.Pool

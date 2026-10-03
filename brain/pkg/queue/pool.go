@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -492,6 +493,22 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 // DiscordSession returns the currently assigned discordgo session.
 func (p *WorkerPool) DiscordSession() *discordgo.Session {
 	return p.getDiscordSession()
+}
+
+// DeliverDirect delivers a message directly to the target Discord channel or thread,
+// completely bypassing the worker queue and LLM agent execution.
+func (p *WorkerPool) DeliverDirect(channelID, text string) error {
+	if p == nil {
+		return errors.New("worker pool is nil")
+	}
+	sess := p.DiscordSession()
+	if sess == nil && p.cfg.DeliveryFunc == nil {
+		return errors.New("discord session is not connected")
+	}
+	if p.cfg.DeliveryFunc != nil {
+		return p.cfg.DeliveryFunc(sess, channelID, text)
+	}
+	return delivery.SendMessage(sess, channelID, text)
 }
 
 // WebhookDispatcher returns the assigned webhook dispatcher.

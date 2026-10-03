@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2195,3 +2196,421 @@ func TestHangarWebhook_ZeroDownstreamCallsToBrain(t *testing.T) {
 	}
 }
 
+
+type mockOutboundDispatcher struct {
+	mu                 sync.Mutex
+	gitPushCalls       []GitPushEventRequest
+	imageReadyCalls    []ImageReadyEventRequest
+	promptCalls        []PromptRequest
+	directMessageCalls []DirectMessageRequest
+	gitPushErr         error
+	imageReadyErr      error
+	promptErr          error
+	directMessageErr   error
+}
+
+func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gitPushCalls = append(m.gitPushCalls, req)
+	return m.gitPushErr
+}
+
+func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.imageReadyCalls = append(m.imageReadyCalls, req)
+	return m.imageReadyErr
+}
+
+func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.promptCalls = append(m.promptCalls, req)
+	return m.promptErr
+}
+
+func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.directMessageCalls = append(m.directMessageCalls, req)
+	return m.directMessageErr
+}
+
+func (m *mockOutboundDispatcher) GitPushCalls() []GitPushEventRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]GitPushEventRequest, len(m.gitPushCalls))
+	copy(copied, m.gitPushCalls)
+	return copied
+}
+
+func (m *mockOutboundDispatcher) PromptCalls() []PromptRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]PromptRequest, len(m.promptCalls))
+	copy(copied, m.promptCalls)
+	return copied
+}
+
+func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]DirectMessageRequest, len(m.directMessageCalls))
+	copy(copied, m.directMessageCalls)
+	return copied
+}
+
+func TestDefaultOutboundDispatcher_AllMethods(t *testing.T) {
+	// 1. Test GitPush dispatch
+	var receivedGitPush GitPushEventRequest
+	gitPushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events/git_push" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&receivedGitPush); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"accepted"}`))
+	}))
+	defer gitPushServer.Close()
+
+	// 2. Test ImageReady dispatch
+	var receivedImageReady ImageReadyEventRequest
+	imageReadyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events/image_ready" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&receivedImageReady); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"accepted"}`))
+	}))
+	defer imageReadyServer.Close()
+
+	// 3. Test Prompt and DirectMessage dispatch with retry
+	var promptAttempts int
+	var receivedPrompt PromptRequest
+	var directAttempts int
+	var receivedDirect DirectMessageRequest
+	brainServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/prompt" {
+			promptAttempts++
+			if promptAttempts == 1 {
+				// First attempt fails with 500 to test retry
+				http.Error(w, "transient error", http.StatusInternalServerError)
+				return
+			}
+			if err := json.NewDecoder(r.Body).Decode(&receivedPrompt); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"queued"}`))
+			return
+		}
+
+		if r.URL.Path == "/discord/message" {
+			directAttempts++
+			if directAttempts == 1 {
+				// First attempt fails with 500 to test retry
+				http.Error(w, "transient error", http.StatusInternalServerError)
+				return
+			}
+			if err := json.NewDecoder(r.Body).Decode(&receivedDirect); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"sent"}`))
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer brainServer.Close()
+
+	dispatcher := NewDefaultOutboundDispatcher(gitPushServer.URL, brainServer.URL, nil)
+	dispatcher.retryDelay = 10 * time.Millisecond // fast retry for unit test
+
+	ctx := context.Background()
+
+	// Test DispatchGitPush
+	err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{
+		Repo:   "azylman/aerial",
+		Ref:    "refs/heads/main",
+		Commit: "testcommit123",
+	})
+	if err != nil {
+		t.Fatalf("DispatchGitPush failed: %v", err)
+	}
+	if receivedGitPush.Repo != "azylman/aerial" || receivedGitPush.Commit != "testcommit123" {
+		t.Errorf("unexpected git push payload: %+v", receivedGitPush)
+	}
+
+	// Test DispatchImageReady
+	dispatcher.hangarURL = imageReadyServer.URL
+	err = dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{
+		Image:  "ghcr.io/azylman/aerial-webhooks-router:latest",
+		Digest: "sha256:abcd",
+	})
+	if err != nil {
+		t.Fatalf("DispatchImageReady failed: %v", err)
+	}
+	if receivedImageReady.Image != "ghcr.io/azylman/aerial-webhooks-router:latest" || receivedImageReady.Digest != "sha256:abcd" {
+		t.Errorf("unexpected image ready payload: %+v", receivedImageReady)
+	}
+
+	// Test DispatchPrompt invalid snowflake
+	err = dispatcher.DispatchPrompt(ctx, PromptRequest{
+		ChannelID: "not-a-snowflake",
+		Prompt:    "hello",
+	})
+	if err == nil {
+		t.Fatalf("expected error on invalid snowflake, got nil")
+	}
+
+	// Test DispatchPrompt valid snowflake with retry
+	validSnowflake := "1555405874565091380"
+	err = dispatcher.DispatchPrompt(ctx, PromptRequest{
+		ChannelID: validSnowflake,
+		Prompt:    "test prompt message",
+	})
+	if err != nil {
+		t.Fatalf("DispatchPrompt failed: %v", err)
+	}
+	if promptAttempts != 2 {
+		t.Errorf("expected 2 attempts for prompt dispatch, got %d", promptAttempts)
+	}
+	if receivedPrompt.ChannelID != validSnowflake || receivedPrompt.Prompt != "test prompt message" {
+		t.Errorf("unexpected prompt payload: %+v", receivedPrompt)
+	}
+
+	// Test DispatchDirectMessage invalid snowflake
+	err = dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+		ChannelID: "not-a-snowflake",
+		Content:   "deployment completed",
+	})
+	if err == nil {
+		t.Fatalf("expected error on invalid snowflake for direct message, got nil")
+	}
+
+	// Test DispatchDirectMessage valid snowflake with retry
+	err = dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+		ChannelID: validSnowflake,
+		Content:   "deployment completed",
+	})
+	if err != nil {
+		t.Fatalf("DispatchDirectMessage failed: %v", err)
+	}
+	if directAttempts != 2 {
+		t.Errorf("expected 2 attempts for direct message dispatch, got %d", directAttempts)
+	}
+	if receivedDirect.ChannelID != validSnowflake || receivedDirect.Content != "deployment completed" {
+		t.Errorf("unexpected direct message payload: %+v", receivedDirect)
+	}
+
+	// Test DispatchDirectMessage client error 400 does not retry
+	clientErrServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer clientErrServer.Close()
+	clientErrDisp := NewDefaultOutboundDispatcher("", clientErrServer.URL, nil)
+	clientErrDisp.retryDelay = 5 * time.Millisecond
+	if err := clientErrDisp.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: validSnowflake, Content: "hi"}); err == nil {
+		t.Errorf("expected error on 400 bad request, got nil")
+	}
+}
+
+func TestProcessGitHubEvent_OutboundDispatch(t *testing.T) {
+	mockDisp := &mockOutboundDispatcher{}
+	mockReg := &mockPRRegistry{
+		ciFailedUpdated: true,
+	}
+
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetDispatcher(mockDisp)
+	srv.SetRegistry(mockReg)
+
+	ctx := context.Background()
+
+	// 1. Push to main triggers DispatchGitPush
+	pushPayloadMain := []byte(`{
+		"ref": "refs/heads/main",
+		"after": "maincommit123",
+		"repository": {"full_name": "azylman/aerial"}
+	}`)
+	_, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-main", pushPayloadMain)
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond) // wait for goroutine
+	calls := mockDisp.GitPushCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 git push dispatch, got %d", len(calls))
+	}
+	if calls[0].Repo != "azylman/aerial" || calls[0].Commit != "maincommit123" || calls[0].Ref != "refs/heads/main" {
+		t.Errorf("unexpected git push call: %+v", calls[0])
+	}
+
+	// 2. Push to feature branch does NOT trigger DispatchGitPush
+	pushPayloadFeat := []byte(`{
+		"ref": "refs/heads/feat/test-branch",
+		"after": "featcommit456",
+		"repository": {"full_name": "azylman/aerial"}
+	}`)
+	_, err = srv.ProcessGitHubEvent(ctx, "push", "del-push-feat", pushPayloadFeat)
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push feat failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if len(mockDisp.GitPushCalls()) != 1 {
+		t.Fatalf("expected still 1 git push dispatch, got %d", len(mockDisp.GitPushCalls()))
+	}
+
+	// 3. Check_run failure with valid snowflake triggers DispatchPrompt
+	mockReg.resolvePRNum = 530
+	mockReg.resolveTargetID = "1555405874565091380"
+	mockReg.ciFailedTargetID = "1555405874565091380"
+	mockReg.ciFailedUpdated = true
+
+	crFailurePayload := []byte(`{
+		"action": "completed",
+		"repository": {"full_name": "azylman/aerial"},
+		"check_run": {
+			"name": "Service Unit Tests",
+			"head_sha": "headsha789",
+			"status": "completed",
+			"conclusion": "failure",
+			"pull_requests": [{"number": 530, "head": {"ref": "feat/test"}}]
+		}
+	}`)
+	_, err = srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-fail", crFailurePayload)
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent check_run failure failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	pCalls := mockDisp.PromptCalls()
+	if len(pCalls) != 1 {
+		t.Fatalf("expected 1 prompt dispatch, got %d", len(pCalls))
+	}
+	if pCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[0].Prompt, "Service Unit Tests") {
+		t.Errorf("unexpected prompt call: %+v", pCalls[0])
+	}
+
+	// 4. Duplicate check_run failure (ciFailedUpdated = false) does NOT trigger DispatchPrompt
+	mockReg.ciFailedUpdated = false
+	_, err = srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-dup", crFailurePayload)
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent duplicate check_run failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected still 1 prompt dispatch for duplicate, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetDispatcher(mockDisp)
+
+	ctx := context.Background()
+
+	// 1. deploy_success with valid snowflake targetID triggers direct message (NOT prompt!)
+	successEvt := HangarDeployEvent{
+		Event:     "deploy_success",
+		JobName:   "brain",
+		Repo:      "azylman/aerial",
+		PRNumber:  528,
+		CommitSHA: "sha3d2a",
+		TargetID:  "1555405874565091380",
+		Status:    "success",
+	}
+	srv.ProcessHangarEvent(ctx, successEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	dmCalls := mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 1 {
+		t.Fatalf("expected 1 direct message dispatch on deploy_success, got %d", len(dmCalls))
+	}
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "Deployment succeeded") {
+		t.Errorf("unexpected deploy_success direct message: %+v", dmCalls[0])
+	}
+
+	// 2. deploy_rollback with valid snowflake targetID triggers direct message with truncation
+	longDetails := strings.Repeat("error detail line\n", 50)
+	rollbackEvt := HangarDeployEvent{
+		Event:     "deploy_rollback",
+		JobName:   "webhooks-router",
+		Repo:      "azylman/aerial",
+		PRNumber:  529,
+		CommitSHA: "shafail",
+		TargetID:  "1555405874565091380",
+		Status:    "rollback",
+		Details:   longDetails,
+	}
+	srv.ProcessHangarEvent(ctx, rollbackEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 2 {
+		t.Fatalf("expected 2 direct message dispatches after rollback, got %d", len(dmCalls))
+	}
+	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "Deployment failed and rolled back") {
+		t.Errorf("unexpected deploy_rollback direct message: %+v", dmCalls[1])
+	}
+	if len(dmCalls[1].Content) > 1000 {
+		t.Errorf("direct message should be truncated, but length is %d", len(dmCalls[1].Content))
+	}
+
+	// 3. deploy_failed with valid snowflake targetID triggers direct message
+	failedEvt := HangarDeployEvent{
+		Event:     "deploy_failed",
+		JobName:   "hangar",
+		Repo:      "azylman/aerial",
+		PRNumber:  530,
+		CommitSHA: "shabroken",
+		TargetID:  "1555405874565091380",
+		Status:    "failed",
+		Details:   "exit status 1",
+	}
+	srv.ProcessHangarEvent(ctx, failedEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 3 {
+		t.Fatalf("expected 3 direct message dispatches after deploy_failed, got %d", len(dmCalls))
+	}
+	if dmCalls[2].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[2].Content, "Deployment failed for job hangar") {
+		t.Errorf("unexpected deploy_failed direct message: %+v", dmCalls[2])
+	}
+
+	// 4. deploy_success with non-snowflake targetID does NOT trigger direct message
+	invalidTargetEvt := HangarDeployEvent{
+		Event:    "deploy_success",
+		JobName:  "hangar",
+		TargetID: "not-a-snowflake",
+	}
+	srv.ProcessHangarEvent(ctx, invalidTargetEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	if len(mockDisp.DirectMessageCalls()) != 3 {
+		t.Fatalf("expected still 3 direct message dispatches after invalid target, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+
+	// 5. STRICT INVARIANT: Deployment events must NEVER invoke DispatchPrompt!
+	if pCalls := mockDisp.PromptCalls(); len(pCalls) != 0 {
+		t.Fatalf("STRICT INVARIANT VIOLATION: expected 0 prompt calls from deployment events, got %d", len(pCalls))
+	}
+}
