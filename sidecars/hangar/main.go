@@ -1659,6 +1659,9 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 				if err := d.SyncHomepageConfigToNomad(syncCtx, d.configDir); err != nil {
 					log.Printf("[Hangar:Periodic] Notice: SyncHomepageConfigToNomad: %v", err)
 				}
+				if err := d.SyncServiceConfigsToNomad(syncCtx, d.configDir); err != nil {
+					log.Printf("[Hangar:Periodic] Notice: SyncServiceConfigsToNomad: %v", err)
+				}
 			}
 		}
 		metrics.RecordSyncRequest("periodic", status)
@@ -1791,6 +1794,61 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 		return fmt.Errorf("failed updating Nomad variable nomad/jobs/homepage: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
 	}
 	log.Printf("[Hangar:Nomad] Successfully pushed homepage config to nomad/jobs/homepage (hash=%s)", configHash[:12])
+	return nil
+}
+
+// ServiceConfigMapping defines the declarative mapping between a repository configuration file
+// and its destination Nomad variable.
+type ServiceConfigMapping struct {
+	RelPath  string
+	NomadVar string
+	VarKey   string
+}
+
+// ManagedServiceConfigs specifies the MCP and auxiliary service configs synchronized into Nomad variables.
+var ManagedServiceConfigs = []ServiceConfigMapping{
+	{RelPath: "services/mcp/scheduler-mcp.yaml", NomadVar: "nomad/jobs/scheduler-mcp", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/mcp/docker-mcp.yaml", NomadVar: "nomad/jobs/docker-mcp", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/mcp/nomad-mcp.yaml", NomadVar: "nomad/jobs/nomad-mcp", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/mcp/infisical-mcp.yaml", NomadVar: "nomad/jobs/infisical-mcp", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/webhooks-router/webhooks-router.yaml", NomadVar: "nomad/jobs/webhooks-router", VarKey: "CONFIG_YAML"},
+}
+
+// SyncServiceConfigsToNomad iterates over ManagedServiceConfigs, validates YAML syntax,
+// and pushes non-empty configurations to their respective Nomad variables using `nomad var put`.
+func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir string) error {
+	for _, mapping := range ManagedServiceConfigs {
+		filePath := filepath.Join(configDir, mapping.RelPath)
+		raw, err := os.ReadFile(filePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("failed to read service config at %s: %w", filePath, err)
+		}
+
+		var parsed map[string]interface{}
+		if err := yaml.Unmarshal(raw, &parsed); err != nil {
+			return fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
+		}
+
+		nomadExec := d.getNomadExecutor()
+		if nomadExec == nil || d.nomadAddr == "" {
+			continue
+		}
+
+		valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		stdout, stderr, err := nomadExec(valCtx, "var", "put", mapping.NomadVar, mapping.VarKey+"=@"+filePath)
+		cancel()
+		if err != nil {
+			combined := string(append(stdout, stderr...))
+			return fmt.Errorf("failed updating Nomad variable %s: %s (%w)", mapping.NomadVar, SanitizeLog(strings.TrimSpace(combined)), err)
+		}
+		log.Printf("[Hangar:Nomad] Successfully pushed %s to %s", mapping.VarKey, mapping.NomadVar)
+	}
+
 	return nil
 }
 
@@ -2465,6 +2523,9 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}
 		if err := d.SyncHomepageConfigToNomad(ctx, repoPath); err != nil {
 			log.Printf("[Hangar:GitPush] Notice: SyncHomepageConfigToNomad: %v", err)
+		}
+		if err := d.SyncServiceConfigsToNomad(ctx, repoPath); err != nil {
+			log.Printf("[Hangar:GitPush] Notice: SyncServiceConfigsToNomad: %v", err)
 		}
 
 		return resp, http.StatusOK

@@ -37,9 +37,20 @@ job "docker-mcp" {
         image        = "ghcr.io/azylman/aerial-docker-mcp:latest"
         network_mode = "host"
         volumes = [
-          "/var/run/docker.sock:/var/run/docker.sock",
-          "/mnt/data/supervisor/share/aerial-config/services/mcp/docker-mcp.yaml:/config/config.yaml:ro"
+          "/var/run/docker.sock:/var/run/docker.sock"
         ]
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/docker-mcp" -}}
+{{- with nomadVar "nomad/jobs/docker-mcp" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/config.yaml"
+        change_mode = "restart"
       }
 
 

@@ -76,7 +76,8 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
-	cfg, err := LoadConfigFile(configPath, os.Getenv("DATABASE_URL"))
+	resolvedPath := ResolveConfigPath(configPath)
+	cfg, err := LoadConfigFile(resolvedPath, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		exitFn("Fatal configuration error: %v", err)
 		return

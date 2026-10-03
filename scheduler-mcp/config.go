@@ -14,6 +14,20 @@ const DefaultConfigPath = "/config/config.yaml"
 // DefaultTimezone is the fallback timezone for tool invocations when unspecified in tool payload.
 const DefaultTimezone = "America/Los_Angeles"
 
+var localConfigPath = "/local/config.yaml"
+
+// ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
+// then /local/config.yaml (if size > 0), falling back to fallbackPath.
+func ResolveConfigPath(fallbackPath string) string {
+	if env := strings.TrimSpace(os.Getenv("CONFIG_PATH")); env != "" {
+		return env
+	}
+	if fi, err := os.Stat(localConfigPath); err == nil && fi.Size() > 0 {
+		return localConfigPath
+	}
+	return fallbackPath
+}
+
 // Config represents the runtime configuration for the scheduler MCP server.
 type Config struct {
 	DatabaseURL string

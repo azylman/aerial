@@ -21,6 +21,20 @@ import (
 // DefaultConfigPath is the canonical in-container configuration path.
 const DefaultConfigPath = "/config/config.yaml"
 
+var localConfigPath = "/local/config.yaml"
+
+// ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
+// then /local/config.yaml (if size > 0), falling back to fallbackPath.
+func ResolveConfigPath(fallbackPath string) string {
+	if env := strings.TrimSpace(os.Getenv("CONFIG_PATH")); env != "" {
+		return env
+	}
+	if fi, err := os.Stat(localConfigPath); err == nil && fi.Size() > 0 {
+		return localConfigPath
+	}
+	return fallbackPath
+}
+
 // Config defines configuration settings for discord-mcp proxy and upstream server.
 type Config struct {
 	Port         string
@@ -233,7 +247,8 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
-	cfg, err := LoadConfigFile(configPath)
+	resolvedPath := ResolveConfigPath(configPath)
+	cfg, err := LoadConfigFile(resolvedPath)
 	if err != nil {
 		exitFn("[Discord-MCP] Fatal configuration error: %v", err)
 	}
