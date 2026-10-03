@@ -35,6 +35,7 @@ job "docker-mcp" {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-docker-mcp:latest"
+        force_pull   = true
         network_mode = "host"
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock"

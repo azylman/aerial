@@ -349,6 +349,10 @@ type SyncDaemon struct {
 	// Webhooks & Deploy Lifecycle
 	webhooksRouterURL      string
 	deployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
+
+	// Nomad Config Cache
+	lastPushedConfigMu sync.Mutex
+	lastPushedConfig   map[string]string
 }
 
 func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
@@ -1676,16 +1680,17 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 			status = "error"
 		} else if anyChanged {
 			status = "synced"
-			if d.configDir != "" {
-				if err := d.SyncBrainConfigToNomad(syncCtx, d.configDir); err != nil {
-					log.Printf("[Hangar:Periodic] Notice: SyncBrainConfigToNomad: %v", err)
-				}
-				if err := d.SyncHomepageConfigToNomad(syncCtx, d.configDir); err != nil {
-					log.Printf("[Hangar:Periodic] Notice: SyncHomepageConfigToNomad: %v", err)
-				}
-				if err := d.SyncServiceConfigsToNomad(syncCtx, d.configDir); err != nil {
-					log.Printf("[Hangar:Periodic] Notice: SyncServiceConfigsToNomad: %v", err)
-				}
+		}
+
+		if !hasError && d.configDir != "" {
+			if err := d.SyncBrainConfigToNomad(syncCtx, d.configDir); err != nil {
+				log.Printf("[Hangar:Periodic] Notice: SyncBrainConfigToNomad: %v", err)
+			}
+			if err := d.SyncHomepageConfigToNomad(syncCtx, d.configDir); err != nil {
+				log.Printf("[Hangar:Periodic] Notice: SyncHomepageConfigToNomad: %v", err)
+			}
+			if err := d.SyncServiceConfigsToNomad(syncCtx, d.configDir); err != nil {
+				log.Printf("[Hangar:Periodic] Notice: SyncServiceConfigsToNomad: %v", err)
 			}
 		}
 		metrics.RecordSyncRequest("periodic", status)
@@ -1733,10 +1738,20 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 		}
 	}
 
+	h := sha256.Sum256(raw)
+	configHash := hex.EncodeToString(h[:])
+
 	nomadExec := d.getNomadExecutor()
 	if nomadExec == nil || d.nomadAddr == "" {
 		return nil
 	}
+
+	d.lastPushedConfigMu.Lock()
+	if d.lastPushedConfig != nil && d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"] == configHash {
+		d.lastPushedConfigMu.Unlock()
+		return nil
+	}
+	d.lastPushedConfigMu.Unlock()
 
 	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -1746,6 +1761,14 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 		combined := string(append(stdout, stderr...))
 		return fmt.Errorf("failed updating Nomad variable nomad/jobs/brain: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
 	}
+
+	d.lastPushedConfigMu.Lock()
+	if d.lastPushedConfig == nil {
+		d.lastPushedConfig = make(map[string]string)
+	}
+	d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"] = configHash
+	d.lastPushedConfigMu.Unlock()
+
 	log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/brain")
 	return nil
 }
@@ -1804,6 +1827,13 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 		return nil
 	}
 
+	d.lastPushedConfigMu.Lock()
+	if d.lastPushedConfig != nil && d.lastPushedConfig["nomad/jobs/homepage"] == configHash {
+		d.lastPushedConfigMu.Unlock()
+		return nil
+	}
+	d.lastPushedConfigMu.Unlock()
+
 	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -1817,6 +1847,14 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 		combined := string(append(stdout, stderr...))
 		return fmt.Errorf("failed updating Nomad variable nomad/jobs/homepage: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
 	}
+
+	d.lastPushedConfigMu.Lock()
+	if d.lastPushedConfig == nil {
+		d.lastPushedConfig = make(map[string]string)
+	}
+	d.lastPushedConfig["nomad/jobs/homepage"] = configHash
+	d.lastPushedConfigMu.Unlock()
+
 	log.Printf("[Hangar:Nomad] Successfully pushed homepage config to nomad/jobs/homepage (hash=%s)", configHash[:12])
 	return nil
 }
@@ -1863,6 +1901,17 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 			continue
 		}
 
+		h := sha256.Sum256(raw)
+		configHash := hex.EncodeToString(h[:])
+		cacheKey := mapping.NomadVar + ":" + mapping.VarKey
+
+		d.lastPushedConfigMu.Lock()
+		if d.lastPushedConfig != nil && d.lastPushedConfig[cacheKey] == configHash {
+			d.lastPushedConfigMu.Unlock()
+			continue
+		}
+		d.lastPushedConfigMu.Unlock()
+
 		valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		stdout, stderr, err := nomadExec(valCtx, "var", "put", mapping.NomadVar, mapping.VarKey+"=@"+filePath)
 		cancel()
@@ -1870,6 +1919,14 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 			combined := string(append(stdout, stderr...))
 			return fmt.Errorf("failed updating Nomad variable %s: %s (%w)", mapping.NomadVar, SanitizeLog(strings.TrimSpace(combined)), err)
 		}
+
+		d.lastPushedConfigMu.Lock()
+		if d.lastPushedConfig == nil {
+			d.lastPushedConfig = make(map[string]string)
+		}
+		d.lastPushedConfig[cacheKey] = configHash
+		d.lastPushedConfigMu.Unlock()
+
 		log.Printf("[Hangar:Nomad] Successfully pushed %s to %s", mapping.VarKey, mapping.NomadVar)
 	}
 
@@ -2111,8 +2168,9 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 			State: "idle",
 			Stage: "idle",
 		},
-		lastAlertTimes:  make(map[string]time.Time),
-		repoGitHubSlugs: make(map[string]string),
+		lastAlertTimes:   make(map[string]time.Time),
+		repoGitHubSlugs:  make(map[string]string),
+		lastPushedConfig: make(map[string]string),
 	}
 }
 
