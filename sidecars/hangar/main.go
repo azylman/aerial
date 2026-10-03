@@ -355,6 +355,12 @@ type SyncDaemon struct {
 	lastNomadImagePoll  time.Time
 	nomadPollMu         sync.Mutex
 
+	// Debounced Image Rollouts
+	pendingImageMu       sync.Mutex
+	pendingImageRollouts map[string]PendingImageRollout
+	imageRolloutCh       chan struct{}
+	imageRolloutDebounce time.Duration
+
 	// Concurrency & Quarantine
 	repoLocksMu        sync.Mutex
 	repoLocks          map[string]*sync.Mutex
@@ -2963,6 +2969,9 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		deploymentPollInterval: pollInterval,
 		deploymentTimeout:      deployTimeout,
 		reconcileCh:            make(chan struct{}, 1),
+		pendingImageRollouts:   make(map[string]PendingImageRollout),
+		imageRolloutCh:         make(chan struct{}, 1),
+		imageRolloutDebounce:   3 * time.Second,
 		repoLocks:              make(map[string]*sync.Mutex),
 		quarantinedCommits:     make(map[QuarantineKey]QuarantineRecord),
 		imageQuarantine:        make(map[string]ImageQuarantineRecord),
@@ -3518,6 +3527,159 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	}, http.StatusOK
 }
 
+// SetImageRolloutDebounce configures the debounce window for batching image rollouts.
+func (d *SyncDaemon) SetImageRolloutDebounce(dur time.Duration) {
+	d.imageRolloutDebounce = dur
+}
+
+// EnqueueImageReadyEvent validates an incoming image ready notification, records all matching
+// Nomad jobs into the pending rollout batch, signals the debouncer worker, and returns HTTP 202 Accepted immediately.
+func (d *SyncDaemon) EnqueueImageReadyEvent(req ImageReadyEventRequest) (ImageReadyEventResponse, int) {
+	imgRef := strings.TrimSpace(req.Image)
+	if imgRef == "" {
+		return ImageReadyEventResponse{
+			Status:  "error",
+			Message: "missing required field: image",
+		}, http.StatusBadRequest
+	}
+
+	var matches []MatchedNomadJob
+	seenJobs := make(map[string]struct{})
+	for _, repo := range d.candidateJobRepos() {
+		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
+			dir := filepath.Join(repo, sub)
+			for _, m := range FindNomadJobsByImage(dir, imgRef) {
+				if _, ok := seenJobs[m.JobName]; !ok {
+					seenJobs[m.JobName] = struct{}{}
+					matches = append(matches, m)
+				}
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		log.Printf("[Hangar:ImageReady] No Nomad jobs found referencing image %s", imgRef)
+		return ImageReadyEventResponse{
+			Status:  "not_found",
+			Image:   imgRef,
+			Message: fmt.Sprintf("no nomad jobs found using image %s", imgRef),
+		}, http.StatusNotFound
+	}
+
+	d.pendingImageMu.Lock()
+	if d.pendingImageRollouts == nil {
+		d.pendingImageRollouts = make(map[string]PendingImageRollout)
+	}
+	appliedJobs := make([]string, 0, len(matches))
+	for _, m := range matches {
+		d.pendingImageRollouts[m.JobName] = PendingImageRollout{
+			JobName: m.JobName,
+			JobPath: m.JobPath,
+			Request: req,
+		}
+		appliedJobs = append(appliedJobs, m.JobName)
+	}
+	d.pendingImageMu.Unlock()
+
+	// Non-blocking channel signal to debounce worker
+	if d.imageRolloutCh != nil {
+		select {
+		case d.imageRolloutCh <- struct{}{}:
+		default:
+		}
+	}
+
+	log.Printf("[Hangar:ImageReady] Queued debounced rollout for image %s (matched %d job(s): %v)", imgRef, len(appliedJobs), appliedJobs)
+
+	return ImageReadyEventResponse{
+		Status:      "accepted",
+		Image:       imgRef,
+		MatchedJobs: appliedJobs,
+		Message:     fmt.Sprintf("queued debounced rollout for %d job(s)", len(appliedJobs)),
+	}, http.StatusAccepted
+}
+
+// StartImageRolloutLoop runs the background debounced worker goroutine for image rollouts.
+func (d *SyncDaemon) StartImageRolloutLoop(ctx context.Context) {
+	if d.imageRolloutCh == nil {
+		d.imageRolloutCh = make(chan struct{}, 1)
+	}
+
+	debounceDuration := d.imageRolloutDebounce
+	if debounceDuration <= 0 {
+		debounceDuration = 3 * time.Second
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Hangar:ImageRollout] PANIC recovered in StartImageRolloutLoop: %v", r)
+			}
+		}()
+
+		var (
+			debounceTimer *time.Timer
+			timerCh       <-chan time.Time
+		)
+
+		for {
+			select {
+			case <-ctx.Done():
+				if debounceTimer != nil {
+					debounceTimer.Stop()
+				}
+				return
+			case <-d.imageRolloutCh:
+				if debounceTimer != nil {
+					if !debounceTimer.Stop() {
+						select {
+						case <-debounceTimer.C:
+						default:
+						}
+					}
+				}
+				debounceTimer = time.NewTimer(debounceDuration)
+				timerCh = debounceTimer.C
+			case <-timerCh:
+				timerCh = nil
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("[Hangar:ImageRollout] PANIC recovered in executePendingImageRollouts: %v", r)
+						}
+					}()
+					d.executePendingImageRollouts(ctx)
+				}()
+			}
+		}
+	}()
+}
+
+func (d *SyncDaemon) executePendingImageRollouts(ctx context.Context) {
+	d.pendingImageMu.Lock()
+	if len(d.pendingImageRollouts) == 0 {
+		d.pendingImageMu.Unlock()
+		return
+	}
+	// Deduplicate rollout requests by image to execute unified job rollout per image
+	uniqueRequests := make(map[string]ImageReadyEventRequest)
+	for _, v := range d.pendingImageRollouts {
+		uniqueRequests[v.Request.Image] = v.Request
+	}
+	d.pendingImageRollouts = make(map[string]PendingImageRollout)
+	d.pendingImageMu.Unlock()
+
+	log.Printf("[Hangar:ImageRollout] Debounce timer expired, executing rollout batch for %d unique image(s)...", len(uniqueRequests))
+
+	for _, req := range uniqueRequests {
+		if ctx.Err() != nil {
+			return
+		}
+		resp, code := d.ExecuteImageReadyEvent(ctx, req)
+		log.Printf("[Hangar:ImageRollout] Rollout for %s completed with code %d: status=%s, message=%s", req.Image, code, resp.Status, resp.Message)
+	}
+}
+
 // SetupMux configures HTTP handlers for metrics, health, status, and sync.
 func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux := http.NewServeMux()
@@ -3648,10 +3810,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-		defer cancel()
-
-		resp, code := daemon.ExecuteImageReadyEvent(ctx, req)
+		resp, code := daemon.EnqueueImageReadyEvent(req)
 		metrics.RecordSyncRequest("image_ready", resp.Status)
 		writeJSON(w, r, code, resp)
 	})
@@ -3672,6 +3831,7 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 
 	daemon.StartPeriodicLoop(ctx)
 	daemon.StartReconcilerLoop(ctx)
+	daemon.StartImageRolloutLoop(ctx)
 	log.Printf("[Hangar] Sidecar GitOps daemon started on :%s (interval: %v, repos: %v, composeDir: %s)", cfg.Port, cfg.Interval, cfg.Repos, cfg.ComposeDir)
 
 	go func() {

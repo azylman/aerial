@@ -6518,8 +6518,8 @@ func TestSetupMux_PushEventsEndpoints(t *testing.T) {
 	rImg := httptest.NewRequest(http.MethodPost, "/events/image_ready", strings.NewReader(`{"image":"ghcr.io/azylman/aerial-webhooks-router:latest"}`))
 	rImg.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(wImg, rImg)
-	if wImg.Code != http.StatusOK {
-		t.Errorf("POST /events/image_ready returned %d; want 200", wImg.Code)
+	if wImg.Code != http.StatusAccepted {
+		t.Errorf("POST /events/image_ready returned %d; want 202 (Accepted)", wImg.Code)
 	}
 
 	// 5. GET /events/image_ready -> 405
@@ -8618,5 +8618,232 @@ func TestReconcileNomadChanges_SkipPurgeWhenDefinedInOtherRepo(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestEnqueueImageReadyEvent_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
 
+	jobContent := `job "debounced-test" {
+		group "debounced-test" {
+			task "debounced-test" {
+				driver = "docker"
+				config {
+					image = "ghcr.io/azylman/debounced-app:latest"
+				}
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "debounced-test.nomad"), []byte(jobContent), 0644)
 
+	d := NewDaemon(DaemonConfig{
+		Repos:     []string{tmpDir},
+		ComposeDir: tmpDir,
+		ConfigDir:  tmpDir,
+	})
+
+	// 1. Missing image -> 400
+	respEmpty, codeEmpty := d.EnqueueImageReadyEvent(ImageReadyEventRequest{})
+	if codeEmpty != http.StatusBadRequest || respEmpty.Status != "error" {
+		t.Errorf("expected 400 for empty image, got %d (%+v)", codeEmpty, respEmpty)
+	}
+
+	// 2. Unknown image -> 404
+	respUnknown, codeUnknown := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
+		Image: "ghcr.io/azylman/nonexistent:latest",
+	})
+	if codeUnknown != http.StatusNotFound || respUnknown.Status != "not_found" {
+		t.Errorf("expected 404 for unknown image, got %d (%+v)", codeUnknown, respUnknown)
+	}
+
+	// 3. Valid image -> 202 Accepted and queued
+	respValid, codeValid := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
+		Image:     "ghcr.io/azylman/debounced-app:latest",
+		Repo:      "azylman/aerial",
+		CommitSHA: "sha123",
+		PRNumber:  555,
+		TargetID:  "1555405874565091380",
+	})
+	if codeValid != http.StatusAccepted || respValid.Status != "accepted" {
+		t.Errorf("expected 202 Accepted, got %d (%+v)", codeValid, respValid)
+	}
+	if len(respValid.MatchedJobs) != 1 || respValid.MatchedJobs[0] != "debounced-test" {
+		t.Errorf("expected matched job debounced-test, got %v", respValid.MatchedJobs)
+	}
+
+	d.pendingImageMu.Lock()
+	rollout, ok := d.pendingImageRollouts["debounced-test"]
+	d.pendingImageMu.Unlock()
+	if !ok {
+		t.Fatalf("expected pendingImageRollouts to contain debounced-test")
+	}
+	if rollout.JobName != "debounced-test" || rollout.Request.CommitSHA != "sha123" {
+		t.Errorf("unexpected rollout stored: %+v", rollout)
+	}
+}
+
+func TestStartImageRolloutLoop_DebouncedExecution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	job1 := `job "service-a" {
+		group "service-a" {
+			task "service-a" {
+				driver = "docker"
+				config {
+					image = "ghcr.io/azylman/service-a:latest"
+				}
+			}
+		}
+	}`
+	job2 := `job "service-b" {
+		group "service-b" {
+			task "service-b" {
+				driver = "docker"
+				config {
+					image = "ghcr.io/azylman/service-b:latest"
+				}
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "service-a.nomad"), []byte(job1), 0644)
+	_ = os.WriteFile(filepath.Join(jobsDir, "service-b.nomad"), []byte(job2), 0644)
+
+	var runCalls []string
+	var runMu sync.Mutex
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	d := NewDaemon(DaemonConfig{
+		Repos:     []string{tmpDir},
+		ComposeDir: tmpDir,
+		ConfigDir:  tmpDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			runMu.Lock()
+			runCalls = append(runCalls, strings.Join(args, " "))
+			runMu.Unlock()
+			return []byte("OK"), nil, nil
+		},
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+	})
+
+	d.SetImageRolloutDebounce(10 * time.Millisecond)
+	d.StartImageRolloutLoop(ctx)
+
+	// Enqueue both images in quick succession
+	_, codeA := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
+		Image:     "ghcr.io/azylman/service-a:latest",
+		CommitSHA: "commit-alpha",
+	})
+	if codeA != http.StatusAccepted {
+		t.Fatalf("expected 202 for service-a, got %d", codeA)
+	}
+
+	_, codeB := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
+		Image:     "ghcr.io/azylman/service-b:latest",
+		CommitSHA: "commit-alpha",
+	})
+	if codeB != http.StatusAccepted {
+		t.Fatalf("expected 202 for service-b, got %d", codeB)
+	}
+
+	// Wait for debounce timer to fire and execute both rollouts
+	time.Sleep(50 * time.Millisecond)
+
+	runMu.Lock()
+	executed := append([]string(nil), runCalls...)
+	runMu.Unlock()
+
+	hasJobRunA := false
+	hasJobRunB := false
+	for _, call := range executed {
+		if strings.Contains(call, "job run -detach") && strings.Contains(call, "service-a.nomad") {
+			hasJobRunA = true
+		}
+		if strings.Contains(call, "job run -detach") && strings.Contains(call, "service-b.nomad") {
+			hasJobRunB = true
+		}
+	}
+
+	if !hasJobRunA || !hasJobRunB {
+		t.Errorf("expected debounced execution of both service-a and service-b, got calls: %v", executed)
+	}
+}
+
+func TestStartImageRolloutLoop_PanicRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	job1 := `job "service-panic" {
+		group "service-panic" {
+			task "service-panic" {
+				driver = "docker"
+				config {
+					image = "ghcr.io/azylman/service-panic:latest"
+				}
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "service-panic.nomad"), []byte(job1), 0644)
+
+	var runCount int
+	var runMu sync.Mutex
+
+	d := NewDaemon(DaemonConfig{
+		Repos:     []string{tmpDir},
+		ComposeDir: tmpDir,
+		ConfigDir:  tmpDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			runMu.Lock()
+			runCount++
+			count := runCount
+			runMu.Unlock()
+			if count == 1 {
+				panic("simulated panic in rollout executor")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	d.SetImageRolloutDebounce(10 * time.Millisecond)
+	d.StartImageRolloutLoop(ctx)
+
+	// First event will trigger panic
+	_, code1 := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
+		Image:     "ghcr.io/azylman/service-panic:latest",
+		CommitSHA: "panic-sha",
+	})
+	if code1 != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", code1)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+
+	// Second event should still execute because loop survived the panic
+	_, code2 := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
+		Image:     "ghcr.io/azylman/service-panic:latest",
+		CommitSHA: "recovered-sha",
+	})
+	if code2 != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", code2)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+
+	runMu.Lock()
+	finalCount := runCount
+	runMu.Unlock()
+
+	if finalCount < 2 {
+		t.Errorf("expected at least 2 executor attempts (surviving panic), got %d", finalCount)
+	}
+}

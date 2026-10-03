@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1487,20 +1488,34 @@ func (s *RouterServer) dispatchWorkflowRunImages(repo string, runID int64, headB
 			log.Printf("[webhooks-router] [dispatcher] no built images detected for workflow run %d (%s)", rID, rp)
 			return
 		}
+		var wg sync.WaitGroup
 		for _, img := range images {
-			req := ImageReadyEventRequest{
-				Image:     img,
-				Repo:      rp,
-				CommitSHA: sha,
-				PRNumber:  pr,
-				TargetID:  tID,
-			}
-			if err := s.dispatcher.DispatchImageReady(dispCtx, req); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", img, err)
-			} else {
-				log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s", img)
-			}
+			wg.Add(1)
+			go func(imageRef string) {
+				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchImageReady for %s: %v", imageRef, r)
+					}
+				}()
+				imgCtx, imgCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer imgCancel()
+
+				req := ImageReadyEventRequest{
+					Image:     imageRef,
+					Repo:      rp,
+					CommitSHA: sha,
+					PRNumber:  pr,
+					TargetID:  tID,
+				}
+				if err := s.dispatcher.DispatchImageReady(imgCtx, req); err != nil {
+					log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
+				} else {
+					log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s", imageRef)
+				}
+			}(img)
 		}
+		wg.Wait()
 	}(repo, runID, headSHA, targetID, prNum)
 }
 

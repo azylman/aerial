@@ -2841,11 +2841,15 @@ func TestDispatchWorkflowRunImages_Integration(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 image_ready dispatches, got %d: %+v", len(calls), calls)
 	}
-	if calls[0].Image != "ghcr.io/azylman/aerial-brain:latest" || calls[0].Repo != "azylman/aerial" || calls[0].CommitSHA != "mainsha123" || calls[0].PRNumber != 534 || calls[0].TargetID != "1555405874565091380" {
-		t.Errorf("unexpected calls[0]: %+v", calls[0])
+	imagesSeen := make(map[string]ImageReadyEventRequest)
+	for _, call := range calls {
+		imagesSeen[call.Image] = call
 	}
-	if calls[1].Image != "ghcr.io/azylman/aerial-webhooks-router:latest" || calls[1].Repo != "azylman/aerial" || calls[1].CommitSHA != "mainsha123" || calls[1].PRNumber != 534 || calls[1].TargetID != "1555405874565091380" {
-		t.Errorf("unexpected calls[1]: %+v", calls[1])
+	if call, ok := imagesSeen["ghcr.io/azylman/aerial-brain:latest"]; !ok || call.Repo != "azylman/aerial" || call.CommitSHA != "mainsha123" || call.PRNumber != 534 || call.TargetID != "1555405874565091380" {
+		t.Errorf("unexpected brain call: %+v", call)
+	}
+	if call, ok := imagesSeen["ghcr.io/azylman/aerial-webhooks-router:latest"]; !ok || call.Repo != "azylman/aerial" || call.CommitSHA != "mainsha123" || call.PRNumber != 534 || call.TargetID != "1555405874565091380" {
+		t.Errorf("unexpected webhooks-router call: %+v", call)
 	}
 
 	// 2. Non-main branch does NOT dispatch
@@ -3387,3 +3391,63 @@ func TestProcessGitHubEvent_PushToMain_TriggersConflictCheckAsync(t *testing.T) 
 		t.Fatal("timed out waiting for async conflict check prompt on push to main")
 	}
 }
+
+func TestDispatchWorkflowRunImages_ParallelDispatch(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := `{
+			"total_count": 2,
+			"jobs": [
+				{"id": 101, "name": "Build & Push Images to GHCR (brain)", "status": "completed", "conclusion": "success"},
+				{"id": 102, "name": "Build & Push Images to GHCR (scheduler-mcp)", "status": "completed", "conclusion": "success"}
+			]
+		}`
+		_, _ = w.Write([]byte(resp))
+	}))
+	defer apiServer.Close()
+
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{GitHubAPIURL: apiServer.URL}, nil)
+	srv.SetDispatcher(mockDisp)
+
+	srv.dispatchWorkflowRunImages("azylman/aerial", 99999, "main", "success", "headsha123", "1555405874565091380", 555)
+
+	// Wait for background dispatch to finish
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mockDisp.mu.Lock()
+		count := len(mockDisp.imageReadyCalls)
+		mockDisp.mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mockDisp.mu.Lock()
+	calls := append([]ImageReadyEventRequest(nil), mockDisp.imageReadyCalls...)
+	mockDisp.mu.Unlock()
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 dispatched image ready calls, got %d", len(calls))
+	}
+
+	imagesSeen := make(map[string]bool)
+	for _, call := range calls {
+		imagesSeen[call.Image] = true
+		if call.CommitSHA != "headsha123" {
+			t.Errorf("expected CommitSHA headsha123, got %s", call.CommitSHA)
+		}
+		if call.PRNumber != 555 {
+			t.Errorf("expected PRNumber 555, got %d", call.PRNumber)
+		}
+	}
+
+	if !imagesSeen["ghcr.io/azylman/aerial-brain:latest"] {
+		t.Errorf("missing brain image dispatch")
+	}
+	if !imagesSeen["ghcr.io/azylman/aerial-scheduler-mcp:latest"] {
+		t.Errorf("missing scheduler-mcp image dispatch")
+	}
+}
+
