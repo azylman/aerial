@@ -1249,36 +1249,6 @@ func TestSanitizeAll(t *testing.T) {
 	}
 }
 
-func TestNotifyBrainReload(t *testing.T) {
-	var received bool
-	var receivedMethod string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received = true
-		receivedMethod = r.Method
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	d := &SyncDaemon{
-		brainInternalURL: srv.URL,
-	}
-
-	d.notifyBrainReload()
-
-	if !received {
-		t.Errorf("expected reload notification to reach mock Brain server")
-	}
-	if receivedMethod != http.MethodPost {
-		t.Errorf("expected POST method, got %s", receivedMethod)
-	}
-
-	// Empty brainInternalURL is safe no-op
-	dEmpty := &SyncDaemon{
-		brainInternalURL: "",
-	}
-	dEmpty.notifyBrainReload()
-}
-
 func TestSyncBrainConfigToNomad(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1996,13 +1966,6 @@ func TestEnsureRepo_CloneError(t *testing.T) {
 	}
 }
 
-func TestNotifyBrainReload_Error(t *testing.T) {
-	d := &SyncDaemon{
-		brainInternalURL: "http://127.0.0.1:65534/invalid",
-	}
-	d.notifyBrainReload()
-}
-
 func TestRunDaemon_ServerFatalError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2214,26 +2177,6 @@ func TestScrubComposeEnv_Extended(t *testing.T) {
 	}
 }
 
-func TestNotifyBrainReload_Success(t *testing.T) {
-	called := false
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-
-	d := &SyncDaemon{
-		brainInternalURL: ts.URL,
-	}
-	d.notifyBrainReload()
-	if !called {
-		t.Errorf("expected brain reload endpoint to be called")
-	}
-
-	// Empty URL no-op
-	dEmpty := &SyncDaemon{}
-	dEmpty.notifyBrainReload()
-}
 
 func TestHasNomadConfigChanges_Coverage(t *testing.T) {
 	d := &SyncDaemon{}
@@ -4054,20 +3997,6 @@ func TestSyncDaemon_RemainingHelpers(t *testing.T) {
 		t.Errorf("expected idle after TTL expiry, got %q", st.State)
 	}
 
-	// notifyBrainReload
-	d.brainInternalURL = ""
-	d.notifyBrainReload()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	d.brainInternalURL = srv.URL
-	d.notifyBrainReload()
-
-	d.brainInternalURL = "http://127.0.0.1:1" // unreachable
-	d.notifyBrainReload()
 
 	// EnsureDockerAuth
 	if err := nilD.EnsureDockerAuth(); err != nil {
@@ -6658,12 +6587,6 @@ func TestStartReconcilerLoop_NilChannel(t *testing.T) {
 	}
 }
 
-func TestNotifyBrainReload_InvalidURL(t *testing.T) {
-	d := &SyncDaemon{
-		brainInternalURL: "://invalid-url-triggers-http-new-request-error",
-	}
-	d.notifyBrainReload()
-}
 
 func TestRunGitCommand_WithDir(t *testing.T) {
 	dir := t.TempDir()

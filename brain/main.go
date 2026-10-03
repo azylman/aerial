@@ -1067,8 +1067,6 @@ func normalizeRoute(path string) string {
 		return "/schedules"
 	case path == "/schedules/runs":
 		return "/schedules/runs"
-	case path == "/internal/reload":
-		return "/internal/reload"
 	case path == "/health":
 		return "/health"
 	case path == "/metrics":
@@ -1098,11 +1096,11 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SetupBrainMux(store db.Store, pool *queue.WorkerPool, reloadFn func(string), searchPaths ...string) *http.ServeMux {
-	return SetupBrainMuxWithEmbedder(store, pool, reloadFn, nil, searchPaths...)
+func SetupBrainMux(store db.Store, pool *queue.WorkerPool, searchPaths ...string) *http.ServeMux {
+	return SetupBrainMuxWithEmbedder(store, pool, nil, searchPaths...)
 }
 
-func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, reloadFn func(string), embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
+func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
@@ -1119,20 +1117,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, reloadFn 
 	mux.HandleFunc("/schedules", handleSchedules(store))
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
 	mux.HandleFunc("/internal/pr/register", handlePRRegister(store))
-	mux.HandleFunc("/internal/reload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-		if reloadFn != nil {
-			reloadFn("Internal Sidecar Trigger")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte(`{"status":"reloaded"}`)); err != nil {
-			log.Printf("[HTTP] Failed to write reload response: %v", err)
-		}
-	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1889,7 +1873,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			return memClient.GenerateEmbedding(eCtx, text, false, 1)
 		}
 	}
-	mux := SetupBrainMuxWithEmbedder(store, pool, reloadConfig, embedder, sessionMgr.Roots()...)
+	mux := SetupBrainMuxWithEmbedder(store, pool, embedder, sessionMgr.Roots()...)
 
 	port := cur.Port
 	ln, err := net.Listen("tcp", ":"+port)
