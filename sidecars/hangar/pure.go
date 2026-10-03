@@ -929,6 +929,13 @@ type ImageReadyEventResponse struct {
 	Message     string   `json:"message,omitempty"`
 }
 
+// PendingImageRollout represents an enqueued container rollout pending debounced execution.
+type PendingImageRollout struct {
+	JobName string
+	JobPath string
+	Request ImageReadyEventRequest
+}
+
 // CoreBuildPaths contains path prefixes in azylman/aerial that trigger container builds in CI.
 var CoreBuildPaths = []string{
 	"brain/",
