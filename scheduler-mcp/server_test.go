@@ -47,6 +47,15 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 	return server, ts
 }
 
+func TestNewServer_NilHandlerPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected NewServer(nil) to panic")
+		}
+	}()
+	NewServer(nil)
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	_, ts := setupTestServer(t)
 	defer ts.Close()

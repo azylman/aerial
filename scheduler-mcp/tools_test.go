@@ -41,21 +41,94 @@ timezone: "America/Chicago"
 		t.Error("expected error for nonexistent config file")
 	}
 
-	// 3. Missing required fields -> fail fast
+	// 3. Malformed YAML -> fail fast
+	malformedPath := filepath.Join(tmpDir, "malformed.yaml")
+	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0644)
+	if _, err := LoadConfigFile(malformedPath, "postgres://..."); err == nil {
+		t.Error("expected error for malformed YAML")
+	}
+
+	// 4. Missing port -> fail fast
+	noPortPath := filepath.Join(tmpDir, "no_port.yaml")
+	_ = os.WriteFile(noPortPath, []byte("timezone: \"America/Chicago\"\n"), 0644)
+	if _, err := LoadConfigFile(noPortPath, "postgres://..."); err == nil {
+		t.Error("expected error when port is missing")
+	}
+
+	// 5. Missing timezone -> fail fast
 	badPath := filepath.Join(tmpDir, "bad.yaml")
 	_ = os.WriteFile(badPath, []byte("port: \"4005\"\n"), 0644)
 	if _, err := LoadConfigFile(badPath, "postgres://..."); err == nil {
 		t.Error("expected error when timezone is missing")
 	}
 
-	// 4. Missing dbURL -> fail fast
+	// 6. Missing dbURL -> fail fast
 	if _, err := LoadConfigFile(cfgPath, ""); err == nil {
 		t.Error("expected error when dbURL is empty")
 	}
 
-	// 5. Empty path -> fail fast
+	// 7. Empty path -> fail fast
 	if _, err := LoadConfigFile("", "postgres://..."); err == nil {
 		t.Error("expected error when path is empty")
+	}
+}
+
+func TestMain_Execution(t *testing.T) {
+	oldRun := runAppFn
+	oldExit := exitFn
+	oldPath := configPath
+	defer func() {
+		runAppFn = oldRun
+		exitFn = oldExit
+		configPath = oldPath
+	}()
+
+	tmpDir := t.TempDir()
+	testCfg := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\n"), 0644)
+	configPath = testCfg
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
+
+	// 1. Success path
+	runCalled := false
+	runAppFn = func(ctx context.Context, cfg *Config) error {
+		runCalled = true
+		return nil
+	}
+	main()
+	if !runCalled {
+		t.Error("expected runAppFn to be called")
+	}
+
+	// 2. Server closed error (should not trigger exitFn)
+	exitCalled := false
+	exitFn = func(format string, v ...interface{}) {
+		exitCalled = true
+	}
+	runAppFn = func(ctx context.Context, cfg *Config) error {
+		return http.ErrServerClosed
+	}
+	main()
+	if exitCalled {
+		t.Error("did not expect exitFn on http.ErrServerClosed")
+	}
+
+	// 3. Server generic failure (should trigger exitFn)
+	exitCalled = false
+	runAppFn = func(ctx context.Context, cfg *Config) error {
+		return context.DeadlineExceeded
+	}
+	main()
+	if !exitCalled {
+		t.Error("expected exitFn on server error")
+	}
+
+	// 4. Config loading failure (should trigger exitFn)
+	exitCalled = false
+	configPath = filepath.Join(tmpDir, "nonexistent.yaml")
+	main()
+	if !exitCalled {
+		t.Error("expected exitFn on config load error")
 	}
 }
 
