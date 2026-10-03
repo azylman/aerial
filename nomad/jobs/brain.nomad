@@ -102,16 +102,13 @@ job "brain" {
       }
 
       env {
-        PORT                        = "8088"
-        AERIAL_HANGAR_URL           = "http://hangar:8087/sync"
-        AGY_MODEL                   = ""
-        DEFAULT_TIMEZONE            = "America/Los_Angeles"
-        TZ                          = "America/Los_Angeles"
-        GIT_TERMINAL_PROMPT         = "0"
-        GOCACHE                     = "/data/cache/go-build"
-        GOPATH                      = "/data/cache/go"
-        GOMODCACHE                  = "/data/cache/go/pkg/mod"
-        GOLANGCI_LINT_CACHE         = "/data/cache/golangci-lint"
+        PORT                = "8088"
+        AERIAL_HANGAR_URL   = "http://hangar:8087/sync"
+        GIT_TERMINAL_PROMPT = "0"
+        GOCACHE             = "/data/cache/go-build"
+        GOPATH              = "/data/cache/go"
+        GOMODCACHE          = "/data/cache/go/pkg/mod"
+        GOLANGCI_LINT_CACHE = "/data/cache/golangci-lint"
       }
 
       template {
