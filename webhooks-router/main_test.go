@@ -2704,10 +2704,36 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 		},
 	}
 
+	mockSidecarJobs := GitHubWorkflowJobsResponse{
+		TotalCount: 2,
+		Jobs: []GitHubWorkflowJobItem{
+			{ID: 10, Name: "Build & Push Sidecar Images to GHCR (banana)", Status: "completed", Conclusion: "success"},
+			{ID: 11, Name: "Build & Push Sidecar Images to GHCR (orin-voice)", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	mockMirrormereJobs := GitHubWorkflowJobsResponse{
+		TotalCount: 2,
+		Jobs: []GitHubWorkflowJobItem{
+			{ID: 20, Name: "Build & Publish Container Image (mirrormere)", Status: "completed", Conclusion: "success"},
+			{ID: 21, Name: "Build & Publish Container Image (mirrormere-cast-watcher)", Status: "completed", Conclusion: "success"},
+		},
+	}
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/actions/runs/12345/jobs") {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(mockJobs)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/actions/runs/54321/jobs") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mockSidecarJobs)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/actions/runs/67890/jobs") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mockMirrormereJobs)
 			return
 		}
 		if strings.Contains(r.URL.Path, "/actions/runs/403/jobs") {
@@ -2752,6 +2778,42 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 	imagesNorm, errNorm := srv.resolveWorkflowRunImages(ctx, "aerial", 12345)
 	if errNorm != nil || len(imagesNorm) != len(expected) {
 		t.Fatalf("expected normalized repo to resolve, got images=%v, err=%v", imagesNorm, errNorm)
+	}
+
+	// Sidecars resolution case (aerial-sidecars)
+	imagesSidecars, errSidecars := srv.resolveWorkflowRunImages(ctx, "azylman/aerial-sidecars", 54321)
+	if errSidecars != nil {
+		t.Fatalf("expected sidecars resolution to succeed, got %v", errSidecars)
+	}
+	expectedSidecars := []string{
+		"ghcr.io/azylman/aerial-sidecar-banana:latest",
+		"ghcr.io/azylman/orin-voice:latest",
+	}
+	if len(imagesSidecars) != len(expectedSidecars) {
+		t.Fatalf("expected %d sidecar images, got %d: %v", len(expectedSidecars), len(imagesSidecars), imagesSidecars)
+	}
+	for i, exp := range expectedSidecars {
+		if imagesSidecars[i] != exp {
+			t.Errorf("sidecar image[%d] expected %q, got %q", i, exp, imagesSidecars[i])
+		}
+	}
+
+	// Mirrormere resolution case (mirrormere)
+	imagesMirrormere, errMirrormere := srv.resolveWorkflowRunImages(ctx, "azylman/mirrormere", 67890)
+	if errMirrormere != nil {
+		t.Fatalf("expected mirrormere resolution to succeed, got %v", errMirrormere)
+	}
+	expectedMirrormere := []string{
+		"ghcr.io/azylman/mirrormere:latest",
+		"ghcr.io/azylman/mirrormere-cast-watcher:latest",
+	}
+	if len(imagesMirrormere) != len(expectedMirrormere) {
+		t.Fatalf("expected %d mirrormere images, got %d: %v", len(expectedMirrormere), len(imagesMirrormere), imagesMirrormere)
+	}
+	for i, exp := range expectedMirrormere {
+		if imagesMirrormere[i] != exp {
+			t.Errorf("mirrormere image[%d] expected %q, got %q", i, exp, imagesMirrormere[i])
+		}
 	}
 
 	// Invalid input cases
