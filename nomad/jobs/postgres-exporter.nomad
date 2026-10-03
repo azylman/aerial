@@ -43,7 +43,6 @@ job "postgres-exporter" {
       }
 
       env {
-        DATA_SOURCE_NAME                     = "postgresql://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
         PG_EXPORTER_DISABLE_SETTINGS_METRICS = "true"
         PG_EXPORTER_AUTO_DISCOVER_DATABASES  = "false"
       }

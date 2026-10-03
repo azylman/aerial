@@ -49,11 +49,7 @@ job "hangar" {
       }
 
       env {
-        PORT               = "8087"
-        SYNC_INTERVAL      = "60s"
-        SYNC_REPOS         = "/share/aerial-config,/share/aerial,/share/mirrormere"
-        NOMAD_ADDR         = "http://127.0.0.1:4646"
-        BRAIN_INTERNAL_URL = "http://brain:8088/internal/reload"
+        CONFIG_PATH = "/share/aerial-config/services/hangar/hangar.yaml"
       }
 
       template {

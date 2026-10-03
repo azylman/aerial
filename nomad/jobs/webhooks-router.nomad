@@ -37,13 +37,13 @@ job "webhooks-router" {
         image        = "ghcr.io/azylman/aerial-webhooks-router:latest"
         network_mode = "host"
         force_pull   = true
+        volumes = [
+          "/mnt/data/supervisor/share/aerial-config/services/webhooks-router/webhooks-router.yaml:/config/webhooks-router.yaml:ro"
+        ]
       }
 
       env {
-        PORT                  = "4020"
-        INFISICAL_URL         = "http://infisical:8085"
-        INFISICAL_ENVIRONMENT = "default"
-        NOMAD_ADDR            = "http://127.0.0.1:4646"
+        CONFIG_PATH = "/config/webhooks-router.yaml"
       }
 
       template {

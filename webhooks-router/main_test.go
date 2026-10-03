@@ -2877,3 +2877,62 @@ func TestDispatchWorkflowRunImages_Integration(t *testing.T) {
 		t.Errorf("expected 0 image_ready calls for in_progress workflow run, got %d", len(mockDisp.ImageReadyCalls()))
 	}
 }
+
+func TestLoadConfig_YAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgFile := tmpDir + "/webhooks-router.yaml"
+	yamlContent := `
+port: "4099"
+infisical_url: "http://infisical.custom:8085"
+infisical_environment: "staging"
+nomad_addr: "http://nomad.custom:4646"
+hangar_url: "http://hangar.custom:8087"
+brain_url: "http://brain.custom:8088"
+`
+	if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write yaml: %v", err)
+	}
+
+	// Clear any env vars that might interfere
+	t.Setenv("PORT", "")
+	t.Setenv("INFISICAL_URL", "")
+	t.Setenv("INFISICAL_HOST_URL", "")
+	t.Setenv("INFISICAL_ENVIRONMENT", "")
+	t.Setenv("NOMAD_ADDR", "")
+	t.Setenv("HANGAR_URL", "")
+	t.Setenv("BRAIN_URL", "")
+
+	cfg := LoadConfig(cfgFile)
+	if cfg.Port != "4099" {
+		t.Errorf("expected port 4099, got %s", cfg.Port)
+	}
+	if cfg.InfisicalURL != "http://infisical.custom:8085" {
+		t.Errorf("expected infisical_url http://infisical.custom:8085, got %s", cfg.InfisicalURL)
+	}
+	if cfg.InfisicalEnvironment != "staging" {
+		t.Errorf("expected env staging, got %s", cfg.InfisicalEnvironment)
+	}
+	if cfg.NomadAddr != "http://nomad.custom:4646" {
+		t.Errorf("expected nomad_addr http://nomad.custom:4646, got %s", cfg.NomadAddr)
+	}
+	if cfg.HangarURL != "http://hangar.custom:8087" {
+		t.Errorf("expected hangar_url http://hangar.custom:8087, got %s", cfg.HangarURL)
+	}
+	if cfg.BrainURL != "http://brain.custom:8088" {
+		t.Errorf("expected brain_url http://brain.custom:8088, got %s", cfg.BrainURL)
+	}
+
+	// Test Env Overrides YAML
+	t.Setenv("PORT", "5000")
+	t.Setenv("INFISICAL_ENVIRONMENT", "dev")
+	cfgOver := LoadConfig(cfgFile)
+	if cfgOver.Port != "5000" {
+		t.Errorf("expected env override port 5000, got %s", cfgOver.Port)
+	}
+	if cfgOver.InfisicalEnvironment != "dev" {
+		t.Errorf("expected env override dev, got %s", cfgOver.InfisicalEnvironment)
+	}
+	if cfgOver.NomadAddr != "http://nomad.custom:4646" {
+		t.Errorf("expected retained yaml nomad_addr, got %s", cfgOver.NomadAddr)
+	}
+}
