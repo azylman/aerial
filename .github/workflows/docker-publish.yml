@@ -47,9 +47,6 @@ jobs:
           filters: |
             brain:
               - 'brain/**'
-              - 'GEMINI.md'
-              - '.agents/**'
-              - 'scripts/**'
             scheduler-mcp:
               - 'scheduler-mcp/**'
             discord-mcp:

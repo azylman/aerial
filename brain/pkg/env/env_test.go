@@ -2440,6 +2440,33 @@ func TestNew_OptSuperpowersSkills(t *testing.T) {
 	}
 }
 
+func TestNew_AgentsSkillsPrecedence(t *testing.T) {
+	origStat := statAgentsSkills
+	defer func() { statAgentsSkills = origStat }()
+
+	mockDir := t.TempDir()
+	// Case 1: /share/aerial/.agents/skills exists and is a directory
+	statAgentsSkills = func(name string) (os.FileInfo, error) {
+		if name == "/share/aerial/.agents/skills" {
+			return os.Stat(mockDir)
+		}
+		return nil, os.ErrNotExist
+	}
+	p1 := New(t.TempDir(), t.TempDir())
+	if p1.agentsSkillsDir != "/share/aerial/.agents/skills" {
+		t.Errorf("expected /share/aerial/.agents/skills, got %q", p1.agentsSkillsDir)
+	}
+
+	// Case 2: /share/aerial/.agents/skills does not exist -> fallback to /app/.agents/skills
+	statAgentsSkills = func(name string) (os.FileInfo, error) {
+		return nil, os.ErrNotExist
+	}
+	p2 := New(t.TempDir(), t.TempDir())
+	if p2.agentsSkillsDir != "/app/.agents/skills" {
+		t.Errorf("expected fallback /app/.agents/skills, got %q", p2.agentsSkillsDir)
+	}
+}
+
 func TestSyncSkills_LegacyCleanupErrors(t *testing.T) {
 	skillsMu.Lock()
 	defer skillsMu.Unlock()

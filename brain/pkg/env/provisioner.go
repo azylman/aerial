@@ -28,7 +28,10 @@ type Provisioner struct {
 	mu sync.Mutex
 }
 
-var statOptSkills = os.Stat
+var (
+	statOptSkills    = os.Stat
+	statAgentsSkills = os.Stat
+)
 
 // New creates a Provisioner targeting the given homeDir and dataDir.
 func New(homeDir, dataDir string) *Provisioner {
@@ -38,12 +41,16 @@ func New(homeDir, dataDir string) *Provisioner {
 			skillsDir = "/opt/superpowers/skills"
 		}
 	}
+	agentsSkillsDir := "/share/aerial/.agents/skills"
+	if fi, err := statAgentsSkills(agentsSkillsDir); err != nil || !fi.IsDir() {
+		agentsSkillsDir = "/app/.agents/skills"
+	}
 	return &Provisioner{
 		homeDir:                 strings.TrimSpace(homeDir),
 		dataDir:                 strings.TrimSpace(dataDir),
 		customSkillsDir:         "/share/aerial-config/custom-skills",
 		superpowersDir:          skillsDir,
-		agentsSkillsDir:         "/app/.agents/skills",
+		agentsSkillsDir:         agentsSkillsDir,
 		aerialRulesDir:          "/share/aerial/rules",
 		configRulesDir:          "/share/aerial-config/rules",
 		agentInstructionsPaths:  DefaultAgentInstructionsSearchPaths,
