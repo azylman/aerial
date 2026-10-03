@@ -141,31 +141,40 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 	return ChannelSnapshot{}, false
 }
 
+// ResolveChannelAndThread resolves a Discord channel or thread to its effective channel ID,
+// effective channel name, thread boolean flag, and thread name (if applicable).
+// For channels that are not threads, threadName is empty.
+func ResolveChannelAndThread(s *discordgo.Session, channelID string) (effectiveID string, effectiveName string, isThread bool, threadName string) {
+	if channelID == "" {
+		return "", "", false, ""
+	}
+
+	snap, ok := resolveChannelSnapshot(s, channelID)
+	if !ok {
+		return channelID, "", false, ""
+	}
+
+	if snap.IsThread {
+		threadName = snap.Name
+		if snap.ParentID != "" {
+			parentSnap, parentOk := resolveChannelSnapshot(s, snap.ParentID)
+			if parentOk {
+				return snap.ParentID, parentSnap.Name, true, threadName
+			}
+			return snap.ParentID, "", true, threadName
+		}
+		return snap.ID, snap.Name, true, threadName
+	}
+	return snap.ID, snap.Name, false, ""
+}
+
 // ResolveEffectiveChannel resolves a Discord channel or thread to its effective channel ID and name.
 // If channelID is a Discord thread, it resolves the parent channel ID and parent channel name.
 // It uses the centralized ChannelSnapshot cache, live Discord State, and singleflight REST queries.
 // For non-numeric or synthetic channel IDs (e.g. HTTP client UUIDs), it immediately returns without REST calls.
 func ResolveEffectiveChannel(s *discordgo.Session, channelID string) (effectiveID string, effectiveName string, isThread bool) {
-	if channelID == "" {
-		return "", "", false
-	}
-
-	snap, ok := resolveChannelSnapshot(s, channelID)
-	if !ok {
-		return channelID, "", false
-	}
-
-	if snap.IsThread {
-		if snap.ParentID != "" {
-			parentSnap, parentOk := resolveChannelSnapshot(s, snap.ParentID)
-			if parentOk {
-				return snap.ParentID, parentSnap.Name, true
-			}
-			return snap.ParentID, "", true
-		}
-		return snap.ID, snap.Name, true
-	}
-	return snap.ID, snap.Name, false
+	effectiveID, effectiveName, isThread, _ = ResolveChannelAndThread(s, channelID)
+	return effectiveID, effectiveName, isThread
 }
 
 func extractMessageBody(content string) string {

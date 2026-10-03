@@ -17,7 +17,9 @@ func TestMessageMetadata_IsEmpty(t *testing.T) {
 		md   MessageMetadata
 	}{
 		{"channel_id", MessageMetadata{ChannelID: "c1"}},
+		{"channel_name", MessageMetadata{ChannelName: "aerial-dev"}},
 		{"target_thread_id", MessageMetadata{TargetThreadID: "t1"}},
+		{"thread_name", MessageMetadata{ThreadName: "docker-orchestration"}},
 		{"guild_id", MessageMetadata{GuildID: "g1"}},
 		{"author_username", MessageMetadata{AuthorUsername: "alice"}},
 		{"author_global_name", MessageMetadata{AuthorGlobalName: "Alice B"}},
