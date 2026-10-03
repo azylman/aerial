@@ -1691,13 +1691,45 @@ type DashboardConfig struct {
 	APIBaseURL string
 }
 
-// NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function.
+// DashboardYAMLConfig defines the declarative file schema for dashboard.yaml.
+type DashboardYAMLConfig struct {
+	Port       string   `yaml:"port"`
+	BrainURL   string   `yaml:"brain_url"`
+	HangarURL  string   `yaml:"hangar_url"`
+	GitSyncURL string   `yaml:"gitsync_url"`
+	GHRepo     string   `yaml:"github_repo"`
+	GHRepos    []string `yaml:"github_repos"`
+	ConfigPath string   `yaml:"config_path"`
+}
+
+// NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function with YAML config file support.
 func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 	if lookup == nil {
 		lookup = func(string) string { return "" }
 	}
 
+	cfgFile := strings.TrimSpace(lookup("CONFIG_PATH"))
+	if cfgFile == "" {
+		if _, err := os.Stat("/config/config.yaml"); err == nil {
+			cfgFile = "/config/config.yaml"
+		} else if _, err := os.Stat("/share/aerial-config/services/dashboard/dashboard.yaml"); err == nil {
+			cfgFile = "/share/aerial-config/services/dashboard/dashboard.yaml"
+		}
+	}
+
+	var ycfg DashboardYAMLConfig
+	if cfgFile != "" {
+		if data, err := os.ReadFile(cfgFile); err == nil {
+			if err := yaml.Unmarshal(data, &ycfg); err != nil {
+				log.Printf("[dashboard] Warning: Failed to parse %s: %v", cfgFile, err)
+			}
+		}
+	}
+
 	brainURL := strings.TrimSpace(lookup("BRAIN_URL"))
+	if brainURL == "" && ycfg.BrainURL != "" {
+		brainURL = strings.TrimSpace(ycfg.BrainURL)
+	}
 	if brainURL == "" {
 		brainURL = "http://brain:8080"
 	}
@@ -1713,9 +1745,14 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 				ghRepos = append(ghRepos, trimmed)
 			}
 		}
+	} else if len(ycfg.GHRepos) > 0 {
+		ghRepos = append(ghRepos, ycfg.GHRepos...)
 	}
 
 	ghRepo := strings.TrimSpace(lookup("GITHUB_REPO"))
+	if ghRepo == "" && ycfg.GHRepo != "" {
+		ghRepo = strings.TrimSpace(ycfg.GHRepo)
+	}
 	if len(ghRepos) > 0 {
 		if ghRepo == "" {
 			ghRepo = ghRepos[0]
@@ -1733,6 +1770,9 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 	}
 
 	port := strings.TrimSpace(lookup("PORT"))
+	if port == "" && ycfg.Port != "" {
+		port = strings.TrimSpace(ycfg.Port)
+	}
 	if port == "" {
 		port = "8080"
 	}
@@ -1741,11 +1781,20 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 	if hangarURL == "" {
 		hangarURL = strings.TrimSpace(lookup("GITSYNC_URL"))
 	}
+	if hangarURL == "" && ycfg.HangarURL != "" {
+		hangarURL = strings.TrimSpace(ycfg.HangarURL)
+	}
+	if hangarURL == "" && ycfg.GitSyncURL != "" {
+		hangarURL = strings.TrimSpace(ycfg.GitSyncURL)
+	}
 	if hangarURL == "" {
 		hangarURL = "http://hangar:8080"
 	}
 
 	configPath := strings.TrimSpace(lookup("AERIAL_CONFIG_PATH"))
+	if configPath == "" && ycfg.ConfigPath != "" {
+		configPath = strings.TrimSpace(ycfg.ConfigPath)
+	}
 	if configPath == "" {
 		configPath = "/share/aerial-config/config.yaml"
 	}

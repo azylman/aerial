@@ -2103,6 +2103,64 @@ func TestNewDashboardConfigFromLookup_Defaults(t *testing.T) {
 	}
 }
 
+func TestNewDashboardConfigFromLookup_YAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "dashboard.yaml")
+	yamlContent := `
+port: "8084"
+brain_url: "http://brain:8088"
+hangar_url: "http://hangar:8087"
+github_repo: "azylman/aerial"
+github_repos:
+  - "azylman/aerial"
+  - "azylman/aerial-config"
+config_path: "/custom/aerial-config/config.yaml"
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write test dashboard.yaml: %v", err)
+	}
+
+	// 1. Load from CONFIG_PATH
+	lookup := func(k string) string {
+		if k == "CONFIG_PATH" {
+			return cfgPath
+		}
+		return ""
+	}
+	cfg := NewDashboardConfigFromLookup(lookup)
+	if cfg.Port != "8084" {
+		t.Errorf("expected port 8084, got %s", cfg.Port)
+	}
+	if cfg.BrainURL != "http://brain:8088" {
+		t.Errorf("expected brain URL http://brain:8088, got %s", cfg.BrainURL)
+	}
+	if cfg.HangarURL != "http://hangar:8087" || cfg.GitSyncURL != "http://hangar:8087" {
+		t.Errorf("expected hangar URL http://hangar:8087, got %s", cfg.HangarURL)
+	}
+	if len(cfg.GHRepos) != 2 || cfg.GHRepos[1] != "azylman/aerial-config" {
+		t.Errorf("expected 2 repos, got %+v", cfg.GHRepos)
+	}
+	if cfg.ConfigPath != "/custom/aerial-config/config.yaml" {
+		t.Errorf("expected config path /custom/aerial-config/config.yaml, got %s", cfg.ConfigPath)
+	}
+
+	// 2. Env overrides take precedence over YAML
+	lookupWithOverride := func(k string) string {
+		switch k {
+		case "CONFIG_PATH":
+			return cfgPath
+		case "PORT":
+			return "9999"
+		default:
+			return ""
+		}
+	}
+	cfgOverride := NewDashboardConfigFromLookup(lookupWithOverride)
+	if cfgOverride.Port != "9999" {
+		t.Errorf("expected env override port 9999, got %s", cfgOverride.Port)
+	}
+}
+
 func TestNewDashboardConfigFromEnv_Smoke(t *testing.T) {
 	cfg := NewDashboardConfigFromEnv()
 	if cfg.Port == "" {
