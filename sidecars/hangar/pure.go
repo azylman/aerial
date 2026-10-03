@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -1002,5 +1003,25 @@ type HangarDeployEvent struct {
 	DeploymentID string    `json:"deployment_id,omitempty"` // Nomad deployment UUID
 	Details      string    `json:"details,omitempty"`       // status description or error message
 	Timestamp    time.Time `json:"timestamp"`
+}
+
+// IsHangarJob checks whether a job name represents the hangar service.
+func IsHangarJob(name string) bool { return strings.EqualFold(strings.TrimSpace(name), "hangar") }
+
+// IsHangarImage checks whether an image reference is for the hangar service.
+func IsHangarImage(img string) bool { return strings.Contains(strings.ToLower(strings.TrimSpace(img)), "hangar") }
+
+// SortNomadChangesHangarLast sorts NomadFileChange slices so hangar changes execute last.
+func SortNomadChangesHangarLast(changes []NomadFileChange) {
+	sort.SliceStable(changes, func(i, j int) bool {
+		return !IsHangarJob(changes[i].JobName) && IsHangarJob(changes[j].JobName)
+	})
+}
+
+// SortMatchedJobsHangarLast sorts MatchedNomadJob slices so hangar is always executed last.
+func SortMatchedJobsHangarLast(matches []MatchedNomadJob) {
+	sort.SliceStable(matches, func(i, j int) bool {
+		return !IsHangarJob(matches[i].JobName) && IsHangarJob(matches[j].JobName)
+	})
 }
 

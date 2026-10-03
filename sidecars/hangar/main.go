@@ -1177,6 +1177,8 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 		return nil
 	}
 
+	SortNomadChangesHangarLast(changes)
+
 	d.nomadMu.Lock()
 	defer d.nomadMu.Unlock()
 
@@ -2288,6 +2290,8 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 		commit = meta[1]
 	}
 
+	SortNomadChangesHangarLast(changes)
+
 	var applied []string
 	for _, ch := range changes {
 		if ch.Action == "delete" {
@@ -2458,6 +2462,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 		if len(nomadChanges) > 0 {
 			resp.NomadChanged = true
+			SortNomadChangesHangarLast(nomadChanges)
 			var appliedJobs []string
 			var deferredJobs []string
 
@@ -2600,6 +2605,8 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 
 	d.nomadMu.Lock()
 	defer d.nomadMu.Unlock()
+
+	SortMatchedJobsHangarLast(matches)
 
 	var appliedJobs []string
 	for _, job := range matches {
@@ -2798,6 +2805,22 @@ func (d *SyncDaemon) StartImageRolloutLoop(ctx context.Context) {
 	}()
 }
 
+func (d *SyncDaemon) isHangarRequest(req ImageReadyEventRequest) bool {
+	if IsHangarImage(req.Image) {
+		return true
+	}
+	for _, repo := range d.candidateJobRepos() {
+		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
+			for _, m := range FindNomadJobsByImage(filepath.Join(repo, sub), req.Image) {
+				if IsHangarJob(m.JobName) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (d *SyncDaemon) executePendingImageRollouts(ctx context.Context) {
 	d.pendingImageMu.Lock()
 	if len(d.pendingImageRollouts) == 0 {
@@ -2814,7 +2837,16 @@ func (d *SyncDaemon) executePendingImageRollouts(ctx context.Context) {
 
 	log.Printf("[Hangar:ImageRollout] Debounce timer expired, executing rollout batch for %d unique image(s)...", len(uniqueRequests))
 
+	var nonHangar, hangar []ImageReadyEventRequest
 	for _, req := range uniqueRequests {
+		if d.isHangarRequest(req) {
+			hangar = append(hangar, req)
+		} else {
+			nonHangar = append(nonHangar, req)
+		}
+	}
+
+	for _, req := range append(nonHangar, hangar...) {
 		if ctx.Err() != nil {
 			return
 		}
