@@ -1593,6 +1593,16 @@ func (m *mockPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha st
 	return m.resolvePRNum, m.resolveBranch, m.resolveTargetID, nil
 }
 
+func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
+	if m.resolveErr != nil {
+		return "", "", "", "", m.resolveErr
+	}
+	if m.err != nil {
+		return "", "", "", "", m.err
+	}
+	return m.resolveTargetID, m.resolveBranch, "", "", nil
+}
+
 func TestNormalizeRepo(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -4097,3 +4107,257 @@ func TestDispatchDeploymentSuccessPrompt(t *testing.T) {
 	}
 }
 
+
+
+func TestResolveSHA_FastPathAndFallback(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Fast path: resolved locally from pr_registry with TargetID
+	mockRegFast := &mockPRRegistry{
+		resolvePRNum:    42,
+		resolveTargetID: "1555405874565091380",
+		resolveBranch:   "feat/fast-path",
+	}
+	srvFast := NewRouterServer(Config{}, nil, nil, nil)
+	srvFast.SetRegistry(mockRegFast)
+
+	prNum, targetID, branch, err := srvFast.ResolveSHA(ctx, "azylman/aerial", "sha-fast-1")
+	if err != nil {
+		t.Fatalf("unexpected error on fast path: %v", err)
+	}
+	if prNum != 42 || targetID != "1555405874565091380" || branch != "feat/fast-path" {
+		t.Errorf("unexpected fast path result: pr=%d target=%s branch=%s", prNum, targetID, branch)
+	}
+
+	// 2. Fast path without TargetID on SHA lookup: falls back to ResolvePRByNumber
+	mockRegNum := &mockPRRegistry{
+		resolvePRNum:    43,
+		resolveTargetID: "1555405874565091380",
+		resolveBranch:   "feat/num-path",
+	}
+	srvNum := NewRouterServer(Config{}, nil, nil, nil)
+	srvNum.SetRegistry(mockRegNum)
+
+	prNum2, targetID2, branch2, err2 := srvNum.ResolveSHA(ctx, "aerial", "sha-num-2")
+	if err2 != nil {
+		t.Fatalf("unexpected error on num path: %v", err2)
+	}
+	if prNum2 != 43 || targetID2 != "1555405874565091380" || branch2 != "feat/num-path" {
+		t.Errorf("unexpected num path result: pr=%d target=%s branch=%s", prNum2, targetID2, branch2)
+	}
+
+	// 3. Fallback path: local SHA returns 0, GitHub API resolves PR and backfills
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/commits/sha-gh-3/pulls") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{
+				{
+					Number: 99,
+					State:  "closed",
+					Head: struct {
+						Ref string `json:"ref"`
+						SHA string `json:"sha"`
+					}{
+						Ref: "feat/gh-fallback",
+						SHA: "sha-head-99",
+					},
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ghServer.Close()
+
+	mockRegGH := &mockPRRegistry{
+		resolvePRNum:     0, // simulate not found by SHA
+		resolveTargetID:  "1555405874565091380",
+		backfillTargetID: "1555405874565091380",
+	}
+	srvGH := NewRouterServer(Config{GitHubAPIURL: ghServer.URL}, nil, nil, nil)
+	srvGH.SetRegistry(mockRegGH)
+
+	prNum3, targetID3, branch3, err3 := srvGH.ResolveSHA(ctx, "azylman/aerial", "sha-gh-3")
+	if err3 != nil {
+		t.Fatalf("unexpected error on github fallback: %v", err3)
+	}
+	if prNum3 != 99 || targetID3 != "1555405874565091380" || branch3 != "feat/gh-fallback" {
+		t.Errorf("unexpected github fallback result: pr=%d target=%s branch=%s", prNum3, targetID3, branch3)
+	}
+	if len(mockRegGH.backfillCalls) != 1 || mockRegGH.backfillCalls[0].mergeSHA != "sha-gh-3" {
+		t.Errorf("expected backfill call for merge_sha sha-gh-3, got: %+v", mockRegGH.backfillCalls)
+	}
+
+	// 4. Zero / Empty SHA
+	p0, t0, b0, err0 := srvGH.ResolveSHA(ctx, "azylman/aerial", "0000000000000000000000000000000000000000")
+	if err0 != nil || p0 != 0 || t0 != "" || b0 != "" {
+		t.Errorf("expected zero results for zero SHA, got pr=%d target=%s branch=%s err=%v", p0, t0, b0, err0)
+	}
+
+	pEmpty, tEmpty, bEmpty, errEmpty := srvGH.ResolveSHA(ctx, "", "")
+	if errEmpty != nil || pEmpty != 0 || tEmpty != "" || bEmpty != "" {
+		t.Errorf("expected zero results for empty repo/sha, got pr=%d target=%s branch=%s err=%v", pEmpty, tEmpty, bEmpty, errEmpty)
+	}
+}
+
+func TestResolveThreadForPR(t *testing.T) {
+	ctx := context.Background()
+
+	// Nil registry returns empty
+	srvNil := NewRouterServer(Config{}, nil, nil, nil)
+	tID, err := srvNil.ResolveThreadForPR(ctx, "azylman/aerial", 123)
+	if err != nil || tID != "" {
+		t.Errorf("expected empty thread for nil registry, got %q err=%v", tID, err)
+	}
+
+	// prNum <= 0 returns empty
+	tID0, err0 := srvNil.ResolveThreadForPR(ctx, "azylman/aerial", 0)
+	if err0 != nil || tID0 != "" {
+		t.Errorf("expected empty thread for prNum 0, got %q err=%v", tID0, err0)
+	}
+
+	// Successful lookup
+	mockReg := &mockPRRegistry{
+		resolveTargetID: "1555405874565091380",
+	}
+	srv := NewRouterServer(Config{}, nil, nil, nil)
+	srv.SetRegistry(mockReg)
+
+	targetID, err := srv.ResolveThreadForPR(ctx, "aerial", 456)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if targetID != "1555405874565091380" {
+		t.Errorf("expected targetID 1555405874565091380, got %q", targetID)
+	}
+}
+
+func TestHandleHangarWebhook_SyncJobNameDefault(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil, nil, nil)
+
+	// 1. sync_success with empty job_name -> accepted and defaulted to git-sync
+	bodySyncSuccess := `{"event": "sync_success", "job_name": "", "repo": "azylman/aerial", "commit_sha": "abc1234", "status": "success", "timestamp": "2026-10-03T18:00:00Z"}`
+	req := httptest.NewRequest(http.MethodPost, "/hangar/webhook", strings.NewReader(bodySyncSuccess))
+	w := httptest.NewRecorder()
+	srv.handleHangarWebhook(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for sync_success with empty job_name, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	var respSync map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &respSync); err != nil {
+		t.Fatalf("failed unmarshaling response: %v", err)
+	}
+	if respSync["job_name"] != "git-sync" {
+		t.Errorf("expected job_name git-sync, got %v", respSync["job_name"])
+	}
+
+	// 2. sync_failed with empty job_name -> accepted and defaulted to git-sync
+	bodySyncFail := `{"event": "sync_failed", "job_name": "", "repo": "azylman/aerial", "status": "failed", "timestamp": "2026-10-03T18:00:00Z"}`
+	reqFail := httptest.NewRequest(http.MethodPost, "/hangar/webhook", strings.NewReader(bodySyncFail))
+	wFail := httptest.NewRecorder()
+	srv.handleHangarWebhook(wFail, reqFail)
+	if wFail.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for sync_failed with empty job_name, got %d", wFail.Code)
+	}
+
+	// 3. deploy_success with empty job_name -> rejected with 400 Bad Request
+	bodyDeploy := `{"event": "deploy_success", "job_name": "", "repo": "azylman/aerial", "status": "success", "timestamp": "2026-10-03T18:00:00Z"}`
+	reqDeploy := httptest.NewRequest(http.MethodPost, "/hangar/webhook", strings.NewReader(bodyDeploy))
+	wDeploy := httptest.NewRecorder()
+	srv.handleHangarWebhook(wDeploy, reqDeploy)
+	if wDeploy.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for deploy_success with empty job_name, got %d", wDeploy.Code)
+	}
+}
+
+func TestDefaultOutboundDispatcher_RetryPrompt(t *testing.T) {
+	ctx := context.Background()
+	var attempts int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("brain is booting"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer ts.Close()
+
+	disp := NewDefaultOutboundDispatcher("http://127.0.0.1:8087", ts.URL, ts.Client())
+	disp.SetRetryConfig(1*time.Millisecond, 4)
+
+	err := disp.DispatchPrompt(ctx, PromptRequest{
+		ChannelID: "1555405874565091380",
+		Prompt:    "Deployment finished",
+	})
+	if err != nil {
+		t.Fatalf("expected prompt delivery after retries, got error: %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestNomadAllocationPrematureGuard(t *testing.T) {
+	ctx := context.Background()
+
+	// Server returning latest deployment status
+	var isHealthy bool
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/v1/job/brain/deployments") {
+			status := "running"
+			if isHealthy {
+				status = "successful"
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]struct {
+				ID     string `json:"ID"`
+				Status string `json:"Status"`
+			}{
+				{ID: "dep-1", Status: status},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    567,
+		deployedMergeSHA: "sha123",
+		deployedRepo:     "azylman/aerial",
+		deployedUpdated:  true,
+	}
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil, nil, nil)
+	srv.SetRegistry(mockReg)
+
+	allocPayload := []byte(`{
+		"Allocation": {
+			"ID": "alloc-new",
+			"JobID": "brain",
+			"DesiredStatus": "run",
+			"ClientStatus": "running"
+		}
+	}`)
+
+	// 1. When deployment is not healthy yet, allocation event does NOT trigger job success
+	isHealthy = false
+	if err := srv.ProcessNomadEvent(ctx, "Allocation", "AllocationUpdated", allocPayload); err != nil {
+		t.Fatalf("unexpected error processing allocation: %v", err)
+	}
+	if len(mockReg.deployedJobCalls) != 0 {
+		t.Errorf("expected 0 deployed job calls when deployment is unhealthy, got %d", len(mockReg.deployedJobCalls))
+	}
+
+	// 2. When deployment is healthy, allocation event triggers job success
+	isHealthy = true
+	if err := srv.ProcessNomadEvent(ctx, "Allocation", "AllocationUpdated", allocPayload); err != nil {
+		t.Fatalf("unexpected error processing healthy allocation: %v", err)
+	}
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "brain" {
+		t.Errorf("expected 1 deployed job call for brain, got: %+v", mockReg.deployedJobCalls)
+	}
+}

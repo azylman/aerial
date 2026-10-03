@@ -1,1101 +1,710 @@
-diff --git a/discord-mcp/go.mod b/discord-mcp/go.mod
-index 1261a40..9ca5707 100644
---- a/discord-mcp/go.mod
-+++ b/discord-mcp/go.mod
-@@ -1,3 +1,5 @@
- module github.com/azylman/aerial/discord-mcp
+diff --git a/sidecars/hangar/main.go b/sidecars/hangar/main.go
+index 2a34b08..d0efed1 100644
+--- a/sidecars/hangar/main.go
++++ b/sidecars/hangar/main.go
+@@ -1351,6 +1351,30 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
+ 						d.nomadKnownDigests[key] = remoteDigest
+ 						d.nomadDigestsMu.Unlock()
  
- go 1.22
++						// Resolve repository HEAD commit SHA to link image rollout to PR
++						var headSHA string
++						if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
++							headSHA = strings.TrimSpace(string(headOut))
++						}
 +
-+require gopkg.in/yaml.v3 v3.0.1
-diff --git a/discord-mcp/go.sum b/discord-mcp/go.sum
-new file mode 100644
-index 0000000..a62c313
---- /dev/null
-+++ b/discord-mcp/go.sum
-@@ -0,0 +1,4 @@
-+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
-+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
-+gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
-+gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-diff --git a/discord-mcp/main.go b/discord-mcp/main.go
-index 4dc4752..026487e 100644
---- a/discord-mcp/main.go
-+++ b/discord-mcp/main.go
-@@ -14,8 +14,13 @@ import (
- 	"strings"
- 	"syscall"
- 	"time"
++						repoName := filepath.Base(repo)
++						if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
++							repoName = "azylman/" + repoName
++						}
 +
-+	"gopkg.in/yaml.v3"
- )
- 
-+// DefaultConfigPath is the canonical in-container configuration path.
-+const DefaultConfigPath = "/config/config.yaml"
++						deployEvt := HangarDeployEvent{
++							Event:     "deploy_started",
++							JobName:   jobName,
++							Repo:      repoName,
++							CommitSHA: headSHA,
++							Image:     imgRef,
++							Digest:    remoteDigest,
++							Status:    "started",
++							Details:   fmt.Sprintf("nomad image poll restart for %s (digest %s)", imgRef, remoteDigest),
++							Timestamp: time.Now().UTC(),
++						}
++						d.DispatchDeployEvent(deployEvt)
 +
- // Config defines configuration settings for discord-mcp proxy and upstream server.
- type Config struct {
- 	Port         string
-@@ -24,36 +29,55 @@ type Config struct {
- 	AppPath      string
- }
+ 						out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
+ 						if runErr != nil {
+ 							log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
+@@ -2286,12 +2310,17 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
+ 	res := d.SyncRepo(ctx, repoPath)
+ 	if res.Error != "" {
+ 		if isSnowflake(req.TargetID) {
++			commitSHA := res.CurrentHead
++			if commitSHA == "" {
++				commitSHA = req.Commit
++			}
+ 			failEvt := HangarDeployEvent{
+ 				Event:     "sync_failed",
++				JobName:   "git-sync",
+ 				Repo:      req.Repo,
+ 				PRNumber:  req.PRNumber,
+ 				TargetID:  req.TargetID,
+-				CommitSHA: res.CurrentHead,
++				CommitSHA: commitSHA,
+ 				Status:    "failed",
+ 				Details:   res.Error,
+ 				Timestamp: time.Now().UTC(),
+@@ -2320,6 +2349,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
+ 		}
+ 		syncEvt := HangarDeployEvent{
+ 			Event:     "sync_success",
++			JobName:   "git-sync",
+ 			Repo:      req.Repo,
+ 			PRNumber:  req.PRNumber,
+ 			TargetID:  req.TargetID,
+diff --git a/sidecars/hangar/main_test.go b/sidecars/hangar/main_test.go
+index 0c1a4c4..98bebaf 100644
+--- a/sidecars/hangar/main_test.go
++++ b/sidecars/hangar/main_test.go
+@@ -3668,10 +3668,21 @@ func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
+ 		},
+ 	}
  
--// DefaultConfig returns production default values for discord-mcp.
--func DefaultConfig() *Config {
--	return &Config{
--		Port:         "4001",
--		UpstreamPort: "4005",
--		NodeBin:      "node",
--		AppPath:      "build/app.js",
--	}
-+// DiscordYAMLConfig defines the declarative file schema for /config/config.yaml.
-+type DiscordYAMLConfig struct {
-+	Port         string `yaml:"port"`
-+	UpstreamPort string `yaml:"upstream_port"`
-+	NodeBin      string `yaml:"node_bin"`
-+	AppPath      string `yaml:"app_path"`
- }
++	var dispatchedEvt HangarDeployEvent
+ 	d := NewDaemon(DaemonConfig{
+ 		ConfigDir:      tmpDir,
+ 		NomadExecutor:  mockNomad,
+ 		RegistryClient: mockClient,
++		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
++			if len(args) > 0 && args[0] == "rev-parse" {
++				return []byte("poll_commit_sha_123\n"), nil, nil
++			}
++			return nil, nil, nil
++		},
++		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
++			dispatchedEvt = evt
++			return nil
++		},
+ 	})
  
--// NewConfigFromLookup populates Config using lookup with fallback to DefaultConfig.
--// Nil lookup is safely guarded.
--func NewConfigFromLookup(lookup func(string) string) *Config {
--	if lookup == nil {
--		return DefaultConfig()
-+// LoadConfigFile loads and validates the YAML config from path.
-+// Fails fast if the file is missing, malformed, or required fields are absent.
-+func LoadConfigFile(path string) (*Config, error) {
-+	cleanPath := strings.TrimSpace(path)
-+	if cleanPath == "" {
-+		return nil, fmt.Errorf("config: path cannot be empty")
+ 	// Pre-seed known digest with older hash so new digest triggers restart
+@@ -3684,6 +3695,9 @@ func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
+ 	if !restartCalled {
+ 		t.Errorf("expected nomad job restart to be called")
+ 	}
++	if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.JobName != "mirrormere-core" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" {
++		t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
 +	}
-+	data, err := os.ReadFile(cleanPath)
+ 	if restartedJob != "mirrormere-core" {
+ 		t.Errorf("expected restarted job 'mirrormere-core', got %q", restartedJob)
+ 	}
+@@ -5140,10 +5154,21 @@ job "svc" {
+ 		return nil, nil, nil
+ 	}
+ 
++	var dispatchedEvt HangarDeployEvent
+ 	d := NewDaemon(DaemonConfig{
+ 		ConfigDir:      tmpDir,
+ 		NomadExecutor:  mockNomad,
+ 		RegistryClient: mockClient,
++		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
++			if len(args) > 0 && args[0] == "rev-parse" {
++				return []byte("poll_commit_sha_123\n"), nil, nil
++			}
++			return nil, nil, nil
++		},
++		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
++			dispatchedEvt = evt
++			return nil
++		},
+ 	})
+ 
+ 	// 1. First poll seeds known digest
+@@ -5183,6 +5208,9 @@ job "svc" {
+ 	if restartedJob != "svc" {
+ 		t.Errorf("expected restart for svc, got %q", restartedJob)
+ 	}
++	if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" || dispatchedEvt.Status != "started" {
++		t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
++	}
+ 
+ 	// Reset poll throttle
+ 	d.nomadPollMu.Lock()
+diff --git a/webhooks-router/main.go b/webhooks-router/main.go
+index 5b918fe..0ebe2e1 100644
+--- a/webhooks-router/main.go
++++ b/webhooks-router/main.go
+@@ -381,6 +381,7 @@ type PRRegistryUpdater interface {
+ 	AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (targetID string, prNumber int, updated bool, err error)
+ 	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
+ 	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
++	ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (targetID string, branch, headSHA, mergeSHA string, err error)
+ 	ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error)
+ 	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
+ 	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
+@@ -608,6 +609,31 @@ func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sh
+ 	return prNum, branch, targetID, nil
+ }
+ 
++func (r *PostgresPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
++	repo = normalizeRepo(repo)
++	if repo == "" || prNumber <= 0 {
++		return "", "", "", "", nil
++	}
++	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
++	defer cancel()
++
++	query := `
++		SELECT target_id, branch, head_sha, COALESCE(merge_sha, '')
++		FROM pr_registry
++		WHERE repo = $1 AND pr_number = $2
++		LIMIT 1;
++	`
++	var targetID, branch, headSHA, mergeSHA string
++	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID, &branch, &headSHA, &mergeSHA)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return "", "", "", "", nil
++	}
 +	if err != nil {
-+		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
++		return "", "", "", "", fmt.Errorf("resolve pr by number: %w", err)
 +	}
-+
-+	var ycfg DiscordYAMLConfig
-+	if err := yaml.Unmarshal(data, &ycfg); err != nil {
-+		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
- 	}
--	cfg := DefaultConfig()
--	if p := strings.TrimSpace(lookup("PORT")); p != "" {
--		cfg.Port = p
-+
-+	port := strings.TrimSpace(ycfg.Port)
-+	if port == "" {
-+		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
- 	}
--	if up := strings.TrimSpace(lookup("UPSTREAM_PORT")); up != "" {
--		cfg.UpstreamPort = up
-+	upstreamPort := strings.TrimSpace(ycfg.UpstreamPort)
-+	if upstreamPort == "" {
-+		return nil, fmt.Errorf("config: upstream_port is required in %s", cleanPath)
- 	}
--	if nb := strings.TrimSpace(lookup("NODE_BIN")); nb != "" {
--		cfg.NodeBin = nb
-+
-+	nodeBin := strings.TrimSpace(ycfg.NodeBin)
-+	if nodeBin == "" {
-+		nodeBin = "node"
- 	}
--	if ap := strings.TrimSpace(lookup("APP_PATH")); ap != "" {
--		cfg.AppPath = ap
-+	appPath := strings.TrimSpace(ycfg.AppPath)
-+	if appPath == "" {
-+		appPath = "build/app.js"
- 	}
--	return cfg
-+
-+	return &Config{
-+		Port:         port,
-+		UpstreamPort: upstreamPort,
-+		NodeBin:      nodeBin,
-+		AppPath:      appPath,
-+	}, nil
- }
- 
- // PollUpstream checks if upstream TCP port is accepting connections.
-@@ -131,6 +155,7 @@ var (
- 	runProxyApp        = RunProxyApp
- 	exitFn             = log.Fatalf
- 	onServerReady      func(addr string)
-+	configPath         = DefaultConfigPath
- )
- 
- // RunProxyApp starts the upstream node process and proxy server with graceful shutdown.
-@@ -208,7 +233,10 @@ func main() {
- 		Level: slog.LevelInfo,
- 	})))
- 
--	cfg := NewConfigFromLookup(os.Getenv)
-+	cfg, err := LoadConfigFile(configPath)
-+	if err != nil {
-+		exitFn("[Discord-MCP] Fatal configuration error: %v", err)
-+	}
- 
- 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
- 	defer cancel()
-diff --git a/discord-mcp/proxy_test.go b/discord-mcp/proxy_test.go
-index ae78475..3667183 100644
---- a/discord-mcp/proxy_test.go
-+++ b/discord-mcp/proxy_test.go
-@@ -12,6 +12,7 @@ import (
- 	"net/http/httptest"
- 	"os"
- 	"os/exec"
-+	"path/filepath"
- 	"strings"
- 	"syscall"
- 	"testing"
-@@ -556,135 +557,70 @@ func TestRunProxyApp_ValidationErrors(t *testing.T) {
- 	}
- }
- 
--func TestNewConfigFromLookup_TableDriven(t *testing.T) {
--	testCases := []struct {
--		name     string
--		lookup   func(string) string
--		expected *Config
--	}{
--		{
--			name:     "nil lookup uses defaults",
--			lookup:   nil,
--			expected: DefaultConfig(),
--		},
--		{
--			name: "empty lookup uses defaults",
--			lookup: func(k string) string {
--				return ""
--			},
--			expected: DefaultConfig(),
--		},
--		{
--			name: "whitespace-only lookup values use defaults",
--			lookup: func(k string) string {
--				return "   "
--			},
--			expected: DefaultConfig(),
--		},
--		{
--			name: "override port only with trimming",
--			lookup: func(k string) string {
--				if k == "PORT" {
--					return "  5001  "
--				}
--				return ""
--			},
--			expected: &Config{
--				Port:         "5001",
--				UpstreamPort: "4005",
--				NodeBin:      "node",
--				AppPath:      "build/app.js",
--			},
--		},
--		{
--			name: "override upstream port only",
--			lookup: func(k string) string {
--				if k == "UPSTREAM_PORT" {
--					return "5005"
--				}
--				return ""
--			},
--			expected: &Config{
--				Port:         "4001",
--				UpstreamPort: "5005",
--				NodeBin:      "node",
--				AppPath:      "build/app.js",
--			},
--		},
--		{
--			name: "override node bin only",
--			lookup: func(k string) string {
--				if k == "NODE_BIN" {
--					return "/usr/local/bin/node"
--				}
--				return ""
--			},
--			expected: &Config{
--				Port:         "4001",
--				UpstreamPort: "4005",
--				NodeBin:      "/usr/local/bin/node",
--				AppPath:      "build/app.js",
--			},
--		},
--		{
--			name: "override app path only",
--			lookup: func(k string) string {
--				if k == "APP_PATH" {
--					return "dist/server.js"
--				}
--				return ""
--			},
--			expected: &Config{
--				Port:         "4001",
--				UpstreamPort: "4005",
--				NodeBin:      "node",
--				AppPath:      "dist/server.js",
--			},
--		},
--		{
--			name: "override all fields with trimming",
--			lookup: func(k string) string {
--				switch k {
--				case "PORT":
--					return " 9001 "
--				case "UPSTREAM_PORT":
--					return " 9005 "
--				case "NODE_BIN":
--					return " /opt/node/bin/node "
--				case "APP_PATH":
--					return " /opt/app/index.js "
--				default:
--					return ""
--				}
--			},
--			expected: &Config{
--				Port:         "9001",
--				UpstreamPort: "9005",
--				NodeBin:      "/opt/node/bin/node",
--				AppPath:      "/opt/app/index.js",
--			},
--		},
-+func TestLoadConfigFile(t *testing.T) {
-+	tmpDir := t.TempDir()
-+	cfgPath := filepath.Join(tmpDir, "config.yaml")
-+	yamlContent := `
-+port: "4001"
-+upstream_port: "4025"
-+node_bin: "/custom/node"
-+app_path: "/custom/app.js"
-+`
-+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
-+		t.Fatalf("failed to write test yaml: %v", err)
-+	}
-+
-+	// 1. Success case with all fields
-+	cfg, err := LoadConfigFile(cfgPath)
-+	if err != nil {
-+		t.Fatalf("LoadConfigFile failed: %v", err)
-+	}
-+	if cfg.Port != "4001" {
-+		t.Errorf("expected port 4001, got %s", cfg.Port)
-+	}
-+	if cfg.UpstreamPort != "4025" {
-+		t.Errorf("expected upstream_port 4025, got %s", cfg.UpstreamPort)
-+	}
-+	if cfg.NodeBin != "/custom/node" {
-+		t.Errorf("expected node_bin /custom/node, got %s", cfg.NodeBin)
-+	}
-+	if cfg.AppPath != "/custom/app.js" {
-+		t.Errorf("expected app_path /custom/app.js, got %s", cfg.AppPath)
- 	}
- 
--	for _, tc := range testCases {
--		t.Run(tc.name, func(t *testing.T) {
--			cfg := NewConfigFromLookup(tc.lookup)
--			if cfg == nil {
--				t.Fatal("expected non-nil config")
--			}
--			if cfg.Port != tc.expected.Port {
--				t.Errorf("expected Port %q, got %q", tc.expected.Port, cfg.Port)
--			}
--			if cfg.UpstreamPort != tc.expected.UpstreamPort {
--				t.Errorf("expected UpstreamPort %q, got %q", tc.expected.UpstreamPort, cfg.UpstreamPort)
--			}
--			if cfg.NodeBin != tc.expected.NodeBin {
--				t.Errorf("expected NodeBin %q, got %q", tc.expected.NodeBin, cfg.NodeBin)
--			}
--			if cfg.AppPath != tc.expected.AppPath {
--				t.Errorf("expected AppPath %q, got %q", tc.expected.AppPath, cfg.AppPath)
--			}
--		})
-+	// 2. Success with minimal fields (node_bin and app_path defaulted)
-+	minPath := filepath.Join(tmpDir, "min.yaml")
-+	_ = os.WriteFile(minPath, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
-+	cfgMin, err := LoadConfigFile(minPath)
-+	if err != nil {
-+		t.Fatalf("LoadConfigFile min failed: %v", err)
-+	}
-+	if cfgMin.NodeBin != "node" || cfgMin.AppPath != "build/app.js" {
-+		t.Errorf("unexpected defaults in min config: %+v", cfgMin)
-+	}
-+
-+	// 3. Missing file -> fail fast
-+	if _, err := LoadConfigFile(filepath.Join(tmpDir, "nonexistent.yaml")); err == nil {
-+		t.Error("expected error for nonexistent file")
-+	}
-+
-+	// 4. Missing required port -> fail fast
-+	badPortPath := filepath.Join(tmpDir, "badport.yaml")
-+	_ = os.WriteFile(badPortPath, []byte("upstream_port: \"4025\"\n"), 0644)
-+	if _, err := LoadConfigFile(badPortPath); err == nil {
-+		t.Error("expected error when port is missing")
-+	}
-+
-+	// 5. Missing required upstream_port -> fail fast
-+	badUpPath := filepath.Join(tmpDir, "badup.yaml")
-+	_ = os.WriteFile(badUpPath, []byte("port: \"4001\"\n"), 0644)
-+	if _, err := LoadConfigFile(badUpPath); err == nil {
-+		t.Error("expected error when upstream_port is missing")
-+	}
-+
-+	// 6. Empty path -> fail fast
-+	if _, err := LoadConfigFile(""); err == nil {
-+		t.Error("expected error when path is empty")
- 	}
- }
- 
-@@ -811,11 +747,18 @@ func TestServeHTTP_UpstreamBodyReadError(t *testing.T) {
- func TestMain_Execution(t *testing.T) {
- 	oldRun := runProxyApp
- 	oldExit := exitFn
-+	oldPath := configPath
- 	defer func() {
- 		runProxyApp = oldRun
- 		exitFn = oldExit
-+		configPath = oldPath
- 	}()
- 
-+	tmpDir := t.TempDir()
-+	testCfg := filepath.Join(tmpDir, "config.yaml")
-+	_ = os.WriteFile(testCfg, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
-+	configPath = testCfg
-+
- 	// 1. Success path
- 	runCalled := false
- 	runProxyApp = func(ctx context.Context, cfg *Config) error {
-diff --git a/docker-mcp/Dockerfile b/docker-mcp/Dockerfile
-index d8c8bbb..363be2e 100644
---- a/docker-mcp/Dockerfile
-+++ b/docker-mcp/Dockerfile
-@@ -13,8 +13,8 @@ RUN --mount=type=cache,target=/root/.npm \
- RUN --mount=type=cache,target=/root/.cache/pip \
-     pip install mcp-server-docker
- 
--ENV PORT=4002
--EXPOSE 4002
-+# Copy entrypoint script
-+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-+RUN chmod +x /usr/local/bin/entrypoint.sh
- 
--ENTRYPOINT ["/sbin/tini", "--"]
--CMD ["supergateway", "--host", "0.0.0.0", "--port", "4002", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/mcp", "--stateful", "--sessionTimeout", "60000", "--cors", "--stdio", "mcp-server-docker"]
-+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-diff --git a/docker-mcp/entrypoint.sh b/docker-mcp/entrypoint.sh
-new file mode 100755
-index 0000000..a1a2fae
---- /dev/null
-+++ b/docker-mcp/entrypoint.sh
-@@ -0,0 +1,25 @@
-+#!/bin/sh
-+set -e
-+
-+CONFIG_FILE="/config/config.yaml"
-+if [ ! -f "$CONFIG_FILE" ]; then
-+  echo "FATAL: $CONFIG_FILE is missing" >&2
-+  exit 1
-+fi
-+
-+PORT=$(grep -E '^[[:space:]]*port:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
-+
-+if [ -z "$PORT" ]; then
-+  echo "FATAL: port is required in $CONFIG_FILE" >&2
-+  exit 1
-+fi
-+
-+exec supergateway \
-+  --host 0.0.0.0 \
-+  --port "$PORT" \
-+  --outputTransport streamableHttp \
-+  --streamableHttpPath /mcp \
-+  --stateful \
-+  --sessionTimeout 60000 \
-+  --cors \
-+  --stdio "mcp-server-docker"
-diff --git a/github-mcp/Dockerfile b/github-mcp/Dockerfile
-index 5226f05..ff8ffca 100644
---- a/github-mcp/Dockerfile
-+++ b/github-mcp/Dockerfile
-@@ -13,8 +13,8 @@ RUN --mount=type=cache,target=/root/.npm \
- # Copy GitHub MCP server static binary
- COPY --from=src --link /server/github-mcp-server /usr/local/bin/github-mcp-server
- 
--ENV PORT=4003
--EXPOSE 4003
-+# Copy entrypoint script
-+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-+RUN chmod +x /usr/local/bin/entrypoint.sh
- 
--ENTRYPOINT ["/sbin/tini", "--"]
--CMD ["supergateway", "--host", "0.0.0.0", "--port", "4003", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/mcp", "--stateful", "--sessionTimeout", "60000", "--cors", "--stdio", "github-mcp-server stdio"]
-+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-diff --git a/github-mcp/entrypoint.sh b/github-mcp/entrypoint.sh
-new file mode 100755
-index 0000000..1604bd8
---- /dev/null
-+++ b/github-mcp/entrypoint.sh
-@@ -0,0 +1,25 @@
-+#!/bin/sh
-+set -e
-+
-+CONFIG_FILE="/config/config.yaml"
-+if [ ! -f "$CONFIG_FILE" ]; then
-+  echo "FATAL: $CONFIG_FILE is missing" >&2
-+  exit 1
-+fi
-+
-+PORT=$(grep -E '^[[:space:]]*port:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
-+
-+if [ -z "$PORT" ]; then
-+  echo "FATAL: port is required in $CONFIG_FILE" >&2
-+  exit 1
-+fi
-+
-+exec supergateway \
-+  --host 0.0.0.0 \
-+  --port "$PORT" \
-+  --outputTransport streamableHttp \
-+  --streamableHttpPath /mcp \
-+  --stateful \
-+  --sessionTimeout 60000 \
-+  --cors \
-+  --stdio "github-mcp-server stdio"
-diff --git a/infisical-mcp/entrypoint.sh b/infisical-mcp/entrypoint.sh
-index cf81083..4048926 100755
---- a/infisical-mcp/entrypoint.sh
-+++ b/infisical-mcp/entrypoint.sh
-@@ -1,9 +1,35 @@
- #!/bin/sh
- set -e
- 
-+CONFIG_FILE="/config/config.yaml"
-+if [ ! -f "$CONFIG_FILE" ]; then
-+  echo "FATAL: $CONFIG_FILE is missing" >&2
-+  exit 1
-+fi
-+
-+PORT=$(grep -E '^[[:space:]]*port:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
-+INF_HOST=$(grep -E '^[[:space:]]*infisical_host_url:' "$CONFIG_FILE" | sed -E 's/^[[:space:]]*infisical_host_url:[[:space:]]*//' | tr -d '"' | tr -d "'")
-+AUTH_METHOD=$(grep -E '^[[:space:]]*auth_method:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
-+MASK_SECRETS=$(grep -E '^[[:space:]]*mask_secret_values:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
-+
-+if [ -z "$PORT" ]; then
-+  echo "FATAL: port is required in $CONFIG_FILE" >&2
-+  exit 1
-+fi
-+if [ -z "$INF_HOST" ]; then
-+  echo "FATAL: infisical_host_url is required in $CONFIG_FILE" >&2
-+  exit 1
-+fi
-+
-+export INFISICAL_HOST_URL="$INF_HOST"
-+if [ -n "$AUTH_METHOD" ]; then
-+  export INFISICAL_AUTH_METHOD="$AUTH_METHOD"
-+fi
-+if [ -n "$MASK_SECRETS" ]; then
-+  export INFISICAL_MASK_SECRET_VALUES="$MASK_SECRETS"
-+fi
-+
- # Check if required Infisical credentials are present.
--# Can authenticate via INFISICAL_TOKEN (Token Auth)
--# OR INFISICAL_UNIVERSAL_AUTH_CLIENT_ID + INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET (Universal Auth).
- AUTH_CONFIGURED=false
- 
- if [ -n "$INFISICAL_TOKEN" ]; then
-@@ -13,10 +39,10 @@ elif [ -n "$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" ] && [ -n "$INFISICAL_UNIVERSAL_
- fi
- 
- if [ "$AUTH_CONFIGURED" = "true" ]; then
--  echo "[infisical-mcp] Credentials detected. Starting supergateway with @infisical/mcp..."
-+  echo "[infisical-mcp] Credentials detected. Starting supergateway with @infisical/mcp on port $PORT..."
-   exec supergateway \
-     --host 0.0.0.0 \
--    --port "${PORT:-4007}" \
-+    --port "$PORT" \
-     --outputTransport streamableHttp \
-     --streamableHttpPath /mcp \
-     --stateful \
-@@ -25,11 +51,10 @@ if [ "$AUTH_CONFIGURED" = "true" ]; then
-     --stdio "infisical-mcp"
- else
-   echo "[infisical-mcp] Notice: Credentials not configured (missing INFISICAL_TOKEN or INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET)."
--  echo "[infisical-mcp] Running in standby healthcheck mode on port ${PORT:-4007} to prevent container restart loops."
--  # Start a lightweight Node.js HTTP server responding 200 OK to healthchecks and standby messages
-+  echo "[infisical-mcp] Running in standby healthcheck mode on port $PORT to prevent container restart loops."
-   exec node -e '
-     const http = require("http");
--    const port = parseInt(process.env.PORT || "4007", 10);
-+    const port = parseInt(process.env.TARGET_PORT || "'"$PORT"'", 10);
-     const server = http.createServer((req, res) => {
-       res.setHeader("Access-Control-Allow-Origin", "*");
-       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-@@ -44,7 +69,7 @@ else
-         status: "standby",
-         service: "infisical-mcp",
-         configured: false,
--        message: "Infisical credentials not configured. Set INFISICAL_TOKEN or INFISICAL_UNIVERSAL_AUTH_CLIENT_ID and SECRET in .env"
-+        message: "Infisical credentials not configured in secrets template"
-       }));
-     });
-     server.listen(port, "0.0.0.0", () => {
-diff --git a/nomad-mcp/Dockerfile b/nomad-mcp/Dockerfile
-index d396bdb..a2b6831 100644
---- a/nomad-mcp/Dockerfile
-+++ b/nomad-mcp/Dockerfile
-@@ -18,8 +18,8 @@ RUN npm install -g supergateway@^3.4.0 && \
- # Copy compiled mcp-nomad Go binary
- COPY --from=builder /go/bin/mcp-nomad /usr/local/bin/mcp-nomad
- 
--ENV PORT=4006
--EXPOSE 4006
-+# Copy entrypoint script
-+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-+RUN chmod +x /usr/local/bin/entrypoint.sh
- 
--ENTRYPOINT ["/sbin/tini", "--"]
--CMD ["supergateway", "--host", "0.0.0.0", "--port", "4006", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/mcp", "--stateful", "--sessionTimeout", "60000", "--cors", "--stdio", "mcp-nomad -transport stdio"]
-+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-diff --git a/nomad-mcp/entrypoint.sh b/nomad-mcp/entrypoint.sh
-new file mode 100755
-index 0000000..9bbed55
---- /dev/null
-+++ b/nomad-mcp/entrypoint.sh
-@@ -0,0 +1,31 @@
-+#!/bin/sh
-+set -e
-+
-+CONFIG_FILE="/config/config.yaml"
-+if [ ! -f "$CONFIG_FILE" ]; then
-+  echo "FATAL: $CONFIG_FILE is missing" >&2
-+  exit 1
-+fi
-+
-+PORT=$(grep -E '^[[:space:]]*port:' "$CONFIG_FILE" | awk -F: '{print $2}' | tr -d ' "' | tr -d "'")
-+NOMAD_ADDR=$(grep -E '^[[:space:]]*nomad_addr:' "$CONFIG_FILE" | sed -E 's/^[[:space:]]*nomad_addr:[[:space:]]*//' | tr -d '"' | tr -d "'")
-+
-+if [ -z "$PORT" ]; then
-+  echo "FATAL: port is required in $CONFIG_FILE" >&2
-+  exit 1
-+fi
-+if [ -z "$NOMAD_ADDR" ]; then
-+  echo "FATAL: nomad_addr is required in $CONFIG_FILE" >&2
-+  exit 1
-+fi
-+
-+export NOMAD_ADDR
-+exec supergateway \
-+  --host 0.0.0.0 \
-+  --port "$PORT" \
-+  --outputTransport streamableHttp \
-+  --streamableHttpPath /mcp \
-+  --stateful \
-+  --sessionTimeout 60000 \
-+  --cors \
-+  --stdio "mcp-nomad -transport stdio"
-diff --git a/nomad/jobs/discord-mcp.nomad b/nomad/jobs/discord-mcp.nomad
-index 4f2bd90..7c281f5 100644
---- a/nomad/jobs/discord-mcp.nomad
-+++ b/nomad/jobs/discord-mcp.nomad
-@@ -36,11 +36,9 @@ job "discord-mcp" {
-         dns_search_domains = ["aerial"]
-         image        = "ghcr.io/azylman/aerial-discord-mcp:latest"
-         network_mode = "host"
--      }
--
--      env {
--        PORT          = "4001"
--        UPSTREAM_PORT = "4025"
-+        volumes = [
-+          "/mnt/data/supervisor/share/aerial-config/services/mcp/discord-mcp.yaml:/config/config.yaml:ro"
-+        ]
-       }
- 
-       template {
-diff --git a/nomad/jobs/docker-mcp.nomad b/nomad/jobs/docker-mcp.nomad
-index 6ecc8fa..f25003b 100644
---- a/nomad/jobs/docker-mcp.nomad
-+++ b/nomad/jobs/docker-mcp.nomad
-@@ -37,13 +37,11 @@ job "docker-mcp" {
-         image        = "ghcr.io/azylman/aerial-docker-mcp:latest"
-         network_mode = "host"
-         volumes = [
--          "/var/run/docker.sock:/var/run/docker.sock"
-+          "/var/run/docker.sock:/var/run/docker.sock",
-+          "/mnt/data/supervisor/share/aerial-config/services/mcp/docker-mcp.yaml:/config/config.yaml:ro"
-         ]
-       }
- 
--      env {
--        PORT = "4002"
--      }
- 
-       service {
-         name     = "docker-mcp"
-diff --git a/nomad/jobs/github-mcp.nomad b/nomad/jobs/github-mcp.nomad
-index 751048a..8d125ae 100644
---- a/nomad/jobs/github-mcp.nomad
-+++ b/nomad/jobs/github-mcp.nomad
-@@ -36,11 +36,11 @@ job "github-mcp" {
-         dns_search_domains = ["aerial"]
-         image        = "ghcr.io/azylman/aerial-github-mcp:latest"
-         network_mode = "host"
-+        volumes = [
-+          "/mnt/data/supervisor/share/aerial-config/services/mcp/github-mcp.yaml:/config/config.yaml:ro"
-+        ]
-       }
- 
--      env {
--        PORT = "4003"
--      }
- 
-       template {
-         data = <<EOH
-diff --git a/nomad/jobs/infisical-mcp.nomad b/nomad/jobs/infisical-mcp.nomad
-index 7168873..3f3d86f 100644
---- a/nomad/jobs/infisical-mcp.nomad
-+++ b/nomad/jobs/infisical-mcp.nomad
-@@ -36,13 +36,9 @@ job "infisical-mcp" {
-         dns_search_domains = ["aerial"]
-         image        = "ghcr.io/azylman/aerial-infisical-mcp:latest"
-         network_mode = "host"
--      }
--
--      env {
--        PORT                         = "4007"
--        INFISICAL_HOST_URL           = "http://infisical:8085"
--        INFISICAL_AUTH_METHOD        = "universal-auth"
--        INFISICAL_MASK_SECRET_VALUES = "false"
-+        volumes = [
-+          "/mnt/data/supervisor/share/aerial-config/services/mcp/infisical-mcp.yaml:/config/config.yaml:ro"
-+        ]
-       }
- 
-       template {
-diff --git a/nomad/jobs/nomad-mcp.nomad b/nomad/jobs/nomad-mcp.nomad
-index bfc6555..6e04b91 100644
---- a/nomad/jobs/nomad-mcp.nomad
-+++ b/nomad/jobs/nomad-mcp.nomad
-@@ -36,11 +36,9 @@ job "nomad-mcp" {
-         dns_search_domains = ["aerial"]
-         image        = "ghcr.io/azylman/aerial-nomad-mcp:latest"
-         network_mode = "host"
--      }
--
--      env {
--        PORT       = "4006"
--        NOMAD_ADDR = "http://127.0.0.1:4646"
-+        volumes = [
-+          "/mnt/data/supervisor/share/aerial-config/services/mcp/nomad-mcp.yaml:/config/config.yaml:ro"
-+        ]
-       }
- 
-       template {
-diff --git a/nomad/jobs/scheduler-mcp.nomad b/nomad/jobs/scheduler-mcp.nomad
-index da3a097..0ddf78f 100644
---- a/nomad/jobs/scheduler-mcp.nomad
-+++ b/nomad/jobs/scheduler-mcp.nomad
-@@ -36,12 +36,9 @@ job "scheduler-mcp" {
-         dns_search_domains = ["aerial"]
-         image        = "ghcr.io/azylman/aerial-scheduler-mcp:latest"
-         network_mode = "host"
--      }
--
--      env {
--        PORT             = "4005"
--        DEFAULT_TIMEZONE = "America/Los_Angeles"
--        TZ               = "America/Los_Angeles"
-+        volumes = [
-+          "/mnt/data/supervisor/share/aerial-config/services/mcp/scheduler-mcp.yaml:/config/config.yaml:ro"
-+        ]
-       }
- 
-       template {
-diff --git a/scheduler-mcp/config.go b/scheduler-mcp/config.go
-index d9c87f2..88779cf 100644
---- a/scheduler-mcp/config.go
-+++ b/scheduler-mcp/config.go
-@@ -4,79 +4,63 @@ import (
- 	"fmt"
- 	"os"
- 	"strings"
--)
- 
--const (
--	// DefaultTimezone is the fallback timezone when unspecified.
--	DefaultTimezone = "America/Los_Angeles"
--	// DefaultPort is the fallback HTTP server port when unspecified.
--	DefaultPort = "8080"
-+	"gopkg.in/yaml.v3"
- )
- 
-+// DefaultConfigPath is the canonical in-container configuration path.
-+const DefaultConfigPath = "/config/config.yaml"
-+
-+// DefaultTimezone is the fallback timezone for tool invocations when unspecified in tool payload.
-+const DefaultTimezone = "America/Los_Angeles"
-+
- // Config represents the runtime configuration for the scheduler MCP server.
- type Config struct {
- 	DatabaseURL string
--	Timezone    string
--	Port        string
-+	Timezone    string `yaml:"timezone"`
-+	Port        string `yaml:"port"`
- }
- 
-+// SchedulerYAMLConfig defines the declarative file schema for /config/config.yaml.
-+type SchedulerYAMLConfig struct {
-+	Port     string `yaml:"port"`
-+	Timezone string `yaml:"timezone"`
++	return targetID, branch, headSHA, mergeSHA, nil
 +}
++
+ func (r *PostgresPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error) {
+ 	repo = normalizeRepo(repo)
+ 	if repo == "" {
+@@ -979,10 +1005,11 @@ type OutboundDispatcher interface {
+ }
  
--// LoadConfigFromLookup reads configuration using the provided environment lookup function.
--// Returns an error if lookup is nil or if no valid database connection string can be constructed.
--func LoadConfigFromLookup(lookup func(string) string) (*Config, error) {
--	if lookup == nil {
--		return nil, fmt.Errorf("config: lookup function cannot be nil")
-+// LoadConfigFile loads and validates the YAML config from path.
-+// Fails fast if the file is missing, malformed, or required fields are absent.
-+func LoadConfigFile(path string, dbURL string) (*Config, error) {
-+	cleanPath := strings.TrimSpace(path)
-+	if cleanPath == "" {
-+		return nil, fmt.Errorf("config: path cannot be empty")
+ type DefaultOutboundDispatcher struct {
+-	hangarURL  string
+-	brainURL   string
+-	httpClient *http.Client
+-	retryDelay time.Duration
++	hangarURL   string
++	brainURL    string
++	httpClient  *http.Client
++	retryDelay  time.Duration
++	maxAttempts int
+ }
+ 
+ func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
+@@ -990,13 +1017,20 @@ func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Clien
+ 		client = &http.Client{Timeout: 15 * time.Second}
+ 	}
+ 	return &DefaultOutboundDispatcher{
+-		hangarURL:  strings.TrimRight(hangarURL, "/"),
+-		brainURL:   strings.TrimRight(brainURL, "/"),
+-		httpClient: client,
+-		retryDelay: 500 * time.Millisecond,
++		hangarURL:   strings.TrimRight(hangarURL, "/"),
++		brainURL:    strings.TrimRight(brainURL, "/"),
++		httpClient:  client,
++		retryDelay:  1500 * time.Millisecond,
++		maxAttempts: 6,
+ 	}
+ }
+ 
++// SetRetryConfig overrides retry delay and attempt bounds for fast hermetic unit tests.
++func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
++	d.retryDelay = delay
++	d.maxAttempts = maxAttempts
++}
++
+ func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
+ 	bodyBytes, err := json.Marshal(req)
+ 	if err != nil {
+@@ -1068,10 +1102,13 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
+ 	endpoint := fmt.Sprintf("%s/prompt", d.brainURL)
+ 	delay := d.retryDelay
+ 	if delay <= 0 {
+-		delay = 500 * time.Millisecond
++		delay = 1500 * time.Millisecond
+ 	}
+ 
+-	const maxAttempts = 3
++	maxAttempts := d.maxAttempts
++	if maxAttempts <= 0 {
++		maxAttempts = 6
 +	}
-+	data, err := os.ReadFile(cleanPath)
+ 	var lastErr error
+ 
+ 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+@@ -1091,6 +1128,10 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
+ 			if attempt < maxAttempts {
+ 				select {
+ 				case <-time.After(delay):
++					delay = time.Duration(float64(delay) * 1.5)
++					if delay > 5*time.Second {
++						delay = 5 * time.Second
++					}
+ 					continue
+ 				case <-ctx.Done():
+ 					return ctx.Err()
+@@ -1114,6 +1155,10 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
+ 			if attempt < maxAttempts {
+ 				select {
+ 				case <-time.After(delay):
++					delay = time.Duration(float64(delay) * 1.5)
++					if delay > 5*time.Second {
++						delay = 5 * time.Second
++					}
+ 					continue
+ 				case <-ctx.Done():
+ 					return ctx.Err()
+@@ -1430,11 +1475,20 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
+ 		return
+ 	}
+ 
+-	if strings.TrimSpace(evt.Event) == "" || strings.TrimSpace(evt.JobName) == "" {
++	if strings.TrimSpace(evt.Event) == "" {
+ 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+ 		return
+ 	}
+ 
++	if strings.TrimSpace(evt.JobName) == "" {
++		if strings.HasPrefix(evt.Event, "sync_") {
++			evt.JobName = "git-sync"
++		} else {
++			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
++			return
++		}
++	}
++
+ 	if s.riverClient != nil {
+ 		args := HangarWebhookArgs{Event: evt}
+ 		if _, err := s.riverClient.Insert(r.Context(), args, &river.InsertOpts{MaxAttempts: 5}); err != nil {
+@@ -1464,17 +1518,87 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
+ 	})
+ }
+ 
++// ResolveSHA resolves a commit SHA to its PR number, target Discord thread ID, and branch.
++// It checks local pr_registry first, then falls back to GitHub commit PR lookup and backfills pr_registry.
++func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, string, string, error) {
++	if repo == "" || sha == "" || isZeroSHA(sha) {
++		return 0, "", "", nil
++	}
++
++	repo = normalizeRepo(repo)
++
++	// 1. Check local pr_registry by SHA (matches head_sha or merge_sha)
++	if s.registry != nil {
++		prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, repo, sha)
++		if err != nil {
++			log.Printf("[webhooks-router] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
++		} else if prNum > 0 {
++			if targetID == "" {
++				tID, _, _, _, errNum := s.registry.ResolvePRByNumber(ctx, repo, prNum)
++				if errNum == nil && tID != "" {
++					targetID = tID
++				}
++			}
++			return prNum, targetID, branch, nil
++		}
++	}
++
++	// 2. Fall back to GitHub API commit PR lookup
++	prNum, branch, err := s.resolvePRFromCommitSHA(ctx, repo, sha)
 +	if err != nil {
-+		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
- 	}
- 
--	port := strings.TrimSpace(lookup("PORT"))
--	if port == "" {
--		port = DefaultPort
-+	var ycfg SchedulerYAMLConfig
-+	if err := yaml.Unmarshal(data, &ycfg); err != nil {
-+		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
- 	}
- 
--	tz := strings.TrimSpace(lookup("DEFAULT_TIMEZONE"))
--	if tz == "" {
--		tz = strings.TrimSpace(lookup("TZ"))
-+	port := strings.TrimSpace(ycfg.Port)
-+	if port == "" {
-+		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
- 	}
-+	tz := strings.TrimSpace(ycfg.Timezone)
- 	if tz == "" {
--		tz = DefaultTimezone
--	}
--
--	dbURL := strings.TrimSpace(lookup("DATABASE_URL"))
--	if dbURL == "" {
--		dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
--		if dbHost != "" {
--			dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
--			if dbUser == "" {
--				dbUser = "aerial"
--			}
--			dbPass := strings.TrimSpace(lookup("POSTGRES_PASSWORD"))
--			if dbPass == "" {
--				dbPass = "aerial_secure_pass"
--			}
--			dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
--			if dbPort == "" {
--				dbPort = "5432"
--			}
--			dbName := strings.TrimSpace(lookup("POSTGRES_DB"))
--			if dbName == "" {
--				dbName = "aerial"
--			}
--			dbURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
--		}
-+		return nil, fmt.Errorf("config: timezone is required in %s", cleanPath)
- 	}
- 
--	if dbURL == "" {
--		return nil, fmt.Errorf("database connection string is required (set DATABASE_URL or POSTGRES_HOST)")
-+	cleanDB := strings.TrimSpace(dbURL)
-+	if cleanDB == "" {
-+		return nil, fmt.Errorf("config: database connection string is required")
- 	}
- 
- 	return &Config{
--		DatabaseURL: dbURL,
-+		DatabaseURL: cleanDB,
- 		Timezone:    tz,
- 		Port:        port,
- 	}, nil
- }
--
--// LoadConfig reads configuration from ambient environment variables.
--func LoadConfig() (*Config, error) {
--	return LoadConfigFromLookup(os.Getenv)
--}
-diff --git a/scheduler-mcp/coverage_enhancement_test.go b/scheduler-mcp/coverage_enhancement_test.go
-index c936ab7..4b23ef1 100644
---- a/scheduler-mcp/coverage_enhancement_test.go
-+++ b/scheduler-mcp/coverage_enhancement_test.go
-@@ -23,28 +23,16 @@ import (
- // 1. config.go coverage
- // -------------------------------------------------------------
- func TestConfig_NewAndLoadCoverage(t *testing.T) {
--	// Nil lookup error check
--	if _, err := LoadConfigFromLookup(nil); err == nil {
--		t.Error("expected error when lookup is nil")
-+	cfg := &Config{
-+		DatabaseURL: "postgres://aerial:aerial_secure_pass@db.internal:5432/aerial?sslmode=disable",
-+		Port:        "8080",
-+		Timezone:    "America/Los_Angeles",
- 	}
--
--	// LoadConfigFromLookup with only POSTGRES_HOST (covering default user/pass/port/db)
--	envHostOnly := map[string]string{
--		"POSTGRES_HOST": "db.internal",
--	}
--	cfgHost, err := LoadConfigFromLookup(func(k string) string { return envHostOnly[k] })
--	if err != nil {
--		t.Fatalf("unexpected error: %v", err)
--	}
--	expectedPG := "postgres://aerial:aerial_secure_pass@db.internal:5432/aerial?sslmode=disable"
--	if cfgHost.DatabaseURL != expectedPG {
--		t.Errorf("expected %s, got %s", expectedPG, cfgHost.DatabaseURL)
--	}
--	if cfgHost.Port != DefaultPort {
--		t.Errorf("expected default port %s, got %s", DefaultPort, cfgHost.Port)
-+	if cfg.Port != "8080" {
-+		t.Errorf("expected port 8080, got %s", cfg.Port)
- 	}
--	if cfgHost.Timezone != DefaultTimezone {
--		t.Errorf("expected default tz %s, got %s", DefaultTimezone, cfgHost.Timezone)
-+	if cfg.Timezone != "America/Los_Angeles" {
-+		t.Errorf("expected tz America/Los_Angeles, got %s", cfg.Timezone)
- 	}
- }
- 
-diff --git a/scheduler-mcp/go.mod b/scheduler-mcp/go.mod
-index d237cda..dcb1eb5 100644
---- a/scheduler-mcp/go.mod
-+++ b/scheduler-mcp/go.mod
-@@ -9,6 +9,7 @@ require (
- 	github.com/jackc/pgx/v5 v5.7.2
- 	github.com/modelcontextprotocol/go-sdk v1.3.1
- 	github.com/robfig/cron/v3 v3.0.1
-+	gopkg.in/yaml.v3 v3.0.1
- 	modernc.org/sqlite v1.30.0
- )
- 
-diff --git a/scheduler-mcp/go.sum b/scheduler-mcp/go.sum
-index a5bc5b6..333ed6e 100644
---- a/scheduler-mcp/go.sum
-+++ b/scheduler-mcp/go.sum
-@@ -1,3 +1,4 @@
-+github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
- github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
- github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
- github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-@@ -23,6 +24,10 @@ github.com/jackc/pgx/v5 v5.7.2 h1:mLoDLV6sonKlvjIEsV56SkWNCnuNv531l94GaIzO+XI=
- github.com/jackc/pgx/v5 v5.7.2/go.mod h1:ncY89UGWxg82EykZUwSpUKEfccBGGYq1xjrOpsbsfGQ=
- github.com/jackc/puddle/v2 v2.2.2 h1:PR8nw+E/1w0GLuRFSmiioY6UooMp6KJv0/61nB7icHo=
- github.com/jackc/puddle/v2 v2.2.2/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
-+github.com/kr/pretty v0.3.0 h1:WgNl7dwNpEZ6jJ9k1snq4pZsg7DOEN8hP9Xw0Tsjwk0=
-+github.com/kr/pretty v0.3.0/go.mod h1:640gp4NfQd8pI5XOwp5fnNeVWj67G7CFk/SaSQn7NBk=
-+github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
-+github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
- github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
- github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
- github.com/modelcontextprotocol/go-sdk v1.3.1 h1:TfqtNKOIWN4Z1oqmPAiWDC2Jq7K9OdJaooe0teoXASI=
-@@ -35,6 +40,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
- github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
- github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
- github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
-+github.com/rogpeppe/go-internal v1.16.0 h1:O9DK+vNMDVGLr2BeZqmpLeMjiMNkuXfcqntWbZV6S5g=
-+github.com/rogpeppe/go-internal v1.16.0/go.mod h1:DrUVZyrJU+txYW5/1kwtXQSMFio52ZOxX7yM1VHvnxs=
- github.com/segmentio/asm v1.1.3 h1:WM03sfUOENvvKexOLp+pCqgb/WDjsi7EK8gIsICtzhc=
- github.com/segmentio/asm v1.1.3/go.mod h1:Ld3L4ZXGNcSLRg4JBsZ3//1+f/TjYl0Mzen/DQy1EJg=
- github.com/segmentio/encoding v0.5.3 h1:OjMgICtcSFuNvQCdwqMCv9Tg7lEOXGwm1J5RPQccx6w=
-@@ -62,6 +69,8 @@ golang.org/x/text v0.29.0/go.mod h1:7MhJOA9CD2qZyOKYazxdYMF85OwPdEr9jTtBpO7ydH4=
- golang.org/x/tools v0.36.0 h1:kWS0uv/zsvHEle1LbV5LE8QujrxB3wfQyxHfhOk0Qkg=
- golang.org/x/tools v0.36.0/go.mod h1:WBDiHKJK8YgLHlcQPYQzNCkUxUypCaa5ZegCVutKm+s=
- gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
-+gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
-+gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
- gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
- gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
- gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-diff --git a/scheduler-mcp/main.go b/scheduler-mcp/main.go
-index c07e2b1..ad5e3fa 100644
---- a/scheduler-mcp/main.go
-+++ b/scheduler-mcp/main.go
-@@ -70,9 +70,9 @@ func main() {
- 		Level: slog.LevelInfo,
- 	})))
- 
--	cfg, err := LoadConfig()
-+	cfg, err := LoadConfigFile(DefaultConfigPath, os.Getenv("DATABASE_URL"))
- 	if err != nil {
--		log.Fatalf("Configuration error: %v", err)
-+		log.Fatalf("Fatal configuration error: %v", err)
- 	}
- 
- 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-diff --git a/scheduler-mcp/server_test.go b/scheduler-mcp/server_test.go
-index ae6929e..ab4225d 100644
---- a/scheduler-mcp/server_test.go
-+++ b/scheduler-mcp/server_test.go
-@@ -499,51 +499,16 @@ func TestMCP_AllHttpAndRPC_EdgeCases(t *testing.T) {
- }
- 
- func TestMCP_DB_AllBranches(t *testing.T) {
--	// 1. LoadConfigFromLookup combinations
--	env1 := map[string]string{
--		"PORT":             "9090",
--		"DEFAULT_TIMEZONE": "America/New_York",
--		"DATABASE_URL":     "postgres://db_url",
-+	// 1. Pure Config dependency injection
-+	cfg1 := &Config{
-+		Port:        "9090",
-+		Timezone:    "America/New_York",
-+		DatabaseURL: "postgres://db_url",
- 	}
--	cfg1, err := LoadConfigFromLookup(func(k string) string { return env1[k] })
--	if err != nil || cfg1.DatabaseURL != "postgres://db_url" || cfg1.Port != "9090" || cfg1.Timezone != "America/New_York" {
--		t.Errorf("expected DATABASE_URL to be loaded, got %+v, err=%v", cfg1, err)
-+	if cfg1.DatabaseURL != "postgres://db_url" || cfg1.Port != "9090" || cfg1.Timezone != "America/New_York" {
-+		t.Errorf("unexpected cfg1: %+v", cfg1)
- 	}
- 
--	env2 := map[string]string{
--		"DB_PATH": "/tmp/local.db",
--	}
--	_, err2 := LoadConfigFromLookup(func(k string) string { return env2[k] })
--	if err2 == nil {
--		t.Errorf("expected error when only legacy DB_PATH is set, got nil")
--	}
--
--	env3 := map[string]string{
--		"POSTGRES_USER":     "u",
--		"POSTGRES_PASSWORD": "p",
--		"POSTGRES_HOST":     "h",
--		"POSTGRES_PORT":     "1234",
--		"POSTGRES_DB":       "d",
--	}
--	cfg3, err := LoadConfigFromLookup(func(k string) string { return env3[k] })
--	if err != nil || cfg3.DatabaseURL != "postgres://u:p@h:1234/d?sslmode=disable" {
--		t.Errorf("expected generated postgres URL, got %+v, err=%v", cfg3, err)
--	}
--
--	// Unset all -> LoadConfigFromLookup must fail (no toxic postgres:5432 default!)
--	emptyLookup := func(string) string { return "" }
--	if _, err := LoadConfigFromLookup(emptyLookup); err == nil {
--		t.Error("expected error from LoadConfigFromLookup when all DB env vars are unset")
--	}
--
--	// Nil lookup must fail explicitly
--	if _, err := LoadConfigFromLookup(nil); err == nil {
--		t.Error("expected error from LoadConfigFromLookup when lookup is nil")
--	}
--
--	// Smoke test production LoadConfig()
--	_, _ = LoadConfig()
--
- 	// 2. isPostgres
- 	if isPostgres(nil) {
- 		t.Error("expected false for isPostgres(nil)")
-diff --git a/scheduler-mcp/tools_test.go b/scheduler-mcp/tools_test.go
-index f5d6760..03004b7 100644
---- a/scheduler-mcp/tools_test.go
-+++ b/scheduler-mcp/tools_test.go
-@@ -10,56 +10,52 @@ import (
- 	"time"
- )
- 
--func TestLoadConfig_TimezoneResolution(t *testing.T) {
--	// 1. Fallback when both DEFAULT_TIMEZONE and TZ are unset
--	cfg1, err := LoadConfigFromLookup(func(k string) string {
--		if k == "DATABASE_URL" {
--			return ":memory:"
--		}
--		return ""
--	})
-+func TestLoadConfigFile(t *testing.T) {
-+	tmpDir := t.TempDir()
-+	cfgPath := filepath.Join(tmpDir, "config.yaml")
-+	yamlContent := `
-+port: "4005"
-+timezone: "America/Chicago"
-+`
-+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
-+		t.Fatalf("failed to write test yaml: %v", err)
++		log.Printf("[webhooks-router] [github] failed resolving PR for commit %s via GitHub API: %v", sha, err)
++		return 0, "", "", err
++	}
++	if prNum == 0 {
++		return 0, "", "", nil
 +	}
 +
-+	// 1. Success case
-+	cfg, err := LoadConfigFile(cfgPath, "postgres://user:pass@host:5432/db")
- 	if err != nil {
--		t.Fatalf("LoadConfigFromLookup failed: %v", err)
-+		t.Fatalf("LoadConfigFile failed: %v", err)
++	var targetID string
++	if s.registry != nil {
++		tID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
++		if err == nil && tID != "" {
++			targetID = tID
++		}
++		// Backfill merge_sha if it was missing
++		backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha)
++		if err != nil {
++			log.Printf("[webhooks-router] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
++		} else if targetID == "" && backfillTID != "" {
++			targetID = backfillTID
++		}
 +	}
-+	if cfg.Port != "4005" {
-+		t.Errorf("expected port 4005, got %s", cfg.Port)
- 	}
--	if cfg1.Timezone != DefaultTimezone {
--		t.Errorf("Expected fallback %q, got %q", DefaultTimezone, cfg1.Timezone)
-+	if cfg.Timezone != "America/Chicago" {
-+		t.Errorf("expected timezone America/Chicago, got %s", cfg.Timezone)
++
++	return prNum, targetID, branch, nil
++}
++
++// ResolveThreadForPR resolves the Discord thread snowflake (target_id) for a PR.
++func (s *RouterServer) ResolveThreadForPR(ctx context.Context, repo string, prNum int) (string, error) {
++	if s.registry == nil || prNum <= 0 {
++		return "", nil
 +	}
-+	if cfg.DatabaseURL != "postgres://user:pass@host:5432/db" {
-+		t.Errorf("expected dbURL postgres://user:pass@host:5432/db, got %s", cfg.DatabaseURL)
++	repo = normalizeRepo(repo)
++	targetID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
++	return targetID, err
++}
++
+ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
+-	if evt.CommitSHA != "" && evt.PRNumber == 0 && s.registry != nil {
+-		prNum, _, targetID, err := s.registry.ResolvePRBySHA(ctx, evt.Repo, evt.CommitSHA)
++	if evt.CommitSHA != "" && evt.PRNumber == 0 {
++		prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA)
+ 		if err != nil {
+-			log.Printf("[webhooks-router] [hangar] failed resolving PR by SHA %s: %v", evt.CommitSHA, err)
++			log.Printf("[webhooks-router] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
+ 		} else if prNum > 0 {
+ 			evt.PRNumber = prNum
+ 			if evt.TargetID == "" {
+ 				evt.TargetID = targetID
+ 			}
+ 		}
++	} else if evt.PRNumber > 0 && evt.TargetID == "" {
++		targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber)
++		if err != nil {
++			log.Printf("[webhooks-router] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
++		} else if targetID != "" {
++			evt.TargetID = targetID
++		}
  	}
  
--	// 2. TZ environment variable fallback
--	cfg2, err := LoadConfigFromLookup(func(k string) string {
--		if k == "DATABASE_URL" {
--			return ":memory:"
--		}
--		if k == "TZ" {
--			return "America/Chicago"
--		}
--		return ""
--	})
--	if err != nil {
--		t.Fatalf("LoadConfigFromLookup failed: %v", err)
-+	// 2. Missing file -> fail fast
-+	if _, err := LoadConfigFile(filepath.Join(tmpDir, "nonexistent.yaml"), "postgres://..."); err == nil {
-+		t.Error("expected error for nonexistent config file")
- 	}
--	if cfg2.Timezone != "America/Chicago" {
--		t.Errorf("Expected TZ 'America/Chicago', got %q", cfg2.Timezone)
-+
-+	// 3. Missing required fields -> fail fast
-+	badPath := filepath.Join(tmpDir, "bad.yaml")
-+	_ = os.WriteFile(badPath, []byte("port: \"4005\"\n"), 0644)
-+	if _, err := LoadConfigFile(badPath, "postgres://..."); err == nil {
-+		t.Error("expected error when timezone is missing")
+ 	log.Printf("[webhooks-router] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
+@@ -2622,7 +2746,16 @@ func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha str
+ 		return 0, "", fmt.Errorf("no pull requests associated with commit %s", sha)
  	}
  
--	// 3. DEFAULT_TIMEZONE environment variable takes highest precedence
--	cfg3, err := LoadConfigFromLookup(func(k string) string {
--		if k == "DATABASE_URL" {
--			return ":memory:"
--		}
--		if k == "DEFAULT_TIMEZONE" {
--			return "America/New_York"
--		}
--		if k == "TZ" {
--			return "America/Chicago"
--		}
--		return ""
--	})
--	if err != nil {
--		t.Fatalf("LoadConfigFromLookup failed: %v", err)
-+	// 4. Missing dbURL -> fail fast
-+	if _, err := LoadConfigFile(cfgPath, ""); err == nil {
-+		t.Error("expected error when dbURL is empty")
- 	}
--	if cfg3.Timezone != "America/New_York" {
--		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", cfg3.Timezone)
+-	return prs[0].Number, prs[0].Head.Ref, nil
++	selected := prs[0]
++	for _, item := range prs[1:] {
++		if selected.State != "closed" && item.State == "closed" {
++			selected = item
++		} else if selected.State == item.State && item.Number > selected.Number {
++			selected = item
++		}
++	}
 +
-+	// 5. Empty path -> fail fast
-+	if _, err := LoadConfigFile("", "postgres://..."); err == nil {
-+		t.Error("expected error when path is empty")
++	return selected.Number, selected.Head.Ref, nil
+ }
+ 
+ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
+diff --git a/webhooks-router/main_test.go b/webhooks-router/main_test.go
+index 63188f2..4a626d5 100644
+--- a/webhooks-router/main_test.go
++++ b/webhooks-router/main_test.go
+@@ -1592,6 +1592,16 @@ func (m *mockPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha st
+ 	return m.resolvePRNum, m.resolveBranch, m.resolveTargetID, nil
+ }
+ 
++func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
++	if m.resolveErr != nil {
++		return "", "", "", "", m.resolveErr
++	}
++	if m.err != nil {
++		return "", "", "", "", m.err
++	}
++	return m.resolveTargetID, m.resolveBranch, "", "", nil
++}
++
+ func TestNormalizeRepo(t *testing.T) {
+ 	tests := []struct {
+ 		input    string
+@@ -4033,3 +4043,257 @@ func TestDispatchDeploymentSuccessPrompt(t *testing.T) {
  	}
  }
  
++
++
++func TestResolveSHA_FastPathAndFallback(t *testing.T) {
++	ctx := context.Background()
++
++	// 1. Fast path: resolved locally from pr_registry with TargetID
++	mockRegFast := &mockPRRegistry{
++		resolvePRNum:    42,
++		resolveTargetID: "1555405874565091380",
++		resolveBranch:   "feat/fast-path",
++	}
++	srvFast := NewRouterServer(Config{}, nil, nil, nil)
++	srvFast.SetRegistry(mockRegFast)
++
++	prNum, targetID, branch, err := srvFast.ResolveSHA(ctx, "azylman/aerial", "sha-fast-1")
++	if err != nil {
++		t.Fatalf("unexpected error on fast path: %v", err)
++	}
++	if prNum != 42 || targetID != "1555405874565091380" || branch != "feat/fast-path" {
++		t.Errorf("unexpected fast path result: pr=%d target=%s branch=%s", prNum, targetID, branch)
++	}
++
++	// 2. Fast path without TargetID on SHA lookup: falls back to ResolvePRByNumber
++	mockRegNum := &mockPRRegistry{
++		resolvePRNum:    43,
++		resolveTargetID: "1555405874565091380",
++		resolveBranch:   "feat/num-path",
++	}
++	srvNum := NewRouterServer(Config{}, nil, nil, nil)
++	srvNum.SetRegistry(mockRegNum)
++
++	prNum2, targetID2, branch2, err2 := srvNum.ResolveSHA(ctx, "aerial", "sha-num-2")
++	if err2 != nil {
++		t.Fatalf("unexpected error on num path: %v", err2)
++	}
++	if prNum2 != 43 || targetID2 != "1555405874565091380" || branch2 != "feat/num-path" {
++		t.Errorf("unexpected num path result: pr=%d target=%s branch=%s", prNum2, targetID2, branch2)
++	}
++
++	// 3. Fallback path: local SHA returns 0, GitHub API resolves PR and backfills
++	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if strings.Contains(r.URL.Path, "/commits/sha-gh-3/pulls") {
++			w.Header().Set("Content-Type", "application/json")
++			_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{
++				{
++					Number: 99,
++					State:  "closed",
++					Head: struct {
++						Ref string `json:"ref"`
++						SHA string `json:"sha"`
++					}{
++						Ref: "feat/gh-fallback",
++						SHA: "sha-head-99",
++					},
++				},
++			})
++			return
++		}
++		http.NotFound(w, r)
++	}))
++	defer ghServer.Close()
++
++	mockRegGH := &mockPRRegistry{
++		resolvePRNum:     0, // simulate not found by SHA
++		resolveTargetID:  "1555405874565091380",
++		backfillTargetID: "1555405874565091380",
++	}
++	srvGH := NewRouterServer(Config{GitHubAPIURL: ghServer.URL}, nil, nil, nil)
++	srvGH.SetRegistry(mockRegGH)
++
++	prNum3, targetID3, branch3, err3 := srvGH.ResolveSHA(ctx, "azylman/aerial", "sha-gh-3")
++	if err3 != nil {
++		t.Fatalf("unexpected error on github fallback: %v", err3)
++	}
++	if prNum3 != 99 || targetID3 != "1555405874565091380" || branch3 != "feat/gh-fallback" {
++		t.Errorf("unexpected github fallback result: pr=%d target=%s branch=%s", prNum3, targetID3, branch3)
++	}
++	if len(mockRegGH.backfillCalls) != 1 || mockRegGH.backfillCalls[0].mergeSHA != "sha-gh-3" {
++		t.Errorf("expected backfill call for merge_sha sha-gh-3, got: %+v", mockRegGH.backfillCalls)
++	}
++
++	// 4. Zero / Empty SHA
++	p0, t0, b0, err0 := srvGH.ResolveSHA(ctx, "azylman/aerial", "0000000000000000000000000000000000000000")
++	if err0 != nil || p0 != 0 || t0 != "" || b0 != "" {
++		t.Errorf("expected zero results for zero SHA, got pr=%d target=%s branch=%s err=%v", p0, t0, b0, err0)
++	}
++
++	pEmpty, tEmpty, bEmpty, errEmpty := srvGH.ResolveSHA(ctx, "", "")
++	if errEmpty != nil || pEmpty != 0 || tEmpty != "" || bEmpty != "" {
++		t.Errorf("expected zero results for empty repo/sha, got pr=%d target=%s branch=%s err=%v", pEmpty, tEmpty, bEmpty, errEmpty)
++	}
++}
++
++func TestResolveThreadForPR(t *testing.T) {
++	ctx := context.Background()
++
++	// Nil registry returns empty
++	srvNil := NewRouterServer(Config{}, nil, nil, nil)
++	tID, err := srvNil.ResolveThreadForPR(ctx, "azylman/aerial", 123)
++	if err != nil || tID != "" {
++		t.Errorf("expected empty thread for nil registry, got %q err=%v", tID, err)
++	}
++
++	// prNum <= 0 returns empty
++	tID0, err0 := srvNil.ResolveThreadForPR(ctx, "azylman/aerial", 0)
++	if err0 != nil || tID0 != "" {
++		t.Errorf("expected empty thread for prNum 0, got %q err=%v", tID0, err0)
++	}
++
++	// Successful lookup
++	mockReg := &mockPRRegistry{
++		resolveTargetID: "1555405874565091380",
++	}
++	srv := NewRouterServer(Config{}, nil, nil, nil)
++	srv.SetRegistry(mockReg)
++
++	targetID, err := srv.ResolveThreadForPR(ctx, "aerial", 456)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if targetID != "1555405874565091380" {
++		t.Errorf("expected targetID 1555405874565091380, got %q", targetID)
++	}
++}
++
++func TestHandleHangarWebhook_SyncJobNameDefault(t *testing.T) {
++	srv := NewRouterServer(Config{}, nil, nil, nil)
++
++	// 1. sync_success with empty job_name -> accepted and defaulted to git-sync
++	bodySyncSuccess := `{"event": "sync_success", "job_name": "", "repo": "azylman/aerial", "commit_sha": "abc1234", "status": "success", "timestamp": "2026-10-03T18:00:00Z"}`
++	req := httptest.NewRequest(http.MethodPost, "/hangar/webhook", strings.NewReader(bodySyncSuccess))
++	w := httptest.NewRecorder()
++	srv.handleHangarWebhook(w, req)
++	if w.Code != http.StatusOK {
++		t.Errorf("expected 200 OK for sync_success with empty job_name, got %d (body: %s)", w.Code, w.Body.String())
++	}
++	var respSync map[string]interface{}
++	if err := json.Unmarshal(w.Body.Bytes(), &respSync); err != nil {
++		t.Fatalf("failed unmarshaling response: %v", err)
++	}
++	if respSync["job_name"] != "git-sync" {
++		t.Errorf("expected job_name git-sync, got %v", respSync["job_name"])
++	}
++
++	// 2. sync_failed with empty job_name -> accepted and defaulted to git-sync
++	bodySyncFail := `{"event": "sync_failed", "job_name": "", "repo": "azylman/aerial", "status": "failed", "timestamp": "2026-10-03T18:00:00Z"}`
++	reqFail := httptest.NewRequest(http.MethodPost, "/hangar/webhook", strings.NewReader(bodySyncFail))
++	wFail := httptest.NewRecorder()
++	srv.handleHangarWebhook(wFail, reqFail)
++	if wFail.Code != http.StatusOK {
++		t.Errorf("expected 200 OK for sync_failed with empty job_name, got %d", wFail.Code)
++	}
++
++	// 3. deploy_success with empty job_name -> rejected with 400 Bad Request
++	bodyDeploy := `{"event": "deploy_success", "job_name": "", "repo": "azylman/aerial", "status": "success", "timestamp": "2026-10-03T18:00:00Z"}`
++	reqDeploy := httptest.NewRequest(http.MethodPost, "/hangar/webhook", strings.NewReader(bodyDeploy))
++	wDeploy := httptest.NewRecorder()
++	srv.handleHangarWebhook(wDeploy, reqDeploy)
++	if wDeploy.Code != http.StatusBadRequest {
++		t.Errorf("expected 400 Bad Request for deploy_success with empty job_name, got %d", wDeploy.Code)
++	}
++}
++
++func TestDefaultOutboundDispatcher_RetryPrompt(t *testing.T) {
++	ctx := context.Background()
++	var attempts int
++	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		attempts++
++		if attempts < 3 {
++			w.WriteHeader(http.StatusInternalServerError)
++			_, _ = w.Write([]byte("brain is booting"))
++			return
++		}
++		w.WriteHeader(http.StatusOK)
++		_, _ = w.Write([]byte(`{"status":"ok"}`))
++	}))
++	defer ts.Close()
++
++	disp := NewDefaultOutboundDispatcher("http://127.0.0.1:8087", ts.URL, ts.Client())
++	disp.SetRetryConfig(1*time.Millisecond, 4)
++
++	err := disp.DispatchPrompt(ctx, PromptRequest{
++		ChannelID: "1555405874565091380",
++		Prompt:    "Deployment finished",
++	})
++	if err != nil {
++		t.Fatalf("expected prompt delivery after retries, got error: %v", err)
++	}
++	if attempts != 3 {
++		t.Errorf("expected 3 attempts, got %d", attempts)
++	}
++}
++
++func TestNomadAllocationPrematureGuard(t *testing.T) {
++	ctx := context.Background()
++
++	// Server returning latest deployment status
++	var isHealthy bool
++	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if strings.Contains(r.URL.Path, "/v1/job/brain/deployments") {
++			status := "running"
++			if isHealthy {
++				status = "successful"
++			}
++			w.Header().Set("Content-Type", "application/json")
++			_ = json.NewEncoder(w).Encode([]struct {
++				ID     string `json:"ID"`
++				Status string `json:"Status"`
++			}{
++				{ID: "dep-1", Status: status},
++			})
++			return
++		}
++		http.NotFound(w, r)
++	}))
++	defer nomadServer.Close()
++
++	mockReg := &mockPRRegistry{
++		deployedTargetID: "1555405874565091380",
++		deployedPRNum:    567,
++		deployedMergeSHA: "sha123",
++		deployedRepo:     "azylman/aerial",
++		deployedUpdated:  true,
++	}
++	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil, nil, nil)
++	srv.SetRegistry(mockReg)
++
++	allocPayload := []byte(`{
++		"Allocation": {
++			"ID": "alloc-new",
++			"JobID": "brain",
++			"DesiredStatus": "run",
++			"ClientStatus": "running"
++		}
++	}`)
++
++	// 1. When deployment is not healthy yet, allocation event does NOT trigger job success
++	isHealthy = false
++	if err := srv.ProcessNomadEvent(ctx, "Allocation", "AllocationUpdated", allocPayload); err != nil {
++		t.Fatalf("unexpected error processing allocation: %v", err)
++	}
++	if len(mockReg.deployedJobCalls) != 0 {
++		t.Errorf("expected 0 deployed job calls when deployment is unhealthy, got %d", len(mockReg.deployedJobCalls))
++	}
++
++	// 2. When deployment is healthy, allocation event triggers job success
++	isHealthy = true
++	if err := srv.ProcessNomadEvent(ctx, "Allocation", "AllocationUpdated", allocPayload); err != nil {
++		t.Fatalf("unexpected error processing healthy allocation: %v", err)
++	}
++	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "brain" {
++		t.Errorf("expected 1 deployed job call for brain, got: %+v", mockReg.deployedJobCalls)
++	}
++}
+diff --git a/webhooks-router/nomad_stream.go b/webhooks-router/nomad_stream.go
+index c312579..24b8896 100644
+--- a/webhooks-router/nomad_stream.go
++++ b/webhooks-router/nomad_stream.go
+@@ -307,7 +307,7 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
+ 			return fmt.Errorf("unmarshal nomad allocation payload: %w", err)
+ 		}
+ 		alloc := allocPayload.Allocation
+-		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" {
++		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" && s.isNomadJobHealthy(ctx, alloc.JobID) {
+ 			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
+ 		}
+ 	}
+diff --git a/webhooks-router/nomad_stream_test.go b/webhooks-router/nomad_stream_test.go
+index 2a8d0c1..e3e4698 100644
+--- a/webhooks-router/nomad_stream_test.go
++++ b/webhooks-router/nomad_stream_test.go
+@@ -105,6 +105,14 @@ func TestNomadStreamSubscriber_HeartbeatAndDeployment(t *testing.T) {
+ 
+ 	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		w.Header().Set("Content-Type", "application/json")
++		if strings.Contains(r.URL.Path, "/deployments") {
++			_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
++			return
++		}
++		if strings.Contains(r.URL.Path, "/allocations") {
++			_, _ = w.Write([]byte(`[{"ID":"alloc-999","DesiredStatus":"run","ClientStatus":"running"}]`))
++			return
++		}
+ 		_, _ = w.Write([]byte(streamData))
+ 	}))
+ 	defer nomadServer.Close()
+@@ -161,6 +169,14 @@ func TestNomadStreamSubscriber_AllocationRunning(t *testing.T) {
+ 
+ 	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		w.Header().Set("Content-Type", "application/json")
++		if strings.Contains(r.URL.Path, "/deployments") {
++			_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
++			return
++		}
++		if strings.Contains(r.URL.Path, "/allocations") {
++			_, _ = w.Write([]byte(`[{"ID":"alloc-999","DesiredStatus":"run","ClientStatus":"running"}]`))
++			return
++		}
+ 		_, _ = w.Write([]byte(streamData))
+ 	}))
+ 	defer nomadServer.Close()

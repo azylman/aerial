@@ -307,7 +307,7 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
 			return fmt.Errorf("unmarshal nomad allocation payload: %w", err)
 		}
 		alloc := allocPayload.Allocation
-		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" {
+		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" && s.isNomadJobHealthy(ctx, alloc.JobID) {
 			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
 		}
 	}
