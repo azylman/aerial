@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -1653,6 +1656,9 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 				if err := d.SyncBrainConfigToNomad(syncCtx, d.configDir); err != nil {
 					log.Printf("[Hangar:Periodic] Notice: SyncBrainConfigToNomad: %v", err)
 				}
+				if err := d.SyncHomepageConfigToNomad(syncCtx, d.configDir); err != nil {
+					log.Printf("[Hangar:Periodic] Notice: SyncHomepageConfigToNomad: %v", err)
+				}
 			}
 			go d.notifyBrainReload()
 		}
@@ -1739,6 +1745,77 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 		return fmt.Errorf("failed updating Nomad variable nomad/jobs/brain: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
 	}
 	log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/brain")
+	return nil
+}
+
+// SyncHomepageConfigToNomad validates homepage.yaml, computes a deterministic hash of all homepage configs,
+// and writes HOMEPAGE_YAML and CONFIG_HASH to Nomad variable nomad/jobs/homepage.
+func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir string) error {
+	homepageConfigPath := filepath.Join(configDir, "services", "homepage", "homepage.yaml")
+	raw, err := os.ReadFile(homepageConfigPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read homepage config at %s: %w", homepageConfigPath, err)
+	}
+
+	if err == nil {
+		var parsed map[string]interface{}
+		if unmarshalErr := yaml.Unmarshal(raw, &parsed); unmarshalErr != nil {
+			return fmt.Errorf("invalid YAML syntax in %s: %w", homepageConfigPath, unmarshalErr)
+		}
+	}
+
+	h := sha256.New()
+	if len(raw) > 0 {
+		h.Write([]byte("homepage.yaml:"))
+		h.Write(raw)
+		h.Write([]byte("\n"))
+	}
+
+	userHomepageDir := filepath.Join(configDir, "homepage")
+	if entries, readDirErr := os.ReadDir(userHomepageDir); readDirErr == nil {
+		var files []string
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".tmp") {
+				continue
+			}
+			files = append(files, name)
+		}
+		sort.Strings(files)
+		for _, f := range files {
+			fPath := filepath.Join(userHomepageDir, f)
+			if fContent, fErr := os.ReadFile(fPath); fErr == nil {
+				h.Write([]byte(f + ":"))
+				h.Write(fContent)
+				h.Write([]byte("\n"))
+			}
+		}
+	}
+
+	configHash := hex.EncodeToString(h.Sum(nil))
+
+	nomadExec := d.getNomadExecutor()
+	if nomadExec == nil || d.nomadAddr == "" {
+		return nil
+	}
+
+	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	args := []string{"var", "put", "nomad/jobs/homepage", "CONFIG_HASH=" + configHash}
+	if len(raw) > 0 {
+		args = append(args, "HOMEPAGE_YAML=@"+homepageConfigPath)
+	}
+
+	stdout, stderr, err := nomadExec(valCtx, args...)
+	if err != nil {
+		combined := string(append(stdout, stderr...))
+		return fmt.Errorf("failed updating Nomad variable nomad/jobs/homepage: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
+	}
+	log.Printf("[Hangar:Nomad] Successfully pushed homepage config to nomad/jobs/homepage (hash=%s)", configHash[:12])
 	return nil
 }
 
@@ -2410,6 +2487,9 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 		if err := d.SyncBrainConfigToNomad(ctx, repoPath); err != nil {
 			log.Printf("[Hangar:GitPush] Notice: SyncBrainConfigToNomad: %v", err)
+		}
+		if err := d.SyncHomepageConfigToNomad(ctx, repoPath); err != nil {
+			log.Printf("[Hangar:GitPush] Notice: SyncHomepageConfigToNomad: %v", err)
 		}
 
 		go d.notifyBrainReload()

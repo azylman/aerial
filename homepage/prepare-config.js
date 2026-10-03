@@ -199,28 +199,43 @@ function run(dirs = {}) {
 
   // Generate runtime.env from declarative service configuration if present
   try {
-    const serviceConfigPath = process.env.CONFIG_PATH ||
-      (fs.existsSync('/config/config.yaml') ? '/config/config.yaml' :
-       fs.existsSync('/share/aerial-config/services/homepage/homepage.yaml') ? '/share/aerial-config/services/homepage/homepage.yaml' : null);
-    if (serviceConfigPath && fs.existsSync(serviceConfigPath)) {
-      const raw = fs.readFileSync(serviceConfigPath, 'utf8');
-      const parsed = parseYaml(yaml, raw, serviceConfigPath);
-      if (parsed && typeof parsed === 'object') {
-        const envLines = [];
-        if (parsed.port) envLines.push(`PORT="${parsed.port}"`);
-        if (parsed.allowed_hosts) envLines.push(`HOMEPAGE_ALLOWED_HOSTS="${parsed.allowed_hosts}"`);
-        if (parsed.log_level) envLines.push(`LOG_LEVEL="${parsed.log_level}"`);
-        if (parsed.node_tls_reject_unauthorized !== undefined) {
-          envLines.push(`NODE_TLS_REJECT_UNAUTHORIZED="${parsed.node_tls_reject_unauthorized}"`);
-        }
-        if (parsed.unifi_url) envLines.push(`HOMEPAGE_VAR_UNIFI_URL="${parsed.unifi_url}"`);
-        if (parsed.unifi_user) envLines.push(`HOMEPAGE_VAR_UNIFI_USER="${parsed.unifi_user}"`);
-        if (parsed.qnap_user) envLines.push(`HOMEPAGE_VAR_QNAP_USER="${parsed.qnap_user}"`);
+    const candidatePaths = [
+      process.env.CONFIG_PATH,
+      '/local/homepage.yaml',
+      '/share/aerial-config/services/homepage/homepage.yaml',
+      '/config/config.yaml'
+    ].filter(Boolean);
 
-        if (envLines.length > 0) {
-          writeAtomic(targetDir, 'runtime.env', envLines.join('\n') + '\n');
-          logEntries.push(`runtime.env: generated from ${serviceConfigPath}`);
+    let parsed = null;
+    let serviceConfigPath = null;
+
+    for (const cand of candidatePaths) {
+      if (fs.existsSync(cand)) {
+        const raw = fs.readFileSync(cand, 'utf8');
+        const res = parseYaml(yaml, raw, cand);
+        if (res && typeof res === 'object' && !res.__parseError && Object.keys(res).length > 0) {
+          parsed = res;
+          serviceConfigPath = cand;
+          break;
         }
+      }
+    }
+
+    if (parsed && serviceConfigPath) {
+      const envLines = [];
+      if (parsed.port) envLines.push(`PORT="${parsed.port}"`);
+      if (parsed.allowed_hosts) envLines.push(`HOMEPAGE_ALLOWED_HOSTS="${parsed.allowed_hosts}"`);
+      if (parsed.log_level) envLines.push(`LOG_LEVEL="${parsed.log_level}"`);
+      if (parsed.node_tls_reject_unauthorized !== undefined) {
+        envLines.push(`NODE_TLS_REJECT_UNAUTHORIZED="${parsed.node_tls_reject_unauthorized}"`);
+      }
+      if (parsed.unifi_url) envLines.push(`HOMEPAGE_VAR_UNIFI_URL="${parsed.unifi_url}"`);
+      if (parsed.unifi_user) envLines.push(`HOMEPAGE_VAR_UNIFI_USER="${parsed.unifi_user}"`);
+      if (parsed.qnap_user) envLines.push(`HOMEPAGE_VAR_QNAP_USER="${parsed.qnap_user}"`);
+
+      if (envLines.length > 0) {
+        writeAtomic(targetDir, 'runtime.env', envLines.join('\n') + '\n');
+        logEntries.push(`runtime.env: generated from ${serviceConfigPath}`);
       }
     }
   } catch (err) {
@@ -236,155 +251,24 @@ function run(dirs = {}) {
   console.log(`[prepare-config] Configuration preparation complete.`);
 }
 
-function startWatcher(options = {}) {
-  const coreDir = options.coreDir || process.env.CORE_CONFIG_DIR || CORE_DIR;
-  const userDir = options.userDir || process.env.USER_CONFIG_DIR || USER_DIR;
-  const targetDir = options.targetDir || process.env.TARGET_CONFIG_DIR || TARGET_DIR;
-  const pollIntervalMs = options.pollIntervalMs !== undefined ? options.pollIntervalMs : 5000;
-  const debounceMs = options.debounceMs !== undefined ? options.debounceMs : 500;
-  const onRecompile = options.onRecompile || null;
-
-  console.log(`[prepare-config] Starting background configuration watcher...`);
-  console.log(`[prepare-config] Monitoring: User=${userDir} | Core=${coreDir} -> Target=${targetDir}`);
-
-  let debounceTimer = null;
-  const triggerRecompile = (source) => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      console.log(`[prepare-config] Configuration change detected via ${source}, recompiling...`);
-      try {
-        run({ coreDir, userDir, targetDir });
-        if (typeof onRecompile === 'function') {
-          onRecompile(null);
-        }
-      } catch (err) {
-        console.error(`[prepare-config] Recompile error: ${err.message}`);
-        if (typeof onRecompile === 'function') {
-          onRecompile(err);
-        }
-      }
-    }, debounceMs);
-  };
-
-  const watchDirs = [userDir, coreDir];
-  const watchers = [];
-
-  for (const dir of watchDirs) {
-    try {
-      if (fs.existsSync(dir)) {
-        const w = fs.watch(dir, (eventType, filename) => {
-          if (filename && !filename.endsWith('.tmp') && !filename.includes('.git')) {
-            triggerRecompile(`fs.watch (${filename})`);
-          }
-        });
-        watchers.push(w);
-        console.log(`[prepare-config] Watching ${dir} for changes via fs.watch.`);
-      }
-    } catch (err) {
-      console.warn(`[prepare-config] Warning: Could not attach inotify to ${dir} (${err.message}); falling back to polling.`);
-    }
-  }
-
-  // Track mtime of every configuration file for reliable cross-mount change detection
-  const fileMtimes = new Map();
-  let isInitial = true;
-  function checkMtimes() {
-    let changed = false;
-    let changedFile = '';
-    const currentFiles = new Set();
-
-    for (const dir of watchDirs) {
-      try {
-        if (!fs.existsSync(dir)) continue;
-        const entries = fs.readdirSync(dir);
-        for (const f of entries) {
-          if (f.endsWith('.yaml') || f.endsWith('.yml') || f.endsWith('.css')) {
-            const fullPath = path.join(dir, f);
-            currentFiles.add(fullPath);
-            try {
-              const stat = fs.statSync(fullPath);
-              const prev = fileMtimes.get(fullPath);
-              if (prev === undefined) {
-                fileMtimes.set(fullPath, stat.mtimeMs);
-                if (!isInitial) {
-                  changed = true;
-                  changedFile = f;
-                }
-              } else if (prev !== stat.mtimeMs) {
-                fileMtimes.set(fullPath, stat.mtimeMs);
-                changed = true;
-                changedFile = f;
-              }
-            } catch (_) {}
-          }
-        }
-      } catch (_) {}
-    }
-
-    // Check for deleted files
-    for (const trackedPath of fileMtimes.keys()) {
-      if (!currentFiles.has(trackedPath)) {
-        fileMtimes.delete(trackedPath);
-        if (!isInitial) {
-          changed = true;
-          changedFile = path.basename(trackedPath);
-        }
-      }
-    }
-
-    if (isInitial) {
-      isInitial = false;
-    } else if (changed) {
-      triggerRecompile(`poll (${changedFile})`);
-    }
-  }
-
-  // Initialize baseline mtimes
-  checkMtimes();
-
-  let intervalTimer = null;
-  if (pollIntervalMs > 0) {
-    intervalTimer = setInterval(checkMtimes, pollIntervalMs);
-  }
-
-  return {
-    close: () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      if (intervalTimer) clearInterval(intervalTimer);
-      for (const w of watchers) {
-        try { w.close(); } catch (_) {}
-      }
-    }
-  };
-}
-
 if (require.main === module) {
-  const isWatchMode = process.argv.includes('--watch') || process.argv.includes('-w');
   try {
     run();
-    if (isWatchMode) {
-      startWatcher();
-    } else {
-      process.exit(0);
-    }
+    process.exit(0);
   } catch (fatalErr) {
     console.error(`[prepare-config] Fatal error during config preparation: ${fatalErr.message}`);
     console.error(`[prepare-config] Copying raw core configs to prevent container crash loop.`);
     copyFallback(CORE_DIR, TARGET_DIR);
-    if (isWatchMode) {
-      startWatcher();
-    } else {
-      process.exit(0);
-    }
+    process.exit(0);
   }
 }
 
 module.exports = {
   run,
-  startWatcher,
   resolveYamlParser,
   parseYaml,
   safeRead,
   writeAtomic,
   copyFallback
 };
+
