@@ -3,6 +3,7 @@ package guard
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -329,4 +330,145 @@ func TestGuardFailOpen(t *testing.T) {
 	if d3.Decision != DecisionDeny {
 		t.Errorf("expected deny on string-encoded args targeting /share, got: %v", d3)
 	}
+
+	// All mode where share allows but schedule denies
+	allSleep := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "sleep 10", "Cwd": "/data"}
+		}
+	}`
+	d4 := runGuard(t, "all", allSleep)
+	if d4.Decision != DecisionDeny {
+		t.Errorf("expected deny on sleep in all mode, got: %v", d4)
+	}
+
+	// All mode benign command
+	allSafe := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "echo 'safe'", "Cwd": "/data"}
+		}
+	}`
+	d5 := runGuard(t, "all", allSafe)
+	if d5.Decision != DecisionAllow {
+		t.Errorf("expected allow on safe command in all mode, got: %v", d5)
+	}
 }
+
+func TestGuardEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	// 1. IsProtectedPath edge cases
+	if IsProtectedPath("") {
+		t.Errorf("expected empty path to not be protected")
+	}
+	if IsProtectedPath("   ") {
+		t.Errorf("expected whitespace path to not be protected")
+	}
+	if IsProtectedPath("/nonexistent/deep/nested/path/to/check/parent/loop") {
+		t.Errorf("expected random nonexistent path to not be protected")
+	}
+
+	// 2. ParseArgs edge cases
+	argsNil, err := ParseArgs(nil)
+	if err != nil || argsNil.TargetFile != "" {
+		t.Errorf("expected empty args on nil raw, got: %+v, err: %v", argsNil, err)
+	}
+	argsEmpty, err := ParseArgs([]byte(""))
+	if err != nil || argsEmpty.TargetFile != "" {
+		t.Errorf("expected empty args on empty raw, got: %+v, err: %v", argsEmpty, err)
+	}
+
+	// Fallback map parsing with lowercase keys and non-string skipping
+	mapJSON := []byte(`{
+		"targetfile": "/share/aerial/bar.go",
+		"commandline": "git status",
+		"cwd": "/share/aerial",
+		"ignored_int": 42
+	}`)
+	argsMap, err := ParseArgs(mapJSON)
+	if err != nil {
+		t.Fatalf("unexpected error parsing mapJSON: %v", err)
+	}
+	if argsMap.TargetFile != "/share/aerial/bar.go" || argsMap.CommandLine != "git status" || argsMap.Cwd != "/share/aerial" {
+		t.Errorf("unexpected argsMap values: %+v", argsMap)
+	}
+
+	// 3. Git mutating command edge cases
+	gitTests := []struct {
+		cmd      string
+		cwd      string
+		wantDeny bool
+	}{
+		{"git --no-pager commit -m 'fix'", "/share/aerial", true},
+		{"git --work-tree=/share/aerial checkout main", "/data", true},
+		{"git --git-dir=/share/aerial commit", "/data", true},
+		{"git -C/share/aerial commit", "/data", true},
+		{"git branch --delete old-branch", "/share/aerial", true},
+		{"rm local.txt", "/share/aerial", true}, // Mutating binary inside protected Cwd
+		{"echo hi > /share/aerial/new.txt", "/data", true},
+	}
+	for _, gt := range gitTests {
+		input := map[string]interface{}{
+			"toolCall": map[string]interface{}{
+				"name": "run_command",
+				"args": map[string]string{
+					"CommandLine": gt.cmd,
+					"Cwd":         gt.cwd,
+				},
+			},
+		}
+		data, _ := json.Marshal(input)
+		d := runGuard(t, "share", string(data))
+		if gt.wantDeny && d.Decision != DecisionDeny {
+			t.Errorf("cmd %q with cwd %q expected deny, got allow", gt.cmd, gt.cwd)
+		}
+	}
+
+	// 4. Schedule guard edge cases
+	if isSleepCommand("") {
+		t.Errorf("expected empty cmd to not be sleep command")
+	}
+	dEmptyCmd := CheckSchedule("run_command", ToolArgs{CommandLine: ""})
+	if dEmptyCmd.Decision != DecisionAllow {
+		t.Errorf("expected allow on empty cmd in schedule guard")
+	}
+
+	// 5. Panic recovery in Process
+	var out bytes.Buffer
+	panicReader := &panickingReader{}
+	if err := Process(panicReader, &out, "all"); err != nil {
+		t.Errorf("expected Process to recover panic and return nil, got: %v", err)
+	}
+	var dPanic Decision
+	if err := json.Unmarshal(out.Bytes(), &dPanic); err != nil || dPanic.Decision != DecisionAllow {
+		t.Errorf("expected allow decision on recovered panic, got: %v", dPanic)
+	}
+
+	// 6. Failing reader in Process
+	var outFail bytes.Buffer
+	failReader := &failingReader{}
+	if err := Process(failReader, &outFail, "all"); err != nil {
+		t.Errorf("expected Process to handle reader error and return nil, got: %v", err)
+	}
+
+	// 7. ParseArgs with plain non-JSON string
+	argsPlainStr, err := ParseArgs([]byte(`"plain non-json string"`))
+	if err != nil || argsPlainStr.TargetFile != "" {
+		t.Errorf("expected empty args for plain non-json string, got: %+v, err: %v", argsPlainStr, err)
+	}
+}
+
+type panickingReader struct{}
+
+func (p *panickingReader) Read([]byte) (int, error) {
+	panic("simulated panic in reader")
+}
+
+type failingReader struct{}
+
+func (f *failingReader) Read([]byte) (int, error) {
+	return 0, errors.New("simulated read error")
+}
+

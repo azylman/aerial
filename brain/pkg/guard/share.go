@@ -153,7 +153,13 @@ func inspectRunCommand(cmd, cwd string) bool {
 				if t == "-C" && i+1 < len(tokens) && IsProtectedPath(tokens[i+1]) {
 					targetsShare = true
 					break
+				} else if strings.HasPrefix(t, "-C") && len(t) > 2 && IsProtectedPath(strings.TrimPrefix(t, "-C")) {
+					targetsShare = true
+					break
 				} else if strings.HasPrefix(t, "--git-dir=") && IsProtectedPath(strings.TrimPrefix(t, "--git-dir=")) {
+					targetsShare = true
+					break
+				} else if strings.HasPrefix(t, "--work-tree=") && IsProtectedPath(strings.TrimPrefix(t, "--work-tree=")) {
 					targetsShare = true
 					break
 				}

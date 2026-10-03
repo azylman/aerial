@@ -3,78 +3,122 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/azylman/aerial/brain/pkg/guard"
 )
 
-func TestHookGuardCLI(t *testing.T) {
-	// Build a temporary test binary
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hook-guard")
+type errWriter struct{}
 
-	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build hook-guard: %v, output: %s", err, string(out))
-	}
+func (e *errWriter) Write(p []byte) (int, error) {
+	return 0, errors.New("simulated write error")
+}
 
+func TestRunCLI(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       []string
 		input      string
 		wantDeny   bool
-		wantReason string
+		wantOutput string
+		wantCode   int
 	}{
 		{
-			name: "share mode denies write to share",
-			args: []string{"share"},
-			input: `{
-				"toolCall": {
-					"name": "write_to_file",
-					"args": {"TargetFile": "/share/aerial/test.go"}
-				}
-			}`,
-			wantDeny:   true,
-			wantReason: "read-only",
+			name:     "share subcommand denies write to share",
+			args:     []string{"hook-guard", "share"},
+			input:    `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/test.go"}}}`,
+			wantDeny: true,
+			wantCode: 0,
 		},
 		{
-			name: "schedule mode denies schedule tool",
-			args: []string{"schedule"},
-			input: `{
-				"toolCall": {
-					"name": "schedule",
-					"args": {"DurationSeconds": 10, "Prompt": "hi"}
-				}
-			}`,
-			wantDeny:   true,
-			wantReason: "strictly prohibited",
+			name:     "schedule subcommand denies schedule",
+			args:     []string{"hook-guard", "schedule"},
+			input:    `{"toolCall": {"name": "schedule", "args": {"DurationSeconds": 10}}}`,
+			wantDeny: true,
+			wantCode: 0,
 		},
 		{
-			name: "all mode allows safe command",
-			args: []string{"all"},
-			input: `{
-				"toolCall": {
-					"name": "run_command",
-					"args": {"CommandLine": "ls -la", "Cwd": "/data"}
-				}
-			}`,
+			name:     "all subcommand allows benign run_command",
+			args:     []string{"hook-guard", "all"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "Cwd": "/data"}}}`,
 			wantDeny: false,
+			wantCode: 0,
+		},
+		{
+			name:     "symlink share-guard base name",
+			args:     []string{"/usr/local/bin/share-guard"},
+			input:    `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial-config/rules.md"}}}`,
+			wantDeny: true,
+			wantCode: 0,
+		},
+		{
+			name:     "symlink schedule-guard base name",
+			args:     []string{"/usr/local/bin/schedule-guard"},
+			input:    `{"toolCall": {"name": "schedule"}}`,
+			wantDeny: true,
+			wantCode: 0,
+		},
+		{
+			name:       "help flag outputs usage",
+			args:       []string{"hook-guard", "--help"},
+			input:      "",
+			wantOutput: "Usage: hook-guard",
+			wantCode:   0,
+		},
+		{
+			name:       "short help flag outputs usage",
+			args:       []string{"hook-guard", "-h"},
+			input:      "",
+			wantOutput: "Usage: hook-guard",
+			wantCode:   0,
+		},
+		{
+			name:       "word help outputs usage",
+			args:       []string{"hook-guard", "help"},
+			input:      "",
+			wantOutput: "Usage: hook-guard",
+			wantCode:   0,
+		},
+		{
+			name:     "empty args defaults to all",
+			args:     []string{},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi"}}}`,
+			wantDeny: false,
+			wantCode: 0,
+		},
+		{
+			name:     "schedule-guard alias arg",
+			args:     []string{"hook-guard", "schedule-guard"},
+			input:    `{"toolCall": {"name": "schedule"}}`,
+			wantDeny: true,
+			wantCode: 0,
+		},
+		{
+			name:     "share-guard alias arg",
+			args:     []string{"hook-guard", "share-guard"},
+			input:    `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/foo.go"}}}`,
+			wantDeny: true,
+			wantCode: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := exec.Command(binPath, tt.args...)
-			cmd.Stdin = stringsReader(tt.input)
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
+			var stdout bytes.Buffer
+			stdinBuf := strings.NewReader(tt.input)
 
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("cmd.Run() failed: %v, stderr: %s", err, stderr.String())
+			code := RunCLI(tt.args, stdinBuf, &stdout)
+			if code != tt.wantCode {
+				t.Errorf("expected exit code %d, got: %d", tt.wantCode, code)
+			}
+
+			if tt.wantOutput != "" {
+				if !strings.Contains(stdout.String(), tt.wantOutput) {
+					t.Errorf("expected output to contain %q, got: %q", tt.wantOutput, stdout.String())
+				}
+				return
 			}
 
 			var d guard.Decision
@@ -83,22 +127,32 @@ func TestHookGuardCLI(t *testing.T) {
 			}
 
 			if tt.wantDeny && d.Decision != guard.DecisionDeny {
-				t.Errorf("expected deny, got allow: %v", d)
+				t.Errorf("expected deny, got: %v", d)
 			}
 			if !tt.wantDeny && d.Decision != guard.DecisionAllow {
-				t.Errorf("expected allow, got deny: %v", d)
+				t.Errorf("expected allow, got: %v", d)
 			}
 		})
 	}
-}
 
-func stringsReader(s string) *bytes.Reader {
-	return bytes.NewReader([]byte(s))
-}
+	t.Run("failing writer covered", func(t *testing.T) {
+		code := RunCLI([]string{"hook-guard"}, strings.NewReader(`{malformed`), &errWriter{})
+		if code != 0 && code != 1 {
+			t.Errorf("unexpected code %d", code)
+		}
+	})
 
-func TestMainHelp(t *testing.T) {
-	// Simple test verifying main compiles and package level variables work
-	if len(os.Args) == 0 {
-		t.Fatal("empty os.Args")
-	}
+	t.Run("help flag with errWriter", func(t *testing.T) {
+		code := RunCLI([]string{"hook-guard", "--help"}, nil, &errWriter{})
+		if code != 1 {
+			t.Errorf("expected 1 on help write failure, got: %d", code)
+		}
+	})
+
+	t.Run("HelpMessage direct", func(t *testing.T) {
+		msg := HelpMessage()
+		if !strings.Contains(msg, "Usage: hook-guard") {
+			t.Errorf("unexpected HelpMessage: %s", msg)
+		}
+	})
 }

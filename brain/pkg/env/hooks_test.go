@@ -112,3 +112,62 @@ print('{"decision": "allow"}')
 		t.Errorf("second SyncHooks call failed: %v", err)
 	}
 }
+
+func TestSyncHooks_Branches(t *testing.T) {
+	// 1. Candidate match in DefaultHooksSearchPaths
+	sourceDir := t.TempDir()
+	origPaths := DefaultHooksSearchPaths
+	defer func() { DefaultHooksSearchPaths = origPaths }()
+	DefaultHooksSearchPaths = []string{sourceDir}
+
+	tmpHome := t.TempDir()
+	p := New(tmpHome, "")
+	p.SetHooksDir("") // force candidate search
+
+	if err := p.SyncHooks(); err != nil {
+		t.Errorf("SyncHooks with candidate path failed: %v", err)
+	}
+
+	// 2. Subdirectory and broken symlink in sourceDir
+	subDir := filepath.Join(sourceDir, "subfolder")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("failed to create subfolder: %v", err)
+	}
+	brokenSymlink := filepath.Join(sourceDir, "broken.sh")
+	_ = os.Symlink(filepath.Join(sourceDir, "nonexistent"), brokenSymlink)
+
+	p.SetHooksDir(sourceDir)
+	if err := p.SyncHooks(); err != nil {
+		t.Errorf("SyncHooks with subfolder and broken symlink failed: %v", err)
+	}
+
+	// 3. Invalid hooksDir pointing to a plain file
+	plainFile := filepath.Join(tmpHome, "file.txt")
+	_ = os.WriteFile(plainFile, []byte("not a dir"), 0644)
+	p.SetHooksDir(plainFile)
+	if err := p.SyncHooks(); err != nil {
+		t.Errorf("SyncHooks with file hooksDir failed: %v", err)
+	}
+
+	// 4. MkdirAll error on config dir (regular file where directory is expected)
+	errHome := t.TempDir()
+	geminiRoot := filepath.Join(errHome, ".gemini")
+	_ = os.MkdirAll(geminiRoot, 0755)
+	_ = os.WriteFile(filepath.Join(geminiRoot, "config"), []byte("file blocker"), 0644)
+	pErr := New(errHome, "")
+	if err := pErr.SyncHooks(); err != nil {
+		t.Errorf("SyncHooks should not fail when config dir creation fails: %v", err)
+	}
+
+	// 5. MkdirAll error on hooks scripts dir
+	errHome2 := t.TempDir()
+	geminiConfig2 := filepath.Join(errHome2, ".gemini", "config")
+	_ = os.MkdirAll(geminiConfig2, 0755)
+	_ = os.WriteFile(filepath.Join(geminiConfig2, "hooks"), []byte("file blocker"), 0644)
+	pErr2 := New(errHome2, "")
+	pErr2.SetHooksDir(sourceDir)
+	if err := pErr2.SyncHooks(); err != nil {
+		t.Errorf("SyncHooks should not fail when hooks scripts dir creation fails: %v", err)
+	}
+}
+
