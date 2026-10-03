@@ -7033,7 +7033,6 @@ func TestExecuteGitPushEvent_DispatchesDeployStarted(t *testing.T) {
 	d := NewDaemon(DaemonConfig{
 		Repos:                  []string{aerialConfigDir},
 		ConfigDir:              aerialConfigDir,
-		DeploymentPollInterval: 10 * time.Millisecond,
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
 			evtCh <- evt
 			return nil
@@ -7259,7 +7258,6 @@ func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
 	d := NewDaemon(DaemonConfig{
 		Repos:                  []string{aerialConfigDir},
 		ConfigDir:              aerialConfigDir,
-		DeploymentPollInterval: 10 * time.Millisecond,
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
 			evtCh <- evt
 			return nil
@@ -7357,7 +7355,6 @@ func TestExecuteImageReadyEvent_DispatchesDeployStartedOnly(t *testing.T) {
 
 	d := NewDaemon(DaemonConfig{
 		ConfigDir:              tmpDir,
-		DeploymentPollInterval: 10 * time.Millisecond,
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
 			evtCh <- evt
 			return nil
@@ -7442,7 +7439,6 @@ func TestExecuteImageReadyEvent_PropagatesMetadataInDeployStarted(t *testing.T) 
 
 	d := NewDaemon(DaemonConfig{
 		ConfigDir:              tmpDir,
-		DeploymentPollInterval: 10 * time.Millisecond,
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
 			evtCh <- evt
 			return nil
@@ -7590,7 +7586,6 @@ func TestReconcileNomadChanges_LifecycleEvents(t *testing.T) {
 	evtCh := make(chan HangarDeployEvent, 10)
 
 	d := NewDaemon(DaemonConfig{
-		DeploymentPollInterval: 10 * time.Millisecond,
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
 			evtCh <- evt
 			return nil

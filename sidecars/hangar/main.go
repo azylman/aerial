@@ -391,8 +391,6 @@ type SyncDaemon struct {
 	// Webhooks & Deploy Lifecycle
 	webhooksRouterURL      string
 	deployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
-	deploymentPollInterval time.Duration
-	deploymentTimeout      time.Duration
 }
 
 func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
@@ -2698,8 +2696,6 @@ type DaemonConfig struct {
 	ComposePullTimeout     time.Duration
 	WebhooksRouterURL      string
 	DeployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
-	DeploymentPollInterval time.Duration
-	DeploymentTimeout      time.Duration
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -2735,14 +2731,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 			webhooksRouterURL = "http://127.0.0.1:4020"
 		}
 	}
-	pollInterval := cfg.DeploymentPollInterval
-	if pollInterval <= 0 {
-		pollInterval = 2 * time.Second
-	}
-	deployTimeout := cfg.DeploymentTimeout
-	if deployTimeout <= 0 {
-		deployTimeout = 180 * time.Second
-	}
 	return &SyncDaemon{
 		repos:                  cfg.Repos,
 		repoUrls:               cfg.RepoURLs,
@@ -2766,8 +2754,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		composePullTimeout:     pullTimeout,
 		webhooksRouterURL:      webhooksRouterURL,
 		deployDispatcher:       cfg.DeployDispatcher,
-		deploymentPollInterval: pollInterval,
-		deploymentTimeout:      deployTimeout,
 		reconcileCh:            make(chan struct{}, 1),
 		pendingImageRollouts:   make(map[string]PendingImageRollout),
 		imageRolloutCh:         make(chan struct{}, 1),
