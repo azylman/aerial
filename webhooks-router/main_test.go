@@ -2464,6 +2464,15 @@ func TestProcessHangarEvent_Direct(t *testing.T) {
 	if resStarted.PRNumber != 99 || resStarted.TargetID != "target-99" {
 		t.Errorf("unexpected resStarted: %+v", resStarted)
 	}
+	if len(mockReg.deployingCalls) != 1 || mockReg.deployingCalls[0].prNumber != 99 || len(mockReg.deployingCalls[0].jobs) != 1 || mockReg.deployingCalls[0].jobs[0] != "webhooks-router" {
+		t.Errorf("unexpected deployingCalls: %+v", mockReg.deployingCalls)
+	}
+	mockReg.deployingErr = errors.New("db error")
+	_, err = srv.ProcessHangarEvent(ctx, evtStarted)
+	if err != nil {
+		t.Errorf("ProcessHangarEvent should not fail when TransitionDeploying errors: %v", err)
+	}
+	mockReg.deployingErr = nil
 
 	// 2. deploy_success with pr_number > 0 logs registry success
 	evtSuccess := HangarDeployEvent{
@@ -3177,6 +3186,27 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	}
 	if dmCalls[5].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[5].Content, "🔄 **(PR: #241, repo: aerial-config)** Git file sync completed") {
 		t.Errorf("unexpected late resolved sync_success direct message: %+v", dmCalls[5])
+	}
+
+	// 7. deploy_success with repo "azylman/aerial-config" triggers direct message (NOT prompt!)
+	configSuccessEvt := HangarDeployEvent{
+		Event:     "deploy_success",
+		JobName:   "homepage",
+		Repo:      "azylman/aerial-config",
+		PRNumber:  242,
+		CommitSHA: "sha_cfg_succ",
+		TargetID:  "1555405874565091380",
+		Status:    "success",
+	}
+	srv.ProcessHangarEvent(ctx, configSuccessEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 7 {
+		t.Fatalf("expected 7 direct message dispatches after config deploy_success, got %d", len(dmCalls))
+	}
+	if dmCalls[6].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[6].Content, "📦 **(PR: #242, repo: aerial-config)** Configuration reloaded and healthy for homepage") {
+		t.Errorf("unexpected config deploy_success direct message: %+v", dmCalls[6])
 	}
 }
 

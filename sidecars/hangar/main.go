@@ -141,6 +141,14 @@ type ReconciliationStatus struct {
 	Error          string    `json:"error,omitempty"`
 }
 
+// ConfigSyncContext holds context for configuration sync events.
+type ConfigSyncContext struct {
+	Repo      string
+	CommitSHA string
+	PRNumber  int
+	TargetID  string
+}
+
 // HangarStatusResponse is the aggregated telemetry payload returned by GET /status.
 type HangarStatusResponse struct {
 	Status         string                `json:"status"` // "synced", "lagging", "error"
@@ -1931,7 +1939,7 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 }
 
 // SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML).
-func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string) error {
+func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	configPath := filepath.Join(configDir, "config.yaml")
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1978,7 +1986,23 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	stdout, stderr, err := nomadExec(valCtx, "var", "put", "-force", "nomad/jobs/brain", "CONFIG_YAML=@"+configPath)
+	args := []string{"var", "put", "-force", "nomad/jobs/brain", "CONFIG_YAML=@" + configPath}
+	if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
+		args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
+		baseEvt := HangarDeployEvent{
+			Event:     "deploy_started",
+			JobName:   "brain",
+			Repo:      syncCtx[0].Repo,
+			CommitSHA: syncCtx[0].CommitSHA,
+			PRNumber:  syncCtx[0].PRNumber,
+			TargetID:  syncCtx[0].TargetID,
+			Status:    "started",
+			Timestamp: time.Now().UTC(),
+		}
+		go d.DispatchDeployEvent(baseEvt)
+	}
+
+	stdout, stderr, err := nomadExec(valCtx, args...)
 	if err != nil {
 		combined := string(append(stdout, stderr...))
 		return fmt.Errorf("failed updating Nomad variable nomad/jobs/brain: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
@@ -1997,7 +2021,7 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 
 // SyncHomepageConfigToNomad validates homepage.yaml, computes a deterministic hash of all homepage configs,
 // and writes HOMEPAGE_YAML and CONFIG_HASH to Nomad variable nomad/jobs/homepage.
-func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir string) error {
+func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	homepageConfigPath := filepath.Join(configDir, "services", "homepage", "homepage.yaml")
 	raw, err := os.ReadFile(homepageConfigPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -2063,6 +2087,20 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 	if len(raw) > 0 {
 		args = append(args, "HOMEPAGE_YAML=@"+homepageConfigPath)
 	}
+	if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
+		args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
+		baseEvt := HangarDeployEvent{
+			Event:     "deploy_started",
+			JobName:   "homepage",
+			Repo:      syncCtx[0].Repo,
+			CommitSHA: syncCtx[0].CommitSHA,
+			PRNumber:  syncCtx[0].PRNumber,
+			TargetID:  syncCtx[0].TargetID,
+			Status:    "started",
+			Timestamp: time.Now().UTC(),
+		}
+		go d.DispatchDeployEvent(baseEvt)
+	}
 
 	stdout, stderr, err := nomadExec(valCtx, args...)
 	if err != nil {
@@ -2102,7 +2140,7 @@ var ManagedServiceConfigs = []ServiceConfigMapping{
 
 // SyncServiceConfigsToNomad iterates over ManagedServiceConfigs, validates YAML syntax,
 // and pushes non-empty configurations to their respective Nomad variables using `nomad var put`.
-func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir string) error {
+func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	for _, mapping := range ManagedServiceConfigs {
 		filePath := filepath.Join(configDir, mapping.RelPath)
 		raw, err := os.ReadFile(filePath)
@@ -2135,7 +2173,22 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		d.lastPushedConfigMu.Unlock()
 
 		valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		stdout, stderr, err := nomadExec(valCtx, "var", "put", "-force", mapping.NomadVar, mapping.VarKey+"=@"+filePath)
+		args := []string{"var", "put", "-force", mapping.NomadVar, mapping.VarKey + "=@" + filePath}
+		if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
+			args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
+			baseEvt := HangarDeployEvent{
+				Event:     "deploy_started",
+				JobName:   strings.TrimPrefix(mapping.NomadVar, "nomad/jobs/"),
+				Repo:      syncCtx[0].Repo,
+				CommitSHA: syncCtx[0].CommitSHA,
+				PRNumber:  syncCtx[0].PRNumber,
+				TargetID:  syncCtx[0].TargetID,
+				Status:    "started",
+				Timestamp: time.Now().UTC(),
+			}
+			go d.DispatchDeployEvent(baseEvt)
+		}
+		stdout, stderr, err := nomadExec(valCtx, args...)
 		cancel()
 		if err != nil {
 			combined := string(append(stdout, stderr...))
@@ -2827,13 +2880,19 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 			resp.Message = "configuration synced; no nomad job changes"
 		}
 
-		if err := d.SyncBrainConfigToNomad(ctx, repoPath); err != nil {
+		sc := ConfigSyncContext{
+			Repo:      req.Repo,
+			CommitSHA: commitSHA,
+			PRNumber:  req.PRNumber,
+			TargetID:  req.TargetID,
+		}
+		if err := d.SyncBrainConfigToNomad(ctx, repoPath, sc); err != nil {
 			log.Printf("[Hangar:GitPush] Notice: SyncBrainConfigToNomad: %v", err)
 		}
-		if err := d.SyncHomepageConfigToNomad(ctx, repoPath); err != nil {
+		if err := d.SyncHomepageConfigToNomad(ctx, repoPath, sc); err != nil {
 			log.Printf("[Hangar:GitPush] Notice: SyncHomepageConfigToNomad: %v", err)
 		}
-		if err := d.SyncServiceConfigsToNomad(ctx, repoPath); err != nil {
+		if err := d.SyncServiceConfigsToNomad(ctx, repoPath, sc); err != nil {
 			log.Printf("[Hangar:GitPush] Notice: SyncServiceConfigsToNomad: %v", err)
 		}
 

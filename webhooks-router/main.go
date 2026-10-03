@@ -739,7 +739,14 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 	query := `
 		UPDATE pr_registry
 		SET status = 'deploying',
-			metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb),
+			metadata = jsonb_set(
+				COALESCE(metadata, '{}'::jsonb),
+				'{jobs}',
+				(
+					SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+					FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || $1::jsonb) AS elem
+				)
+			),
 			updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $2 AND pr_number = $3 AND status NOT IN ('closed', 'conflict')
 		RETURNING target_id;
@@ -1639,6 +1646,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 
 	if s.registry != nil && evt.PRNumber > 0 {
 		if evt.Event == "deploy_started" {
+			if evt.JobName != "" {
+				if _, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
+					log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
+				}
+			}
 			log.Printf("[webhooks-router] [registry] pr %s#%d deployment started for job %s", evt.Repo, evt.PRNumber, evt.JobName)
 		} else if evt.Event == "deploy_success" {
 			log.Printf("[webhooks-router] [registry] pr %s#%d deployed successfully for job %s", evt.Repo, evt.PRNumber, evt.JobName)
@@ -1659,8 +1671,19 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
 	} else if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
-			return &evt, err
+		cleanRepo := strings.ToLower(strings.TrimSpace(evt.Repo))
+		if strings.Contains(cleanRepo, "aerial-config") {
+			msg := fmt.Sprintf("📦 %sConfiguration reloaded and healthy for %s", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
+			if dmErr := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+				ChannelID: evt.TargetID,
+				Content:   msg,
+			}); dmErr != nil {
+				log.Printf("[webhooks-router] [dispatcher] warning dispatching config reload direct message: %v", dmErr)
+			}
+		} else {
+			if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
+				return &evt, err
+			}
 		}
 	} else if evt.Event == "deploy_rollback" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID

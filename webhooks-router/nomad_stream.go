@@ -44,13 +44,29 @@ type NomadDeploymentEventPayload struct {
 	} `json:"Deployment"`
 }
 
+// NomadTaskEvent captures task lifecycle events within an allocation.
+type NomadTaskEvent struct {
+	Type           string `json:"Type"`
+	DisplayMessage string `json:"DisplayMessage"`
+	Time           int64  `json:"Time"`
+}
+
+// NomadTaskState captures the state of a task in an allocation.
+type NomadTaskState struct {
+	State    string           `json:"State"`
+	Failed   bool             `json:"Failed"`
+	Restarts int              `json:"Restarts"`
+	Events   []NomadTaskEvent `json:"Events"`
+}
+
 // NomadAllocationEventPayload captures allocation updates from Nomad.
 type NomadAllocationEventPayload struct {
 	Allocation struct {
-		ID            string `json:"ID"`
-		JobID         string `json:"JobID"`
-		DesiredStatus string `json:"DesiredStatus"` // "run", "stop"
-		ClientStatus  string `json:"ClientStatus"`  // "running", "pending", "failed", "complete"
+		ID            string                    `json:"ID"`
+		JobID         string                    `json:"JobID"`
+		DesiredStatus string                    `json:"DesiredStatus"` // "run", "stop"
+		ClientStatus  string                    `json:"ClientStatus"`  // "running", "pending", "failed", "complete"
+		TaskStates    map[string]NomadTaskState `json:"TaskStates"`
 	} `json:"Allocation"`
 }
 
@@ -307,6 +323,9 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
 			return fmt.Errorf("unmarshal nomad allocation payload: %w", err)
 		}
 		alloc := allocPayload.Allocation
+		if isAllocationRestarting(alloc.TaskStates) {
+			return nil
+		}
 		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" && s.isNomadJobHealthy(ctx, alloc.JobID) {
 			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
 		}
@@ -390,9 +409,20 @@ func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID s
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID)
 
 	if IsValidDiscordSnowflake(targetID) && s.dispatcher != nil {
-		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching deployment success prompt for %s: %v", cleanJob, err)
-			return err
+		cleanRepo := strings.ToLower(strings.TrimSpace(repo))
+		if strings.Contains(cleanRepo, "aerial-config") {
+			msg := fmt.Sprintf("📦 %sConfiguration reloaded and healthy for %s", formatDirectMessagePrefix(prNumber, repo), cleanJob)
+			if dmErr := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+				ChannelID: targetID,
+				Content:   msg,
+			}); dmErr != nil {
+				log.Printf("[webhooks-router] [dispatcher] warning dispatching config reload direct message: %v", dmErr)
+			}
+		} else {
+			if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching deployment success prompt for %s: %v", cleanJob, err)
+				return err
+			}
 		}
 	}
 	return nil
@@ -542,4 +572,20 @@ func jobNameFromImage(imageRef string) string {
 	}
 	base = strings.TrimPrefix(base, "aerial-")
 	return base
+}
+
+// isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart.
+func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
+	for _, ts := range taskStates {
+		if strings.EqualFold(ts.State, "pending") || strings.EqualFold(ts.State, "restarting") {
+			return true
+		}
+		if len(ts.Events) > 0 {
+			lastEvt := ts.Events[len(ts.Events)-1]
+			if lastEvt.Type == "Restart Signaled" || lastEvt.Type == "Restarting" {
+				return true
+			}
+		}
+	}
+	return false
 }

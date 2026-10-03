@@ -8026,3 +8026,121 @@ func TestDefaultNomadExecutor_ExtraBranches(t *testing.T) {
 	_, _, _ = runGitCommand(cancelCtx, "", "", "version")
 }
 
+func TestSyncConfigsToNomad_WithSyncContextAndDeployStarted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	configDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("model: \"test\"\nchannels:\n  default:\n    mode: threads\n"), 0644)
+	if err := os.MkdirAll(filepath.Join(configDir, "services", "homepage"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(configDir, "services", "homepage", "homepage.yaml"), []byte("title: \"Test\"\n"), 0644)
+	if err := os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 8080\n"), 0644)
+
+	var (
+		mu           sync.Mutex
+		capturedArgs [][]string
+		events       []HangarDeployEvent
+	)
+
+	d := &SyncDaemon{
+		nomadAddr:        "http://127.0.0.1:4646",
+		lastPushedConfig: make(map[string]string),
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			mu.Lock()
+			capturedArgs = append(capturedArgs, args)
+			mu.Unlock()
+			return []byte("ok"), nil, nil
+		},
+		deployDispatcher: func(dispCtx context.Context, evt HangarDeployEvent) error {
+			mu.Lock()
+			events = append(events, evt)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	sc := ConfigSyncContext{
+		Repo:      "azylman/aerial-config",
+		CommitSHA: "sha_cfg_123",
+		PRNumber:  101,
+		TargetID:  "1555405874565091380",
+	}
+
+	// 1. SyncBrainConfigToNomad with sc
+	if err := d.SyncBrainConfigToNomad(ctx, configDir, sc); err != nil {
+		t.Fatalf("SyncBrainConfigToNomad error: %v", err)
+	}
+
+	// 2. SyncHomepageConfigToNomad with sc
+	if err := d.SyncHomepageConfigToNomad(ctx, configDir, sc); err != nil {
+		t.Fatalf("SyncHomepageConfigToNomad error: %v", err)
+	}
+
+	// 3. SyncServiceConfigsToNomad with sc
+	if err := d.SyncServiceConfigsToNomad(ctx, configDir, sc); err != nil {
+		t.Fatalf("SyncServiceConfigsToNomad error: %v", err)
+	}
+
+	// Give goroutines time to invoke deployDispatcher
+	var capturedEvents []HangarDeployEvent
+	for i := 0; i < 50; i++ {
+		mu.Lock()
+		count := len(events)
+		capturedEvents = append([]HangarDeployEvent(nil), events...)
+		mu.Unlock()
+		if count >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(capturedArgs) < 3 {
+		t.Fatalf("expected at least 3 calls to nomadExecutor, got %d", len(capturedArgs))
+	}
+
+	// Verify COMMIT_SHA was passed in all calls
+	for i, args := range capturedArgs {
+		hasCommit := false
+		for _, arg := range args {
+			if arg == "COMMIT_SHA=sha_cfg_123" {
+				hasCommit = true
+				break
+			}
+		}
+		if !hasCommit {
+			t.Errorf("call %d missing COMMIT_SHA arg: %v", i, args)
+		}
+	}
+
+	// Verify events
+	foundBrain := false
+	foundHomepage := false
+	foundScheduler := false
+	for _, evt := range capturedEvents {
+		if evt.Event != "deploy_started" || evt.Repo != sc.Repo || evt.CommitSHA != sc.CommitSHA || evt.PRNumber != sc.PRNumber || evt.TargetID != sc.TargetID {
+			t.Errorf("unexpected event payload: %+v", evt)
+		}
+		switch evt.JobName {
+		case "brain":
+			foundBrain = true
+		case "homepage":
+			foundHomepage = true
+		case "scheduler-mcp":
+			foundScheduler = true
+		}
+	}
+
+	if !foundBrain || !foundHomepage || !foundScheduler {
+		t.Errorf("missing expected deploy_started events: brain=%v, homepage=%v, scheduler=%v (events: %+v)",
+			foundBrain, foundHomepage, foundScheduler, capturedEvents)
+	}
+}
+
