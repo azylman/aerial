@@ -2301,6 +2301,61 @@ func TestGetDockerExecutor_Branches(t *testing.T) {
 	if d.getDockerExecutor() == nil {
 		t.Errorf("expected non-nil executor when dockerExecutor is nil")
 	}
+
+	customCalled := false
+	d.dockerExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		customCalled = true
+		return []byte("custom-docker"), nil, nil
+	}
+	execFn := d.getDockerExecutor()
+	_, _, _ = execFn(context.Background(), "")
+	if !customCalled {
+		t.Errorf("expected custom docker executor to be called")
+	}
+}
+
+func TestGetComposeExecutor_Branches(t *testing.T) {
+	var nilDaemon *SyncDaemon
+	if nilDaemon.getComposeExecutor() == nil {
+		t.Errorf("expected non-nil default compose executor for nil daemon")
+	}
+
+	d := &SyncDaemon{}
+	if d.getComposeExecutor() == nil {
+		t.Errorf("expected non-nil executor when composeExecutor is nil")
+	}
+
+	customCalled := false
+	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		customCalled = true
+		return []byte("custom-compose"), nil, nil
+	}
+	execFn := d.getComposeExecutor()
+	_, _, _ = execFn(context.Background(), "", "")
+	if !customCalled {
+		t.Errorf("expected custom compose executor to be called")
+	}
+}
+
+func TestPendingNomadServerRestart(t *testing.T) {
+	var nilDaemon *SyncDaemon
+	nilDaemon.recordPendingNomadServerRestart()
+	if nilDaemon.consumePendingNomadServerRestart() {
+		t.Errorf("expected false for nil daemon")
+	}
+
+	d := &SyncDaemon{}
+	if d.consumePendingNomadServerRestart() {
+		t.Errorf("expected false initially")
+	}
+
+	d.recordPendingNomadServerRestart()
+	if !d.consumePendingNomadServerRestart() {
+		t.Errorf("expected true after recording restart")
+	}
+	if d.consumePendingNomadServerRestart() {
+		t.Errorf("expected false on subsequent consume")
+	}
 }
 
 func TestSyncRepo_ResetFailureAndPostMergeRevParseError(t *testing.T) {
@@ -6376,5 +6431,183 @@ func TestStartImageRolloutLoop_PanicRecovery(t *testing.T) {
 
 	if finalCount < 2 {
 		t.Errorf("expected at least 2 executor attempts (surviving panic), got %d", finalCount)
+	}
+}
+
+func TestExecutePendingImageRollouts_Branches(t *testing.T) {
+	d := NewDaemon(DaemonConfig{
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: 12345"), nil, nil
+		},
+	})
+
+	// 1. Empty rollouts (immediate return)
+	d.executePendingImageRollouts(context.Background())
+
+	// 2. Cancelled context
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.pendingImageMu.Lock()
+	d.pendingImageRollouts["img1"] = PendingImageRollout{
+		Request: ImageReadyEventRequest{
+			Image: "ghcr.io/azylman/aerial-brain:latest",
+		},
+	}
+	d.pendingImageMu.Unlock()
+	d.executePendingImageRollouts(cancelCtx)
+
+	// 3. Normal execution
+	d.pendingImageMu.Lock()
+	d.pendingImageRollouts["img1"] = PendingImageRollout{
+		Request: ImageReadyEventRequest{
+			Image: "ghcr.io/azylman/aerial-brain:latest",
+		},
+	}
+	d.pendingImageMu.Unlock()
+	d.executePendingImageRollouts(context.Background())
+}
+
+func TestStartReconcilerLoop_NilChannel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &SyncDaemon{}
+	d.StartReconcilerLoop(ctx)
+	if d.reconcileCh == nil {
+		t.Errorf("expected reconcileCh to be initialized")
+	}
+}
+
+func TestNotifyBrainReload_InvalidURL(t *testing.T) {
+	d := &SyncDaemon{
+		brainInternalURL: "://invalid-url-triggers-http-new-request-error",
+	}
+	d.notifyBrainReload()
+}
+
+func TestRunGitCommand_WithDir(t *testing.T) {
+	dir := t.TempDir()
+	stdout, _, err := runGitCommand(context.Background(), dir, "", "init")
+	if err != nil {
+		t.Logf("runGitCommand init: %v, stdout: %s", err, string(stdout))
+	}
+}
+
+func TestDefaultNomadExecutor_AddrAndToken(t *testing.T) {
+	execNoAddrTok := defaultNomadExecutor("", "")
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, _ = execNoAddrTok(cancelCtx, "version")
+
+	execAddrTok := defaultNomadExecutor("http://127.0.0.1:4646", "secret-token")
+	cancelCtx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	_, _, _ = execAddrTok(cancelCtx2, "version")
+}
+
+func TestGetDeployDispatcher_Branches(t *testing.T) {
+	var nilDaemon *SyncDaemon
+	if nilDaemon.getDeployDispatcher() == nil {
+		t.Errorf("expected non-nil default deploy dispatcher for nil daemon")
+	}
+
+	d := &SyncDaemon{}
+	if d.getDeployDispatcher() == nil {
+		t.Errorf("expected non-nil default deploy dispatcher when deployDispatcher is nil")
+	}
+
+	customCalled := false
+	d.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
+		customCalled = true
+		return nil
+	}
+	fn := d.getDeployDispatcher()
+	_ = fn(context.Background(), HangarDeployEvent{})
+	if !customCalled {
+		t.Errorf("expected custom deploy dispatcher to be called")
+	}
+}
+
+func TestGetRegistryClient_NilDaemon(t *testing.T) {
+	var nilDaemon *SyncDaemon
+	client := nilDaemon.getRegistryClient()
+	if client == nil {
+		t.Errorf("expected non-nil default client for nil daemon")
+	}
+}
+
+func TestDefaultDeployDispatcher_InvalidURL(t *testing.T) {
+	d := &SyncDaemon{
+		webhooksRouterURL: "://invalid-router-url",
+	}
+	err := d.defaultDeployDispatcher(context.Background(), HangarDeployEvent{})
+	if err == nil {
+		t.Errorf("expected error for invalid router URL")
+	}
+}
+
+func TestRunGitCommand_WithPat(t *testing.T) {
+	stdout, _, err := runGitCommand(context.Background(), "", "mock-pat", "version")
+	if err != nil {
+		t.Logf("runGitCommand version: %v, stdout: %s", err, string(stdout))
+	}
+}
+
+func TestNomadChanges_CancelledContext(t *testing.T) {
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	dFail := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			cancel()
+			return nil, nil, errors.New("git fail")
+		},
+	})
+	hasCfg, errCfg := dFail.HasNomadConfigChanges(cancelCtx, "/repo", "c1", "c2")
+	if !errors.Is(errCfg, context.Canceled) || hasCfg {
+		t.Errorf("expected context.Canceled from HasNomadConfigChanges, got %v, %v", hasCfg, errCfg)
+	}
+
+	cancelCtx2, cancel2 := context.WithCancel(context.Background())
+	dFail2 := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			cancel2()
+			return nil, nil, errors.New("git fail")
+		},
+	})
+	changes, errChanges := dFail2.HasNomadChanges(cancelCtx2, "/repo", "c1", "c2")
+	if !errors.Is(errChanges, context.Canceled) || changes != nil {
+		t.Errorf("expected context.Canceled from HasNomadChanges, got %v, %v", changes, errChanges)
+	}
+}
+
+func TestNomadChanges_FallbackCancelledContext(t *testing.T) {
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	callCount := 0
+	dFail := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			callCount++
+			if callCount == 2 {
+				cancel()
+			}
+			return nil, nil, errors.New("git fail")
+		},
+	})
+	hasCfg, errCfg := dFail.HasNomadConfigChanges(cancelCtx, "/repo", "c1", "c2")
+	if !errors.Is(errCfg, context.Canceled) || hasCfg {
+		t.Errorf("expected context.Canceled from HasNomadConfigChanges fallback, got %v, %v", hasCfg, errCfg)
+	}
+
+	cancelCtx2, cancel2 := context.WithCancel(context.Background())
+	callCount2 := 0
+	dFail2 := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			callCount2++
+			if callCount2 == 2 {
+				cancel2()
+			}
+			return nil, nil, errors.New("git fail")
+		},
+	})
+	changes, errChanges := dFail2.HasNomadChanges(cancelCtx2, "/repo", "c1", "c2")
+	if !errors.Is(errChanges, context.Canceled) || changes != nil {
+		t.Errorf("expected context.Canceled from HasNomadChanges fallback, got %v, %v", changes, errChanges)
 	}
 }

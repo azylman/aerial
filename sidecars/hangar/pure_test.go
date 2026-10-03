@@ -1590,6 +1590,9 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 		{"third party go2rtc", "alexxit/go2rtc:1.9.8", ""},
 		{"third party redis", "redis:7-alpine", ""},
 		{"empty string", "", ""},
+		{"aerial suffix", "ghcr.io/someone/aerial", "azylman/aerial"},
+		{"aerial with tag", "ghcr.io/someone/aerial:v1.0", "azylman/aerial"},
+		{"azylman other image", "ghcr.io/azylman/other-tool:latest", ""},
 	}
 
 	for _, tt := range tests {
@@ -1695,6 +1698,43 @@ func TestFindJobDefinitionInRepos(t *testing.T) {
 	}
 	if _, found := FindJobDefinitionInRepos("brain", "", nil); found {
 		t.Errorf("expected false for empty candidateRepos")
+	}
+}
+
+func TestFindJobDefinitionInRepos_EdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+	repo := filepath.Join(tempDir, "repo")
+	jobsDir := filepath.Join(repo, "jobs")
+	if err := os.MkdirAll(jobsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Directory entry inside jobsDir (entry.IsDir() branch)
+	subDir := filepath.Join(jobsDir, "subdir.nomad")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Non-nomad file (!IsNomadJobFile branch)
+	if err := os.WriteFile(filepath.Join(jobsDir, "notes.txt"), []byte("not a nomad job"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Nomad file with different job name
+	otherJobSpec := `job "other" { type = "service" }`
+	if err := os.WriteFile(filepath.Join(jobsDir, "other.nomad"), []byte(otherJobSpec), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Candidate repos including empty string and skipRepoPath
+	repos := []string{"", repo}
+	if path, found := FindJobDefinitionInRepos("target", "", repos); found {
+		t.Errorf("expected target not found, got %s", path)
+	}
+
+	// Target matching "other"
+	if path, found := FindJobDefinitionInRepos("other", "", repos); !found || !strings.Contains(path, "other.nomad") {
+		t.Errorf("expected other to be found, got %s, %v", path, found)
 	}
 }
 
