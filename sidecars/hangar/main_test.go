@@ -8158,5 +8158,100 @@ func TestReconcileStartupDeployments_NilDaemon(t *testing.T) {
 	nilDaemon.ReconcileStartupDeployments(context.Background())
 }
 
+func TestReconcileNomadChanges_SkipPurgeWhenDefinedInOtherRepo(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoA := filepath.Join(tempDir, "aerial-config")
+	repoB := filepath.Join(tempDir, "aerial")
+
+	jobsDirA := filepath.Join(repoA, "jobs")
+	nomadJobsDirB := filepath.Join(repoB, "nomad", "jobs")
+
+	if err := os.MkdirAll(jobsDirA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nomadJobsDirB, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	jobSpecBrain := `job "brain" { type = "service" }`
+	if err := os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(jobSpecBrain), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stoppedJobs []string
+	var mu sync.Mutex
+
+	d := NewDaemon(DaemonConfig{
+		Repos:      []string{repoA, repoB},
+		ConfigDir:  repoA,
+		ComposeDir: repoB,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if len(args) >= 3 && args[0] == "job" && args[1] == "stop" {
+				stoppedJobs = append(stoppedJobs, args[len(args)-1])
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	// Case 1: Job brain deleted in repoA, but exists in repoB -> should NOT be stopped
+	err := d.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
+		{
+			Path:    "jobs/brain.nomad",
+			Action:  "delete",
+			JobName: "brain",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	if len(stoppedJobs) > 0 {
+		t.Errorf("expected 0 stopped jobs for brain, got %v", stoppedJobs)
+	}
+	stoppedJobs = nil
+	mu.Unlock()
+
+	// Case 2: Job truly_deleted deleted in repoA and not in repoB -> SHOULD be stopped
+	err = d.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
+		{
+			Path:    "jobs/truly_deleted.nomad",
+			Action:  "delete",
+			JobName: "truly_deleted",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	if len(stoppedJobs) != 1 || stoppedJobs[0] != "truly_deleted" {
+		t.Errorf("expected truly_deleted to be stopped, got %v", stoppedJobs)
+	}
+	stoppedJobs = nil
+	mu.Unlock()
+
+	// Case 3: ExecuteNomadTeardowns with both jobs
+	pending := []NomadChangeEvent{
+		{
+			RepoPath: repoA,
+			Changes: []NomadFileChange{
+				{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
+				{Path: "jobs/old_orphan.nomad", Action: "delete", JobName: "old_orphan"},
+			},
+		},
+	}
+	d.ExecuteNomadTeardowns(ctx, pending)
+
+	mu.Lock()
+	if len(stoppedJobs) != 1 || stoppedJobs[0] != "old_orphan" {
+		t.Errorf("expected only old_orphan to be stopped in teardowns, got %v", stoppedJobs)
+	}
+	mu.Unlock()
+}
+
 
 
