@@ -5549,26 +5549,43 @@ func TestExecuteGitPushEvent_DispatchesDeployStarted(t *testing.T) {
 		t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
 	}
 
-	// 1. Wait for deploy_started
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "deploy_started" {
-			t.Errorf("expected deploy_started, got %q", evt.Event)
+	// 1. Wait for sync_success (git-sync) and deploy_started (webhooks-router)
+	var receivedEvts []HangarDeployEvent
+	for i := 0; i < 2; i++ {
+		select {
+		case evt := <-evtCh:
+			receivedEvts = append(receivedEvts, evt)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event %d", i+1)
 		}
-		if evt.JobName != "webhooks-router" {
-			t.Errorf("expected job_name webhooks-router, got %q", evt.JobName)
+	}
+
+	var deployStartedEvt *HangarDeployEvent
+	var syncSuccessEvt *HangarDeployEvent
+	for i := range receivedEvts {
+		if receivedEvts[i].Event == "deploy_started" {
+			deployStartedEvt = &receivedEvts[i]
+		} else if receivedEvts[i].Event == "sync_success" {
+			syncSuccessEvt = &receivedEvts[i]
 		}
-		if evt.Repo != "aerial-config" {
-			t.Errorf("expected repo aerial-config, got %q", evt.Repo)
-		}
-		if evt.CommitSHA != "commit_abc123" {
-			t.Errorf("expected commit_sha commit_abc123, got %q", evt.CommitSHA)
-		}
-		if evt.Status != "started" {
-			t.Errorf("expected status started, got %q", evt.Status)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for deploy_started event")
+	}
+	if syncSuccessEvt == nil {
+		t.Fatalf("missing sync_success event in received: %+v", receivedEvts)
+	}
+	if deployStartedEvt == nil {
+		t.Fatalf("missing deploy_started event in received: %+v", receivedEvts)
+	}
+	if deployStartedEvt.JobName != "webhooks-router" {
+		t.Errorf("expected job_name webhooks-router, got %q", deployStartedEvt.JobName)
+	}
+	if deployStartedEvt.Repo != "aerial-config" {
+		t.Errorf("expected repo aerial-config, got %q", deployStartedEvt.Repo)
+	}
+	if deployStartedEvt.CommitSHA != "commit_abc123" {
+		t.Errorf("expected commit_sha commit_abc123, got %q", deployStartedEvt.CommitSHA)
+	}
+	if deployStartedEvt.Status != "started" {
+		t.Errorf("expected status started, got %q", deployStartedEvt.Status)
 	}
 
 	// 2. Ensure deployment observation is delegated to webhooks-router
@@ -5704,6 +5721,33 @@ func TestExecuteGitPushEvent_DispatchesSyncSuccessAndFailure(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for fallback commit sync_success event")
 	}
+
+	// 4. Successful sync with empty TargetID still dispatches sync_success (for late resolution)
+	respEmpty, codeEmpty := dSuccess.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo:     "aerial",
+		Ref:      "refs/heads/main",
+		Commit:   "commit_empty_target",
+		TargetID: "",
+		PRNumber: 0,
+	})
+	if codeEmpty != http.StatusOK || respEmpty.Status != "accepted" {
+		t.Fatalf("expected 200 accepted for empty TargetID, got %d (%s)", codeEmpty, respEmpty.Status)
+	}
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "sync_success" {
+			t.Errorf("expected sync_success, got %q", evt.Event)
+		}
+		if evt.TargetID != "" {
+			t.Errorf("expected empty TargetID, got %q", evt.TargetID)
+		}
+		if evt.CommitSHA != "sha_sync_ok" {
+			t.Errorf("expected CommitSHA sha_sync_ok, got %q", evt.CommitSHA)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for empty TargetID sync_success event")
+	}
 }
 
 func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
@@ -5765,9 +5809,9 @@ func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
 		t.Errorf("expected 0 applied jobs on run failure, got %v", resp.AppliedJobs)
 	}
 
-	// Collect both dispatched events
+	// Collect all three dispatched events: sync_success (git-sync), deploy_started (webhooks-router), deploy_failed (webhooks-router)
 	var received []HangarDeployEvent
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		select {
 		case evt := <-evtCh:
 			received = append(received, evt)
@@ -5776,9 +5820,13 @@ func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
 		}
 	}
 
+	hasSyncSuccess := false
 	hasStarted := false
 	hasFailed := false
 	for _, evt := range received {
+		if evt.Event == "sync_success" {
+			hasSyncSuccess = true
+		}
 		if evt.Event == "deploy_started" {
 			hasStarted = true
 		}
@@ -5791,6 +5839,9 @@ func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
 				t.Errorf("expected details to contain error message, got %q", evt.Details)
 			}
 		}
+	}
+	if !hasSyncSuccess {
+		t.Errorf("missing sync_success event in received: %+v", received)
 	}
 	if !hasStarted {
 		t.Errorf("missing deploy_started event in received: %+v", received)
