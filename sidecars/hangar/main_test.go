@@ -998,8 +998,8 @@ func TestNewConfigFromLookup_Custom(t *testing.T) {
 func TestNewConfigFromLookup_Defaults(t *testing.T) {
 	// Empty lookup returns defaults
 	cfg := NewConfigFromLookup(func(string) string { return "" })
-	if cfg.Port != "8080" {
-		t.Errorf("expected default port 8080, got %q", cfg.Port)
+	if cfg.Port != "8087" {
+		t.Errorf("expected default port 8087, got %q", cfg.Port)
 	}
 	if cfg.Interval != 60*time.Second {
 		t.Errorf("expected default interval 60s, got %v", cfg.Interval)
@@ -1010,8 +1010,8 @@ func TestNewConfigFromLookup_Defaults(t *testing.T) {
 	if cfg.ConfigDir != "/share/aerial-config" {
 		t.Errorf("expected default configDir /share/aerial-config, got %q", cfg.ConfigDir)
 	}
-	if cfg.BrainInternalURL != "http://brain:8080/internal/reload" {
-		t.Errorf("expected default brainInternalURL 'http://brain:8080/internal/reload', got %q", cfg.BrainInternalURL)
+	if cfg.BrainInternalURL != "http://brain:8088/internal/reload" {
+		t.Errorf("expected default brainInternalURL 'http://brain:8088/internal/reload', got %q", cfg.BrainInternalURL)
 	}
 	if len(cfg.ExtraSecrets) != 0 {
 		t.Errorf("expected 0 extraSecrets with empty lookup, got %v", cfg.ExtraSecrets)
@@ -1019,8 +1019,85 @@ func TestNewConfigFromLookup_Defaults(t *testing.T) {
 
 	// Nil lookup safely behaves the same as empty lookup
 	cfgNil := NewConfigFromLookup(nil)
-	if cfgNil.Port != "8080" {
-		t.Errorf("expected default port 8080 with nil lookup, got %q", cfgNil.Port)
+	if cfgNil.Port != "8087" {
+		t.Errorf("expected default port 8087 with nil lookup, got %q", cfgNil.Port)
+	}
+}
+
+func TestNewConfigFromLookup_YAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "hangar.yaml")
+	yamlData := `
+port: "8087"
+sync_interval: "45s"
+sync_repos:
+  - "/repo/a"
+  - "/repo/b"
+nomad_addr: "http://nomad.cluster:4646"
+brain_internal_url: "http://brain.cluster:8088/internal/reload"
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlData), 0644); err != nil {
+		t.Fatalf("failed to write test yaml: %v", err)
+	}
+
+	// 1. Load from YAML via CONFIG_PATH
+	cfg := NewConfigFromLookup(func(k string) string {
+		if k == "CONFIG_PATH" {
+			return cfgPath
+		}
+		return ""
+	})
+
+	if cfg.Port != "8087" {
+		t.Errorf("expected port 8087, got %q", cfg.Port)
+	}
+	if cfg.Interval != 45*time.Second {
+		t.Errorf("expected interval 45s, got %v", cfg.Interval)
+	}
+	if len(cfg.Repos) != 2 || cfg.Repos[0] != "/repo/a" || cfg.Repos[1] != "/repo/b" {
+		t.Errorf("unexpected repos from yaml: %v", cfg.Repos)
+	}
+	if cfg.NomadAddr != "http://nomad.cluster:4646" {
+		t.Errorf("expected nomadAddr 'http://nomad.cluster:4646', got %q", cfg.NomadAddr)
+	}
+	if cfg.BrainInternalURL != "http://brain.cluster:8088/internal/reload" {
+		t.Errorf("expected brainInternalURL 'http://brain.cluster:8088/internal/reload', got %q", cfg.BrainInternalURL)
+	}
+
+	// 2. Env overrides take precedence over YAML
+	cfgOver := NewConfigFromLookup(func(k string) string {
+		switch k {
+		case "CONFIG_PATH":
+			return cfgPath
+		case "PORT":
+			return "9999"
+		case "SYNC_INTERVAL":
+			return "10s"
+		case "SYNC_REPOS":
+			return "/override/repo"
+		case "NOMAD_ADDR":
+			return "http://override.nomad:4646"
+		case "BRAIN_INTERNAL_URL":
+			return "http://override.brain:8088/reload"
+		default:
+			return ""
+		}
+	})
+
+	if cfgOver.Port != "9999" {
+		t.Errorf("expected port override 9999, got %q", cfgOver.Port)
+	}
+	if cfgOver.Interval != 10*time.Second {
+		t.Errorf("expected interval override 10s, got %v", cfgOver.Interval)
+	}
+	if len(cfgOver.Repos) != 1 || cfgOver.Repos[0] != "/override/repo" {
+		t.Errorf("expected repos override, got %v", cfgOver.Repos)
+	}
+	if cfgOver.NomadAddr != "http://override.nomad:4646" {
+		t.Errorf("expected nomadAddr override, got %q", cfgOver.NomadAddr)
+	}
+	if cfgOver.BrainInternalURL != "http://override.brain:8088/reload" {
+		t.Errorf("expected brainInternalURL override, got %q", cfgOver.BrainInternalURL)
 	}
 }
 
