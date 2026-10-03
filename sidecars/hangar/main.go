@@ -2194,7 +2194,7 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 			d.DispatchDeployEvent(baseEvt)
 
 			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", change.JobName, change.Path)
-			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "run", "-detach=false", fullPath)
+			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "run", "-detach", fullPath)
 			if err != nil {
 				combined := string(append(out, errBytes...))
 				failEvt := baseEvt
@@ -3162,7 +3162,7 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 		}
 		d.DispatchDeployEvent(baseEvt)
 
-		out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", fullPath)
+		out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach", fullPath)
 		if errRun != nil {
 			failEvt := baseEvt
 			failEvt.Event = "deploy_failed"
@@ -3327,7 +3327,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 						}
 						d.DispatchDeployEvent(baseEvt)
 
-						out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", fullPath)
+						out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach", fullPath)
 						if errRun != nil {
 							log.Printf("[Hangar:GitPush] nomad job run failed for %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), errRun)
 							failEvt := baseEvt
@@ -3422,7 +3422,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		d.DispatchDeployEvent(baseEvt)
 
 		log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s...", job.JobName, job.JobPath)
-		outRun, errRunBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", job.JobPath)
+		outRun, errRunBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach", job.JobPath)
 		if errRun != nil {
 			log.Printf("[Hangar:ImageReady] Warning: job run failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...)))), errRun)
 			failEvt := baseEvt

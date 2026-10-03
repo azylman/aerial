@@ -517,7 +517,7 @@ type DefaultOutboundDispatcher struct {
 
 func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &DefaultOutboundDispatcher{
 		hangarURL:  strings.TrimRight(hangarURL, "/"),
@@ -1096,7 +1096,7 @@ func (s *RouterServer) dispatchGitPush(repo, ref, commit string) {
 				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchGitPush: %v", r)
 			}
 		}()
-		dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		dispCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := s.dispatcher.DispatchGitPush(dispCtx, GitPushEventRequest{
 			Repo:   rp,
