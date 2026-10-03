@@ -37,17 +37,17 @@ Aerial uses a decoupled **Two-Repository Architecture**:
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                          HASHICORP NOMAD MULTI-NODE CLUSTER MESH                            │
+│                       HASHICORP NOMAD 3-NODE HETEROGENEOUS CLUSTER                          │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Core Server (quiet-zero/haos)│ GPU Worker (orin)            │ Kiosk Display (kiosk)         │
+│ Core Server (quiet-zero)     │ GPU Worker (calibarn)        │ Touch Kiosk (cockpit)         │
 │ • aerial-brain               │ • orin-voice (Whisper GPU)   │ • kiosk-client (ALSA / ear)   │
-│ • aerial-postgres (pgvector) │ • Wyoming speech daemon      │ • WebRTC stream & Chromium UI │
-│ • coredns (*.aerial, *.lan)  │ • Host volume whisper_cache  │ • Voice fingerprinter sidecar │
-│ • infisical & redis (Secrets)├──────────────────────────────┴───────────────────────────────┤
-│ • webhooks-router (Push CD)  │ Edge Worker (ameridroid)                                     │
-│ • aerial-hangar (GitOps)     │ • laya-openvino (Intel VNNI INT8 System-1 classifier)        │
-│ • Full Telemetry Matrix      │ • Low-latency ambient triage inference                      │
-└──────────────────────────────┴──────────────────────────────────────────────────────────────┘
+│ • aerial-postgres (pgvector) │ • Kokoro-82M TTS synthesis   │ • WebRTC stream & Chromium UI │
+│ • coredns (*.aerial, *.lan)  │ • Wyoming protocol (:10300)  │ • Voice fingerprinter sidecar │
+│ • infisical & redis (Secrets)│ • Host volume whisper_cache  │ • wake-word detection         │
+│ • webhooks-router (Push CD)  │ • High-bandwidth speech pipe │ • Real-time user touch HUD    │
+│ • aerial-hangar (GitOps)     │ • CUDA / Tensor acceleration │ • Local audio capture         │
+│ • Full Telemetry Matrix      │ • Edge AI speech engine      │ • Ambient room microphone     │
+└──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -239,7 +239,7 @@ job "custom-worker" {
   datacenters = ["dc1"]
   type        = "service"
 
-  # Target specific cluster hardware (e.g. quiet-zero, orin, kiosk, ameridroid)
+  # Target specific cluster node class (e.g. quiet-zero, calibarn, cockpit)
   constraint {
     attribute = "${node.class}"
     operator  = "="

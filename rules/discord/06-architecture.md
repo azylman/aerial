@@ -41,11 +41,10 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and Hang
   - **`aerial-grafana`**: Cyberpunk-themed visual telemetry dashboards.
   - **`ollama`**: Local LLM and vector embedding server for semantic memory.
 
-- **Multi-Node Cluster Topology**:
-  - **`quiet-zero` / `haos`**: Core server node hosting persistent storage, PostgreSQL, Brain, Hangar, Vector, and telemetry stacks.
-  - **`orin`**: Jetson Orin hosting `orin-voice` with NVIDIA GPU acceleration for Whisper ASR and Wyoming speech processing.
-  - **`kiosk`**: Beelink N100 hosting `kiosk-client` (`mirrormere-ear` audio capture, wake-word detection, and WebRTC streaming).
-  - **`ameridroid`**: Intel N150 hosting `laya-openvino` VNNI INT8 System-1 classifier.
+- **Heterogeneous 3-Node Cluster Topology**:
+  - **`quiet-zero`** (Core Server Node): Primary server hosting persistent storage, PostgreSQL + pgvector, Brain execution engine, Hangar GitOps, CoreDNS, Infisical, and full-stack telemetry.
+  - **`calibarn`** (AI / GPU Compute Node): Hardware-accelerated edge node with NVIDIA GPU acceleration hosting speech recognition (Faster-Whisper large-v3-turbo) and voice synthesis (Kokoro-82M TTS) over Wyoming protocol.
+  - **`cockpit`** (Touch Kiosk Node): Interactive touch display HUD hosting microphone capture (`ear`), wake-word detection, and WebRTC media streaming.
 
 To inspect active job allocations, service health, or cluster status, query Nomad jobs via `nomad-mcp` (`list_jobs`, `get_job`, `get_allocation_logs`) or inspect `nomad/jobs/*.nomad`.
 
