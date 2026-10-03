@@ -1660,7 +1660,6 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 					log.Printf("[Hangar:Periodic] Notice: SyncHomepageConfigToNomad: %v", err)
 				}
 			}
-			go d.notifyBrainReload()
 		}
 		metrics.RecordSyncRequest("periodic", status)
 
@@ -1675,30 +1674,6 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 		return nil, fmt.Errorf("unexpected return type from singleflight: %T", val)
 	}
 	return res, nil
-}
-
-// notifyBrainReload sends a best-effort POST request to Brain's internal reload endpoint.
-func (d *SyncDaemon) notifyBrainReload() {
-	brainURL := d.brainInternalURL
-	if brainURL == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL, nil)
-	if err != nil {
-		log.Printf("[Hangar] Warning: failed to create brain reload request: %v", err)
-		return
-	}
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[Hangar] Notice: brain reload trigger failed: %v", err)
-		return
-	}
-	defer closeWarn(resp.Body, "brain reload response body")
-	log.Printf("[Hangar] Successfully dispatched internal reload trigger to Brain (%s)", brainURL)
 }
 
 // SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML).
@@ -2492,7 +2467,6 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 			log.Printf("[Hangar:GitPush] Notice: SyncHomepageConfigToNomad: %v", err)
 		}
 
-		go d.notifyBrainReload()
 		return resp, http.StatusOK
 	}
 

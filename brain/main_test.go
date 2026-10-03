@@ -319,7 +319,7 @@ func TestHandleDirectMessage(t *testing.T) {
 				return nil
 			},
 		})
-		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil, nil)
+		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil)
 
 		// /discord/message should return 200 OK
 		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`))
@@ -491,7 +491,7 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 
 	t.Run("SetupBrainMuxWithEmbedder_Endpoints", func(t *testing.T) {
 		fake := db.NewFakeStore()
-		mux := SetupBrainMuxWithEmbedder(fake, nil, nil, nil)
+		mux := SetupBrainMuxWithEmbedder(fake, nil, nil)
 
 		// Test /api/transcripts/search route
 		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=test", nil)
@@ -949,7 +949,6 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/facts/789", "/facts"},
 		{"/schedules", "/schedules"},
 		{"/schedules/runs", "/schedules/runs"},
-		{"/internal/reload", "/internal/reload"},
 		{"/health", "/health"},
 		{"/metrics", "/metrics"},
 		{"/unknown/path", "unmatched"},
@@ -1165,13 +1164,8 @@ func TestHandleSchedules_And_Runs_ErrorBranches(t *testing.T) {
 func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	store := db.NewFakeStore()
 
-	reloaded := false
-	reloadFn := func(source string) {
-		reloaded = true
-	}
-
 	tmpHome := t.TempDir()
-	mux := SetupBrainMux(store, nil, reloadFn, tmpHome)
+	mux := SetupBrainMux(store, nil, tmpHome)
 
 	// Test /health
 	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -1187,21 +1181,6 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	mux.ServeHTTP(wTranscripts, reqTranscripts)
 	if wTranscripts.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /transcripts, got %d", wTranscripts.Code)
-	}
-
-	// Test /internal/reload (GET -> 405, POST -> 200)
-	reqReloadGet := httptest.NewRequest(http.MethodGet, "/internal/reload", nil)
-	wReloadGet := httptest.NewRecorder()
-	mux.ServeHTTP(wReloadGet, reqReloadGet)
-	if wReloadGet.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 from GET /internal/reload, got %d", wReloadGet.Code)
-	}
-
-	reqReloadPost := httptest.NewRequest(http.MethodPost, "/internal/reload", nil)
-	wReloadPost := httptest.NewRecorder()
-	mux.ServeHTTP(wReloadPost, reqReloadPost)
-	if wReloadPost.Code != http.StatusOK || !reloaded {
-		t.Errorf("Expected 200 and reloaded=true from POST /internal/reload, got %d, %t", wReloadPost.Code, reloaded)
 	}
 }
 
@@ -2788,13 +2767,7 @@ func TestHandlePrompt_BodyCloseError(t *testing.T) {
 func TestSetupBrainMux_WriteErrors(t *testing.T) {
 	store := db.NewFakeStore()
 	pool := newTestWorkerPool(store)
-	mux := SetupBrainMux(store, pool, func(string) {})
-
-	// /internal/reload write error
-	reqReload := httptest.NewRequest(http.MethodPost, "/internal/reload", nil)
-	recReload := httptest.NewRecorder()
-	errWReload := &errorResponseWriter{ResponseWriter: recReload}
-	mux.ServeHTTP(errWReload, reqReload)
+	mux := SetupBrainMux(store, pool)
 
 	// /health write error
 	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
