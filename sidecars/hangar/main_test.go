@@ -1302,11 +1302,13 @@ channels:
 		t.Fatalf("expected nil for disabled nomadAddr, got %v", err)
 	}
 
-	// 6. Successful push to Nomad
+	// 6. Successful push to Nomad with hash caching
 	var capturedArgs []string
+	brainCalls := 0
 	dSuccess := &SyncDaemon{
 		nomadAddr: "http://127.0.0.1:4646",
 		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			brainCalls++
 			capturedArgs = args
 			return []byte("var updated"), nil, nil
 		},
@@ -1316,6 +1318,26 @@ channels:
 	}
 	if len(capturedArgs) < 4 || capturedArgs[0] != "var" || capturedArgs[1] != "put" || capturedArgs[2] != "nomad/jobs/brain" {
 		t.Errorf("unexpected nomad CLI args: %v", capturedArgs)
+	}
+	if brainCalls != 1 {
+		t.Fatalf("expected 1 call to nomadExecutor, got %d", brainCalls)
+	}
+
+	// 6b. Second call with unchanged config -> cache hit, skips Nomad CLI call
+	if err := dSuccess.SyncBrainConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success on cached call, got %v", err)
+	}
+	if brainCalls != 1 {
+		t.Errorf("expected brainCalls to remain 1, got %d", brainCalls)
+	}
+
+	// 6c. Modified config -> cache invalidated, pushes to Nomad
+	_ = os.WriteFile(filepath.Join(valDir, "config.yaml"), []byte("channels:\n  default:\n    mode: classify\n"), 0644)
+	if err := dSuccess.SyncBrainConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success after config update, got %v", err)
+	}
+	if brainCalls != 2 {
+		t.Errorf("expected brainCalls to be 2 after modification, got %d", brainCalls)
 	}
 
 	// 7. Nomad CLI failure -> error
@@ -1381,15 +1403,37 @@ func TestSyncHomepageConfigToNomad(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(valDir, "homepage", "temp.tmp"), []byte("ignore me too"), 0644)
 
 	var capturedArgs []string
+	homepageCalls := 0
 	dSuccess := &SyncDaemon{
 		nomadAddr: "http://127.0.0.1:4646",
 		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			homepageCalls++
 			capturedArgs = args
 			return []byte("var updated"), nil, nil
 		},
 	}
 	if err := dSuccess.SyncHomepageConfigToNomad(ctx, valDir); err != nil {
 		t.Fatalf("expected success pushing to nomad, got %v", err)
+	}
+	if homepageCalls != 1 {
+		t.Fatalf("expected 1 homepage call, got %d", homepageCalls)
+	}
+
+	// 4b. Second call with unchanged config -> cache hit, skips Nomad CLI call
+	if err := dSuccess.SyncHomepageConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success on cached call, got %v", err)
+	}
+	if homepageCalls != 1 {
+		t.Errorf("expected homepageCalls to remain 1, got %d", homepageCalls)
+	}
+
+	// 4c. Modified homepage config -> cache invalidated, pushes to Nomad
+	_ = os.WriteFile(filepath.Join(valDir, "services", "homepage", "homepage.yaml"), []byte("title: Updated Aerial Dashboard\n"), 0644)
+	if err := dSuccess.SyncHomepageConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success after homepage update, got %v", err)
+	}
+	if homepageCalls != 2 {
+		t.Errorf("expected homepageCalls to be 2 after modification, got %d", homepageCalls)
 	}
 	if len(capturedArgs) < 5 || capturedArgs[2] != "nomad/jobs/homepage" {
 		t.Fatalf("unexpected nomad CLI args: %v", capturedArgs)
@@ -1487,6 +1531,23 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 	}
 	if len(calls) != 3 {
 		t.Fatalf("expected 3 nomad var put calls, got %d: %v", len(calls), calls)
+	}
+
+	// 4b. Second call with unchanged configs -> cache hit, skips all 3
+	if err := dSuccess.SyncServiceConfigsToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success on cached call, got %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected calls to remain 3, got %d", len(calls))
+	}
+
+	// 4c. Modify 1 service config -> only that 1 gets pushed
+	_ = os.WriteFile(filepath.Join(valDir, "services", "mcp", "docker-mcp.yaml"), []byte("docker_host: unix:///var/run/docker.sock\n# modified\n"), 0644)
+	if err := dSuccess.SyncServiceConfigsToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success on modified service call, got %v", err)
+	}
+	if len(calls) != 4 {
+		t.Fatalf("expected calls to increase to 4, got %d", len(calls))
 	}
 
 	// 5. Disabled Nomad executor -> safe no-op
@@ -2137,6 +2198,83 @@ func TestTriggerSync_AnyChanged(t *testing.T) {
 	}
 	if len(results) != 1 || !results[0].Changed {
 		t.Errorf("expected 1 result with Changed=true, got %+v", results)
+	}
+}
+
+func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
+	tempDir := t.TempDir()
+	localDir := filepath.Join(tempDir, "local")
+	_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+
+	configDir := filepath.Join(tempDir, "config")
+	_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0644)
+	_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 4001\n"), 0644)
+
+	head := "1111111111111111111111111111111111111111"
+	var nomadCalls [][]string
+	var nomadMu sync.Mutex
+
+	d := NewDaemon(DaemonConfig{
+		Repos:     []string{localDir},
+		ConfigDir: configDir,
+		NomadAddr: "http://127.0.0.1:4646",
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			nomadMu.Lock()
+			nomadCalls = append(nomadCalls, args)
+			nomadMu.Unlock()
+			return []byte("var updated"), nil, nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) == 0 {
+				return nil, nil, nil
+			}
+			switch args[0] {
+			case "config":
+				return nil, nil, nil
+			case "rev-parse":
+				return []byte(head), nil, nil
+			case "fetch":
+				return nil, nil, nil
+			case "merge":
+				return []byte("Already up to date."), nil, nil
+			case "diff":
+				return nil, nil, nil
+			}
+			return nil, nil, nil
+		},
+	})
+
+	results, err := d.TriggerSync()
+	if err != nil {
+		t.Fatalf("TriggerSync failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Changed {
+		t.Fatalf("expected 1 result with Changed=false, got %+v", results)
+	}
+
+	nomadMu.Lock()
+	callsCount := len(nomadCalls)
+	nomadMu.Unlock()
+
+	if callsCount == 0 {
+		t.Fatalf("expected nomad var put calls even when git repo has no changes, got 0")
+	}
+
+	results2, err := d.TriggerSync()
+	if err != nil {
+		t.Fatalf("second TriggerSync failed: %v", err)
+	}
+	if len(results2) != 1 || results2[0].Changed {
+		t.Fatalf("expected 1 result with Changed=false, got %+v", results2)
+	}
+
+	nomadMu.Lock()
+	secondCount := len(nomadCalls)
+	nomadMu.Unlock()
+
+	if secondCount != callsCount {
+		t.Fatalf("expected call count to remain %d due to caching, got %d", callsCount, secondCount)
 	}
 }
 

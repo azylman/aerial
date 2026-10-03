@@ -35,6 +35,7 @@ job "github-mcp" {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-github-mcp:latest"
+        force_pull   = true
         network_mode = "host"
       }
 
