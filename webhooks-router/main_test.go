@@ -2971,7 +2971,7 @@ func TestProcessGitHubEvent_PRMergedDirectMessage(t *testing.T) {
 		if dm.ChannelID != "1555405874565091380" {
 			t.Errorf("expected channelID 1555405874565091380, got %s", dm.ChannelID)
 		}
-		if !strings.Contains(dm.Content, "PR #542 on azylman/aerial merged into main (merge542).") {
+		if !strings.Contains(dm.Content, "PR #542 on azylman/aerial merged into main.") {
 			t.Errorf("unexpected content: %s", dm.Content)
 		}
 	case <-time.After(2 * time.Second):
