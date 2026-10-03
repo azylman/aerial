@@ -1254,7 +1254,39 @@ type mockPRRegistry struct {
 	ciFailedBySHATarget  string
 	ciFailedBySHAUpdated bool
 	ciFailedBySHAErr     error
-	err                  error
+
+	listOpenPRsCalls []string
+	openPRs          []RegisteredPR
+	listOpenPRsErr   error
+
+	conflictCalls    []struct{ repo string; prNumber int }
+	conflictTargetID string
+	conflictUpdated  bool
+	conflictErr      error
+
+	err error
+}
+
+func (m *mockPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error) {
+	if m.listOpenPRsErr != nil {
+		return nil, m.listOpenPRsErr
+	}
+	if m.err != nil {
+		return nil, m.err
+	}
+	m.listOpenPRsCalls = append(m.listOpenPRsCalls, repo)
+	return m.openPRs, nil
+}
+
+func (m *mockPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	if m.conflictErr != nil {
+		return "", false, m.conflictErr
+	}
+	if m.err != nil {
+		return "", false, m.err
+	}
+	m.conflictCalls = append(m.conflictCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	return m.conflictTargetID, m.conflictUpdated, nil
 }
 
 func (m *mockPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
@@ -2204,6 +2236,7 @@ type mockOutboundDispatcher struct {
 	imageReadyCalls    []ImageReadyEventRequest
 	imageReadyCh       chan ImageReadyEventRequest
 	promptCalls        []PromptRequest
+	promptCh           chan PromptRequest
 	directMessageCalls []DirectMessageRequest
 	directMessageCh    chan DirectMessageRequest
 	gitPushErr         error
@@ -2242,8 +2275,15 @@ func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req Ima
 
 func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.promptCalls = append(m.promptCalls, req)
+	ch := m.promptCh
+	m.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- req:
+		default:
+		}
+	}
 	return m.promptErr
 }
 
@@ -3083,5 +3123,267 @@ brain_url: "http://brain.custom:8088"
 	}
 	if cfgOver.NomadAddr != "http://nomad.custom:4646" {
 		t.Errorf("expected retained yaml nomad_addr, got %s", cfgOver.NomadAddr)
+	}
+}
+
+func TestCheckOpenPRConflicts_Detected(t *testing.T) {
+	ctx := context.Background()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/repos/azylman/aerial/pulls/543") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"number": 543,
+				"mergeable": false,
+				"mergeable_state": "dirty"
+			}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer apiServer.Close()
+
+	mockReg := &mockPRRegistry{
+		openPRs: []RegisteredPR{
+			{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"},
+		},
+		conflictTargetID: "1555405874565091380",
+		conflictUpdated:  true,
+	}
+
+	mockDisp := &mockOutboundDispatcher{
+		promptCh:        make(chan PromptRequest, 5),
+		directMessageCh: make(chan DirectMessageRequest, 5),
+	}
+
+	srv := NewRouterServer(Config{GitHubAPIURL: apiServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+	srv.SetConflictCheckDelay(0)
+
+	err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
+	if err != nil {
+		t.Fatalf("checkOpenPRConflicts failed: %v", err)
+	}
+
+	if len(mockReg.conflictCalls) != 1 || mockReg.conflictCalls[0].prNumber != 543 {
+		t.Errorf("expected conflict call for PR 543, got %+v", mockReg.conflictCalls)
+	}
+
+	select {
+	case prompt := <-mockDisp.promptCh:
+		if prompt.ChannelID != "1555405874565091380" {
+			t.Errorf("expected ChannelID 1555405874565091380, got %s", prompt.ChannelID)
+		}
+		if !strings.Contains(prompt.Prompt, "Merge conflict detected on PR #543") {
+			t.Errorf("unexpected prompt content: %s", prompt.Prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for conflict prompt dispatch")
+	}
+
+	select {
+	case dm := <-mockDisp.directMessageCh:
+		if dm.ChannelID != "1555405874565091380" {
+			t.Errorf("expected ChannelID 1555405874565091380, got %s", dm.ChannelID)
+		}
+		if !strings.Contains(dm.Content, "has merge conflicts with main") {
+			t.Errorf("unexpected dm content: %s", dm.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for conflict direct message")
+	}
+}
+
+func TestCheckOpenPRConflicts_CleanPR_NoAction(t *testing.T) {
+	ctx := context.Background()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 544,
+			"mergeable": true,
+			"mergeable_state": "clean"
+		}`))
+	}))
+	defer apiServer.Close()
+
+	mockReg := &mockPRRegistry{
+		openPRs: []RegisteredPR{
+			{PRNumber: 544, Branch: "feat/clean", TargetID: "1555405874565091380", HeadSHA: "head544"},
+		},
+	}
+	mockDisp := &mockOutboundDispatcher{
+		promptCh: make(chan PromptRequest, 5),
+	}
+
+	srv := NewRouterServer(Config{GitHubAPIURL: apiServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+	srv.SetConflictCheckDelay(0)
+
+	err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
+	if err != nil {
+		t.Fatalf("checkOpenPRConflicts failed: %v", err)
+	}
+
+	if len(mockReg.conflictCalls) != 0 {
+		t.Errorf("expected 0 conflict calls for clean PR, got %d", len(mockReg.conflictCalls))
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Errorf("expected 0 prompt calls, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+func TestCheckOpenPRConflicts_RetryNullMergeable(t *testing.T) {
+	ctx := context.Background()
+	var attempts atomic.Int32
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		att := attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if att == 1 {
+			// First attempt returns null mergeable
+			_, _ = w.Write([]byte(`{
+				"number": 545,
+				"mergeable": null,
+				"mergeable_state": "unknown"
+			}`))
+			return
+		}
+		// Subsequent attempt returns dirty conflict
+		_, _ = w.Write([]byte(`{
+			"number": 545,
+			"mergeable": false,
+			"mergeable_state": "dirty"
+		}`))
+	}))
+	defer apiServer.Close()
+
+	mockReg := &mockPRRegistry{
+		openPRs: []RegisteredPR{
+			{PRNumber: 545, Branch: "feat/retry", TargetID: "1555405874565091380", HeadSHA: "head545"},
+		},
+		conflictTargetID: "1555405874565091380",
+		conflictUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{
+		promptCh: make(chan PromptRequest, 5),
+	}
+
+	srv := NewRouterServer(Config{GitHubAPIURL: apiServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+	srv.SetConflictCheckDelay(1 * time.Millisecond)
+
+	err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
+	if err != nil {
+		t.Fatalf("checkOpenPRConflicts failed: %v", err)
+	}
+
+	if attempts.Load() < 2 {
+		t.Errorf("expected at least 2 attempts for null mergeable retry, got %d", attempts.Load())
+	}
+	if len(mockReg.conflictCalls) != 1 {
+		t.Errorf("expected conflict call after retry resolved, got %d", len(mockReg.conflictCalls))
+	}
+}
+
+func TestProcessGitHubEvent_AutoMergeDisabled(t *testing.T) {
+	ctx := context.Background()
+	mockReg := &mockPRRegistry{
+		conflictTargetID: "1555405874565091380",
+		conflictUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{
+		promptCh:        make(chan PromptRequest, 5),
+		directMessageCh: make(chan DirectMessageRequest, 5),
+	}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	payload := `{
+		"action": "auto_merge_disabled",
+		"number": 543,
+		"pull_request": {
+			"number": 543,
+			"head": {"ref": "feat/my-feature", "sha": "head543"}
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+
+	res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-amd", []byte(payload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent failed: %v", err)
+	}
+	if res.Action != "auto_merge_disabled" || res.PRNumber != 543 {
+		t.Errorf("unexpected event: %+v", res)
+	}
+
+	select {
+	case prompt := <-mockDisp.promptCh:
+		if prompt.ChannelID != "1555405874565091380" {
+			t.Errorf("expected ChannelID 1555405874565091380, got %s", prompt.ChannelID)
+		}
+		if !strings.Contains(prompt.Prompt, "Merge conflict detected on PR #543") {
+			t.Errorf("unexpected prompt content: %s", prompt.Prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for auto_merge_disabled prompt dispatch")
+	}
+}
+
+func TestProcessGitHubEvent_PushToMain_TriggersConflictCheckAsync(t *testing.T) {
+	ctx := context.Background()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 543,
+			"mergeable": false,
+			"mergeable_state": "dirty"
+		}`))
+	}))
+	defer apiServer.Close()
+
+	mockReg := &mockPRRegistry{
+		openPRs: []RegisteredPR{
+			{PRNumber: 543, Branch: "feat/conflict-check", TargetID: "1555405874565091380", HeadSHA: "head543"},
+		},
+		conflictTargetID: "1555405874565091380",
+		conflictUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{
+		gitPushCh: make(chan GitPushEventRequest, 5),
+		promptCh:  make(chan PromptRequest, 5),
+	}
+
+	srv := NewRouterServer(Config{GitHubAPIURL: apiServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+	srv.SetConflictCheckDelay(1 * time.Millisecond)
+
+	pushPayload := `{
+		"ref": "refs/heads/main",
+		"after": "mainsha123",
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+
+	_, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-conflict", []byte(pushPayload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push failed: %v", err)
+	}
+
+	select {
+	case prompt := <-mockDisp.promptCh:
+		if prompt.ChannelID != "1555405874565091380" {
+			t.Errorf("expected ChannelID 1555405874565091380, got %s", prompt.ChannelID)
+		}
+		if !strings.Contains(prompt.Prompt, "Merge conflict detected on PR #543") {
+			t.Errorf("unexpected prompt content: %s", prompt.Prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for async conflict check prompt on push to main")
 	}
 }
