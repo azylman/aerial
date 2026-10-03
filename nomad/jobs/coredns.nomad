@@ -42,13 +42,26 @@ job "coredns" {
 
       template {
         data = <<EOH
+lan:53 {
+    hosts /local/hosts {
+        reload 5s
+        fallthrough
+    }
+    forward . {{ if nomadVarExists "nomad/jobs/coredns" }}{{ with nomadVar "nomad/jobs/coredns" }}{{ if .UPSTREAM_DNS }}{{ .UPSTREAM_DNS }}{{ else }}1.1.1.1 8.8.8.8{{ end }}{{ end }}{{ else }}1.1.1.1 8.8.8.8{{ end }}
+    cache 30 {
+        success 1024
+        denial 512
+    }
+    errors
+}
+
 .:53 {
     hosts /local/hosts {
         reload 5s
         fallthrough
     }
     forward . {{ if nomadVarExists "nomad/jobs/coredns" }}{{ with nomadVar "nomad/jobs/coredns" }}{{ if .UPSTREAM_DNS }}{{ .UPSTREAM_DNS }}{{ else }}1.1.1.1 8.8.8.8{{ end }}{{ end }}{{ else }}1.1.1.1 8.8.8.8{{ end }} {
-        except aerial lan
+        except aerial
     }
     cache 30 {
         success 1024
