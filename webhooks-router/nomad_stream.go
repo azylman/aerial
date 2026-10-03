@@ -338,7 +338,7 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID, status)
 
 	if IsValidDiscordSnowflake(targetID) && s.dispatcher != nil {
-		dmMsg := fmt.Sprintf("👾 %sNomad deployment failed for %s. Following up...", formatDirectMessagePrefix(prNumber, repo), cleanJob)
+		dmMsg := fmt.Sprintf("💥 %sNomad deployment failed for %s. Following up...", formatDirectMessagePrefix(prNumber, repo), cleanJob)
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
 			ChannelID: targetID,
 			Content:   dmMsg,
