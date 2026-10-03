@@ -1758,11 +1758,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
 
 					if IsValidDiscordSnowflake(res.TargetID) && s.dispatcher != nil {
-						commitStr := res.MergeSHA
-						if commitStr == "" {
-							commitStr = res.HeadSHA
-						}
-						msg := fmt.Sprintf("PR #%d on %s merged into main (%s).", res.PRNumber, res.Repo, commitStr)
+						msg := fmt.Sprintf("PR #%d on %s merged into main.", res.PRNumber, res.Repo)
 						go func(tID, m string) {
 							defer func() {
 								if r := recover(); r != nil {
