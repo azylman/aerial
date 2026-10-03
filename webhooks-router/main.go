@@ -1605,7 +1605,7 @@ type GitHubWorkflowJobsResponse struct {
 	Jobs       []GitHubWorkflowJobItem `json:"jobs"`
 }
 
-var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*Push(?:\s+Images\s+to\s+GHCR)?\s*\(([^)]+)\)`)
+var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*(?:Push|Publish)(?:\s+(?:Sidecar\s+)?(?:Container\s+)?Images?(?:\s+to\s+GHCR)?)?\s*\(([^)]+)\)`)
 
 var aerialServiceImageMap = map[string]string{
 	"brain":           "ghcr.io/azylman/aerial-brain:latest",
@@ -2222,7 +2222,18 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 		service := strings.TrimSpace(m[1])
 		img, ok := aerialServiceImageMap[service]
 		if !ok {
-			img = fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service)
+			cleanRepo := strings.ToLower(repo)
+			if strings.HasSuffix(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar") {
+				if strings.HasPrefix(service, "orin-") {
+					img = fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service)
+				} else {
+					img = fmt.Sprintf("ghcr.io/%s/aerial-sidecar-%s:latest", owner, service)
+				}
+			} else if strings.HasSuffix(cleanRepo, "mirrormere") || strings.Contains(cleanRepo, "mirrormere") {
+				img = fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service)
+			} else {
+				img = fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service)
+			}
 		}
 		if _, exists := seen[img]; !exists {
 			seen[img] = struct{}{}
