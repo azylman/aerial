@@ -42,13 +42,20 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 		decision = CheckShare(payload.ToolCall.Name, args)
 	case "schedule":
 		decision = CheckSchedule(payload.ToolCall.Name, args)
+	case "batch":
+		decision = CheckBatch(payload, args)
 	default:
-		// "all" mode: evaluate share first, then schedule
+		// "all" mode: evaluate share first, then schedule, then batch
 		dShare := CheckShare(payload.ToolCall.Name, args)
 		if dShare.Decision == DecisionDeny {
 			decision = dShare
 		} else {
-			decision = CheckSchedule(payload.ToolCall.Name, args)
+			dSched := CheckSchedule(payload.ToolCall.Name, args)
+			if dSched.Decision == DecisionDeny {
+				decision = dSched
+			} else {
+				decision = CheckBatch(payload, args)
+			}
 		}
 	}
 

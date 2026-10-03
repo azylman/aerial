@@ -356,6 +356,41 @@ func TestGuardFailOpen(t *testing.T) {
 	if d5.Decision != DecisionAllow {
 		t.Errorf("expected allow on safe command in all mode, got: %v", d5)
 	}
+
+	// All mode where batch denies
+	allBatch := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "git add ."}
+		}
+	}`
+	d6 := runGuard(t, "all", allBatch)
+	if d6.Decision != DecisionDeny {
+		t.Errorf("expected deny on unbatched git add in all mode, got: %v", d6)
+	}
+
+	// Explicit batch mode
+	batchDeny := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "go test ./..."}
+		}
+	}`
+	d7 := runGuard(t, "batch", batchDeny)
+	if d7.Decision != DecisionDeny {
+		t.Errorf("expected deny on unscoped test in batch mode, got: %v", d7)
+	}
+
+	batchAllow := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "go test ./pkg/guard"}
+		}
+	}`
+	d8 := runGuard(t, "batch", batchAllow)
+	if d8.Decision != DecisionAllow {
+		t.Errorf("expected allow on scoped test in batch mode, got: %v", d8)
+	}
 }
 
 func TestGuardEdgeCases(t *testing.T) {
