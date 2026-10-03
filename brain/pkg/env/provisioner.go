@@ -24,6 +24,7 @@ type Provisioner struct {
 	systemInstructionsPaths []string
 	aerialRulesDir          string
 	configRulesDir          string
+	hooksDir                string
 
 	mu sync.Mutex
 }
@@ -53,6 +54,7 @@ func New(homeDir, dataDir string) *Provisioner {
 		agentsSkillsDir:         agentsSkillsDir,
 		aerialRulesDir:          "/share/aerial/rules",
 		configRulesDir:          "/share/aerial-config/rules",
+		hooksDir:                "/share/aerial/scripts/hooks",
 		agentInstructionsPaths:  DefaultAgentInstructionsSearchPaths,
 		systemInstructionsPaths: DefaultSystemInstructionsSearchPaths,
 	}
@@ -93,6 +95,13 @@ func (p *Provisioner) SetConfigRulesDir(dir string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.configRulesDir = dir
+}
+
+// SetHooksDir sets the search path for lifecycle hooks.
+func (p *Provisioner) SetHooksDir(dir string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hooksDir = dir
 }
 
 // SetAgentInstructionsSearchPaths sets the search paths for AGENTS.md instructions.
@@ -136,6 +145,10 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 
 	if err := p.SyncSkills(); err != nil {
 		return fmt.Errorf("failed to sync skills: %w", err)
+	}
+
+	if err := p.SyncHooks(); err != nil {
+		return fmt.Errorf("failed to sync hooks: %w", err)
 	}
 
 	return nil
