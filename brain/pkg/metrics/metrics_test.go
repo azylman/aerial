@@ -48,7 +48,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	SchedulerExecutionDurationSeconds.WithLabelValues("cron").Observe(1.2)
 	MemoryOperationsTotal.WithLabelValues("search", "success").Inc()
 	MemorySearchDurationSeconds.Observe(0.015)
-	ConfigReloadsTotal.WithLabelValues("watcher", "success").Inc()
+	ConfigReloadsTotal.WithLabelValues("SIGHUP", "success").Inc()
 
 	// Register DB stats with in-memory sqlite
 	db, err := sql.Open("sqlite", ":memory:")

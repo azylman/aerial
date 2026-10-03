@@ -368,6 +368,9 @@ if [ "$MODE" = "staged" ]; then
             pkgs=$(echo "$STAGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             if [ -n "$pkgs" ]; then
                 for p in $pkgs; do
+                    if [ ! -d "$svc/$p" ]; then
+                        continue
+                    fi
                     if [ "$p" = "." ]; then
                         run_golangci_lint "$svc" "."
                     else

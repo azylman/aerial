@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2356,6 +2357,88 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(runner.NewMockDaemonSpawner()))
 	if err != nil {
 		t.Fatalf("RunBrainApp failed: %v", err)
+	}
+}
+
+func TestRunBrainApp_SIGHUP(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
+
+	cfg := config.NewTestConfig()
+	cur := cfg.Current()
+	cur.GeminiHomeDir = tmpDir
+	cur.DataDir = filepath.Join(tmpDir, "data")
+	cur.Port = "0"
+	cur.Model = "gemini-2.5-flash"
+	cur.DatabaseURL = ":memory:"
+	if cur.AgyBin == "" {
+		cur.AgyBin = "/bin/true"
+	}
+	cfg.Update(cur)
+
+	ready := make(chan struct{})
+	oldReady := onServerReady
+	onServerReady = func(addr string) {
+		close(ready)
+	}
+	defer func() { onServerReady = oldReady }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hupChan := make(chan os.Signal, 1)
+	reloadReceived := make(chan string, 1)
+
+	go func() {
+		<-ready
+		// Send mock SIGHUP via injected channel (zero raw POSIX signal broadcasts)
+		hupChan <- syscall.SIGHUP
+		select {
+		case src := <-reloadReceived:
+			if src != "SIGHUP" {
+				t.Errorf("expected reload source SIGHUP, got %q", src)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("timeout waiting for SIGHUP reload callback")
+		}
+		cancel()
+	}()
+
+	mockStore := db.NewFakeStore()
+	err := RunBrainApp(ctx, cfg,
+		WithStore(mockStore),
+		WithProcessSpawner(runner.NewMockDaemonSpawner()),
+		WithHupChannel(hupChan),
+		WithOnReload(func(src string) {
+			select {
+			case reloadReceived <- src:
+			default:
+			}
+		}),
+	)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("RunBrainApp failed: %v", err)
+	}
+}
+
+func TestBrainAppOptions_Coverage(t *testing.T) {
+	var opts brainAppOptions
+	hupChan := make(chan os.Signal, 1)
+	WithHupChannel(hupChan)(&opts)
+	if opts.hupChan != hupChan {
+		t.Errorf("expected hupChan to be set")
+	}
+
+	called := false
+	WithOnReload(func(src string) {
+		called = true
+	})(&opts)
+	if opts.onReload == nil {
+		t.Fatalf("expected onReload to be set")
+	}
+	opts.onReload("test")
+	if !called {
+		t.Errorf("expected onReload to be invoked")
 	}
 }
 

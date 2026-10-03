@@ -451,7 +451,7 @@ var (
 	ConfigReloadsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_config_reloads_total",
-			Help: "Total hot-reload events triggered by file watcher or sidecar.",
+			Help: "Total hot-reload events triggered by SIGHUP, HTTP trigger, or sidecar.",
 		},
 		[]string{"source", "status"},
 	)
