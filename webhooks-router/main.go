@@ -381,6 +381,7 @@ type PRRegistryUpdater interface {
 	AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (targetID string, prNumber int, updated bool, err error)
 	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
 	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
+	ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (targetID string, branch, headSHA, mergeSHA string, err error)
 	ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error)
 	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
@@ -606,6 +607,31 @@ func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sh
 		return 0, "", "", fmt.Errorf("resolve pr by sha: %w", err)
 	}
 	return prNum, branch, targetID, nil
+}
+
+func (r *PostgresPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return "", "", "", "", nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT target_id, branch, head_sha, COALESCE(merge_sha, '')
+		FROM pr_registry
+		WHERE repo = $1 AND pr_number = $2
+		LIMIT 1;
+	`
+	var targetID, branch, headSHA, mergeSHA string
+	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID, &branch, &headSHA, &mergeSHA)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", "", "", nil
+	}
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("resolve pr by number: %w", err)
+	}
+	return targetID, branch, headSHA, mergeSHA, nil
 }
 
 func (r *PostgresPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error) {
@@ -979,10 +1005,11 @@ type OutboundDispatcher interface {
 }
 
 type DefaultOutboundDispatcher struct {
-	hangarURL  string
-	brainURL   string
-	httpClient *http.Client
-	retryDelay time.Duration
+	hangarURL   string
+	brainURL    string
+	httpClient  *http.Client
+	retryDelay  time.Duration
+	maxAttempts int
 }
 
 func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
@@ -990,11 +1017,18 @@ func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Clien
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &DefaultOutboundDispatcher{
-		hangarURL:  strings.TrimRight(hangarURL, "/"),
-		brainURL:   strings.TrimRight(brainURL, "/"),
-		httpClient: client,
-		retryDelay: 500 * time.Millisecond,
+		hangarURL:   strings.TrimRight(hangarURL, "/"),
+		brainURL:    strings.TrimRight(brainURL, "/"),
+		httpClient:  client,
+		retryDelay:  1500 * time.Millisecond,
+		maxAttempts: 6,
 	}
+}
+
+// SetRetryConfig overrides retry delay and attempt bounds for fast hermetic unit tests.
+func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
+	d.retryDelay = delay
+	d.maxAttempts = maxAttempts
 }
 
 func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
@@ -1068,10 +1102,13 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
 	endpoint := fmt.Sprintf("%s/prompt", d.brainURL)
 	delay := d.retryDelay
 	if delay <= 0 {
-		delay = 500 * time.Millisecond
+		delay = 1500 * time.Millisecond
 	}
 
-	const maxAttempts = 3
+	maxAttempts := d.maxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 6
+	}
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -1091,6 +1128,10 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
 			if attempt < maxAttempts {
 				select {
 				case <-time.After(delay):
+					delay = time.Duration(float64(delay) * 1.5)
+					if delay > 5*time.Second {
+						delay = 5 * time.Second
+					}
 					continue
 				case <-ctx.Done():
 					return ctx.Err()
@@ -1114,6 +1155,10 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
 			if attempt < maxAttempts {
 				select {
 				case <-time.After(delay):
+					delay = time.Duration(float64(delay) * 1.5)
+					if delay > 5*time.Second {
+						delay = 5 * time.Second
+					}
 					continue
 				case <-ctx.Done():
 					return ctx.Err()
@@ -1430,9 +1475,18 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if strings.TrimSpace(evt.Event) == "" || strings.TrimSpace(evt.JobName) == "" {
+	if strings.TrimSpace(evt.Event) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
 		return
+	}
+
+	if strings.TrimSpace(evt.JobName) == "" {
+		if strings.HasPrefix(evt.Event, "sync_") {
+			evt.JobName = "git-sync"
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+			return
+		}
 	}
 
 	if s.riverClient != nil {
@@ -1464,16 +1518,86 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
-	if evt.CommitSHA != "" && evt.PRNumber == 0 && s.registry != nil {
-		prNum, _, targetID, err := s.registry.ResolvePRBySHA(ctx, evt.Repo, evt.CommitSHA)
+// ResolveSHA resolves a commit SHA to its PR number, target Discord thread ID, and branch.
+// It checks local pr_registry first, then falls back to GitHub commit PR lookup and backfills pr_registry.
+func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, string, string, error) {
+	if repo == "" || sha == "" || isZeroSHA(sha) {
+		return 0, "", "", nil
+	}
+
+	repo = normalizeRepo(repo)
+
+	// 1. Check local pr_registry by SHA (matches head_sha or merge_sha)
+	if s.registry != nil {
+		prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, repo, sha)
 		if err != nil {
-			log.Printf("[webhooks-router] [hangar] failed resolving PR by SHA %s: %v", evt.CommitSHA, err)
+			log.Printf("[webhooks-router] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
+		} else if prNum > 0 {
+			if targetID == "" {
+				tID, _, _, _, errNum := s.registry.ResolvePRByNumber(ctx, repo, prNum)
+				if errNum == nil && tID != "" {
+					targetID = tID
+				}
+			}
+			return prNum, targetID, branch, nil
+		}
+	}
+
+	// 2. Fall back to GitHub API commit PR lookup
+	prNum, branch, err := s.resolvePRFromCommitSHA(ctx, repo, sha)
+	if err != nil {
+		log.Printf("[webhooks-router] [github] failed resolving PR for commit %s via GitHub API: %v", sha, err)
+		return 0, "", "", err
+	}
+	if prNum == 0 {
+		return 0, "", "", nil
+	}
+
+	var targetID string
+	if s.registry != nil {
+		tID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
+		if err == nil && tID != "" {
+			targetID = tID
+		}
+		// Backfill merge_sha if it was missing
+		backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha)
+		if err != nil {
+			log.Printf("[webhooks-router] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
+		} else if targetID == "" && backfillTID != "" {
+			targetID = backfillTID
+		}
+	}
+
+	return prNum, targetID, branch, nil
+}
+
+// ResolveThreadForPR resolves the Discord thread snowflake (target_id) for a PR.
+func (s *RouterServer) ResolveThreadForPR(ctx context.Context, repo string, prNum int) (string, error) {
+	if s.registry == nil || prNum <= 0 {
+		return "", nil
+	}
+	repo = normalizeRepo(repo)
+	targetID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
+	return targetID, err
+}
+
+func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
+	if evt.CommitSHA != "" && evt.PRNumber == 0 {
+		prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA)
+		if err != nil {
+			log.Printf("[webhooks-router] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
 		} else if prNum > 0 {
 			evt.PRNumber = prNum
 			if evt.TargetID == "" {
 				evt.TargetID = targetID
 			}
+		}
+	} else if evt.PRNumber > 0 && evt.TargetID == "" {
+		targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber)
+		if err != nil {
+			log.Printf("[webhooks-router] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		} else if targetID != "" {
+			evt.TargetID = targetID
 		}
 	}
 
@@ -2622,7 +2746,16 @@ func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha str
 		return 0, "", fmt.Errorf("no pull requests associated with commit %s", sha)
 	}
 
-	return prs[0].Number, prs[0].Head.Ref, nil
+	selected := prs[0]
+	for _, item := range prs[1:] {
+		if selected.State != "closed" && item.State == "closed" {
+			selected = item
+		} else if selected.State == item.State && item.Number > selected.Number {
+			selected = item
+		}
+	}
+
+	return selected.Number, selected.Head.Ref, nil
 }
 
 func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {

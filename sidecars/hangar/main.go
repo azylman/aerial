@@ -1351,6 +1351,30 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 						d.nomadKnownDigests[key] = remoteDigest
 						d.nomadDigestsMu.Unlock()
 
+						// Resolve repository HEAD commit SHA to link image rollout to PR
+						var headSHA string
+						if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
+							headSHA = strings.TrimSpace(string(headOut))
+						}
+
+						repoName := filepath.Base(repo)
+						if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
+							repoName = "azylman/" + repoName
+						}
+
+						deployEvt := HangarDeployEvent{
+							Event:     "deploy_started",
+							JobName:   jobName,
+							Repo:      repoName,
+							CommitSHA: headSHA,
+							Image:     imgRef,
+							Digest:    remoteDigest,
+							Status:    "started",
+							Details:   fmt.Sprintf("nomad image poll restart for %s (digest %s)", imgRef, remoteDigest),
+							Timestamp: time.Now().UTC(),
+						}
+						d.DispatchDeployEvent(deployEvt)
+
 						out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
 						if runErr != nil {
 							log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
@@ -2286,12 +2310,17 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 	res := d.SyncRepo(ctx, repoPath)
 	if res.Error != "" {
 		if isSnowflake(req.TargetID) {
+			commitSHA := res.CurrentHead
+			if commitSHA == "" {
+				commitSHA = req.Commit
+			}
 			failEvt := HangarDeployEvent{
 				Event:     "sync_failed",
+				JobName:   "git-sync",
 				Repo:      req.Repo,
 				PRNumber:  req.PRNumber,
 				TargetID:  req.TargetID,
-				CommitSHA: res.CurrentHead,
+				CommitSHA: commitSHA,
 				Status:    "failed",
 				Details:   res.Error,
 				Timestamp: time.Now().UTC(),
@@ -2320,6 +2349,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}
 		syncEvt := HangarDeployEvent{
 			Event:     "sync_success",
+			JobName:   "git-sync",
 			Repo:      req.Repo,
 			PRNumber:  req.PRNumber,
 			TargetID:  req.TargetID,
