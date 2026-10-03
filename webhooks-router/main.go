@@ -376,11 +376,11 @@ func cleanRepoName(repo string) string {
 func formatDirectMessagePrefix(prNumber int, repo string) string {
 	repoName := cleanRepoName(repo)
 	if prNumber > 0 && repoName != "" {
-		return fmt.Sprintf("**(PR: #%d, repo: %s)**: ", prNumber, repoName)
+		return fmt.Sprintf("**(PR: #%d, repo: %s)** ", prNumber, repoName)
 	} else if repoName != "" {
-		return fmt.Sprintf("**(repo: %s)**: ", repoName)
+		return fmt.Sprintf("**(repo: %s)** ", repoName)
 	} else if prNumber > 0 {
-		return fmt.Sprintf("**(PR: #%d)**: ", prNumber)
+		return fmt.Sprintf("**(PR: #%d)** ", prNumber)
 	}
 	return ""
 }
