@@ -49,7 +49,7 @@ Check active deployment and container swap progress:
 /share/aerial/scripts/aerial-pr.sh deploy-status main
 ```
 - **Response Format Invariant**: Report deployment status in plain prose strictly capped at 2 sentences max (zero markdown bullet lists, tables, or forward-looking checklists).
-- If deployment is ongoing, reschedule a 2-minute follow-up check via `scheduler-mcp` (`schedule_once`).
+- Deployment status and completion outcomes are delivered reactively to Discord via Hangar and webhooks-router without manual polling.
 
 ---
 

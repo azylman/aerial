@@ -12,7 +12,7 @@
    - All log streams and GitOps reconcile outputs pass through regex sanitizers to mask sensitive tokens.
 
 4. **Scheduling Invariant**:
-   - **Persistent Schedules & Follow-Up Reminders**: **ALWAYS** use the persistent scheduler MCP tools (`scheduler_schedule_recurring`, `scheduler_schedule_once`, `scheduler_list_schedules`, `scheduler_cancel_schedule`). NEVER use the built-in ephemeral CLI `schedule` tool for user reminders, cron jobs, PR follow-ups, or subagent keep-alive.
+   - **Persistent Schedules & Follow-Up Reminders**: **ALWAYS** use the persistent scheduler MCP tools (`scheduler_schedule_recurring`, `scheduler_schedule_once`, `scheduler_list_schedules`, `scheduler_cancel_schedule`). NEVER use the built-in ephemeral CLI `schedule` tool for user reminders, cron jobs, or subagent keep-alive. PR follow-ups and continuous delivery are fully automated via event-driven push webhooks; never schedule PR checks via `scheduler-mcp`.
    - **CLI `schedule` Tool Prohibition**: The built-in ephemeral CLI `schedule` tool is **strictly prohibited**. Calling `schedule` produces a background task that prompts the model to emit intermediate waiting text, which triggers `agy`'s print-mode drain and kills active execution.
 
 5. **Instruction Precedence Hierarchy**:
