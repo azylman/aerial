@@ -300,6 +300,18 @@ type RegisteredPR struct {
 	HeadSHA  string `json:"head_sha"`
 }
 
+// DeployingPR holds metadata for a PR currently undergoing deployment rollout.
+type DeployingPR struct {
+	ID       int64                  `json:"id"`
+	Repo     string                 `json:"repo"`
+	PRNumber int                    `json:"pr_number"`
+	Branch   string                 `json:"branch"`
+	HeadSHA  string                 `json:"head_sha"`
+	MergeSHA string                 `json:"merge_sha"`
+	TargetID string                 `json:"target_id"`
+	Metadata map[string]interface{} `json:"metadata"`
+}
+
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
 type PRRegistryUpdater interface {
 	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
@@ -311,6 +323,9 @@ type PRRegistryUpdater interface {
 	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
 	ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error)
 	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
+	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
+	AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
+	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
 }
 
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
@@ -578,6 +593,171 @@ func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo 
 		return "", false, fmt.Errorf("atomic transition conflict: %w", err)
 	}
 	return targetID, true, nil
+}
+
+func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (string, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return "", nil
+	}
+	jobsJSON, err := json.Marshal(jobs)
+	if err != nil {
+		jobsJSON = []byte("[]")
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET status = 'deploying',
+			metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $2 AND pr_number = $3 AND status NOT IN ('closed', 'conflict')
+		RETURNING target_id;
+	`
+	var targetID string
+	err = r.pool.QueryRow(qCtx, query, jobsJSON, repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("transition deploying: %w", err)
+	}
+	return targetID, nil
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+	jobName = strings.TrimSpace(jobName)
+	if jobName == "" {
+		return "", 0, "", "", false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	tx, err := r.pool.Begin(qCtx)
+	if err != nil {
+		return "", 0, "", "", false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(qCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			log.Printf("[webhooks-router] [registry] tx rollback error: %v", rbErr)
+		}
+	}()
+
+	selectQuery := `
+		SELECT id, target_id, pr_number, COALESCE(NULLIF(merge_sha, ''), head_sha), repo, COALESCE(metadata, '{}'::jsonb)
+		FROM pr_registry
+		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
+		ORDER BY updated_at DESC
+		LIMIT 1
+		FOR UPDATE
+	`
+
+	var id int64
+	var targetID, mergeSHA, repoOut string
+	var prNum int
+	var metaBytes []byte
+	err = tx.QueryRow(qCtx, selectQuery, jobName).Scan(&id, &targetID, &prNum, &mergeSHA, &repoOut, &metaBytes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, "", "", false, nil
+	}
+	if err != nil {
+		return "", 0, "", "", false, fmt.Errorf("select deploying pr: %w", err)
+	}
+
+	var meta map[string]interface{}
+	if len(metaBytes) > 0 {
+		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			log.Printf("[webhooks-router] [registry] failed to unmarshal metadata for job deploy: %v", err)
+		}
+	}
+	if meta == nil {
+		meta = make(map[string]interface{})
+	}
+
+	jobs := extractJobsFromMetadata(meta)
+	var remaining []string
+	for _, j := range jobs {
+		if !strings.EqualFold(j, jobName) {
+			remaining = append(remaining, j)
+		}
+	}
+
+	if len(remaining) > 0 {
+		// More jobs are still deploying for this PR; update remaining jobs in metadata and remain in deploying state
+		remainingJSON, err := json.Marshal(remaining)
+		if err != nil {
+			remainingJSON = []byte("[]")
+		}
+		updateQuery := `
+			UPDATE pr_registry
+			SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb),
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = $2 AND status = 'deploying'
+		`
+		if _, err := tx.Exec(qCtx, updateQuery, remainingJSON, id); err != nil {
+			return "", 0, "", "", false, fmt.Errorf("update remaining jobs: %w", err)
+		}
+		if err := tx.Commit(qCtx); err != nil {
+			return "", 0, "", "", false, fmt.Errorf("commit remaining jobs tx: %w", err)
+		}
+		return "", 0, "", "", false, nil
+	}
+
+	// All candidate jobs for this PR have successfully deployed!
+	updateQuery := `
+		UPDATE pr_registry
+		SET status = 'deployed',
+		    metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'deploying'
+	`
+	tag, err := tx.Exec(qCtx, updateQuery, id)
+	if err != nil {
+		return "", 0, "", "", false, fmt.Errorf("update pr deployed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return "", 0, "", "", false, nil
+	}
+
+	if err := tx.Commit(qCtx); err != nil {
+		return "", 0, "", "", false, fmt.Errorf("commit pr deployed tx: %w", err)
+	}
+
+	return targetID, prNum, mergeSHA, repoOut, true, nil
+}
+
+func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingPR, error) {
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, COALESCE(metadata, '{}'::jsonb)
+		FROM pr_registry
+		WHERE status = 'deploying'
+		ORDER BY id ASC;
+	`
+	rows, err := r.pool.Query(qCtx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list deploying prs: %w", err)
+	}
+	defer rows.Close()
+
+	var prs []DeployingPR
+	for rows.Next() {
+		var p DeployingPR
+		var metaBytes []byte
+		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.Branch, &p.HeadSHA, &p.MergeSHA, &p.TargetID, &metaBytes); err != nil {
+			return nil, fmt.Errorf("scan deploying pr: %w", err)
+		}
+		if len(metaBytes) > 0 {
+			if err := json.Unmarshal(metaBytes, &p.Metadata); err != nil {
+				log.Printf("[webhooks-router] [registry] failed to unmarshal metadata for pr %s#%d: %v", p.Repo, p.PRNumber, err)
+			}
+		}
+		prs = append(prs, p)
+	}
+	return prs, rows.Err()
 }
 
 // Discord Snowflake validation
@@ -1488,6 +1668,22 @@ func (s *RouterServer) dispatchWorkflowRunImages(repo string, runID int64, headB
 			log.Printf("[webhooks-router] [dispatcher] no built images detected for workflow run %d (%s)", rID, rp)
 			return
 		}
+
+		var targetJobs []string
+		for _, img := range images {
+			jobName := jobNameFromImage(img)
+			if jobName != "" {
+				targetJobs = append(targetJobs, jobName)
+			}
+		}
+		if len(targetJobs) > 0 && s.registry != nil && pr > 0 {
+			if _, err := s.registry.TransitionDeploying(dispCtx, rp, pr, targetJobs); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", rp, pr, err)
+			} else {
+				log.Printf("[webhooks-router] [dispatcher] pr %s#%d transitioned to deploying with jobs: %v", rp, pr, targetJobs)
+			}
+		}
+
 		var wg sync.WaitGroup
 		for _, img := range images {
 			wg.Add(1)
@@ -2442,6 +2638,19 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		}
 		log.Println("[webhooks-router] River worker pool started successfully")
 	}
+
+	// Initialize and launch Nomad Event Stream subscriber
+	nomadSub := NewNomadStreamSubscriber(server)
+	nomadSub.Start(ctx)
+
+	// Reconcile any active deployments from pr_registry (startup sweep)
+	go func() {
+		sweepCtx, sweepCancel := context.WithTimeout(ctx, 15*time.Second)
+		defer sweepCancel()
+		if sweepErr := server.ReconcileActiveDeployments(sweepCtx); sweepErr != nil {
+			log.Printf("[webhooks-router] [sweep] startup active deployment reconciliation error: %v", sweepErr)
+		}
+	}()
 
 	ln, err := net.Listen("tcp", ":"+cfg.Port)
 	if err != nil {

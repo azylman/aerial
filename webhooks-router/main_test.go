@@ -1264,7 +1264,62 @@ type mockPRRegistry struct {
 	conflictUpdated  bool
 	conflictErr      error
 
+	deployingCalls []struct {
+		repo     string
+		prNumber int
+		jobs     []string
+	}
+	deployingTargetID string
+	deployingErr      error
+
+	deployedJobCalls []string
+	deployedTargetID string
+	deployedPRNum    int
+	deployedMergeSHA string
+	deployedRepo     string
+	deployedUpdated  bool
+	deployedErr      error
+
+	listDeployingPRs []DeployingPR
+	listDeployingErr error
+
 	err error
+}
+
+func (m *mockPRRegistry) TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (string, error) {
+	if m.deployingErr != nil {
+		return "", m.deployingErr
+	}
+	if m.err != nil {
+		return "", m.err
+	}
+	m.deployingCalls = append(m.deployingCalls, struct {
+		repo     string
+		prNumber int
+		jobs     []string
+	}{repo, prNumber, jobs})
+	return m.deployingTargetID, nil
+}
+
+func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+	if m.deployedErr != nil {
+		return "", 0, "", "", false, m.deployedErr
+	}
+	if m.err != nil {
+		return "", 0, "", "", false, m.err
+	}
+	m.deployedJobCalls = append(m.deployedJobCalls, jobName)
+	return m.deployedTargetID, m.deployedPRNum, m.deployedMergeSHA, m.deployedRepo, m.deployedUpdated, nil
+}
+
+func (m *mockPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingPR, error) {
+	if m.listDeployingErr != nil {
+		return nil, m.listDeployingErr
+	}
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.listDeployingPRs, nil
 }
 
 func (m *mockPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error) {
