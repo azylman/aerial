@@ -112,9 +112,6 @@ job "brain" {
         GOPATH                      = "/data/cache/go"
         GOMODCACHE                  = "/data/cache/go/pkg/mod"
         GOLANGCI_LINT_CACHE         = "/data/cache/golangci-lint"
-        OPENOBSERVE_URL             = "http://openobserve:5080/openobserve"
-        OPENOBSERVE_ORG             = "default"
-        OPENOBSERVE_ROOT_USER_EMAIL = "admin@aerial.local"
       }
 
       template {
