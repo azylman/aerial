@@ -1619,14 +1619,40 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
 	if s.registry != nil && evt.PRNumber > 0 {
-		if evt.Event == "deploy_success" {
+		if evt.Event == "deploy_started" {
+			log.Printf("[webhooks-router] [registry] pr %s#%d deployment started for job %s", evt.Repo, evt.PRNumber, evt.JobName)
+		} else if evt.Event == "deploy_success" {
 			log.Printf("[webhooks-router] [registry] pr %s#%d deployed successfully for job %s", evt.Repo, evt.PRNumber, evt.JobName)
 		} else if evt.Event == "deploy_rollback" {
 			log.Printf("[webhooks-router] [registry] pr %s#%d deployment rolled back for job %s", evt.Repo, evt.PRNumber, evt.JobName)
 		}
 	}
 
-	if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+	if evt.Event == "deploy_started" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+		targetID := evt.TargetID
+		var msg string
+		if evt.Repo != "" && evt.PRNumber > 0 && evt.CommitSHA != "" {
+			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA)
+		} else if evt.Repo != "" && evt.PRNumber > 0 {
+			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s (PR #%d).", evt.JobName, evt.Repo, evt.PRNumber)
+		} else if evt.Repo != "" && evt.CommitSHA != "" {
+			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s (commit: %s).", evt.JobName, evt.Repo, evt.CommitSHA)
+		} else if evt.PRNumber > 0 && evt.CommitSHA != "" {
+			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s (PR #%d, commit: %s).", evt.JobName, evt.PRNumber, evt.CommitSHA)
+		} else if evt.Repo != "" {
+			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s on %s.", evt.JobName, evt.Repo)
+		} else {
+			msg = fmt.Sprintf("Continuous Delivery deployment started for job %s.", evt.JobName)
+		}
+		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+			ChannelID: targetID,
+			Content:   msg,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_started direct message: %v", err)
+			return &evt, fmt.Errorf("dispatch deploy_started direct message: %w", err)
+		}
+		log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
+	} else if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
 			return &evt, err
 		}

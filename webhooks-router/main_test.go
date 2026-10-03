@@ -2956,6 +2956,33 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 
 	ctx := context.Background()
 
+	// 0. deploy_started with valid snowflake targetID triggers direct message (NOT prompt!)
+	startedEvt := HangarDeployEvent{
+		Event:     "deploy_started",
+		JobName:   "brain",
+		Repo:      "azylman/aerial",
+		PRNumber:  527,
+		CommitSHA: "sha1234",
+		TargetID:  "1555405874565091380",
+		Status:    "started",
+	}
+	srv.ProcessHangarEvent(ctx, startedEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	dmCalls := mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 1 {
+		t.Fatalf("expected 1 direct message dispatch after deploy_started, got %d", len(dmCalls))
+	}
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "Continuous Delivery deployment started for job brain on azylman/aerial") {
+		t.Errorf("unexpected deploy_started direct message: %+v", dmCalls[0])
+	}
+	if !strings.Contains(dmCalls[0].Content, "PR #527") || !strings.Contains(dmCalls[0].Content, "commit: sha1234") {
+		t.Errorf("expected PR #527 and commit in message: %+v", dmCalls[0])
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls on deploy_started, got %d", len(mockDisp.PromptCalls()))
+	}
+
 	// 1. deploy_success with valid snowflake targetID triggers prompt with channel context and directive (NOT direct message!)
 	successEvt := HangarDeployEvent{
 		Event:     "deploy_success",
@@ -2982,8 +3009,8 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if !strings.Contains(pCalls[0].Prompt, "Directive: Based on the recent conversation context above") {
 		t.Errorf("expected directive in prompt: %s", pCalls[0].Prompt)
 	}
-	if len(mockDisp.DirectMessageCalls()) != 0 {
-		t.Fatalf("expected 0 direct message calls on deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
+	if len(mockDisp.DirectMessageCalls()) != 1 {
+		t.Fatalf("expected 1 direct message call on deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 
 	// 2. deploy_rollback with valid snowflake targetID triggers prompt with error details and directive (NOT direct message!)
@@ -3014,9 +3041,9 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if !strings.Contains(pCalls[1].Prompt, "```") {
 		t.Errorf("expected codeblock in prompt: %s", pCalls[1].Prompt)
 	}
-	// direct message count should still be 0
-	if len(mockDisp.DirectMessageCalls()) != 0 {
-		t.Fatalf("expected 0 direct message dispatches after rollback, got %d", len(mockDisp.DirectMessageCalls()))
+	// direct message count should still be 1 (from deploy_started)
+	if len(mockDisp.DirectMessageCalls()) != 1 {
+		t.Fatalf("expected 1 direct message dispatch after rollback, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 
 	// 3. deploy_failed with valid snowflake targetID triggers prompt
@@ -3054,12 +3081,12 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, syncSuccessEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	dmCalls := mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 1 {
-		t.Fatalf("expected 1 direct message dispatch after sync_success, got %d", len(dmCalls))
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 2 {
+		t.Fatalf("expected 2 direct message dispatches after sync_success, got %d", len(dmCalls))
 	}
-	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "Git sync completed") {
-		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[0])
+	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "Git sync completed") {
+		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[1])
 	}
 
 	// 5. sync_failed with valid snowflake targetID triggers prompt
@@ -3093,11 +3120,27 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, invalidTargetEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	if len(mockDisp.DirectMessageCalls()) != 1 {
-		t.Fatalf("expected still 1 direct message dispatch after invalid target, got %d", len(mockDisp.DirectMessageCalls()))
+	if len(mockDisp.DirectMessageCalls()) != 2 {
+		t.Fatalf("expected still 2 direct message dispatches after invalid target deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 	if len(mockDisp.PromptCalls()) != 4 {
-		t.Fatalf("expected still 4 prompt dispatches after invalid target, got %d", len(mockDisp.PromptCalls()))
+		t.Fatalf("expected still 4 prompt dispatches after invalid target deploy_success, got %d", len(mockDisp.PromptCalls()))
+	}
+
+	// 7. deploy_started with non-snowflake targetID does NOT trigger direct message or prompt
+	invalidStartedEvt := HangarDeployEvent{
+		Event:    "deploy_started",
+		JobName:  "hangar",
+		TargetID: "not-a-snowflake",
+	}
+	srv.ProcessHangarEvent(ctx, invalidStartedEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	if len(mockDisp.DirectMessageCalls()) != 2 {
+		t.Fatalf("expected still 2 direct message dispatches after invalid target deploy_started, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+	if len(mockDisp.PromptCalls()) != 4 {
+		t.Fatalf("expected still 4 prompt dispatches after invalid target deploy_started, got %d", len(mockDisp.PromptCalls()))
 	}
 }
 
