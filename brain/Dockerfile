@@ -91,7 +91,8 @@ COPY --link --from=builder /aerial-brain /usr/local/bin/aerial-brain
 COPY --link --from=builder /transcript-search /usr/local/bin/transcript-search
 COPY --link --from=builder /hook-guard /usr/local/bin/hook-guard
 RUN ln -s /usr/local/bin/hook-guard /usr/local/bin/share-guard && \
-    ln -s /usr/local/bin/hook-guard /usr/local/bin/schedule-guard
+    ln -s /usr/local/bin/hook-guard /usr/local/bin/schedule-guard && \
+    ln -s /usr/local/bin/hook-guard /usr/local/bin/batch-guard
 COPY --link scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh 2>/dev/null || true
 COPY --link rules /app/rules
