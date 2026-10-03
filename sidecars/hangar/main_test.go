@@ -7828,3 +7828,150 @@ func TestFetchRegistryWithAuth_ErrorBranches(t *testing.T) {
 		}
 	})
 }
+
+func TestIsHangarRequest_Direct(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "nomad", "jobs")
+	if err := os.MkdirAll(jobsDir, 0755); err != nil {
+		t.Fatalf("failed creating jobs dir: %v", err)
+	}
+	hangarJobHCL := `
+job "hangar" {
+  group "hangar" {
+    task "hangar" {
+      config {
+        image = "ghcr.io/custom/worker:v1"
+      }
+    }
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(jobsDir, "hangar.nomad"), []byte(hangarJobHCL), 0644); err != nil {
+		t.Fatalf("failed writing job file: %v", err)
+	}
+
+	d := &SyncDaemon{
+		repos: []string{tmpDir},
+	}
+
+	// 1. Direct hangar image match
+	if !d.isHangarRequest(ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial/hangar:latest"}) {
+		t.Fatal("expected isHangarRequest true for hangar image")
+	}
+
+	// 2. Matching nomad job that is a hangar job
+	if !d.isHangarRequest(ImageReadyEventRequest{Image: "ghcr.io/custom/worker:v1"}) {
+		t.Fatal("expected isHangarRequest true for job named hangar")
+	}
+
+	// 3. Unrelated image
+	if d.isHangarRequest(ImageReadyEventRequest{Image: "ghcr.io/custom/other:v1"}) {
+		t.Fatal("expected isHangarRequest false for unrelated image")
+	}
+}
+
+func TestGetRemoteImageRevision_IndexWithAnnotations(t *testing.T) {
+	t.Parallel()
+	mockClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/vnd.oci.image.index.v1+json"}},
+					Body: ioNopCloser(strings.NewReader(`{
+						"schemaVersion": 2,
+						"manifests": [
+							{
+								"digest": "sha256:child111111111111111111111111111111111111111111111111111111111111",
+								"platform": {"os": "linux", "architecture": "amd64"}
+							}
+						],
+						"annotations": {
+							"org.opencontainers.image.revision": "1234567890abcdef1234567890abcdef12345678"
+						}
+					}`)),
+				}, nil
+			},
+		},
+	}
+
+	d := &SyncDaemon{
+		registryClient: mockClient,
+	}
+
+	rev, err := d.GetRemoteImageRevision(context.Background(), "ghcr.io/azylman/aerial:latest")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rev != "1234567890abcdef1234567890abcdef12345678" {
+		t.Fatalf("expected revision, got %s", rev)
+	}
+}
+
+func TestFetchRegistryWithAuth_RealmAndEmptyTokenErrors(t *testing.T) {
+	t.Parallel()
+
+	// 1. Invalid realm
+	mockClientInvalidRealm := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="://invalid-realm-url"`}},
+					Body:       ioNopCloser(strings.NewReader("unauthorized")),
+				}, nil
+			},
+		},
+	}
+
+	d1 := &SyncDaemon{registryClient: mockClientInvalidRealm}
+	resp1, _, err1 := d1.fetchRegistryWithAuth(context.Background(), "https://ghcr.io/v2/repo/manifests/latest", "ghcr.io", "repo", "", "")
+	if resp1 != nil && resp1.Body != nil {
+		_ = resp1.Body.Close()
+	}
+	if err1 == nil || !strings.Contains(err1.Error(), "failed parsing token realm") {
+		t.Fatalf("expected failed parsing token realm error, got %v", err1)
+	}
+
+	// 2. Token endpoint returns empty token
+	mockClientEmptyToken := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				if strings.Contains(req.URL.Path, "manifests") {
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="https://ghcr.io/token",service="ghcr.io"`}},
+						Body:       ioNopCloser(strings.NewReader("unauthorized")),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       ioNopCloser(strings.NewReader(`{}`)),
+				}, nil
+			},
+		},
+	}
+
+	d2 := &SyncDaemon{registryClient: mockClientEmptyToken}
+	resp2, _, err2 := d2.fetchRegistryWithAuth(context.Background(), "https://ghcr.io/v2/repo/manifests/latest", "ghcr.io", "repo", "", "")
+	if resp2 != nil && resp2.Body != nil {
+		_ = resp2.Body.Close()
+	}
+	if err2 == nil || !strings.Contains(err2.Error(), "empty bearer token returned") {
+		t.Fatalf("expected empty bearer token error, got %v", err2)
+	}
+}
+
+func TestDefaultNomadExecutor_ExtraBranches(t *testing.T) {
+	t.Parallel()
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	execFn := defaultNomadExecutor("http://127.0.0.1:4646", "dummy-secret-token")
+	_, _, _ = execFn(cancelCtx, "status")
+	_, _, _ = defaultDockerExecutor(cancelCtx, "version")
+	_, _, _ = defaultComposeExecutor(cancelCtx, "", "version")
+	_, _, _ = runGitCommand(cancelCtx, "", "", "version")
+}
+

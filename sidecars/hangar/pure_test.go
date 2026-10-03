@@ -2144,3 +2144,53 @@ func TestExtractConfigBlobDigest_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractManifestAnnotations_TableDriven(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		json []byte
+		want map[string]string
+	}{
+		{
+			name: "empty input",
+			json: []byte{},
+			want: nil,
+		},
+		{
+			name: "invalid json",
+			json: []byte("not-json"),
+			want: nil,
+		},
+		{
+			name: "valid json with annotations",
+			json: []byte(`{"annotations":{"org.opencontainers.image.revision":"abcdef1234567890"}}`),
+			want: map[string]string{"org.opencontainers.image.revision": "abcdef1234567890"},
+		},
+		{
+			name: "valid json without annotations",
+			json: []byte(`{"schemaVersion": 2}`),
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ExtractManifestAnnotations(tc.json)
+			if tc.want == nil && got != nil {
+				t.Fatalf("expected nil, got %v", got)
+			}
+			if tc.want != nil {
+				if len(got) != len(tc.want) {
+					t.Fatalf("expected len %d, got %d", len(tc.want), len(got))
+				}
+				for k, v := range tc.want {
+					if got[k] != v {
+						t.Fatalf("for key %s, expected %s, got %s", k, v, got[k])
+					}
+				}
+			}
+		})
+	}
+}
+
