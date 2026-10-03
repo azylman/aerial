@@ -250,6 +250,8 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		dep := depPayload.Deployment
 		if strings.EqualFold(dep.Status, "successful") {
 			sub.server.HandleNomadJobSuccess(ctx, dep.JobID, dep.ID)
+		} else if strings.EqualFold(dep.Status, "failed") || strings.EqualFold(dep.Status, "cancelled") {
+			sub.server.HandleNomadJobFailure(ctx, dep.JobID, dep.ID, dep.Status, dep.StatusDescription)
 		}
 
 	case "Allocation":
@@ -261,6 +263,57 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" {
 			sub.server.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
 		}
+	}
+}
+
+// HandleNomadJobFailure processes a confirmed deployment failure or cancellation for a Nomad job.
+func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, status, statusDesc string) {
+	if s.registry == nil {
+		return
+	}
+
+	cleanJob := strings.TrimSpace(jobID)
+	if cleanJob == "" {
+		return
+	}
+
+	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployFailedByJob(ctx, cleanJob)
+	if err != nil {
+		log.Printf("[webhooks-router] [nomad] error transitioning job %s to deploy_failed: %v", cleanJob, err)
+		return
+	}
+	if !updated {
+		return
+	}
+
+	log.Printf("[webhooks-router] [nomad] deployment failure confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s, status: %s)",
+		repo, prNumber, cleanJob, mergeSHA, targetID, refID, status)
+
+	if IsValidDiscordSnowflake(targetID) && s.dispatcher != nil {
+		lines := []string{
+			fmt.Sprintf("Nomad deployment for job %s failed with status %q (PR #%d on %s, commit: %s, deployment ID: %s).", cleanJob, status, prNumber, repo, mergeSHA, refID),
+		}
+		if cleanDesc := strings.TrimSpace(statusDesc); cleanDesc != "" {
+			lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDesc)))
+		}
+		lines = append(lines, "Please investigate and fix the deployment failure.")
+		prompt := strings.Join(lines, "\n")
+
+		go func(tID, p string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (nomad failure): %v", r)
+				}
+			}()
+			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
+				ChannelID: tID,
+				Prompt:    p,
+			}); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching failure prompt for %s: %v", cleanJob, err)
+			}
+		}(targetID, prompt)
 	}
 }
 
