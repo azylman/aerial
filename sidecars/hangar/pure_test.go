@@ -2122,3 +2122,63 @@ func TestParseJobStatusOutput_TableDriven(t *testing.T) {
 	}
 }
 
+func TestFindJobDefinitionInRepos(t *testing.T) {
+	tempDir := t.TempDir()
+	repoA := filepath.Join(tempDir, "repo-a")
+	repoB := filepath.Join(tempDir, "repo-b")
+
+	jobsDirA := filepath.Join(repoA, "jobs")
+	nomadJobsDirB := filepath.Join(repoB, "nomad", "jobs")
+
+	if err := os.MkdirAll(jobsDirA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nomadJobsDirB, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	jobSpecBrain := `job "brain" {
+  type = "service"
+}`
+	jobSpecPostgres := `job "postgres" {
+  type = "service"
+}`
+
+	if err := os.WriteFile(filepath.Join(jobsDirA, "brain.nomad"), []byte(jobSpecBrain), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(jobSpecBrain), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nomadJobsDirB, "postgres.nomad"), []byte(jobSpecPostgres), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repos := []string{repoA, repoB}
+
+	// Case 1: Job exists in repoB when repoA is skipped
+	foundPath, found := FindJobDefinitionInRepos("brain", repoA, repos)
+	if !found {
+		t.Errorf("expected brain to be found in repoB when skipping repoA")
+	}
+	expectedB := filepath.Join(nomadJobsDirB, "brain.nomad")
+	if foundPath != expectedB {
+		t.Errorf("expected path %s, got %s", expectedB, foundPath)
+	}
+
+	// Case 2: Job does not exist when repoB is skipped (postgres only in repoB)
+	_, found = FindJobDefinitionInRepos("postgres", repoB, repos)
+	if found {
+		t.Errorf("expected postgres NOT to be found when skipping repoB")
+	}
+
+	// Case 3: Empty job name or empty repos
+	if _, found := FindJobDefinitionInRepos("", repoA, repos); found {
+		t.Errorf("expected false for empty jobName")
+	}
+	if _, found := FindJobDefinitionInRepos("brain", "", nil); found {
+		t.Errorf("expected false for empty candidateRepos")
+	}
+}
+
+

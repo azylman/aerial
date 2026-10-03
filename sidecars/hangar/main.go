@@ -2115,6 +2115,33 @@ func (d *SyncDaemon) reconcileNomadServer(ctx context.Context, composeDir string
 	return nil
 }
 
+// candidateJobRepos returns all distinct repository paths known to the daemon.
+func (d *SyncDaemon) candidateJobRepos() []string {
+	var repos []string
+	seen := make(map[string]struct{})
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		clean := filepath.Clean(p)
+		if _, ok := seen[clean]; !ok {
+			seen[clean] = struct{}{}
+			repos = append(repos, clean)
+		}
+	}
+	for _, r := range d.repos {
+		add(r)
+	}
+	add(d.composeDir)
+	add(d.configDir)
+	return repos
+}
+
+// IsJobDefinedInOtherRepo checks whether a Nomad job is defined in any tracked repo other than skipRepo.
+func (d *SyncDaemon) IsJobDefinedInOtherRepo(jobName string, skipRepo string) (string, bool) {
+	return FindJobDefinitionInRepos(jobName, skipRepo, d.candidateJobRepos())
+}
+
 // ReconcileNomadChanges validates and applies or stops Nomad job specifications.
 func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string, changes []NomadFileChange) error {
 	if len(changes) == 0 {
@@ -2130,6 +2157,10 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	// Phase 1: Teardowns (stop deleted jobs)
 	for _, change := range changes {
 		if change.Action == "delete" {
+			if survivingPath, found := d.IsJobDefinedInOtherRepo(change.JobName, repoPath); found {
+				log.Printf("[Hangar:Nomad] Notice: skipping teardown for deleted job %s (deleted from %s): job is still defined in %s", change.JobName, repoPath, survivingPath)
+				continue
+			}
 			log.Printf("[Hangar:Nomad] Stopping deleted job %s...", change.JobName)
 			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "stop", "-purge", change.JobName)
 			if err != nil {
@@ -2195,6 +2226,10 @@ func (d *SyncDaemon) ExecuteNomadTeardowns(ctx context.Context, pending []NomadC
 	for _, evt := range pending {
 		for _, change := range evt.Changes {
 			if change.Action == "delete" {
+				if survivingPath, found := d.IsJobDefinedInOtherRepo(change.JobName, evt.RepoPath); found {
+					log.Printf("[Hangar:Nomad] Pre-flight teardown: skipping stop for deleted job %s (deleted from %s): job is still defined in %s", change.JobName, evt.RepoPath, survivingPath)
+					continue
+				}
 				log.Printf("[Hangar:Nomad] Pre-flight teardown for deleted job %s...", change.JobName)
 				out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", change.JobName)
 				if err != nil {
@@ -2235,56 +2270,66 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	jobsDir := filepath.Join(d.configDir, "jobs")
-	entries, err := os.ReadDir(jobsDir)
-	if err != nil {
-		return nil
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
-			continue
-		}
-		jobPath := filepath.Join(jobsDir, entry.Name())
-		content, readErr := os.ReadFile(jobPath)
-		if readErr != nil {
-			continue
-		}
-		jobName := ExtractJobName(string(content), entry.Name())
-		images := ExtractNomadJobImages(string(content))
-
-		for _, imgRef := range images {
-			remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
-			if digestErr != nil || remoteDigest == "" {
+	seenFiles := make(map[string]struct{})
+	for _, repo := range d.candidateJobRepos() {
+		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
+			jobsDir := filepath.Join(repo, sub)
+			entries, err := os.ReadDir(jobsDir)
+			if err != nil {
 				continue
 			}
 
-			key := jobName + ":" + imgRef
-			d.nomadDigestsMu.RLock()
-			lastDigest, seen := d.nomadKnownDigests[key]
-			d.nomadDigestsMu.RUnlock()
-
-			if !seen {
-				d.nomadDigestsMu.Lock()
-				if d.nomadKnownDigests == nil {
-					d.nomadKnownDigests = make(map[string]string)
+			for _, entry := range entries {
+				if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
+					continue
 				}
-				d.nomadKnownDigests[key] = remoteDigest
-				d.nomadDigestsMu.Unlock()
-				continue
-			}
+				jobPath := filepath.Join(jobsDir, entry.Name())
+				if _, seen := seenFiles[jobPath]; seen {
+					continue
+				}
+				seenFiles[jobPath] = struct{}{}
 
-			if lastDigest != remoteDigest {
-				log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
-				d.nomadDigestsMu.Lock()
-				d.nomadKnownDigests[key] = remoteDigest
-				d.nomadDigestsMu.Unlock()
+				content, readErr := os.ReadFile(jobPath)
+				if readErr != nil {
+					continue
+				}
+				jobName := ExtractJobName(string(content), entry.Name())
+				images := ExtractNomadJobImages(string(content))
 
-				out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-reschedule", jobName)
-				if runErr != nil {
-					log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
-				} else {
-					log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
+				for _, imgRef := range images {
+					remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
+					if digestErr != nil || remoteDigest == "" {
+						continue
+					}
+
+					key := jobName + ":" + imgRef
+					d.nomadDigestsMu.RLock()
+					lastDigest, seen := d.nomadKnownDigests[key]
+					d.nomadDigestsMu.RUnlock()
+
+					if !seen {
+						d.nomadDigestsMu.Lock()
+						if d.nomadKnownDigests == nil {
+							d.nomadKnownDigests = make(map[string]string)
+						}
+						d.nomadKnownDigests[key] = remoteDigest
+						d.nomadDigestsMu.Unlock()
+						continue
+					}
+
+					if lastDigest != remoteDigest {
+						log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
+						d.nomadDigestsMu.Lock()
+						d.nomadKnownDigests[key] = remoteDigest
+						d.nomadDigestsMu.Unlock()
+
+						out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-reschedule", jobName)
+						if runErr != nil {
+							log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
+						} else {
+							log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
+						}
+					}
 				}
 			}
 		}
@@ -3089,6 +3134,10 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 	var applied []string
 	for _, ch := range changes {
 		if ch.Action == "delete" {
+			if survivingPath, found := d.IsJobDefinedInOtherRepo(ch.JobName, repoPath); found {
+				log.Printf("[Hangar:Nomad] Notice: skipping teardown for deleted job %s (deleted from %s): job is still defined in %s", ch.JobName, repoPath, survivingPath)
+				continue
+			}
 			out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", ch.JobName)
 			if err != nil {
 				log.Printf("[Hangar:Nomad] Warning: failed to stop deleted job %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
@@ -3221,6 +3270,10 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 			for _, ch := range nomadChanges {
 				if ch.Action == "delete" {
+					if survivingPath, found := d.IsJobDefinedInOtherRepo(ch.JobName, repoPath); found {
+						log.Printf("[Hangar:GitPush] Notice: skipping stop for deleted job %s (deleted from %s): job is still defined in %s", ch.JobName, repoPath, survivingPath)
+						continue
+					}
 					out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", ch.JobName)
 					if err != nil {
 						log.Printf("[Hangar:GitPush] Warning stopping deleted job %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
@@ -3321,11 +3374,18 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		}, http.StatusBadRequest
 	}
 
-	jobsDir := filepath.Join(d.configDir, "jobs")
-	matches := FindNomadJobsByImage(jobsDir, imgRef)
-	if len(matches) == 0 && d.composeDir != "" {
-		coreJobsDir := filepath.Join(d.composeDir, "nomad", "jobs")
-		matches = append(matches, FindNomadJobsByImage(coreJobsDir, imgRef)...)
+	var matches []MatchedNomadJob
+	seenJobs := make(map[string]struct{})
+	for _, repo := range d.candidateJobRepos() {
+		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
+			dir := filepath.Join(repo, sub)
+			for _, m := range FindNomadJobsByImage(dir, imgRef) {
+				if _, ok := seenJobs[m.JobName]; !ok {
+					seenJobs[m.JobName] = struct{}{}
+					matches = append(matches, m)
+				}
+			}
+		}
 	}
 
 	if len(matches) == 0 {

@@ -832,6 +832,64 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 	return changes
 }
 
+// FindJobDefinitionInRepos searches candidate repositories for a Nomad job specification
+// that defines the specified jobName, excluding the repo at skipRepoPath.
+// Returns the file path where the job is defined and true if found, or ("", false) if not found.
+func FindJobDefinitionInRepos(jobName string, skipRepoPath string, candidateRepos []string) (string, bool) {
+	if jobName == "" {
+		return "", false
+	}
+	cleanSkip := ""
+	if skipRepoPath != "" {
+		cleanSkip = filepath.Clean(skipRepoPath)
+	}
+
+	seenDirs := make(map[string]struct{})
+	for _, repo := range candidateRepos {
+		if repo == "" {
+			continue
+		}
+		cleanRepo := filepath.Clean(repo)
+		if cleanSkip != "" && cleanRepo == cleanSkip {
+			continue
+		}
+
+		// Candidate directories in each repo where job specifications might reside
+		candidateDirs := []string{
+			filepath.Join(cleanRepo, "jobs"),
+			filepath.Join(cleanRepo, "nomad", "jobs"),
+		}
+
+		for _, dir := range candidateDirs {
+			cleanDir := filepath.Clean(dir)
+			if _, seen := seenDirs[cleanDir]; seen {
+				continue
+			}
+			seenDirs[cleanDir] = struct{}{}
+
+			entries, err := os.ReadDir(cleanDir)
+			if err != nil {
+				continue
+			}
+
+			for _, entry := range entries {
+				if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
+					continue
+				}
+				fullPath := filepath.Join(cleanDir, entry.Name())
+				content, err := os.ReadFile(fullPath)
+				if err != nil {
+					continue
+				}
+				if ExtractJobName(string(content), entry.Name()) == jobName {
+					return fullPath, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
 // GitPushEventRequest represents an incoming git push event.
 type GitPushEventRequest struct {
 	Repo   string `json:"repo"`
