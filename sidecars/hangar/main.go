@@ -1758,7 +1758,7 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	stdout, stderr, err := nomadExec(valCtx, "var", "put", "nomad/jobs/brain", "CONFIG_YAML=@"+configPath)
+	stdout, stderr, err := nomadExec(valCtx, "var", "put", "-force", "nomad/jobs/brain", "CONFIG_YAML=@"+configPath)
 	if err != nil {
 		combined := string(append(stdout, stderr...))
 		return fmt.Errorf("failed updating Nomad variable nomad/jobs/brain: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
@@ -1839,7 +1839,7 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	args := []string{"var", "put", "nomad/jobs/homepage", "CONFIG_HASH=" + configHash}
+	args := []string{"var", "put", "-force", "nomad/jobs/homepage", "CONFIG_HASH=" + configHash}
 	if len(raw) > 0 {
 		args = append(args, "HOMEPAGE_YAML=@"+homepageConfigPath)
 	}
@@ -1915,7 +1915,7 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		d.lastPushedConfigMu.Unlock()
 
 		valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		stdout, stderr, err := nomadExec(valCtx, "var", "put", mapping.NomadVar, mapping.VarKey+"=@"+filePath)
+		stdout, stderr, err := nomadExec(valCtx, "var", "put", "-force", mapping.NomadVar, mapping.VarKey+"=@"+filePath)
 		cancel()
 		if err != nil {
 			combined := string(append(stdout, stderr...))

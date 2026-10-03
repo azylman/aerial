@@ -1316,7 +1316,7 @@ channels:
 	if err := dSuccess.SyncBrainConfigToNomad(ctx, valDir); err != nil {
 		t.Fatalf("expected success pushing to nomad, got %v", err)
 	}
-	if len(capturedArgs) < 4 || capturedArgs[0] != "var" || capturedArgs[1] != "put" || capturedArgs[2] != "nomad/jobs/brain" {
+	if len(capturedArgs) < 5 || capturedArgs[0] != "var" || capturedArgs[1] != "put" || capturedArgs[2] != "-force" || capturedArgs[3] != "nomad/jobs/brain" {
 		t.Errorf("unexpected nomad CLI args: %v", capturedArgs)
 	}
 	if brainCalls != 1 {
@@ -1369,7 +1369,7 @@ func TestSyncHomepageConfigToNomad(t *testing.T) {
 	if err := dEmpty.SyncHomepageConfigToNomad(ctx, emptyDir); err != nil {
 		t.Fatalf("expected nil for empty configDir, got %v", err)
 	}
-	if len(emptyArgs) < 4 || emptyArgs[2] != "nomad/jobs/homepage" {
+	if len(emptyArgs) < 5 || emptyArgs[2] != "-force" || emptyArgs[3] != "nomad/jobs/homepage" {
 		t.Errorf("expected nomad/jobs/homepage target, got %v", emptyArgs)
 	}
 
@@ -1435,7 +1435,7 @@ func TestSyncHomepageConfigToNomad(t *testing.T) {
 	if homepageCalls != 2 {
 		t.Errorf("expected homepageCalls to be 2 after modification, got %d", homepageCalls)
 	}
-	if len(capturedArgs) < 5 || capturedArgs[2] != "nomad/jobs/homepage" {
+	if len(capturedArgs) < 6 || capturedArgs[2] != "-force" || capturedArgs[3] != "nomad/jobs/homepage" {
 		t.Fatalf("unexpected nomad CLI args: %v", capturedArgs)
 	}
 	foundHash := false
