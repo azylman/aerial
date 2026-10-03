@@ -14,9 +14,6 @@ if [ "$(id -u)" = "0" ]; then
     chown -R node:node /config 2>/dev/null || true
 fi
 
-# Start background configuration watcher to hot-reload on git syncs or config updates
-NODE_PATH=/app/node_modules node /app/core-homepage/prepare-config.js --watch &
-
 # Export variables from runtime.env if generated from declarative YAML
 if [ -f /config/runtime.env ]; then
     set -a

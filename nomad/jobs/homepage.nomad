@@ -45,7 +45,20 @@ job "homepage" {
       }
 
       env {
-        CONFIG_PATH = "/share/aerial-config/services/homepage/homepage.yaml"
+        CONFIG_PATH = "/local/homepage.yaml"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/homepage" }}
+{{ with nomadVar "nomad/jobs/homepage" }}
+# Config Hash: {{ .CONFIG_HASH }}
+{{ if .HOMEPAGE_YAML }}{{ .HOMEPAGE_YAML }}{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "local/homepage.yaml"
+        change_mode = "restart"
       }
 
       template {

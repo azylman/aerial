@@ -1360,6 +1360,106 @@ channels:
 	}
 }
 
+func TestSyncHomepageConfigToNomad(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// 1. Missing homepage.yaml and missing homepage directory -> safe success / push empty hash
+	emptyDir := t.TempDir()
+	var emptyArgs []string
+	dEmpty := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			emptyArgs = args
+			return []byte("ok"), nil, nil
+		},
+	}
+	if err := dEmpty.SyncHomepageConfigToNomad(ctx, emptyDir); err != nil {
+		t.Fatalf("expected nil for empty configDir, got %v", err)
+	}
+	if len(emptyArgs) < 4 || emptyArgs[2] != "nomad/jobs/homepage" {
+		t.Errorf("expected nomad/jobs/homepage target, got %v", emptyArgs)
+	}
+
+	// 2. Unreadable config (directory instead of file) -> error
+	badDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(badDir, "services", "homepage", "homepage.yaml"), 0755); err != nil {
+		t.Fatalf("failed creating bad path: %v", err)
+	}
+	d := &SyncDaemon{nomadAddr: "http://127.0.0.1:4646"}
+	if err := d.SyncHomepageConfigToNomad(ctx, badDir); err == nil {
+		t.Fatalf("expected error reading directory as homepage.yaml, got nil")
+	}
+
+	// 3. Invalid YAML syntax in homepage.yaml -> error
+	invDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(invDir, "services", "homepage"), 0755)
+	_ = os.WriteFile(filepath.Join(invDir, "services", "homepage", "homepage.yaml"), []byte("invalid: yaml: [unclosed"), 0644)
+	if err := d.SyncHomepageConfigToNomad(ctx, invDir); err == nil || !strings.Contains(err.Error(), "invalid YAML syntax") {
+		t.Fatalf("expected invalid YAML syntax error, got %v", err)
+	}
+
+	// 4. Valid homepage.yaml and user homepage files -> successful push with deterministic hash
+	valDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(valDir, "services", "homepage"), 0755)
+	_ = os.WriteFile(filepath.Join(valDir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\nallowed_hosts: \"*\"\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(valDir, "homepage"), 0755)
+	_ = os.WriteFile(filepath.Join(valDir, "homepage", "services.yaml"), []byte("- My Group: []\n"), 0644)
+	_ = os.WriteFile(filepath.Join(valDir, "homepage", "widgets.yaml"), []byte("- search: {}\n"), 0644)
+	// Add .hidden and .tmp files that must be ignored
+	_ = os.WriteFile(filepath.Join(valDir, "homepage", ".hidden"), []byte("ignore me"), 0644)
+	_ = os.WriteFile(filepath.Join(valDir, "homepage", "temp.tmp"), []byte("ignore me too"), 0644)
+
+	var capturedArgs []string
+	dSuccess := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			capturedArgs = args
+			return []byte("var updated"), nil, nil
+		},
+	}
+	if err := dSuccess.SyncHomepageConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success pushing to nomad, got %v", err)
+	}
+	if len(capturedArgs) < 5 || capturedArgs[2] != "nomad/jobs/homepage" {
+		t.Fatalf("unexpected nomad CLI args: %v", capturedArgs)
+	}
+	foundHash := false
+	foundYAML := false
+	for _, arg := range capturedArgs {
+		if strings.HasPrefix(arg, "CONFIG_HASH=") {
+			foundHash = true
+			hashVal := strings.TrimPrefix(arg, "CONFIG_HASH=")
+			if len(hashVal) != 64 {
+				t.Errorf("expected 64-char sha256 hex hash, got %s", hashVal)
+			}
+		}
+		if strings.HasPrefix(arg, "HOMEPAGE_YAML=@") {
+			foundYAML = true
+		}
+	}
+	if !foundHash || !foundYAML {
+		t.Errorf("missing CONFIG_HASH or HOMEPAGE_YAML in args: %v", capturedArgs)
+	}
+
+	// 5. Disabled Nomad executor -> safe no-op
+	dNoNomad := &SyncDaemon{nomadAddr: ""}
+	if err := dNoNomad.SyncHomepageConfigToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected nil for disabled nomadAddr, got %v", err)
+	}
+
+	// 6. Nomad CLI failure -> error
+	dFail := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
+		},
+	}
+	if err := dFail.SyncHomepageConfigToNomad(ctx, valDir); err == nil || !strings.Contains(err.Error(), "failed updating Nomad variable") {
+		t.Fatalf("expected Nomad update error, got %v", err)
+	}
+}
+
 func TestRepoLock_ThreadSafety(t *testing.T) {
 	daemon := NewDaemon(DaemonConfig{})
 
