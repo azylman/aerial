@@ -7051,6 +7051,99 @@ func TestExecuteGitPushEvent_DispatchesDeployStartedAndSuccess(t *testing.T) {
 	}
 }
 
+func TestExecuteGitPushEvent_DispatchesSyncSuccessAndFailure(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	aerialDir := filepath.Join(tmpDir, "aerial")
+	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0755)
+
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	// 1. Successful sync with TargetID dispatches sync_success
+	dSuccess := NewDaemon(DaemonConfig{
+		Repos:     []string{aerialDir},
+		ConfigDir: aerialDir,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				return []byte("sha_sync_ok"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+	})
+
+	resp, code := dSuccess.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo:     "aerial",
+		Ref:      "refs/heads/main",
+		Commit:   "commit_12345",
+		TargetID: "1555405874565091380",
+		PRNumber: 542,
+	})
+	if code != http.StatusOK || resp.Status != "accepted" {
+		t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
+	}
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "sync_success" {
+			t.Errorf("expected sync_success, got %q", evt.Event)
+		}
+		if evt.TargetID != "1555405874565091380" {
+			t.Errorf("expected TargetID 1555405874565091380, got %q", evt.TargetID)
+		}
+		if evt.PRNumber != 542 {
+			t.Errorf("expected PRNumber 542, got %d", evt.PRNumber)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sync_success event")
+	}
+
+	// 2. Failed sync with TargetID dispatches sync_failed
+	dFail := NewDaemon(DaemonConfig{
+		Repos:     []string{aerialDir},
+		ConfigDir: aerialDir,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && (args[0] == "fetch" || args[0] == "pull") {
+				return nil, []byte("fatal: remote error"), fmt.Errorf("git fetch failed")
+			}
+			return []byte(""), nil, nil
+		},
+	})
+
+	respFail, codeFail := dFail.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo:     "aerial",
+		Ref:      "refs/heads/main",
+		Commit:   "commit_fail",
+		TargetID: "1555405874565091380",
+		PRNumber: 542,
+	})
+	if codeFail != http.StatusInternalServerError || respFail.Status != "error" {
+		t.Fatalf("expected 500 error, got %d (%s)", codeFail, respFail.Status)
+	}
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "sync_failed" {
+			t.Errorf("expected sync_failed, got %q", evt.Event)
+		}
+		if evt.TargetID != "1555405874565091380" {
+			t.Errorf("expected TargetID 1555405874565091380, got %q", evt.TargetID)
+		}
+		if evt.Status != "failed" {
+			t.Errorf("expected status failed, got %q", evt.Status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sync_failed event")
+	}
+}
+
 func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()

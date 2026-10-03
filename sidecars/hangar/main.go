@@ -505,7 +505,7 @@ func (d *SyncDaemon) MonitorDeploymentAsync(jobName string, minVersion int, base
 				log.Printf("[Hangar:Deploy] PANIC recovered in deployment monitor for %s: %v", jobName, r)
 			}
 		}()
-		monCtx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
+		monCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 		defer cancel()
 
 		pollInterval := d.deploymentPollInterval
@@ -519,6 +519,12 @@ func (d *SyncDaemon) MonitorDeploymentAsync(jobName string, minVersion int, base
 			select {
 			case <-monCtx.Done():
 				log.Printf("[Hangar:Deploy] Deployment monitor timed out for %s", jobName)
+				timeoutEvt := baseEvt
+				timeoutEvt.Event = "deploy_failed"
+				timeoutEvt.Status = "failed"
+				timeoutEvt.Details = fmt.Sprintf("deployment monitor timed out after 3m for job %s", jobName)
+				timeoutEvt.Timestamp = time.Now().UTC()
+				d.DispatchDeployEvent(timeoutEvt)
 				return
 			case <-ticker.C:
 				out, errBytes, err := d.getNomadExecutor()(monCtx, "job", "status", "-json", jobName)
@@ -581,7 +587,7 @@ func (d *SyncDaemon) MonitorDeploymentAsync(jobName string, minVersion int, base
 					// Still running, continue loop
 				} else {
 					// No deployment stanza: check running allocations
-					if status.Summary.Children.Running > 0 {
+					if status.TotalRunning() > 0 {
 						evt := baseEvt
 						evt.Event = "deploy_success"
 						evt.Status = "success"
@@ -3211,6 +3217,19 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 	res := d.SyncRepo(ctx, repoPath)
 	if res.Error != "" {
+		if isSnowflake(req.TargetID) {
+			failEvt := HangarDeployEvent{
+				Event:     "sync_failed",
+				Repo:      req.Repo,
+				PRNumber:  req.PRNumber,
+				TargetID:  req.TargetID,
+				CommitSHA: res.CurrentHead,
+				Status:    "failed",
+				Details:   res.Error,
+				Timestamp: time.Now().UTC(),
+			}
+			d.DispatchDeployEvent(failEvt)
+		}
 		return GitPushEventResponse{
 			Status:  "error",
 			Repo:    req.Repo,
@@ -3224,6 +3243,24 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		Repo:   req.Repo,
 		Ref:    req.Ref,
 		Commit: res.CurrentHead,
+	}
+
+	if isSnowflake(req.TargetID) {
+		commitSHA := res.CurrentHead
+		if commitSHA == "" {
+			commitSHA = req.Commit
+		}
+		syncEvt := HangarDeployEvent{
+			Event:     "sync_success",
+			Repo:      req.Repo,
+			PRNumber:  req.PRNumber,
+			TargetID:  req.TargetID,
+			CommitSHA: commitSHA,
+			Status:    "success",
+			Details:   "git sync completed",
+			Timestamp: time.Now().UTC(),
+		}
+		d.DispatchDeployEvent(syncEvt)
 	}
 
 	cleanRepo := strings.ToLower(filepath.Clean(repoPath))

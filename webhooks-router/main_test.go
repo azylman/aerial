@@ -2200,10 +2200,12 @@ func TestHangarWebhook_ZeroDownstreamCallsToBrain(t *testing.T) {
 type mockOutboundDispatcher struct {
 	mu                 sync.Mutex
 	gitPushCalls       []GitPushEventRequest
+	gitPushCh          chan GitPushEventRequest
 	imageReadyCalls    []ImageReadyEventRequest
 	imageReadyCh       chan ImageReadyEventRequest
 	promptCalls        []PromptRequest
 	directMessageCalls []DirectMessageRequest
+	directMessageCh    chan DirectMessageRequest
 	gitPushErr         error
 	imageReadyErr      error
 	promptErr          error
@@ -2212,8 +2214,15 @@ type mockOutboundDispatcher struct {
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.gitPushCalls = append(m.gitPushCalls, req)
+	ch := m.gitPushCh
+	m.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- req:
+		default:
+		}
+	}
 	return m.gitPushErr
 }
 
@@ -2240,8 +2249,15 @@ func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptR
 
 func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.directMessageCalls = append(m.directMessageCalls, req)
+	ch := m.directMessageCh
+	m.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- req:
+		default:
+		}
+	}
 	return m.directMessageErr
 }
 
@@ -2877,3 +2893,137 @@ func TestDispatchWorkflowRunImages_Integration(t *testing.T) {
 		t.Errorf("expected 0 image_ready calls for in_progress workflow run, got %d", len(mockDisp.ImageReadyCalls()))
 	}
 }
+
+func TestProcessGitHubEvent_PRMergedDirectMessage(t *testing.T) {
+	ctx := context.Background()
+	mockReg := &mockPRRegistry{
+		mergedTargetID: "1555405874565091380",
+	}
+	mockDisp := &mockOutboundDispatcher{
+		directMessageCh: make(chan DirectMessageRequest, 5),
+	}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	prMergedPayload := `{
+		"action": "closed",
+		"number": 542,
+		"pull_request": {
+			"number": 542,
+			"merged": true,
+			"head": {"ref": "feat/batch1", "sha": "head542"},
+			"merge_commit_sha": "merge542"
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+
+	res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merge", []byte(prMergedPayload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent failed: %v", err)
+	}
+	if res.PRNumber != 542 || res.Action != "closed" {
+		t.Errorf("unexpected resolved event: %+v", res)
+	}
+
+	select {
+	case dm := <-mockDisp.directMessageCh:
+		if dm.ChannelID != "1555405874565091380" {
+			t.Errorf("expected channelID 1555405874565091380, got %s", dm.ChannelID)
+		}
+		if !strings.Contains(dm.Content, "PR #542 on azylman/aerial merged into main (merge542).") {
+			t.Errorf("unexpected content: %s", dm.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pr_merged direct message")
+	}
+}
+
+func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
+	ctx := context.Background()
+	mockDisp := &mockOutboundDispatcher{
+		directMessageCh: make(chan DirectMessageRequest, 5),
+	}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetDispatcher(mockDisp)
+
+	// 1. sync_success
+	syncSuccessEvt := HangarDeployEvent{
+		Event:     "sync_success",
+		Repo:      "azylman/aerial",
+		PRNumber:  542,
+		CommitSHA: "merge542",
+		TargetID:  "1555405874565091380",
+		Status:    "success",
+	}
+	srv.ProcessHangarEvent(ctx, syncSuccessEvt)
+
+	select {
+	case dm := <-mockDisp.directMessageCh:
+		if dm.ChannelID != "1555405874565091380" || !strings.Contains(dm.Content, "Git sync completed for azylman/aerial") {
+			t.Errorf("unexpected direct message content: %s", dm.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sync_success direct message")
+	}
+
+	// 2. sync_failed
+	syncFailedEvt := HangarDeployEvent{
+		Event:     "sync_failed",
+		Repo:      "azylman/aerial",
+		PRNumber:  542,
+		CommitSHA: "merge542",
+		TargetID:  "1555405874565091380",
+		Status:    "failed",
+		Details:   "merge conflict in rules/foo.md",
+	}
+	srv.ProcessHangarEvent(ctx, syncFailedEvt)
+
+	select {
+	case dm := <-mockDisp.directMessageCh:
+		if !strings.Contains(dm.Content, "Git sync failed for azylman/aerial") || !strings.Contains(dm.Content, "merge conflict") {
+			t.Errorf("unexpected fail direct message content: %s", dm.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sync_failed direct message")
+	}
+}
+
+func TestProcessGitHubEvent_GitPushCarriesTargetID(t *testing.T) {
+	ctx := context.Background()
+	mockReg := &mockPRRegistry{
+		resolvePRNum:    542,
+		resolveBranch:   "main",
+		resolveTargetID: "1555405874565091380",
+	}
+	mockDisp := &mockOutboundDispatcher{
+		gitPushCh: make(chan GitPushEventRequest, 5),
+	}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	pushPayload := `{
+		"ref": "refs/heads/main",
+		"after": "merge542",
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+
+	_, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-main", []byte(pushPayload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push failed: %v", err)
+	}
+
+	select {
+	case call := <-mockDisp.gitPushCh:
+		if call.TargetID != "1555405874565091380" {
+			t.Errorf("expected TargetID 1555405874565091380, got %s", call.TargetID)
+		}
+		if call.PRNumber != 542 {
+			t.Errorf("expected PRNumber 542, got %d", call.PRNumber)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for git_push dispatch")
+	}
+}
+

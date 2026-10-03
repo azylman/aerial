@@ -477,9 +477,11 @@ func IsValidDiscordSnowflake(id string) bool {
 }
 
 type GitPushEventRequest struct {
-	Repo   string `json:"repo"`
-	Ref    string `json:"ref"`
-	Commit string `json:"commit"`
+	Repo     string `json:"repo"`
+	Ref      string `json:"ref"`
+	Commit   string `json:"commit"`
+	TargetID string `json:"target_id,omitempty"`
+	PRNumber int    `json:"pr_number,omitempty"`
 }
 
 type ImageReadyEventRequest struct {
@@ -1057,6 +1059,48 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_failed direct message: %v", err)
 			}
 		}(targetID, msg)
+	} else if evt.Event == "sync_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+		targetID := evt.TargetID
+		msg := fmt.Sprintf("Git sync completed for %s (commit %s). Mounted rules, skills, and configs updated.", evt.Repo, evt.CommitSHA)
+		if evt.PRNumber > 0 {
+			msg = fmt.Sprintf("Git sync completed for %s (PR #%d, commit %s). Mounted rules, skills, and configs updated.", evt.Repo, evt.PRNumber, evt.CommitSHA)
+		}
+		go func(tID, m string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (sync_success): %v", r)
+				}
+			}()
+			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+				ChannelID: tID,
+				Content:   m,
+			}); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching sync_success direct message: %v", err)
+			}
+		}(targetID, msg)
+	} else if evt.Event == "sync_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+		targetID := evt.TargetID
+		msg := fmt.Sprintf("Git sync failed for %s (commit %s): %s.", evt.Repo, evt.CommitSHA, evt.Details)
+		if evt.PRNumber > 0 {
+			msg = fmt.Sprintf("Git sync failed for %s (PR #%d, commit %s): %s.", evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Details)
+		}
+		go func(tID, m string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (sync_failed): %v", r)
+				}
+			}()
+			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+				ChannelID: tID,
+				Content:   m,
+			}); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching sync_failed direct message: %v", err)
+			}
+		}(targetID, msg)
 	}
 
 	return &evt
@@ -1086,11 +1130,11 @@ func (s *RouterServer) dispatchCIFailurePrompt(targetID, checkName, repo, headSH
 	}(targetID, prompt)
 }
 
-func (s *RouterServer) dispatchGitPush(repo, ref, commit string) {
+func (s *RouterServer) dispatchGitPush(repo, ref, commit, targetID string, prNum int) {
 	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) {
 		return
 	}
-	go func(rp, rf, cm string) {
+	go func(rp, rf, cm, tID string, pr int) {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchGitPush: %v", r)
@@ -1099,15 +1143,17 @@ func (s *RouterServer) dispatchGitPush(repo, ref, commit string) {
 		dispCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := s.dispatcher.DispatchGitPush(dispCtx, GitPushEventRequest{
-			Repo:   rp,
-			Ref:    rf,
-			Commit: cm,
+			Repo:     rp,
+			Ref:      rf,
+			Commit:   cm,
+			TargetID: tID,
+			PRNumber: pr,
 		}); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] error dispatching git_push to hangar for %s: %v", rp, err)
 		} else {
 			log.Printf("[webhooks-router] [dispatcher] successfully dispatched git_push to hangar for %s (%s)", rp, cm)
 		}
-	}(repo, ref, commit)
+	}(repo, ref, commit, targetID, prNum)
 }
 
 func (s *RouterServer) dispatchWorkflowRunImages(repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) {
@@ -1404,6 +1450,29 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 						res.TargetID = targetID
 					}
 					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
+
+					if IsValidDiscordSnowflake(res.TargetID) && s.dispatcher != nil {
+						commitStr := res.MergeSHA
+						if commitStr == "" {
+							commitStr = res.HeadSHA
+						}
+						msg := fmt.Sprintf("PR #%d on %s merged into main (%s).", res.PRNumber, res.Repo, commitStr)
+						go func(tID, m string) {
+							defer func() {
+								if r := recover(); r != nil {
+									log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (pr_merged): %v", r)
+								}
+							}()
+							dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+							defer cancel()
+							if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+								ChannelID: tID,
+								Content:   m,
+							}); err != nil {
+								log.Printf("[webhooks-router] [dispatcher] error dispatching pr_merged direct message: %v", err)
+							}
+						}(res.TargetID, msg)
+					}
 				} else {
 					targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
 					if err != nil {
@@ -1670,8 +1739,6 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
 			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, delivery)
 
-		s.dispatchGitPush(res.Repo, p.Ref, res.HeadSHA)
-
 		if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
 			targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
 			if err != nil {
@@ -1683,6 +1750,8 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			}
 			log.Printf("[webhooks-router] [registry] pr %s#%d backfilled merge_sha (%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
 		}
+
+		s.dispatchGitPush(res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber)
 		return res, nil
 
 	default:
