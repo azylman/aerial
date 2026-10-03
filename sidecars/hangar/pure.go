@@ -892,9 +892,11 @@ func FindJobDefinitionInRepos(jobName string, skipRepoPath string, candidateRepo
 
 // GitPushEventRequest represents an incoming git push event.
 type GitPushEventRequest struct {
-	Repo   string `json:"repo"`
-	Ref    string `json:"ref"`
-	Commit string `json:"commit"`
+	Repo     string `json:"repo"`
+	Ref      string `json:"ref"`
+	Commit   string `json:"commit"`
+	TargetID string `json:"target_id,omitempty"`
+	PRNumber int    `json:"pr_number,omitempty"`
 }
 
 // GitPushEventResponse represents the acknowledgment for a git push event.
@@ -1161,6 +1163,51 @@ type HangarDeployEvent struct {
 	Timestamp    time.Time `json:"timestamp"`
 }
 
+// TaskGroupSummary represents allocation summary counts for a single task group.
+type TaskGroupSummary struct {
+	Queued   int `json:"Queued"`
+	Complete int `json:"Complete"`
+	Failed   int `json:"Failed"`
+	Running  int `json:"Running"`
+	Starting int `json:"Starting"`
+	Lost     int `json:"Lost"`
+	Unknown  int `json:"Unknown"`
+}
+
+// NomadJobSummary encapsulates the Nomad job allocation summary.
+// Real Nomad API provides a map of task group names to TaskGroupSummary.
+// For backwards compatibility with synthetic test payloads, Children is also supported.
+type NomadJobSummary struct {
+	TaskGroups map[string]TaskGroupSummary `json:"-"`
+	Children   struct {
+		Pending int `json:"Pending"`
+		Running int `json:"Running"`
+		Dead    int `json:"Dead"`
+	} `json:"Children"`
+}
+
+// UnmarshalJSON handles both map-based task group summaries and legacy Children formats.
+func (s *NomadJobSummary) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	s.TaskGroups = make(map[string]TaskGroupSummary)
+	for k, v := range raw {
+		if k == "Children" {
+			if err := json.Unmarshal(v, &s.Children); err != nil {
+				return err
+			}
+			continue
+		}
+		var tg TaskGroupSummary
+		if err := json.Unmarshal(v, &tg); err == nil {
+			s.TaskGroups[k] = tg
+		}
+	}
+	return nil
+}
+
 // NomadJobStatusOutput represents parsed output from nomad job status -json.
 type NomadJobStatusOutput struct {
 	ID               string `json:"ID"`
@@ -1175,13 +1222,22 @@ type NomadJobStatusOutput struct {
 			AutoRevert bool `json:"AutoRevert"`
 		} `json:"TaskGroups"`
 	} `json:"LatestDeployment"`
-	Summary struct {
-		Children struct {
-			Pending int `json:"Pending"`
-			Running int `json:"Running"`
-			Dead    int `json:"Dead"`
-		} `json:"Children"`
-	} `json:"Summary"`
+	Summary NomadJobSummary `json:"Summary"`
+}
+
+// TotalRunning returns the total count of running allocations across all task groups.
+func (o *NomadJobStatusOutput) TotalRunning() int {
+	if o == nil {
+		return 0
+	}
+	total := 0
+	for _, tg := range o.Summary.TaskGroups {
+		total += tg.Running
+	}
+	if total == 0 && o.Summary.Children.Running > 0 {
+		return o.Summary.Children.Running
+	}
+	return total
 }
 
 // ParseJobStatusOutput parses JSON output from nomad job status -json,

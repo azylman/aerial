@@ -2181,4 +2181,73 @@ func TestFindJobDefinitionInRepos(t *testing.T) {
 	}
 }
 
+func TestParseJobStatusOutput_RealNomadSummary(t *testing.T) {
+	raw := []byte(`{
+		"ID": "hangar",
+		"JobVersion": 10,
+		"SubmitTime": 1727800000,
+		"Summary": {
+			"hangar": {
+				"Queued": 0,
+				"Complete": 9,
+				"Failed": 0,
+				"Running": 2,
+				"Starting": 0,
+				"Lost": 0
+			},
+			"sidecar": {
+				"Queued": 0,
+				"Complete": 0,
+				"Failed": 0,
+				"Running": 1,
+				"Starting": 0,
+				"Lost": 0
+			}
+		}
+	}`)
+
+	out, err := ParseJobStatusOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseJobStatusOutput failed on real Nomad summary: %v", err)
+	}
+	if out.ID != "hangar" {
+		t.Errorf("expected ID hangar, got %s", out.ID)
+	}
+	if out.TotalRunning() != 3 {
+		t.Errorf("expected TotalRunning() == 3, got %d", out.TotalRunning())
+	}
+	if out.Summary.TaskGroups["hangar"].Running != 2 {
+		t.Errorf("expected hangar task group running == 2, got %d", out.Summary.TaskGroups["hangar"].Running)
+	}
+	if out.Summary.TaskGroups["sidecar"].Running != 1 {
+		t.Errorf("expected sidecar task group running == 1, got %d", out.Summary.TaskGroups["sidecar"].Running)
+	}
+}
+
+func TestNomadJobStatusOutput_TotalRunning_NilAndFallback(t *testing.T) {
+	var nilOut *NomadJobStatusOutput
+	if nilOut.TotalRunning() != 0 {
+		t.Errorf("expected 0 for nil receiver, got %d", nilOut.TotalRunning())
+	}
+
+	out := &NomadJobStatusOutput{}
+	out.Summary.Children.Running = 4
+	if out.TotalRunning() != 4 {
+		t.Errorf("expected 4 from Children.Running fallback, got %d", out.TotalRunning())
+	}
+}
+
+func TestNomadJobSummary_UnmarshalJSON_Errors(t *testing.T) {
+	var s NomadJobSummary
+	if err := s.UnmarshalJSON([]byte("not valid json at all")); err == nil {
+		t.Error("expected error for invalid json, got nil")
+	}
+
+	if err := s.UnmarshalJSON([]byte(`{"Children": "not an object"}`)); err == nil {
+		t.Error("expected error for malformed Children, got nil")
+	}
+}
+
+
+
 
