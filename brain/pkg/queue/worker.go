@@ -41,6 +41,7 @@ type turnExecution struct {
 	effectiveID         string
 	effectiveName       string
 	isThread            bool
+	threadName          string
 	wakeIdx             int
 	wakeInfos           []wakeInfo
 	trailingMsgs        []db.Message
@@ -652,7 +653,7 @@ func isHTTPClientBurst(burst []db.Message) bool {
 }
 
 func (te *turnExecution) resolveTurnPolicy() bool {
-	te.effectiveID, te.effectiveName, te.isThread = ResolveEffectiveChannel(te.pool.getDiscordSession(), te.threadID)
+	te.effectiveID, te.effectiveName, te.isThread, te.threadName = ResolveChannelAndThread(te.pool.getDiscordSession(), te.threadID)
 	if te.pool.cfg.ResolveChannelPolicy != nil {
 		te.policy = te.pool.cfg.ResolveChannelPolicy(te.effectiveID, te.effectiveName)
 	} else {
@@ -1240,6 +1241,16 @@ func (te *turnExecution) buildTurnPrompt() {
 			log.Printf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
 		} else if strings.TrimSpace(ambientCtx) != "" {
 			log.Printf("[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
+		}
+	}
+
+	// Enrich burst messages with channel and thread names if not already set
+	for i := range te.burst {
+		if te.burst[i].Metadata.ChannelName == "" && te.effectiveName != "" {
+			te.burst[i].Metadata.ChannelName = te.effectiveName
+		}
+		if te.isThread && te.burst[i].Metadata.ThreadName == "" && te.threadName != "" {
+			te.burst[i].Metadata.ThreadName = te.threadName
 		}
 	}
 

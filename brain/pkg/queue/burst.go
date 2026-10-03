@@ -171,7 +171,24 @@ func FormatSingleDiscordPrompt(m db.Message) string {
 		channelID = m.ThreadID
 	}
 	sb.WriteString(fmt.Sprintf("- channel_id: %s\n", channelID))
+	if m.Metadata.ChannelName != "" {
+		cleanChannelName := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.ChannelName, "\n", " "), "\r", "")
+		cleanChannelName = strings.TrimSpace(sanitizer.SanitizePromptTags(cleanChannelName))
+		if cleanChannelName != "" {
+			if !strings.HasPrefix(cleanChannelName, "#") {
+				cleanChannelName = "#" + cleanChannelName
+			}
+			sb.WriteString(fmt.Sprintf("- channel_name: %q\n", cleanChannelName))
+		}
+	}
 	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", m.ThreadID))
+	if m.Metadata.ThreadName != "" {
+		cleanThreadName := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.ThreadName, "\n", " "), "\r", "")
+		cleanThreadName = strings.TrimSpace(sanitizer.SanitizePromptTags(cleanThreadName))
+		if cleanThreadName != "" {
+			sb.WriteString(fmt.Sprintf("- thread_name: %q\n", cleanThreadName))
+		}
+	}
 	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
 	sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.AuthorID))
 	cleanUsername := strings.ReplaceAll(strings.ReplaceAll(m.AuthorName, "\n", " "), "\r", "")

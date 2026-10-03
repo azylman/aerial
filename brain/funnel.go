@@ -398,9 +398,13 @@ func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetTh
 		}
 	}
 
+	_, effName, _, threadName := queue.ResolveChannelAndThread(s, m.ChannelID)
+
 	return db.MessageMetadata{
 		ChannelID:         m.ChannelID,
+		ChannelName:       effName,
 		TargetThreadID:    targetThreadID,
+		ThreadName:        threadName,
 		GuildID:           m.GuildID,
 		AuthorUsername:    username,
 		AuthorGlobalName:  globalName,

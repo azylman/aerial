@@ -22,7 +22,9 @@ const (
 // MessageMetadata stores structured Discord and source metadata preserved throughout the queue lifecycle.
 type MessageMetadata struct {
 	ChannelID         string   `json:"channel_id,omitempty"`
+	ChannelName       string   `json:"channel_name,omitempty"`
 	TargetThreadID    string   `json:"target_thread_id,omitempty"`
+	ThreadName        string   `json:"thread_name,omitempty"`
 	GuildID           string   `json:"guild_id,omitempty"`
 	AuthorUsername    string   `json:"author_username,omitempty"`
 	AuthorGlobalName  string   `json:"author_global_name,omitempty"`
@@ -39,7 +41,9 @@ type MessageMetadata struct {
 // IsEmpty returns true if all metadata fields are zero/empty.
 func (m MessageMetadata) IsEmpty() bool {
 	return m.ChannelID == "" &&
+		m.ChannelName == "" &&
 		m.TargetThreadID == "" &&
+		m.ThreadName == "" &&
 		m.GuildID == "" &&
 		m.AuthorUsername == "" &&
 		m.AuthorGlobalName == "" &&
