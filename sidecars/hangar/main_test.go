@@ -5378,7 +5378,7 @@ func TestNomadOrchestration_UnitSuite(t *testing.T) {
 
 	// 1. defaultNomadExecutor execution & token scrubbing
 	execFn := defaultNomadExecutor("http://127.0.0.1:4646", "secret-nomad-token")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, _, _ = execFn(ctx, "version")
 
@@ -7236,6 +7236,101 @@ func TestExecuteImageReadyEvent_DispatchesDeployRollback(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for deploy_rollback")
+	}
+}
+
+func TestExecuteImageReadyEvent_PropagatesMetadataAndDispatchesDeploySuccess(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	job1 := `job "brain" {
+		task "brain" {
+			config {
+				image = "ghcr.io/azylman/aerial-brain:latest"
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "brain.nomad"), []byte(job1), 0644)
+
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir:              tmpDir,
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				return []byte("Evaluation ID: run-success-123"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "job" && args[1] == "restart" {
+				return []byte("Restart triggered"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+				return []byte(`{
+					"ID": "brain",
+					"JobVersion": 3,
+					"LatestDeployment": {
+						"ID": "dep-success-uuid",
+						"JobVersion": 3,
+						"Status": "successful",
+						"StatusDescription": "deployment successful"
+					}
+				}`), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	resp, code := d.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image:     "ghcr.io/azylman/aerial-brain:latest",
+		Digest:    "sha256:digest_brain",
+		Repo:      "azylman/aerial",
+		CommitSHA: "headsha777",
+		PRNumber:  535,
+		TargetID:  "1555405874565091380",
+	})
+	if code != http.StatusOK || resp.Status != "accepted" {
+		t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
+	}
+
+	// 1. Wait for deploy_started
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_started" {
+			t.Errorf("expected deploy_started, got %q", evt.Event)
+		}
+		if evt.JobName != "brain" {
+			t.Errorf("expected job_name brain, got %q", evt.JobName)
+		}
+		if evt.Repo != "azylman/aerial" || evt.CommitSHA != "headsha777" || evt.PRNumber != 535 || evt.TargetID != "1555405874565091380" {
+			t.Errorf("metadata missing in deploy_started: %+v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_started")
+	}
+
+	// 2. Wait for deploy_success
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_success" {
+			t.Errorf("expected deploy_success, got %q", evt.Event)
+		}
+		if evt.Status != "success" {
+			t.Errorf("expected status success, got %q", evt.Status)
+		}
+		if evt.DeploymentID != "dep-success-uuid" {
+			t.Errorf("expected deployment_id dep-success-uuid, got %q", evt.DeploymentID)
+		}
+		if evt.Repo != "azylman/aerial" || evt.CommitSHA != "headsha777" || evt.PRNumber != 535 || evt.TargetID != "1555405874565091380" {
+			t.Errorf("metadata missing in deploy_success: %+v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_success")
 	}
 }
 
