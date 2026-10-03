@@ -16,6 +16,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search ./cmd/transcript-search
 
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hook-guard ./cmd/hook-guard
+
 # Prune Go SDK test, doc, and api directories before exporting to runtime stage
 RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
@@ -85,8 +89,11 @@ WORKDIR /app
 
 COPY --link --from=builder /aerial-brain /usr/local/bin/aerial-brain
 COPY --link --from=builder /transcript-search /usr/local/bin/transcript-search
+COPY --link --from=builder /hook-guard /usr/local/bin/hook-guard
+RUN ln -s /usr/local/bin/hook-guard /usr/local/bin/share-guard && \
+    ln -s /usr/local/bin/hook-guard /usr/local/bin/schedule-guard
 COPY --link scripts/ /usr/local/bin/
-RUN chmod +x /usr/local/bin/*.sh || true
+RUN chmod +x /usr/local/bin/*.sh 2>/dev/null || true
 COPY --link rules /app/rules
 COPY --link .agents /app/.agents
 
