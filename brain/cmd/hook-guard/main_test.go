@@ -151,6 +151,34 @@ func TestRunCLI(t *testing.T) {
 			wantDeny: true,
 			wantCode: 0,
 		},
+		{
+			name:     "commit subcommand allows benign command",
+			args:     []string{"hook-guard", "commit"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hello", "Cwd": "/data"}}}`,
+			wantDeny: false,
+			wantCode: 0,
+		},
+		{
+			name:     "symlink commit-guard base name",
+			args:     []string{"/usr/local/bin/commit-guard"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hello", "Cwd": "/data"}}}`,
+			wantDeny: false,
+			wantCode: 0,
+		},
+		{
+			name:     "commit-guard alias arg",
+			args:     []string{"hook-guard", "commit-guard"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hello", "Cwd": "/data"}}}`,
+			wantDeny: false,
+			wantCode: 0,
+		},
+		{
+			name:     "commit-safety-guard alias arg",
+			args:     []string{"hook-guard", "commit-safety-guard"},
+			input:    `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hello", "Cwd": "/data"}}}`,
+			wantDeny: false,
+			wantCode: 0,
+		},
 	}
 
 	for _, tt := range tests {
