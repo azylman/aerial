@@ -57,13 +57,27 @@ type RouterYAMLConfig struct {
 	BrainURL             string `yaml:"brain_url"`
 }
 
+var webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
+
 // LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
 func LoadConfig(configPath string) Config {
 	var fileCfg RouterYAMLConfig
-	if configPath != "" {
-		if data, err := os.ReadFile(configPath); err == nil {
+	targetPath := strings.TrimSpace(configPath)
+	if targetPath != "" {
+		if fi, err := os.Stat(targetPath); err != nil || fi.Size() == 0 {
+			targetPath = ""
+		}
+	}
+	if targetPath == "" {
+		if fi, err := os.Stat(webhooksRouterFallbackConfigPath); err == nil && fi.Size() > 0 {
+			targetPath = webhooksRouterFallbackConfigPath
+		}
+	}
+
+	if targetPath != "" {
+		if data, err := os.ReadFile(targetPath); err == nil {
 			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
-				log.Printf("[WebhooksRouter] Warning: failed to parse yaml config at %s: %v", configPath, err)
+				log.Printf("[WebhooksRouter] Warning: failed to parse yaml config at %s: %v", targetPath, err)
 			}
 		}
 	}

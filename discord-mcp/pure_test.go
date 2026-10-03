@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -717,6 +719,66 @@ func TestIsToolNameBlocked_MixedCase(t *testing.T) {
 	if !isToolNameBlocked("discord_send", blocked) {
 		t.Error("expected true for mixed-case key in blocked map")
 	}
+}
+
+func TestResolveConfigPath(t *testing.T) {
+	fallback := "/config/config.yaml"
+
+	t.Run("CONFIG_PATH environment variable takes precedence", func(t *testing.T) {
+		t.Setenv("CONFIG_PATH", "/custom/override/config.yaml")
+		got := ResolveConfigPath(fallback)
+		if got != "/custom/override/config.yaml" {
+			t.Errorf("expected /custom/override/config.yaml, got %s", got)
+		}
+	})
+
+	t.Run("Local config exists and has non-zero size", func(t *testing.T) {
+		t.Setenv("CONFIG_PATH", "")
+		tmpDir := t.TempDir()
+		localFile := filepath.Join(tmpDir, "config.yaml")
+		if err := os.WriteFile(localFile, []byte("port: '4001'\nupstream_port: '4025'\n"), 0644); err != nil {
+			t.Fatalf("failed to write temp local config: %v", err)
+		}
+
+		oldLocal := localConfigPath
+		localConfigPath = localFile
+		t.Cleanup(func() { localConfigPath = oldLocal })
+
+		got := ResolveConfigPath(fallback)
+		if got != localFile {
+			t.Errorf("expected %s, got %s", localFile, got)
+		}
+	})
+
+	t.Run("Local config exists but has zero size falls back", func(t *testing.T) {
+		t.Setenv("CONFIG_PATH", "")
+		tmpDir := t.TempDir()
+		emptyFile := filepath.Join(tmpDir, "empty.yaml")
+		if err := os.WriteFile(emptyFile, []byte(""), 0644); err != nil {
+			t.Fatalf("failed to write empty local config: %v", err)
+		}
+
+		oldLocal := localConfigPath
+		localConfigPath = emptyFile
+		t.Cleanup(func() { localConfigPath = oldLocal })
+
+		got := ResolveConfigPath(fallback)
+		if got != fallback {
+			t.Errorf("expected fallback %s, got %s", fallback, got)
+		}
+	})
+
+	t.Run("Local config does not exist falls back", func(t *testing.T) {
+		t.Setenv("CONFIG_PATH", "")
+		oldLocal := localConfigPath
+		localConfigPath = "/non/existent/config.yaml"
+		t.Cleanup(func() { localConfigPath = oldLocal })
+
+		got := ResolveConfigPath(fallback)
+		if got != fallback {
+			t.Errorf("expected fallback %s, got %s", fallback, got)
+		}
+	})
 }
 
 

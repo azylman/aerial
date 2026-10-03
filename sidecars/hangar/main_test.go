@@ -1430,6 +1430,83 @@ func TestSyncHomepageConfigToNomad(t *testing.T) {
 	}
 }
 
+func TestSyncServiceConfigsToNomad(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// 1. Missing service configs -> skipped gracefully, returns nil
+	emptyDir := t.TempDir()
+	dEmpty := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			t.Fatalf("unexpected call to nomadExecutor on empty dir: %v", args)
+			return nil, nil, nil
+		},
+	}
+	if err := dEmpty.SyncServiceConfigsToNomad(ctx, emptyDir); err != nil {
+		t.Fatalf("expected nil for empty configDir, got %v", err)
+	}
+
+	// 2. Unreadable file (directory instead of file) -> error
+	badDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(badDir, "services", "mcp", "scheduler-mcp.yaml"), 0755); err != nil {
+		t.Fatalf("failed creating bad path: %v", err)
+	}
+	dBad := &SyncDaemon{nomadAddr: "http://127.0.0.1:4646"}
+	if err := dBad.SyncServiceConfigsToNomad(ctx, badDir); err == nil || !strings.Contains(err.Error(), "failed to read service config") {
+		t.Fatalf("expected error reading directory as file, got %v", err)
+	}
+
+	// 3. Invalid YAML syntax in a service config -> error
+	invDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(invDir, "services", "mcp"), 0755)
+	_ = os.WriteFile(filepath.Join(invDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("invalid: yaml: [unclosed"), 0644)
+	dInv := &SyncDaemon{nomadAddr: "http://127.0.0.1:4646"}
+	if err := dInv.SyncServiceConfigsToNomad(ctx, invDir); err == nil || !strings.Contains(err.Error(), "invalid YAML syntax") {
+		t.Fatalf("expected invalid YAML syntax error, got %v", err)
+	}
+
+	// 4. Valid service configs -> pushes to all Nomad variables
+	valDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(valDir, "services", "mcp"), 0755)
+	_ = os.MkdirAll(filepath.Join(valDir, "services", "webhooks-router"), 0755)
+	_ = os.WriteFile(filepath.Join(valDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: \"4005\"\n"), 0644)
+	_ = os.WriteFile(filepath.Join(valDir, "services", "mcp", "docker-mcp.yaml"), []byte("port: \"4002\"\n"), 0644)
+	_ = os.WriteFile(filepath.Join(valDir, "services", "webhooks-router", "webhooks-router.yaml"), []byte("port: \"4020\"\n"), 0644)
+
+	var calls [][]string
+	dSuccess := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			calls = append(calls, args)
+			return []byte("var updated"), nil, nil
+		},
+	}
+	if err := dSuccess.SyncServiceConfigsToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 nomad var put calls, got %d: %v", len(calls), calls)
+	}
+
+	// 5. Disabled Nomad executor -> safe no-op
+	dNoNomad := &SyncDaemon{nomadAddr: ""}
+	if err := dNoNomad.SyncServiceConfigsToNomad(ctx, valDir); err != nil {
+		t.Fatalf("expected nil for disabled nomadAddr, got %v", err)
+	}
+
+	// 6. Nomad CLI failure -> error
+	dFail := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
+		},
+	}
+	if err := dFail.SyncServiceConfigsToNomad(ctx, valDir); err == nil || !strings.Contains(err.Error(), "failed updating Nomad variable") {
+		t.Fatalf("expected Nomad update error, got %v", err)
+	}
+}
+
 func TestRepoLock_ThreadSafety(t *testing.T) {
 	daemon := NewDaemon(DaemonConfig{})
 

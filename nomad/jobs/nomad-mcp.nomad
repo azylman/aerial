@@ -36,9 +36,18 @@ job "nomad-mcp" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-nomad-mcp:latest"
         network_mode = "host"
-        volumes = [
-          "/mnt/data/supervisor/share/aerial-config/services/mcp/nomad-mcp.yaml:/config/config.yaml:ro"
-        ]
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/nomad-mcp" -}}
+{{- with nomadVar "nomad/jobs/nomad-mcp" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/config.yaml"
+        change_mode = "restart"
       }
 
       template {

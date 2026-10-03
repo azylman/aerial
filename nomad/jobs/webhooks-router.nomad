@@ -37,13 +37,22 @@ job "webhooks-router" {
         image        = "ghcr.io/azylman/aerial-webhooks-router:latest"
         network_mode = "host"
         force_pull   = true
-        volumes = [
-          "/mnt/data/supervisor/share/aerial-config/services/webhooks-router/webhooks-router.yaml:/config/webhooks-router.yaml:ro"
-        ]
       }
 
       env {
-        CONFIG_PATH = "/config/webhooks-router.yaml"
+        CONFIG_PATH = "/local/webhooks-router.yaml"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/webhooks-router" -}}
+{{- with nomadVar "nomad/jobs/webhooks-router" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/webhooks-router.yaml"
+        change_mode = "restart"
       }
 
       template {

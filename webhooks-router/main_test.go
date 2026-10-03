@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3582,6 +3583,69 @@ brain_url: "http://brain.custom:8088"
 	}
 	if cfgOver.NomadAddr != "http://nomad.custom:4646" {
 		t.Errorf("expected retained yaml nomad_addr, got %s", cfgOver.NomadAddr)
+	}
+}
+
+func TestLoadConfig_FallbackAndZeroByte(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Zero-byte local config with fallback config existing
+	localZero := filepath.Join(tmpDir, "local_zero.yaml")
+	if err := os.WriteFile(localZero, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to create zero-byte file: %v", err)
+	}
+
+	fallbackValid := filepath.Join(tmpDir, "fallback_valid.yaml")
+	fallbackContent := `
+port: "4088"
+infisical_url: "http://infisical.fallback:8085"
+nomad_addr: "http://nomad.fallback:4646"
+`
+	if err := os.WriteFile(fallbackValid, []byte(fallbackContent), 0644); err != nil {
+		t.Fatalf("failed to create fallback config: %v", err)
+	}
+
+	oldFallback := webhooksRouterFallbackConfigPath
+	webhooksRouterFallbackConfigPath = fallbackValid
+	t.Cleanup(func() { webhooksRouterFallbackConfigPath = oldFallback })
+
+	// Clear env vars that might interfere
+	t.Setenv("PORT", "")
+	t.Setenv("INFISICAL_URL", "")
+	t.Setenv("INFISICAL_HOST_URL", "")
+	t.Setenv("NOMAD_ADDR", "")
+
+	cfgFallback := LoadConfig(localZero)
+	if cfgFallback.Port != "4088" {
+		t.Errorf("expected fallback port 4088, got %s", cfgFallback.Port)
+	}
+	if cfgFallback.InfisicalURL != "http://infisical.fallback:8085" {
+		t.Errorf("expected fallback infisical_url http://infisical.fallback:8085, got %s", cfgFallback.InfisicalURL)
+	}
+
+	// 2. Zero-byte local config with non-existent fallback -> uses defaults
+	webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
+	cfgDefaults := LoadConfig(localZero)
+	if cfgDefaults.Port != "4020" {
+		t.Errorf("expected default port 4020, got %s", cfgDefaults.Port)
+	}
+	if cfgDefaults.InfisicalURL != "http://127.0.0.1:8085" {
+		t.Errorf("expected default infisical_url http://127.0.0.1:8085, got %s", cfgDefaults.InfisicalURL)
+	}
+
+	// 3. Empty configPath with valid fallback
+	webhooksRouterFallbackConfigPath = fallbackValid
+	cfgEmptyPath := LoadConfig("")
+	if cfgEmptyPath.Port != "4088" {
+		t.Errorf("expected port 4088 from fallback on empty configPath, got %s", cfgEmptyPath.Port)
+	}
+
+	// 4. Non-empty local config takes precedence over fallback
+	localValid := filepath.Join(tmpDir, "local_valid.yaml")
+	_ = os.WriteFile(localValid, []byte("port: \"4077\"\n"), 0644)
+	cfgLocal := LoadConfig(localValid)
+	if cfgLocal.Port != "4077" {
+		t.Errorf("expected local port 4077, got %s", cfgLocal.Port)
 	}
 }
 
