@@ -3668,7 +3668,7 @@ func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
 		},
 	}
 
-	var dispatchedEvt HangarDeployEvent
+	evtCh := make(chan HangarDeployEvent, 10)
 	d := NewDaemon(DaemonConfig{
 		ConfigDir:      tmpDir,
 		NomadExecutor:  mockNomad,
@@ -3680,7 +3680,7 @@ func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
 			return nil, nil, nil
 		},
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			dispatchedEvt = evt
+			evtCh <- evt
 			return nil
 		},
 	})
@@ -3695,8 +3695,13 @@ func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
 	if !restartCalled {
 		t.Errorf("expected nomad job restart to be called")
 	}
-	if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.JobName != "mirrormere-core" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" {
-		t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
+	select {
+	case dispatchedEvt := <-evtCh:
+		if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.JobName != "mirrormere-core" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" {
+			t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("timed out waiting for deploy_started event")
 	}
 	if restartedJob != "mirrormere-core" {
 		t.Errorf("expected restarted job 'mirrormere-core', got %q", restartedJob)
@@ -5154,7 +5159,7 @@ job "svc" {
 		return nil, nil, nil
 	}
 
-	var dispatchedEvt HangarDeployEvent
+	evtCh := make(chan HangarDeployEvent, 10)
 	d := NewDaemon(DaemonConfig{
 		ConfigDir:      tmpDir,
 		NomadExecutor:  mockNomad,
@@ -5166,7 +5171,7 @@ job "svc" {
 			return nil, nil, nil
 		},
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			dispatchedEvt = evt
+			evtCh <- evt
 			return nil
 		},
 	})
@@ -5208,8 +5213,13 @@ job "svc" {
 	if restartedJob != "svc" {
 		t.Errorf("expected restart for svc, got %q", restartedJob)
 	}
-	if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" || dispatchedEvt.Status != "started" {
-		t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
+	select {
+	case dispatchedEvt := <-evtCh:
+		if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" || dispatchedEvt.Status != "started" {
+			t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("timed out waiting for deploy_started event")
 	}
 
 	// Reset poll throttle
