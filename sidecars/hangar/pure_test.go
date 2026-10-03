@@ -10,197 +10,6 @@ import (
 	"testing"
 )
 
-func TestFilterConflictContainers_TableDriven(t *testing.T) {
-	tests := []struct {
-		name         string
-		dockerPs     string
-		selfHostname string
-		wantIDs      []string
-	}{
-		{
-			name: "valid conflict containers with different non-running states",
-			dockerPs: strings.Join([]string{
-				"c01111111111\t/c01111111111_brain\tExited (0)",
-				"c02222222222\t/c02222222222_brain\tCreated",
-				"c03333333333\tc03333333333_brain\tDead",
-			}, "\n"),
-			selfHostname: "otherhost",
-			wantIDs:      []string{"c01111111111", "c02222222222", "c03333333333"},
-		},
-		{
-			name: "running or restarting containers are ignored",
-			dockerPs: strings.Join([]string{
-				"c01111111111\t/c01111111111_brain\tUp 2 hours",
-				"c02222222222\t/c02222222222_brain\tRestarting (1) 5 seconds ago",
-				"c03333333333\t/c03333333333_brain\tExited (0)",
-			}, "\n"),
-			selfHostname: "otherhost",
-			wantIDs:      []string{"c03333333333"},
-		},
-		{
-			name: "self hostname is preserved and ignored",
-			dockerPs: strings.Join([]string{
-				"selfhost1234\t/selfhost1234_brain\tExited (0)",
-				"c02222222222\t/c02222222222_brain\tExited (0)",
-			}, "\n"),
-			selfHostname: "selfhost1234",
-			wantIDs:      []string{"c02222222222"},
-		},
-		{
-			name: "self hostname match on full ID when shortID is used",
-			dockerPs: strings.Join([]string{
-				"aabbccddeeff001122\t/aabbccddeeff_brain\tExited (0)",
-				"c02222222222\t/c02222222222_brain\tExited (0)",
-			}, "\n"),
-			selfHostname: "aabbccddeeff001122",
-			wantIDs:      []string{"c02222222222"},
-		},
-		{
-			name: "dead gitsync conflict container is included",
-			dockerPs: strings.Join([]string{
-				"c01111111111\t/c01111111111_aerial-gitsync\tExited (0)",
-			}, "\n"),
-			selfHostname: "otherhost",
-			wantIDs:      []string{"c01111111111"},
-		},
-		{
-			name: "case-insensitive hex matching",
-			dockerPs: strings.Join([]string{
-				"C0A1B2C3D4E5\t/c0a1b2c3d4e5_brain\tExited (0)",
-			}, "\n"),
-			selfHostname: "otherhost",
-			wantIDs:      []string{"C0A1B2C3D4E5"},
-		},
-		{
-			name: "non-hex shortID or length less than 12 ignored",
-			dockerPs: strings.Join([]string{
-				"short123\t/short123_brain\tExited (0)",
-				"nonhexzzzzzz\t/nonhexzzzzzz_brain\tExited (0)",
-				"c01111111111\t/c01111111111_brain\tExited (0)",
-			}, "\n"),
-			selfHostname: "otherhost",
-			wantIDs:      []string{"c01111111111"},
-		},
-		{
-			name: "multiple comma-separated names with leading slashes",
-			dockerPs: strings.Join([]string{
-				"c01111111111\t/alias1,/c01111111111_brain,alias2\tExited (0)",
-			}, "\n"),
-			selfHostname: "otherhost",
-			wantIDs:      []string{"c01111111111"},
-		},
-		{
-			name: "malformed lines and empty output",
-			dockerPs: strings.Join([]string{
-				"",
-				"only_id",
-				"id\tname",
-				"   \t  \t  ",
-				"c01111111111\t/c01111111111_brain\tExited (0)",
-			}, "\n"),
-			selfHostname: "otherhost",
-			wantIDs:      []string{"c01111111111"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FilterConflictContainers(tt.dockerPs, tt.selfHostname)
-			var gotIDs []string
-			for _, c := range got {
-				gotIDs = append(gotIDs, c.ID)
-			}
-			if len(gotIDs) != len(tt.wantIDs) {
-				t.Fatalf("expected %d IDs, got %d: %v", len(tt.wantIDs), len(gotIDs), gotIDs)
-			}
-			for i := range gotIDs {
-				if gotIDs[i] != tt.wantIDs[i] {
-					t.Errorf("ID[%d] = %q, want %q", i, gotIDs[i], tt.wantIDs[i])
-				}
-			}
-		})
-	}
-}
-
-func TestParseComposeServices_TableDriven(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected []string
-	}{
-		{
-			name:     "standard services with gitsync and hangar excluded",
-			input:    "brain\ngitsync\nhangar\nHANGAR\ndashboard\nprometheus\n",
-			expected: []string{"brain", "dashboard", "prometheus"},
-		},
-		{
-			name:     "case variants of gitsync and hangar",
-			input:    "GITSYNC\nservice1\nGitSync\nservice2\ngitsync\nHangar\n",
-			expected: []string{"service1", "service2"},
-		},
-		{
-			name:     "crlf and duplicates",
-			input:    "brain\r\nserviceA\r\nbrain\r\nserviceB\r\n\r\n",
-			expected: []string{"brain", "serviceA", "serviceB"},
-		},
-		{
-			name:     "empty input",
-			input:    "\n   \n\r\n",
-			expected: []string{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ParseComposeServices(tt.input)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("expected %d services, got %d: %v", len(tt.expected), len(got), got)
-			}
-			for i := range got {
-				if got[i] != tt.expected[i] {
-					t.Errorf("[%d] = %q, want %q", i, got[i], tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
-func TestIsComposeFile_TableDriven(t *testing.T) {
-	tests := []struct {
-		path     string
-		expected bool
-	}{
-		{"docker-compose.yml", true},
-		{"docker-compose.yaml", true},
-		{"docker-compose.override.yml", true},
-		{"docker-compose.override.yaml", true},
-		{"compose.yaml", true},
-		{"compose.yml", true},
-		{"compose.override.yaml", true},
-		{"compose.override.yml", true},
-		{".env", true},
-		{".env.example", true},
-		{"/root/deploy/docker-compose.yml", true},
-		{"C:\\Users\\alexz\\.env", true},
-		{"nomad/nomad.hcl", true},
-		{"nomad/server.hcl", true},
-		{"main.go", false},
-		{"README.md", false},
-		{"docker-compose.sh", false},
-		{"compose.json", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got := IsComposeFile(tt.path)
-			if got != tt.expected {
-				t.Errorf("IsComposeFile(%q) = %v, want %v", tt.path, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestIsNomadConfigFile_TableDriven(t *testing.T) {
 	tests := []struct {
 		path     string
@@ -261,44 +70,6 @@ func TestFilterNomadConfigFiles_TableDriven(t *testing.T) {
 	}
 }
 
-func TestFilterComposeChanges_TableDriven(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []string
-		expected []string
-	}{
-		{
-			name:     "mixed list",
-			input:    []string{"brain/main.go", "docker-compose.yml", "README.md", "deploy/.env", "nomad/nomad.hcl"},
-			expected: []string{"docker-compose.yml", "deploy/.env", "nomad/nomad.hcl"},
-		},
-		{
-			name:     "no compose files",
-			input:    []string{"pkg/config.go", "Makefile"},
-			expected: nil,
-		},
-		{
-			name:     "empty slice",
-			input:    []string{},
-			expected: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FilterComposeChanges(tt.input)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("expected %d matches, got %d: %v", len(tt.expected), len(got), got)
-			}
-			for i := range got {
-				if got[i] != tt.expected[i] {
-					t.Errorf("[%d] = %q, want %q", i, got[i], tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
 func TestBuildDiscordAlertContent_TableDriven(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -316,15 +87,15 @@ func TestBuildDiscordAlertContent_TableDriven(t *testing.T) {
 			repoPath:     "/share/aerial",
 			faultyCommit: "abc1234",
 			rolledBackTo: "def5678",
-			stage:        "compose apply",
-			errorMsg:     "container failed to start",
+			stage:        "nomad apply",
+			errorMsg:     "job failed to place",
 			checkSubstrs: []string{
-				"🚨 **GitSync GitOps Rollback Alert: Reconcile Failed**",
+				"🚨 **GitSync GitOps Alert: Reconcile Failed**",
 				"**Repository:**",
-				"**Stage:** `compose apply`",
-				"**Faulty Commit:** `abc1234`",
+				"**Stage:** `nomad apply`",
+				"**Commit:** `abc1234`",
 				"**Rolled Back To:** `def5678`",
-				"container failed to start",
+				"job failed to place",
 			},
 		},
 		{
@@ -336,7 +107,7 @@ func TestBuildDiscordAlertContent_TableDriven(t *testing.T) {
 			stage:        "validation",
 			errorMsg:     strings.Repeat("X", 1300),
 			checkSubstrs: []string{
-				"🚨 **GitSync GitOps Rollback Alert: Validation Error**",
+				"🚨 **GitSync GitOps Alert: Validation Error**",
 				"**Stage:** `validation`",
 				strings.Repeat("X", 1200),
 				"[... truncated for length]",
@@ -351,8 +122,7 @@ func TestBuildDiscordAlertContent_TableDriven(t *testing.T) {
 			stage:        "",
 			errorMsg:     "",
 			checkSubstrs: []string{
-				"🚨 **GitSync GitOps Rollback Alert: Clean Alert**",
-				"*Faulty commit quarantined to prevent sync loops. Newer commits to origin/main will sync normally.*",
+				"🚨 **GitSync GitOps Alert: Clean Alert**",
 			},
 		},
 	}
@@ -397,21 +167,11 @@ func TestCalculateSyncStatus_TableDriven(t *testing.T) {
 			expected: "lagging",
 		},
 		{
-			name: "quarantined takes precedence over lagging and synced",
-			repos: map[string]RepoStatus{
-				"repo1": {SyncStatus: "synced"},
-				"repo2": {SyncStatus: "lagging"},
-				"repo3": {SyncStatus: "quarantined", Quarantined: true},
-			},
-			expected: "quarantined",
-		},
-		{
 			name: "error takes highest precedence",
 			repos: map[string]RepoStatus{
 				"repo1": {SyncStatus: "synced"},
 				"repo2": {SyncStatus: "lagging"},
-				"repo3": {SyncStatus: "quarantined", Quarantined: true},
-				"repo4": {SyncStatus: "error", Error: "disk read failed"},
+				"repo3": {SyncStatus: "error", Error: "disk read failed"},
 			},
 			expected: "error",
 		},
@@ -426,6 +186,7 @@ func TestCalculateSyncStatus_TableDriven(t *testing.T) {
 		})
 	}
 }
+
 
 func TestScrubComposeEnv_TableDriven(t *testing.T) {
 	tests := []struct {
@@ -1197,39 +958,6 @@ func TestContainsDigest_TableDriven(t *testing.T) {
 			got := ContainsDigest(tt.repoDigests, tt.target)
 			if got != tt.want {
 				t.Errorf("ContainsDigest() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRollbackTagForService_TableDriven(t *testing.T) {
-	tests := []struct {
-		name    string
-		service string
-		want    string
-	}{
-		{
-			name:    "unprefixed service",
-			service: "brain",
-			want:    "aerial-brain:rollback-target",
-		},
-		{
-			name:    "already prefixed service",
-			service: "aerial-brain",
-			want:    "aerial-brain:rollback-target",
-		},
-		{
-			name:    "whitespace handling",
-			service: "  dashboard  ",
-			want:    "aerial-dashboard:rollback-target",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := RollbackTagForService(tt.service)
-			if got != tt.want {
-				t.Errorf("RollbackTagForService(%q) = %q, want %q", tt.service, got, tt.want)
 			}
 		})
 	}

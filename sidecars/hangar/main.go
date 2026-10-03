@@ -102,70 +102,33 @@ func (d *SyncDaemon) SanitizeAll(input string) string {
 	return out
 }
 
-// QuarantineKey uniquely identifies a repository and a commit SHA.
-type QuarantineKey struct {
-	RepoPath  string
-	CommitSHA string
-}
-
-// QuarantineRecord holds diagnostic metadata for a quarantined commit.
-type QuarantineRecord struct {
-	RepoPath      string    `json:"repo_path"`
-	CommitSHA     string    `json:"commit_sha"`
-	PreviousHead  string    `json:"previous_head"`
-	Reason        string    `json:"reason"`
-	FailureStage  string    `json:"failure_stage"` // "validation" or "compose_up"
-	QuarantinedAt time.Time `json:"quarantined_at"`
-}
-
-// ImageQuarantineRecord holds diagnostic metadata for a quarantined container image digest.
-type ImageQuarantineRecord struct {
-	Service       string    `json:"service"`
-	Digest        string    `json:"digest"`
-	Reason        string    `json:"reason"`
-	QuarantinedAt time.Time `json:"quarantined_at"`
-}
-
-// ComposeChangeEvent captures a detected configuration change before reconciliation.
-type ComposeChangeEvent struct {
-	RepoPath           string    `json:"repo_path"`
-	PreviousHead       string    `json:"previous_head"`
-	CurrentHead        string    `json:"current_head"`
-	Timestamp          time.Time `json:"timestamp"`
-	NomadConfigChanged bool      `json:"nomad_config_changed,omitempty"`
-}
-
 // RepoSyncResult holds telemetry for a single repository sync operation.
 type RepoSyncResult struct {
-	Repo           string `json:"repo"`
-	PreviousHead   string `json:"previous_head"`
-	CurrentHead    string `json:"current_head"`
-	Changed        bool   `json:"changed"`
-	ComposeChanged bool   `json:"compose_changed,omitempty"`
-	Error          string `json:"error,omitempty"`
+	Repo         string `json:"repo"`
+	PreviousHead string `json:"previous_head"`
+	CurrentHead  string `json:"current_head"`
+	Changed      bool   `json:"changed"`
+	Error        string `json:"error,omitempty"`
 }
 
 // RepoStatus holds git commit and timestamp metadata for an individual repository.
 type RepoStatus struct {
-	Repo              string     `json:"repo"`
-	GitHubRepo        string     `json:"github_repo,omitempty"`
-	DiskCommit        string     `json:"disk_commit"`
-	DiskCommitTime    *time.Time `json:"disk_commit_time,omitempty"`
-	RemoteCommit      string     `json:"remote_commit"`
-	RemoteCommitTime  *time.Time `json:"remote_commit_time,omitempty"`
-	TimeLagSeconds    int64      `json:"time_lag_seconds"`
-	SyncStatus        string     `json:"sync_status"` // "synced", "lagging", "quarantined", "error"
-	Quarantined       bool       `json:"quarantined,omitempty"`
-	QuarantinedCommit string     `json:"quarantined_commit,omitempty"`
-	QuarantineReason  string     `json:"quarantine_reason,omitempty"`
-	LastSyncTime      time.Time  `json:"last_sync_time"`
-	Error             string     `json:"error,omitempty"`
+	Repo             string     `json:"repo"`
+	GitHubRepo       string     `json:"github_repo,omitempty"`
+	DiskCommit       string     `json:"disk_commit"`
+	DiskCommitTime   *time.Time `json:"disk_commit_time,omitempty"`
+	RemoteCommit     string     `json:"remote_commit"`
+	RemoteCommitTime *time.Time `json:"remote_commit_time,omitempty"`
+	TimeLagSeconds   int64      `json:"time_lag_seconds"`
+	SyncStatus       string     `json:"sync_status"` // "synced", "lagging", "error"
+	LastSyncTime     time.Time  `json:"last_sync_time"`
+	Error            string     `json:"error,omitempty"`
 }
 
-// ReconciliationStatus captures in-memory state of active and recent Docker Compose reconciliations.
+// ReconciliationStatus captures in-memory state of active and recent reconciliations.
 type ReconciliationStatus struct {
 	Active         bool      `json:"active"`
-	State          string    `json:"state"`                     // "idle", "pulling", "swapping", "rolling_back", "healthy", "failed"
+	State          string    `json:"state"`                     // "idle", "healthy", "failed"
 	Stage          string    `json:"stage"`                     // alias to State for backward compatibility
 	Trigger        string    `json:"trigger,omitempty"`         // "image_poll", "git_sync", "manual_api"
 	TargetServices []string  `json:"target_services,omitempty"` // services planned/targeted for reconciliation
@@ -177,7 +140,7 @@ type ReconciliationStatus struct {
 
 // HangarStatusResponse is the aggregated telemetry payload returned by GET /status.
 type HangarStatusResponse struct {
-	Status         string                `json:"status"` // "synced", "lagging", "quarantined", "error"
+	Status         string                `json:"status"` // "synced", "lagging", "error"
 	MaxLagSeconds  int64                 `json:"max_lag_seconds"`
 	LastSyncTime   time.Time             `json:"last_sync_time"`
 	Repos          map[string]RepoStatus `json:"repos"`
@@ -328,7 +291,6 @@ type SyncDaemon struct {
 	composeDir    string
 	configDir     string
 	reconcileCh   chan struct{}
-	composeMu     sync.Mutex
 	lastReconcile time.Time
 	lastSyncTimes   map[string]time.Time
 	repoGitHubSlugs map[string]string
@@ -341,7 +303,6 @@ type SyncDaemon struct {
 	composeExecutor  ComposeExecutor
 	dockerExecutor   DockerExecutor
 	gitExecutor      GitExecutor
-	composePullTimeout time.Duration
 
 	// Nomad Orchestration
 	nomadAddr           string
@@ -361,19 +322,13 @@ type SyncDaemon struct {
 	imageRolloutCh       chan struct{}
 	imageRolloutDebounce time.Duration
 
-	// Concurrency & Quarantine
-	repoLocksMu        sync.Mutex
-	repoLocks          map[string]*sync.Mutex
-	pendingChangesMu   sync.Mutex
-	pendingChanges     []ComposeChangeEvent
-	pendingTargetsMu   sync.Mutex
-	pendingTargets     map[string]struct{}
-	reconcileStateMu   sync.RWMutex
-	reconcileStatus    ReconciliationStatus
-	quarantineMu       sync.RWMutex
-	quarantinedCommits map[QuarantineKey]QuarantineRecord
-	imageQuarantineMu  sync.RWMutex
-	imageQuarantine    map[string]ImageQuarantineRecord
+	// Concurrency & Nomad Server Reconcile
+	repoLocksMu                 sync.Mutex
+	repoLocks                   map[string]*sync.Mutex
+	pendingNomadServerRestartMu sync.Mutex
+	pendingNomadServerRestart   bool
+	reconcileStateMu            sync.RWMutex
+	reconcileStatus             ReconciliationStatus
 
 	// HTTP & Registry
 	registryClient *http.Client
@@ -615,8 +570,6 @@ func (d *SyncDaemon) MonitorDeploymentAsync(jobName string, minVersion int, base
 
 const (
 	startupDeploymentStaleThreshold = 10 * time.Minute
-	imageQuarantineTTL              = 60 * time.Minute
-	defaultComposePullTimeout       = 10 * time.Minute
 )
 
 // ReconcileStartupDeployments checks Nomad on daemon boot to detect if Hangar itself
@@ -706,61 +659,6 @@ func (d *SyncDaemon) ReconcileStartupDeployments(ctx context.Context) {
 	}
 }
 
-func (d *SyncDaemon) quarantineImage(service, digest, reason string) {
-	d.imageQuarantineMu.Lock()
-	defer d.imageQuarantineMu.Unlock()
-	if d.imageQuarantine == nil {
-		d.imageQuarantine = make(map[string]ImageQuarantineRecord)
-	}
-	key := fmt.Sprintf("%s@%s", service, strings.TrimSpace(digest))
-	d.imageQuarantine[key] = ImageQuarantineRecord{
-		Service:       service,
-		Digest:        strings.TrimSpace(digest),
-		Reason:        reason,
-		QuarantinedAt: time.Now(),
-	}
-	metrics.RecordImageQuarantine(service, reason)
-	count := 0.0
-	for _, rec := range d.imageQuarantine {
-		if rec.Service == service {
-			count++
-		}
-	}
-	metrics.RecordActiveQuarantines(service, count)
-}
-
-func (d *SyncDaemon) isImageQuarantined(service, digest string) bool {
-	d.imageQuarantineMu.RLock()
-	defer d.imageQuarantineMu.RUnlock()
-	if d.imageQuarantine == nil {
-		return false
-	}
-	key := fmt.Sprintf("%s@%s", service, strings.TrimSpace(digest))
-	rec, ok := d.imageQuarantine[key]
-	if !ok {
-		return false
-	}
-	if time.Since(rec.QuarantinedAt) > imageQuarantineTTL {
-		return false
-	}
-	return true
-}
-
-func (d *SyncDaemon) clearImageQuarantine(service string) {
-	d.imageQuarantineMu.Lock()
-	defer d.imageQuarantineMu.Unlock()
-	if d.imageQuarantine == nil {
-		metrics.RecordActiveQuarantines(service, 0)
-		return
-	}
-	for k, rec := range d.imageQuarantine {
-		if rec.Service == service {
-			delete(d.imageQuarantine, k)
-		}
-	}
-	metrics.RecordActiveQuarantines(service, 0)
-}
-
 // GetLastReconcile returns the timestamp of the last successful reconciliation under statusMu read lock.
 func (d *SyncDaemon) GetLastReconcile() time.Time {
 	d.statusMu.RLock()
@@ -773,40 +671,6 @@ func (d *SyncDaemon) SetLastReconcile(t time.Time) {
 	d.statusMu.Lock()
 	defer d.statusMu.Unlock()
 	d.lastReconcile = t
-}
-
-func (d *SyncDaemon) recordPendingTargets(services []string) {
-	if d == nil || len(services) == 0 {
-		return
-	}
-	d.pendingTargetsMu.Lock()
-	defer d.pendingTargetsMu.Unlock()
-	if d.pendingTargets == nil {
-		d.pendingTargets = make(map[string]struct{})
-	}
-	for _, s := range services {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			d.pendingTargets[s] = struct{}{}
-		}
-	}
-}
-
-func (d *SyncDaemon) drainPendingTargets() []string {
-	if d == nil {
-		return nil
-	}
-	d.pendingTargetsMu.Lock()
-	defer d.pendingTargetsMu.Unlock()
-	if len(d.pendingTargets) == 0 {
-		return nil
-	}
-	result := make([]string, 0, len(d.pendingTargets))
-	for s := range d.pendingTargets {
-		result = append(result, s)
-	}
-	d.pendingTargets = make(map[string]struct{})
-	return result
 }
 
 func (d *SyncDaemon) updateReconcileStatus(fn func(*ReconciliationStatus)) {
@@ -871,44 +735,6 @@ func resolveGitDir(repoPath string) (string, error) {
 		return filepath.Clean(target), nil
 	}
 	return gitPath, nil
-}
-
-// HasComposeChanges checks whether compose or environment configuration files changed between commits.
-func (d *SyncDaemon) HasComposeChanges(ctx context.Context, repoPath, prevHead, currHead string) (bool, error) {
-	if ctx.Err() != nil {
-		return false, ctx.Err()
-	}
-	if prevHead == "" || currHead == "" || prevHead == currHead {
-		return false, nil
-	}
-	if repoPath == "" {
-		return false, nil
-	}
-
-	composeTargets := composeFileTargets
-
-	args := append([]string{"diff", "--name-only", prevHead, currHead, "--"}, composeTargets...)
-	stdout, _, err := d.getGitExecutor()(ctx, repoPath, args...)
-	if err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		// Fallback for shallow clone or disconnected histories
-		fallbackArgs := append([]string{"diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--"}, composeTargets...)
-		stdoutFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, fallbackArgs...)
-		if errFallback != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
-			}
-			log.Printf("[Hangar] Warning: Failed to inspect diff in %s (%v); failing safe to trigger reconcile", repoPath, errFallback)
-			return true, nil
-		}
-		lines := strings.Split(strings.TrimSpace(string(stdoutFallback)), "\n")
-		return len(FilterComposeChanges(lines)) > 0, nil
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
-	return len(FilterComposeChanges(lines)) > 0, nil
 }
 
 // HasNomadConfigChanges checks whether Nomad daemon configuration files changed between commits.
@@ -1040,108 +866,6 @@ func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []strin
 	return append(args, subCmd...)
 }
 
-// CleanConflictContainers queries Docker for stopped or exited conflict containers left behind
-// by aborted Docker Compose recreation attempts (which rename containers to <short_id>_<service>)
-// and purges them to prevent name collision errors on subsequent compose runs.
-func (d *SyncDaemon) CleanConflictContainers(ctx context.Context) error {
-	args := []string{"ps", "-a", "--filter", "label=com.docker.compose.project=aerial", "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}"}
-	stdout, stderr, err := d.getDockerExecutor()(ctx, args...)
-	if err != nil {
-		log.Printf("[Hangar:ConflictClean] Warning: failed to list containers: %s (%v)", SanitizeLog(strings.TrimSpace(string(stderr))), err)
-		return fmt.Errorf("failed to list containers: %s (%w)", SanitizeLog(strings.TrimSpace(string(stderr))), err)
-	}
-
-	conflicts := FilterConflictContainers(string(stdout), os.Getenv("HOSTNAME"))
-	for _, c := range conflicts {
-		shortID := c.ID
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
-		}
-		// Remove conflict container
-		_, rmErrBytes, rmErr := d.getDockerExecutor()(ctx, "rm", "-f", shortID)
-		if rmErr != nil {
-			rmErrStr := string(rmErrBytes)
-			if strings.Contains(rmErrStr, "No such container") {
-				log.Printf("[Hangar:ConflictClean] Container %s already removed", shortID)
-			} else {
-				log.Printf("[Hangar:ConflictClean] Warning: failed to remove conflict container %s (%s): %s (%v)", shortID, c.Names, SanitizeLog(strings.TrimSpace(rmErrStr)), rmErr)
-			}
-		} else {
-			log.Printf("[Hangar:ConflictClean] Purged orphaned conflict container %s (%s, status: %s)", shortID, c.Names, c.Status)
-		}
-	}
-	return nil
-}
-
-// ValidateCompose executes docker compose config --quiet to verify valid syntax and schema before apply.
-func (d *SyncDaemon) ValidateCompose(ctx context.Context, composeDir string) error {
-	composeFile := filepath.Join(composeDir, "docker-compose.yml")
-	if _, err := os.Stat(composeFile); err != nil {
-		return fmt.Errorf("compose file not found: %w", err)
-	}
-
-	args := d.getComposeArgs(composeDir, "config", "--quiet")
-	_, stderr, err := d.getComposeExecutor()(ctx, composeDir, args...)
-	if err != nil {
-		sanitized := SanitizeLog(strings.TrimSpace(string(stderr)))
-		return fmt.Errorf("compose validation failed: %s (%w)", sanitized, err)
-	}
-	return nil
-}
-
-// parseComposeServices parses newline-delimited compose service names, trims whitespace,
-// deduplicates entries, and filters out the gitsync sidecar service (case-insensitive).
-func parseComposeServices(output string) []string {
-	return ParseComposeServices(output)
-}
-
-// GetReconcileTargets queries docker compose config --services to discover all defined services,
-// filtering out the gitsync sidecar service.
-func (d *SyncDaemon) GetReconcileTargets(ctx context.Context, composeDir string) ([]string, error) {
-	args := d.getComposeArgs(composeDir, "config", "--services")
-	stdout, stderr, err := d.getComposeExecutor()(ctx, composeDir, args...)
-	if err != nil {
-		sanitized := SanitizeLog(strings.TrimSpace(string(stderr)))
-		return nil, fmt.Errorf("failed to discover compose services: %s (%w)", sanitized, err)
-	}
-
-	return parseComposeServices(string(stdout)), nil
-}
-
-type composeConfigJSON struct {
-	Services map[string]struct {
-		Image string `json:"image"`
-	} `json:"services"`
-}
-
-// GetServiceImages inspects docker compose configuration and extracts a mapping of service names
-// to their configured container image references, excluding gitsync.
-func (d *SyncDaemon) GetServiceImages(ctx context.Context, composeDir string) (map[string]string, error) {
-	args := d.getComposeArgs(composeDir, "config", "--format", "json")
-	stdout, stderr, err := d.getComposeExecutor()(ctx, composeDir, args...)
-	if err != nil {
-		sanitized := SanitizeLog(strings.TrimSpace(string(stderr)))
-		return nil, fmt.Errorf("failed to inspect compose services: %s (%w)", sanitized, err)
-	}
-
-	var parsed composeConfigJSON
-	if err := json.Unmarshal(stdout, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to parse compose config json: %w", err)
-	}
-
-	result := make(map[string]string, len(parsed.Services))
-	for svcName, svcDef := range parsed.Services {
-		svcClean := strings.TrimSpace(svcName)
-		if svcClean == "" || strings.EqualFold(svcClean, "gitsync") || strings.EqualFold(svcClean, "hangar") {
-			continue
-		}
-		img := strings.TrimSpace(svcDef.Image)
-		if img != "" {
-			result[svcClean] = img
-		}
-	}
-	return result, nil
-}
 
 var sha256DigestRegex = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
@@ -1275,120 +999,12 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 	return digest, nil
 }
 
-// GetServicesWithNewImages inspects running containers for candidate services, compares their image
-// RepoDigests with upstream registry manifests, and returns which services need reconciliation.
-func (d *SyncDaemon) GetServicesWithNewImages(
-	ctx context.Context,
-	candidateServices []string,
-	serviceImages map[string]string,
-) ([]string, map[string]string, error) {
-	if len(candidateServices) == 0 {
-		return nil, nil, nil
-	}
-
-	var servicesToUpdate []string
-	newDigests := make(map[string]string)
-
-	for _, svc := range candidateServices {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		if strings.EqualFold(svc, "gitsync") || strings.EqualFold(svc, "hangar") {
-			continue
-		}
-		imageRef, ok := serviceImages[svc]
-		if !ok || strings.TrimSpace(imageRef) == "" {
-			continue
-		}
-
-		containerName := "aerial-" + svc
-		outImgID, errInspectBytes, errInspect := d.getDockerExecutor()(ctx, "inspect", containerName, "--format", "{{.Image}}")
-		if errInspect != nil {
-			outImgID, errInspectBytes, errInspect = d.getDockerExecutor()(ctx, "inspect", svc, "--format", "{{.Image}}")
-		}
-		if errInspect != nil {
-			log.Printf("[Hangar:ImagePoll] Warning: container for service %s not inspectable: %s (%v); skipping image check", svc, SanitizeLog(strings.TrimSpace(string(errInspectBytes))), errInspect)
-			continue
-		}
-
-		imageID := strings.TrimSpace(string(outImgID))
-		if imageID == "" {
-			continue
-		}
-
-		outDigests, errDigestsBytes, errDigests := d.getDockerExecutor()(ctx, "image", "inspect", imageID, "--format", "{{json .RepoDigests}}")
-		if errDigests != nil {
-			log.Printf("[Hangar:ImagePoll] Warning: image %s for service %s not inspectable: %s (%v); skipping", imageID, svc, SanitizeLog(strings.TrimSpace(string(errDigestsBytes))), errDigests)
-			continue
-		}
-
-		var repoDigests []string
-		if err := json.Unmarshal(outDigests, &repoDigests); err != nil {
-			log.Printf("[Hangar:ImagePoll] Warning: failed to parse RepoDigests for service %s: %v", svc, err)
-			continue
-		}
-
-		remoteDigest, err := d.GetRemoteImageDigest(ctx, imageRef)
-		if err != nil {
-			log.Printf("[Hangar:ImagePoll] Warning: failed to get remote digest for service %s (%s): %v", svc, imageRef, err)
-			continue
-		}
-
-		if d.isImageQuarantined(svc, remoteDigest) {
-			log.Printf("[Hangar:ImagePoll] Notice: remote digest %s for service %s is quarantined, skipping update", remoteDigest, svc)
-			continue
-		}
-
-		if !ContainsDigest(repoDigests, remoteDigest) {
-			log.Printf("[Hangar:ImagePoll] New image build detected for service %s: remote digest %s not in local repo digests %v", svc, remoteDigest, repoDigests)
-			servicesToUpdate = append(servicesToUpdate, svc)
-			newDigests[svc] = remoteDigest
-		}
-	}
-
-	return servicesToUpdate, newDigests, nil
-}
-
-// CheckAndReconcileNewImages checks if any running services have newer images available in their registry,
+// CheckAndReconcileNewImages checks if any Nomad jobs have newer images available in their registry,
 // and triggers an asynchronous, debounced reconciliation if new images are detected.
 func (d *SyncDaemon) CheckAndReconcileNewImages(ctx context.Context) error {
-	defer func() {
-		if nomadErr := d.CheckAndReconcileNomadImages(ctx); nomadErr != nil {
-			log.Printf("[Hangar:NomadImagePoll] Warning: checking nomad images: %v", nomadErr)
-		}
-	}()
-
-	pollCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	composeDir := d.composeDir
-	if _, err := os.Stat(filepath.Join(composeDir, "docker-compose.yml")); err != nil {
-		return nil
-	}
-
-	serviceImages, err := d.GetServiceImages(pollCtx, composeDir)
-	if err != nil {
-		return fmt.Errorf("failed to get service images: %w", err)
-	}
-
-	candidates := make([]string, 0, len(serviceImages))
-	for svc := range serviceImages {
-		candidates = append(candidates, svc)
-	}
-
-	servicesWithNewImages, _, err := d.GetServicesWithNewImages(pollCtx, candidates, serviceImages)
-	if err != nil {
-		return fmt.Errorf("failed to check services with new images: %w", err)
-	}
-
-	if len(servicesWithNewImages) > 0 {
-		log.Printf("[Hangar:ImagePoll] Triggering reconciliation for %d services with new images: %v", len(servicesWithNewImages), servicesWithNewImages)
-		d.recordPendingTargets(servicesWithNewImages)
-		return d.TriggerReconcile(ctx, true)
-	}
-
-	return nil
+	return d.CheckAndReconcileNomadImages(ctx)
 }
+
 
 var snowflakeRegex = regexp.MustCompile(`^\d{17,20}$`)
 
@@ -1411,80 +1027,26 @@ func (d *SyncDaemon) getRepoLock(repoPath string) *sync.Mutex {
 	return l
 }
 
-func (d *SyncDaemon) isQuarantined(repoPath, commitSHA string) (QuarantineRecord, bool) {
-	d.quarantineMu.RLock()
-	defer d.quarantineMu.RUnlock()
-	if d.quarantinedCommits == nil {
-		return QuarantineRecord{}, false
+func (d *SyncDaemon) recordPendingNomadServerRestart() {
+	if d == nil {
+		return
 	}
-	key := QuarantineKey{
-		RepoPath:  filepath.Clean(repoPath),
-		CommitSHA: strings.TrimSpace(commitSHA),
-	}
-	rec, ok := d.quarantinedCommits[key]
-	return rec, ok
+	d.pendingNomadServerRestartMu.Lock()
+	defer d.pendingNomadServerRestartMu.Unlock()
+	d.pendingNomadServerRestart = true
 }
 
-func (d *SyncDaemon) getQuarantineForRepo(repoPath string) (QuarantineRecord, bool) {
-	d.quarantineMu.RLock()
-	defer d.quarantineMu.RUnlock()
-	if d.quarantinedCommits == nil {
-		return QuarantineRecord{}, false
+func (d *SyncDaemon) consumePendingNomadServerRestart() bool {
+	if d == nil {
+		return false
 	}
-	cleaned := filepath.Clean(repoPath)
-	for k, rec := range d.quarantinedCommits {
-		if k.RepoPath == cleaned {
-			return rec, true
-		}
-	}
-	return QuarantineRecord{}, false
+	d.pendingNomadServerRestartMu.Lock()
+	defer d.pendingNomadServerRestartMu.Unlock()
+	restart := d.pendingNomadServerRestart
+	d.pendingNomadServerRestart = false
+	return restart
 }
 
-func (d *SyncDaemon) quarantineCommit(repoPath, commitSHA, prevHead, stage, reason string) {
-	d.quarantineMu.Lock()
-	defer d.quarantineMu.Unlock()
-	if d.quarantinedCommits == nil {
-		d.quarantinedCommits = make(map[QuarantineKey]QuarantineRecord)
-	}
-	key := QuarantineKey{
-		RepoPath:  filepath.Clean(repoPath),
-		CommitSHA: strings.TrimSpace(commitSHA),
-	}
-	d.quarantinedCommits[key] = QuarantineRecord{
-		RepoPath:      filepath.Clean(repoPath),
-		CommitSHA:     strings.TrimSpace(commitSHA),
-		PreviousHead:  strings.TrimSpace(prevHead),
-		Reason:        SanitizeLog(strings.TrimSpace(reason)),
-		FailureStage:  stage,
-		QuarantinedAt: time.Now(),
-	}
-}
-
-func (d *SyncDaemon) clearQuarantineForRepo(repoPath, currentSha string) {
-	d.quarantineMu.Lock()
-	defer d.quarantineMu.Unlock()
-	cleaned := filepath.Clean(repoPath)
-	for k := range d.quarantinedCommits {
-		if k.RepoPath == cleaned && k.CommitSHA != currentSha {
-			delete(d.quarantinedCommits, k)
-		}
-	}
-}
-
-func (d *SyncDaemon) recordPendingChange(change ComposeChangeEvent) {
-	d.pendingChangesMu.Lock()
-	defer d.pendingChangesMu.Unlock()
-	change.RepoPath = filepath.Clean(change.RepoPath)
-	d.pendingChanges = append(d.pendingChanges, change)
-}
-
-func (d *SyncDaemon) drainPendingChanges() []ComposeChangeEvent {
-	d.pendingChangesMu.Lock()
-	defer d.pendingChangesMu.Unlock()
-	changes := d.pendingChanges
-	d.pendingChanges = nil
-	return changes
-}
 
 type rawSystemConfig struct {
 	SystemChannel string `yaml:"system_channel"`
@@ -1695,365 +1257,15 @@ func (d *SyncDaemon) postChannelMessage(ctx context.Context, client *http.Client
 	}
 }
 
-// executeRollback safely resets affected repositories to PreviousHead, restores container image snapshots,
-// quarantines the faulty commit/digest, and restores container topology with --wait --wait-timeout 180 --remove-orphans --no-build.
-func (d *SyncDaemon) executeRollback(
-	ctx context.Context,
-	pending []ComposeChangeEvent,
-	stage string,
-	causeErr error,
-	targets []string,
-	snapshots map[string]string,
-	serviceImages map[string]string,
-	targetDigests map[string]string,
-) error {
-	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 180*time.Second)
-	defer cancel()
-
-	d.updateReconcileStatus(func(s *ReconciliationStatus) {
-		s.State = "rolling_back"
-		s.Stage = "rolling_back"
-	})
-
-	var rollbackErrs []error
-
-	// 1. Image restoration & quarantining
-	if len(targets) == 0 {
-		metrics.RecordRollback("compose", stage)
-	}
-	for _, svc := range targets {
-		metrics.RecordRollback(svc, stage)
-		if targetDigests != nil && targetDigests[svc] != "" {
-			d.quarantineImage(svc, targetDigests[svc], causeErr.Error())
-			log.Printf("[Hangar:GitOps] Quarantined failed image digest %s for service %s", targetDigests[svc], svc)
-		}
-
-		if snapshots != nil && snapshots[svc] != "" {
-			snapshotTag := snapshots[svc]
-			origImage := ""
-			if serviceImages != nil {
-				origImage = serviceImages[svc]
-			}
-			if origImage != "" {
-				if _, tagStderr, tagErr := d.getDockerExecutor()(rollbackCtx, "tag", snapshotTag, origImage); tagErr != nil {
-					err := fmt.Errorf("failed to restore image tag for service %s (%s -> %s): %s (%w)", svc, snapshotTag, origImage, SanitizeLog(strings.TrimSpace(string(tagStderr))), tagErr)
-					log.Printf("[Hangar:GitOps] Critical: %v", err)
-					rollbackErrs = append(rollbackErrs, err)
-				} else {
-					log.Printf("[Hangar:GitOps] Restored snapshot %s back to %s for service %s", snapshotTag, origImage, svc)
-				}
-			}
-		}
-	}
-
-	// 2. Git restoration
-	for _, ch := range pending {
-		if ch.PreviousHead == "" || ch.RepoPath == "" {
-			continue
-		}
-		repoLock := d.getRepoLock(ch.RepoPath)
-		repoLock.Lock()
-
-		outReset, errResetBytes, errReset := d.getGitExecutor()(rollbackCtx, ch.RepoPath, "reset", "--hard", ch.PreviousHead)
-		if errReset != nil {
-			combined := string(append(outReset, errResetBytes...))
-			err := fmt.Errorf("failed to reset %s to %s: %s (%w)", ch.RepoPath, ch.PreviousHead, SanitizeLog(combined), errReset)
-			log.Printf("[Hangar:GitOps] Critical: %v", err)
-			rollbackErrs = append(rollbackErrs, err)
-		} else {
-			log.Printf("[Hangar:GitOps] Successfully rolled back %s to %s", ch.RepoPath, ch.PreviousHead)
-		}
-
-		d.quarantineCommit(ch.RepoPath, ch.CurrentHead, ch.PreviousHead, stage, causeErr.Error())
-		repoLock.Unlock()
-
-		d.SendDiscordAlert(context.Background(), "Docker Compose Failure (Rolled Back)", ch.RepoPath, ch.CurrentHead, ch.PreviousHead, stage, causeErr.Error())
-	}
-
-	composeDir := d.composeDir
-
-	if cleanErr := d.CleanConflictContainers(rollbackCtx); cleanErr != nil {
-		log.Printf("[Hangar:ConflictClean] Warning: failed cleaning conflict containers during rollback: %v", cleanErr)
-	}
-
-	restoredTargets, errTargets := d.GetReconcileTargets(rollbackCtx, composeDir)
-	if errTargets != nil {
-		err := fmt.Errorf("failed to discover targets after rollback in %s: %w", composeDir, errTargets)
-		log.Printf("[Hangar:GitOps] Critical: %v", err)
-		rollbackErrs = append(rollbackErrs, err)
-		d.SendDiscordAlert(context.Background(), "CRITICAL: Rollback Target Discovery Failed", composeDir, "", "", "rollback target discovery", err.Error())
-		return errors.Join(rollbackErrs...)
-	}
-	if len(restoredTargets) == 0 {
-		return errors.Join(rollbackErrs...)
-	}
-
-	upArgs := append([]string{"up", "-d", "--wait", "--wait-timeout", "180", "--remove-orphans", "--no-build"}, restoredTargets...)
-	stdoutUp, stderrUp, errUp := d.getComposeExecutor()(rollbackCtx, composeDir, d.getComposeArgs(composeDir, upArgs...)...)
-	combinedUp := string(append(stdoutUp, stderrUp...))
-	if errUp != nil {
-		err := fmt.Errorf("re-applying restored configuration failed: %s (%w)", SanitizeLog(combinedUp), errUp)
-		log.Printf("[Hangar:GitOps] CRITICAL: %v", err)
-		rollbackErrs = append(rollbackErrs, err)
-		d.SendDiscordAlert(context.Background(), "🚨 CRITICAL: Rollback Re-Apply Failed", composeDir, "", "", "rollback re-apply", fmt.Sprintf("Failed to restore containers to previous configuration: %s (%v)", SanitizeLog(combinedUp), errUp))
-	} else {
-		log.Printf("[Hangar:GitOps] Restored previous container topology successfully (%s)", SanitizeLog(combinedUp))
-		if len(pending) == 0 {
-			d.SendDiscordAlert(context.Background(), "Docker Compose Image Failure (Rolled Back)", composeDir, "", "", stage, causeErr.Error())
-		}
-	}
-
-	// Clean temporary snapshots
-	for _, snapshotTag := range snapshots {
-		if _, rmiStderr, rmiErr := d.getDockerExecutor()(rollbackCtx, "rmi", snapshotTag); rmiErr != nil {
-			log.Printf("[Hangar:GitOps] Notice: rollback temporary snapshot tag %s cleanup: %s (%v)", snapshotTag, SanitizeLog(strings.TrimSpace(string(rmiStderr))), rmiErr)
-		}
-	}
-
-	return errors.Join(rollbackErrs...)
-}
-
-// ReconcileCompose executes docker compose pull and up -d --wait with timeout, metrics observation,
-// pre-flight image snapshotting, and health-gated automated rollback.
-func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices ...string) (err error) {
-	if d.reconcileFn != nil {
-		return d.reconcileFn(parentCtx)
-	}
-
-	d.composeMu.Lock()
-	defer d.composeMu.Unlock()
-
-	start := time.Now()
-	defer func() {
-		metrics.RecordReconciliation(metrics.SanitizeStatus(err), time.Since(start))
-	}()
-
-	composeDir := d.composeDir
-
-	if _, statErr := os.Stat(filepath.Join(composeDir, "docker-compose.yml")); statErr != nil {
-		log.Printf("[Hangar:GitOps] Notice: No docker-compose.yml found in %s, skipping reconciliation", composeDir)
-		return nil
-	}
-
-	pending := d.drainPendingChanges()
-	drainedTargets := d.drainPendingTargets()
-
-	// 1. Conflict container cleanup & pre-flight validation gate
-	valCtx, valCancel := context.WithTimeout(parentCtx, 30*time.Second)
-	defer valCancel()
-
-	// Ensure Docker registry credentials are configured for private images before compose apply
-	if authErr := d.EnsureDockerAuth(); authErr != nil {
-		log.Printf("[Hangar:GitOps] Warning: Failed to refresh Docker auth before reconciliation: %v", d.SanitizeAll(authErr.Error()))
-	}
-
-	if cleanErr := d.CleanConflictContainers(valCtx); cleanErr != nil {
-		log.Printf("[Hangar:ConflictClean] Warning: failed cleaning conflict containers before reconciliation: %v", cleanErr)
-	}
-
-	if valErr := d.ValidateCompose(valCtx, composeDir); valErr != nil {
-		log.Printf("[Hangar:GitOps] ERROR: Pre-flight validation failed: %v. Initiating automated rollback.", valErr)
-		rollbackErr := d.executeRollback(parentCtx, pending, "pre-flight validation", valErr, nil, nil, nil, nil)
-		if rollbackErr != nil {
-			return errors.Join(valErr, rollbackErr)
-		}
-		return valErr
-	}
-
-	// 2. Discover target services excluding gitsync
-	serviceImages, errImages := d.GetServiceImages(valCtx, composeDir)
-	if errImages != nil {
-		log.Printf("[Hangar:GitOps] Warning: Failed to inspect service images: %v", errImages)
-	}
-
-	var targets []string
-	trigger := "git_sync"
-	if len(targetServices) > 0 && len(pending) == 0 {
-		targets = targetServices
-		trigger = "manual_api"
-	} else if len(drainedTargets) > 0 && len(pending) == 0 {
-		targets = drainedTargets
-		trigger = "image_poll"
-	} else {
-		allTargets, targetErr := d.GetReconcileTargets(valCtx, composeDir)
-		if targetErr != nil {
-			log.Printf("[Hangar:GitOps] ERROR: Service discovery failed: %v. Initiating automated rollback.", targetErr)
-			rollbackErr := d.executeRollback(parentCtx, pending, "service discovery", targetErr, nil, nil, nil, nil)
-			if rollbackErr != nil {
-				return errors.Join(targetErr, rollbackErr)
-			}
-			return targetErr
-		}
-		targets = allTargets
-		trigger = "git_sync"
-	}
-
-	if len(targets) == 0 {
-		log.Printf("[Hangar:GitOps] Notice: No external services to reconcile in %s (gitsync excluded)", composeDir)
-		return nil
-	}
-
-	diskHead := ""
-	if out, _, hErr := d.getGitExecutor()(valCtx, composeDir, "rev-parse", "HEAD"); hErr == nil {
-		diskHead = strings.TrimSpace(string(out))
-		if len(diskHead) > 7 {
-			diskHead = diskHead[:7]
-		}
-	}
-
-	d.updateReconcileStatus(func(s *ReconciliationStatus) {
-		s.Active = true
-		s.State = "pulling"
-		s.Stage = "pulling"
-		s.Trigger = trigger
-		s.CommitSHA = diskHead
-		s.TargetServices = append([]string(nil), targets...)
-		s.StartedAt = time.Now().UTC()
-		s.CompletedAt = time.Time{}
-		s.Error = ""
-	})
-
-	defer func() {
-		d.updateReconcileStatus(func(s *ReconciliationStatus) {
-			s.Active = false
-			s.CompletedAt = time.Now().UTC()
-			if err != nil {
-				s.State = "failed"
-				s.Stage = "failed"
-				s.Error = err.Error()
-			} else {
-				s.State = "healthy"
-				s.Stage = "healthy"
-				s.Error = ""
-			}
-		})
-	}()
-
-	// 3. Pre-flight snapshotting of running container images BEFORE pull
-	snapshots := make(map[string]string)
-	targetDigests := make(map[string]string)
-
-	for _, svc := range targets {
-		containerName := "aerial-" + svc
-		outImgID, _, err := d.getDockerExecutor()(valCtx, "inspect", containerName, "--format", "{{.Image}}")
-		if err != nil {
-			outImgID, _, err = d.getDockerExecutor()(valCtx, "inspect", svc, "--format", "{{.Image}}")
-		}
-		if err == nil && len(bytes.TrimSpace(outImgID)) > 0 {
-			runningImageID := string(bytes.TrimSpace(outImgID))
-			snapshotTag := RollbackTagForService(svc)
-			_, tagStderr, tagErr := d.getDockerExecutor()(valCtx, "tag", runningImageID, snapshotTag)
-			if tagErr != nil {
-				log.Printf("[Hangar:GitOps] Warning: failed to snapshot %s (%s -> %s): %s (%v)", svc, runningImageID, snapshotTag, SanitizeLog(strings.TrimSpace(string(tagStderr))), tagErr)
-			} else {
-				snapshots[svc] = snapshotTag
-			}
-		}
-	}
-
-	// 4. Pre-flight pull
-	pullTimeout := d.composePullTimeout
-	if pullTimeout <= 0 {
-		pullTimeout = defaultComposePullTimeout
-	}
-	pullCtx, pullCancel := context.WithTimeout(parentCtx, pullTimeout)
-	defer pullCancel()
-
-	pullArgs := append([]string{"pull"}, targets...)
-	pullStdout, pullStderr, pullErr := d.getComposeExecutor()(pullCtx, composeDir, d.getComposeArgs(composeDir, pullArgs...)...)
-	if pullErr != nil {
-		combinedPull := string(append(pullStdout, pullStderr...))
-		sanitizedPull := SanitizeLog(strings.TrimSpace(combinedPull))
-		log.Printf("[Hangar:GitOps] ERROR: docker compose pull failed: %s (%v). Initiating automated rollback.", sanitizedPull, pullErr)
-		rollbackErr := d.executeRollback(parentCtx, pending, "compose pull", fmt.Errorf("%s (%w)", sanitizedPull, pullErr), targets, snapshots, serviceImages, targetDigests)
-		if rollbackErr != nil {
-			return errors.Join(fmt.Errorf("compose pull failed: %s (%w)", sanitizedPull, pullErr), rollbackErr)
-		}
-		return fmt.Errorf("compose pull failed: %s (%w)", sanitizedPull, pullErr)
-	}
-
-	// 5. Bounded compose execution with 210s context timeout for --wait-timeout 180
-	ctx, cancel := context.WithTimeout(parentCtx, 210*time.Second)
-	defer cancel()
-
-	log.Printf("[Hangar:GitOps] Reconciling Docker Compose state for %d services (%v) in %s...", len(targets), targets, composeDir)
-
-	d.updateReconcileStatus(func(s *ReconciliationStatus) {
-		s.State = "swapping"
-		s.Stage = "swapping"
-	})
-
-	upArgs := append([]string{"up", "-d", "--wait", "--wait-timeout", "180", "--remove-orphans", "--no-build"}, targets...)
-	stdout, stderr, cmdErr := d.getComposeExecutor()(ctx, composeDir, d.getComposeArgs(composeDir, upArgs...)...)
-	combined := string(append(stdout, stderr...))
-	sanitized := SanitizeLog(strings.TrimSpace(combined))
-
-	if cmdErr != nil {
-		log.Printf("[Hangar:GitOps] ERROR: docker compose up failed: %s (%v). Initiating automated rollback.", sanitized, cmdErr)
-		// Capture current remote digest for quarantine
-		queryCtx, queryCancel := context.WithTimeout(context.WithoutCancel(parentCtx), 10*time.Second)
-		for _, svc := range targets {
-			if serviceImages != nil {
-				if imgRef, ok := serviceImages[svc]; ok {
-					dgst, err := d.GetRemoteImageDigest(queryCtx, imgRef)
-					if err != nil {
-						log.Printf("[Hangar:GitOps] Warning: failed to fetch remote digest for quarantine of %s (%s): %v", svc, imgRef, err)
-					} else if dgst != "" {
-						targetDigests[svc] = dgst
-					}
-				}
-			}
-		}
-		queryCancel()
-		rollbackErr := d.executeRollback(parentCtx, pending, "compose apply", fmt.Errorf("%s (%w)", sanitized, cmdErr), targets, snapshots, serviceImages, targetDigests)
-		if rollbackErr != nil {
-			return errors.Join(fmt.Errorf("compose up failed: %s (%w)", sanitized, cmdErr), rollbackErr)
-		}
-		return fmt.Errorf("compose up failed: %s (%w)", sanitized, cmdErr)
-	}
-
-	if sanitized != "" {
-		log.Printf("[Hangar:GitOps] Reconcile output: %s", sanitized)
-	}
-	log.Printf("[Hangar:GitOps] Docker Compose reconciliation successfully applied.")
-
-	hasNomadConfigChange := false
-	for _, p := range pending {
-		if p.NomadConfigChanged {
-			hasNomadConfigChange = true
-			break
-		}
-	}
-	if hasNomadConfigChange {
-		if errNomad := d.reconcileNomadServer(ctx, composeDir); errNomad != nil {
-			log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
-		}
-	}
-
-	// Clear quarantine for successful targets
-	for _, svc := range targets {
-		d.clearImageQuarantine(svc)
-	}
-
-	// Delete temporary snapshots
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(parentCtx), 30*time.Second)
-	defer cleanupCancel()
-	for _, snapshotTag := range snapshots {
-		if _, rmiStderr, rmiErr := d.getDockerExecutor()(cleanupCtx, "rmi", snapshotTag); rmiErr != nil {
-			log.Printf("[Hangar:GitOps] Notice: temporary snapshot tag %s cleanup: %s (%v)", snapshotTag, SanitizeLog(strings.TrimSpace(string(rmiStderr))), rmiErr)
-		}
-	}
-
-	d.SetLastReconcile(time.Now())
-	return nil
-}
-
-// TriggerReconcile requests Docker Compose reconciliation. If async is true, it queues
+// TriggerReconcile requests reconciliation of pending Nomad jobs. If async is true, it queues
 // reconciliation onto the debounced worker channel. If async is false, it executes
-// ReconcileCompose synchronously.
+// ReconcilePendingNomad synchronously.
 func (d *SyncDaemon) TriggerReconcile(ctx context.Context, async bool) error {
 	if !async {
-		return d.ReconcileCompose(ctx)
+		if d.reconcileFn != nil {
+			return d.reconcileFn(ctx)
+		}
+		return d.ReconcilePendingNomad(ctx)
 	}
 	d.mu.Lock()
 	if d.reconcileCh == nil {
@@ -2383,15 +1595,21 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 					d.pendingNomadMu.Unlock()
 					d.ExecuteNomadTeardowns(context.Background(), pendingNomad)
 
-					// Phase 2: Docker Compose reconciliation
-					if recErr := d.ReconcileCompose(context.Background()); recErr != nil {
-						log.Printf("[Hangar:GitOps] Debounced background reconcile failed: %v", recErr)
+					// Phase 2: Check for Nomad server daemon config changes
+					if d.consumePendingNomadServerRestart() {
+						if errNomad := d.reconcileNomadServer(context.Background(), d.composeDir); errNomad != nil {
+							log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
+						} else {
+							// Wait briefly for Nomad API readiness after server container restart
+							time.Sleep(3 * time.Second)
+						}
 					}
 
 					// Phase 3: Nomad reconciliation (job applications)
 					if nomadErr := d.ReconcilePendingNomad(context.Background()); nomadErr != nil {
 						log.Printf("[Hangar:GitOps] Debounced Nomad reconcile failed: %v", nomadErr)
 					}
+					d.SetLastReconcile(time.Now())
 				})
 			}
 		}
@@ -2530,17 +1748,7 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 			return res
 		}
 	} else {
-		// 2. Inspect fetched commit SHA for active quarantine
-		if outFetchHead, _, errFetchHead := d.getGitExecutor()(opCtx, repoPath, "rev-parse", "FETCH_HEAD"); errFetchHead == nil {
-			fetchedSha := strings.TrimSpace(string(outFetchHead))
-			if rec, quarantined := d.isQuarantined(repoPath, fetchedSha); quarantined {
-				log.Printf("[Hangar] Notice: remote commit %s for %s is quarantined (reason: %s). Skipping pull to prevent failure loop.", fetchedSha, repoPath, rec.Reason)
-				res.Error = fmt.Sprintf("commit %s is quarantined: %s", fetchedSha, rec.Reason)
-				return res
-			}
-		}
-
-		// 3. Fast-forward merge verified clean upstream commit
+		// 2. Fast-forward merge verified clean upstream commit
 		outMerge, errMergeBytes, errMerge := d.getGitExecutor()(opCtx, repoPath, "merge", "--ff-only", "FETCH_HEAD")
 		if errMerge != nil {
 			combinedMerge := string(append(outMerge, errMergeBytes...))
@@ -2573,28 +1781,15 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 
 	if res.PreviousHead != res.CurrentHead {
 		res.Changed = true
-		d.clearQuarantineForRepo(repoPath, res.CurrentHead)
 		log.Printf("[Hangar] Repository %s updated: %s -> %s", repoPath, res.PreviousHead, res.CurrentHead)
 
-		composeChanged, errCompose := d.HasComposeChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
-		if errCompose != nil {
-			log.Printf("[Hangar] Warning: Failed to check compose changes in %s: %v", repoPath, errCompose)
-			res.Error = fmt.Sprintf("compose change check failed: %v", errCompose)
+		nomadCfgChanged, errNomadCfg := d.HasNomadConfigChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
+		if errNomadCfg != nil {
+			log.Printf("[Hangar] Warning: Failed to check nomad config changes in %s: %v", repoPath, errNomadCfg)
 		}
-		if composeChanged {
-			res.ComposeChanged = true
-			log.Printf("[Hangar:GitOps] Infrastructure/compose changes detected in %s (%s -> %s). Triggering debounced reconciliation.", repoPath, res.PreviousHead, res.CurrentHead)
-			nomadCfgChanged, errNomadCfg := d.HasNomadConfigChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
-			if errNomadCfg != nil {
-				log.Printf("[Hangar] Warning: Failed to check nomad config changes in %s: %v", repoPath, errNomadCfg)
-			}
-			d.recordPendingChange(ComposeChangeEvent{
-				RepoPath:           repoPath,
-				PreviousHead:       res.PreviousHead,
-				CurrentHead:        res.CurrentHead,
-				Timestamp:          time.Now(),
-				NomadConfigChanged: nomadCfgChanged,
-			})
+		if nomadCfgChanged {
+			log.Printf("[Hangar:GitOps] Nomad daemon configuration changes detected in %s (%s -> %s). Triggering debounced reconciliation.", repoPath, res.PreviousHead, res.CurrentHead)
+			d.recordPendingNomadServerRestart()
 			if d.reconcileCh != nil {
 				select {
 				case d.reconcileCh <- struct{}{}:
@@ -2842,24 +2037,6 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 			}
 		}
 
-		// Check quarantine state
-		if rec, quarantined := d.isQuarantined(repo, remoteSha); quarantined {
-			st.SyncStatus = "quarantined"
-			st.Quarantined = true
-			st.QuarantinedCommit = rec.CommitSHA
-			st.QuarantineReason = rec.Reason
-		} else if rec, quarantined := d.isQuarantined(repo, diskSha); quarantined {
-			st.SyncStatus = "quarantined"
-			st.Quarantined = true
-			st.QuarantinedCommit = rec.CommitSHA
-			st.QuarantineReason = rec.Reason
-		} else if rec, quarantined := d.getQuarantineForRepo(repo); quarantined {
-			st.SyncStatus = "quarantined"
-			st.Quarantined = true
-			st.QuarantinedCommit = rec.CommitSHA
-			st.QuarantineReason = rec.Reason
-		}
-
 		resp.Repos[repo] = st
 	}
 
@@ -2895,7 +2072,6 @@ type DaemonConfig struct {
 	NomadAddr              string
 	NomadToken             string
 	RegistryClient         *http.Client
-	ComposePullTimeout     time.Duration
 	WebhooksRouterURL      string
 	DeployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
 	DeploymentPollInterval time.Duration
@@ -2915,17 +2091,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	}
 	if cfg.BrainInternalURL == "" {
 		cfg.BrainInternalURL = "http://brain:8080/internal/reload"
-	}
-	pullTimeout := cfg.ComposePullTimeout
-	if pullTimeout <= 0 {
-		if raw := os.Getenv("COMPOSE_PULL_TIMEOUT"); raw != "" {
-			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-				pullTimeout = d
-			}
-		}
-	}
-	if pullTimeout <= 0 {
-		pullTimeout = defaultComposePullTimeout
 	}
 	webhooksRouterURL := cfg.WebhooksRouterURL
 	if webhooksRouterURL == "" {
@@ -2963,7 +2128,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		nomadToken:             cfg.NomadToken,
 		nomadKnownDigests:      make(map[string]string),
 		registryClient:         cfg.RegistryClient,
-		composePullTimeout:     pullTimeout,
 		webhooksRouterURL:      webhooksRouterURL,
 		deployDispatcher:       cfg.DeployDispatcher,
 		deploymentPollInterval: pollInterval,
@@ -2973,13 +2137,10 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		imageRolloutCh:         make(chan struct{}, 1),
 		imageRolloutDebounce:   3 * time.Second,
 		repoLocks:              make(map[string]*sync.Mutex),
-		quarantinedCommits:     make(map[QuarantineKey]QuarantineRecord),
-		imageQuarantine:        make(map[string]ImageQuarantineRecord),
 		reconcileStatus: ReconciliationStatus{
 			State: "idle",
 			Stage: "idle",
 		},
-		pendingTargets:  make(map[string]struct{}),
 		lastAlertTimes:  make(map[string]time.Time),
 		repoGitHubSlugs: make(map[string]string),
 	}
@@ -3761,7 +2922,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		}
 		writeJSON(w, r, http.StatusAccepted, map[string]interface{}{
 			"status":           "queued",
-			"message":          "Docker Compose reconciliation scheduled",
+			"message":          "Nomad reconciliation scheduled",
 			"debounce_seconds": int(reconcilerDebounceDuration.Seconds()),
 		})
 	})
