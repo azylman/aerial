@@ -175,16 +175,63 @@ func formatUptimeString(sec int) string {
 	return FormatUptimeString(sec)
 }
 
+// ExtractAerialServiceName extracts the canonical Aerial service name and returns whether
+// the container belongs to the Aerial stack (either Docker Compose or Nomad managed).
+func ExtractAerialServiceName(c DockerContainerJSON) (string, bool) {
+	if c.Labels != nil {
+		// 1. Docker Compose labels: project must be aerial if specified
+		if proj, ok := c.Labels["com.docker.compose.project"]; ok {
+			if proj == "aerial" {
+				if svc, ok := c.Labels["com.docker.compose.service"]; ok && svc != "" {
+					return svc, true
+				}
+			}
+			// Foreign Compose project (e.g. homeassistant) -> reject
+			return "", false
+		}
+
+		// 2. Explicit aerial.service label (present on all first-party Aerial images)
+		if svc, ok := c.Labels["aerial.service"]; ok && svc != "" {
+			return svc, true
+		}
+
+		// 3. Nomad allocation container (task_name-<alloc_id>)
+		if allocID, ok := c.Labels["com.hashicorp.nomad.alloc_id"]; ok && allocID != "" {
+			if len(c.Names) > 0 {
+				name := strings.TrimPrefix(c.Names[0], "/")
+				// Nomad names containers <task>-<alloc_id>
+				if strings.HasSuffix(name, "-"+allocID) {
+					task := strings.TrimSuffix(name, "-"+allocID)
+					if task != "" {
+						return task, true
+					}
+				}
+			}
+		}
+
+		// 4. Fallback for test fixtures where com.docker.compose.service was set without project
+		if svc, ok := c.Labels["com.docker.compose.service"]; ok && svc != "" {
+			return svc, true
+		}
+	}
+
+	// 5. Legacy/fallback container name prefix
+	if len(c.Names) > 0 {
+		name := strings.TrimPrefix(c.Names[0], "/")
+		if strings.HasPrefix(name, "aerial-") {
+			svc := strings.TrimPrefix(name, "aerial-")
+			if svc != "" {
+				return svc, true
+			}
+		}
+	}
+
+	return "", false
+}
+
 // IsCoreAerialContainer determines whether a container is part of the core Aerial stack.
 func IsCoreAerialContainer(c DockerContainerJSON) bool {
-	svcName := ""
-	if c.Labels != nil {
-		svcName = c.Labels["com.docker.compose.service"]
-	}
-	if svcName == "" && len(c.Names) > 0 {
-		name := strings.TrimPrefix(c.Names[0], "/")
-		svcName = strings.TrimPrefix(name, "aerial-")
-	}
+	svcName, _ := ExtractAerialServiceName(c)
 	svcName = strings.ToLower(svcName)
 
 	switch svcName {
@@ -317,15 +364,8 @@ func BuildContainerChips(rawContainers []DockerContainerJSON, now time.Time) []M
 	seen := make(map[string]bool)
 
 	for _, c := range rawContainers {
-		var svcName string
-		if svc, ok := c.Labels["com.docker.compose.service"]; ok && svc != "" {
-			svcName = svc
-		} else if len(c.Names) > 0 {
-			name := strings.TrimPrefix(c.Names[0], "/")
-			svcName = strings.TrimPrefix(name, "aerial-")
-		}
-
-		if svcName == "" || seen[svcName] {
+		svcName, isAerial := ExtractAerialServiceName(c)
+		if !isAerial || svcName == "" || seen[svcName] {
 			continue
 		}
 		seen[svcName] = true
@@ -373,15 +413,8 @@ func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []st
 
 	containerByService := make(map[string]DockerContainerJSON)
 	for _, c := range rawContainers {
-		var svcName string
-		if svc, ok := c.Labels["com.docker.compose.service"]; ok && svc != "" {
-			svcName = svc
-		} else if len(c.Names) > 0 {
-			name := strings.TrimPrefix(c.Names[0], "/")
-			svcName = strings.TrimPrefix(name, "aerial-")
-		}
-
-		if svcName != "" {
+		svcName, isAerial := ExtractAerialServiceName(c)
+		if isAerial && svcName != "" {
 			if existing, ok := containerByService[svcName]; !ok || c.Created > existing.Created {
 				containerByService[svcName] = c
 			}
@@ -1063,11 +1096,8 @@ func MergeClusterDeploymentsWithHangar(
 	groupsByCommit := make(map[string][]DockerContainerJSON)
 	for _, c := range aerialContainers {
 		commit := ExtractSingleContainerCommit(c)
-		if commit == "" && gitSync.Reconciliation != nil && len(gitSync.Reconciliation.TargetServices) > 0 {
-			svc := c.Labels["com.docker.compose.service"]
-			if svc == "" && len(c.Names) > 0 {
-				svc = strings.TrimPrefix(strings.TrimPrefix(c.Names[0], "/"), "aerial-")
-			}
+		svc, isStackContainer := ExtractAerialServiceName(c)
+		if commit == "" && gitSync.Reconciliation != nil && len(gitSync.Reconciliation.TargetServices) > 0 && svc != "" {
 			for _, ts := range gitSync.Reconciliation.TargetServices {
 				if ts == svc {
 					if gitSync.Reconciliation.CommitSHA != "" {
@@ -1077,16 +1107,8 @@ func MergeClusterDeploymentsWithHangar(
 				}
 			}
 		}
-		if commit == "" {
-			isStackContainer := false
-			if proj, ok := c.Labels["com.docker.compose.project"]; ok && proj == "aerial" {
-				isStackContainer = true
-			} else if len(c.Names) > 0 && strings.HasPrefix(strings.TrimPrefix(c.Names[0], "/"), "aerial-") {
-				isStackContainer = true
-			}
-			if isStackContainer {
-				commit = currentCommit
-			}
+		if commit == "" && isStackContainer {
+			commit = currentCommit
 		}
 		if commit == "" {
 			continue

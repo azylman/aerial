@@ -2710,6 +2710,31 @@ func TestFetchDockerClusterState_Extended(t *testing.T) {
 						Status:  "Exited (1)",
 						Created: time.Now().UTC().Add(-time.Hour).Unix(),
 					},
+					{
+						Names:   []string{"/scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
+						State:   "running",
+						Status:  "Up 30 minutes (healthy)",
+						Created: time.Now().UTC().Add(-30 * time.Minute).Unix(),
+						Labels: map[string]string{
+							"aerial.service":               "scheduler-mcp",
+							"com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e",
+						},
+					},
+					{
+						Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
+						State:   "running",
+						Status:  "Up 15 minutes (healthy)",
+						Created: time.Now().UTC().Add(-15 * time.Minute).Unix(),
+						Labels: map[string]string{
+							"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
+						},
+					},
+					{
+						Names:   []string{"/hassio_supervisor"},
+						State:   "running",
+						Status:  "Up 10 hours",
+						Created: time.Now().UTC().Add(-10 * time.Hour).Unix(),
+					},
 				}
 				data, _ := json.Marshal(containers)
 				return &http.Response{
@@ -2725,8 +2750,8 @@ func TestFetchDockerClusterState_Extended(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchDockerClusterState failed: %v", err)
 	}
-	if len(services) != 4 {
-		t.Errorf("expected 4 services, got %d", len(services))
+	if len(services) != 6 {
+		t.Errorf("expected 6 services (including Nomad), got %d", len(services))
 	}
 
 	// 2. HTTP 500 error

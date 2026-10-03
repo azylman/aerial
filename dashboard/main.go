@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -951,20 +952,7 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 	var services []ServiceStatus
 
 	for _, c := range rawContainers {
-		isAerial := false
-		var svcName string
-
-		if proj, ok := c.Labels["com.docker.compose.project"]; ok && proj == "aerial" {
-			isAerial = true
-			svcName = c.Labels["com.docker.compose.service"]
-		} else if len(c.Names) > 0 {
-			name := strings.TrimPrefix(c.Names[0], "/")
-			if strings.HasPrefix(name, "aerial-") {
-				isAerial = true
-				svcName = strings.TrimPrefix(name, "aerial-")
-			}
-		}
-
+		svcName, isAerial := ExtractAerialServiceName(c)
 		if !isAerial || svcName == "" {
 			continue
 		}
@@ -1709,7 +1697,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 	}
 
 	cfgFile := strings.TrimSpace(lookup("CONFIG_PATH"))
-	if cfgFile == "" {
+	if cfgFile == "" && flag.Lookup("test.v") == nil {
 		if _, err := os.Stat("/config/config.yaml"); err == nil {
 			cfgFile = "/config/config.yaml"
 		} else if _, err := os.Stat("/share/aerial-config/services/dashboard/dashboard.yaml"); err == nil {
