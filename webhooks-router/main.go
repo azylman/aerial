@@ -291,6 +291,14 @@ func normalizeRepo(repo string) string {
 	return repo
 }
 
+// RegisteredPR holds basic identification for an active pull request.
+type RegisteredPR struct {
+	PRNumber int    `json:"pr_number"`
+	Branch   string `json:"branch"`
+	TargetID string `json:"target_id"`
+	HeadSHA  string `json:"head_sha"`
+}
+
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
 type PRRegistryUpdater interface {
 	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
@@ -300,6 +308,8 @@ type PRRegistryUpdater interface {
 	AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (targetID string, prNumber int, updated bool, err error)
 	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
 	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
+	ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error)
+	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 }
 
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
@@ -510,6 +520,63 @@ func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sh
 		return 0, "", "", fmt.Errorf("resolve pr by sha: %w", err)
 	}
 	return prNum, branch, targetID, nil
+}
+
+func (r *PostgresPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" {
+		return nil, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT pr_number, branch, target_id, head_sha
+		FROM pr_registry
+		WHERE repo = $1 AND status NOT IN ('merged', 'closed', 'conflict')
+		ORDER BY pr_number ASC;
+	`
+	rows, err := r.pool.Query(qCtx, query, repo)
+	if err != nil {
+		return nil, fmt.Errorf("list open prs: %w", err)
+	}
+	defer rows.Close()
+
+	var prs []RegisteredPR
+	for rows.Next() {
+		var p RegisteredPR
+		if err := rows.Scan(&p.PRNumber, &p.Branch, &p.TargetID, &p.HeadSHA); err != nil {
+			return nil, fmt.Errorf("scan open pr: %w", err)
+		}
+		prs = append(prs, p)
+	}
+	return prs, rows.Err()
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return "", false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET status = 'conflict',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status != 'conflict' AND status NOT IN ('merged', 'closed')
+		RETURNING target_id;
+	`
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("atomic transition conflict: %w", err)
+	}
+	return targetID, true, nil
 }
 
 // Discord Snowflake validation
@@ -780,12 +847,13 @@ func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, r
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
-	cfg         Config
-	httpClient  *http.Client
-	riverClient RiverInserter
-	registry    PRRegistryUpdater
-	dispatcher  OutboundDispatcher
-	onProcessed func(event, delivery string)
+	cfg                Config
+	httpClient         *http.Client
+	riverClient        RiverInserter
+	registry           PRRegistryUpdater
+	dispatcher         OutboundDispatcher
+	onProcessed        func(event, delivery string)
+	conflictCheckDelay time.Duration
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -794,13 +862,19 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	s := &RouterServer{
-		cfg:        cfg,
-		httpClient: client,
+		cfg:                cfg,
+		httpClient:         client,
+		conflictCheckDelay: 2 * time.Second,
 	}
 	if len(riverClient) > 0 {
 		s.riverClient = riverClient[0]
 	}
 	return s
+}
+
+// SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
+func (s *RouterServer) SetConflictCheckDelay(d time.Duration) {
+	s.conflictCheckDelay = d
 }
 
 // SetRiverClient assigns the RiverInserter instance to RouterServer.
@@ -1173,6 +1247,195 @@ func (s *RouterServer) dispatchCIFailurePrompt(targetID, checkName, repo, headSH
 	}(targetID, prompt)
 }
 
+func (s *RouterServer) dispatchConflictPrompt(targetID, repo, branch, headSHA string, prNum int) {
+	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+		return
+	}
+	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
+	go func(tID, p string) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (conflict): %v", r)
+			}
+		}()
+		dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
+			ChannelID: tID,
+			Prompt:    p,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching conflict prompt: %v", err)
+		} else {
+			log.Printf("[webhooks-router] [dispatcher] successfully dispatched conflict prompt for PR #%d to %s", prNum, tID)
+		}
+	}(targetID, prompt)
+}
+
+func (s *RouterServer) dispatchConflictDirectMessage(targetID, repo, branch string, prNum int) {
+	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+		return
+	}
+	msg := fmt.Sprintf("PR #%d on %s (branch %s) has merge conflicts with main. Initiating automatic conflict resolution.", prNum, repo, branch)
+	go func(tID, m string) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (conflict): %v", r)
+			}
+		}()
+		dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+			ChannelID: tID,
+			Content:   m,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching conflict direct message: %v", err)
+		}
+	}(targetID, msg)
+}
+
+// GitHubPRDetails encapsulates mergeability information returned by GitHub's Pull Request API.
+type GitHubPRDetails struct {
+	Number         int    `json:"number"`
+	Mergeable      *bool  `json:"mergeable"`
+	MergeableState string `json:"mergeable_state"`
+}
+
+func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber int) (*GitHubPRDetails, error) {
+	if repo == "" || prNumber <= 0 {
+		return nil, fmt.Errorf("invalid repo or prNumber for pr details")
+	}
+	if !strings.Contains(repo, "/") {
+		repo = "azylman/" + repo
+	}
+	apiURL := s.cfg.GitHubAPIURL
+	if apiURL == "" {
+		apiURL = "https://api.github.com"
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/pulls/%d", apiURL, repo, prNumber)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create github pr details request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if s.cfg.GitHubToken != "" {
+		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github pr details request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		return nil, fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github pr details returned status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read github pr details response: %w", err)
+	}
+	var details GitHubPRDetails
+	if err := json.Unmarshal(body, &details); err != nil {
+		return nil, fmt.Errorf("unmarshal github pr details: %w", err)
+	}
+	return &details, nil
+}
+
+func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
+	if s.registry == nil {
+		return nil
+	}
+	openPRs, err := s.registry.ListOpenPRs(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("list open prs: %w", err)
+	}
+	if len(openPRs) == 0 {
+		return nil
+	}
+
+	for _, pr := range openPRs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var details *GitHubPRDetails
+		// Polling retry for mergeable: null (GitHub computes asynchronously)
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				delay := s.conflictCheckDelay
+				if delay <= 0 {
+					delay = 200 * time.Millisecond
+				}
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			det, fetchErr := s.fetchPRDetails(ctx, repo, pr.PRNumber)
+			if fetchErr != nil {
+				log.Printf("[webhooks-router] [github] error fetching PR #%d details for conflict check: %v", pr.PRNumber, fetchErr)
+				if strings.Contains(fetchErr.Error(), "403") || strings.Contains(strings.ToLower(fetchErr.Error()), "rate limit") {
+					return fetchErr
+				}
+				break
+			}
+			details = det
+			if details.Mergeable != nil || (details.MergeableState != "" && details.MergeableState != "unknown") {
+				break
+			}
+		}
+
+		if details == nil {
+			continue
+		}
+
+		isConflict := (details.Mergeable != nil && !*details.Mergeable) || details.MergeableState == "dirty"
+		if isConflict {
+			targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
+			if trErr != nil {
+				log.Printf("[webhooks-router] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
+				continue
+			}
+			if updated {
+				if targetID == "" {
+					targetID = pr.TargetID
+				}
+				log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to conflict (target_id=%s)", repo, pr.PRNumber, targetID)
+				s.dispatchConflictPrompt(targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber)
+				s.dispatchConflictDirectMessage(targetID, repo, pr.Branch, pr.PRNumber)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *RouterServer) checkOpenPRConflictsAsync(repo string) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[webhooks-router] [github] PANIC recovered in checkOpenPRConflictsAsync: %v", r)
+			}
+		}()
+		bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		if s.conflictCheckDelay > 0 {
+			select {
+			case <-time.After(s.conflictCheckDelay):
+			case <-bgCtx.Done():
+				return
+			}
+		}
+
+		if err := s.checkOpenPRConflicts(bgCtx, repo); err != nil {
+			log.Printf("[webhooks-router] [github] error in checkOpenPRConflicts for %s: %v", repo, err)
+		}
+	}()
+}
+
 func (s *RouterServer) dispatchGitPush(repo, ref, commit, targetID string, prNum int) {
 	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) {
 		return
@@ -1537,6 +1800,20 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					res.TargetID = targetID
 				}
 				log.Printf("[webhooks-router] [registry] pr %s#%d synchronized (head_sha=%s, status=open, target_id=%s)", res.Repo, res.PRNumber, res.HeadSHA, res.TargetID)
+			} else if res.Action == "auto_merge_disabled" {
+				targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, res.Repo, res.PRNumber)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] error transitioning pr auto_merge_disabled to conflict: %v", err)
+					return nil, err
+				}
+				if targetID != "" && res.TargetID == "" {
+					res.TargetID = targetID
+				}
+				if updated {
+					log.Printf("[webhooks-router] [registry] pr %s#%d auto_merge_disabled transitioned to conflict (target_id=%s)", res.Repo, res.PRNumber, res.TargetID)
+					s.dispatchConflictPrompt(res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber)
+					s.dispatchConflictDirectMessage(res.TargetID, res.Repo, res.Branch, res.PRNumber)
+				}
 			}
 		}
 		return res, nil
@@ -1795,6 +2072,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 
 		s.dispatchGitPush(res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber)
+		if strings.HasPrefix(p.Ref, "refs/heads/main") {
+			s.checkOpenPRConflictsAsync(res.Repo)
+		}
 		return res, nil
 
 	default:
