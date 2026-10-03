@@ -146,6 +146,87 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
+type DirectMessageRequest struct {
+	ChannelID string `json:"channel_id"`
+	ThreadID  string `json:"thread_id,omitempty"`
+	Content   string `json:"content"`
+	Text      string `json:"text,omitempty"`
+}
+
+func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if pool == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Worker pool not available"})
+			return
+		}
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if closeErr := r.Body.Close(); closeErr != nil {
+			log.Printf("[HTTP] Warning closing direct message request body: %v", closeErr)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+			return
+		}
+
+		var req DirectMessageRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+			return
+		}
+
+		targetID := strings.TrimSpace(req.ChannelID)
+		if targetID == "" {
+			targetID = strings.TrimSpace(req.ThreadID)
+		}
+		if targetID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' field is required and cannot be empty"})
+			return
+		}
+		if !queue.IsNumericSnowflake(targetID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"})
+			return
+		}
+
+		content := strings.TrimSpace(req.Content)
+		if content == "" {
+			content = strings.TrimSpace(req.Text)
+		}
+		if content == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'content' field is required and cannot be empty"})
+			return
+		}
+
+		if err := pool.DeliverDirect(targetID, content); err != nil {
+			if strings.Contains(err.Error(), "discord session is not connected") || strings.Contains(err.Error(), "discord session is nil") {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Discord session not connected"})
+				return
+			}
+			var restErr *discordgo.RESTError
+			if errors.As(err, &restErr) {
+				if restErr.Response != nil && restErr.Response.StatusCode >= 400 && restErr.Response.StatusCode < 500 {
+					writeJSON(w, restErr.Response.StatusCode, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+					return
+				}
+			}
+			if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "cannot send") {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to deliver message: %v", err)})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "sent", "channel_id": targetID})
+	}
+}
+
 type VoiceAskRequest struct {
 	Prompt         string `json:"prompt"`
 	SessionID      string `json:"session_id,omitempty"`
@@ -1026,6 +1107,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, reloadFn 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
+	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(store, searchPaths...))

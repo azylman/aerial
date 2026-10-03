@@ -171,6 +171,10 @@ ensure_deadcode() {
 
 run_deadcode() {
     svc="$1"
+    if [ "${SKIP_DEADCODE:-0}" = "1" ] || [ "${AERIAL_SKIP_DEADCODE:-0}" = "1" ]; then
+        echo "   [deadcode] Skipping deadcode check for $svc (SKIP_DEADCODE=1)"
+        return 0
+    fi
     if [ -d "$svc" ]; then
         echo "   [deadcode] Checking $svc for unreachable code..."
         ensure_deadcode
