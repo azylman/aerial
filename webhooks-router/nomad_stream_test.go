@@ -506,4 +506,196 @@ func TestNomadStreamSubscriber_WithRiver(t *testing.T) {
 	}
 }
 
+func TestIsAllocationRestarting_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		taskStates map[string]NomadTaskState
+		want       bool
+	}{
+		{
+			name:       "nil or empty map",
+			taskStates: nil,
+			want:       false,
+		},
+		{
+			name: "running task without events",
+			taskStates: map[string]NomadTaskState{
+				"brain": {State: "running", Failed: false},
+			},
+			want: false,
+		},
+		{
+			name: "pending task state",
+			taskStates: map[string]NomadTaskState{
+				"brain": {State: "pending"},
+			},
+			want: true,
+		},
+		{
+			name: "restarting task state",
+			taskStates: map[string]NomadTaskState{
+				"brain": {State: "restarting"},
+			},
+			want: true,
+		},
+		{
+			name: "last event Restart Signaled",
+			taskStates: map[string]NomadTaskState{
+				"brain": {
+					State: "running",
+					Events: []NomadTaskEvent{
+						{Type: "Started"},
+						{Type: "Restart Signaled", DisplayMessage: "Template with change_mode restart re-rendered"},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "last event Restarting",
+			taskStates: map[string]NomadTaskState{
+				"brain": {
+					State: "running",
+					Events: []NomadTaskEvent{
+						{Type: "Restart Signaled"},
+						{Type: "Restarting"},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "last event Started after Restarting",
+			taskStates: map[string]NomadTaskState{
+				"brain": {
+					State: "running",
+					Events: []NomadTaskEvent{
+						{Type: "Restart Signaled"},
+						{Type: "Restarting"},
+						{Type: "Started"},
+					},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAllocationRestarting(tt.taskStates)
+			if got != tt.want {
+				t.Errorf("isAllocationRestarting() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNomadStreamSubscriber_ConfigReload_DirectMessage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := `{"Index":1003,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-cfg-1","JobID":"scheduler-mcp","DesiredStatus":"run","ClientStatus":"running"}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(`[{"ID":"alloc-cfg-1","DesiredStatus":"run","ClientStatus":"running"}]`))
+			return
+		}
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    245,
+		deployedMergeSHA: "sha_config_reload_abc",
+		deployedRepo:     "azylman/aerial-config",
+		deployedUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "scheduler-mcp" {
+		t.Fatalf("expected deployedJobCalls [scheduler-mcp], got %v", mockReg.deployedJobCalls)
+	}
+
+	// Verify direct message was dispatched (NO prompt calls!)
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Errorf("expected 0 prompt calls for aerial-config, got %d", len(mockDisp.PromptCalls()))
+	}
+	dmCalls := mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 1 {
+		t.Fatalf("expected 1 direct message call, got %d", len(dmCalls))
+	}
+	if dmCalls[0].ChannelID != "1555405874565091380" {
+		t.Errorf("expected target ID 1555405874565091380, got %s", dmCalls[0].ChannelID)
+	}
+	if !strings.Contains(dmCalls[0].Content, "📦 **(PR: #245, repo: aerial-config)** Configuration reloaded and healthy for scheduler-mcp") {
+		t.Errorf("unexpected direct message content: %s", dmCalls[0].Content)
+	}
+}
+
+func TestNomadStreamSubscriber_AllocationRestarting_Guarded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := `{"Index":1004,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-restart-1","JobID":"brain","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"brain":{"State":"restarting"}}}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(`[{"ID":"alloc-restart-1","DesiredStatus":"run","ClientStatus":"running"}]`))
+			return
+		}
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	// Should NOT call deployedJobCalls or dispatch anything while restarting
+	if len(mockReg.deployedJobCalls) != 0 {
+		t.Errorf("expected 0 deployedJobCalls while restarting, got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Errorf("expected 0 prompt calls, got %d", len(mockDisp.PromptCalls()))
+	}
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Errorf("expected 0 direct message calls, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+}
+
 
