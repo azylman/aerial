@@ -2219,3 +2219,165 @@ func TestMergeClusterDeployments_UnparentedContainersDoNotSpawnCards(t *testing.
 	}
 }
 
+
+
+func TestExtractAerialServiceName(t *testing.T) {
+	tests := []struct {
+		name        string
+		container   DockerContainerJSON
+		expectedSvc string
+		expectedOk  bool
+	}{
+		{
+			name: "Docker Compose container",
+			container: DockerContainerJSON{
+				Names: []string{"/aerial-brain-1"},
+				Labels: map[string]string{
+					"com.docker.compose.project": "aerial",
+					"com.docker.compose.service": "brain",
+				},
+			},
+			expectedSvc: "brain",
+			expectedOk:  true,
+		},
+		{
+			name: "Foreign Docker Compose project container",
+			container: DockerContainerJSON{
+				Names: []string{"/homeassistant-web-1"},
+				Labels: map[string]string{
+					"com.docker.compose.project": "homeassistant",
+					"com.docker.compose.service": "web",
+				},
+			},
+			expectedSvc: "",
+			expectedOk:  false,
+		},
+		{
+			name: "Nomad container with aerial.service label",
+			container: DockerContainerJSON{
+				Names: []string{"/scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
+				Labels: map[string]string{
+					"aerial.service":               "scheduler-mcp",
+					"com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e",
+				},
+			},
+			expectedSvc: "scheduler-mcp",
+			expectedOk:  true,
+		},
+		{
+			name: "Nomad container with alloc_id in name",
+			container: DockerContainerJSON{
+				Names: []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
+				Labels: map[string]string{
+					"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
+				},
+			},
+			expectedSvc: "victoriametrics-mcp",
+			expectedOk:  true,
+		},
+		{
+			name: "Legacy container with aerial- prefix",
+			container: DockerContainerJSON{
+				Names: []string{"/aerial-proxy"},
+			},
+			expectedSvc: "proxy",
+			expectedOk:  true,
+		},
+		{
+			name: "Host supervisor container (non-Aerial)",
+			container: DockerContainerJSON{
+				Names: []string{"/hassio_supervisor"},
+				Labels: map[string]string{
+					"io.hass.type": "supervisor",
+				},
+			},
+			expectedSvc: "",
+			expectedOk:  false,
+		},
+		{
+			name: "Host addon container (non-Aerial)",
+			container: DockerContainerJSON{
+				Names: []string{"/app_core_mosquitto"},
+				Labels: map[string]string{
+					"supervisor_managed": "",
+				},
+			},
+			expectedSvc: "",
+			expectedOk:  false,
+		},
+		{
+			name: "Empty container metadata",
+			container: DockerContainerJSON{
+				Names:  nil,
+				Labels: nil,
+				State:  "running",
+			},
+			expectedSvc: "",
+			expectedOk:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, ok := ExtractAerialServiceName(tc.container)
+			if ok != tc.expectedOk {
+				t.Errorf("expected ok=%v, got %v", tc.expectedOk, ok)
+			}
+			if svc != tc.expectedSvc {
+				t.Errorf("expected svc=%q, got %q", tc.expectedSvc, svc)
+			}
+		})
+	}
+}
+
+func TestBuildContainerChips_NomadContainers(t *testing.T) {
+	now := time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC)
+	rawContainers := []DockerContainerJSON{
+		{
+			ID:      "brain-nomad",
+			Names:   []string{"/brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0"},
+			Created: now.Add(-120 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"aerial.service":               "brain",
+				"com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0",
+			},
+		},
+		{
+			ID:      "vm-nomad",
+			Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
+			Created: now.Add(-300 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
+			},
+		},
+		{
+			ID:    "hassio-supervisor",
+			Names: []string{"/hassio_supervisor"},
+			State: "running",
+		},
+	}
+
+	chips := BuildContainerChips(rawContainers, now)
+	if len(chips) != 2 {
+		t.Fatalf("expected 2 chips for Nomad containers, got %d", len(chips))
+	}
+
+	chipMap := make(map[string]MatrixJobChip)
+	for _, chip := range chips {
+		chipMap[chip.Name] = chip
+	}
+
+	if brainChip, ok := chipMap["brain"]; !ok {
+		t.Errorf("missing chip for brain")
+	} else if brainChip.Status != "completed" || brainChip.Conclusion != "success" {
+		t.Errorf("unexpected brain chip status/conclusion: %+v", brainChip)
+	}
+
+	if vmChip, ok := chipMap["victoriametrics-mcp"]; !ok {
+		t.Errorf("missing chip for victoriametrics-mcp")
+	} else if vmChip.Status != "completed" {
+		t.Errorf("unexpected victoriametrics chip status: %+v", vmChip)
+	}
+}
