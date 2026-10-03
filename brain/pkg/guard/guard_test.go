@@ -391,6 +391,41 @@ func TestGuardFailOpen(t *testing.T) {
 	if d8.Decision != DecisionAllow {
 		t.Errorf("expected allow on scoped test in batch mode, got: %v", d8)
 	}
+
+	// All mode where search denies
+	allSearch := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "find . -name '*.go'"}
+		}
+	}`
+	d9 := runGuard(t, "all", allSearch)
+	if d9.Decision != DecisionDeny {
+		t.Errorf("expected deny on find without maxdepth in all mode, got: %v", d9)
+	}
+
+	// Search mode explicit
+	searchDeny := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "find / -maxdepth 1"}
+		}
+	}`
+	d10 := runGuard(t, "search", searchDeny)
+	if d10.Decision != DecisionDeny {
+		t.Errorf("expected deny on root search in search mode, got: %v", d10)
+	}
+
+	searchAllow := `{
+		"toolCall": {
+			"name": "run_command",
+			"args": {"CommandLine": "find . -maxdepth 2 -name '*.go'"}
+		}
+	}`
+	d11 := runGuard(t, "search", searchAllow)
+	if d11.Decision != DecisionAllow {
+		t.Errorf("expected allow on find with maxdepth in search mode, got: %v", d11)
+	}
 }
 
 func TestGuardEdgeCases(t *testing.T) {
