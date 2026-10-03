@@ -372,6 +372,19 @@ func cleanRepoName(repo string) string {
 	return strings.TrimPrefix(repo, "azylman/")
 }
 
+// formatDirectMessagePrefix formats the bold PR and repo prefix for direct Discord messages.
+func formatDirectMessagePrefix(prNumber int, repo string) string {
+	repoName := cleanRepoName(repo)
+	if prNumber > 0 && repoName != "" {
+		return fmt.Sprintf("**(PR: #%d, repo: %s)**: ", prNumber, repoName)
+	} else if repoName != "" {
+		return fmt.Sprintf("**(repo: %s)**: ", repoName)
+	} else if prNumber > 0 {
+		return fmt.Sprintf("**(PR: #%d)**: ", prNumber)
+	}
+	return ""
+}
+
 // RegisteredPR holds basic identification for an active pull request.
 type RegisteredPR struct {
 	PRNumber int    `json:"pr_number"`
@@ -1636,17 +1649,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 
 	if evt.Event == "deploy_started" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
-		repoName := cleanRepoName(evt.Repo)
-		var msg string
-		if repoName != "" && evt.PRNumber > 0 {
-			msg = fmt.Sprintf("(PR: #%d, repo: %s): Starting deploy for %s", evt.PRNumber, repoName, evt.JobName)
-		} else if repoName != "" {
-			msg = fmt.Sprintf("(repo: %s): Starting deploy for %s", repoName, evt.JobName)
-		} else if evt.PRNumber > 0 {
-			msg = fmt.Sprintf("(PR: #%d): Starting deploy for %s", evt.PRNumber, evt.JobName)
-		} else {
-			msg = fmt.Sprintf("Starting deploy for %s", evt.JobName)
-		}
+		msg := formatDirectMessagePrefix(evt.PRNumber, evt.Repo) + fmt.Sprintf("Starting deploy for %s", evt.JobName)
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
 			ChannelID: targetID,
 			Content:   msg,
@@ -1671,6 +1674,13 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			} else if tID != "" {
 				targetID = tID
 			}
+		}
+		dmMsg := formatDirectMessagePrefix(evt.PRNumber, evt.Repo) + fmt.Sprintf("Deployment failed and rolled back for %s. Following up...", evt.JobName)
+		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+			ChannelID: targetID,
+			Content:   dmMsg,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] warning dispatching deploy_rollback direct message: %v", err)
 		}
 		lines := []string{
 			fmt.Sprintf("Deployment failed and rolled back for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
@@ -1700,6 +1710,13 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 				targetID = tID
 			}
 		}
+		dmMsg := formatDirectMessagePrefix(evt.PRNumber, evt.Repo) + fmt.Sprintf("Deployment failed for %s. Following up...", evt.JobName)
+		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+			ChannelID: targetID,
+			Content:   dmMsg,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] warning dispatching deploy_failed direct message: %v", err)
+		}
 		lines := []string{
 			fmt.Sprintf("Deployment failed for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 		}
@@ -1717,17 +1734,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 	} else if evt.Event == "sync_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
-		repoName := cleanRepoName(evt.Repo)
-		var msg string
-		if repoName != "" && evt.PRNumber > 0 {
-			msg = fmt.Sprintf("(PR: #%d, repo: %s): Git file sync completed", evt.PRNumber, repoName)
-		} else if repoName != "" {
-			msg = fmt.Sprintf("(repo: %s): Git file sync completed", repoName)
-		} else if evt.PRNumber > 0 {
-			msg = fmt.Sprintf("(PR: #%d): Git file sync completed", evt.PRNumber)
-		} else {
-			msg = "Git file sync completed"
-		}
+		msg := formatDirectMessagePrefix(evt.PRNumber, evt.Repo) + "Git file sync completed"
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
 			ChannelID: targetID,
 			Content:   msg,
@@ -1737,6 +1744,13 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 	} else if evt.Event == "sync_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
+		dmMsg := formatDirectMessagePrefix(evt.PRNumber, evt.Repo) + "Git file sync failed. Following up..."
+		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+			ChannelID: targetID,
+			Content:   dmMsg,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] warning dispatching sync_failed direct message: %v", err)
+		}
 		lines := []string{
 			fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber),
 		}
@@ -1885,6 +1899,13 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
 	}
+	dmMsg := formatDirectMessagePrefix(prNum, repo) + fmt.Sprintf("CI check %q failed. Following up...", checkName)
+	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+		ChannelID: targetID,
+		Content:   dmMsg,
+	}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] warning dispatching ci_failed direct message: %v", err)
+	}
 	lines := []string{
 		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
 	}
@@ -1911,6 +1932,13 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
+	}
+	dmMsg := formatDirectMessagePrefix(prNum, repo) + "Merge conflict detected. Following up..."
+	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+		ChannelID: targetID,
+		Content:   dmMsg,
+	}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] warning dispatching conflict direct message: %v", err)
 	}
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
 	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
@@ -2389,17 +2417,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
 
 					if IsValidDiscordSnowflake(res.TargetID) && s.dispatcher != nil {
-						repoName := cleanRepoName(res.Repo)
-						var msg string
-						if repoName != "" && res.PRNumber > 0 {
-							msg = fmt.Sprintf("(PR: #%d, repo: %s): Merged into main", res.PRNumber, repoName)
-						} else if res.PRNumber > 0 {
-							msg = fmt.Sprintf("(PR: #%d): Merged into main", res.PRNumber)
-						} else if repoName != "" {
-							msg = fmt.Sprintf("(repo: %s): Merged into main", repoName)
-						} else {
-							msg = "Merged into main"
-						}
+						msg := formatDirectMessagePrefix(res.PRNumber, res.Repo) + "Merged into main"
 						if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
 							ChannelID: res.TargetID,
 							Content:   msg,
