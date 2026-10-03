@@ -1617,38 +1617,48 @@ func formatChannelContext(msgs []ChannelMessageContext) string {
 	if len(msgs) == 0 {
 		return "No recent channel messages found."
 	}
-	var lines []string
-	lines = append(lines, "Recent Discord channel context:")
-	lines = append(lines, "<CHANNEL_CONTEXT>")
-	totalRunes := 0
-	truncated := false
+
+	var bullets []string
 	for _, m := range msgs {
 		author := strings.TrimSpace(m.AuthorName)
 		if author == "" {
 			author = "User"
 		}
 		if cleanContent := sanitizeChannelContextText(m.Content); cleanContent != "" {
-			bullet := fmt.Sprintf("- [%s]: %s", author, truncatePromptRunes(cleanContent, 300))
-			totalRunes += len([]rune(bullet))
-			if totalRunes > 4000 {
-				truncated = true
-				break
-			}
-			lines = append(lines, bullet)
+			bullets = append(bullets, fmt.Sprintf("- [%s]: %s", author, truncatePromptRunes(cleanContent, 300)))
 		}
 		if cleanResp := sanitizeChannelContextText(m.ResponseText); cleanResp != "" {
-			bullet := fmt.Sprintf("- [Aerial]: %s", truncatePromptRunes(cleanResp, 300))
-			totalRunes += len([]rune(bullet))
-			if totalRunes > 4000 {
-				truncated = true
-				break
-			}
-			lines = append(lines, bullet)
+			bullets = append(bullets, fmt.Sprintf("- [Aerial]: %s", truncatePromptRunes(cleanResp, 300)))
 		}
 	}
+
+	// Iterate backwards from the most recent bullet to ensure the latest conversation context is preserved
+	totalRunes := 0
+	truncated := false
+	var selectedBullets []string
+	for i := len(bullets) - 1; i >= 0; i-- {
+		b := bullets[i]
+		bRunes := len([]rune(b))
+		if totalRunes+bRunes > 4000 {
+			truncated = true
+			break
+		}
+		totalRunes += bRunes
+		selectedBullets = append(selectedBullets, b)
+	}
+
+	// Reverse selected bullets so they render in chronological order (oldest to newest)
+	for i, j := 0, len(selectedBullets)-1; i < j; i, j = i+1, j-1 {
+		selectedBullets[i], selectedBullets[j] = selectedBullets[j], selectedBullets[i]
+	}
+
+	var lines []string
+	lines = append(lines, "Recent Discord channel context:")
+	lines = append(lines, "<CHANNEL_CONTEXT>")
 	if truncated {
 		lines = append(lines, "... (older context truncated)")
 	}
+	lines = append(lines, selectedBullets...)
 	lines = append(lines, "</CHANNEL_CONTEXT>")
 	return strings.Join(lines, "\n")
 }
