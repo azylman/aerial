@@ -1,0 +1,357 @@
+package main
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestJobNameFromImage_TableDriven(t *testing.T) {
+	tests := []struct {
+		image    string
+		expected string
+	}{
+		{"ghcr.io/azylman/aerial-brain:latest", "brain"},
+		{"ghcr.io/azylman/aerial-scheduler-mcp:latest", "scheduler-mcp"},
+		{"ghcr.io/azylman/aerial-discord-mcp:latest", "discord-mcp"},
+		{"ghcr.io/azylman/aerial-hangar:latest", "hangar"},
+		{"ghcr.io/azylman/aerial-webhooks-router:latest", "webhooks-router"},
+		{"ghcr.io/azylman/aerial-dashboard:latest", "dashboard"},
+		{"ghcr.io/azylman/mirrormere:latest", "mirrormere"},
+		{"ghcr.io/azylman/mirrormere-voice-fingerprinter:latest", "mirrormere-voice-fingerprinter"},
+		{"ghcr.io/azylman/custom-service:v1.0.0", "custom-service"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		got := jobNameFromImage(tt.image)
+		if got != tt.expected {
+			t.Errorf("jobNameFromImage(%q) = %q, expected %q", tt.image, got, tt.expected)
+		}
+	}
+}
+
+func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]interface{}
+		expected []string
+	}{
+		{
+			name:     "nil metadata",
+			metadata: nil,
+			expected: nil,
+		},
+		{
+			name: "jobs array string",
+			metadata: map[string]interface{}{
+				"jobs": []interface{}{"brain", "scheduler-mcp"},
+			},
+			expected: []string{"brain", "scheduler-mcp"},
+		},
+		{
+			name: "single job string",
+			metadata: map[string]interface{}{
+				"job": "hangar",
+			},
+			expected: []string{"hangar"},
+		},
+		{
+			name: "both jobs and job",
+			metadata: map[string]interface{}{
+				"jobs": []interface{}{"brain"},
+				"job":  "hangar",
+			},
+			expected: []string{"brain", "hangar"},
+		},
+		{
+			name: "empty jobs array",
+			metadata: map[string]interface{}{
+				"jobs": []interface{}{},
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractJobsFromMetadata(tt.metadata)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d jobs, got %d: %v", len(tt.expected), len(got), got)
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("job[%d] = %q, expected %q", i, got[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestNomadStreamSubscriber_HeartbeatAndDeployment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := strings.Join([]string{
+		"{}",
+		"",
+		`{"Index":1001,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-123","JobID":"brain","Status":"successful","StatusDescription":"Deployment completed successfully"}}}]}`,
+		"{}",
+	}, "\n") + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    552,
+		deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+		deployedRepo:     "azylman/aerial",
+		deployedUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "brain" {
+		t.Fatalf("expected deployedJobCalls [brain], got %v", mockReg.deployedJobCalls)
+	}
+
+	// Verify direct message was dispatched
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mockDisp.mu.Lock()
+		count := len(mockDisp.directMessageCalls)
+		mockDisp.mu.Unlock()
+		if count > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mockDisp.mu.Lock()
+	calls := append([]DirectMessageRequest(nil), mockDisp.directMessageCalls...)
+	mockDisp.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 direct message call, got %d", len(calls))
+	}
+	if calls[0].ChannelID != "1555405874565091380" {
+		t.Errorf("expected target ID 1555405874565091380, got %s", calls[0].ChannelID)
+	}
+	if !strings.Contains(calls[0].Content, "Deployment succeeded for job brain") {
+		t.Errorf("unexpected message content: %s", calls[0].Content)
+	}
+}
+
+func TestNomadStreamSubscriber_AllocationRunning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := `{"Index":1002,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-999","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    552,
+		deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+		deployedRepo:     "azylman/aerial",
+		deployedUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "webhooks-router" {
+		t.Fatalf("expected deployedJobCalls [webhooks-router], got %v", mockReg.deployedJobCalls)
+	}
+}
+
+func TestNomadStreamSubscriber_IndexResetOnOutOfBounds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var attemptCount int
+	var mu sync.Mutex
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attemptCount++
+		attempt := attemptCount
+		mu.Unlock()
+
+		if attempt == 1 {
+			// First call: index is out of bounds
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"index 999999 is out of bounds"}`))
+			return
+		}
+
+		// Second call: index was reset, return valid stream
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}\n"))
+	}))
+	defer nomadServer.Close()
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	sub := NewNomadStreamSubscriber(srv)
+	sub.lastIndex = 999999
+
+	err1 := sub.consumeStream(ctx)
+	if err1 == nil {
+		t.Fatalf("expected error on attempt 1, got nil")
+	}
+
+	sub.mu.Lock()
+	resetIndex := sub.lastIndex
+	sub.mu.Unlock()
+
+	if resetIndex != 0 {
+		t.Errorf("expected lastIndex to be reset to 0, got %d", resetIndex)
+	}
+
+	// Attempt 2 should succeed connecting without error
+	err2 := sub.consumeStream(ctx)
+	if err2 != nil && !strings.Contains(err2.Error(), "EOF") {
+		t.Fatalf("unexpected error on attempt 2: %v", err2)
+	}
+}
+
+func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/v1/job/webhooks-router/allocations") {
+			_, _ = w.Write([]byte(`[
+				{"ID":"alloc-old","JobID":"webhooks-router","DesiredStatus":"stop","ClientStatus":"complete"},
+				{"ID":"alloc-new","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}
+			]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		listDeployingPRs: []DeployingPR{
+			{
+				ID:       101,
+				Repo:     "azylman/aerial",
+				PRNumber: 552,
+				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+				TargetID: "1555405874565091380",
+				Metadata: map[string]interface{}{
+					"jobs": []interface{}{"webhooks-router"},
+				},
+			},
+		},
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    552,
+		deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+		deployedRepo:     "azylman/aerial",
+		deployedUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	if err := srv.ReconcileActiveDeployments(ctx); err != nil {
+		t.Fatalf("ReconcileActiveDeployments failed: %v", err)
+	}
+
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "webhooks-router" {
+		t.Fatalf("expected deployedJobCalls [webhooks-router], got %v", mockReg.deployedJobCalls)
+	}
+}
+
+func TestRouterServer_IsNomadJobHealthy_DeploymentsAndAllocations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var deploymentStatus string
+	var returnDeployments404 bool
+	var allocsJSON string
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			if returnDeployments404 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write([]byte(`[{"ID":"dep-1","JobID":"brain","Status":"` + deploymentStatus + `"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(allocsJSON))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer nomadServer.Close()
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+
+	// Case 1: Deployments endpoint has status "running" -> incomplete, return false
+	deploymentStatus = "running"
+	returnDeployments404 = false
+	if srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be false when deployment is running")
+	}
+
+	// Case 2: Deployments endpoint has status "successful" -> complete, return true
+	deploymentStatus = "successful"
+	if !srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be true when deployment is successful")
+	}
+
+	// Case 3: No deployments endpoint, allocation is pending -> incomplete, return false
+	returnDeployments404 = true
+	allocsJSON = `[{"ID":"a1","DesiredStatus":"run","ClientStatus":"pending"}]`
+	if srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be false when allocation is pending")
+	}
+
+	// Case 4: No deployments endpoint, allocation is running -> complete, return true
+	allocsJSON = `[{"ID":"a1","DesiredStatus":"run","ClientStatus":"running"}]`
+	if !srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be true when allocation is running")
+	}
+}
+
