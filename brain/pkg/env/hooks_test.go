@@ -62,6 +62,24 @@ func TestSyncHooks_Default(t *testing.T) {
 	}
 }
 
+func TestDefaultCanonicalHooksJSON(t *testing.T) {
+	t.Parallel()
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(defaultCanonicalHooksJSON), &parsed); err != nil {
+		t.Fatalf("defaultCanonicalHooksJSON is not valid JSON: %v", err)
+	}
+	if _, ok := parsed["share-guard"]; !ok {
+		t.Errorf("expected 'share-guard' in defaultCanonicalHooksJSON")
+	}
+	if _, ok := parsed["schedule-guard"]; !ok {
+		t.Errorf("expected 'schedule-guard' in defaultCanonicalHooksJSON")
+	}
+	if _, ok := parsed["commit-guard"]; !ok {
+		t.Errorf("expected 'commit-guard' in defaultCanonicalHooksJSON")
+	}
+}
+
 func TestSyncHooks_WithSourceFiles(t *testing.T) {
 	t.Parallel()
 

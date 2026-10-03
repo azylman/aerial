@@ -36,6 +36,20 @@ const defaultCanonicalHooksJSON = `{
         ]
       }
     ]
+  },
+  "commit-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hook-guard commit",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }
 `
