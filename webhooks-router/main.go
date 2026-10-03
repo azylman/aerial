@@ -271,14 +271,74 @@ func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWeb
 	if w.server == nil {
 		return errors.New("router server not configured on worker")
 	}
-	log.Printf("[webhooks-router] [river] processing job id=%d event=%s delivery=%s", job.ID, job.Args.Event, job.Args.Delivery)
+	log.Printf("[webhooks-router] [river] processing github job id=%d event=%s delivery=%s", job.ID, job.Args.Event, job.Args.Delivery)
 	_, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body)
 	if err != nil {
-		log.Printf("[webhooks-router] [river] error processing job id=%d event=%s delivery=%s: %v", job.ID, job.Args.Event, job.Args.Delivery, err)
+		log.Printf("[webhooks-router] [river] error processing github job id=%d event=%s delivery=%s: %v", job.ID, job.Args.Event, job.Args.Delivery, err)
 		return err
 	}
 	return nil
 }
+
+// HangarWebhookArgs contains payload data for durable background processing of Hangar webhooks.
+type HangarWebhookArgs struct {
+	Event HangarDeployEvent `json:"event"`
+}
+
+func (HangarWebhookArgs) Kind() string {
+	return "hangar_webhook"
+}
+
+// HangarWebhookWorker processes Hangar deployment and sync webhook events from River.
+type HangarWebhookWorker struct {
+	river.WorkerDefaults[HangarWebhookArgs]
+	server *RouterServer
+}
+
+func (w *HangarWebhookWorker) Work(ctx context.Context, job *river.Job[HangarWebhookArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	log.Printf("[webhooks-router] [river] processing hangar job id=%d event=%s job_name=%s", job.ID, job.Args.Event.Event, job.Args.Event.JobName)
+	_, err := w.server.ProcessHangarEvent(ctx, job.Args.Event)
+	if err != nil {
+		log.Printf("[webhooks-router] [river] error processing hangar job id=%d: %v", job.ID, err)
+		return err
+	}
+	return nil
+}
+
+// NomadEventArgs contains payload data for durable background processing of Nomad stream events.
+type NomadEventArgs struct {
+	Topic   string          `json:"topic"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+	Index   uint64          `json:"index,omitempty"`
+}
+
+func (NomadEventArgs) Kind() string {
+	return "nomad_event"
+}
+
+// NomadEventWorker processes Nomad deployment and allocation events from River.
+type NomadEventWorker struct {
+	river.WorkerDefaults[NomadEventArgs]
+	server *RouterServer
+}
+
+func (w *NomadEventWorker) Work(ctx context.Context, job *river.Job[NomadEventArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	log.Printf("[webhooks-router] [river] processing nomad job id=%d topic=%s type=%s", job.ID, job.Args.Topic, job.Args.Type)
+	err := w.server.ProcessNomadEvent(ctx, job.Args.Topic, job.Args.Type, job.Args.Payload)
+	if err != nil {
+		log.Printf("[webhooks-router] [river] error processing nomad job id=%d: %v", job.ID, err)
+		return err
+	}
+	return nil
+}
+
 
 // normalizeRepo ensures repository names are normalized with the owner prefix.
 func normalizeRepo(repo string) string {
@@ -328,6 +388,14 @@ type PRRegistryUpdater interface {
 	AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
+	GetRecentChannelContext(ctx context.Context, targetID string, limit int) ([]ChannelMessageContext, error)
+}
+
+// ChannelMessageContext holds historical conversation snippets for prompt enrichment.
+type ChannelMessageContext struct {
+	AuthorName   string
+	Content      string
+	ResponseText string
 }
 
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
@@ -830,6 +898,45 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 	return prs, rows.Err()
 }
 
+func (r *PostgresPRRegistry) GetRecentChannelContext(ctx context.Context, targetID string, limit int) ([]ChannelMessageContext, error) {
+	targetID = strings.TrimSpace(targetID)
+	if targetID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT author_name, content, COALESCE(response_text, '')
+		FROM (
+			SELECT author_name, content, response_text, created_at
+			FROM messages
+			WHERE thread_id = $1
+			ORDER BY created_at DESC
+			LIMIT $2
+		) sub
+		ORDER BY created_at ASC;
+	`
+	rows, err := r.pool.Query(qCtx, query, targetID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get recent channel context: %w", err)
+	}
+	defer rows.Close()
+
+	var results []ChannelMessageContext
+	for rows.Next() {
+		var m ChannelMessageContext
+		if err := rows.Scan(&m.AuthorName, &m.Content, &m.ResponseText); err != nil {
+			return nil, fmt.Errorf("scan recent channel context: %w", err)
+		}
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
 // Discord Snowflake validation
 var snowflakeRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
 
@@ -1328,7 +1435,25 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	processed := s.ProcessHangarEvent(r.Context(), evt)
+	if s.riverClient != nil {
+		args := HangarWebhookArgs{Event: evt}
+		if _, err := s.riverClient.Insert(r.Context(), args, &river.InsertOpts{MaxAttempts: 5}); err != nil {
+			log.Printf("[webhooks-router] [hangar] ERROR: failed to insert job into river: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"status":   "accepted",
+			"event":    evt.Event,
+			"job_name": evt.JobName,
+		})
+		return
+	}
+
+	processed, err := s.ProcessHangarEvent(r.Context(), evt)
+	if err != nil {
+		log.Printf("[webhooks-router] [hangar] error processing hangar event: %v", err)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "accepted",
@@ -1339,7 +1464,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) *HangarDeployEvent {
+func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
 	if evt.CommitSHA != "" && evt.PRNumber == 0 && s.registry != nil {
 		prNum, _, targetID, err := s.registry.ResolvePRBySHA(ctx, evt.Repo, evt.CommitSHA)
 		if err != nil {
@@ -1364,31 +1489,18 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	}
 
 	if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		targetID := evt.TargetID
-		msg := fmt.Sprintf("Deployment succeeded for job %s (PR #%d, commit %s).", evt.JobName, evt.PRNumber, evt.CommitSHA)
-		go func(tID, m string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (deploy_success): %v", r)
-				}
-			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
-				ChannelID: tID,
-				Content:   m,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_success direct message: %v", err)
-			}
-		}(targetID, msg)
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
+			return &evt, err
+		}
 	} else if evt.Event == "deploy_rollback" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
 		if s.registry != nil && evt.PRNumber > 0 {
 			tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
 			if err != nil {
 				log.Printf("[webhooks-router] [registry] error transitioning deploy_rollback: %v", err)
+				return &evt, err
 			} else if !updated {
-				return &evt
+				return &evt, nil
 			} else if tID != "" {
 				targetID = tID
 			}
@@ -1401,29 +1513,22 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		lines = append(lines, "Please investigate and fix the deployment rollback failure.")
 		prompt := strings.Join(lines, "\n")
-		go func(tID, p string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (deploy_rollback): %v", r)
-				}
-			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
-				ChannelID: tID,
-				Prompt:    p,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_rollback prompt: %v", err)
-			}
-		}(targetID, prompt)
+		if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
+			ChannelID: targetID,
+			Prompt:    prompt,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_rollback prompt: %v", err)
+			return &evt, fmt.Errorf("dispatch deploy_rollback prompt: %w", err)
+		}
 	} else if evt.Event == "deploy_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
 		if s.registry != nil && evt.PRNumber > 0 {
 			tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
 			if err != nil {
 				log.Printf("[webhooks-router] [registry] error transitioning deploy_failed: %v", err)
+				return &evt, err
 			} else if !updated {
-				return &evt
+				return &evt, nil
 			} else if tID != "" {
 				targetID = tID
 			}
@@ -1436,42 +1541,26 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		lines = append(lines, "Please investigate and fix the deployment failure.")
 		prompt := strings.Join(lines, "\n")
-		go func(tID, p string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (deploy_failed): %v", r)
-				}
-			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
-				ChannelID: tID,
-				Prompt:    p,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_failed prompt: %v", err)
-			}
-		}(targetID, prompt)
+		if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
+			ChannelID: targetID,
+			Prompt:    prompt,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_failed prompt: %v", err)
+			return &evt, fmt.Errorf("dispatch deploy_failed prompt: %w", err)
+		}
 	} else if evt.Event == "sync_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
 		msg := fmt.Sprintf("Git sync completed for %s (commit %s). Mounted rules, skills, and configs updated.", evt.Repo, evt.CommitSHA)
 		if evt.PRNumber > 0 {
 			msg = fmt.Sprintf("Git sync completed for %s (PR #%d, commit %s). Mounted rules, skills, and configs updated.", evt.Repo, evt.PRNumber, evt.CommitSHA)
 		}
-		go func(tID, m string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (sync_success): %v", r)
-				}
-			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
-				ChannelID: tID,
-				Content:   m,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching sync_success direct message: %v", err)
-			}
-		}(targetID, msg)
+		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+			ChannelID: targetID,
+			Content:   msg,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching sync_success direct message: %v", err)
+			return &evt, fmt.Errorf("dispatch sync_success direct message: %w", err)
+		}
 	} else if evt.Event == "sync_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
 		lines := []string{
@@ -1485,24 +1574,16 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		lines = append(lines, "Please investigate and fix the git sync failure.")
 		prompt := strings.Join(lines, "\n")
-		go func(tID, p string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (sync_failed): %v", r)
-				}
-			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
-				ChannelID: tID,
-				Prompt:    p,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching sync_failed prompt: %v", err)
-			}
-		}(targetID, prompt)
+		if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
+			ChannelID: targetID,
+			Prompt:    prompt,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching sync_failed prompt: %v", err)
+			return &evt, fmt.Errorf("dispatch sync_failed prompt: %w", err)
+		}
 	}
 
-	return &evt
+	return &evt, nil
 }
 
 const maxPromptRunes = 1500
@@ -1516,9 +1597,109 @@ func truncatePromptDetails(s string) string {
 	return string(runes[:maxPromptRunes]) + "... (truncated)"
 }
 
-func (s *RouterServer) dispatchCIFailurePrompt(targetID, checkName, repo, headSHA string, prNum int, details, checkURL string) {
+func truncatePromptRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "... (truncated)"
+}
+
+func sanitizeChannelContextText(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "</CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]")
+	s = strings.ReplaceAll(s, "<CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]")
+	return strings.TrimSpace(s)
+}
+
+func formatChannelContext(msgs []ChannelMessageContext) string {
+	if len(msgs) == 0 {
+		return "No recent channel messages found."
+	}
+	var lines []string
+	lines = append(lines, "Recent Discord channel context:")
+	lines = append(lines, "<CHANNEL_CONTEXT>")
+	totalRunes := 0
+	truncated := false
+	for _, m := range msgs {
+		author := strings.TrimSpace(m.AuthorName)
+		if author == "" {
+			author = "User"
+		}
+		if cleanContent := sanitizeChannelContextText(m.Content); cleanContent != "" {
+			bullet := fmt.Sprintf("- [%s]: %s", author, truncatePromptRunes(cleanContent, 300))
+			totalRunes += len([]rune(bullet))
+			if totalRunes > 4000 {
+				truncated = true
+				break
+			}
+			lines = append(lines, bullet)
+		}
+		if cleanResp := sanitizeChannelContextText(m.ResponseText); cleanResp != "" {
+			bullet := fmt.Sprintf("- [Aerial]: %s", truncatePromptRunes(cleanResp, 300))
+			totalRunes += len([]rune(bullet))
+			if totalRunes > 4000 {
+				truncated = true
+				break
+			}
+			lines = append(lines, bullet)
+		}
+	}
+	if truncated {
+		lines = append(lines, "... (older context truncated)")
+	}
+	lines = append(lines, "</CHANNEL_CONTEXT>")
+	return strings.Join(lines, "\n")
+}
+
+func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targetID, jobName, repo, commitSHA string, prNum int, refID string) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
-		return
+		return nil
+	}
+
+	var contextMsgs []ChannelMessageContext
+	if s.registry != nil {
+		msgs, err := s.registry.GetRecentChannelContext(ctx, targetID, 20)
+		if err != nil {
+			log.Printf("[webhooks-router] [registry] warning fetching channel context for %s: %v", targetID, err)
+		} else {
+			contextMsgs = msgs
+		}
+	}
+
+	var lines []string
+	header := fmt.Sprintf("Continuous Delivery deployment completed for job %s (PR #%d, commit: %s).", jobName, prNum, commitSHA)
+	if repo != "" && refID != "" {
+		header = fmt.Sprintf("Continuous Delivery deployment completed for job %s on %s (PR #%d, commit: %s, ref: %s).", jobName, repo, prNum, commitSHA, refID)
+	} else if repo != "" {
+		header = fmt.Sprintf("Continuous Delivery deployment completed for job %s on %s (PR #%d, commit: %s).", jobName, repo, prNum, commitSHA)
+	} else if refID != "" {
+		header = fmt.Sprintf("Continuous Delivery deployment completed for job %s (PR #%d, commit: %s, ref: %s).", jobName, prNum, commitSHA, refID)
+	}
+	lines = append(lines, header)
+
+	if ctxStr := formatChannelContext(contextMsgs); ctxStr != "" {
+		lines = append(lines, "", ctxStr)
+	}
+
+	lines = append(lines, "", "Directive: Based on the recent conversation context above, suggest logical next steps if any work or follow-ups remain; otherwise, celebrate completion.")
+	prompt := strings.Join(lines, "\n")
+
+	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
+		ChannelID: targetID,
+		Prompt:    prompt,
+	}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_success prompt: %v", err)
+		return fmt.Errorf("dispatch deploy_success prompt: %w", err)
+	}
+	log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_success prompt for job %s to %s", jobName, targetID)
+	return nil
+}
+
+func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, checkName, repo, headSHA string, prNum int, details, checkURL string) error {
+	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+		return nil
 	}
 	lines := []string{
 		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
@@ -1532,47 +1713,31 @@ func (s *RouterServer) dispatchCIFailurePrompt(targetID, checkName, repo, headSH
 	lines = append(lines, "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix.")
 	prompt := strings.Join(lines, "\n")
 
-	go func(tID, p string) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (ci_failed): %v", r)
-			}
-		}()
-		dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
-			ChannelID: tID,
-			Prompt:    p,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching ci_failed prompt: %v", err)
-		} else {
-			log.Printf("[webhooks-router] [dispatcher] successfully dispatched ci_failed prompt for PR #%d to %s", prNum, tID)
-		}
-	}(targetID, prompt)
+	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
+		ChannelID: targetID,
+		Prompt:    prompt,
+	}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] error dispatching ci_failed prompt: %v", err)
+		return fmt.Errorf("dispatch ci_failed prompt: %w", err)
+	}
+	log.Printf("[webhooks-router] [dispatcher] successfully dispatched ci_failed prompt for PR #%d to %s", prNum, targetID)
+	return nil
 }
 
-func (s *RouterServer) dispatchConflictPrompt(targetID, repo, branch, headSHA string, prNum int) {
+func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
-		return
+		return nil
 	}
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
-	go func(tID, p string) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (conflict): %v", r)
-			}
-		}()
-		dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
-			ChannelID: tID,
-			Prompt:    p,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching conflict prompt: %v", err)
-		} else {
-			log.Printf("[webhooks-router] [dispatcher] successfully dispatched conflict prompt for PR #%d to %s", prNum, tID)
-		}
-	}(targetID, prompt)
+	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
+		ChannelID: targetID,
+		Prompt:    prompt,
+	}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] error dispatching conflict prompt: %v", err)
+		return fmt.Errorf("dispatch conflict prompt: %w", err)
+	}
+	log.Printf("[webhooks-router] [dispatcher] successfully dispatched conflict prompt for PR #%d to %s", prNum, targetID)
+	return nil
 }
 
 // GitHubPRDetails encapsulates mergeability information returned by GitHub's Pull Request API.
@@ -1686,133 +1851,97 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 					targetID = pr.TargetID
 				}
 				log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to conflict (target_id=%s)", repo, pr.PRNumber, targetID)
-				s.dispatchConflictPrompt(targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber)
+				if err := s.dispatchConflictPrompt(ctx, targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber); err != nil {
+					log.Printf("[webhooks-router] [registry] error dispatching conflict prompt for PR #%d: %v", pr.PRNumber, err)
+				}
 			}
 		}
 	}
 	return nil
 }
 
-func (s *RouterServer) checkOpenPRConflictsAsync(repo string) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] [github] PANIC recovered in checkOpenPRConflictsAsync: %v", r)
-			}
-		}()
-		bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-
-		if s.conflictCheckDelay > 0 {
-			select {
-			case <-time.After(s.conflictCheckDelay):
-			case <-bgCtx.Done():
-				return
-			}
-		}
-
-		if err := s.checkOpenPRConflicts(bgCtx, repo); err != nil {
-			log.Printf("[webhooks-router] [github] error in checkOpenPRConflicts for %s: %v", repo, err)
-		}
-	}()
-}
-
-func (s *RouterServer) dispatchGitPush(repo, ref, commit, targetID string, prNum int) {
+func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, targetID string, prNum int) error {
 	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) {
-		return
+		return nil
 	}
-	go func(rp, rf, cm, tID string, pr int) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchGitPush: %v", r)
-			}
-		}()
-		dispCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := s.dispatcher.DispatchGitPush(dispCtx, GitPushEventRequest{
-			Repo:     rp,
-			Ref:      rf,
-			Commit:   cm,
-			TargetID: tID,
-			PRNumber: pr,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching git_push to hangar for %s: %v", rp, err)
-		} else {
-			log.Printf("[webhooks-router] [dispatcher] successfully dispatched git_push to hangar for %s (%s)", rp, cm)
-		}
-	}(repo, ref, commit, targetID, prNum)
+	if err := s.dispatcher.DispatchGitPush(ctx, GitPushEventRequest{
+		Repo:     repo,
+		Ref:      ref,
+		Commit:   commit,
+		TargetID: targetID,
+		PRNumber: prNum,
+	}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] error dispatching git_push to hangar for %s: %v", repo, err)
+		return fmt.Errorf("dispatch git_push to hangar: %w", err)
+	}
+	log.Printf("[webhooks-router] [dispatcher] successfully dispatched git_push to hangar for %s (%s)", repo, commit)
+	return nil
 }
 
-func (s *RouterServer) dispatchWorkflowRunImages(repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) {
+func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
 	if s.dispatcher == nil {
-		return
+		return nil
 	}
 	if conclusion != "success" || !(headBranch == "main" || strings.HasPrefix(headBranch, "refs/heads/main")) {
-		return
+		return nil
 	}
-	go func(rp string, rID int64, sha, tID string, pr int) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in dispatchWorkflowRunImages: %v", r)
-			}
-		}()
-		dispCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
 
-		images, err := s.resolveWorkflowRunImages(dispCtx, rp, rID)
-		if err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error resolving images for workflow run %d (%s): %v", rID, rp, err)
-			return
-		}
-		if len(images) == 0 {
-			log.Printf("[webhooks-router] [dispatcher] no built images detected for workflow run %d (%s)", rID, rp)
-			return
-		}
+	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
+	if err != nil {
+		log.Printf("[webhooks-router] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
+		return fmt.Errorf("resolve workflow run images: %w", err)
+	}
+	if len(images) == 0 {
+		log.Printf("[webhooks-router] [dispatcher] no built images detected for workflow run %d (%s)", runID, repo)
+		return nil
+	}
 
-		var targetJobs []string
-		for _, img := range images {
-			jobName := jobNameFromImage(img)
-			if jobName != "" {
-				targetJobs = append(targetJobs, jobName)
-			}
+	var targetJobs []string
+	for _, img := range images {
+		jobName := jobNameFromImage(img)
+		if jobName != "" {
+			targetJobs = append(targetJobs, jobName)
 		}
-		if len(targetJobs) > 0 && s.registry != nil && pr > 0 {
-			if _, err := s.registry.TransitionDeploying(dispCtx, rp, pr, targetJobs); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", rp, pr, err)
+	}
+	if len(targetJobs) > 0 && s.registry != nil && prNum > 0 {
+		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, targetJobs); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
+			return fmt.Errorf("transition pr deploying: %w", err)
+		}
+		log.Printf("[webhooks-router] [dispatcher] pr %s#%d transitioned to deploying with jobs: %v", repo, prNum, targetJobs)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(images))
+	for _, img := range images {
+		wg.Add(1)
+		go func(imageRef string) {
+			defer wg.Done()
+			req := ImageReadyEventRequest{
+				Image:     imageRef,
+				Repo:      repo,
+				CommitSHA: headSHA,
+				PRNumber:  prNum,
+				TargetID:  targetID,
+			}
+			if err := s.dispatcher.DispatchImageReady(ctx, req); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
+				errCh <- err
 			} else {
-				log.Printf("[webhooks-router] [dispatcher] pr %s#%d transitioned to deploying with jobs: %v", rp, pr, targetJobs)
+				log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s", imageRef)
 			}
-		}
+		}(img)
+	}
+	wg.Wait()
+	close(errCh)
 
-		var wg sync.WaitGroup
-		for _, img := range images {
-			wg.Add(1)
-			go func(imageRef string) {
-				defer wg.Done()
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchImageReady for %s: %v", imageRef, r)
-					}
-				}()
-				imgCtx, imgCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer imgCancel()
-
-				req := ImageReadyEventRequest{
-					Image:     imageRef,
-					Repo:      rp,
-					CommitSHA: sha,
-					PRNumber:  pr,
-					TargetID:  tID,
-				}
-				if err := s.dispatcher.DispatchImageReady(imgCtx, req); err != nil {
-					log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
-				} else {
-					log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s", imageRef)
-				}
-			}(img)
+	var firstErr error
+	for err := range errCh {
+		if firstErr == nil {
+			firstErr = err
 		}
-		wg.Wait()
-	}(repo, runID, headSHA, targetID, prNum)
+	}
+	return firstErr
 }
 
 // GitHub Webhook Payloads and Resolution Types
@@ -2077,21 +2206,13 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 
 					if IsValidDiscordSnowflake(res.TargetID) && s.dispatcher != nil {
 						msg := fmt.Sprintf("PR #%d on %s merged into main.", res.PRNumber, res.Repo)
-						go func(tID, m string) {
-							defer func() {
-								if r := recover(); r != nil {
-									log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (pr_merged): %v", r)
-								}
-							}()
-							dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-							defer cancel()
-							if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
-								ChannelID: tID,
-								Content:   m,
-							}); err != nil {
-								log.Printf("[webhooks-router] [dispatcher] error dispatching pr_merged direct message: %v", err)
-							}
-						}(res.TargetID, msg)
+						if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+							ChannelID: res.TargetID,
+							Content:   msg,
+						}); err != nil {
+							log.Printf("[webhooks-router] [dispatcher] error dispatching pr_merged direct message: %v", err)
+							return nil, err
+						}
 					}
 				} else {
 					targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
@@ -2125,7 +2246,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d auto_merge_disabled transitioned to conflict (target_id=%s)", res.Repo, res.PRNumber, res.TargetID)
-					s.dispatchConflictPrompt(res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber)
+					if err := s.dispatchConflictPrompt(ctx, res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -2204,7 +2327,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (check=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
+					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL); err != nil {
+						return nil, err
+					}
 				}
 			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
@@ -2224,7 +2349,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					if pr == 0 {
 						pr = prNum
 					}
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL)
+					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -2297,7 +2424,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (workflow=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
+					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL); err != nil {
+						return nil, err
+					}
 				}
 			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
@@ -2317,13 +2446,17 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					if pr == 0 {
 						pr = prNum
 					}
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL)
+					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
 
 		if p.Action == "completed" && p.WorkflowRun.Status == "completed" && p.WorkflowRun.Conclusion == "success" && (p.WorkflowRun.HeadBranch == "main" || strings.HasPrefix(p.WorkflowRun.HeadBranch, "refs/heads/main")) {
-			s.dispatchWorkflowRunImages(res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber)
+			if err := s.dispatchWorkflowRunImages(ctx, res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
+				return nil, err
+			}
 		}
 
 		return res, nil
@@ -2400,9 +2533,20 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			log.Printf("[webhooks-router] [registry] pr %s#%d backfilled merge_sha (%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
 		}
 
-		s.dispatchGitPush(res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber)
+		if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
+			return nil, err
+		}
 		if strings.HasPrefix(p.Ref, "refs/heads/main") {
-			s.checkOpenPRConflictsAsync(res.Repo)
+			if s.conflictCheckDelay > 0 {
+				select {
+				case <-time.After(s.conflictCheckDelay):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
+				log.Printf("[webhooks-router] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
+			}
 		}
 		return res, nil
 
@@ -2753,6 +2897,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 		workers := river.NewWorkers()
 		river.AddWorker(workers, &GitHubWebhookWorker{server: server})
+		river.AddWorker(workers, &HangarWebhookWorker{server: server})
+		river.AddWorker(workers, &NomadEventWorker{server: server})
 
 		rc, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
 			Queues: map[string]river.QueueConfig{

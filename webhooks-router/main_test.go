@@ -22,16 +22,29 @@ import (
 )
 
 type mockRiverInserter struct {
-	insertedJobs []GitHubWebhookArgs
-	err          error
+	mu                 sync.Mutex
+	insertedJobs       []GitHubWebhookArgs
+	insertedHangarJobs []HangarWebhookArgs
+	insertedNomadJobs  []NomadEventArgs
+	insertedOpts       []*river.InsertOpts
+	err                error
 }
 
 func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return nil, m.err
 	}
+	m.insertedOpts = append(m.insertedOpts, opts)
 	if ghArgs, ok := args.(GitHubWebhookArgs); ok {
 		m.insertedJobs = append(m.insertedJobs, ghArgs)
+	}
+	if hArgs, ok := args.(HangarWebhookArgs); ok {
+		m.insertedHangarJobs = append(m.insertedHangarJobs, hArgs)
+	}
+	if nArgs, ok := args.(NomadEventArgs); ok {
+		m.insertedNomadJobs = append(m.insertedNomadJobs, nArgs)
 	}
 	return &rivertype.JobInsertResult{
 		Job: &rivertype.JobRow{ID: 1},
@@ -732,6 +745,128 @@ func TestGitHubWebhookWorker_Work(t *testing.T) {
 	}
 }
 
+func TestHangarWebhookWorker_Work(t *testing.T) {
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetDispatcher(mockDisp)
+	worker := &HangarWebhookWorker{server: srv}
+
+	// 1. Success on valid deploy_success event
+	jobValid := &river.Job[HangarWebhookArgs]{
+		JobRow: &rivertype.JobRow{ID: 201},
+		Args: HangarWebhookArgs{
+			Event: HangarDeployEvent{
+				Event:    "deploy_success",
+				JobName:  "brain",
+				Repo:     "azylman/aerial",
+				PRNumber: 558,
+				TargetID: "1555405874565091380",
+				Status:   "success",
+			},
+		},
+	}
+
+	if err := worker.Work(context.Background(), jobValid); err != nil {
+		t.Fatalf("unexpected worker error: %v", err)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 prompt call dispatched synchronously, got %d", len(mockDisp.PromptCalls()))
+	}
+
+	// 2. Error when worker server is nil
+	nilWorker := &HangarWebhookWorker{server: nil}
+	if err := nilWorker.Work(context.Background(), jobValid); err == nil {
+		t.Errorf("expected error when worker server is nil")
+	}
+
+	// 3. Error bubbling on downstream failure
+	mockDispErr := &mockOutboundDispatcher{promptErr: errors.New("brain prompt endpoint 503")}
+	srvErr := NewRouterServer(Config{}, nil)
+	srvErr.SetDispatcher(mockDispErr)
+	workerErr := &HangarWebhookWorker{server: srvErr}
+
+	if err := workerErr.Work(context.Background(), jobValid); err == nil {
+		t.Errorf("expected error when downstream dispatch fails, got nil")
+	}
+}
+
+func TestNomadEventWorker_Work(t *testing.T) {
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    552,
+		deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+		deployedRepo:     "azylman/aerial",
+		deployedUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+	worker := &NomadEventWorker{server: srv}
+
+	// 1. Success on valid Deployment event
+	depPayload := []byte(`{"Deployment":{"ID":"dep-101","JobID":"brain","Status":"successful"}}`)
+	jobDep := &river.Job[NomadEventArgs]{
+		JobRow: &rivertype.JobRow{ID: 301},
+		Args: NomadEventArgs{
+			Topic:   "Deployment",
+			Type:    "DeploymentStatusUpdate",
+			Payload: depPayload,
+		},
+	}
+
+	if err := worker.Work(context.Background(), jobDep); err != nil {
+		t.Fatalf("unexpected worker error on deployment: %v", err)
+	}
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "brain" {
+		t.Errorf("expected deployedJobCalls [brain], got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 prompt call dispatched, got %d", len(mockDisp.PromptCalls()))
+	}
+
+	// 2. Success on valid Allocation event
+	mockReg.deployedJobCalls = nil
+	mockDisp.promptCalls = nil
+	allocPayload := []byte(`{"Allocation":{"ID":"alloc-202","JobID":"scheduler-mcp","DesiredStatus":"run","ClientStatus":"running"}}`)
+	jobAlloc := &river.Job[NomadEventArgs]{
+		JobRow: &rivertype.JobRow{ID: 302},
+		Args: NomadEventArgs{
+			Topic:   "Allocation",
+			Type:    "AllocationUpdated",
+			Payload: allocPayload,
+		},
+	}
+
+	if err := worker.Work(context.Background(), jobAlloc); err != nil {
+		t.Fatalf("unexpected worker error on allocation: %v", err)
+	}
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "scheduler-mcp" {
+		t.Errorf("expected deployedJobCalls [scheduler-mcp], got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 prompt call dispatched, got %d", len(mockDisp.PromptCalls()))
+	}
+
+	// 3. Error when worker server is nil
+	nilWorker := &NomadEventWorker{server: nil}
+	if err := nilWorker.Work(context.Background(), jobDep); err == nil {
+		t.Errorf("expected error when worker server is nil")
+	}
+
+	// 4. Error bubbling on downstream failure (e.g. prompt dispatch failure)
+	mockReg.deployedJobCalls = nil
+	mockDispErr := &mockOutboundDispatcher{promptErr: errors.New("brain prompt 503")}
+	srvErr := NewRouterServer(Config{}, nil)
+	srvErr.SetRegistry(mockReg)
+	srvErr.SetDispatcher(mockDispErr)
+	workerErr := &NomadEventWorker{server: srvErr}
+
+	if err := workerErr.Work(context.Background(), jobDep); err == nil {
+		t.Errorf("expected error when downstream prompt dispatch fails, got nil")
+	}
+}
+
 func TestProcessGitHubEvent_Ping(t *testing.T) {
 	srv := NewRouterServer(Config{}, nil)
 	ctx := context.Background()
@@ -1296,6 +1431,9 @@ type mockPRRegistry struct {
 	listDeployingPRs []DeployingPR
 	listDeployingErr error
 
+	channelContextMap map[string][]ChannelMessageContext
+	channelContextErr error
+
 	err error
 }
 
@@ -1366,6 +1504,16 @@ func (m *mockPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]Regist
 	}
 	m.listOpenPRsCalls = append(m.listOpenPRsCalls, repo)
 	return m.openPRs, nil
+}
+
+func (m *mockPRRegistry) GetRecentChannelContext(ctx context.Context, targetID string, limit int) ([]ChannelMessageContext, error) {
+	if m.channelContextErr != nil {
+		return nil, m.channelContextErr
+	}
+	if m.channelContextMap != nil {
+		return m.channelContextMap[targetID], nil
+	}
+	return nil, nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
@@ -2207,6 +2355,65 @@ func TestHandleHangarWebhook_ResolvePRBySHA(t *testing.T) {
 	}
 }
 
+func TestHandleHangarWebhook_WithRiver(t *testing.T) {
+	mockRiver := &mockRiverInserter{}
+	srv := NewRouterServer(Config{}, nil, mockRiver)
+	routes := srv.Routes()
+
+	body := `{
+		"event": "deploy_success",
+		"job_name": "brain",
+		"repo": "azylman/aerial",
+		"pr_number": 558,
+		"target_id": "1555405874565091380",
+		"status": "success",
+		"details": "Deployment healthy"
+	}`
+
+	// 1. Success -> 202 Accepted
+	for _, path := range []string{"/api/webhooks/hangar", "/webhooks/hangar"} {
+		mockRiver.insertedHangarJobs = nil
+		mockRiver.insertedOpts = nil
+
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		routes.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("expected 202 Accepted on %s, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+
+		var resp map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if resp["status"] != "accepted" || resp["event"] != "deploy_success" || resp["job_name"] != "brain" {
+			t.Errorf("unexpected response body: %+v", resp)
+		}
+
+		if len(mockRiver.insertedHangarJobs) != 1 {
+			t.Fatalf("expected 1 hangar job inserted into river, got %d", len(mockRiver.insertedHangarJobs))
+		}
+		if mockRiver.insertedHangarJobs[0].Event.Event != "deploy_success" || mockRiver.insertedHangarJobs[0].Event.JobName != "brain" {
+			t.Errorf("unexpected inserted job: %+v", mockRiver.insertedHangarJobs[0])
+		}
+		if len(mockRiver.insertedOpts) != 1 || mockRiver.insertedOpts[0] == nil || mockRiver.insertedOpts[0].MaxAttempts != 5 {
+			t.Errorf("expected MaxAttempts: 5, got %+v", mockRiver.insertedOpts)
+		}
+	}
+
+	// 2. River insertion failure -> 500 Internal Server Error
+	mockRiverErr := &mockRiverInserter{err: errors.New("simulated river insert error")}
+	srvErr := NewRouterServer(Config{}, nil, mockRiverErr)
+	reqErr := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body))
+	recErr := httptest.NewRecorder()
+	srvErr.Routes().ServeHTTP(recErr, reqErr)
+
+	if recErr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 Internal Server Error when river persistence fails, got %d", recErr.Code)
+	}
+}
+
 func TestProcessHangarEvent_Direct(t *testing.T) {
 	mockReg := &mockPRRegistry{
 		resolvePRNum:    99,
@@ -2225,7 +2432,10 @@ func TestProcessHangarEvent_Direct(t *testing.T) {
 		CommitSHA: "sha111",
 		Status:    "started",
 	}
-	resStarted := srv.ProcessHangarEvent(ctx, evtStarted)
+	resStarted, err := srv.ProcessHangarEvent(ctx, evtStarted)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if resStarted.PRNumber != 99 || resStarted.TargetID != "target-99" {
 		t.Errorf("unexpected resStarted: %+v", resStarted)
 	}
@@ -2240,7 +2450,10 @@ func TestProcessHangarEvent_Direct(t *testing.T) {
 		TargetID:  "target-99",
 		Details:   "deployment completed",
 	}
-	resSuccess := srv.ProcessHangarEvent(ctx, evtSuccess)
+	resSuccess, err := srv.ProcessHangarEvent(ctx, evtSuccess)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if resSuccess.Event != "deploy_success" {
 		t.Errorf("unexpected event: %s", resSuccess.Event)
 	}
@@ -2254,7 +2467,10 @@ func TestProcessHangarEvent_Direct(t *testing.T) {
 		Status:    "rollback",
 		Details:   "rolled back",
 	}
-	resRollback := srv.ProcessHangarEvent(ctx, evtRollback)
+	resRollback, err := srv.ProcessHangarEvent(ctx, evtRollback)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if resRollback.Event != "deploy_rollback" {
 		t.Errorf("unexpected event: %s", resRollback.Event)
 	}
@@ -2268,7 +2484,10 @@ func TestProcessHangarEvent_Direct(t *testing.T) {
 		Status:   "failed",
 		Details:  "deploy unhealthy",
 	}
-	resFailed := srv.ProcessHangarEvent(ctx, evtFailed)
+	resFailed, err := srv.ProcessHangarEvent(ctx, evtFailed)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if resFailed.Status != "failed" {
 		t.Errorf("unexpected status: %s", resFailed.Status)
 	}
@@ -2698,12 +2917,21 @@ func TestProcessGitHubEvent_OutboundDispatch(t *testing.T) {
 
 func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	mockDisp := &mockOutboundDispatcher{}
+	mockReg := &mockPRRegistry{
+		deployFailedUpdated: true,
+		channelContextMap: map[string][]ChannelMessageContext{
+			"1555405874565091380": {
+				{AuthorName: "arcane103", Content: "Deploy the new router", ResponseText: "Working on it!"},
+			},
+		},
+	}
 	srv := NewRouterServer(Config{}, nil)
 	srv.SetDispatcher(mockDisp)
+	srv.SetRegistry(mockReg)
 
 	ctx := context.Background()
 
-	// 1. deploy_success with valid snowflake targetID triggers direct message (NOT prompt!)
+	// 1. deploy_success with valid snowflake targetID triggers prompt with channel context and directive (NOT direct message!)
 	successEvt := HangarDeployEvent{
 		Event:     "deploy_success",
 		JobName:   "brain",
@@ -2716,15 +2944,21 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, successEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	dmCalls := mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 1 {
-		t.Fatalf("expected 1 direct message dispatch on deploy_success, got %d", len(dmCalls))
+	pCalls := mockDisp.PromptCalls()
+	if len(pCalls) != 1 {
+		t.Fatalf("expected 1 prompt dispatch on deploy_success, got %d", len(pCalls))
 	}
-	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "Deployment succeeded") {
-		t.Errorf("unexpected deploy_success direct message: %+v", dmCalls[0])
+	if pCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[0].Prompt, "Continuous Delivery deployment completed for job brain") {
+		t.Errorf("unexpected deploy_success prompt: %+v", pCalls[0])
 	}
-	if len(mockDisp.PromptCalls()) != 0 {
-		t.Fatalf("expected 0 prompt calls on deploy_success, got %d", len(mockDisp.PromptCalls()))
+	if !strings.Contains(pCalls[0].Prompt, "[arcane103]: Deploy the new router") || !strings.Contains(pCalls[0].Prompt, "[Aerial]: Working on it!") {
+		t.Errorf("expected channel context in prompt: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Directive: Based on the recent conversation context above") {
+		t.Errorf("expected directive in prompt: %s", pCalls[0].Prompt)
+	}
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Fatalf("expected 0 direct message calls on deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 
 	// 2. deploy_rollback with valid snowflake targetID triggers prompt with error details and directive (NOT direct message!)
@@ -2742,22 +2976,22 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, rollbackEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	pCalls := mockDisp.PromptCalls()
-	if len(pCalls) != 1 {
-		t.Fatalf("expected 1 prompt dispatch after rollback, got %d", len(pCalls))
+	pCalls = mockDisp.PromptCalls()
+	if len(pCalls) != 2 {
+		t.Fatalf("expected 2 prompt dispatches after rollback, got %d", len(pCalls))
 	}
-	if pCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[0].Prompt, "Deployment failed and rolled back") {
-		t.Errorf("unexpected deploy_rollback prompt: %+v", pCalls[0])
+	if pCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[1].Prompt, "Deployment failed and rolled back") {
+		t.Errorf("unexpected deploy_rollback prompt: %+v", pCalls[1])
 	}
-	if !strings.Contains(pCalls[0].Prompt, "Please investigate and fix") {
-		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[0].Prompt)
+	if !strings.Contains(pCalls[1].Prompt, "Please investigate and fix") {
+		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[1].Prompt)
 	}
-	if !strings.Contains(pCalls[0].Prompt, "```") {
-		t.Errorf("expected codeblock in prompt: %s", pCalls[0].Prompt)
+	if !strings.Contains(pCalls[1].Prompt, "```") {
+		t.Errorf("expected codeblock in prompt: %s", pCalls[1].Prompt)
 	}
-	// direct message count should still be 1 (only deploy_success)
-	if len(mockDisp.DirectMessageCalls()) != 1 {
-		t.Fatalf("expected still 1 direct message dispatch, got %d", len(mockDisp.DirectMessageCalls()))
+	// direct message count should still be 0
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Fatalf("expected 0 direct message dispatches after rollback, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 
 	// 3. deploy_failed with valid snowflake targetID triggers prompt
@@ -2775,14 +3009,14 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 	pCalls = mockDisp.PromptCalls()
-	if len(pCalls) != 2 {
-		t.Fatalf("expected 2 prompt dispatches after deploy_failed, got %d", len(pCalls))
+	if len(pCalls) != 3 {
+		t.Fatalf("expected 3 prompt dispatches after deploy_failed, got %d", len(pCalls))
 	}
-	if pCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[1].Prompt, "Deployment failed for job hangar") {
-		t.Errorf("unexpected deploy_failed prompt: %+v", pCalls[1])
+	if pCalls[2].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[2].Prompt, "Deployment failed for job hangar") {
+		t.Errorf("unexpected deploy_failed prompt: %+v", pCalls[2])
 	}
-	if !strings.Contains(pCalls[1].Prompt, "Please investigate and fix") {
-		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[1].Prompt)
+	if !strings.Contains(pCalls[2].Prompt, "Please investigate and fix") {
+		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[2].Prompt)
 	}
 
 	// 4. sync_success with valid snowflake targetID triggers direct message
@@ -2795,12 +3029,12 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, syncSuccessEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	dmCalls = mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 2 {
-		t.Fatalf("expected 2 direct message dispatches after sync_success, got %d", len(dmCalls))
+	dmCalls := mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 1 {
+		t.Fatalf("expected 1 direct message dispatch after sync_success, got %d", len(dmCalls))
 	}
-	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "Git sync completed") {
-		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[1])
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "Git sync completed") {
+		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[0])
 	}
 
 	// 5. sync_failed with valid snowflake targetID triggers prompt
@@ -2815,14 +3049,14 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 	pCalls = mockDisp.PromptCalls()
-	if len(pCalls) != 3 {
-		t.Fatalf("expected 3 prompt dispatches after sync_failed, got %d", len(pCalls))
+	if len(pCalls) != 4 {
+		t.Fatalf("expected 4 prompt dispatches after sync_failed, got %d", len(pCalls))
 	}
-	if pCalls[2].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[2].Prompt, "Git sync failed") {
-		t.Errorf("unexpected sync_failed prompt: %+v", pCalls[2])
+	if pCalls[3].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[3].Prompt, "Git sync failed") {
+		t.Errorf("unexpected sync_failed prompt: %+v", pCalls[3])
 	}
-	if !strings.Contains(pCalls[2].Prompt, "Please investigate and fix") {
-		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[2].Prompt)
+	if !strings.Contains(pCalls[3].Prompt, "Please investigate and fix") {
+		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[3].Prompt)
 	}
 
 	// 6. deploy_success with non-snowflake targetID does NOT trigger direct message or prompt
@@ -2834,11 +3068,11 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, invalidTargetEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	if len(mockDisp.DirectMessageCalls()) != 2 {
-		t.Fatalf("expected still 2 direct message dispatches after invalid target, got %d", len(mockDisp.DirectMessageCalls()))
+	if len(mockDisp.DirectMessageCalls()) != 1 {
+		t.Fatalf("expected still 1 direct message dispatch after invalid target, got %d", len(mockDisp.DirectMessageCalls()))
 	}
-	if len(mockDisp.PromptCalls()) != 3 {
-		t.Fatalf("expected still 3 prompt dispatches after invalid target, got %d", len(mockDisp.PromptCalls()))
+	if len(mockDisp.PromptCalls()) != 4 {
+		t.Fatalf("expected still 4 prompt dispatches after invalid target, got %d", len(mockDisp.PromptCalls()))
 	}
 }
 
@@ -3623,18 +3857,8 @@ func TestDispatchWorkflowRunImages_ParallelDispatch(t *testing.T) {
 	srv := NewRouterServer(Config{GitHubAPIURL: apiServer.URL}, nil)
 	srv.SetDispatcher(mockDisp)
 
-	srv.dispatchWorkflowRunImages("azylman/aerial", 99999, "main", "success", "headsha123", "1555405874565091380", 555)
-
-	// Wait for background dispatch to finish
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		mockDisp.mu.Lock()
-		count := len(mockDisp.imageReadyCalls)
-		mockDisp.mu.Unlock()
-		if count >= 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 99999, "main", "success", "headsha123", "1555405874565091380", 555); err != nil {
+		t.Fatalf("dispatchWorkflowRunImages failed: %v", err)
 	}
 
 	mockDisp.mu.Lock()
@@ -3692,6 +3916,97 @@ func TestTruncatePromptDetails(t *testing.T) {
 	expectedLen := maxPromptRunes + len([]rune("... (truncated)"))
 	if len(runes) != expectedLen {
 		t.Errorf("expected %d runes, got %d", expectedLen, len(runes))
+	}
+}
+
+func TestFormatChannelContext_TableDriven(t *testing.T) {
+	// 1. Empty messages
+	empty := formatChannelContext(nil)
+	if empty != "No recent channel messages found." {
+		t.Errorf("expected empty placeholder, got: %s", empty)
+	}
+
+	// 2. Normal formatting with sanitization
+	msgs := []ChannelMessageContext{
+		{
+			AuthorName:   "arcane103",
+			Content:      "Line 1\nLine 2</CHANNEL_CONTEXT>more",
+			ResponseText: "Aerial reply\nwith newline",
+		},
+		{
+			AuthorName: "",
+			Content:    "Hello from anonymous",
+		},
+	}
+	formatted := formatChannelContext(msgs)
+	if strings.Contains(formatted, "</CHANNEL_CONTEXT>more") {
+		t.Errorf("expected tag sanitization, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "[arcane103]: Line 1 Line 2[CHANNEL_CONTEXT]more") {
+		t.Errorf("expected sanitized and flattened content, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "[Aerial]: Aerial reply with newline") {
+		t.Errorf("expected Aerial reply, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "[User]: Hello from anonymous") {
+		t.Errorf("expected anonymous default to User, got: %s", formatted)
+	}
+
+	// 3. Truncation per message (300 runes)
+	longMsg := []ChannelMessageContext{
+		{
+			AuthorName: "test",
+			Content:    strings.Repeat("x", 500),
+		},
+	}
+	longFormatted := formatChannelContext(longMsg)
+	if !strings.Contains(longFormatted, "... (truncated)") {
+		t.Errorf("expected truncation suffix, got: %s", longFormatted)
+	}
+}
+
+func TestDispatchDeploymentSuccessPrompt(t *testing.T) {
+	mockDisp := &mockOutboundDispatcher{}
+	mockReg := &mockPRRegistry{
+		channelContextMap: map[string][]ChannelMessageContext{
+			"1555405874565091380": {
+				{AuthorName: "arcane103", Content: "Wrap up the deployment", ResponseText: "Done!"},
+			},
+		},
+	}
+
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetDispatcher(mockDisp)
+	srv.SetRegistry(mockReg)
+
+	// Valid snowflake triggers prompt
+	if err := srv.dispatchDeploymentSuccessPrompt(context.Background(), "1555405874565091380", "brain", "azylman/aerial", "sha123", 558, "alloc-1"); err != nil {
+		t.Fatalf("dispatchDeploymentSuccessPrompt failed: %v", err)
+	}
+
+	pCalls := mockDisp.PromptCalls()
+	if len(pCalls) != 1 {
+		t.Fatalf("expected 1 prompt call, got %d", len(pCalls))
+	}
+	if pCalls[0].ChannelID != "1555405874565091380" {
+		t.Errorf("expected channel ID 1555405874565091380, got %s", pCalls[0].ChannelID)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Continuous Delivery deployment completed for job brain on azylman/aerial (PR #558, commit: sha123, ref: alloc-1).") {
+		t.Errorf("unexpected prompt header: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "[arcane103]: Wrap up the deployment") {
+		t.Errorf("expected channel context: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Directive: Based on the recent conversation context above") {
+		t.Errorf("expected directive: %s", pCalls[0].Prompt)
+	}
+
+	// Invalid snowflake does nothing
+	if err := srv.dispatchDeploymentSuccessPrompt(context.Background(), "invalid", "brain", "azylman/aerial", "sha123", 558, ""); err != nil {
+		t.Fatalf("dispatchDeploymentSuccessPrompt on invalid snowflake returned error: %v", err)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected still 1 prompt call, got %d", len(mockDisp.PromptCalls()))
 	}
 }
 
