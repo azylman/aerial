@@ -3963,6 +3963,29 @@ func TestFormatChannelContext_TableDriven(t *testing.T) {
 	if !strings.Contains(longFormatted, "... (truncated)") {
 		t.Errorf("expected truncation suffix, got: %s", longFormatted)
 	}
+
+	// 4. Rune cap keeping most recent data (4000 runes total)
+	// Create 25 messages of ~200 runes each (total ~5000 runes).
+	// The oldest messages should be truncated; the newest messages MUST be preserved.
+	var cappedMsgs []ChannelMessageContext
+	for i := 1; i <= 25; i++ {
+		cappedMsgs = append(cappedMsgs, ChannelMessageContext{
+			AuthorName: fmt.Sprintf("user%d", i),
+			Content:    fmt.Sprintf("Message payload %d: %s", i, strings.Repeat("y", 180)),
+		})
+	}
+	cappedFormatted := formatChannelContext(cappedMsgs)
+	if !strings.Contains(cappedFormatted, "... (older context truncated)") {
+		t.Errorf("expected older context truncated notice, got: %s", cappedFormatted)
+	}
+	// The oldest message (user1) should be truncated
+	if strings.Contains(cappedFormatted, "[user1]:") {
+		t.Errorf("expected oldest message to be truncated when cap exceeded, but found user1")
+	}
+	// The newest message (user25) MUST be present!
+	if !strings.Contains(cappedFormatted, "[user25]:") {
+		t.Errorf("expected newest message [user25] to be preserved, but was missing: %s", cappedFormatted)
+	}
 }
 
 func TestDispatchDeploymentSuccessPrompt(t *testing.T) {
