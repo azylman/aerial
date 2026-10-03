@@ -3717,6 +3717,15 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 	}
 }
 
+// HangarYAMLConfig defines the declarative file schema for services/hangar/hangar.yaml.
+type HangarYAMLConfig struct {
+	Port             string   `yaml:"port"`
+	SyncInterval     string   `yaml:"sync_interval"`
+	SyncRepos        []string `yaml:"sync_repos"`
+	NomadAddr        string   `yaml:"nomad_addr"`
+	BrainInternalURL string   `yaml:"brain_internal_url"`
+}
+
 // NewConfigFromLookup extracts DaemonConfig using a provided lookup function.
 // If lookup is nil, it safely defaults to returning empty strings without ambient env access.
 func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
@@ -3724,25 +3733,48 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		lookup = func(string) string { return "" }
 	}
 
-	port := lookup("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	rawRepos := lookup("SYNC_REPOS")
-	if rawRepos == "" {
-		rawRepos = "/share/aerial-config,/share/aerial"
-	}
-
-	var repos []string
-	for _, r := range strings.Split(rawRepos, ",") {
-		r = strings.TrimSpace(r)
-		if r != "" {
-			repos = append(repos, r)
+	configPath := lookup("CONFIG_PATH")
+	var fileCfg HangarYAMLConfig
+	if configPath != "" {
+		if data, err := os.ReadFile(configPath); err == nil {
+			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
+				log.Printf("[Hangar] Warning: failed to parse yaml config at %s: %v", configPath, err)
+			}
 		}
 	}
 
+	port := lookup("PORT")
+	if port == "" && fileCfg.Port != "" {
+		port = fileCfg.Port
+	}
+	if port == "" {
+		port = "8087"
+	}
+
+	rawRepos := lookup("SYNC_REPOS")
+	var repos []string
+	if rawRepos != "" {
+		for _, r := range strings.Split(rawRepos, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				repos = append(repos, r)
+			}
+		}
+	} else if len(fileCfg.SyncRepos) > 0 {
+		for _, r := range fileCfg.SyncRepos {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				repos = append(repos, r)
+			}
+		}
+	} else {
+		repos = []string{"/share/aerial-config", "/share/aerial"}
+	}
+
 	intervalStr := lookup("SYNC_INTERVAL")
+	if intervalStr == "" && fileCfg.SyncInterval != "" {
+		intervalStr = fileCfg.SyncInterval
+	}
 	interval := 60 * time.Second
 	if intervalStr != "" {
 		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
@@ -3785,8 +3817,11 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	discordWebhookURL := lookup("DISCORD_WEBHOOK_URL")
 
 	brainInternalURL := lookup("BRAIN_INTERNAL_URL")
+	if brainInternalURL == "" && fileCfg.BrainInternalURL != "" {
+		brainInternalURL = fileCfg.BrainInternalURL
+	}
 	if brainInternalURL == "" {
-		brainInternalURL = "http://brain:8080/internal/reload"
+		brainInternalURL = "http://brain:8088/internal/reload"
 	}
 
 	extraSecretCandidates := []string{
@@ -3809,6 +3844,9 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	}
 
 	nomadAddr := lookup("NOMAD_ADDR")
+	if nomadAddr == "" && fileCfg.NomadAddr != "" {
+		nomadAddr = fileCfg.NomadAddr
+	}
 	if nomadAddr == "" {
 		nomadAddr = "http://host.docker.internal:4646"
 	}
@@ -3840,7 +3878,16 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 
 // NewConfigFromEnv extracts DaemonConfig from environment variables with sensible defaults.
 func NewConfigFromEnv() DaemonConfig {
-	return NewConfigFromLookup(os.Getenv)
+	return NewConfigFromLookup(func(k string) string {
+		v := os.Getenv(k)
+		if k == "CONFIG_PATH" && v == "" {
+			defaultPath := "/share/aerial-config/services/hangar/hangar.yaml"
+			if _, err := os.Stat(defaultPath); err == nil {
+				return defaultPath
+			}
+		}
+		return v
+	})
 }
 
 func main() {

@@ -3237,6 +3237,13 @@ func TestResolveEffectiveChannel_ThreadParent(t *testing.T) {
 	if !isThread {
 		t.Errorf("Expected isThread = true, got %v", isThread)
 	}
+
+	// Verify ResolveChannelAndThread returns threadName as well
+	effID2, effName2, isThread2, resolvedThreadName := ResolveChannelAndThread(s, threadID)
+	if effID2 != parentID || effName2 != parentName || !isThread2 || resolvedThreadName != threadName {
+		t.Errorf("ResolveChannelAndThread = (%q, %q, %v, %q), expected (%q, %q, true, %q)",
+			effID2, effName2, isThread2, resolvedThreadName, parentID, parentName, threadName)
+	}
 }
 
 func TestResolveEffectiveChannel_ThreadMissingParent(t *testing.T) {

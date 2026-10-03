@@ -23,6 +23,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
+	"gopkg.in/yaml.v3"
 )
 
 // TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
@@ -45,9 +46,31 @@ type Config struct {
 	BrainURL              string
 }
 
-// LoadConfigFromEnv initializes configuration from environment variables.
-func LoadConfigFromEnv() Config {
+// RouterYAMLConfig defines the declarative file schema for services/webhooks-router/webhooks-router.yaml.
+type RouterYAMLConfig struct {
+	Port                 string `yaml:"port"`
+	InfisicalURL         string `yaml:"infisical_url"`
+	InfisicalEnvironment string `yaml:"infisical_environment"`
+	NomadAddr            string `yaml:"nomad_addr"`
+	HangarURL            string `yaml:"hangar_url"`
+	BrainURL             string `yaml:"brain_url"`
+}
+
+// LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
+func LoadConfig(configPath string) Config {
+	var fileCfg RouterYAMLConfig
+	if configPath != "" {
+		if data, err := os.ReadFile(configPath); err == nil {
+			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
+				log.Printf("[WebhooksRouter] Warning: failed to parse yaml config at %s: %v", configPath, err)
+			}
+		}
+	}
+
 	port := os.Getenv("PORT")
+	if port == "" && fileCfg.Port != "" {
+		port = fileCfg.Port
+	}
 	if port == "" {
 		port = "4020"
 	}
@@ -55,6 +78,9 @@ func LoadConfigFromEnv() Config {
 	infURL := os.Getenv("INFISICAL_URL")
 	if infURL == "" {
 		infURL = os.Getenv("INFISICAL_HOST_URL")
+	}
+	if infURL == "" && fileCfg.InfisicalURL != "" {
+		infURL = fileCfg.InfisicalURL
 	}
 	if infURL == "" {
 		infURL = "http://127.0.0.1:8085"
@@ -76,11 +102,17 @@ func LoadConfigFromEnv() Config {
 	}
 
 	envName := os.Getenv("INFISICAL_ENVIRONMENT")
+	if envName == "" && fileCfg.InfisicalEnvironment != "" {
+		envName = fileCfg.InfisicalEnvironment
+	}
 	if envName == "" {
 		envName = "prod"
 	}
 
 	nomadAddr := os.Getenv("NOMAD_ADDR")
+	if nomadAddr == "" && fileCfg.NomadAddr != "" {
+		nomadAddr = fileCfg.NomadAddr
+	}
 	if nomadAddr == "" {
 		nomadAddr = "http://127.0.0.1:4646"
 	}
@@ -110,6 +142,9 @@ func LoadConfigFromEnv() Config {
 	}
 
 	hangarURL := os.Getenv("HANGAR_URL")
+	if hangarURL == "" && fileCfg.HangarURL != "" {
+		hangarURL = fileCfg.HangarURL
+	}
 	if hangarURL == "" {
 		hangarURL = "http://127.0.0.1:8087"
 	}
@@ -117,6 +152,9 @@ func LoadConfigFromEnv() Config {
 	brainURL := os.Getenv("BRAIN_INTERNAL_URL")
 	if brainURL == "" {
 		brainURL = os.Getenv("BRAIN_URL")
+	}
+	if brainURL == "" && fileCfg.BrainURL != "" {
+		brainURL = fileCfg.BrainURL
 	}
 	if brainURL == "" {
 		brainURL = "http://127.0.0.1:8088"
@@ -137,6 +175,11 @@ func LoadConfigFromEnv() Config {
 		HangarURL:             strings.TrimRight(hangarURL, "/"),
 		BrainURL:              strings.TrimRight(brainURL, "/"),
 	}
+}
+
+// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
+func LoadConfigFromEnv() Config {
+	return LoadConfig(os.Getenv("CONFIG_PATH"))
 }
 
 // InfisicalWebhookPayload captures common payload variants from Infisical webhooks.
