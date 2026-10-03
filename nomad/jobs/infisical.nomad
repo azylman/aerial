@@ -74,8 +74,9 @@ job "infisical" {
       }
 
       resources {
-        cpu    = 200
-        memory = 512
+        cpu        = 100
+        memory     = 64
+        memory_max = 128
       }
     }
 
@@ -132,8 +133,9 @@ EOH
       }
 
       resources {
-        cpu    = 1000
-        memory = 2048
+        cpu        = 500
+        memory     = 1024
+        memory_max = 2048
       }
     }
   }

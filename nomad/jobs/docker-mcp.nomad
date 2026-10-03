@@ -65,8 +65,9 @@ job "docker-mcp" {
       }
 
       resources {
-        cpu    = 100
-        memory = 256
+        cpu        = 100
+        memory     = 384
+        memory_max = 768
       }
     }
   }

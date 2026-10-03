@@ -67,8 +67,9 @@ job "proxy" {
       }
 
       resources {
-        cpu    = 200
-        memory = 128
+        cpu        = 100
+        memory     = 128
+        memory_max = 256
       }
     }
   }
