@@ -6830,6 +6830,56 @@ func TestExecutePendingImageRollouts_Branches(t *testing.T) {
 	d.executePendingImageRollouts(context.Background())
 }
 
+func TestExecutePendingImageRollouts_HangarLast(t *testing.T) {
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	_ = os.WriteFile(filepath.Join(jobsDir, "hangar.nomad"), []byte(`job "hangar" { task "h" { config { image = "ghcr.io/azylman/aerial-hangar:latest" } } }`), 0644)
+	_ = os.WriteFile(filepath.Join(jobsDir, "webhooks-router.nomad"), []byte(`job "webhooks-router" { task "r" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } }`), 0644)
+
+	var mu sync.Mutex
+	var executedJobs []string
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir: tmpDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 3 && args[0] == "job" && args[1] == "restart" {
+				mu.Lock()
+				executedJobs = append(executedJobs, args[len(args)-1])
+				mu.Unlock()
+			}
+			return []byte("Evaluation ID: 12345"), nil, nil
+		},
+	})
+
+	d.pendingImageMu.Lock()
+	d.pendingImageRollouts["hangar"] = PendingImageRollout{
+		JobName: "hangar",
+		Request: ImageReadyEventRequest{
+			Image: "ghcr.io/azylman/aerial-hangar:latest",
+		},
+	}
+	d.pendingImageRollouts["webhooks-router"] = PendingImageRollout{
+		JobName: "webhooks-router",
+		Request: ImageReadyEventRequest{
+			Image: "ghcr.io/azylman/aerial-webhooks-router:latest",
+		},
+	}
+	d.pendingImageMu.Unlock()
+
+	d.executePendingImageRollouts(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(executedJobs) != 2 {
+		t.Fatalf("expected 2 executed jobs, got %v", executedJobs)
+	}
+	if executedJobs[0] != "webhooks-router" || executedJobs[1] != "hangar" {
+		t.Fatalf("expected webhooks-router first and hangar last, got %v", executedJobs)
+	}
+}
+
 func TestStartReconcilerLoop_NilChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -1738,3 +1738,67 @@ func TestFindJobDefinitionInRepos_EdgeCases(t *testing.T) {
 	}
 }
 
+
+func TestIsHangarJob_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected bool
+	}{
+		{"hangar", true},
+		{"Hangar", true},
+		{" HANGAR ", true},
+		{"webhooks-router", false},
+		{"brain", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsHangarJob(tt.name); got != tt.expected {
+				t.Errorf("IsHangarJob(%q) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsHangarImage_TableDriven(t *testing.T) {
+	tests := []struct {
+		image    string
+		expected bool
+	}{
+		{"ghcr.io/azylman/aerial-hangar:latest", true},
+		{"aerial-hangar", true},
+		{"ghcr.io/azylman/aerial-webhooks-router:latest", false},
+		{"brain:latest", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.image, func(t *testing.T) {
+			if got := IsHangarImage(tt.image); got != tt.expected {
+				t.Errorf("IsHangarImage(%q) = %v, want %v", tt.image, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSortNomadChangesHangarLast_TableDriven(t *testing.T) {
+	changes := []NomadFileChange{
+		{JobName: "hangar", Path: "jobs/hangar.nomad"},
+		{JobName: "brain", Path: "jobs/brain.nomad"},
+		{JobName: "webhooks-router", Path: "jobs/webhooks-router.nomad"},
+	}
+	SortNomadChangesHangarLast(changes)
+	if changes[0].JobName != "brain" || changes[1].JobName != "webhooks-router" || changes[2].JobName != "hangar" {
+		t.Fatalf("unexpected order after SortNomadChangesHangarLast: %+v", changes)
+	}
+}
+
+func TestSortMatchedJobsHangarLast_TableDriven(t *testing.T) {
+	matches := []MatchedNomadJob{
+		{JobName: "hangar", JobPath: "jobs/hangar.nomad"},
+		{JobName: "scheduler-mcp", JobPath: "jobs/scheduler-mcp.nomad"},
+	}
+	SortMatchedJobsHangarLast(matches)
+	if matches[0].JobName != "scheduler-mcp" || matches[1].JobName != "hangar" {
+		t.Fatalf("unexpected order after SortMatchedJobsHangarLast: %+v", matches)
+	}
+}
