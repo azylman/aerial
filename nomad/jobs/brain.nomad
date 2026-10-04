@@ -101,6 +101,12 @@ job "brain" {
             target   = "/mnt/nas-scratch"
             source   = "/mnt/data/supervisor/share/Aerial"
             readonly = false
+          },
+          {
+            type     = "bind"
+            target   = "/coverage"
+            source   = "/mnt/data/supervisor/share/coverage/brain"
+            readonly = false
           }
         ]
       }
@@ -113,6 +119,7 @@ job "brain" {
         GOPATH              = "/data/cache/go"
         GOMODCACHE          = "/data/cache/go/pkg/mod"
         GOLANGCI_LINT_CACHE = "/data/cache/golangci-lint"
+        GOCOVERDIR          = "/coverage"
       }
 
       template {

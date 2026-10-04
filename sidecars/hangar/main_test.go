@@ -8297,3 +8297,20 @@ func TestSyncConfigsToNomad_WithSyncContextAndDeployStarted(t *testing.T) {
 	}
 }
 
+func TestCoverageFlushEndpoint(t *testing.T) {
+	mux := SetupMux(&SyncDaemon{})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+}
+
+

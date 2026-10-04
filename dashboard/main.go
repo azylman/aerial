@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime/coverage"
 	"sort"
 	"strconv"
 	"strings"
@@ -1915,6 +1916,28 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(cfg.BrainURL))
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
 	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
+	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := coverage.WriteCountersDir(dir); err != nil {
+				log.Printf("[dashboard] coverage flush error: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		writeResponse(w, r, []byte("ok\n"))
+	})
+	mux.HandleFunc("/dashboard/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := coverage.WriteCountersDir(dir); err != nil {
+				log.Printf("[dashboard] coverage flush error: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		writeResponse(w, r, []byte("ok\n"))
+	})
 
 	if assetReg != nil {
 		mux.HandleFunc("/", assetReg.ServeHTTP)

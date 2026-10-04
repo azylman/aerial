@@ -4859,3 +4859,29 @@ func TestNomadAddrConfigResolution(t *testing.T) {
 		}
 	})
 }
+
+func TestCoverageFlushEndpoint(t *testing.T) {
+	mux := SetupDashboardMux(DashboardConfig{}, nil)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+
+	resp2, err2 := http.Get(ts.URL + "/dashboard/debug/coverage/flush")
+	if err2 != nil {
+		t.Fatalf("unexpected error: %v", err2)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK, got: %d", resp2.StatusCode)
+	}
+}

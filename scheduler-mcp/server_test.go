@@ -639,3 +639,20 @@ func TestDB_SchemeValidationWithoutHook(t *testing.T) {
 	}
 }
 
+func TestCoverageFlushEndpoint(t *testing.T) {
+	server := NewServer(&ToolHandler{})
+	ts := httptest.NewServer(server.Routes())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+}
+
+

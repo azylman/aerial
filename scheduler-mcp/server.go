@@ -8,6 +8,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"runtime/coverage"
 	"strings"
 	"syscall"
 
@@ -95,6 +97,7 @@ func (s *Server) registerTools() {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/debug/coverage/flush", s.handleCoverageFlush)
 
 	mcpBridge := http.HandlerFunc(s.handleMCP)
 	mux.Handle("/mcp", mcpBridge)
@@ -110,10 +113,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeResponse(w, r, []byte(`{"status":"ok"}`))
 }
 
+func (s *Server) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
+	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+		if err := coverage.WriteCountersDir(dir); err != nil {
+			log.Printf("[scheduler-mcp] coverage flush error: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+	writeResponse(w, r, []byte("ok\n"))
+}
+
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// If GET /health hits root handler
 	if r.URL.Path == "/health" {
 		s.handleHealth(w, r)
+		return
+	}
+	if r.URL.Path == "/debug/coverage/flush" {
+		s.handleCoverageFlush(w, r)
 		return
 	}
 

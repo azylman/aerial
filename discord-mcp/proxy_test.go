@@ -935,6 +935,25 @@ func TestServeHTTP_UpstreamCloseError(t *testing.T) {
 	}
 }
 
+func TestCoverageFlushEndpoint(t *testing.T) {
+	srv, err := StartProxyServer("0", "http://127.0.0.1:9999")
+	if err != nil {
+		t.Fatalf("failed to initialize proxy server: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+}
+
 
 
 

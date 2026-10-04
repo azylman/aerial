@@ -87,6 +87,7 @@ func TestMain_Execution(t *testing.T) {
 	testCfg := filepath.Join(tmpDir, "config.yaml")
 	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\n"), 0644)
 	configPath = testCfg
+	t.Setenv("CONFIG_PATH", testCfg)
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
 
 	// 1. Success path
@@ -126,6 +127,7 @@ func TestMain_Execution(t *testing.T) {
 	// 4. Config loading failure (should trigger exitFn)
 	exitCalled = false
 	configPath = filepath.Join(tmpDir, "nonexistent.yaml")
+	t.Setenv("CONFIG_PATH", configPath)
 	main()
 	if !exitCalled {
 		t.Error("expected exitFn on config load error")
