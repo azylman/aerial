@@ -34,7 +34,7 @@ job "vector" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "timberio/vector:0.40.0-alpine"
+        image        = "timberio/vector:0.58.0-alpine"
         network_mode = "host"
         healthchecks {
           disable = true
