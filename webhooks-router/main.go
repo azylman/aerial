@@ -729,21 +729,21 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 	if repo == "" || prNumber <= 0 || len(jobs) == 0 {
 		return "", nil
 	}
-	var canonicalJobs []string
+	var cleanJobs []string
 	seen := make(map[string]struct{})
 	for _, j := range jobs {
-		cj := canonicalJobName(j)
+		cj := strings.TrimSpace(j)
 		if cj != "" {
 			if _, exists := seen[cj]; !exists {
 				seen[cj] = struct{}{}
-				canonicalJobs = append(canonicalJobs, cj)
+				cleanJobs = append(cleanJobs, cj)
 			}
 		}
 	}
-	if len(canonicalJobs) == 0 {
+	if len(cleanJobs) == 0 {
 		return "", nil
 	}
-	jobsJSON, err := json.Marshal(canonicalJobs)
+	jobsJSON, err := json.Marshal(cleanJobs)
 	if err != nil {
 		jobsJSON = []byte("[]")
 	}
@@ -777,7 +777,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
-	jobName = canonicalJobName(jobName)
+	jobName = strings.TrimSpace(jobName)
 	if jobName == "" {
 		return "", 0, "", "", false, nil
 	}
@@ -797,12 +797,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(NULLIF(merge_sha, ''), head_sha), repo, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status = 'deploying' AND (
-			metadata->'jobs' ? $1 OR metadata->>'job' = $1
-			OR ($1 = 'mirrormere-core' AND (metadata->'jobs' ? 'mirrormere' OR metadata->>'job' = 'mirrormere'))
-			OR ($1 = 'banana-protocol' AND (metadata->'jobs' ? 'banana' OR metadata->'jobs' ? 'sidecar-banana' OR metadata->'jobs' ? 'aerial-sidecar-banana'))
-			OR ($1 = 'kiosk-client' AND (metadata->'jobs' ? 'mirrormere-ear' OR metadata->'jobs' ? 'mirrormere-cast-watcher'))
-		)
+		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
 		ORDER BY updated_at DESC
 		LIMIT 1
 		FOR UPDATE
@@ -833,8 +828,8 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	jobs := extractJobsFromMetadata(meta)
 	var remaining []string
 	for _, j := range jobs {
-		if !strings.EqualFold(canonicalJobName(j), jobName) {
-			remaining = append(remaining, canonicalJobName(j))
+		if !strings.EqualFold(j, jobName) {
+			remaining = append(remaining, j)
 		}
 	}
 
@@ -909,7 +904,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, r
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
-	jobName = canonicalJobName(jobName)
+	jobName = strings.TrimSpace(jobName)
 	if jobName == "" {
 		return "", 0, "", "", false, nil
 	}
@@ -919,12 +914,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo
 		FROM pr_registry
-		WHERE status = 'deploying' AND (
-			metadata->'jobs' ? $1 OR metadata->>'job' = $1
-			OR ($1 = 'mirrormere-core' AND (metadata->'jobs' ? 'mirrormere' OR metadata->>'job' = 'mirrormere'))
-			OR ($1 = 'banana-protocol' AND (metadata->'jobs' ? 'banana' OR metadata->'jobs' ? 'sidecar-banana' OR metadata->'jobs' ? 'aerial-sidecar-banana'))
-			OR ($1 = 'kiosk-client' AND (metadata->'jobs' ? 'mirrormere-ear' OR metadata->'jobs' ? 'mirrormere-cast-watcher'))
-		)
+		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
 		ORDER BY updated_at DESC
 		LIMIT 1;
 	`
@@ -1062,9 +1052,16 @@ type DirectMessageRequest struct {
 	Content   string `json:"content"`
 }
 
+type ImageReadyEventResponse struct {
+	Status      string   `json:"status"`
+	Image       string   `json:"image,omitempty"`
+	MatchedJobs []string `json:"matched_jobs,omitempty"`
+	Message     string   `json:"message,omitempty"`
+}
+
 type OutboundDispatcher interface {
 	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
-	DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) error
+	DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
 }
@@ -1133,22 +1130,22 @@ func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req Git
 	return nil
 }
 
-func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) error {
+func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
 	bodyBytes, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("marshal image ready request: %w", err)
+		return nil, fmt.Errorf("marshal image ready request: %w", err)
 	}
 
 	endpoint := fmt.Sprintf("%s/events/image_ready", d.hangarURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("create image ready request: %w", err)
+		return nil, fmt.Errorf("create image ready request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := d.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("image ready request failed: %w", err)
+		return nil, fmt.Errorf("image ready request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -1156,18 +1153,24 @@ func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req 
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		if readErr == nil && isHangarUnmanagedError(respBody) {
 			log.Printf("[webhooks-router] [dispatcher] hangar confirmed image %s has no matching nomad jobs (skipping): %s", req.Image, string(respBody))
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("hangar image ready returned 404: %s", string(respBody))
+		return nil, fmt.Errorf("hangar image ready returned 404: %s", string(respBody))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			return fmt.Errorf("hangar image ready returned status %d (read error: %w)", resp.StatusCode, readErr)
+			return nil, fmt.Errorf("hangar image ready returned status %d (read error: %w)", resp.StatusCode, readErr)
 		}
-		return fmt.Errorf("hangar image ready returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("hangar image ready returned status %d: %s", resp.StatusCode, string(respBody))
 	}
-	return nil
+
+	var res ImageReadyEventResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] warning decoding image ready response for %s: %v", req.Image, err)
+		return nil, nil
+	}
+	return res.MatchedJobs, nil
 }
 
 func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
@@ -2161,23 +2164,12 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		return nil
 	}
 
-	var targetJobs []string
-	for _, img := range images {
-		jobName := jobNameFromImage(img)
-		if jobName != "" {
-			targetJobs = append(targetJobs, jobName)
-		}
-	}
-	if len(targetJobs) > 0 && s.registry != nil && prNum > 0 {
-		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, targetJobs); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
-			return fmt.Errorf("transition pr deploying: %w", err)
-		}
-		log.Printf("[webhooks-router] [dispatcher] pr %s#%d transitioned to deploying with jobs: %v", repo, prNum, targetJobs)
-	}
-
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	seenJobs := make(map[string]struct{})
+	var allMatchedJobs []string
 	errCh := make(chan error, len(images))
+
 	for _, img := range images {
 		wg.Add(1)
 		go func(imageRef string) {
@@ -2189,16 +2181,38 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 				PRNumber:  prNum,
 				TargetID:  targetID,
 			}
-			if err := s.dispatcher.DispatchImageReady(ctx, req); err != nil {
+			matchedJobs, err := s.dispatcher.DispatchImageReady(ctx, req)
+			if err != nil {
 				log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
 				errCh <- err
 			} else {
-				log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s", imageRef)
+				log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s (matched: %v)", imageRef, matchedJobs)
+				if len(matchedJobs) > 0 {
+					mu.Lock()
+					for _, j := range matchedJobs {
+						cleanJ := strings.TrimSpace(j)
+						if cleanJ != "" {
+							if _, ok := seenJobs[cleanJ]; !ok {
+								seenJobs[cleanJ] = struct{}{}
+								allMatchedJobs = append(allMatchedJobs, cleanJ)
+							}
+						}
+					}
+					mu.Unlock()
+				}
 			}
 		}(img)
 	}
 	wg.Wait()
 	close(errCh)
+
+	if len(allMatchedJobs) > 0 && s.registry != nil && prNum > 0 {
+		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, allMatchedJobs); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
+			return fmt.Errorf("transition pr deploying: %w", err)
+		}
+		log.Printf("[webhooks-router] [dispatcher] pr %s#%d transitioned to deploying with jobs: %v", repo, prNum, allMatchedJobs)
+	}
 
 	var firstErr error
 	for err := range errCh {
@@ -2358,28 +2372,18 @@ type GitHubWorkflowJobsResponse struct {
 var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*(?:Push|Publish)(?:\s+(?:Sidecar\s+)?(?:Container\s+)?Images?(?:\s+to\s+GHCR)?)?\s*\(([^)]+)\)`)
 
 var aerialServiceImageMap = map[string]string{
-	"brain":                          "ghcr.io/azylman/aerial-brain:latest",
-	"scheduler-mcp":                  "ghcr.io/azylman/aerial-scheduler-mcp:latest",
-	"discord-mcp":                    "ghcr.io/azylman/aerial-discord-mcp:latest",
-	"docker-mcp":                     "ghcr.io/azylman/aerial-docker-mcp:latest",
-	"github-mcp":                     "ghcr.io/azylman/aerial-github-mcp:latest",
-	"nomad-mcp":                      "ghcr.io/azylman/aerial-nomad-mcp:latest",
-	"infisical-mcp":                  "ghcr.io/azylman/aerial-infisical-mcp:latest",
-	"dashboard":                      "ghcr.io/azylman/aerial-dashboard:latest",
-	"docs":                          "ghcr.io/azylman/aerial-docs:latest",
-	"proxy":                          "ghcr.io/azylman/aerial-proxy:latest",
-	"hangar":                         "ghcr.io/azylman/aerial-hangar:latest",
-	"webhooks-router":                "ghcr.io/azylman/aerial-webhooks-router:latest",
-	"mirrormere-core":                "ghcr.io/azylman/mirrormere:latest",
-	"mirrormere-voice-fingerprinter": "ghcr.io/azylman/mirrormere-voice-fingerprinter:latest",
-	"anomaly-detector":               "ghcr.io/azylman/aerial-sidecar-anomaly-detector:latest",
-	"aura-farming":                    "ghcr.io/azylman/aerial-sidecar-aura-farming:latest",
-	"banana-protocol":                "ghcr.io/azylman/aerial-sidecar-banana:latest",
-	"laya-openvino":                  "ghcr.io/azylman/aerial-sidecar-laya-openvino:latest",
-	"photos-api":                     "ghcr.io/azylman/aerial-sidecar-photos-api:latest",
-	"photos-sync":                    "ghcr.io/azylman/aerial-sidecar-photos-sync:latest",
-	"scratch-service":                "ghcr.io/azylman/aerial-sidecar-scratch-service:latest",
-	"orin-voice":                     "ghcr.io/azylman/orin-voice:latest",
+	"brain":           "ghcr.io/azylman/aerial-brain:latest",
+	"scheduler-mcp":   "ghcr.io/azylman/aerial-scheduler-mcp:latest",
+	"discord-mcp":     "ghcr.io/azylman/aerial-discord-mcp:latest",
+	"docker-mcp":      "ghcr.io/azylman/aerial-docker-mcp:latest",
+	"github-mcp":      "ghcr.io/azylman/aerial-github-mcp:latest",
+	"nomad-mcp":       "ghcr.io/azylman/aerial-nomad-mcp:latest",
+	"infisical-mcp":   "ghcr.io/azylman/aerial-infisical-mcp:latest",
+	"dashboard":       "ghcr.io/azylman/aerial-dashboard:latest",
+	"docs":            "ghcr.io/azylman/aerial-docs:latest",
+	"proxy":           "ghcr.io/azylman/aerial-proxy:latest",
+	"hangar":          "ghcr.io/azylman/aerial-hangar:latest",
+	"webhooks-router": "ghcr.io/azylman/aerial-webhooks-router:latest",
 }
 
 type GitHubCommit struct {

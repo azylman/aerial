@@ -21,13 +21,13 @@ func TestJobNameFromImage_TableDriven(t *testing.T) {
 		{"ghcr.io/azylman/aerial-hangar:latest", "hangar"},
 		{"ghcr.io/azylman/aerial-webhooks-router:latest", "webhooks-router"},
 		{"ghcr.io/azylman/aerial-dashboard:latest", "dashboard"},
-		{"ghcr.io/azylman/mirrormere:latest", "mirrormere-core"},
-		{"ghcr.io/azylman/mirrormere:sha-0e2ef7c", "mirrormere-core"},
+		{"ghcr.io/azylman/mirrormere:latest", "mirrormere"},
+		{"ghcr.io/azylman/mirrormere:sha-0e2ef7c", "mirrormere"},
 		{"ghcr.io/azylman/mirrormere-voice-fingerprinter:latest", "mirrormere-voice-fingerprinter"},
-		{"ghcr.io/azylman/aerial-sidecar-banana:latest", "banana-protocol"},
-		{"ghcr.io/azylman/aerial-sidecar-photos-api:latest", "photos-api"},
-		{"ghcr.io/azylman/mirrormere-ear:latest", "kiosk-client"},
-		{"ghcr.io/azylman/mirrormere-cast-watcher:latest", "kiosk-client"},
+		{"ghcr.io/azylman/aerial-sidecar-banana:latest", "sidecar-banana"},
+		{"ghcr.io/azylman/aerial-sidecar-photos-api:latest", "sidecar-photos-api"},
+		{"ghcr.io/azylman/mirrormere-ear:latest", "mirrormere-ear"},
+		{"ghcr.io/azylman/mirrormere-cast-watcher:latest", "mirrormere-cast-watcher"},
 		{"ghcr.io/azylman/custom-service:v1.0.0", "custom-service"},
 		{"", ""},
 	}
@@ -36,33 +36,6 @@ func TestJobNameFromImage_TableDriven(t *testing.T) {
 		got := jobNameFromImage(tt.image)
 		if got != tt.expected {
 			t.Errorf("jobNameFromImage(%q) = %q, expected %q", tt.image, got, tt.expected)
-		}
-	}
-}
-
-func TestCanonicalJobName_TableDriven(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"mirrormere", "mirrormere-core"},
-		{"mirrormere-core", "mirrormere-core"},
-		{"banana", "banana-protocol"},
-		{"sidecar-banana", "banana-protocol"},
-		{"aerial-sidecar-banana", "banana-protocol"},
-		{"banana-protocol", "banana-protocol"},
-		{"mirrormere-ear", "kiosk-client"},
-		{"mirrormere-cast-watcher", "kiosk-client"},
-		{"kiosk-client", "kiosk-client"},
-		{"brain", "brain"},
-		{"photos-api", "photos-api"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		got := canonicalJobName(tt.input)
-		if got != tt.expected {
-			t.Errorf("canonicalJobName(%q) = %q, expected %q", tt.input, got, tt.expected)
 		}
 	}
 }
@@ -101,18 +74,19 @@ func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 			expected: []string{"brain", "hangar"},
 		},
 		{
-			name: "deduplicates alias and canonical job name",
+			name: "deduplicates clean job names",
 			metadata: map[string]interface{}{
-				"jobs": []interface{}{"mirrormere", "mirrormere-core"},
+				"jobs": []interface{}{"brain", "brain", "hangar"},
 			},
-			expected: []string{"mirrormere-core"},
+			expected: []string{"brain", "hangar"},
 		},
 		{
-			name: "canonicalizes sidecar aliases",
+			name: "deduplicates duplicate job names in jobs and job",
 			metadata: map[string]interface{}{
-				"jobs": []interface{}{"banana", "mirrormere-ear"},
+				"jobs": []interface{}{"brain", "hangar"},
+				"job":  "brain",
 			},
-			expected: []string{"banana-protocol", "kiosk-client"},
+			expected: []string{"brain", "hangar"},
 		},
 		{
 			name: "empty jobs array",

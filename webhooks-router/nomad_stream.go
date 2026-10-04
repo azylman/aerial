@@ -575,11 +575,11 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 	seen := make(map[string]struct{})
 	var jobs []string
 	addJob := func(s string) {
-		canonical := canonicalJobName(s)
-		if canonical != "" {
-			if _, exists := seen[canonical]; !exists {
-				seen[canonical] = struct{}{}
-				jobs = append(jobs, canonical)
+		clean := strings.TrimSpace(s)
+		if clean != "" {
+			if _, exists := seen[clean]; !exists {
+				seen[clean] = struct{}{}
+				jobs = append(jobs, clean)
 			}
 		}
 	}
@@ -606,21 +606,6 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 	return jobs
 }
 
-// canonicalJobName maps known job aliases and image basenames to their canonical Nomad job ID.
-func canonicalJobName(name string) string {
-	clean := strings.TrimSpace(name)
-	switch strings.ToLower(clean) {
-	case "mirrormere":
-		return "mirrormere-core"
-	case "banana", "sidecar-banana", "aerial-sidecar-banana":
-		return "banana-protocol"
-	case "mirrormere-ear", "mirrormere-cast-watcher":
-		return "kiosk-client"
-	default:
-		return clean
-	}
-}
-
 // jobNameFromImage maps a container image reference to its candidate Nomad job name.
 func jobNameFromImage(imageRef string) string {
 	clean := strings.TrimSpace(imageRef)
@@ -640,7 +625,7 @@ func jobNameFromImage(imageRef string) string {
 			imgWithoutTag = imgWithoutTag[:idx]
 		}
 		if strings.EqualFold(clean, img) || strings.EqualFold(cleanWithoutTag, imgWithoutTag) {
-			return canonicalJobName(svc)
+			return svc
 		}
 	}
 
@@ -649,9 +634,8 @@ func jobNameFromImage(imageRef string) string {
 	if idx := strings.LastIndex(base, "/"); idx != -1 {
 		base = base[idx+1:]
 	}
-	base = strings.TrimPrefix(base, "aerial-sidecar-")
 	base = strings.TrimPrefix(base, "aerial-")
-	return canonicalJobName(base)
+	return base
 }
 
 // isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart.
