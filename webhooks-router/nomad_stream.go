@@ -606,37 +606,6 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 	return jobs
 }
 
-// jobNameFromImage maps a container image reference to its candidate Nomad job name.
-func jobNameFromImage(imageRef string) string {
-	clean := strings.TrimSpace(imageRef)
-	if clean == "" {
-		return ""
-	}
-
-	// 1. Strip tag/digest for mapping comparison
-	cleanWithoutTag := clean
-	if idx := strings.LastIndex(cleanWithoutTag, ":"); idx != -1 {
-		cleanWithoutTag = cleanWithoutTag[:idx]
-	}
-
-	for svc, img := range aerialServiceImageMap {
-		imgWithoutTag := img
-		if idx := strings.LastIndex(imgWithoutTag, ":"); idx != -1 {
-			imgWithoutTag = imgWithoutTag[:idx]
-		}
-		if strings.EqualFold(clean, img) || strings.EqualFold(cleanWithoutTag, imgWithoutTag) {
-			return svc
-		}
-	}
-
-	// 2. Fallback heuristic
-	base := cleanWithoutTag
-	if idx := strings.LastIndex(base, "/"); idx != -1 {
-		base = base[idx+1:]
-	}
-	base = strings.TrimPrefix(base, "aerial-")
-	return base
-}
 
 // isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart.
 func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {

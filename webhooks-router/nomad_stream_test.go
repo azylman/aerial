@@ -10,35 +10,6 @@ import (
 	"time"
 )
 
-func TestJobNameFromImage_TableDriven(t *testing.T) {
-	tests := []struct {
-		image    string
-		expected string
-	}{
-		{"ghcr.io/azylman/aerial-brain:latest", "brain"},
-		{"ghcr.io/azylman/aerial-scheduler-mcp:latest", "scheduler-mcp"},
-		{"ghcr.io/azylman/aerial-discord-mcp:latest", "discord-mcp"},
-		{"ghcr.io/azylman/aerial-hangar:latest", "hangar"},
-		{"ghcr.io/azylman/aerial-webhooks-router:latest", "webhooks-router"},
-		{"ghcr.io/azylman/aerial-dashboard:latest", "dashboard"},
-		{"ghcr.io/azylman/mirrormere:latest", "mirrormere"},
-		{"ghcr.io/azylman/mirrormere:sha-0e2ef7c", "mirrormere"},
-		{"ghcr.io/azylman/mirrormere-voice-fingerprinter:latest", "mirrormere-voice-fingerprinter"},
-		{"ghcr.io/azylman/aerial-sidecar-banana:latest", "sidecar-banana"},
-		{"ghcr.io/azylman/aerial-sidecar-photos-api:latest", "sidecar-photos-api"},
-		{"ghcr.io/azylman/mirrormere-ear:latest", "mirrormere-ear"},
-		{"ghcr.io/azylman/mirrormere-cast-watcher:latest", "mirrormere-cast-watcher"},
-		{"ghcr.io/azylman/custom-service:v1.0.0", "custom-service"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		got := jobNameFromImage(tt.image)
-		if got != tt.expected {
-			t.Errorf("jobNameFromImage(%q) = %q, expected %q", tt.image, got, tt.expected)
-		}
-	}
-}
 
 func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 	tests := []struct {
