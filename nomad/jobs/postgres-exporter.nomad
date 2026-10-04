@@ -34,7 +34,7 @@ job "postgres-exporter" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "prometheuscommunity/postgres-exporter:v0.16.0"
+        image        = "prometheuscommunity/postgres-exporter:v0.20.1"
         network_mode = "host"
         healthchecks {
           disable = true
