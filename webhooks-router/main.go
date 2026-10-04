@@ -2371,20 +2371,6 @@ type GitHubWorkflowJobsResponse struct {
 
 var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*(?:Push|Publish)(?:\s+(?:Sidecar\s+)?(?:Container\s+)?Images?(?:\s+to\s+GHCR)?)?\s*\(([^)]+)\)`)
 
-var aerialServiceImageMap = map[string]string{
-	"brain":           "ghcr.io/azylman/aerial-brain:latest",
-	"scheduler-mcp":   "ghcr.io/azylman/aerial-scheduler-mcp:latest",
-	"discord-mcp":     "ghcr.io/azylman/aerial-discord-mcp:latest",
-	"docker-mcp":      "ghcr.io/azylman/aerial-docker-mcp:latest",
-	"github-mcp":      "ghcr.io/azylman/aerial-github-mcp:latest",
-	"nomad-mcp":       "ghcr.io/azylman/aerial-nomad-mcp:latest",
-	"infisical-mcp":   "ghcr.io/azylman/aerial-infisical-mcp:latest",
-	"dashboard":       "ghcr.io/azylman/aerial-dashboard:latest",
-	"docs":            "ghcr.io/azylman/aerial-docs:latest",
-	"proxy":           "ghcr.io/azylman/aerial-proxy:latest",
-	"hangar":          "ghcr.io/azylman/aerial-hangar:latest",
-	"webhooks-router": "ghcr.io/azylman/aerial-webhooks-router:latest",
-}
 
 type GitHubCommit struct {
 	ID      string `json:"id"`
@@ -3026,20 +3012,18 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 			continue
 		}
 		service := strings.TrimSpace(m[1])
-		img, ok := aerialServiceImageMap[service]
-		if !ok {
-			cleanRepo := strings.ToLower(repo)
-			if strings.HasSuffix(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar") {
-				if strings.HasPrefix(service, "orin-") {
-					img = fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service)
-				} else {
-					img = fmt.Sprintf("ghcr.io/%s/aerial-sidecar-%s:latest", owner, service)
-				}
-			} else if strings.HasSuffix(cleanRepo, "mirrormere") || strings.Contains(cleanRepo, "mirrormere") {
+		var img string
+		cleanRepo := strings.ToLower(repo)
+		if strings.HasSuffix(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar") {
+			if strings.HasPrefix(service, "orin-") {
 				img = fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service)
 			} else {
-				img = fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service)
+				img = fmt.Sprintf("ghcr.io/%s/aerial-sidecar-%s:latest", owner, service)
 			}
+		} else if strings.HasSuffix(cleanRepo, "mirrormere") || strings.Contains(cleanRepo, "mirrormere") {
+			img = fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service)
+		} else {
+			img = fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service)
 		}
 		if _, exists := seen[img]; !exists {
 			seen[img] = struct{}{}
