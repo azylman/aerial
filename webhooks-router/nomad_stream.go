@@ -274,6 +274,7 @@ func (sub *NomadStreamSubscriber) processStreamLine(ctx context.Context, line []
 // handleNomadEvent dispatches an individual Nomad event to its corresponding handler.
 func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event NomadEvent) {
 	// Pre-filter noise in memory before hitting River or DB
+	var idempotencyKey string
 	switch event.Topic {
 	case "Deployment":
 		var depPayload NomadDeploymentEventPayload
@@ -284,6 +285,9 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		if !strings.EqualFold(status, "successful") && !strings.EqualFold(status, "failed") && !strings.EqualFold(status, "cancelled") {
 			return
 		}
+		if depPayload.Deployment.ID != "" && depPayload.Deployment.JobID != "" {
+			idempotencyKey = fmt.Sprintf("nomad:deployment:%s:%s:%s", depPayload.Deployment.JobID, depPayload.Deployment.ID, status)
+		}
 	case "Allocation":
 		var allocPayload NomadAllocationEventPayload
 		if err := json.Unmarshal(event.Payload, &allocPayload); err != nil {
@@ -292,6 +296,9 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		alloc := allocPayload.Allocation
 		if alloc.DesiredStatus != "run" || alloc.ClientStatus != "running" {
 			return
+		}
+		if alloc.ID != "" && alloc.JobID != "" {
+			idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s", alloc.JobID, alloc.ID)
 		}
 	case "Evaluation":
 		var evalPayload NomadEvaluationEventPayload
@@ -305,8 +312,10 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		if len(eval.FailedTGAllocs) > 0 || eval.BlockedEval != "" ||
 			strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled") || strings.EqualFold(eval.Status, "blocked") {
 			// Pass through to River/ProcessNomadEvent for failure handling
+			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status)
 		} else if strings.EqualFold(eval.Status, "complete") && strings.TrimSpace(eval.DeploymentID) == "" {
 			// In-place complete evaluation; pass through for success handling
+			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:complete", eval.JobID, eval.ID)
 		} else {
 			return
 		}
@@ -315,13 +324,24 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		return
 	}
 
+	if idempotencyKey == "" {
+		idempotencyKey = randomNonce()
+	}
+
 	if sub.server != nil && sub.server.riverClient != nil {
 		args := NomadEventArgs{
-			Topic:   event.Topic,
-			Type:    event.Type,
-			Payload: event.Payload,
+			IdempotencyKey: idempotencyKey,
+			Topic:          event.Topic,
+			Type:           event.Type,
+			Payload:        event.Payload,
 		}
-		if _, err := sub.server.riverClient.Insert(ctx, args, &river.InsertOpts{MaxAttempts: 5}); err != nil {
+		opts := &river.InsertOpts{
+			MaxAttempts: 5,
+			UniqueOpts: river.UniqueOpts{
+				ByPeriod: 15 * time.Minute,
+			},
+		}
+		if _, err := sub.server.riverClient.Insert(ctx, args, opts); err != nil {
 			log.Printf("[webhooks-router] [nomad-stream] error inserting nomad event into river: %v", err)
 		}
 		return

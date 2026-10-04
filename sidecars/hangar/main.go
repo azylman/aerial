@@ -2942,6 +2942,15 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 
 	SortMatchedJobsHangarLast(matches)
 
+	digest := req.Digest
+	if digest == "" {
+		if remoteDigest, err := d.GetRemoteImageDigest(ctx, imgRef); err == nil && remoteDigest != "" {
+			digest = remoteDigest
+		} else if err != nil {
+			log.Printf("[Hangar:ImageReady] Warning: could not resolve remote digest for %s: %v", imgRef, err)
+		}
+	}
+
 	var appliedJobs []string
 	for _, job := range matches {
 		if errVal := d.ValidateNomadJob(ctx, job.JobPath); errVal != nil {
@@ -2957,7 +2966,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 			PRNumber:  req.PRNumber,
 			TargetID:  req.TargetID,
 			Image:     req.Image,
-			Digest:    req.Digest,
+			Digest:    digest,
 			Status:    "started",
 			Timestamp: time.Now().UTC(),
 		}
@@ -2984,13 +2993,13 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 
 		appliedJobs = append(appliedJobs, job.JobName)
 
-		if req.Digest != "" {
+		if digest != "" {
 			key := job.JobName + ":" + imgRef
 			d.nomadDigestsMu.Lock()
 			if d.nomadKnownDigests == nil {
 				d.nomadKnownDigests = make(map[string]string)
 			}
-			d.nomadKnownDigests[key] = req.Digest
+			d.nomadKnownDigests[key] = digest
 			d.nomadDigestsMu.Unlock()
 		}
 	}
