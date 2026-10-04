@@ -2136,6 +2136,7 @@ var ManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/infisical-mcp.yaml", NomadVar: "nomad/jobs/infisical-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/webhooks-router/webhooks-router.yaml", NomadVar: "nomad/jobs/webhooks-router", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/mirrormere/mirrormere.yaml", NomadVar: "nomad/jobs/mirrormere-core", VarKey: "CONFIG_YAML"},
 }
 
 // SyncServiceConfigsToNomad iterates over ManagedServiceConfigs, validates YAML syntax,
