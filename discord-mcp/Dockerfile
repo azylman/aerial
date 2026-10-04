@@ -27,7 +27,7 @@ COPY main.go proxy.go pure.go ./
 # Build statically linked Go proxy with compiler cache mounts
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /discord-mcp .
+    CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /discord-mcp .
 
 # -----------------------------------------------------------------------------
 # Stage 3: Production Runtime

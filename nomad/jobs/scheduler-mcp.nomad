@@ -40,6 +40,13 @@ job "scheduler-mcp" {
         healthchecks {
           disable = true
         }
+        volumes = [
+          "/mnt/data/supervisor/share/coverage/scheduler-mcp:/coverage:rw",
+        ]
+      }
+
+      env {
+        GOCOVERDIR = "/coverage"
       }
 
       template {

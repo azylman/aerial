@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime/coverage"
 	"sort"
 	"strings"
 	"sync"
@@ -3198,6 +3199,8 @@ func (d *SyncDaemon) executePendingImageRollouts(ctx context.Context) {
 	}
 }
 
+var writeCountersDirFn = coverage.WriteCountersDir
+
 // SetupMux configures HTTP handlers for metrics, health, status, and sync.
 func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux := http.NewServeMux()
@@ -3205,6 +3208,17 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux.Handle("/metrics", metrics.Handler())
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeCountersDirFn(dir); err != nil {
+				log.Printf("[hangar] coverage flush error: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
 

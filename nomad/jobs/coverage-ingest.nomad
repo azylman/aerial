@@ -45,7 +45,8 @@ job "coverage-ingest" {
         args         = ["/local/ingest.sh"]
         volumes = [
           "/mnt/data/supervisor/share/coverage:/share/coverage:rw",
-          "/mnt/data/supervisor/share/aerial:/share/aerial:ro"
+          "/mnt/data/supervisor/share/aerial:/share/aerial:ro",
+          "/mnt/data/supervisor/share/mirrormere:/share/mirrormere:ro"
         ]
       }
 
@@ -74,6 +75,9 @@ apk add --no-cache postgresql-client >/dev/null 2>&1
 COVERAGE_DIR="/share/coverage"
 SOURCE_DIR="/share/aerial"
 
+mkdir -p "$COVERAGE_DIR" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
+find "$COVERAGE_DIR" -type f -mtime +2 -delete 2>/dev/null || true
+
 if [ ! -d "$COVERAGE_DIR" ]; then
   echo "ℹ️ [coverage-ingest] No coverage directory found at $COVERAGE_DIR."
   exit 0
@@ -81,7 +85,15 @@ fi
 
 # 1. Trigger live in-memory flush on active microservices
 echo "🔄 [coverage-ingest] Requesting live runtime flush on registered services..."
-curl -fsS -m 2 http://127.0.0.1:4020/debug/coverage/flush >/dev/null 2>&1 || true
+for flush_url in \
+  "http://127.0.0.1:4020/debug/coverage/flush" \
+  "http://127.0.0.1:8087/debug/coverage/flush" \
+  "http://127.0.0.1:4005/debug/coverage/flush" \
+  "http://127.0.0.1:4001/debug/coverage/flush" \
+  "http://127.0.0.1:8084/debug/coverage/flush" \
+  "http://127.0.0.1:8088/debug/coverage/flush"; do
+  curl -fsS -m 2 "$flush_url" >/dev/null 2>&1 || true
+done
 
 # 2. Sweep service directories
 for svc_path in "$COVERAGE_DIR"/*; do
@@ -104,8 +116,19 @@ for svc_path in "$COVERAGE_DIR"/*; do
   fi
 
   src_path="$SOURCE_DIR/$svc_name"
+  if [ ! -d "$src_path" ] && [ -d "$SOURCE_DIR/sidecars/$svc_name" ]; then
+    src_path="$SOURCE_DIR/sidecars/$svc_name"
+  fi
   if [ ! -d "$src_path" ]; then
-    src_path="$SOURCE_DIR"
+    if [ -d "/share/mirrormere/$svc_name" ]; then
+      src_path="/share/mirrormere/$svc_name"
+    elif [ -d "/share/mirrormere/sidecars/$svc_name" ]; then
+      src_path="/share/mirrormere/sidecars/$svc_name"
+    elif [ -d "/share/mirrormere" ]; then
+      src_path="/share/mirrormere"
+    else
+      src_path="$SOURCE_DIR"
+    fi
   fi
 
   sql_tmp="/tmp/$${svc_name}.sql"

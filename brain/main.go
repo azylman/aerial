@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/coverage"
 	"sort"
 	"strconv"
 	"strings"
@@ -1100,6 +1101,8 @@ func SetupBrainMux(store db.Store, pool *queue.WorkerPool, searchPaths ...string
 	return SetupBrainMuxWithEmbedder(store, pool, nil, searchPaths...)
 }
 
+var writeCountersDirFn = coverage.WriteCountersDir
+
 func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
@@ -1117,6 +1120,19 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/schedules", handleSchedules(store))
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
 	mux.HandleFunc("/internal/pr/register", handlePRRegister(store))
+	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeCountersDirFn(dir); err != nil {
+				log.Printf("[brain] coverage flush error: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("ok\n")); err != nil {
+			log.Printf("[brain] failed to write coverage flush response: %v", err)
+		}
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

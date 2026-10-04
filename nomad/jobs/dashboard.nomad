@@ -42,13 +42,15 @@ job "dashboard" {
         }
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock:ro",
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro"
+          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro",
+          "/mnt/data/supervisor/share/coverage/dashboard:/coverage:rw"
         ]
       }
 
       env {
         CONFIG_PATH = "/share/aerial-config/services/dashboard/dashboard.yaml"
         NOMAD_ADDR  = "http://127.0.0.1:4646"
+        GOCOVERDIR  = "/coverage"
       }
 
       template {
