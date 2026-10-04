@@ -1,8 +1,8 @@
 # Aerial
 
-An autonomous AI agent and homelab operations platform engineered for heterogeneous multi-node clusters running HashiCorp Nomad.
+An autonomous AI agent and configurable homelab operations platform engineered for heterogeneous multi-node clusters running HashiCorp Nomad.
 
-Aerial is built from the ground up around an autonomous AI agent that serves as the intelligent core and operator of a multi-node homelab. While interfacing with her through Discord, Aerial actively commands compute across storage servers, local GPU inference nodes, and touch kiosks—executing complex multi-turn workflows, authoring and deploying her own code, orchestrating background container workloads, and running persistent scheduled pipelines.
+Aerial is built from the ground up around end-to-end configurability across both the agent and the platform. While Aerial herself is tailored through pluggable execution backends (such as `agy-cli` or Gemini CLI), domain-specific skills, and modular persona rules, the underlying platform is equally extensible—orchestrating user-defined containers, declarative Nomad sidecars, and persistent scheduled pipelines. While interfacing with her through Discord, Aerial actively commands compute across storage servers, local GPU inference nodes, and touch kiosks—executing complex multi-turn workflows, authoring and deploying her own code, and operating your homelab fleet.
 
 **Observability, CI/CD, reliability, and extensibility are first-class invariants.** Deployments are fully automated through event-driven push GitOps that continuously reconciles Nomad jobs and proactively self-heals failing CI builds or deployment rollbacks, backed by a turnkey telemetry matrix featuring VictoriaMetrics TSDB, Vector log streaming to OpenObserve, and pre-provisioned Grafana dashboards. The system guarantees operational resilience through dynamic CoreDNS service discovery, centralized secret governance via Infisical, read-only container mounts, and Last Known Good Configuration (LKGC) fallbacks, while staying fully extensible via custom skills, declarative Nomad sidecar jobs, and Streamable HTTP MCP microservices.
 
