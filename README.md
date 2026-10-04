@@ -10,27 +10,28 @@ Aerial is built from the ground up around an autonomous AI agent that serves as 
 
 ## 1. System Architecture & Topology
 
-Aerial uses a decoupled **Two-Repository Architecture**:
-- **Engine Repo (`azylman/aerial`)**: Core Go backend (`aerial-brain`), MCP microservices, observability telemetry stack, and Nomad cluster jobs (`nomad/jobs/*.nomad`).
-- **User Config Repo (e.g. `your-username/your-aerial-config`)**: Private user configuration (`config.yaml`), persona guidelines (`rules/`), channel rules (`channels/`), custom telemetry scrapes (`victoriametrics/`), custom skills (`custom-skills/`), and user sidecar jobs (`jobs/*.nomad`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
+Aerial separates generic platform orchestration from private homelab state using a decoupled **Two-Repository Architecture**:
+- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`aerial-brain`), declarative Nomad cluster jobs (`nomad/jobs/*.nomad`), turnkey telemetry stack (VictoriaMetrics, Vector, Grafana), PostgreSQL 16 persistence, CoreDNS service discovery, and outbound MCP microservices.
+- **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user sidecar jobs (`jobs/*.nomad`), custom skills and automation runbooks (`custom-skills/`), modular telemetry scrapes (`victoriametrics/`), platform options (`config.yaml`), persona guidelines (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                  MULTIPLEXED INGRESS LAYER                                  │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Discord Gateway              │ Real-time Voice (Kiosk/Orin) │ HTTP REST & Webhooks          │
-│ • Realtime Gateway Events    │ • Whisper ASR (GPU Accel)    │ • /prompt (Prompt Injection)  │
-│ • Laya System-1 Classifier   │ • Wyoming Protocol (:10300)  │ • /voice/ask (Voice Pipeline) │
-│ • Continuous Typing Pulses   │ • WebRTC & Audio Streaming   │ • /discord/message & Webhooks │
+│ Real-time Voice (Kiosk/Orin) │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
+│ • Whisper ASR (GPU Accel)    │ • /prompt (Prompt Injection) │ • Realtime Gateway Events     │
+│ • Wyoming Protocol (:10300)  │ • /voice/ask (Voice Pipeline)│ • Laya System-1 Classifier    │
+│ • WebRTC & Audio Streaming   │ • /discord/message & Webhooks│ • Continuous Typing Pulses    │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                        Aerial Brain                                         │
-│  • Multi-Protocol Execution Core (Persistent Streaming agy Daemon Pool & UnifiedProcessPool)│
+│  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
+│  • Self-Healing GitOps Worker (Proactive CI/CD Remediation)                                 │
+│  • Multi-Protocol Execution Core (Streaming agy Daemon Pool & UnifiedProcessPool)           │
 │  • Laya INT8 ModernBERT-large Ambient Classifier (/v1/systemone)                            │
 │  • Read-Only Kernel Mounts (/share/aerial-config:ro, /share/aerial:ro)                      │
-│  • Zero-Downtime SIGHUP Hot-Reloading (Nomad Template Signaling) & LKGC Fallback            │
 │  • PostgreSQL 16 Multi-Turn Thread Memory & Atomic CAS Task State                           │
 │  • Semantic Memory Hybrid RRF (dense pgvector HNSW + sparse FTS lexical search)             │
 │  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
@@ -42,22 +43,23 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 │                       HASHICORP NOMAD 3-NODE HETEROGENEOUS CLUSTER                          │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Core Server (quiet-zero)     │ GPU Worker (calibarn)        │ Touch Kiosk (cockpit)         │
-│ • aerial-brain               │ • orin-voice (Whisper GPU)   │ • kiosk-client (ALSA / ear)   │
+│ • aerial-brain (Agent Core)  │ • orin-voice (Whisper GPU)   │ • kiosk-client (ALSA / ear)   │
 │ • aerial-postgres (pgvector) │ • Kokoro-82M TTS synthesis   │ • WebRTC stream & Chromium UI │
 │ • coredns (*.aerial, *.lan)  │ • Wyoming protocol (:10300)  │ • Voice fingerprinter sidecar │
 │ • infisical & redis (Secrets)│ • Host volume whisper_cache  │ • wake-word detection         │
-│ • webhooks-router (Push CD)  │ • High-bandwidth speech pipe │ • Real-time user touch HUD    │
-│ • aerial-hangar (GitOps)     │ • CUDA / Tensor acceleration │ • Local audio capture         │
-│ • Full Telemetry Matrix      │ • Edge AI speech engine      │ • Ambient room microphone     │
+│ • webhooks-router & hangar   │ • High-bandwidth speech pipe │ • Real-time user touch HUD    │
+│ • User Sidecars (*.nomad)    │ • CUDA / Tensor acceleration │ • Local audio capture         │
+│ • Persistent Cron Pipelines  │ • Edge AI speech engine      │ • Ambient room microphone     │
+│ • Full Telemetry Matrix      │ • Host GPU worker offload    │ • Wayland display kiosk       │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                             OUTBOUND MCP & OBSERVABILITY MATRIX                             │
+│                          AUTONOMOUS TOOL RUNTIME (MCP) & TELEMETRY                          │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Nomad Cluster MCP (:4005)    │ Database Scheduler (:8080)   │ VictoriaMetrics TSDB (:8428)  │
-│ Discord REST MCP (:4001)     │ Infisical Secrets (:4006)    │ OpenObserve Telemetry (:5080) │
-│ GitHub Operations MCP (:4003)│ Vector Log Pipeline (:8686)  │ Grafana Cyberpunk HUD (:3000) │
+│ GitHub Operations MCP (:4003)│ Infisical Secrets (:4006)    │ OpenObserve Telemetry (:5080) │
+│ Discord REST MCP (:4001)     │ Host Docker MCP (:4002)      │ Grafana Cyberpunk HUD (:3000) │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
 ```
 
