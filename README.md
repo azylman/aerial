@@ -30,7 +30,7 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 │  • Multi-Protocol Execution Core (Persistent Streaming agy Daemon Pool & UnifiedProcessPool)│
 │  • Laya INT8 ModernBERT-large Ambient Classifier (/v1/systemone)                            │
 │  • Read-Only Kernel Mounts (/share/aerial-config:ro, /share/aerial:ro)                      │
-│  • Recursive File Watcher (fsnotify) with Hot-Reloading & LKGC Fallback                     │
+│  • Zero-Downtime SIGHUP Hot-Reloading (Nomad Template Signaling) & LKGC Fallback            │
 │  • PostgreSQL 16 Multi-Turn Thread Memory & Atomic CAS Task State                           │
 │  • Semantic Memory Hybrid RRF (dense pgvector HNSW + sparse FTS lexical search)             │
 │  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
@@ -155,7 +155,7 @@ User configuration and persona rules live in your private configuration reposito
        - `post_turn`: Captures turn outcome, error messages, duration, and LLM token usage.
    - **Substantive Response Enforcement**: Agent turns must always produce substantive output; unrecovered empty stdout or missing responses trigger automatic retry and failure handling without swallowed turns.
    - **Server Whitelisting (Default-Deny)**: Set `channels.default.mode: "ignore"` to ignore the entire server by default, responding only in explicitly declared channels.
-   - **Hot-Reloading & LKGC**: Changes to `config.yaml` are detected instantly via `fsnotify` and reconfigured in-memory without restarting the daemon. If invalid YAML is saved, Aerial retains the **Last Known Good Configuration (LKGC)** in memory and posts a diagnostic alert to `#aerial-dev`.
+   - **Hot-Reloading & LKGC**: Changes to `config.yaml` trigger zero-downtime hot-reloads via Nomad template signaling (`SIGHUP`) and are reconfigured in-memory without restarting the daemon. If invalid YAML is saved, Aerial retains the **Last Known Good Configuration (LKGC)** in memory and posts a diagnostic alert to `#aerial-dev`.
 
 2. **`AGENTS.md`** (Persona & Tone Overrides):
    Define custom persona rules, tone guidelines, or private operational context. Instructions in `AGENTS.md` take priority over base `GEMINI.md` rules.
