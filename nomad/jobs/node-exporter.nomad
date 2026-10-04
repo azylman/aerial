@@ -34,7 +34,7 @@ job "node-exporter" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "prom/node-exporter:v1.8.2"
+        image        = "prom/node-exporter:v1.12.1"
         network_mode = "host"
         healthchecks {
           disable = true
