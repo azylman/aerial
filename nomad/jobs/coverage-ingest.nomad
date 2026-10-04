@@ -64,7 +64,7 @@ EOH
       }
 
       template {
-        data = <<'EOH'
+        data = <<EOH
 #!/bin/sh
 set -eu
 
@@ -95,7 +95,7 @@ for svc_path in "$COVERAGE_DIR"/*; do
   fi
 
   echo "⚡ [coverage-ingest] Ingesting $count counter file(s) for service: $svc_name"
-  tmp_out="/tmp/${svc_name}.cov"
+  tmp_out="/tmp/$${svc_name}.cov"
 
   if ! go tool covdata textfmt -i="$svc_path" -o="$tmp_out" 2>/dev/null; then
     echo "⚠️ [coverage-ingest] Failed to convert binary covdata for $svc_name"
@@ -108,7 +108,7 @@ for svc_path in "$COVERAGE_DIR"/*; do
     src_path="$SOURCE_DIR"
   fi
 
-  sql_tmp="/tmp/${svc_name}.sql"
+  sql_tmp="/tmp/$${svc_name}.sql"
   echo "BEGIN;" > "$sql_tmp"
 
   (cd "$src_path" && go tool cover -func="$tmp_out" 2>/dev/null || true) | while IFS= read -r line; do
@@ -119,7 +119,7 @@ for svc_path in "$COVERAGE_DIR"/*; do
     file_loc=$(echo "$line" | awk '{print $1}')
     fn_name=$(echo "$line" | awk '{print $2}')
     pct=$(echo "$line" | awk '{print $3}' | tr -d '%')
-    file_name="${file_loc%%:*}"
+    file_name="$${file_loc%%:*}"
 
     # Sanitize quotes for safe SQL formatting
     fn_name=$(echo "$fn_name" | sed "s/'/''/g")
