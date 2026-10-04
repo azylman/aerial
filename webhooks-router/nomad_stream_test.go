@@ -870,4 +870,56 @@ func TestNomadStreamSubscriber_AllocationRestarting_Guarded(t *testing.T) {
 	}
 }
 
+func TestNomadStreamSubscriber_Evaluation_RestartWithDeploymentID_Succeeds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Evaluation with a non-empty DeploymentID (e.g. from an allocation restart / older spec)
+	// should succeed when the job is verified healthy in Nomad.
+	streamData := `{"Index":1008,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-restart-1","JobID":"kiosk-client","Status":"complete","DeploymentID":"dep-old-stale-1"}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-old-stale-1","Status":"successful"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(`[{"ID":"alloc-kiosk-1","DesiredStatus":"run","ClientStatus":"running"}]`))
+			return
+		}
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    599,
+		deployedMergeSHA: "sha_eval_restart",
+		deployedRepo:     "azylman/mirrormere",
+		deployedUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "kiosk-client" {
+		t.Fatalf("expected deployedJobCalls [kiosk-client], got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 prompt call, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+
 

@@ -313,8 +313,8 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 			strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled") || strings.EqualFold(eval.Status, "blocked") {
 			// Pass through to River/ProcessNomadEvent for failure handling
 			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status)
-		} else if strings.EqualFold(eval.Status, "complete") && strings.TrimSpace(eval.DeploymentID) == "" {
-			// In-place complete evaluation; pass through for success handling
+		} else if strings.EqualFold(eval.Status, "complete") {
+			// In-place or restart complete evaluation; pass through for success handling
 			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:complete", eval.JobID, eval.ID)
 		} else {
 			return
@@ -393,7 +393,7 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
 				desc = fmt.Sprintf("failed task group allocations: %v", eval.FailedTGAllocs)
 			}
 			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, desc)
-		} else if strings.EqualFold(eval.Status, "complete") && strings.TrimSpace(eval.DeploymentID) == "" {
+		} else if strings.EqualFold(eval.Status, "complete") {
 			if s.isNomadJobHealthy(ctx, eval.JobID) {
 				return s.HandleNomadJobSuccess(ctx, eval.JobID, eval.ID)
 			}
