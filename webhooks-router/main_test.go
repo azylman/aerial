@@ -2586,6 +2586,7 @@ type mockOutboundDispatcher struct {
 	imageReadyErr      error
 	promptErr          error
 	directMessageErr   error
+	matchedJobs        map[string][]string // image -> matched jobs
 }
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
@@ -2602,10 +2603,14 @@ func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPus
 	return m.gitPushErr
 }
 
-func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) error {
+func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
 	m.mu.Lock()
 	m.imageReadyCalls = append(m.imageReadyCalls, req)
 	ch := m.imageReadyCh
+	var jobs []string
+	if m.matchedJobs != nil {
+		jobs = m.matchedJobs[req.Image]
+	}
 	m.mu.Unlock()
 	if ch != nil {
 		select {
@@ -2613,7 +2618,7 @@ func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req Ima
 		default:
 		}
 	}
-	return m.imageReadyErr
+	return jobs, m.imageReadyErr
 }
 
 func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
@@ -2771,7 +2776,7 @@ func TestDefaultOutboundDispatcher_AllMethods(t *testing.T) {
 
 	// Test DispatchImageReady
 	dispatcher.hangarURL = imageReadyServer.URL
-	err = dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{
+	_, err = dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{
 		Image:  "ghcr.io/azylman/aerial-webhooks-router:latest",
 		Digest: "sha256:abcd",
 	})
@@ -4121,6 +4126,52 @@ func TestDispatchWorkflowRunImages_ParallelDispatch(t *testing.T) {
 	}
 }
 
+func TestDispatchWorkflowRunImages_MatchedJobsTransitionDeploying(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := `{
+			"total_count": 2,
+			"jobs": [
+				{"id": 101, "name": "Build & Push Images to GHCR (brain)", "status": "completed", "conclusion": "success"},
+				{"id": 102, "name": "Build & Push Images to GHCR (scheduler-mcp)", "status": "completed", "conclusion": "success"}
+			]
+		}`
+		_, _ = w.Write([]byte(resp))
+	}))
+	defer apiServer.Close()
+
+	mockDisp := &mockOutboundDispatcher{
+		matchedJobs: map[string][]string{
+			"ghcr.io/azylman/aerial-brain:latest":         {"brain"},
+			"ghcr.io/azylman/aerial-scheduler-mcp:latest": {"scheduler-mcp", "brain"},
+		},
+	}
+	mockReg := &mockPRRegistry{}
+
+	srv := NewRouterServer(Config{GitHubAPIURL: apiServer.URL}, nil)
+	srv.SetDispatcher(mockDisp)
+	srv.SetRegistry(mockReg)
+
+	if err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 99999, "main", "success", "headsha123", "1555405874565091380", 555); err != nil {
+		t.Fatalf("dispatchWorkflowRunImages failed: %v", err)
+	}
+
+	if len(mockReg.deployingCalls) != 1 {
+		t.Fatalf("expected 1 deploying call, got %d", len(mockReg.deployingCalls))
+	}
+	call := mockReg.deployingCalls[0]
+	if call.repo != "azylman/aerial" || call.prNumber != 555 {
+		t.Errorf("unexpected call repo/prNumber: %s#%d", call.repo, call.prNumber)
+	}
+	jobsMap := make(map[string]bool)
+	for _, j := range call.jobs {
+		jobsMap[j] = true
+	}
+	if len(call.jobs) != 2 || !jobsMap["brain"] || !jobsMap["scheduler-mcp"] {
+		t.Errorf("expected matched jobs [brain, scheduler-mcp], got: %v", call.jobs)
+	}
+}
+
 func TestTruncatePromptDetails(t *testing.T) {
 	// 1. Backtick sanitization
 	withBackticks := "error occurred:\n```json\n{\"error\":\"broken\"}\n```\nend"
@@ -4553,7 +4604,7 @@ func TestDefaultOutboundDispatcher_NotFoundTolerated(t *testing.T) {
 	if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial-sidecars", Ref: "refs/heads/main", Commit: "abc"}); err != nil {
 		t.Fatalf("expected nil error on 404 git_push, got: %v", err)
 	}
-	if err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere-eink-renderer:latest"}); err != nil {
+	if _, err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere-eink-renderer:latest"}); err != nil {
 		t.Fatalf("expected nil error on 404 image_ready, got: %v", err)
 	}
 
@@ -4562,7 +4613,7 @@ func TestDefaultOutboundDispatcher_NotFoundTolerated(t *testing.T) {
 	if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "abc"}); err == nil {
 		t.Fatal("expected error on 500 git_push, got nil")
 	}
-	if err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
+	if _, err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
 		t.Fatal("expected error on 500 image_ready, got nil")
 	}
 
@@ -4577,7 +4628,7 @@ func TestDefaultOutboundDispatcher_NotFoundTolerated(t *testing.T) {
 	if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "abc"}); err == nil {
 		t.Fatal("expected error on HTML 404 git_push, got nil")
 	}
-	if err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
+	if _, err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
 		t.Fatal("expected error on HTML 404 image_ready, got nil")
 	}
 }
