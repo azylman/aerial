@@ -4343,14 +4343,61 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
+	// 1. Without GOCOVERDIR -> 200 OK
+	orig := os.Getenv("GOCOVERDIR")
+	_ = os.Unsetenv("GOCOVERDIR")
+	defer func() {
+		if orig != "" {
+			_ = os.Setenv("GOCOVERDIR", orig)
+		} else {
+			_ = os.Unsetenv("GOCOVERDIR")
+		}
+	}()
+
 	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK, got: %d", resp.StatusCode)
+		t.Errorf("expected 200 OK without GOCOVERDIR, got: %d", resp.StatusCode)
+	}
+
+	// 2. With GOCOVERDIR + mock success -> 200 OK
+	oldFn := writeCountersDirFn
+	defer func() { writeCountersDirFn = oldFn }()
+
+	called := false
+	writeCountersDirFn = func(dir string) error {
+		called = true
+		return nil
+	}
+	_ = os.Setenv("GOCOVERDIR", t.TempDir())
+
+	resp2, err2 := http.Get(ts.URL + "/debug/coverage/flush")
+	if err2 != nil {
+		t.Fatalf("unexpected error: %v", err2)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK with GOCOVERDIR, got: %d", resp2.StatusCode)
+	}
+	if !called {
+		t.Errorf("expected writeCountersDirFn to be called")
+	}
+
+	// 3. With GOCOVERDIR + mock error -> 500 Internal Server Error
+	writeCountersDirFn = func(dir string) error {
+		return errors.New("simulated flush error")
+	}
+
+	resp3, err3 := http.Get(ts.URL + "/debug/coverage/flush")
+	if err3 != nil {
+		t.Fatalf("unexpected error: %v", err3)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 on error, got: %d", resp3.StatusCode)
 	}
 }
 

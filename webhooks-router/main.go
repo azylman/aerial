@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -1463,9 +1462,11 @@ func (s *RouterServer) Routes() http.Handler {
 	return mux
 }
 
+var writeCountersDirFn = coverage.WriteCountersDir
+
 func (s *RouterServer) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
-	if dir := os.Getenv("GOCOVERDIR"); dir != "" && flag.Lookup("test.v") == nil {
-		if err := coverage.WriteCountersDir(dir); err != nil {
+	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+		if err := writeCountersDirFn(dir); err != nil {
 			log.Printf("[webhooks-router] coverage flush error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

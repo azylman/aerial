@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -1102,6 +1101,8 @@ func SetupBrainMux(store db.Store, pool *queue.WorkerPool, searchPaths ...string
 	return SetupBrainMuxWithEmbedder(store, pool, nil, searchPaths...)
 }
 
+var writeCountersDirFn = coverage.WriteCountersDir
+
 func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
@@ -1120,8 +1121,8 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
 	mux.HandleFunc("/internal/pr/register", handlePRRegister(store))
 	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" && flag.Lookup("test.v") == nil {
-			if err := coverage.WriteCountersDir(dir); err != nil {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeCountersDirFn(dir); err != nil {
 				log.Printf("[brain] coverage flush error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

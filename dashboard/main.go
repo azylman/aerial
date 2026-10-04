@@ -1903,6 +1903,8 @@ func NewDashboardConfigFromEnv() DashboardConfig {
 	return cfg
 }
 
+var writeCountersDirFn = coverage.WriteCountersDir
+
 // SetupDashboardMux configures the HTTP router and route handlers.
 func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handler {
 	mux := http.NewServeMux()
@@ -1917,8 +1919,8 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
 	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
 	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" && flag.Lookup("test.v") == nil {
-			if err := coverage.WriteCountersDir(dir); err != nil {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeCountersDirFn(dir); err != nil {
 				log.Printf("[dashboard] coverage flush error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -1928,8 +1930,8 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 		writeResponse(w, r, []byte("ok\n"))
 	})
 	mux.HandleFunc("/dashboard/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" && flag.Lookup("test.v") == nil {
-			if err := coverage.WriteCountersDir(dir); err != nil {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeCountersDirFn(dir); err != nil {
 				log.Printf("[dashboard] coverage flush error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

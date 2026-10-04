@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -123,6 +122,8 @@ func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, del
 	return false
 }
 
+var writeCountersDirFn = coverage.WriteCountersDir
+
 // StartProxyServer sets up the HTTP proxy mux and starts the server.
 func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	proxyHandler, err := NewProxyHandler(upstreamBase, BlockedToolNames)
@@ -137,8 +138,8 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 		writeProxyResponse(w, r, BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
 	})
 	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" && flag.Lookup("test.v") == nil {
-			if err := coverage.WriteCountersDir(dir); err != nil {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeCountersDirFn(dir); err != nil {
 				log.Printf("[discord-mcp] coverage flush error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
