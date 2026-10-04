@@ -29,13 +29,11 @@ Aerial separates generic platform orchestration from private homelab state using
 │                                        Aerial Brain                                         │
 │  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
 │  • Self-Healing GitOps Worker (Proactive CI/CD Remediation)                                 │
-│  • Multi-Protocol Execution Core (Streaming agy Daemon Pool & UnifiedProcessPool)           │
+│  • Configurable Multi-Protocol Execution Core: agy-cli, Gemini CLI, etc.                    │
 │  • Laya INT8 ModernBERT-large Ambient Classifier (/v1/systemone)                            │
-│  • Read-Only Kernel Mounts (/share/aerial-config:ro, /share/aerial:ro)                      │
 │  • PostgreSQL 16 Multi-Turn Thread Memory & Atomic CAS Task State                           │
 │  • Semantic Memory Hybrid RRF (dense pgvector HNSW + sparse FTS lexical search)             │
 │  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
-│  • Substantive Response Enforcement (Zero Swallowed Turns)                                  │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
                                                │
                                                ▼
