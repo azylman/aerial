@@ -1,8 +1,8 @@
 # Aerial
 
-An over-engineered, meticulously architected, AI slop, Discord personal assistant from a professional software engineer. All gas, no breaks (code reviews). Named after Gundam Aerial. Runs on HashiCorp Nomad. Observability, CI/CD, reliability, extensibility, etc. are core concerns.
+An autonomous AI personal assistant, systems architect, and principal software engineering collaborator inspired by XVX-016 Gundam Aerial. Meticulously engineered for multi-modal operation across Discord, real-time Voice, and interactive touch kiosks, backed by a heterogeneous HashiCorp Nomad cluster. Observability, hermetic reliability, zero-downtime GitOps continuous delivery, and full-stack autonomous execution are first-class invariants.
 
-Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord, real-time Voice, and HTTP APIs, with persistent multi-turn PostgreSQL & pgvector memory, full-stack observability with VictoriaMetrics and OpenObserve, deep Prometheus telemetry instrumentation, event-driven push GitOps continuous delivery, CoreDNS dynamic service discovery, Infisical centralized secret management, HashiCorp Nomad cluster orchestration, and an extensible architecture for custom skills, MCP tools, and Nomad sidecar jobs.
+Aerial combines multi-agent orchestration, subagent-driven development, and persistent PostgreSQL state with hybrid semantic memory (dense vector + lexical search), local INT8 edge triage, full-stack VictoriaMetrics/OpenObserve telemetry, CoreDNS service discovery, Infisical secret governance, and an extensible MCP microservice matrix.
 
 ---
 
@@ -30,7 +30,7 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 │  • Read-Only Kernel Mounts (/share/aerial-config:ro, /share/aerial:ro)                      │
 │  • Recursive File Watcher (fsnotify) with Hot-Reloading & LKGC Fallback                     │
 │  • PostgreSQL 16 Multi-Turn Thread Memory & Atomic CAS Task State                           │
-│  • Semantic Memory Native pgvector RAG (HNSW Cosine ops / 384-dim)                          │
+│  • Semantic Memory Hybrid RRF (dense pgvector HNSW + sparse FTS lexical search)             │
 │  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
 │  • Substantive Response Enforcement (Zero Swallowed Turns)                                  │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -144,7 +144,7 @@ User configuration and persona rules live in your private configuration reposito
      - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
    - **Wake Sensitivity Modes (`wake_mode`)**:
      - `mention` (or `mentions`, `direct`): Aerial responds strictly to explicit user pings (`@Aerial`) and direct replies. Keyword triggers and LLM classification are bypassed with zero token cost. Ambient channel chatter is silently appended into `transcript.jsonl` so Aerial retains complete conversational lookback when subsequently pinged.
-     - `classifier` (or `ambient`): Tier 1 wakes strictly on direct mentions and direct replies; Tier 2 ambient messages are scored (0.0 to 1.0) by `Gemini 3.8 Flash (Low)` using recent channel context. Plaintext keywords do not trigger Tier 1 wakes.
+     - `classifier` (or `ambient`): Tier 1 wakes strictly on direct mentions and direct replies; Tier 2 ambient messages are scored (0.0 to 1.0) locally by the in-cluster Laya System-1 INT8 ModernBERT-large classifier (`/v1/systemone`) evaluating recent channel context and thread history with zero external API latency or token cost. Plaintext keywords do not trigger Tier 1 wakes.
      - `all` (or `always`): Responds to every incoming message (default inside active threads).
    - **Channel Lifecycle Webhook Interceptors (`hooks:`)**:
      - Generic harness extension points allowing user services or sidecars to programmatically modify turn behavior:
@@ -331,7 +331,7 @@ Aerial uses an automated, event-driven GitOps push continuous deployment pipelin
 
 | Service | Port | Description |
 | :--- | :--- | :--- |
-| **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | Dedicated PostgreSQL 16 relational database with `pgvector` extension for production state, CAS task queues, vector memory, PR registry, schedules, and Grafana storage. Production runs exclusively on PostgreSQL. |
+| **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | Dedicated PostgreSQL 16 relational database with `pgvector` extension for production state, CAS task queues, Hybrid RRF semantic memory (dense vector + sparse FTS), PR registry, schedules, and Grafana storage. Production runs exclusively on PostgreSQL. |
 | **`aerial-brain`** | `8080` (Host `8088`) | Multi-protocol Go execution daemon running `agy`, PostgreSQL memory, multiplexed Discord, Voice (`/voice/ask`), and HTTP (`/prompt`) ingress, Prometheus metrics (`:8080/metrics`), and file watcher. Mounted `:ro`. |
 | **`aerial-hangar`** | `8087` (Host `8087`) | Dedicated Hangar sidecar daemon managing automated repository synchronization, push GitOps reconciliation for Nomad jobs, image update detection, snapshot rollbacks, and Prometheus metrics. Mounted `:rw`. |
 | **`coredns`** | `53` (Host `53/udp`) | Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`. |
