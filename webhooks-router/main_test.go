@@ -4520,3 +4520,118 @@ func TestNomadAllocationPrematureGuard(t *testing.T) {
 		t.Errorf("expected 1 deployed job call for brain, got: %+v", mockReg.deployedJobCalls)
 	}
 }
+
+
+func TestDefaultOutboundDispatcher_NotFoundTolerated(t *testing.T) {
+	t.Parallel()
+	var gitPushCalls int
+	var imageReadyCalls int
+
+	statusCode := http.StatusNotFound
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/events/git_push" {
+			gitPushCalls++
+			w.WriteHeader(statusCode)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "repository not managed by hangar"})
+			return
+		}
+		if r.URL.Path == "/events/image_ready" {
+			imageReadyCalls++
+			w.WriteHeader(statusCode)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "not_found", "message": "no nomad jobs found using image"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dispatcher := NewDefaultOutboundDispatcher(server.URL, "http://127.0.0.1:8080", nil)
+	dispatcher.retryDelay = 1 * time.Millisecond
+	ctx := context.Background()
+
+	// 1. Verify 404 StatusNotFound is tolerated (returns nil)
+	if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial-sidecars", Ref: "refs/heads/main", Commit: "abc"}); err != nil {
+		t.Fatalf("expected nil error on 404 git_push, got: %v", err)
+	}
+	if err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere-eink-renderer:latest"}); err != nil {
+		t.Fatalf("expected nil error on 404 image_ready, got: %v", err)
+	}
+
+	// 2. Verify non-404 error (e.g. 500) is NOT tolerated and returns error
+	statusCode = http.StatusInternalServerError
+	if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "abc"}); err == nil {
+		t.Fatal("expected error on 500 git_push, got nil")
+	}
+	if err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
+		t.Fatal("expected error on 500 image_ready, got nil")
+	}
+
+	// 3. Verify HTML 404 (non-Hangar JSON, e.g. misconfigured proxy) is NOT tolerated and returns error
+	html404Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("<html><title>404 Not Found</title><body>Proxy Error</body></html>"))
+	}))
+	defer html404Server.Close()
+	dispatcher.hangarURL = html404Server.URL
+	if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "abc"}); err == nil {
+		t.Fatal("expected error on HTML 404 git_push, got nil")
+	}
+	if err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
+		t.Fatal("expected error on HTML 404 image_ready, got nil")
+	}
+}
+
+func TestResolveWorkflowRunImages_SkippedStepFiltering(t *testing.T) {
+	t.Parallel()
+	mockJobs := GitHubWorkflowJobsResponse{
+		TotalCount: 2,
+		Jobs: []GitHubWorkflowJobItem{
+			{
+				ID:         101,
+				Name:       "Build & Publish Container Image (mirrormere)",
+				Status:     "completed",
+				Conclusion: "success",
+				Steps: []GitHubWorkflowJobStep{
+					{Name: "Checkout Repository", Status: "completed", Conclusion: "success", Number: 1},
+					{Name: "Path Filter Check", Status: "completed", Conclusion: "success", Number: 2},
+					{Name: "Build and Push Docker Image", Status: "completed", Conclusion: "skipped", Number: 3},
+				},
+			},
+			{
+				ID:         102,
+				Name:       "Build & Publish Container Image (mirrormere-cast-watcher)",
+				Status:     "completed",
+				Conclusion: "success",
+				Steps: []GitHubWorkflowJobStep{
+					{Name: "Checkout Repository", Status: "completed", Conclusion: "success", Number: 1},
+					{Name: "Path Filter Check", Status: "completed", Conclusion: "success", Number: 2},
+					{Name: "Build and Push Docker Image", Status: "completed", Conclusion: "success", Number: 3},
+				},
+			},
+		},
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/actions/runs/999/jobs") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mockJobs)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, nil, nil, nil)
+	images, err := srv.resolveWorkflowRunImages(context.Background(), "azylman/mirrormere", 999)
+	if err != nil {
+		t.Fatalf("unexpected error resolving workflow run images: %v", err)
+	}
+
+	if len(images) != 1 {
+		t.Fatalf("expected 1 image (cast-watcher), got %d: %v", len(images), images)
+	}
+	if images[0] != "ghcr.io/azylman/mirrormere-cast-watcher:latest" {
+		t.Errorf("expected cast-watcher image, got %s", images[0])
+	}
+}

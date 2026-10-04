@@ -1090,6 +1090,14 @@ func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req Git
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if readErr == nil && isHangarUnmanagedError(respBody) {
+			log.Printf("[webhooks-router] [dispatcher] hangar confirmed repo %s is not managed by hangar (skipping): %s", req.Repo, string(respBody))
+			return nil
+		}
+		return fmt.Errorf("hangar git push returned 404: %s", string(respBody))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
@@ -1119,6 +1127,14 @@ func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req 
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if readErr == nil && isHangarUnmanagedError(respBody) {
+			log.Printf("[webhooks-router] [dispatcher] hangar confirmed image %s has no matching nomad jobs (skipping): %s", req.Image, string(respBody))
+			return nil
+		}
+		return fmt.Errorf("hangar image ready returned 404: %s", string(respBody))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
@@ -2249,11 +2265,64 @@ type GitHubWorkflowRunPayload struct {
 	} `json:"repository"`
 }
 
-type GitHubWorkflowJobItem struct {
-	ID         int64  `json:"id"`
+type GitHubWorkflowJobStep struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	Number     int    `json:"number"`
+}
+
+type GitHubWorkflowJobItem struct {
+	ID         int64                   `json:"id"`
+	Name       string                  `json:"name"`
+	Status     string                  `json:"status"`
+	Conclusion string                  `json:"conclusion"`
+	Steps      []GitHubWorkflowJobStep `json:"steps,omitempty"`
+}
+
+// hasExecutedBuildStep verifies that if steps are present and a build/push step is defined,
+// that step actually concluded with success rather than being skipped.
+type hangarJSONResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+func isHangarUnmanagedError(body []byte) bool {
+	var hResp hangarJSONResponse
+	if err := json.Unmarshal(body, &hResp); err != nil {
+		return false
+	}
+	if hResp.Status == "not_found" {
+		return true
+	}
+	msg := strings.ToLower(hResp.Message)
+	return strings.Contains(msg, "is not managed by hangar") || strings.Contains(msg, "not managed by hangar") || strings.Contains(msg, "no nomad jobs found")
+}
+
+func hasExecutedBuildStep(steps []GitHubWorkflowJobStep) bool {
+	if len(steps) == 0 {
+		return true
+	}
+	var pushSteps []GitHubWorkflowJobStep
+	for _, step := range steps {
+		nameLower := strings.ToLower(step.Name)
+		if (strings.Contains(nameLower, "build") && strings.Contains(nameLower, "push")) ||
+			(strings.Contains(nameLower, "build") && strings.Contains(nameLower, "publish")) ||
+			strings.Contains(nameLower, "docker push") ||
+			strings.Contains(nameLower, "push image") ||
+			strings.Contains(nameLower, "push docker") {
+			pushSteps = append(pushSteps, step)
+		}
+	}
+	if len(pushSteps) == 0 {
+		return true
+	}
+	for _, ps := range pushSteps {
+		if ps.Conclusion == "success" {
+			return true
+		}
+	}
+	return false
 }
 
 type GitHubWorkflowJobsResponse struct {
@@ -2908,6 +2977,9 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 
 	for _, job := range jobsResp.Jobs {
 		if job.Status != "completed" || job.Conclusion != "success" {
+			continue
+		}
+		if !hasExecutedBuildStep(job.Steps) {
 			continue
 		}
 		m := buildJobRegex.FindStringSubmatch(job.Name)
