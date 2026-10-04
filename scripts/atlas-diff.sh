@@ -141,7 +141,7 @@ if [ -z "$DEV_URL" ]; then
     fi
 
     # Determine connection string: test direct container name resolution first
-    if [ ${#NET_ARGS[@]} -gt 0 ]; then
+    if [ ${#NET_ARGS[@]} -gt 0 ] && getent hosts "$DEV_CONTAINER" >/dev/null 2>&1; then
         DEV_URL="postgres://postgres:dev@${DEV_CONTAINER}:5432/dev?sslmode=disable"
     else
         HOST_PORT=$(docker port "$DEV_CONTAINER" 5432 2>/dev/null | head -n1 | awk -F':' '{print $NF}')

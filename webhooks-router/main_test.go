@@ -4686,3 +4686,19 @@ func TestResolveWorkflowRunImages_SkippedStepFiltering(t *testing.T) {
 		t.Errorf("expected cast-watcher image, got %s", images[0])
 	}
 }
+
+func TestCoverageFlushEndpoint(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil, nil, nil)
+	ts := httptest.NewServer(srv.Routes())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+}

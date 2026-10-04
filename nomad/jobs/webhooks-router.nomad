@@ -40,10 +40,14 @@ job "webhooks-router" {
         healthchecks {
           disable = true
         }
+        volumes = [
+          "/mnt/data/supervisor/share/coverage/webhooks-router:/coverage:rw",
+        ]
       }
 
       env {
         CONFIG_PATH = "/local/webhooks-router.yaml"
+        GOCOVERDIR  = "/coverage"
       }
 
       template {
