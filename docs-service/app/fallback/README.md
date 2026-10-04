@@ -23,7 +23,7 @@ Nginx Edge Gateway"]
 • Headless agy Agent Runner
 • In-Process Discord Funnel
 • Fast Ambient Classifier
-• Recursive File Watcher
+• SIGHUP Zero-Downtime Reloading
 • :ro Repositories Mount"]
     end
 
