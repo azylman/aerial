@@ -1,8 +1,10 @@
 # Aerial
 
-An autonomous AI personal assistant, systems architect, and principal software engineering collaborator inspired by XVX-016 Gundam Aerial. Meticulously engineered for multi-modal operation across Discord, real-time Voice, and interactive touch kiosks, backed by a heterogeneous HashiCorp Nomad cluster. Observability, hermetic reliability, zero-downtime GitOps continuous delivery, and full-stack autonomous execution are first-class invariants.
+A batteries-included, self-hosted homelab platform and autonomous operations hub engineered for heterogeneous multi-node clusters running HashiCorp Nomad.
 
-Aerial combines multi-agent orchestration, subagent-driven development, and persistent PostgreSQL state with hybrid semantic memory (dense vector + lexical search), local INT8 edge triage, full-stack VictoriaMetrics/OpenObserve telemetry, CoreDNS service discovery, Infisical secret governance, and an extensible MCP microservice matrix.
+Aerial turns everyday homelab hardware—storage servers, local GPU inference nodes, and touch kiosk appliances—into a unified, self-healing infrastructure platform. Beyond being an autonomous AI assistant, Aerial serves as a complete homelab operations hub: orchestrating background container workloads, running persistent scheduled pipelines, and executing recurring batch jobs.
+
+**Observability, CI/CD, reliability, and extensibility are first-class invariants.** Deployments are fully automated through event-driven push GitOps that continuously reconciles Nomad jobs and proactively self-heals failing CI builds or deployment rollbacks, backed by a turnkey telemetry matrix featuring VictoriaMetrics TSDB, Vector log streaming to OpenObserve, and pre-provisioned Grafana dashboards. The system guarantees operational resilience through dynamic CoreDNS service discovery, centralized secret governance via Infisical, read-only container mounts, and Last Known Good Configuration (LKGC) fallbacks, while staying fully extensible via custom skills, declarative Nomad sidecar jobs, and Streamable HTTP MCP microservices.
 
 ---
 
