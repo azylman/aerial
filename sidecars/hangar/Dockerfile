@@ -20,8 +20,8 @@ RUN apk add --no-cache ca-certificates git bash tzdata docker-cli && \
 COPY --link --from=docker/compose-bin:v2.32.4 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
 RUN ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
-COPY --link --from=hashicorp/nomad:1.8.4 /bin/nomad /usr/local/bin/nomad
-COPY --link --from=hashicorp/nomad:1.8.4 /lib/ld-linux-x86-64.so.2 /lib/libc.so.6 /lib/libresolv.so.2 /lib/libpthread.so.0 /lib/libm.so.6 /lib/
+COPY --link --from=hashicorp/nomad:2.0.7 /bin/nomad /usr/local/bin/nomad
+COPY --link --from=hashicorp/nomad:2.0.7 /lib/ld-linux-x86-64.so.2 /lib/libc.so.6 /lib/libresolv.so.2 /lib/libpthread.so.0 /lib/libm.so.6 /lib/
 RUN mkdir -p /lib64 && ln -sf /lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
 
 COPY --link --from=builder /hangar /usr/local/bin/hangar

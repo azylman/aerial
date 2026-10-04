@@ -4,7 +4,7 @@ services:
   #     Dedicated single-node control plane and local HAOS client node.
   # ----------------------------------------------------------------------------
   nomad-server:
-    image: hashicorp/nomad:1.8.4
+    image: hashicorp/nomad:2.0.7
     container_name: aerial-nomad-server
     restart: unless-stopped
     network_mode: host
