@@ -590,7 +590,7 @@ func TestIsAllocationRestarting_TableDriven(t *testing.T) {
 	}
 }
 
-func TestNomadStreamSubscriber_ConfigReload_DirectMessage(t *testing.T) {
+func TestNomadStreamSubscriber_ConfigReload_PromptDispatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -635,19 +635,200 @@ func TestNomadStreamSubscriber_ConfigReload_DirectMessage(t *testing.T) {
 		t.Fatalf("expected deployedJobCalls [scheduler-mcp], got %v", mockReg.deployedJobCalls)
 	}
 
-	// Verify direct message was dispatched (NO prompt calls!)
+	// Verify prompt was dispatched uniformly across repos (NO direct messages!)
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Errorf("expected 0 direct message calls, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+	promptCalls := mockDisp.PromptCalls()
+	if len(promptCalls) != 1 {
+		t.Fatalf("expected 1 prompt call, got %d", len(promptCalls))
+	}
+	if promptCalls[0].ChannelID != "1555405874565091380" {
+		t.Errorf("expected target ID 1555405874565091380, got %s", promptCalls[0].ChannelID)
+	}
+	if !strings.Contains(promptCalls[0].Prompt, "Continuous Delivery deployment completed for job scheduler-mcp on azylman/aerial-config") {
+		t.Errorf("unexpected prompt content: %s", promptCalls[0].Prompt)
+	}
+}
+
+func TestNomadStreamSubscriber_Evaluation_InPlaceSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := `{"Index":1004,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-inplace-1","JobID":"brain","Status":"complete","DeploymentID":""}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-old-1","Status":"successful"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(`[{"ID":"alloc-brain-1","DesiredStatus":"run","ClientStatus":"running"}]`))
+			return
+		}
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    585,
+		deployedMergeSHA: "sha_eval_success",
+		deployedRepo:     "azylman/aerial",
+		deployedUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "brain" {
+		t.Fatalf("expected deployedJobCalls [brain], got %v", mockReg.deployedJobCalls)
+	}
+	promptCalls := mockDisp.PromptCalls()
+	if len(promptCalls) != 1 {
+		t.Fatalf("expected 1 prompt call, got %d", len(promptCalls))
+	}
+	if !strings.Contains(promptCalls[0].Prompt, "job brain on azylman/aerial") {
+		t.Errorf("unexpected prompt content: %s", promptCalls[0].Prompt)
+	}
+}
+
+func TestNomadStreamSubscriber_Evaluation_DeploymentManaged_Skipped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// An evaluation that spawned a deployment (DeploymentID != "") must be skipped by evaluation handler
+	streamData := `{"Index":1005,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-managed-1","JobID":"brain","Status":"complete","DeploymentID":"dep-rolling-99"}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployedJobCalls, got %v", mockReg.deployedJobCalls)
+	}
 	if len(mockDisp.PromptCalls()) != 0 {
-		t.Errorf("expected 0 prompt calls for aerial-config, got %d", len(mockDisp.PromptCalls()))
+		t.Fatalf("expected 0 prompt calls, got %d", len(mockDisp.PromptCalls()))
 	}
-	dmCalls := mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 1 {
-		t.Fatalf("expected 1 direct message call, got %d", len(dmCalls))
+}
+
+func TestNomadStreamSubscriber_Evaluation_PlacementFailedTGAllocs_TreatedAsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// When scheduler cannot place allocations, eval status is "complete" but FailedTGAllocs is populated
+	streamData := `{"Index":1006,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-fail-allocs","JobID":"brain","Status":"complete","DeploymentID":"","FailedTGAllocs":{"brain":{"AllocationResourceExhausted":1}}}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    586,
+		deployFailedJobMergeSHA: "sha_eval_fail",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
 	}
-	if dmCalls[0].ChannelID != "1555405874565091380" {
-		t.Errorf("expected target ID 1555405874565091380, got %s", dmCalls[0].ChannelID)
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
 	}
-	if !strings.Contains(dmCalls[0].Content, "📦 **(PR: #245, repo: aerial-config)** Configuration reloaded and healthy for scheduler-mcp") {
-		t.Errorf("unexpected direct message content: %s", dmCalls[0].Content)
+
+	if len(mockReg.deployFailedJobCalls) != 1 || mockReg.deployFailedJobCalls[0] != "brain" {
+		t.Fatalf("expected failedJobCalls [brain], got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 failure prompt call, got %d", len(mockDisp.PromptCalls()))
+	}
+	if !strings.Contains(mockDisp.PromptCalls()[0].Prompt, "failed with status \"complete\"") {
+		t.Errorf("unexpected failure prompt content: %s", mockDisp.PromptCalls()[0].Prompt)
+	}
+	if len(mockDisp.DirectMessageCalls()) != 1 {
+		t.Fatalf("expected 1 failure direct message call, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+}
+
+func TestNomadStreamSubscriber_Evaluation_StatusFailed_TreatedAsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := `{"Index":1007,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-status-failed","JobID":"brain","Status":"failed","StatusDescription":"scheduling timeout","DeploymentID":""}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    587,
+		deployFailedJobMergeSHA: "sha_eval_fail_status",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 1 || mockReg.deployFailedJobCalls[0] != "brain" {
+		t.Fatalf("expected failedJobCalls [brain], got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 failure prompt call, got %d", len(mockDisp.PromptCalls()))
+	}
+	if !strings.Contains(mockDisp.PromptCalls()[0].Prompt, "scheduling timeout") {
+		t.Errorf("unexpected failure prompt content: %s", mockDisp.PromptCalls()[0].Prompt)
 	}
 }
 

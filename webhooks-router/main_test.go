@@ -3188,7 +3188,7 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 		t.Errorf("unexpected late resolved sync_success direct message: %+v", dmCalls[5])
 	}
 
-	// 7. deploy_success with repo "azylman/aerial-config" triggers direct message (NOT prompt!)
+	// 7. deploy_success with repo "azylman/aerial-config" triggers prompt dispatch uniformly across all repos
 	configSuccessEvt := HangarDeployEvent{
 		Event:     "deploy_success",
 		JobName:   "homepage",
@@ -3201,12 +3201,18 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, configSuccessEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	dmCalls = mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 7 {
-		t.Fatalf("expected 7 direct message dispatches after config deploy_success, got %d", len(dmCalls))
+	if len(mockDisp.DirectMessageCalls()) != 6 {
+		t.Fatalf("expected still 6 direct message dispatches after config deploy_success, got %d", len(mockDisp.DirectMessageCalls()))
 	}
-	if dmCalls[6].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[6].Content, "📦 **(PR: #242, repo: aerial-config)** Configuration reloaded and healthy for homepage") {
-		t.Errorf("unexpected config deploy_success direct message: %+v", dmCalls[6])
+	promptCalls := mockDisp.PromptCalls()
+	if len(promptCalls) != 5 {
+		t.Fatalf("expected 5 prompt dispatches after config deploy_success, got %d", len(promptCalls))
+	}
+	if promptCalls[4].ChannelID != "1555405874565091380" {
+		t.Errorf("expected target ID 1555405874565091380, got %s", promptCalls[4].ChannelID)
+	}
+	if !strings.Contains(promptCalls[4].Prompt, "Continuous Delivery deployment completed for job homepage on azylman/aerial-config") {
+		t.Errorf("unexpected prompt content: %s", promptCalls[4].Prompt)
 	}
 }
 
