@@ -1566,6 +1566,20 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 	if err := dFail.SyncServiceConfigsToNomad(ctx, valDir); err == nil || !strings.Contains(err.Error(), "failed updating Nomad variable") {
 		t.Fatalf("expected Nomad update error, got %v", err)
 	}
+
+	// 5. Verify mirrormere-core config mapping exists
+	hasMirrormere := false
+	for _, m := range ManagedServiceConfigs {
+		if m.RelPath == "services/mirrormere/mirrormere.yaml" &&
+			m.NomadVar == "nomad/jobs/mirrormere-core" &&
+			m.VarKey == "CONFIG_YAML" {
+			hasMirrormere = true
+			break
+		}
+	}
+	if !hasMirrormere {
+		t.Errorf("expected ManagedServiceConfigs to contain mirrormere mapping, got %v", ManagedServiceConfigs)
+	}
 }
 
 func TestRepoLock_ThreadSafety(t *testing.T) {
