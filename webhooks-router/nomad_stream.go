@@ -572,44 +572,86 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 		return nil
 	}
 
+	seen := make(map[string]struct{})
 	var jobs []string
+	addJob := func(s string) {
+		canonical := canonicalJobName(s)
+		if canonical != "" {
+			if _, exists := seen[canonical]; !exists {
+				seen[canonical] = struct{}{}
+				jobs = append(jobs, canonical)
+			}
+		}
+	}
+
 	if rawJobs, ok := meta["jobs"]; ok {
 		switch v := rawJobs.(type) {
 		case []interface{}:
 			for _, item := range v {
-				if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
-					jobs = append(jobs, strings.TrimSpace(s))
+				if s, ok := item.(string); ok {
+					addJob(s)
 				}
 			}
 		case []string:
-			jobs = append(jobs, v...)
+			for _, s := range v {
+				addJob(s)
+			}
 		}
 	}
 	if rawJob, ok := meta["job"]; ok {
-		if s, ok := rawJob.(string); ok && strings.TrimSpace(s) != "" {
-			jobs = append(jobs, strings.TrimSpace(s))
+		if s, ok := rawJob.(string); ok {
+			addJob(s)
 		}
 	}
 	return jobs
 }
 
+// canonicalJobName maps known job aliases and image basenames to their canonical Nomad job ID.
+func canonicalJobName(name string) string {
+	clean := strings.TrimSpace(name)
+	switch strings.ToLower(clean) {
+	case "mirrormere":
+		return "mirrormere-core"
+	case "banana", "sidecar-banana", "aerial-sidecar-banana":
+		return "banana-protocol"
+	case "mirrormere-ear", "mirrormere-cast-watcher":
+		return "kiosk-client"
+	default:
+		return clean
+	}
+}
+
 // jobNameFromImage maps a container image reference to its candidate Nomad job name.
 func jobNameFromImage(imageRef string) string {
 	clean := strings.TrimSpace(imageRef)
+	if clean == "" {
+		return ""
+	}
+
+	// 1. Strip tag/digest for mapping comparison
+	cleanWithoutTag := clean
+	if idx := strings.LastIndex(cleanWithoutTag, ":"); idx != -1 {
+		cleanWithoutTag = cleanWithoutTag[:idx]
+	}
+
 	for svc, img := range aerialServiceImageMap {
-		if strings.EqualFold(img, clean) {
-			return svc
+		imgWithoutTag := img
+		if idx := strings.LastIndex(imgWithoutTag, ":"); idx != -1 {
+			imgWithoutTag = imgWithoutTag[:idx]
+		}
+		if strings.EqualFold(clean, img) || strings.EqualFold(cleanWithoutTag, imgWithoutTag) {
+			return canonicalJobName(svc)
 		}
 	}
-	base := clean
-	if idx := strings.LastIndex(base, ":"); idx != -1 {
-		base = base[:idx]
-	}
+
+	// 2. Fallback heuristic
+	base := cleanWithoutTag
 	if idx := strings.LastIndex(base, "/"); idx != -1 {
 		base = base[idx+1:]
 	}
+	base = strings.TrimPrefix(base, "aerial-sidecar-")
 	base = strings.TrimPrefix(base, "aerial-")
-	return base
+	return canonicalJobName(base)
 }
 
 // isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart.

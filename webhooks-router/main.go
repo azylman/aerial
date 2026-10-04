@@ -726,10 +726,24 @@ func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo 
 
 func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (string, error) {
 	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
+	if repo == "" || prNumber <= 0 || len(jobs) == 0 {
 		return "", nil
 	}
-	jobsJSON, err := json.Marshal(jobs)
+	var canonicalJobs []string
+	seen := make(map[string]struct{})
+	for _, j := range jobs {
+		cj := canonicalJobName(j)
+		if cj != "" {
+			if _, exists := seen[cj]; !exists {
+				seen[cj] = struct{}{}
+				canonicalJobs = append(canonicalJobs, cj)
+			}
+		}
+	}
+	if len(canonicalJobs) == 0 {
+		return "", nil
+	}
+	jobsJSON, err := json.Marshal(canonicalJobs)
 	if err != nil {
 		jobsJSON = []byte("[]")
 	}
@@ -763,7 +777,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
-	jobName = strings.TrimSpace(jobName)
+	jobName = canonicalJobName(jobName)
 	if jobName == "" {
 		return "", 0, "", "", false, nil
 	}
@@ -783,7 +797,12 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(NULLIF(merge_sha, ''), head_sha), repo, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
+		WHERE status = 'deploying' AND (
+			metadata->'jobs' ? $1 OR metadata->>'job' = $1
+			OR ($1 = 'mirrormere-core' AND (metadata->'jobs' ? 'mirrormere' OR metadata->>'job' = 'mirrormere'))
+			OR ($1 = 'banana-protocol' AND (metadata->'jobs' ? 'banana' OR metadata->'jobs' ? 'sidecar-banana' OR metadata->'jobs' ? 'aerial-sidecar-banana'))
+			OR ($1 = 'kiosk-client' AND (metadata->'jobs' ? 'mirrormere-ear' OR metadata->'jobs' ? 'mirrormere-cast-watcher'))
+		)
 		ORDER BY updated_at DESC
 		LIMIT 1
 		FOR UPDATE
@@ -814,8 +833,8 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	jobs := extractJobsFromMetadata(meta)
 	var remaining []string
 	for _, j := range jobs {
-		if !strings.EqualFold(j, jobName) {
-			remaining = append(remaining, j)
+		if !strings.EqualFold(canonicalJobName(j), jobName) {
+			remaining = append(remaining, canonicalJobName(j))
 		}
 	}
 
@@ -890,7 +909,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, r
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
-	jobName = strings.TrimSpace(jobName)
+	jobName = canonicalJobName(jobName)
 	if jobName == "" {
 		return "", 0, "", "", false, nil
 	}
@@ -900,7 +919,12 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo
 		FROM pr_registry
-		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
+		WHERE status = 'deploying' AND (
+			metadata->'jobs' ? $1 OR metadata->>'job' = $1
+			OR ($1 = 'mirrormere-core' AND (metadata->'jobs' ? 'mirrormere' OR metadata->>'job' = 'mirrormere'))
+			OR ($1 = 'banana-protocol' AND (metadata->'jobs' ? 'banana' OR metadata->'jobs' ? 'sidecar-banana' OR metadata->'jobs' ? 'aerial-sidecar-banana'))
+			OR ($1 = 'kiosk-client' AND (metadata->'jobs' ? 'mirrormere-ear' OR metadata->'jobs' ? 'mirrormere-cast-watcher'))
+		)
 		ORDER BY updated_at DESC
 		LIMIT 1;
 	`
@@ -928,6 +952,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	if tag.RowsAffected() == 0 {
 		return "", 0, "", "", false, nil
 	}
+
 	return targetID, prNum, mergeSHA, repoOut, true, nil
 }
 
@@ -2333,18 +2358,28 @@ type GitHubWorkflowJobsResponse struct {
 var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*(?:Push|Publish)(?:\s+(?:Sidecar\s+)?(?:Container\s+)?Images?(?:\s+to\s+GHCR)?)?\s*\(([^)]+)\)`)
 
 var aerialServiceImageMap = map[string]string{
-	"brain":           "ghcr.io/azylman/aerial-brain:latest",
-	"scheduler-mcp":   "ghcr.io/azylman/aerial-scheduler-mcp:latest",
-	"discord-mcp":     "ghcr.io/azylman/aerial-discord-mcp:latest",
-	"docker-mcp":      "ghcr.io/azylman/aerial-docker-mcp:latest",
-	"github-mcp":      "ghcr.io/azylman/aerial-github-mcp:latest",
-	"nomad-mcp":       "ghcr.io/azylman/aerial-nomad-mcp:latest",
-	"infisical-mcp":   "ghcr.io/azylman/aerial-infisical-mcp:latest",
-	"dashboard":       "ghcr.io/azylman/aerial-dashboard:latest",
-	"docs":           "ghcr.io/azylman/aerial-docs:latest",
-	"proxy":           "ghcr.io/azylman/aerial-proxy:latest",
-	"hangar":          "ghcr.io/azylman/aerial-hangar:latest",
-	"webhooks-router": "ghcr.io/azylman/aerial-webhooks-router:latest",
+	"brain":                          "ghcr.io/azylman/aerial-brain:latest",
+	"scheduler-mcp":                  "ghcr.io/azylman/aerial-scheduler-mcp:latest",
+	"discord-mcp":                    "ghcr.io/azylman/aerial-discord-mcp:latest",
+	"docker-mcp":                     "ghcr.io/azylman/aerial-docker-mcp:latest",
+	"github-mcp":                     "ghcr.io/azylman/aerial-github-mcp:latest",
+	"nomad-mcp":                      "ghcr.io/azylman/aerial-nomad-mcp:latest",
+	"infisical-mcp":                  "ghcr.io/azylman/aerial-infisical-mcp:latest",
+	"dashboard":                      "ghcr.io/azylman/aerial-dashboard:latest",
+	"docs":                          "ghcr.io/azylman/aerial-docs:latest",
+	"proxy":                          "ghcr.io/azylman/aerial-proxy:latest",
+	"hangar":                         "ghcr.io/azylman/aerial-hangar:latest",
+	"webhooks-router":                "ghcr.io/azylman/aerial-webhooks-router:latest",
+	"mirrormere-core":                "ghcr.io/azylman/mirrormere:latest",
+	"mirrormere-voice-fingerprinter": "ghcr.io/azylman/mirrormere-voice-fingerprinter:latest",
+	"anomaly-detector":               "ghcr.io/azylman/aerial-sidecar-anomaly-detector:latest",
+	"aura-farming":                    "ghcr.io/azylman/aerial-sidecar-aura-farming:latest",
+	"banana-protocol":                "ghcr.io/azylman/aerial-sidecar-banana:latest",
+	"laya-openvino":                  "ghcr.io/azylman/aerial-sidecar-laya-openvino:latest",
+	"photos-api":                     "ghcr.io/azylman/aerial-sidecar-photos-api:latest",
+	"photos-sync":                    "ghcr.io/azylman/aerial-sidecar-photos-sync:latest",
+	"scratch-service":                "ghcr.io/azylman/aerial-sidecar-scratch-service:latest",
+	"orin-voice":                     "ghcr.io/azylman/orin-voice:latest",
 }
 
 type GitHubCommit struct {
