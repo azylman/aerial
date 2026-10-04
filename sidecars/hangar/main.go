@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -3210,7 +3211,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	})
 
 	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+		if dir := os.Getenv("GOCOVERDIR"); dir != "" && flag.Lookup("test.v") == nil {
 			if err := coverage.WriteCountersDir(dir); err != nil {
 				log.Printf("[hangar] coverage flush error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)

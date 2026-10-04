@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -114,7 +115,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
-	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+	if dir := os.Getenv("GOCOVERDIR"); dir != "" && flag.Lookup("test.v") == nil {
 		if err := coverage.WriteCountersDir(dir); err != nil {
 			log.Printf("[scheduler-mcp] coverage flush error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
