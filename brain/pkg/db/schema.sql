@@ -288,3 +288,18 @@ CREATE INDEX IF NOT EXISTS river_notification_created_at_idx ON river_notificati
 CREATE INDEX IF NOT EXISTS river_notification_topic_id_idx ON river_notification (topic, id);
 
 
+
+-- Production Code Coverage Table
+CREATE TABLE IF NOT EXISTS production_code_coverage (
+    service TEXT NOT NULL,
+    file TEXT NOT NULL,
+    function_name TEXT NOT NULL,
+    coverage_percent REAL NOT NULL DEFAULT 0.0,
+    last_executed_at TIMESTAMPTZ,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (service, file, function_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_production_coverage_last_executed ON production_code_coverage(last_executed_at);
+CREATE INDEX IF NOT EXISTS idx_production_coverage_service ON production_code_coverage(service);

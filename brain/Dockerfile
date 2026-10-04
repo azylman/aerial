@@ -79,7 +79,7 @@ COPY --link --from=arigaio/atlas:latest /atlas /usr/local/bin/atlas
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Install official Antigravity CLI binary
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
+RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
 
 # Copy decoupled superpowers skills
 COPY --link --from=superpowers /opt/skills /opt/skills

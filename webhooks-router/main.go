@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime/coverage"
 	"strings"
 	"sync"
 	"syscall"
@@ -1403,7 +1404,20 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /api/webhooks/hangar", s.handleHangarWebhook)
 	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
+	mux.HandleFunc("POST /debug/coverage/flush", s.handleCoverageFlush)
+	mux.HandleFunc("GET /debug/coverage/flush", s.handleCoverageFlush)
 	return mux
+}
+
+func (s *RouterServer) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
+	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+		if err := coverage.WriteCountersDir(dir); err != nil {
+			log.Printf("[webhooks-router] coverage flush error: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "flushed"})
 }
 
 func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
