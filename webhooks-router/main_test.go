@@ -4702,3 +4702,77 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Errorf("expected 200 OK, got: %d", resp.StatusCode)
 	}
 }
+
+func TestShouldSendDeployStarted_Deduplication(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil)
+
+	// First call -> true
+	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_abc") {
+		t.Errorf("expected true on initial call")
+	}
+
+	// Immediate duplicate -> false
+	if srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_abc") {
+		t.Errorf("expected false on immediate duplicate call")
+	}
+
+	// Different job -> true
+	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "webhooks-router", "sha_abc") {
+		t.Errorf("expected true for different job")
+	}
+
+	// Different SHA -> true
+	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_def") {
+		t.Errorf("expected true for different commit SHA")
+	}
+
+	// Older than 5 minutes -> true
+	srv.deployStartedMu.Lock()
+	srv.deployStartedCache["azylman/aerial:603:brain:sha_abc"] = time.Now().Add(-6 * time.Minute)
+	srv.deployStartedMu.Unlock()
+
+	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_abc") {
+		t.Errorf("expected true after 5-minute TTL expiration")
+	}
+}
+
+func TestProcessHangarEvent_DeployStarted_DirectMessageDeduplication(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil)
+	mockDisp := &mockOutboundDispatcher{}
+	srv.SetDispatcher(mockDisp)
+
+	evt := HangarDeployEvent{
+		Event:     "deploy_started",
+		Repo:      "azylman/aerial",
+		PRNumber:  603,
+		JobName:   "brain",
+		CommitSHA: "sha_start_test",
+		TargetID:  "1555405874565091380",
+	}
+
+	// 1. First event dispatches direct message
+	_, err := srv.ProcessHangarEvent(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error on first event: %v", err)
+	}
+
+	mockDisp.mu.Lock()
+	dmCount1 := len(mockDisp.directMessageCalls)
+	mockDisp.mu.Unlock()
+	if dmCount1 != 1 {
+		t.Fatalf("expected 1 direct message dispatched, got %d", dmCount1)
+	}
+
+	// 2. Duplicate event within 5 minutes suppresses direct message
+	_, err = srv.ProcessHangarEvent(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error on duplicate event: %v", err)
+	}
+
+	mockDisp.mu.Lock()
+	dmCount2 := len(mockDisp.directMessageCalls)
+	mockDisp.mu.Unlock()
+	if dmCount2 != 1 {
+		t.Fatalf("expected duplicate direct message to be suppressed (count remained 1), got %d", dmCount2)
+	}
+}

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -295,13 +297,31 @@ func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWeb
 	return nil
 }
 
+func randomNonce() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("nonce-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 // HangarWebhookArgs contains payload data for durable background processing of Hangar webhooks.
 type HangarWebhookArgs struct {
-	Event HangarDeployEvent `json:"event"`
+	IdempotencyKey string            `json:"idempotency_key,omitempty" river:"unique"`
+	Event          HangarDeployEvent `json:"event"`
 }
 
 func (HangarWebhookArgs) Kind() string {
 	return "hangar_webhook"
+}
+
+func (HangarWebhookArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts: river.UniqueOpts{
+			ByPeriod: 15 * time.Minute,
+		},
+	}
 }
 
 // HangarWebhookWorker processes Hangar deployment and sync webhook events from River.
@@ -325,14 +345,24 @@ func (w *HangarWebhookWorker) Work(ctx context.Context, job *river.Job[HangarWeb
 
 // NomadEventArgs contains payload data for durable background processing of Nomad stream events.
 type NomadEventArgs struct {
-	Topic   string          `json:"topic"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-	Index   uint64          `json:"index,omitempty"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty" river:"unique"`
+	Topic          string          `json:"topic"`
+	Type           string          `json:"type"`
+	Payload        json.RawMessage `json:"payload"`
+	Index          uint64          `json:"index,omitempty"`
 }
 
 func (NomadEventArgs) Kind() string {
 	return "nomad_event"
+}
+
+func (NomadEventArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts: river.UniqueOpts{
+			ByPeriod: 15 * time.Minute,
+		},
+	}
 }
 
 // NomadEventWorker processes Nomad deployment and allocation events from River.
@@ -763,7 +793,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 				)
 			),
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3 AND status NOT IN ('closed', 'conflict')
+		WHERE repo = $2 AND pr_number = $3 AND status NOT IN ('closed', 'conflict', 'deployed')
 		RETURNING target_id;
 	`
 	var targetID string
@@ -1342,6 +1372,8 @@ type RouterServer struct {
 	dispatcher         OutboundDispatcher
 	onProcessed        func(event, delivery string)
 	conflictCheckDelay time.Duration
+	deployStartedMu    sync.Mutex
+	deployStartedCache map[string]time.Time
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -1353,11 +1385,32 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 		cfg:                cfg,
 		httpClient:         client,
 		conflictCheckDelay: 2 * time.Second,
+		deployStartedCache: make(map[string]time.Time),
 	}
 	if len(riverClient) > 0 {
 		s.riverClient = riverClient[0]
 	}
 	return s
+}
+
+func (s *RouterServer) shouldSendDeployStarted(repo string, prNum int, jobName, commitSHA string) bool {
+	key := fmt.Sprintf("%s:%d:%s:%s", repo, prNum, jobName, commitSHA)
+	s.deployStartedMu.Lock()
+	defer s.deployStartedMu.Unlock()
+	if s.deployStartedCache == nil {
+		s.deployStartedCache = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for k, t := range s.deployStartedCache {
+		if now.Sub(t) > 10*time.Minute {
+			delete(s.deployStartedCache, k)
+		}
+	}
+	if last, exists := s.deployStartedCache[key]; exists && now.Sub(last) < 5*time.Minute {
+		return false
+	}
+	s.deployStartedCache[key] = now
+	return true
 }
 
 // SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
@@ -1588,8 +1641,23 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	}
 
 	if s.riverClient != nil {
-		args := HangarWebhookArgs{Event: evt}
-		if _, err := s.riverClient.Insert(r.Context(), args, &river.InsertOpts{MaxAttempts: 5}); err != nil {
+		var idempotencyKey string
+		if evt.CommitSHA != "" && evt.JobName != "" {
+			idempotencyKey = fmt.Sprintf("%s:%s:%s:%s", evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
+		} else {
+			idempotencyKey = randomNonce()
+		}
+		args := HangarWebhookArgs{
+			IdempotencyKey: idempotencyKey,
+			Event:          evt,
+		}
+		opts := &river.InsertOpts{
+			MaxAttempts: 5,
+			UniqueOpts: river.UniqueOpts{
+				ByPeriod: 15 * time.Minute,
+			},
+		}
+		if _, err := s.riverClient.Insert(r.Context(), args, opts); err != nil {
 			log.Printf("[webhooks-router] [hangar] ERROR: failed to insert job into river: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
@@ -1718,16 +1786,20 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	}
 
 	if evt.Event == "deploy_started" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		targetID := evt.TargetID
-		msg := fmt.Sprintf("🚀 %sStarting deploy for %s", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
-		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-			ChannelID: targetID,
-			Content:   msg,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_started direct message: %v", err)
-			return &evt, fmt.Errorf("dispatch deploy_started direct message: %w", err)
+		if s.shouldSendDeployStarted(evt.Repo, evt.PRNumber, evt.JobName, evt.CommitSHA) {
+			targetID := evt.TargetID
+			msg := fmt.Sprintf("🚀 %sStarting deploy for %s", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
+			if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+				ChannelID: targetID,
+				Content:   msg,
+			}); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_started direct message: %v", err)
+				return &evt, fmt.Errorf("dispatch deploy_started direct message: %w", err)
+			}
+			log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
+		} else {
+			log.Printf("[webhooks-router] [dispatcher] suppressing duplicate deploy_started direct message for %s#%d job=%s sha=%s", evt.Repo, evt.PRNumber, evt.JobName, evt.CommitSHA)
 		}
-		log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
 	} else if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
 			return &evt, err

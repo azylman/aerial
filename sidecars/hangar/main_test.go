@@ -6730,10 +6730,25 @@ func TestStartImageRolloutLoop_DebouncedExecution(t *testing.T) {
 	var runMu sync.Mutex
 	evtCh := make(chan HangarDeployEvent, 10)
 
+	mockRegistryClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
 	d := NewDaemon(DaemonConfig{
-		Repos:     []string{tmpDir},
-		ComposeDir: tmpDir,
-		ConfigDir:  tmpDir,
+		Repos:          []string{tmpDir},
+		ComposeDir:     tmpDir,
+		ConfigDir:      tmpDir,
+		RegistryClient: mockRegistryClient,
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 			runMu.Lock()
 			runCalls = append(runCalls, strings.Join(args, " "))
@@ -6812,10 +6827,25 @@ func TestStartImageRolloutLoop_PanicRecovery(t *testing.T) {
 	var runCount int
 	var runMu sync.Mutex
 
+	mockRegistryClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
 	d := NewDaemon(DaemonConfig{
-		Repos:     []string{tmpDir},
-		ComposeDir: tmpDir,
-		ConfigDir:  tmpDir,
+		Repos:          []string{tmpDir},
+		ComposeDir:     tmpDir,
+		ConfigDir:      tmpDir,
+		RegistryClient: mockRegistryClient,
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 			runMu.Lock()
 			runCount++
@@ -6863,7 +6893,22 @@ func TestStartImageRolloutLoop_PanicRecovery(t *testing.T) {
 }
 
 func TestExecutePendingImageRollouts_Branches(t *testing.T) {
+	mockRegistryClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
 	d := NewDaemon(DaemonConfig{
+		RegistryClient: mockRegistryClient,
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 			return []byte("Evaluation ID: 12345"), nil, nil
 		},
@@ -6906,8 +6951,23 @@ func TestExecutePendingImageRollouts_HangarLast(t *testing.T) {
 	var mu sync.Mutex
 	var executedJobs []string
 
+	mockRegistryClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
 	d := NewDaemon(DaemonConfig{
-		ConfigDir: tmpDir,
+		ConfigDir:      tmpDir,
+		RegistryClient: mockRegistryClient,
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 			if len(args) >= 3 && args[0] == "job" && args[1] == "restart" {
 				mu.Lock()
@@ -6942,6 +7002,85 @@ func TestExecutePendingImageRollouts_HangarLast(t *testing.T) {
 	}
 	if executedJobs[0] != "webhooks-router" || executedJobs[1] != "hangar" {
 		t.Fatalf("expected webhooks-router first and hangar last, got %v", executedJobs)
+	}
+}
+
+func TestHandleImageReadyEvent_CachesDigestInNomadKnownDigests(t *testing.T) {
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	job := `job "test-caching" {
+		group "test-caching" {
+			task "test-caching" {
+				driver = "docker"
+				config {
+					image = "ghcr.io/azylman/test-caching:latest"
+				}
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "test-caching.nomad"), []byte(job), 0644)
+
+	expectedDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	mockRegistryClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", expectedDigest)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir:      tmpDir,
+		RegistryClient: mockRegistryClient,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: 12345"), nil, nil
+		},
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			if evt.Event == "deploy_started" {
+				evtCh <- evt
+			}
+			return nil
+		},
+	})
+
+	_, code := d.ExecuteImageReadyEvent(context.Background(), ImageReadyEventRequest{
+		Image:     "ghcr.io/azylman/test-caching:latest",
+		Repo:      "azylman/aerial",
+		CommitSHA: "testsha",
+		PRNumber:  123,
+	})
+
+	if code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 from ExecuteImageReadyEvent, got %d", code)
+	}
+
+	d.nomadMu.Lock()
+	cachedDigest := d.nomadKnownDigests["test-caching:ghcr.io/azylman/test-caching:latest"]
+	d.nomadMu.Unlock()
+
+	if cachedDigest != expectedDigest {
+		t.Errorf("expected cached digest %q, got %q", expectedDigest, cachedDigest)
+	}
+
+	var dispatchedEvt HangarDeployEvent
+	select {
+	case dispatchedEvt = <-evtCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for deploy_started event dispatch")
+	}
+
+	if dispatchedEvt.Digest != expectedDigest {
+		t.Errorf("expected dispatched event digest %q, got %q", expectedDigest, dispatchedEvt.Digest)
 	}
 }
 
