@@ -1671,19 +1671,8 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
 	} else if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		cleanRepo := strings.ToLower(strings.TrimSpace(evt.Repo))
-		if strings.Contains(cleanRepo, "aerial-config") {
-			msg := fmt.Sprintf("📦 %sConfiguration reloaded and healthy for %s", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
-			if dmErr := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-				ChannelID: evt.TargetID,
-				Content:   msg,
-			}); dmErr != nil {
-				log.Printf("[webhooks-router] [dispatcher] warning dispatching config reload direct message: %v", dmErr)
-			}
-		} else {
-			if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
-				return &evt, err
-			}
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
+			return &evt, err
 		}
 	} else if evt.Event == "deploy_rollback" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID

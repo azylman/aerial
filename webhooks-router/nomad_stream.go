@@ -44,6 +44,20 @@ type NomadDeploymentEventPayload struct {
 	} `json:"Deployment"`
 }
 
+// NomadEvaluationEventPayload captures evaluation status updates from Nomad.
+type NomadEvaluationEventPayload struct {
+	Evaluation struct {
+		ID                string                 `json:"ID"`
+		JobID             string                 `json:"JobID"`
+		Status            string                 `json:"Status"` // "complete", "failed", "blocked", "canceled"
+		StatusDescription string                 `json:"StatusDescription"`
+		DeploymentID      string                 `json:"DeploymentID"`
+		BlockedEval       string                 `json:"BlockedEval"`
+		FailedTGAllocs    map[string]interface{} `json:"FailedTGAllocs"`
+	} `json:"Evaluation"`
+}
+
+
 // NomadTaskEvent captures task lifecycle events within an allocation.
 type NomadTaskEvent struct {
 	Type           string `json:"Type"`
@@ -174,7 +188,7 @@ func (sub *NomadStreamSubscriber) consumeStream(ctx context.Context) error {
 	idx := sub.lastIndex
 	sub.mu.Unlock()
 
-	streamURL := fmt.Sprintf("%s/v1/event/stream?topic=Deployment:*&topic=Allocation:*", sub.nomadAddr)
+	streamURL := fmt.Sprintf("%s/v1/event/stream?topic=Deployment:*&topic=Allocation:*&topic=Evaluation:*", sub.nomadAddr)
 	if idx > 0 {
 		streamURL += fmt.Sprintf("&index=%d", idx)
 	}
@@ -279,6 +293,23 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		if alloc.DesiredStatus != "run" || alloc.ClientStatus != "running" {
 			return
 		}
+	case "Evaluation":
+		var evalPayload NomadEvaluationEventPayload
+		if err := json.Unmarshal(event.Payload, &evalPayload); err != nil {
+			return
+		}
+		eval := evalPayload.Evaluation
+		if strings.TrimSpace(eval.JobID) == "" {
+			return
+		}
+		if len(eval.FailedTGAllocs) > 0 || eval.BlockedEval != "" ||
+			strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled") || strings.EqualFold(eval.Status, "blocked") {
+			// Pass through to River/ProcessNomadEvent for failure handling
+		} else if strings.EqualFold(eval.Status, "complete") && strings.TrimSpace(eval.DeploymentID) == "" {
+			// In-place complete evaluation; pass through for success handling
+		} else {
+			return
+		}
 	default:
 		// Drop unhandled topics immediately
 		return
@@ -328,6 +359,24 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
 		}
 		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" && s.isNomadJobHealthy(ctx, alloc.JobID) {
 			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
+		}
+	case "Evaluation":
+		var evalPayload NomadEvaluationEventPayload
+		if err := json.Unmarshal(rawPayload, &evalPayload); err != nil {
+			return fmt.Errorf("unmarshal nomad evaluation payload: %w", err)
+		}
+		eval := evalPayload.Evaluation
+		if len(eval.FailedTGAllocs) > 0 || eval.BlockedEval != "" ||
+			strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled") || strings.EqualFold(eval.Status, "blocked") {
+			desc := eval.StatusDescription
+			if desc == "" && len(eval.FailedTGAllocs) > 0 {
+				desc = fmt.Sprintf("failed task group allocations: %v", eval.FailedTGAllocs)
+			}
+			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, desc)
+		} else if strings.EqualFold(eval.Status, "complete") && strings.TrimSpace(eval.DeploymentID) == "" {
+			if s.isNomadJobHealthy(ctx, eval.JobID) {
+				return s.HandleNomadJobSuccess(ctx, eval.JobID, eval.ID)
+			}
 		}
 	}
 	return nil
@@ -409,20 +458,9 @@ func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID s
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID)
 
 	if IsValidDiscordSnowflake(targetID) && s.dispatcher != nil {
-		cleanRepo := strings.ToLower(strings.TrimSpace(repo))
-		if strings.Contains(cleanRepo, "aerial-config") {
-			msg := fmt.Sprintf("📦 %sConfiguration reloaded and healthy for %s", formatDirectMessagePrefix(prNumber, repo), cleanJob)
-			if dmErr := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-				ChannelID: targetID,
-				Content:   msg,
-			}); dmErr != nil {
-				log.Printf("[webhooks-router] [dispatcher] warning dispatching config reload direct message: %v", dmErr)
-			}
-		} else {
-			if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching deployment success prompt for %s: %v", cleanJob, err)
-				return err
-			}
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching deployment success prompt for %s: %v", cleanJob, err)
+			return err
 		}
 	}
 	return nil
