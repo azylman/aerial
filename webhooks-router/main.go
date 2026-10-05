@@ -1378,8 +1378,6 @@ type RouterServer struct {
 	dispatcher         OutboundDispatcher
 	onProcessed        func(event, delivery string)
 	conflictCheckDelay time.Duration
-	deployStartedMu    sync.Mutex
-	deployStartedCache map[string]time.Time
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -1391,32 +1389,11 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 		cfg:                cfg,
 		httpClient:         client,
 		conflictCheckDelay: 2 * time.Second,
-		deployStartedCache: make(map[string]time.Time),
 	}
 	if len(riverClient) > 0 {
 		s.riverClient = riverClient[0]
 	}
 	return s
-}
-
-func (s *RouterServer) shouldSendDeployStarted(repo string, prNum int, jobName, commitSHA string) bool {
-	key := fmt.Sprintf("%s:%d:%s:%s", repo, prNum, jobName, commitSHA)
-	s.deployStartedMu.Lock()
-	defer s.deployStartedMu.Unlock()
-	if s.deployStartedCache == nil {
-		s.deployStartedCache = make(map[string]time.Time)
-	}
-	now := time.Now()
-	for k, t := range s.deployStartedCache {
-		if now.Sub(t) > 10*time.Minute {
-			delete(s.deployStartedCache, k)
-		}
-	}
-	if last, exists := s.deployStartedCache[key]; exists && now.Sub(last) < 5*time.Minute {
-		return false
-	}
-	s.deployStartedCache[key] = now
-	return true
 }
 
 // SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
@@ -1795,20 +1772,16 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	}
 
 	if evt.Event == "deploy_started" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		if s.shouldSendDeployStarted(evt.Repo, evt.PRNumber, evt.JobName, evt.CommitSHA) {
-			targetID := evt.TargetID
-			msg := fmt.Sprintf("🚀 %sStarting deploy for %s", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
-			if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-				ChannelID: targetID,
-				Content:   msg,
-			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_started direct message: %v", err)
-				return &evt, fmt.Errorf("dispatch deploy_started direct message: %w", err)
-			}
-			log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
-		} else {
-			log.Printf("[webhooks-router] [dispatcher] suppressing duplicate deploy_started direct message for %s#%d job=%s sha=%s", evt.Repo, evt.PRNumber, evt.JobName, evt.CommitSHA)
+		targetID := evt.TargetID
+		msg := fmt.Sprintf("🚀 %sStarting deploy for %s", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
+		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+			ChannelID: targetID,
+			Content:   msg,
+		}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_started direct message: %v", err)
+			return &evt, fmt.Errorf("dispatch deploy_started direct message: %w", err)
 		}
+		log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
 	} else if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
 			return &evt, err

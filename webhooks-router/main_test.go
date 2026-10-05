@@ -4787,40 +4787,7 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	}
 }
 
-func TestShouldSendDeployStarted_Deduplication(t *testing.T) {
-	srv := NewRouterServer(Config{}, nil)
-
-	// First call -> true
-	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_abc") {
-		t.Errorf("expected true on initial call")
-	}
-
-	// Immediate duplicate -> false
-	if srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_abc") {
-		t.Errorf("expected false on immediate duplicate call")
-	}
-
-	// Different job -> true
-	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "webhooks-router", "sha_abc") {
-		t.Errorf("expected true for different job")
-	}
-
-	// Different SHA -> true
-	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_def") {
-		t.Errorf("expected true for different commit SHA")
-	}
-
-	// Older than 5 minutes -> true
-	srv.deployStartedMu.Lock()
-	srv.deployStartedCache["azylman/aerial:603:brain:sha_abc"] = time.Now().Add(-6 * time.Minute)
-	srv.deployStartedMu.Unlock()
-
-	if !srv.shouldSendDeployStarted("azylman/aerial", 603, "brain", "sha_abc") {
-		t.Errorf("expected true after 5-minute TTL expiration")
-	}
-}
-
-func TestProcessHangarEvent_DeployStarted_DirectMessageDeduplication(t *testing.T) {
+func TestProcessHangarEvent_DeployStarted_DirectMessage_DispatchAndErrorPropagation(t *testing.T) {
 	srv := NewRouterServer(Config{}, nil)
 	mockDisp := &mockOutboundDispatcher{}
 	srv.SetDispatcher(mockDisp)
@@ -4834,30 +4801,39 @@ func TestProcessHangarEvent_DeployStarted_DirectMessageDeduplication(t *testing.
 		TargetID:  "1555405874565091380",
 	}
 
-	// 1. First event dispatches direct message
+	// 1. Valid deploy_started event dispatches direct message and returns nil error
 	_, err := srv.ProcessHangarEvent(context.Background(), evt)
 	if err != nil {
-		t.Fatalf("unexpected error on first event: %v", err)
+		t.Fatalf("unexpected error on valid event: %v", err)
 	}
 
 	mockDisp.mu.Lock()
-	dmCount1 := len(mockDisp.directMessageCalls)
+	dmCount := len(mockDisp.directMessageCalls)
+	var lastReq DirectMessageRequest
+	if dmCount > 0 {
+		lastReq = mockDisp.directMessageCalls[0]
+	}
 	mockDisp.mu.Unlock()
-	if dmCount1 != 1 {
-		t.Fatalf("expected 1 direct message dispatched, got %d", dmCount1)
+
+	if dmCount != 1 {
+		t.Fatalf("expected 1 direct message dispatched, got %d", dmCount)
+	}
+	if lastReq.ChannelID != evt.TargetID {
+		t.Errorf("expected channel ID %s, got %s", evt.TargetID, lastReq.ChannelID)
+	}
+	expectedContent := "🚀 **(PR: #603, repo: aerial)** Starting deploy for brain"
+	if lastReq.Content != expectedContent {
+		t.Errorf("expected content %q, got %q", expectedContent, lastReq.Content)
 	}
 
-	// 2. Duplicate event within 5 minutes suppresses direct message
+	// 2. Dispatch error propagation (e.g. Brain offline / Discord error) returns error so River will retry
+	mockDisp.directMessageErr = errors.New("brain offline")
 	_, err = srv.ProcessHangarEvent(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("unexpected error on duplicate event: %v", err)
+	if err == nil {
+		t.Fatalf("expected error from ProcessHangarEvent when DispatchDirectMessage fails, got nil")
 	}
-
-	mockDisp.mu.Lock()
-	dmCount2 := len(mockDisp.directMessageCalls)
-	mockDisp.mu.Unlock()
-	if dmCount2 != 1 {
-		t.Fatalf("expected duplicate direct message to be suppressed (count remained 1), got %d", dmCount2)
+	if !strings.Contains(err.Error(), "brain offline") {
+		t.Errorf("expected error to contain 'brain offline', got: %v", err)
 	}
 }
 
@@ -4868,6 +4844,22 @@ func TestRiverUniqueOpts_ByArgs(t *testing.T) {
 	}
 	if hangarOpts.UniqueOpts.ByPeriod != 15*time.Minute {
 		t.Errorf("HangarWebhookArgs InsertOpts expected ByPeriod = 15m, got %v", hangarOpts.UniqueOpts.ByPeriod)
+	}
+
+	// Verify HangarWebhookArgs with explicit IdempotencyKey retains UniqueOpts with ByArgs and ByPeriod
+	hangarWithKey := HangarWebhookArgs{
+		IdempotencyKey: "hangar-deploy-started-603-brain",
+		Event: HangarDeployEvent{
+			Event:    "deploy_started",
+			JobName:  "brain",
+			PRNumber: 603,
+		},
+	}.InsertOpts()
+	if !hangarWithKey.UniqueOpts.ByArgs {
+		t.Errorf("HangarWebhookArgs with IdempotencyKey expected UniqueOpts.ByArgs = true, got false")
+	}
+	if hangarWithKey.UniqueOpts.ByPeriod != 15*time.Minute {
+		t.Errorf("HangarWebhookArgs with IdempotencyKey expected ByPeriod = 15m, got %v", hangarWithKey.UniqueOpts.ByPeriod)
 	}
 
 	nomadOpts := NomadEventArgs{}.InsertOpts()
