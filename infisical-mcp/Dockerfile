@@ -6,7 +6,7 @@ RUN apk add --no-cache tini curl
 
 # Install supergateway and @infisical/mcp, symlink binary, and purge npm/corepack bloat
 RUN --mount=type=cache,target=/root/.npm \
-    npm install -g supergateway@^3.4.0 @infisical/mcp@0.0.24 && \
+    npm install -g supergateway@^4.1.0 @infisical/mcp@0.0.24 && \
     ln -s /usr/local/bin/mcp /usr/local/bin/infisical-mcp && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 

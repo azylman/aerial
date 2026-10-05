@@ -12,7 +12,7 @@ FROM node:22-alpine
 RUN apk add --no-cache tini curl
 
 # Install universal stdio-to-HTTP MCP translation gateway and purge npm/corepack runtime bloat
-RUN npm install -g supergateway@^3.4.0 && \
+RUN npm install -g supergateway@^4.1.0 && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy compiled mcp-nomad Go binary
