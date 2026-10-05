@@ -10,11 +10,11 @@ Aerial is built from the ground up around end-to-end configurability across both
 
 ## Tech Stack
 
-Built in **Go (1.24)** and orchestrated as a resilient bare-metal homelab mesh:
+Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 
 - **Cluster Orchestration**: **HashiCorp Nomad** — Heterogeneous bare-metal cluster managing distributed daemons, batch tasks, and GPU workloads.
 - **Service Discovery & Routing**: **CoreDNS** (internal mesh DNS) + **Nginx** (reverse proxy & edge ingress).
-- **Persistence & Vector Memory**: **PostgreSQL 16 + pgvector** — Multi-turn conversation state, relational persistence, and hybrid RRF search (dense HNSW embeddings + sparse FTS).
+- **Persistence & Vector Memory**: **PostgreSQL 18 + pgvector** — Multi-turn conversation state, relational persistence, and hybrid RRF search (dense HNSW embeddings + sparse FTS).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Nomad batch jobs.
 - **Queuing & Idempotent Ingestion**: **River** — Transactional, PostgreSQL-backed Go job queue powering strictly idempotent webhook processing and event dispatch.
 - **Secrets Management**: **Infisical + Redis** — Centralized secret governance with dynamic runtime injection and zero plaintext disk persistence.
@@ -29,7 +29,7 @@ Built in **Go (1.24)** and orchestrated as a resilient bare-metal homelab mesh:
 ## 1. System Architecture & Topology
 
 Aerial separates generic platform orchestration from private homelab state using a decoupled **Two-Repository Architecture**:
-- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`aerial-brain`), declarative Nomad cluster jobs (`nomad/jobs/*.nomad`), turnkey telemetry stack (VictoriaMetrics, Vector, Grafana), PostgreSQL 16 persistence, CoreDNS service discovery, and outbound MCP microservices.
+- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`aerial-brain`), declarative Nomad cluster jobs (`nomad/jobs/*.nomad`), turnkey telemetry stack (VictoriaMetrics, Vector, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
 - **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user sidecar jobs (`jobs/*.nomad`), custom skills and automation runbooks (`custom-skills/`), modular telemetry scrapes (`victoriametrics/`), platform options (`config.yaml`), persona guidelines (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
@@ -49,7 +49,7 @@ Aerial separates generic platform orchestration from private homelab state using
 │  • Self-Healing GitOps Worker (Proactive CI/CD Remediation)                                 │
 │  • Configurable Multi-Protocol Execution Core: agy-cli, Gemini CLI, etc.                    │
 │  • Laya INT8 ModernBERT-large Ambient Classifier (/v1/systemone)                            │
-│  • PostgreSQL 16 Multi-Turn Thread Memory & Atomic CAS Task State                           │
+│  • PostgreSQL 18 Multi-Turn Thread Memory & Atomic CAS Task State                           │
 │  • Semantic Memory Hybrid RRF (dense pgvector HNSW + sparse FTS lexical search)             │
 │  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -309,13 +309,13 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 ```
 
 ### 1. VictoriaMetrics TSDB (`aerial-victoriametrics`)
-- **Engine**: Single-node VictoriaMetrics (`v1.101.0`) running with 5-year retention (`-retentionPeriod=5y`) and 15s scrape interval.
+- **Engine**: Single-node VictoriaMetrics (`v1.153.0`) running with 5-year retention (`-retentionPeriod=5y`) and 15s scrape interval.
 - **Dynamic Modular Scrapes**: VictoriaMetrics automatically discovers and live-reloads scrape configurations mounted from `/share/aerial-config/victoriametrics/*.yml` every 15 seconds without container restarts (`-promscrape.configCheckInterval=15s`).
 - **Token Interpolation**: Automatically expands environment variables (e.g. `%{HA_METRICS_TOKEN}`) in custom scrape configs.
 
 ### 2. Pre-Provisioned Grafana Dashboards (`http://localhost:8089/grafana/`)
 - **Single-Click Anonymous Admin Access**: Instant dashboard access without login friction.
-- **Persistent Backend**: Dashboards and user settings persist directly in PostgreSQL 16 (`GF_DATABASE_TYPE=postgres`).
+- **Persistent Backend**: Dashboards and user settings persist directly in PostgreSQL 18 (`GF_DATABASE_TYPE=postgres`).
 - **Pre-Provisioned Dashboard Suite**:
   - **`⚡ Aerial Brain & Hangar Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway ping, classifier triage decisions, Ollama vector search durations, GitSync and Hangar reconcile runs.
   - **`🐘 PostgreSQL Overview` (`postgres-overview.json`)**: Active backends, connection pool state, buffer cache hit ratio (>99%), commits/rollbacks, tuple read/write velocity, and lock contention.
@@ -351,7 +351,7 @@ Aerial uses an automated, event-driven GitOps push continuous deployment pipelin
 
 | Service | Port | Description |
 | :--- | :--- | :--- |
-| **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | Dedicated PostgreSQL 16 relational database with `pgvector` extension for production state, CAS task queues, Hybrid RRF semantic memory (dense vector + sparse FTS), PR registry, schedules, and Grafana storage. Production runs exclusively on PostgreSQL. |
+| **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | Dedicated PostgreSQL 18 relational database with `pgvector` extension for production state, CAS task queues, Hybrid RRF semantic memory (dense vector + sparse FTS), PR registry, schedules, and Grafana storage. Production runs exclusively on PostgreSQL. |
 | **`aerial-brain`** | `8080` (Host `8088`) | Multi-protocol Go execution daemon running `agy`, PostgreSQL memory, multiplexed Discord, Voice (`/voice/ask`), and HTTP (`/prompt`) ingress, Prometheus metrics (`:8080/metrics`), and SIGHUP configuration hot-reloading. Mounted `:ro`. |
 | **`aerial-hangar`** | `8087` (Host `8087`) | Dedicated Hangar sidecar daemon managing automated repository synchronization, push GitOps reconciliation for Nomad jobs, image update detection, snapshot rollbacks, and Prometheus metrics. Mounted `:rw`. |
 | **`coredns`** | `53` (Host `53/udp`) | Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`. |

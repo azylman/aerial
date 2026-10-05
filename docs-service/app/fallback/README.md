@@ -29,7 +29,7 @@ Nginx Edge Gateway"]
 
     subgraph Persistence ["💾 Persistence & Memory"]
         Postgres[("aerial-postgres (:5432)
-• PostgreSQL 16 + pgvector
+• PostgreSQL 18 + pgvector
 • Atomic CAS Task Queue
 • Vector RAG (384-dim)
 • Schedules & Grafana DB")]
