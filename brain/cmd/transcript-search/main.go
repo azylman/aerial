@@ -195,7 +195,7 @@ func executeSearchHTTP(ctx context.Context, cfg CLIConfig) (transcript.SearchRes
 	q.Set("limit", strconv.Itoa(cfg.Limit))
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := newRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return transcript.SearchResult{}, err
 	}
@@ -224,9 +224,11 @@ func executeSearchHTTP(ctx context.Context, cfg CLIConfig) (transcript.SearchRes
 	return res, nil
 }
 
+var newRequestWithContext = http.NewRequestWithContext
+
 func executeStatsHTTP(ctx context.Context, cfg CLIConfig) (map[string]any, error) {
 	endpoint := fmt.Sprintf("%s/api/transcripts/stats", strings.TrimRight(cfg.BaseURL, "/"))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -254,8 +256,13 @@ func executeStatsHTTP(ctx context.Context, cfg CLIConfig) (map[string]any, error
 	return stats, nil
 }
 
+var (
+	initDBFn          = db.InitDB
+	jsonMarshalIndent = json.MarshalIndent
+)
+
 var newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
-	sqlDB, err := db.InitDB(pgURL)
+	sqlDB, err := initDBFn(pgURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres connect failed: %w", err)
 	}
@@ -288,7 +295,7 @@ func runCLI(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("failed fetching stats: %w", err)
 		}
 		if cfg.JSON {
-			b, err := json.MarshalIndent(stats, "", "  ")
+			b, err := jsonMarshalIndent(stats, "", "  ")
 			if err != nil {
 				return err
 			}
@@ -330,7 +337,7 @@ func runCLI(ctx context.Context, args []string, out io.Writer) error {
 	}
 
 	if cfg.JSON {
-		b, err := json.MarshalIndent(res, "", "  ")
+		b, err := jsonMarshalIndent(res, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -346,7 +353,10 @@ func runCLI(ctx context.Context, args []string, out io.Writer) error {
 	return nil
 }
 
-func runMain(ctx context.Context, args []string, out, errOut io.Writer) int {
+func runMain(args []string, out, errOut io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	if err := runCLI(ctx, args, out); err != nil {
 		_, _ = fmt.Fprintf(errOut, "Error: %v\n", err) //nolint:errcheck
 		return 1
@@ -355,8 +365,5 @@ func runMain(ctx context.Context, args []string, out, errOut io.Writer) int {
 }
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	os.Exit(runMain(ctx, os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runMain(os.Args[1:], os.Stdout, os.Stderr))
 }

@@ -70,11 +70,11 @@ if (-not $hasDocker -and (Get-Command "wsl" -ErrorAction SilentlyContinue)) {
 
 # Branch A: Active Docker Daemon -> Full Linux Container Coverage Execution
 if ($hasDocker) {
-    Write-Host "   [Docker] Detected active Docker daemon. Running Linux coverage in golang:1.24..." -ForegroundColor DarkCyan
+    Write-Host "   [Docker] Detected active Docker daemon. Running Linux coverage in golang:1.27.1..." -ForegroundColor DarkCyan
     $svcArg = if ($Service) { "--service $Service" } else { "" }
     $checkArg = if ($Check) { "--check" } else { "" }
     $gapsArg = if ($Gaps) { "--gaps" } else { "" }
-    docker run --rm -v "${normRepoRoot}:/app" -w /app golang:1.24 sh -c "sh scripts/check-coverage.sh $svcArg $checkArg $gapsArg"
+    docker run --rm -v "${normRepoRoot}:/app" -w /app golang:1.27.1 sh -c "sh scripts/check-coverage.sh $svcArg $checkArg $gapsArg"
     if ($LASTEXITCODE -ne 0) {
         throw "Linux test coverage check failed inside Docker container"
     }

@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -427,7 +429,7 @@ func TestRunMain(t *testing.T) {
 		}))
 		defer server.Close()
 
-		code := runMain(context.Background(), []string{"stats", "--url", server.URL}, &out, &errOut)
+		code := runMain([]string{"stats", "--url", server.URL}, &out, &errOut)
 		if code != 0 {
 			t.Fatalf("expected exit code 0, got %d, err: %s", code, errOut.String())
 		}
@@ -435,7 +437,7 @@ func TestRunMain(t *testing.T) {
 
 	t.Run("Failure", func(t *testing.T) {
 		var out, errOut bytes.Buffer
-		code := runMain(context.Background(), []string{"search", "--url", "http://127.0.0.1:59998"}, &out, &errOut)
+		code := runMain([]string{"search", "--url", "http://127.0.0.1:59998"}, &out, &errOut)
 		if code != 1 {
 			t.Fatalf("expected exit code 1, got %d", code)
 		}
@@ -553,4 +555,119 @@ type failingWriter struct{}
 
 func (f *failingWriter) Write(p []byte) (n int, err error) {
 	return 0, errors.New("simulated disk full write error")
+}
+
+func TestHTTPConnectionTruncatedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "500")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("truncated"))
+		if hijacker, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hijacker.Hijack()
+			_ = conn.Close()
+		}
+	}))
+	defer server.Close()
+
+	t.Run("ExecuteSearchHTTP_TruncatedBody", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: server.URL, Query: "test"}
+		_, err := executeSearchHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on truncated body in executeSearchHTTP")
+		}
+	})
+
+	t.Run("ExecuteStatsHTTP_TruncatedBody", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: server.URL}
+		_, err := executeStatsHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on truncated body in executeStatsHTTP")
+		}
+	})
+}
+
+func TestNewRequestWithContextErrors(t *testing.T) {
+	oldFn := newRequestWithContext
+	defer func() { newRequestWithContext = oldFn }()
+
+	newRequestWithContext = func(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+		return nil, errors.New("simulated request creation failure")
+	}
+
+	t.Run("ExecuteSearchHTTP_NewRequestError", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: "http://localhost:8080", Query: "test"}
+		_, err := executeSearchHTTP(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
+			t.Fatalf("expected simulated error, got %v", err)
+		}
+	})
+
+	t.Run("ExecuteStatsHTTP_NewRequestError", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: "http://localhost:8080"}
+		_, err := executeStatsHTTP(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
+			t.Fatalf("expected simulated error, got %v", err)
+		}
+	})
+}
+
+func TestJSONMarshalIndentErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "stats") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_sessions": 10, "status": "ok"})
+		} else {
+			_ = json.NewEncoder(w).Encode(transcript.SearchResult{Query: "test", Mode: "auto"})
+		}
+	}))
+	defer server.Close()
+
+	oldFn := jsonMarshalIndent
+	defer func() { jsonMarshalIndent = oldFn }()
+
+	jsonMarshalIndent = func(v any, prefix, indent string) ([]byte, error) {
+		return nil, errors.New("simulated json marshal indent error")
+	}
+
+	t.Run("RunCLI_StatsJSONMarshalError", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"stats", "--json", "--url", server.URL}, &buf)
+		if err == nil || !strings.Contains(err.Error(), "simulated json marshal indent error") {
+			t.Fatalf("expected marshal error in stats json, got %v", err)
+		}
+	})
+
+	t.Run("RunCLI_SearchJSONMarshalError", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"search", "test", "--json", "--url", server.URL}, &buf)
+		if err == nil || !strings.Contains(err.Error(), "simulated json marshal indent error") {
+			t.Fatalf("expected marshal error in search json, got %v", err)
+		}
+	})
+}
+
+func TestNewDirectStoreFnSuccess(t *testing.T) {
+	oldInit := initDBFn
+	defer func() { initDBFn = oldInit }()
+
+	sqlDB, err := sql.Open("pgx", "postgres://user:pass@127.0.0.1:5432/aerial?sslmode=disable")
+	if err != nil {
+		t.Fatalf("failed creating test sql.DB: %v", err)
+	}
+
+	initDBFn = func(dsnOrCfg any) (*sql.DB, error) {
+		return sqlDB, nil
+	}
+
+	store, closeFn, err := newDirectStoreFn("postgres://mock")
+	if err != nil {
+		t.Fatalf("unexpected error from newDirectStoreFn: %v", err)
+	}
+	if store == nil {
+		t.Fatal("expected non-nil store")
+	}
+	if closeFn == nil {
+		t.Fatal("expected non-nil closeFn")
+	}
+	closeFn()
 }

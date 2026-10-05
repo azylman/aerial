@@ -362,7 +362,7 @@ func TestIsThreadAlreadyExistsError_TableDriven(t *testing.T) {
 		},
 		{
 			name: "wrapped RESTError",
-			err: fmt.Errorf("outer wrapper: %w", &discordgo.RESTError{
+			err: fmt.Errorf("outer wrapper: %w", discordgo.RESTError{
 				Message: &discordgo.APIErrorMessage{Code: 160004},
 			}),
 			want: true,

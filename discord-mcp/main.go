@@ -104,7 +104,9 @@ func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, del
 			return false
 		default:
 		}
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+upstreamPort, 200*time.Millisecond)
+		var d net.Dialer
+		d.Timeout = 200 * time.Millisecond
+		conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:"+upstreamPort)
 		if err == nil {
 			if closeErr := conn.Close(); closeErr != nil {
 				log.Printf("[Discord-MCP] Warning closing probe connection: %v", closeErr)
@@ -206,7 +208,8 @@ func RunProxyApp(ctx context.Context, cfg *Config) error {
 	upstreamBase := FormatUpstreamURL(cfg.UpstreamPort)
 	pollUpstreamFn(ctx, cfg.UpstreamPort, 20, 50*time.Millisecond)
 
-	ln, err := net.Listen("tcp", ":"+cfg.Port)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {
 		killProcess(cmd)
 		return err

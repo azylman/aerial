@@ -309,6 +309,19 @@ func IsThreadAlreadyExistsError(err error) bool {
 		}
 		return false
 	}
+	var restErrVal discordgo.RESTError
+	if errors.As(err, &restErrVal) {
+		if restErrVal.Message != nil && restErrVal.Message.Code == discordErrCodeThreadAlreadyCreated {
+			return true
+		}
+		if len(restErrVal.ResponseBody) > 0 {
+			bodyStr := strings.ToLower(string(restErrVal.ResponseBody))
+			if strings.Contains(bodyStr, "160004") || strings.Contains(bodyStr, "already been created") {
+				return true
+			}
+		}
+		return false
+	}
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "160004") || strings.Contains(errStr, "already been created")
 }

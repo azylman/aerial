@@ -77,7 +77,7 @@ function Run-GoVet($svc) {
             Pop-Location
         }
     } elseif ($hasDocker) {
-        docker run --rm -v "${svcPath}:/app" -w /app golang:1.24 go vet ./...
+        docker run --rm -v "${svcPath}:/app" -w /app golang:1.27.1 go vet ./...
         if ($LASTEXITCODE -ne 0) { throw "go vet (docker) failed on $svc" }
     }
 }
@@ -90,7 +90,7 @@ function Run-GolangCILint($svc, $targetPkg = "./...") {
         Push-Location $svcPath
         $prevToolchain = $env:GOTOOLCHAIN
         try {
-            $env:GOTOOLCHAIN = "go1.24.1"
+            $env:GOTOOLCHAIN = "go1.27.1"
             & golangci-lint run --path-prefix="$normSvc" --config "$repoRoot/.golangci.yml" $targetPkg
             if ($LASTEXITCODE -ne 0) { throw "golangci-lint failed on $svc ($targetPkg)" }
         } finally {
@@ -102,7 +102,7 @@ function Run-GolangCILint($svc, $targetPkg = "./...") {
             Pop-Location
         }
     } elseif ($hasDocker) {
-        docker run --rm -v "${repoRoot}:/workspace" -w "/workspace/$svc" golangci/golangci-lint:v1.64.5 golangci-lint run --path-prefix="$normSvc" --config /workspace/.golangci.yml $targetPkg
+        docker run --rm -v "${repoRoot}:/workspace" -w "/workspace/$svc" golangci/golangci-lint:v2.14.0 golangci-lint run --path-prefix="$normSvc" --config /workspace/.golangci.yml $targetPkg
         if ($LASTEXITCODE -ne 0) { throw "golangci-lint (docker) failed on $svc" }
     } elseif ($hasGo) {
         Write-Host "   (golangci-lint not found, running go vet for $svc)" -ForegroundColor Yellow
@@ -116,7 +116,7 @@ function Ensure-Deadcode {
     if ($script:hasDeadcode) { return }
     if ($hasGo) {
         Write-Host "   [deadcode] Installing deadcode via go install..." -ForegroundColor Yellow
-        & go install golang.org/x/tools/cmd/deadcode@v0.30.0
+        & go install golang.org/x/tools/cmd/deadcode@v0.51.0
         if ($goBinPath -and (Test-Path (Join-Path $goBinPath "deadcode.exe"))) {
             if (-not ($env:PATH -split ';' -contains $goBinPath)) {
                 $env:PATH = "$goBinPath;" + $env:PATH
@@ -188,7 +188,7 @@ function Run-GoTest($svc) {
             Pop-Location
         }
     } elseif ($hasDocker) {
-        docker run --rm -v "${svcPath}:/app" -w /app golang:1.24 go test -v ./...
+        docker run --rm -v "${svcPath}:/app" -w /app golang:1.27.1 go test -v ./...
         if ($LASTEXITCODE -ne 0) { throw "go test (docker) failed on $svc" }
     } else {
         throw "Neither go nor docker found in PATH."
@@ -315,7 +315,7 @@ if (Test-Path $checkCovScript) {
         & sh $checkCovScript $covArgs
         if ($LASTEXITCODE -ne 0) { throw "Coverage threshold verification failed" }
     } elseif ($hasDocker) {
-        docker run --rm -v "${repoRoot}:/app" -w /app golang:1.24 sh scripts/check-coverage.sh $covArgs
+        docker run --rm -v "${repoRoot}:/app" -w /app golang:1.27.1 sh scripts/check-coverage.sh $covArgs
         if ($LASTEXITCODE -ne 0) { throw "Coverage threshold verification (docker) failed" }
     }
 }

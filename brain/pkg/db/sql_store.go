@@ -19,7 +19,7 @@ func isDBTXNil(d DBTX) bool {
 		return true
 	}
 	v := reflect.ValueOf(d)
-	return v.Kind() == reflect.Ptr && v.IsNil()
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // NewSQLStore creates a new Store instance wrapping the provided *sql.DB connection.
