@@ -8,6 +8,24 @@ Aerial is built from the ground up around end-to-end configurability across both
 
 ---
 
+## Tech Stack
+
+Built in **Go (1.24)** and orchestrated as a resilient bare-metal homelab mesh:
+
+- **Cluster Orchestration**: **HashiCorp Nomad** — Heterogeneous bare-metal cluster managing distributed daemons, batch tasks, and GPU workloads.
+- **Service Discovery & Routing**: **CoreDNS** (internal mesh DNS) + **Nginx** (reverse proxy & edge ingress).
+- **Persistence & Vector Memory**: **PostgreSQL 16 + pgvector** — Multi-turn conversation state, relational persistence, and hybrid RRF search (dense HNSW embeddings + sparse FTS).
+- **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Nomad batch jobs.
+- **Queuing & Idempotent Ingestion**: **River** — Transactional, PostgreSQL-backed Go job queue powering strictly idempotent webhook processing and event dispatch.
+- **Secrets Management**: **Infisical + Redis** — Centralized secret governance with dynamic runtime injection and zero plaintext disk persistence.
+- **Observability & Telemetry**:
+  - **Metrics**: **VictoriaMetrics** (TSDB) + **Grafana** (telemetry HUDs) + Prometheus Exporters (**cAdvisor**, **Node Exporter**)
+  - **Logs**: **Vector** (collection & transforms) + **OpenObserve** (structured SQL log analytics)
+- **Agent Protocols & Extensibility**: **Model Context Protocol (MCP)** — Streamable HTTP microservices providing modular tool boundaries across the platform.
+- **Edge AI & Speech**: **Faster-Whisper (CUDA)** + **Kokoro-82M TTS** over Wyoming protocol, with quantized **ModernBERT** ambient triage.
+
+---
+
 ## 1. System Architecture & Topology
 
 Aerial separates generic platform orchestration from private homelab state using a decoupled **Two-Repository Architecture**:
