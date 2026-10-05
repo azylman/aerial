@@ -560,3 +560,71 @@ func TestDynamicVoicePool_EdgeCasesAndUncoveredBranches(t *testing.T) {
 	}()
 	dynCloseRace.MarkDirty()
 }
+
+type mockRotatorVoicePool struct {
+	mockVoicePool
+	shouldRotate bool
+	rotReason    string
+	rotatedSess  AgentSession
+	rotateErr    error
+}
+
+func (m *mockRotatorVoicePool) ShouldRotateSession(sess AgentSession) (bool, string) {
+	return m.shouldRotate, m.rotReason
+}
+
+func (m *mockRotatorVoicePool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+	return m.rotatedSess, m.rotateErr
+}
+
+func TestDynamicVoicePool_SessionRotator(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil receiver
+	var nilPool *DynamicVoicePool
+	if should, _ := nilPool.ShouldRotateSession(nil); should {
+		t.Error("expected nil pool ShouldRotateSession to return false")
+	}
+	if _, err := nilPool.RotateSession(ctx, "k"); err == nil {
+		t.Error("expected nil pool RotateSession to return error")
+	}
+
+	// 2. Underlying pool does not implement SessionRotator
+	nonRot := newMockVoicePool("m1")
+	dynNonRot := NewDynamicVoicePoolWithInitial(nonRot, "fp-1", nil)
+	if should, _ := dynNonRot.ShouldRotateSession(nil); should {
+		t.Error("expected non-rotator pool ShouldRotateSession to return false")
+	}
+	rot, err := dynNonRot.RotateSession(ctx, "k")
+	if err != nil || rot != nil {
+		t.Errorf("expected RotateSession on non-rotator to return nil, nil, got (%v, %v)", rot, err)
+	}
+
+	// 3. Underlying pool implements SessionRotator
+	fakeSess := &mockVoiceSession{sessID: "rot-s", targetKey: "k"}
+	rotPool := &mockRotatorVoicePool{
+		mockVoicePool: *newMockVoicePool("m2"),
+		shouldRotate:  true,
+		rotReason:     "test reason",
+		rotatedSess:   fakeSess,
+	}
+	dynRot := NewDynamicVoicePoolWithInitial(rotPool, "fp-2", nil)
+	if should, reason := dynRot.ShouldRotateSession(fakeSess); !should || reason != "test reason" {
+		t.Errorf("expected ShouldRotateSession to delegate, got (%v, %q)", should, reason)
+	}
+	sess, err := dynRot.RotateSession(ctx, "k")
+	if err != nil || sess != fakeSess {
+		t.Errorf("expected RotateSession to delegate, got (%v, %v)", sess, err)
+	}
+
+	// 4. Closed dynamic pool
+	if err := dynRot.Close(); err != nil {
+		t.Fatalf("unexpected Close error: %v", err)
+	}
+	if should, _ := dynRot.ShouldRotateSession(fakeSess); should {
+		t.Error("expected closed pool ShouldRotateSession to return false")
+	}
+	if _, err := dynRot.RotateSession(ctx, "k"); err == nil {
+		t.Error("expected closed pool RotateSession to return error")
+	}
+}

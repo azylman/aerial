@@ -1521,7 +1521,7 @@ func TestUnifiedProcessPool_CloseConcurrentMultipleDaemons(t *testing.T) {
 	}
 }
 
-func TestUnifiedProcessPool_TurnCompletionRotationHook(t *testing.T) {
+func TestUnifiedProcessPool_SessionRotator(t *testing.T) {
 	var spawnCounter atomic.Int32
 
 	mock := &MockDaemonSpawner{
@@ -1545,55 +1545,79 @@ func TestUnifiedProcessPool_TurnCompletionRotationHook(t *testing.T) {
 	defer pool.Close()
 
 	ctx := context.Background()
+
+	// 1. ShouldRotateSession with nil session or nil pool
+	if should, _ := pool.ShouldRotateSession(nil); should {
+		t.Error("expected ShouldRotateSession(nil) to return false")
+	}
+	var nilPool *UnifiedProcessPool
+	if should, _ := nilPool.ShouldRotateSession(nil); should {
+		t.Error("expected (*UnifiedProcessPool)(nil).ShouldRotateSession to return false")
+	}
+
 	d1, err := pool.GetOrCreate(ctx, "target-turn-hook", "")
 	if err != nil {
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
 
-	// 1. If not dirty, onTurnFinished callback does not rotate
-	sink1 := newMockTurnSink()
-	turn1 := &TurnContext{TurnID: "t-1", Sink: sink1, CreatedAt: time.Now()}
-	d1.inflight = append(d1.inflight, turn1)
-	d1.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"ok"}}`)
-	time.Sleep(50 * time.Millisecond)
-
-	curDaemon, ok := pool.Get("target-turn-hook")
-	if !ok || curDaemon != d1 {
-		t.Fatalf("expected d1 to still be current when not dirty")
+	// 2. Clean daemon does not need rotation
+	if should, _ := pool.ShouldRotateSession(d1); should {
+		t.Error("expected clean daemon ShouldRotateSession to return false")
 	}
 
-	// 2. Mark dirty and dispatch turn completion
+	// 3. Mark dirty: ShouldRotateSession reports true
 	d1.MarkDirty()
-	sink2 := newMockTurnSink()
-	turn2 := &TurnContext{TurnID: "t-2", Sink: sink2, CreatedAt: time.Now()}
-	d1.inflight = append(d1.inflight, turn2)
-	d1.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"ok"}}`)
-
-	// Wait for background rotation to replace d1
-	var rotatedDaemon *StreamingDaemon
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		d, ok := pool.Get("target-turn-hook")
-		if ok && d != d1 && d.State() != StateClosed {
-			rotatedDaemon = d
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	should, reason := pool.ShouldRotateSession(d1)
+	if !should {
+		t.Error("expected dirty daemon ShouldRotateSession to return true")
 	}
-	if rotatedDaemon == nil {
-		t.Fatalf("timed out waiting for background rotation on turn completion")
+	if !strings.Contains(reason, "dirty") {
+		t.Errorf("expected reason to mention dirty, got: %s", reason)
+	}
+
+	// 4. Synchronously rotate session
+	rotatedSess, err := pool.RotateSession(ctx, "target-turn-hook")
+	if err != nil {
+		t.Fatalf("unexpected RotateSession error: %v", err)
+	}
+	if rotatedSess == nil {
+		t.Fatal("expected non-nil rotated session")
+	}
+	if rotatedSess == d1 {
+		t.Fatal("expected rotated session to be different from old daemon")
+	}
+	if d1.State() != StateClosed {
+		t.Errorf("expected old daemon to be closed, got state: %v", d1.State())
+	}
+
+	// Rotated daemon is registered in the pool as current
+	curDaemon, ok := pool.Get("target-turn-hook")
+	if !ok || curDaemon != rotatedSess {
+		t.Errorf("expected rotated session to be registered in pool as current daemon")
 	}
 	if spawnCounter.Load() != 2 {
 		t.Errorf("expected spawn count 2, got %d", spawnCounter.Load())
 	}
 
-	// 3. Verify onTurnFinished ignores closed pool
+	// Clean rotated session does not need rotation
+	if should, _ := pool.ShouldRotateSession(rotatedSess); should {
+		t.Error("expected newly rotated session ShouldRotateSession to return false")
+	}
+
+	// 5. Test closed pool behavior
 	if err := pool.Close(); err != nil {
 		t.Fatalf("unexpected pool.Close() error: %v", err)
 	}
-	// Calling onTurnFinished on rotatedDaemon after pool closed should return early safely
-	rotatedDaemon.MarkDirty()
-	rotatedDaemon.onTurnFinished(rotatedDaemon)
+	if _, err := pool.RotateSession(ctx, "target-turn-hook"); err == nil {
+		t.Error("expected error from RotateSession on closed pool")
+	}
+	if should, _ := pool.ShouldRotateSession(rotatedSess); should {
+		t.Error("expected ShouldRotateSession on closed pool to return false")
+	}
+}
+
+func TestUnifiedProcessPool_TurnFinishedHook(t *testing.T) {
+	TestUnifiedProcessPool_SessionRotator(t)
 }
 
 func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
@@ -1779,19 +1803,17 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		// Now finish turn via NDJSON result event
 		d1.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"finished"}}`)
 
-		// Daemon should rotate upon turn completion
-		deadline := time.Now().Add(2 * time.Second)
-		var rotatedDaemon *StreamingDaemon
-		for time.Now().Before(deadline) {
-			d, ok := pool.Get("thread-inflight")
-			if ok && d != d1 && d.State() != StateClosed {
-				rotatedDaemon = d
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
+		// SessionRotator rotates upon turn completion
+		if should, _ := pool.ShouldRotateSession(d1); !should {
+			t.Fatalf("expected dirty daemon to indicate rotation needed after turn completion")
 		}
-		if rotatedDaemon == nil {
-			t.Fatalf("timed out waiting for daemon rotation after in-flight turn completion")
+		rotatedSess, err := pool.RotateSession(ctx, "thread-inflight")
+		if err != nil {
+			t.Fatalf("failed rotating session: %v", err)
+		}
+		rotatedDaemon, ok := rotatedSess.(*StreamingDaemon)
+		if !ok || rotatedDaemon == nil || rotatedDaemon == d1 {
+			t.Fatalf("expected new rotated daemon distinct from d1")
 		}
 		if spawnCounter.Load() != 2 {
 			t.Errorf("expected spawn count 2, got %d", spawnCounter.Load())

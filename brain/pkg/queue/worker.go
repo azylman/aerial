@@ -191,6 +191,68 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	}
 }
 
+func (te *turnExecution) checkTurnEndRotation(activePool runner.AgentPool, execSession runner.AgentSession) {
+	if te == nil || te.pool == nil || activePool == nil || execSession == nil {
+		return
+	}
+	rotator, ok := activePool.(runner.SessionRotator)
+	if !ok {
+		return
+	}
+	should, rotReason := rotator.ShouldRotateSession(execSession)
+	if !should {
+		return
+	}
+
+	scope := "thread"
+	if strings.EqualFold(te.policy.Mode, "channel") {
+		scope = "channel"
+	}
+	log.Printf("[WorkerPool] Synchronously rotating session for %s %s (reason: %s)", scope, te.threadID, rotReason)
+	metrics.RecordSessionRotation("turn_end", scope, rotReason)
+
+	rotParentCtx := context.Background()
+	if te.pool.ctx != nil {
+		rotParentCtx = te.pool.ctx
+	}
+	rotCtx, cancel := context.WithTimeout(rotParentCtx, 15*time.Second)
+	defer cancel()
+
+	newSess, rotErr := rotator.RotateSession(rotCtx, te.threadID)
+	if rotErr != nil {
+		log.Printf("[WorkerPool] Warning: turn-end session rotation failed for %s: %v", te.threadID, rotErr)
+		if evictor, ok := activePool.(interface{ EvictSession(string) error }); ok {
+			if evictErr := evictor.EvictSession(te.threadID); evictErr != nil {
+				log.Printf("[WorkerPool] Warning: failed evicting session during rotation error for %s: %v", te.threadID, evictErr)
+			}
+		}
+		te.rotateSessionID(te.threadID, "")
+		te.currentSessionID = ""
+		return
+	}
+
+	if newSess != nil {
+		newSessionID := newSess.SessionID()
+		if s := te.store(); s != nil {
+			if dbErr := s.RotateSessionID(context.Background(), te.threadID, newSessionID); dbErr != nil {
+				log.Printf("[WorkerPool] Error latching new session ID into database for %s: %v. Evicting daemon to maintain DB truth.", te.threadID, dbErr)
+				if evictor, ok := activePool.(interface{ EvictSession(string) error }); ok {
+					if evictErr := evictor.EvictSession(te.threadID); evictErr != nil {
+						log.Printf("[WorkerPool] Warning: failed evicting session during DB latch error for %s: %v", te.threadID, evictErr)
+					}
+				}
+				te.rotateSessionID(te.threadID, "")
+				te.currentSessionID = ""
+				return
+			}
+		}
+		log.Printf("[WorkerPool] Successfully rotated session for %s %s to %s", scope, te.threadID, newSessionID)
+		te.previousSessionID = te.currentSessionID
+		te.currentSessionID = newSessionID
+		te.turnCount = 0
+	}
+}
+
 func (te *turnExecution) getSessionTurnCount(threadID string) (int, error) {
 	if s := te.store(); s != nil {
 		return s.GetSessionTurnCount(context.Background(), threadID)
@@ -2191,6 +2253,8 @@ func (te *turnExecution) executeWithRetries() {
 							}
 						}
 						log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
+
+						te.checkTurnEndRotation(activePool, execSession)
 
 						return
 					}

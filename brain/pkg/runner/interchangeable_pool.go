@@ -36,7 +36,10 @@ type InterchangeablePool struct {
 	cancel     context.CancelFunc
 }
 
-var _ AgentPool = (*InterchangeablePool)(nil)
+var (
+	_ AgentPool      = (*InterchangeablePool)(nil)
+	_ SessionRotator = (*InterchangeablePool)(nil)
+)
 
 // NewInterchangeablePool constructs an InterchangeablePool wrapping an underlying UnifiedProcessPool.
 // It generates worker keys, registers them as pre-warmed targets on the underlying pool,
@@ -158,6 +161,16 @@ func (p *InterchangeablePool) GetOrCreateSession(ctx context.Context, targetKey 
 	}()
 
 	return sess, nil
+}
+
+// ShouldRotateSession reports whether the session needs rotation.
+func (p *InterchangeablePool) ShouldRotateSession(sess AgentSession) (bool, string) {
+	return false, ""
+}
+
+// RotateSession is a no-op for InterchangeablePool since worker rotation is handled per lease.
+func (p *InterchangeablePool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+	return nil, nil
 }
 
 func (p *InterchangeablePool) rotateAndRelease(workerKey string) {

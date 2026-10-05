@@ -920,3 +920,42 @@ func TestReleaseTurnSink_ToolAndSkillForwarding(t *testing.T) {
 	nilRS.OnSkillActivated("self-improvement", "discord")
 }
 
+
+func TestInterchangeablePool_SessionRotator(t *testing.T) {
+	mockSpawner := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			return inW, outR, errR, &MockProcessHandle{pid: 100}, nil
+		},
+	}
+	upp := NewUnifiedProcessPool(PoolConfig{}, mockSpawner)
+	defer upp.Close()
+
+	pool := NewInterchangeablePool(upp, InterchangeablePoolConfig{WorkerCount: 1})
+	defer pool.Close()
+
+	ctx := context.Background()
+	sess, err := pool.GetOrCreateSession(ctx, "any", "")
+	if err != nil {
+		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
+	}
+
+	if should, _ := pool.ShouldRotateSession(sess); should {
+		t.Errorf("expected ShouldRotateSession to return false")
+	}
+
+	rotSess, err := pool.RotateSession(ctx, "any")
+	if err != nil {
+		t.Fatalf("unexpected RotateSession error: %v", err)
+	}
+	if rotSess != nil {
+		t.Errorf("expected RotateSession to return nil for InterchangeablePool")
+	}
+}

@@ -22,7 +22,10 @@ type DynamicVoicePool struct {
 	closed      bool
 }
 
-var _ AgentPool = (*DynamicVoicePool)(nil)
+var (
+	_ AgentPool      = (*DynamicVoicePool)(nil)
+	_ SessionRotator = (*DynamicVoicePool)(nil)
+)
 
 // NewDynamicVoicePool constructs a DynamicVoicePool using the provided factory.
 // It invokes the factory immediately to obtain the initial active pool and fingerprint.
@@ -69,6 +72,51 @@ func (p *DynamicVoicePool) GetOrCreateSession(ctx context.Context, targetKey str
 	}
 
 	return pool.GetOrCreateSession(ctx, targetKey, sessionID)
+}
+
+// ShouldRotateSession delegates rotation check to the current pool if it implements SessionRotator.
+func (p *DynamicVoicePool) ShouldRotateSession(sess AgentSession) (bool, string) {
+	if p == nil {
+		return false, ""
+	}
+
+	p.mu.RLock()
+	closed := p.closed
+	pool := p.currentPool
+	p.mu.RUnlock()
+
+	if closed || pool == nil {
+		return false, ""
+	}
+
+	if rotator, ok := pool.(SessionRotator); ok {
+		return rotator.ShouldRotateSession(sess)
+	}
+	return false, ""
+}
+
+// RotateSession delegates session rotation to the current pool if it implements SessionRotator.
+func (p *DynamicVoicePool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+	if p == nil {
+		return nil, errors.New("dynamic voice pool is nil")
+	}
+
+	p.mu.RLock()
+	closed := p.closed
+	pool := p.currentPool
+	p.mu.RUnlock()
+
+	if closed {
+		return nil, errors.New("dynamic voice pool is closed")
+	}
+	if pool == nil {
+		return nil, errors.New("no active voice pool")
+	}
+
+	if rotator, ok := pool.(SessionRotator); ok {
+		return rotator.RotateSession(ctx, targetKey)
+	}
+	return nil, nil
 }
 
 // Initialize pre-warms the currently active pool.

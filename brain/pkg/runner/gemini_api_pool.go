@@ -496,7 +496,10 @@ type GeminiAPIPool struct {
 	closed   bool
 }
 
-var _ AgentPool = (*GeminiAPIPool)(nil)
+var (
+	_ AgentPool      = (*GeminiAPIPool)(nil)
+	_ SessionRotator = (*GeminiAPIPool)(nil)
+)
 
 // NewGeminiAPIPool instantiates a GeminiAPIPool with sensible defaults.
 func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
@@ -602,6 +605,16 @@ func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string
 	}
 	p.sessions[targetKey] = sess
 	return sess, nil
+}
+
+// ShouldRotateSession reports whether the session needs rotation.
+func (p *GeminiAPIPool) ShouldRotateSession(sess AgentSession) (bool, string) {
+	return false, ""
+}
+
+// RotateSession retrieves or initializes the session for targetKey.
+func (p *GeminiAPIPool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+	return p.GetOrCreateSession(ctx, targetKey, "")
 }
 
 // Initialize pre-warms configured target sessions.

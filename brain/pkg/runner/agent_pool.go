@@ -22,3 +22,9 @@ type AgentPool interface {
 	Initialize(ctx context.Context) error
 	Close() error
 }
+
+// SessionRotator is an optional interface implemented by pools that support explicit session rotation.
+type SessionRotator interface {
+	ShouldRotateSession(sess AgentSession) (bool, string)
+	RotateSession(ctx context.Context, targetKey string) (AgentSession, error)
+}
