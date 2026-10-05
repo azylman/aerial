@@ -923,3 +923,292 @@ func TestNomadStreamSubscriber_Evaluation_RestartWithDeploymentID_Succeeds(t *te
 
 
 
+
+func TestExtractAllocationErrorDetails_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		clientDesc string
+		taskStates map[string]NomadTaskState
+		wantSubstr string
+	}{
+		{
+			name:       "nil states and empty desc",
+			clientDesc: "",
+			taskStates: nil,
+			wantSubstr: "allocation failed",
+		},
+		{
+			name:       "fallback to client description",
+			clientDesc: "Failed tasks",
+			taskStates: nil,
+			wantSubstr: "Failed tasks",
+		},
+		{
+			name:       "driver error in event",
+			clientDesc: "Failed tasks",
+			taskStates: map[string]NomadTaskState{
+				"brain": {
+					Failed: true,
+					State:  "dead",
+					Events: []NomadTaskEvent{
+						{Type: "Received", DisplayMessage: "Task received by client"},
+						{Type: "Driver Failure", DriverError: "bind source path does not exist: /mnt/data/supervisor/share/coverage/brain"},
+					},
+				},
+			},
+			wantSubstr: `task "brain": bind source path does not exist: /mnt/data/supervisor/share/coverage/brain`,
+		},
+		{
+			name:       "driver error in event details map",
+			clientDesc: "Failed tasks",
+			taskStates: map[string]NomadTaskState{
+				"brain": {
+					Failed: true,
+					State:  "dead",
+					Events: []NomadTaskEvent{
+						{
+							Type:    "Driver Failure",
+							Details: map[string]string{"driver_error": "failed to create container: out of memory"},
+						},
+					},
+				},
+			},
+			wantSubstr: `task "brain": failed to create container: out of memory`,
+		},
+		{
+			name:       "setup error in event",
+			clientDesc: "",
+			taskStates: map[string]NomadTaskState{
+				"sidecar": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Task Setup", SetupError: "prestart hook failed: permission denied"},
+					},
+				},
+			},
+			wantSubstr: `task "sidecar": prestart hook failed: permission denied`,
+		},
+		{
+			name:       "validation error in event",
+			clientDesc: "",
+			taskStates: map[string]NomadTaskState{
+				"api": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Failed Validation", ValidationError: "invalid environment variable"},
+					},
+				},
+			},
+			wantSubstr: `task "api": invalid environment variable`,
+		},
+		{
+			name:       "exit code non-zero",
+			clientDesc: "",
+			taskStates: map[string]NomadTaskState{
+				"worker": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Terminated", ExitCode: 1, DisplayMessage: "Terminated unexpectedly"},
+					},
+				},
+			},
+			wantSubstr: `task "worker": Terminated unexpectedly (exited with code 1)`,
+		},
+		{
+			name:       "fallback to last event display message on dead task",
+			clientDesc: "",
+			taskStates: map[string]NomadTaskState{
+				"proxy": {
+					Failed: true,
+					State:  "dead",
+					Events: []NomadTaskEvent{
+						{Type: "Alloc Unhealthy", DisplayMessage: "Unhealthy because of failed task"},
+					},
+				},
+			},
+			wantSubstr: `task "proxy": Unhealthy because of failed task`,
+		},
+		{
+			name:       "multiple tasks sorted deterministically",
+			clientDesc: "Failed tasks",
+			taskStates: map[string]NomadTaskState{
+				"worker": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Driver Failure", DriverError: "worker failed"},
+					},
+				},
+				"api": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Driver Failure", DriverError: "api failed"},
+					},
+				},
+			},
+			wantSubstr: "task \"api\": api failed\ntask \"worker\": worker failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAllocationErrorDetails(tt.clientDesc, tt.taskStates)
+			if !strings.Contains(got, tt.wantSubstr) {
+				t.Errorf("extractAllocationErrorDetails() = %q, want substring %q", got, tt.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestRouterServer_IsNomadJobHealthy_DeploymentsOutOfOrder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var depsJSON string
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(depsJSON))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer nomadServer.Close()
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+
+	// Case 1: Deployments out of order in API response: older failed deployment at index 0, newer successful at index 1
+	// Must sort by CreateIndex descending and evaluate the newest deployment as successful!
+	depsJSON = `[
+		{"ID":"dep-v14-failed","JobID":"brain","Status":"failed","JobVersion":14,"CreateIndex":19265},
+		{"ID":"dep-v16-success","JobID":"brain","Status":"successful","JobVersion":16,"CreateIndex":19397},
+		{"ID":"dep-v15-success","JobID":"brain","Status":"successful","JobVersion":15,"CreateIndex":19349}
+	]`
+	if !srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be true when newest deployment (highest CreateIndex) is successful")
+	}
+
+	// Case 2: Auto-revert case: higher JobVersion failed, but auto-revert deployment rolled back to older JobVersion
+	// Must detect that higher JobVersion failed/was reverted and return false!
+	depsJSON = `[
+		{"ID":"dep-revert-v16","JobID":"brain","Status":"successful","JobVersion":16,"CreateIndex":20500},
+		{"ID":"dep-v17-failed","JobID":"brain","Status":"failed","JobVersion":17,"CreateIndex":20400}
+	]`
+	if srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be false when deployment was rolled back from failed higher version")
+	}
+
+	// Case 2b: Auto-revert indicated in StatusDescription
+	depsJSON = `[
+		{"ID":"dep-v17-roll","JobID":"brain","Status":"successful","JobVersion":17,"CreateIndex":20600,"StatusDescription":"Rolling back to version 16"}
+	]`
+	if srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be false when StatusDescription indicates rolling back")
+	}
+
+	// Case 3: Newer deployment failed (highest CreateIndex is failed)
+	depsJSON = `[
+		{"ID":"dep-v15-success","JobID":"brain","Status":"successful","JobVersion":15,"CreateIndex":19349},
+		{"ID":"dep-v16-failed","JobID":"brain","Status":"failed","JobVersion":16,"CreateIndex":19397}
+	]`
+	if srv.isNomadJobHealthy(ctx, "brain") {
+		t.Errorf("expected isNomadJobHealthy to be false when newest deployment (highest CreateIndex) is failed")
+	}
+}
+
+func TestNomadStreamSubscriber_AllocationFailure_DriverError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := strings.Join([]string{
+		`{"Index":1009,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-fail-1","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed","ClientDescription":"Failed tasks","TaskStates":{"brain":{"State":"dead","Failed":true,"Events":[{"Type":"Driver Failure","DriverError":"invalid mount config: bind source path does not exist: /mnt/data/supervisor/share/coverage/brain"}]}}}}}]}`,
+	}, "\n") + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    613,
+		deployFailedJobMergeSHA: "7cbc1f9b1234567890",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 1 || mockReg.deployFailedJobCalls[0] != "brain" {
+		t.Fatalf("expected deployFailedJobCalls [brain], got %v", mockReg.deployFailedJobCalls)
+	}
+
+	dmCalls := mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 1 {
+		t.Fatalf("expected 1 direct message call on failure, got %d", len(dmCalls))
+	}
+	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "💥 **(PR: #613, repo: aerial)** Nomad deployment failed for brain. Following up...") {
+		t.Errorf("unexpected direct message content: %+v", dmCalls[0])
+	}
+
+	pCalls := mockDisp.PromptCalls()
+	if len(pCalls) != 1 {
+		t.Fatalf("expected 1 prompt call, got %d", len(pCalls))
+	}
+	if pCalls[0].ChannelID != "1555405874565091380" {
+		t.Errorf("expected target ID 1555405874565091380, got %s", pCalls[0].ChannelID)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Nomad deployment for job brain failed") {
+		t.Errorf("unexpected prompt content: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "bind source path does not exist: /mnt/data/supervisor/share/coverage/brain") {
+		t.Errorf("expected driver error in prompt: %s", pCalls[0].Prompt)
+	}
+}
+
+func TestNomadStreamSubscriber_WithRiver_AllocationFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := strings.Join([]string{
+		`{"Index":2010,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-dead-1","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed"}}}]}`,
+	}, "\n") + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockRiver := &mockRiverInserter{}
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil, mockRiver)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockRiver.insertedNomadJobs) != 1 {
+		t.Fatalf("expected 1 nomad job inserted into river, got %d: %+v", len(mockRiver.insertedNomadJobs), mockRiver.insertedNomadJobs)
+	}
+	if mockRiver.insertedNomadJobs[0].Topic != "Allocation" {
+		t.Errorf("expected Topic Allocation, got %s", mockRiver.insertedNomadJobs[0].Topic)
+	}
+	if !strings.Contains(mockRiver.insertedNomadJobs[0].IdempotencyKey, ":failed") {
+		t.Errorf("expected idempotency key to contain ':failed', got %s", mockRiver.insertedNomadJobs[0].IdempotencyKey)
+	}
+}

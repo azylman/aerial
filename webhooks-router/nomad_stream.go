@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,9 +61,18 @@ type NomadEvaluationEventPayload struct {
 
 // NomadTaskEvent captures task lifecycle events within an allocation.
 type NomadTaskEvent struct {
-	Type           string `json:"Type"`
-	DisplayMessage string `json:"DisplayMessage"`
-	Time           int64  `json:"Time"`
+	Type            string            `json:"Type"`
+	DisplayMessage  string            `json:"DisplayMessage"`
+	DriverError     string            `json:"DriverError"`
+	Message         string            `json:"Message"`
+	RestartReason   string            `json:"RestartReason"`
+	SetupError      string            `json:"SetupError"`
+	DownloadError   string            `json:"DownloadError"`
+	ValidationError string            `json:"ValidationError"`
+	VaultError      string            `json:"VaultError"`
+	ExitCode        int               `json:"ExitCode"`
+	Details         map[string]string `json:"Details"`
+	Time            int64             `json:"Time"`
 }
 
 // NomadTaskState captures the state of a task in an allocation.
@@ -76,11 +86,12 @@ type NomadTaskState struct {
 // NomadAllocationEventPayload captures allocation updates from Nomad.
 type NomadAllocationEventPayload struct {
 	Allocation struct {
-		ID            string                    `json:"ID"`
-		JobID         string                    `json:"JobID"`
-		DesiredStatus string                    `json:"DesiredStatus"` // "run", "stop"
-		ClientStatus  string                    `json:"ClientStatus"`  // "running", "pending", "failed", "complete"
-		TaskStates    map[string]NomadTaskState `json:"TaskStates"`
+		ID                string                    `json:"ID"`
+		JobID             string                    `json:"JobID"`
+		DesiredStatus     string                    `json:"DesiredStatus"` // "run", "stop"
+		ClientStatus      string                    `json:"ClientStatus"`  // "running", "pending", "failed", "complete"
+		ClientDescription string                    `json:"ClientDescription"`
+		TaskStates        map[string]NomadTaskState `json:"TaskStates"`
 	} `json:"Allocation"`
 }
 
@@ -90,6 +101,7 @@ type NomadJobAllocSummary struct {
 	JobID         string `json:"JobID"`
 	DesiredStatus string `json:"DesiredStatus"`
 	ClientStatus  string `json:"ClientStatus"`
+	CreateIndex   uint64 `json:"CreateIndex"`
 }
 
 // NomadStreamSubscriber manages the persistent event streaming connection to Nomad.
@@ -137,7 +149,9 @@ func (sub *NomadStreamSubscriber) Start(ctx context.Context) {
 			}
 		}()
 
+		sub.mu.Lock()
 		delay := sub.reconnectDelay
+		sub.mu.Unlock()
 		if delay <= 0 {
 			delay = 1 * time.Second
 		}
@@ -294,11 +308,17 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 			return
 		}
 		alloc := allocPayload.Allocation
-		if alloc.DesiredStatus != "run" || alloc.ClientStatus != "running" {
+		isRunning := alloc.DesiredStatus == "run" && alloc.ClientStatus == "running"
+		isFailed := strings.EqualFold(alloc.ClientStatus, "failed")
+		if !isRunning && !isFailed {
 			return
 		}
 		if alloc.ID != "" && alloc.JobID != "" {
-			idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s", alloc.JobID, alloc.ID)
+			if isFailed {
+				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s:failed", alloc.JobID, alloc.ID)
+			} else {
+				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s", alloc.JobID, alloc.ID)
+			}
 		}
 	case "Evaluation":
 		var evalPayload NomadEvaluationEventPayload
@@ -374,6 +394,10 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
 			return fmt.Errorf("unmarshal nomad allocation payload: %w", err)
 		}
 		alloc := allocPayload.Allocation
+		if strings.EqualFold(alloc.ClientStatus, "failed") {
+			statusDesc := extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates)
+			return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", statusDesc)
+		}
 		if isAllocationRestarting(alloc.TaskStates) {
 			return nil
 		}
@@ -537,12 +561,39 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 			defer respDep.Body.Close()
 			if respDep.StatusCode == http.StatusOK {
 				var deps []struct {
-					ID     string `json:"ID"`
-					Status string `json:"Status"`
+					ID                string `json:"ID"`
+					Status            string `json:"Status"`
+					StatusDescription string `json:"StatusDescription"`
+					JobVersion        uint64 `json:"JobVersion"`
+					CreateIndex       uint64 `json:"CreateIndex"`
 				}
 				if err := json.NewDecoder(respDep.Body).Decode(&deps); err == nil && len(deps) > 0 {
-					// Deployments are sorted newest first; return true only if the newest is successful
-					return strings.EqualFold(deps[0].Status, "successful")
+					// Nomad does NOT sort deployments newest first! Sort by CreateIndex descending.
+					sort.SliceStable(deps, func(i, j int) bool {
+						return deps[i].CreateIndex > deps[j].CreateIndex
+					})
+
+					latest := deps[0]
+					if !strings.EqualFold(latest.Status, "successful") {
+						return false
+					}
+
+					// Auto-Revert Trap Protection:
+					// 1. Check if the latest deployment status description indicates a rollback
+					desc := strings.ToLower(latest.StatusDescription)
+					if strings.Contains(desc, "roll") || strings.Contains(desc, "revert") {
+						return false
+					}
+
+					// 2. If any deployment in the history has a higher JobVersion than latest,
+					// then Nomad rolled back to an older version and the candidate deployment failed.
+					for _, d := range deps[1:] {
+						if d.JobVersion > latest.JobVersion {
+							return false
+						}
+					}
+
+					return true
 				}
 			}
 		}
@@ -570,6 +621,9 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 
 	var allocs []NomadJobAllocSummary
 	if err := json.NewDecoder(resp.Body).Decode(&allocs); err != nil {
+		return false
+	}
+	if len(allocs) == 0 {
 		return false
 	}
 
@@ -626,7 +680,6 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 	return jobs
 }
 
-
 // isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart.
 func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
 	for _, ts := range taskStates {
@@ -641,4 +694,77 @@ func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
 		}
 	}
 	return false
+}
+
+// extractAllocationErrorDetails extracts human-readable failure diagnostics from allocation task states and events.
+func extractAllocationErrorDetails(clientDesc string, taskStates map[string]NomadTaskState) string {
+	var taskErrors []string
+
+	// Sort task names for deterministic ordering in tests and alerts
+	taskNames := make([]string, 0, len(taskStates))
+	for name := range taskStates {
+		taskNames = append(taskNames, name)
+	}
+	sort.Strings(taskNames)
+
+	for _, name := range taskNames {
+		ts := taskStates[name]
+		// Only extract error details from tasks that failed or are dead
+		if !ts.Failed && !strings.EqualFold(ts.State, "dead") {
+			continue
+		}
+
+		var errMsg string
+
+		// Search events in reverse order to find the latest specific error diagnostic
+		for i := len(ts.Events) - 1; i >= 0; i-- {
+			evt := ts.Events[i]
+			if evt.DriverError != "" {
+				errMsg = evt.DriverError
+			} else if evt.SetupError != "" {
+				errMsg = evt.SetupError
+			} else if evt.DownloadError != "" {
+				errMsg = evt.DownloadError
+			} else if evt.ValidationError != "" {
+				errMsg = evt.ValidationError
+			} else if evt.VaultError != "" {
+				errMsg = evt.VaultError
+			} else if evt.Details != nil && evt.Details["driver_error"] != "" {
+				errMsg = evt.Details["driver_error"]
+			} else if (evt.Type == "Driver Failure" || evt.Type == "Task Setup" || evt.Type == "Failed Validation") && evt.DisplayMessage != "" {
+				errMsg = evt.DisplayMessage
+			} else if evt.ExitCode != 0 {
+				errMsg = fmt.Sprintf("exited with code %d", evt.ExitCode)
+				if evt.DisplayMessage != "" {
+					errMsg = fmt.Sprintf("%s (%s)", evt.DisplayMessage, errMsg)
+				}
+			}
+
+			if errMsg != "" {
+				break
+			}
+		}
+
+		// Fallback to last event's DisplayMessage if task is failed/dead and no specific error field was found
+		if errMsg == "" && len(ts.Events) > 0 {
+			lastEvt := ts.Events[len(ts.Events)-1]
+			if strings.TrimSpace(lastEvt.DisplayMessage) != "" {
+				errMsg = strings.TrimSpace(lastEvt.DisplayMessage)
+			}
+		}
+
+		if errMsg != "" {
+			taskErrors = append(taskErrors, fmt.Sprintf("task %q: %s", name, errMsg))
+		}
+	}
+
+	if len(taskErrors) > 0 {
+		return strings.Join(taskErrors, "\n")
+	}
+
+	if strings.TrimSpace(clientDesc) != "" {
+		return strings.TrimSpace(clientDesc)
+	}
+
+	return "allocation failed"
 }
