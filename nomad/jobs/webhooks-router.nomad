@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "webhooks-router" {
   datacenters = ["dc1"]
   type        = "service"
@@ -34,7 +39,7 @@ job "webhooks-router" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-webhooks-router:latest"
+        image        = "ghcr.io/azylman/aerial-webhooks-router:${var.image_tag}"
         network_mode = "host"
         force_pull   = true
         healthchecks {

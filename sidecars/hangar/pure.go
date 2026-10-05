@@ -575,6 +575,8 @@ func FilterNomadChanges(changedFiles []string) []string {
 // If parsing fails, it falls back to the file basename stripped of .nomad extensions.
 func ExtractJobName(content string, fallbackFileName string) string {
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	buf := make([]byte, 1024*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
@@ -601,6 +603,8 @@ func ExtractNomadJobImages(content string) []string {
 	var images []string
 	seen := make(map[string]struct{})
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	buf := make([]byte, 1024*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
@@ -627,6 +631,32 @@ func ExtractNomadJobImages(content string) []string {
 		}
 	}
 	return images
+}
+
+// HasNomadJobVariable returns true if the Nomad job specification content declares the specified input variable.
+func HasNomadJobVariable(content, varName string) bool {
+	varName = strings.TrimSpace(varName)
+	if content == "" || varName == "" {
+		return false
+	}
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	buf := make([]byte, 1024*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "variable" {
+			token := strings.TrimSuffix(fields[1], "{")
+			token = strings.Trim(token, "\"'`")
+			if token == varName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NomadFileChange represents a changed Nomad job specification with its git action (apply or delete).

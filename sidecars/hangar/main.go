@@ -264,6 +264,10 @@ func defaultNomadExecutor(nomadAddr, nomadToken string) NomadExecutor {
 type NomadChangeEvent struct {
 	RepoPath  string
 	Changes   []NomadFileChange
+	Repo      string
+	CommitSHA string
+	PRNumber  int
+	TargetID  string
 	Timestamp time.Time
 }
 
@@ -619,12 +623,32 @@ func (d *SyncDaemon) HasNomadChanges(ctx context.Context, repoPath, prevHead, cu
 	return ParseNomadGitStatus(string(stdout)), nil
 }
 
-func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadFileChange) {
+func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadFileChange, meta ...string) {
 	d.pendingNomadMu.Lock()
 	defer d.pendingNomadMu.Unlock()
+	var repo, commit, targetID string
+	var prNumber int
+	if len(meta) >= 1 {
+		repo = meta[0]
+	}
+	if len(meta) >= 2 {
+		commit = meta[1]
+	}
+	if len(meta) >= 3 {
+		targetID = meta[2]
+	}
+	if len(meta) >= 4 {
+		if parsed, err := strconv.Atoi(meta[3]); err == nil {
+			prNumber = parsed
+		}
+	}
 	d.pendingNomadChanges = append(d.pendingNomadChanges, NomadChangeEvent{
 		RepoPath:  repoPath,
 		Changes:   changes,
+		Repo:      repo,
+		CommitSHA: commit,
+		PRNumber:  prNumber,
+		TargetID:  targetID,
 		Timestamp: time.Now(),
 	})
 }
@@ -1394,9 +1418,34 @@ func (d *SyncDaemon) IsJobDefinedInOtherRepo(jobName string, skipRepo string) (s
 }
 
 // ReconcileNomadChanges validates and applies or stops Nomad job specifications.
-func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string, changes []NomadFileChange) error {
+func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) error {
 	if len(changes) == 0 {
 		return nil
+	}
+
+	var repo, commit, targetID string
+	var prNumber int
+	if len(meta) >= 1 {
+		repo = meta[0]
+	}
+	if len(meta) >= 2 {
+		commit = meta[1]
+	}
+	if len(meta) >= 3 {
+		targetID = meta[2]
+	}
+	if len(meta) >= 4 {
+		if parsed, err := strconv.Atoi(meta[3]); err == nil {
+			prNumber = parsed
+		}
+	}
+	if repo == "" && repoPath != "" {
+		repo = NormalizeGitHubSlug(repoPath)
+	}
+	if commit == "" && repoPath != "" {
+		if headOut, _, headErr := d.getGitExecutor()(ctx, repoPath, "rev-parse", "HEAD"); headErr == nil {
+			commit = strings.TrimSpace(string(headOut))
+		}
 	}
 
 	SortNomadChangesHangarLast(changes)
@@ -1441,6 +1490,10 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 			baseEvt := HangarDeployEvent{
 				Event:     "deploy_started",
 				JobName:   change.JobName,
+				Repo:      repo,
+				CommitSHA: commit,
+				PRNumber:  prNumber,
+				TargetID:  targetID,
 				Status:    "started",
 				Timestamp: time.Now().UTC(),
 			}
@@ -1466,11 +1519,10 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 }
 
 // ReconcileNomadJobs is an alias for ReconcileNomadChanges.
-func (d *SyncDaemon) ReconcileNomadJobs(ctx context.Context, repoPath string, changes []NomadFileChange) error {
-	return d.ReconcileNomadChanges(ctx, repoPath, changes)
+func (d *SyncDaemon) ReconcileNomadJobs(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) error {
+	return d.ReconcileNomadChanges(ctx, repoPath, changes, meta...)
 }
 
-// ExecuteNomadTeardowns runs nomad job stop -purge for any deleted jobs across pending changes.
 func (d *SyncDaemon) ExecuteNomadTeardowns(ctx context.Context, pending []NomadChangeEvent) {
 	if len(pending) == 0 {
 		return
@@ -1502,7 +1554,7 @@ func (d *SyncDaemon) ReconcilePendingNomad(ctx context.Context) error {
 	}
 	var errs []error
 	for _, evt := range pending {
-		if err := d.ReconcileNomadChanges(ctx, evt.RepoPath, evt.Changes); err != nil {
+		if err := d.ReconcileNomadChanges(ctx, evt.RepoPath, evt.Changes, evt.Repo, evt.CommitSHA, evt.TargetID, strconv.Itoa(evt.PRNumber)); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -1726,7 +1778,7 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 }
 
 // SyncRepo synchronizes a single repository via git pull --ff-only with fallback to reset --hard FETCH_HEAD.
-func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyncResult) {
+func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string, syncCtx ...ConfigSyncContext) (res RepoSyncResult) {
 	res = RepoSyncResult{Repo: repoPath}
 
 	if repoPath == "" {
@@ -1863,7 +1915,23 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 		}
 		if len(nomadChanges) > 0 {
 			log.Printf("[Hangar:GitOps] Nomad job changes detected in %s (%d changes). Triggering debounced reconciliation.", repoPath, len(nomadChanges))
-			d.recordPendingNomadChanges(repoPath, nomadChanges)
+			var meta []string
+			if len(syncCtx) > 0 {
+				meta = []string{
+					syncCtx[0].Repo,
+					syncCtx[0].CommitSHA,
+					syncCtx[0].TargetID,
+					strconv.Itoa(syncCtx[0].PRNumber),
+				}
+			} else {
+				meta = []string{
+					NormalizeGitHubSlug(repoPath),
+					res.CurrentHead,
+					"",
+					"0",
+				}
+			}
+			d.recordPendingNomadChanges(repoPath, nomadChanges, meta...)
 			if d.reconcileCh != nil {
 				select {
 				case d.reconcileCh <- struct{}{}:
@@ -2714,11 +2782,17 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}, http.StatusNotFound
 	}
 
-	res := d.SyncRepo(ctx, repoPath)
+	commitSHA := req.Commit
+	sc := ConfigSyncContext{
+		Repo:      req.Repo,
+		CommitSHA: commitSHA,
+		PRNumber:  req.PRNumber,
+		TargetID:  req.TargetID,
+	}
+	res := d.SyncRepo(ctx, repoPath, sc)
 	if res.Error != "" {
-		commitSHA := res.CurrentHead
-		if commitSHA == "" {
-			commitSHA = req.Commit
+		if res.CurrentHead != "" {
+			commitSHA = res.CurrentHead
 		}
 		failEvt := HangarDeployEvent{
 			Event:     "sync_failed",
@@ -2747,10 +2821,10 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		Commit: res.CurrentHead,
 	}
 
-	commitSHA := res.CurrentHead
-	if commitSHA == "" {
-		commitSHA = req.Commit
+	if res.CurrentHead != "" {
+		commitSHA = res.CurrentHead
 	}
+	sc.CommitSHA = commitSHA
 	syncEvt := HangarDeployEvent{
 		Event:     "sync_success",
 		JobName:   "git-sync",
@@ -2896,12 +2970,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 			resp.Message = "configuration synced; no nomad job changes"
 		}
 
-		sc := ConfigSyncContext{
-			Repo:      req.Repo,
-			CommitSHA: commitSHA,
-			PRNumber:  req.PRNumber,
-			TargetID:  req.TargetID,
-		}
+		sc.CommitSHA = commitSHA
 		if err := d.SyncBrainConfigToNomad(ctx, repoPath, sc); err != nil {
 			log.Printf("[Hangar:GitPush] Notice: SyncBrainConfigToNomad: %v", err)
 		}
@@ -2967,9 +3036,20 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	}
 
 	var appliedJobs []string
+	var runErrors []string
 	for _, job := range matches {
+		content, readErr := os.ReadFile(job.JobPath)
+		if readErr != nil {
+			log.Printf("[Hangar:ImageReady] Failed reading job file %s: %v", job.JobPath, readErr)
+			runErrors = append(runErrors, fmt.Sprintf("%s: read error: %v", job.JobName, readErr))
+			continue
+		}
+
+		jobSpec := string(content)
+
 		if errVal := d.ValidateNomadJob(ctx, job.JobPath); errVal != nil {
 			log.Printf("[Hangar:ImageReady] Validation failed for job %s (%s): %v", job.JobName, job.JobPath, errVal)
+			runErrors = append(runErrors, fmt.Sprintf("%s validation failed: %v", job.JobName, errVal))
 			continue
 		}
 
@@ -2987,23 +3067,46 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		}
 		d.DispatchDeployEvent(baseEvt)
 
-		log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s...", job.JobName, job.JobPath)
-		outRun, errRunBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach", job.JobPath)
+		runArgs := []string{"job", "run", "-detach"}
+		varInjected := false
+		if HasNomadJobVariable(jobSpec, "image_tag") {
+			tag := req.CommitSHA
+			if tag == "" {
+				if digest != "" {
+					cleanDigest := strings.TrimPrefix(digest, "@")
+					if !strings.HasPrefix(cleanDigest, "sha256:") {
+						cleanDigest = "sha256:" + cleanDigest
+					}
+					tag = "latest@" + cleanDigest
+				} else {
+					tag = "latest"
+				}
+			}
+			runArgs = append(runArgs, "-var=image_tag="+tag)
+			varInjected = true
+		}
+		runArgs = append(runArgs, job.JobPath)
+
+		log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s (args: %v)...", job.JobName, job.JobPath, runArgs)
+		outRun, errRunBytes, errRun := d.getNomadExecutor()(ctx, runArgs...)
 		if errRun != nil {
-			log.Printf("[Hangar:ImageReady] Warning: job run failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...)))), errRun)
+			log.Printf("[Hangar:ImageReady] Error: job run failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...)))), errRun)
 			failEvt := baseEvt
 			failEvt.Event = "deploy_failed"
 			failEvt.Status = "failed"
 			failEvt.Details = SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...))))
 			failEvt.Timestamp = time.Now().UTC()
 			d.DispatchDeployEvent(failEvt)
+			runErrors = append(runErrors, fmt.Sprintf("%s: %v", job.JobName, errRun))
 			continue
 		}
 
-		log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for job %s...", job.JobName)
-		outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", job.JobName)
-		if errRest != nil {
-			log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
+		if !varInjected {
+			log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for unparameterized job %s...", job.JobName)
+			outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", job.JobName)
+			if errRest != nil {
+				log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
+			}
 		}
 
 		appliedJobs = append(appliedJobs, job.JobName)
@@ -3019,11 +3122,13 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		}
 	}
 
-	if len(appliedJobs) == 0 {
+	if len(runErrors) > 0 {
+		errMsg := strings.Join(runErrors, "; ")
 		return ImageReadyEventResponse{
-			Status:  "error",
-			Image:   imgRef,
-			Message: "failed to apply or restart any matching nomad jobs",
+			Status:      "error",
+			Image:       imgRef,
+			MatchedJobs: appliedJobs,
+			Message:     errMsg,
 		}, http.StatusInternalServerError
 	}
 
@@ -3031,7 +3136,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		Status:      "accepted",
 		Image:       imgRef,
 		MatchedJobs: appliedJobs,
-		Message:     fmt.Sprintf("successfully applied and rescheduled %d job(s)", len(appliedJobs)),
+		Message:     fmt.Sprintf("successfully applied %d matching nomad job(s)", len(appliedJobs)),
 	}, http.StatusOK
 }
 
