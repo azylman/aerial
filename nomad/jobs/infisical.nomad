@@ -50,7 +50,7 @@ job "infisical" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "redis:7-alpine"
+        image        = "valkey/valkey:9-alpine"
         network_mode = "host"
         healthchecks {
           disable = true
