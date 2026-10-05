@@ -439,12 +439,12 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 		t.Fatalf("expected rotation on turnCount >= DefaultMaxSessionTurns, got %v (%s)", shouldRotate, reason)
 	}
 
-	// Case 3: stepCount >= 180
+	// Case 3: raw daemon stepCount (NDJSON chunk volume) alone does not trigger rotation without SessionManager transcript limit
 	d.turnCount = 2
 	d.stepCount = 185
 	shouldRotate, reason = pool.ShouldRotate(d)
-	if !shouldRotate || !strings.Contains(reason, "step count threshold exceeded") {
-		t.Fatalf("expected rotation on stepCount >= 180, got %v (%s)", shouldRotate, reason)
+	if shouldRotate || reason != "" {
+		t.Fatalf("expected no rotation on raw daemon stepCount >= 180 without transcript limit, got %v (%s)", shouldRotate, reason)
 	}
 
 	// Case 4: below threshold

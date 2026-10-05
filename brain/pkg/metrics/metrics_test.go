@@ -337,3 +337,35 @@ func TestRecordToolAndSkillExecution(t *testing.T) {
 		t.Errorf("expected subagent_invocations_total for unknown fallback, got:\n%s", body)
 	}
 }
+
+func TestNormalizeRotationReason(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"daemon marked dirty during in-flight turn", "dirty"},
+		{"dirty", "dirty"},
+		{"step count threshold exceeded (185 >= 180)", "steps"},
+		{"transcript step count threshold exceeded (180 >= 180)", "steps"},
+		{"steps", "steps"},
+		{"turn count threshold exceeded (10 >= 10)", "turns"},
+		{"transcript turn count threshold exceeded (10 >= 10)", "turns"},
+		{"turns", "turns"},
+		{"transcript file size threshold exceeded (1048576 >= 524288 bytes)", "bytes"},
+		{"bytes", "bytes"},
+		{"session DB size threshold exceeded (2097152 >= 1048576 bytes)", "db_bytes"},
+		{"db_bytes", "db_bytes"},
+		{"", "unknown"},
+		{"unknown", "unknown"},
+		{"   ", "unknown"},
+		{"random arbitrary reason", "other"},
+	}
+
+	for _, tt := range tests {
+		got := NormalizeRotationReason(tt.input)
+		if got != tt.expected {
+			t.Errorf("NormalizeRotationReason(%q) = %q; want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+

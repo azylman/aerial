@@ -143,7 +143,8 @@ func extractSubagentID(toolOut string) string {
 
 	// 3. Embedded JSON fallback for lines with prefixes
 	for i := 0; i < len(trimmed); i++ {
-		if trimmed[i] == '[' {
+		switch trimmed[i] {
+		case '[':
 			var embeddedList []subagentItem
 			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
 			if err := dec.Decode(&embeddedList); err == nil {
@@ -153,7 +154,7 @@ func extractSubagentID(toolOut string) string {
 					}
 				}
 			}
-		} else if trimmed[i] == '{' {
+		case '{':
 			var embeddedPayload subagentPayload
 			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
 			if err := dec.Decode(&embeddedPayload); err == nil {
