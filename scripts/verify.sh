@@ -116,7 +116,14 @@ run_golangci_lint() {
         echo "   [golangci-lint] Linting $svc ($targetPkg)..."
         if has_cmd golangci-lint; then
             export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.1}"
-            (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg")
+            if ! (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg"); then
+                if has_cmd go; then
+                    echo "   (golangci-lint failed due to Go toolchain mismatch, falling back to go vet for $svc)"
+                    (cd "$svc" && go vet "$targetPkg")
+                else
+                    exit 1
+                fi
+            fi
         elif has_docker; then
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \

@@ -1432,3 +1432,154 @@ func TestProcessNomadEvent_PlanResult_Dropped(t *testing.T) {
 		t.Fatalf("expected 0 deployFailedJobCalls, got %v", mockReg.deployFailedJobCalls)
 	}
 }
+
+func TestNomadStreamSubscriber_Evaluation_BlockedStatus_Ignored(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A blocked evaluation represents Nomad waiting for cluster state changes to place remaining allocations;
+	// it must be safely ignored without failing the active deployment.
+	streamData := `{"Index":2050,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"995a3489-6ff6-c3aa-6541-0175856c6e84","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"3b3eb97e-6077-6951-6489-5dbe1dfdbb6f"}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    636,
+		deployFailedJobMergeSHA: "b1507e486bd8758a392e6903ae5829bcf7a632a3",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls for blocked evaluation, got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockReg.deployedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployedJobCalls for blocked evaluation, got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls for blocked evaluation, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+func TestNomadStreamSubscriber_Evaluation_Complete_WithBlockedEval_Ignored(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// An initial evaluation that placed what it could and created a blocked evaluation for the remainder
+	// (BlockedEval != "") must be safely ignored while queued allocations await placement.
+	streamData := `{"Index":2051,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"033659ef-f967-628b-9bd2-f1b76f646261","JobID":"hangar","Status":"complete","BlockedEval":"995a3489-6ff6-c3aa-6541-0175856c6e84","DeploymentID":"3b3eb97e-6077-6951-6489-5dbe1dfdbb6f","FailedTGAllocs":{"hangar":{"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"hangar":1}}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    636,
+		deployFailedJobMergeSHA: "b1507e486bd8758a392e6903ae5829bcf7a632a3",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls for complete eval with BlockedEval, got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls for complete eval with BlockedEval, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+func TestNomadStreamSubscriber_Evaluation_MixedState_BlockedWithUnqueuedFailure_TreatedAsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// In a multi-task-group job, if an evaluation has a BlockedEval/queued allocation for group A,
+	// but a terminal unqueued failure for group B, it MUST still be treated as a deployment failure.
+	streamData := `{"Index":2052,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-mixed-fail","JobID":"brain","Status":"complete","BlockedEval":"eval-blocked-b","FailedTGAllocs":{"groupA":{"DimensionExhausted":{"network: port collision":1}},"groupB":{"ConstraintFiltered":1}},"QueuedAllocations":{"groupA":1,"groupB":0}}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    637,
+		deployFailedJobMergeSHA: "sha_mixed_fail",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 1 || mockReg.deployFailedJobCalls[0] != "brain" {
+		t.Fatalf("expected deployFailedJobCalls [brain], got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 prompt call for unqueued failure in mixed evaluation, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+func TestProcessNomadEvent_Evaluation_Blocked_ReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	mockReg := &mockPRRegistry{}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	payload := json.RawMessage(`{"Evaluation":{"ID":"eval-blocked-direct","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations"}}`)
+	err := srv.ProcessNomadEvent(ctx, "Evaluation", "EvaluationUpdated", payload)
+	if err != nil {
+		t.Fatalf("expected nil error on blocked evaluation, got: %v", err)
+	}
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls for blocked evaluation, got %v", mockReg.deployFailedJobCalls)
+	}
+}
+

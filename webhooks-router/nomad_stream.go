@@ -360,17 +360,16 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		if strings.TrimSpace(eval.JobID) == "" {
 			return
 		}
-		isBlockedOrFailed := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled") || strings.EqualFold(eval.Status, "blocked") || eval.BlockedEval != ""
 		hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
+		isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
 
-		if isBlockedOrFailed || hasUnqueuedFailures {
+		if hasUnqueuedFailures || isExplicitFailure {
 			// Pass through to River/ProcessNomadEvent for failure handling
 			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status)
+		} else if strings.EqualFold(eval.Status, "blocked") || eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
+			// Blocked evaluation or all unplaced allocations queued for rollout; wait for follow-up allocation/deployment events
+			return
 		} else if strings.EqualFold(eval.Status, "complete") {
-			if allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
-				// Evaluation completed with all failed task groups queued for rollout/scheduling; wait for follow-up allocation/deployment events
-				return
-			}
 			// In-place or restart complete evaluation; pass through for success handling
 			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:complete", eval.JobID, eval.ID)
 		} else {
@@ -455,10 +454,10 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 			return fmt.Errorf("unmarshal nomad evaluation payload: %w", err)
 		}
 		eval := evalPayload.Evaluation
-		isBlockedOrFailed := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled") || strings.EqualFold(eval.Status, "blocked") || eval.BlockedEval != ""
 		hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
+		isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
 
-		if isBlockedOrFailed || hasUnqueuedFailures {
+		if hasUnqueuedFailures || isExplicitFailure {
 			if s.isNomadJobHealthy(ctx, eval.JobID) {
 				return nil
 			}
@@ -467,11 +466,10 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 				desc = fmt.Sprintf("failed task group allocations: %v", eval.FailedTGAllocs)
 			}
 			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, desc)
+		} else if strings.EqualFold(eval.Status, "blocked") || eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
+			// All unplaced allocations have queued allocations / blocked evaluation waiting to place them
+			return nil
 		} else if strings.EqualFold(eval.Status, "complete") {
-			if allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
-				// All failed task groups have queued allocations and will be placed by scheduler once old allocations stop
-				return nil
-			}
 			if s.isNomadJobHealthy(ctx, eval.JobID) {
 				return s.HandleNomadJobSuccess(ctx, eval.JobID, eval.ID)
 			}
