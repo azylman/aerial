@@ -197,9 +197,10 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			transBytes := p.cfg.SessionManager.GetTranscriptSize(trimmedSess)
 			dbBytes := p.cfg.SessionManager.GetSessionDBSize(trimmedSess)
 			steps := p.cfg.SessionManager.CountTranscriptSteps(trimmedSess)
-			if transBytes >= session.DefaultMaxTranscriptBytes || dbBytes >= session.DefaultMaxSessionDBBytes || steps >= session.DefaultMaxSessionSteps {
-				log.Printf("[UnifiedProcessPool] Requested session %s exceeds guardrails (bytes=%d, db_bytes=%d, steps=%d). Resetting to fresh session.",
-					trimmedSess, transBytes, dbBytes, steps)
+			turns := p.cfg.SessionManager.CountTranscriptTurns(trimmedSess)
+			if transBytes >= DefaultMaxTranscriptBytes || dbBytes >= DefaultMaxSessionDBBytes || steps >= DefaultMaxSessionSteps || turns >= DefaultMaxSessionTurns {
+				log.Printf("[UnifiedProcessPool] Requested session %s exceeds guardrails (bytes=%d, db_bytes=%d, steps=%d, turns=%d). Resetting to fresh session.",
+					trimmedSess, transBytes, dbBytes, steps, turns)
 				trimmedSess = ""
 			}
 		}
@@ -532,10 +533,12 @@ const (
 	DefaultMaxSessionSteps    = session.DefaultMaxSessionSteps
 	DefaultMaxTranscriptByte  = session.DefaultMaxTranscriptBytes
 	DefaultMaxTranscriptBytes = session.DefaultMaxTranscriptBytes
+	DefaultMaxSessionDBBytes  = session.DefaultMaxSessionDBBytes
 )
 
 // ShouldRotate evaluates whether a daemon has reached its session lifetime thresholds
-// (10 turns or 180 steps) and is safe to rotate (no in-flight turns).
+// (DefaultMaxSessionTurns turns, DefaultMaxSessionSteps steps, DefaultMaxTranscriptBytes,
+// or DefaultMaxSessionDBBytes) and is safe to rotate (no in-flight turns).
 func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	if d == nil {
 		return false, ""
@@ -553,14 +556,17 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 		return true, fmt.Sprintf("step count threshold exceeded (%d >= %d)", d.StepCount(), DefaultMaxSessionSteps)
 	}
 	if p != nil && p.cfg.SessionManager != nil && d.SessionID() != "" {
+		if turns := p.cfg.SessionManager.CountTranscriptTurns(d.SessionID()); turns >= DefaultMaxSessionTurns {
+			return true, fmt.Sprintf("transcript turn count threshold exceeded (%d >= %d)", turns, DefaultMaxSessionTurns)
+		}
 		if steps := p.cfg.SessionManager.CountTranscriptSteps(d.SessionID()); steps >= DefaultMaxSessionSteps {
 			return true, fmt.Sprintf("transcript step count threshold exceeded (%d >= %d)", steps, DefaultMaxSessionSteps)
 		}
-		if size := p.cfg.SessionManager.GetTranscriptSize(d.SessionID()); size >= session.DefaultMaxTranscriptBytes {
-			return true, fmt.Sprintf("transcript file size threshold exceeded (%d >= %d bytes)", size, session.DefaultMaxTranscriptBytes)
+		if size := p.cfg.SessionManager.GetTranscriptSize(d.SessionID()); size >= DefaultMaxTranscriptBytes {
+			return true, fmt.Sprintf("transcript file size threshold exceeded (%d >= %d bytes)", size, DefaultMaxTranscriptBytes)
 		}
-		if dbSize := p.cfg.SessionManager.GetSessionDBSize(d.SessionID()); dbSize >= session.DefaultMaxSessionDBBytes {
-			return true, fmt.Sprintf("session DB size threshold exceeded (%d >= %d bytes)", dbSize, session.DefaultMaxSessionDBBytes)
+		if dbSize := p.cfg.SessionManager.GetSessionDBSize(d.SessionID()); dbSize >= DefaultMaxSessionDBBytes {
+			return true, fmt.Sprintf("session DB size threshold exceeded (%d >= %d bytes)", dbSize, DefaultMaxSessionDBBytes)
 		}
 	}
 	return false, ""
@@ -598,7 +604,7 @@ func (p *UnifiedProcessPool) RotateDaemon(ctx context.Context, targetKey string,
 
 // ExecuteEphemeral dispatches a prompt to targetKey's daemon and synchronously awaits the response.
 // It performs proactive input validation and automatically triggers asynchronous session rotation
-// if the daemon reaches its lifetime thresholds (10 turns).
+// if the daemon reaches its lifetime thresholds (DefaultMaxSessionTurns turns).
 func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, prompt string) (string, error) {
 	if p == nil {
 		return "", fmt.Errorf("process pool is nil")

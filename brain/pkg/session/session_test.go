@@ -1459,6 +1459,73 @@ func TestManager_CountTranscriptSteps(t *testing.T) {
 	}
 }
 
+func TestManager_CountTranscriptTurns(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := New(tmpDir, tmpDir)
+
+	// 1. Nil manager
+	var nilMgr *Manager
+	if turns := nilMgr.CountTranscriptTurns("sess-1"); turns != 0 {
+		t.Errorf("expected 0 turns from nil manager, got %d", turns)
+	}
+
+	// 2. Empty / whitespace session ID
+	if turns := mgr.CountTranscriptTurns(""); turns != 0 {
+		t.Errorf("expected 0 turns for empty session ID, got %d", turns)
+	}
+	if turns := mgr.CountTranscriptTurns("   "); turns != 0 {
+		t.Errorf("expected 0 turns for whitespace session ID, got %d", turns)
+	}
+
+	// 3. Security: path traversal
+	if turns := mgr.CountTranscriptTurns("../../../root"); turns != 0 {
+		t.Errorf("expected 0 turns for path traversal, got %d", turns)
+	}
+
+	// 4. Non-existent session
+	if turns := mgr.CountTranscriptTurns("sess-ghost"); turns != 0 {
+		t.Errorf("expected 0 turns for ghost session, got %d", turns)
+	}
+
+	// 5. Valid session with empty file -> 0 turns
+	sessID := "sess-turn-test"
+	sessDir := filepath.Join(tmpDir, "brain", sessID, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+	tPath := filepath.Join(sessDir, "transcript.jsonl")
+	if err := os.WriteFile(tPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to create empty file: %v", err)
+	}
+	if turns := mgr.CountTranscriptTurns(sessID); turns != 0 {
+		t.Errorf("expected 0 turns for empty file, got %d", turns)
+	}
+
+	// 6. Transcript with 3 turns (2 genuine user input, 1 ambient)
+	lines := `{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn 1"}
+{"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp 1"}
+{"step_index": 2, "source": "AMBIENT", "type": "USER_INPUT", "content": "[Chat #general] @alex: hey"}
+{"step_index": 3, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn 2"}
+{"step_index": 4, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp 2"}
+`
+	if err := os.WriteFile(tPath, []byte(lines), 0644); err != nil {
+		t.Fatalf("failed to write lines: %v", err)
+	}
+	if turns := mgr.CountTranscriptTurns(sessID); turns != 2 {
+		t.Errorf("expected 2 turns, got %d", turns)
+	}
+
+	// 7. transcript_full.jsonl has higher turns (e.g. 3) -> 3 total turns
+	fullPath := filepath.Join(sessDir, "transcript_full.jsonl")
+	fullLines := lines + `{"step_index": 5, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn 3"}` + "\n"
+	if err := os.WriteFile(fullPath, []byte(fullLines), 0644); err != nil {
+		t.Fatalf("failed to write full lines: %v", err)
+	}
+	if turns := mgr.CountTranscriptTurns(sessID); turns != 3 {
+		t.Errorf("expected 3 turns from larger full transcript, got %d", turns)
+	}
+}
+
 func TestHasUnfinishedBackgroundTask(t *testing.T) {
 	t.Parallel()
 

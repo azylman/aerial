@@ -429,14 +429,14 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 		t.Errorf("expected false for nil daemon, got %v (%s)", shouldRotate, reason)
 	}
 
-	// Case 2: turnCount >= 10
+	// Case 2: turnCount >= DefaultMaxSessionTurns
 	d := &StreamingDaemon{
-		turnCount: 10,
+		turnCount: DefaultMaxSessionTurns,
 		state:     StateReady,
 	}
 	shouldRotate, reason = pool.ShouldRotate(d)
 	if !shouldRotate || !strings.Contains(reason, "turn count threshold exceeded") {
-		t.Fatalf("expected rotation on turnCount >= 10, got %v (%s)", shouldRotate, reason)
+		t.Fatalf("expected rotation on turnCount >= DefaultMaxSessionTurns, got %v (%s)", shouldRotate, reason)
 	}
 
 	// Case 3: stepCount >= 180
@@ -547,6 +547,30 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 	shouldRotate, reason = pool.ShouldRotate(dSessDB)
 	if !shouldRotate || !strings.Contains(reason, "session DB size threshold exceeded") {
 		t.Fatalf("expected rotation on session DB size exceeded, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 11: SessionManager transcript turn count limit exceeded
+	sessIDTurns := "sess-rotate-turns"
+	sessDirTurns := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDTurns, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDirTurns, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	var turnContent strings.Builder
+	for i := 0; i < DefaultMaxSessionTurns; i++ {
+		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}` + "\n", i*2, i+1))
+		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}` + "\n", i*2+1, i+1))
+	}
+	if err := os.WriteFile(filepath.Join(sessDirTurns, "transcript.jsonl"), []byte(turnContent.String()), 0644); err != nil {
+		t.Fatalf("failed to write transcript turns: %v", err)
+	}
+
+	dSessTurns := &StreamingDaemon{
+		sessionID: sessIDTurns,
+		state:     StateReady,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dSessTurns)
+	if !shouldRotate || !strings.Contains(reason, "transcript turn count threshold exceeded") {
+		t.Fatalf("expected rotation on transcript turns exceeded, got %v (%s)", shouldRotate, reason)
 	}
 }
 
@@ -700,6 +724,34 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 	if lastSpawnedSteps == nil || *lastSpawnedSteps != "" {
 		t.Errorf("expected session to be reset to empty due to step count guardrails, got %v", lastSpawnedSteps)
 	}
+
+	// 6. Requesting a sessionID that exceeds transcript turn count guardrails
+	oversizedTurnsSess := "550e8400-e29b-41d4-a716-446655440004"
+	sessDirTurnsGuard := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedTurnsSess, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDirTurnsGuard, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	var turnContentGuard strings.Builder
+	for i := 0; i < DefaultMaxSessionTurns; i++ {
+		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}` + "\n", i*2, i+1))
+		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}` + "\n", i*2+1, i+1))
+	}
+	if err := os.WriteFile(filepath.Join(sessDirTurnsGuard, "transcript.jsonl"), []byte(turnContentGuard.String()), 0644); err != nil {
+		t.Fatalf("failed to write transcript turns: %v", err)
+	}
+
+	d6, err := pool.GetOrCreate(ctx, "target-oversized-turns", oversizedTurnsSess)
+	if err != nil {
+		t.Fatalf("failed GetOrCreate for oversized turns session: %v", err)
+	}
+	if d6 == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	lastSpawnedTurns := lastSpawnedSessionID.Load()
+	if lastSpawnedTurns == nil || *lastSpawnedTurns != "" {
+		t.Errorf("expected session to be reset to empty due to turn count guardrails, got %v", lastSpawnedTurns)
+	}
 }
 
 func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
@@ -733,7 +785,7 @@ func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
 	d1.mu.Lock()
-	d1.turnCount = 10
+	d1.turnCount = DefaultMaxSessionTurns
 	d1.stepCount = 185
 	d1.mu.Unlock()
 
