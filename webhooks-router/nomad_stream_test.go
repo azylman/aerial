@@ -1741,3 +1741,136 @@ func TestProcessNomadEvent_Evaluation_BlockedWithFailedTGAllocs_ReturnsNil(t *te
 }
 
 
+
+
+func TestNomadStreamSubscriber_DuplicateNomadEventSkipped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := `{"Index":2001,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-dup-1","JobID":"brain","Status":"successful"}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockRiver := &mockRiverInserter{skipDuplicate: true}
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil, mockRiver)
+	sub := NewNomadStreamSubscriber(srv)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	// Verify metric counter incremented via /metrics
+	reqM := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	recM := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(recM, reqM)
+	if !strings.Contains(recM.Body.String(), `webhooks_router_unique_skipped_total{kind="nomad_event"}`) {
+		t.Errorf("expected /metrics to include nomad_event duplicate count, got:\n%s", recM.Body.String())
+	}
+}
+
+func TestHandleUnmanagedJobCrash_RiverAndDirect(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. With riverClient != nil -> enqueues NomadCrashAlertArgs
+	mockRiver := &mockRiverInserter{}
+	srvRiver := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil, mockRiver)
+
+	err := srvRiver.HandleUnmanagedJobCrash(ctx, "openobserve", "alloc-1", "failed", "OOMKilled")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if len(mockRiver.insertedCrashAlertJobs) != 1 {
+		t.Fatalf("expected 1 crash alert job, got %d", len(mockRiver.insertedCrashAlertJobs))
+	}
+	if mockRiver.insertedCrashAlertJobs[0].JobID != "openobserve" || mockRiver.insertedCrashAlertJobs[0].AllocID != "alloc-1" {
+		t.Errorf("unexpected crash alert args: %+v", mockRiver.insertedCrashAlertJobs[0])
+	}
+
+	// 2. With riverClient != nil and skipDuplicate == true -> increments nomad_crash_alert metric
+	mockRiverDup := &mockRiverInserter{skipDuplicate: true}
+	srvRiverDup := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil, mockRiverDup)
+	err = srvRiverDup.HandleUnmanagedJobCrash(ctx, "openobserve", "alloc-2", "failed", "OOMKilled")
+	if err != nil {
+		t.Fatalf("expected nil error on duplicate crash, got %v", err)
+	}
+	reqM := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	recM := httptest.NewRecorder()
+	srvRiverDup.Routes().ServeHTTP(recM, reqM)
+	if !strings.Contains(recM.Body.String(), `webhooks_router_unique_skipped_total{kind="nomad_crash_alert"}`) {
+		t.Errorf("expected /metrics to include nomad_crash_alert duplicate count, got:\n%s", recM.Body.String())
+	}
+
+	// 3. With riverClient == nil -> direct execution via ProcessCrashAlert
+	mockDisp := &mockOutboundDispatcher{}
+	srvDirect := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	srvDirect.SetDispatcher(mockDisp)
+
+	err = srvDirect.HandleUnmanagedJobCrash(ctx, "openobserve", "alloc-3", "failed", "signal: killed")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if len(mockDisp.DirectMessageCalls()) != 1 {
+		t.Errorf("expected 1 DM call on direct crash alert, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Errorf("expected 1 prompt call on direct crash alert, got %d", len(mockDisp.PromptCalls()))
+	}
+
+	// 4. Empty job ID is no-op
+	if err := srvDirect.HandleUnmanagedJobCrash(ctx, "", "", "", ""); err != nil {
+		t.Errorf("expected nil error on empty job ID, got %v", err)
+	}
+}
+
+func TestHandleNomadJobFailure_UnmanagedJobDelegation(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. When registry returns updated: false (unmanaged job), delegates to HandleUnmanagedJobCrash
+	mockReg := &mockPRRegistry{
+		deployFailedJobUpdated: false, // not tracked in pr_registry
+	}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	err := srv.HandleNomadJobFailure(ctx, "openobserve", "alloc-99", "failed", "Task OOM killed")
+	if err != nil {
+		t.Fatalf("expected nil error from unmanaged job failure, got %v", err)
+	}
+
+	if len(mockDisp.DirectMessageCalls()) != 1 {
+		t.Fatalf("expected 1 DM call for unmanaged job crash, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+	if !strings.Contains(mockDisp.DirectMessageCalls()[0].Content, "💥 Nomad job `openobserve` crashed or failed. Following up...") {
+		t.Errorf("unexpected DM content: %s", mockDisp.DirectMessageCalls()[0].Content)
+	}
+
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 prompt call for unmanaged job crash, got %d", len(mockDisp.PromptCalls()))
+	}
+	if !strings.Contains(mockDisp.PromptCalls()[0].Prompt, "Nomad job `openobserve` failed or crashed unexpectedly") {
+		t.Errorf("unexpected prompt content: %s", mockDisp.PromptCalls()[0].Prompt)
+	}
+	if !strings.Contains(mockDisp.PromptCalls()[0].Prompt, "Task OOM killed") {
+		t.Errorf("expected error details in prompt, got: %s", mockDisp.PromptCalls()[0].Prompt)
+	}
+
+	// 2. When registry is nil, delegates to HandleUnmanagedJobCrash
+	mockDispNilReg := &mockOutboundDispatcher{}
+	srvNilReg := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	srvNilReg.SetDispatcher(mockDispNilReg)
+
+	err = srvNilReg.HandleNomadJobFailure(ctx, "cadvisor", "alloc-100", "failed", "Docker daemon died")
+	if err != nil {
+		t.Fatalf("expected nil error with nil registry, got %v", err)
+	}
+	if len(mockDispNilReg.DirectMessageCalls()) != 1 || len(mockDispNilReg.PromptCalls()) != 1 {
+		t.Errorf("expected 1 DM and 1 prompt call with nil registry")
+	}
+}

@@ -24,6 +24,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
@@ -32,6 +34,27 @@ import (
 
 // TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
 const TargetNomadVariable = "nomad/jobs/shared"
+
+// UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
+var UniqueSkippedTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "webhooks_router_unique_skipped_total",
+		Help: "Total number of River jobs skipped as duplicates due to unique constraints.",
+	},
+	[]string{"kind"},
+)
+
+func init() {
+	prometheus.MustRegister(UniqueSkippedTotal)
+}
+
+// RecordUniqueSkipped increments the UniqueSkippedTotal counter for the specified kind.
+func RecordUniqueSkipped(kind string) {
+	if kind == "" {
+		return
+	}
+	UniqueSkippedTotal.WithLabelValues(kind).Inc()
+}
 
 // Config holds runtime configuration for webhooks-router.
 type Config struct {
@@ -48,6 +71,7 @@ type Config struct {
 	PostgresURL           string
 	HangarURL             string
 	BrainURL              string
+	SystemChannelID       string
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/webhooks-router/webhooks-router.yaml.
@@ -58,6 +82,7 @@ type RouterYAMLConfig struct {
 	NomadAddr            string `yaml:"nomad_addr"`
 	HangarURL            string `yaml:"hangar_url"`
 	BrainURL             string `yaml:"brain_url"`
+	SystemChannelID      string `yaml:"system_channel_id"`
 }
 
 var webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
@@ -184,6 +209,14 @@ func LoadConfig(configPath string) Config {
 		brainURL = "http://127.0.0.1:8088"
 	}
 
+	systemChanID := os.Getenv("SYSTEM_CHANNEL_ID")
+	if systemChanID == "" {
+		systemChanID = os.Getenv("DISCORD_CHANNEL_ID")
+	}
+	if systemChanID == "" && fileCfg.SystemChannelID != "" {
+		systemChanID = fileCfg.SystemChannelID
+	}
+
 	return Config{
 		Port:                  port,
 		InfisicalURL:          strings.TrimRight(infURL, "/"),
@@ -198,6 +231,7 @@ func LoadConfig(configPath string) Config {
 		PostgresURL:           pgURL,
 		HangarURL:             strings.TrimRight(hangarURL, "/"),
 		BrainURL:              strings.TrimRight(brainURL, "/"),
+		SystemChannelID:       strings.TrimSpace(systemChanID),
 	}
 }
 
@@ -276,12 +310,22 @@ type RiverInserter interface {
 // GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
 type GitHubWebhookArgs struct {
 	Event    string `json:"event"`
-	Delivery string `json:"delivery"`
+	Delivery string `json:"delivery" river:"unique"`
 	Body     []byte `json:"body"`
 }
 
 func (GitHubWebhookArgs) Kind() string {
 	return "github_webhook"
+}
+
+func (GitHubWebhookArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs:   true,
+			ByPeriod: 15 * time.Minute,
+		},
+	}
 }
 
 // GitHubWebhookWorker processes GitHub webhook events asynchronously from River.
@@ -387,6 +431,51 @@ func (w *NomadEventWorker) Work(ctx context.Context, job *river.Job[NomadEventAr
 	err := w.server.ProcessNomadEvent(ctx, job.Args.Topic, job.Args.Type, job.Args.Payload)
 	if err != nil {
 		log.Printf("[webhooks-router] [river] error processing nomad job id=%d: %v", job.ID, err)
+		return err
+	}
+	return nil
+}
+
+// NomadCrashAlertArgs contains payload data for durable background processing of unmanaged Nomad crash alerts.
+type NomadCrashAlertArgs struct {
+	JobID      string `json:"job_id" river:"unique"`
+	AllocID    string `json:"alloc_id"`
+	Status     string `json:"status"`
+	StatusDesc string `json:"status_desc"`
+}
+
+func (NomadCrashAlertArgs) Kind() string {
+	return "nomad_crash_alert"
+}
+
+func (NomadCrashAlertArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs:   true,
+			ByPeriod: 15 * time.Minute,
+		},
+	}
+}
+
+// NomadCrashAlertWorker processes unmanaged Nomad job crash alerts from River.
+type NomadCrashAlertWorker struct {
+	river.WorkerDefaults[NomadCrashAlertArgs]
+	server *RouterServer
+}
+
+func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCrashAlertArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	var jobID int64
+	if job != nil && job.JobRow != nil {
+		jobID = job.ID
+	}
+	log.Printf("[webhooks-router] [river] processing nomad crash alert job id=%d job_id=%s alloc_id=%s", jobID, job.Args.JobID, job.Args.AllocID)
+	err := w.server.ProcessCrashAlert(ctx, job.Args)
+	if err != nil {
+		log.Printf("[webhooks-router] [river] error processing nomad crash alert job id=%d: %v", jobID, err)
 		return err
 	}
 	return nil
@@ -1068,6 +1157,20 @@ func IsValidDiscordSnowflake(id string) bool {
 	return snowflakeRegex.MatchString(strings.TrimSpace(id))
 }
 
+var re4xx = regexp.MustCompile(`\bstatus 4\d{2}\b`)
+
+// is4xxClientError returns true if the error indicates a 4xx HTTP client error or invalid Discord snowflake.
+func is4xxClientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if re4xx.MatchString(msg) || strings.Contains(msg, "invalid discord snowflake") {
+		return true
+	}
+	return false
+}
+
 type GitPushEventRequest struct {
 	Repo     string `json:"repo"`
 	Ref      string `json:"ref"`
@@ -1440,6 +1543,7 @@ func (s *RouterServer) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /health", s.handleHealthz)
+	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("POST /webhooks/infisical", s.handleInfisicalWebhook)
 	mux.HandleFunc("POST /webhooks/generic", s.handleGenericWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
@@ -1649,10 +1753,14 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 				ByPeriod: 15 * time.Minute,
 			},
 		}
-		if _, err := s.riverClient.Insert(r.Context(), args, opts); err != nil {
+		res, err := s.riverClient.Insert(r.Context(), args, opts)
+		if err != nil {
 			log.Printf("[webhooks-router] [hangar] ERROR: failed to insert job into river: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
+		}
+		if res != nil && res.UniqueSkippedAsDuplicate {
+			RecordUniqueSkipped("hangar_webhook")
 		}
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"status":   "accepted",
@@ -2528,10 +2636,15 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 
 	// Synchronously persist to durable storage (PostgreSQL river_job table)
 	// before acknowledging to GitHub (transactional outbox invariant).
-	if _, err := s.riverClient.Insert(r.Context(), args, nil); err != nil {
+	opts := args.InsertOpts()
+	res, err := s.riverClient.Insert(r.Context(), args, &opts)
+	if err != nil {
 		log.Printf("[webhooks-router] [github] ERROR: failed to insert job into river: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 		return
+	}
+	if res != nil && res.UniqueSkippedAsDuplicate {
+		RecordUniqueSkipped("github_webhook")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -3301,6 +3414,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		river.AddWorker(workers, &GitHubWebhookWorker{server: server})
 		river.AddWorker(workers, &HangarWebhookWorker{server: server})
 		river.AddWorker(workers, &NomadEventWorker{server: server})
+		river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
 
 		rc, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
 			Queues: map[string]river.QueueConfig{

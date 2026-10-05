@@ -403,8 +403,12 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 				ByPeriod: 15 * time.Minute,
 			},
 		}
-		if _, err := sub.server.riverClient.Insert(ctx, args, opts); err != nil {
+		res, err := sub.server.riverClient.Insert(ctx, args, opts)
+		if err != nil {
 			log.Printf("[webhooks-router] [nomad-stream] error inserting nomad event into river: %v", err)
+		}
+		if res != nil && res.UniqueSkippedAsDuplicate {
+			RecordUniqueSkipped("nomad_event")
 		}
 		return
 	}
@@ -490,13 +494,13 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 
 // HandleNomadJobFailure processes a confirmed deployment failure or cancellation for a Nomad job.
 func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, status, statusDesc string) error {
-	if s.registry == nil {
-		return nil
-	}
-
 	cleanJob := strings.TrimSpace(jobID)
 	if cleanJob == "" {
 		return nil
+	}
+
+	if s.registry == nil {
+		return s.HandleUnmanagedJobCrash(ctx, cleanJob, refID, status, statusDesc)
 	}
 
 	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployFailedByJob(ctx, cleanJob)
@@ -505,7 +509,7 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		return err
 	}
 	if !updated {
-		return nil
+		return s.HandleUnmanagedJobCrash(ctx, cleanJob, refID, status, statusDesc)
 	}
 
 	log.Printf("[webhooks-router] [nomad] deployment failure confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s, status: %s)",
@@ -877,4 +881,87 @@ func extractAllocationErrorDetails(clientDesc string, taskStates map[string]Noma
 	}
 
 	return "allocation failed"
+}
+
+
+// HandleUnmanagedJobCrash coordinates debounced failure reporting for non-PR unmanaged Nomad jobs.
+func (s *RouterServer) HandleUnmanagedJobCrash(ctx context.Context, jobID, allocID, status, statusDesc string) error {
+	cleanJob := strings.TrimSpace(jobID)
+	if cleanJob == "" {
+		return nil
+	}
+
+	args := NomadCrashAlertArgs{
+		JobID:      cleanJob,
+		AllocID:    strings.TrimSpace(allocID),
+		Status:     strings.TrimSpace(status),
+		StatusDesc: strings.TrimSpace(statusDesc),
+	}
+
+	if s.riverClient != nil {
+		opts := args.InsertOpts()
+		res, err := s.riverClient.Insert(ctx, args, &opts)
+		if err != nil {
+			log.Printf("[webhooks-router] [nomad] error enqueuing crash alert into river: %v", err)
+			return fmt.Errorf("enqueue crash alert: %w", err)
+		}
+		if res != nil && res.UniqueSkippedAsDuplicate {
+			RecordUniqueSkipped("nomad_crash_alert")
+		}
+		return nil
+	}
+
+	return s.ProcessCrashAlert(ctx, args)
+}
+
+// ProcessCrashAlert delivers direct Discord messages and AI prompt notifications for unmanaged job crashes.
+func (s *RouterServer) ProcessCrashAlert(ctx context.Context, args NomadCrashAlertArgs) error {
+	channelID := strings.TrimSpace(s.cfg.SystemChannelID)
+	if !IsValidDiscordSnowflake(channelID) {
+		log.Printf("[webhooks-router] [crash-alert] system channel ID is not configured or invalid snowflake (%q); dropping alert for job %s", channelID, args.JobID)
+		return nil
+	}
+
+	if s.dispatcher == nil {
+		log.Printf("[webhooks-router] [crash-alert] dispatcher not configured; cannot deliver alert for job %s", args.JobID)
+		return nil
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	dmContent := fmt.Sprintf("💥 Nomad job `%s` crashed or failed. Following up...", args.JobID)
+	if err := s.dispatcher.DispatchDirectMessage(callCtx, DirectMessageRequest{
+		ChannelID: channelID,
+		Content:   dmContent,
+	}); err != nil {
+		log.Printf("[webhooks-router] [crash-alert] warning dispatching direct message: %v", err)
+		if is4xxClientError(err) {
+			log.Printf("[webhooks-router] [crash-alert] direct message failed with 4xx client error; dropping cleanly: %v", err)
+			return nil
+		}
+	}
+
+	lines := []string{
+		fmt.Sprintf("Nomad job `%s` failed or crashed unexpectedly (status: %s, allocation ID: %s).", args.JobID, args.Status, args.AllocID),
+	}
+	if cleanDesc := strings.TrimSpace(args.StatusDesc); cleanDesc != "" {
+		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDesc)))
+	}
+	lines = append(lines, "Please investigate and fix the service failure.")
+	prompt := strings.Join(lines, "\n")
+
+	if err := s.dispatcher.DispatchPrompt(callCtx, PromptRequest{
+		ChannelID: channelID,
+		Prompt:    prompt,
+	}); err != nil {
+		if is4xxClientError(err) {
+			log.Printf("[webhooks-router] [crash-alert] prompt dispatch failed with 4xx client error; dropping cleanly: %v", err)
+			return nil
+		}
+		log.Printf("[webhooks-router] [crash-alert] error dispatching failure prompt for %s: %v", args.JobID, err)
+		return fmt.Errorf("dispatch failure prompt for %s: %w", args.JobID, err)
+	}
+
+	return nil
 }
