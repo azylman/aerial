@@ -1592,6 +1592,20 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 	if !hasMirrormere {
 		t.Errorf("expected ManagedServiceConfigs to contain mirrormere mapping, got %v", ManagedServiceConfigs)
 	}
+
+	// 6. Verify orin-voice config mapping exists
+	hasOrinVoice := false
+	for _, m := range ManagedServiceConfigs {
+		if m.RelPath == "services/voice/voice.yaml" &&
+			m.NomadVar == "nomad/jobs/orin-voice" &&
+			m.VarKey == "CONFIG_YAML" {
+			hasOrinVoice = true
+			break
+		}
+	}
+	if !hasOrinVoice {
+		t.Errorf("expected ManagedServiceConfigs to contain orin-voice mapping, got %v", ManagedServiceConfigs)
+	}
 }
 
 func TestRepoLock_ThreadSafety(t *testing.T) {
