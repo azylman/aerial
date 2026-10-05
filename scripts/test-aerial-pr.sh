@@ -194,6 +194,19 @@ assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target2:ok' && ec
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target3:ok' && echo true || echo false)" "Target precedence: DISCORD_CHANNEL_ID takes third priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && echo true || echo false)" "Target precedence: fallback to 1542423172400291873"
 
+# Case 7: Candidate Nomad job name extraction from changed files
+NOMAD_JOB_EXTRACTION_CHECK=$(bash -c '
+    sample_files="nomad/jobs/cadvisor.nomad
+nomad/jobs/node-exporter.nomad
+docs/superpowers/plans/test.md
+jobs/kiosk-client.nomad"
+    job_names=$(echo "$sample_files" | grep -E "(^|/)jobs/.*\.nomad$" | sed -E "s|.*/([^/]+)\.nomad$|\1|" | sort -u || true)
+    jobs_json=$(echo "$job_names" | jq -R . | jq -s .)
+    meta_json=$(jq -n --argjson jobs "$jobs_json" "{jobs: \$jobs}")
+    echo "$meta_json" | jq -r ".jobs | join(\",\")"
+')
+assert_eq "cadvisor,kiosk-client,node-exporter" "$NOMAD_JOB_EXTRACTION_CHECK" "Candidate Nomad jobs extracted into JSON metadata"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

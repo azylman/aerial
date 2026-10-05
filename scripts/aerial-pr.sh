@@ -989,6 +989,23 @@ submit_scratch() {
             brain_reg_url="http://127.0.0.1:8088/internal/pr/register"
         fi
     fi
+    # Extract candidate Nomad job names from changed .nomad files
+    local changed_jobs_json="[]"
+    local changed_nomad_files
+    changed_nomad_files=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git show --pretty="" --name-only "$commit_sha" 2>/dev/null || true)
+    if [ -n "$changed_nomad_files" ]; then
+        local job_names
+        job_names=$(echo "$changed_nomad_files" | grep -E '(^|/)jobs/.*\.nomad$' | sed -E 's|.*/([^/]+)\.nomad$|\1|' | sort -u || true)
+        if [ -n "$job_names" ]; then
+            changed_jobs_json=$(echo "$job_names" | jq -R . | jq -s .)
+        fi
+    fi
+
+    local meta_json="{}"
+    if [ "$changed_jobs_json" != "[]" ]; then
+        meta_json=$(jq -n --argjson jobs "$changed_jobs_json" '{jobs: $jobs}')
+    fi
+
     local reg_payload
     reg_payload=$(jq -n \
         --arg repo "${REPO_NAME}" \
@@ -997,7 +1014,8 @@ submit_scratch() {
         --arg head_sha "$commit_sha" \
         --arg target_id "$target_id" \
         --arg title "$clean_title" \
-        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title}')
+        --arg metadata "$meta_json" \
+        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $metadata}')
 
     local reg_resp
     reg_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \

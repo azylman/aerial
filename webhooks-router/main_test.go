@@ -2147,6 +2147,35 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	if err != nil || resPR != 0 {
 		t.Errorf("ResolvePRBySHA zero sha: got (%d, %v); expected (0, nil)", resPR, err)
 	}
+
+	// 12. Test AtomicTransitionDeployedByJob for a PR in 'merged' status with jobs in metadata
+	_, _ = pool.Exec(ctx, "UPDATE pr_registry SET status = 'merged', metadata = '{\"jobs\":[\"cadvisor\",\"node-exporter\"]}'::jsonb WHERE repo = $1 AND pr_number = $2", repo, testPRNum)
+	_, _, _, _, updated, err = reg.AtomicTransitionDeployedByJob(ctx, "cadvisor")
+	if err != nil {
+		t.Fatalf("AtomicTransitionDeployedByJob first job failed: %v", err)
+	}
+	if updated {
+		t.Errorf("expected updated=false when jobs remain, got true")
+	}
+	// Verify status is deploying and remaining jobs has node-exporter
+	var curStatus string
+	var metaBytes []byte
+	_ = pool.QueryRow(ctx, "SELECT status, metadata FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&curStatus, &metaBytes)
+	if curStatus != "deploying" {
+		t.Errorf("expected status deploying after first job, got %s", curStatus)
+	}
+	// Second job finishes
+	tID, pNum, _, rOut, updated, err := reg.AtomicTransitionDeployedByJob(ctx, "node-exporter")
+	if err != nil {
+		t.Fatalf("AtomicTransitionDeployedByJob second job failed: %v", err)
+	}
+	if !updated || pNum != testPRNum || tID != targetID || rOut != repo {
+		t.Errorf("expected updated=true on second job, got %v (pr=%d, target=%s, repo=%s)", updated, pNum, tID, rOut)
+	}
+	_ = pool.QueryRow(ctx, "SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&curStatus)
+	if curStatus != "deployed" {
+		t.Errorf("expected status deployed after all jobs, got %s", curStatus)
+	}
 }
 
 func TestHandleHangarWebhook_EndpointsAndValidation(t *testing.T) {

@@ -4692,12 +4692,27 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0755)
 	_ = os.WriteFile(filepath.Join(aerialDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
 
+	evtChAerial := make(chan HangarDeployEvent, 1)
+	dNomadAerial.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
+		evtChAerial <- evt
+		return nil
+	}
 	respAerialNomad, codeAerialNomad := dNomadAerial.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
+		Repo:     "aerial",
+		Ref:      "refs/heads/main",
+		PRNumber: 611,
+		TargetID: "1555422677936644147",
 	})
 	if codeAerialNomad != http.StatusOK || respAerialNomad.Status != "accepted" || respAerialNomad.ContainersBuilding || !respAerialNomad.NomadChanged {
 		t.Errorf("expected accepted with NomadChanged=true for aerial nomad change, got code %d, status %s, nomadChanged %v", codeAerialNomad, respAerialNomad.Status, respAerialNomad.NomadChanged)
+	}
+	select {
+	case evt := <-evtChAerial:
+		if evt.PRNumber != 611 || evt.TargetID != "1555422677936644147" || evt.JobName != "migrate" {
+			t.Errorf("expected deploy event with PRNumber 611 and TargetID 1555422677936644147, got %+v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for deploy event from dNomadAerial")
 	}
 
 	// 6. Aerial-config push with deferred nomad job due to active build
@@ -4815,12 +4830,27 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 		},
 	})
 
+	evtChConfig := make(chan HangarDeployEvent, 1)
+	dConfigApplied.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
+		evtChConfig <- evt
+		return nil
+	}
 	respConfigApp, codeConfigApp := dConfigApplied.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial-config",
-		Ref:  "refs/heads/main",
+		Repo:     "aerial-config",
+		Ref:      "refs/heads/main",
+		PRNumber: 255,
+		TargetID: "1555422677936644147",
 	})
 	if codeConfigApp != http.StatusOK || respConfigApp.ContainersBuilding || len(respConfigApp.AppliedJobs) != 1 {
 		t.Errorf("expected job applied when image ready, got code %d, building %v, applied %v", codeConfigApp, respConfigApp.ContainersBuilding, respConfigApp.AppliedJobs)
+	}
+	select {
+	case evt := <-evtChConfig:
+		if evt.PRNumber != 255 || evt.TargetID != "1555422677936644147" || evt.JobName != "webhooks-router" {
+			t.Errorf("expected config deploy event with PRNumber 255 and TargetID 1555422677936644147, got %+v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for deploy event from dConfigApplied")
 	}
 
 	// 8. Push to peripheral repo (mirrormere)
@@ -5131,6 +5161,34 @@ func TestApplyNomadChangesDirectly_Comprehensive(t *testing.T) {
 	})
 	if err != nil || len(applied) != 1 || applied[0] != "test" {
 		t.Errorf("expected applied job [test], got %v (err: %v)", applied, err)
+	}
+
+	// 6. Metadata propagation (TargetID and PRNumber)
+	evtCh := make(chan HangarDeployEvent, 1)
+	dMeta := &SyncDaemon{
+		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: eval-123"), nil, nil
+		},
+		deployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+	}
+	applied, err = dMeta.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
+		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
+	}, "azylman/aerial", "headsha123", "1555422677936644147", "123")
+	if err != nil || len(applied) != 1 || applied[0] != "test" {
+		t.Fatalf("expected applied job [test], got %v (err: %v)", applied, err)
+	}
+
+	var capturedEvt HangarDeployEvent
+	select {
+	case capturedEvt = <-evtCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for deploy event")
+	}
+	if capturedEvt.PRNumber != 123 || capturedEvt.TargetID != "1555422677936644147" || capturedEvt.Repo != "azylman/aerial" || capturedEvt.CommitSHA != "headsha123" {
+		t.Errorf("expected metadata propagated, got %+v", capturedEvt)
 	}
 }
 
