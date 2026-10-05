@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "brain" {
   datacenters = ["dc1"]
   type        = "service"
@@ -51,7 +56,7 @@ job "brain" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-brain:latest"
+        image        = "ghcr.io/azylman/aerial-brain:${var.image_tag}"
         force_pull   = true
         network_mode = "host"
         shm_size     = 536870912

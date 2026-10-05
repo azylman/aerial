@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "discord-mcp" {
   datacenters = ["dc1"]
   type        = "service"
@@ -34,7 +39,7 @@ job "discord-mcp" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-discord-mcp:latest"
+        image        = "ghcr.io/azylman/aerial-discord-mcp:${var.image_tag}"
         force_pull   = true
         network_mode = "host"
         healthchecks {

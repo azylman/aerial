@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "scheduler-mcp" {
   datacenters = ["dc1"]
   type        = "service"
@@ -34,7 +39,7 @@ job "scheduler-mcp" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-scheduler-mcp:latest"
+        image        = "ghcr.io/azylman/aerial-scheduler-mcp:${var.image_tag}"
         force_pull   = true
         network_mode = "host"
         healthchecks {
