@@ -422,7 +422,9 @@ func (d *SyncDaemon) getDeployDispatcher() func(ctx context.Context, evt HangarD
 	if d != nil && d.deployDispatcher != nil {
 		return d.deployDispatcher
 	}
-	return d.defaultDeployDispatcher
+	return func(ctx context.Context, evt HangarDeployEvent) error {
+		return errors.New("deploy dispatcher is not configured (deployDispatcher is nil)")
+	}
 }
 
 func (d *SyncDaemon) defaultDeployDispatcher(ctx context.Context, evt HangarDeployEvent) error {
@@ -3499,6 +3501,9 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 // RunDaemon starts the background sync daemon and HTTP server.
 func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 	daemon := NewDaemon(cfg)
+	if daemon.deployDispatcher == nil {
+		daemon.deployDispatcher = daemon.defaultDeployDispatcher
+	}
 
 	if err := daemon.EnsureDockerAuth(); err != nil {
 		log.Printf("[Hangar] Warning: Failed to configure Docker registry authentication: %v", SanitizeLog(err.Error()))
