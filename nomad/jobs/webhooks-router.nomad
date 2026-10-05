@@ -41,7 +41,6 @@ job "webhooks-router" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-webhooks-router:${var.image_tag}"
         network_mode = "host"
-        force_pull   = true
         healthchecks {
           disable = true
         }
