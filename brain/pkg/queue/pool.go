@@ -28,10 +28,6 @@ import (
 )
 
 const (
-	DefaultMaxSessionTurns     = session.DefaultMaxSessionTurns
-	DefaultMaxSessionSteps     = session.DefaultMaxSessionSteps
-	DefaultMaxTranscriptBytes = session.DefaultMaxTranscriptBytes
-	DefaultMaxSessionDBBytes    = session.DefaultMaxSessionDBBytes
 	DefaultMaxQuotaPauseDBBytes = session.DefaultMaxQuotaPauseDBBytes
 	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
@@ -342,6 +338,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 		if p.sessionMgr != nil {
 			poolCfg.TranscriptRescuer = p.sessionMgr.ExtractResponseSince
+			poolCfg.SessionManager = p.sessionMgr
 		}
 		p.processPool = runner.NewUnifiedProcessPool(poolCfg, nil)
 	}
@@ -356,6 +353,16 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			SetTranscriptRescuer(func(convID string, since time.Time) string)
 		}); ok {
 			tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
+		}
+		if sm, ok := p.processPool.(interface {
+			SetSessionManager(*session.Manager)
+		}); ok {
+			sm.SetSessionManager(p.sessionMgr)
+		}
+		if sm, ok := p.lowEffortProcessPool.(interface {
+			SetSessionManager(*session.Manager)
+		}); ok {
+			sm.SetSessionManager(p.sessionMgr)
 		}
 	}
 

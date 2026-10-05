@@ -4168,10 +4168,6 @@ func (m *mockSequentialPool) Close() error {
 	return nil
 }
 
-func (m *mockSequentialPool) EvictSession(targetKey string) error {
-	return nil
-}
-
 func TestPrewarmProcessPoolsSequentially(t *testing.T) {
 	var mu sync.Mutex
 	var order []string

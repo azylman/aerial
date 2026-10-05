@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/google/uuid"
 )
 
@@ -191,13 +192,6 @@ func (p *InterchangeablePool) rotateAndRelease(workerKey string) {
 }
 
 // Close marks the pool as closed, terminates background routines, and closes the underlying pool.
-func (p *InterchangeablePool) EvictSession(targetKey string) error {
-	if p == nil || p.underlying == nil {
-		return nil
-	}
-	return p.underlying.EvictSession(targetKey)
-}
-
 func (p *InterchangeablePool) Close() error {
 	if p == nil {
 		return nil
@@ -282,6 +276,14 @@ func (p *InterchangeablePool) SetTranscriptRescuer(rescuer func(convID string, s
 		return
 	}
 	p.underlying.SetTranscriptRescuer(rescuer)
+}
+
+// SetSessionManager updates the session manager on the underlying pool if supported.
+func (p *InterchangeablePool) SetSessionManager(sm *session.Manager) {
+	if p == nil || p.underlying == nil {
+		return
+	}
+	p.underlying.SetSessionManager(sm)
 }
 
 // MarkDirty delegates dirty marking and eviction to the underlying pool.

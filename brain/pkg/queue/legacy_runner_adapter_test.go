@@ -29,7 +29,6 @@ func (m *mockTrackerPool) GetOrCreateSession(ctx context.Context, targetKey stri
 	return nil, nil
 }
 
-func (m *mockTrackerPool) EvictSession(targetKey string) error { return nil }
 func (m *mockTrackerPool) Initialize(ctx context.Context) error { return nil }
 func (m *mockTrackerPool) Close() error                         { return nil }
 

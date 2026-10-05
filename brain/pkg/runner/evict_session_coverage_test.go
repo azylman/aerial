@@ -56,66 +56,6 @@ func TestPools_EvictSession_Coverage(t *testing.T) {
 			t.Errorf("expected target-evict-live to be removed from pool")
 		}
 	}
-
-	// 2. DynamicVoicePool.EvictSession
-	{
-		var nilDynamic *DynamicVoicePool
-		if err := nilDynamic.EvictSession("voice-1"); err != nil {
-			t.Errorf("expected nil error on nil DynamicVoicePool.EvictSession")
-		}
-
-		plain := &plainPoolWithoutModel{}
-		dyn := NewDynamicVoicePoolWithInitial(plain, "plain-model", nil)
-		if err := dyn.EvictSession("voice-target"); err != nil {
-			t.Errorf("unexpected error on DynamicVoicePool.EvictSession: %v", err)
-		}
-	}
-
-	// 3. GeminiAPIPool.EvictSession
-	{
-		var nilGemini *GeminiAPIPool
-		if err := nilGemini.EvictSession("gem-1"); err != nil {
-			t.Errorf("expected nil error on nil GeminiAPIPool.EvictSession")
-		}
-
-		gPool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-			APIKey: "test-key",
-			Model:  "gemini-2.5-flash",
-		})
-		if err := gPool.EvictSession("gem-target"); err != nil {
-			t.Errorf("unexpected error on GeminiAPIPool.EvictSession: %v", err)
-		}
-	}
-
-	// 4. InterchangeablePool.EvictSession
-	{
-		var nilInter *InterchangeablePool
-		if err := nilInter.EvictSession("inter-1"); err != nil {
-			t.Errorf("expected nil error on nil InterchangeablePool.EvictSession")
-		}
-
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000002\"}\n"))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, NewMockProcessHandle(99998), nil
-			},
-		}
-		uPool := NewUnifiedProcessPool(PoolConfig{Model: "gemini-2.5-flash"}, mock)
-		defer uPool.Close()
-
-		interPool := NewInterchangeablePool(uPool, InterchangeablePoolConfig{WorkerCount: 1})
-		defer interPool.Close()
-
-		if err := interPool.EvictSession("inter-target"); err != nil {
-			t.Errorf("unexpected error on InterchangeablePool.EvictSession: %v", err)
-		}
-	}
 }
 
 func TestThrowawayTurnSink_NoOpCallbacks_Coverage(t *testing.T) {
