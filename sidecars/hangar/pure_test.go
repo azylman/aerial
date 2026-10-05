@@ -2194,3 +2194,98 @@ func TestExtractManifestAnnotations_TableDriven(t *testing.T) {
 	}
 }
 
+func TestHasNomadJobVariable_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		content string
+		varName string
+		want    bool
+	}{
+		{
+			name: "standard double quotes with block",
+			content: `variable "image_tag" {
+  type    = string
+  default = "latest"
+}`,
+			varName: "image_tag",
+			want:    true,
+		},
+		{
+			name: "single quotes with block",
+			content: `variable 'image_tag' {
+  type = string
+}`,
+			varName: "image_tag",
+			want:    true,
+		},
+		{
+			name:    "bare identifier",
+			content: `variable image_tag {}`,
+			varName: "image_tag",
+			want:    true,
+		},
+		{
+			name:    "compact brace without space",
+			content: `variable "image_tag"{`,
+			varName: "image_tag",
+			want:    true,
+		},
+		{
+			name:    "indented with trailing comment",
+			content: `  variable "image_tag" { # input parameter`,
+			varName: "image_tag",
+			want:    true,
+		},
+		{
+			name:    "hash commented out variable",
+			content: `# variable "image_tag" {`,
+			varName: "image_tag",
+			want:    false,
+		},
+		{
+			name:    "slash commented out variable",
+			content: `// variable "image_tag" {`,
+			varName: "image_tag",
+			want:    false,
+		},
+		{
+			name: "different variable name",
+			content: `variable "db_password" {
+  type = string
+}`,
+			varName: "image_tag",
+			want:    false,
+		},
+		{
+			name:    "prefix match does not trigger false positive",
+			content: `variable "image_tag_prefix" {}`,
+			varName: "image_tag",
+			want:    false,
+		},
+		{
+			name:    "empty content",
+			content: "",
+			varName: "image_tag",
+			want:    false,
+		},
+		{
+			name:    "empty varName",
+			content: `variable "image_tag" {}`,
+			varName: "",
+			want:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := HasNomadJobVariable(tc.content, tc.varName)
+			if got != tc.want {
+				t.Fatalf("HasNomadJobVariable(%q, %q) = %v, want %v", tc.content, tc.varName, got, tc.want)
+			}
+		})
+	}
+}
+
