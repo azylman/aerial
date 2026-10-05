@@ -606,6 +606,9 @@ func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string
 
 // Initialize pre-warms configured target sessions.
 func (p *GeminiAPIPool) EvictSession(targetKey string) error {
+	if p == nil {
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.sessions, targetKey)
