@@ -260,3 +260,20 @@ func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
 
 	p.StopWithTimeout(1 * time.Second)
 }
+
+func TestWorkerPool_CheckUnrotatedSessions_ContextCancelled(t *testing.T) {
+	fake := db.NewFakeStore()
+	defer func() { _ = fake.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p := &WorkerPool{
+		cfg: WorkerPoolConfig{Store: fake},
+	}
+	lastReported := make(map[string]int)
+	p.checkUnrotatedSessions(ctx, lastReported)
+	if len(lastReported) != 0 {
+		t.Errorf("expected empty lastReported on cancelled context, got %d entries", len(lastReported))
+	}
+}
