@@ -4692,7 +4692,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0755)
 	_ = os.WriteFile(filepath.Join(aerialDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
 
-	evtChAerial := make(chan HangarDeployEvent, 1)
+	evtChAerial := make(chan HangarDeployEvent, 10)
 	dNomadAerial.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
 		evtChAerial <- evt
 		return nil
@@ -4706,13 +4706,19 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 	if codeAerialNomad != http.StatusOK || respAerialNomad.Status != "accepted" || respAerialNomad.ContainersBuilding || !respAerialNomad.NomadChanged {
 		t.Errorf("expected accepted with NomadChanged=true for aerial nomad change, got code %d, status %s, nomadChanged %v", codeAerialNomad, respAerialNomad.Status, respAerialNomad.NomadChanged)
 	}
-	select {
-	case evt := <-evtChAerial:
-		if evt.PRNumber != 611 || evt.TargetID != "1555422677936644147" || evt.JobName != "migrate" {
-			t.Errorf("expected deploy event with PRNumber 611 and TargetID 1555422677936644147, got %+v", evt)
+	var foundAerialDeployEvt bool
+	for !foundAerialDeployEvt {
+		select {
+		case evt := <-evtChAerial:
+			if evt.PRNumber != 611 || evt.TargetID != "1555422677936644147" {
+				t.Errorf("expected PRNumber 611 and TargetID 1555422677936644147, got %+v", evt)
+			}
+			if evt.JobName == "migrate" {
+				foundAerialDeployEvt = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for migrate deploy event from dNomadAerial")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for deploy event from dNomadAerial")
 	}
 
 	// 6. Aerial-config push with deferred nomad job due to active build
@@ -4830,7 +4836,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 		},
 	})
 
-	evtChConfig := make(chan HangarDeployEvent, 1)
+	evtChConfig := make(chan HangarDeployEvent, 10)
 	dConfigApplied.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
 		evtChConfig <- evt
 		return nil
@@ -4844,13 +4850,19 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 	if codeConfigApp != http.StatusOK || respConfigApp.ContainersBuilding || len(respConfigApp.AppliedJobs) != 1 {
 		t.Errorf("expected job applied when image ready, got code %d, building %v, applied %v", codeConfigApp, respConfigApp.ContainersBuilding, respConfigApp.AppliedJobs)
 	}
-	select {
-	case evt := <-evtChConfig:
-		if evt.PRNumber != 255 || evt.TargetID != "1555422677936644147" || evt.JobName != "webhooks-router" {
-			t.Errorf("expected config deploy event with PRNumber 255 and TargetID 1555422677936644147, got %+v", evt)
+	var foundConfigDeployEvt bool
+	for !foundConfigDeployEvt {
+		select {
+		case evt := <-evtChConfig:
+			if evt.PRNumber != 255 || evt.TargetID != "1555422677936644147" {
+				t.Errorf("expected config deploy event with PRNumber 255 and TargetID 1555422677936644147, got %+v", evt)
+			}
+			if evt.JobName == "webhooks-router" {
+				foundConfigDeployEvt = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for webhooks-router deploy event from dConfigApplied")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for deploy event from dConfigApplied")
 	}
 
 	// 8. Push to peripheral repo (mirrormere)
