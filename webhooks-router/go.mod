@@ -3,7 +3,7 @@ module github.com/azylman/aerial/webhooks-router
 go 1.27.1
 
 require (
-	github.com/jackc/pgx/v5 v5.8.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/riverqueue/river v0.18.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.18.0
 	github.com/riverqueue/river/rivertype v0.18.0

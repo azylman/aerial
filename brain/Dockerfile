@@ -71,7 +71,7 @@ RUN mkdir -p -m 0700 /root/.ssh && \
 
 # Copy Go SDK, golangci-lint, and Node.js 22 LTS runtime from builders/images
 COPY --link --from=builder /usr/local/go /usr/local/go
-COPY --link --from=golangci/golangci-lint:v1.64.5 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
+COPY --link --from=golangci/golangci-lint:v2.14.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
 COPY --link --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --link --from=arigaio/atlas:latest /atlas /usr/local/bin/atlas
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
