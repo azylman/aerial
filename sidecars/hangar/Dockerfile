@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /hangar .
 
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates git bash tzdata docker-cli && \
     mkdir -p /mnt/data/supervisor/share && \

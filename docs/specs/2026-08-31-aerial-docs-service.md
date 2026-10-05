@@ -4,7 +4,7 @@
 The `aerial-docs` service provides living Markdown documentation rendering with embedded Mermaid.js diagrams directly from the user's private configuration repository (`${AERIAL_CONFIG_DIR}/docs`). It is namespaced under the `/docs/` subpath on the `aerial-proxy` reverse gateway.
 
 ## 2. Architecture & Topography
-- **Engine**: Nginx Alpine (`nginx:1.27-alpine`) serving a Docsify SPA shell and vendored client-side libraries.
+- **Engine**: Nginx Alpine (`nginx:1.30-alpine`) serving a Docsify SPA shell and vendored client-side libraries.
 - **Reverse Proxy Routing**:
   - `aerial-proxy` routes `location /docs/` -> `http://aerial-docs:80/`
   - Exact match `location = /docs` issues an HTTP 301 redirect to `/docs/`
