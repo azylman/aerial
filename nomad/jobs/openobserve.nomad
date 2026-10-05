@@ -34,7 +34,7 @@ job "openobserve" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "public.ecr.aws/zinclabs/openobserve:v1.0.2-debug"
+        image        = "public.ecr.aws/zinclabs/openobserve:v1.0.4"
         network_mode = "host"
         healthchecks {
           disable = true
