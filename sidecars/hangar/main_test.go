@@ -396,15 +396,27 @@ func TestStartReconcilerLoop(t *testing.T) {
 }
 
 func TestStartPeriodicLoop(t *testing.T) {
+	triggered := make(chan struct{}, 1)
 	daemon := &SyncDaemon{
-		interval: 10 * time.Millisecond,
+		interval: 5 * time.Millisecond,
 		repos:    []string{},
+		triggerFn: func() ([]RepoSyncResult, error) {
+			select {
+			case triggered <- struct{}{}:
+			default:
+			}
+			return nil, errors.New("simulated periodic sync notice")
+		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	daemon.StartPeriodicLoop(ctx)
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-triggered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for periodic loop execution")
+	}
 	cancel()
-	time.Sleep(10 * time.Millisecond)
 }
 
 func TestEnsureRepoAndSync(t *testing.T) {
@@ -3655,15 +3667,26 @@ func TestStartPeriodicLoop_ExecutionAndShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	triggered := make(chan struct{}, 1)
 	d := NewDaemon(DaemonConfig{
-		Interval: 10 * time.Millisecond,
+		Interval:   5 * time.Millisecond,
 		ComposeDir: t.TempDir(),
 	})
+	d.triggerFn = func() ([]RepoSyncResult, error) {
+		select {
+		case triggered <- struct{}{}:
+		default:
+		}
+		return nil, nil
+	}
 
 	d.StartPeriodicLoop(ctx)
-	time.Sleep(35 * time.Millisecond)
+	select {
+	case <-triggered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for periodic loop execution")
+	}
 	cancel()
-	time.Sleep(10 * time.Millisecond)
 }
 
 func TestReconciliationStatus_TTLReset(t *testing.T) {
@@ -8576,6 +8599,92 @@ job "router" {
 			t.Fatalf("expected no -var=image_tag passed to unparameterized job, got %v", capturedArgs)
 		}
 	}
+
+	// Sub-test 4: Empty CommitSHA and empty Digest falls back to latest
+	capturedArgs = nil
+	// Sub-test 4: Empty CommitSHA and empty Digest falls back to latest when remote digest cannot be resolved
+	capturedArgs = nil
+	restartCalled = false
+	dNoDigest := NewDaemon(DaemonConfig{
+		ConfigDir:  tmpDir,
+		ComposeDir: tmpDir,
+		RegistryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("not found")),
+					}, nil
+				},
+			},
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				capturedArgs = append([]string(nil), args...)
+				return []byte("Evaluation ID: run-latest"), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+	resp, code = dNoDigest.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
+		Repo:     "azylman/aerial",
+		PRNumber: 615,
+	})
+	if code != http.StatusOK || resp.Status != "accepted" {
+		t.Fatalf("expected 200 accepted for empty sha/digest fallback, got %d (%s)", code, resp.Status)
+	}
+	wantLatestArg := "-var=image_tag=latest"
+	foundLatest := false
+	for _, a := range capturedArgs {
+		if a == wantLatestArg {
+			foundLatest = true
+			break
+		}
+	}
+	if !foundLatest {
+		t.Fatalf("expected args to contain %q, got %v", wantLatestArg, capturedArgs)
+	}
+
+	// Sub-test 5: Digest without sha256: prefix gets normalized
+	capturedArgs = nil
+	resp, code = d.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
+		Digest:   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		Repo:     "azylman/aerial",
+	})
+	if code != http.StatusOK || resp.Status != "accepted" {
+		t.Fatalf("expected 200 accepted for unadorned digest, got %d (%s)", code, resp.Status)
+	}
+	foundCleanDigest := false
+	for _, a := range capturedArgs {
+		if a == wantDigestArg {
+			foundCleanDigest = true
+			break
+		}
+	}
+	if !foundCleanDigest {
+		t.Fatalf("expected args to contain %q with prepended sha256, got %v", wantDigestArg, capturedArgs)
+	}
+
+	// Sub-test 6: Unparameterized legacy job with restart error logs warning and succeeds
+	dRestartFail := NewDaemon(DaemonConfig{
+		ConfigDir:  tmpDir,
+		ComposeDir: tmpDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "restart" {
+				return nil, []byte("restart failed warning"), errors.New("exit status 1")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+	resp, code = dRestartFail.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image: "ghcr.io/azylman/legacy-app:latest",
+	})
+	if code != http.StatusOK || resp.Status != "accepted" {
+		t.Fatalf("expected 200 accepted even if restart fails warning, got %d (%s)", code, resp.Status)
+	}
 }
 
 func TestExecuteImageReadyEvent_NonZeroExitCodeDoesNotSwallowError(t *testing.T) {
@@ -8684,3 +8793,114 @@ func TestReconcilePendingNomad_PipesPRMetadata(t *testing.T) {
 		t.Fatal("timed out waiting for deploy_started from ReconcilePendingNomad")
 	}
 }
+
+func TestExecuteImageReadyEvent_JobFileValidationAndReadErrors(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	jobPath := filepath.Join(jobsDir, "val-fail.nomad")
+	_ = os.WriteFile(jobPath, []byte(`job "val-fail" {
+  task "t" {
+    config {
+      image = "ghcr.io/azylman/val-fail:latest"
+    }
+  }
+}`), 0644)
+
+	// 1. ValidateNomadJob returns error
+	dValFail := NewDaemon(DaemonConfig{
+		ConfigDir: tmpDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+				return nil, []byte("syntax error in HCL"), errors.New("validate failed")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	resp, code := dValFail.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image: "ghcr.io/azylman/val-fail:latest",
+	})
+	if code != http.StatusInternalServerError || resp.Status != "error" {
+		t.Fatalf("expected 500 error on validation failure, got %d (%+v)", code, resp)
+	}
+	if !strings.Contains(resp.Message, "validation failed") {
+		t.Errorf("expected validation failed in message, got %q", resp.Message)
+	}
+
+	// 2. ReadFile returns error (file removed during lookup)
+	jobPath2 := filepath.Join(jobsDir, "read-fail.nomad")
+	_ = os.WriteFile(jobPath2, []byte(`job "read-fail" {
+  task "t" {
+    config {
+      image = "ghcr.io/azylman/read-fail:latest"
+    }
+  }
+}`), 0644)
+
+	dReadFail := NewDaemon(DaemonConfig{
+		ConfigDir: tmpDir,
+		RegistryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					// Remove the job file before the loop reads it!
+					_ = os.Remove(jobPath2)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{"token":"abc"}`)),
+					}, nil
+				},
+			},
+		},
+	})
+
+	resp2, code2 := dReadFail.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image: "ghcr.io/azylman/read-fail:latest",
+	})
+	if code2 != http.StatusInternalServerError || resp2.Status != "error" {
+		t.Fatalf("expected 500 error on read failure, got %d (%+v)", code2, resp2)
+	}
+	if !strings.Contains(resp2.Message, "read error") {
+		t.Errorf("expected read error in message, got %q", resp2.Message)
+	}
+}
+
+func TestExecuteGitPushEvent_ConfigSyncNotices(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(filepath.Join(configDir, ".git"), 0755)
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir: configDir,
+		Repos:     []string{configDir},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "log" {
+				return []byte("sha123\x002026-10-05T00:00:00Z"), nil, nil
+			}
+			if len(args) > 0 && args[0] == "pull" {
+				return []byte("Already up to date."), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "var" && args[1] == "put" {
+				return nil, []byte("nomad var put permission denied"), errors.New("var put failed")
+			}
+			return []byte(""), nil, nil
+		},
+	})
+
+	req := GitPushEventRequest{
+		Repo:   "azylman/aerial-config",
+		Commit: "sha123",
+	}
+	resp, code := d.ExecuteGitPushEvent(ctx, req)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 OK even with config sync notice, got %d (%+v)", code, resp)
+	}
+}
+
