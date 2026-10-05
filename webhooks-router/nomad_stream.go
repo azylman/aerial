@@ -729,7 +729,6 @@ func (s *RouterServer) isNomadBatchTemplateHealthy(ctx context.Context, cleanAdd
 	if err := json.NewDecoder(resp.Body).Decode(&jobSpec); err != nil {
 		return false
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
 
 	isPeriodic := jobSpec.Periodic != nil && jobSpec.Periodic.Enabled
 	isParameterized := jobSpec.ParameterizedJob != nil
