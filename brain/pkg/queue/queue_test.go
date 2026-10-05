@@ -1638,24 +1638,24 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	<-completedCh
 
 	// Verify post-execution state:
-	// Worker preserves session and turn count continues to increment
+	// Worker rotates session and resets turn count to 0
 	finalSessionID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID: %v", err)
 	}
-	if finalSessionID != initialSessionID {
-		t.Errorf("Expected session ID to be preserved as %q, got: %s", initialSessionID, finalSessionID)
+	if finalSessionID != "" {
+		t.Errorf("Expected session ID to be rotated (empty), got: %s", finalSessionID)
 	}
 
 	finalTurnCount, err := getSessionTurnCount(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query turn count: %v", err)
 	}
-	if finalTurnCount != DefaultMaxSessionTurns {
-		t.Errorf("Expected turn_count=%d after turn %d, got %d", DefaultMaxSessionTurns, DefaultMaxSessionTurns, finalTurnCount)
+	if finalTurnCount != 0 {
+		t.Errorf("Expected turn_count=0 after turn %d, got %d", DefaultMaxSessionTurns, finalTurnCount)
 	}
 
-	// Send turn DefaultMaxSessionTurns + 1 (Turn 11, preserves session)
+	// Send turn DefaultMaxSessionTurns + 1 (starts fresh session)
 	completedCh = make(chan struct{}, 1)
 	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: fmt.Sprintf("<@aerial> Turn %d", DefaultMaxSessionTurns+1), CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg3)
@@ -1666,15 +1666,15 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to query turn count after turn 11: %v", err)
 	}
-	if turn11Count != DefaultMaxSessionTurns+1 {
-		t.Errorf("Expected turn_count=%d on turn 11, got %d", DefaultMaxSessionTurns+1, turn11Count)
+	if turn11Count != 1 {
+		t.Errorf("Expected turn_count=1 on turn 11, got %d", turn11Count)
 	}
 	turn11SessionID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID after turn 11: %v", err)
 	}
-	if turn11SessionID != initialSessionID {
-		t.Errorf("Expected session ID to remain %q, got: %s", initialSessionID, turn11SessionID)
+	if turn11SessionID == initialSessionID || turn11SessionID == "" {
+		t.Errorf("Expected fresh session ID on turn 11, got: %s", turn11SessionID)
 	}
 }
 
@@ -4257,12 +4257,17 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get session ID after turn 2: %v", err)
 	}
-	if s2 != "c9b5e679-7425-40de-944b-e07fc1f90ae7" {
-		t.Errorf("Expected session preserved after Turn 2, got %q", s2)
+	if s2 != "" {
+		t.Errorf("Expected session to be rotated (empty) after Turn 2, got %q", s2)
 	}
 
-	// Rotate session to cold state to test Turn 3 cold bootstrap
-	_ = rotateSessionID(store, channelID, "")
+	prevS2, err := getPreviousSessionID(store, channelID)
+	if err != nil {
+		t.Fatalf("Failed to get previous session ID after turn 2: %v", err)
+	}
+	if prevS2 != "c9b5e679-7425-40de-944b-e07fc1f90ae7" {
+		t.Errorf("Expected previous session ID after Turn 2 to be %q, got %q", "c9b5e679-7425-40de-944b-e07fc1f90ae7", prevS2)
+	}
 
 	// 3. Process Turn 3 -> executes as Turn 1 cold bootstrap (fetches history, passes sessionID = "")
 	msg3 := db.Message{
@@ -4399,9 +4404,6 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		t.Errorf("Turn 10 in existing session should NOT contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[1])
 	}
 	mu.Unlock()
-
-	// Rotate session to cold state to test Turn 3 cold bootstrap and previous session seeding
-	_ = rotateSessionID(store, channelID, "")
 
 	// Verify DB state after rotation
 	currentSess, err := getSessionID(store, channelID)
@@ -7016,8 +7018,8 @@ func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 	}
 
 	mu.Lock()
-	if gotSessionID != "old-session-id" {
-		t.Errorf("Expected session %q preserved after %d turns, got: %q", "old-session-id", DefaultMaxSessionTurns, gotSessionID)
+	if gotSessionID != "" {
+		t.Errorf("Expected session to be rotated (empty) after %d turns, got: %q", DefaultMaxSessionTurns, gotSessionID)
 	}
 	mu.Unlock()
 }
@@ -12014,14 +12016,14 @@ func TestSession_RotationAtStepLimit_PreFlight(t *testing.T) {
 	}
 
 	mu.Lock()
-	if gotSessionID != oldSessionID {
-		t.Errorf("Expected session to be preserved as %q after %d steps, got: %q", oldSessionID, DefaultMaxSessionSteps, gotSessionID)
+	if gotSessionID != "" {
+		t.Errorf("Expected session to be rotated (empty) after %d steps, got: %q", DefaultMaxSessionSteps, gotSessionID)
 	}
 	mu.Unlock()
 
 	prevSess, _ := getPreviousSessionID(store, "thread-step-limit-test")
-	if prevSess != "" {
-		t.Errorf("Expected previous session ID to be empty, got %q", prevSess)
+	if prevSess != oldSessionID {
+		t.Errorf("Expected previous session ID to be %q, got %q", oldSessionID, prevSess)
 	}
 }
 
@@ -12097,14 +12099,14 @@ func TestSession_RotationAtByteLimit_PreFlight(t *testing.T) {
 	}
 
 	mu.Lock()
-	if gotSessionID != oldSessionID {
-		t.Errorf("Expected session to be preserved as %q after %d bytes, got: %q", oldSessionID, DefaultMaxTranscriptBytes, gotSessionID)
+	if gotSessionID != "" {
+		t.Errorf("Expected session to be rotated (empty) after %d bytes, got: %q", DefaultMaxTranscriptBytes, gotSessionID)
 	}
 	mu.Unlock()
 
 	prevSess, _ := getPreviousSessionID(store, "thread-byte-limit-test")
-	if prevSess != "" {
-		t.Errorf("Expected previous session ID to be empty, got %q", prevSess)
+	if prevSess != oldSessionID {
+		t.Errorf("Expected previous session ID to be %q, got %q", oldSessionID, prevSess)
 	}
 }
 
@@ -12165,15 +12167,15 @@ func TestSession_RotationAtLimit_PostExecution(t *testing.T) {
 		t.Fatal("Timeout waiting for message")
 	}
 
-	// In post-execution, worker no longer rotates sessions based on step limit
+	// In post-execution, worker rotates sessions based on step limit
 	curSess, _ := getSessionID(store, "thread-post-rot-test")
-	if curSess != executedSessionID {
-		t.Errorf("Expected session %q to be preserved post execution, got: %q", executedSessionID, curSess)
+	if curSess != "" {
+		t.Errorf("Expected session to be rotated (empty) post execution, got: %q", curSess)
 	}
 
 	prevSess, _ := getPreviousSessionID(store, "thread-post-rot-test")
-	if prevSess != "" {
-		t.Errorf("Expected previous session ID to be empty post execution, got %q", prevSess)
+	if prevSess != executedSessionID {
+		t.Errorf("Expected previous session ID to be %q post execution, got %q", executedSessionID, prevSess)
 	}
 }
 
@@ -12256,8 +12258,8 @@ func TestWatchdog_RotationCircuitBreaker_OnBloat(t *testing.T) {
 	if attempts[0] != bloatedSessionID {
 		t.Errorf("Expected attempt 1 to use session %q, got %q", bloatedSessionID, attempts[0])
 	}
-	if attempts[1] != bloatedSessionID {
-		t.Errorf("Expected attempt 2 to preserve session %q, got: %q", bloatedSessionID, attempts[1])
+	if attempts[1] != "" {
+		t.Errorf("Expected attempt 2 to rotate session (empty), got: %q", attempts[1])
 	}
 }
 
@@ -12325,8 +12327,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != "sess-chan-byte" {
-			t.Errorf("Expected session to be preserved as %q in channel mode byte limit, got: %q", "sess-chan-byte", gotSessionID)
+		if gotSessionID != "" {
+			t.Errorf("Expected session to be rotated (empty) in channel mode byte limit, got: %q", gotSessionID)
 		}
 		mu.Unlock()
 	})
@@ -12393,8 +12395,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != oldSess {
-			t.Errorf("Expected session to be preserved as %q in channel mode step limit, got: %q", oldSess, gotSessionID)
+		if gotSessionID != "" {
+			t.Errorf("Expected session to be rotated (empty) in channel mode step limit, got: %q", gotSessionID)
 		}
 		mu.Unlock()
 	})
@@ -12451,8 +12453,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		}
 
 		curSess, _ := getSessionID(store, "thread-post-byte-test")
-		if curSess != executedSessionID {
-			t.Errorf("Expected session %q to be preserved post execution, got: %q", executedSessionID, curSess)
+		if curSess != "" {
+			t.Errorf("Expected session to be rotated (empty) post execution, got: %q", curSess)
 		}
 	})
 
@@ -12526,8 +12528,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		if len(attempts) != 2 {
 			t.Fatalf("Expected 2 attempts, got %d", len(attempts))
 		}
-		if attempts[1] != bloatedSessionID {
-			t.Errorf("Expected attempt 2 to preserve session %q, got: %q", bloatedSessionID, attempts[1])
+		if attempts[1] != "" {
+			t.Errorf("Expected attempt 2 to rotate session (empty), got: %q", attempts[1])
 		}
 	})
 }

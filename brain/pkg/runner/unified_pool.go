@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
@@ -145,11 +146,9 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		p.mu.RUnlock()
 		return nil, fmt.Errorf("process pool is closed")
 	}
-	if d, exists := p.daemons[targetKey]; exists && d != nil && d.State() != StateClosed && !d.IsDirty() {
-		if trimmedSess == "" || d.SessionID() == "" || d.SessionID() == trimmedSess {
-			p.mu.RUnlock()
-			return d, nil
-		}
+	if d, exists := p.daemons[targetKey]; exists && isDaemonMatch(d, trimmedSess) {
+		p.mu.RUnlock()
+		return d, nil
 	}
 	p.mu.RUnlock()
 
@@ -160,7 +159,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			return nil, fmt.Errorf("process pool is closed")
 		}
 		if d, exists := p.daemons[targetKey]; exists && d != nil {
-			if d.State() != StateClosed && !d.IsDirty() && (trimmedSess == "" || d.SessionID() == "" || d.SessionID() == trimmedSess) {
+			if isDaemonMatch(d, trimmedSess) {
 				p.mu.Unlock()
 				return d, nil
 			}
@@ -269,6 +268,34 @@ func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey s
 		return nil, err // return untyped nil interface
 	}
 	return d, nil
+}
+
+// EvictSession closes and removes the active daemon for targetKey.
+func (p *UnifiedProcessPool) EvictSession(targetKey string) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	d, exists := p.daemons[targetKey]
+	if exists {
+		delete(p.daemons, targetKey)
+	}
+	p.mu.Unlock()
+
+	if exists && d != nil {
+		return d.Close()
+	}
+	return nil
+}
+
+func isDaemonMatch(d *StreamingDaemon, trimmedSess string) bool {
+	if d == nil || d.State() == StateClosed || d.IsDirty() {
+		return false
+	}
+	if trimmedSess == "" {
+		return true
+	}
+	return d.SessionID() == "" || d.SessionID() == trimmedSess
 }
 
 // Close gracefully terminates all daemons tracked by the pool.
@@ -470,9 +497,9 @@ func (p *UnifiedProcessPool) MarkDirty() {
 
 // Session rotation thresholds for memory pressure mitigation and context compaction.
 const (
-	DefaultMaxSessionTurns   = 10
-	DefaultMaxSessionSteps   = 180
-	DefaultMaxTranscriptByte = 500 * 1024
+	DefaultMaxSessionTurns   = session.DefaultMaxSessionTurns
+	DefaultMaxSessionSteps   = session.DefaultMaxSessionSteps
+	DefaultMaxTranscriptByte = session.DefaultMaxTranscriptBytes
 )
 
 // ShouldRotate evaluates whether a daemon has reached its session lifetime thresholds

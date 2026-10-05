@@ -191,6 +191,13 @@ func (p *InterchangeablePool) rotateAndRelease(workerKey string) {
 }
 
 // Close marks the pool as closed, terminates background routines, and closes the underlying pool.
+func (p *InterchangeablePool) EvictSession(targetKey string) error {
+	if p == nil || p.underlying == nil {
+		return nil
+	}
+	return p.underlying.EvictSession(targetKey)
+}
+
 func (p *InterchangeablePool) Close() error {
 	if p == nil {
 		return nil
