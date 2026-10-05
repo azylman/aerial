@@ -72,6 +72,19 @@ func (p *DynamicVoicePool) GetOrCreateSession(ctx context.Context, targetKey str
 }
 
 // Initialize pre-warms the currently active pool.
+func (p *DynamicVoicePool) EvictSession(targetKey string) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	pool := p.currentPool
+	p.mu.RUnlock()
+	if pool != nil {
+		return pool.EvictSession(targetKey)
+	}
+	return nil
+}
+
 func (p *DynamicVoicePool) Initialize(ctx context.Context) error {
 	if p == nil {
 		return errors.New("dynamic voice pool is nil")

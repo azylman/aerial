@@ -1091,21 +1091,21 @@ func TestWorkerPool_QuotaPause_RotatesBloatedSession(t *testing.T) {
 		t.Fatalf("timed out waiting for quota failure completion")
 	}
 
-	// Session should be preserved because worker no longer rotates sessions on guardrail limits
+	// Session should be rotated to cold state "" because steps >= DefaultMaxSessionSteps
 	currSess, err := store.GetSessionID(context.Background(), threadID)
 	if err != nil {
 		t.Fatalf("failed to query session ID: %v", err)
 	}
-	if currSess != validUUID {
-		t.Errorf("expected session ID to be preserved as %q, got %q", validUUID, currSess)
+	if currSess != "" {
+		t.Errorf("expected session ID to be rotated to empty \"\", got %q", currSess)
 	}
 
 	prevSess, err := store.GetPreviousSessionID(context.Background(), threadID)
 	if err != nil {
 		t.Fatalf("failed to query previous session ID: %v", err)
 	}
-	if prevSess != "" {
-		t.Errorf("expected previous session ID to be empty, got %q", prevSess)
+	if prevSess != validUUID {
+		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
 	}
 }
 
@@ -1202,16 +1202,16 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	if sessionsSeen[0] != validUUID {
 		t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, sessionsSeen[0])
 	}
-	if sessionsSeen[1] != validUUID {
-		t.Errorf("expected attempt 2 to preserve session ID %q, got %q", validUUID, sessionsSeen[1])
+	if sessionsSeen[1] != "" {
+		t.Errorf("expected attempt 2 to be cold retry (empty session ID) due to guardrail rotation, got %q", sessionsSeen[1])
 	}
 
 	prevSess, err := store.GetPreviousSessionID(context.Background(), threadID)
 	if err != nil {
 		t.Fatalf("failed to query previous session ID: %v", err)
 	}
-	if prevSess != "" {
-		t.Errorf("expected previous session ID to be empty, got %q", prevSess)
+	if prevSess != validUUID {
+		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
 	}
 }
 
@@ -1518,14 +1518,14 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != oldSess {
-			t.Errorf("Expected session to be preserved as %q, got: %q", oldSess, gotSessionID)
+		if gotSessionID != "" {
+			t.Errorf("Expected session to be rotated (empty) on channel DB limit, got: %q", gotSessionID)
 		}
 		mu.Unlock()
 
 		prevSess, _ := getPreviousSessionID(store, "chan-db-thread")
-		if prevSess != "" {
-			t.Errorf("Expected previous session ID to be empty in store, got %q", prevSess)
+		if prevSess != oldSess {
+			t.Errorf("Expected previous session ID to be %q in store, got %q", oldSess, prevSess)
 		}
 	})
 
@@ -1668,8 +1668,8 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != oldSess {
-			t.Errorf("Expected session to be preserved as %q on thread DB limit, got: %q", oldSess, gotSessionID)
+		if gotSessionID != "" {
+			t.Errorf("Expected session to be rotated (empty) on thread DB limit, got: %q", gotSessionID)
 		}
 		mu.Unlock()
 	})
@@ -1874,8 +1874,8 @@ func TestWorker_SessionDBRotation_WatchdogTimeout(t *testing.T) {
 	if attempts[0] != bloatedSessionID {
 		t.Errorf("Expected attempt 1 to use session %q, got %q", bloatedSessionID, attempts[0])
 	}
-	if attempts[1] != bloatedSessionID {
-		t.Errorf("Expected attempt 2 to preserve session %q, got: %q", bloatedSessionID, attempts[1])
+	if attempts[1] != "" {
+		t.Errorf("Expected attempt 2 to rotate session (empty), got: %q", attempts[1])
 	}
 }
 
@@ -1931,12 +1931,12 @@ func TestWorker_SessionDBRotation_PostExecution(t *testing.T) {
 	}
 
 	curSess, _ := getSessionID(store, "thread-post-db-test")
-	if curSess != executedSessionID {
-		t.Errorf("Expected session %q to be preserved post execution, got: %q", executedSessionID, curSess)
+	if curSess != "" {
+		t.Errorf("Expected session to be rotated (empty) post execution, got: %q", curSess)
 	}
 	prevSess, _ := getPreviousSessionID(store, "thread-post-db-test")
-	if prevSess != "" {
-		t.Errorf("Expected previous session ID to be empty post execution, got %q", prevSess)
+	if prevSess != executedSessionID {
+		t.Errorf("Expected previous session ID to be %q post execution, got %q", executedSessionID, prevSess)
 	}
 }
 
@@ -2014,8 +2014,8 @@ func TestWorker_SessionDBRotation_TransientRetry(t *testing.T) {
 	if attempts[0] != transSessionID {
 		t.Errorf("Expected attempt 1 to use session %q, got %q", transSessionID, attempts[0])
 	}
-	if attempts[1] != transSessionID {
-		t.Errorf("Expected attempt 2 to preserve session %q, got: %q", transSessionID, attempts[1])
+	if attempts[1] != "" {
+		t.Errorf("Expected attempt 2 to rotate session (empty), got: %q", attempts[1])
 	}
 }
 
@@ -3495,8 +3495,8 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 		if recordedSessions[0] != validUUID {
 			t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, recordedSessions[0])
 		}
-		if recordedSessions[1] != validUUID {
-			t.Errorf("expected attempt 2 session to be preserved as %q, got %q", validUUID, recordedSessions[1])
+		if recordedSessions[1] != "" {
+			t.Errorf("expected attempt 2 session to be rotated (empty) on guardrail breach, got %q", recordedSessions[1])
 		}
 	})
 

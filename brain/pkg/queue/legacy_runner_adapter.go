@@ -66,6 +66,16 @@ func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKe
 	return s, nil
 }
 
+func (p *legacyRunnerAgentPool) EvictSession(targetKey string) error {
+	p.mu.Lock()
+	delete(p.sessions, targetKey)
+	p.mu.Unlock()
+	if p.trackerPool != nil {
+		return p.trackerPool.EvictSession(targetKey)
+	}
+	return nil
+}
+
 func (p *legacyRunnerAgentPool) Initialize(ctx context.Context) error {
 	return nil
 }

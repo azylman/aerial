@@ -58,6 +58,13 @@ func (m *mockVoicePool) GetOrCreateSession(ctx context.Context, targetKey string
 	return s, nil
 }
 
+func (m *mockVoicePool) EvictSession(targetKey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sessions, targetKey)
+	return nil
+}
+
 func (m *mockVoicePool) Initialize(ctx context.Context) error {
 	atomic.AddInt32(&m.initCalled, 1)
 	if m.initDelay > 0 {
@@ -480,6 +487,7 @@ type plainPoolWithoutModel struct{}
 func (p *plainPoolWithoutModel) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
 	return nil, nil
 }
+func (p *plainPoolWithoutModel) EvictSession(targetKey string) error { return nil }
 func (p *plainPoolWithoutModel) Initialize(ctx context.Context) error { return nil }
 func (p *plainPoolWithoutModel) Close() error                         { return nil }
 

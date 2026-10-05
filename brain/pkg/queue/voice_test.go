@@ -951,6 +951,11 @@ func (p *queueMockVoiceProcessPool) Close() error {
 	return nil
 }
 
+func (p *queueMockVoiceProcessPool) EvictSession(targetKey string) error {
+	delete(p.sessions, targetKey)
+	return nil
+}
+
 var _ runner.AgentPool = (*queueMockVoiceProcessPool)(nil)
 var _ runner.AgentSession = (*queueMockVoiceSession)(nil)
 
