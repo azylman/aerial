@@ -215,7 +215,9 @@ func (d *StreamingDaemon) TurnCount() int {
 	return d.turnCount
 }
 
-// StepCount returns the total number of step_update events received across all turns.
+// StepCount returns the total number of raw NDJSON step_update events received across all turns.
+// Note: This reflects stdout streaming chunk volume, not conversation trajectory steps (which
+// are canonically tracked in transcript.jsonl via SessionManager.CountTranscriptSteps).
 func (d *StreamingDaemon) StepCount() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

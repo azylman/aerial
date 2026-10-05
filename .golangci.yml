@@ -1,58 +1,58 @@
-run:
-  timeout: 5m
-
+version: "2"
 linters:
   enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - typecheck
-    - unused
-    - errname
-    - sqlclosecheck
     - bodyclose
-    - nilerr
     - copyloopvar
-    - errorlint
     - errchkjson
-    - noctx
+    - errname
+    - errorlint
     - fatcontext
-    - tparallel
-    - unparam
+    - nilerr
+    - noctx
     - predeclared
-    - wastedassign
+    - sqlclosecheck
+    - tparallel
     - unconvert
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-    exclude-functions:
-      - (*bytes.Buffer).Write
-      - (*bytes.Buffer).WriteString
-      - (*bytes.Buffer).WriteByte
-      - (*bytes.Buffer).WriteRune
-      - (*strings.Builder).Write
-      - (*strings.Builder).WriteString
-      - (*strings.Builder).WriteByte
-      - (*strings.Builder).WriteRune
-      - hash.Hash.Write
-      - (*database/sql.Rows).Close
-      - (io.Closer).Close
-      - (io.ReadCloser).Close
-
-issues:
-  exclude-use-default: false
-  exclude-rules:
-    # 1. Monorepo-wide test exclusions
-    - path: _test\.go
-      linters:
-        - errcheck
-        - errchkjson
-        - ineffassign
-        - staticcheck
-        - unused
-        - noctx
-        - unparam
-        - wastedassign
+    - unparam
+    - wastedassign
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+      exclude-functions:
+        - (*bytes.Buffer).Write
+        - (*bytes.Buffer).WriteString
+        - (*bytes.Buffer).WriteByte
+        - (*bytes.Buffer).WriteRune
+        - (*strings.Builder).Write
+        - (*strings.Builder).WriteString
+        - (*strings.Builder).WriteByte
+        - (*strings.Builder).WriteRune
+        - hash.Hash.Write
+        - (*database/sql.Rows).Close
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+          - errchkjson
+          - ineffassign
+          - noctx
+          - staticcheck
+          - unparam
+          - unused
+          - wastedassign
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

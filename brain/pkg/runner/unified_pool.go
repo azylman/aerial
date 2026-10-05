@@ -526,9 +526,8 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	if d.TurnCount() >= DefaultMaxSessionTurns {
 		return true, fmt.Sprintf("turn count threshold exceeded (%d >= %d)", d.TurnCount(), DefaultMaxSessionTurns)
 	}
-	if d.StepCount() >= DefaultMaxSessionSteps {
-		return true, fmt.Sprintf("step count threshold exceeded (%d >= %d)", d.StepCount(), DefaultMaxSessionSteps)
-	}
+	// Note: Step count limits are evaluated canonically against transcript.jsonl via SessionManager.CountTranscriptSteps below.
+	// d.StepCount() tracks stdout NDJSON streaming chunk volume, which must not be confused with trajectory steps.
 	if p != nil && p.cfg.SessionManager != nil && d.SessionID() != "" {
 		if turns := p.cfg.SessionManager.CountTranscriptTurns(d.SessionID()); turns >= DefaultMaxSessionTurns {
 			return true, fmt.Sprintf("transcript turn count threshold exceeded (%d >= %d)", turns, DefaultMaxSessionTurns)

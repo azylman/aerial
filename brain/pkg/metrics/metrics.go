@@ -869,6 +869,27 @@ func RecordWebhookDispatch(hook, status string, duration time.Duration) {
 	WebhookDurationSeconds.WithLabelValues(hook).Observe(duration.Seconds())
 }
 
+// NormalizeRotationReason normalizes raw rotation reason strings into low-cardinality categorical enums.
+func NormalizeRotationReason(reason string) string {
+	r := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(r, "dirty"):
+		return "dirty"
+	case strings.Contains(r, "step"):
+		return "steps"
+	case strings.Contains(r, "turn"):
+		return "turns"
+	case strings.Contains(r, "db size") || strings.Contains(r, "db_bytes"):
+		return "db_bytes"
+	case strings.Contains(r, "size") || strings.Contains(r, "bytes"):
+		return "bytes"
+	case r == "" || r == "unknown":
+		return "unknown"
+	default:
+		return "other"
+	}
+}
+
 // RecordSessionRotation records a session rotation event with phase, scope, and reason.
 func RecordSessionRotation(phase, scope, reason string) {
 	if phase == "" {
@@ -877,11 +898,10 @@ func RecordSessionRotation(phase, scope, reason string) {
 	if scope == "" {
 		scope = "thread"
 	}
-	if reason == "" {
-		reason = "unknown"
-	}
+	reason = NormalizeRotationReason(reason)
 	SessionRotationsTotal.WithLabelValues(phase, scope, reason).Inc()
 }
+
 
 // RecordOllamaInference records in-flight token counts, phase durations, and tokens/sec from Ollama generate responses.
 func RecordOllamaInference(model string, promptTokens, evalTokens int, promptEvalDur, evalDur, loadDur time.Duration, totalDur ...time.Duration) {
