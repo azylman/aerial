@@ -44,7 +44,6 @@ job "hangar" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-hangar:${var.image_tag}"
         network_mode = "host"
-        force_pull   = true
         healthchecks {
           disable = true
         }

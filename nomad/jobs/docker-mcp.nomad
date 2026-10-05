@@ -40,7 +40,6 @@ job "docker-mcp" {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-docker-mcp:${var.image_tag}"
-        force_pull   = true
         network_mode = "host"
         healthchecks {
           disable = true
