@@ -21,6 +21,13 @@ job "openobserve" {
   group "openobserve" {
     count = 1
 
+    restart {
+      attempts = 5
+      interval = "15m"
+      delay    = "15s"
+      mode     = "delay"
+    }
+
     network {
       mode = "host"
       port "http" {
@@ -98,8 +105,8 @@ EOH
 
       resources {
         cpu        = 500
-        memory     = 1024
-        memory_max = 2048
+        memory     = 2048
+        memory_max = 4096
       }
     }
   }
