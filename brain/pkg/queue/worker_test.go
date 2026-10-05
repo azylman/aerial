@@ -1038,13 +1038,13 @@ func TestWorkerPool_QuotaPause_RotatesBloatedSession(t *testing.T) {
 		}
 	}()
 
-	// Prepare transcript on disk with step_index >= DefaultMaxSessionSteps and quota exhaustion error
+	// Prepare transcript on disk with step_index >= session.DefaultMaxSessionSteps and quota exhaustion error
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
 	_ = os.MkdirAll(sessDir, 0755)
 	tNow := time.Now().UTC()
 	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
 {"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2h30m.","created_at":%q}
-`, DefaultMaxSessionSteps, tNow.Format(time.RFC3339))
+`, session.DefaultMaxSessionSteps, tNow.Format(time.RFC3339))
 	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644)
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
@@ -1091,21 +1091,21 @@ func TestWorkerPool_QuotaPause_RotatesBloatedSession(t *testing.T) {
 		t.Fatalf("timed out waiting for quota failure completion")
 	}
 
-	// Session should be rotated to cold state "" because steps >= DefaultMaxSessionSteps
+	// Session should be preserved by queue across quota pause, delegating rotation to the agent pool
 	currSess, err := store.GetSessionID(context.Background(), threadID)
 	if err != nil {
 		t.Fatalf("failed to query session ID: %v", err)
 	}
-	if currSess != "" {
-		t.Errorf("expected session ID to be rotated to empty \"\", got %q", currSess)
+	if currSess != validUUID {
+		t.Errorf("expected session ID %q preserved across quota pause, got %q", validUUID, currSess)
 	}
 
 	prevSess, err := store.GetPreviousSessionID(context.Background(), threadID)
 	if err != nil {
 		t.Fatalf("failed to query previous session ID: %v", err)
 	}
-	if prevSess != validUUID {
-		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
+	if prevSess != "" {
+		t.Errorf("expected previous session ID to be empty, got %q", prevSess)
 	}
 }
 
@@ -1153,7 +1153,7 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 			if attemptNum == 1 {
 				// During attempt 1, the session executes steps that exceed the guardrail
 				bloatedContent := fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"tool runaway","created_at":%q}`+"\n",
-					DefaultMaxSessionSteps+5, time.Now().UTC().Format(time.RFC3339))
+					session.DefaultMaxSessionSteps+5, time.Now().UTC().Format(time.RFC3339))
 				f, _ := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0644)
 				if f != nil {
 					_, _ = f.WriteString(bloatedContent)
@@ -1202,16 +1202,16 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	if sessionsSeen[0] != validUUID {
 		t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, sessionsSeen[0])
 	}
-	if sessionsSeen[1] != "" {
-		t.Errorf("expected attempt 2 to be cold retry (empty session ID) due to guardrail rotation, got %q", sessionsSeen[1])
+	if sessionsSeen[1] != validUUID {
+		t.Errorf("expected attempt 2 to preserve session ID %q across transient retry, got %q", validUUID, sessionsSeen[1])
 	}
 
 	prevSess, err := store.GetPreviousSessionID(context.Background(), threadID)
 	if err != nil {
 		t.Fatalf("failed to query previous session ID: %v", err)
 	}
-	if prevSess != validUUID {
-		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
+	if prevSess != "" {
+		t.Errorf("expected previous session ID to be empty, got %q", prevSess)
 	}
 }
 
@@ -1465,7 +1465,7 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		if err := os.MkdirAll(convDir, 0755); err != nil {
 			t.Fatalf("failed to create convDir: %v", err)
 		}
-		// Write .db alone (1.6 MB) >= DefaultMaxSessionDBBytes (1.5 MB)
+		// Write .db alone (1.6 MB) >= session.DefaultMaxSessionDBBytes (1.5 MB)
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 1600*1024), 0644)
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, 600*1024), 0644)
 
@@ -1518,14 +1518,14 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != "" {
-			t.Errorf("Expected session to be rotated (empty) on channel DB limit, got: %q", gotSessionID)
+		if gotSessionID != oldSess {
+			t.Errorf("Expected queue to preserve session %q, delegating rotation to pool, got: %q", oldSess, gotSessionID)
 		}
 		mu.Unlock()
 
 		prevSess, _ := getPreviousSessionID(store, "chan-db-thread")
-		if prevSess != oldSess {
-			t.Errorf("Expected previous session ID to be %q in store, got %q", oldSess, prevSess)
+		if prevSess != "" {
+			t.Errorf("Expected no rotation (empty previous session ID), got %q", prevSess)
 		}
 	})
 
@@ -1541,7 +1541,7 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		if err := os.MkdirAll(convDir, 0755); err != nil {
 			t.Fatalf("failed to create convDir: %v", err)
 		}
-		// Write .db (1 MB) and .db-wal (600 KB) -> DB alone (1 MB) < DefaultMaxSessionDBBytes (1.5 MB)
+		// Write .db (1 MB) and .db-wal (600 KB) -> DB alone (1 MB) < session.DefaultMaxSessionDBBytes (1.5 MB)
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 1000*1024), 0644)
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, 600*1024), 0644)
 
@@ -1617,7 +1617,7 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		if err := os.MkdirAll(convDir, 0755); err != nil {
 			t.Fatalf("failed to create convDir: %v", err)
 		}
-		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, DefaultMaxSessionDBBytes+1024), 0644)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
 
 		_ = saveSessionID(store, "thread-db-thread", oldSess)
 		_, _ = incrementSessionTurnCount(store, "thread-db-thread")
@@ -1668,8 +1668,8 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != "" {
-			t.Errorf("Expected session to be rotated (empty) on thread DB limit, got: %q", gotSessionID)
+		if gotSessionID != oldSess {
+			t.Errorf("Expected queue to preserve session %q, delegating rotation to pool, got: %q", oldSess, gotSessionID)
 		}
 		mu.Unlock()
 	})
@@ -1678,7 +1678,7 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
 	t.Parallel()
 
-	// Rotate on Quota Pause when DB size >= DefaultMaxQuotaPauseDBBytes
+	// Rotate on Quota Pause when DB size >= session.DefaultMaxQuotaPauseDBBytes
 	t.Run("RotateWhenDBSizeExceedsQuotaPauseThreshold", func(t *testing.T) {
 		t.Parallel()
 		store := setupTestStore(t)
@@ -1688,7 +1688,7 @@ func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
 		oldSess := "sess-quota-pause-db-rot"
 		convDir := filepath.Join(tmpDir, "conversations")
 		_ = os.MkdirAll(convDir, 0755)
-		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, DefaultMaxQuotaPauseDBBytes+1024), 0644)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxQuotaPauseDBBytes+1024), 0644)
 
 		_ = saveSessionID(store, "thread-qp-rot", oldSess)
 
@@ -1741,7 +1741,7 @@ func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
 		}
 	})
 
-	// Preserve session on Quota Pause when DB size < DefaultMaxQuotaPauseDBBytes
+	// Preserve session on Quota Pause when DB size < session.DefaultMaxQuotaPauseDBBytes
 	t.Run("PreserveWhenDBSizeBelowQuotaPauseThreshold", func(t *testing.T) {
 		t.Parallel()
 		store := setupTestStore(t)
@@ -1836,8 +1836,8 @@ func TestWorker_SessionDBRotation_WatchdogTimeout(t *testing.T) {
 			mu.Unlock()
 
 			if currentAttempt == 1 {
-				// During attempt 1, write a bloated DB (exceeding DefaultMaxSessionDBBytes)
-				_ = os.WriteFile(filepath.Join(convDir, bloatedSessionID+".db"), make([]byte, DefaultMaxSessionDBBytes+1024), 0644)
+				// During attempt 1, write a bloated DB (exceeding session.DefaultMaxSessionDBBytes)
+				_ = os.WriteFile(filepath.Join(convDir, bloatedSessionID+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
 				return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
 			}
 
@@ -1874,8 +1874,8 @@ func TestWorker_SessionDBRotation_WatchdogTimeout(t *testing.T) {
 	if attempts[0] != bloatedSessionID {
 		t.Errorf("Expected attempt 1 to use session %q, got %q", bloatedSessionID, attempts[0])
 	}
-	if attempts[1] != "" {
-		t.Errorf("Expected attempt 2 to rotate session (empty), got: %q", attempts[1])
+	if attempts[1] != bloatedSessionID {
+		t.Errorf("Expected attempt 2 to preserve session %q across watchdog retry, got: %q", bloatedSessionID, attempts[1])
 	}
 }
 
@@ -1903,8 +1903,8 @@ func TestWorker_SessionDBRotation_PostExecution(t *testing.T) {
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			// During execution, write a DB that exceeds DefaultMaxSessionDBBytes
-			_ = os.WriteFile(filepath.Join(convDir, executedSessionID+".db"), make([]byte, DefaultMaxSessionDBBytes+500), 0644)
+			// During execution, write a DB that exceeds session.DefaultMaxSessionDBBytes
+			_ = os.WriteFile(filepath.Join(convDir, executedSessionID+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0644)
 			return mockJSONResponse(executedSessionID, "Execution heavy DB output"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -1931,12 +1931,12 @@ func TestWorker_SessionDBRotation_PostExecution(t *testing.T) {
 	}
 
 	curSess, _ := getSessionID(store, "thread-post-db-test")
-	if curSess != "" {
-		t.Errorf("Expected session to be rotated (empty) post execution, got: %q", curSess)
+	if curSess != executedSessionID {
+		t.Errorf("Expected session %q preserved post execution, delegating rotation to pool, got: %q", executedSessionID, curSess)
 	}
 	prevSess, _ := getPreviousSessionID(store, "thread-post-db-test")
-	if prevSess != executedSessionID {
-		t.Errorf("Expected previous session ID to be %q post execution, got %q", executedSessionID, prevSess)
+	if prevSess != "" {
+		t.Errorf("Expected previous session ID to be empty, got %q", prevSess)
 	}
 }
 
@@ -1975,8 +1975,8 @@ func TestWorker_SessionDBRotation_TransientRetry(t *testing.T) {
 			mu.Unlock()
 
 			if currentAttempt == 1 {
-				// During attempt 1, write a bloated DB (exceeding DefaultMaxSessionDBBytes)
-				_ = os.WriteFile(filepath.Join(convDir, transSessionID+".db"), make([]byte, DefaultMaxSessionDBBytes+1024), 0644)
+				// During attempt 1, write a bloated DB (exceeding session.DefaultMaxSessionDBBytes)
+				_ = os.WriteFile(filepath.Join(convDir, transSessionID+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
 				// Return a transient error
 				return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
 			}
@@ -2014,8 +2014,8 @@ func TestWorker_SessionDBRotation_TransientRetry(t *testing.T) {
 	if attempts[0] != transSessionID {
 		t.Errorf("Expected attempt 1 to use session %q, got %q", transSessionID, attempts[0])
 	}
-	if attempts[1] != "" {
-		t.Errorf("Expected attempt 2 to rotate session (empty), got: %q", attempts[1])
+	if attempts[1] != transSessionID {
+		t.Errorf("Expected attempt 2 to preserve session %q across transient retry, got: %q", transSessionID, attempts[1])
 	}
 }
 
@@ -3312,7 +3312,7 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"run_command","args":{"command_line":"docker stats --no-stream"}}]}
 {"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"CONTAINER ID aerial-brain MEM USAGE 120MiB"}
 {"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2s.","created_at":%q}
-`, DefaultMaxSessionSteps, tNow.Format(time.RFC3339))
+`, session.DefaultMaxSessionSteps, tNow.Format(time.RFC3339))
 					if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
 						t.Errorf("failed to update transcript during attempt 1: %v", err)
 					}
@@ -3440,7 +3440,7 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"view_file","args":{"target_file":"/tmp/build.log"}}]}
 {"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"build failed at line 42"}
 {"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"transient network timeout"}
-`, DefaultMaxSessionSteps)
+`, session.DefaultMaxSessionSteps)
 					if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
 						t.Errorf("failed to update transcript during attempt 1: %v", err)
 					}
@@ -3495,8 +3495,8 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 		if recordedSessions[0] != validUUID {
 			t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, recordedSessions[0])
 		}
-		if recordedSessions[1] != "" {
-			t.Errorf("expected attempt 2 session to be rotated (empty) on guardrail breach, got %q", recordedSessions[1])
+		if recordedSessions[1] != validUUID {
+			t.Errorf("expected attempt 2 session to be preserved as %q on transient retry, got %q", validUUID, recordedSessions[1])
 		}
 	})
 

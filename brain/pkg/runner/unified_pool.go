@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
@@ -30,6 +31,7 @@ type PoolConfig struct {
 	TranscriptRescuer       func(convID string, since time.Time) string
 	MemoryRetriever         MemoryRetriever
 	AmbientContextRetriever AmbientContextRetriever
+	SessionManager          *session.Manager
 }
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
@@ -99,6 +101,16 @@ func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(convID string, si
 	}
 }
 
+// SetSessionManager updates the session manager for rotation guardrail checks.
+func (p *UnifiedProcessPool) SetSessionManager(sm *session.Manager) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.SessionManager = sm
+}
+
 // Initialize pre-warms configured target daemons sequentially in the caller's context.
 func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	p.mu.RLock()
@@ -146,9 +158,11 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		p.mu.RUnlock()
 		return nil, fmt.Errorf("process pool is closed")
 	}
-	if d, exists := p.daemons[targetKey]; exists && isDaemonMatch(d, trimmedSess) {
-		p.mu.RUnlock()
-		return d, nil
+	if d, exists := p.daemons[targetKey]; exists {
+		if should, _ := p.ShouldRotate(d); !should && isDaemonMatch(d, trimmedSess) {
+			p.mu.RUnlock()
+			return d, nil
+		}
 	}
 	p.mu.RUnlock()
 
@@ -159,7 +173,8 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			return nil, fmt.Errorf("process pool is closed")
 		}
 		if d, exists := p.daemons[targetKey]; exists && d != nil {
-			if isDaemonMatch(d, trimmedSess) {
+			should, rotReason := p.ShouldRotate(d)
+			if !should && isDaemonMatch(d, trimmedSess) {
 				p.mu.Unlock()
 				return d, nil
 			}
@@ -168,11 +183,26 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			go func(oldD *StreamingDaemon, tKey string) {
 				defer p.bgWg.Done()
 				if closeErr := oldD.Close(); closeErr != nil {
-					log.Printf("[UnifiedProcessPool] Warning: error closing dirty daemon %q: %v", tKey, closeErr)
+					log.Printf("[UnifiedProcessPool] Warning: error closing old daemon %q: %v", tKey, closeErr)
 				}
 			}(d, targetKey)
+			if should {
+				metrics.RecordSessionRotation("pre_flight", "pool", rotReason)
+				trimmedSess = ""
+			}
 		}
 		p.mu.Unlock()
+
+		if trimmedSess != "" && p.cfg.SessionManager != nil {
+			transBytes := p.cfg.SessionManager.GetTranscriptSize(trimmedSess)
+			dbBytes := p.cfg.SessionManager.GetSessionDBSize(trimmedSess)
+			steps := p.cfg.SessionManager.CountTranscriptSteps(trimmedSess)
+			if transBytes >= session.DefaultMaxTranscriptBytes || dbBytes >= session.DefaultMaxSessionDBBytes || steps >= session.DefaultMaxSessionSteps {
+				log.Printf("[UnifiedProcessPool] Requested session %s exceeds guardrails (bytes=%d, db_bytes=%d, steps=%d). Resetting to fresh session.",
+					trimmedSess, transBytes, dbBytes, steps)
+				trimmedSess = ""
+			}
+		}
 
 		daemonEnv := p.cfg.Env
 		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
@@ -188,13 +218,13 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		}
 
 		daemonCfg := DaemonConfig{
-			ThreadID:          targetKey,
-			SessionID:         trimmedSess,
-			Model:             p.cfg.Model,
-			AgyBin:            p.cfg.AgyBin,
-			Cwd:               p.cfg.Cwd,
-			Env:               daemonEnv,
-			GeminiHomeDir:     p.cfg.GeminiHomeDir,
+			ThreadID:                targetKey,
+			SessionID:               trimmedSess,
+			Model:                   p.cfg.Model,
+			AgyBin:                  p.cfg.AgyBin,
+			Cwd:                     p.cfg.Cwd,
+			Env:                     daemonEnv,
+			GeminiHomeDir:           p.cfg.GeminiHomeDir,
 			TranscriptRescuer:       p.cfg.TranscriptRescuer,
 			MemoryRetriever:         p.cfg.MemoryRetriever,
 			AmbientContextRetriever: p.cfg.AmbientContextRetriever,
@@ -218,8 +248,9 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 				return
 			}
 			tracked := p.daemons[targetKey] == d
-			should, _ := p.ShouldRotate(d)
+			should, rotReason := p.ShouldRotate(d)
 			if should && tracked {
+				metrics.RecordSessionRotation("post_turn", "pool", rotReason)
 				p.bgWg.Add(1)
 				p.mu.RUnlock()
 				go func(tKey string) {
@@ -497,9 +528,10 @@ func (p *UnifiedProcessPool) MarkDirty() {
 
 // Session rotation thresholds for memory pressure mitigation and context compaction.
 const (
-	DefaultMaxSessionTurns   = session.DefaultMaxSessionTurns
-	DefaultMaxSessionSteps   = session.DefaultMaxSessionSteps
-	DefaultMaxTranscriptByte = session.DefaultMaxTranscriptBytes
+	DefaultMaxSessionTurns    = session.DefaultMaxSessionTurns
+	DefaultMaxSessionSteps    = session.DefaultMaxSessionSteps
+	DefaultMaxTranscriptByte  = session.DefaultMaxTranscriptBytes
+	DefaultMaxTranscriptBytes = session.DefaultMaxTranscriptBytes
 )
 
 // ShouldRotate evaluates whether a daemon has reached its session lifetime thresholds
@@ -519,6 +551,17 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	}
 	if d.StepCount() >= DefaultMaxSessionSteps {
 		return true, fmt.Sprintf("step count threshold exceeded (%d >= %d)", d.StepCount(), DefaultMaxSessionSteps)
+	}
+	if p != nil && p.cfg.SessionManager != nil && d.SessionID() != "" {
+		if steps := p.cfg.SessionManager.CountTranscriptSteps(d.SessionID()); steps >= DefaultMaxSessionSteps {
+			return true, fmt.Sprintf("transcript step count threshold exceeded (%d >= %d)", steps, DefaultMaxSessionSteps)
+		}
+		if size := p.cfg.SessionManager.GetTranscriptSize(d.SessionID()); size >= session.DefaultMaxTranscriptBytes {
+			return true, fmt.Sprintf("transcript file size threshold exceeded (%d >= %d bytes)", size, session.DefaultMaxTranscriptBytes)
+		}
+		if dbSize := p.cfg.SessionManager.GetSessionDBSize(d.SessionID()); dbSize >= session.DefaultMaxSessionDBBytes {
+			return true, fmt.Sprintf("session DB size threshold exceeded (%d >= %d bytes)", dbSize, session.DefaultMaxSessionDBBytes)
+		}
 	}
 	return false, ""
 }

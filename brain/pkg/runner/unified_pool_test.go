@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
@@ -481,6 +483,222 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 	shouldRotate, reason = pool.ShouldRotate(dDirtyInflight)
 	if shouldRotate || reason != "" {
 		t.Fatalf("expected no rotation for dirty daemon with >0 inflight, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 8: SessionManager transcript step count limit exceeded
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+	pool.SetSessionManager(sessMgr)
+
+	sessIDSteps := "sess-rotate-steps"
+	sessDirSteps := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDSteps, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDirSteps, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	transcriptContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps-1)
+	if err := os.WriteFile(filepath.Join(sessDirSteps, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	dSessSteps := &StreamingDaemon{
+		sessionID: sessIDSteps,
+		state:     StateReady,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dSessSteps)
+	if !shouldRotate || !strings.Contains(reason, "transcript step count threshold exceeded") {
+		t.Fatalf("expected rotation on transcript steps exceeded, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 9: SessionManager transcript file size limit exceeded
+	sessIDSize := "sess-rotate-size"
+	sessDirSize := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDSize, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDirSize, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	largeData := make([]byte, session.DefaultMaxTranscriptBytes+10)
+	if err := os.WriteFile(filepath.Join(sessDirSize, "transcript.jsonl"), largeData, 0644); err != nil {
+		t.Fatalf("failed to write large transcript: %v", err)
+	}
+
+	dSessSize := &StreamingDaemon{
+		sessionID: sessIDSize,
+		state:     StateReady,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dSessSize)
+	if !shouldRotate || !strings.Contains(reason, "transcript file size threshold exceeded") {
+		t.Fatalf("expected rotation on transcript size exceeded, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 10: SessionManager DB size limit exceeded
+	sessIDDB := "sess-rotate-db"
+	convDir := filepath.Join(tmpDir, "conversations")
+	if err := os.MkdirAll(convDir, 0755); err != nil {
+		t.Fatalf("failed to create conversations dir: %v", err)
+	}
+	largeDBData := make([]byte, session.DefaultMaxSessionDBBytes+10)
+	if err := os.WriteFile(filepath.Join(convDir, sessIDDB+".db"), largeDBData, 0644); err != nil {
+		t.Fatalf("failed to write large session DB: %v", err)
+	}
+
+	dSessDB := &StreamingDaemon{
+		sessionID: sessIDDB,
+		state:     StateReady,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dSessDB)
+	if !shouldRotate || !strings.Contains(reason, "session DB size threshold exceeded") {
+		t.Fatalf("expected rotation on session DB size exceeded, got %v (%s)", shouldRotate, reason)
+	}
+}
+
+func TestUnifiedProcessPool_SetSessionManager(t *testing.T) {
+	pool := NewUnifiedProcessPool(PoolConfig{}, nil)
+	tmpDir := t.TempDir()
+	sm := session.New(tmpDir, tmpDir)
+	pool.SetSessionManager(sm)
+
+	pool.mu.RLock()
+	gotSM := pool.cfg.SessionManager
+	pool.mu.RUnlock()
+	if gotSM != sm {
+		t.Errorf("expected session manager to be updated")
+	}
+
+	// nil pool safety
+	var nilPool *UnifiedProcessPool
+	nilPool.SetSessionManager(sm)
+}
+
+func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testing.T) {
+	var spawnCounter atomic.Int32
+	var lastSpawnedSessionID atomic.Pointer[string]
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			count := spawnCounter.Add(1)
+			sID := cfg.SessionID
+			lastSpawnedSessionID.Store(&sID)
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				sessJSON := cfg.SessionID
+				if sessJSON == "" {
+					sessJSON = fmt.Sprintf("00000000-0000-0000-0000-%012d", count)
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessJSON)))
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+		},
+	}
+
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		SessionManager: sessMgr,
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// 1. Initial creation
+	d1, err := pool.GetOrCreate(ctx, "target-1", "")
+	if err != nil {
+		t.Fatalf("failed creating initial daemon: %v", err)
+	}
+
+	// Make d1 exceed turn count threshold
+	d1.mu.Lock()
+	d1.turnCount = DefaultMaxSessionTurns
+	d1.mu.Unlock()
+
+	// 2. Next GetOrCreate should trigger pre-flight rotation
+	d2, err := pool.GetOrCreate(ctx, "target-1", "")
+	if err != nil {
+		t.Fatalf("failed GetOrCreate after threshold exceeded: %v", err)
+	}
+	if d2 == d1 {
+		t.Fatalf("expected new daemon instance after pre-flight rotation")
+	}
+	if d1.State() != StateClosed {
+		t.Fatalf("expected old daemon to be closed, got %v", d1.State())
+	}
+
+	// 3. Requesting a sessionID that exceeds disk guardrails
+	oversizedSess := "550e8400-e29b-41d4-a716-446655440001"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedSess, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	largeData := make([]byte, session.DefaultMaxTranscriptBytes+10)
+	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), largeData, 0644); err != nil {
+		t.Fatalf("failed to write large transcript: %v", err)
+	}
+
+	d3, err := pool.GetOrCreate(ctx, "target-oversized", oversizedSess)
+	if err != nil {
+		t.Fatalf("failed GetOrCreate for oversized session: %v", err)
+	}
+	if d3 == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	// The session passed to daemon config should have been reset to empty string
+	lastSpawned := lastSpawnedSessionID.Load()
+	if lastSpawned == nil || *lastSpawned != "" {
+		t.Errorf("expected session to be reset to empty due to disk guardrails, got %v", lastSpawned)
+	}
+
+	// 4. Requesting a sessionID that exceeds DB guardrails
+	oversizedDBSess := "550e8400-e29b-41d4-a716-446655440002"
+	convDir := filepath.Join(tmpDir, "conversations")
+	if err := os.MkdirAll(convDir, 0755); err != nil {
+		t.Fatalf("failed to create conversations dir: %v", err)
+	}
+	largeDBData := make([]byte, session.DefaultMaxSessionDBBytes+10)
+	if err := os.WriteFile(filepath.Join(convDir, oversizedDBSess+".db"), largeDBData, 0644); err != nil {
+		t.Fatalf("failed to write large session DB: %v", err)
+	}
+
+	d4, err := pool.GetOrCreate(ctx, "target-oversized-db", oversizedDBSess)
+	if err != nil {
+		t.Fatalf("failed GetOrCreate for oversized DB session: %v", err)
+	}
+	if d4 == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	lastSpawnedDB := lastSpawnedSessionID.Load()
+	if lastSpawnedDB == nil || *lastSpawnedDB != "" {
+		t.Errorf("expected session to be reset to empty due to DB guardrails, got %v", lastSpawnedDB)
+	}
+
+	// 5. Requesting a sessionID that exceeds transcript step count guardrails
+	oversizedStepsSess := "550e8400-e29b-41d4-a716-446655440003"
+	sessDirSteps := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedStepsSess, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDirSteps, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	transcriptContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps)
+	if err := os.WriteFile(filepath.Join(sessDirSteps, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	d5, err := pool.GetOrCreate(ctx, "target-oversized-steps", oversizedStepsSess)
+	if err != nil {
+		t.Fatalf("failed GetOrCreate for oversized steps session: %v", err)
+	}
+	if d5 == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	lastSpawnedSteps := lastSpawnedSessionID.Load()
+	if lastSpawnedSteps == nil || *lastSpawnedSteps != "" {
+		t.Errorf("expected session to be reset to empty due to step count guardrails, got %v", lastSpawnedSteps)
 	}
 }
 

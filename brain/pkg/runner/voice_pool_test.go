@@ -62,11 +62,6 @@ func (m *mockAgentPool) GetOrCreateSession(ctx context.Context, targetKey string
 	return sess, nil
 }
 
-func (m *mockAgentPool) EvictSession(targetKey string) error {
-	delete(m.sessions, targetKey)
-	return nil
-}
-
 func (m *mockAgentPool) Initialize(ctx context.Context) error {
 	m.initCalled = true
 	return m.initErr
@@ -89,7 +84,6 @@ func TestAgentInterfaces_Satisfaction(t *testing.T) {
 
 	mp := newMockAgentPool()
 	_ = mp.Initialize(context.Background())
-	_ = mp.EvictSession("target")
 	_ = mp.Close()
 }
 

@@ -1513,6 +1513,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 			if runtimeBase == "" && cfg != nil {
 				runtimeBase = cfg.GeminiHomeDir()
 			}
+			voiceSessionMgr := session.New(voiceHome, runtimeBase)
 			voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
 				GeminiHomeDir:           voiceHome,
 				Model:                   lowEffortModel,
@@ -1522,6 +1523,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 				PrewarmedTargets:        prewarmedTargets,
 				MemoryRetriever:         memoryRetriever,
 				AmbientContextRetriever: ambRetriever,
+				SessionManager:          voiceSessionMgr,
 			}, spawner)
 		}
 
@@ -1702,6 +1704,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		Env:               poolEnv,
 		MemoryRetriever:   memoryRetriever,
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
+		SessionManager:    sessionMgr,
 	}, appOpts.processSpawner)
 	defer func() {
 		if err := discordPrimaryPool.Close(); err != nil {
@@ -1717,6 +1720,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		Env:               poolEnv,
 		PrewarmedTargets:  []string{"ephemeral:worker-0", "ephemeral:worker-1"},
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
+		SessionManager:    sessionMgr,
 	}, appOpts.processSpawner)
 
 	ephemeralPool := runner.NewInterchangeablePool(ephemeralUnderlying, runner.InterchangeablePoolConfig{
@@ -1738,6 +1742,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		MemoryRetriever:   memoryRetriever,
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		PrewarmedTargets:  []string{"discord:worker-0", "discord:worker-1"},
+		SessionManager:    sessionMgr,
 	}, appOpts.processSpawner)
 
 	discordLowEffortPool := runner.NewInterchangeablePool(discordLowEffortUnderlying, runner.InterchangeablePoolConfig{
