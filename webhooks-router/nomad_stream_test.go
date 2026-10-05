@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1311,5 +1312,123 @@ func TestNomadStreamSubscriber_Evaluation_MultiTaskGroup_UnqueuedFailure_Treated
 	}
 	if !strings.Contains(mockDisp.PromptCalls()[0].Prompt, "failed task group allocations") {
 		t.Errorf("expected failure prompt to mention failed task group allocations: %s", mockDisp.PromptCalls()[0].Prompt)
+	}
+}
+
+func TestNomadStreamSubscriber_PlanResult_Ignored(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Internal scheduler planning calculation events (PlanResult) must be completely ignored
+	// and never trigger deployment failure or success.
+	streamData := strings.Join([]string{
+		`{"Index":2030,"Events":[{"Topic":"Allocation","Type":"PlanResult","Payload":{"Allocation":{"ID":"alloc-plan-1","JobID":"github-mcp","DesiredStatus":"stop","ClientStatus":"failed"}}}]}`,
+		`{"Index":2031,"Events":[{"Topic":"Deployment","Type":"PlanResult","Payload":{"Deployment":{"ID":"dep-plan-1","JobID":"github-mcp","Status":"failed"}}}]}`,
+		`{"Index":2032,"Events":[{"Topic":"Evaluation","Type":"PlanResult","Payload":{"Evaluation":{"ID":"eval-plan-1","JobID":"github-mcp","Status":"failed"}}}]}`,
+	}, "\n") + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    631,
+		deployFailedJobMergeSHA: "63abb6557e1aca574d792aa1f7c9ca07dbf86cf3",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls for PlanResult events, got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockReg.deployedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployedJobCalls for PlanResult events, got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls for PlanResult events, got %d", len(mockDisp.PromptCalls()))
+	}
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Fatalf("expected 0 direct message calls for PlanResult events, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+}
+
+func TestNomadStreamSubscriber_AllocationFailure_StaleAllocation_IgnoredWhenJobHealthy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// If an old or superseded allocation emits a failure event, but the job's latest deployment is already successful,
+	// the failure event must be safely ignored without failing the active PR.
+	streamData := `{"Index":2040,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"old-dead-alloc","JobID":"github-mcp","DesiredStatus":"stop","ClientStatus":"failed","ClientDescription":"Failed tasks"}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-succ-1","Status":"successful","StatusDescription":"Deployment completed successfully","JobVersion":10,"CreateIndex":22255}]`))
+			return
+		}
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    631,
+		deployFailedJobMergeSHA: "63abb6557e1aca574d792aa1f7c9ca07dbf86cf3",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls when job is already healthy, got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls when job is already healthy, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+func TestProcessNomadEvent_PlanResult_Dropped(t *testing.T) {
+	ctx := context.Background()
+	mockReg := &mockPRRegistry{}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	payload := json.RawMessage(`{"Allocation":{"ID":"alloc-1","JobID":"github-mcp","ClientStatus":"failed"}}`)
+	err := srv.ProcessNomadEvent(ctx, "Allocation", "PlanResult", payload)
+	if err != nil {
+		t.Fatalf("expected nil error on PlanResult, got: %v", err)
+	}
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls, got %v", mockReg.deployFailedJobCalls)
 	}
 }

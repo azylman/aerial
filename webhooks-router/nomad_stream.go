@@ -315,6 +315,10 @@ func (sub *NomadStreamSubscriber) processStreamLine(ctx context.Context, line []
 // handleNomadEvent dispatches an individual Nomad event to its corresponding handler.
 func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event NomadEvent) {
 	// Pre-filter noise in memory before hitting River or DB
+	if strings.EqualFold(event.Type, "PlanResult") {
+		// Ignore internal scheduler planning calculations (PlanResult is not a lifecycle state transition)
+		return
+	}
 	var idempotencyKey string
 	switch event.Topic {
 	case "Deployment":
@@ -409,7 +413,10 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 }
 
 // ProcessNomadEvent processes a filtered Nomad stream event synchronously.
-func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, rawPayload json.RawMessage) error {
+func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType string, rawPayload json.RawMessage) error {
+	if strings.EqualFold(eventType, "PlanResult") {
+		return nil
+	}
 	switch topic {
 	case "Deployment":
 		var depPayload NomadDeploymentEventPayload
@@ -429,6 +436,10 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
 		}
 		alloc := allocPayload.Allocation
 		if strings.EqualFold(alloc.ClientStatus, "failed") {
+			// Stale allocation protection: ignore failure events from superseded or stopped allocations if the job is already healthy
+			if s.isNomadJobHealthy(ctx, alloc.JobID) {
+				return nil
+			}
 			statusDesc := extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates)
 			return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", statusDesc)
 		}
@@ -448,6 +459,9 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, _ string, r
 		hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
 
 		if isBlockedOrFailed || hasUnqueuedFailures {
+			if s.isNomadJobHealthy(ctx, eval.JobID) {
+				return nil
+			}
 			desc := eval.StatusDescription
 			if desc == "" && len(eval.FailedTGAllocs) > 0 {
 				desc = fmt.Sprintf("failed task group allocations: %v", eval.FailedTGAllocs)
