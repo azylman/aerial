@@ -145,11 +145,14 @@ type ReconciliationStatus struct {
 
 // ConfigSyncContext holds context for configuration sync events.
 type ConfigSyncContext struct {
-	Repo      string
-	CommitSHA string
-	PRNumber  int
-	TargetID  string
+	Repo         string
+	CommitSHA    string
+	PRNumber     int
+	TargetID     string
+	ChangedFiles []string
+	DiffGated    bool
 }
+
 
 // HangarStatusResponse is the aggregated telemetry payload returned by GET /status.
 type HangarStatusResponse struct {
@@ -2050,8 +2053,23 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 		return nil
 	}
 
+	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
+	isChangedInGit := !diffGated || fileInChangedList("config.yaml", syncCtx[0].ChangedFiles)
+
 	d.lastPushedConfigMu.Lock()
-	if d.lastPushedConfig != nil && d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"] == configHash {
+	cachedHash := ""
+	if d.lastPushedConfig != nil {
+		cachedHash = d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"]
+	}
+	if !isChangedInGit {
+		if d.lastPushedConfig == nil {
+			d.lastPushedConfig = make(map[string]string)
+		}
+		d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"] = configHash
+		d.lastPushedConfigMu.Unlock()
+		return nil
+	}
+	if cachedHash == configHash {
 		d.lastPushedConfigMu.Unlock()
 		return nil
 	}
@@ -2147,8 +2165,23 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 		return nil
 	}
 
+	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
+	isChangedInGit := !diffGated || homepageInChangedList(syncCtx[0].ChangedFiles)
+
 	d.lastPushedConfigMu.Lock()
-	if d.lastPushedConfig != nil && d.lastPushedConfig["nomad/jobs/homepage"] == configHash {
+	cachedHash := ""
+	if d.lastPushedConfig != nil {
+		cachedHash = d.lastPushedConfig["nomad/jobs/homepage"]
+	}
+	if !isChangedInGit {
+		if d.lastPushedConfig == nil {
+			d.lastPushedConfig = make(map[string]string)
+		}
+		d.lastPushedConfig["nomad/jobs/homepage"] = configHash
+		d.lastPushedConfigMu.Unlock()
+		return nil
+	}
+	if cachedHash == configHash {
 		d.lastPushedConfigMu.Unlock()
 		return nil
 	}
@@ -2262,8 +2295,23 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		configHash := hex.EncodeToString(h[:])
 		cacheKey := mapping.NomadVar + ":" + mapping.VarKey
 
+		diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
+		isChangedInGit := !diffGated || fileInChangedList(mapping.RelPath, syncCtx[0].ChangedFiles)
+
 		d.lastPushedConfigMu.Lock()
-		if d.lastPushedConfig != nil && d.lastPushedConfig[cacheKey] == configHash {
+		cachedHash := ""
+		if d.lastPushedConfig != nil {
+			cachedHash = d.lastPushedConfig[cacheKey]
+		}
+		if !isChangedInGit {
+			if d.lastPushedConfig == nil {
+				d.lastPushedConfig = make(map[string]string)
+			}
+			d.lastPushedConfig[cacheKey] = configHash
+			d.lastPushedConfigMu.Unlock()
+			continue
+		}
+		if cachedHash == configHash {
 			d.lastPushedConfigMu.Unlock()
 			continue
 		}
@@ -2685,9 +2733,56 @@ func (d *SyncDaemon) CheckGitHubRepoBuildInProgress(ctx context.Context, repoSlu
 	return false
 }
 
+func isAllZeros(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c != '0' {
+			return false
+		}
+	}
+	return true
+}
+
+func fileInChangedList(target string, changed []string) bool {
+	targetClean := filepath.Clean(filepath.ToSlash(target))
+	targetClean = strings.TrimPrefix(targetClean, "/")
+	for _, f := range changed {
+		clean := filepath.Clean(filepath.ToSlash(f))
+		clean = strings.TrimPrefix(clean, "/")
+		if clean == targetClean {
+			return true
+		}
+	}
+	return false
+}
+
+func homepageInChangedList(changed []string) bool {
+	targetClean := "services/homepage/homepage.yaml"
+	for _, f := range changed {
+		clean := filepath.Clean(filepath.ToSlash(f))
+		clean = strings.TrimPrefix(clean, "/")
+		if clean == targetClean {
+			return true
+		}
+		if clean == "homepage" || strings.HasPrefix(clean, "homepage/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *SyncDaemon) getChangedFiles(ctx context.Context, repoPath, prevHead, currHead string) ([]string, error) {
 	if prevHead == "" || currHead == "" || prevHead == currHead {
 		return nil, nil
+	}
+	if isAllZeros(prevHead) {
+		outFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, "diff-tree", "--no-commit-id", "--name-only", "-r", currHead)
+		if errFallback != nil {
+			return nil, errFallback
+		}
+		return splitLines(string(outFallback)), nil
 	}
 	out, _, err := d.getGitExecutor()(ctx, repoPath, "diff", "--name-only", prevHead, currHead)
 	if err != nil {
@@ -2898,6 +2993,19 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 	}
 
 	if isAerialConfig {
+		changedFiles, errDiff := d.getChangedFiles(ctx, repoPath, res.PreviousHead, res.CurrentHead)
+		if errDiff != nil {
+			log.Printf("[Hangar:GitPush] Error: getChangedFiles failed for %s: %v", repoPath, errDiff)
+			return GitPushEventResponse{
+				Status:  "error",
+				Repo:    req.Repo,
+				Commit:  res.CurrentHead,
+				Message: fmt.Sprintf("failed inspecting git diff: %v", errDiff),
+			}, http.StatusInternalServerError
+		}
+		sc.DiffGated = true
+		sc.ChangedFiles = changedFiles
+
 		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
 		if errNomad != nil {
 			log.Printf("[Hangar:GitPush] Warning: HasNomadChanges failed for %s: %v", repoPath, errNomad)
