@@ -29,13 +29,19 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 		return
 	}
 
+	type newWorker struct {
+		threadID string
+		state    *threadWorkerState
+	}
+	var newWorkers []newWorker
+
 	for _, msg := range msgs {
 		state, exists := p.threadChs[msg.ThreadID]
 		if !exists {
 			state = &threadWorkerState{ch: make(chan db.Message, 100)}
 			p.threadChs[msg.ThreadID] = state
 			p.wg.Add(1)
-			go p.runThreadWorker(msg.ThreadID, state)
+			newWorkers = append(newWorkers, newWorker{threadID: msg.ThreadID, state: state})
 		}
 
 		select {
@@ -59,6 +65,10 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 		}
 	}
 	p.mu.Unlock()
+
+	for _, nw := range newWorkers {
+		go p.runThreadWorker(nw.threadID, nw.state)
+	}
 }
 
 func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) {
@@ -94,6 +104,9 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 
 			metrics.QueueDepth.Dec()
 			burst := []db.Message{msg}
+
+			p.mu.Lock()
+			state.inFlight = true
 		DrainLoop:
 			for len(burst) < 5 {
 				select {
@@ -104,9 +117,6 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 					break DrainLoop
 				}
 			}
-
-			p.mu.Lock()
-			state.inFlight = true
 			p.mu.Unlock()
 
 			p.processBurst(burst)
