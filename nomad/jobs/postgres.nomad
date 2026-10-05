@@ -36,7 +36,7 @@ job "postgres" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "pgvector/pgvector:pg16"
+        image        = "pgvector/pgvector:pg18"
         network_mode = "host"
         healthchecks {
           disable = true
@@ -45,7 +45,7 @@ job "postgres" {
           {
             type     = "volume"
             target   = "/var/lib/postgresql/data"
-            source   = "aerial-postgres-data"
+            source   = "aerial-postgres-18-data"
             readonly = false
           }
         ]

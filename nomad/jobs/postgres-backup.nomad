@@ -34,7 +34,7 @@ job "postgres-backup" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "prodrigestivill/postgres-backup-local:16"
+        image        = "prodrigestivill/postgres-backup-local:18"
         network_mode = "host"
         healthchecks {
           disable = true

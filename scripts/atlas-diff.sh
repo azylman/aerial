@@ -88,7 +88,7 @@ if [ -z "$DEV_URL" ]; then
         exit 1
     fi
 
-    ATLAS_IMAGE="${ATLAS_IMAGE:-pgvector/pgvector:pg16}"
+    ATLAS_IMAGE="${ATLAS_IMAGE:-pgvector/pgvector:pg18}"
     DEV_CONTAINER="aerial-atlas-dev-$$-$(date +%s)"
     
     # Check if shared network exists (e.g. aerial-net)
