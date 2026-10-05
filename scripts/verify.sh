@@ -259,7 +259,7 @@ run_node_syntax() {
         if has_cmd node; then
             node --check "$file"
         elif has_docker; then
-            cat "$file" | docker run --rm -i node:20 node --check
+            cat "$file" | docker run --rm -i node:22 node --check
         fi
     fi
 }
@@ -272,7 +272,7 @@ run_node_test() {
         if has_cmd node; then
             (cd "$dir" && node --test $test_pattern)
         elif has_docker; then
-            tar -cf - "$dir" | docker run --rm -i node:20 sh -c "tar -xf - && cd $dir && node --test $test_pattern"
+            tar -cf - "$dir" | docker run --rm -i node:22 sh -c "tar -xf - && cd $dir && node --test $test_pattern"
         fi
     fi
 }
@@ -284,7 +284,7 @@ run_json_syntax() {
         if has_cmd node; then
             node -e "JSON.parse(require('fs').readFileSync('$file', 'utf8'))"
         elif has_docker; then
-            cat "$file" | docker run --rm -i node:20 node -e "let d=''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => JSON.parse(d));"
+            cat "$file" | docker run --rm -i node:22 node -e "let d=''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => JSON.parse(d));"
         fi
     fi
 }

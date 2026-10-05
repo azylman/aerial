@@ -203,7 +203,7 @@ function Run-NodeCheck($relPath) {
             & node --check $fullPath
             if ($LASTEXITCODE -ne 0) { throw "Node syntax check failed on $relPath" }
         } elseif ($hasDocker) {
-            docker run --rm -v "${repoRoot}:/app" -w /app node:20 node --check $relPath
+            docker run --rm -v "${repoRoot}:/app" -w /app node:22 node --check $relPath
             if ($LASTEXITCODE -ne 0) { throw "Node syntax check (docker) failed on $relPath" }
         }
     }
@@ -222,7 +222,7 @@ function Run-NodeTest($relDir, $testPattern) {
                 Pop-Location
             }
         } elseif ($hasDocker) {
-            docker run --rm -v "${fullDir}:/app" -w /app node:20 sh -c "node --test $testPattern"
+            docker run --rm -v "${fullDir}:/app" -w /app node:22 sh -c "node --test $testPattern"
             if ($LASTEXITCODE -ne 0) { throw "Node unit tests (docker) failed in $relDir" }
         }
     }

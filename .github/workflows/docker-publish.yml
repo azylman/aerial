@@ -128,10 +128,10 @@ jobs:
             **/go.sum
             **/go.mod
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
 
       - name: Verify Monorepo Test Coverage & Gating
@@ -161,10 +161,10 @@ jobs:
             **/go.sum
             **/go.mod
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Verify Repository Hygiene & Invariants
         run: |
@@ -348,7 +348,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push ${{ matrix.service }}
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}

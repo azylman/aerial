@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
 # --- Superpowers stage ---------------------------------------------------
-FROM alpine:3.20 AS superpowers
+FROM alpine:3.21 AS superpowers
 
 RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
     wget -qO- https://github.com/obra/superpowers/archive/refs/tags/v6.3.0.tar.gz | tar -xz --strip-components=1 -C /tmp/superpowers && \
@@ -71,10 +71,10 @@ RUN mkdir -p -m 0700 /root/.ssh && \
     echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
     chmod 0600 /root/.ssh/config
 
-# Copy Go SDK, golangci-lint, and Node.js 20 LTS runtime from builders/images
+# Copy Go SDK, golangci-lint, and Node.js 22 LTS runtime from builders/images
 COPY --link --from=builder /usr/local/go /usr/local/go
 COPY --link --from=golangci/golangci-lint:v1.64.5 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
-COPY --link --from=node:20-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --link --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --link --from=arigaio/atlas:latest /atlas /usr/local/bin/atlas
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
