@@ -538,3 +538,59 @@ func GetSessionActiveTasks(database DBTX, threadID string) ([]session.TaskMetada
 	return tasks, nil
 }
 
+// FindUnrotatedSessions returns sessions whose turn count strictly exceeds minTurns (defaulting to session.DefaultMaxSessionTurns if minTurns <= 0), ordered by turn_count DESC.
+func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int) ([]SessionInfo, error) {
+	if database == nil {
+		return nil, nil
+	}
+	if minTurns <= 0 {
+		minTurns = session.DefaultMaxSessionTurns
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+	SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
+	FROM sessions
+	WHERE turn_count > $1
+	ORDER BY turn_count DESC
+	`
+	rows, err := database.QueryContext(queryCtx, query, minTurns)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []SessionInfo
+	for rows.Next() {
+		var (
+			info         SessionInfo
+			rawCreatedAt any
+			rawUpdatedAt any
+		)
+		if err := rows.Scan(
+			&info.ThreadID,
+			&info.InternalSessionID,
+			&info.PreviousSessionID,
+			&info.TurnCount,
+			&rawCreatedAt,
+			&rawUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if t, ok := ParseDBTime(rawCreatedAt); ok {
+			info.CreatedAt = t
+		}
+		if t, ok := ParseDBTime(rawUpdatedAt); ok {
+			info.UpdatedAt = t
+		}
+		sessions = append(sessions, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}

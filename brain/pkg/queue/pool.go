@@ -573,25 +573,102 @@ func (p *WorkerPool) SessionManager() *session.Manager {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
-	if p.processPool != nil {
+	if p.processPool != nil || p.cfg.Store != nil {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
 			interval := p.cfg.MaintenanceInterval
 			if interval <= 0 {
-				interval = 30 * time.Second
+				interval = 30 * time.Minute
 			}
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
+			lastReportedTurnCount := make(map[string]int)
 			for {
 				select {
 				case <-p.ctx.Done():
 					return
 				case <-ticker.C:
-					// Periodic maintenance tick
+					p.checkUnrotatedSessions(p.ctx, lastReportedTurnCount)
 				}
 			}
 		}()
+	}
+}
+
+// checkUnrotatedSessions scans for active sessions exceeding the turn limit without rotating and alerts the system channel.
+// It deduplicates alerts via lastReportedTurnCount so dormant threads do not produce repetitive notifications.
+func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTurnCount map[string]int) {
+	if p == nil || p.cfg.Store == nil {
+		return
+	}
+	parentCtx := context.Background()
+	if ctx != nil {
+		parentCtx = ctx
+	} else if p.ctx != nil {
+		parentCtx = p.ctx
+	}
+	checkCtx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
+	defer cancel()
+
+	sessions, err := p.cfg.Store.FindUnrotatedSessions(checkCtx, session.DefaultMaxSessionTurns)
+	if err != nil {
+		log.Printf("[WorkerPool] Warning: failed to query unrotated sessions: %v", err)
+		return
+	}
+
+	activeUnrotated := make(map[string]struct{}, len(sessions))
+	var runawayList []db.SessionInfo
+	for _, s := range sessions {
+		activeUnrotated[s.ThreadID] = struct{}{}
+		lastCount := lastReportedTurnCount[s.ThreadID]
+		if s.TurnCount > lastCount {
+			runawayList = append(runawayList, s)
+		}
+	}
+	for threadID := range lastReportedTurnCount {
+		if _, exists := activeUnrotated[threadID]; !exists {
+			delete(lastReportedTurnCount, threadID)
+		}
+	}
+
+	if len(runawayList) == 0 {
+		return
+	}
+
+	displayCap := 5
+	var lines []string
+	for i, s := range runawayList {
+		if i >= displayCap {
+			lines = append(lines, fmt.Sprintf("- *...and %d more runaway session(s)*", len(runawayList)-displayCap))
+			break
+		}
+		lines = append(lines, fmt.Sprintf("- Thread `<#%s>` (`%s`): **%d** turns (session: `%s`)", s.ThreadID, s.ThreadID, s.TurnCount, s.InternalSessionID))
+	}
+
+	for _, s := range runawayList {
+		lastReportedTurnCount[s.ThreadID] = s.TurnCount
+	}
+
+	sess := p.getDiscordSession()
+	sysChan := ""
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			sysChan = cur.SystemChannel
+		}
+	}
+	if sysChan == "" {
+		sysChan = config.DefaultConfigData().SystemChannel
+	}
+
+	alertMsg := fmt.Sprintf("⚠️ **Unrotated Runaway Sessions Detected**\n\nThe following sessions have exceeded the turn limit (%d turns) without rotating:\n%s\n\n*Purely informational watchdog alert. Sessions may require investigation if turn count continues increasing.*",
+		session.DefaultMaxSessionTurns, strings.Join(lines, "\n"))
+	sanitizedAlert := sanitizeErrorText(alertMsg)
+
+	if p.cfg.SystemAlertFunc != nil {
+		if alertErr := p.cfg.SystemAlertFunc(sess, sysChan, "Unrotated Runaway Sessions", sanitizedAlert); alertErr != nil {
+			log.Printf("[WorkerPool] Warning: failed to send unrotated sessions alert to system channel %q: %v", sysChan, alertErr)
+		}
 	}
 }
 
