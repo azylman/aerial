@@ -1673,3 +1673,71 @@ func TestProcessNomadEvent_Evaluation_Blocked_ReturnsNil(t *testing.T) {
 	}
 }
 
+func TestNomadStreamSubscriber_Evaluation_BlockedWithFailedTGAllocs_Ignored(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A blocked evaluation created by Nomad during a rolling update (e.g. port collision before old alloc stops)
+	// includes FailedTGAllocs and QueuedAllocations: 0, with Status: "blocked" and StatusDescription: "created to place remaining allocations".
+	// It MUST be ignored without failing the active deployment.
+	streamData := `{"Index":2053,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"bda9b66d-3cef-17a0-fce1-4faec0f3a52d","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"5622959a-4da3-fb28-09c7-5f6909503687","FailedTGAllocs":{"webhooks-router":{"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    642,
+		deployFailedJobMergeSHA: "e1d523155b4dfb34689d1a186090507960d9425d",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls for blocked evaluation with FailedTGAllocs, got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockReg.deployedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployedJobCalls for blocked evaluation with FailedTGAllocs, got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls for blocked evaluation with FailedTGAllocs, got %d", len(mockDisp.PromptCalls()))
+	}
+}
+
+func TestProcessNomadEvent_Evaluation_BlockedWithFailedTGAllocs_ReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	mockReg := &mockPRRegistry{
+		deployFailedJobUpdated: true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	payload := json.RawMessage(`{"Evaluation":{"ID":"eval-blocked-direct","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"webhooks-router":{"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}`)
+	err := srv.ProcessNomadEvent(ctx, "Evaluation", "EvaluationUpdated", payload)
+	if err != nil {
+		t.Fatalf("expected nil error on blocked evaluation with FailedTGAllocs, got: %v", err)
+	}
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls for blocked evaluation with FailedTGAllocs, got %v", mockReg.deployFailedJobCalls)
+	}
+}
+
+
