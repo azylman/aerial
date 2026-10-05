@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1556,6 +1557,55 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 		}
 	}
 	return maxSteps
+}
+
+// CountTranscriptTurns returns the total number of non-ambient user turns for the session
+// by counting non-ambient USER_INPUT entries in transcript.jsonl. Returns 0 if empty, invalid, or not found.
+func (m *Manager) CountTranscriptTurns(sessionID string) int {
+	cleanID := strings.TrimSpace(sessionID)
+	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+		return 0
+	}
+
+	var maxTurns int
+	for _, sessDir := range m.getTargetDirs(cleanID) {
+		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+			filePath := filepath.Join(logsDir, name)
+			f, err := os.Open(filePath)
+			if err != nil {
+				continue
+			}
+			scanner := bufio.NewScanner(f)
+			buf := make([]byte, 64*1024)
+			scanner.Buffer(buf, 1024*1024)
+			var turns int
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" || !strings.Contains(line, "USER_INPUT") {
+					continue
+				}
+				var step struct {
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
+					if step.Type == "USER_INPUT" && !isAmbient {
+						turns++
+					}
+				}
+			}
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("[Session] Warning: failed to close file %s: %v", filePath, closeErr)
+			}
+			if turns > maxTurns {
+				maxTurns = turns
+			}
+		}
+	}
+	return maxTurns
 }
 
 // GetSessionDir returns the canonical directory path for a session ID.
