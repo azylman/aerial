@@ -12,7 +12,7 @@
    - **Zero-Bypass Verification**: Under NO circumstance commit or push unverified changes; fresh verification evidence (`scripts/verify.sh --staged`) must be obtained prior to commit. Comprehensive monorepo sweeps and coverage gating are offloaded to GitHub Actions CI.
 
 3. **Core Software Engineering & Hermetic Testing Invariants**:
-   - **Production Database**: Aerial runs exclusively on PostgreSQL 16 with `pgvector` (`aerial-postgres`) for production persistence (messages, sessions, schedules, facts, embeddings, and Grafana).
+   - **Production Database**: Aerial runs exclusively on PostgreSQL 18 with `pgvector` (`aerial-postgres`) for production persistence (messages, sessions, schedules, facts, embeddings, and Grafana).
    - **Hermetic In-Memory Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory database handles or `t.TempDir()` isolated files strictly for fast, hermetic unit testing. Unit tests MUST NEVER write to shared host database paths, `/data`, or `/share`.
    - **Subprocess & Runner Airgapping**: Live agent runner execution (`runner.RunAgy`), real `agy` binaries, and live shell subprocesses must NEVER execute during test runs. Production supplies `runner.RunAgy`; tests supply mock runner functions guarded by `isTestEnvironment()`.
    - **Pure Constructor Injection & Atomic Snapshots**: Packages MUST require explicitly passed dependencies in constructors; subpackage workers read dynamic configuration JIT via `cfg.Current()` snapshots and never cache scalar config fields in long-lived struct fields.

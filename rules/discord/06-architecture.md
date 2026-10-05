@@ -8,7 +8,7 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and Hang
 
 - **Core Infrastructure & Execution**:
   - **`aerial-brain`**: Multi-protocol Antigravity execution engine managing multi-turn memory, multiplexed ingress (Discord gateway funnel, real-time voice pipeline via `/voice/ask`, HTTP prompt injection via `/prompt`, and direct outbound delivery via `/discord/message`), Laya INT8 System-1 ambient triage (`/v1/systemone`), and background task scheduling.
-  - **`aerial-postgres`**: PostgreSQL 16 relational database with `pgvector` for production persistence (messages, sessions, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, PR registry, and Grafana).
+  - **`aerial-postgres`**: PostgreSQL 18 relational database with `pgvector` for production persistence (messages, sessions, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, PR registry, and Grafana).
   - **`aerial-hangar`**: Dedicated infrastructure sidecar holding read-write repository mounts, executing event-driven GitOps push reconciliation and automated git synchronization.
   - **`coredns`**: Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`.
   - **`infisical`**: Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`).
