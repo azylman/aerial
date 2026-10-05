@@ -23,12 +23,14 @@ import (
 )
 
 type mockRiverInserter struct {
-	mu                 sync.Mutex
-	insertedJobs       []GitHubWebhookArgs
-	insertedHangarJobs []HangarWebhookArgs
-	insertedNomadJobs  []NomadEventArgs
-	insertedOpts       []*river.InsertOpts
-	err                error
+	mu                     sync.Mutex
+	insertedJobs           []GitHubWebhookArgs
+	insertedHangarJobs     []HangarWebhookArgs
+	insertedNomadJobs      []NomadEventArgs
+	insertedCrashAlertJobs []NomadCrashAlertArgs
+	insertedOpts           []*river.InsertOpts
+	skipDuplicate          bool
+	err                    error
 }
 
 func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error) {
@@ -47,8 +49,12 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 	if nArgs, ok := args.(NomadEventArgs); ok {
 		m.insertedNomadJobs = append(m.insertedNomadJobs, nArgs)
 	}
+	if caArgs, ok := args.(NomadCrashAlertArgs); ok {
+		m.insertedCrashAlertJobs = append(m.insertedCrashAlertJobs, caArgs)
+	}
 	return &rivertype.JobInsertResult{
-		Job: &rivertype.JobRow{ID: 1},
+		Job:                       &rivertype.JobRow{ID: 1},
+		UniqueSkippedAsDuplicate: m.skipDuplicate,
 	}, nil
 }
 
@@ -4868,5 +4874,249 @@ func TestRiverUniqueOpts_ByArgs(t *testing.T) {
 	}
 	if nomadOpts.UniqueOpts.ByPeriod != 15*time.Minute {
 		t.Errorf("NomadEventArgs InsertOpts expected ByPeriod = 15m, got %v", nomadOpts.UniqueOpts.ByPeriod)
+	}
+}
+
+
+func TestRecordUniqueSkipped_And_MetricsEndpoint(t *testing.T) {
+	// 1. RecordUniqueSkipped empty kind does nothing
+	RecordUniqueSkipped("")
+
+	// 2. Call RecordUniqueSkipped
+	kind := "test_kind_metric"
+	RecordUniqueSkipped(kind)
+
+	// 3. Test GET /metrics endpoint
+	srv := NewRouterServer(Config{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /metrics, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "webhooks_router_unique_skipped_total") {
+		t.Errorf("expected /metrics body to contain webhooks_router_unique_skipped_total, got:\n%s", body)
+	}
+	if !strings.Contains(body, `kind="test_kind_metric"`) {
+		t.Errorf("expected /metrics body to contain kind=\"test_kind_metric\", got:\n%s", body)
+	}
+}
+
+func TestHandleGitHubWebhook_DuplicateSkipped(t *testing.T) {
+	mockRiver := &mockRiverInserter{skipDuplicate: true}
+	srv := NewRouterServer(Config{}, nil, mockRiver)
+
+	body := `{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "dup-gh-delivery-1")
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on duplicate, got %d", rec.Code)
+	}
+
+	// Verify metric counter incremented via /metrics
+	reqM := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	recM := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(recM, reqM)
+	if !strings.Contains(recM.Body.String(), `webhooks_router_unique_skipped_total{kind="github_webhook"}`) {
+		t.Errorf("expected /metrics to include github_webhook duplicate count, got:\n%s", recM.Body.String())
+	}
+
+	// Verify GitHubWebhookArgs has river:unique and InsertOpts
+	args := GitHubWebhookArgs{Delivery: "test-delivery"}
+	opts := args.InsertOpts()
+	if !opts.UniqueOpts.ByArgs {
+		t.Errorf("expected GitHubWebhookArgs UniqueOpts.ByArgs = true")
+	}
+	if opts.UniqueOpts.ByPeriod != 15*time.Minute {
+		t.Errorf("expected ByPeriod = 15m, got %v", opts.UniqueOpts.ByPeriod)
+	}
+}
+
+func TestHandleHangarWebhook_DuplicateSkipped(t *testing.T) {
+	mockRiver := &mockRiverInserter{skipDuplicate: true}
+	srv := NewRouterServer(Config{}, nil, mockRiver)
+
+	body := `{"event":"deploy_success","job_name":"brain","commit_sha":"abc1234"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted on duplicate, got %d", rec.Code)
+	}
+
+	// Verify metric counter incremented via /metrics
+	reqM := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	recM := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(recM, reqM)
+	if !strings.Contains(recM.Body.String(), `webhooks_router_unique_skipped_total{kind="hangar_webhook"}`) {
+		t.Errorf("expected /metrics to include hangar_webhook duplicate count, got:\n%s", recM.Body.String())
+	}
+}
+
+func TestConfig_SystemChannelID(t *testing.T) {
+	// 1. From SYSTEM_CHANNEL_ID
+	os.Setenv("SYSTEM_CHANNEL_ID", "123456789012345678")
+	cfg := LoadConfigFromEnv()
+	if cfg.SystemChannelID != "123456789012345678" {
+		t.Errorf("expected 123456789012345678, got %s", cfg.SystemChannelID)
+	}
+	os.Unsetenv("SYSTEM_CHANNEL_ID")
+
+	// 2. From DISCORD_CHANNEL_ID fallback
+	os.Setenv("DISCORD_CHANNEL_ID", "987654321098765432")
+	cfg2 := LoadConfigFromEnv()
+	if cfg2.SystemChannelID != "987654321098765432" {
+		t.Errorf("expected 987654321098765432, got %s", cfg2.SystemChannelID)
+	}
+	os.Unsetenv("DISCORD_CHANNEL_ID")
+
+	// 3. From YAML config
+	tmpDir := t.TempDir()
+	yamlFile := os.ExpandEnv(tmpDir + "/config.yaml")
+	if err := os.WriteFile(yamlFile, []byte("system_channel_id: \"112233445566778899\"\n"), 0644); err != nil {
+		t.Fatalf("failed to write yaml config: %v", err)
+	}
+	cfg3 := LoadConfig(yamlFile)
+	if cfg3.SystemChannelID != "112233445566778899" {
+		t.Errorf("expected 112233445566778899 from yaml, got %s", cfg3.SystemChannelID)
+	}
+}
+
+func TestNomadCrashAlertArgs_And_Worker(t *testing.T) {
+	args := NomadCrashAlertArgs{
+		JobID:      "openobserve",
+		AllocID:    "alloc-oom",
+		Status:     "failed",
+		StatusDesc: "OOMKilled exit code 137",
+	}
+
+	if args.Kind() != "nomad_crash_alert" {
+		t.Errorf("expected kind nomad_crash_alert, got %s", args.Kind())
+	}
+	opts := args.InsertOpts()
+	if !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
+		t.Errorf("unexpected InsertOpts: %+v", opts)
+	}
+
+	// Test NomadCrashAlertWorker with nil server
+	workerNil := &NomadCrashAlertWorker{server: nil}
+	if err := workerNil.Work(context.Background(), &river.Job[NomadCrashAlertArgs]{JobRow: &rivertype.JobRow{ID: 101}, Args: args}); err == nil {
+		t.Errorf("expected error with nil server, got nil")
+	}
+
+	// Test NomadCrashAlertWorker with valid server
+	disp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	srv.SetDispatcher(disp)
+
+	worker := &NomadCrashAlertWorker{server: srv}
+	if err := worker.Work(context.Background(), &river.Job[NomadCrashAlertArgs]{JobRow: &rivertype.JobRow{ID: 101}, Args: args}); err != nil {
+		t.Fatalf("unexpected error from worker: %v", err)
+	}
+
+	dmCalls := disp.DirectMessageCalls()
+	if len(dmCalls) != 1 || !strings.Contains(dmCalls[0].Content, "💥 Nomad job `openobserve` crashed or failed. Following up...") {
+		t.Errorf("unexpected dm calls: %+v", dmCalls)
+	}
+
+	promptCalls := disp.PromptCalls()
+	if len(promptCalls) != 1 || !strings.Contains(promptCalls[0].Prompt, "Nomad job `openobserve` failed or crashed unexpectedly") {
+		t.Errorf("unexpected prompt calls: %+v", promptCalls)
+	}
+}
+
+func TestIs4xxClientError_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil error", nil, false},
+		{"status 400", errors.New("brain prompt returned status 400: bad request"), true},
+		{"status 404", errors.New("brain prompt returned status 404: not found"), true},
+		{"status 422", errors.New("brain internal message returned status 422: unprocessable"), true},
+		{"status 403", errors.New("brain prompt returned status 403: forbidden"), true},
+		{"status 500", errors.New("brain prompt returned status 500: internal server error"), false},
+		{"status 502", errors.New("brain prompt returned status 502: bad gateway"), false},
+		{"network timeout", errors.New("dial tcp 127.0.0.1:8088: i/o timeout"), false},
+		{"invalid snowflake", errors.New("invalid discord snowflake channel id: \"abc\""), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := is4xxClientError(tt.err)
+			if got != tt.expected {
+				t.Errorf("is4xxClientError(%v) = %v, expected %v", tt.err, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestProcessCrashAlert_EdgeCases(t *testing.T) {
+	ctx := context.Background()
+	args := NomadCrashAlertArgs{
+		JobID:      "grafana",
+		AllocID:    "alloc-123",
+		Status:     "failed",
+		StatusDesc: "panic in main",
+	}
+
+	// 1. Missing or invalid snowflake channel -> drops cleanly (nil error, no dispatcher calls)
+	disp := &mockOutboundDispatcher{}
+	srvInvalid := NewRouterServer(Config{SystemChannelID: "invalid-snowflake"}, nil)
+	srvInvalid.SetDispatcher(disp)
+
+	if err := srvInvalid.ProcessCrashAlert(ctx, args); err != nil {
+		t.Errorf("expected nil error on invalid snowflake, got %v", err)
+	}
+	if len(disp.DirectMessageCalls()) != 0 || len(disp.PromptCalls()) != 0 {
+		t.Errorf("expected 0 dispatcher calls on invalid snowflake")
+	}
+
+	// 2. Dispatcher is nil -> drops cleanly (nil error)
+	srvNilDisp := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	if err := srvNilDisp.ProcessCrashAlert(ctx, args); err != nil {
+		t.Errorf("expected nil error when dispatcher is nil, got %v", err)
+	}
+
+	// 3. 4xx client error on prompt -> drops cleanly (returns nil)
+	disp4xx := &mockOutboundDispatcher{
+		promptErr: errors.New("brain prompt returned status 404: channel not found"),
+	}
+	srv4xx := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	srv4xx.SetDispatcher(disp4xx)
+
+	if err := srv4xx.ProcessCrashAlert(ctx, args); err != nil {
+		t.Errorf("expected nil error when prompt returns 4xx client error, got %v", err)
+	}
+
+	// 4. 4xx client error on DM -> drops cleanly (returns nil)
+	dispDM4xx := &mockOutboundDispatcher{
+		directMessageErr: errors.New("brain internal message returned status 400: bad request"),
+	}
+	srvDM4xx := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	srvDM4xx.SetDispatcher(dispDM4xx)
+
+	if err := srvDM4xx.ProcessCrashAlert(ctx, args); err != nil {
+		t.Errorf("expected nil error when DM returns 4xx client error, got %v", err)
+	}
+
+	// 5. 5xx server error on prompt -> returns error for River to retry
+	disp5xx := &mockOutboundDispatcher{
+		promptErr: errors.New("brain prompt returned status 500: internal server error"),
+	}
+	srv5xx := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
+	srv5xx.SetDispatcher(disp5xx)
+
+	if err := srv5xx.ProcessCrashAlert(ctx, args); err == nil {
+		t.Errorf("expected non-nil error when prompt returns 500 server error, got nil")
 	}
 }
