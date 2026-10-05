@@ -797,6 +797,10 @@ sync_repos:
   - "/repo/b"
 nomad_addr: "http://nomad.cluster:4646"
 brain_internal_url: "http://brain.cluster:8088/internal/reload"
+service_configs:
+  - rel_path: "services/voice/voice.yaml"
+    nomad_var: "nomad/jobs/orin-voice"
+    var_key: "CONFIG_YAML"
 `
 	if err := os.WriteFile(cfgPath, []byte(yamlData), 0644); err != nil {
 		t.Fatalf("failed to write test yaml: %v", err)
@@ -824,6 +828,9 @@ brain_internal_url: "http://brain.cluster:8088/internal/reload"
 	}
 	if cfg.BrainInternalURL != "http://brain.cluster:8088/internal/reload" {
 		t.Errorf("expected brainInternalURL 'http://brain.cluster:8088/internal/reload', got %q", cfg.BrainInternalURL)
+	}
+	if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != "services/voice/voice.yaml" {
+		t.Errorf("expected 1 serviceConfig from yaml, got %v", cfg.ServiceConfigs)
 	}
 
 	// 2. Env overrides take precedence over YAML
@@ -1579,32 +1586,37 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 		t.Fatalf("expected Nomad update error, got %v", err)
 	}
 
-	// 5. Verify mirrormere-core config mapping exists
-	hasMirrormere := false
-	for _, m := range ManagedServiceConfigs {
-		if m.RelPath == "services/mirrormere/mirrormere.yaml" &&
-			m.NomadVar == "nomad/jobs/mirrormere-core" &&
-			m.VarKey == "CONFIG_YAML" {
-			hasMirrormere = true
-			break
+	// 5. Verify core default service configs stay generic (no user/deployment specific jobs in core)
+	for _, m := range DefaultManagedServiceConfigs {
+		if strings.Contains(m.NomadVar, "orin-voice") || strings.Contains(m.NomadVar, "mirrormere") {
+			t.Errorf("expected DefaultManagedServiceConfigs to remain generic, found deployment-specific mapping: %v", m)
 		}
-	}
-	if !hasMirrormere {
-		t.Errorf("expected ManagedServiceConfigs to contain mirrormere mapping, got %v", ManagedServiceConfigs)
 	}
 
-	// 6. Verify orin-voice config mapping exists
-	hasOrinVoice := false
-	for _, m := range ManagedServiceConfigs {
-		if m.RelPath == "services/voice/voice.yaml" &&
-			m.NomadVar == "nomad/jobs/orin-voice" &&
-			m.VarKey == "CONFIG_YAML" {
-			hasOrinVoice = true
-			break
-		}
+	// 6. Verify GetServiceConfigMappings dynamically reads service_configs from hangar.yaml in configDir
+	customDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(customDir, "services", "hangar"), 0755)
+	hangarYAML := `
+service_configs:
+  - rel_path: "services/custom/custom.yaml"
+    nomad_var: "nomad/jobs/custom-job"
+    var_key: "CONFIG_YAML"
+`
+	_ = os.WriteFile(filepath.Join(customDir, "services", "hangar", "hangar.yaml"), []byte(hangarYAML), 0644)
+	customMappings := dSuccess.GetServiceConfigMappings(customDir)
+	if len(customMappings) != 1 || customMappings[0].RelPath != "services/custom/custom.yaml" || customMappings[0].NomadVar != "nomad/jobs/custom-job" {
+		t.Fatalf("expected custom mappings from hangar.yaml, got %v", customMappings)
 	}
-	if !hasOrinVoice {
-		t.Errorf("expected ManagedServiceConfigs to contain orin-voice mapping, got %v", ManagedServiceConfigs)
+
+	// 7. Verify GetServiceConfigMappings falls back to daemon-configured serviceConfigs
+	dCustom := &SyncDaemon{
+		serviceConfigs: []ServiceConfigMapping{
+			{RelPath: "services/test/test.yaml", NomadVar: "nomad/jobs/test-job", VarKey: "CONFIG_YAML"},
+		},
+	}
+	daemonMappings := dCustom.GetServiceConfigMappings(t.TempDir())
+	if len(daemonMappings) != 1 || daemonMappings[0].RelPath != "services/test/test.yaml" {
+		t.Fatalf("expected daemon-configured mappings, got %v", daemonMappings)
 	}
 }
 
