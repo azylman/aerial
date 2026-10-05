@@ -1897,7 +1897,8 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	mux := SetupBrainMuxWithEmbedder(store, pool, embedder, sessionMgr.Roots()...)
 
 	port := cur.Port
-	ln, err := net.Listen("tcp", ":"+port)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", ":"+port)
 	if err != nil {
 		return err
 	}

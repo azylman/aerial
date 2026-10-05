@@ -32,6 +32,9 @@ linters:
         - (*database/sql.Rows).Close
         - (io.Closer).Close
         - (io.ReadCloser).Close
+    staticcheck:
+      checks:
+        - "SA*"
   exclusions:
     generated: lax
     rules:

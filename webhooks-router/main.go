@@ -150,9 +150,15 @@ func LoadConfig(configPath string) Config {
 		pgURL = os.Getenv("DATABASE_URL")
 	}
 	if pgURL == "" {
-		if _, err := net.LookupHost("aerial-postgres"); err == nil {
+		hostResolves := func(host string) bool {
+			ctxLookup, cancelLookup := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancelLookup()
+			_, err := net.DefaultResolver.LookupHost(ctxLookup, host)
+			return err == nil
+		}
+		if hostResolves("aerial-postgres") {
 			pgURL = "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
-		} else if _, err := net.LookupHost("postgres"); err == nil {
+		} else if hostResolves("postgres") {
 			pgURL = "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
 		} else {
 			pgURL = "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
@@ -3327,7 +3333,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		}
 	}()
 
-	ln, err := net.Listen("tcp", ":"+cfg.Port)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {
 		return fmt.Errorf("listening on port %s: %w", cfg.Port, err)
 	}

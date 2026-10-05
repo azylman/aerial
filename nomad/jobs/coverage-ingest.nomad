@@ -39,7 +39,7 @@ job "coverage-ingest" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "golang:1.24-alpine"
+        image        = "golang:1.27.1-alpine"
         network_mode = "host"
         command      = "/bin/sh"
         args         = ["/local/ingest.sh"]

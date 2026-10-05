@@ -1,8 +1,6 @@
 module github.com/azylman/aerial/webhooks-router
 
-go 1.24.0
-
-toolchain go1.24.13
+go 1.27.1
 
 require (
 	github.com/jackc/pgx/v5 v5.8.0
