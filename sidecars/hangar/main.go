@@ -367,6 +367,8 @@ type SyncDaemon struct {
 	// Nomad Config Cache
 	lastPushedConfigMu sync.Mutex
 	lastPushedConfig   map[string]string
+
+	serviceConfigs []ServiceConfigMapping
 }
 
 func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
@@ -2192,13 +2194,14 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 // ServiceConfigMapping defines the declarative mapping between a repository configuration file
 // and its destination Nomad variable.
 type ServiceConfigMapping struct {
-	RelPath  string
-	NomadVar string
-	VarKey   string
+	RelPath  string `yaml:"rel_path"`
+	NomadVar string `yaml:"nomad_var"`
+	VarKey   string `yaml:"var_key"`
 }
 
-// ManagedServiceConfigs specifies the MCP and auxiliary service configs synchronized into Nomad variables.
-var ManagedServiceConfigs = []ServiceConfigMapping{
+// DefaultManagedServiceConfigs specifies the default built-in MCP and auxiliary service configs
+// synchronized into Nomad variables when not overridden by services/hangar/hangar.yaml.
+var DefaultManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/mcp/scheduler-mcp.yaml", NomadVar: "nomad/jobs/scheduler-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/docker-mcp.yaml", NomadVar: "nomad/jobs/docker-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
@@ -2206,14 +2209,34 @@ var ManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/infisical-mcp.yaml", NomadVar: "nomad/jobs/infisical-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/webhooks-router/webhooks-router.yaml", NomadVar: "nomad/jobs/webhooks-router", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/mirrormere/mirrormere.yaml", NomadVar: "nomad/jobs/mirrormere-core", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/voice/voice.yaml", NomadVar: "nomad/jobs/orin-voice", VarKey: "CONFIG_YAML"},
 }
 
-// SyncServiceConfigsToNomad iterates over ManagedServiceConfigs, validates YAML syntax,
+// ManagedServiceConfigs provides backward compatibility for references to the default service configs.
+var ManagedServiceConfigs = DefaultManagedServiceConfigs
+
+// GetServiceConfigMappings resolves the active service config mappings for a given configDir.
+// If configDir contains services/hangar/hangar.yaml with non-empty service_configs, it dynamically parses and returns them.
+// Otherwise, it falls back to daemon-configured serviceConfigs, or DefaultManagedServiceConfigs if none are configured.
+func (d *SyncDaemon) GetServiceConfigMappings(configDir string) []ServiceConfigMapping {
+	if configDir != "" {
+		hangarCfgPath := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
+		if raw, err := os.ReadFile(hangarCfgPath); err == nil {
+			var hCfg HangarYAMLConfig
+			if err := yaml.Unmarshal(raw, &hCfg); err == nil && len(hCfg.ServiceConfigs) > 0 {
+				return hCfg.ServiceConfigs
+			}
+		}
+	}
+	if d != nil && len(d.serviceConfigs) > 0 {
+		return d.serviceConfigs
+	}
+	return DefaultManagedServiceConfigs
+}
+
+// SyncServiceConfigsToNomad iterates over resolved service config mappings, validates YAML syntax,
 // and pushes non-empty configurations to their respective Nomad variables using `nomad var put`.
 func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
-	for _, mapping := range ManagedServiceConfigs {
+	for _, mapping := range d.GetServiceConfigMappings(configDir) {
 		filePath := filepath.Join(configDir, mapping.RelPath)
 		raw, err := os.ReadFile(filePath)
 		if err != nil {
@@ -2460,6 +2483,7 @@ type DaemonConfig struct {
 	RegistryClient         *http.Client
 	WebhooksRouterURL      string
 	DeployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
+	ServiceConfigs         []ServiceConfigMapping
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -2518,6 +2542,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		lastAlertTimes:   make(map[string]time.Time),
 		repoGitHubSlugs:  make(map[string]string),
 		lastPushedConfig: make(map[string]string),
+		serviceConfigs:   cfg.ServiceConfigs,
 	}
 }
 
@@ -3526,11 +3551,12 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 
 // HangarYAMLConfig defines the declarative file schema for services/hangar/hangar.yaml.
 type HangarYAMLConfig struct {
-	Port             string   `yaml:"port"`
-	SyncInterval     string   `yaml:"sync_interval"`
-	SyncRepos        []string `yaml:"sync_repos"`
-	NomadAddr        string   `yaml:"nomad_addr"`
-	BrainInternalURL string   `yaml:"brain_internal_url"`
+	Port             string                 `yaml:"port"`
+	SyncInterval     string                 `yaml:"sync_interval"`
+	SyncRepos        []string               `yaml:"sync_repos"`
+	NomadAddr        string                 `yaml:"nomad_addr"`
+	BrainInternalURL string                 `yaml:"brain_internal_url"`
+	ServiceConfigs   []ServiceConfigMapping `yaml:"service_configs"`
 }
 
 // NewConfigFromLookup extracts DaemonConfig using a provided lookup function.
@@ -3664,6 +3690,11 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		webhooksRouterURL = "http://127.0.0.1:4020"
 	}
 
+	var serviceConfigs []ServiceConfigMapping
+	if len(fileCfg.ServiceConfigs) > 0 {
+		serviceConfigs = fileCfg.ServiceConfigs
+	}
+
 	return DaemonConfig{
 		Port:              port,
 		Repos:             repos,
@@ -3680,6 +3711,7 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		NomadAddr:         nomadAddr,
 		NomadToken:        nomadToken,
 		WebhooksRouterURL: webhooksRouterURL,
+		ServiceConfigs:    serviceConfigs,
 	}
 }
 
