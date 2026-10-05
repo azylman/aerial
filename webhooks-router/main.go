@@ -828,7 +828,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(NULLIF(merge_sha, ''), head_sha), repo, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
+		WHERE status IN ('deploying', 'merged') AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
 		ORDER BY updated_at DESC
 		LIMIT 1
 		FOR UPDATE
@@ -872,9 +872,10 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		}
 		updateQuery := `
 			UPDATE pr_registry
-			SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb),
+			SET status = 'deploying',
+			    metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb),
 			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = $2 AND status = 'deploying'
+			WHERE id = $2 AND status IN ('deploying', 'merged')
 		`
 		if _, err := tx.Exec(qCtx, updateQuery, remainingJSON, id); err != nil {
 			return "", 0, "", "", false, fmt.Errorf("update remaining jobs: %w", err)
@@ -891,7 +892,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		SET status = 'deployed',
 		    metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb),
 		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'deploying'
+		WHERE id = $1 AND status IN ('deploying', 'merged')
 	`
 	tag, err := tx.Exec(qCtx, updateQuery, id)
 	if err != nil {
@@ -945,7 +946,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo
 		FROM pr_registry
-		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
+		WHERE status IN ('deploying', 'merged') AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
 		ORDER BY updated_at DESC
 		LIMIT 1;
 	`
@@ -964,7 +965,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 		UPDATE pr_registry
 		SET status = 'deploy_failed',
 		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'deploying';
+		WHERE id = $1 AND status IN ('deploying', 'merged');
 	`
 	tag, err := r.pool.Exec(qCtx, updateQuery, id)
 	if err != nil {
@@ -984,7 +985,10 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 	query := `
 		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status = 'deploying'
+		WHERE status = 'deploying' OR (status = 'merged' AND (
+			CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0
+			OR COALESCE(metadata->>'job', '') != ''
+		))
 		ORDER BY id ASC;
 	`
 	rows, err := r.pool.Query(qCtx, query)

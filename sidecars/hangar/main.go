@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"runtime/coverage"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -2615,12 +2616,21 @@ func splitLines(s string) []string {
 }
 
 func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) ([]string, error) {
-	var repo, commit string
+	var repo, commit, targetID string
+	var prNumber int
 	if len(meta) >= 1 {
 		repo = meta[0]
 	}
 	if len(meta) >= 2 {
 		commit = meta[1]
+	}
+	if len(meta) >= 3 {
+		targetID = meta[2]
+	}
+	if len(meta) >= 4 {
+		if parsed, err := strconv.Atoi(meta[3]); err == nil {
+			prNumber = parsed
+		}
 	}
 
 	SortNomadChangesHangarLast(changes)
@@ -2651,6 +2661,8 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 			JobName:   ch.JobName,
 			Repo:      repo,
 			CommitSHA: commit,
+			PRNumber:  prNumber,
+			TargetID:  targetID,
 			Status:    "started",
 			Timestamp: time.Now().UTC(),
 		}
@@ -2768,7 +2780,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, req.Repo, req.Commit)
+			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			resp.AppliedJobs = applied
 			if errRec != nil {
 				resp.Status = "error"
@@ -2849,6 +2861,8 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 							JobName:   ch.JobName,
 							Repo:      req.Repo,
 							CommitSHA: req.Commit,
+							PRNumber:  req.PRNumber,
+							TargetID:  req.TargetID,
 							Status:    "started",
 							Timestamp: time.Now().UTC(),
 						}
