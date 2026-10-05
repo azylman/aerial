@@ -2,7 +2,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build upstream vianaz/mcp-discord TypeScript project
 # -----------------------------------------------------------------------------
-FROM node:20-alpine AS node-build
+FROM node:22-alpine AS node-build
 WORKDIR /app
 
 # Download pinned release tarball directly (avoids git package and commit history overhead)
@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # -----------------------------------------------------------------------------
 # Stage 3: Production Runtime
 # -----------------------------------------------------------------------------
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 
 # Purge npm, corepack, and yarn runtime bloat (not needed; node runs build/app.js)
