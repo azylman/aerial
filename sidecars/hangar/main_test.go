@@ -8946,3 +8946,338 @@ func TestExecuteGitPushEvent_ConfigSyncNotices(t *testing.T) {
 	}
 }
 
+
+func TestSyncBrainConfigToNomad_DiffGated(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(configDir, 0755)
+
+	configPath := filepath.Join(configDir, "config.yaml")
+	_ = os.WriteFile(configPath, []byte("channels:\n  default:\n    mode: mention\n"), 0644)
+
+	var mu sync.Mutex
+	var nomadCalls [][]string
+	var events []HangarDeployEvent
+
+	d := NewDaemon(DaemonConfig{
+		NomadAddr: "http://127.0.0.1:4646",
+		ConfigDir: configDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			mu.Lock()
+			nomadCalls = append(nomadCalls, args)
+			mu.Unlock()
+			return []byte("ok"), nil, nil
+		},
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			mu.Lock()
+			events = append(events, evt)
+			mu.Unlock()
+			return nil
+		},
+	})
+
+	scUntouched := ConfigSyncContext{
+		Repo:         "azylman/aerial-config",
+		CommitSHA:    "sha_untouched",
+		DiffGated:    true,
+		ChangedFiles: []string{"README.md"},
+	}
+
+	// 1. Untouched file in diff-gated push: should NOT put var, but should prime cache
+	if err := d.SyncBrainConfigToNomad(ctx, configDir, scUntouched); err != nil {
+		t.Fatalf("SyncBrainConfigToNomad unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	if len(nomadCalls) != 0 {
+		t.Fatalf("expected 0 nomad calls for untouched diff, got %d", len(nomadCalls))
+	}
+	d.lastPushedConfigMu.Lock()
+	cached := d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"]
+	d.lastPushedConfigMu.Unlock()
+	if cached == "" {
+		t.Fatalf("expected cache to be primed for brain config")
+	}
+	mu.Unlock()
+
+	// 2. Touched in diff, but identical content (double-filter): should NOT put var
+	scSameContent := ConfigSyncContext{
+		Repo:         "azylman/aerial-config",
+		CommitSHA:    "sha_same",
+		DiffGated:    true,
+		ChangedFiles: []string{"config.yaml"},
+	}
+	if err := d.SyncBrainConfigToNomad(ctx, configDir, scSameContent); err != nil {
+		t.Fatalf("SyncBrainConfigToNomad error: %v", err)
+	}
+	mu.Lock()
+	if len(nomadCalls) != 0 {
+		t.Fatalf("expected 0 nomad calls for identical content, got %d", len(nomadCalls))
+	}
+	mu.Unlock()
+
+	// 3. Touched in diff with modified content: SHOULD put var and emit deploy_started
+	_ = os.WriteFile(configPath, []byte("channels:\n  default:\n    mode: always\n"), 0644)
+	scModified := ConfigSyncContext{
+		Repo:         "azylman/aerial-config",
+		CommitSHA:    "sha_modified",
+		DiffGated:    true,
+		ChangedFiles: []string{"config.yaml"},
+	}
+	if err := d.SyncBrainConfigToNomad(ctx, configDir, scModified); err != nil {
+		t.Fatalf("SyncBrainConfigToNomad error: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	if len(nomadCalls) != 1 {
+		t.Fatalf("expected 1 nomad call for modified config, got %d", len(nomadCalls))
+	}
+	if len(events) != 1 || events[0].JobName != "brain" || events[0].Event != "deploy_started" {
+		t.Fatalf("expected deploy_started event for brain, got %+v", events)
+	}
+	mu.Unlock()
+}
+
+func TestSyncHomepageConfigToNomad_DiffGated(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(filepath.Join(configDir, "services", "homepage"), 0755)
+	_ = os.MkdirAll(filepath.Join(configDir, "homepage"), 0755)
+
+	hpYaml := filepath.Join(configDir, "services", "homepage", "homepage.yaml")
+	_ = os.WriteFile(hpYaml, []byte("title: Homepage\n"), 0644)
+	subYaml := filepath.Join(configDir, "homepage", "services.yaml")
+	_ = os.WriteFile(subYaml, []byte("services:\n  - name: test\n"), 0644)
+
+	var mu sync.Mutex
+	var nomadCalls [][]string
+	var events []HangarDeployEvent
+
+	d := NewDaemon(DaemonConfig{
+		NomadAddr: "http://127.0.0.1:4646",
+		ConfigDir: configDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			mu.Lock()
+			nomadCalls = append(nomadCalls, args)
+			mu.Unlock()
+			return []byte("ok"), nil, nil
+		},
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			mu.Lock()
+			events = append(events, evt)
+			mu.Unlock()
+			return nil
+		},
+	})
+
+	scUntouched := ConfigSyncContext{
+		Repo:         "azylman/aerial-config",
+		CommitSHA:    "sha_untouched",
+		DiffGated:    true,
+		ChangedFiles: []string{"services/voice/voice.yaml"},
+	}
+
+	// 1. Untouched in diff: should NOT put var, but should prime cache
+	if err := d.SyncHomepageConfigToNomad(ctx, configDir, scUntouched); err != nil {
+		t.Fatalf("SyncHomepageConfigToNomad error: %v", err)
+	}
+
+	mu.Lock()
+	if len(nomadCalls) != 0 {
+		t.Fatalf("expected 0 nomad calls for untouched diff, got %d", len(nomadCalls))
+	}
+	d.lastPushedConfigMu.Lock()
+	cached := d.lastPushedConfig["nomad/jobs/homepage"]
+	d.lastPushedConfigMu.Unlock()
+	if cached == "" {
+		t.Fatalf("expected cache to be primed for homepage config")
+	}
+	mu.Unlock()
+
+	// 2. Subfile in homepage/ directory touched: SHOULD put var
+	_ = os.WriteFile(subYaml, []byte("services:\n  - name: test2\n"), 0644)
+	scSubTouched := ConfigSyncContext{
+		Repo:         "azylman/aerial-config",
+		CommitSHA:    "sha_sub",
+		DiffGated:    true,
+		ChangedFiles: []string{"homepage/services.yaml"},
+	}
+	if err := d.SyncHomepageConfigToNomad(ctx, configDir, scSubTouched); err != nil {
+		t.Fatalf("SyncHomepageConfigToNomad error: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	if len(nomadCalls) != 1 {
+		t.Fatalf("expected 1 nomad call for modified homepage subfile, got %d", len(nomadCalls))
+	}
+	if len(events) != 1 || events[0].JobName != "homepage" {
+		t.Fatalf("expected deploy_started event for homepage, got %+v", events)
+	}
+	mu.Unlock()
+}
+
+func TestSyncServiceConfigsToNomad_DiffGated(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(filepath.Join(configDir, "services", "voice"), 0755)
+	_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755)
+	_ = os.MkdirAll(filepath.Join(configDir, "services", "hangar"), 0755)
+
+	voiceYaml := filepath.Join(configDir, "services", "voice", "voice.yaml")
+	_ = os.WriteFile(voiceYaml, []byte("model: small.en\n"), 0644)
+	schedYaml := filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml")
+	_ = os.WriteFile(schedYaml, []byte("enabled: true\n"), 0644)
+
+	hangarYaml := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
+	hangarContent := `service_configs:
+  - rel_path: "services/voice/voice.yaml"
+    nomad_var: "nomad/jobs/orin-voice"
+    var_key: "CONFIG_YAML"
+  - rel_path: "services/mcp/scheduler-mcp.yaml"
+    nomad_var: "nomad/jobs/scheduler-mcp"
+    var_key: "CONFIG_YAML"
+`
+	_ = os.WriteFile(hangarYaml, []byte(hangarContent), 0644)
+
+	var mu sync.Mutex
+	var nomadCalls [][]string
+	var events []HangarDeployEvent
+
+	d := NewDaemon(DaemonConfig{
+		NomadAddr: "http://127.0.0.1:4646",
+		ConfigDir: configDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			mu.Lock()
+			nomadCalls = append(nomadCalls, args)
+			mu.Unlock()
+			return []byte("ok"), nil, nil
+		},
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			mu.Lock()
+			events = append(events, evt)
+			mu.Unlock()
+			return nil
+		},
+	})
+
+	// Scenario mimicking PR #264: ONLY services/hangar/hangar.yaml was touched in the git push!
+	scHangarOnly := ConfigSyncContext{
+		Repo:         "azylman/aerial-config",
+		CommitSHA:    "sha_pr264",
+		DiffGated:    true,
+		ChangedFiles: []string{"services/hangar/hangar.yaml"},
+	}
+
+	if err := d.SyncServiceConfigsToNomad(ctx, configDir, scHangarOnly); err != nil {
+		t.Fatalf("SyncServiceConfigsToNomad unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	if len(nomadCalls) != 0 {
+		t.Fatalf("expected ZERO nomad calls for PR #264 hangar-only diff, got %d", len(nomadCalls))
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected ZERO deploy_started events (no phantom deploys), got %d", len(events))
+	}
+	d.lastPushedConfigMu.Lock()
+	cachedVoice := d.lastPushedConfig["nomad/jobs/orin-voice:CONFIG_YAML"]
+	cachedSched := d.lastPushedConfig["nomad/jobs/scheduler-mcp:CONFIG_YAML"]
+	d.lastPushedConfigMu.Unlock()
+	if cachedVoice == "" || cachedSched == "" {
+		t.Fatalf("expected cache to be primed for untouched service configs")
+	}
+	mu.Unlock()
+
+	// Now modify services/voice/voice.yaml and push: ONLY orin-voice should be pushed!
+	_ = os.WriteFile(voiceYaml, []byte("model: distil-small.en\n"), 0644)
+	scVoiceOnly := ConfigSyncContext{
+		Repo:         "azylman/aerial-config",
+		CommitSHA:    "sha_voice_update",
+		DiffGated:    true,
+		ChangedFiles: []string{"services/voice/voice.yaml"},
+	}
+
+	if err := d.SyncServiceConfigsToNomad(ctx, configDir, scVoiceOnly); err != nil {
+		t.Fatalf("SyncServiceConfigsToNomad error: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	if len(nomadCalls) != 1 {
+		t.Fatalf("expected exactly 1 nomad call (only orin-voice), got %d", len(nomadCalls))
+	}
+	if len(events) != 1 || events[0].JobName != "orin-voice" {
+		t.Fatalf("expected deploy_started event exclusively for orin-voice, got %+v", events)
+	}
+	mu.Unlock()
+}
+
+func TestExecuteGitPushEvent_AerialConfig_DiffGating(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(filepath.Join(configDir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(configDir, "services", "voice"), 0755)
+	_ = os.MkdirAll(filepath.Join(configDir, "services", "hangar"), 0755)
+
+	voiceYaml := filepath.Join(configDir, "services", "voice", "voice.yaml")
+	_ = os.WriteFile(voiceYaml, []byte("model: small.en\n"), 0644)
+	hangarYaml := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
+	hangarContent := `service_configs:
+  - rel_path: "services/voice/voice.yaml"
+    nomad_var: "nomad/jobs/orin-voice"
+    var_key: "CONFIG_YAML"
+`
+	_ = os.WriteFile(hangarYaml, []byte(hangarContent), 0644)
+
+	var mu sync.Mutex
+	var varPutJobs []string
+
+	d := NewDaemon(DaemonConfig{
+		NomadAddr: "http://127.0.0.1:4646",
+		ConfigDir: configDir,
+		Repos:     []string{configDir},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "log" {
+				return []byte("sha_curr\x002026-10-05T00:00:00Z"), nil, nil
+			}
+			if len(args) > 0 && args[0] == "rev-parse" {
+				return []byte("sha_curr\n"), nil, nil
+			}
+			if len(args) > 0 && args[0] == "pull" {
+				return []byte("Updating sha_prev..sha_curr"), nil, nil
+			}
+			if len(args) > 0 && args[0] == "diff" && args[1] == "--name-only" {
+				return []byte("services/hangar/hangar.yaml\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 4 && args[0] == "var" && args[1] == "put" {
+				mu.Lock()
+				varPutJobs = append(varPutJobs, args[3])
+				mu.Unlock()
+			}
+			return []byte("ok"), nil, nil
+		},
+	})
+
+	req := GitPushEventRequest{
+		Repo:   "azylman/aerial-config",
+		Commit: "sha_curr",
+	}
+
+	resp, code := d.ExecuteGitPushEvent(ctx, req)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d (%+v)", code, resp)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(varPutJobs) != 0 {
+		t.Fatalf("expected zero var put calls for untouched service configs, got: %v", varPutJobs)
+	}
+}
