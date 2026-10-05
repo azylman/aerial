@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 var (
@@ -672,6 +674,27 @@ func (f *FakeStore) GetSessionInfo(ctx context.Context, threadID string) (*Sessi
 		return nil, nil
 	}
 	return cloneSessionInfo(s), nil
+}
+
+func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int) ([]SessionInfo, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("FindUnrotatedSessions"); err != nil {
+		return nil, err
+	}
+	if minTurns <= 0 {
+		minTurns = session.DefaultMaxSessionTurns
+	}
+	var res []SessionInfo
+	for _, s := range f.sessions {
+		if s != nil && s.TurnCount > minTurns {
+			res = append(res, *cloneSessionInfo(s))
+		}
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].TurnCount > res[j].TurnCount
+	})
+	return res, nil
 }
 
 func (f *FakeStore) GetThreadSummary(ctx context.Context, threadID string) (string, string, error) {

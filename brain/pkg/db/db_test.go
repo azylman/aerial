@@ -611,6 +611,113 @@ func TestGetSessionInfo_EdgeCasesAndSQLStore(t *testing.T) {
 	}
 }
 
+func TestFindUnrotatedSessions(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	ctx := context.Background()
+
+	// 1. Nil database returns nil, nil
+	nilRes, err := FindUnrotatedSessions(ctx, nil, 8)
+	if err != nil || nilRes != nil {
+		t.Fatalf("expected nil, nil for nil DB, got res=%v, err=%v", nilRes, err)
+	}
+
+	// 2. Insert sessions with varied turn counts
+	_ = SaveSessionID(database, "th-low", "sess-low")
+	_ = SaveSessionID(database, "th-high-9", "sess-9")
+	_ = SaveSessionID(database, "th-high-12", "sess-12")
+
+	// Increment turn counts
+	for i := 0; i < 3; i++ {
+		_, _ = IncrementSessionTurnCount(database, "th-low")
+	}
+	for i := 0; i < 9; i++ {
+		_, _ = IncrementSessionTurnCount(database, "th-high-9")
+	}
+	for i := 0; i < 12; i++ {
+		_, _ = IncrementSessionTurnCount(database, "th-high-12")
+	}
+
+	// 3. Query with minTurns <= 0 (defaults to session.DefaultMaxSessionTurns = 8)
+	// Both th-high-12 (12) and th-high-9 (9) should be returned, ordered by turn_count DESC
+	unrotated, err := FindUnrotatedSessions(ctx, database, 0)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions failed: %v", err)
+	}
+	if len(unrotated) != 2 {
+		t.Fatalf("expected 2 unrotated sessions (>8), got %d", len(unrotated))
+	}
+	if unrotated[0].ThreadID != "th-high-12" || unrotated[0].TurnCount != 12 {
+		t.Errorf("expected first to be th-high-12 with 12 turns, got %+v", unrotated[0])
+	}
+	if unrotated[1].ThreadID != "th-high-9" || unrotated[1].TurnCount != 9 {
+		t.Errorf("expected second to be th-high-9 with 9 turns, got %+v", unrotated[1])
+	}
+
+	// 4. SQLStore method
+	store := NewSQLStore(database)
+	storeRes, err := store.FindUnrotatedSessions(ctx, 10)
+	if err != nil {
+		t.Fatalf("store.FindUnrotatedSessions failed: %v", err)
+	}
+	if len(storeRes) != 1 || storeRes[0].ThreadID != "th-high-12" {
+		t.Errorf("expected only th-high-12 for minTurns=10, got %+v", storeRes)
+	}
+
+	// Nil store error
+	var nilStore *SQLStore
+	if _, err := nilStore.FindUnrotatedSessions(ctx, 8); err == nil {
+		t.Error("expected error for nil SQLStore")
+	}
+
+	// Closed DB error
+	closedDB, _ := InitDB(":memory:")
+	_ = closedDB.Close()
+	if _, err := FindUnrotatedSessions(ctx, closedDB, 8); err == nil {
+		t.Error("expected error for closed DB")
+	}
+
+	// 5. FakeStore implementation
+	fake := NewFakeStore()
+	defer func() { _ = fake.Close() }()
+
+	_ = fake.SaveSessionID(ctx, "fake-low", "s-low")
+	_ = fake.SaveSessionID(ctx, "fake-9", "s-9")
+	_ = fake.SaveSessionID(ctx, "fake-15", "s-15")
+
+	for i := 0; i < 5; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "fake-low")
+	}
+	for i := 0; i < 9; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "fake-9")
+	}
+	for i := 0; i < 15; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "fake-15")
+	}
+
+	fakeUnrotated, err := fake.FindUnrotatedSessions(ctx, 0)
+	if err != nil {
+		t.Fatalf("fake.FindUnrotatedSessions failed: %v", err)
+	}
+	if len(fakeUnrotated) != 2 {
+		t.Fatalf("expected 2 unrotated sessions in fake store, got %d", len(fakeUnrotated))
+	}
+	if fakeUnrotated[0].ThreadID != "fake-15" || fakeUnrotated[0].TurnCount != 15 {
+		t.Errorf("expected first fake unrotated to be fake-15, got %+v", fakeUnrotated[0])
+	}
+	if fakeUnrotated[1].ThreadID != "fake-9" || fakeUnrotated[1].TurnCount != 9 {
+		t.Errorf("expected second fake unrotated to be fake-9, got %+v", fakeUnrotated[1])
+	}
+
+	// Closed fake store error
+	closedFake := NewFakeStore()
+	_ = closedFake.Close()
+	if _, err := closedFake.FindUnrotatedSessions(ctx, 8); err == nil {
+		t.Error("expected error for closed FakeStore")
+	}
+}
+
 func TestSchedulesCompatibility(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
