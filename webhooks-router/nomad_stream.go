@@ -676,7 +676,7 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 		return false
 	}
 	if len(allocs) == 0 {
-		return false
+		return s.isNomadBatchTemplateHealthy(ctx, cleanAddr, job)
 	}
 
 	hasRunning := false
@@ -689,7 +689,55 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 			hasRunning = true
 		}
 	}
-	return hasRunning
+	if hasRunning {
+		return true
+	}
+	return s.isNomadBatchTemplateHealthy(ctx, cleanAddr, job)
+}
+
+// isNomadBatchTemplateHealthy queries Nomad for periodic or parameterized batch job templates
+// that do not maintain persistent allocations between runs.
+func (s *RouterServer) isNomadBatchTemplateHealthy(ctx context.Context, cleanAddr, job string) bool {
+	jobEndpoint := fmt.Sprintf("%s/v1/job/%s", cleanAddr, job)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jobEndpoint, nil)
+	if err != nil {
+		return false
+	}
+	if s.cfg.NomadToken != "" {
+		req.Header.Set("X-Nomad-Token", s.cfg.NomadToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	var jobSpec struct {
+		Type             string `json:"Type"`
+		Status           string `json:"Status"`
+		Stop             bool   `json:"Stop"`
+		Periodic         *struct {
+			Enabled bool `json:"Enabled"`
+		} `json:"Periodic"`
+		ParameterizedJob interface{} `json:"ParameterizedJob"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&jobSpec); err != nil {
+		return false
+	}
+
+	isPeriodic := jobSpec.Periodic != nil && jobSpec.Periodic.Enabled
+	isParameterized := jobSpec.ParameterizedJob != nil
+	isBatchTemplate := isPeriodic || isParameterized
+
+	return strings.EqualFold(jobSpec.Type, "batch") &&
+		isBatchTemplate &&
+		strings.EqualFold(jobSpec.Status, "running") &&
+		!jobSpec.Stop
 }
 
 // extractJobsFromMetadata extracts candidate Nomad job names stored in the PR registry metadata JSONB.
