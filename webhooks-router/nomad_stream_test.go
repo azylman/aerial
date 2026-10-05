@@ -443,6 +443,96 @@ func TestRouterServer_IsNomadJobHealthy_DeploymentsAndAllocations(t *testing.T) 
 	}
 }
 
+func TestRouterServer_IsNomadJobHealthy_BatchTemplates(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var jobSpecJSON string
+	var jobSpecStatus int
+	var allocsJSON string
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(allocsJSON))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/job/") {
+			if jobSpecStatus != 0 && jobSpecStatus != http.StatusOK {
+				w.WriteHeader(jobSpecStatus)
+				return
+			}
+			if jobSpecJSON != "" {
+				_, _ = w.Write([]byte(jobSpecJSON))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer nomadServer.Close()
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+
+	// Case 1: Periodic batch job with 0 allocations, running & enabled -> healthy
+	allocsJSON = `[]`
+	jobSpecJSON = `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`
+	jobSpecStatus = http.StatusOK
+	if !srv.isNomadJobHealthy(ctx, "coverage-ingest") {
+		t.Errorf("expected periodic batch job with 0 allocations to be healthy")
+	}
+
+	// Case 2: Periodic batch job with completed past allocations -> healthy
+	allocsJSON = `[{"ID":"a1","DesiredStatus":"stop","ClientStatus":"complete"}]`
+	if !srv.isNomadJobHealthy(ctx, "coverage-ingest") {
+		t.Errorf("expected periodic batch job with completed past allocations to be healthy")
+	}
+
+	// Case 3: Periodic batch job with actively failing allocation -> unhealthy
+	allocsJSON = `[{"ID":"a1","DesiredStatus":"run","ClientStatus":"failed"}]`
+	if srv.isNomadJobHealthy(ctx, "coverage-ingest") {
+		t.Errorf("expected periodic batch job with actively failing allocation to be unhealthy")
+	}
+
+	// Case 4: Parameterized batch job with 0 allocations, running -> healthy
+	allocsJSON = `[]`
+	jobSpecJSON = `{"ID":"batch-worker","Type":"batch","Status":"running","Stop":false,"Periodic":null,"ParameterizedJob":{"Payload":"optional"}}`
+	if !srv.isNomadJobHealthy(ctx, "batch-worker") {
+		t.Errorf("expected parameterized batch job with 0 allocations to be healthy")
+	}
+
+	// Case 5: Non-periodic batch job (Periodic == null, ParameterizedJob == null) with 0 allocations -> unhealthy
+	allocsJSON = `[]`
+	jobSpecJSON = `{"ID":"migrate","Type":"batch","Status":"running","Stop":false,"Periodic":null,"ParameterizedJob":null}`
+	if srv.isNomadJobHealthy(ctx, "migrate") {
+		t.Errorf("expected non-periodic batch job with 0 allocations to be unhealthy")
+	}
+
+	// Case 6: Stopped periodic batch job (Stop == true / Status == "dead") -> unhealthy
+	allocsJSON = `[]`
+	jobSpecJSON = `{"ID":"coverage-ingest","Type":"batch","Status":"dead","Stop":true,"Periodic":{"Enabled":true}}`
+	if srv.isNomadJobHealthy(ctx, "coverage-ingest") {
+		t.Errorf("expected stopped periodic batch job to be unhealthy")
+	}
+
+	// Case 7: Periodic batch job with Periodic.Enabled == false -> unhealthy
+	allocsJSON = `[]`
+	jobSpecJSON = `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":false}}`
+	if srv.isNomadJobHealthy(ctx, "coverage-ingest") {
+		t.Errorf("expected disabled periodic batch job to be unhealthy")
+	}
+
+	// Case 8: Nomad job spec API 404/500 -> unhealthy
+	allocsJSON = `[]`
+	jobSpecStatus = http.StatusInternalServerError
+	if srv.isNomadJobHealthy(ctx, "coverage-ingest") {
+		t.Errorf("expected API error to be unhealthy")
+	}
+}
+
 func TestNomadStreamSubscriber_WithRiver(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
