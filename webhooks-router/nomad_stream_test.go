@@ -1218,3 +1218,98 @@ func TestNomadStreamSubscriber_WithRiver_AllocationFailure(t *testing.T) {
 		t.Errorf("expected idempotency key to contain ':failed', got %s", mockRiver.insertedNomadJobs[0].IdempotencyKey)
 	}
 }
+
+func TestNomadStreamSubscriber_Evaluation_QueuedAllocations_Ignored(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Evaluation with port collision but queued allocations represents transient rolling update queueing;
+	// it should neither trigger deployment failure nor premature success.
+	streamData := `{"Index":2020,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-queued-1","JobID":"scheduler-mcp","Status":"complete","DeploymentID":"","FailedTGAllocs":{"scheduler-mcp":{"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"scheduler-mcp":1}}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    629,
+		deployFailedJobMergeSHA: "d9d4129bbfae5726d7d5953d8d7b0d87426afe53",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployFailedJobCalls, got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockReg.deployedJobCalls) != 0 {
+		t.Fatalf("expected 0 deployedJobCalls, got %v", mockReg.deployedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls, got %d", len(mockDisp.PromptCalls()))
+	}
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Fatalf("expected 0 direct message calls, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+}
+
+func TestNomadStreamSubscriber_Evaluation_MultiTaskGroup_UnqueuedFailure_TreatedAsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// In a multi-task-group job, if taskGroupA fatally fails with 0 queued allocations
+	// while taskGroupB has 1 queued allocation, the evaluation MUST still be treated as a failure.
+	streamData := `{"Index":2021,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-multi-fail","JobID":"brain","Status":"complete","DeploymentID":"","FailedTGAllocs":{"taskGroupA":{"ResourceExhausted":1}},"QueuedAllocations":{"taskGroupB":1}}}}]}` + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    630,
+		deployFailedJobMergeSHA: "sha_multi_tg_fail",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 1 || mockReg.deployFailedJobCalls[0] != "brain" {
+		t.Fatalf("expected deployFailedJobCalls [brain], got %v", mockReg.deployFailedJobCalls)
+	}
+	if len(mockDisp.PromptCalls()) != 1 {
+		t.Fatalf("expected 1 prompt call for unqueued task group failure, got %d", len(mockDisp.PromptCalls()))
+	}
+	if !strings.Contains(mockDisp.PromptCalls()[0].Prompt, "failed task group allocations") {
+		t.Errorf("expected failure prompt to mention failed task group allocations: %s", mockDisp.PromptCalls()[0].Prompt)
+	}
+}
