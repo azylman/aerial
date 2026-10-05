@@ -627,18 +627,17 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 		return false
 	}
 
-	// Sort allocations by CreateIndex descending so newest allocation is evaluated first
-	sort.SliceStable(allocs, func(i, j int) bool {
-		return allocs[i].CreateIndex > allocs[j].CreateIndex
-	})
-
-	latestAlloc := allocs[0]
-	// If newest allocation failed or is pending, deployment is not healthy
-	if latestAlloc.ClientStatus == "failed" || latestAlloc.ClientStatus == "pending" {
-		return false
+	hasRunning := false
+	for _, a := range allocs {
+		// If an allocation is actively failing or pending, the rollout is incomplete
+		if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
+			return false
+		}
+		if a.DesiredStatus == "run" && a.ClientStatus == "running" {
+			hasRunning = true
+		}
 	}
-	// Must be running with DesiredStatus run
-	return latestAlloc.DesiredStatus == "run" && latestAlloc.ClientStatus == "running"
+	return hasRunning
 }
 
 // extractJobsFromMetadata extracts candidate Nomad job names stored in the PR registry metadata JSONB.
