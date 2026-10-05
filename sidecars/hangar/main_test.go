@@ -7255,13 +7255,21 @@ func TestDefaultNomadExecutor_AddrAndToken(t *testing.T) {
 
 func TestGetDeployDispatcher_Branches(t *testing.T) {
 	var nilDaemon *SyncDaemon
-	if nilDaemon.getDeployDispatcher() == nil {
-		t.Errorf("expected non-nil default deploy dispatcher for nil daemon")
+	fnNil := nilDaemon.getDeployDispatcher()
+	if fnNil == nil {
+		t.Fatalf("expected non-nil dispatcher function for nil daemon")
+	}
+	if err := fnNil(context.Background(), HangarDeployEvent{}); err == nil {
+		t.Errorf("expected error from deploy dispatcher on nil daemon")
 	}
 
 	d := &SyncDaemon{}
-	if d.getDeployDispatcher() == nil {
-		t.Errorf("expected non-nil default deploy dispatcher when deployDispatcher is nil")
+	fn := d.getDeployDispatcher()
+	if fn == nil {
+		t.Fatalf("expected non-nil dispatcher function when deployDispatcher is nil")
+	}
+	if err := fn(context.Background(), HangarDeployEvent{}); err == nil {
+		t.Errorf("expected error from deploy dispatcher when deployDispatcher is nil")
 	}
 
 	customCalled := false
@@ -7269,8 +7277,10 @@ func TestGetDeployDispatcher_Branches(t *testing.T) {
 		customCalled = true
 		return nil
 	}
-	fn := d.getDeployDispatcher()
-	_ = fn(context.Background(), HangarDeployEvent{})
+	fnCustom := d.getDeployDispatcher()
+	if err := fnCustom(context.Background(), HangarDeployEvent{}); err != nil {
+		t.Errorf("unexpected error from custom deploy dispatcher: %v", err)
+	}
 	if !customCalled {
 		t.Errorf("expected custom deploy dispatcher to be called")
 	}
@@ -8526,10 +8536,14 @@ job "router" {
 
 	var capturedArgs []string
 	var restartCalled bool
+	mockDispatcher := func(ctx context.Context, evt HangarDeployEvent) error {
+		return nil
+	}
 
 	d := NewDaemon(DaemonConfig{
-		ConfigDir:  tmpDir,
-		ComposeDir: tmpDir,
+		ConfigDir:        tmpDir,
+		ComposeDir:       tmpDir,
+		DeployDispatcher: mockDispatcher,
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
 				capturedArgs = append([]string(nil), args...)
@@ -8632,8 +8646,9 @@ job "router" {
 	capturedArgs = nil
 	restartCalled = false
 	dNoDigest := NewDaemon(DaemonConfig{
-		ConfigDir:  tmpDir,
-		ComposeDir: tmpDir,
+		ConfigDir:        tmpDir,
+		ComposeDir:       tmpDir,
+		DeployDispatcher: mockDispatcher,
 		RegistryClient: &http.Client{
 			Transport: &roundTripperFunc{
 				fn: func(req *http.Request) (*http.Response, error) {
@@ -8696,8 +8711,9 @@ job "router" {
 
 	// Sub-test 6: Unparameterized legacy job with restart error logs warning and succeeds
 	dRestartFail := NewDaemon(DaemonConfig{
-		ConfigDir:  tmpDir,
-		ComposeDir: tmpDir,
+		ConfigDir:        tmpDir,
+		ComposeDir:       tmpDir,
+		DeployDispatcher: mockDispatcher,
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 			if len(args) >= 2 && args[0] == "job" && args[1] == "restart" {
 				return nil, []byte("restart failed warning"), errors.New("exit status 1")
