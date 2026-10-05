@@ -6,7 +6,7 @@ FROM node:22-alpine AS node-build
 WORKDIR /app
 
 # Download pinned release tarball directly (avoids git package and commit history overhead)
-RUN wget -qO- https://github.com/vianaz/mcp-discord/archive/74ac920fbc6abb8e1f7d09aea84e530e12ad1d1d.tar.gz | tar -xz --strip-components=1
+RUN wget -qO- https://github.com/vianaz/mcp-discord/archive/f350aac986338cf14d9b210104cb594385347508.tar.gz | tar -xz --strip-components=1
 
 # Install dependencies with cache mount and build TypeScript
 RUN --mount=type=cache,target=/root/.npm npm install --ignore-scripts

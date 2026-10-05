@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
 # --- Superpowers stage ---------------------------------------------------
-FROM alpine:3.21 AS superpowers
+FROM alpine:3.24 AS superpowers
 
 RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
     wget -qO- https://github.com/obra/superpowers/archive/refs/tags/v6.3.0.tar.gz | tar -xz --strip-components=1 -C /tmp/superpowers && \
@@ -61,10 +61,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy statically linked Docker CLI and Compose plugin (avoids heavy docker.io/containerd apt packages)
+# Copy statically linked Docker CLI (avoids heavy docker.io/containerd apt packages)
 COPY --link --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
-COPY --link --from=docker/compose-bin:v2.32.4 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-RUN ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 # Configure default SSH client with include for aerial-config
 RUN mkdir -p -m 0700 /root/.ssh && \

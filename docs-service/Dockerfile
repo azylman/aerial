@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM nginx:1.27-alpine-slim
+FROM nginx:1.30-alpine-slim
 
 # Clean default Nginx files and prepare /docs mount point (no curl needed; uses BusyBox wget)
 RUN rm -rf /usr/share/nginx/html/* /etc/nginx/conf.d/default.conf && \

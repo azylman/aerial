@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM nginx:1.27-alpine-slim
+FROM nginx:1.30-alpine-slim
 COPY --link default.conf /etc/nginx/conf.d/default.conf
 COPY --link grafana-cyberpunk.css /etc/nginx/grafana-cyberpunk.css
 COPY --link agentsview-cyberpunk.css /etc/nginx/agentsview-cyberpunk.css

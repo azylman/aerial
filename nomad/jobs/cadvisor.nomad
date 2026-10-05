@@ -34,7 +34,7 @@ job "cadvisor" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "gcr.io/cadvisor/cadvisor:v0.55.1"
+        image        = "ghcr.io/google/cadvisor:v0.60.6"
         network_mode = "host"
         healthchecks {
           disable = true
