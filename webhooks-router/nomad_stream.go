@@ -358,6 +358,7 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		opts := &river.InsertOpts{
 			MaxAttempts: 5,
 			UniqueOpts: river.UniqueOpts{
+				ByArgs:   true,
 				ByPeriod: 15 * time.Minute,
 			},
 		}

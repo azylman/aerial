@@ -319,6 +319,7 @@ func (HangarWebhookArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
 		MaxAttempts: 5,
 		UniqueOpts: river.UniqueOpts{
+			ByArgs:   true,
 			ByPeriod: 15 * time.Minute,
 		},
 	}
@@ -360,6 +361,7 @@ func (NomadEventArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
 		MaxAttempts: 5,
 		UniqueOpts: river.UniqueOpts{
+			ByArgs:   true,
 			ByPeriod: 15 * time.Minute,
 		},
 	}
@@ -1660,6 +1662,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 		opts := &river.InsertOpts{
 			MaxAttempts: 5,
 			UniqueOpts: river.UniqueOpts{
+				ByArgs:   true,
 				ByPeriod: 15 * time.Minute,
 			},
 		}
