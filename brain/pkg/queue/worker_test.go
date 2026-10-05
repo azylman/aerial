@@ -3830,6 +3830,293 @@ func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
 	}
 }
 
+type mockRotatorPool struct {
+	shouldRotate bool
+	rotReason    string
+	rotateErr    error
+	newSession   runner.AgentSession
+	rotateCalled bool
+	evictedKey   string
+	evictCalls   int
+}
+
+func (m *mockRotatorPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
+	return nil, nil
+}
+func (m *mockRotatorPool) Initialize(ctx context.Context) error { return nil }
+func (m *mockRotatorPool) Close() error                           { return nil }
+
+func (m *mockRotatorPool) ShouldRotateSession(sess runner.AgentSession) (bool, string) {
+	return m.shouldRotate, m.rotReason
+}
+
+func (m *mockRotatorPool) RotateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
+	m.rotateCalled = true
+	if m.rotateErr != nil {
+		return nil, m.rotateErr
+	}
+	return m.newSession, nil
+}
+
+func (m *mockRotatorPool) EvictSession(targetKey string) error {
+	m.evictedKey = targetKey
+	m.evictCalls++
+	return nil
+}
+
+type mockRotatorSession struct {
+	sessionID string
+}
+
+func (s *mockRotatorSession) Send(prompt string, turn *runner.TurnContext) error { return nil }
+func (s *mockRotatorSession) SessionID() string                                   { return s.sessionID }
+
+type mockRotateStore struct {
+	*db.FakeStore
+	rotateFn func(ctx context.Context, sessionKey, newSessionID string) error
+}
+
+func (m *mockRotateStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
+	if m.rotateFn != nil {
+		return m.rotateFn(ctx, sessionKey, newSessionID)
+	}
+	return m.FakeStore.RotateSessionID(ctx, sessionKey, newSessionID)
+}
+
+func TestTurnExecution_CheckTurnEndRotation(t *testing.T) {
+	t.Parallel()
+
+	// 1. Normal rotation (thread mode)
+	t.Run("NormalRotation_Thread", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		_ = store.SaveSessionID(context.Background(), "thread-rot-1", "sess-old-1")
+		pool := &WorkerPool{
+			ctx: context.Background(),
+			cfg: WorkerPoolConfig{Store: store},
+		}
+		rotPool := &mockRotatorPool{
+			shouldRotate: true,
+			rotReason:    "turn_limit",
+			newSession:   &mockRotatorSession{sessionID: "sess-new-1"},
+		}
+		te := &turnExecution{
+			pool:             pool,
+			threadID:         "thread-rot-1",
+			currentSessionID: "sess-old-1",
+			turnCount:        10,
+			policy:           config.ChannelPolicy{Mode: "thread"},
+		}
+		execSession := &mockRotatorSession{sessionID: "sess-old-1"}
+
+		te.checkTurnEndRotation(rotPool, execSession)
+
+		if !rotPool.rotateCalled {
+			t.Errorf("expected RotateSession to be called")
+		}
+		if te.turnCount != 0 {
+			t.Errorf("expected turnCount to reset to 0, got %d", te.turnCount)
+		}
+		if te.currentSessionID != "sess-new-1" {
+			t.Errorf("expected currentSessionID to be sess-new-1, got %s", te.currentSessionID)
+		}
+		if te.previousSessionID != "sess-old-1" {
+			t.Errorf("expected previousSessionID to be sess-old-1, got %s", te.previousSessionID)
+		}
+		dbSessID, err := store.GetSessionID(context.Background(), "thread-rot-1")
+		if err != nil || dbSessID != "sess-new-1" {
+			t.Errorf("expected DB session ID to be sess-new-1, got %s (err: %v)", dbSessID, err)
+		}
+	})
+
+	// 2. Normal rotation (channel mode)
+	t.Run("NormalRotation_Channel", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		_ = store.SaveSessionID(context.Background(), "channel-rot-1", "sess-old-chan")
+		pool := &WorkerPool{
+			ctx: context.Background(),
+			cfg: WorkerPoolConfig{Store: store},
+		}
+		rotPool := &mockRotatorPool{
+			shouldRotate: true,
+			rotReason:    "ttl_expired",
+			newSession:   &mockRotatorSession{sessionID: "sess-new-chan"},
+		}
+		te := &turnExecution{
+			pool:             pool,
+			threadID:         "channel-rot-1",
+			currentSessionID: "sess-old-chan",
+			turnCount:        5,
+			policy:           config.ChannelPolicy{Mode: "channel"},
+		}
+		execSession := &mockRotatorSession{sessionID: "sess-old-chan"}
+
+		te.checkTurnEndRotation(rotPool, execSession)
+
+		if !rotPool.rotateCalled {
+			t.Errorf("expected RotateSession to be called")
+		}
+		if te.turnCount != 0 || te.currentSessionID != "sess-new-chan" {
+			t.Errorf("expected channel mode rotation to update turnCount and session ID")
+		}
+		dbSessID, err := store.GetSessionID(context.Background(), "channel-rot-1")
+		if err != nil || dbSessID != "sess-new-chan" {
+			t.Errorf("expected DB session ID to be sess-new-chan, got %s (err: %v)", dbSessID, err)
+		}
+	})
+
+	// 3. No rotation when ShouldRotateSession returns false
+	t.Run("NoRotation", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		_ = store.SaveSessionID(context.Background(), "thread-rot-2", "sess-active-2")
+		pool := &WorkerPool{
+			ctx: context.Background(),
+			cfg: WorkerPoolConfig{Store: store},
+		}
+		rotPool := &mockRotatorPool{
+			shouldRotate: false,
+			rotReason:    "",
+			newSession:   &mockRotatorSession{sessionID: "sess-should-not-use"},
+		}
+		te := &turnExecution{
+			pool:             pool,
+			threadID:         "thread-rot-2",
+			currentSessionID: "sess-active-2",
+			turnCount:        3,
+		}
+		execSession := &mockRotatorSession{sessionID: "sess-active-2"}
+
+		te.checkTurnEndRotation(rotPool, execSession)
+
+		if rotPool.rotateCalled {
+			t.Errorf("expected RotateSession NOT to be called when ShouldRotateSession returns false")
+		}
+		if te.turnCount != 3 {
+			t.Errorf("expected turnCount to remain 3, got %d", te.turnCount)
+		}
+		if te.currentSessionID != "sess-active-2" {
+			t.Errorf("expected currentSessionID to remain sess-active-2, got %s", te.currentSessionID)
+		}
+	})
+
+	// 4. Spawn failure: RotateSession returns an error
+	t.Run("SpawnFailure", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		_ = store.SaveSessionID(context.Background(), "thread-rot-3", "sess-old-3")
+		pool := &WorkerPool{
+			ctx: context.Background(),
+			cfg: WorkerPoolConfig{Store: store},
+		}
+		rotPool := &mockRotatorPool{
+			shouldRotate: true,
+			rotReason:    "turn_limit",
+			rotateErr:    errors.New("spawn failed: oom"),
+		}
+		te := &turnExecution{
+			pool:             pool,
+			threadID:         "thread-rot-3",
+			currentSessionID: "sess-old-3",
+			turnCount:        12,
+		}
+		execSession := &mockRotatorSession{sessionID: "sess-old-3"}
+
+		te.checkTurnEndRotation(rotPool, execSession)
+
+		if !rotPool.rotateCalled {
+			t.Errorf("expected RotateSession to be called")
+		}
+		if rotPool.evictedKey != "thread-rot-3" {
+			t.Errorf("expected EvictSession to be called for thread-rot-3, got %q", rotPool.evictedKey)
+		}
+		if te.currentSessionID != "" {
+			t.Errorf("expected currentSessionID to be cleared, got %q", te.currentSessionID)
+		}
+		dbSessID, err := store.GetSessionID(context.Background(), "thread-rot-3")
+		if err != nil || dbSessID != "" {
+			t.Errorf("expected DB session ID to be cleared to empty string, got %q (err: %v)", dbSessID, err)
+		}
+	})
+
+	// 5. DB latch failure: s.RotateSessionID returns error
+	t.Run("DBLatchFailure", func(t *testing.T) {
+		t.Parallel()
+		fakeStore := setupTestStore(t)
+		_ = fakeStore.SaveSessionID(context.Background(), "thread-rot-4", "sess-old-4")
+		mockStore := &mockRotateStore{
+			FakeStore: fakeStore,
+			rotateFn: func(ctx context.Context, sessionKey, newSessionID string) error {
+				if newSessionID != "" {
+					return errors.New("db connection lost")
+				}
+				return fakeStore.RotateSessionID(ctx, sessionKey, newSessionID)
+			},
+		}
+		pool := &WorkerPool{
+			ctx: context.Background(),
+			cfg: WorkerPoolConfig{Store: mockStore},
+		}
+		rotPool := &mockRotatorPool{
+			shouldRotate: true,
+			rotReason:    "turn_limit",
+			newSession:   &mockRotatorSession{sessionID: "sess-new-4"},
+		}
+		te := &turnExecution{
+			pool:             pool,
+			threadID:         "thread-rot-4",
+			currentSessionID: "sess-old-4",
+			turnCount:        10,
+		}
+		execSession := &mockRotatorSession{sessionID: "sess-old-4"}
+
+		te.checkTurnEndRotation(rotPool, execSession)
+
+		if !rotPool.rotateCalled {
+			t.Errorf("expected RotateSession to be called")
+		}
+		if rotPool.evictedKey != "thread-rot-4" {
+			t.Errorf("expected EvictSession to be called for thread-rot-4, got %q", rotPool.evictedKey)
+		}
+		if te.currentSessionID != "" {
+			t.Errorf("expected currentSessionID to be cleared, got %q", te.currentSessionID)
+		}
+		dbSessID, err := fakeStore.GetSessionID(context.Background(), "thread-rot-4")
+		if err != nil || dbSessID != "" {
+			t.Errorf("expected DB session ID to be cleared, got %q (err: %v)", dbSessID, err)
+		}
+	})
+
+	// 6. Nil and unsupported interface guards
+	t.Run("Guards", func(t *testing.T) {
+		t.Parallel()
+		rotPool := &mockRotatorPool{shouldRotate: true}
+		execSession := &mockRotatorSession{sessionID: "s1"}
+
+		// te == nil
+		var teNil *turnExecution
+		teNil.checkTurnEndRotation(rotPool, execSession)
+
+		// te.pool == nil
+		teNoPool := &turnExecution{threadID: "t1"}
+		teNoPool.checkTurnEndRotation(rotPool, execSession)
+
+		// activePool == nil
+		teWithPool := &turnExecution{
+			pool: &WorkerPool{ctx: context.Background()},
+		}
+		teWithPool.checkTurnEndRotation(nil, execSession)
+
+		// execSession == nil
+		teWithPool.checkTurnEndRotation(rotPool, nil)
+
+		// activePool does not implement runner.SessionRotator
+		nonRotatorPool := &legacyRunnerAgentPool{}
+		teWithPool.checkTurnEndRotation(nonRotatorPool, execSession)
+	})
+}
+
 
 
 

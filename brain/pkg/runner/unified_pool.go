@@ -51,8 +51,9 @@ type UnifiedProcessPool struct {
 }
 
 var (
-	_ AgentPool    = (*UnifiedProcessPool)(nil)
-	_ AgentSession = (*StreamingDaemon)(nil)
+	_ AgentPool      = (*UnifiedProcessPool)(nil)
+	_ SessionRotator = (*UnifiedProcessPool)(nil)
+	_ AgentSession   = (*StreamingDaemon)(nil)
 )
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
@@ -241,33 +242,6 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			}
 			return nil, fmt.Errorf("failed to start daemon for target %q: %w", targetKey, spawnErr)
 		}
-
-		daemon.SetOnTurnFinished(func(d *StreamingDaemon) {
-			p.mu.RLock()
-			if p.closed {
-				p.mu.RUnlock()
-				return
-			}
-			tracked := p.daemons[targetKey] == d
-			should, rotReason := p.ShouldRotate(d)
-			if should && tracked {
-				metrics.RecordSessionRotation("post_turn", "pool", rotReason)
-				p.bgWg.Add(1)
-				p.mu.RUnlock()
-				go func(tKey string) {
-					defer p.bgWg.Done()
-					rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
-					defer cancel()
-					if _, rotErr := p.RotateDaemon(rotCtx, tKey, ""); rotErr != nil {
-						if !errors.Is(rotErr, context.Canceled) {
-							log.Printf("[UnifiedProcessPool] Warning: rotation failed on turn completion for %q: %v", tKey, rotErr)
-						}
-					}
-				}(targetKey)
-				return
-			}
-			p.mu.RUnlock()
-		})
 
 		p.mu.Lock()
 		if p.closed {
@@ -600,6 +574,29 @@ func (p *UnifiedProcessPool) RotateDaemon(ctx context.Context, targetKey string,
 	}
 
 	return newDaemon, nil
+}
+
+// ShouldRotateSession checks if the given AgentSession exceeds lifetime rotation thresholds.
+func (p *UnifiedProcessPool) ShouldRotateSession(sess AgentSession) (bool, string) {
+	if p == nil || sess == nil {
+		return false, ""
+	}
+	if d, ok := sess.(*StreamingDaemon); ok {
+		return p.ShouldRotate(d)
+	}
+	return false, ""
+}
+
+// RotateSession evicts the existing daemon for targetKey and synchronously spawns a fresh replacement daemon.
+func (p *UnifiedProcessPool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+	d, err := p.RotateDaemon(ctx, targetKey, "")
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, nil
+	}
+	return d, nil
 }
 
 // ExecuteEphemeral dispatches a prompt to targetKey's daemon and synchronously awaits the response.

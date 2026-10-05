@@ -3473,3 +3473,26 @@ func TestParseJSONRPCBody_Coverage(t *testing.T) {
 		t.Errorf("expected error on completely invalid json")
 	}
 }
+
+func TestGeminiAPIPool_SessionRotator(t *testing.T) {
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "dummy"})
+	defer pool.Close()
+
+	ctx := context.Background()
+	sess, err := pool.GetOrCreateSession(ctx, "target-rot", "")
+	if err != nil {
+		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
+	}
+
+	if should, _ := pool.ShouldRotateSession(sess); should {
+		t.Errorf("expected ShouldRotateSession to return false")
+	}
+
+	rotSess, err := pool.RotateSession(ctx, "target-rot")
+	if err != nil {
+		t.Fatalf("unexpected RotateSession error: %v", err)
+	}
+	if rotSess == nil {
+		t.Fatal("expected non-nil rotated session")
+	}
+}
