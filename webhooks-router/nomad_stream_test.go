@@ -489,10 +489,16 @@ func TestNomadStreamSubscriber_WithRiver(t *testing.T) {
 		t.Errorf("unexpected third inserted job: %+v", mockRiver.insertedNomadJobs[2])
 	}
 
-	// Verify all River inserts used MaxAttempts: 5
+	// Verify all River inserts used MaxAttempts: 5 and ByArgs: true
 	for i, opts := range mockRiver.insertedOpts {
 		if opts == nil || opts.MaxAttempts != 5 {
 			t.Errorf("job %d missing MaxAttempts: 5: %+v", i, opts)
+		}
+		if opts == nil || !opts.UniqueOpts.ByArgs {
+			t.Errorf("job %d missing UniqueOpts.ByArgs: true: %+v", i, opts)
+		}
+		if opts == nil || opts.UniqueOpts.ByPeriod != 15*time.Minute {
+			t.Errorf("job %d unexpected ByPeriod: %+v", i, opts)
 		}
 	}
 }

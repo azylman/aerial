@@ -2454,6 +2454,14 @@ func TestHandleHangarWebhook_WithRiver(t *testing.T) {
 		if len(mockRiver.insertedOpts) != 1 || mockRiver.insertedOpts[0] == nil || mockRiver.insertedOpts[0].MaxAttempts != 5 {
 			t.Errorf("expected MaxAttempts: 5, got %+v", mockRiver.insertedOpts)
 		}
+		if len(mockRiver.insertedOpts) > 0 && mockRiver.insertedOpts[0] != nil {
+			if !mockRiver.insertedOpts[0].UniqueOpts.ByArgs {
+				t.Errorf("expected UniqueOpts.ByArgs: true, got %+v", mockRiver.insertedOpts[0].UniqueOpts)
+			}
+			if mockRiver.insertedOpts[0].UniqueOpts.ByPeriod != 15*time.Minute {
+				t.Errorf("expected UniqueOpts.ByPeriod: 15m, got %v", mockRiver.insertedOpts[0].UniqueOpts.ByPeriod)
+			}
+		}
 	}
 
 	// 2. River insertion failure -> 500 Internal Server Error
@@ -4850,5 +4858,23 @@ func TestProcessHangarEvent_DeployStarted_DirectMessageDeduplication(t *testing.
 	mockDisp.mu.Unlock()
 	if dmCount2 != 1 {
 		t.Fatalf("expected duplicate direct message to be suppressed (count remained 1), got %d", dmCount2)
+	}
+}
+
+func TestRiverUniqueOpts_ByArgs(t *testing.T) {
+	hangarOpts := HangarWebhookArgs{}.InsertOpts()
+	if !hangarOpts.UniqueOpts.ByArgs {
+		t.Errorf("HangarWebhookArgs InsertOpts expected UniqueOpts.ByArgs = true, got false")
+	}
+	if hangarOpts.UniqueOpts.ByPeriod != 15*time.Minute {
+		t.Errorf("HangarWebhookArgs InsertOpts expected ByPeriod = 15m, got %v", hangarOpts.UniqueOpts.ByPeriod)
+	}
+
+	nomadOpts := NomadEventArgs{}.InsertOpts()
+	if !nomadOpts.UniqueOpts.ByArgs {
+		t.Errorf("NomadEventArgs InsertOpts expected UniqueOpts.ByArgs = true, got false")
+	}
+	if nomadOpts.UniqueOpts.ByPeriod != 15*time.Minute {
+		t.Errorf("NomadEventArgs InsertOpts expected ByPeriod = 15m, got %v", nomadOpts.UniqueOpts.ByPeriod)
 	}
 }
