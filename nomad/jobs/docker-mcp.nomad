@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "docker-mcp" {
   datacenters = ["dc1"]
   type        = "service"
@@ -34,7 +39,7 @@ job "docker-mcp" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-docker-mcp:latest"
+        image        = "ghcr.io/azylman/aerial-docker-mcp:${var.image_tag}"
         force_pull   = true
         network_mode = "host"
         healthchecks {

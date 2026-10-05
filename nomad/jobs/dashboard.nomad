@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "dashboard" {
   datacenters = ["dc1"]
   type        = "service"
@@ -34,7 +39,7 @@ job "dashboard" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-dashboard:latest"
+        image        = "ghcr.io/azylman/aerial-dashboard:${var.image_tag}"
         force_pull   = true
         network_mode = "host"
         healthchecks {

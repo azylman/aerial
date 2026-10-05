@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "hangar" {
   datacenters = ["dc1"]
   type        = "service"
@@ -37,7 +42,7 @@ job "hangar" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-hangar:latest"
+        image        = "ghcr.io/azylman/aerial-hangar:${var.image_tag}"
         network_mode = "host"
         force_pull   = true
         healthchecks {

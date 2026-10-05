@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "agentsview" {
   datacenters = ["dc1"]
   type        = "service"
@@ -34,7 +39,7 @@ job "agentsview" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/agentsview:latest"
+        image        = "ghcr.io/azylman/agentsview:${var.image_tag}"
         network_mode = "host"
         healthchecks {
           disable = true

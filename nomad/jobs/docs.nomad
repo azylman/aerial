@@ -1,3 +1,8 @@
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
 job "docs" {
   datacenters = ["dc1"]
   type        = "service"
@@ -34,7 +39,7 @@ job "docs" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-docs:latest"
+        image        = "ghcr.io/azylman/aerial-docs:${var.image_tag}"
         network_mode = "host"
         healthchecks {
           disable = true
