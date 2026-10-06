@@ -23,8 +23,9 @@ type DynamicVoicePool struct {
 }
 
 var (
-	_ AgentPool      = (*DynamicVoicePool)(nil)
-	_ SessionRotator = (*DynamicVoicePool)(nil)
+	_ AgentPool       = (*DynamicVoicePool)(nil)
+	_ SessionRotator  = (*DynamicVoicePool)(nil)
+	_ LeasedAgentPool = (*DynamicVoicePool)(nil)
 )
 
 // NewDynamicVoicePool constructs a DynamicVoicePool using the provided factory.
@@ -314,4 +315,22 @@ func (p *DynamicVoicePool) Fingerprint() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.currentKey
+}
+
+// AcquireLease delegates lease acquisition to the underlying pool if supported.
+func (p *DynamicVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
+	if p == nil {
+		return nil, errors.New("dynamic voice pool is uninitialized")
+	}
+	p.mu.RLock()
+	cur := p.currentPool
+	closed := p.closed
+	p.mu.RUnlock()
+	if closed {
+		return nil, errors.New("dynamic voice pool is closed")
+	}
+	if lp, ok := cur.(LeasedAgentPool); ok {
+		return lp.AcquireLease(ctx, targetKey)
+	}
+	return nil, errors.New("underlying pool does not support leasing")
 }

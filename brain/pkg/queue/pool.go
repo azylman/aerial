@@ -340,6 +340,25 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			poolCfg.TranscriptRescuer = p.sessionMgr.ExtractResponseSince
 			poolCfg.SessionManager = p.sessionMgr
 		}
+		if store := p.Store(); store != nil {
+			poolCfg.OnSessionRotated = func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+				return store.RotateSessionID(ctx, targetKey, newSessionID)
+			}
+			poolCfg.GetSessionRecord = func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+				sessID, err := store.GetSessionID(ctx, targetKey)
+				if err != nil {
+					return runner.SessionRecord{}, err
+				}
+				turns, err := store.GetSessionTurnCount(ctx, targetKey)
+				if err != nil {
+					turns = 0
+				}
+				return runner.SessionRecord{
+					ActiveSessionID: sessID,
+					TurnCount:       turns,
+				}, nil
+			}
+		}
 		p.processPool = runner.NewUnifiedProcessPool(poolCfg, nil)
 	}
 
@@ -363,6 +382,36 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			SetSessionManager(*session.Manager)
 		}); ok {
 			sm.SetSessionManager(p.sessionMgr)
+		}
+	}
+
+	if store := p.Store(); store != nil {
+		getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+			sessID, err := store.GetSessionID(ctx, targetKey)
+			if err != nil {
+				return runner.SessionRecord{}, err
+			}
+			turns, err := store.GetSessionTurnCount(ctx, targetKey)
+			if err != nil {
+				turns = 0
+			}
+			return runner.SessionRecord{
+				ActiveSessionID: sessID,
+				TurnCount:       turns,
+			}, nil
+		}
+		onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			return store.RotateSessionID(ctx, targetKey, newSessionID)
+		}
+		if sc, ok := p.processPool.(interface {
+			SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
+		}); ok {
+			sc.SetSessionCallbacks(getRec, onRot)
+		}
+		if sc, ok := p.lowEffortProcessPool.(interface {
+			SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
+		}); ok {
+			sc.SetSessionCallbacks(getRec, onRot)
 		}
 	}
 
@@ -965,36 +1014,71 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	model := p.LowEffortModel()
 	start := time.Now()
-	daemon, dErr := procPool.GetOrCreateSession(ctx, deviceKey, "")
-	if dErr != nil {
-		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
-	}
+	nodeInstructions := config.LoadScopeInstructions(deviceKey)
 
 	var detector *SentenceDetector
 	if sentenceCb != nil {
 		detector = NewSentenceDetector()
 	}
 	sink := newVoiceTurnSink(ctx, onStatus, sentenceCb, detector)
-	turnCtx := &runner.TurnContext{
-		TurnID:    uuid.New().String(),
-		SessionID: deviceKey,
-		Model:     model,
-		Prompt:    turnPrompt,
-		Sink:      sink,
-		CreatedAt: time.Now(),
-		Ctx:       ctx,
-	}
 
-	if sendErr := daemon.Send(turnPrompt, turnCtx); sendErr != nil {
-		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", deviceKey, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
-	}
+	var turnRes *runner.TurnResult
+	var turnErr error
+	activeSession := deviceKey
 
-	turnRes, turnErr := sink.Wait(ctx)
-	activeSession := daemon.SessionID()
-	if activeSession == "" {
-		activeSession = deviceKey
+	if leasedPool, ok := procPool.(runner.LeasedAgentPool); ok {
+		lease, lErr := leasedPool.AcquireLease(ctx, deviceKey)
+		if lErr != nil {
+			metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+			return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", lErr)
+		}
+		defer func() {
+			if relErr := lease.Release(); relErr != nil {
+				log.Printf("[WorkerPool] Warning releasing voice lease for %s: %v", deviceKey, relErr)
+			}
+		}()
+		activeSession = lease.SessionID()
+		if activeSession == "" {
+			activeSession = deviceKey
+		}
+		turnCtx := &runner.TurnContext{
+			TurnID:            uuid.New().String(),
+			SessionID:         activeSession,
+			Model:             model,
+			Prompt:            turnPrompt,
+			ScopeInstructions: nodeInstructions,
+			Sink:              sink,
+			CreatedAt:         time.Now(),
+			Ctx:               ctx,
+		}
+		turnRes, turnErr = lease.Execute(ctx, turnCtx)
+		if turnErr != nil && !errors.Is(turnErr, context.Canceled) && !errors.Is(turnErr, context.DeadlineExceeded) {
+			turnErr = fmt.Errorf("failed sending turn to voice daemon: %w", turnErr)
+		}
+	} else {
+		daemon, dErr := procPool.GetOrCreateSession(ctx, deviceKey, "")
+		if dErr != nil {
+			metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+			return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
+		}
+		turnCtx := &runner.TurnContext{
+			TurnID:            uuid.New().String(),
+			SessionID:         deviceKey,
+			Model:             model,
+			Prompt:            turnPrompt,
+			ScopeInstructions: nodeInstructions,
+			Sink:              sink,
+			CreatedAt:         time.Now(),
+			Ctx:               ctx,
+		}
+		if sendErr := daemon.Send(turnPrompt, turnCtx); sendErr != nil {
+			metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+			return "", deviceKey, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
+		}
+		turnRes, turnErr = sink.Wait(ctx)
+		if daemon.SessionID() != "" {
+			activeSession = daemon.SessionID()
+		}
 	}
 
 	resolver := runner.NewTurnResolver()

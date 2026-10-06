@@ -577,7 +577,8 @@ type TurnPromptInput struct {
 	LookbackHistory     []HistoryMessage
 	PreviousSessionID   string
 	IsColdStart         bool
-	ChannelInstructions string
+	ScopeInstructions   string
+	ChannelInstructions string // Deprecated: Use ScopeInstructions
 	InjectedHookContext string
 	AmbientContext      string
 }
@@ -621,16 +622,26 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 		}
 	}
 
-	// Layer 2: Channel Instructions (if present)
-	if strings.TrimSpace(input.ChannelInstructions) != "" {
-		instText := strings.TrimSpace(input.ChannelInstructions)
-		if !strings.HasPrefix(instText, "<CHANNEL_INSTRUCTIONS>") {
-			instText = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>", instText)
+	// Layer 2: Scope Instructions (if present)
+	if strings.TrimSpace(input.ScopeInstructions) != "" {
+		scopeInst := strings.TrimSpace(input.ScopeInstructions)
+		if !strings.HasPrefix(scopeInst, "<SCOPE_INSTRUCTIONS>") {
+			scopeInst = fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
 		}
 		if basePrompt != "" {
-			basePrompt = instText + "\n\n" + basePrompt
+			basePrompt = scopeInst + "\n\n" + basePrompt
 		} else {
-			basePrompt = instText
+			basePrompt = scopeInst
+		}
+	} else if strings.TrimSpace(input.ChannelInstructions) != "" {
+		chanInst := strings.TrimSpace(input.ChannelInstructions)
+		if !strings.HasPrefix(chanInst, "<CHANNEL_INSTRUCTIONS>") && !strings.HasPrefix(chanInst, "<SCOPE_INSTRUCTIONS>") {
+			chanInst = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>", chanInst)
+		}
+		if basePrompt != "" {
+			basePrompt = chanInst + "\n\n" + basePrompt
+		} else {
+			basePrompt = chanInst
 		}
 	}
 

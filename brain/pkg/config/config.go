@@ -21,10 +21,10 @@ import (
 )
 
 var (
-	instructionsCacheMu sync.RWMutex
-	instructionsCache   = make(map[string]string)
-
+	instructionsCacheMu      sync.RWMutex
+	instructionsCache        = make(map[string]string)
 	reChannelInstructionsTag = regexp.MustCompile(`(?i)</channel_instructions\s*>`)
+	reScopeInstructionsTag   = regexp.MustCompile(`(?i)</scope_instructions\s*>`)
 )
 
 var ConfigSearchPaths = []string{
@@ -35,12 +35,28 @@ var ConfigSearchPaths = []string{
 	"/share/aerial/config.yaml",
 }
 
+var ScopeInstructionsDirs = []string{
+	"/share/aerial-config/channels",
+	"/share/aerial/channels",
+	"/app/channels",
+	"./channels",
+	"/share/aerial-config/scopes",
+	"/share/aerial/scopes",
+	"/app/scopes",
+	"./scopes",
+	"/share/aerial-config/nodes",
+	"/share/aerial/nodes",
+	"/app/nodes",
+	"./nodes",
+}
+
 var ChannelInstructionsDirs = []string{
 	"/share/aerial-config/channels",
 	"/share/aerial/channels",
 	"/app/channels",
 	"./channels",
 }
+
 
 type WebhookEndpoint struct {
 	URL             string `yaml:"url" json:"url"`
@@ -1401,11 +1417,17 @@ func NormalizeChannelName(channelName string) string {
 	return s
 }
 
-// LoadChannelInstructions loads per-channel instructions from convention-based markdown files.
-// It normalizes the channel name, searches ChannelInstructionsDirs with path confinement,
+// NormalizeScopeName standardizes scope names (channels, nodes, devices) for config key and file lookups.
+// It trims whitespace, strips any leading '#', lowercases, and strictly blocks directory traversal.
+func NormalizeScopeName(scopeName string) string {
+	return NormalizeChannelName(scopeName)
+}
+
+// LoadScopeInstructions loads per-scope (channel, node, kiosk) instructions from convention-based markdown files.
+// It normalizes the scope name, searches ScopeInstructionsDirs with path confinement,
 // enforces regular file checks, caps reading at 64KB, and sanitizes instructions closing tags.
-func LoadChannelInstructions(channelName string) string {
-	normName := NormalizeChannelName(channelName)
+func LoadScopeInstructions(scopeName string) string {
+	normName := NormalizeScopeName(scopeName)
 	if normName == "" {
 		return ""
 	}
@@ -1418,8 +1440,17 @@ func LoadChannelInstructions(channelName string) string {
 		candidateNames = append(candidateNames, strings.ReplaceAll(normName, "-", " "))
 	}
 
-	for _, dir := range ChannelInstructionsDirs {
-		cleanDir := filepath.Clean(dir)
+	searchDirs := make([]string, 0, len(ScopeInstructionsDirs)+len(ChannelInstructionsDirs))
+	seenDirs := make(map[string]bool)
+	for _, d := range append(append([]string{}, ChannelInstructionsDirs...), ScopeInstructionsDirs...) {
+		cd := filepath.Clean(d)
+		if !seenDirs[cd] {
+			seenDirs[cd] = true
+			searchDirs = append(searchDirs, cd)
+		}
+	}
+
+	for _, cleanDir := range searchDirs {
 		for _, cand := range candidateNames {
 			targetPath := filepath.Join(cleanDir, cand+".md")
 			cleanTarget := filepath.Clean(targetPath)
@@ -1443,8 +1474,9 @@ func LoadChannelInstructions(channelName string) string {
 			}
 			trimmed := strings.TrimSpace(string(data))
 			if len(trimmed) > 0 {
-				// Defensively escape any closing delimiter tag to prevent breakout
+				// Defensively escape any closing delimiter tags to prevent breakout
 				sanitized := reChannelInstructionsTag.ReplaceAllString(trimmed, "<\\/CHANNEL_INSTRUCTIONS>")
+				sanitized = reScopeInstructionsTag.ReplaceAllString(sanitized, "<\\/SCOPE_INSTRUCTIONS>")
 				instructionsCacheMu.Lock()
 				instructionsCache[normName] = sanitized
 				instructionsCacheMu.Unlock()
@@ -1461,6 +1493,12 @@ func LoadChannelInstructions(channelName string) string {
 		}
 	}
 	return ""
+}
+
+// LoadChannelInstructions loads per-channel instructions from convention-based markdown files.
+// Deprecated: Use LoadScopeInstructions instead.
+func LoadChannelInstructions(channelName string) string {
+	return LoadScopeInstructions(channelName)
 }
 
 func writeAtomicFile(targetPath, content string) error {

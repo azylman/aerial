@@ -192,7 +192,14 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 }
 
 func (te *turnExecution) checkTurnEndRotation(activePool runner.AgentPool, execSession runner.AgentSession) {
-	if te == nil || te.pool == nil || activePool == nil || execSession == nil {
+	if te == nil || te.pool == nil || activePool == nil {
+		return
+	}
+	if _, ok := activePool.(runner.LeasedAgentPool); ok {
+		// Leased pools autonomously manage rotation and DB latching via lease.Release()
+		return
+	}
+	if execSession == nil {
 		return
 	}
 	rotator, ok := activePool.(runner.SessionRotator)
@@ -1589,51 +1596,134 @@ func (te *turnExecution) executeWithRetries() {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
-			var sessionErr error
-			execSession, sessionErr = activePool.GetOrCreateSession(runCtx, te.threadID, te.currentSessionID)
-			if sessionErr != nil {
-				execSession = nil
-				err = sessionErr
-				outcome = runner.NewTurnResolver().Resolve(runCtx, nil, sessionErr, te.currentSessionID)
-			} else {
-				if execSession != nil && execSession.SessionID() != "" && te.currentSessionID != "" && execSession.SessionID() != te.currentSessionID {
-					if isLowEffort && te.pool.lowEffortProcessPool != nil {
-						log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with low effort session %s", te.currentSessionID, te.threadID, execSession.SessionID())
-					} else {
-						te.currentSessionID = execSession.SessionID()
-						te.saveSessionID(te.threadID, te.currentSessionID)
-					}
-				}
-				sink := newDiscordTurnSink(te.statusUpdater)
-				sessIDToSend := te.currentSessionID
-				if isLowEffort && te.pool.lowEffortProcessPool != nil && execSession != nil && execSession.SessionID() != "" {
-					sessIDToSend = execSession.SessionID()
-				}
-				turnCtx := &runner.TurnContext{
-					TurnID:    uuid.New().String(),
-					SessionID: sessIDToSend,
-					Model:     currentModel,
-					Prompt:    promptToSend,
-					Sink:      sink,
-					CreatedAt: time.Now(),
-					Ctx:       runCtx,
-				}
-				if sendErr := execSession.Send(promptToSend, turnCtx); sendErr != nil {
-					err = sendErr
-					outcome = runner.NewTurnResolver().Resolve(runCtx, nil, sendErr, execSession.SessionID())
+			if leasedPool, ok := activePool.(runner.LeasedAgentPool); ok {
+				lease, leaseErr := leasedPool.AcquireLease(runCtx, te.threadID)
+				if leaseErr != nil {
+					err = leaseErr
+					outcome = runner.NewTurnResolver().Resolve(runCtx, nil, leaseErr, te.currentSessionID)
 				} else {
-					var turnErr error
-					turnRes, turnErr = sink.Wait(runCtx)
-					err = turnErr
-					if turnRes != nil {
-						stderr = turnRes.Stderr
+					func() {
+						var skipRotation bool
+						defer func() {
+							if skipRotation {
+								lease.CancelRotation()
+							}
+							if relErr := lease.Release(); relErr != nil {
+								log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+							}
+						}()
+						if lease.SessionID() != "" && te.currentSessionID != "" && lease.SessionID() != te.currentSessionID {
+							if !(isLowEffort && te.pool.lowEffortProcessPool != nil) {
+								te.currentSessionID = lease.SessionID()
+								te.saveSessionID(te.threadID, te.currentSessionID)
+							}
+						}
+						sink := newDiscordTurnSink(te.statusUpdater)
+						sessIDToSend := te.currentSessionID
+						if isLowEffort && te.pool.lowEffortProcessPool != nil && lease.SessionID() != "" {
+							sessIDToSend = lease.SessionID()
+						}
+						scopeInst := config.LoadScopeInstructions(te.effectiveName)
+						turnCtx := &runner.TurnContext{
+							TurnID:              uuid.New().String(),
+							SessionID:           sessIDToSend,
+							Model:               currentModel,
+							Prompt:              promptToSend,
+							ScopeInstructions:   scopeInst,
+							ChannelInstructions: scopeInst,
+							CoordinationContext: te.injectedHookContext,
+							Sink:                sink,
+							CreatedAt:           time.Now(),
+							Ctx:                 runCtx,
+						}
+						var execErr error
+						turnRes, execErr = lease.Execute(runCtx, turnCtx)
+						if execErr != nil {
+							err = execErr
+							outcome = runner.NewTurnResolver().Resolve(runCtx, turnRes, execErr, lease.SessionID())
+						} else {
+							if turnRes != nil {
+								stderr = turnRes.Stderr
+							}
+							targetSess := lease.SessionID()
+							if targetSess == "" {
+								targetSess = te.currentSessionID
+							}
+							resolver := runner.NewTurnResolver()
+							outcome = resolver.Resolve(runCtx, turnRes, nil, targetSess)
+						}
+						if !outcome.IsSuccess {
+							targetSess := lease.SessionID()
+							if targetSess == "" {
+								targetSess = te.currentSessionID
+							}
+							if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+								poolCtx := context.Background()
+								if te.pool.ctx != nil {
+									poolCtx = te.pool.ctx
+								}
+								if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+									outcome.ErrorDetail = transcriptErr
+									stderr = transcriptErr
+								}
+							}
+						}
+						if runner.IsQuotaPause(outcome.ErrorDetail, stderr) {
+							skipRotation = true
+						}
+					}()
+				}
+			} else {
+				var sessionErr error
+				execSession, sessionErr = activePool.GetOrCreateSession(runCtx, te.threadID, te.currentSessionID)
+				if sessionErr != nil {
+					execSession = nil
+					err = sessionErr
+					outcome = runner.NewTurnResolver().Resolve(runCtx, nil, sessionErr, te.currentSessionID)
+				} else {
+					if execSession != nil && execSession.SessionID() != "" && te.currentSessionID != "" && execSession.SessionID() != te.currentSessionID {
+						if isLowEffort && te.pool.lowEffortProcessPool != nil {
+							log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with low effort session %s", te.currentSessionID, te.threadID, execSession.SessionID())
+						} else {
+							te.currentSessionID = execSession.SessionID()
+							te.saveSessionID(te.threadID, te.currentSessionID)
+						}
 					}
-					targetSess := execSession.SessionID()
-					if targetSess == "" {
-						targetSess = te.currentSessionID
+					sink := newDiscordTurnSink(te.statusUpdater)
+					sessIDToSend := te.currentSessionID
+					if isLowEffort && te.pool.lowEffortProcessPool != nil && execSession != nil && execSession.SessionID() != "" {
+						sessIDToSend = execSession.SessionID()
 					}
-					resolver := runner.NewTurnResolver()
-					outcome = resolver.Resolve(runCtx, turnRes, turnErr, targetSess)
+					scopeInst := config.LoadScopeInstructions(te.effectiveName)
+					turnCtx := &runner.TurnContext{
+						TurnID:              uuid.New().String(),
+						SessionID:           sessIDToSend,
+						Model:               currentModel,
+						Prompt:              promptToSend,
+						ScopeInstructions:   scopeInst,
+						ChannelInstructions: scopeInst,
+						CoordinationContext: te.injectedHookContext,
+						Sink:                sink,
+						CreatedAt:           time.Now(),
+						Ctx:                 runCtx,
+					}
+					if sendErr := execSession.Send(promptToSend, turnCtx); sendErr != nil {
+						err = sendErr
+						outcome = runner.NewTurnResolver().Resolve(runCtx, nil, sendErr, execSession.SessionID())
+					} else {
+						var turnErr error
+						turnRes, turnErr = sink.Wait(runCtx)
+						err = turnErr
+						if turnRes != nil {
+							stderr = turnRes.Stderr
+						}
+						targetSess := execSession.SessionID()
+						if targetSess == "" {
+							targetSess = te.currentSessionID
+						}
+						resolver := runner.NewTurnResolver()
+						outcome = resolver.Resolve(runCtx, turnRes, turnErr, targetSess)
+					}
 				}
 			}
 		} else {

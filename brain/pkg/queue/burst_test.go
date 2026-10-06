@@ -424,6 +424,23 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "Scope instructions produces SCOPE_INSTRUCTIONS block",
+			input: TurnPromptInput{
+				Burst: []db.Message{
+					{AuthorName: "alice", Content: "turn on lights", CreatedAt: now},
+				},
+				ScopeInstructions: "Spoken brevity for touch-kiosk-kitchen.",
+			},
+			check: func(t *testing.T, prompt string) {
+				if !strings.Contains(prompt, "<SCOPE_INSTRUCTIONS>") {
+					t.Errorf("expected <SCOPE_INSTRUCTIONS> block, got:\n%s", prompt)
+				}
+				if !strings.Contains(prompt, "Spoken brevity for touch-kiosk-kitchen.") {
+					t.Errorf("expected instructions content, got:\n%s", prompt)
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {

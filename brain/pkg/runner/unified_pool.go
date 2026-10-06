@@ -32,6 +32,10 @@ type PoolConfig struct {
 	MemoryRetriever         MemoryRetriever
 	AmbientContextRetriever AmbientContextRetriever
 	SessionManager          *session.Manager
+	OnSessionRotated        func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error
+	GetSessionRecord        func(ctx context.Context, targetKey string) (SessionRecord, error)
+	MaxSessionTurns         int
+	TargetLockTimeout       time.Duration
 }
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
@@ -46,14 +50,17 @@ type UnifiedProcessPool struct {
 	closed     bool
 	closeOnce  sync.Once
 	closeErr   error
-	ctx        context.Context
-	cancel     context.CancelFunc
+	ctx         context.Context
+	cancel      context.CancelFunc
+	targetLocks map[string]*targetLock
+	targetMu    sync.Mutex
 }
 
 var (
-	_ AgentPool      = (*UnifiedProcessPool)(nil)
-	_ SessionRotator = (*UnifiedProcessPool)(nil)
-	_ AgentSession   = (*StreamingDaemon)(nil)
+	_ AgentPool       = (*UnifiedProcessPool)(nil)
+	_ SessionRotator  = (*UnifiedProcessPool)(nil)
+	_ LeasedAgentPool = (*UnifiedProcessPool)(nil)
+	_ AgentSession    = (*StreamingDaemon)(nil)
 )
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
@@ -74,10 +81,11 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 	return &UnifiedProcessPool{
 		cfg:        cfg,
 		spawner:    spawner,
-		daemons:    make(map[string]*StreamingDaemon),
-		prewarming: make(map[string]bool),
-		ctx:        ctx,
-		cancel:     cancel,
+		daemons:     make(map[string]*StreamingDaemon),
+		prewarming:  make(map[string]bool),
+		targetLocks: make(map[string]*targetLock),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -110,6 +118,17 @@ func (p *UnifiedProcessPool) SetSessionManager(sm *session.Manager) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cfg.SessionManager = sm
+}
+
+// SetSessionCallbacks updates the session record lookup and rotation callbacks.
+func (p *UnifiedProcessPool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.GetSessionRecord = getRec
+	p.cfg.OnSessionRotated = onRot
 }
 
 // Initialize pre-warms configured target daemons sequentially in the caller's context.
@@ -652,4 +671,304 @@ func (p *UnifiedProcessPool) EphemeralLLMFunc(targetKey string) LLMFunc {
 		}
 		return p.ExecuteEphemeral(ctx, targetKey, prompt)
 	}
+}
+
+type targetLock struct {
+	sem  chan struct{}
+	refs int32
+}
+
+func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
+	p.targetMu.Lock()
+	if p.targetLocks == nil {
+		p.targetLocks = make(map[string]*targetLock)
+	}
+	tl, ok := p.targetLocks[targetKey]
+	if !ok {
+		tl = &targetLock{
+			sem: make(chan struct{}, 1),
+		}
+		p.targetLocks[targetKey] = tl
+	}
+	tl.refs++
+	p.targetMu.Unlock()
+
+	timeout := p.cfg.TargetLockTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case tl.sem <- struct{}{}:
+		return tl, nil
+	case <-lockCtx.Done():
+		p.releaseTargetLock(targetKey, tl, false)
+		return nil, fmt.Errorf("timeout waiting for target lock for %s: %w", targetKey, lockCtx.Err())
+	}
+}
+
+func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {
+	if held {
+		select {
+		case <-tl.sem:
+		default:
+		}
+	}
+	p.targetMu.Lock()
+	tl.refs--
+	if tl.refs <= 0 {
+		delete(p.targetLocks, targetKey)
+	}
+	p.targetMu.Unlock()
+}
+
+// AcquireLease blocks until the target lock is acquired, ensures a daemon is initialized,
+// and returns an exclusive SessionLease.
+func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
+	if p == nil {
+		return nil, errors.New("unified process pool is uninitialized")
+	}
+	trimmedKey := strings.TrimSpace(targetKey)
+	if trimmedKey == "" {
+		return nil, errors.New("targetKey cannot be empty")
+	}
+
+	tl, err := p.acquireTargetLock(ctx, trimmedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var rec SessionRecord
+	if p.cfg.GetSessionRecord != nil {
+		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil {
+			rec = r
+		}
+	}
+
+	d, dErr := p.GetOrCreate(ctx, trimmedKey, rec.ActiveSessionID)
+	if dErr != nil {
+		p.releaseTargetLock(trimmedKey, tl, true)
+		return nil, fmt.Errorf("failed to get or create daemon for %s: %w", trimmedKey, dErr)
+	}
+
+	isCold := false
+	turnCount := 0
+	if rec.TurnCount == 0 || rec.ActiveSessionID == "" {
+		isCold = true
+	} else {
+		turnCount = rec.TurnCount
+	}
+
+	sessID := d.SessionID()
+	if sessID == "" {
+		sessID = rec.ActiveSessionID
+	}
+
+	lease := &unifiedSessionLease{
+		pool:       p,
+		daemon:     d,
+		targetKey:  trimmedKey,
+		sessionID:  sessID,
+		prevSessID: rec.PreviousSessionID,
+		isCold:     isCold,
+		turnCount:  turnCount,
+		lock:       tl,
+	}
+	return lease, nil
+}
+
+type unifiedSessionLease struct {
+	pool        *UnifiedProcessPool
+	daemon      *StreamingDaemon
+	targetKey   string
+	sessionID   string
+	prevSessID  string
+	isCold      bool
+	turnCount      int
+	cancelRotation bool
+	lock           *targetLock
+	releaseOnce    sync.Once
+}
+
+var _ SessionLease = (*unifiedSessionLease)(nil)
+
+func (l *unifiedSessionLease) CancelRotation() {
+	l.cancelRotation = true
+}
+
+func (l *unifiedSessionLease) SessionID() string {
+	return l.sessionID
+}
+
+func (l *unifiedSessionLease) PreviousSessionID() string {
+	return l.prevSessID
+}
+
+func (l *unifiedSessionLease) IsCold() bool {
+	return l.isCold
+}
+
+func (l *unifiedSessionLease) TurnCount() int {
+	return l.turnCount
+}
+
+type leaseTurnSinkWrapper struct {
+	inner TurnSink
+	buf   *BufferingTurnSink
+}
+
+func (s *leaseTurnSinkWrapper) OnTurnStarted() {
+	if s.inner != nil {
+		s.inner.OnTurnStarted()
+	}
+	s.buf.OnTurnStarted()
+}
+
+func (s *leaseTurnSinkWrapper) OnThinking() {
+	if s.inner != nil {
+		s.inner.OnThinking()
+	}
+	s.buf.OnThinking()
+}
+
+func (s *leaseTurnSinkWrapper) OnToolCall(toolName, commandName string) {
+	if s.inner != nil {
+		s.inner.OnToolCall(toolName, commandName)
+	}
+	s.buf.OnToolCall(toolName, commandName)
+}
+
+func (s *leaseTurnSinkWrapper) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+	if s.inner != nil {
+		s.inner.OnToolCompleted(toolName, mcpServer, duration, status)
+	}
+	s.buf.OnToolCompleted(toolName, mcpServer, duration, status)
+}
+
+func (s *leaseTurnSinkWrapper) OnSkillActivated(skillName, source string) {
+	if s.inner != nil {
+		s.inner.OnSkillActivated(skillName, source)
+	}
+	s.buf.OnSkillActivated(skillName, source)
+}
+
+func (s *leaseTurnSinkWrapper) OnTextDelta(delta string) {
+	if s.inner != nil {
+		s.inner.OnTextDelta(delta)
+	}
+	s.buf.OnTextDelta(delta)
+}
+
+func (s *leaseTurnSinkWrapper) OnResult(res *TurnResult) {
+	if s.inner != nil {
+		s.inner.OnResult(res)
+	}
+	s.buf.OnResult(res)
+}
+
+func (s *leaseTurnSinkWrapper) OnError(err error) {
+	if s.inner != nil {
+		s.inner.OnError(err)
+	}
+	s.buf.OnError(err)
+}
+
+func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
+	if turn == nil {
+		return nil, errors.New("turn context cannot be nil")
+	}
+	if turn.Ctx == nil {
+		turn.Ctx = ctx
+	}
+
+	compiledPrompt := turn.Prompt
+	if l.isCold {
+		scopeInst := strings.TrimSpace(turn.ScopeInstructions)
+		if scopeInst == "" {
+			scopeInst = strings.TrimSpace(turn.ChannelInstructions)
+		}
+		if scopeInst != "" && !strings.Contains(compiledPrompt, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(compiledPrompt, "<CHANNEL_INSTRUCTIONS>") {
+			scopeBlock := fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
+			compiledPrompt = scopeBlock + "\n\n" + compiledPrompt
+		}
+		if l.prevSessID != "" && !strings.Contains(compiledPrompt, "<PREVIOUS_SESSION>") {
+			prevBlock := fmt.Sprintf("<PREVIOUS_SESSION>\nPrevious Session ID: %s\n</PREVIOUS_SESSION>", l.prevSessID)
+			compiledPrompt = prevBlock + "\n\n" + compiledPrompt
+		}
+		if strings.TrimSpace(turn.ThreadSummary) != "" && !strings.Contains(compiledPrompt, "<THREAD_SUMMARY>") {
+			sumBlock := fmt.Sprintf("<THREAD_SUMMARY>\n%s\n</THREAD_SUMMARY>", strings.TrimSpace(turn.ThreadSummary))
+			compiledPrompt = sumBlock + "\n\n" + compiledPrompt
+		}
+	}
+	if strings.TrimSpace(turn.CoordinationContext) != "" && !strings.Contains(compiledPrompt, "<COORDINATION_CONTEXT>") {
+		coordBlock := fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(turn.CoordinationContext))
+		compiledPrompt = coordBlock + "\n\n" + compiledPrompt
+	}
+
+	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+	combinedSink := &leaseTurnSinkWrapper{
+		inner: turn.Sink,
+		buf:   bufSink,
+	}
+	origSink := turn.Sink
+	turn.Sink = combinedSink
+	defer func() {
+		turn.Sink = origSink
+	}()
+
+	if err := l.daemon.Send(compiledPrompt, turn); err != nil {
+		return nil, err
+	}
+
+	res, waitErr := bufSink.Wait(ctx)
+	if waitErr != nil {
+		return nil, waitErr
+	}
+	l.turnCount++
+	l.isCold = false
+	return res, nil
+}
+
+func (l *unifiedSessionLease) Release() error {
+	var releaseErr error
+	l.releaseOnce.Do(func() {
+		defer l.pool.releaseTargetLock(l.targetKey, l.lock, true)
+
+		if l.cancelRotation {
+			return
+		}
+
+		shouldRotate, reason := l.pool.ShouldRotate(l.daemon)
+		if !shouldRotate && l.pool.cfg.MaxSessionTurns > 0 && l.turnCount >= l.pool.cfg.MaxSessionTurns {
+			shouldRotate = true
+			reason = fmt.Sprintf("reached maximum turn threshold (%d)", l.pool.cfg.MaxSessionTurns)
+		}
+
+		if shouldRotate {
+			log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", l.targetKey, reason)
+			newSessionID := uuid.New().String()
+			oldSessionID := l.sessionID
+
+			if l.pool.cfg.OnSessionRotated != nil {
+				if rotErr := l.pool.cfg.OnSessionRotated(context.Background(), l.targetKey, oldSessionID, newSessionID); rotErr != nil {
+					log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", l.targetKey, rotErr)
+					if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {
+						log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", l.targetKey, evictErr)
+					}
+					releaseErr = rotErr
+					return
+				}
+			}
+
+			if _, rotErr := l.pool.RotateDaemon(context.Background(), l.targetKey, ""); rotErr != nil {
+				log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", l.targetKey, rotErr)
+				if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {
+					log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", l.targetKey, evictErr)
+				}
+			}
+		}
+	})
+	return releaseErr
 }
