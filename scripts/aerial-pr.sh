@@ -992,7 +992,7 @@ submit_scratch() {
     # Extract candidate Nomad job names from changed .nomad files
     local changed_jobs_json="[]"
     local changed_nomad_files
-    changed_nomad_files=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git show --pretty="" --name-only "$commit_sha" 2>/dev/null || true)
+    changed_nomad_files=$(git diff --name-only --diff-filter=d "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git show --pretty="" --name-only --diff-filter=d "$commit_sha" 2>/dev/null || true)
     if [ -n "$changed_nomad_files" ]; then
         local job_names
         job_names=$(echo "$changed_nomad_files" | grep -E '(^|/)jobs/.*\.nomad$' | sed -E 's|.*/([^/]+)\.nomad$|\1|' | sort -u || true)

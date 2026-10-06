@@ -207,6 +207,31 @@ jobs/kiosk-client.nomad"
 ')
 assert_eq "cadvisor,kiosk-client,node-exporter" "$NOMAD_JOB_EXTRACTION_CHECK" "Candidate Nomad jobs extracted into JSON metadata"
 
+# Case 8: Nomad job extraction filters out deleted jobs via --diff-filter=d
+NOMAD_DELETED_JOB_CHECK=$(bash -c '
+    TEST_GIT_DIR=$(mktemp -d /tmp/aerial-pr-nomad-diff.XXXXXX)
+    trap "rm -rf \"$TEST_GIT_DIR\"" EXIT
+    git init -q "$TEST_GIT_DIR"
+    git -C "$TEST_GIT_DIR" config user.name "Tester"
+    git -C "$TEST_GIT_DIR" config user.email "tester@example.com"
+    mkdir -p "$TEST_GIT_DIR/jobs"
+    echo "job1" > "$TEST_GIT_DIR/jobs/kiosk-client.nomad"
+    echo "job2" > "$TEST_GIT_DIR/jobs/kiosk-ear.nomad"
+    git -C "$TEST_GIT_DIR" add .
+    git -C "$TEST_GIT_DIR" commit -q -m "initial"
+    git -C "$TEST_GIT_DIR" checkout -q -b feat
+    rm "$TEST_GIT_DIR/jobs/kiosk-client.nomad"
+    echo "job3" > "$TEST_GIT_DIR/jobs/kiosk-go2rtc.nomad"
+    git -C "$TEST_GIT_DIR" add -A
+    git -C "$TEST_GIT_DIR" commit -q -m "remove kiosk-client, add kiosk-go2rtc"
+
+    changed_nomad_files=$(git -C "$TEST_GIT_DIR" diff --name-only --diff-filter=d HEAD~1...HEAD 2>/dev/null || true)
+    job_names=$(echo "$changed_nomad_files" | grep -E "(^|/)jobs/.*\.nomad$" | sed -E "s|.*/([^/]+)\.nomad$|\1|" | sort -u || true)
+    jobs_json=$(echo "$job_names" | jq -R . | jq -s .)
+    echo "$jobs_json" | jq -r "join(\",\")"
+')
+assert_eq "kiosk-go2rtc" "$NOMAD_DELETED_JOB_CHECK" "Deleted Nomad jobs are filtered out from metadata"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then
