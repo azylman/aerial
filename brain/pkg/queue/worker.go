@@ -861,21 +861,9 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		}
 
 		// wakeIdx >= 0
-		if te.currentSessionID == "" {
-			var sessErr error
-			te.currentSessionID, sessErr = te.getSessionID(te.threadID)
-			if sessErr != nil {
-				log.Printf("[Worker] Warning getting session ID for thread %s: %v", te.threadID, sessErr)
-			}
-		}
 		if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
 			log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", te.currentSessionID, te.threadID)
 			te.currentSessionID = ""
-		}
-		if te.currentSessionID != "" && te.pool.sessionMgr != nil {
-			if _, dirErr := te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID); dirErr != nil {
-				log.Printf("[Worker] Warning ensuring session dir for %s: %v", te.currentSessionID, dirErr)
-			}
 		}
 
 		// Phase 1 (Leading ambient messages)
@@ -923,12 +911,7 @@ func (te *turnExecution) markAmbientBurst() {
 	if te.pool == nil {
 		return
 	}
-	hasDiskSession := te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID)
-	if hasDiskSession && te.pool.sessionMgr != nil {
-		if _, dirErr := te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID); dirErr != nil {
-			log.Printf("[Queue] Warning ensuring session dir for %s: %v", te.currentSessionID, dirErr)
-		}
-	}
+
 
 	metrics.RecordTurnCompleted("ambient", te.triggerType, "classifier", time.Since(te.execStart))
 
@@ -1603,26 +1586,19 @@ func (te *turnExecution) executeWithRetries() {
 					outcome = runner.NewTurnResolver().Resolve(runCtx, nil, leaseErr, te.currentSessionID)
 				} else {
 					func() {
-						var skipRotation bool
 						defer func() {
-							if skipRotation {
-								lease.CancelRotation()
-							}
 							if relErr := lease.Release(); relErr != nil {
 								log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
 							}
 						}()
-						if lease.SessionID() != "" && te.currentSessionID != "" && lease.SessionID() != te.currentSessionID {
-							if !(isLowEffort && te.pool.lowEffortProcessPool != nil) {
+						if lease.SessionID() != "" && lease.SessionID() != te.currentSessionID {
+							if !(isLowEffort && te.pool.lowEffortProcessPool != nil && te.currentSessionID != "") {
 								te.currentSessionID = lease.SessionID()
 								te.saveSessionID(te.threadID, te.currentSessionID)
 							}
 						}
 						sink := newDiscordTurnSink(te.statusUpdater)
-						sessIDToSend := te.currentSessionID
-						if isLowEffort && te.pool.lowEffortProcessPool != nil && lease.SessionID() != "" {
-							sessIDToSend = lease.SessionID()
-						}
+						sessIDToSend := lease.SessionID()
 						scopeInst := config.LoadScopeInstructions(te.effectiveName)
 						turnCtx := &runner.TurnContext{
 							TurnID:              uuid.New().String(),
@@ -1657,7 +1633,7 @@ func (te *turnExecution) executeWithRetries() {
 							if targetSess == "" {
 								targetSess = te.currentSessionID
 							}
-							if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+							if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil {
 								poolCtx := context.Background()
 								if te.pool.ctx != nil {
 									poolCtx = te.pool.ctx
@@ -1667,9 +1643,6 @@ func (te *turnExecution) executeWithRetries() {
 									stderr = transcriptErr
 								}
 							}
-						}
-						if runner.IsQuotaPause(outcome.ErrorDetail, stderr) {
-							skipRotation = true
 						}
 					}()
 				}

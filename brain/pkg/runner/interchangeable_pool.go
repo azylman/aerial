@@ -573,10 +573,6 @@ func (l *interchangeableSessionLease) Execute(ctx context.Context, turn *TurnCon
 	return l.inner.Execute(ctx, turn)
 }
 
-func (l *interchangeableSessionLease) CancelRotation() {
-	l.inner.CancelRotation()
-}
-
 func (l *interchangeableSessionLease) Release() error {
 	var err error
 	l.once.Do(func() {

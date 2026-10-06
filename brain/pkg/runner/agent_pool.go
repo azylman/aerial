@@ -37,10 +37,6 @@ type SessionLease interface {
 	// Execution
 	Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error)
 
-	// CancelRotation instructs the lease to suppress session rotation on Release.
-	// Used when external turn errors (such as API quota pauses) require preserving session state.
-	CancelRotation()
-
 	// Release terminates the turn lease. It is idempotent (sync.Once), evaluates rotation,
 	// calls the injected persistence hook (OnSessionRotated), and releases the target lock.
 	Release() error

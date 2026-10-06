@@ -961,7 +961,8 @@ func hasCapacityPhrases(combined string) bool {
 	}
 	return strings.Contains(combined, "exhausted your capacity on this model") ||
 		strings.Contains(combined, "capacity on this model") ||
-		strings.Contains(combined, "rate limit reached")
+		strings.Contains(combined, "rate limit reached") ||
+		strings.Contains(combined, "rate limit exceeded")
 }
 
 // IsCapacityBlip detects transient model capacity throttles (e.g. 0s-5s capacity exhaustions,

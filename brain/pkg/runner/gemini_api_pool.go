@@ -1441,10 +1441,6 @@ type geminiSessionLease struct {
 
 var _ SessionLease = (*geminiSessionLease)(nil)
 
-func (l *geminiSessionLease) CancelRotation() {
-	l.cancelRotation = true
-}
-
 func (l *geminiSessionLease) SessionID() string {
 	return l.sessionID
 }
@@ -1505,12 +1501,21 @@ func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*T
 	}()
 
 	if err := l.session.Send(compiledPrompt, turn); err != nil {
+		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") {
+			l.cancelRotation = true
+		}
 		return nil, err
 	}
 
 	res, waitErr := bufSink.Wait(ctx)
 	if waitErr != nil {
+		if IsQuotaPause(waitErr.Error(), "") || IsCapacityBlip(waitErr.Error(), "") {
+			l.cancelRotation = true
+		}
 		return nil, waitErr
+	}
+	if res != nil && (IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "") || IsQuotaPause(res.Response, "") || IsCapacityBlip(res.Response, "")) {
+		l.cancelRotation = true
 	}
 	l.turnCount++
 	l.isCold = false

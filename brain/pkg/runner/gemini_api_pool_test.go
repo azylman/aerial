@@ -3732,14 +3732,8 @@ func TestGeminiAPIPool_AcquireLease_PersistenceFailureRollback(t *testing.T) {
 
 func TestGeminiAPIPool_AcquireLease_CancelRotation(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-		if flusher != nil {
-			flusher.Flush()
-		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
 	}))
 	defer ts.Close()
 
@@ -3769,18 +3763,20 @@ func TestGeminiAPIPool_AcquireLease_CancelRotation(t *testing.T) {
 		Ctx:    ctx,
 	}
 
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
+	_, execErr := lease.Execute(ctx, turnCtx)
+	if execErr == nil {
+		t.Fatalf("expected error from Execute on 429 response, got nil")
 	}
-
-	lease.CancelRotation()
+	if !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
+		t.Fatalf("expected IsQuotaPause or IsCapacityBlip on Execute error, got: %v", execErr)
+	}
 
 	if relErr := lease.Release(); relErr != nil {
 		t.Fatalf("Release error: %v", relErr)
 	}
 
 	if rotationCalled {
-		t.Error("expected OnSessionRotated NOT to be called when CancelRotation was invoked")
+		t.Error("expected OnSessionRotated NOT to be called when turn encountered quota pause")
 	}
 }
 

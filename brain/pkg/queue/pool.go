@@ -408,11 +408,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}); ok {
 			sc.SetSessionCallbacks(getRec, onRot)
 		}
-		if sc, ok := p.lowEffortProcessPool.(interface {
-			SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
-		}); ok {
-			sc.SetSessionCallbacks(getRec, onRot)
-		}
+
 	}
 
 	if p.cfg.HistoryFetcher == nil {

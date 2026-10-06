@@ -539,6 +539,9 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	if d.InflightCount() > 0 {
 		return false, "" // Never rotate during in-flight turn
 	}
+	if d.TaskTracker() != nil && d.TaskTracker().ActiveCount() > 0 {
+		return false, "" // Never rotate while background tasks are running
+	}
 	if d.IsDirty() {
 		return true, "daemon marked dirty during in-flight turn"
 	}
@@ -794,11 +797,10 @@ type unifiedSessionLease struct {
 
 var _ SessionLease = (*unifiedSessionLease)(nil)
 
-func (l *unifiedSessionLease) CancelRotation() {
-	l.cancelRotation = true
-}
-
 func (l *unifiedSessionLease) SessionID() string {
+	if l.daemon != nil && l.daemon.SessionID() != "" {
+		return l.daemon.SessionID()
+	}
 	return l.sessionID
 }
 
@@ -919,12 +921,35 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	}()
 
 	if err := l.daemon.Send(compiledPrompt, turn); err != nil {
+		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") {
+			l.cancelRotation = true
+		}
 		return nil, err
 	}
 
 	res, waitErr := bufSink.Wait(ctx)
+	if l.daemon != nil && l.daemon.SessionID() != "" {
+		l.sessionID = l.daemon.SessionID()
+	}
+	if res != nil && res.ConversationID != "" {
+		l.sessionID = res.ConversationID
+	}
 	if waitErr != nil {
+		if IsQuotaPause(waitErr.Error(), "") || IsCapacityBlip(waitErr.Error(), "") {
+			l.cancelRotation = true
+		}
 		return nil, waitErr
+	}
+	if res != nil {
+		if IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "") || IsQuotaPause(res.Response, "") || IsCapacityBlip(res.Response, "") {
+			l.cancelRotation = true
+		} else if strings.TrimSpace(res.Response) == "" && l.pool != nil && l.pool.cfg.SessionManager != nil && l.sessionID != "" {
+			if tErr, err := l.pool.cfg.SessionManager.ExtractLastTurnError(ctx, l.sessionID, turn.CreatedAt); err == nil && tErr != "" {
+				if IsQuotaPause(tErr, "") || IsCapacityBlip(tErr, "") {
+					l.cancelRotation = true
+				}
+			}
+		}
 	}
 	l.turnCount++
 	l.isCold = false
@@ -937,6 +962,9 @@ func (l *unifiedSessionLease) Release() error {
 		defer l.pool.releaseTargetLock(l.targetKey, l.lock, true)
 
 		if l.cancelRotation {
+			return
+		}
+		if l.daemon != nil && l.daemon.TaskTracker() != nil && l.daemon.TaskTracker().ActiveCount() > 0 {
 			return
 		}
 

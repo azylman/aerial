@@ -2703,7 +2703,7 @@ func TestUnifiedProcessPool_AcquireLease_CancelRotation(t *testing.T) {
 						break
 					}
 					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
+						_, _ = outW.Write([]byte(`{"event":"result","response":"","error":"RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.","status":"ERROR"}` + "\n"))
 					}
 				}
 			}()
@@ -2734,18 +2734,20 @@ func TestUnifiedProcessPool_AcquireLease_CancelRotation(t *testing.T) {
 		Ctx:    ctx,
 	}
 
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
+	_, execErr := lease.Execute(ctx, turnCtx)
+	if execErr == nil {
+		t.Fatalf("expected Execute error on quota pause, got nil")
 	}
-
-	lease.CancelRotation()
+	if !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
+		t.Fatalf("expected IsQuotaPause on Execute error, got: %v", execErr)
+	}
 
 	if relErr := lease.Release(); relErr != nil {
 		t.Fatalf("Release error: %v", relErr)
 	}
 
 	if rotationCalled {
-		t.Error("expected OnSessionRotated NOT to be called when CancelRotation was invoked")
+		t.Error("expected OnSessionRotated NOT to be called when turn encountered quota pause")
 	}
 }
 
