@@ -998,8 +998,6 @@ func TestInterchangeablePool_AcquireLease_Lifecycle(t *testing.T) {
 		t.Errorf("expected 'custom-result-ok', got %+v", res)
 	}
 
-	lease.CancelRotation()
-
 	availBefore := pool.AvailableCount()
 	if err := lease.Release(); err != nil {
 		t.Fatalf("unexpected Release error: %v", err)
