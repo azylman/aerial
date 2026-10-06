@@ -538,8 +538,13 @@ func GetSessionActiveTasks(database DBTX, threadID string) ([]session.TaskMetada
 	return tasks, nil
 }
 
-// FindUnrotatedSessions returns sessions whose turn count strictly exceeds minTurns (defaulting to session.DefaultMaxSessionTurns if minTurns <= 0), ordered by turn_count DESC.
-func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int) ([]SessionInfo, error) {
+// DefaultUnrotatedSessionMaxAge defines the default recency horizon (2 hours) for detecting
+// unrotated runaway sessions. Dormant sessions older than this horizon are excluded from alerting.
+const DefaultUnrotatedSessionMaxAge = 2 * time.Hour
+
+// FindUnrotatedSessions returns sessions whose turn count strictly exceeds minTurns (defaulting to session.DefaultMaxSessionTurns if minTurns <= 0)
+// and were updated within maxAge (defaulting to DefaultUnrotatedSessionMaxAge if maxAge is empty; pass <= 0 to disable age filtering), ordered by turn_count DESC.
+func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -552,13 +557,33 @@ func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int) ([]
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-	SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
-	FROM sessions
-	WHERE turn_count > $1
-	ORDER BY turn_count DESC
-	`
-	rows, err := database.QueryContext(queryCtx, query, minTurns)
+	limitAge := DefaultUnrotatedSessionMaxAge
+	if len(maxAge) > 0 {
+		limitAge = maxAge[0]
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if limitAge > 0 {
+		cutoff := time.Now().UTC().Add(-limitAge)
+		query := `
+		SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
+		FROM sessions
+		WHERE turn_count > $1 AND updated_at >= $2
+		ORDER BY turn_count DESC
+		`
+		rows, err = database.QueryContext(queryCtx, query, minTurns, cutoff)
+	} else {
+		query := `
+		SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
+		FROM sessions
+		WHERE turn_count > $1
+		ORDER BY turn_count DESC
+		`
+		rows, err = database.QueryContext(queryCtx, query, minTurns)
+	}
 	if err != nil {
 		return nil, err
 	}

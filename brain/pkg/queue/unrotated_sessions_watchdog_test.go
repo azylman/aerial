@@ -18,12 +18,12 @@ type mockErrSessionStore struct {
 	findErr error
 }
 
-func (m *mockErrSessionStore) FindUnrotatedSessions(ctx context.Context, minTurns int) ([]db.SessionInfo, error) {
+func (m *mockErrSessionStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]db.SessionInfo, error) {
 	if m.findErr != nil {
 		return nil, m.findErr
 	}
 	if m.Store != nil {
-		return m.Store.FindUnrotatedSessions(ctx, minTurns)
+		return m.Store.FindUnrotatedSessions(ctx, minTurns, maxAge...)
 	}
 	return nil, nil
 }
@@ -275,5 +275,45 @@ func TestWorkerPool_CheckUnrotatedSessions_ContextCancelled(t *testing.T) {
 	p.checkUnrotatedSessions(ctx, lastReported)
 	if len(lastReported) != 0 {
 		t.Errorf("expected empty lastReported on cancelled context, got %d entries", len(lastReported))
+	}
+}
+
+func TestWorkerPool_CheckUnrotatedSessions_ExcludesDormantSessions(t *testing.T) {
+	fake := db.NewFakeStore()
+	defer func() { _ = fake.Close() }()
+
+	ctx := context.Background()
+
+	var alertCalled bool
+	recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+		alertCalled = true
+		return nil
+	}
+
+	p := &WorkerPool{
+		cfg: WorkerPoolConfig{
+			Store:           fake,
+			SystemAlertFunc: recordAlert,
+		},
+	}
+
+	// Seed an unrotated session with 15 turns
+	_ = fake.SaveSessionID(ctx, "th-dormant", "sess-dormant")
+	for i := 0; i < 15; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "th-dormant")
+	}
+
+	// Backdate session UpdatedAt to 3 hours ago (beyond 2-hour default horizon)
+	dormantTime := time.Now().UTC().Add(-3 * time.Hour)
+	fake.SetSessionUpdatedAt("th-dormant", dormantTime)
+
+	lastReported := make(map[string]int)
+	p.checkUnrotatedSessions(ctx, lastReported)
+
+	if alertCalled {
+		t.Error("expected no system alert for dormant session older than 2 hours")
+	}
+	if len(lastReported) != 0 {
+		t.Errorf("expected lastReported to remain empty for dormant session, got %v", lastReported)
 	}
 }

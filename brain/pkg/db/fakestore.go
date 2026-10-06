@@ -479,6 +479,15 @@ func (f *FakeStore) SetMessageUpdatedAt(id string, t time.Time) {
 	}
 }
 
+// SetSessionUpdatedAt updates the UpdatedAt timestamp of an existing session (useful in tests).
+func (f *FakeStore) SetSessionUpdatedAt(threadID string, t time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.sessions[threadID]; ok && s != nil {
+		s.UpdatedAt = t
+	}
+}
+
 func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -676,7 +685,7 @@ func (f *FakeStore) GetSessionInfo(ctx context.Context, threadID string) (*Sessi
 	return cloneSessionInfo(s), nil
 }
 
-func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int) ([]SessionInfo, error) {
+func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	if err := f.checkClosedAndFail("FindUnrotatedSessions"); err != nil {
@@ -685,10 +694,20 @@ func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int) ([]
 	if minTurns <= 0 {
 		minTurns = session.DefaultMaxSessionTurns
 	}
+	limitAge := DefaultUnrotatedSessionMaxAge
+	if len(maxAge) > 0 {
+		limitAge = maxAge[0]
+	}
+	var cutoff time.Time
+	if limitAge > 0 {
+		cutoff = time.Now().UTC().Add(-limitAge)
+	}
 	var res []SessionInfo
 	for _, s := range f.sessions {
 		if s != nil && s.TurnCount > minTurns {
-			res = append(res, *cloneSessionInfo(s))
+			if limitAge <= 0 || s.UpdatedAt.After(cutoff) || s.UpdatedAt.Equal(cutoff) {
+				res = append(res, *cloneSessionInfo(s))
+			}
 		}
 	}
 	sort.Slice(res, func(i, j int) bool {

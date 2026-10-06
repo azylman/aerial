@@ -463,11 +463,11 @@ func (s *SQLStore) GetSessionInfo(ctx context.Context, threadID string) (*Sessio
 	return GetSessionInfo(s.db, threadID)
 }
 
-func (s *SQLStore) FindUnrotatedSessions(ctx context.Context, minTurns int) ([]SessionInfo, error) {
+func (s *SQLStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
 	if s == nil || isDBTXNil(s.db) {
 		return nil, fmt.Errorf("database is nil")
 	}
-	return FindUnrotatedSessions(ctx, s.db, minTurns)
+	return FindUnrotatedSessions(ctx, s.db, minTurns, maxAge...)
 }
 
 func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
