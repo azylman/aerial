@@ -124,7 +124,7 @@ type BufferingTurnSink struct {
 	mu            sync.Mutex
 	builder       strings.Builder
 	emittedAny    bool
-	toolsExecuted bool
+	purgedPreTool bool
 	resCh         chan *TurnResult
 	errCh         chan error
 	once          sync.Once
@@ -159,9 +159,11 @@ func (s *BufferingTurnSink) OnThinking() {
 // and invokes the OnToolCall hook if configured.
 func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
 	s.mu.Lock()
+	if strings.TrimSpace(s.builder.String()) != "" || s.emittedAny {
+		s.purgedPreTool = true
+	}
 	s.builder.Reset()
 	s.emittedAny = false
-	s.toolsExecuted = true
 	s.mu.Unlock()
 
 	if s.cfg.OnToolCall != nil {
@@ -173,9 +175,11 @@ func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
 // tool execution, and invokes the OnToolCompleted hook if configured.
 func (s *BufferingTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
 	s.mu.Lock()
+	if strings.TrimSpace(s.builder.String()) != "" || s.emittedAny {
+		s.purgedPreTool = true
+	}
 	s.builder.Reset()
 	s.emittedAny = false
-	s.toolsExecuted = true
 	s.mu.Unlock()
 
 	if s.cfg.OnToolCompleted != nil {
@@ -208,17 +212,18 @@ func (s *BufferingTurnSink) OnResult(res *TurnResult) {
 	s.once.Do(func() {
 		s.mu.Lock()
 		accumulated := s.builder.String()
-		toolsRan := s.toolsExecuted
+		purged := s.purgedPreTool
 		s.mu.Unlock()
 
 		if res == nil {
 			res = &TurnResult{Response: accumulated}
 		} else if strings.TrimSpace(accumulated) != "" {
 			res.Response = accumulated
-		} else if toolsRan {
-			// If tools were executed but no post-tool text was emitted,
-			// any text in res.Response was intermediate monologue or prompt echo.
-			// Suppress it so intermediate chatter does not resurrect.
+		} else if purged {
+			// If pre-tool text deltas were streamed and purged upon tool execution,
+			// but no post-tool text deltas were emitted, any text in res.Response
+			// was intermediate monologue or prompt echo. Suppress it so intermediate
+			// chatter does not resurrect.
 			res.Response = ""
 		}
 

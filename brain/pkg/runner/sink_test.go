@@ -339,6 +339,25 @@ func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
 			t.Errorf("expected clean terminal response %q, got %q", expected, res.Response)
 		}
 	})
+
+	t.Run("Non-streaming turn with tool execution preserves final result", func(t *testing.T) {
+		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+		// In a non-streaming runner (e.g. legacy runner adapter, mock runner),
+		// tool hooks fire (e.g. from watchdog or adapter) without any streamed text deltas.
+		sink.OnToolCall("run_command", "bash -c 'echo hello'")
+		sink.OnToolCompleted("run_command", "native", 50*time.Millisecond, "DONE")
+
+		// The runner finishes and delivers the full substantive output in OnResult
+		sink.OnResult(&TurnResult{Response: "Completed task output."})
+
+		res, err := sink.Wait(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected wait error: %v", err)
+		}
+		if res.Response != "Completed task output." {
+			t.Errorf("expected non-streaming response preserved, got %q", res.Response)
+		}
+	})
 }
 
 func TestBufferingTurnSink_DeltaRescueOnError(t *testing.T) {
