@@ -120,13 +120,14 @@ type BufferingTurnSinkConfig struct {
 // BufferingTurnSink implements TurnSink with thread-safe text delta accumulation,
 // pluggable hooks, substantive delta error recovery, and result synchronization.
 type BufferingTurnSink struct {
-	cfg        BufferingTurnSinkConfig
-	mu         sync.Mutex
-	builder    strings.Builder
-	emittedAny bool
-	resCh      chan *TurnResult
-	errCh      chan error
-	once       sync.Once
+	cfg           BufferingTurnSinkConfig
+	mu            sync.Mutex
+	builder       strings.Builder
+	emittedAny    bool
+	purgedPreTool bool
+	resCh         chan *TurnResult
+	errCh         chan error
+	once          sync.Once
 }
 
 var _ TurnSink = (*BufferingTurnSink)(nil)
@@ -154,15 +155,33 @@ func (s *BufferingTurnSink) OnThinking() {
 	}
 }
 
-// OnToolCall invokes the OnToolCall hook if configured.
+// OnToolCall resets the delta buffer to purge pre-tool monologue/prompt echoes,
+// and invokes the OnToolCall hook if configured.
 func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
+	s.mu.Lock()
+	if strings.TrimSpace(s.builder.String()) != "" || s.emittedAny {
+		s.purgedPreTool = true
+	}
+	s.builder.Reset()
+	s.emittedAny = false
+	s.mu.Unlock()
+
 	if s.cfg.OnToolCall != nil {
 		s.cfg.OnToolCall(toolName, commandName)
 	}
 }
 
-// OnToolCompleted invokes the OnToolCompleted hook if configured.
+// OnToolCompleted resets the delta buffer to purge stray stream chunks leaked during
+// tool execution, and invokes the OnToolCompleted hook if configured.
 func (s *BufferingTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+	s.mu.Lock()
+	if strings.TrimSpace(s.builder.String()) != "" || s.emittedAny {
+		s.purgedPreTool = true
+	}
+	s.builder.Reset()
+	s.emittedAny = false
+	s.mu.Unlock()
+
 	if s.cfg.OnToolCompleted != nil {
 		s.cfg.OnToolCompleted(toolName, mcpServer, duration, status)
 	}
@@ -186,18 +205,26 @@ func (s *BufferingTurnSink) OnTextDelta(delta string) {
 	}
 }
 
-// OnResult finalizes the turn, backfilling response from deltas if empty,
+// OnResult finalizes the turn, preferring accumulated deltas if non-empty,
+// falling back to res.Response if the buffer is empty,
 // invoking the OnComplete hook, and delivering to resCh.
 func (s *BufferingTurnSink) OnResult(res *TurnResult) {
 	s.once.Do(func() {
 		s.mu.Lock()
 		accumulated := s.builder.String()
+		purged := s.purgedPreTool
 		s.mu.Unlock()
 
 		if res == nil {
 			res = &TurnResult{Response: accumulated}
-		} else if strings.TrimSpace(res.Response) == "" && strings.TrimSpace(accumulated) != "" {
+		} else if strings.TrimSpace(accumulated) != "" {
 			res.Response = accumulated
+		} else if purged {
+			// If pre-tool text deltas were streamed and purged upon tool execution,
+			// but no post-tool text deltas were emitted, any text in res.Response
+			// was intermediate monologue or prompt echo. Suppress it so intermediate
+			// chatter does not resurrect.
+			res.Response = ""
 		}
 
 		if s.cfg.OnComplete != nil {
