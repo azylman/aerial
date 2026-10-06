@@ -628,3 +628,68 @@ func TestDynamicVoicePool_SessionRotator(t *testing.T) {
 		t.Error("expected closed pool RotateSession to return error")
 	}
 }
+
+type mockLeasedVoicePool struct {
+	mockVoicePool
+	lease    SessionLease
+	leaseErr error
+}
+
+func (m *mockLeasedVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
+	return m.lease, m.leaseErr
+}
+
+type fakeSessionLease struct {
+	sessID string
+}
+
+func (f *fakeSessionLease) SessionID() string         { return f.sessID }
+func (f *fakeSessionLease) PreviousSessionID() string { return "" }
+func (f *fakeSessionLease) IsCold() bool              { return false }
+func (f *fakeSessionLease) TurnCount() int            { return 1 }
+func (f *fakeSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
+	return &TurnResult{Response: "fake lease ok"}, nil
+}
+func (f *fakeSessionLease) CancelRotation() {}
+func (f *fakeSessionLease) Release() error  { return nil }
+
+func TestDynamicVoicePool_AcquireLease(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil receiver
+	var nilPool *DynamicVoicePool
+	if _, err := nilPool.AcquireLease(ctx, "k"); err == nil {
+		t.Error("expected error from nil pool AcquireLease")
+	}
+
+	// 2. Underlying pool does not implement LeasedAgentPool
+	mockNonLeased := newMockVoicePool("m1")
+	dynNonLeased := NewDynamicVoicePoolWithInitial(mockNonLeased, "fp-1", nil)
+	defer dynNonLeased.Close()
+	if _, err := dynNonLeased.AcquireLease(ctx, "k"); err == nil {
+		t.Error("expected error when underlying does not implement LeasedAgentPool")
+	}
+
+	// 3. Underlying pool implements LeasedAgentPool
+	fakeL := &fakeSessionLease{sessID: "lease-123"}
+	mockLeased := &mockLeasedVoicePool{
+		mockVoicePool: *newMockVoicePool("m2"),
+		lease:         fakeL,
+	}
+	dynLeased := NewDynamicVoicePoolWithInitial(mockLeased, "fp-2", nil)
+	lease, err := dynLeased.AcquireLease(ctx, "k")
+	if err != nil {
+		t.Fatalf("unexpected AcquireLease error: %v", err)
+	}
+	if lease != fakeL {
+		t.Errorf("expected lease %v, got %v", fakeL, lease)
+	}
+
+	// 4. Closed dynamic pool
+	if err := dynLeased.Close(); err != nil {
+		t.Fatalf("unexpected Close error: %v", err)
+	}
+	if _, err := dynLeased.AcquireLease(ctx, "k"); err == nil {
+		t.Error("expected error on closed dynamic pool AcquireLease")
+	}
+}

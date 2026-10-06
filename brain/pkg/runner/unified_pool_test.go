@@ -558,8 +558,8 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 	}
 	var turnContent strings.Builder
 	for i := 0; i < DefaultMaxSessionTurns; i++ {
-		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}` + "\n", i*2, i+1))
-		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}` + "\n", i*2+1, i+1))
+		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1))
+		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1))
 	}
 	if err := os.WriteFile(filepath.Join(sessDirTurns, "transcript.jsonl"), []byte(turnContent.String()), 0644); err != nil {
 		t.Fatalf("failed to write transcript turns: %v", err)
@@ -734,8 +734,8 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 	}
 	var turnContentGuard strings.Builder
 	for i := 0; i < DefaultMaxSessionTurns; i++ {
-		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}` + "\n", i*2, i+1))
-		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}` + "\n", i*2+1, i+1))
+		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1))
+		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1))
 	}
 	if err := os.WriteFile(filepath.Join(sessDirTurnsGuard, "transcript.jsonl"), []byte(turnContentGuard.String()), 0644); err != nil {
 		t.Fatalf("failed to write transcript turns: %v", err)
@@ -953,9 +953,9 @@ func (s *mockSinkCapture) OnToolCall(tool, cmd string) {
 }
 func (s *mockSinkCapture) OnToolCompleted(tool, server string, d time.Duration, status string) {}
 func (s *mockSinkCapture) OnSkillActivated(skill, source string)                               {}
-func (s *mockSinkCapture) OnTextDelta(delta string) { s.delta += delta }
-func (s *mockSinkCapture) OnResult(res *TurnResult) { s.result = res }
-func (s *mockSinkCapture) OnError(err error)        { s.err = err }
+func (s *mockSinkCapture) OnTextDelta(delta string)                                            { s.delta += delta }
+func (s *mockSinkCapture) OnResult(res *TurnResult)                                            { s.result = res }
+func (s *mockSinkCapture) OnError(err error)                                                   { s.err = err }
 
 func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	outR, outW := io.Pipe()
@@ -2352,7 +2352,6 @@ func TestUnifiedProcessPool_GetOrCreateSession_PropagatesSessionID(t *testing.T)
 	}
 }
 
-
 func TestUnifiedProcessPool_AcquireLease_BasicExecution(t *testing.T) {
 	mock := &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
@@ -2622,4 +2621,149 @@ func TestUnifiedProcessPool_AcquireLease_ConcurrencySerialization(t *testing.T) 
 		t.Fatalf("lease3 AcquireLease error after lease1 release: %v", err3)
 	}
 	_ = lease3.Release()
+}
+
+func TestUnifiedProcessPool_LeaseTurnSinkWrapper_AllMethods(t *testing.T) {
+	inner := newMockTurnSink()
+	buf := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+	wrapper := &leaseTurnSinkWrapper{
+		inner: inner,
+		buf:   buf,
+	}
+
+	wrapper.OnTurnStarted()
+	wrapper.OnThinking()
+	wrapper.OnToolCall("bash", "ls")
+	wrapper.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
+	wrapper.OnSkillActivated("self-improvement", "discord")
+	wrapper.OnTextDelta("delta")
+	res := &TurnResult{Response: "ok"}
+	wrapper.OnResult(res)
+	testErr := errors.New("test error")
+	wrapper.OnError(testErr)
+
+	if !inner.started {
+		t.Error("expected inner.started to be true")
+	}
+	if inner.thinking != 1 {
+		t.Errorf("expected inner.thinking == 1, got %d", inner.thinking)
+	}
+
+	// Nil inner sink safety
+	nilWrapper := &leaseTurnSinkWrapper{
+		inner: nil,
+		buf:   NewBufferingTurnSink(BufferingTurnSinkConfig{}),
+	}
+	nilWrapper.OnTurnStarted()
+	nilWrapper.OnThinking()
+	nilWrapper.OnToolCall("bash", "ls")
+	nilWrapper.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
+	nilWrapper.OnSkillActivated("self-improvement", "discord")
+	nilWrapper.OnTextDelta("delta")
+	nilWrapper.OnResult(res)
+	nilWrapper.OnError(testErr)
+}
+
+func TestUnifiedProcessPool_SetSessionCallbacks(t *testing.T) {
+	mock := &MockDaemonSpawner{}
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	getRec := func(ctx context.Context, targetKey string) (SessionRecord, error) {
+		return SessionRecord{}, nil
+	}
+	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+		return nil
+	}
+
+	pool.SetSessionCallbacks(getRec, onRot)
+	if pool.cfg.GetSessionRecord == nil || pool.cfg.OnSessionRotated == nil {
+		t.Error("expected callbacks to be set")
+	}
+
+	// Nil receiver safety
+	var nilPool *UnifiedProcessPool
+	nilPool.SetSessionCallbacks(getRec, onRot)
+}
+
+func TestUnifiedProcessPool_AcquireLease_CancelRotation(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := uuid.New().String()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						break
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 305}, nil
+		},
+	}
+
+	var rotationCalled bool
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-cancel-rot")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "first message",
+		Ctx:    ctx,
+	}
+
+	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+		t.Fatalf("Execute error: %v", execErr)
+	}
+
+	lease.CancelRotation()
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if rotationCalled {
+		t.Error("expected OnSessionRotated NOT to be called when CancelRotation was invoked")
+	}
+}
+
+func TestUnifiedProcessPool_AcquireLease_Validation(t *testing.T) {
+	ctx := context.Background()
+
+	// Nil receiver
+	var nilPool *UnifiedProcessPool
+	if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
+		t.Error("expected error from nil pool AcquireLease")
+	}
+
+	// Empty targetKey
+	mock := &MockDaemonSpawner{}
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	if _, err := pool.AcquireLease(ctx, "   "); err == nil {
+		t.Error("expected error from empty targetKey AcquireLease")
+	}
 }

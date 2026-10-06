@@ -497,10 +497,14 @@ func (p *InterchangeablePool) AcquireLease(ctx context.Context, targetKey string
 	}
 
 	var workerKey string
+	var pDone <-chan struct{}
+	if p.ctx != nil {
+		pDone = p.ctx.Done()
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-p.ctx.Done():
+	case <-pDone:
 		return nil, errors.New("interchangeable pool is closed")
 	case key := <-p.available:
 		workerKey = key
