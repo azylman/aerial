@@ -655,14 +655,50 @@ func TestFindUnrotatedSessions(t *testing.T) {
 		t.Errorf("expected second to be th-high-9 with 9 turns, got %+v", unrotated[1])
 	}
 
+	// 3b. Verify recency horizon excludes dormant sessions (>2h) by default,
+	// but includes them when maxAge <= 0 or extended.
+	dormantTime := time.Now().UTC().Add(-3 * time.Hour)
+	_, err = database.Exec("INSERT INTO sessions (thread_id, internal_session_id, turn_count, created_at, updated_at) VALUES ('th-old', 'sess-old', 20, $1, $2)", dormantTime, dormantTime)
+	if err != nil {
+		t.Fatalf("failed to insert dormant session: %v", err)
+	}
+
+	// Default 2-hour horizon excludes th-old
+	recentOnly, err := FindUnrotatedSessions(ctx, database, 8)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions with default maxAge failed: %v", err)
+	}
+	if len(recentOnly) != 2 {
+		t.Fatalf("expected 2 recent sessions, got %d", len(recentOnly))
+	}
+
+	// Extended 4-hour horizon includes th-old
+	extended, err := FindUnrotatedSessions(ctx, database, 8, 4*time.Hour)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions with 4h maxAge failed: %v", err)
+	}
+	if len(extended) != 3 || extended[0].ThreadID != "th-old" {
+		t.Fatalf("expected 3 sessions with th-old first, got %+v", extended)
+	}
+
+	// maxAge <= 0 disables age filtering
+	allSessions, err := FindUnrotatedSessions(ctx, database, 8, 0)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions with disabled maxAge failed: %v", err)
+	}
+	if len(allSessions) != 3 {
+		t.Fatalf("expected 3 sessions with disabled maxAge, got %d", len(allSessions))
+	}
+
 	// 4. SQLStore method
 	store := NewSQLStore(database)
 	storeRes, err := store.FindUnrotatedSessions(ctx, 10)
 	if err != nil {
 		t.Fatalf("store.FindUnrotatedSessions failed: %v", err)
 	}
+	// With default 2-hour horizon, th-old is excluded, so only th-high-12 remains
 	if len(storeRes) != 1 || storeRes[0].ThreadID != "th-high-12" {
-		t.Errorf("expected only th-high-12 for minTurns=10, got %+v", storeRes)
+		t.Errorf("expected only th-high-12 for minTurns=10 with default recency, got %+v", storeRes)
 	}
 
 	// Nil store error
@@ -708,6 +744,32 @@ func TestFindUnrotatedSessions(t *testing.T) {
 	}
 	if fakeUnrotated[1].ThreadID != "fake-9" || fakeUnrotated[1].TurnCount != 9 {
 		t.Errorf("expected second fake unrotated to be fake-9, got %+v", fakeUnrotated[1])
+	}
+
+	// Verify FakeStore recency horizon
+	fake.SetSessionUpdatedAt("fake-15", time.Now().UTC().Add(-3*time.Hour))
+	fakeRecent, err := fake.FindUnrotatedSessions(ctx, 0)
+	if err != nil {
+		t.Fatalf("fake.FindUnrotatedSessions failed: %v", err)
+	}
+	if len(fakeRecent) != 1 || fakeRecent[0].ThreadID != "fake-9" {
+		t.Errorf("expected only fake-9 with default recency horizon, got %+v", fakeRecent)
+	}
+
+	fakeExtended, err := fake.FindUnrotatedSessions(ctx, 0, 4*time.Hour)
+	if err != nil {
+		t.Fatalf("fake.FindUnrotatedSessions with 4h failed: %v", err)
+	}
+	if len(fakeExtended) != 2 {
+		t.Errorf("expected 2 unrotated sessions with 4h horizon, got %d", len(fakeExtended))
+	}
+
+	fakeAll, err := fake.FindUnrotatedSessions(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("fake.FindUnrotatedSessions with disabled maxAge failed: %v", err)
+	}
+	if len(fakeAll) != 2 {
+		t.Errorf("expected 2 unrotated sessions with disabled maxAge, got %d", len(fakeAll))
 	}
 
 	// Closed fake store error
