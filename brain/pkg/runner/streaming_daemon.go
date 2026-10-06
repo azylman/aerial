@@ -29,15 +29,19 @@ type TurnSink interface {
 	OnError(err error)
 }
 
-// TurnContext encapsulates the metadata, prompt, and callback sink for a single turn.
+// TurnContext encapsulates the metadata, prompt, structured context, and callback sink for a single turn.
 type TurnContext struct {
-	TurnID    string
-	SessionID string
-	Model     string
-	Prompt    string
-	Sink      TurnSink
-	CreatedAt time.Time
-	Ctx       context.Context
+	TurnID              string
+	SessionID           string
+	Model               string
+	Prompt              string
+	ScopeInstructions   string
+	ChannelInstructions string // Deprecated: Use ScopeInstructions
+	CoordinationContext string
+	ThreadSummary       string
+	Sink                TurnSink
+	CreatedAt           time.Time
+	Ctx                 context.Context
 }
 
 type inFlightToolCall struct {

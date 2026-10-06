@@ -2074,13 +2074,13 @@ func TestCleanParameters(t *testing.T) {
 		t.Parallel()
 		// Build a 20-level deeply nested schema object
 		root := map[string]interface{}{
-			"type": "object",
+			"type":                 "object",
 			"additionalProperties": false,
 		}
 		curr := root
 		for i := 0; i < 20; i++ {
 			child := map[string]interface{}{
-				"type": "object",
+				"type":                 "object",
 				"additionalProperties": false,
 			}
 			curr["properties"] = map[string]interface{}{
@@ -2090,7 +2090,7 @@ func TestCleanParameters(t *testing.T) {
 		}
 		curr["properties"] = map[string]interface{}{
 			"leaf": map[string]interface{}{
-				"type": "string",
+				"type":                 "string",
 				"additionalProperties": false,
 			},
 		}
@@ -3494,5 +3494,345 @@ func TestGeminiAPIPool_SessionRotator(t *testing.T) {
 	}
 	if rotSess == nil {
 		t.Fatal("expected non-nil rotated session")
+	}
+}
+
+func TestGeminiAPIPool_AcquireLease_BasicExecution(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"hello from lease"}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:     "test-key",
+		Model:      "gemini-2.5-flash",
+		BaseURL:    ts.URL,
+		HTTPClient: ts.Client(),
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			return SessionRecord{
+				ActiveSessionID:   "550e8400-e29b-41d4-a716-446655440001",
+				PreviousSessionID: "550e8400-e29b-41d4-a716-446655440000",
+				TurnCount:         0,
+			}, nil
+		},
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-lease-1")
+	if err != nil {
+		t.Fatalf("unexpected AcquireLease error: %v", err)
+	}
+
+	if !lease.IsCold() {
+		t.Errorf("expected IsCold to be true")
+	}
+	if lease.PreviousSessionID() != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("expected prev session %q, got %q", "550e8400-e29b-41d4-a716-446655440000", lease.PreviousSessionID())
+	}
+	if lease.SessionID() != "550e8400-e29b-41d4-a716-446655440001" {
+		t.Errorf("expected session %q, got %q", "550e8400-e29b-41d4-a716-446655440001", lease.SessionID())
+	}
+	if lease.TurnCount() != 0 {
+		t.Errorf("expected TurnCount 0, got %d", lease.TurnCount())
+	}
+
+	// 1. Cold execution with ScopeInstructions, CoordinationContext, ThreadSummary
+	turnCtx := &TurnContext{
+		TurnID:              "turn-1",
+		Prompt:              "hello",
+		ScopeInstructions:   "scope rule",
+		CoordinationContext: "coord info",
+		ThreadSummary:       "summary of thread",
+		Ctx:                 ctx,
+	}
+
+	res, execErr := lease.Execute(ctx, turnCtx)
+	if execErr != nil {
+		t.Fatalf("unexpected Execute error: %v", execErr)
+	}
+	if res == nil || res.Response != "hello from lease" {
+		t.Errorf("expected 'hello from lease', got %+v", res)
+	}
+	if lease.IsCold() {
+		t.Errorf("expected IsCold to be false after execution")
+	}
+	if lease.TurnCount() != 1 {
+		t.Errorf("expected TurnCount 1, got %d", lease.TurnCount())
+	}
+
+	// 2. Warm execution
+	turnCtx2 := &TurnContext{
+		TurnID: "turn-2",
+		Prompt: "hello again",
+		Ctx:    ctx,
+	}
+	res2, execErr2 := lease.Execute(ctx, turnCtx2)
+	if execErr2 != nil {
+		t.Fatalf("unexpected warm Execute error: %v", execErr2)
+	}
+	if res2 == nil || res2.Response != "hello from lease" {
+		t.Errorf("expected 'hello from lease', got %+v", res2)
+	}
+	if lease.TurnCount() != 2 {
+		t.Errorf("expected TurnCount 2, got %d", lease.TurnCount())
+	}
+
+	// 3. Error branch: nil turn context
+	if _, err := lease.Execute(ctx, nil); err == nil {
+		t.Error("expected error when executing nil turn context")
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Errorf("unexpected Release error: %v", relErr)
+	}
+
+	// 4. Cold execution with ChannelInstructions fallback
+	leaseChan, err := pool.AcquireLease(ctx, "target-chan-fallback")
+	if err != nil {
+		t.Fatalf("unexpected AcquireLease error: %v", err)
+	}
+	turnChan := &TurnContext{
+		TurnID:              "turn-chan",
+		Prompt:              "hello chan",
+		ChannelInstructions: "channel guideline",
+		Ctx:                 ctx,
+	}
+	if _, err := leaseChan.Execute(ctx, turnChan); err != nil {
+		t.Fatalf("unexpected Execute error with channel instructions: %v", err)
+	}
+	_ = leaseChan.Release()
+}
+
+func TestGeminiAPIPool_AcquireLease_RotationAndPersistence(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	var rotatedOld, rotatedNew string
+	var rotationCalled bool
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:          "test-key",
+		Model:           "gemini-2.5-flash",
+		BaseURL:         ts.URL,
+		HTTPClient:      ts.Client(),
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			rotatedOld = oldSessionID
+			rotatedNew = newSessionID
+			return nil
+		},
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-rot-1")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "first message",
+		Ctx:    ctx,
+	}
+
+	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+		t.Fatalf("Execute error: %v", execErr)
+	}
+
+	initSessID := lease.SessionID()
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Errorf("expected OnSessionRotated to be called")
+	}
+	if rotatedOld != initSessID {
+		t.Errorf("expected rotatedOld %q, got %q", initSessID, rotatedOld)
+	}
+	if rotatedNew == "" || rotatedNew == rotatedOld {
+		t.Errorf("expected fresh rotatedNew, got %q", rotatedNew)
+	}
+}
+
+func TestGeminiAPIPool_AcquireLease_PersistenceFailureRollback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	expectedErr := errors.New("simulated DB latch timeout")
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:          "test-key",
+		Model:           "gemini-2.5-flash",
+		BaseURL:         ts.URL,
+		HTTPClient:      ts.Client(),
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			return expectedErr
+		},
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-fail-rot")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "trigger rotation",
+		Ctx:    ctx,
+	}
+
+	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+		t.Fatalf("Execute error: %v", execErr)
+	}
+
+	relErr := lease.Release()
+	if !errors.Is(relErr, expectedErr) {
+		t.Errorf("expected Release to propagate DB error %v, got %v", expectedErr, relErr)
+	}
+
+	// Session should be evicted from pool
+	pool.mu.RLock()
+	_, exists := pool.sessions["target-fail-rot"]
+	pool.mu.RUnlock()
+	if exists {
+		t.Errorf("expected session to be evicted from pool after DB latch failure")
+	}
+}
+
+func TestGeminiAPIPool_AcquireLease_CancelRotation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	var rotationCalled bool
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:          "test-key",
+		Model:           "gemini-2.5-flash",
+		BaseURL:         ts.URL,
+		HTTPClient:      ts.Client(),
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			return nil
+		},
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-cancel-rot")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "first message",
+		Ctx:    ctx,
+	}
+
+	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+		t.Fatalf("Execute error: %v", execErr)
+	}
+
+	lease.CancelRotation()
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if rotationCalled {
+		t.Error("expected OnSessionRotated NOT to be called when CancelRotation was invoked")
+	}
+}
+
+func TestGeminiAPIPool_AcquireLease_ConcurrencySerialization(t *testing.T) {
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:            "test-key",
+		Model:             "gemini-2.5-flash",
+		TargetLockTimeout: 100 * time.Millisecond,
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease1, err := pool.AcquireLease(ctx, "target-conc")
+	if err != nil {
+		t.Fatalf("lease1 AcquireLease error: %v", err)
+	}
+
+	// lease2 should time out while lease1 is held
+	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	_, err2 := pool.AcquireLease(ctxTimeout, "target-conc")
+	if err2 == nil {
+		t.Fatalf("expected lease2 AcquireLease to time out while lease1 is held")
+	}
+
+	// Release lease1
+	if err := lease1.Release(); err != nil {
+		t.Fatalf("lease1 release error: %v", err)
+	}
+
+	// lease3 should now succeed
+	lease3, err3 := pool.AcquireLease(ctx, "target-conc")
+	if err3 != nil {
+		t.Fatalf("lease3 AcquireLease error after lease1 release: %v", err3)
+	}
+	_ = lease3.Release()
+}
+
+func TestGeminiAPIPool_AcquireLease_Validation(t *testing.T) {
+	ctx := context.Background()
+
+	// Nil receiver
+	var nilPool *GeminiAPIPool
+	if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
+		t.Error("expected error from nil pool AcquireLease")
+	}
+
+	// Empty targetKey
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "test"})
+	defer pool.Close()
+
+	if _, err := pool.AcquireLease(ctx, "   "); err == nil {
+		t.Error("expected error from empty targetKey AcquireLease")
 	}
 }

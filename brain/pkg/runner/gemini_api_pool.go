@@ -20,6 +20,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/mcp"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/google/uuid"
 )
 
 var apiKeyQueryRegex = regexp.MustCompile(`(?i)(key=)[^& \t\r\n"']+`)
@@ -410,6 +411,10 @@ type GeminiAPIPoolConfig struct {
 	DataDir                 string
 	MemoryRetriever         MemoryRetriever
 	AmbientContextRetriever AmbientContextRetriever
+	OnSessionRotated        func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error
+	GetSessionRecord        func(ctx context.Context, targetKey string) (SessionRecord, error)
+	MaxSessionTurns         int
+	TargetLockTimeout       time.Duration
 }
 
 // geminiFunctionCall represents a function call requested by the model.
@@ -490,11 +495,19 @@ type geminiStreamChunk struct {
 
 // GeminiAPIPool manages direct REST-based sessions for target devices.
 type GeminiAPIPool struct {
-	cfg      GeminiAPIPoolConfig
-	sessions map[string]*GeminiAPISession
-	mu       sync.RWMutex
-	closed   bool
+	cfg         GeminiAPIPoolConfig
+	sessions    map[string]*GeminiAPISession
+	mu          sync.RWMutex
+	targetLocks map[string]*targetLock
+	targetMu    sync.Mutex
+	closed      bool
 }
+
+var (
+	_ AgentPool       = (*GeminiAPIPool)(nil)
+	_ SessionRotator  = (*GeminiAPIPool)(nil)
+	_ LeasedAgentPool = (*GeminiAPIPool)(nil)
+)
 
 var (
 	_ AgentPool      = (*GeminiAPIPool)(nil)
@@ -544,8 +557,9 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 		}
 	}
 	return &GeminiAPIPool{
-		cfg:      cfg,
-		sessions: make(map[string]*GeminiAPISession),
+		cfg:         cfg,
+		sessions:    make(map[string]*GeminiAPISession),
+		targetLocks: make(map[string]*targetLock),
 	}
 }
 
@@ -1303,4 +1317,244 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	}
 
 	return nil
+}
+
+func (p *GeminiAPIPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
+	p.targetMu.Lock()
+	if p.targetLocks == nil {
+		p.targetLocks = make(map[string]*targetLock)
+	}
+	tl, ok := p.targetLocks[targetKey]
+	if !ok {
+		tl = &targetLock{
+			sem: make(chan struct{}, 1),
+		}
+		p.targetLocks[targetKey] = tl
+	}
+	tl.refs++
+	p.targetMu.Unlock()
+
+	timeout := p.cfg.TargetLockTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case tl.sem <- struct{}{}:
+		return tl, nil
+	case <-lockCtx.Done():
+		p.releaseTargetLock(targetKey, tl, false)
+		return nil, fmt.Errorf("timeout waiting for target lock for %s: %w", targetKey, lockCtx.Err())
+	}
+}
+
+func (p *GeminiAPIPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {
+	if held {
+		select {
+		case <-tl.sem:
+		default:
+		}
+	}
+	p.targetMu.Lock()
+	tl.refs--
+	if tl.refs <= 0 {
+		delete(p.targetLocks, targetKey)
+	}
+	p.targetMu.Unlock()
+}
+
+// AcquireLease blocks until the target lock is acquired, ensures a session is initialized,
+// and returns an exclusive SessionLease.
+func (p *GeminiAPIPool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
+	if p == nil {
+		return nil, errors.New("gemini api pool is uninitialized")
+	}
+	trimmedKey := strings.TrimSpace(targetKey)
+	if trimmedKey == "" {
+		return nil, errors.New("targetKey cannot be empty")
+	}
+
+	tl, err := p.acquireTargetLock(ctx, trimmedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var rec SessionRecord
+	if p.cfg.GetSessionRecord != nil {
+		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil {
+			rec = r
+		}
+	}
+
+	sess, sErr := p.GetOrCreateSession(ctx, trimmedKey, rec.ActiveSessionID)
+	if sErr != nil {
+		p.releaseTargetLock(trimmedKey, tl, true)
+		return nil, fmt.Errorf("failed to get or create session for %s: %w", trimmedKey, sErr)
+	}
+
+	gSess, ok := sess.(*GeminiAPISession)
+	if !ok {
+		p.releaseTargetLock(trimmedKey, tl, true)
+		return nil, fmt.Errorf("unexpected session type for %s", trimmedKey)
+	}
+
+	isCold := false
+	turnCount := 0
+	if rec.TurnCount == 0 || rec.ActiveSessionID == "" {
+		isCold = true
+	} else {
+		turnCount = rec.TurnCount
+	}
+
+	sessID := gSess.SessionID()
+	if sessID == "" {
+		sessID = rec.ActiveSessionID
+	}
+
+	lease := &geminiSessionLease{
+		pool:       p,
+		session:    gSess,
+		targetKey:  trimmedKey,
+		sessionID:  sessID,
+		prevSessID: rec.PreviousSessionID,
+		isCold:     isCold,
+		turnCount:  turnCount,
+		lock:       tl,
+	}
+	return lease, nil
+}
+
+type geminiSessionLease struct {
+	pool        *GeminiAPIPool
+	session     *GeminiAPISession
+	targetKey   string
+	sessionID   string
+	prevSessID  string
+	isCold      bool
+	turnCount      int
+	cancelRotation bool
+	lock           *targetLock
+	releaseOnce    sync.Once
+}
+
+var _ SessionLease = (*geminiSessionLease)(nil)
+
+func (l *geminiSessionLease) CancelRotation() {
+	l.cancelRotation = true
+}
+
+func (l *geminiSessionLease) SessionID() string {
+	return l.sessionID
+}
+
+func (l *geminiSessionLease) PreviousSessionID() string {
+	return l.prevSessID
+}
+
+func (l *geminiSessionLease) IsCold() bool {
+	return l.isCold
+}
+
+func (l *geminiSessionLease) TurnCount() int {
+	return l.turnCount
+}
+
+func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
+	if turn == nil {
+		return nil, errors.New("turn context cannot be nil")
+	}
+	if turn.Ctx == nil {
+		turn.Ctx = ctx
+	}
+
+	compiledPrompt := turn.Prompt
+	if l.isCold {
+		scopeInst := strings.TrimSpace(turn.ScopeInstructions)
+		if scopeInst == "" {
+			scopeInst = strings.TrimSpace(turn.ChannelInstructions)
+		}
+		if scopeInst != "" && !strings.Contains(compiledPrompt, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(compiledPrompt, "<CHANNEL_INSTRUCTIONS>") {
+			scopeBlock := fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
+			compiledPrompt = scopeBlock + "\n\n" + compiledPrompt
+		}
+		if l.prevSessID != "" && !strings.Contains(compiledPrompt, "<PREVIOUS_SESSION>") {
+			prevBlock := fmt.Sprintf("<PREVIOUS_SESSION>\nPrevious Session ID: %s\n</PREVIOUS_SESSION>", l.prevSessID)
+			compiledPrompt = prevBlock + "\n\n" + compiledPrompt
+		}
+		if strings.TrimSpace(turn.ThreadSummary) != "" && !strings.Contains(compiledPrompt, "<THREAD_SUMMARY>") {
+			sumBlock := fmt.Sprintf("<THREAD_SUMMARY>\n%s\n</THREAD_SUMMARY>", strings.TrimSpace(turn.ThreadSummary))
+			compiledPrompt = sumBlock + "\n\n" + compiledPrompt
+		}
+	}
+	if strings.TrimSpace(turn.CoordinationContext) != "" && !strings.Contains(compiledPrompt, "<COORDINATION_CONTEXT>") {
+		coordBlock := fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(turn.CoordinationContext))
+		compiledPrompt = coordBlock + "\n\n" + compiledPrompt
+	}
+
+	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+	combinedSink := &leaseTurnSinkWrapper{
+		inner: turn.Sink,
+		buf:   bufSink,
+	}
+	origSink := turn.Sink
+	turn.Sink = combinedSink
+	defer func() {
+		turn.Sink = origSink
+	}()
+
+	if err := l.session.Send(compiledPrompt, turn); err != nil {
+		return nil, err
+	}
+
+	res, waitErr := bufSink.Wait(ctx)
+	if waitErr != nil {
+		return nil, waitErr
+	}
+	l.turnCount++
+	l.isCold = false
+	return res, nil
+}
+
+func (l *geminiSessionLease) Release() error {
+	var releaseErr error
+	l.releaseOnce.Do(func() {
+		defer l.pool.releaseTargetLock(l.targetKey, l.lock, true)
+
+		if l.cancelRotation {
+			return
+		}
+
+		shouldRotate, reason := l.pool.ShouldRotateSession(l.session)
+		if !shouldRotate && l.pool.cfg.MaxSessionTurns > 0 && l.turnCount >= l.pool.cfg.MaxSessionTurns {
+			shouldRotate = true
+			reason = fmt.Sprintf("reached maximum turn threshold (%d)", l.pool.cfg.MaxSessionTurns)
+		}
+
+		if shouldRotate {
+			log.Printf("[GeminiAPIPool] Session rotation triggered for %s (reason: %s)", l.targetKey, reason)
+			newSessionID := uuid.New().String()
+			oldSessionID := l.sessionID
+
+			if l.pool.cfg.OnSessionRotated != nil {
+				if rotErr := l.pool.cfg.OnSessionRotated(context.Background(), l.targetKey, oldSessionID, newSessionID); rotErr != nil {
+					log.Printf("[GeminiAPIPool] Persistence callback failed during rotation for %s: %v. Resetting session to maintain DB truth.", l.targetKey, rotErr)
+					l.pool.mu.Lock()
+					delete(l.pool.sessions, l.targetKey)
+					l.pool.mu.Unlock()
+					releaseErr = rotErr
+					return
+				}
+			}
+
+			if _, rotErr := l.pool.RotateSession(context.Background(), l.targetKey); rotErr != nil {
+				log.Printf("[GeminiAPIPool] Warning rotating session for %s: %v", l.targetKey, rotErr)
+				l.pool.mu.Lock()
+				delete(l.pool.sessions, l.targetKey)
+				l.pool.mu.Unlock()
+			}
+		}
+	})
+	return releaseErr
 }

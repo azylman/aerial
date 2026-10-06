@@ -37,8 +37,9 @@ type InterchangeablePool struct {
 }
 
 var (
-	_ AgentPool      = (*InterchangeablePool)(nil)
-	_ SessionRotator = (*InterchangeablePool)(nil)
+	_ AgentPool       = (*InterchangeablePool)(nil)
+	_ SessionRotator  = (*InterchangeablePool)(nil)
+	_ LeasedAgentPool = (*InterchangeablePool)(nil)
 )
 
 // NewInterchangeablePool constructs an InterchangeablePool wrapping an underlying UnifiedProcessPool.
@@ -299,6 +300,14 @@ func (p *InterchangeablePool) SetSessionManager(sm *session.Manager) {
 	p.underlying.SetSessionManager(sm)
 }
 
+// SetSessionCallbacks updates the session record lookup and rotation callbacks on the underlying pool if supported.
+func (p *InterchangeablePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
+	if p == nil || p.underlying == nil {
+		return
+	}
+	p.underlying.SetSessionCallbacks(getRec, onRot)
+}
+
 // MarkDirty delegates dirty marking and eviction to the underlying pool.
 func (p *InterchangeablePool) MarkDirty() {
 	if p == nil || p.underlying == nil {
@@ -476,4 +485,108 @@ func (s *releaseTurnSink) OnError(err error) {
 	if s.inner != nil {
 		s.inner.OnError(err)
 	}
+}
+
+// AcquireLease leases an available worker slot and delegates lease acquisition to the underlying pool.
+func (p *InterchangeablePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
+	if p == nil {
+		return nil, errors.New("interchangeable pool is uninitialized")
+	}
+	if p.closed.Load() {
+		return nil, errors.New("interchangeable pool is closed")
+	}
+
+	var workerKey string
+	var pDone <-chan struct{}
+	if p.ctx != nil {
+		pDone = p.ctx.Done()
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-pDone:
+		return nil, errors.New("interchangeable pool is closed")
+	case key := <-p.available:
+		workerKey = key
+	}
+
+	if p.closed.Load() {
+		select {
+		case p.available <- workerKey:
+		default:
+		}
+		return nil, errors.New("interchangeable pool is closed")
+	}
+
+	if p.underlying == nil {
+		select {
+		case p.available <- workerKey:
+		default:
+		}
+		return nil, errors.New("underlying pool is nil")
+	}
+
+	lease, err := p.underlying.AcquireLease(ctx, workerKey)
+	if err != nil {
+		if !p.closed.Load() {
+			select {
+			case p.available <- workerKey:
+			default:
+			}
+		}
+		return nil, err
+	}
+
+	return &interchangeableSessionLease{
+		inner:     lease,
+		pool:      p,
+		workerKey: workerKey,
+	}, nil
+}
+
+type interchangeableSessionLease struct {
+	inner     SessionLease
+	pool      *InterchangeablePool
+	workerKey string
+	once      sync.Once
+}
+
+var _ SessionLease = (*interchangeableSessionLease)(nil)
+
+func (l *interchangeableSessionLease) SessionID() string {
+	return l.inner.SessionID()
+}
+
+func (l *interchangeableSessionLease) PreviousSessionID() string {
+	return l.inner.PreviousSessionID()
+}
+
+func (l *interchangeableSessionLease) IsCold() bool {
+	return l.inner.IsCold()
+}
+
+func (l *interchangeableSessionLease) TurnCount() int {
+	return l.inner.TurnCount()
+}
+
+func (l *interchangeableSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
+	return l.inner.Execute(ctx, turn)
+}
+
+func (l *interchangeableSessionLease) CancelRotation() {
+	l.inner.CancelRotation()
+}
+
+func (l *interchangeableSessionLease) Release() error {
+	var err error
+	l.once.Do(func() {
+		err = l.inner.Release()
+		if !l.pool.closed.Load() {
+			select {
+			case l.pool.available <- l.workerKey:
+			default:
+			}
+		}
+	})
+	return err
 }

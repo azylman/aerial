@@ -801,7 +801,8 @@ func (s *testEventSink) OnToolCall(name, cmd string) {
 	}
 }
 
-func (s *testEventSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {}
+func (s *testEventSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+}
 
 func (s *testEventSink) OnSkillActivated(skillName, source string) {}
 
@@ -920,7 +921,6 @@ func TestReleaseTurnSink_ToolAndSkillForwarding(t *testing.T) {
 	nilRS.OnSkillActivated("self-improvement", "discord")
 }
 
-
 func TestInterchangeablePool_SessionRotator(t *testing.T) {
 	mockSpawner := &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
@@ -958,4 +958,136 @@ func TestInterchangeablePool_SessionRotator(t *testing.T) {
 	if rotSess != nil {
 		t.Errorf("expected RotateSession to return nil for InterchangeablePool")
 	}
+}
+
+func TestInterchangeablePool_AcquireLease_Lifecycle(t *testing.T) {
+	mock := createTestSpawner()
+	underlying := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer underlying.Close()
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 2,
+	})
+	defer pool.Close()
+	ctx := context.Background()
+	if err := pool.Initialize(ctx); err != nil {
+		t.Fatalf("unexpected Initialize error: %v", err)
+	}
+
+	lease, err := pool.AcquireLease(ctx, "target-key")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	if lease.SessionID() == "" {
+		t.Error("expected non-empty SessionID")
+	}
+	_ = lease.PreviousSessionID()
+	_ = lease.IsCold()
+	_ = lease.TurnCount()
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "custom-prompt",
+		Ctx:    ctx,
+	}
+	res, execErr := lease.Execute(ctx, turnCtx)
+	if execErr != nil {
+		t.Fatalf("unexpected Execute error: %v", execErr)
+	}
+	if res == nil || res.Response != "custom-result-ok" {
+		t.Errorf("expected 'custom-result-ok', got %+v", res)
+	}
+
+	lease.CancelRotation()
+
+	availBefore := pool.AvailableCount()
+	if err := lease.Release(); err != nil {
+		t.Fatalf("unexpected Release error: %v", err)
+	}
+	if pool.AvailableCount() != availBefore+1 {
+		t.Errorf("expected worker to be returned to pool, avail: %d", pool.AvailableCount())
+	}
+
+	// Idempotent double release
+	if err := lease.Release(); err != nil {
+		t.Errorf("unexpected error on second Release: %v", err)
+	}
+}
+
+func TestInterchangeablePool_AcquireLease_ErrorBranches(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil receiver
+	var nilPool *InterchangeablePool
+	if _, err := nilPool.AcquireLease(ctx, "k"); err == nil {
+		t.Error("expected error from nil pool AcquireLease")
+	}
+
+	// 2. Closed pool
+	mock := createTestSpawner()
+	underlying := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer underlying.Close()
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 1,
+	})
+	_ = pool.Initialize(ctx)
+	_ = pool.Close()
+
+	if _, err := pool.AcquireLease(ctx, "k"); err == nil {
+		t.Error("expected error from closed pool AcquireLease")
+	}
+
+	// 3. Cancelled context
+	pool2 := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 1,
+	})
+	defer pool2.Close()
+	// Drain available workers
+	<-pool2.available
+	ctxCancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := pool2.AcquireLease(ctxCancelled, "k"); err == nil {
+		t.Error("expected error from cancelled context AcquireLease")
+	}
+
+	// 4. Closed while waiting or underlying nil
+	pool3 := &InterchangeablePool{
+		available: make(chan string, 1),
+	}
+	pool3.available <- "w1"
+	if _, err := pool3.AcquireLease(ctx, "k"); err == nil {
+		t.Error("expected error when underlying pool is nil")
+	}
+
+	poolClosedWhileAvailable := &InterchangeablePool{
+		available: make(chan string, 1),
+	}
+	poolClosedWhileAvailable.closed.Store(true)
+	poolClosedWhileAvailable.available <- "w1"
+	if _, err := poolClosedWhileAvailable.AcquireLease(ctx, "k"); err == nil {
+		t.Error("expected error when pool closed flag is set")
+	}
+}
+
+func TestInterchangeablePool_SetSessionCallbacks(t *testing.T) {
+	mock := createTestSpawner()
+	underlying := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer underlying.Close()
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 1,
+	})
+	defer pool.Close()
+
+	// Normal call
+	pool.SetSessionManager(nil)
+	pool.SetSessionCallbacks(nil, nil)
+
+	// Nil safety
+	var nilPool *InterchangeablePool
+	nilPool.SetSessionManager(nil)
+	nilPool.SetSessionCallbacks(nil, nil)
+
+	nilUnderlying := &InterchangeablePool{}
+	nilUnderlying.SetSessionManager(nil)
+	nilUnderlying.SetSessionCallbacks(nil, nil)
 }

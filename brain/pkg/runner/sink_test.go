@@ -327,3 +327,13 @@ func TestBufferingTurnSink_ToolAndSkillHooks(t *testing.T) {
 	nilSink.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
 	nilSink.OnSkillActivated("self-improvement", "discord")
 }
+
+func TestThrowawayTurnSink_UnusedHooks(t *testing.T) {
+	sink := NewThrowawayTurnSink()
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnToolCall("tool", "cmd")
+	sink.OnToolCompleted("tool", "srv", time.Second, "ok")
+	sink.OnSkillActivated("skill", "src")
+	sink.OnTextDelta("delta")
+}
