@@ -451,7 +451,9 @@ func (s *releaseTurnSink) OnThinking() {
 
 func (s *releaseTurnSink) OnStepStarted(stepIndex int) {
 	if s.inner != nil {
-		s.inner.OnStepStarted(stepIndex)
+		if sa, ok := s.inner.(StepAwareSink); ok {
+			sa.OnStepStarted(stepIndex)
+		}
 	}
 }
 

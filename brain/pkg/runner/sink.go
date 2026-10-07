@@ -48,9 +48,6 @@ func (s *ThrowawayTurnSink) OnTurnStarted() {}
 // OnThinking is a no-op for throwaway turns.
 func (s *ThrowawayTurnSink) OnThinking() {}
 
-// OnStepStarted is a no-op for throwaway turns.
-func (s *ThrowawayTurnSink) OnStepStarted(stepIndex int) {}
-
 // OnToolCall is a no-op for throwaway turns.
 func (s *ThrowawayTurnSink) OnToolCall(toolName, commandName string) {}
 
@@ -135,6 +132,7 @@ type BufferingTurnSink struct {
 }
 
 var _ TurnSink = (*BufferingTurnSink)(nil)
+var _ StepAwareSink = (*BufferingTurnSink)(nil)
 
 // NewBufferingTurnSink constructs an initialized BufferingTurnSink.
 func NewBufferingTurnSink(cfg BufferingTurnSinkConfig) *BufferingTurnSink {

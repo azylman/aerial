@@ -795,7 +795,6 @@ func (s *testEventSink) OnThinking() {
 	}
 }
 
-func (s *testEventSink) OnStepStarted(stepIndex int) {}
 
 func (s *testEventSink) OnToolCall(name, cmd string) {
 	if s.onTool != nil {

@@ -21,13 +21,18 @@ import (
 type TurnSink interface {
 	OnTurnStarted()
 	OnThinking()
-	OnStepStarted(stepIndex int)
 	OnToolCall(toolName, commandName string)
 	OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string)
 	OnSkillActivated(skillName, source string)
 	OnTextDelta(delta string)
 	OnResult(res *TurnResult)
 	OnError(err error)
+}
+
+// StepAwareSink is an optional interface that TurnSinks can implement
+// to receive step boundary notifications for intermediate delta purging.
+type StepAwareSink interface {
+	OnStepStarted(stepIndex int)
 }
 
 // TurnContext encapsulates the metadata, prompt, structured context, and callback sink for a single turn.
@@ -592,7 +597,9 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				d.inflightMu.Unlock()
 
 				if isNewStep {
-					activeTurn.Sink.OnStepStarted(stepIdx)
+					if sa, ok := activeTurn.Sink.(StepAwareSink); ok {
+						sa.OnStepStarted(stepIdx)
+					}
 				}
 			}
 

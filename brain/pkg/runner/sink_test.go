@@ -584,7 +584,6 @@ func TestThrowawayTurnSink_UnusedHooks(t *testing.T) {
 	sink := NewThrowawayTurnSink()
 	sink.OnTurnStarted()
 	sink.OnThinking()
-	sink.OnStepStarted(1)
 	sink.OnToolCall("tool", "cmd")
 	sink.OnToolCompleted("tool", "srv", time.Second, "ok")
 	sink.OnSkillActivated("skill", "src")

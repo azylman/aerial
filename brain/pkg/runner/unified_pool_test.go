@@ -947,7 +947,6 @@ type mockSinkCapture struct {
 
 func (s *mockSinkCapture) OnTurnStarted() {}
 func (s *mockSinkCapture) OnThinking()    { s.thinking = true }
-func (s *mockSinkCapture) OnStepStarted(stepIndex int) {}
 func (s *mockSinkCapture) OnToolCall(tool, cmd string) {
 	s.toolName = tool
 	s.commandName = cmd
