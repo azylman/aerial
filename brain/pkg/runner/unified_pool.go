@@ -835,6 +835,15 @@ func (s *leaseTurnSinkWrapper) OnThinking() {
 	s.buf.OnThinking()
 }
 
+func (s *leaseTurnSinkWrapper) OnStepStarted(stepIndex int) {
+	if s.inner != nil {
+		s.inner.OnStepStarted(stepIndex)
+	}
+	if s.buf != nil {
+		s.buf.OnStepStarted(stepIndex)
+	}
+}
+
 func (s *leaseTurnSinkWrapper) OnToolCall(toolName, commandName string) {
 	if s.inner != nil {
 		s.inner.OnToolCall(toolName, commandName)

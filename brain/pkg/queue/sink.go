@@ -87,6 +87,9 @@ func (d *DiscordTurnSink) OnTurnStarted() {}
 // OnThinking is called when the runner enters thinking mode.
 func (d *DiscordTurnSink) OnThinking() {}
 
+// OnStepStarted is a no-op for DiscordTurnSink.
+func (d *DiscordTurnSink) OnStepStarted(stepIndex int) {}
+
 // OnToolCall updates the status badge message with the executing tool name.
 func (d *DiscordTurnSink) OnToolCall(toolName, commandName string) {
 	if d.editor != nil && d.badgeMessageID != "" {
@@ -183,6 +186,9 @@ func (v *VoiceTurnSink) OnTurnStarted() {}
 
 // OnThinking is called when the runner enters thinking mode.
 func (v *VoiceTurnSink) OnThinking() {}
+
+// OnStepStarted is a no-op for VoiceTurnSink.
+func (v *VoiceTurnSink) OnStepStarted(stepIndex int) {}
 
 // OnToolCall is called when a tool invocation begins.
 func (v *VoiceTurnSink) OnToolCall(toolName, commandName string) {}

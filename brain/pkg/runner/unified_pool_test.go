@@ -947,6 +947,7 @@ type mockSinkCapture struct {
 
 func (s *mockSinkCapture) OnTurnStarted() {}
 func (s *mockSinkCapture) OnThinking()    { s.thinking = true }
+func (s *mockSinkCapture) OnStepStarted(stepIndex int) {}
 func (s *mockSinkCapture) OnToolCall(tool, cmd string) {
 	s.toolName = tool
 	s.commandName = cmd
@@ -2633,6 +2634,7 @@ func TestUnifiedProcessPool_LeaseTurnSinkWrapper_AllMethods(t *testing.T) {
 
 	wrapper.OnTurnStarted()
 	wrapper.OnThinking()
+	wrapper.OnStepStarted(1)
 	wrapper.OnToolCall("bash", "ls")
 	wrapper.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
 	wrapper.OnSkillActivated("self-improvement", "discord")
@@ -2656,6 +2658,7 @@ func TestUnifiedProcessPool_LeaseTurnSinkWrapper_AllMethods(t *testing.T) {
 	}
 	nilWrapper.OnTurnStarted()
 	nilWrapper.OnThinking()
+	nilWrapper.OnStepStarted(1)
 	nilWrapper.OnToolCall("bash", "ls")
 	nilWrapper.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
 	nilWrapper.OnSkillActivated("self-improvement", "discord")

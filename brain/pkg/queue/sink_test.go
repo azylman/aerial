@@ -679,6 +679,7 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	tSink := NewThrowawayTurnSink()
 	tSink.OnTurnStarted()
 	tSink.OnThinking()
+	tSink.OnStepStarted(1)
 	tSink.OnToolCall("test-tool", "test-cmd")
 	tSink.OnTextDelta("delta")
 
@@ -686,6 +687,7 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	dSink := NewDiscordTurnSink(nil, "chan-1", "msg-1", nil, nil)
 	dSink.OnTurnStarted()
 	dSink.OnThinking()
+	dSink.OnStepStarted(1)
 	dSink.OnToolCompleted("tool", "native", 10*time.Millisecond, "ok")
 	dSink.OnSkillActivated("skill", "discord")
 
@@ -694,6 +696,7 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	vSink := newVoiceTurnSink(context.Background(), func(s string) { voiceStatus = s }, nil, nil)
 	vSink.OnTurnStarted()
 	vSink.OnThinking()
+	vSink.OnStepStarted(1)
 	vSink.OnTextDelta("voice-delta")
 	vSink.OnToolCall("run_cmd", "sleep 1")
 	vSink.OnToolCompleted("run_cmd", "native", 10*time.Millisecond, "ok")
@@ -711,6 +714,7 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	rSink := newDiscordTurnSink(nil)
 	rSink.OnTurnStarted()
 	rSink.OnThinking()
+	rSink.OnStepStarted(1)
 	rSink.OnTextDelta("turn-delta")
 	rSink.OnToolCall("tool", "cmd")
 	rSink.OnToolCall("", "")
@@ -719,6 +723,7 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	voiceSink := NewVoiceTurnSink(voiceWriter, "device-noop")
 	voiceSink.OnTurnStarted()
 	voiceSink.OnThinking()
+	voiceSink.OnStepStarted(1)
 	voiceSink.OnToolCall("tool", "cmd")
 	voiceSink.OnToolCompleted("tool", "native", 10*time.Millisecond, "ok")
 	voiceSink.OnSkillActivated("skill", "voice")
@@ -772,16 +777,19 @@ func TestTurnSinks_NoopCallbacks(t *testing.T) {
 	tt := NewThrowawayTurnSink()
 	tt.OnTurnStarted()
 	tt.OnThinking()
+	tt.OnStepStarted(1)
 	tt.OnToolCall("test_tool", "echo")
 	tt.OnTextDelta("delta")
 
 	dt := NewDiscordTurnSink(nil, "chan", "msg", nil, nil)
 	dt.OnTurnStarted()
 	dt.OnThinking()
+	dt.OnStepStarted(1)
 
 	vt := NewVoiceTurnSink(nil, "kiosk")
 	vt.OnTurnStarted()
 	vt.OnThinking()
+	vt.OnStepStarted(1)
 	vt.OnToolCall("test_tool", "echo")
 }
 
