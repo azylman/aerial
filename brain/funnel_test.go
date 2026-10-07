@@ -65,6 +65,15 @@ func newTestWorkerPool(dbOrStore any) *queue.WorkerPool {
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return `{"event":"result","result":{"status":"SUCCESS","response":"mock test response"}}`, "", 0, nil
 		},
+		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(status string)) (string, string, error) {
+			return "mock voice response", sessionID, nil
+		},
+		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(status string), onSentence func(sentence string)) (string, string, error) {
+			if onSentence != nil {
+				onSentence("mock voice response")
+			}
+			return "mock voice response", sessionID, nil
+		},
 		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
 			return "mock notification"
 		},
