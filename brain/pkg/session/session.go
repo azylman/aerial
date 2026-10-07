@@ -26,11 +26,11 @@ const DefaultMaxSessionSteps = 180
 // DefaultMaxTranscriptBytes defines the engine-wide maximum transcript file size in bytes (500 KB) before session rotation.
 const DefaultMaxTranscriptBytes = 500 * 1024
 
-// DefaultMaxSessionDBBytes defines the engine-wide maximum conversation SQLite/protobuf size in bytes (1.5 MB) before session rotation.
-const DefaultMaxSessionDBBytes = 1536 * 1024
+// DefaultMaxSessionDBBytes defines the engine-wide maximum conversation SQLite/protobuf size in bytes (8 MB) before session rotation.
+const DefaultMaxSessionDBBytes = 8 * 1024 * 1024
 
-// DefaultMaxQuotaPauseDBBytes defines the reactive conversation size threshold in bytes (1.2 MB) to trigger session rotation upon quota exhaustion.
-const DefaultMaxQuotaPauseDBBytes = 1200 * 1024
+// DefaultMaxQuotaPauseDBBytes defines the reactive conversation size threshold in bytes (6 MB) to trigger session rotation upon quota exhaustion.
+const DefaultMaxQuotaPauseDBBytes = 6 * 1024 * 1024
 
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
