@@ -837,7 +837,9 @@ func (s *leaseTurnSinkWrapper) OnThinking() {
 
 func (s *leaseTurnSinkWrapper) OnStepStarted(stepIndex int) {
 	if s.inner != nil {
-		s.inner.OnStepStarted(stepIndex)
+		if sa, ok := s.inner.(StepAwareSink); ok {
+			sa.OnStepStarted(stepIndex)
+		}
 	}
 	if s.buf != nil {
 		s.buf.OnStepStarted(stepIndex)
