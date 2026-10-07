@@ -2993,6 +2993,12 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			res.HeadSHA = p.HeadCommit.ID
 		}
 
+		if !strings.HasPrefix(p.Ref, "refs/heads/main") {
+			log.Printf("[webhooks-router] [github] [push] non-main branch push on ref %s (repo %s), skipping PR merge resolution", p.Ref, res.Repo)
+			res.ResolutionSource = "non_main_branch"
+			return res, nil
+		}
+
 		if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 			if s.registry != nil {
 				prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA)

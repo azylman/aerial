@@ -1183,6 +1183,28 @@ func TestProcessGitHubEvent_Push(t *testing.T) {
 		t.Errorf("unexpected push tag result: %+v", resTag)
 	}
 
+	// 4. Feature branch push (non-main branch skips merge resolution)
+	payloadFeat := `{
+		"ref": "refs/heads/feat/new-feature",
+		"before": "featprev",
+		"after": "featsha222",
+		"head_commit": {
+			"id": "featsha222",
+			"message": "feat: new feature"
+		},
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	resFeat, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-feat", []byte(payloadFeat))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push feat failed: %v", err)
+	}
+	if resFeat.ResolutionSource != "non_main_branch" || resFeat.PRNumber != 0 {
+		t.Errorf("unexpected push feat result: %+v", resFeat)
+	}
+
 	// Malformed JSON
 	_, err = srv.ProcessGitHubEvent(ctx, "push", "del-push-4", []byte(`{invalid`))
 	if err == nil {
@@ -1853,6 +1875,24 @@ func TestProcessGitHubEvent_RegistryTransitions(t *testing.T) {
 	}
 	if len(mockReg.backfillCalls) != 1 || mockReg.backfillCalls[0].prNumber != 522 || mockReg.backfillCalls[0].mergeSHA != "pushsha999" {
 		t.Errorf("unexpected backfillCalls: %+v", mockReg.backfillCalls)
+	}
+
+	// 9b. Push to feature branch does NOT trigger BackfillPushMergeSHA
+	payloadFeatPush := `{
+		"ref": "refs/heads/feat/branch-1",
+		"after": "featsha888",
+		"repository": {"full_name": "azylman/aerial"},
+		"head_commit": {"id": "featsha888", "message": "feat: work in progress"}
+	}`
+	resFeatPush, err := srvWithGH.ProcessGitHubEvent(ctx, "push", "del-push-feat-reg", []byte(payloadFeatPush))
+	if err != nil {
+		t.Fatalf("push to feature branch failed: %v", err)
+	}
+	if len(mockReg.backfillCalls) != 1 {
+		t.Errorf("expected backfillCalls to remain 1 after feature push, got %d", len(mockReg.backfillCalls))
+	}
+	if resFeatPush.ResolutionSource != "non_main_branch" {
+		t.Errorf("expected ResolutionSource non_main_branch, got %s", resFeatPush.ResolutionSource)
 	}
 
 	// 10. Registry error propagation: error bubbles up to River
