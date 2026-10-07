@@ -8,27 +8,35 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/runner"
-	"github.com/google/uuid"
 )
 
-type legacyRunnerAgentPool struct {
+func init() {
+	testPoolHook = func(cfg WorkerPoolConfig) runner.AgentPool {
+		if cfg.RunnerFunc != nil || cfg.RunnerWithOptionsFunc != nil {
+			return newTestRunnerAgentPool(cfg, cfg.ProcessPool)
+		}
+		return nil
+	}
+}
+
+type testRunnerAgentPool struct {
 	cfg         WorkerPoolConfig
 	trackerPool runner.AgentPool
 	mu          sync.Mutex
-	sessions    map[string]*legacyRunnerAgentSession
+	sessions    map[string]*testRunnerAgentSession
 	locks       map[string]*sync.Mutex
 }
 
-func newLegacyRunnerAgentPool(cfg WorkerPoolConfig, trackerPool runner.AgentPool) *legacyRunnerAgentPool {
-	return &legacyRunnerAgentPool{
+func newTestRunnerAgentPool(cfg WorkerPoolConfig, trackerPool runner.AgentPool) *testRunnerAgentPool {
+	return &testRunnerAgentPool{
 		cfg:         cfg,
 		trackerPool: trackerPool,
-		sessions:    make(map[string]*legacyRunnerAgentSession),
+		sessions:    make(map[string]*testRunnerAgentSession),
 		locks:       make(map[string]*sync.Mutex),
 	}
 }
 
-func (p *legacyRunnerAgentPool) getTargetLock(targetKey string) *sync.Mutex {
+func (p *testRunnerAgentPool) getTargetLock(targetKey string) *sync.Mutex {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.locks == nil {
@@ -42,7 +50,7 @@ func (p *legacyRunnerAgentPool) getTargetLock(targetKey string) *sync.Mutex {
 	return l
 }
 
-func (p *legacyRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, bool) {
+func (p *testRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, bool) {
 	if p.trackerPool != nil {
 		if tp, ok := p.trackerPool.(interface {
 			Get(string) (*runner.StreamingDaemon, bool)
@@ -53,7 +61,7 @@ func (p *legacyRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, b
 	return nil, false
 }
 
-func (p *legacyRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string, sessionID string) (*runner.StreamingDaemon, error) {
+func (p *testRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string, sessionID string) (*runner.StreamingDaemon, error) {
 	if p.trackerPool != nil {
 		if tp, ok := p.trackerPool.(interface {
 			GetOrCreate(context.Context, string, string) (*runner.StreamingDaemon, error)
@@ -64,7 +72,16 @@ func (p *legacyRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string
 	return nil, fmt.Errorf("no underlying process pool")
 }
 
-func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
+func (p *testRunnerAgentPool) Underlying() *runner.UnifiedProcessPool {
+	if p.trackerPool != nil {
+		if up, ok := p.trackerPool.(*runner.UnifiedProcessPool); ok {
+			return up
+		}
+	}
+	return nil
+}
+
+func (p *testRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	trimmed := strings.TrimSpace(sessionID)
@@ -76,7 +93,7 @@ func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKe
 		s.mu.Unlock()
 		return s, nil
 	}
-	s := &legacyRunnerAgentSession{
+	s := &testRunnerAgentSession{
 		pool:      p,
 		targetKey: targetKey,
 		sessionID: trimmed,
@@ -85,9 +102,9 @@ func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKe
 	return s, nil
 }
 
-func (p *legacyRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
+func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
 	if p == nil {
-		return nil, fmt.Errorf("legacy runner pool is uninitialized")
+		return nil, fmt.Errorf("test runner pool is uninitialized")
 	}
 	trimmedKey := strings.TrimSpace(targetKey)
 	if trimmedKey == "" {
@@ -102,10 +119,10 @@ func (p *legacyRunnerAgentPool) AcquireLease(ctx context.Context, targetKey stri
 		tl.Unlock()
 		return nil, err
 	}
-	s, ok := sess.(*legacyRunnerAgentSession)
+	s, ok := sess.(*testRunnerAgentSession)
 	if !ok {
 		tl.Unlock()
-		return nil, fmt.Errorf("session is not *legacyRunnerAgentSession")
+		return nil, fmt.Errorf("session is not *testRunnerAgentSession")
 	}
 
 	var rec runner.SessionRecord
@@ -140,7 +157,7 @@ func (p *legacyRunnerAgentPool) AcquireLease(ctx context.Context, targetKey stri
 	s.sessionID = sessID
 	s.mu.Unlock()
 
-	lease := &legacySessionLease{
+	lease := &testSessionLease{
 		pool:       p,
 		session:    s,
 		targetKey:  trimmedKey,
@@ -153,65 +170,70 @@ func (p *legacyRunnerAgentPool) AcquireLease(ctx context.Context, targetKey stri
 	return lease, nil
 }
 
-func (p *legacyRunnerAgentPool) RotateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
-	newSessID := uuid.New().String()
+func (p *testRunnerAgentPool) RotateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	trimmedKey := strings.TrimSpace(targetKey)
+	if trimmedKey == "" {
+		return nil, fmt.Errorf("targetKey cannot be empty")
+	}
+
+	oldSessID := ""
+	if existing, ok := p.sessions[trimmedKey]; ok {
+		existing.mu.Lock()
+		oldSessID = existing.sessionID
+		existing.mu.Unlock()
+	}
+
+	newSessID := ""
 	if p.cfg.Store != nil {
-		if rErr := p.cfg.Store.RotateSessionID(ctx, targetKey, newSessID); rErr != nil {
-			return nil, rErr
+		storedID, err := p.cfg.Store.GetSessionID(ctx, trimmedKey)
+		if err == nil && storedID != "" && storedID != oldSessID {
+			newSessID = storedID
 		}
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	oldSessID := ""
-	if s, ok := p.sessions[targetKey]; ok {
-		s.mu.Lock()
-		oldSessID = s.sessionID
-		s.sessionID = newSessID
-		s.prevSessionID = oldSessID
-		s.turnCount = 0
-		s.isCold = true
-		s.mu.Unlock()
-		return s, nil
-	}
-	s := &legacyRunnerAgentSession{
+	s := &testRunnerAgentSession{
 		pool:          p,
-		targetKey:     targetKey,
+		targetKey:     trimmedKey,
 		sessionID:     newSessID,
 		prevSessionID: oldSessID,
 		turnCount:     0,
 		isCold:        true,
 	}
-	p.sessions[targetKey] = s
+	p.sessions[trimmedKey] = s
 	return s, nil
 }
 
-func (p *legacyRunnerAgentPool) ShouldRotateSession(sess runner.AgentSession) (bool, string) {
-	if s, ok := sess.(*legacyRunnerAgentSession); ok && s != nil {
+func (p *testRunnerAgentPool) ShouldRotateSession(sess runner.AgentSession) (bool, string) {
+	if s, ok := sess.(*testRunnerAgentSession); ok && s != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.turnCount >= runner.DefaultMaxSessionTurns {
-			return true, fmt.Sprintf("turn count threshold exceeded (%d >= %d)", s.turnCount, runner.DefaultMaxSessionTurns)
+		if s.turnCount > runner.DefaultMaxSessionTurns {
+			return true, "turn_count_exceeded"
 		}
 	}
 	return false, ""
 }
 
-func (p *legacyRunnerAgentPool) Initialize(ctx context.Context) error {
+func (p *testRunnerAgentPool) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (p *legacyRunnerAgentPool) Close() error {
+func (p *testRunnerAgentPool) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessions = make(map[string]*testRunnerAgentSession)
 	return nil
 }
 
-var _ runner.AgentPool = (*legacyRunnerAgentPool)(nil)
-var _ runner.LeasedAgentPool = (*legacyRunnerAgentPool)(nil)
-var _ runner.SessionRotator = (*legacyRunnerAgentPool)(nil)
+var _ runner.AgentPool = (*testRunnerAgentPool)(nil)
+var _ runner.LeasedAgentPool = (*testRunnerAgentPool)(nil)
+var _ runner.SessionRotator = (*testRunnerAgentPool)(nil)
 
-type legacySessionLease struct {
-	pool        *legacyRunnerAgentPool
-	session     *legacyRunnerAgentSession
+type testSessionLease struct {
+	pool        *testRunnerAgentPool
+	session     *testRunnerAgentSession
 	targetKey   string
 	sessionID   string
 	prevSessID  string
@@ -221,9 +243,9 @@ type legacySessionLease struct {
 	releaseOnce sync.Once
 }
 
-var _ runner.SessionLease = (*legacySessionLease)(nil)
+var _ runner.SessionLease = (*testSessionLease)(nil)
 
-func (l *legacySessionLease) SessionID() string {
+func (l *testSessionLease) SessionID() string {
 	if l.session != nil {
 		if sID := l.session.SessionID(); sID != "" {
 			return sID
@@ -232,19 +254,19 @@ func (l *legacySessionLease) SessionID() string {
 	return l.sessionID
 }
 
-func (l *legacySessionLease) PreviousSessionID() string {
+func (l *testSessionLease) PreviousSessionID() string {
 	return l.prevSessID
 }
 
-func (l *legacySessionLease) IsCold() bool {
+func (l *testSessionLease) IsCold() bool {
 	return l.isCold
 }
 
-func (l *legacySessionLease) TurnCount() int {
+func (l *testSessionLease) TurnCount() int {
 	return l.turnCount
 }
 
-func (l *legacySessionLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
+func (l *testSessionLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
 	if turn == nil {
 		return nil, fmt.Errorf("turn context cannot be nil")
 	}
@@ -255,7 +277,7 @@ func (l *legacySessionLease) Execute(ctx context.Context, turn *runner.TurnConte
 	bufSink := runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{})
 	origSink := turn.Sink
 	if origSink != nil {
-		turn.Sink = &leaseTurnSinkWrapper{inner: origSink, buf: bufSink}
+		turn.Sink = &testTurnSinkWrapper{inner: origSink, buf: bufSink}
 	} else {
 		turn.Sink = bufSink
 	}
@@ -301,7 +323,7 @@ func (l *legacySessionLease) Execute(ctx context.Context, turn *runner.TurnConte
 	return res, nil
 }
 
-func (l *legacySessionLease) Release() error {
+func (l *testSessionLease) Release() error {
 	var releaseErr error
 	l.releaseOnce.Do(func() {
 		if l.lock != nil {
@@ -311,26 +333,26 @@ func (l *legacySessionLease) Release() error {
 	return releaseErr
 }
 
-type leaseTurnSinkWrapper struct {
+type testTurnSinkWrapper struct {
 	inner runner.TurnSink
 	buf   *runner.BufferingTurnSink
 }
 
-func (s *leaseTurnSinkWrapper) OnTurnStarted() {
+func (s *testTurnSinkWrapper) OnTurnStarted() {
 	if s.inner != nil {
 		s.inner.OnTurnStarted()
 	}
 	s.buf.OnTurnStarted()
 }
 
-func (s *leaseTurnSinkWrapper) OnThinking() {
+func (s *testTurnSinkWrapper) OnThinking() {
 	if s.inner != nil {
 		s.inner.OnThinking()
 	}
 	s.buf.OnThinking()
 }
 
-func (s *leaseTurnSinkWrapper) OnStepStarted(stepIndex int) {
+func (s *testTurnSinkWrapper) OnStepStarted(stepIndex int) {
 	if s.inner != nil {
 		if sa, ok := s.inner.(runner.StepAwareSink); ok {
 			sa.OnStepStarted(stepIndex)
@@ -339,50 +361,50 @@ func (s *leaseTurnSinkWrapper) OnStepStarted(stepIndex int) {
 	s.buf.OnStepStarted(stepIndex)
 }
 
-func (s *leaseTurnSinkWrapper) OnToolCall(toolName, commandName string) {
+func (s *testTurnSinkWrapper) OnToolCall(toolName, commandName string) {
 	if s.inner != nil {
 		s.inner.OnToolCall(toolName, commandName)
 	}
 	s.buf.OnToolCall(toolName, commandName)
 }
 
-func (s *leaseTurnSinkWrapper) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+func (s *testTurnSinkWrapper) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
 	if s.inner != nil {
 		s.inner.OnToolCompleted(toolName, mcpServer, duration, status)
 	}
 	s.buf.OnToolCompleted(toolName, mcpServer, duration, status)
 }
 
-func (s *leaseTurnSinkWrapper) OnSkillActivated(skillName, source string) {
+func (s *testTurnSinkWrapper) OnSkillActivated(skillName, source string) {
 	if s.inner != nil {
 		s.inner.OnSkillActivated(skillName, source)
 	}
 	s.buf.OnSkillActivated(skillName, source)
 }
 
-func (s *leaseTurnSinkWrapper) OnTextDelta(delta string) {
+func (s *testTurnSinkWrapper) OnTextDelta(delta string) {
 	if s.inner != nil {
 		s.inner.OnTextDelta(delta)
 	}
 	s.buf.OnTextDelta(delta)
 }
 
-func (s *leaseTurnSinkWrapper) OnResult(res *runner.TurnResult) {
+func (s *testTurnSinkWrapper) OnResult(res *runner.TurnResult) {
 	if s.inner != nil {
 		s.inner.OnResult(res)
 	}
 	s.buf.OnResult(res)
 }
 
-func (s *leaseTurnSinkWrapper) OnError(err error) {
+func (s *testTurnSinkWrapper) OnError(err error) {
 	if s.inner != nil {
 		s.inner.OnError(err)
 	}
 	s.buf.OnError(err)
 }
 
-type legacyRunnerAgentSession struct {
-	pool          *legacyRunnerAgentPool
+type testRunnerAgentSession struct {
+	pool          *testRunnerAgentPool
 	targetKey     string
 	sessionID     string
 	prevSessionID string
@@ -391,13 +413,13 @@ type legacyRunnerAgentSession struct {
 	mu            sync.Mutex
 }
 
-func (s *legacyRunnerAgentSession) SessionID() string {
+func (s *testRunnerAgentSession) SessionID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessionID
 }
 
-func (s *legacyRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) error {
+func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) error {
 	if turn != nil && turn.Sink != nil {
 		turn.Sink.OnTurnStarted()
 		turn.Sink.OnToolCall("processing", "")
@@ -555,4 +577,8 @@ func (s *legacyRunnerAgentSession) Send(prompt string, turn *runner.TurnContext)
 	return nil
 }
 
-var _ runner.AgentSession = (*legacyRunnerAgentSession)(nil)
+var _ runner.AgentSession = (*testRunnerAgentSession)(nil)
+
+type dummyNonRotatorPool struct {
+	runner.AgentPool
+}

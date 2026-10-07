@@ -43,6 +43,9 @@ func sanitizeErrorText(errStr string) string {
 	return sanitizer.SanitizeLog(errStr)
 }
 
+// testPoolHook is an optional hook injected by tests to wrap custom test runners without compiling test adapters into production.
+var testPoolHook func(cfg WorkerPoolConfig) runner.AgentPool
+
 type WorkerPoolConfig struct {
 	DB             *sql.DB
 	Store          db.Store
@@ -219,8 +222,10 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			return "", "", 1, fmt.Errorf("queue: RunnerWithOptionsFunc not configured on WorkerPool")
 		}
 	}
-	if hasCustomRunner {
-		cfg.ProcessPool = newLegacyRunnerAgentPool(cfg, cfg.ProcessPool)
+	if hasCustomRunner && testPoolHook != nil {
+		if wrapped := testPoolHook(cfg); wrapped != nil {
+			cfg.ProcessPool = wrapped
+		}
 	}
 	if cfg.NotifierFunc == nil {
 		notifierRunner := cfg.NotifierRunnerFunc
@@ -838,10 +843,10 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 	if up, ok := p.processPool.(*runner.UnifiedProcessPool); ok {
 		return up
 	}
-	if lp, ok := p.processPool.(*legacyRunnerAgentPool); ok {
-		if up, ok := lp.trackerPool.(*runner.UnifiedProcessPool); ok {
-			return up
-		}
+	if uw, ok := p.processPool.(interface {
+		Underlying() *runner.UnifiedProcessPool
+	}); ok {
+		return uw.Underlying()
 	}
 	return nil
 }
