@@ -37,6 +37,8 @@ type turnExecution struct {
 	currentSessionID    string
 	previousSessionID   string
 	turnCount           int
+	lease               runner.SessionLease
+	isCold              bool
 	policy              config.ChannelPolicy
 	effectiveID         string
 	effectiveName       string
@@ -563,6 +565,62 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		return
 	}
 
+	// 1. Resolve active execution pool (primary vs low effort)
+	isLowEffort := false
+	for _, m := range te.burst {
+		if strings.EqualFold(strings.TrimSpace(m.Effort), "low") {
+			isLowEffort = true
+			break
+		}
+	}
+	activePool := te.pool.processPool
+	if isLowEffort && te.pool.lowEffortProcessPool != nil {
+		activePool = te.pool.lowEffortProcessPool
+	} else if isLowEffort && te.pool.lowEffortProcessPool == nil {
+		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
+	}
+	te.activePool = activePool
+
+	if activePool == nil {
+		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
+		return
+	}
+	leasedPool, ok := activePool.(runner.LeasedAgentPool)
+	if !ok {
+		te.failBurst(fmt.Errorf("queue: active pool does not implement runner.LeasedAgentPool for thread %s", te.threadID))
+		return
+	}
+
+	// 2. Acquire exclusive session lease before prompt construction
+	leaseCtx, leaseCancel := context.WithTimeout(te.pool.ctx, 30*time.Second)
+	lease, leaseErr := leasedPool.AcquireLease(leaseCtx, te.threadID)
+	leaseCancel()
+	if leaseErr != nil {
+		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
+		return
+	}
+	te.lease = lease
+	defer func() {
+		if te.lease != nil {
+			if relErr := te.lease.Release(); relErr != nil {
+				log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+			}
+		}
+	}()
+
+	te.currentSessionID = lease.SessionID()
+	te.previousSessionID = lease.PreviousSessionID()
+	te.isCold = lease.IsCold()
+	te.turnCount = lease.TurnCount()
+
+	if te.currentSessionID != "" && te.isCold {
+		if !(isLowEffort && te.pool.lowEffortProcessPool != nil) {
+			te.saveSessionID(te.threadID, te.currentSessionID)
+		}
+	}
+
+
+
 	if te.policy.Hooks.PreTurn != nil {
 		preReq := buildPreTurnRequest(te)
 		var dispatcher WebhookDispatcher
@@ -864,6 +922,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
 			log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", te.currentSessionID, te.threadID)
 			te.currentSessionID = ""
+			te.saveSessionID(te.threadID, "")
 		}
 
 		// Phase 1 (Leading ambient messages)
@@ -1168,7 +1227,7 @@ func (te *turnExecution) buildTurnPrompt() {
 	}
 
 	snap, _ := resolveChannelSnapshot(te.pool.getDiscordSession(), te.threadID)
-	isColdStart := te.currentSessionID == "" || te.turnCount <= 1
+	isColdStart := te.isCold
 
 	// Policy mode dictates conversational engagement contract:
 	// - Channel Mode: Aerial wakes selectively. Ambient chatter bypasses session memory,
@@ -1573,129 +1632,65 @@ func (te *turnExecution) executeWithRetries() {
 		var resp *runner.AgyResponse
 		var outcome runner.TurnOutcome
 		var turnRes *runner.TurnResult
-		var execSession runner.AgentSession
 
-		if activePool != nil {
+
+		if te.lease != nil {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
-			if leasedPool, ok := activePool.(runner.LeasedAgentPool); ok {
-				lease, leaseErr := leasedPool.AcquireLease(runCtx, te.threadID)
-				if leaseErr != nil {
-					err = leaseErr
-					outcome = runner.NewTurnResolver().Resolve(runCtx, nil, leaseErr, te.currentSessionID)
-				} else {
-					func() {
-						defer func() {
-							if relErr := lease.Release(); relErr != nil {
-								log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
-							}
-						}()
-						if lease.SessionID() != "" && lease.SessionID() != te.currentSessionID {
-							if !(isLowEffort && te.pool.lowEffortProcessPool != nil && te.currentSessionID != "") {
-								te.currentSessionID = lease.SessionID()
-								te.saveSessionID(te.threadID, te.currentSessionID)
-							}
-						}
-						sink := newDiscordTurnSink(te.statusUpdater)
-						sessIDToSend := lease.SessionID()
-						scopeInst := config.LoadScopeInstructions(te.effectiveName)
-						turnCtx := &runner.TurnContext{
-							TurnID:              uuid.New().String(),
-							SessionID:           sessIDToSend,
-							Model:               currentModel,
-							Prompt:              promptToSend,
-							ScopeInstructions:   scopeInst,
-							ChannelInstructions: scopeInst,
-							CoordinationContext: te.injectedHookContext,
-							Sink:                sink,
-							CreatedAt:           time.Now(),
-							Ctx:                 runCtx,
-						}
-						var execErr error
-						turnRes, execErr = lease.Execute(runCtx, turnCtx)
-						if execErr != nil {
-							err = execErr
-							outcome = runner.NewTurnResolver().Resolve(runCtx, turnRes, execErr, lease.SessionID())
-						} else {
-							if turnRes != nil {
-								stderr = turnRes.Stderr
-							}
-							targetSess := lease.SessionID()
-							if targetSess == "" {
-								targetSess = te.currentSessionID
-							}
-							resolver := runner.NewTurnResolver()
-							outcome = resolver.Resolve(runCtx, turnRes, nil, targetSess)
-						}
-						if !outcome.IsSuccess {
-							targetSess := lease.SessionID()
-							if targetSess == "" {
-								targetSess = te.currentSessionID
-							}
-							if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil {
-								poolCtx := context.Background()
-								if te.pool.ctx != nil {
-									poolCtx = te.pool.ctx
-								}
-								if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
-									outcome.ErrorDetail = transcriptErr
-									stderr = transcriptErr
-								}
-							}
-						}
-					}()
+			if te.lease.SessionID() != "" && te.lease.SessionID() != te.currentSessionID {
+				if !(isLowEffort && te.pool.lowEffortProcessPool != nil && te.currentSessionID != "") {
+					te.currentSessionID = te.lease.SessionID()
+					te.saveSessionID(te.threadID, te.currentSessionID)
 				}
+			}
+			sink := newDiscordTurnSink(te.statusUpdater)
+			sessIDToSend := te.currentSessionID
+			if te.lease != nil && te.lease.SessionID() != "" && te.currentSessionID != "" {
+				sessIDToSend = te.lease.SessionID()
+			}
+			scopeInst := config.LoadScopeInstructions(te.effectiveName)
+			turnCtx := &runner.TurnContext{
+				TurnID:              uuid.New().String(),
+				SessionID:           sessIDToSend,
+				Model:               currentModel,
+				Prompt:              promptToSend,
+				ScopeInstructions:   scopeInst,
+				ChannelInstructions: scopeInst,
+				CoordinationContext: te.injectedHookContext,
+				Sink:                sink,
+				CreatedAt:           time.Now(),
+				Ctx:                 runCtx,
+			}
+			var execErr error
+			turnRes, execErr = te.lease.Execute(runCtx, turnCtx)
+			if execErr != nil {
+				err = execErr
+				outcome = runner.NewTurnResolver().Resolve(runCtx, turnRes, execErr, te.lease.SessionID())
 			} else {
-				var sessionErr error
-				execSession, sessionErr = activePool.GetOrCreateSession(runCtx, te.threadID, te.currentSessionID)
-				if sessionErr != nil {
-					execSession = nil
-					err = sessionErr
-					outcome = runner.NewTurnResolver().Resolve(runCtx, nil, sessionErr, te.currentSessionID)
-				} else {
-					if execSession != nil && execSession.SessionID() != "" && te.currentSessionID != "" && execSession.SessionID() != te.currentSessionID {
-						if isLowEffort && te.pool.lowEffortProcessPool != nil {
-							log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with low effort session %s", te.currentSessionID, te.threadID, execSession.SessionID())
-						} else {
-							te.currentSessionID = execSession.SessionID()
-							te.saveSessionID(te.threadID, te.currentSessionID)
-						}
+				if turnRes != nil {
+					stderr = turnRes.Stderr
+				}
+				targetSess := te.lease.SessionID()
+				if targetSess == "" {
+					targetSess = te.currentSessionID
+				}
+				resolver := runner.NewTurnResolver()
+				outcome = resolver.Resolve(runCtx, turnRes, nil, targetSess)
+			}
+			if !outcome.IsSuccess {
+				targetSess := te.lease.SessionID()
+				if targetSess == "" {
+					targetSess = te.currentSessionID
+				}
+				if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil {
+					poolCtx := context.Background()
+					if te.pool.ctx != nil {
+						poolCtx = te.pool.ctx
 					}
-					sink := newDiscordTurnSink(te.statusUpdater)
-					sessIDToSend := te.currentSessionID
-					if isLowEffort && te.pool.lowEffortProcessPool != nil && execSession != nil && execSession.SessionID() != "" {
-						sessIDToSend = execSession.SessionID()
-					}
-					scopeInst := config.LoadScopeInstructions(te.effectiveName)
-					turnCtx := &runner.TurnContext{
-						TurnID:              uuid.New().String(),
-						SessionID:           sessIDToSend,
-						Model:               currentModel,
-						Prompt:              promptToSend,
-						ScopeInstructions:   scopeInst,
-						ChannelInstructions: scopeInst,
-						CoordinationContext: te.injectedHookContext,
-						Sink:                sink,
-						CreatedAt:           time.Now(),
-						Ctx:                 runCtx,
-					}
-					if sendErr := execSession.Send(promptToSend, turnCtx); sendErr != nil {
-						err = sendErr
-						outcome = runner.NewTurnResolver().Resolve(runCtx, nil, sendErr, execSession.SessionID())
-					} else {
-						var turnErr error
-						turnRes, turnErr = sink.Wait(runCtx)
-						err = turnErr
-						if turnRes != nil {
-							stderr = turnRes.Stderr
-						}
-						targetSess := execSession.SessionID()
-						if targetSess == "" {
-							targetSess = te.currentSessionID
-						}
-						resolver := runner.NewTurnResolver()
-						outcome = resolver.Resolve(runCtx, turnRes, turnErr, targetSess)
+					if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+						outcome.ErrorDetail = transcriptErr
+						stderr = transcriptErr
 					}
 				}
 			}
@@ -1759,8 +1754,8 @@ func (te *turnExecution) executeWithRetries() {
 			if targetSess == "" && outcome.SessionID != "" {
 				targetSess = outcome.SessionID
 			}
-			if targetSess == "" && execSession != nil && execSession.SessionID() != "" {
-				targetSess = execSession.SessionID()
+			if targetSess == "" && te.lease != nil && te.lease.SessionID() != "" {
+				targetSess = te.lease.SessionID()
 			}
 			if targetSess == "" {
 				targetSess = te.currentSessionID
@@ -2317,7 +2312,7 @@ func (te *turnExecution) executeWithRetries() {
 						}
 						log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
 
-						te.checkTurnEndRotation(activePool, execSession)
+						te.checkTurnEndRotation(activePool, nil)
 
 						return
 					}
@@ -2364,6 +2359,19 @@ func (te *turnExecution) executeWithRetries() {
 			}
 			te.rotateSessionID(te.threadID, "")
 			te.currentSessionID = ""
+			if te.lease != nil {
+				if relErr := te.lease.Release(); relErr != nil {
+					log.Printf("[WorkerPool] Warning releasing lease on corruption reset for %s: %v", te.threadID, relErr)
+				}
+				te.lease = nil
+			}
+			if leasedPool, ok := activePool.(runner.LeasedAgentPool); ok {
+				newLease, lErr := leasedPool.AcquireLease(te.pool.ctx, te.threadID)
+				if lErr == nil {
+					te.lease = newLease
+					te.currentSessionID = newLease.SessionID()
+				}
+			}
 
 			if attempt < maxAttempts {
 				backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
@@ -2659,4 +2667,32 @@ func calculateCapacityBackoff(attempt int, resetDur time.Duration) time.Duration
 	}
 	delay += time.Duration(rand.Intn(3000)) * time.Millisecond
 	return delay
+}
+
+func (te *turnExecution) failBurst(err error) {
+	te.stopTyping()
+	if te.statusUpdater != nil {
+		te.statusUpdater.Stop()
+		te.statusUpdater.DeleteStatusMessage()
+	}
+	metrics.RecordTurnCompleted("failed", te.triggerType, "system", time.Since(te.execStart))
+	te.turnStatus = "failed"
+	te.turnError = err.Error()
+	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+	for _, m := range te.burst {
+		te.updateMessageStatus(m.ID, db.StatusFailed, err.Error())
+		if m.ScheduleRunID != "" {
+			te.updateScheduleRunStatus(db.UpdateRunParams{
+				RunID:       m.ScheduleRunID,
+				MessageID:   m.ID,
+				Status:      "failed",
+				CompletedAt: time.Now().UTC(),
+				DurationMs:  time.Since(te.execStart).Milliseconds(),
+				Error:       err.Error(),
+			})
+		}
+		if te.pool.cfg.OnMessageCompleted != nil {
+			te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
+		}
+	}
 }

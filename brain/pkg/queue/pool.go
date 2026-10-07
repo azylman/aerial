@@ -353,9 +353,14 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 				if err != nil {
 					turns = 0
 				}
+				prevID, err := store.GetPreviousSessionID(ctx, targetKey)
+				if err != nil {
+					prevID = ""
+				}
 				return runner.SessionRecord{
-					ActiveSessionID: sessID,
-					TurnCount:       turns,
+					ActiveSessionID:   sessID,
+					PreviousSessionID: prevID,
+					TurnCount:         turns,
 				}, nil
 			}
 		}
@@ -395,9 +400,14 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			if err != nil {
 				turns = 0
 			}
+			prevID, err := store.GetPreviousSessionID(ctx, targetKey)
+			if err != nil {
+				prevID = ""
+			}
 			return runner.SessionRecord{
-				ActiveSessionID: sessID,
-				TurnCount:       turns,
+				ActiveSessionID:   sessID,
+				PreviousSessionID: prevID,
+				TurnCount:         turns,
 			}, nil
 		}
 		onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {

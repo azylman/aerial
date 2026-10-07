@@ -758,7 +758,7 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 
 	isCold := false
 	turnCount := 0
-	if rec.TurnCount == 0 || rec.ActiveSessionID == "" {
+	if rec.TurnCount <= 1 || rec.ActiveSessionID == "" {
 		isCold = true
 	} else {
 		turnCount = rec.TurnCount

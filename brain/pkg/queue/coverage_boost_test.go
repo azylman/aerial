@@ -2518,6 +2518,7 @@ func TestTurnExecution_BuildTurnPrompt_CachedSummary(t *testing.T) {
 		pool:     pool,
 		threadID: "t-cached-sum",
 		burst:    []db.Message{{ID: "m1", ThreadID: "t-cached-sum", Content: "current"}},
+		isCold:   true,
 	}
 	te.buildTurnPrompt()
 	if !strings.Contains(te.turnPrompt, "<THREAD_SUMMARY>hi</THREAD_SUMMARY>") {
