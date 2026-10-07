@@ -2,7 +2,9 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
@@ -31,6 +33,25 @@ func (m *mockTrackerPool) GetOrCreateSession(ctx context.Context, targetKey stri
 
 func (m *mockTrackerPool) Initialize(ctx context.Context) error { return nil }
 func (m *mockTrackerPool) Close() error                         { return nil }
+
+type mockStepAwareSink struct {
+	stepIndex int
+	thinking  bool
+	skills    []string
+	deltas    []string
+	completed bool
+	errored   bool
+}
+
+func (m *mockStepAwareSink) OnTurnStarted()                                                      {}
+func (m *mockStepAwareSink) OnThinking()                                                         { m.thinking = true }
+func (m *mockStepAwareSink) OnStepStarted(idx int)                                               { m.stepIndex = idx }
+func (m *mockStepAwareSink) OnToolCall(toolName, commandName string)                             {}
+func (m *mockStepAwareSink) OnToolCompleted(toolName, mcp string, d time.Duration, stat string) { m.completed = true }
+func (m *mockStepAwareSink) OnSkillActivated(skillName, src string)                              { m.skills = append(m.skills, skillName) }
+func (m *mockStepAwareSink) OnTextDelta(delta string)                                            { m.deltas = append(m.deltas, delta) }
+func (m *mockStepAwareSink) OnResult(res *runner.TurnResult)                                     {}
+func (m *mockStepAwareSink) OnError(err error)                                                   { m.errored = true }
 
 func TestLegacyRunnerAgentPool_Coverage(t *testing.T) {
 	cfg := WorkerPoolConfig{
@@ -96,4 +117,87 @@ func TestLegacyRunnerAgentPool_Coverage(t *testing.T) {
 	vs.OnTurnStarted()
 	vs.OnThinking()
 	vs.OnToolCall("tool", "cmd")
+	vs.OnToolCompleted("tool", "mcp", time.Second, "ok")
+	vs.OnSkillActivated("skill", "src")
+	vs.OnTextDelta("delta")
+	vs.OnResult(&runner.TurnResult{Response: "ok"})
+	vs.OnError(errors.New("err"))
+
+	ds := NewDiscordTurnSink(nil, "ch-1", "msg-1", nil, nil)
+	ds.OnTurnStarted()
+	ds.OnThinking()
+	ds.OnToolCompleted("tool", "mcp", time.Second, "ok")
+	ds.OnSkillActivated("skill", "src")
+
+	// 5. RotateSession and ShouldRotateSession
+	rotatedSess, err := pool.RotateSession(context.Background(), "target1")
+	if err != nil || rotatedSess == nil {
+		t.Fatalf("failed to RotateSession on existing session: %v", err)
+	}
+	if !rotatedSess.(*legacyRunnerAgentSession).isCold {
+		t.Errorf("expected isCold to be true after RotateSession")
+	}
+
+	// Rotate on non-existing session
+	newRotated, err := pool.RotateSession(context.Background(), "target-fresh")
+	if err != nil || newRotated == nil {
+		t.Fatalf("failed to RotateSession on new session: %v", err)
+	}
+
+	// ShouldRotateSession
+	should, _ := pool.ShouldRotateSession(newRotated)
+	if should {
+		t.Errorf("new session should not rotate")
+	}
+	newRotated.(*legacyRunnerAgentSession).turnCount = runner.DefaultMaxSessionTurns + 1
+	should, reason := pool.ShouldRotateSession(newRotated)
+	if !should || reason == "" {
+		t.Errorf("expected should rotate true, got %v (%s)", should, reason)
+	}
+	if should, _ := pool.ShouldRotateSession(nil); should {
+		t.Errorf("nil session should not rotate")
+	}
+
+	// 6. leaseTurnSinkWrapper with both nil inner and mock step-aware inner
+	buf1 := runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{})
+	wrapperNil := &leaseTurnSinkWrapper{inner: nil, buf: buf1}
+	wrapperNil.OnTurnStarted()
+	wrapperNil.OnThinking()
+	wrapperNil.OnStepStarted(0)
+	wrapperNil.OnToolCall("tool", "cmd")
+	wrapperNil.OnToolCompleted("tool", "mcp", time.Second, "ok")
+	wrapperNil.OnSkillActivated("sk", "src")
+	wrapperNil.OnTextDelta("txt")
+	wrapperNil.OnResult(&runner.TurnResult{Response: "ok"})
+	wrapperNil.OnError(errors.New("err"))
+
+	buf2 := runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{})
+	stepSink := &mockStepAwareSink{}
+	wrapperStep := &leaseTurnSinkWrapper{inner: stepSink, buf: buf2}
+	wrapperStep.OnTurnStarted()
+	wrapperStep.OnThinking()
+	wrapperStep.OnStepStarted(42)
+	wrapperStep.OnToolCall("tool", "cmd")
+	wrapperStep.OnToolCompleted("tool", "mcp", time.Second, "ok")
+	wrapperStep.OnSkillActivated("sk", "src")
+	wrapperStep.OnTextDelta("txt")
+	wrapperStep.OnResult(&runner.TurnResult{Response: "ok"})
+	wrapperStep.OnError(errors.New("err"))
+
+	if !stepSink.thinking || stepSink.stepIndex != 42 || !stepSink.completed || len(stepSink.skills) != 1 || len(stepSink.deltas) != 1 || !stepSink.errored {
+		t.Errorf("step aware sink did not receive expected callbacks: %+v", stepSink)
+	}
+
+	// 7. AcquireLease and SessionLease methods
+	lease, err := pool.AcquireLease(context.Background(), "target1")
+	if err != nil || lease == nil {
+		t.Fatalf("failed to acquire lease: %v", err)
+	}
+	if lease.SessionID() == "" {
+		t.Errorf("lease sessionID empty")
+	}
+	_ = lease.IsCold()
+	_ = lease.PreviousSessionID()
+	_ = lease.TurnCount()
+	lease.Release()
 }
