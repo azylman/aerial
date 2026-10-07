@@ -462,8 +462,8 @@ func FormatMessage(m db.Message) string {
 	return fmt.Sprintf("[@%s]%s (%s): %s", author, replyTo, ts, bodyText)
 }
 
-// DefaultAmbientWakePrompt is the canonical evaluation directive used by the ambient relevance classifier.
-const DefaultAmbientWakePrompt = "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
+// DefaultAmbientWakePrompt is the canonical evaluation directive used by the ambient intent classifier.
+const DefaultAmbientWakePrompt = "determine whether the target message is intended for aerial, based on the recent channel context."
 
 // BuildPrompt constructs the classification prompt for a single target message.
 func BuildPrompt(target db.Message, recentContext []db.Message) string {

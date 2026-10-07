@@ -2035,6 +2035,9 @@ func TestClassifier_SystemOne_Success(t *testing.T) {
 	if q.Instructions != DefaultAmbientWakePrompt {
 		t.Errorf("expected DefaultAmbientWakePrompt in request, got %q", q.Instructions)
 	}
+	if q.Instructions != "determine whether the target message is intended for aerial, based on the recent channel context." {
+		t.Errorf("expected validated P5 prompt in request, got %q", q.Instructions)
+	}
 	if !strings.Contains(receivedReq.State, "alex: Aerial, what is the server status?") {
 		t.Errorf("expected state to contain formatted message, got %q", receivedReq.State)
 	}
