@@ -4117,6 +4117,125 @@ func TestTurnExecution_CheckTurnEndRotation(t *testing.T) {
 	})
 }
 
+func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	threadID := "thread-rotated-cold-test"
+	oldSessionID := "11111111-1111-1111-1111-111111111111"
+	newSessionID := "22222222-2222-2222-2222-222222222222"
+
+	// 1. Simulate prior rotation: RotateSessionID puts newSessionID in DB and sets turn_count to 0
+	_ = store.SaveSessionID(context.Background(), threadID, oldSessionID)
+	_ = store.RotateSessionID(context.Background(), threadID, newSessionID)
+	_ = store.SaveThreadSummary(context.Background(), threadID, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>", "msg-pre-rot")
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       threadID,
+		GuildID:  "g1",
+		ParentID: "parent-chan",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+
+	var mu sync.Mutex
+	var capturedPrompts []string
+	doneCh := make(chan struct{}, 2)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "threads"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		HistoryFetcher: func(ctx context.Context, tid, beforeID string, limit int) ([]HistoryMessage, error) {
+			return []HistoryMessage{
+				{ID: "msg-hist-1", AuthorName: "alex", Content: "pre-rotation message", CreatedAt: time.Now().Add(-10 * time.Minute)},
+			}, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			if strings.Contains(prompt, "Synthesize the following") {
+				return mockJSONResponse(sessionID, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>"), "", 0, nil
+			}
+			mu.Lock()
+			capturedPrompts = append(capturedPrompts, prompt)
+			mu.Unlock()
+			return mockJSONResponse(sessionID, "Turn response"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Turn 1 of new rotated session:
+	msg1 := db.Message{ID: "msg-post-rot-1", ThreadID: threadID, Content: "what was discussed earlier?"}
+	_ = insertMessage(store, msg1)
+	pool.Enqueue(msg1)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message 1")
+	}
+
+	// Turn 2 of rotated session (warm):
+	msg2 := db.Message{ID: "msg-post-rot-2", ThreadID: threadID, Content: "follow-up question"}
+	_ = insertMessage(store, msg2)
+	pool.Enqueue(msg2)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message 2")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(capturedPrompts) != 2 {
+		t.Fatalf("Expected 2 captured prompts, got %d", len(capturedPrompts))
+	}
+
+	// Turn 1: MUST be treated as cold start despite non-empty currentSessionID
+	turn1Prompt := capturedPrompts[0]
+	if !strings.Contains(turn1Prompt, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>") {
+		t.Errorf("Expected Turn 1 of rotated session to contain <THREAD_SUMMARY>, got:\n%s", turn1Prompt)
+	}
+	if !strings.Contains(turn1Prompt, "<PREVIOUS_SESSION>") {
+		t.Errorf("Expected Turn 1 of rotated session to contain <PREVIOUS_SESSION>, got:\n%s", turn1Prompt)
+	}
+	if !strings.Contains(turn1Prompt, "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 1 of rotated session to contain <CHANNEL_HISTORY>, got:\n%s", turn1Prompt)
+	}
+
+	// Turn 2: MUST be treated as warm turn (no summary, no channel history in threads mode, no previous session block)
+	turn2Prompt := capturedPrompts[1]
+	if strings.Contains(turn2Prompt, "<THREAD_SUMMARY>") {
+		t.Errorf("Expected Turn 2 (warm turn) to NOT contain <THREAD_SUMMARY>, got:\n%s", turn2Prompt)
+	}
+	if strings.Contains(turn2Prompt, "<PREVIOUS_SESSION>") {
+		t.Errorf("Expected Turn 2 (warm turn) to NOT contain <PREVIOUS_SESSION>, got:\n%s", turn2Prompt)
+	}
+	if strings.Contains(turn2Prompt, "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 2 (warm turn in threads mode) to NOT contain <CHANNEL_HISTORY>, got:\n%s", turn2Prompt)
+	}
+}
+
 
 
 

@@ -1168,7 +1168,7 @@ func (te *turnExecution) buildTurnPrompt() {
 	}
 
 	snap, _ := resolveChannelSnapshot(te.pool.getDiscordSession(), te.threadID)
-	isColdStart := te.currentSessionID == ""
+	isColdStart := te.currentSessionID == "" || te.turnCount <= 1
 
 	// Policy mode dictates conversational engagement contract:
 	// - Channel Mode: Aerial wakes selectively. Ambient chatter bypasses session memory,
