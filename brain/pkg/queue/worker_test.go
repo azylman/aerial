@@ -4112,7 +4112,7 @@ func TestTurnExecution_CheckTurnEndRotation(t *testing.T) {
 		teWithPool.checkTurnEndRotation(rotPool, nil)
 
 		// activePool does not implement runner.SessionRotator
-		nonRotatorPool := &legacyRunnerAgentPool{}
+		nonRotatorPool := &dummyNonRotatorPool{}
 		teWithPool.checkTurnEndRotation(nonRotatorPool, execSession)
 	})
 }
