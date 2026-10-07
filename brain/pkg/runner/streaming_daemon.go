@@ -21,6 +21,7 @@ import (
 type TurnSink interface {
 	OnTurnStarted()
 	OnThinking()
+	OnStepStarted(stepIndex int)
 	OnToolCall(toolName, commandName string)
 	OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string)
 	OnSkillActivated(skillName, source string)
@@ -42,6 +43,8 @@ type TurnContext struct {
 	Sink                TurnSink
 	CreatedAt           time.Time
 	Ctx                 context.Context
+	lastStepIndex       int
+	hasSeenStep         bool
 }
 
 type inFlightToolCall struct {
@@ -566,6 +569,30 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 							toolEndStatus = "error"
 						}
 					}
+				}
+			}
+
+			if !hasStepIdx {
+				if idx, ok := raw["step_index"].(float64); ok {
+					stepIdx = int(idx)
+					hasStepIdx = true
+				} else if idx, ok := raw["step_index"].(int); ok {
+					stepIdx = idx
+					hasStepIdx = true
+				}
+			}
+
+			if hasStepIdx {
+				d.inflightMu.Lock()
+				isNewStep := !activeTurn.hasSeenStep || stepIdx != activeTurn.lastStepIndex
+				if isNewStep {
+					activeTurn.hasSeenStep = true
+					activeTurn.lastStepIndex = stepIdx
+				}
+				d.inflightMu.Unlock()
+
+				if isNewStep {
+					activeTurn.Sink.OnStepStarted(stepIdx)
 				}
 			}
 

@@ -48,6 +48,9 @@ func (s *ThrowawayTurnSink) OnTurnStarted() {}
 // OnThinking is a no-op for throwaway turns.
 func (s *ThrowawayTurnSink) OnThinking() {}
 
+// OnStepStarted is a no-op for throwaway turns.
+func (s *ThrowawayTurnSink) OnStepStarted(stepIndex int) {}
+
 // OnToolCall is a no-op for throwaway turns.
 func (s *ThrowawayTurnSink) OnToolCall(toolName, commandName string) {}
 
@@ -108,6 +111,7 @@ func (s *ThrowawayTurnSink) Result() (string, error) {
 type BufferingTurnSinkConfig struct {
 	OnTurnStarted      func()
 	OnThinking         func()
+	OnStepStarted      func(stepIndex int)
 	OnToolCall         func(toolName, commandName string)
 	OnToolCompleted    func(toolName, mcpServer string, duration time.Duration, status string)
 	OnSkillActivated   func(skillName, source string)
@@ -120,14 +124,14 @@ type BufferingTurnSinkConfig struct {
 // BufferingTurnSink implements TurnSink with thread-safe text delta accumulation,
 // pluggable hooks, substantive delta error recovery, and result synchronization.
 type BufferingTurnSink struct {
-	cfg           BufferingTurnSinkConfig
-	mu            sync.Mutex
-	builder       strings.Builder
-	emittedAny    bool
-	purgedPreTool bool
-	resCh         chan *TurnResult
-	errCh         chan error
-	once          sync.Once
+	cfg                BufferingTurnSinkConfig
+	mu                 sync.Mutex
+	builder            strings.Builder
+	emittedAny         bool
+	purgedIntermediate bool
+	resCh              chan *TurnResult
+	errCh              chan error
+	once               sync.Once
 }
 
 var _ TurnSink = (*BufferingTurnSink)(nil)
@@ -155,12 +159,28 @@ func (s *BufferingTurnSink) OnThinking() {
 	}
 }
 
+// OnStepStarted resets the delta buffer when a new execution step begins,
+// purging intermediate chatter from prior steps before the current step generates output.
+func (s *BufferingTurnSink) OnStepStarted(stepIndex int) {
+	s.mu.Lock()
+	if strings.TrimSpace(s.builder.String()) != "" || s.emittedAny {
+		s.purgedIntermediate = true
+	}
+	s.builder.Reset()
+	s.emittedAny = false
+	s.mu.Unlock()
+
+	if s.cfg.OnStepStarted != nil {
+		s.cfg.OnStepStarted(stepIndex)
+	}
+}
+
 // OnToolCall resets the delta buffer to purge pre-tool monologue/prompt echoes,
 // and invokes the OnToolCall hook if configured.
 func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
 	s.mu.Lock()
 	if strings.TrimSpace(s.builder.String()) != "" || s.emittedAny {
-		s.purgedPreTool = true
+		s.purgedIntermediate = true
 	}
 	s.builder.Reset()
 	s.emittedAny = false
@@ -176,7 +196,7 @@ func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
 func (s *BufferingTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
 	s.mu.Lock()
 	if strings.TrimSpace(s.builder.String()) != "" || s.emittedAny {
-		s.purgedPreTool = true
+		s.purgedIntermediate = true
 	}
 	s.builder.Reset()
 	s.emittedAny = false
@@ -212,7 +232,7 @@ func (s *BufferingTurnSink) OnResult(res *TurnResult) {
 	s.once.Do(func() {
 		s.mu.Lock()
 		accumulated := s.builder.String()
-		purged := s.purgedPreTool
+		purged := s.purgedIntermediate
 		s.mu.Unlock()
 
 		if res == nil {
@@ -220,8 +240,8 @@ func (s *BufferingTurnSink) OnResult(res *TurnResult) {
 		} else if strings.TrimSpace(accumulated) != "" {
 			res.Response = accumulated
 		} else if purged {
-			// If pre-tool text deltas were streamed and purged upon tool execution,
-			// but no post-tool text deltas were emitted, any text in res.Response
+			// If intermediate text deltas were streamed and purged upon step transition
+			// or tool execution, but no post-tool text deltas were emitted, any text in res.Response
 			// was intermediate monologue or prompt echo. Suppress it so intermediate
 			// chatter does not resurrect.
 			res.Response = ""

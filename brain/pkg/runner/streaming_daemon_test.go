@@ -25,6 +25,7 @@ type mockTurnSink struct {
 	mu                   sync.Mutex
 	started              bool
 	thinking             int
+	stepStarts           []int
 	toolCalls            []string
 	completedTools       []string
 	completedToolDetails []mockCompletedTool
@@ -49,6 +50,12 @@ func (s *mockTurnSink) OnThinking() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.thinking++
+}
+
+func (s *mockTurnSink) OnStepStarted(stepIndex int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stepStarts = append(s.stepStarts, stepIndex)
 }
 
 func (s *mockTurnSink) OnToolCall(toolName, commandName string) {
@@ -2275,8 +2282,90 @@ func TestStreamingDaemon_TranscriptRescue_RecordsCapacityThrottle(t *testing.T) 
 	}
 }
 
+func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
 
+	testSessionUUID := "00000000-0000-0000-0000-000000000001"
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 999}, nil
+		},
+	}
 
+	initPayload := fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", testSessionUUID)
+	go func() {
+		_, _ = outW.Write([]byte(initPayload))
+	}()
 
+	daemon, err := StartStreamingDaemon(context.Background(), DaemonConfig{
+		SessionID: testSessionUUID,
+	}, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer func() {
+		_ = daemon.Close()
+		_ = inR.Close()
+	}()
 
+	mockSink := newMockTurnSink()
+	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{
+		OnStepStarted: mockSink.OnStepStarted,
+		OnTextDelta:   mockSink.OnTextDelta,
+		OnComplete:    mockSink.OnResult,
+		OnError:       mockSink.OnError,
+	})
 
+	turn := &TurnContext{
+		TurnID:    "turn-step-aware",
+		SessionID: testSessionUUID,
+		Model:     "gemini-3.8-flash-high",
+		Prompt:    "test step-aware purging",
+		CreatedAt: time.Now(),
+		Sink:      bufSink,
+	}
+
+	daemon.inflightMu.Lock()
+	daemon.inflight = append(daemon.inflight, turn)
+	daemon.inflightMu.Unlock()
+
+	// Step 1: Intermediate waiting text in su["step_index"]
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Let me wait for task..."}}`)
+	if bufSink.AccumulatedText() != "Let me wait for task..." {
+		t.Fatalf("expected step 1 delta accumulated, got %q", bufSink.AccumulatedText())
+	}
+
+	// Step 2: System update / intermediate step in su["step_index"]
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"Reviewing logs..."}}`)
+	if bufSink.AccumulatedText() != "Reviewing logs..." {
+		t.Fatalf("expected step 1 purged and step 2 accumulated, got %q", bufSink.AccumulatedText())
+	}
+
+	// Step 3: Terminal step with top-level raw["step_index"] fallback
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_index":3,"step_update":{"state":"ACTIVE","step_type":"agent_response","text_delta":"All work completed! Ready to roll."}}`)
+	if bufSink.AccumulatedText() != "All work completed! Ready to roll." {
+		t.Fatalf("expected step 2 purged and step 3 accumulated, got %q", bufSink.AccumulatedText())
+	}
+
+	// agy emits final result with multi-step concatenated text
+	daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"Let me wait for task... Reviewing logs... All work completed! Ready to roll."}}`)
+
+	res, err := bufSink.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected wait error: %v", err)
+	}
+	expected := "All work completed! Ready to roll."
+	if res.Response != expected {
+		t.Errorf("expected clean terminal deliverable %q, got %q", expected, res.Response)
+	}
+
+	mockSink.mu.Lock()
+	stepStarts := mockSink.stepStarts
+	mockSink.mu.Unlock()
+
+	if len(stepStarts) != 3 || stepStarts[0] != 1 || stepStarts[1] != 2 || stepStarts[2] != 3 {
+		t.Errorf("unexpected step starts recorded: %v", stepStarts)
+	}
+}

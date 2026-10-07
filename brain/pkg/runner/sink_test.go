@@ -360,6 +360,103 @@ func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
 	})
 }
 
+func TestBufferingTurnSink_StepResetPurgesBuffer(t *testing.T) {
+	t.Run("Step transition purges intermediate chatter from prior steps", func(t *testing.T) {
+		var stepHookCalls []int
+		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{
+			OnStepStarted: func(idx int) {
+				stepHookCalls = append(stepHookCalls, idx)
+			},
+		})
+
+		// Step 348: Model emits intermediate waiting text
+		sink.OnStepStarted(348)
+		sink.OnTextDelta("I will wait for the background task to complete...")
+		if sink.AccumulatedText() == "" {
+			t.Fatalf("expected non-empty buffer during step 348")
+		}
+
+		// Step 349: Subagent review completes (system update) -> step index advances
+		sink.OnStepStarted(349)
+		if sink.AccumulatedText() != "" {
+			t.Errorf("expected buffer reset after step 349, got %q", sink.AccumulatedText())
+		}
+
+		// Step 350: Intermediate triage delta
+		sink.OnTextDelta("Checking tasks...")
+
+		// Step 352: Terminal deliverable step
+		sink.OnStepStarted(352)
+		if sink.AccumulatedText() != "" {
+			t.Errorf("expected buffer reset after step 352, got %q", sink.AccumulatedText())
+		}
+		sink.OnTextDelta("All tasks completed cleanly! ")
+		sink.OnTextDelta("Deliverable is ready.")
+
+		// Incoming agy result with concatenated multi-step text
+		sink.OnResult(&TurnResult{
+			Response: "I will wait for the background task to complete... Checking tasks... All tasks completed cleanly! Deliverable is ready.",
+		})
+
+		res, err := sink.Wait(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected wait error: %v", err)
+		}
+		expected := "All tasks completed cleanly! Deliverable is ready."
+		if res.Response != expected {
+			t.Errorf("expected clean terminal response %q, got %q", expected, res.Response)
+		}
+
+		// Verify step hooks fired in order
+		if len(stepHookCalls) != 3 || stepHookCalls[0] != 348 || stepHookCalls[1] != 349 || stepHookCalls[2] != 352 {
+			t.Errorf("unexpected step hook calls: %v", stepHookCalls)
+		}
+	})
+
+	t.Run("Step transition with silent terminal step suppresses resurrected chatter", func(t *testing.T) {
+		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+
+		// Step 1: Model emits waiting text
+		sink.OnStepStarted(1)
+		sink.OnTextDelta("Intermediate waiting commentary.")
+
+		// Step 2: Tool execution with zero post-tool deltas
+		sink.OnStepStarted(2)
+		if sink.AccumulatedText() != "" {
+			t.Errorf("expected buffer reset on step 2, got %q", sink.AccumulatedText())
+		}
+
+		// agy returns concatenated result containing step 1 text
+		sink.OnResult(&TurnResult{
+			Response: "Intermediate waiting commentary.",
+		})
+
+		res, err := sink.Wait(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected wait error: %v", err)
+		}
+		if res.Response != "" {
+			t.Errorf("expected resurrected chatter to be suppressed, got %q", res.Response)
+		}
+	})
+
+	t.Run("Single step with deltas retains output without purge", func(t *testing.T) {
+		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+		sink.OnStepStarted(1)
+		sink.OnTextDelta("Clean direct response.")
+
+		sink.OnResult(&TurnResult{Response: "Clean direct response."})
+
+		res, err := sink.Wait(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected wait error: %v", err)
+		}
+		if res.Response != "Clean direct response." {
+			t.Errorf("expected response preserved, got %q", res.Response)
+		}
+	})
+}
+
 func TestBufferingTurnSink_DeltaRescueOnError(t *testing.T) {
 	var completedRes *TurnResult
 	sink := NewBufferingTurnSink(BufferingTurnSinkConfig{
@@ -487,6 +584,7 @@ func TestThrowawayTurnSink_UnusedHooks(t *testing.T) {
 	sink := NewThrowawayTurnSink()
 	sink.OnTurnStarted()
 	sink.OnThinking()
+	sink.OnStepStarted(1)
 	sink.OnToolCall("tool", "cmd")
 	sink.OnToolCompleted("tool", "srv", time.Second, "ok")
 	sink.OnSkillActivated("skill", "src")
