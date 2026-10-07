@@ -1541,7 +1541,7 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		if err := os.MkdirAll(convDir, 0755); err != nil {
 			t.Fatalf("failed to create convDir: %v", err)
 		}
-		// Write .db (1 MB) and .db-wal (600 KB) -> DB alone (1 MB) < session.DefaultMaxSessionDBBytes (8 MB)
+		// Write .db (1 MB) and .db-wal (600 KB) -> DB alone (1 MB) < session.DefaultMaxSessionDBBytes (2 MB)
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 1000*1024), 0644)
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, 600*1024), 0644)
 
