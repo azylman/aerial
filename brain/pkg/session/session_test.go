@@ -1326,11 +1326,11 @@ func TestSessionRotationConstants(t *testing.T) {
 	if DefaultMaxTranscriptBytes != 500*1024 {
 		t.Errorf("expected DefaultMaxTranscriptBytes=512000, got %d", DefaultMaxTranscriptBytes)
 	}
-	if DefaultMaxSessionDBBytes != 1536*1024 {
-		t.Errorf("expected DefaultMaxSessionDBBytes=1572864, got %d", DefaultMaxSessionDBBytes)
+	if DefaultMaxSessionDBBytes != 8*1024*1024 {
+		t.Errorf("expected DefaultMaxSessionDBBytes=8388608, got %d", DefaultMaxSessionDBBytes)
 	}
-	if DefaultMaxQuotaPauseDBBytes != 1200*1024 {
-		t.Errorf("expected DefaultMaxQuotaPauseDBBytes=1228800, got %d", DefaultMaxQuotaPauseDBBytes)
+	if DefaultMaxQuotaPauseDBBytes != 6*1024*1024 {
+		t.Errorf("expected DefaultMaxQuotaPauseDBBytes=6291456, got %d", DefaultMaxQuotaPauseDBBytes)
 	}
 }
 
