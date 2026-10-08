@@ -653,7 +653,7 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 		t.Fatalf("expected old daemon to be closed, got %v", d1.State())
 	}
 
-	// 3. Requesting a sessionID that exceeds disk guardrails
+	// 3. Requesting a sessionID that exceeds disk thresholds preserves session ID (rotation deferred to turn end)
 	oversizedSess := "550e8400-e29b-41d4-a716-446655440001"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedSess, ".system_generated", "logs")
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
@@ -672,13 +672,13 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 		t.Fatalf("expected non-nil daemon")
 	}
 
-	// The session passed to daemon config should have been reset to empty string
+	// The session passed to daemon config should be preserved (turn-end rotation handles lifecycle)
 	lastSpawned := lastSpawnedSessionID.Load()
-	if lastSpawned == nil || *lastSpawned != "" {
-		t.Errorf("expected session to be reset to empty due to disk guardrails, got %v", lastSpawned)
+	if lastSpawned == nil || *lastSpawned != oversizedSess {
+		t.Errorf("expected session to be preserved as %q, got %v", oversizedSess, lastSpawned)
 	}
 
-	// 4. Requesting a sessionID that exceeds DB guardrails
+	// 4. Requesting a sessionID that exceeds DB thresholds preserves session ID (rotation deferred to turn end)
 	oversizedDBSess := "550e8400-e29b-41d4-a716-446655440002"
 	convDir := filepath.Join(tmpDir, "conversations")
 	if err := os.MkdirAll(convDir, 0755); err != nil {
@@ -698,11 +698,11 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 	}
 
 	lastSpawnedDB := lastSpawnedSessionID.Load()
-	if lastSpawnedDB == nil || *lastSpawnedDB != "" {
-		t.Errorf("expected session to be reset to empty due to DB guardrails, got %v", lastSpawnedDB)
+	if lastSpawnedDB == nil || *lastSpawnedDB != oversizedDBSess {
+		t.Errorf("expected session to be preserved as %q, got %v", oversizedDBSess, lastSpawnedDB)
 	}
 
-	// 5. Requesting a sessionID that exceeds transcript step count guardrails
+	// 5. Requesting a sessionID that exceeds transcript step count thresholds preserves session ID (rotation deferred to turn end)
 	oversizedStepsSess := "550e8400-e29b-41d4-a716-446655440003"
 	sessDirSteps := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedStepsSess, ".system_generated", "logs")
 	if err := os.MkdirAll(sessDirSteps, 0755); err != nil {
@@ -722,11 +722,11 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 	}
 
 	lastSpawnedSteps := lastSpawnedSessionID.Load()
-	if lastSpawnedSteps == nil || *lastSpawnedSteps != "" {
-		t.Errorf("expected session to be reset to empty due to step count guardrails, got %v", lastSpawnedSteps)
+	if lastSpawnedSteps == nil || *lastSpawnedSteps != oversizedStepsSess {
+		t.Errorf("expected session to be preserved as %q, got %v", oversizedStepsSess, lastSpawnedSteps)
 	}
 
-	// 6. Requesting a sessionID that exceeds transcript turn count guardrails
+	// 6. Requesting a sessionID that exceeds transcript turn count thresholds preserves session ID (rotation deferred to turn end)
 	oversizedTurnsSess := "550e8400-e29b-41d4-a716-446655440004"
 	sessDirTurnsGuard := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedTurnsSess, ".system_generated", "logs")
 	if err := os.MkdirAll(sessDirTurnsGuard, 0755); err != nil {
@@ -750,8 +750,8 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 	}
 
 	lastSpawnedTurns := lastSpawnedSessionID.Load()
-	if lastSpawnedTurns == nil || *lastSpawnedTurns != "" {
-		t.Errorf("expected session to be reset to empty due to turn count guardrails, got %v", lastSpawnedTurns)
+	if lastSpawnedTurns == nil || *lastSpawnedTurns != oversizedTurnsSess {
+		t.Errorf("expected session to be preserved as %q, got %v", oversizedTurnsSess, lastSpawnedTurns)
 	}
 }
 
