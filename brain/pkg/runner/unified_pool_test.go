@@ -504,13 +504,14 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 	dSessSteps := &StreamingDaemon{
 		sessionID: sessIDSteps,
 		state:     StateReady,
+		turnCount: DefaultMinSessionTurns,
 	}
 	shouldRotate, reason = pool.ShouldRotate(dSessSteps)
 	if !shouldRotate || !strings.Contains(reason, "transcript step count threshold exceeded") {
 		t.Fatalf("expected rotation on transcript steps exceeded, got %v (%s)", shouldRotate, reason)
 	}
 
-	// Case 9: SessionManager transcript file size limit exceeded
+	// Case 9: SessionManager transcript file size limit exceeded (at turnCount >= DefaultMinSessionTurns)
 	sessIDSize := "sess-rotate-size"
 	sessDirSize := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDSize, ".system_generated", "logs")
 	if err := os.MkdirAll(sessDirSize, 0755); err != nil {
@@ -524,13 +525,14 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 	dSessSize := &StreamingDaemon{
 		sessionID: sessIDSize,
 		state:     StateReady,
+		turnCount: DefaultMinSessionTurns,
 	}
 	shouldRotate, reason = pool.ShouldRotate(dSessSize)
 	if !shouldRotate || !strings.Contains(reason, "transcript file size threshold exceeded") {
 		t.Fatalf("expected rotation on transcript size exceeded, got %v (%s)", shouldRotate, reason)
 	}
 
-	// Case 10: SessionManager DB size limit exceeded
+	// Case 10: SessionManager DB size limit exceeded (at turnCount >= DefaultMinSessionTurns)
 	sessIDDB := "sess-rotate-db"
 	convDir := filepath.Join(tmpDir, "conversations")
 	if err := os.MkdirAll(convDir, 0755); err != nil {
@@ -544,6 +546,7 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 	dSessDB := &StreamingDaemon{
 		sessionID: sessIDDB,
 		state:     StateReady,
+		turnCount: DefaultMinSessionTurns,
 	}
 	shouldRotate, reason = pool.ShouldRotate(dSessDB)
 	if !shouldRotate || !strings.Contains(reason, "session DB size threshold exceeded") {
@@ -572,6 +575,101 @@ func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
 	shouldRotate, reason = pool.ShouldRotate(dSessTurns)
 	if !shouldRotate || !strings.Contains(reason, "transcript turn count threshold exceeded") {
 		t.Fatalf("expected rotation on transcript turns exceeded, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 12: Under min turns (< DefaultMinSessionTurns), standard 1x thresholds do NOT rotate
+	sessIDUnderMin := "sess-under-min"
+	sessDirUnderMin := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDUnderMin, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDirUnderMin, 0755)
+	// Write 1x steps and 1x size at turn 1
+	underMinStepsContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps)
+	_ = os.WriteFile(filepath.Join(sessDirUnderMin, "transcript.jsonl"), []byte(underMinStepsContent), 0644)
+	_ = os.WriteFile(filepath.Join(convDir, sessIDUnderMin+".db"), make([]byte, DefaultMaxSessionDBBytes), 0644)
+
+	dUnderMin := &StreamingDaemon{
+		sessionID: sessIDUnderMin,
+		state:     StateReady,
+		turnCount: 1, // Below DefaultMinSessionTurns (3)
+	}
+	shouldRotate, reason = pool.ShouldRotate(dUnderMin)
+	if shouldRotate || reason != "" {
+		t.Fatalf("expected no rotation under min turns for 1x thresholds, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 13: Under min turns (< DefaultMinSessionTurns), 3x emergency thresholds DO rotate
+	// 13a: 3x step count blowout
+	sessIDEmergSteps := "sess-emerg-steps"
+	sessDirEmergSteps := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDEmergSteps, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDirEmergSteps, 0755)
+	emergStepsContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultEmergencyRotationMultiplier*DefaultMaxSessionSteps)
+	_ = os.WriteFile(filepath.Join(sessDirEmergSteps, "transcript.jsonl"), []byte(emergStepsContent), 0644)
+	dEmergSteps := &StreamingDaemon{
+		sessionID: sessIDEmergSteps,
+		state:     StateReady,
+		turnCount: 1,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dEmergSteps)
+	if !shouldRotate || !strings.Contains(reason, "transcript step count emergency threshold exceeded") {
+		t.Fatalf("expected emergency step rotation under min turns, got %v (%s)", shouldRotate, reason)
+	}
+
+	// 13b: 3x transcript size blowout
+	sessIDEmergSize := "sess-emerg-size"
+	sessDirEmergSize := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDEmergSize, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDirEmergSize, 0755)
+	_ = os.WriteFile(filepath.Join(sessDirEmergSize, "transcript.jsonl"), make([]byte, DefaultEmergencyRotationMultiplier*DefaultMaxTranscriptBytes+10), 0644)
+	dEmergSize := &StreamingDaemon{
+		sessionID: sessIDEmergSize,
+		state:     StateReady,
+		turnCount: 1,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dEmergSize)
+	if !shouldRotate || !strings.Contains(reason, "transcript file size emergency threshold exceeded") {
+		t.Fatalf("expected emergency size rotation under min turns, got %v (%s)", shouldRotate, reason)
+	}
+
+	// 13c: 3x DB size blowout
+	sessIDEmergDB := "sess-emerg-db"
+	_ = os.WriteFile(filepath.Join(convDir, sessIDEmergDB+".db"), make([]byte, DefaultEmergencyRotationMultiplier*DefaultMaxSessionDBBytes+10), 0644)
+	dEmergDB := &StreamingDaemon{
+		sessionID: sessIDEmergDB,
+		state:     StateReady,
+		turnCount: 2,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dEmergDB)
+	if !shouldRotate || !strings.Contains(reason, "session DB size emergency threshold exceeded") {
+		t.Fatalf("expected emergency DB rotation under min turns, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 14: Under min turns, dirty daemon rotates immediately regardless of turn count
+	dDirtyUnderMin := &StreamingDaemon{
+		sessionID: "sess-dirty-undermin",
+		state:     StateReady,
+		turnCount: 1,
+		dirty:     true,
+	}
+	shouldRotate, reason = pool.ShouldRotate(dDirtyUnderMin)
+	if !shouldRotate || !strings.Contains(reason, "daemon marked dirty") {
+		t.Fatalf("expected dirty daemon to rotate under min turns, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 15: Custom MinSessionTurns and EmergencyRotationMultiplier configuration
+	customPool := NewUnifiedProcessPool(PoolConfig{
+		MinSessionTurns:             5,
+		EmergencyRotationMultiplier: 2,
+		SessionManager:              sessMgr,
+	}, nil)
+	sessIDCustom := "sess-custom-config"
+	_ = os.WriteFile(filepath.Join(convDir, sessIDCustom+".db"), make([]byte, 2*DefaultMaxSessionDBBytes+10), 0644)
+	dCustom := &StreamingDaemon{
+		sessionID: sessIDCustom,
+		state:     StateReady,
+		turnCount: 3, // < custom min turns (5)
+	}
+	// At turn 3, 2x DB size hits emergency multiplier (2x) and rotates
+	shouldRotate, reason = customPool.ShouldRotate(dCustom)
+	if !shouldRotate || !strings.Contains(reason, "session DB size emergency threshold exceeded") {
+		t.Fatalf("expected emergency rotation with custom multiplier=2, got %v (%s)", shouldRotate, reason)
 	}
 }
 

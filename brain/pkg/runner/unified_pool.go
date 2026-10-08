@@ -34,8 +34,10 @@ type PoolConfig struct {
 	SessionManager          *session.Manager
 	OnSessionRotated        func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error
 	GetSessionRecord        func(ctx context.Context, targetKey string) (SessionRecord, error)
-	MaxSessionTurns         int
-	TargetLockTimeout       time.Duration
+	MaxSessionTurns             int
+	MinSessionTurns             int
+	EmergencyRotationMultiplier int
+	TargetLockTimeout           time.Duration
 }
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
@@ -510,16 +512,20 @@ func (p *UnifiedProcessPool) MarkDirty() {
 
 // Session rotation thresholds for memory pressure mitigation and context compaction.
 const (
-	DefaultMaxSessionTurns    = session.DefaultMaxSessionTurns
-	DefaultMaxSessionSteps    = session.DefaultMaxSessionSteps
-	DefaultMaxTranscriptByte  = session.DefaultMaxTranscriptBytes
-	DefaultMaxTranscriptBytes = session.DefaultMaxTranscriptBytes
-	DefaultMaxSessionDBBytes  = session.DefaultMaxSessionDBBytes
+	DefaultMinSessionTurns             = session.DefaultMinSessionTurns
+	DefaultEmergencyRotationMultiplier = session.DefaultEmergencyRotationMultiplier
+	DefaultMaxSessionTurns             = session.DefaultMaxSessionTurns
+	DefaultMaxSessionSteps             = session.DefaultMaxSessionSteps
+	DefaultMaxTranscriptByte           = session.DefaultMaxTranscriptBytes
+	DefaultMaxTranscriptBytes          = session.DefaultMaxTranscriptBytes
+	DefaultMaxSessionDBBytes           = session.DefaultMaxSessionDBBytes
 )
 
 // ShouldRotate evaluates whether a daemon has reached its session lifetime thresholds
 // (DefaultMaxSessionTurns turns, DefaultMaxSessionSteps steps, DefaultMaxTranscriptBytes,
 // or DefaultMaxSessionDBBytes) and is safe to rotate (no in-flight turns).
+// A minimum turn floor (DefaultMinSessionTurns = 3) is enforced before standard thresholds apply,
+// unless any trigger reaches emergency proportions (DefaultEmergencyRotationMultiplier = 3x).
 func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	if d == nil {
 		return false, ""
@@ -533,24 +539,67 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	if d.IsDirty() {
 		return true, "daemon marked dirty during in-flight turn"
 	}
-	if d.TurnCount() >= DefaultMaxSessionTurns {
-		return true, fmt.Sprintf("turn count threshold exceeded (%d >= %d)", d.TurnCount(), DefaultMaxSessionTurns)
+
+	minTurns := DefaultMinSessionTurns
+	if p != nil && p.cfg.MinSessionTurns > 0 {
+		minTurns = p.cfg.MinSessionTurns
 	}
-	// Note: Step count limits are evaluated canonically against transcript.jsonl via SessionManager.CountTranscriptSteps below.
-	// d.StepCount() tracks stdout NDJSON streaming chunk volume, which must not be confused with trajectory steps.
+	maxTurns := DefaultMaxSessionTurns
+	if p != nil && p.cfg.MaxSessionTurns > 0 {
+		maxTurns = p.cfg.MaxSessionTurns
+	}
+	mult := DefaultEmergencyRotationMultiplier
+	if p != nil && p.cfg.EmergencyRotationMultiplier > 0 {
+		mult = p.cfg.EmergencyRotationMultiplier
+	}
+
+	currentTurns := d.TurnCount()
+	var transcriptTurns, steps int
+	var size, dbSize int64
 	if p != nil && p.cfg.SessionManager != nil && d.SessionID() != "" {
-		if turns := p.cfg.SessionManager.CountTranscriptTurns(d.SessionID()); turns >= DefaultMaxSessionTurns {
-			return true, fmt.Sprintf("transcript turn count threshold exceeded (%d >= %d)", turns, DefaultMaxSessionTurns)
+		transcriptTurns = p.cfg.SessionManager.CountTranscriptTurns(d.SessionID())
+		if transcriptTurns > currentTurns {
+			currentTurns = transcriptTurns
 		}
-		if steps := p.cfg.SessionManager.CountTranscriptSteps(d.SessionID()); steps >= DefaultMaxSessionSteps {
-			return true, fmt.Sprintf("transcript step count threshold exceeded (%d >= %d)", steps, DefaultMaxSessionSteps)
+		steps = p.cfg.SessionManager.CountTranscriptSteps(d.SessionID())
+		size = p.cfg.SessionManager.GetTranscriptSize(d.SessionID())
+		dbSize = p.cfg.SessionManager.GetSessionDBSize(d.SessionID())
+	}
+
+	// 1. Max turn limits (always rotate once maximum turn count reached)
+	if currentTurns >= maxTurns {
+		if d.TurnCount() >= maxTurns {
+			return true, fmt.Sprintf("turn count threshold exceeded (%d >= %d)", d.TurnCount(), maxTurns)
 		}
-		if size := p.cfg.SessionManager.GetTranscriptSize(d.SessionID()); size >= DefaultMaxTranscriptBytes {
-			return true, fmt.Sprintf("transcript file size threshold exceeded (%d >= %d bytes)", size, DefaultMaxTranscriptBytes)
+		return true, fmt.Sprintf("transcript turn count threshold exceeded (%d >= %d)", transcriptTurns, maxTurns)
+	}
+
+	// 2. Minimum turn floor: if currentTurns < minTurns, only rotate if any trigger reaches 3x emergency threshold.
+	if currentTurns < minTurns {
+		emergencySteps := mult * DefaultMaxSessionSteps
+		if steps >= emergencySteps {
+			return true, fmt.Sprintf("transcript step count emergency threshold exceeded (%d >= %d)", steps, emergencySteps)
 		}
-		if dbSize := p.cfg.SessionManager.GetSessionDBSize(d.SessionID()); dbSize >= DefaultMaxSessionDBBytes {
-			return true, fmt.Sprintf("session DB size threshold exceeded (%d >= %d bytes)", dbSize, DefaultMaxSessionDBBytes)
+		emergencySize := int64(mult) * DefaultMaxTranscriptBytes
+		if size >= emergencySize {
+			return true, fmt.Sprintf("transcript file size emergency threshold exceeded (%d >= %d bytes)", size, emergencySize)
 		}
+		emergencyDBSize := int64(mult) * DefaultMaxSessionDBBytes
+		if dbSize >= emergencyDBSize {
+			return true, fmt.Sprintf("session DB size emergency threshold exceeded (%d >= %d bytes)", dbSize, emergencyDBSize)
+		}
+		return false, ""
+	}
+
+	// 3. Standard 1x thresholds apply once currentTurns >= minTurns
+	if steps >= DefaultMaxSessionSteps {
+		return true, fmt.Sprintf("transcript step count threshold exceeded (%d >= %d)", steps, DefaultMaxSessionSteps)
+	}
+	if size >= DefaultMaxTranscriptBytes {
+		return true, fmt.Sprintf("transcript file size threshold exceeded (%d >= %d bytes)", size, DefaultMaxTranscriptBytes)
+	}
+	if dbSize >= DefaultMaxSessionDBBytes {
+		return true, fmt.Sprintf("session DB size threshold exceeded (%d >= %d bytes)", dbSize, DefaultMaxSessionDBBytes)
 	}
 	return false, ""
 }

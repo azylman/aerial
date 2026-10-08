@@ -1317,6 +1317,12 @@ func TestSession_RemediatedBranchesAndEdges(t *testing.T) {
 }
 
 func TestSessionRotationConstants(t *testing.T) {
+	if DefaultMinSessionTurns != 3 {
+		t.Errorf("expected DefaultMinSessionTurns=3, got %d", DefaultMinSessionTurns)
+	}
+	if DefaultEmergencyRotationMultiplier != 3 {
+		t.Errorf("expected DefaultEmergencyRotationMultiplier=3, got %d", DefaultEmergencyRotationMultiplier)
+	}
 	if DefaultMaxSessionTurns != 8 {
 		t.Errorf("expected DefaultMaxSessionTurns=8, got %d", DefaultMaxSessionTurns)
 	}

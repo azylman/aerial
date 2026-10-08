@@ -17,6 +17,12 @@ import (
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
+// DefaultMinSessionTurns defines the engine-wide minimum turns before standard rotation thresholds apply.
+const DefaultMinSessionTurns = 3
+
+// DefaultEmergencyRotationMultiplier defines the threshold multiplier (3x) required to trigger early rotation before DefaultMinSessionTurns.
+const DefaultEmergencyRotationMultiplier = 3
+
 // DefaultMaxSessionTurns defines the engine-wide maximum turn limit before an agy session is rotated.
 const DefaultMaxSessionTurns = 8
 
