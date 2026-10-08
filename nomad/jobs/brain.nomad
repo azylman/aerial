@@ -30,7 +30,7 @@ job "brain" {
       attempts = 10
       interval = "15m"
       delay    = "10s"
-      mode     = "delay"
+      mode     = "fail"
     }
 
     reschedule {

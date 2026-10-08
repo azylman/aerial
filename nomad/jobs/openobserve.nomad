@@ -25,7 +25,7 @@ job "openobserve" {
       attempts = 5
       interval = "15m"
       delay    = "15s"
-      mode     = "delay"
+      mode     = "fail"
     }
 
     network {

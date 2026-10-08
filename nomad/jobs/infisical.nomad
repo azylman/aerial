@@ -35,7 +35,7 @@ job "infisical" {
       attempts = 5
       delay    = "15s"
       interval = "10m"
-      mode     = "delay"
+      mode     = "fail"
     }
 
     # Task 1: Redis cache & session backend
