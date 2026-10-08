@@ -48,17 +48,59 @@ job "victoriametrics" {
             readonly = false
           }
         ]
-        volumes = [
-          "/mnt/data/supervisor/share/aerial:/share/aerial:ro",
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro"
-        ]
         args = [
           "-storageDataPath=/victoria-metrics-data",
-          "-promscrape.config=/share/aerial/victoriametrics/scrape.yml",
+          "-promscrape.config=/local/scrape.yml",
           "-promscrape.configCheckInterval=15s",
           "-retentionPeriod=5y",
           "-loggerFormat=json"
         ]
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/victoriametrics" -}}
+{{- with nomadVar "nomad/jobs/victoriametrics" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- else -}}
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["127.0.0.1:8083"]
+
+  - job_name: "node-exporter"
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  - job_name: "victoriametrics"
+    static_configs:
+      - targets: ["127.0.0.1:8428"]
+
+  - job_name: "aerial-brain"
+    static_configs:
+      - targets: ["127.0.0.1:8088"]
+
+  - job_name: "aerial-hangar"
+    static_configs:
+      - targets: ["127.0.0.1:8087"]
+
+  - job_name: "postgres"
+    static_configs:
+      - targets: ["127.0.0.1:9187"]
+
+  - job_name: "webhooks-router"
+    static_configs:
+      - targets: ["127.0.0.1:4020"]
+{{- end -}}
+EOH
+        destination   = "local/scrape.yml"
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
       }
 
       template {
