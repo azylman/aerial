@@ -34,7 +34,7 @@ job "victoriametrics-mcp" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/victoriametrics/mcp-victoriametrics:latest"
+        image        = "ghcr.io/victoriametrics/mcp-victoriametrics:1.20.2"
         network_mode = "host"
         healthchecks {
           disable = true

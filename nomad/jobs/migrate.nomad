@@ -31,7 +31,7 @@ job "aerial-core-db-migrate" {
       driver = "docker"
 
       config {
-        image        = "arigaio/atlas:latest"
+        image        = "arigaio/atlas:1.3.3"
         network_mode = "host"
         healthchecks {
           disable = true
