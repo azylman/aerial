@@ -45,6 +45,17 @@ job "coredns" {
 
       template {
         data = <<EOH
+aerial:53 {
+    hosts /local/hosts {
+        reload 5s
+    }
+    cache 30 {
+        success 1024
+        denial 512
+    }
+    errors
+}
+
 lan:53 {
     hosts /local/hosts {
         reload 5s
