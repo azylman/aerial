@@ -341,11 +341,12 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		alloc := allocPayload.Allocation
 		isRunning := alloc.DesiredStatus == "run" && alloc.ClientStatus == "running"
 		isFailed := strings.EqualFold(alloc.ClientStatus, "failed")
-		if !isRunning && !isFailed {
+		isExhausted := alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates)
+		if !isRunning && !isFailed && !isExhausted {
 			return
 		}
 		if alloc.ID != "" && alloc.JobID != "" {
-			if isFailed {
+			if isFailed || isExhausted {
 				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s:failed", alloc.JobID, alloc.ID)
 			} else {
 				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s", alloc.JobID, alloc.ID)
@@ -448,6 +449,10 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 			if s.isNomadJobHealthy(ctx, alloc.JobID) {
 				return nil
 			}
+			statusDesc := extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates)
+			return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", statusDesc)
+		}
+		if alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates) {
 			statusDesc := extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates)
 			return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", statusDesc)
 		}
@@ -794,9 +799,43 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 	return jobs
 }
 
-// isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart.
+// isTaskRestartExhausted returns true if a task has exhausted its restart policy attempts
+// (either entering an extended backoff delay under mode="delay" or permanently failing under mode="fail")
+// and is not actively running.
+func isTaskRestartExhausted(ts NomadTaskState) bool {
+	if strings.EqualFold(ts.State, "running") {
+		return false
+	}
+	for i := len(ts.Events) - 1; i >= 0; i-- {
+		evt := ts.Events[i]
+		if evt.Type == "Started" {
+			return false
+		}
+		if evt.RestartReason == "Exceeded allowed attempts, applying a delay" ||
+			evt.Type == "Not Restarting" ||
+			strings.HasPrefix(evt.RestartReason, "Exceeded allowed attempts") {
+			return true
+		}
+	}
+	return false
+}
+
+// isAllocationRestartExhausted returns true if any task in the allocation has exhausted its allowed restart attempts.
+func isAllocationRestartExhausted(taskStates map[string]NomadTaskState) bool {
+	for _, ts := range taskStates {
+		if isTaskRestartExhausted(ts) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart within policy.
 func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
 	for _, ts := range taskStates {
+		if isTaskRestartExhausted(ts) {
+			continue
+		}
 		if strings.EqualFold(ts.State, "pending") || strings.EqualFold(ts.State, "restarting") {
 			return true
 		}
@@ -823,8 +862,8 @@ func extractAllocationErrorDetails(clientDesc string, taskStates map[string]Noma
 
 	for _, name := range taskNames {
 		ts := taskStates[name]
-		// Only extract error details from tasks that failed or are dead
-		if !ts.Failed && !strings.EqualFold(ts.State, "dead") {
+		// Extract error details from tasks that failed, are dead, or have exhausted restart attempts
+		if !ts.Failed && !strings.EqualFold(ts.State, "dead") && !isTaskRestartExhausted(ts) {
 			continue
 		}
 
@@ -859,11 +898,13 @@ func extractAllocationErrorDetails(clientDesc string, taskStates map[string]Noma
 			}
 		}
 
-		// Fallback to last event's DisplayMessage if task is failed/dead and no specific error field was found
+		// Fallback to last event's DisplayMessage or RestartReason if task is failed/dead/exhausted and no specific error field was found
 		if errMsg == "" && len(ts.Events) > 0 {
 			lastEvt := ts.Events[len(ts.Events)-1]
 			if strings.TrimSpace(lastEvt.DisplayMessage) != "" {
 				errMsg = strings.TrimSpace(lastEvt.DisplayMessage)
+			} else if strings.TrimSpace(lastEvt.RestartReason) != "" {
+				errMsg = strings.TrimSpace(lastEvt.RestartReason)
 			}
 		}
 
