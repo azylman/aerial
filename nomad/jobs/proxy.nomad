@@ -55,6 +55,27 @@ job "proxy" {
         ]
       }
 
+      template {
+        data = <<EOH
+# Dynamic Nomad service upstreams rendered by Nomad template
+{{ range nomadServices }}
+{{ if ne .Name "proxy" }}
+upstream {{ .Name }} {
+{{ range nomadService .Name }}
+    server {{ .Address }}:{{ .Port }};
+{{ else }}
+    server 127.0.0.1:65535 down;
+{{ end }}
+    keepalive 16;
+}
+{{ end }}
+{{ end }}
+EOH
+        destination   = "local/upstreams.conf"
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
+      }
+
       service {
         name     = "proxy"
         port     = "http"
