@@ -70,31 +70,59 @@ scrape_config_files:
 scrape_configs:
   - job_name: "cadvisor"
     static_configs:
+{{- range nomadService "cadvisor" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- else }}
       - targets: ["127.0.0.1:8083"]
+{{- end }}
 
   - job_name: "node-exporter"
     static_configs:
+{{- range nomadService "node-exporter" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- else }}
       - targets: ["127.0.0.1:9100"]
+{{- end }}
 
   - job_name: "victoriametrics"
     static_configs:
+{{- range nomadService "victoriametrics" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- else }}
       - targets: ["127.0.0.1:8428"]
+{{- end }}
 
   - job_name: "aerial-brain"
     static_configs:
+{{- range nomadService "brain" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- else }}
       - targets: ["127.0.0.1:8088"]
+{{- end }}
 
   - job_name: "aerial-hangar"
     static_configs:
+{{- range nomadService "hangar" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- else }}
       - targets: ["127.0.0.1:8087"]
+{{- end }}
 
   - job_name: "postgres"
     static_configs:
+{{- range nomadService "postgres-exporter" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- else }}
       - targets: ["127.0.0.1:9187"]
+{{- end }}
 
   - job_name: "webhooks-router"
     static_configs:
+{{- range nomadService "webhooks-router" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- else }}
       - targets: ["127.0.0.1:4020"]
+{{- end }}
 EOH
         destination   = "local/scrape.yml"
         change_mode   = "signal"
