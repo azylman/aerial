@@ -52,6 +52,7 @@ job "victoriametrics" {
           "-storageDataPath=/victoria-metrics-data",
           "-promscrape.config=/local/scrape.yml",
           "-promscrape.configCheckInterval=15s",
+          "-promscrape.config.strictParse=false",
           "-retentionPeriod=5y",
           "-loggerFormat=json"
         ]
@@ -59,14 +60,12 @@ job "victoriametrics" {
 
       template {
         data = <<EOH
-{{- if nomadVarExists "nomad/jobs/victoriametrics" -}}
-{{- with nomadVar "nomad/jobs/victoriametrics" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
-{{- else -}}
 global:
   scrape_interval: 15s
   scrape_timeout: 10s
+
+scrape_config_files:
+  - "/local/scrapes/*.yml"
 
 scrape_configs:
   - job_name: "cadvisor"
@@ -96,9 +95,31 @@ scrape_configs:
   - job_name: "webhooks-router"
     static_configs:
       - targets: ["127.0.0.1:4020"]
-{{- end -}}
 EOH
         destination   = "local/scrape.yml"
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/victoriametrics" -}}
+{{- with nomadVar "nomad/jobs/victoriametrics" -}}
+{{- if .CONFIG_YAML -}}
+{{- if not (contains "global:" .CONFIG_YAML) -}}
+{{ .CONFIG_YAML }}
+{{- else -}}
+[]
+{{- end -}}
+{{- else -}}
+[]
+{{- end -}}
+{{- end -}}
+{{- else -}}
+[]
+{{- end -}}
+EOH
+        destination   = "local/scrapes/config.yml"
         change_mode   = "signal"
         change_signal = "SIGHUP"
       }
