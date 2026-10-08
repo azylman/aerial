@@ -34,7 +34,7 @@ job "homepage" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/gethomepage/homepage:latest"
+        image        = "ghcr.io/gethomepage/homepage:v2.4.0"
         network_mode = "host"
         healthchecks {
           disable = true

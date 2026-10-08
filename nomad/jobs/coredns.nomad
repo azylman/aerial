@@ -35,7 +35,7 @@ job "coredns" {
       kill_timeout = "10s"
 
       config {
-        image        = "coredns/coredns:latest"
+        image        = "coredns/coredns:1.14.7"
         network_mode = "host"
         healthchecks {
           disable = true
