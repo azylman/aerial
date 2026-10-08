@@ -213,18 +213,6 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		}
 		p.mu.Unlock()
 
-		if trimmedSess != "" && p.cfg.SessionManager != nil {
-			transBytes := p.cfg.SessionManager.GetTranscriptSize(trimmedSess)
-			dbBytes := p.cfg.SessionManager.GetSessionDBSize(trimmedSess)
-			steps := p.cfg.SessionManager.CountTranscriptSteps(trimmedSess)
-			turns := p.cfg.SessionManager.CountTranscriptTurns(trimmedSess)
-			if transBytes >= DefaultMaxTranscriptBytes || dbBytes >= DefaultMaxSessionDBBytes || steps >= DefaultMaxSessionSteps || turns >= DefaultMaxSessionTurns {
-				log.Printf("[UnifiedProcessPool] Requested session %s exceeds guardrails (bytes=%d, db_bytes=%d, steps=%d, turns=%d). Resetting to fresh session.",
-					trimmedSess, transBytes, dbBytes, steps, turns)
-				trimmedSess = ""
-			}
-		}
-
 		daemonEnv := p.cfg.Env
 		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
 			geminiDir := filepath.Join(home, ".gemini")
