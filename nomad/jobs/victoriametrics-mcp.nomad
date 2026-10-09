@@ -17,9 +17,8 @@ job "victoriametrics-mcp" {
     count = 1
 
     network {
-      mode = "host"
       port "mcp" {
-        static = 4044
+        to = 4044
       }
     }
 
@@ -27,10 +26,10 @@ job "victoriametrics-mcp" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/victoriametrics/mcp-victoriametrics:1.20.2"
-        network_mode = "host"
+        ports        = ["mcp"]
         healthchecks {
           disable = true
         }

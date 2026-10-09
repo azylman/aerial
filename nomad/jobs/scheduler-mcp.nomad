@@ -22,9 +22,8 @@ job "scheduler-mcp" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 4005
+        to = 4005
       }
     }
 
@@ -32,10 +31,10 @@ job "scheduler-mcp" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-scheduler-mcp:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }

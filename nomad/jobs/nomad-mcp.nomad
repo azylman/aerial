@@ -22,9 +22,8 @@ job "nomad-mcp" {
     count = 1
 
     network {
-      mode = "host"
       port "mcp" {
-        static = 4006
+        to = 4006
       }
     }
 
@@ -32,10 +31,10 @@ job "nomad-mcp" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-nomad-mcp:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["mcp"]
         healthchecks {
           disable = true
         }
@@ -45,7 +44,7 @@ job "nomad-mcp" {
         data = <<EOH
 {{- if nomadVarExists "nomad/jobs/nomad-mcp" -}}
 {{- with nomadVar "nomad/jobs/nomad-mcp" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML | regexReplaceAll "http://127.0.0.1:4646" (printf "http://%s:4646" (env "attr.unique.network.ip-address")) -}}{{- end -}}
 {{- end -}}
 {{- end -}}
 EOH
