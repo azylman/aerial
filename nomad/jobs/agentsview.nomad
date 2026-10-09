@@ -39,8 +39,7 @@ job "agentsview" {
         healthchecks {
           disable = true
         }
-        command      = "/bin/sh"
-        args         = ["/local/run-agentsview.sh"]
+        entrypoint   = ["/bin/sh", "/local/run-agentsview.sh"]
         mounts = [
           {
             type     = "volume"
