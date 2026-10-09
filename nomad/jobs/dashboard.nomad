@@ -22,9 +22,8 @@ job "dashboard" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 8084
+        to = 8084
       }
     }
 
@@ -32,10 +31,10 @@ job "dashboard" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-dashboard:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }
@@ -48,7 +47,7 @@ job "dashboard" {
 
       env {
         CONFIG_PATH = "/share/aerial-config/services/dashboard/dashboard.yaml"
-        NOMAD_ADDR  = "http://127.0.0.1:4646"
+        NOMAD_ADDR  = "http://${attr.unique.network.ip-address}:4646"
         GOCOVERDIR  = "/coverage"
       }
 
