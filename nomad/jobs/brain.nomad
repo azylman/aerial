@@ -36,9 +36,8 @@ job "brain" {
     }
 
     network {
-      mode = "host"
       port "http" {
-        static = 8088
+        to = 8088
       }
     }
 
@@ -49,10 +48,10 @@ job "brain" {
       kill_timeout = "60s"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-brain:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["http"]
         shm_size     = 536870912
         healthchecks {
           disable = true
@@ -112,7 +111,8 @@ job "brain" {
 
       env {
         PORT                = "8088"
-        AERIAL_HANGAR_URL   = "http://hangar:8087/sync"
+        AERIAL_HANGAR_URL   = "http://hangar.aerial/sync"
+        AERIAL_BRAIN_URL    = "http://brain.aerial"
         GIT_TERMINAL_PROMPT = "0"
         GOCACHE             = "/data/cache/go-build"
         GOPATH              = "/data/cache/go"

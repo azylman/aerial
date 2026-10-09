@@ -22,9 +22,8 @@ job "webhooks-router" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 4020
+        to = 4020
       }
     }
 
@@ -32,10 +31,10 @@ job "webhooks-router" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-webhooks-router:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }
@@ -46,6 +45,10 @@ job "webhooks-router" {
 
       env {
         CONFIG_PATH = "/local/webhooks-router.yaml"
+        NOMAD_ADDR  = "http://${attr.unique.network.ip-address}:4646"
+        HANGAR_URL  = "http://hangar.aerial"
+        BRAIN_URL   = "http://brain.aerial"
+        PORT        = "4020"
         GOCOVERDIR  = "/coverage"
       }
 
