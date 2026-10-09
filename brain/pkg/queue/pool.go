@@ -696,6 +696,8 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 		return
 	}
 
+	sess := p.getDiscordSession()
+
 	displayCap := 5
 	var lines []string
 	for i, s := range runawayList {
@@ -703,14 +705,13 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 			lines = append(lines, fmt.Sprintf("- *...and %d more runaway session(s)*", len(runawayList)-displayCap))
 			break
 		}
-		lines = append(lines, fmt.Sprintf("- Thread `<#%s>` (`%s`): **%d** turns (session: `%s`)", s.ThreadID, s.ThreadID, s.TurnCount, s.InternalSessionID))
+		lines = append(lines, formatUnrotatedSessionLine(sess, s))
 	}
 
 	for _, s := range runawayList {
 		lastReportedTurnCount[s.ThreadID] = s.TurnCount
 	}
 
-	sess := p.getDiscordSession()
 	sysChan := ""
 	if p.appCfg != nil {
 		if cur := p.appCfg.Current(); cur != nil {
@@ -730,6 +731,24 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 			log.Printf("[WorkerPool] Warning: failed to send unrotated sessions alert to system channel %q: %v", sysChan, alertErr)
 		}
 	}
+}
+
+// formatUnrotatedSessionLine formats an unrotated session entry for system alerts, resolving Discord snowflakes
+// to readable channel or thread mention links.
+func formatUnrotatedSessionLine(sess *discordgo.Session, s db.SessionInfo) string {
+	if !IsNumericSnowflake(s.ThreadID) {
+		return fmt.Sprintf("- Thread `%s`: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
+	}
+
+	effID, _, isThread, _ := ResolveChannelAndThread(sess, s.ThreadID)
+	if isThread {
+		if effID != "" && effID != s.ThreadID {
+			return fmt.Sprintf("- Thread <#%s> (in <#%s>): **%d** turns (session: `%s`)", s.ThreadID, effID, s.TurnCount, s.InternalSessionID)
+		}
+		return fmt.Sprintf("- Thread <#%s>: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
+	}
+
+	return fmt.Sprintf("- Channel <#%s>: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
 }
 
 // StopWithTimeout initiates a bounded graceful drain of the worker pool, allowing inflight turns

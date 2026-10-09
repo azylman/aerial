@@ -317,3 +317,80 @@ func TestWorkerPool_CheckUnrotatedSessions_ExcludesDormantSessions(t *testing.T)
 		t.Errorf("expected lastReported to remain empty for dormant session, got %v", lastReported)
 	}
 }
+
+func TestFormatUnrotatedSessionLine(t *testing.T) {
+	// 1. Non-numeric snowflake (fallback format)
+	nonSnowflake := db.SessionInfo{
+		ThreadID:          "th-custom-session",
+		TurnCount:         9,
+		InternalSessionID: "sess-uuid-1234",
+	}
+	if got := formatUnrotatedSessionLine(nil, nonSnowflake); got != "- Thread `th-custom-session`: **9** turns (session: `sess-uuid-1234`)" {
+		t.Errorf("unexpected non-snowflake line: %q", got)
+	}
+
+	// 2. Channel snowflake resolved via cache
+	chanID := "1464358486849622120"
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   chanID,
+		Type: discordgo.ChannelTypeGuildText,
+		Name: "general",
+	})
+	defer InvalidateChannelCache(chanID)
+
+	chanSession := db.SessionInfo{
+		ThreadID:          chanID,
+		TurnCount:         10,
+		InternalSessionID: "sess-chan-5678",
+	}
+	if got := formatUnrotatedSessionLine(nil, chanSession); got != "- Channel <#1464358486849622120>: **10** turns (session: `sess-chan-5678`)" {
+		t.Errorf("unexpected channel line: %q", got)
+	}
+
+	// 3. Thread snowflake with parent channel
+	threadID := "1557949887948005398"
+	parentID := "1542423172400291873"
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   parentID,
+		Type: discordgo.ChannelTypeGuildText,
+		Name: "aerial-dev",
+	})
+	defer InvalidateChannelCache(parentID)
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       threadID,
+		ParentID: parentID,
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+		Name:     "Resolve Notification Snowflake IDs",
+	})
+	defer InvalidateChannelCache(threadID)
+
+	threadSession := db.SessionInfo{
+		ThreadID:          threadID,
+		TurnCount:         12,
+		InternalSessionID: "sess-thread-9999",
+	}
+	expectedThread := "- Thread <#1557949887948005398> (in <#1542423172400291873>): **12** turns (session: `sess-thread-9999`)"
+	if got := formatUnrotatedSessionLine(nil, threadSession); got != expectedThread {
+		t.Errorf("unexpected thread line with parent: %q, expected: %q", got, expectedThread)
+	}
+
+	// 4. Thread snowflake without parent channel
+	orphanID := "1557949887948005399"
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   orphanID,
+		Type: discordgo.ChannelTypeGuildPublicThread,
+		Name: "Orphan Thread",
+	})
+	defer InvalidateChannelCache(orphanID)
+
+	orphanThreadSession := db.SessionInfo{
+		ThreadID:          orphanID,
+		TurnCount:         15,
+		InternalSessionID: "sess-orphan-0000",
+	}
+	expectedOrphan := "- Thread <#1557949887948005399>: **15** turns (session: `sess-orphan-0000`)"
+	if got := formatUnrotatedSessionLine(nil, orphanThreadSession); got != expectedOrphan {
+		t.Errorf("unexpected thread line without parent: %q, expected: %q", got, expectedOrphan)
+	}
+}
