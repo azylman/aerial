@@ -44,7 +44,7 @@ job "nomad-mcp" {
         data = <<EOH
 {{- if nomadVarExists "nomad/jobs/nomad-mcp" -}}
 {{- with nomadVar "nomad/jobs/nomad-mcp" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML | regexReplaceAll "http://127.0.0.1:4646" (printf "http://%s:4646" (env "attr.unique.network.ip-address")) -}}{{- end -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML.Value | regexReplaceAll "http://127.0.0.1:4646" (printf "http://%s:4646" (env "attr.unique.network.ip-address")) -}}{{- end -}}
 {{- end -}}
 {{- end -}}
 EOH
