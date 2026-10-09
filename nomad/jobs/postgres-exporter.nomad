@@ -17,9 +17,8 @@ job "postgres-exporter" {
     count = 1
 
     network {
-      mode = "host"
       port "metrics" {
-        static = 9187
+        to = 9187
       }
     }
 
@@ -27,10 +26,10 @@ job "postgres-exporter" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "prometheuscommunity/postgres-exporter:v0.20.1"
-        network_mode = "host"
+        ports        = ["metrics"]
         healthchecks {
           disable = true
         }
