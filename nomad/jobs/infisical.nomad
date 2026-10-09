@@ -46,7 +46,7 @@ job "infisical" {
         healthchecks {
           disable = true
         }
-        args         = ["--port", "${NOMAD_PORT_redis}", "--bind", "127.0.0.1", "--protected-mode", "no", "--save", ""]
+        args         = ["--port", "${NOMAD_PORT_redis}", "--bind", "0.0.0.0", "--protected-mode", "no", "--save", ""]
       }
 
       service {
