@@ -38,7 +38,7 @@ job "victoriametrics-mcp" {
       env {
         MCP_SERVER_MODE        = "http"
         MCP_LISTEN_ADDR        = ":4044"
-        VM_INSTANCE_ENTRYPOINT = "http://victoriametrics:8428"
+        VM_INSTANCE_ENTRYPOINT = "http://victoriametrics.aerial"
         VM_INSTANCE_TYPE       = "single"
         MCP_DISABLED_TOOLS     = "documentation,export,metric_relabel_debug"
       }

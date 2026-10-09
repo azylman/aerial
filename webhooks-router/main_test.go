@@ -176,7 +176,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	os.Unsetenv("NOMAD_ADDR")
 	os.Unsetenv("INFISICAL_ENVIRONMENT")
 	cfgDef := LoadConfigFromEnv()
-	if cfgDef.Port != "4020" || cfgDef.InfisicalURL != "http://127.0.0.1:8085" || cfgDef.NomadAddr != "http://127.0.0.1:4646" {
+	if cfgDef.Port != "4020" || cfgDef.InfisicalURL != "http://infisical.aerial" || cfgDef.NomadAddr != "http://127.0.0.1:4646" {
 		t.Errorf("unexpected default config: %+v", cfgDef)
 	}
 }
@@ -3865,8 +3865,8 @@ nomad_addr: "http://nomad.fallback:4646"
 	if cfgDefaults.Port != "4020" {
 		t.Errorf("expected default port 4020, got %s", cfgDefaults.Port)
 	}
-	if cfgDefaults.InfisicalURL != "http://127.0.0.1:8085" {
-		t.Errorf("expected default infisical_url http://127.0.0.1:8085, got %s", cfgDefaults.InfisicalURL)
+	if cfgDefaults.InfisicalURL != "http://infisical.aerial" {
+		t.Errorf("expected default infisical_url http://infisical.aerial, got %s", cfgDefaults.InfisicalURL)
 	}
 
 	// 3. Empty configPath with valid fallback
