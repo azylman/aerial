@@ -18,9 +18,7 @@ job "node-exporter" {
 
     network {
       mode = "host"
-      port "metrics" {
-        static = 9100
-      }
+      port "metrics" {}
     }
 
     task "node-exporter" {
@@ -41,6 +39,7 @@ job "node-exporter" {
           "/:/rootfs:ro"
         ]
         args = [
+          "--web.listen-address=:${NOMAD_PORT_metrics}",
           "--path.procfs=/host/proc",
           "--path.sysfs=/host/sys",
           "--path.rootfs=/rootfs",
