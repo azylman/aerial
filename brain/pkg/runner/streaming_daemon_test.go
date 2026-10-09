@@ -2369,3 +2369,33 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 		t.Errorf("unexpected step starts recorded: %v", stepStarts)
 	}
 }
+
+func TestStreamingDaemon_InitialTurnCount(t *testing.T) {
+	_, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
+	}()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 403}, nil
+		},
+	}
+
+	ctx := context.Background()
+	d, err := StartStreamingDaemon(ctx, DaemonConfig{
+		SessionID:        "00000000-0000-0000-0000-000000000001",
+		InitialTurnCount: 4,
+	}, mock)
+	if err != nil {
+		t.Fatalf("StartStreamingDaemon error: %v", err)
+	}
+	defer d.Close()
+
+	if d.TurnCount() != 4 {
+		t.Errorf("expected TurnCount 4, got %d", d.TurnCount())
+	}
+}

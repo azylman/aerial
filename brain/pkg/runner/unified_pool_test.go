@@ -2869,3 +2869,214 @@ func TestUnifiedProcessPool_AcquireLease_Validation(t *testing.T) {
 		t.Error("expected error from empty targetKey AcquireLease")
 	}
 }
+
+func TestUnifiedProcessPool_AcquireLease_PropagatesInitialTurnCountAndRotates(t *testing.T) {
+	var capturedCfg DaemonConfig
+	var rotatedOld, rotatedNew string
+	var rotationCalled bool
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			capturedCfg = cfg
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = uuid.New().String()
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						break
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 401}, nil
+		},
+	}
+
+	existingSessID := uuid.New().String()
+	pool := NewUnifiedProcessPool(PoolConfig{
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			return SessionRecord{
+				ActiveSessionID: existingSessID,
+				TurnCount:       DefaultMaxSessionTurns - 1,
+			}, nil
+		},
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			rotatedOld = oldSessionID
+			rotatedNew = newSessionID
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "channel-general")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	if capturedCfg.InitialTurnCount != DefaultMaxSessionTurns-1 {
+		t.Errorf("expected InitialTurnCount %d, got %d", DefaultMaxSessionTurns-1, capturedCfg.InitialTurnCount)
+	}
+
+	if lease.TurnCount() != DefaultMaxSessionTurns-1 {
+		t.Errorf("expected lease TurnCount %d, got %d", DefaultMaxSessionTurns-1, lease.TurnCount())
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-8",
+		Prompt: "user message triggering turn 8",
+		Ctx:    ctx,
+	}
+	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+		t.Fatalf("Execute error: %v", execErr)
+	}
+
+	if lease.TurnCount() != DefaultMaxSessionTurns {
+		t.Errorf("expected lease TurnCount %d after execution, got %d", DefaultMaxSessionTurns, lease.TurnCount())
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Errorf("expected session rotation to be triggered on reaching DefaultMaxSessionTurns (%d)", DefaultMaxSessionTurns)
+	}
+	if rotatedOld != existingSessID {
+		t.Errorf("expected rotatedOld %q, got %q", existingSessID, rotatedOld)
+	}
+	if rotatedNew == "" || rotatedNew == rotatedOld {
+		t.Errorf("expected fresh rotatedNew, got %q", rotatedNew)
+	}
+}
+
+func TestUnifiedProcessPool_GetOrCreate_PropagatesInitialTurnCount(t *testing.T) {
+	var capturedCfg DaemonConfig
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			capturedCfg = cfg
+			_, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", uuid.New().String())))
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 402}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	d, err := pool.GetOrCreate(ctx, "target-init-turns", "sess-123", 5)
+	if err != nil {
+		t.Fatalf("GetOrCreate error: %v", err)
+	}
+	if capturedCfg.InitialTurnCount != 5 {
+		t.Errorf("expected DaemonConfig.InitialTurnCount 5, got %d", capturedCfg.InitialTurnCount)
+	}
+	if d.TurnCount() != 5 {
+		t.Errorf("expected daemon.TurnCount() 5, got %d", d.TurnCount())
+	}
+}
+
+func TestUnifiedProcessPool_AcquireLease_DefersRotationToTurnEndEvenIfExceeded(t *testing.T) {
+	var rotationCalled bool
+	var rotatedOld string
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = uuid.New().String()
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						break
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 405}, nil
+		},
+	}
+
+	existingSessID := uuid.New().String()
+	pool := NewUnifiedProcessPool(PoolConfig{
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			return SessionRecord{
+				ActiveSessionID: existingSessID,
+				TurnCount:       DefaultMaxSessionTurns,
+			}, nil
+		},
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			rotatedOld = oldSessionID
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-already-exceeded")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	if lease.SessionID() != existingSessID {
+		t.Fatalf("expected lease to preserve existing session %q pre-lease, got %q", existingSessID, lease.SessionID())
+	}
+	if rotationCalled {
+		t.Fatalf("rotation must NOT be called pre-lease")
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-9",
+		Prompt: "user message triggering turn 9",
+		Ctx:    ctx,
+	}
+	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+		t.Fatalf("Execute error: %v", execErr)
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Errorf("expected session rotation to trigger on Release() at turn end")
+	}
+	if rotatedOld != existingSessID {
+		t.Errorf("expected rotatedOld %q, got %q", existingSessID, rotatedOld)
+	}
+}

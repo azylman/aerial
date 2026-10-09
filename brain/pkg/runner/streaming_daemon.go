@@ -130,16 +130,17 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	}
 
 	d := &StreamingDaemon{
-		cfg:          cfg,
-		spawner:      spawner,
-		handle:       handle,
-		stdin:        stdin,
-		stdout:       stdout,
-		stderrCloser: stderr,
-		stderr:       actWriter,
+		cfg:           cfg,
+		spawner:       spawner,
+		handle:        handle,
+		stdin:         stdin,
+		stdout:        stdout,
+		stderrCloser:  stderr,
+		stderr:        actWriter,
 		taskTracker:   NewTaskTracker(),
 		state:         StateStarting,
 		lastUsed:      time.Now(),
+		turnCount:     cfg.InitialTurnCount,
 		inFlightTools: make(map[int]inFlightToolCall),
 	}
 
