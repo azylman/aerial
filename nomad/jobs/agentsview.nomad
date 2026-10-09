@@ -22,9 +22,8 @@ job "agentsview" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 8082
+        to = 8082
       }
     }
 
@@ -32,10 +31,10 @@ job "agentsview" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/agentsview:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }

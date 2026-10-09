@@ -17,9 +17,8 @@ job "homepage" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 3001
+        to = 3001
       }
     }
 
@@ -27,10 +26,10 @@ job "homepage" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/gethomepage/homepage:v2.4.0"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }

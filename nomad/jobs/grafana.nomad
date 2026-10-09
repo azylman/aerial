@@ -17,9 +17,8 @@ job "grafana" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 3000
+        to = 3000
       }
     }
 
@@ -27,10 +26,10 @@ job "grafana" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "grafana/grafana:13.2.3"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }
