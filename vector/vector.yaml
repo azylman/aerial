@@ -35,7 +35,8 @@ transforms:
       if exists(.label."com.docker.compose.service") {
         .service = to_string!(.label."com.docker.compose.service")
       } else {
-        .service = .container_name
+        # Strip Nomad 36-character allocation UUID suffix if present (-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+        .service = replace(to_string(.container_name), r'-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', "")
       }
 
       # 3. Ensure baseline timestamp exists from Docker
@@ -393,11 +394,13 @@ transforms:
 
         # Standard Go logger / Hangar reconciliation / Docker status / Supergateway / Service-specific fallbacks
         if !exists(.level) {
-          parsed, err = parse_regex(.message, r'^(?P<go_timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\s+(?:\[(?P<tag>[^\]]+)\]\s+)?(?P<msg>.*)$')
+          parsed, err = parse_regex(.message, r'^(?:\[(?P<prefix_tag>[^\]]+)\]\s+)?(?P<go_timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\s+(?:\[(?P<tag>[^\]]+)\]\s+)?(?P<msg>.*)$')
           if err == null {
             .message = parsed.msg
             msg_lower = downcase(string!(.message))
-            if contains(msg_lower, "error") || contains(msg_lower, "fatal") || contains(msg_lower, "fail") {
+            if msg_lower == "server error: context canceled" || msg_lower == "context canceled" {
+              .level = "info"
+            } else if contains(msg_lower, "error") || contains(msg_lower, "fatal") || contains(msg_lower, "fail") {
               .level = "error"
             } else if contains(msg_lower, "warn") {
               .level = "warn"
@@ -407,7 +410,9 @@ transforms:
             if !exists(.attributes) {
               .attributes = {}
             }
-            if exists(parsed.tag) {
+            if exists(parsed.prefix_tag) {
+              .attributes.tag = parsed.prefix_tag
+            } else if exists(parsed.tag) {
               .attributes.tag = parsed.tag
             }
           } else if match(string!(.message), r'^\s*Container\s+[a-zA-Z0-9_-]+\s+(Healthy|Running|Started|Created|Waiting|Recreated|Recreate|Stopping|Stopped)') {
@@ -444,7 +449,7 @@ transforms:
             }
           } else if ends_with(to_string(.service), "-mcp") {
             trimmed = strip_whitespace(string!(.message))
-            if trimmed == "" || match(trimmed, r'^(GitHub MCP Server running on stdio|server run cancelled)') {
+            if trimmed == "" || match(trimmed, r'^(GitHub MCP Server running on stdio|server run cancelled|.*Server started on stdio|.*Starting .* MCP server)') {
               .level = "info"
             }
           } else if .service == "ollama" {
