@@ -300,10 +300,12 @@ run_vector_syntax() {
     file="$1"
     if [ -f "$file" ]; then
         echo "   [vector validate] Validating $file..."
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^aerial-vector$'; then
-            docker cp "$file" aerial-vector:/tmp/verify-vector.yaml >/dev/null 2>&1
-            docker exec aerial-vector vector validate --skip-healthchecks /tmp/verify-vector.yaml
-            docker exec aerial-vector rm -f /tmp/verify-vector.yaml >/dev/null 2>&1
+        local vector_container
+        vector_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(aerial-)?vector(-[0-9a-f-]+)?$' | head -n 1 || true)
+        if [ -n "$vector_container" ]; then
+            docker cp "$file" "${vector_container}:/tmp/verify-vector.yaml" >/dev/null 2>&1
+            docker exec "$vector_container" vector validate --skip-healthchecks /tmp/verify-vector.yaml
+            docker exec "$vector_container" rm -f /tmp/verify-vector.yaml >/dev/null 2>&1
         elif has_cmd vector; then
             OPENOBSERVE_ROOT_USER_PASSWORD=dummy OPENOBSERVE_ROOT_USER_EMAIL=dummy@local vector validate --skip-healthchecks "$file"
         fi
