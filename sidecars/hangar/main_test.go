@@ -1529,13 +1529,15 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 		t.Fatalf("expected invalid YAML syntax error, got %v", err)
 	}
 
-	// 4. Valid service configs -> pushes to all Nomad variables
+	// 4. Valid service configs -> pushes to all Nomad variables (including sequence-based YAML like scrape.yml)
 	valDir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(valDir, "services", "mcp"), 0755)
 	_ = os.MkdirAll(filepath.Join(valDir, "services", "webhooks-router"), 0755)
+	_ = os.MkdirAll(filepath.Join(valDir, "services", "victoriametrics"), 0755)
 	_ = os.WriteFile(filepath.Join(valDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: \"4005\"\n"), 0644)
 	_ = os.WriteFile(filepath.Join(valDir, "services", "mcp", "docker-mcp.yaml"), []byte("port: \"4002\"\n"), 0644)
 	_ = os.WriteFile(filepath.Join(valDir, "services", "webhooks-router", "webhooks-router.yaml"), []byte("port: \"4020\"\n"), 0644)
+	_ = os.WriteFile(filepath.Join(valDir, "services", "victoriametrics", "scrape.yml"), []byte("- job_name: \"anomaly-detector\"\n"), 0644)
 
 	var calls [][]string
 	dSuccess := &SyncDaemon{
@@ -1548,16 +1550,16 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 	if err := dSuccess.SyncServiceConfigsToNomad(ctx, valDir); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
-	if len(calls) != 3 {
-		t.Fatalf("expected 3 nomad var put calls, got %d: %v", len(calls), calls)
+	if len(calls) != 4 {
+		t.Fatalf("expected 4 nomad var put calls, got %d: %v", len(calls), calls)
 	}
 
-	// 4b. Second call with unchanged configs -> cache hit, skips all 3
+	// 4b. Second call with unchanged configs -> cache hit, skips all 4
 	if err := dSuccess.SyncServiceConfigsToNomad(ctx, valDir); err != nil {
 		t.Fatalf("expected success on cached call, got %v", err)
 	}
-	if len(calls) != 3 {
-		t.Fatalf("expected calls to remain 3, got %d", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("expected calls to remain 4, got %d", len(calls))
 	}
 
 	// 4c. Modify 1 service config -> only that 1 gets pushed
@@ -1565,8 +1567,8 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 	if err := dSuccess.SyncServiceConfigsToNomad(ctx, valDir); err != nil {
 		t.Fatalf("expected success on modified service call, got %v", err)
 	}
-	if len(calls) != 4 {
-		t.Fatalf("expected calls to increase to 4, got %d", len(calls))
+	if len(calls) != 5 {
+		t.Fatalf("expected calls to increase to 5, got %d", len(calls))
 	}
 
 	// 5. Disabled Nomad executor -> safe no-op
