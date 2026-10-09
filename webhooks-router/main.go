@@ -126,7 +126,7 @@ func LoadConfig(configPath string) Config {
 		infURL = fileCfg.InfisicalURL
 	}
 	if infURL == "" {
-		infURL = "http://127.0.0.1:8085"
+		infURL = "http://infisical.aerial"
 	}
 
 	clientID := os.Getenv("INFISICAL_CLIENT_ID")

@@ -86,7 +86,13 @@ EOH
         data = <<EOH
 {{ range nomadServices }}
 {{ range nomadService .Name }}
-{{ .Address }} {{ .Name }} {{ .Name }}.lan {{ .Name }}.aerial
+{{ .Address }} {{ .Name }} {{ .Name }}.lan
+{{ end }}
+{{ end }}
+{{ range nomadService "proxy" }}
+{{ $proxyIP := .Address }}
+{{ range nomadServices }}
+{{ $proxyIP }} {{ .Name }}.aerial
 {{ end }}
 {{ end }}
 EOH

@@ -70,7 +70,7 @@ datasources:
   - name: VictoriaMetrics
     type: prometheus
     access: proxy
-    url: http://victoriametrics:8428
+    url: http://victoriametrics.aerial
     isDefault: true
     jsonData:
       httpMethod: POST
