@@ -24,9 +24,8 @@ job "openobserve" {
     }
 
     network {
-      mode = "host"
       port "http" {
-        static = 5080
+        to = 5080
       }
     }
 
@@ -34,10 +33,10 @@ job "openobserve" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "public.ecr.aws/zinclabs/openobserve:v1.0.4"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }

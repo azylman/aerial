@@ -17,9 +17,8 @@ job "vector" {
     count = 1
 
     network {
-      mode = "host"
       port "api" {
-        static = 8686
+        to = 8686
       }
     }
 
@@ -27,10 +26,10 @@ job "vector" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "timberio/vector:0.58.0-alpine"
-        network_mode = "host"
+        ports        = ["api"]
         healthchecks {
           disable = true
         }
@@ -54,7 +53,7 @@ job "vector" {
         VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION = "true"
         VECTOR_WATCH_CONFIG                           = "true"
         OPENOBSERVE_ROOT_USER_EMAIL                   = "admin@aerial.local"
-        OPENOBSERVE_ENDPOINT                          = "http://openobserve:5080"
+        OPENOBSERVE_ENDPOINT                          = "http://openobserve.aerial"
       }
 
       template {

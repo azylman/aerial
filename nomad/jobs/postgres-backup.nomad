@@ -17,9 +17,8 @@ job "postgres-backup" {
     count = 1
 
     network {
-      mode = "host"
       port "health" {
-        static = 8086
+        to = 8086
       }
     }
 
@@ -27,10 +26,10 @@ job "postgres-backup" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "prodrigestivill/postgres-backup-local:18"
-        network_mode = "host"
+        ports        = ["health"]
         healthchecks {
           disable = true
         }
