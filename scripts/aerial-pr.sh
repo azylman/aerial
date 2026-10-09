@@ -977,7 +977,7 @@ submit_scratch() {
         brain_reg_url="${AERIAL_BRAIN_URL%/}/internal/pr/register"
     else
         # Probe candidate endpoints for Brain's /internal/pr/register handler (defaulting to 8088 on Nomad)
-        for cand in "http://127.0.0.1:8088" "http://host.docker.internal:8088" "http://127.0.0.1:8080" "http://aerial-brain:8080"; do
+        for cand in "http://127.0.0.1:8088" "http://brain.aerial" "http://host.docker.internal:8088" "http://127.0.0.1:8080" "http://aerial-brain:8080"; do
             local probe_code
             probe_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 -X POST "${cand}/internal/pr/register" 2>/dev/null || true)
             if [ "$probe_code" = "400" ] || [ "$probe_code" = "200" ]; then
@@ -986,7 +986,7 @@ submit_scratch() {
             fi
         done
         if [ -z "$brain_reg_url" ]; then
-            brain_reg_url="http://127.0.0.1:8088/internal/pr/register"
+            brain_reg_url="http://brain.aerial/internal/pr/register"
         fi
     fi
     # Extract candidate Nomad job names from changed .nomad files

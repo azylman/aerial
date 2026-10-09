@@ -22,9 +22,8 @@ job "hangar" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 8087
+        to = 8087
       }
     }
 
@@ -35,10 +34,10 @@ job "hangar" {
       kill_timeout = "30s"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-hangar:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }
@@ -52,8 +51,11 @@ job "hangar" {
       }
 
       env {
-        CONFIG_PATH = "/share/aerial-config/services/hangar/hangar.yaml"
-        GOCOVERDIR  = "/coverage"
+        CONFIG_PATH        = "/share/aerial-config/services/hangar/hangar.yaml"
+        NOMAD_ADDR         = "http://${attr.unique.network.ip-address}:4646"
+        BRAIN_INTERNAL_URL = "http://brain.aerial/internal/reload"
+        PORT               = "8087"
+        GOCOVERDIR         = "/coverage"
       }
 
       template {
