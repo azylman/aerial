@@ -173,7 +173,8 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 
 // GetOrCreate retrieves an active StreamingDaemon for targetKey, or starts one via singleflight.
 // If sessionID is non-empty, it is passed to the daemon config to resume an existing conversation.
-func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, sessionID string) (*StreamingDaemon, error) {
+// If initialTurns is provided, the first value is passed to DaemonConfig.InitialTurnCount on fresh spawn.
+func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, sessionID string, initialTurns ...int) (*StreamingDaemon, error) {
 	trimmedSess := strings.TrimSpace(sessionID)
 	p.mu.RLock()
 	if p.closed {
@@ -181,7 +182,8 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		return nil, fmt.Errorf("process pool is closed")
 	}
 	if d, exists := p.daemons[targetKey]; exists {
-		if should, _ := p.ShouldRotate(d); !should && isDaemonMatch(d, trimmedSess) {
+		should, _ := p.ShouldRotate(d)
+		if isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
 			p.mu.RUnlock()
 			return d, nil
 		}
@@ -196,7 +198,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		}
 		if d, exists := p.daemons[targetKey]; exists && d != nil {
 			should, rotReason := p.ShouldRotate(d)
-			if !should && isDaemonMatch(d, trimmedSess) {
+			if isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
 				p.mu.Unlock()
 				return d, nil
 			}
@@ -208,9 +210,8 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 					log.Printf("[UnifiedProcessPool] Warning: error closing old daemon %q: %v", tKey, closeErr)
 				}
 			}(d, targetKey)
-			if should {
+			if should && trimmedSess == "" {
 				metrics.RecordSessionRotation("pre_flight", "pool", rotReason)
-				trimmedSess = ""
 			}
 		}
 		p.mu.Unlock()
@@ -228,9 +229,15 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			})
 		}
 
+		initTurnCount := 0
+		if len(initialTurns) > 0 && initialTurns[0] > 0 {
+			initTurnCount = initialTurns[0]
+		}
+
 		daemonCfg := DaemonConfig{
 			ThreadID:                targetKey,
 			SessionID:               trimmedSess,
+			InitialTurnCount:        initTurnCount,
 			Model:                   p.cfg.Model,
 			AgyBin:                  p.cfg.AgyBin,
 			Cwd:                     p.cfg.Cwd,
@@ -787,7 +794,7 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 		}
 	}
 
-	d, dErr := p.GetOrCreate(ctx, trimmedKey, rec.ActiveSessionID)
+	d, dErr := p.GetOrCreate(ctx, trimmedKey, rec.ActiveSessionID, rec.TurnCount)
 	if dErr != nil {
 		p.releaseTargetLock(trimmedKey, tl, true)
 		return nil, fmt.Errorf("failed to get or create daemon for %s: %w", trimmedKey, dErr)
@@ -1017,13 +1024,18 @@ func (l *unifiedSessionLease) Release() error {
 		}
 
 		shouldRotate, reason := l.pool.ShouldRotate(l.daemon)
-		if !shouldRotate && l.pool.cfg.MaxSessionTurns > 0 && l.turnCount >= l.pool.cfg.MaxSessionTurns {
+		maxTurns := DefaultMaxSessionTurns
+		if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
+			maxTurns = l.pool.cfg.MaxSessionTurns
+		}
+		if !shouldRotate && l.turnCount >= maxTurns {
 			shouldRotate = true
-			reason = fmt.Sprintf("reached maximum turn threshold (%d)", l.pool.cfg.MaxSessionTurns)
+			reason = fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
 		}
 
 		if shouldRotate {
 			log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", l.targetKey, reason)
+			metrics.RecordSessionRotation("turn_end", "pool", reason)
 			newSessionID := uuid.New().String()
 			oldSessionID := l.sessionID
 
