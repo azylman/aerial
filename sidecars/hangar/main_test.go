@@ -1529,6 +1529,28 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 		t.Fatalf("expected invalid YAML syntax error, got %v", err)
 	}
 
+	// 3b. Non-YAML service config (e.g. .conf) -> skips YAML validation and syncs successfully
+	nonYamlDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(nonYamlDir, "proxy"), 0755)
+	_ = os.WriteFile(filepath.Join(nonYamlDir, "proxy", "default.conf"), []byte("server { listen 80; proxy_pass http://backend; }"), 0644)
+	var nonYamlCalls [][]string
+	dNonYaml := &SyncDaemon{
+		nomadAddr: "http://127.0.0.1:4646",
+		serviceConfigs: []ServiceConfigMapping{
+			{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/proxy", VarKey: "DEFAULT_CONF"},
+		},
+		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+			nonYamlCalls = append(nonYamlCalls, args)
+			return []byte("var updated"), nil, nil
+		},
+	}
+	if err := dNonYaml.SyncServiceConfigsToNomad(ctx, nonYamlDir); err != nil {
+		t.Fatalf("expected non-YAML config to sync successfully, got %v", err)
+	}
+	if len(nonYamlCalls) != 1 {
+		t.Fatalf("expected 1 nomad var put call for non-YAML config, got %d", len(nonYamlCalls))
+	}
+
 	// 4. Valid service configs -> pushes to all Nomad variables (including sequence-based YAML like scrape.yml)
 	valDir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(valDir, "services", "mcp"), 0755)
