@@ -2,12 +2,7 @@ job "postgres" {
   datacenters = ["dc1"]
   type        = "service"
 
-  # Target quiet-zero core server node where persistent storage resides
-  constraint {
-    attribute = "${node.class}"
-    operator  = "regexp"
-    value     = "quiet-zero|haos"
-  }
+  node_pool   = "default"
 
   update {
     max_parallel      = 1
