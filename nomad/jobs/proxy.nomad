@@ -39,12 +39,19 @@ job "proxy" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/aerial-config/proxy/default.conf:/etc/nginx/conf.d/default.conf:ro",
-          "/mnt/data/supervisor/share/aerial/proxy/grafana-cyberpunk.css:/etc/nginx/grafana-cyberpunk.css:ro",
-          "/mnt/data/supervisor/share/aerial/proxy/agentsview-cyberpunk.css:/etc/nginx/agentsview-cyberpunk.css:ro",
-          "/mnt/data/supervisor/share/aerial/proxy/openobserve-cyberpunk.css:/etc/nginx/openobserve-cyberpunk.css:ro"
-        ]
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/proxy" -}}
+{{- with nomadVar "nomad/jobs/proxy" -}}
+{{- if .DEFAULT_CONF -}}{{- .DEFAULT_CONF -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination   = "local/default.conf"
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
       }
 
       template {

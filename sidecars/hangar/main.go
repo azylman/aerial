@@ -2282,9 +2282,12 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 			return fmt.Errorf("failed to read service config at %s: %w", filePath, err)
 		}
 
-		var parsed any
-		if err := yaml.Unmarshal(raw, &parsed); err != nil {
-			return fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
+		ext := strings.ToLower(filepath.Ext(filePath))
+		if ext == ".yaml" || ext == ".yml" {
+			var parsed any
+			if err := yaml.Unmarshal(raw, &parsed); err != nil {
+				return fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
+			}
 		}
 
 		nomadExec := d.getNomadExecutor()
