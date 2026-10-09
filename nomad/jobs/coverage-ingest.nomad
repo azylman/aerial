@@ -2,12 +2,7 @@ job "coverage-ingest" {
   datacenters = ["dc1"]
   type        = "batch"
 
-  # Target quiet-zero core server node
-  constraint {
-    attribute = "${node.class}"
-    operator  = "regexp"
-    value     = "quiet-zero|haos"
-  }
+  node_pool   = "default"
 
   periodic {
     cron             = "0 4 * * *" # Daily at 4:00 AM UTC

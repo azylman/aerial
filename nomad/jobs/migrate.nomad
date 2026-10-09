@@ -2,12 +2,7 @@ job "aerial-core-db-migrate" {
   datacenters = ["dc1"]
   type        = "batch"
 
-  # Target quiet-zero core server node
-  constraint {
-    attribute = "${node.class}"
-    operator  = "regexp"
-    value     = "quiet-zero|haos"
-  }
+  node_pool   = "default"
 
   reschedule {
     attempts = 0
