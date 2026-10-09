@@ -26,9 +26,6 @@ job "proxy" {
       port "http" {
         static = 80
       }
-      port "agentsview" {
-        static = 8089
-      }
     }
 
     task "proxy" {
