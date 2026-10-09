@@ -22,9 +22,8 @@ job "discord-mcp" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 4001
+        to = 4001
       }
     }
 
@@ -32,10 +31,10 @@ job "discord-mcp" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-discord-mcp:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["http"]
         healthchecks {
           disable = true
         }

@@ -22,9 +22,8 @@ job "infisical-mcp" {
     count = 1
 
     network {
-      mode = "host"
       port "mcp" {
-        static = 4007
+        to = 4007
       }
     }
 
@@ -32,10 +31,10 @@ job "infisical-mcp" {
       driver = "docker"
 
       config {
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-infisical-mcp:${var.image_tag}"
-        network_mode = "host"
+        ports        = ["mcp"]
         healthchecks {
           disable = true
         }
