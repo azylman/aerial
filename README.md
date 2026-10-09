@@ -355,7 +355,7 @@ Aerial uses an automated, event-driven GitOps push continuous deployment pipelin
 | **`aerial-brain`** | `8080` (Host `8088`) | Multi-protocol Go execution daemon running `agy`, PostgreSQL memory, multiplexed Discord, Voice (`/voice/ask`), and HTTP (`/prompt`) ingress, Prometheus metrics (`:8080/metrics`), and SIGHUP configuration hot-reloading. Mounted `:ro`. |
 | **`aerial-hangar`** | `8087` (Host `8087`) | Dedicated Hangar sidecar daemon managing automated repository synchronization, push GitOps reconciliation for Nomad jobs, image update detection, snapshot rollbacks, and Prometheus metrics. Mounted `:rw`. |
 | **`coredns`** | `53` (Host `53/udp`) | Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`. |
-| **`infisical`** | `8085` (Host `8085`) | Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`). |
+| **`infisical`** | Dynamic (via `infisical.aerial`) | Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`). |
 | **`webhooks-router`** | `4020` (Host `4020`) | Event-driven webhook dispatcher routing GitHub push webhooks to Hangar and Infisical secret changes to Nomad variables. |
 | **`nomad-mcp`** | `4005` (Host `4005`) | Native Streamable HTTP MCP server for Nomad cluster orchestration, job lifecycles, and allocation diagnostics. |
 | **`infisical-mcp`** | `4006` (Host `4006`) | Native Streamable HTTP MCP server for Infisical secret management and rotation. |
@@ -371,7 +371,7 @@ Aerial uses an automated, event-driven GitOps push continuous deployment pipelin
 | **`aerial-cadvisor`** | `8080` (Internal) | cAdvisor container metrics collector gathering per-container CPU, memory, network, and disk telemetry. |
 | **`aerial-node-exporter`**| `9100` (Internal) | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
 | **`aerial-postgres-exporter`**| `9187` (Internal) | PostgreSQL database metrics exporter gathering connection pools, locks, query stats, and buffer metrics. |
-| **`aerial-victoriametrics`**| `8428` (Internal) | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all exporters with 5-year retention and dynamic `scrape.d/` config. |
+| **`aerial-victoriametrics`**| Dynamic (via `victoriametrics.aerial`) | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all exporters with 5-year retention and dynamic `scrape.d/` config. |
 | **`aerial-grafana`** | `3000` (via proxy) | Grafana visual dashboards serving system HUD & container metrics with PostgreSQL persistent backend and pre-provisioned dashboards. |
 | **`docker-mcp`** | `4002` (Host `4002`) | Auxiliary host Docker MCP inspection service over `/var/run/docker.sock`. |
 

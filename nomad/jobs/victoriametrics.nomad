@@ -18,9 +18,7 @@ job "victoriametrics" {
 
     network {
       mode = "host"
-      port "http" {
-        static = 8428
-      }
+      port "http" {}
     }
 
     task "victoriametrics" {
@@ -44,6 +42,7 @@ job "victoriametrics" {
           }
         ]
         args = [
+          "-httpListenAddr=:${NOMAD_PORT_http}",
           "-storageDataPath=/victoria-metrics-data",
           "-promscrape.config=/local/scrape.yml",
           "-promscrape.configCheckInterval=15s",

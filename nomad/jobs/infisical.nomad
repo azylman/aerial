@@ -18,12 +18,8 @@ job "infisical" {
 
     network {
       mode = "host"
-      port "http" {
-        static = 8085
-      }
-      port "redis" {
-        static = 6380
-      }
+      port "http" {}
+      port "redis" {}
     }
 
     restart {
@@ -50,7 +46,7 @@ job "infisical" {
         healthchecks {
           disable = true
         }
-        args         = ["--port", "6380", "--bind", "0.0.0.0", "--protected-mode", "no", "--save", ""]
+        args         = ["--port", "${NOMAD_PORT_redis}", "--bind", "127.0.0.1", "--protected-mode", "no", "--save", ""]
       }
 
       service {
@@ -93,10 +89,10 @@ job "infisical" {
       }
 
       env {
-        PORT                          = "8085"
+        PORT                          = "${NOMAD_PORT_http}"
         HOST                          = "0.0.0.0"
-        REDIS_URL                     = "redis://infisical-redis:6380"
-        SITE_URL                      = "http://infisical:8085"
+        REDIS_URL                     = "redis://127.0.0.1:${NOMAD_PORT_redis}"
+        SITE_URL                      = "http://infisical.aerial"
         ALLOW_INTERNAL_IP_CONNECTIONS = "true"
       }
 
