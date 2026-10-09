@@ -18,9 +18,7 @@ job "cadvisor" {
 
     network {
       mode = "host"
-      port "metrics" {
-        static = 8083
-      }
+      port "metrics" {}
     }
 
     task "cadvisor" {
@@ -45,7 +43,7 @@ job "cadvisor" {
           "/var/run/docker.sock:/var/run/docker.sock:ro"
         ]
         args = [
-          "--port=8083",
+          "--port=${NOMAD_PORT_metrics}",
           "--docker_only=true",
           "--housekeeping_interval=15s",
           "--disable_metrics=percpu,sched,tcp,udp,advtcp,process,referenced_memory,hugetlb,memory_numa,cpu_topology,resctrl,cpuset",
