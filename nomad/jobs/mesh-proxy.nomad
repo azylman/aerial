@@ -65,7 +65,7 @@ EOH
 {{ if and (ne .Name "proxy") (ne .Name "mesh-proxy") }}
 upstream {{ .Name }} {
 {{ range nomadService .Name }}
-    server {{ .Address }}:{{ .Port }};
+    server {{ if contains ":" .Address }}[{{ .Address }}]{{ else }}{{ .Address }}{{ end }}:{{ .Port }};
 {{ else }}
     server 127.0.0.1:65535 down;
 {{ end }}

@@ -1265,8 +1265,8 @@ M	docker-compose.yml
 R100	jobs/old.nomad	jobs/new.nomad
 `
 	changes := ParseNomadGitStatus(statusOutput)
-	if len(changes) != 4 {
-		t.Fatalf("expected 4 nomad changes, got %d: %+v", len(changes), changes)
+	if len(changes) != 5 {
+		t.Fatalf("expected 5 nomad changes, got %d: %+v", len(changes), changes)
 	}
 
 	if changes[0].Path != "jobs/infisical.nomad" || changes[0].Action != "apply" || changes[0].JobName != "infisical" {
@@ -1278,8 +1278,11 @@ R100	jobs/old.nomad	jobs/new.nomad
 	if changes[2].Path != "jobs/deprecated.nomad" || changes[2].Action != "delete" || changes[2].JobName != "deprecated" {
 		t.Errorf("unexpected change[2]: %+v", changes[2])
 	}
-	if changes[3].Path != "jobs/new.nomad" || changes[3].Action != "apply" || changes[3].JobName != "new" {
+	if changes[3].Path != "jobs/old.nomad" || changes[3].Action != "delete" || changes[3].JobName != "old" {
 		t.Errorf("unexpected change[3]: %+v", changes[3])
+	}
+	if changes[4].Path != "jobs/new.nomad" || changes[4].Action != "apply" || changes[4].JobName != "new" {
+		t.Errorf("unexpected change[4]: %+v", changes[4])
 	}
 
 	// Additional ParseNomadGitStatus cases
@@ -1289,8 +1292,10 @@ R100	jobs/old.nomad	jobs/new.nomad
 	}
 
 	renameStatus := ParseNomadGitStatus("R090\tjobs/old.nomad\tjobs/renamed.nomad\n")
-	if len(renameStatus) != 1 || renameStatus[0].Action != "apply" || renameStatus[0].JobName != "renamed" {
-		t.Errorf("expected 1 change (apply renamed) for rename status, got %+v", renameStatus)
+	if len(renameStatus) != 2 ||
+		renameStatus[0].Action != "delete" || renameStatus[0].JobName != "old" ||
+		renameStatus[1].Action != "apply" || renameStatus[1].JobName != "renamed" {
+		t.Errorf("expected 2 changes (delete old, apply renamed) for rename status, got %+v", renameStatus)
 	}
 
 	nonNomadStatus := ParseNomadGitStatus("M\tdocker-compose.yml\nA\tREADME.md\n")
