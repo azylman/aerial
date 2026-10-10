@@ -1,4 +1,4 @@
-job "aerial-core-db-migrate" {
+job "db-migrate" {
   datacenters = ["dc1"]
   type        = "batch"
 
@@ -49,7 +49,7 @@ job "aerial-core-db-migrate" {
         data = <<EOH
 variable "postgres_url" {
   type    = string
-  default = "{{ if nomadVarExists "nomad/jobs/aerial-core-db-migrate" }}{{ with nomadVar "nomad/jobs/aerial-core-db-migrate" }}{{ if .POSTGRES_URL }}{{ .POSTGRES_URL }}{{ else }}postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable{{ end }}{{ end }}{{ else }}postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable{{ end }}"
+  default = "{{ if nomadVarExists "nomad/jobs/db-migrate" }}{{ with nomadVar "nomad/jobs/db-migrate" }}{{ if .POSTGRES_URL }}{{ .POSTGRES_URL }}{{ else }}postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable{{ end }}{{ end }}{{ else }}postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable{{ end }}"
 }
 
 env "core" {
