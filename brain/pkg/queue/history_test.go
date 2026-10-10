@@ -677,3 +677,73 @@ func TestSanitizeHistoryContent_PreviousSessionTag(t *testing.T) {
 		t.Errorf("expected escaped <\\/PREVIOUS_SESSION>, got: %q", sanitized)
 	}
 }
+
+func TestFormatChannelHistory_TimezoneFormatting(t *testing.T) {
+	t.Parallel()
+
+
+	t.Run("explicit America/Los_Angeles formats PDT", func(t *testing.T) {
+		t.Parallel()
+		// Temporarily clamp now to shortly after ts by overriding in test logic if needed,
+		// but FormatChannelHistory checks m.CreatedAt against now - 4h.
+		// In FormatChannelHistory, now is time.Now().UTC().
+		// So CreatedAt must be within last 4 hours of now.
+		now := time.Now().UTC()
+		locLA, err := time.LoadLocation("America/Los_Angeles")
+		if err != nil {
+			t.Fatalf("failed to load America/Los_Angeles: %v", err)
+		}
+		recentMsgs := []HistoryMessage{
+			{
+				ID:         "msg-recent-1",
+				AuthorName: "Alice",
+				Role:       "User",
+				Content:    "Hello recent",
+				CreatedAt:  now.Add(-10 * time.Minute),
+			},
+		}
+		formatted := FormatChannelHistory(recentMsgs, "America/Los_Angeles")
+		expectedTime := now.Add(-10 * time.Minute).In(locLA).Format("2006-01-02 15:04:05 MST")
+		if !strings.Contains(formatted, expectedTime) {
+			t.Errorf("expected %q in formatted history, got:\n%s", expectedTime, formatted)
+		}
+	})
+
+	t.Run("default empty tzOpt falls back to UTC", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now().UTC()
+		recentMsgs := []HistoryMessage{
+			{
+				ID:         "msg-recent-2",
+				AuthorName: "Bob",
+				Role:       "User",
+				Content:    "Hello UTC",
+				CreatedAt:  now.Add(-5 * time.Minute),
+			},
+		}
+		formatted := FormatChannelHistory(recentMsgs)
+		expectedTime := now.Add(-5 * time.Minute).UTC().Format("2006-01-02 15:04:05 UTC")
+		if !strings.Contains(formatted, expectedTime) {
+			t.Errorf("expected %q in formatted history, got:\n%s", expectedTime, formatted)
+		}
+	})
+
+	t.Run("invalid timezone string falls back to UTC without panic", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now().UTC()
+		recentMsgs := []HistoryMessage{
+			{
+				ID:         "msg-recent-3",
+				AuthorName: "Charlie",
+				Role:       "User",
+				Content:    "Hello invalid tz",
+				CreatedAt:  now.Add(-5 * time.Minute),
+			},
+		}
+		formatted := FormatChannelHistory(recentMsgs, "Invalid/Timezone/Bogus")
+		expectedTime := now.Add(-5 * time.Minute).UTC().Format("2006-01-02 15:04:05 UTC")
+		if !strings.Contains(formatted, expectedTime) {
+			t.Errorf("expected %q in formatted history on invalid tz, got:\n%s", expectedTime, formatted)
+		}
+	})
+}

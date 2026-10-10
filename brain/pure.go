@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/bwmarrin/discordgo"
@@ -247,7 +248,14 @@ func BuildDiscordPrompt(input DiscordPromptInput) string {
 	sanitizedContent := strings.ReplaceAll(m.Content, "</USER_REQUEST>", "<\\/USER_REQUEST>")
 	sanitizedContent = strings.ReplaceAll(sanitizedContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
 	sb.WriteString(fmt.Sprintf("- content: %s\n", sanitizedContent))
-	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", m.Timestamp.Format(time.RFC3339)))
+
+	ts := m.Timestamp
+	if strings.TrimSpace(input.Timezone) != "" {
+		if loc, err := time.LoadLocation(strings.TrimSpace(input.Timezone)); err == nil && loc != nil {
+			ts = ts.In(loc)
+		}
+	}
+	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", ts.Format(time.RFC3339)))
 
 	var mentions []string
 	var mentionUserIDs []string

@@ -46,6 +46,7 @@ type AgyEnvInput struct {
 	HomeDir  string
 	APIKey   string
 	TargetID string
+	Timezone string
 	ExtraEnv []string
 }
 
@@ -125,6 +126,10 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 
 	if target := strings.TrimSpace(input.TargetID); target != "" {
 		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+target)
+	}
+
+	if tz := strings.TrimSpace(input.Timezone); tz != "" {
+		cmdEnv = append(cmdEnv, "TZ="+tz)
 	}
 
 	if len(input.ExtraEnv) > 0 {

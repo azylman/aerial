@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -48,9 +49,19 @@ func SanitizeHistoryContent(s string) string {
 // content to 1,000 characters, sorts messages chronologically (oldest to newest),
 // and formats them inside a secure <CHANNEL_HISTORY> block with security guidance.
 // Returns an empty string if no messages remain after clamping or if messages is empty.
-func FormatChannelHistory(messages []HistoryMessage) string {
+func FormatChannelHistory(messages []HistoryMessage, tzOpt ...string) string {
 	if len(messages) == 0 {
 		return ""
+	}
+
+	var loc *time.Location
+	if len(tzOpt) > 0 && strings.TrimSpace(tzOpt[0]) != "" {
+		if l, err := time.LoadLocation(strings.TrimSpace(tzOpt[0])); err == nil {
+			loc = l
+		}
+	}
+	if loc == nil {
+		loc = time.UTC
 	}
 
 	now := time.Now().UTC()
@@ -106,7 +117,7 @@ func FormatChannelHistory(messages []HistoryMessage) string {
 			author = "@" + author
 		}
 
-		timeStr := m.CreatedAt.UTC().Format("2006-01-02 15:04:05 UTC")
+		timeStr := m.CreatedAt.In(loc).Format("2006-01-02 15:04:05 MST")
 		sb.WriteString(fmt.Sprintf("- [%s] [%s (%s)]: %s\n", timeStr, author, role, content))
 	}
 
