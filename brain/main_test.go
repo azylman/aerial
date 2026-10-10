@@ -4144,6 +4144,42 @@ func TestBuildPoolEnv(t *testing.T) {
 			t.Errorf("expected custom GOLANGCI_LINT_CACHE, got %q", envMap["GOLANGCI_LINT_CACHE"])
 		}
 	})
+
+	t.Run("InjectsConfiguredTimezone", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		base := []string{"EXISTING=1"}
+		res := buildPoolEnv(base, tmpDir, "America/Los_Angeles")
+
+		envMap := make(map[string]string)
+		for _, e := range res {
+			if k, v, ok := strings.Cut(e, "="); ok {
+			envMap[k] = v
+			}
+		}
+
+		if envMap["TZ"] != "America/Los_Angeles" {
+			t.Errorf("expected TZ=America/Los_Angeles, got %q", envMap["TZ"])
+		}
+	})
+
+	t.Run("PreservesExplicitTZ", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		base := []string{"TZ=UTC"}
+		res := buildPoolEnv(base, tmpDir, "America/Los_Angeles")
+
+		envMap := make(map[string]string)
+		for _, e := range res {
+			if k, v, ok := strings.Cut(e, "="); ok {
+			envMap[k] = v
+			}
+		}
+
+		if envMap["TZ"] != "UTC" {
+			t.Errorf("expected explicit TZ=UTC to be preserved, got %q", envMap["TZ"])
+		}
+	})
 }
 
 type mockSequentialPool struct {

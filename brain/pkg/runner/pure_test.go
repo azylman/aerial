@@ -182,6 +182,7 @@ func TestBuildAgyEnv(t *testing.T) {
 				HomeDir:  "/custom/home",
 				APIKey:   "secret-token-123",
 				TargetID: "target-agent",
+				Timezone: "America/Los_Angeles",
 				ExtraEnv: []string{"EXTRA_KEY=foo"},
 			},
 			contains: []string{
@@ -195,6 +196,7 @@ func TestBuildAgyEnv(t *testing.T) {
 				"ANTIGRAVITY_API_KEY=secret-token-123",
 				"GOOGLE_GENAI_API_KEY=secret-token-123",
 				"AERIAL_TARGET_ID=target-agent",
+				"TZ=America/Los_Angeles",
 				"EXTRA_KEY=foo",
 			},
 		},

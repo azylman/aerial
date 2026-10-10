@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/db"
@@ -172,7 +173,7 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 }
 
 // FormatSingleDiscordPrompt formats a single structured Discord message into the canonical <USER_REQUEST> prompt envelope JIT.
-func FormatSingleDiscordPrompt(m db.Message) string {
+func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	var sb strings.Builder
 	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
 	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
@@ -226,7 +227,12 @@ func FormatSingleDiscordPrompt(m db.Message) string {
 	sb.WriteString(fmt.Sprintf("- content: %s\n", sanitizedContent))
 	ts := m.CreatedAt
 	if ts.IsZero() {
-		ts = time.Now().UTC()
+		ts = time.Now()
+	}
+	if len(tzOpt) > 0 && strings.TrimSpace(tzOpt[0]) != "" {
+		if loc, err := time.LoadLocation(strings.TrimSpace(tzOpt[0])); err == nil && loc != nil {
+			ts = ts.In(loc)
+		}
 	}
 	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", ts.Format(time.RFC3339)))
 
@@ -258,15 +264,22 @@ func FormatSingleDiscordPrompt(m db.Message) string {
 }
 
 // CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.
-func CoalesceBurstPrompt(burst []db.Message) string {
+func CoalesceBurstPrompt(burst []db.Message, tzOpt ...string) string {
 	if len(burst) == 0 {
 		return ""
 	}
 	if len(burst) == 1 {
 		if !burst[0].Metadata.IsEmpty() {
-			return FormatSingleDiscordPrompt(burst[0])
+			return FormatSingleDiscordPrompt(burst[0], tzOpt...)
 		}
 		return burst[0].Content
+	}
+
+	var loc *time.Location
+	if len(tzOpt) > 0 && strings.TrimSpace(tzOpt[0]) != "" {
+		if l, err := time.LoadLocation(strings.TrimSpace(tzOpt[0])); err == nil {
+			loc = l
+		}
 	}
 
 	var sb strings.Builder
@@ -279,10 +292,14 @@ func CoalesceBurstPrompt(burst []db.Message) string {
 		if !strings.HasPrefix(author, "@") {
 			author = "@" + author
 		}
-		timeStr := m.CreatedAt.Format("15:04:05")
-		if m.CreatedAt.IsZero() {
-			timeStr = time.Now().UTC().Format("15:04:05")
+		ts := m.CreatedAt
+		if ts.IsZero() {
+			ts = time.Now()
 		}
+		if loc != nil {
+			ts = ts.In(loc)
+		}
+		timeStr := ts.Format("15:04:05")
 		body := sanitizer.SanitizePromptTags(m.BodyText())
 		sb.WriteString(fmt.Sprintf("--- Message %d (by %s at %s) ---\n%s\n\n", i+1, author, timeStr, body))
 	}
@@ -581,11 +598,12 @@ type TurnPromptInput struct {
 	ChannelInstructions string // Deprecated: Use ScopeInstructions
 	InjectedHookContext string
 	AmbientContext      string
+	Timezone            string
 }
 
 // AssembleTurnPrompt deterministically composes the turn prompt in exact top-to-bottom document order.
 func AssembleTurnPrompt(input TurnPromptInput) string {
-	basePrompt := CoalesceBurstPrompt(input.Burst)
+	basePrompt := CoalesceBurstPrompt(input.Burst, input.Timezone)
 
 	// Layer 6: Thread Summary (if present)
 	if strings.TrimSpace(input.ThreadSummary) != "" {
@@ -602,7 +620,7 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 
 	// Layer 5: Channel History Lookback (if present)
 	if len(input.LookbackHistory) > 0 {
-		if formattedHist := FormatChannelHistory(input.LookbackHistory); formattedHist != "" {
+		if formattedHist := FormatChannelHistory(input.LookbackHistory, input.Timezone); formattedHist != "" {
 			if basePrompt != "" {
 				basePrompt = formattedHist + "\n\n" + basePrompt
 			} else {

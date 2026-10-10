@@ -265,6 +265,9 @@ func TestBuildDiscordPrompt_TableDriven(t *testing.T) {
 		if !strings.Contains(prompt, "- content: Hello Aerial, deploy the new binary\n") {
 			t.Error("missing content")
 		}
+		if !strings.Contains(prompt, "- timestamp: 2026-09-12T12:00:00-07:00\n") {
+			t.Errorf("expected localized timestamp in prompt, got: %s", prompt)
+		}
 	})
 
 	t.Run("prompt tag escaping and nil author safety", func(t *testing.T) {

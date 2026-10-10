@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/azylman/aerial/brain/pkg/ambient"
 	"github.com/azylman/aerial/brain/pkg/classifier"
@@ -1383,7 +1384,7 @@ func extractAllMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
 
 // buildPoolEnv returns a process environment slice with unified compiler and module
 // cache directories under runtimeBase/cache when not already explicitly set.
-func buildPoolEnv(baseEnv []string, runtimeBase string) []string {
+func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []string {
 	if runtimeBase == "" {
 		return baseEnv
 	}
@@ -1417,6 +1418,17 @@ func buildPoolEnv(baseEnv []string, runtimeBase string) []string {
 	}
 	if !envMap["GOLANGCI_LINT_CACHE"] {
 		extra = append(extra, "GOLANGCI_LINT_CACHE="+filepath.Join(cacheBase, "golangci-lint"))
+	}
+	if !envMap["TZ"] {
+		var tz string
+		if len(timezone) > 0 && strings.TrimSpace(timezone[0]) != "" {
+			tz = strings.TrimSpace(timezone[0])
+		} else {
+			tz = config.GetTimezone()
+		}
+		if tz != "" {
+			extra = append(extra, "TZ="+tz)
+		}
 	}
 
 	if len(extra) == 0 {
@@ -1519,7 +1531,8 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 				Model:                   lowEffortModel,
 				AgyBin:                  cur.AgyBin,
 				Cwd:                     cur.DataDir,
-				Env:                     buildPoolEnv(os.Environ(), runtimeBase),
+				Env:                     buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone),
+				Timezone:                cur.Timezone,
 				PrewarmedTargets:        prewarmedTargets,
 				MemoryRetriever:         memoryRetriever,
 				AmbientContextRetriever: ambRetriever,
@@ -1682,7 +1695,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	voiceHome := filepath.Join(runtimeBase, "runtimes", "voice")
 	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
 
-	poolEnv := buildPoolEnv(os.Environ(), runtimeBase)
+	poolEnv := buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone)
 
 	memClient := memory.New(cfg, sessionMgr.Roots()...)
 	var memoryRetriever runner.MemoryRetriever
@@ -1702,6 +1715,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AgyBin:            cur.AgyBin,
 		Cwd:               cur.DataDir,
 		Env:               poolEnv,
+		Timezone:          cur.Timezone,
 		MemoryRetriever:   memoryRetriever,
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		SessionManager:    sessionMgr,
@@ -1718,6 +1732,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AgyBin:            cur.AgyBin,
 		Cwd:               cur.DataDir,
 		Env:               poolEnv,
+		Timezone:          cur.Timezone,
 		PrewarmedTargets:  []string{"ephemeral:worker-0", "ephemeral:worker-1"},
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		SessionManager:    sessionMgr,
@@ -1739,6 +1754,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AgyBin:            cur.AgyBin,
 		Cwd:               cur.DataDir,
 		Env:               poolEnv,
+		Timezone:          cur.Timezone,
 		MemoryRetriever:   memoryRetriever,
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		PrewarmedTargets:  []string{"discord:worker-0", "discord:worker-1"},

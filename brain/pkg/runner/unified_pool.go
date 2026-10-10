@@ -38,6 +38,7 @@ type PoolConfig struct {
 	MinSessionTurns             int
 	EmergencyRotationMultiplier int
 	TargetLockTimeout           time.Duration
+	Timezone                    string
 }
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
@@ -226,6 +227,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 				BaseEnv:  p.cfg.Env,
 				HomeDir:  home,
 				TargetID: targetKey,
+				Timezone: p.cfg.Timezone,
 			})
 		}
 

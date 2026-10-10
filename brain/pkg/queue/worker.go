@@ -1014,7 +1014,13 @@ func buildPreTurnRequest(te *turnExecution) *PreTurnRequest {
 	}
 	prompt := te.turnPrompt
 	if prompt == "" {
-		prompt = CoalesceBurstPrompt(te.burst)
+		var tz string
+		if te.pool != nil && te.pool.appCfg != nil {
+			if cur := te.pool.appCfg.Current(); cur != nil {
+				tz = cur.Timezone
+			}
+		}
+		prompt = CoalesceBurstPrompt(te.burst, tz)
 	}
 	return &PreTurnRequest{
 		ChannelID:  channelID,
@@ -1365,6 +1371,13 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 	}
 
+	var tz string
+	if te.pool != nil && te.pool.appCfg != nil {
+		if cur := te.pool.appCfg.Current(); cur != nil {
+			tz = cur.Timezone
+		}
+	}
+
 	te.turnPrompt = AssembleTurnPrompt(TurnPromptInput{
 		AmbientContext:      ambientCtx,
 		Burst:               te.burst,
@@ -1374,6 +1387,7 @@ func (te *turnExecution) buildTurnPrompt() {
 		IsColdStart:         isColdStart,
 		ChannelInstructions: instructions,
 		InjectedHookContext: te.injectedHookContext,
+		Timezone:            tz,
 	})
 	te.turnPrompt = te.preparePrompt(te.turnPrompt)
 }

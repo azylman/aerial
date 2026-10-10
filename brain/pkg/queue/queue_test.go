@@ -1355,15 +1355,22 @@ func TestQueueBurstCoalescing(t *testing.T) {
 	if !strings.Contains(capturedPrompt, "<USER_REQUEST>") || !strings.Contains(capturedPrompt, "[Multiple messages received in channel]") {
 		t.Errorf("Expected coalesced prompt header, got: %s", capturedPrompt)
 	}
-	expectedM1 := fmt.Sprintf("--- Message 1 (by @Alice at %s) ---", t0.Format("15:04:05"))
+	var loc *time.Location
+	if pool.appCfg != nil && pool.appCfg.Current() != nil && pool.appCfg.Current().Timezone != "" {
+		loc, _ = time.LoadLocation(pool.appCfg.Current().Timezone)
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	expectedM1 := fmt.Sprintf("--- Message 1 (by @Alice at %s) ---", t0.In(loc).Format("15:04:05"))
 	if !strings.Contains(capturedPrompt, expectedM1) || !strings.Contains(capturedPrompt, "Hello from Alice") {
 		t.Errorf("Expected message 1 (%s) in coalesced prompt, got: %s", expectedM1, capturedPrompt)
 	}
-	expectedM2 := fmt.Sprintf("--- Message 2 (by @Bob at %s) ---", t1.Format("15:04:05"))
+	expectedM2 := fmt.Sprintf("--- Message 2 (by @Bob at %s) ---", t1.In(loc).Format("15:04:05"))
 	if !strings.Contains(capturedPrompt, expectedM2) || !strings.Contains(capturedPrompt, "Hello from Bob") {
 		t.Errorf("Expected message 2 (%s) in coalesced prompt, got: %s", expectedM2, capturedPrompt)
 	}
-	expectedM3 := fmt.Sprintf("--- Message 3 (by @Charlie at %s) ---", t2.Format("15:04:05"))
+	expectedM3 := fmt.Sprintf("--- Message 3 (by @Charlie at %s) ---", t2.In(loc).Format("15:04:05"))
 	if !strings.Contains(capturedPrompt, expectedM3) || !strings.Contains(capturedPrompt, "Hello from Charlie") {
 		t.Errorf("Expected message 3 (%s) in coalesced prompt, got: %s", expectedM3, capturedPrompt)
 	}
