@@ -1537,7 +1537,7 @@ func TestSyncServiceConfigsToNomad(t *testing.T) {
 	dNonYaml := &SyncDaemon{
 		nomadAddr: "http://127.0.0.1:4646",
 		serviceConfigs: []ServiceConfigMapping{
-			{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/proxy", VarKey: "DEFAULT_CONF"},
+			{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/mesh-proxy", VarKey: "DEFAULT_CONF"},
 		},
 		nomadExecutor: func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
 			nonYamlCalls = append(nonYamlCalls, args)
