@@ -409,7 +409,7 @@ Secrets and credentials are managed through Infisical and synced automatically t
 Core jobs are defined in `nomad/jobs/*.nomad` and deployed via Nomad:
 ```bash
 # Run database migrations batch job:
-nomad job run nomad/jobs/migrate.nomad
+nomad job run nomad/jobs/db-migrate.nomad
 
 # Run core services:
 nomad job run nomad/jobs/coredns.nomad

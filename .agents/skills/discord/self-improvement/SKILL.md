@@ -268,7 +268,7 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - **Step 3: Verify Integrity & Code Hygiene (`./scripts/verify.sh --staged`)**:
      - Staged pre-flight checks automatically run `check_no_imperative_ddl` to ensure no raw DDL leaked into application code, and validate migration directory checksums via `atlas migrate validate`.
    - **Step 4: Hermetic Tests & Nomad Batch Migration Execution**:
-     - Run target database tests (`go test -v ./brain/pkg/db/...`). Ensure application code does not embed migration runners on startup, and that schema provisioning cluster-wide is handled via the colocated Nomad batch job (`nomad/jobs/migrate.nomad`).
+     - Run target database tests (`go test -v ./brain/pkg/db/...`). Ensure application code does not embed migration runners on startup, and that schema provisioning cluster-wide is handled via the colocated Nomad batch job (`nomad/jobs/db-migrate.nomad`).
 
 ---
 
