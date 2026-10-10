@@ -89,12 +89,22 @@ EOH
 {{ .Address }} {{ .Name }} {{ .Name }}.lan
 {{ end }}
 {{ end }}
+{{ $meshProxy := nomadService "mesh-proxy" }}
+{{- if $meshProxy }}
+{{ range $meshProxy }}
+{{ $proxyIP := .Address }}
+{{ range nomadServices }}
+{{ $proxyIP }} {{ .Name }}.aerial
+{{ end }}
+{{ end }}
+{{- else }}
 {{ range nomadService "proxy" }}
 {{ $proxyIP := .Address }}
 {{ range nomadServices }}
 {{ $proxyIP }} {{ .Name }}.aerial
 {{ end }}
 {{ end }}
+{{- end }}
 EOH
         destination = "local/hosts"
         change_mode = "noop"
