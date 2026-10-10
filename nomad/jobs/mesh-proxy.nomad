@@ -47,10 +47,6 @@ job "mesh-proxy" {
 {{- with nomadVar "nomad/jobs/mesh-proxy" -}}
 {{- if .DEFAULT_CONF -}}{{- .DEFAULT_CONF -}}{{- end -}}
 {{- end -}}
-{{- else if nomadVarExists "nomad/jobs/proxy" -}}
-{{- with nomadVar "nomad/jobs/proxy" -}}
-{{- if .DEFAULT_CONF -}}{{- .DEFAULT_CONF -}}{{- end -}}
-{{- end -}}
 {{- end -}}
 EOH
         destination   = "local/default.conf"
@@ -62,7 +58,7 @@ EOH
         data = <<EOH
 # Dynamic Nomad service upstreams rendered by Nomad template
 {{ range nomadServices }}
-{{ if and (ne .Name "proxy") (ne .Name "mesh-proxy") }}
+{{ if ne .Name "mesh-proxy" }}
 upstream {{ .Name }} {
 {{ range nomadService .Name }}
     server {{ if contains ":" .Address }}[{{ .Address }}]{{ else }}{{ .Address }}{{ end }}:{{ .Port }};
@@ -96,13 +92,6 @@ EOH
             ignore_warnings = false
           }
         }
-      }
-
-      # Backwards compatibility alias for services resolving proxy.aerial
-      service {
-        name     = "proxy"
-        port     = "http"
-        provider = "nomad"
       }
 
       resources {
