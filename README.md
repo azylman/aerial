@@ -416,7 +416,7 @@ nomad job run nomad/jobs/coredns.nomad
 nomad job run nomad/jobs/postgres.nomad
 nomad job run nomad/jobs/brain.nomad
 nomad job run nomad/jobs/hangar.nomad
-nomad job run nomad/jobs/proxy.nomad
+nomad job run nomad/jobs/mesh-proxy.nomad
 ```
 On boot, `aerial-brain` and `aerial-hangar` adopt or clone your private configuration repository into `/share/aerial-config` and synchronize settings.
 

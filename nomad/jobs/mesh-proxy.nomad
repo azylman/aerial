@@ -3,7 +3,7 @@ variable "image_tag" {
   default = "latest"
 }
 
-job "proxy" {
+job "mesh-proxy" {
   datacenters = ["dc1"]
   type        = "service"
 
@@ -18,7 +18,7 @@ job "proxy" {
     auto_revert       = true
   }
 
-  group "proxy" {
+  group "mesh-proxy" {
     count = 1
 
     network {
@@ -28,7 +28,7 @@ job "proxy" {
       }
     }
 
-    task "proxy" {
+    task "mesh-proxy" {
       driver = "docker"
 
       config {
@@ -43,7 +43,11 @@ job "proxy" {
 
       template {
         data = <<EOH
-{{- if nomadVarExists "nomad/jobs/proxy" -}}
+{{- if nomadVarExists "nomad/jobs/mesh-proxy" -}}
+{{- with nomadVar "nomad/jobs/mesh-proxy" -}}
+{{- if .DEFAULT_CONF -}}{{- .DEFAULT_CONF -}}{{- end -}}
+{{- end -}}
+{{- else if nomadVarExists "nomad/jobs/proxy" -}}
 {{- with nomadVar "nomad/jobs/proxy" -}}
 {{- if .DEFAULT_CONF -}}{{- .DEFAULT_CONF -}}{{- end -}}
 {{- end -}}
@@ -58,7 +62,7 @@ EOH
         data = <<EOH
 # Dynamic Nomad service upstreams rendered by Nomad template
 {{ range nomadServices }}
-{{ if ne .Name "proxy" }}
+{{ if and (ne .Name "proxy") (ne .Name "mesh-proxy") }}
 upstream {{ .Name }} {
 {{ range nomadService .Name }}
     server {{ .Address }}:{{ .Port }};
@@ -76,12 +80,12 @@ EOH
       }
 
       service {
-        name     = "proxy"
+        name     = "mesh-proxy"
         port     = "http"
         provider = "nomad"
 
         check {
-          name     = "proxy-health"
+          name     = "mesh-proxy-health"
           type     = "http"
           path     = "/health"
           interval = "15s"
@@ -92,6 +96,13 @@ EOH
             ignore_warnings = false
           }
         }
+      }
+
+      # Backwards compatibility alias for services resolving proxy.aerial
+      service {
+        name     = "proxy"
+        port     = "http"
+        provider = "nomad"
       }
 
       resources {

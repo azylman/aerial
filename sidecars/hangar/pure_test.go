@@ -1446,7 +1446,7 @@ func TestIsSafeJobPath_TableDriven(t *testing.T) {
 		path     string
 		expected bool
 	}{
-		{"valid nomad file in base", "/share/aerial-config/jobs/webhooks-edge.nomad", true},
+		{"valid nomad file in base", "/share/aerial-config/jobs/aerial-edge-proxy.nomad", true},
 		{"valid nested nomad file", "/share/aerial-config/jobs/edge/webhooks.nomad.hcl", true},
 		{"path traversal escape false", "/share/aerial-config/jobs/../secret.nomad", false},
 		{"outside directory false", "/etc/passwd", false},
