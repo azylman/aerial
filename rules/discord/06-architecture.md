@@ -30,7 +30,7 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and Hang
   - **`aerial-docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
   - **`webhooks-router`**: Secret sync router dispatching Infisical webhook events to Nomad variables, and event-driven GitHub push webhooks to Hangar.
-  - **`cloudflared-webhooks` / `aerial-edge-proxy`**: Ingress tunnel services exposing secure external webhooks and public domains into the local Nomad mesh.
+  - **`cloudflared-webhooks` / `edge-proxy`**: Ingress tunnel services exposing secure external webhooks and public domains into the local Nomad mesh.
 
 - **Observability & Supporting Services**:
   - **`aerial-vector`**: High-performance log collector and transform pipeline shipping container stdout/stderr into OpenObserve.
