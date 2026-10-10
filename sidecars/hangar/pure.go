@@ -680,6 +680,25 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 			continue
 		}
 		status := parts[0]
+		if strings.HasPrefix(status, "R") && len(parts) >= 3 {
+			oldPath := parts[1]
+			newPath := parts[2]
+			if IsNomadJobFile(oldPath) {
+				changes = append(changes, NomadFileChange{
+					Path:    oldPath,
+					Action:  "delete",
+					JobName: ExtractJobName("", oldPath),
+				})
+			}
+			if IsNomadJobFile(newPath) {
+				changes = append(changes, NomadFileChange{
+					Path:    newPath,
+					Action:  "apply",
+					JobName: ExtractJobName("", newPath),
+				})
+			}
+			continue
+		}
 		filePath := parts[len(parts)-1]
 		if !IsNomadJobFile(filePath) {
 			continue
