@@ -94,7 +94,7 @@ http {
     # 1. Public GitHub Webhooks Entrypoint
     server {
         listen 4021 default_server;
-        server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .webhooks_domain }}{{ .webhooks_domain }}{{ else }}webhooks.* ~^webhooks\..+${{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .webhooks_domain }}{{ .webhooks_domain }}{{ else }}webhooks.* ~^webhooks\..+${{ end }}{{ end }}{{ else }}webhooks.* ~^webhooks\..+${{ end }};
+        server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .webhooks_domain }}{{ .webhooks_domain }}{{ else }}webhooks.*{{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .webhooks_domain }}{{ .webhooks_domain }}{{ else }}webhooks.*{{ end }}{{ end }}{{ else }}webhooks.*{{ end }};
 
         # Healthcheck endpoint for Nomad
         location = /health {
@@ -157,7 +157,7 @@ http {
     # 2. Public Documentation Entrypoint (Reverse proxy to docs.aerial via mesh-proxy)
     server {
         listen 4021;
-        server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .docs_domain }}{{ .docs_domain }}{{ else }}docs.* ~^docs\..+${{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .docs_domain }}{{ .docs_domain }}{{ else }}docs.* ~^docs\..+${{ end }}{{ end }}{{ else }}docs.* ~^docs\..+${{ end }};
+        server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .docs_domain }}{{ .docs_domain }}{{ else }}docs.*{{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .docs_domain }}{{ .docs_domain }}{{ else }}docs.*{{ end }}{{ end }}{{ else }}docs.*{{ end }};
 
         location / {
             proxy_pass http://127.0.0.1:80;
@@ -174,7 +174,7 @@ http {
     # 3. Public Web Application Entrypoint (Reverse proxy to mesh-proxy)
     server {
         listen 4021;
-        server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .app_domain }}{{ .app_domain }}{{ else }}aerial.* ~^aerial\..+${{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .app_domain }}{{ .app_domain }}{{ else }}aerial.* ~^aerial\..+${{ end }}{{ end }}{{ else }}aerial.* ~^aerial\..+${{ end }};
+        server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .app_domain }}{{ .app_domain }}{{ else }}aerial.*{{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .app_domain }}{{ .app_domain }}{{ else }}aerial.*{{ end }}{{ end }}{{ else }}aerial.*{{ end }};
 
         location / {
             proxy_pass http://127.0.0.1:80;
