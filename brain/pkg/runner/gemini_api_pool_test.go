@@ -3780,6 +3780,205 @@ func TestGeminiAPIPool_AcquireLease_CancelRotation(t *testing.T) {
 	}
 }
 
+func TestGeminiAPIPool_AcquireLease_ClearsCancelRotationOnSuccessfulRetry(t *testing.T) {
+	var callCount int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&callCount, 1)
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"Retry succeeded."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+		flusher.Flush()
+	}))
+	defer ts.Close()
+
+	var rotationCalled bool
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:          "test-key",
+		Model:           "gemini-2.5-flash",
+		BaseURL:         ts.URL,
+		HTTPClient:      ts.Client(),
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			return nil
+		},
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-retry-clear")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx1 := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "first attempt",
+		Ctx:    ctx,
+	}
+
+	// Attempt 1 fails with 429 -> sets cancelRotation
+	_, execErr1 := lease.Execute(ctx, turnCtx1)
+	if execErr1 == nil {
+		t.Fatalf("expected error from Execute on attempt 1, got nil")
+	}
+
+	// Attempt 2 succeeds on same lease -> clears cancelRotation
+	turnCtx2 := &TurnContext{
+		TurnID: "turn-1-retry",
+		Prompt: "second attempt",
+		Ctx:    ctx,
+	}
+	res2, execErr2 := lease.Execute(ctx, turnCtx2)
+	if execErr2 != nil {
+		t.Fatalf("attempt 2 Execute error: %v", execErr2)
+	}
+	if res2 == nil || res2.Response != "Retry succeeded." {
+		t.Fatalf("unexpected res2: %v", res2)
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Error("expected OnSessionRotated to be called when retry on same lease succeeded")
+	}
+}
+
+func TestGeminiAPIPool_AcquireLease_ConversationalRateLimitTextDoesNotCancelRotation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"I hit an external rate limit reached earlier, but cached the response."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+		flusher.Flush()
+	}))
+	defer ts.Close()
+
+	var rotationCalled bool
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:          "test-key",
+		Model:           "gemini-2.5-flash",
+		BaseURL:         ts.URL,
+		HTTPClient:      ts.Client(),
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			return nil
+		},
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-conversational")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "check status",
+		Ctx:    ctx,
+	}
+
+	res, execErr := lease.Execute(ctx, turnCtx)
+	if execErr != nil {
+		t.Fatalf("unexpected Execute error: %v", execErr)
+	}
+	if res == nil || !strings.Contains(res.Response, "rate limit reached") {
+		t.Fatalf("unexpected res: %v", res)
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Error("expected OnSessionRotated to be called despite conversational text containing rate limit phrasing")
+	}
+}
+
+func TestGeminiAPIPool_AcquireLease_DefaultMaxSessionTurnsFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+		flusher.Flush()
+	}))
+	defer ts.Close()
+
+	var rotationCount int
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:     "test-key",
+		Model:      "gemini-2.5-flash",
+		BaseURL:    ts.URL,
+		HTTPClient: ts.Client(),
+		// MaxSessionTurns omitted -> should default to DefaultMaxSessionTurns (8)
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCount++
+			return nil
+		},
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-default-turns")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	// TurnCount starts at 0. Run 7 turns: turnCount becomes 7 (< 8) -> should not rotate
+	for i := 0; i < 7; i++ {
+		turnCtx := &TurnContext{
+			TurnID: fmt.Sprintf("turn-%d", i+1),
+			Prompt: "turn",
+			Ctx:    ctx,
+		}
+		if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+			t.Fatalf("turn %d Execute error: %v", i+1, execErr)
+		}
+	}
+
+	// Set turnCount to 8 on 8th turn:
+	turnCtx8 := &TurnContext{
+		TurnID: "turn-8",
+		Prompt: "turn 8",
+		Ctx:    ctx,
+	}
+	if _, execErr := lease.Execute(ctx, turnCtx8); execErr != nil {
+		t.Fatalf("turn 8 Execute error: %v", execErr)
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if rotationCount != 1 {
+		t.Errorf("expected 1 rotation at DefaultMaxSessionTurns (8), got %d", rotationCount)
+	}
+}
+
 func TestGeminiAPIPool_AcquireLease_ConcurrencySerialization(t *testing.T) {
 	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:            "test-key",

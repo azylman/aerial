@@ -1461,6 +1461,7 @@ func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*T
 	if turn == nil {
 		return nil, errors.New("turn context cannot be nil")
 	}
+	l.cancelRotation = false
 	if turn.Ctx == nil {
 		turn.Ctx = ctx
 	}
@@ -1514,8 +1515,10 @@ func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*T
 		}
 		return nil, waitErr
 	}
-	if res != nil && (IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "") || IsQuotaPause(res.Response, "") || IsCapacityBlip(res.Response, "")) {
-		l.cancelRotation = true
+	if res != nil && !IsSubstantiveResponse(res.Response) {
+		if IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "") {
+			l.cancelRotation = true
+		}
 	}
 	l.turnCount++
 	l.isCold = false
@@ -1532,9 +1535,13 @@ func (l *geminiSessionLease) Release() error {
 		}
 
 		shouldRotate, reason := l.pool.ShouldRotateSession(l.session)
-		if !shouldRotate && l.pool.cfg.MaxSessionTurns > 0 && l.turnCount >= l.pool.cfg.MaxSessionTurns {
+		maxTurns := DefaultMaxSessionTurns
+		if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
+			maxTurns = l.pool.cfg.MaxSessionTurns
+		}
+		if !shouldRotate && l.turnCount >= maxTurns {
 			shouldRotate = true
-			reason = fmt.Sprintf("reached maximum turn threshold (%d)", l.pool.cfg.MaxSessionTurns)
+			reason = fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
 		}
 
 		if shouldRotate {

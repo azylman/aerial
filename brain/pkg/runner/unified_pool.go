@@ -938,6 +938,7 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	if turn == nil {
 		return nil, errors.New("turn context cannot be nil")
 	}
+	l.cancelRotation = false
 	if turn.Ctx == nil {
 		turn.Ctx = ctx
 	}
@@ -997,10 +998,10 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 		}
 		return nil, waitErr
 	}
-	if res != nil {
-		if IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "") || IsQuotaPause(res.Response, "") || IsCapacityBlip(res.Response, "") {
+	if res != nil && !IsSubstantiveResponse(res.Response) {
+		if IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "") {
 			l.cancelRotation = true
-		} else if strings.TrimSpace(res.Response) == "" && l.pool != nil && l.pool.cfg.SessionManager != nil && l.sessionID != "" {
+		} else if l.pool != nil && l.pool.cfg.SessionManager != nil && l.sessionID != "" {
 			if tErr, err := l.pool.cfg.SessionManager.ExtractLastTurnError(ctx, l.sessionID, turn.CreatedAt); err == nil && tErr != "" {
 				if IsQuotaPause(tErr, "") || IsCapacityBlip(tErr, "") {
 					l.cancelRotation = true
