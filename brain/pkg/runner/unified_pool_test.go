@@ -2851,6 +2851,222 @@ func TestUnifiedProcessPool_AcquireLease_CancelRotation(t *testing.T) {
 	}
 }
 
+func TestUnifiedProcessPool_AcquireLease_RotatesWhenResponseSubstantiveDespiteStderrThrottle(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := uuid.New().String()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						break
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						// agy recovered from transient 429 internally: produces substantive output while error/stderr retains throttle note
+						_, _ = outW.Write([]byte(`{"event":"result","response":"Task completed successfully and verified.","error":"API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.","status":"DONE"}` + "\n"))
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 306}, nil
+		},
+	}
+
+	var rotationCalled bool
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-substantive-rot")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "do task",
+		Ctx:    ctx,
+	}
+
+	res, execErr := lease.Execute(ctx, turnCtx)
+	if execErr != nil {
+		t.Fatalf("unexpected Execute error: %v", execErr)
+	}
+	if res == nil || res.Response != "Task completed successfully and verified." {
+		t.Fatalf("expected substantive response, got: %v", res)
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Error("expected OnSessionRotated to be called for substantive response despite transient stderr throttle")
+	}
+}
+
+func TestUnifiedProcessPool_AcquireLease_ClearsCancelRotationOnSuccessfulRetry(t *testing.T) {
+	var turnAttempt int
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := uuid.New().String()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						break
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						turnAttempt++
+						if turnAttempt == 1 {
+							// Attempt 1: throttle error without response
+							_, _ = outW.Write([]byte(`{"event":"result","response":"","error":"RESOURCE_EXHAUSTED: quota exceeded. Resets in 5s.","status":"ERROR"}` + "\n"))
+						} else {
+							// Attempt 2: success
+							_, _ = outW.Write([]byte(`{"event":"result","response":"Retry succeeded with substantive output.","status":"DONE"}` + "\n"))
+						}
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 307}, nil
+		},
+	}
+
+	var rotationCalled bool
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-retry-clear")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx1 := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "attempt 1",
+		Ctx:    ctx,
+	}
+	// Attempt 1 fails on throttle -> arms cancelRotation
+	_, execErr1 := lease.Execute(ctx, turnCtx1)
+	if execErr1 == nil {
+		t.Fatal("expected attempt 1 to fail on throttle")
+	}
+
+	// Attempt 2 succeeds on same lease -> clears cancelRotation
+	turnCtx2 := &TurnContext{
+		TurnID: "turn-1-retry",
+		Prompt: "attempt 2",
+		Ctx:    ctx,
+	}
+	res2, execErr2 := lease.Execute(ctx, turnCtx2)
+	if execErr2 != nil {
+		t.Fatalf("attempt 2 failed: %v", execErr2)
+	}
+	if res2 == nil || res2.Response != "Retry succeeded with substantive output." {
+		t.Fatalf("unexpected res2: %v", res2)
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Error("expected OnSessionRotated to be called after attempt 2 succeeded on the same lease")
+	}
+}
+
+func TestUnifiedProcessPool_AcquireLease_ConversationalRateLimitTextDoesNotCancelRotation(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := uuid.New().String()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						break
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						// Assistant conversationally mentions rate limit in response text
+						_, _ = outW.Write([]byte(`{"event":"result","response":"I hit an external rate limit reached earlier, but I cached the result.","status":"DONE"}` + "\n"))
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 308}, nil
+		},
+	}
+
+	var rotationCalled bool
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCalled = true
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-conversational-ratelimit")
+	if err != nil {
+		t.Fatalf("AcquireLease error: %v", err)
+	}
+
+	turnCtx := &TurnContext{
+		TurnID: "turn-1",
+		Prompt: "check rate limit status",
+		Ctx:    ctx,
+	}
+
+	res, execErr := lease.Execute(ctx, turnCtx)
+	if execErr != nil {
+		t.Fatalf("unexpected Execute error: %v", execErr)
+	}
+	if res == nil || !strings.Contains(res.Response, "rate limit reached") {
+		t.Fatalf("expected conversational response, got: %v", res)
+	}
+
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release error: %v", relErr)
+	}
+
+	if !rotationCalled {
+		t.Error("expected OnSessionRotated to be called despite conversational text containing rate limit phrasing")
+	}
+}
+
 func TestUnifiedProcessPool_AcquireLease_Validation(t *testing.T) {
 	ctx := context.Background()
 
