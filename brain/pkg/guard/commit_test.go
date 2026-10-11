@@ -28,6 +28,34 @@ func TestScanDiff_Patterns(t *testing.T) {
 		wantSample   string
 	}{
 		{
+			name: "Internal cluster domain detected",
+			diff: `diff --git a/pkg/net/client.go b/pkg/net/client.go
+--- a/pkg/net/client.go
++++ b/pkg/net/client.go
+@@ -10,3 +10,4 @@
+ package net
++var watcherURL = "http://mirrormere-cast-watcher.aerial/action"
+`,
+			wantCategory: "InternalClusterDomain",
+			wantFile:     "pkg/net/client.go",
+			wantLine:     11,
+			wantSample:   "mirrormere-cast-watcher.aerial",
+		},
+		{
+			name: "Internal LAN domain detected",
+			diff: `diff --git a/pkg/net/client.go b/pkg/net/client.go
+--- a/pkg/net/client.go
++++ b/pkg/net/client.go
+@@ -10,3 +10,4 @@
+ package net
++var edgeURL = "http://ollama.lan:11434"
+`,
+			wantCategory: "InternalClusterDomain",
+			wantFile:     "pkg/net/client.go",
+			wantLine:     11,
+			wantSample:   "ollama.lan",
+		},
+		{
 			name: "RFC1918 IP address detected",
 			diff: `diff --git a/pkg/net/client.go b/pkg/net/client.go
 --- a/pkg/net/client.go
@@ -452,6 +480,91 @@ func TestCheckCommit(t *testing.T) {
 	}
 	if !strings.Contains(d6.Reason, "RFC1918_192_168") {
 		t.Errorf("expected RFC1918_192_168 in reason, got: %s", d6.Reason)
+	}
+}
+
+func TestIsCoreAerial(t *testing.T) {
+	// 1. .git/config origin remote URL check
+	tmpAerial := t.TempDir()
+	aerialGitDir := filepath.Join(tmpAerial, ".git")
+	_ = os.MkdirAll(aerialGitDir, 0755)
+	_ = os.WriteFile(filepath.Join(aerialGitDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial.git\n"), 0644)
+	if !IsCoreAerial(tmpAerial, "git commit") {
+		t.Errorf("expected true for aerial remote URL")
+	}
+
+	tmpMirrormere := t.TempDir()
+	mmGitDir := filepath.Join(tmpMirrormere, ".git")
+	_ = os.MkdirAll(mmGitDir, 0755)
+	_ = os.WriteFile(filepath.Join(mmGitDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/mirrormere.git\n"), 0644)
+	if IsCoreAerial(tmpMirrormere, "git commit") {
+		t.Errorf("expected false for mirrormere remote URL")
+	}
+
+	// Exclude aerial-config and aerial-sidecars
+	tmpConfig := t.TempDir()
+	cfgGitDir := filepath.Join(tmpConfig, ".git")
+	_ = os.MkdirAll(cfgGitDir, 0755)
+	_ = os.WriteFile(filepath.Join(cfgGitDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial-config.git\n"), 0644)
+	if IsCoreAerial(tmpConfig, "git commit") {
+		t.Errorf("expected false for aerial-config")
+	}
+}
+
+func TestCheckCommit_InternalClusterDomainFiltering(t *testing.T) {
+	origGitRunner := gitCmdRunner
+	defer func() { gitCmdRunner = origGitRunner }()
+
+	// In peripheral repo (mirrormere): .aerial is denied
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		for _, a := range args {
+			if a == "--cached" {
+				return "diff --git a/pkg/display.js b/pkg/display.js\n--- a/pkg/display.js\n+++ b/pkg/display.js\n@@ -1,1 +1,2 @@\n+const url = \"http://mirrormere-cast-watcher.aerial/action\"\n", nil
+			}
+		}
+		return "", nil
+	}
+
+	dPeripheral := CheckCommit("run_command", ToolArgs{
+		CommandLine: "git commit -m \"add cast watcher\"",
+		Cwd:         "/data/scratch/mirrormere-scratch",
+	})
+	if dPeripheral.Decision != DecisionDeny {
+		t.Errorf("expected deny for .aerial domain in peripheral repo, got: %v", dPeripheral)
+	}
+	if !strings.Contains(dPeripheral.Reason, "InternalClusterDomain") {
+		t.Errorf("expected InternalClusterDomain in reason, got: %s", dPeripheral.Reason)
+	}
+
+	// In core aerial repo: .aerial is allowed for Nomad service mesh
+	tmpAerial := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpAerial, ".git"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpAerial, ".git", "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial.git\n"), 0644)
+
+	dAerial := CheckCommit("run_command", ToolArgs{
+		CommandLine: "git commit -m \"update nomad service\"",
+		Cwd:         tmpAerial,
+	})
+	if dAerial.Decision != DecisionAllow {
+		t.Errorf("expected allow for .aerial domain in core aerial repo, got: %v", dAerial)
+	}
+
+	// In core aerial repo: RFC1918 IPs are still denied
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		for _, a := range args {
+			if a == "--cached" {
+				return "diff --git a/pkg/client.go b/pkg/client.go\n--- a/pkg/client.go\n+++ b/pkg/client.go\n@@ -1,1 +1,2 @@\n+const ip = \"192.168.1.50\"\n", nil
+			}
+		}
+		return "", nil
+	}
+
+	dAerialIP := CheckCommit("run_command", ToolArgs{
+		CommandLine: "git commit -m \"hardcoded ip\"",
+		Cwd:         tmpAerial,
+	})
+	if dAerialIP.Decision != DecisionDeny {
+		t.Errorf("expected deny for RFC1918 IP in core aerial repo, got: %v", dAerialIP)
 	}
 }
 
