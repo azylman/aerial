@@ -30,6 +30,7 @@ type PatternRule struct {
 // Strictly contains generic patterns without any hardcoded personal PII.
 var BuiltinPatterns = []PatternRule{
 	{Category: "RFC1918_192_168", Regex: regexp.MustCompile(`\b192\.168\.\d{1,3}\.\d{1,3}\b`)},
+	{Category: "InternalClusterDomain", Regex: regexp.MustCompile(`(?i)\b[a-zA-Z0-9_-]+\.(?:aerial|lan)\b`)},
 	{Category: "GitHubPAT", Regex: regexp.MustCompile(`\b(ghp|github_pat|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,80}\b`)},
 	{Category: "PrivateKey", Regex: regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`)},
 	{Category: "DiscordWebhook", Regex: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+`)},
@@ -437,6 +438,59 @@ func IsAerialConfig(targetDir string, cmd string) bool {
 	return false
 }
 
+// IsCoreAerial returns true if targetDir or cmd targets the core aerial monorepo
+// (which legitimately uses *.aerial for Nomad service discovery mesh).
+func IsCoreAerial(targetDir string, cmd string) bool {
+	dir := targetDir
+	if dir == "" {
+		dir = "."
+	}
+
+	// 1. Inspect .git/config in targetDir if present
+	gitConfigFile := filepath.Join(dir, ".git", "config")
+	if data, err := os.ReadFile(gitConfigFile); err == nil {
+		content := strings.ToLower(string(data))
+		if (strings.Contains(content, "/aerial.git") || strings.Contains(content, "/aerial\"") || strings.Contains(content, "azylman/aerial")) &&
+			!strings.Contains(content, "aerial-config") && !strings.Contains(content, "aerial-sidecars") {
+			return true
+		}
+	}
+
+	// Handle git worktree or submodule where .git is a file
+	gitFile := filepath.Join(dir, ".git")
+	if data, err := os.ReadFile(gitFile); err == nil {
+		content := strings.ToLower(string(data))
+		if (strings.Contains(content, "/aerial.git") || strings.Contains(content, "azylman/aerial")) &&
+			!strings.Contains(content, "aerial-config") && !strings.Contains(content, "aerial-sidecars") {
+			return true
+		}
+		if strings.HasPrefix(strings.TrimSpace(content), "gitdir:") {
+			gitDir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), "gitdir:"))
+			if !filepath.IsAbs(gitDir) {
+				gitDir = filepath.Join(dir, gitDir)
+			}
+			if cfgData, err := os.ReadFile(filepath.Join(gitDir, "config")); err == nil {
+				cfgContent := strings.ToLower(string(cfgData))
+				if (strings.Contains(cfgContent, "/aerial.git") || strings.Contains(cfgContent, "azylman/aerial")) &&
+					!strings.Contains(cfgContent, "aerial-config") && !strings.Contains(cfgContent, "aerial-sidecars") {
+					return true
+				}
+			}
+		}
+	}
+
+	// 3. Query git remote get-url origin
+	if out, err := gitCmdRunner(dir, "remote", "get-url", "origin"); err == nil {
+		trimmed := strings.ToLower(strings.TrimSpace(out))
+		if (strings.HasSuffix(trimmed, "/aerial") || strings.HasSuffix(trimmed, "/aerial.git") || strings.Contains(trimmed, "azylman/aerial")) &&
+			!strings.Contains(trimmed, "aerial-config") && !strings.Contains(trimmed, "aerial-sidecars") {
+			return true
+		}
+	}
+
+	return false
+}
+
 // isAllCommit checks if git commit was called with -a, -am, or --all flags.
 func isAllCommit(cmd string) bool {
 	subCommands := splitCommands(cmd)
@@ -560,7 +614,17 @@ func CheckCommit(toolName string, args ToolArgs) *Decision {
 	}
 
 	diff := diffBuilder.String()
-	violations := ScanDiff(diff, false)
+	patterns := GetActivePatterns()
+	if IsCoreAerial(dir, args.CommandLine) {
+		filtered := make([]PatternRule, 0, len(patterns))
+		for _, p := range patterns {
+			if p.Category != "InternalClusterDomain" {
+				filtered = append(filtered, p)
+			}
+		}
+		patterns = filtered
+	}
+	violations := ScanDiffWithPatterns(diff, false, patterns)
 	if len(violations) > 0 {
 		return &Decision{
 			Decision: DecisionDeny,
