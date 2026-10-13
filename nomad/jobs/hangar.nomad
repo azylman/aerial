@@ -51,11 +51,12 @@ job "hangar" {
       }
 
       env {
-        CONFIG_PATH        = "/share/aerial-config/services/hangar/hangar.yaml"
-        NOMAD_ADDR         = "http://${attr.unique.network.ip-address}:4646"
-        BRAIN_INTERNAL_URL = "http://brain.aerial/internal/reload"
-        PORT               = "8087"
-        GOCOVERDIR         = "/coverage"
+        CONFIG_PATH         = "/share/aerial-config/services/hangar/hangar.yaml"
+        NOMAD_ADDR          = "http://${attr.unique.network.ip-address}:4646"
+        BRAIN_INTERNAL_URL  = "http://brain.aerial/internal/reload"
+        WEBHOOKS_ROUTER_URL = "http://webhooks-router.aerial"
+        PORT                = "8087"
+        GOCOVERDIR          = "/coverage"
       }
 
       template {
