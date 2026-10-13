@@ -81,6 +81,12 @@ fi
 # 1. Trigger live in-memory flush on active microservices
 echo "🔄 [coverage-ingest] Requesting live runtime flush on registered services..."
 for flush_url in \
+  "http://webhooks-router.aerial/debug/coverage/flush" \
+  "http://hangar.aerial/debug/coverage/flush" \
+  "http://scheduler-mcp.aerial/debug/coverage/flush" \
+  "http://discord-mcp.aerial/debug/coverage/flush" \
+  "http://dashboard.aerial/debug/coverage/flush" \
+  "http://brain.aerial/debug/coverage/flush" \
   "http://127.0.0.1:4020/debug/coverage/flush" \
   "http://127.0.0.1:8087/debug/coverage/flush" \
   "http://127.0.0.1:4005/debug/coverage/flush" \
@@ -159,8 +165,8 @@ EOS
 
   if psql "$POSTGRES_URL" -f "$sql_tmp" >/dev/null 2>&1; then
     echo "✅ [coverage-ingest] Upserted coverage for $svc_name into production_code_coverage."
-    # Purge processed counters and meta to prevent inode leak
-    rm -f "$svc_path"/covcounters.* "$svc_path"/covmeta.*
+    # Purge processed counters to prevent accumulation; preserve covmeta for subsequent textfmt runs
+    rm -f "$svc_path"/covcounters.*
   else
     echo "🚨 [coverage-ingest] SQL upsert failed for $svc_name"
   fi
