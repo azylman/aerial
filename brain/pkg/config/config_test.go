@@ -74,14 +74,20 @@ func TestWriteAtomicFile(t *testing.T) {
 	}
 }
 
-func TestLoadConfigValidYAML(t *testing.T) {
-	t.Setenv("AGY_MODEL", "")
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "")
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
+func TestLoadConfig_Ingestion_TableDriven(t *testing.T) {
+	origGlobal := activeGlobalConfig.Current()
+	t.Cleanup(func() {
+		activeGlobalConfig.update(origGlobal)
+	})
 
-	yamlContent := `
+	t.Run("ValidModernYAML", func(t *testing.T) {
+		t.Setenv("AGY_MODEL", "")
+		t.Setenv("DEFAULT_TIMEZONE", "")
+		t.Setenv("TZ", "")
+		tmpDir := t.TempDir()
+		yamlPath := filepath.Join(tmpDir, "config.yaml")
+
+		yamlContent := `
 model: "gemini-1.5-pro"
 timeout_minutes: 45
 timezone: "America/New_York"
@@ -101,120 +107,47 @@ mcp_servers:
     weather:
       serverUrl: "http://weather:8080/mcp"
 `
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write test yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
-	}
-
-	c := cfg.Current()
-	if c.Model != "gemini-1.5-pro" {
-		t.Errorf("Expected model 'gemini-1.5-pro', got %q", c.Model)
-	}
-	if c.Timezone != "America/New_York" {
-		t.Errorf("Expected timezone 'America/New_York', got %q", c.Timezone)
-	}
-	if c.SystemChannel != "my-alerts" {
-		t.Errorf("Expected system channel 'my-alerts', got %q", c.SystemChannel)
-	}
-	if len(c.McpServers.Discord) != 1 || c.McpServers.Discord["weather"] == nil {
-		t.Errorf("Unexpected McpServers.Discord: %v", c.McpServers.Discord)
-	}
-
-	// Verify getters
-	if GetTimezone() != "America/New_York" {
-		t.Errorf("GetTimezone expected 'America/New_York', got %q", GetTimezone())
-	}
-	if GetSystemChannel() != "my-alerts" {
-		t.Errorf("GetSystemChannel expected 'my-alerts', got %q", GetSystemChannel())
-	}
-	rtCfg := GetRuntimeConfig()
-	if rtCfg.Model != "gemini-1.5-pro" {
-		t.Errorf("GetRuntimeConfig returned unexpected struct: %+v", rtCfg)
-	}
-}
-
-func TestLoadConfigCorruptedYAML_LKGCFallback(t *testing.T) {
-	t.Setenv("AGY_MODEL", "")
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "")
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-
-	// 1. Write initial valid YAML
-	validYAML := `
-model: "gemini-2.5-flash"
-system_channel: "dev-channel-1"
-channels:
-  default:
-    mode: "threads"
-`
-	if err := os.WriteFile(yamlPath, []byte(validYAML), 0644); err != nil {
-		t.Fatalf("Failed to write valid yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("Initial LoadConfigFromPaths failed: %v", err)
-	}
-	if cfg.Current().Model != "gemini-2.5-flash" {
-		t.Fatalf("Unexpected initial config: %+v", cfg.Current())
-	}
-
-	// 2. Corrupt YAML with invalid syntax
-	corruptYAML := `
-model: [broken yaml invalid syntax: ::: {
-`
-	if err := os.WriteFile(yamlPath, []byte(corruptYAML), 0644); err != nil {
-		t.Fatalf("Failed to overwrite with corrupt yaml: %v", err)
-	}
-
-	cfgAfter, errAfter := LoadConfigFromPaths(yamlPath)
-	if errAfter == nil {
-		t.Fatal("Expected error on corrupted YAML, got nil")
-	}
-	if cfgAfter != nil {
-		t.Errorf("Expected nil *Config on LoadConfigFromPaths error, got %+v", cfgAfter)
-	}
-
-	// Verify Reload returns error and retains LKGC on the active instance
-	errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
-		return LoadConfigFromPaths(yamlPath)
-	})
-	if errReload == nil {
-		t.Fatal("Expected error on corrupted YAML reload, got nil")
-	}
-	if cfg.Current().Model != "gemini-2.5-flash" {
-		t.Errorf("Expected retained LKGC model 'gemini-2.5-flash', got model=%q",
-			cfg.Current().Model)
-	}
-	rtCfg := GetRuntimeConfig()
-	if rtCfg.Model != "gemini-2.5-flash" || rtCfg.SystemChannel != "dev-channel-1" {
-		t.Errorf("Expected GetRuntimeConfig() to retain LKGC, got %+v", rtCfg)
-	}
-}
-
-func TestLoadConfigEnvInterpolation(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-
-	mockLookup := func(key string) string {
-		switch key {
-		case "TEST_EXPAND_MODEL":
-			return "interpolated-gemini-model"
-		case "TEST_EXPAND_CHAN":
-			return "interpolated-channel"
-		case "TEST_EXPAND_PORT":
-			return "9090"
-		default:
-			return ""
+		if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+			t.Fatalf("Failed to write test yaml: %v", err)
 		}
-	}
 
-	yamlContent := `
+		cfg, err := LoadConfigFromPaths(yamlPath)
+		if err != nil {
+			t.Fatalf("LoadConfigFromPaths failed: %v", err)
+		}
+
+		c := cfg.Current()
+		if c.Model != "gemini-1.5-pro" || c.Timezone != "America/New_York" || c.SystemChannel != "my-alerts" {
+			t.Errorf("Unexpected loaded config: %+v", c)
+		}
+		if len(c.McpServers.Discord) != 1 || c.McpServers.Discord["weather"] == nil {
+			t.Errorf("Unexpected McpServers.Discord: %v", c.McpServers.Discord)
+		}
+
+		if GetTimezone() != "America/New_York" || GetSystemChannel() != "my-alerts" {
+			t.Errorf("Getters mismatch: tz=%q, sysChan=%q", GetTimezone(), GetSystemChannel())
+		}
+		if rtCfg := GetRuntimeConfig(); rtCfg.Model != "gemini-1.5-pro" {
+			t.Errorf("GetRuntimeConfig returned unexpected struct: %+v", rtCfg)
+		}
+	})
+
+	t.Run("EnvInterpolation", func(t *testing.T) {
+		yamlPath := filepath.Join(t.TempDir(), "config.yaml")
+		mockLookup := func(key string) string {
+			switch key {
+			case "TEST_EXPAND_MODEL":
+				return "interpolated-gemini-model"
+			case "TEST_EXPAND_CHAN":
+				return "interpolated-channel"
+			case "TEST_EXPAND_PORT":
+				return "9090"
+			default:
+				return ""
+			}
+		}
+
+		yamlContent := `
 model: "${TEST_EXPAND_MODEL}"
 system_channel: "${TEST_EXPAND_CHAN}"
 port: "${TEST_EXPAND_PORT}"
@@ -222,47 +155,163 @@ channels:
   default:
     mode: "threads"
 `
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
+		if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+			t.Fatalf("Failed to write yaml: %v", err)
+		}
 
-	cfg, err := LoadConfigFromLookup(mockLookup, yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromLookup failed: %v", err)
-	}
+		cfg, err := LoadConfigFromLookup(mockLookup, yamlPath)
+		if err != nil {
+			t.Fatalf("LoadConfigFromLookup failed: %v", err)
+		}
+		if c := cfg.Current(); c.Model != "interpolated-gemini-model" || c.SystemChannel != "interpolated-channel" || c.Port != "9090" {
+			t.Errorf("Unexpected interpolated config: %+v", c)
+		}
+	})
 
-	if cfg.Current().Model != "interpolated-gemini-model" {
-		t.Errorf("Expected interpolated model 'interpolated-gemini-model', got %q", cfg.Current().Model)
-	}
-	if cfg.Current().SystemChannel != "interpolated-channel" {
-		t.Errorf("Expected interpolated system_channel 'interpolated-channel', got %q", cfg.Current().SystemChannel)
-	}
-	if cfg.Current().Port != "9090" {
-		t.Errorf("Expected interpolated port '9090', got %q", cfg.Current().Port)
-	}
+	t.Run("LegacyYAML_BackwardsCompatibility", func(t *testing.T) {
+		t.Setenv("AGY_MODEL", "")
+		t.Setenv("DEFAULT_TIMEZONE", "")
+		t.Setenv("TZ", "")
+		yamlPath := filepath.Join(t.TempDir(), "config_legacy.yaml")
+		legacyYAML := `
+model: "gemini-3.7-flash"
+timeout_minutes: 20
+timezone: "America/Los_Angeles"
+system_channel: "aerial-dev"
+channels:
+  default:
+    mode: "threads"
+    allow_system_ops: false
+    max_session_turns: 0
+    typing_indicator: "always"
+  general:
+    mode: "channel"
+    wake_mode: "classifier"
+    allow_system_ops: true
+    max_session_turns: 50
+    typing_indicator: "on_mention"
+memory:
+  fact_extraction:
+    enabled: true
+    interval: "6h"
+`
+		if err := os.WriteFile(yamlPath, []byte(legacyYAML), 0644); err != nil {
+			t.Fatalf("Failed to write legacy yaml: %v", err)
+		}
+
+		cfg, err := LoadConfigFromPaths(yamlPath)
+		if err != nil {
+			t.Fatalf("Expected legacy YAML to unmarshal cleanly, got: %v", err)
+		}
+		if c := cfg.Current(); c.Model != "gemini-3.7-flash" || c.Timezone != "America/Los_Angeles" || c.SystemChannel != "aerial-dev" {
+			t.Errorf("Unexpected legacy config: %+v", c)
+		}
+
+		genPolicy := cfg.ResolveChannelPolicy("99999", "general")
+		if genPolicy.Mode != "channel" || genPolicy.GetWakeMode() != "classifier" {
+			t.Errorf("Unexpected resolved general policy from legacy YAML: %+v", genPolicy)
+		}
+	})
+
+	t.Run("HashedDefaultChannelNormalization", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "hashed_default.yaml")
+		_ = os.WriteFile(p, []byte("channels:\n  \"#default\":\n    mode: \"channel\"\n"), 0644)
+		cfg, err := LoadConfigFromPaths(p)
+		if err != nil {
+			t.Fatalf("LoadConfigFromPaths failed with #default: %v", err)
+		}
+		if defPol, ok := cfg.Current().Channels["default"]; !ok || defPol.Mode != "channel" {
+			t.Errorf("Expected default policy with mode=channel, got %+v", defPol)
+		}
+	})
 }
 
-func TestLoadConfigMissingFileFallbacks(t *testing.T) {
-	mockLookup := func(key string) string {
-		switch key {
-		case "AGY_MODEL":
-			return "env-model-fallback"
-		case "DEFAULT_TIMEZONE":
-			return "Europe/London"
-		case "SYSTEM_CHANNEL":
-			return "env-system-chan"
-		default:
-			return ""
-		}
-	}
+func TestLoadConfigFromPaths_LKGCAndFallback_TableDriven(t *testing.T) {
+	origGlobal := activeGlobalConfig.Current()
+	t.Cleanup(func() {
+		activeGlobalConfig.update(origGlobal)
+	})
 
-	cfg, err := LoadConfigFromLookup(mockLookup, "/non/existent/file/for/sure/config.yaml")
-	if err == nil {
-		t.Fatalf("expected LoadConfigFromLookup to fail for missing file, got nil error")
-	}
-	if cfg != nil {
-		t.Fatalf("expected nil *Config when loading missing file, got %+v", cfg)
-	}
+	t.Run("MissingSearchPaths_FailsFast", func(t *testing.T) {
+		cfg, err := LoadConfigFromPaths(filepath.Join(t.TempDir(), "does_not_exist.yaml"))
+		if err == nil || cfg != nil || !strings.Contains(err.Error(), "no configuration file found in search paths") {
+			t.Fatalf("expected missing paths error, got cfg=%+v, err=%v", cfg, err)
+		}
+	})
+
+	t.Run("MissingFileLookup_FailsFast", func(t *testing.T) {
+		cfg, err := LoadConfigFromLookup(func(string) string { return "" }, filepath.Join(t.TempDir(), "missing.yaml"))
+		if err == nil || cfg != nil {
+			t.Fatalf("expected LoadConfigFromLookup error for missing file, got cfg=%+v", cfg)
+		}
+	})
+
+	t.Run("CorruptedYAML_FailsFast", func(t *testing.T) {
+		corruptPath := filepath.Join(t.TempDir(), "broken.yaml")
+		_ = os.WriteFile(corruptPath, []byte("model: [invalid yaml {::"), 0644)
+		cfg, err := LoadConfigFromPaths(corruptPath)
+		if err == nil || cfg != nil || !strings.Contains(err.Error(), "failed to load configuration from any path") {
+			t.Fatalf("expected corrupted YAML error, got cfg=%+v, err=%v", cfg, err)
+		}
+	})
+
+	t.Run("CorruptedPrimary_CorruptedDiskLKGC_FailsFast", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		p1, p2 := filepath.Join(tmpDir, "p1.yaml"), filepath.Join(tmpDir, "p2.yaml")
+		_ = os.WriteFile(p1, []byte("model: [broken1"), 0644)
+		_ = os.WriteFile(p2, []byte("model: [broken2"), 0644)
+		cfg, err := LoadConfigFromPaths(p1, p2)
+		if err == nil || cfg != nil {
+			t.Fatalf("expected error when both primary and disk LKGC fail, got cfg=%+v", cfg)
+		}
+	})
+
+	t.Run("CorruptedPrimary_OnDiskLKGCFallback_Success", func(t *testing.T) {
+		t.Setenv("AGY_MODEL", "")
+		tmpDir := t.TempDir()
+		primary, lkgc := filepath.Join(tmpDir, "primary.yaml"), filepath.Join(tmpDir, "lkgc.yaml")
+		_ = os.WriteFile(primary, []byte("model: [broken"), 0644)
+		_ = os.WriteFile(lkgc, []byte("model: gemini-disk-lkgc\nchannels:\n  default:\n    mode: threads\n"), 0644)
+		cfg, err := LoadConfigFromPaths(primary, lkgc)
+		if err != nil || cfg == nil || cfg.Current().Model != "gemini-disk-lkgc" {
+			t.Fatalf("expected fallback to disk LKGC, got cfg=%+v, err=%v", cfg, err)
+		}
+	})
+
+	t.Run("ReloadCorruptedYAML_RetainsInMemoryActiveLKGC", func(t *testing.T) {
+		t.Setenv("AGY_MODEL", "")
+		t.Setenv("DEFAULT_TIMEZONE", "")
+		t.Setenv("TZ", "")
+		cfgPath := filepath.Join(t.TempDir(), "retained.yaml")
+		validYAML := "model: gemini-initial-valid\nsystem_channel: valid-alerts\nchannels:\n  default:\n    mode: threads\n"
+		if err := os.WriteFile(cfgPath, []byte(validYAML), 0644); err != nil {
+			t.Fatalf("failed to write valid yaml: %v", err)
+		}
+
+		cfg, err := LoadConfigFromPaths(cfgPath)
+		if err != nil || cfg.Current().Model != "gemini-initial-valid" {
+			t.Fatalf("initial load failed: cfg=%+v, err=%v", cfg, err)
+		}
+
+		_ = os.WriteFile(cfgPath, []byte("corrupt: [invalid:::"), 0644)
+		if _, err := LoadConfigFromPaths(cfgPath); err == nil {
+			t.Fatal("expected LoadConfigFromPaths to fail on corrupted file")
+		}
+
+		errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
+			return LoadConfigFromPaths(cfgPath)
+		})
+		if errReload == nil {
+			t.Fatal("expected Reload to fail on corrupt file")
+		}
+
+		if cfg.Current().Model != "gemini-initial-valid" || cfg.Current().SystemChannel != "valid-alerts" {
+			t.Errorf("active config failed to retain LKGC: %+v", cfg.Current())
+		}
+		if rt := GetRuntimeConfig(); rt.Model != "gemini-initial-valid" || rt.SystemChannel != "valid-alerts" {
+			t.Errorf("GetRuntimeConfig failed to retain LKGC: %+v", rt)
+		}
+	})
 }
 
 func TestChannelPolicy_Parsing(t *testing.T) {
@@ -636,7 +685,9 @@ channels:
 	}
 }
 
-func TestResolveChannelPolicy(t *testing.T) {
+func TestResolveChannelPolicy_TableDriven(t *testing.T) {
+	t.Parallel()
+
 	trueVal := true
 	falseVal := false
 	thresh := 0.75
@@ -645,6 +696,7 @@ func TestResolveChannelPolicy(t *testing.T) {
 			"default": {
 				Mode:       "threads",
 				IgnoreBots: &trueVal,
+				WakeMode:   "mention",
 			},
 			"general": {
 				Mode:                 "channel",
@@ -653,6 +705,9 @@ func TestResolveChannelPolicy(t *testing.T) {
 			},
 			"aerial-dev": {
 				IgnoreBots: &falseVal,
+			},
+			"aerial-general": {
+				Mode: "threads",
 			},
 			"release..v2": {
 				Mode: "channel",
@@ -667,92 +722,86 @@ func TestResolveChannelPolicy(t *testing.T) {
 		},
 	})
 
-	// 1. Match by Snowflake ID
-	p1 := cfg.ResolveChannelPolicy("1543668253363150928", "aerial-dev")
-	if p1.Mode != "channel" || p1.IsBotIgnored() {
-		t.Errorf("Unexpected policy for snowflake ID match: %+v", p1)
+	tests := []struct {
+		name          string
+		channelID     string
+		channelName   string
+		expectedMode  string
+		expectedWake  string
+		expectBotIgn  bool
+		ambientThresh float64
+	}{
+		{
+			name:         "MatchBySnowflakeID",
+			channelID:    "1543668253363150928",
+			channelName:  "aerial-dev",
+			expectedMode: "channel",
+			expectBotIgn: false,
+		},
+		{
+			name:          "MatchByName_LeadingHashAndUppercase",
+			channelID:     "999999",
+			channelName:   "#General",
+			expectedMode:  "channel",
+			expectedWake:  "classifier",
+			expectBotIgn:  true,
+			ambientThresh: 0.75,
+		},
+		{
+			name:         "MatchByName_WithoutHash_DefaultInheritance",
+			channelID:    "999999",
+			channelName:  "aerial-dev",
+			expectedMode: "threads",
+			expectBotIgn: false,
+		},
+		{
+			name:         "MatchTraversalSequence_Dots",
+			channelID:    "999999",
+			channelName:  "release..v2",
+			expectedMode: "channel",
+			expectBotIgn: true,
+		},
+		{
+			name:         "MatchTraversalSequence_Slash",
+			channelID:    "999999",
+			channelName:  "#projects/alpha",
+			expectedMode: "channel",
+			expectBotIgn: true,
+		},
+		{
+			name:         "FallbackToDefaultPolicy",
+			channelID:    "999999",
+			channelName:  "unknown-channel",
+			expectedMode: "threads",
+			expectBotIgn: true,
+		},
+		{
+			name:         "WakeModeInheritedFromDefault",
+			channelID:    "12345",
+			channelName:  "aerial-general",
+			expectedMode: "threads",
+			expectedWake: "mention",
+			expectBotIgn: true,
+		},
 	}
 
-	// 2. Match by Channel Name with leading '#' and uppercase
-	p2 := cfg.ResolveChannelPolicy("999999", "#General")
-	if p2.Mode != "channel" || !p2.IsBotIgnored() || p2.GetWakeMode() != "classifier" || p2.GetAmbientWakeThreshold() != 0.75 {
-		t.Errorf("Unexpected policy for #General match: %+v", p2)
-	}
-
-	// 3. Match by Channel Name without '#'
-	p3 := cfg.ResolveChannelPolicy("999999", "aerial-dev")
-	if p3.Mode != "threads" || p3.IsBotIgnored() {
-		t.Errorf("Unexpected policy for aerial-dev match with default inheritance: %+v", p3)
-	}
-
-	// 4. Match channel names containing traversal sequences (decoupled policy key lookup)
-	pRelease := cfg.ResolveChannelPolicy("999999", "release..v2")
-	if pRelease.Mode != "channel" {
-		t.Errorf("Expected release..v2 to match channel mode, got: %+v", pRelease)
-	}
-	pAlpha := cfg.ResolveChannelPolicy("999999", "#projects/alpha")
-	if pAlpha.Mode != "channel" {
-		t.Errorf("Expected #projects/alpha to match channel mode, got: %+v", pAlpha)
-	}
-
-	// 5. Fallback to default when neither ID nor name match
-	p4 := cfg.ResolveChannelPolicy("999999", "unknown-channel")
-	if p4.Mode != "threads" || !p4.IsBotIgnored() {
-		t.Errorf("Unexpected policy for fallback: %+v", p4)
-	}
-}
-
-func TestLoadConfigLegacyYAML_BackwardsCompatibility(t *testing.T) {
-	t.Setenv("AGY_MODEL", "")
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "")
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_legacy.yaml")
-
-	legacyYAML := `
-model: "gemini-3.7-flash"
-timeout_minutes: 20
-timezone: "America/Los_Angeles"
-system_channel: "aerial-dev"
-channels:
-  default:
-    mode: "threads"
-    allow_system_ops: false
-    max_session_turns: 0
-    typing_indicator: "always"
-  general:
-    mode: "channel"
-    wake_mode: "classifier"
-    allow_system_ops: true
-    max_session_turns: 50
-    typing_indicator: "on_mention"
-memory:
-  fact_extraction:
-    enabled: true
-    interval: "6h"
-`
-	if err := os.WriteFile(yamlPath, []byte(legacyYAML), 0644); err != nil {
-		t.Fatalf("Failed to write legacy yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("Expected legacy YAML to unmarshal cleanly with zero errors, got: %v", err)
-	}
-
-	if cfg.Current().Model != "gemini-3.7-flash" {
-		t.Errorf("Expected model 'gemini-3.7-flash', got %q", cfg.Current().Model)
-	}
-	if cfg.Current().Timezone != "America/Los_Angeles" {
-		t.Errorf("Expected timezone 'America/Los_Angeles', got %q", cfg.Current().Timezone)
-	}
-	if cfg.Current().SystemChannel != "aerial-dev" {
-		t.Errorf("Expected system_channel 'aerial-dev', got %q", cfg.Current().SystemChannel)
-	}
-
-	genPolicy := cfg.ResolveChannelPolicy("99999", "general")
-	if genPolicy.Mode != "channel" || genPolicy.GetWakeMode() != "classifier" {
-		t.Errorf("Unexpected resolved general policy from legacy YAML: %+v", genPolicy)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := cfg.ResolveChannelPolicy(tc.channelID, tc.channelName)
+			if p.Mode != tc.expectedMode {
+				t.Errorf("expected mode %q, got %q", tc.expectedMode, p.Mode)
+			}
+			if tc.expectedWake != "" && p.GetWakeMode() != tc.expectedWake {
+				t.Errorf("expected wake mode %q, got %q", tc.expectedWake, p.GetWakeMode())
+			}
+			if p.IsBotIgnored() != tc.expectBotIgn {
+				t.Errorf("expected IsBotIgnored=%v, got %v", tc.expectBotIgn, p.IsBotIgnored())
+			}
+			if tc.ambientThresh > 0 && p.GetAmbientWakeThreshold() != tc.ambientThresh {
+				t.Errorf("expected threshold %v, got %v", tc.ambientThresh, p.GetAmbientWakeThreshold())
+			}
+		})
 	}
 }
 
@@ -1175,46 +1224,80 @@ channels:
 	}
 }
 
-func TestConfigGettersAndFallbacks(t *testing.T) {
-	origCfg := activeGlobalConfig.Current()
-	defer func() {
-		activeGlobalConfig.update(origCfg)
-	}()
-
-	// 1. Injected Chicago timezone
-	activeGlobalConfig.update(&ConfigData{
-		Timezone:      "America/Chicago",
-		SystemChannel: "custom-sys-chan",
+func TestConfigGettersAndFallbacks_TableDriven(t *testing.T) {
+	origGlobal := activeGlobalConfig.Current()
+	t.Cleanup(func() {
+		activeGlobalConfig.update(origGlobal)
 	})
-	if tz := GetTimezone(); tz != "America/Chicago" {
-		t.Errorf("expected 'America/Chicago', got %q", tz)
+
+	tests := []struct {
+		name          string
+		timezone      string
+		systemChannel string
+		expectedTZ    string
+		expectedChan  string
+	}{
+		{
+			name:          "Configured_ChicagoTimezone_CustomChannel",
+			timezone:      "America/Chicago",
+			systemChannel: "custom-sys-chan",
+			expectedTZ:    "America/Chicago",
+			expectedChan:  "custom-sys-chan",
+		},
+		{
+			name:          "Configured_DenverTimezone",
+			timezone:      "America/Denver",
+			systemChannel: "custom-sys-chan",
+			expectedTZ:    "America/Denver",
+			expectedChan:  "custom-sys-chan",
+		},
+		{
+			name:          "Configured_UTCTimezone",
+			timezone:      "UTC",
+			expectedTZ:    "UTC",
+			expectedChan:  "aerial-dev",
+		},
+		{
+			name:          "Configured_NewYorkTimezone",
+			timezone:      "America/New_York",
+			expectedTZ:    "America/New_York",
+			expectedChan:  "aerial-dev",
+		},
+		{
+			name:          "EmptyFallbacks_DefaultTimezoneAndChannel",
+			timezone:      "",
+			systemChannel: "",
+			expectedTZ:    "America/Los_Angeles",
+			expectedChan:  "aerial-dev",
+		},
 	}
 
-	// 2. Injected Denver timezone
-	activeGlobalConfig.update(&ConfigData{
-		Timezone:      "America/Denver",
-		SystemChannel: "custom-sys-chan",
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			activeGlobalConfig.update(&ConfigData{
+				Timezone:      tc.timezone,
+				SystemChannel: tc.systemChannel,
+			})
+			if tz := GetTimezone(); tz != tc.expectedTZ {
+				t.Errorf("expected timezone %q, got %q", tc.expectedTZ, tz)
+			}
+			if ch := GetSystemChannel(); ch != tc.expectedChan {
+				t.Errorf("expected system channel %q, got %q", tc.expectedChan, ch)
+			}
+		})
+	}
+
+	t.Run("FallbackDefaults_OptionsAndEnv", func(t *testing.T) {
+		activeGlobalConfig.update(&ConfigData{
+			Model:         "Custom-Env-Model",
+			Timezone:      "Asia/Tokyo",
+			SystemChannel: "custom-sys-channel",
+		})
+		fb := getFallbackDefaults()
+		if fb.Model != "Custom-Env-Model" || fb.Timezone != "Asia/Tokyo" || fb.SystemChannel != "custom-sys-channel" {
+			t.Errorf("Unexpected fallback defaults: %+v", fb)
+		}
 	})
-	if tz := GetTimezone(); tz != "America/Denver" {
-		t.Errorf("expected 'America/Denver', got %q", tz)
-	}
-
-	// 3. Injected custom system channel
-	if ch := GetSystemChannel(); ch != "custom-sys-chan" {
-		t.Errorf("expected 'custom-sys-chan', got %q", ch)
-	}
-
-	// 4. Injected empty fallback
-	activeGlobalConfig.update(&ConfigData{
-		Timezone:      "",
-		SystemChannel: "",
-	})
-	if tz := GetTimezone(); tz != "America/Los_Angeles" {
-		t.Errorf("expected default 'America/Los_Angeles', got %q", tz)
-	}
-	if ch := GetSystemChannel(); ch != "aerial-dev" {
-		t.Errorf("expected default 'aerial-dev', got %q", ch)
-	}
 }
 
 func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
@@ -1416,85 +1499,6 @@ func TestConfig_UnmarshalYAML_InvalidTypes(t *testing.T) {
 	}
 }
 
-func TestGetFallbackDefaults_OptionsAndEnv(t *testing.T) {
-	origGlobal := activeGlobalConfig.Current()
-	defer func() {
-		activeGlobalConfig.update(origGlobal)
-	}()
-
-	activeGlobalConfig.update(&ConfigData{
-		Model:         "Custom-Env-Model",
-		Timezone:      "Asia/Tokyo",
-		SystemChannel: "custom-sys-channel",
-	})
-
-	fb := getFallbackDefaults()
-	if fb.Model != "Custom-Env-Model" {
-		t.Errorf("Expected Model=Custom-Env-Model, got %s", fb.Model)
-	}
-	if fb.Timezone != "Asia/Tokyo" {
-		t.Errorf("Expected Timezone=Asia/Tokyo, got %s", fb.Timezone)
-	}
-	if fb.SystemChannel != "custom-sys-channel" {
-		t.Errorf("Expected SystemChannel=custom-sys-channel, got %s", fb.SystemChannel)
-	}
-}
-
-func TestGetTimezone_And_GetSystemChannel_Fallbacks(t *testing.T) {
-	oldCfg := activeGlobalConfig.Current()
-	defer func() {
-		activeGlobalConfig.update(oldCfg)
-	}()
-
-	// 1. Configured UTC
-	activeGlobalConfig.update(&ConfigData{Timezone: "UTC"})
-	if tz := GetTimezone(); tz != "UTC" {
-		t.Errorf("Expected UTC, got %s", tz)
-	}
-
-	// 2. Configured America/New_York
-	activeGlobalConfig.update(&ConfigData{Timezone: "America/New_York"})
-	if tz := GetTimezone(); tz != "America/New_York" {
-		t.Errorf("Expected America/New_York, got %s", tz)
-	}
-
-	// 3. Absolute default
-	activeGlobalConfig.update(&ConfigData{Timezone: ""})
-	if tz := GetTimezone(); tz != "America/Los_Angeles" {
-		t.Errorf("Expected America/Los_Angeles, got %s", tz)
-	}
-
-	// 4. Configured channel
-	activeGlobalConfig.update(&ConfigData{SystemChannel: "env-channel-1"})
-	if ch := GetSystemChannel(); ch != "env-channel-1" {
-		t.Errorf("Expected env-channel-1, got %s", ch)
-	}
-
-	// 5. System channel default
-	activeGlobalConfig.update(&ConfigData{SystemChannel: ""})
-	if ch := GetSystemChannel(); ch != "aerial-dev" {
-		t.Errorf("Expected aerial-dev, got %s", ch)
-	}
-}
-
-func TestLoadConfigFromPaths_HashedDefaultChannel(t *testing.T) {
-	tmpDir := t.TempDir()
-	p := filepath.Join(tmpDir, "hashed_default.yaml")
-	_ = os.WriteFile(p, []byte(`
-channels:
-  "#default":
-    mode: "channel"
-`), 0644)
-
-	cfg, err := LoadConfigFromPaths(p)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed with #default: %v", err)
-	}
-	if defPol, ok := cfg.Current().Channels["default"]; !ok || defPol.Mode != "channel" {
-		t.Errorf("Expected default policy with mode=channel, got %+v", defPol)
-	}
-}
-
 func TestIsAdmin_EmptyAndBlank(t *testing.T) {
 	// Empty admin list
 	cfgEmpty := NewFromData(&ConfigData{AdminUsers: nil})
@@ -1565,24 +1569,6 @@ func TestNewTestConfig_HermeticDefaults(t *testing.T) {
 	}
 	if custom.DataDir() != "/custom/data" {
 		t.Errorf("expected overridden DataDir, got %q", custom.DataDir())
-	}
-}
-
-func TestResolveChannelPolicy_WakeModeInheritance(t *testing.T) {
-	cfg := NewFromData(&ConfigData{
-		Channels: map[string]ChannelPolicy{
-			"default": {
-				Mode:     "threads",
-				WakeMode: "mention",
-			},
-			"aerial-general": {
-				Mode: "threads",
-			},
-		},
-	})
-	pol := cfg.ResolveChannelPolicy("12345", "aerial-general")
-	if pol.WakeMode != "mention" {
-		t.Errorf("Expected inherited WakeMode=mention, got %s", pol.WakeMode)
 	}
 }
 
@@ -3144,137 +3130,6 @@ mcp_servers:
 			t.Errorf("expected nil Ephemeral map for nil src, got: %v", cloned.McpServers.Ephemeral)
 		}
 	})
-}
-
-func TestLoadConfigFromPaths_MissingFiles_FailsFast(t *testing.T) {
-	nonExistent := filepath.Join(t.TempDir(), "does_not_exist.yaml")
-	cfg, err := LoadConfigFromPaths(nonExistent)
-	if err == nil {
-		t.Fatalf("expected error when config file does not exist, got nil")
-	}
-	if cfg != nil {
-		t.Fatalf("expected nil *Config when loading fails, got %+v", cfg)
-	}
-	if !strings.Contains(err.Error(), "no configuration file found in search paths") {
-		t.Errorf("expected error message to indicate missing search paths, got: %v", err)
-	}
-}
-
-func TestLoadConfigFromPaths_CorruptedYAML_FailsFast(t *testing.T) {
-	tmpDir := t.TempDir()
-	corruptPath := filepath.Join(tmpDir, "broken.yaml")
-	if err := os.WriteFile(corruptPath, []byte("model: [invalid yaml {::"), 0644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(corruptPath)
-	if err == nil {
-		t.Fatalf("expected error on corrupted YAML, got nil")
-	}
-	if cfg != nil {
-		t.Fatalf("expected nil *Config when loading corrupted YAML, got %+v", cfg)
-	}
-	if !strings.Contains(err.Error(), "failed to load configuration from any path") {
-		t.Errorf("expected error message to indicate failure to load from any path, got: %v", err)
-	}
-}
-
-func TestLoadConfigFromPaths_CorruptedWithCorruptedDiskLKGC_FailsFast(t *testing.T) {
-	tmpDir := t.TempDir()
-	primary := filepath.Join(tmpDir, "primary.yaml")
-	lkgc := filepath.Join(tmpDir, "lkgc.yaml")
-
-	if err := os.WriteFile(primary, []byte("model: [invalid primary yaml"), 0644); err != nil {
-		t.Fatalf("failed to write primary: %v", err)
-	}
-	if err := os.WriteFile(lkgc, []byte("model: [invalid lkgc yaml"), 0644); err != nil {
-		t.Fatalf("failed to write lkgc: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(primary, lkgc)
-	if err == nil {
-		t.Fatalf("expected error when both primary and disk LKGC fail, got nil")
-	}
-	if cfg != nil {
-		t.Fatalf("expected nil *Config when both files fail, got %+v", cfg)
-	}
-}
-
-func TestLoadConfigFromPaths_OnDiskLKGCFallback_Success(t *testing.T) {
-	t.Setenv("AGY_MODEL", "")
-	tmpDir := t.TempDir()
-	primary := filepath.Join(tmpDir, "primary.yaml")
-	lkgc := filepath.Join(tmpDir, "lkgc.yaml")
-
-	if err := os.WriteFile(primary, []byte("model: [invalid primary yaml"), 0644); err != nil {
-		t.Fatalf("failed to write primary: %v", err)
-	}
-	validLKGC := `
-model: "gemini-disk-lkgc"
-channels:
-  default:
-    mode: "threads"
-`
-	if err := os.WriteFile(lkgc, []byte(validLKGC), 0644); err != nil {
-		t.Fatalf("failed to write lkgc: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(primary, lkgc)
-	if err != nil {
-		t.Fatalf("expected successful fallback to on-disk LKGC, got error: %v", err)
-	}
-	if cfg == nil || cfg.Current() == nil {
-		t.Fatalf("expected non-nil config loaded from disk LKGC")
-	}
-	if cfg.Current().Model != "gemini-disk-lkgc" {
-		t.Errorf("expected model 'gemini-disk-lkgc', got %q", cfg.Current().Model)
-	}
-}
-
-func TestReload_CorruptedYAML_RetainsActiveLKGC(t *testing.T) {
-	t.Setenv("AGY_MODEL", "")
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-
-	validYAML := `
-model: "gemini-initial-valid"
-system_channel: "valid-alerts"
-channels:
-  default:
-    mode: "threads"
-`
-	if err := os.WriteFile(cfgPath, []byte(validYAML), 0644); err != nil {
-		t.Fatalf("failed to write valid yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(cfgPath)
-	if err != nil {
-		t.Fatalf("initial load failed: %v", err)
-	}
-	if cfg.Current().Model != "gemini-initial-valid" {
-		t.Fatalf("unexpected initial model: %q", cfg.Current().Model)
-	}
-
-	// Corrupt file on disk
-	if err := os.WriteFile(cfgPath, []byte("corrupt: [invalid yaml:::"), 0644); err != nil {
-		t.Fatalf("failed to overwrite with corrupt yaml: %v", err)
-	}
-
-	// Using custom reload supplier pointing to cfgPath
-	errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
-		return LoadConfigFromPaths(cfgPath)
-	})
-	if errReload == nil {
-		t.Fatalf("expected Reload to fail on corrupt file, got nil")
-	}
-
-	// Verify active config retains previous valid model
-	if cfg.Current().Model != "gemini-initial-valid" {
-		t.Errorf("expected active config to retain 'gemini-initial-valid', got %q", cfg.Current().Model)
-	}
-	if cfg.Current().SystemChannel != "valid-alerts" {
-		t.Errorf("expected system channel 'valid-alerts', got %q", cfg.Current().SystemChannel)
-	}
 }
 
 func TestExampleConfig_Valid(t *testing.T) {
