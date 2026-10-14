@@ -331,97 +331,308 @@ channels:
 	}
 }
 
-func TestChannelPolicy_Validation_MissingDefault(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// 1. Missing channels entirely
-	yamlPath1 := filepath.Join(tmpDir, "config1.yaml")
-	yamlNoChannels := `
+func TestChannelPolicy_Validation_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		yaml        string
+		expectedErr string
+	}{
+		{
+			name: "missing channels section",
+			yaml: `
 model: "gemini-2.5-flash"
-`
-	if err := os.WriteFile(yamlPath1, []byte(yamlNoChannels), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-	_, err := LoadConfigFromPaths(yamlPath1)
-	if err == nil {
-		t.Error("Expected error when channels.default is missing, got nil")
-	}
-
-	// 2. channels present but no default
-	yamlPath2 := filepath.Join(tmpDir, "config2.yaml")
-	yamlNoDefault := `
+`,
+			expectedErr: "channels.default is required",
+		},
+		{
+			name: "channels present but default missing",
+			yaml: `
 model: "gemini-2.5-flash"
 channels:
   general:
     mode: "channel"
-`
-	if err := os.WriteFile(yamlPath2, []byte(yamlNoDefault), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-	_, err = LoadConfigFromPaths(yamlPath2)
-	if err == nil {
-		t.Error("Expected error when channels.default is missing from channels map, got nil")
-	}
-}
-
-func TestChannelPolicy_Validation_InvalidMode(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-
-	yamlInvalidMode := `
+`,
+			expectedErr: "channels.default is required",
+		},
+		{
+			name: "default channel mode invalid",
+			yaml: `
 model: "gemini-2.5-flash"
 channels:
   default:
     mode: "unsupported_mode"
-`
-	if err := os.WriteFile(yamlPath, []byte(yamlInvalidMode), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-	_, err := LoadConfigFromPaths(yamlPath)
-	if err == nil {
-		t.Error("Expected error when channels.default has invalid mode, got nil")
-	}
-}
-
-func TestChannelPolicy_DefaultsAndNormalization(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// 1. Test default in threads mode gets mode: "threads"
-	yamlPath1 := filepath.Join(tmpDir, "config_threads.yaml")
-	yamlThreads := `
+`,
+			expectedErr: "channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled'",
+		},
+		{
+			name: "non-default channel mode invalid",
+			yaml: `
 model: "gemini-2.5-flash"
 channels:
   default:
     mode: "threads"
-`
-	if err := os.WriteFile(yamlPath1, []byte(yamlThreads), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-	cfg, err := LoadConfigFromPaths(yamlPath1)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
-	}
-	if cfg.Current().Channels["default"].Mode != "threads" {
-		t.Errorf("Expected default mode='threads', got %q", cfg.Current().Channels["default"].Mode)
-	}
-
-	// 2. Test default in channel mode gets mode: "channel"
-	yamlPath2 := filepath.Join(tmpDir, "config_channel.yaml")
-	yamlChannel := `
+  some-channel:
+    mode: "invalid_mode_name"
+`,
+			expectedErr: "mode must be 'threads', 'channel', 'ignore', or 'disabled'",
+		},
+		{
+			name: "default ambient threshold negative",
+			yaml: `
 model: "gemini-2.5-flash"
 channels:
   default:
+    mode: "threads"
+    ambient_wake_threshold: -0.1
+`,
+			expectedErr: "channels.default ambient_wake_threshold must be between 0.0 and 1.0",
+		},
+		{
+			name: "non-default ambient threshold greater than 1",
+			yaml: `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+  lounge:
     mode: "channel"
-`
-	if err := os.WriteFile(yamlPath2, []byte(yamlChannel), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
+    ambient_wake_threshold: 1.5
+`,
+			expectedErr: "ambient_wake_threshold must be between 0.0 and 1.0",
+		},
 	}
-	cfg, err = LoadConfigFromPaths(yamlPath2)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			yamlPath := filepath.Join(tmpDir, "config.yaml")
+			if err := os.WriteFile(yamlPath, []byte(tc.yaml), 0644); err != nil {
+				t.Fatalf("failed to write test yaml: %v", err)
+			}
+
+			_, err := LoadConfigFromLookup(nil, yamlPath)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.expectedErr)
+			}
+			if !strings.Contains(err.Error(), tc.expectedErr) {
+				t.Errorf("expected error containing %q, got: %v", tc.expectedErr, err)
+			}
+		})
 	}
-	if cfg.Current().Channels["default"].Mode != "channel" {
-		t.Errorf("Expected default mode='channel', got %q", cfg.Current().Channels["default"].Mode)
+}
+
+func TestChannelPolicy_DefaultsAndInheritance_TableDriven(t *testing.T) {
+	orig := ActiveConfig().Current()
+	t.Cleanup(func() {
+		ActiveConfig().Update(orig)
+	})
+
+	tests := []struct {
+		name   string
+		yaml   string
+		assert func(t *testing.T, cfg *Config)
+	}{
+		{
+			name: "mode defaults and normalization",
+			yaml: `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				if cfg.Current().Channels["default"].Mode != "threads" {
+					t.Errorf("Expected default mode='threads', got %q", cfg.Current().Channels["default"].Mode)
+				}
+			},
+		},
+		{
+			name: "ignored channels and snowflake id resolution",
+			yaml: `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+  random:
+    mode: "ignore"
+  "123456789":
+    mode: "ignore"
+  disabled-channel:
+    mode: "disabled"
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				pRandom := cfg.ResolveChannelPolicy("99999", "random")
+				if !pRandom.IsIgnored() || pRandom.Mode != "ignore" {
+					t.Errorf("Expected 'random' channel to be ignored, got %+v", pRandom)
+				}
+
+				pSnowflake := cfg.ResolveChannelPolicy("123456789", "some-name")
+				if !pSnowflake.IsIgnored() || pSnowflake.Mode != "ignore" {
+					t.Errorf("Expected snowflake '123456789' to be ignored, got %+v", pSnowflake)
+				}
+
+				pDisabled := cfg.ResolveChannelPolicy("77777", "disabled-channel")
+				if !pDisabled.IsIgnored() || pDisabled.Mode != "disabled" {
+					t.Errorf("Expected 'disabled-channel' to be ignored, got %+v", pDisabled)
+				}
+
+				pOther := cfg.ResolveChannelPolicy("66666", "general")
+				if pOther.IsIgnored() || pOther.Mode != "threads" {
+					t.Errorf("Expected 'general' channel to not be ignored, got %+v", pOther)
+				}
+			},
+		},
+		{
+			name: "default deny ignore mode inheritance",
+			yaml: `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "ignore"
+  aerial-dev:
+    mode: "threads"
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				defPolicy := cfg.Current().Channels["default"]
+				if !defPolicy.IsIgnored() || defPolicy.Mode != "ignore" {
+					t.Errorf("Expected default policy mode=ignore, got %+v", defPolicy)
+				}
+
+				pUnmatched := cfg.ResolveChannelPolicy("11111", "random-general")
+				if !pUnmatched.IsIgnored() {
+					t.Errorf("Expected unmatched channel to be ignored under default-deny, got %+v", pUnmatched)
+				}
+
+				pDev := cfg.ResolveChannelPolicy("22222", "aerial-dev")
+				if pDev.IsIgnored() || pDev.Mode != "threads" {
+					t.Errorf("Expected aerial-dev to be threads mode and not ignored, got %+v", pDev)
+				}
+			},
+		},
+		{
+			name: "ambient wake threshold resolution and zero pointer override",
+			yaml: `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "ignore"
+  lounge:
+    mode: "channel"
+    ambient_wake_threshold: 0.75
+  silent:
+    mode: "channel"
+    ambient_wake_threshold: 0.0
+  auto:
+    mode: "channel"
+  threads_chan:
+    mode: "threads"
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				pLounge := cfg.ResolveChannelPolicy("123", "lounge")
+				if pLounge.AmbientWakeThreshold == nil || *pLounge.AmbientWakeThreshold != 0.75 {
+					t.Errorf("expected AmbientWakeThreshold 0.75, got %v", pLounge.AmbientWakeThreshold)
+				}
+				if pLounge.GetAmbientWakeThreshold() != 0.75 {
+					t.Errorf("expected GetAmbientWakeThreshold() 0.75, got %f", pLounge.GetAmbientWakeThreshold())
+				}
+
+				pSilent := cfg.ResolveChannelPolicy("456", "silent")
+				if pSilent.AmbientWakeThreshold == nil || *pSilent.AmbientWakeThreshold != 0.0 {
+					t.Errorf("expected AmbientWakeThreshold 0.0, got %v", pSilent.AmbientWakeThreshold)
+				}
+				if pSilent.GetAmbientWakeThreshold() != 0.0 {
+					t.Errorf("expected GetAmbientWakeThreshold() 0.0, got %f", pSilent.GetAmbientWakeThreshold())
+				}
+
+				pAuto := cfg.ResolveChannelPolicy("789", "auto")
+				if pAuto.AmbientWakeThreshold != nil {
+					t.Errorf("expected AmbientWakeThreshold nil for auto channel, got %v", pAuto.AmbientWakeThreshold)
+				}
+				if pAuto.GetAmbientWakeThreshold() != 0.80 {
+					t.Errorf("expected default 0.80 for channel mode, got %f", pAuto.GetAmbientWakeThreshold())
+				}
+
+				pThreads := cfg.ResolveChannelPolicy("101", "threads_chan")
+				if pThreads.GetAmbientWakeThreshold() != 0.0 {
+					t.Errorf("expected 0.0 for non-channel mode, got %f", pThreads.GetAmbientWakeThreshold())
+				}
+			},
+		},
+		{
+			name: "ambient wake threshold inheritance from default",
+			yaml: `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+    ambient_wake_threshold: 0.65
+  lounge:
+    mode: "channel"
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				pLounge := cfg.ResolveChannelPolicy("123", "lounge")
+				if pLounge.AmbientWakeThreshold == nil || *pLounge.AmbientWakeThreshold != 0.65 {
+					t.Errorf("expected inherited AmbientWakeThreshold 0.65, got %v", pLounge.AmbientWakeThreshold)
+				}
+				if pLounge.GetAmbientWakeThreshold() != 0.65 {
+					t.Errorf("expected GetAmbientWakeThreshold() 0.65, got %f", pLounge.GetAmbientWakeThreshold())
+				}
+			},
+		},
+		{
+			name: "ignore bots inheritance and explicit pointer overrides",
+			yaml: `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "ignore"
+    ignore_bots: true
+  lounge:
+    mode: "channel"
+    ignore_bots: false
+  bot_allowed:
+    mode: "threads"
+    ignore_bots: false
+  inherits_true:
+    mode: "channel"
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				pLounge := cfg.ResolveChannelPolicy("123", "lounge")
+				if pLounge.IsBotIgnored() {
+					t.Errorf("expected lounge ignore_bots: false to override default ignore_bots: true")
+				}
+				if pLounge.IgnoreBots == nil || *pLounge.IgnoreBots != false {
+					t.Errorf("expected pLounge.IgnoreBots pointer to be &false, got %v", pLounge.IgnoreBots)
+				}
+
+				pBotAllowed := cfg.ResolveChannelPolicy("456", "bot_allowed")
+				if pBotAllowed.IsBotIgnored() {
+					t.Errorf("expected bot_allowed ignore_bots: false to override default ignore_bots: true")
+				}
+
+				pInherits := cfg.ResolveChannelPolicy("789", "inherits_true")
+				if !pInherits.IsBotIgnored() {
+					t.Errorf("expected inherits_true to inherit ignore_bots: true from default")
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			yamlPath := filepath.Join(tmpDir, "config.yaml")
+			if err := os.WriteFile(yamlPath, []byte(tc.yaml), 0644); err != nil {
+				t.Fatalf("failed to write test yaml: %v", err)
+			}
+
+			cfg, err := LoadConfigFromPaths(yamlPath)
+			if err != nil {
+				t.Fatalf("LoadConfigFromPaths failed: %v", err)
+			}
+
+			tc.assert(t, cfg)
+		})
 	}
 }
 
@@ -622,286 +833,6 @@ func TestChannelPolicy_IsIgnored(t *testing.T) {
 	}
 }
 
-func TestChannelPolicy_IgnoredMode_YAML(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_ignored_channels.yaml")
-
-	yamlContent := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "threads"
-  random:
-    mode: "ignore"
-  "123456789":
-    mode: "ignore"
-  disabled-channel:
-    mode: "disabled"
-`
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
-	}
-
-	// Verify ignored channels with mode "ignore"
-	pRandom := cfg.ResolveChannelPolicy("99999", "random")
-	if !pRandom.IsIgnored() || pRandom.Mode != "ignore" {
-		t.Errorf("Expected 'random' channel to be ignored, got %+v", pRandom)
-	}
-
-	pSnowflake := cfg.ResolveChannelPolicy("123456789", "some-name")
-	if !pSnowflake.IsIgnored() || pSnowflake.Mode != "ignore" {
-		t.Errorf("Expected snowflake '123456789' to be ignored, got %+v", pSnowflake)
-	}
-
-	pDisabled := cfg.ResolveChannelPolicy("77777", "disabled-channel")
-	if !pDisabled.IsIgnored() || pDisabled.Mode != "disabled" {
-		t.Errorf("Expected 'disabled-channel' to be ignored, got %+v", pDisabled)
-	}
-	pOther := cfg.ResolveChannelPolicy("66666", "general")
-	if pOther.IsIgnored() || pOther.Mode != "threads" {
-		t.Errorf("Expected 'general' channel to not be ignored, got %+v", pOther)
-	}
-}
-
-func TestChannelPolicy_DefaultDeny_IgnoreMode(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_default_ignore.yaml")
-
-	yamlContent := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "ignore"
-  aerial-dev:
-    mode: "threads"
-`
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed with default mode: ignore: %v", err)
-	}
-
-	// Default channel should be ignored
-	defPolicy := cfg.Current().Channels["default"]
-	if !defPolicy.IsIgnored() || defPolicy.Mode != "ignore" {
-		t.Errorf("Expected default policy mode=ignore, got %+v", defPolicy)
-	}
-
-	// Unmatched channel should inherit default deny / ignore
-	pUnmatched := cfg.ResolveChannelPolicy("11111", "random-general")
-	if !pUnmatched.IsIgnored() {
-		t.Errorf("Expected unmatched channel to be ignored under default-deny, got %+v", pUnmatched)
-	}
-
-	// Explicit override should work
-	pDev := cfg.ResolveChannelPolicy("22222", "aerial-dev")
-	if pDev.IsIgnored() || pDev.Mode != "threads" {
-		t.Errorf("Expected aerial-dev to be threads mode and not ignored, got %+v", pDev)
-	}
-}
-
-func TestChannelPolicy_Validation_InvalidNonDefaultMode(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_invalid_nondefault_mode.yaml")
-
-	yamlContent := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "threads"
-  some-channel:
-    mode: "invalid_mode_name"
-`
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-
-	_, err := LoadConfigFromPaths(yamlPath)
-	if err == nil {
-		t.Fatalf("Expected error for invalid channel mode, got nil")
-	}
-	if !strings.Contains(err.Error(), "mode must be 'threads', 'channel', 'ignore', or 'disabled'") {
-		t.Errorf("Expected descriptive mode validation error, got: %v", err)
-	}
-}
-
-func TestChannelPolicy_AmbientWakeThreshold(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_ambient.yaml")
-	yamlContent := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "ignore"
-  lounge:
-    mode: "channel"
-    ambient_wake_threshold: 0.75
-  silent:
-    mode: "channel"
-    ambient_wake_threshold: 0.0
-  auto:
-    mode: "channel"
-  threads_chan:
-    mode: "threads"
-`
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
-	}
-
-	pLounge := cfg.ResolveChannelPolicy("123", "lounge")
-	if pLounge.AmbientWakeThreshold == nil || *pLounge.AmbientWakeThreshold != 0.75 {
-		t.Errorf("expected AmbientWakeThreshold 0.75, got %v", pLounge.AmbientWakeThreshold)
-	}
-	if pLounge.GetAmbientWakeThreshold() != 0.75 {
-		t.Errorf("expected GetAmbientWakeThreshold() 0.75, got %f", pLounge.GetAmbientWakeThreshold())
-	}
-
-	pSilent := cfg.ResolveChannelPolicy("456", "silent")
-	if pSilent.AmbientWakeThreshold == nil || *pSilent.AmbientWakeThreshold != 0.0 {
-		t.Errorf("expected AmbientWakeThreshold 0.0, got %v", pSilent.AmbientWakeThreshold)
-	}
-	if pSilent.GetAmbientWakeThreshold() != 0.0 {
-		t.Errorf("expected GetAmbientWakeThreshold() 0.0, got %f", pSilent.GetAmbientWakeThreshold())
-	}
-
-	pAuto := cfg.ResolveChannelPolicy("789", "auto")
-	if pAuto.AmbientWakeThreshold != nil {
-		t.Errorf("expected AmbientWakeThreshold nil for auto channel, got %v", pAuto.AmbientWakeThreshold)
-	}
-	if pAuto.GetAmbientWakeThreshold() != 0.80 {
-		t.Errorf("expected default 0.80 for channel mode, got %f", pAuto.GetAmbientWakeThreshold())
-	}
-
-	pThreads := cfg.ResolveChannelPolicy("101", "threads_chan")
-	if pThreads.GetAmbientWakeThreshold() != 0.0 {
-		t.Errorf("expected 0.0 for non-channel mode, got %f", pThreads.GetAmbientWakeThreshold())
-	}
-}
-
-func TestChannelPolicy_AmbientWakeThreshold_Inheritance(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_ambient_inherit.yaml")
-	yamlContent := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "threads"
-    ambient_wake_threshold: 0.65
-  lounge:
-    mode: "channel"
-`
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
-	}
-	pLounge := cfg.ResolveChannelPolicy("123", "lounge")
-	if pLounge.AmbientWakeThreshold == nil || *pLounge.AmbientWakeThreshold != 0.65 {
-		t.Errorf("expected inherited AmbientWakeThreshold 0.65, got %v", pLounge.AmbientWakeThreshold)
-	}
-	if pLounge.GetAmbientWakeThreshold() != 0.65 {
-		t.Errorf("expected GetAmbientWakeThreshold() 0.65, got %f", pLounge.GetAmbientWakeThreshold())
-	}
-}
-
-func TestChannelPolicy_Validation_InvalidAmbientWakeThreshold(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Negative threshold in default
-	yamlPath1 := filepath.Join(tmpDir, "config_neg.yaml")
-	yamlNeg := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "threads"
-    ambient_wake_threshold: -0.1
-`
-	if err := os.WriteFile(yamlPath1, []byte(yamlNeg), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-	if _, err := LoadConfigFromPaths(yamlPath1); err == nil {
-		t.Errorf("Expected error for ambient_wake_threshold < 0.0, got nil")
-	}
-
-	// Threshold > 1.0 in channel
-	yamlPath2 := filepath.Join(tmpDir, "config_gt1.yaml")
-	yamlGt1 := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "threads"
-  lounge:
-    mode: "channel"
-    ambient_wake_threshold: 1.5
-`
-	if err := os.WriteFile(yamlPath2, []byte(yamlGt1), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-	if _, err := LoadConfigFromPaths(yamlPath2); err == nil {
-		t.Errorf("Expected error for ambient_wake_threshold > 1.0, got nil")
-	}
-}
-
-func TestChannelPolicy_IgnoreBotsInheritance(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_ignore_bots.yaml")
-	yamlContent := `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "ignore"
-    ignore_bots: true
-  lounge:
-    mode: "channel"
-    ignore_bots: false
-  bot_allowed:
-    mode: "threads"
-    ignore_bots: false
-  inherits_true:
-    mode: "channel"
-`
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write yaml: %v", err)
-	}
-
-	cfg, err := LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
-	}
-
-	pLounge := cfg.ResolveChannelPolicy("123", "lounge")
-	if pLounge.IsBotIgnored() {
-		t.Errorf("expected lounge ignore_bots: false to override default ignore_bots: true")
-	}
-	if pLounge.IgnoreBots == nil || *pLounge.IgnoreBots != false {
-		t.Errorf("expected pLounge.IgnoreBots pointer to be &false, got %v", pLounge.IgnoreBots)
-	}
-
-	pBotAllowed := cfg.ResolveChannelPolicy("456", "bot_allowed")
-	if pBotAllowed.IsBotIgnored() {
-		t.Errorf("expected bot_allowed ignore_bots: false to override default ignore_bots: true")
-	}
-
-	pInherits := cfg.ResolveChannelPolicy("789", "inherits_true")
-	if !pInherits.IsBotIgnored() {
-		t.Errorf("expected inherits_true to inherit ignore_bots: true from default")
-	}
-}
 
 func TestNormalizeChannelName(t *testing.T) {
 	cases := []struct {
