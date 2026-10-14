@@ -192,6 +192,28 @@ http {
             proxy_read_timeout 86400s;
         }
     }
+
+    # 4. Public Browser Entrypoint (Reverse proxy to browser.aerial via mesh-proxy)
+    server {
+        listen 4021;
+        server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .browser_domain }}{{ .browser_domain }}{{ else }}browser.*{{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .browser_domain }}{{ .browser_domain }}{{ else }}browser.*{{ end }}{{ end }}{{ else }}browser.*{{ end }};
+
+        location / {
+            proxy_pass http://127.0.0.1:80;
+            proxy_http_version 1.1;
+            proxy_set_header Host browser.aerial;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            proxy_set_header X-Forwarded-Host $host;
+
+            # WebSocket & SSE Support for live CDP and session viewer
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 86400s;
+        }
+    }
 }
 EOH
         destination = "local/nginx.conf"
