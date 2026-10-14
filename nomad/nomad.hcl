@@ -11,9 +11,11 @@ server {
 }
 
 client {
-  enabled           = true
-  node_class        = "quiet-zero"
-  cpu_total_compute = 12000
+  enabled                 = true
+  node_class              = "quiet-zero"
+  cpu_total_compute       = 12000
+  gc_interval             = "10m"
+  gc_disk_usage_threshold = 90
   options = {
     "fingerprint.blacklist" = "env_aws,env_gce,env_azure,env_digitalocean"
   }
@@ -35,6 +37,11 @@ plugin "docker" {
     }
     auth {
       config = "/mnt/data/nomad/client/docker-auth.json"
+    }
+    gc {
+      image       = true
+      image_delay = "168h"
+      container   = true
     }
   }
 }
