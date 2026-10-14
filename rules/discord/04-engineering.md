@@ -34,12 +34,6 @@
    - **Dynamic Scope Reconciliation & Post-Implementation Re-Tiering Invariant**: Never open a PR based solely on initial upfront tier estimations. Immediately following implementation, inspect actual diff metrics (`git diff --stat`). If the diff expanded past the initial tier threshold (e.g. cumulative LOC > 200 or touches to core queue/runner logic, worker turn loops, turn sinks/resolvers, process pools, or database schemas), the task MUST immediately auto-escalate to Tier 3. For any task escalated to Tier 3:
      - The diff review MUST be performed by the full Girl Gang panel (4 disciplines), not a single reviewer.
      - **MANDATORY HUMAN ESCALATION CHECKPOINT (STOP BEFORE AUTO-MERGE)**: The agent MUST NOT arm auto-merge autonomously. It must pause, synthesize panel review findings, report the scope escalation to Discord with diff metrics, and await explicit user authorization.
-   - **Subagent Model Tier & Cost Discipline Invariant**:
-     - When delegating tasks to subagents via `invoke_subagent`, the primary agent must explicitly set the `Model` argument based on the cognitive role of the task:
-       - **Low-Effort / Fast Tier (`Model: "flash"` or `Model: "flash_lite"`)**: Mandatory for all mechanical implementation, coding from task briefs/specs, unit test authoring, table-driven fixture expansion, lint/formatting remediation, and single-package refactors.
-       - **Inherited / Standard Tier (`Model: "inherit"`)**: Reserved for cross-package integration debugging and multi-file dependency reconciliation.
-       - **High-Effort / Reasoning Tier (`Model: "pro"`)**: Strictly reserved for architectural design reviews (The Girl Gang), whole-branch diff audits, and fix-loop escalations (rounds 4+).
-     - **Zero-Inherit Default for Implementers**: Never omit the `Model` argument or leave it as `Model: "inherit"` when spawning implementation subagents. Inheriting the parent's high-effort reasoning model for transcription and test generation is treated as an architectural defect.
 
 5. **Host-Native Tooling & Container Cleanliness Invariants**:
    - **Host-Native Execution**: When planning or executing builds, tests, lints, or script validations (`go test`, `node --test`, `golangci-lint run`, `./scripts/verify.sh`), always invoke the installed binaries directly in the workspace shell (`run_command`). Never wrap standard unit test commands in `docker run`.
