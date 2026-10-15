@@ -46,7 +46,6 @@ job "vanadis" {
       env {
         CONFIG_PATH   = "/local/vanadis.yaml"
         BRAIN_URL     = "http://brain.aerial"
-        VANADIS_MODEL = "gemini-4-flash"
         PORT          = "4025"
         GOCOVERDIR    = "/coverage"
       }
