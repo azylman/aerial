@@ -1786,7 +1786,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		Cwd:               cur.DataDir,
 		Env:               poolEnv,
 		Timezone:          cur.Timezone,
-		MemoryRetriever:   memoryRetriever,
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		PrewarmedTargets:  []string{"discord:worker-0", "discord:worker-1"},
 		SessionManager:    sessionMgr,

@@ -32,6 +32,7 @@ type SessionLease interface {
 	SessionID() string
 	PreviousSessionID() string
 	IsCold() bool
+	IsEphemeral() bool
 	TurnCount() int
 
 	// Execution
