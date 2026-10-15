@@ -41,18 +41,16 @@ var (
 
 // Config holds runtime configuration for the Vanadis orchestrator service.
 type Config struct {
-	Port         string
-	PostgresURL  string
-	BrainURL     string
-	DefaultModel string
+	Port        string
+	PostgresURL string
+	BrainURL    string
 }
 
 // VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
 type VanadisYAMLConfig struct {
-	Port         string `yaml:"port"`
-	PostgresURL  string `yaml:"postgres_url"`
-	BrainURL     string `yaml:"brain_url"`
-	DefaultModel string `yaml:"default_model"`
+	Port        string `yaml:"port"`
+	PostgresURL string `yaml:"postgres_url"`
+	BrainURL    string `yaml:"brain_url"`
 }
 
 var (
@@ -111,10 +109,9 @@ func LoadConfig(configPath string) Config {
 	}
 
 	return Config{
-		Port:         firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
-		PostgresURL:  pgURL,
-		BrainURL:     strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
-		DefaultModel: firstNonEmpty(os.Getenv("VANADIS_MODEL"), fileCfg.DefaultModel, "gemini-4-flash"),
+		Port:        firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
+		PostgresURL: pgURL,
+		BrainURL:    strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
 	}
 }
 
@@ -513,7 +510,6 @@ func (w *ExecuteChunkWorker) Work(ctx context.Context, job *river.Job[ExecuteChu
 type BrainPromptRequest struct {
 	ChannelID      string `json:"channel_id"`
 	Prompt         string `json:"prompt"`
-	Model          string `json:"model"`
 	VanadisChunkID string `json:"vanadis_chunk_id"`
 }
 
@@ -598,11 +594,9 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return fmt.Errorf("format chunk prompt: %w", err)
 	}
 
-	model := firstNonEmpty(s.cfg.DefaultModel, "gemini-4-flash")
 	reqPayload := BrainPromptRequest{
 		ChannelID:      build.ThreadID,
 		Prompt:         prompt,
-		Model:          model,
 		VanadisChunkID: chunk.ID,
 	}
 
@@ -1011,8 +1005,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("[vanadis] Server listening on %s (BrainURL: %s, DefaultModel: %s)",
-			ln.Addr().String(), cfg.BrainURL, cfg.DefaultModel)
+		log.Printf("[vanadis] Server listening on %s (BrainURL: %s)",
+			ln.Addr().String(), cfg.BrainURL)
 		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}

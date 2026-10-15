@@ -247,7 +247,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 		lookupHostFn = origLookup
 	}()
 
-	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "VANADIS_MODEL", "CONFIG_PATH"} {
+	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "CONFIG_PATH"} {
 		t.Setenv(k, "")
 	}
 
@@ -262,7 +262,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 			return nil, errors.New("not found")
 		}
 		cfg := LoadConfig("")
-		if cfg.Port != "4025" || cfg.DefaultModel != "gemini-4-flash" || cfg.BrainURL != "http://127.0.0.1:8088" {
+		if cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088" {
 			t.Fatalf("unexpected defaults: %+v", cfg)
 		}
 		if !strings.Contains(cfg.PostgresURL, "@aerial-postgres:5432/") {
@@ -299,14 +299,13 @@ func TestLoadConfigAndEnv(t *testing.T) {
 port: "4099"
 postgres_url: "postgres://u:p@db:5432/vanadis"
 brain_url: "http://brain.aerial:8088/"
-default_model: "gemini-4-pro"
 `
 		if err := os.WriteFile(yamlPath, []byte(yamlContent), 0o600); err != nil {
 			t.Fatalf("write yaml: %v", err)
 		}
 		vanadisFallbackConfigPath = yamlPath
 		cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml"))
-		if cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://brain.aerial:8088" || cfg.DefaultModel != "gemini-4-pro" {
+		if cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://brain.aerial:8088" {
 			t.Fatalf("unexpected yaml config: %+v", cfg)
 		}
 
@@ -316,10 +315,9 @@ default_model: "gemini-4-pro"
 		t.Setenv("PORT", "4030")
 		t.Setenv("POSTGRES_URL", "postgres://env:5432/db")
 		t.Setenv("BRAIN_INTERNAL_URL", "http://internal-brain:8088/")
-		t.Setenv("VANADIS_MODEL", "custom-model")
 
 		envCfg := LoadConfigFromEnv()
-		if envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" || envCfg.DefaultModel != "custom-model" {
+		if envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" {
 			t.Fatalf("unexpected env override config: %+v", envCfg)
 		}
 	})
@@ -700,7 +698,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	defer brainSrv.Close()
 
 	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, DefaultModel: "gemini-4-flash"}, memStore, &mockRiverInserter{}, brainSrv.Client())
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, &mockRiverInserter{}, brainSrv.Client())
 
 	// 1. Build not found -> nil
 	if err := srv.ProcessExecuteChunk(ctx, "nonexistent", 0, false); err != nil {
@@ -807,7 +805,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 func TestHTTPEndpoints(t *testing.T) {
 	memStore := newMemoryVanadisStore()
 	inserter := &mockRiverInserter{}
-	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088", DefaultModel: "gemini-4-flash"}, memStore, inserter, nil)
+	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088"}, memStore, inserter, nil)
 	mux := srv.Routes()
 
 	doReq := func(method, path string, body io.Reader) *httptest.ResponseRecorder {
