@@ -232,6 +232,14 @@ NOMAD_DELETED_JOB_CHECK=$(bash -c '
 ')
 assert_eq "kiosk-go2rtc" "$NOMAD_DELETED_JOB_CHECK" "Deleted Nomad jobs are filtered out from metadata"
 
+# Case 9: --vanadis-chunk global flag parsing
+VANADIS_FLAG_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --vanadis-chunk=chunk-xyz-123 --source-only 2>/dev/null || true
+    echo \"\${VANADIS_CHUNK_ID}\"
+")
+assert_eq "chunk-xyz-123" "$VANADIS_FLAG_CHECK" "--vanadis-chunk=<id> sets VANADIS_CHUNK_ID"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

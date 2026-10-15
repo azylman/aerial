@@ -4372,6 +4372,53 @@ func TestHandlePRRegister(t *testing.T) {
 			t.Errorf("Expected 500 on store failure, got %d", rec.Code)
 		}
 	}
+
+	// 7. Successful Registration with vanadis_chunk_id and diff_stat
+	{
+		err := store.CreateVanadisBuild(context.Background(), db.VanadisBuild{
+			ID:        "build-reg-1",
+			Repo:      "aerial",
+			ThreadID:  "1555405874565091380",
+			Objective: "Test PR linkage",
+		}, []db.VanadisChunk{
+			{
+				ID:           "chunk-reg-1",
+				ChunkIndex:   0,
+				Title:        "Task 1",
+				Instructions: "Do task 1",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CreateVanadisBuild failed: %v", err)
+		}
+
+		payload := `{"repo":"aerial","pr_number":510,"branch":"feat/vanadis-chunk","head_sha":"head510","target_id":"1555405874565091380","title":"feat: vanadis chunk","vanadis_chunk_id":"chunk-reg-1","diff_stat":" 2 files changed, 45 insertions(+)"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK with vanadis_chunk_id, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		chunk, err := store.GetVanadisChunk(context.Background(), "chunk-reg-1")
+		if err != nil {
+			t.Fatalf("GetVanadisChunk failed: %v", err)
+		}
+		if chunk.PRNumber != 510 || chunk.Status != "pr_opened" || chunk.DiffStat != "2 files changed, 45 insertions(+)" {
+			t.Errorf("Unexpected Vanadis chunk state after PR register: %+v", chunk)
+		}
+	}
+
+	// 8. Registration with non-existent vanadis_chunk_id returns 500
+	{
+		payload := `{"repo":"aerial","pr_number":511,"branch":"feat/vanadis-chunk-bad","head_sha":"head511","target_id":"1555405874565091380","vanadis_chunk_id":"missing-chunk-id","diff_stat":"1 file changed"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("Expected 500 when AttachVanadisChunkPR fails, got %d (%s)", rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {
