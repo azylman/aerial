@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -34,6 +35,9 @@ import (
 
 // TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
 const TargetNomadVariable = "nomad/jobs/shared"
+
+// VanadisQueueName is the River queue name for Vanadis build chunk execution jobs.
+const VanadisQueueName = "vanadis"
 
 // UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
 var UniqueSkippedTotal = prometheus.NewCounterVec(
@@ -363,6 +367,22 @@ func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCr
 	return nil
 }
 
+// VanadisExecuteChunkArgs defines the River job payload for executing a single Vanadis build chunk.
+type VanadisExecuteChunkArgs struct {
+	BuildID    string `json:"build_id" river:"unique"`
+	ChunkIndex int    `json:"chunk_index" river:"unique"`
+}
+
+func (VanadisExecuteChunkArgs) Kind() string { return "vanadis_execute_chunk" }
+
+func (VanadisExecuteChunkArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       VanadisQueueName,
+		MaxAttempts: 3,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByPeriod: 15 * time.Minute},
+	}
+}
+
 // normalizeRepo ensures repository names are normalized with the owner prefix.
 func normalizeRepo(repo string) string {
 	repo = strings.TrimSpace(repo)
@@ -429,6 +449,33 @@ type DeployingPR struct {
 	Metadata map[string]interface{} `json:"metadata"`
 }
 
+// VanadisChunkSummary holds condensed status metadata for a single chunk in a Vanadis build.
+type VanadisChunkSummary struct {
+	ID         string `json:"id"`
+	ChunkIndex int    `json:"chunk_index"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	PRNumber   int    `json:"pr_number,omitempty"`
+	DiffStat   string `json:"diff_stat,omitempty"`
+}
+
+// VanadisAdvancementResult describes the outcome of advancing a Vanadis build chunk upon PR merge.
+type VanadisAdvancementResult struct {
+	Matched          bool                  `json:"matched"`
+	Advanced         bool                  `json:"advanced"`
+	BuildID          string                `json:"build_id"`
+	Repo             string                `json:"repo"`
+	ThreadID         string                `json:"thread_id"`
+	Tier             int                   `json:"tier"`
+	Objective        string                `json:"objective"`
+	BuildStatus      string                `json:"build_status"`
+	MergedChunkIndex int                   `json:"merged_chunk_index"`
+	MergedChunkTitle string                `json:"merged_chunk_title"`
+	NextChunkIndex   int                   `json:"next_chunk_index"`
+	BuildCompleted   bool                  `json:"build_completed"`
+	Chunks           []VanadisChunkSummary `json:"chunks,omitempty"`
+}
+
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
 type PRRegistryUpdater interface {
 	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
@@ -447,6 +494,9 @@ type PRRegistryUpdater interface {
 	AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
 	GetRecentChannelContext(ctx context.Context, targetID string, limit int) ([]ChannelMessageContext, error)
+	AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
+	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
+	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
 }
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
@@ -456,13 +506,23 @@ type ChannelMessageContext struct {
 	ResponseText string
 }
 
+type pgxQueryExecer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
 type PostgresPRRegistry struct {
-	pool *pgxpool.Pool
+	pool pgxQueryExecer
 }
 
 // NewPostgresPRRegistry constructs a new PostgresPRRegistry.
-func NewPostgresPRRegistry(pool *pgxpool.Pool) *PostgresPRRegistry {
+func NewPostgresPRRegistry(pool pgxQueryExecer) *PostgresPRRegistry {
+	if typedPool, ok := pool.(*pgxpool.Pool); ok && typedPool == nil {
+		pool = nil
+	}
 	return &PostgresPRRegistry{pool: pool}
 }
 
@@ -825,6 +885,205 @@ func (r *PostgresPRRegistry) GetRecentChannelContext(ctx context.Context, target
 		results = append(results, m)
 	}
 	return results, rows.Err()
+}
+
+func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return &VanadisAdvancementResult{}, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	tx, err := r.pool.Begin(qCtx)
+	if err != nil {
+		return nil, fmt.Errorf("begin vanadis advance tx: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(qCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			log.Printf("[webhooks-router] [registry] vanadis tx rollback error: %v", rbErr)
+		}
+	}()
+
+	selectChunkQuery := `
+		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.repo, b.thread_id, b.tier, b.objective, b.status
+		FROM vanadis_chunks c
+		JOIN vanadis_builds b ON c.build_id = b.id
+		WHERE b.repo = $1 AND c.pr_number = $2
+		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
+
+	var chunkID, buildID, cTitle, cStatus, bRepo, threadID, objective, bStatus string
+	var chunkIdx, tier int
+	err = tx.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
+		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &bRepo, &threadID, &tier, &objective, &bStatus,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &VanadisAdvancementResult{Matched: false}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select vanadis chunk by pr: %w", err)
+	}
+
+	if bStatus == "cancelled" || bStatus == "failed" || cStatus == "merged" {
+		return &VanadisAdvancementResult{
+			Matched:          true,
+			Advanced:         false,
+			BuildID:          buildID,
+			Repo:             bRepo,
+			ThreadID:         threadID,
+			Tier:             tier,
+			Objective:        objective,
+			BuildStatus:      bStatus,
+			MergedChunkIndex: chunkIdx,
+			MergedChunkTitle: cTitle,
+			NextChunkIndex:   -1,
+		}, nil
+	}
+
+	updateChunkQuery := `UPDATE vanadis_chunks SET status = 'merged', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+	if _, err := tx.Exec(qCtx, updateChunkQuery, chunkID); err != nil {
+		return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
+	}
+
+	allChunksQuery := `SELECT id, chunk_index, title, status, COALESCE(pr_number, 0), diff_stat FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
+	rows, err := tx.Query(qCtx, allChunksQuery, buildID)
+	if err != nil {
+		return nil, fmt.Errorf("query vanadis build chunks: %w", err)
+	}
+	var allChunks []VanadisChunkSummary
+	for rows.Next() {
+		var cs VanadisChunkSummary
+		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Title, &cs.Status, &cs.PRNumber, &cs.DiffStat); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan vanadis build chunk: %w", scanErr)
+		}
+		if cs.ID == chunkID {
+			cs.Status = "merged"
+		}
+		allChunks = append(allChunks, cs)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate vanadis build chunks: %w", err)
+	}
+
+	nextChunkIdx := -1
+	fallbackIdx := -1
+	for _, cs := range allChunks {
+		if cs.Status != "merged" {
+			if cs.ChunkIndex > chunkIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
+				nextChunkIdx = cs.ChunkIndex
+			} else if fallbackIdx == -1 {
+				fallbackIdx = cs.ChunkIndex
+			}
+		}
+	}
+	if nextChunkIdx == -1 {
+		nextChunkIdx = fallbackIdx
+	}
+
+	if nextChunkIdx >= 0 {
+		if err := tx.Commit(qCtx); err != nil {
+			return nil, fmt.Errorf("commit vanadis chunk advance tx: %w", err)
+		}
+		return &VanadisAdvancementResult{
+			Matched:          true,
+			Advanced:         true,
+			BuildID:          buildID,
+			Repo:             bRepo,
+			ThreadID:         threadID,
+			Tier:             tier,
+			Objective:        objective,
+			BuildStatus:      bStatus,
+			MergedChunkIndex: chunkIdx,
+			MergedChunkTitle: cTitle,
+			NextChunkIndex:   nextChunkIdx,
+			BuildCompleted:   false,
+			Chunks:           allChunks,
+		}, nil
+	}
+
+	updateBuildQuery := `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+	if _, err := tx.Exec(qCtx, updateBuildQuery, buildID); err != nil {
+		return nil, fmt.Errorf("update vanadis build completed: %w", err)
+	}
+	if err := tx.Commit(qCtx); err != nil {
+		return nil, fmt.Errorf("commit vanadis build completed tx: %w", err)
+	}
+	return &VanadisAdvancementResult{
+		Matched:          true,
+		Advanced:         true,
+		BuildID:          buildID,
+		Repo:             bRepo,
+		ThreadID:         threadID,
+		Tier:             tier,
+		Objective:        objective,
+		BuildStatus:      "completed",
+		MergedChunkIndex: chunkIdx,
+		MergedChunkTitle: cTitle,
+		NextChunkIndex:   -1,
+		BuildCompleted:   true,
+		Chunks:           allChunks,
+	}, nil
+}
+
+func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT EXISTS (
+			SELECT 1
+			FROM vanadis_chunks c
+			JOIN vanadis_builds b ON c.build_id = b.id
+			WHERE b.repo = $1 AND c.pr_number = $2
+			  AND (
+				  b.status = 'running'
+				  OR EXISTS (
+					  SELECT 1 FROM vanadis_chunks c2
+					  WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
+				  )
+			  )
+		);`
+	var exists bool
+	if err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check vanadis deploy wake suppression: %w", err)
+	}
+	return exists, nil
+}
+
+func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE vanadis_chunks c
+		SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+		FROM vanadis_builds b
+		WHERE c.build_id = b.id AND b.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
+		RETURNING c.build_id;`
+	var buildID string
+	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&buildID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("fail vanadis chunk by pr: %w", err)
+	}
+
+	updateBuild := `UPDATE vanadis_builds SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'running';`
+	if _, err := r.pool.Exec(qCtx, updateBuild, buildID); err != nil {
+		return false, fmt.Errorf("fail vanadis build by pr: %w", err)
+	}
+	return true, nil
 }
 
 // Discord Snowflake validation
@@ -1376,6 +1635,77 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	return nil
 }
 
+func isHangarSyncedRepo(repo string) bool {
+	norm := strings.ToLower(normalizeRepo(repo))
+	return norm == "azylman/aerial" || norm == "azylman/aerial-config"
+}
+
+func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
+	if res == nil {
+		return ""
+	}
+	total := len(res.Chunks)
+	lines := []string{
+		fmt.Sprintf("Vanadis build %s completed on %s (Tier %d, %d chunks merged).", res.BuildID, res.Repo, res.Tier, total),
+	}
+	if obj := strings.TrimSpace(res.Objective); obj != "" {
+		lines = append(lines, fmt.Sprintf("Objective: %s", obj))
+	}
+	if total > 0 {
+		lines = append(lines, "", "Merged Chunks Ledger:")
+		for _, c := range res.Chunks {
+			prLabel := ""
+			if c.PRNumber > 0 {
+				prLabel = fmt.Sprintf(" (PR #%d)", c.PRNumber)
+			}
+			line := fmt.Sprintf("- Chunk %d/%d: %s%s", c.ChunkIndex+1, total, c.Title, prLabel)
+			if ds := strings.TrimSpace(c.DiffStat); ds != "" {
+				line += fmt.Sprintf(" — %s", ds)
+			}
+			lines = append(lines, line)
+		}
+	}
+	lines = append(lines, "", "All Vanadis build chunks have merged into main. Summarize the completed build and verification outcomes for the user.")
+	return strings.Join(lines, "\n")
+}
+
+func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prNumber int) error {
+	if s.registry == nil || prNumber <= 0 {
+		return nil
+	}
+	res, err := s.registry.AdvanceVanadisChunkByPR(ctx, repo, prNumber)
+	if err != nil {
+		return err
+	}
+	if res == nil || !res.Matched || !res.Advanced {
+		return nil
+	}
+	total := len(res.Chunks)
+	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
+		if s.riverClient != nil {
+			if err := s.insertRiverJob(ctx, VanadisExecuteChunkArgs{
+				BuildID:    res.BuildID,
+				ChunkIndex: res.NextChunkIndex,
+			}); err != nil {
+				return fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
+			}
+		}
+		dmMsg := fmt.Sprintf("⚡ **(Build: %s, Chunk %d/%d)** Merged PR #%d (%s) — advancing to Chunk %d/%d",
+			res.BuildID, res.MergedChunkIndex+1, total, prNumber, res.MergedChunkTitle, res.NextChunkIndex+1, total)
+		if err := s.dispatchDirectMessage(ctx, res.ThreadID, "vanadis_chunk_advanced", dmMsg); err != nil {
+			log.Printf("[webhooks-router] [vanadis] warning dispatching chunk advancement message for build %s: %v", res.BuildID, err)
+		}
+		return nil
+	}
+	if res.BuildCompleted {
+		dmMsg := fmt.Sprintf("🏁 **(Build: %s, repo: %s)** All %d Vanadis build chunks merged!",
+			res.BuildID, cleanRepoName(res.Repo), total)
+		prompt := formatVanadisBuildCompletedPrompt(res)
+		return s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", dmMsg, prompt)
+	}
+	return nil
+}
+
 func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
 	if evt.CommitSHA != "" && evt.PRNumber == 0 {
 		if prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA); err != nil {
@@ -1402,6 +1732,9 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	}
 
 	if !IsValidDiscordSnowflake(evt.TargetID) || s.dispatcher == nil {
+		if evt.Event == "sync_success" && evt.PRNumber > 0 {
+			return &evt, s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber)
+		}
 		return &evt, nil
 	}
 
@@ -1431,7 +1764,15 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		)
 		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt)
 	case "sync_success":
-		return &evt, s.dispatchDirectMessage(ctx, evt.TargetID, "sync_success", fmt.Sprintf("🔄 %sGit file sync completed", prefix))
+		if err := s.dispatchDirectMessage(ctx, evt.TargetID, "sync_success", fmt.Sprintf("🔄 %sGit file sync completed", prefix)); err != nil {
+			return &evt, err
+		}
+		if evt.PRNumber > 0 {
+			if err := s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber); err != nil {
+				return &evt, err
+			}
+		}
+		return &evt, nil
 	case "sync_failed":
 		header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber)
 		if evt.PRNumber == 0 {
@@ -1509,6 +1850,16 @@ func formatChannelContext(msgs []ChannelMessageContext) string {
 func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targetID, jobName, repo, commitSHA string, prNum int, refID string) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
+	}
+
+	if s.registry != nil && prNum > 0 {
+		suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
+		if err != nil {
+			log.Printf("[webhooks-router] [vanadis] warning checking deploy wake suppression for %s#%d: %v", repo, prNum, err)
+		} else if suppressed {
+			log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
+			return s.dispatchDirectMessage(ctx, targetID, "deploy_success", fmt.Sprintf("✅ %sContinuous Delivery deployment completed for job %s", formatDirectMessagePrefix(prNum, repo), jobName))
+		}
 	}
 
 	var contextMsgs []ChannelMessageContext
@@ -2079,12 +2430,20 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					if err := s.dispatchDirectMessage(ctx, res.TargetID, "pr_merged", fmt.Sprintf("🔀 %sMerged into main", formatDirectMessagePrefix(res.PRNumber, res.Repo))); err != nil {
 						return nil, err
 					}
+					if !isHangarSyncedRepo(res.Repo) {
+						if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+							return nil, err
+						}
+					}
 				} else {
 					targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
 					if err != nil {
 						return nil, err
 					}
 					res.TargetID = firstNonEmpty(res.TargetID, targetID)
+					if _, err := s.registry.FailVanadisChunkByPR(ctx, res.Repo, res.PRNumber); err != nil {
+						log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
+					}
 				}
 			case "synchronize":
 				targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
@@ -2198,6 +2557,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 
 		if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 			return nil, err
+		}
+		if res.PRNumber > 0 && !isHangarSyncedRepo(res.Repo) {
+			if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+				return nil, err
+			}
 		}
 		if s.conflictCheckDelay > 0 {
 			select {
@@ -2438,7 +2802,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 			Queues: map[string]river.QueueConfig{
 				river.QueueDefault: {MaxWorkers: 10},
 			},
-			Workers: workers,
+			Workers:             workers,
+			SkipUnknownJobCheck: true,
 		})
 		if err != nil {
 			return fmt.Errorf("create river client: %w", err)

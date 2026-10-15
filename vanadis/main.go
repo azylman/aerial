@@ -646,7 +646,9 @@ func (s *VanadisServer) dispatchBrainPrompt(ctx context.Context, payload BrainPr
 		}
 		return fmt.Errorf("brain prompt returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		log.Printf("[vanadis] warning draining response body: %v", err)
+	}
 	return nil
 }
 
@@ -835,7 +837,9 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.insertRiverJob(r.Context(), ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0}); err != nil {
-		_ = s.store.UpdateBuildStatus(r.Context(), buildID, "failed")
+		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
+			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("failed to enqueue chunk 0: %v", err)})
 		return
 	}

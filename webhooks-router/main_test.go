@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -31,6 +33,7 @@ type mockRiverInserter struct {
 	insertedHangarJobs     []HangarWebhookArgs
 	insertedNomadJobs      []NomadEventArgs
 	insertedCrashAlertJobs []NomadCrashAlertArgs
+	insertedVanadisJobs    []VanadisExecuteChunkArgs
 	insertedOpts           []*river.InsertOpts
 	skipDuplicate          bool
 	err                    error
@@ -52,6 +55,8 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedNomadJobs = append(m.insertedNomadJobs, a)
 	case NomadCrashAlertArgs:
 		m.insertedCrashAlertJobs = append(m.insertedCrashAlertJobs, a)
+	case VanadisExecuteChunkArgs:
+		m.insertedVanadisJobs = append(m.insertedVanadisJobs, a)
 	}
 	return &rivertype.JobInsertResult{
 		Job:                      &rivertype.JobRow{ID: 1},
@@ -144,6 +149,18 @@ type mockPRRegistry struct {
 
 	channelContextMap map[string][]ChannelMessageContext
 	channelContextErr error
+
+	advanceVanadisCalls []struct{ repo string; prNumber int }
+	advanceVanadisRes   *VanadisAdvancementResult
+	advanceVanadisErr   error
+
+	suppressVanadisCalls []struct{ repo string; prNumber int }
+	suppressVanadisRes   bool
+	suppressVanadisErr   error
+
+	failVanadisCalls []struct{ repo string; prNumber int }
+	failVanadisRes   bool
+	failVanadisErr   error
 
 	err error
 }
@@ -285,6 +302,33 @@ func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prN
 		return "", "", "", "", err
 	}
 	return m.resolveTargetID, m.resolveBranch, "", "", nil
+}
+
+func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
+	m.advanceVanadisCalls = append(m.advanceVanadisCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	if err := m.checkErr(m.advanceVanadisErr); err != nil {
+		return nil, err
+	}
+	if m.advanceVanadisRes != nil {
+		return m.advanceVanadisRes, nil
+	}
+	return &VanadisAdvancementResult{}, nil
+}
+
+func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
+	m.suppressVanadisCalls = append(m.suppressVanadisCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	if err := m.checkErr(m.suppressVanadisErr); err != nil {
+		return false, err
+	}
+	return m.suppressVanadisRes, nil
+}
+
+func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
+	m.failVanadisCalls = append(m.failVanadisCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	if err := m.checkErr(m.failVanadisErr); err != nil {
+		return false, err
+	}
+	return m.failVanadisRes, nil
 }
 
 type mockOutboundDispatcher struct {
@@ -3248,3 +3292,655 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	}
 	assertRow("", "", "deployed")
 }
+
+// --- 10. Vanadis Build Queue Advancement & Wake Suppression Tests ---
+
+func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("VanadisExecuteChunkArgs_KindAndInsertOpts", func(t *testing.T) {
+		args := VanadisExecuteChunkArgs{BuildID: "build-01", ChunkIndex: 2}
+		if got := args.Kind(); got != "vanadis_execute_chunk" {
+			t.Fatalf("Kind() = %q, want vanadis_execute_chunk", got)
+		}
+		opts := args.InsertOpts()
+		if opts.Queue != VanadisQueueName || opts.MaxAttempts != 3 || !opts.UniqueOpts.ByArgs {
+			t.Fatalf("unexpected InsertOpts(): %+v", opts)
+		}
+	})
+
+	t.Run("isHangarSyncedRepo_And_formatVanadisBuildCompletedPrompt", func(t *testing.T) {
+		for _, repo := range []string{"azylman/aerial", "aerial", "AZYLMAN/AERIAL-CONFIG", "aerial-config"} {
+			if !isHangarSyncedRepo(repo) {
+				t.Errorf("expected isHangarSyncedRepo(%q) == true", repo)
+			}
+		}
+		for _, repo := range []string{"azylman/mirrormere", "mirrormere", "azylman/aerial-sidecars", ""} {
+			if isHangarSyncedRepo(repo) {
+				t.Errorf("expected isHangarSyncedRepo(%q) == false", repo)
+			}
+		}
+
+		if got := formatVanadisBuildCompletedPrompt(nil); got != "" {
+			t.Errorf("expected empty prompt for nil result, got %q", got)
+		}
+
+		prompt := formatVanadisBuildCompletedPrompt(&VanadisAdvancementResult{
+			BuildID:   "build-777",
+			Repo:      "azylman/aerial",
+			Tier:      3,
+			Objective: "Ship Vanadis Phase 3",
+			Chunks: []VanadisChunkSummary{
+				{ChunkIndex: 0, Title: "Schema", PRNumber: 101, DiffStat: "2 files (+50)"},
+				{ChunkIndex: 1, Title: "Worker", PRNumber: 0, DiffStat: ""},
+			},
+		})
+		for _, sub := range []string{
+			"Vanadis build build-777 completed on azylman/aerial (Tier 3, 2 chunks merged).",
+			"Objective: Ship Vanadis Phase 3",
+			"- Chunk 1/2: Schema (PR #101) — 2 files (+50)",
+			"- Chunk 2/2: Worker",
+			"All Vanadis build chunks have merged into main.",
+		} {
+			if !strings.Contains(prompt, sub) {
+				t.Errorf("expected prompt to contain %q, got:\n%s", sub, prompt)
+			}
+		}
+	})
+
+	t.Run("advanceVanadisChunk_MidRun_And_Completed_And_Errors", func(t *testing.T) {
+		validThread := "123456789012345678"
+
+		// 1. Nil registry or non-positive PR
+		srvNil := newTestRouter(Config{}, nil, nil, nil)
+		if err := srvNil.advanceVanadisChunk(ctx, "aerial", 10); err != nil {
+			t.Fatalf("expected nil on nil registry, got %v", err)
+		}
+
+		reg := &mockPRRegistry{}
+		disp := &mockOutboundDispatcher{}
+		inserter := &mockRiverInserter{}
+		srv := newTestRouter(Config{}, nil, reg, disp, inserter)
+
+		if err := srv.advanceVanadisChunk(ctx, "aerial", 0); err != nil {
+			t.Fatalf("expected nil on prNumber=0, got %v", err)
+		}
+
+		// 2. Unmatched or unadvanced result
+		reg.advanceVanadisRes = &VanadisAdvancementResult{Matched: false}
+		if err := srv.advanceVanadisChunk(ctx, "aerial", 10); err != nil {
+			t.Fatalf("expected nil on unmatched result, got %v", err)
+		}
+
+		// 3. Registry error
+		reg.advanceVanadisErr = errors.New("db failure")
+		if err := srv.advanceVanadisChunk(ctx, "aerial", 10); err == nil {
+			t.Fatal("expected error from AdvanceVanadisChunkByPR")
+		}
+		reg.advanceVanadisErr = nil
+
+		// 4. Mid-run chunk advancement: enqueues next chunk in River and sends DM
+		reg.advanceVanadisRes = &VanadisAdvancementResult{
+			Matched:          true,
+			Advanced:         true,
+			BuildID:          "build-mid",
+			Repo:             "azylman/aerial",
+			ThreadID:         validThread,
+			MergedChunkIndex: 0,
+			MergedChunkTitle: "Chunk One",
+			NextChunkIndex:   1,
+			BuildCompleted:   false,
+			Chunks: []VanadisChunkSummary{
+				{ChunkIndex: 0, Title: "Chunk One", Status: "merged"},
+				{ChunkIndex: 1, Title: "Chunk Two", Status: "pending"},
+			},
+		}
+		disp.directMessageErr = errors.New("dm transient failure") // should only log warning
+		if err := srv.advanceVanadisChunk(ctx, "aerial", 42); err != nil {
+			t.Fatalf("unexpected error on mid-run advance: %v", err)
+		}
+		disp.directMessageErr = nil
+		if len(inserter.insertedVanadisJobs) != 1 || inserter.insertedVanadisJobs[0].BuildID != "build-mid" || inserter.insertedVanadisJobs[0].ChunkIndex != 1 {
+			t.Fatalf("expected VanadisExecuteChunkArgs{build-mid, 1}, got %+v", inserter.insertedVanadisJobs)
+		}
+		dms := disp.DirectMessageCalls()
+		if len(dms) != 1 || !strings.Contains(dms[0].Content, "Chunk 1/2") || !strings.Contains(dms[0].Content, "Chunk 2/2") {
+			t.Fatalf("unexpected advancement DM: %+v", dms)
+		}
+
+		// 5. River insert error during mid-run advancement
+		inserter.err = errors.New("river insert failed")
+		if err := srv.advanceVanadisChunk(ctx, "aerial", 42); err == nil {
+			t.Fatal("expected error when River insert fails")
+		}
+		inserter.err = nil
+
+		// 6. Final build completion: dispatches completion DM + prompt
+		disp.directMessageCalls = nil
+		disp.promptCalls = nil
+		reg.advanceVanadisRes = &VanadisAdvancementResult{
+			Matched:          true,
+			Advanced:         true,
+			BuildID:          "build-done",
+			Repo:             "azylman/aerial",
+			ThreadID:         validThread,
+			Tier:             2,
+			Objective:        "Complete all chunks",
+			MergedChunkIndex: 1,
+			MergedChunkTitle: "Chunk Two",
+			NextChunkIndex:   -1,
+			BuildCompleted:   true,
+			Chunks: []VanadisChunkSummary{
+				{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
+				{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
+			},
+		}
+		if err := srv.advanceVanadisChunk(ctx, "aerial", 42); err != nil {
+			t.Fatalf("unexpected error on build completion: %v", err)
+		}
+		if len(disp.DirectMessageCalls()) != 1 || !strings.Contains(disp.DirectMessageCalls()[0].Content, "All 2 Vanadis build chunks merged!") {
+			t.Fatalf("expected completion DM, got %+v", disp.DirectMessageCalls())
+		}
+		if len(disp.PromptCalls()) != 1 || !strings.Contains(disp.PromptCalls()[0].Prompt, "Vanadis build build-done completed") {
+			t.Fatalf("expected completion prompt, got %+v", disp.PromptCalls())
+		}
+	})
+
+	t.Run("ProcessHangarEvent_And_ProcessGitHubEvent_Wiring", func(t *testing.T) {
+		validThread := "123456789012345678"
+		reg := &mockPRRegistry{
+			mergedTargetID:   validThread,
+			closedTargetID:   validThread,
+			backfillTargetID: validThread,
+			resolvePRNum:     77,
+			resolveTargetID:  validThread,
+			advanceVanadisRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-wire",
+				Repo:             "azylman/aerial",
+				ThreadID:         validThread,
+				MergedChunkIndex: 0,
+				MergedChunkTitle: "Chunk 1",
+				NextChunkIndex:   1,
+				Chunks:           []VanadisChunkSummary{{ChunkIndex: 0}, {ChunkIndex: 1}},
+			},
+		}
+		disp := &mockOutboundDispatcher{}
+		inserter := &mockRiverInserter{}
+		srv := newTestRouter(Config{}, nil, reg, disp, inserter)
+		srv.SetConflictCheckDelay(0)
+
+		// 1. Hangar sync_success with valid TargetID advances Vanadis chunk
+		if _, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
+			Event:    "sync_success",
+			JobName:  "git-sync",
+			Repo:     "azylman/aerial",
+			PRNumber: 77,
+			TargetID: validThread,
+		}); err != nil {
+			t.Fatalf("ProcessHangarEvent sync_success failed: %v", err)
+		}
+		if len(reg.advanceVanadisCalls) != 1 || reg.advanceVanadisCalls[0].prNumber != 77 {
+			t.Fatalf("expected AdvanceVanadisChunkByPR call for PR 77, got %+v", reg.advanceVanadisCalls)
+		}
+
+		// 2. Hangar sync_success with empty TargetID still advances Vanadis chunk
+		reg.resolveTargetID = ""
+		if _, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
+			Event:    "sync_success",
+			JobName:  "git-sync",
+			Repo:     "azylman/aerial",
+			PRNumber: 78,
+		}); err != nil {
+			t.Fatalf("ProcessHangarEvent sync_success without target_id failed: %v", err)
+		}
+		if len(reg.advanceVanadisCalls) != 2 || reg.advanceVanadisCalls[1].prNumber != 78 {
+			t.Fatalf("expected AdvanceVanadisChunkByPR call for PR 78, got %+v", reg.advanceVanadisCalls)
+		}
+		reg.resolveTargetID = validThread
+
+		// 3. Hangar sync_success error propagation
+		reg.advanceVanadisErr = errors.New("advance err")
+		if _, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
+			Event:    "sync_success",
+			JobName:  "git-sync",
+			Repo:     "azylman/aerial",
+			PRNumber: 79,
+			TargetID: validThread,
+		}); err == nil {
+			t.Fatal("expected error from ProcessHangarEvent when advanceVanadisChunk fails")
+		}
+		reg.advanceVanadisErr = nil
+
+		// 4. GitHub pull_request closed (merged) on non-Hangar-synced repo advances Vanadis chunk
+		reg.advanceVanadisCalls = nil
+		prMergedMirrormere := `{"action":"closed","number":88,"pull_request":{"number":88,"merged":true,"merge_commit_sha":"abc1234","head":{"ref":"feat/ui","sha":"def5678"}},"repository":{"full_name":"azylman/mirrormere"}}`
+		if _, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-1", []byte(prMergedMirrormere)); err != nil {
+			t.Fatalf("ProcessGitHubEvent merged PR failed: %v", err)
+		}
+		if len(reg.advanceVanadisCalls) != 1 || reg.advanceVanadisCalls[0].prNumber != 88 {
+			t.Fatalf("expected AdvanceVanadisChunkByPR for mirrormere#88, got %+v", reg.advanceVanadisCalls)
+		}
+
+		reg.advanceVanadisErr = errors.New("pr merge advance err")
+		if _, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-1b", []byte(prMergedMirrormere)); err == nil {
+			t.Fatal("expected error when advanceVanadisChunk fails on merged PR")
+		}
+		reg.advanceVanadisErr = nil
+
+		// 5. GitHub pull_request closed (unmerged) calls FailVanadisChunkByPR
+		reg.failVanadisErr = errors.New("fail chunk warning")
+		prClosedUnmerged := `{"action":"closed","number":89,"pull_request":{"number":89,"merged":false,"head":{"ref":"feat/abandoned","sha":"def5678"}},"repository":{"full_name":"azylman/aerial"}}`
+		if _, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-2", []byte(prClosedUnmerged)); err != nil {
+			t.Fatalf("ProcessGitHubEvent unmerged PR failed: %v", err)
+		}
+		if len(reg.failVanadisCalls) != 1 || reg.failVanadisCalls[0].prNumber != 89 {
+			t.Fatalf("expected FailVanadisChunkByPR for aerial#89, got %+v", reg.failVanadisCalls)
+		}
+		reg.failVanadisErr = nil
+
+		// 6. GitHub push to main on non-Hangar-synced repo advances Vanadis chunk
+		reg.advanceVanadisCalls = nil
+		pushSidecars := `{"ref":"refs/heads/main","after":"1111222233334444555566667777888899990000","repository":{"full_name":"azylman/aerial-sidecars"}}`
+		if _, err := srv.ProcessGitHubEvent(ctx, "push", "del-3", []byte(pushSidecars)); err != nil {
+			t.Fatalf("ProcessGitHubEvent push failed: %v", err)
+		}
+		if len(reg.advanceVanadisCalls) != 1 || reg.advanceVanadisCalls[0].prNumber != 77 {
+			t.Fatalf("expected AdvanceVanadisChunkByPR on push to aerial-sidecars, got %+v", reg.advanceVanadisCalls)
+		}
+
+		reg.advanceVanadisErr = errors.New("push advance err")
+		if _, err := srv.ProcessGitHubEvent(ctx, "push", "del-3b", []byte(pushSidecars)); err == nil {
+			t.Fatal("expected error when advanceVanadisChunk fails on push")
+		}
+		reg.advanceVanadisErr = nil
+	})
+
+	t.Run("dispatchDeploymentSuccessPrompt_WakeSuppression", func(t *testing.T) {
+		validThread := "123456789012345678"
+		reg := &mockPRRegistry{suppressVanadisRes: true}
+		disp := &mockOutboundDispatcher{}
+		srv := newTestRouter(Config{}, nil, reg, disp)
+
+		// 1. Suppressed mid-run deploy sends DM only, no /prompt wake
+		if err := srv.dispatchDeploymentSuccessPrompt(ctx, validThread, "vanadis", "azylman/aerial", "abc1234", 55, "dep-1"); err != nil {
+			t.Fatalf("dispatchDeploymentSuccessPrompt failed: %v", err)
+		}
+		if len(disp.PromptCalls()) != 0 {
+			t.Fatalf("expected 0 /prompt calls when suppressed, got %d", len(disp.PromptCalls()))
+		}
+		if len(disp.DirectMessageCalls()) != 1 || !strings.Contains(disp.DirectMessageCalls()[0].Content, "Continuous Delivery deployment completed for job vanadis") {
+			t.Fatalf("expected deploy_success direct message, got %+v", disp.DirectMessageCalls())
+		}
+
+		// 2. Suppression check error logs warning and falls back to normal /prompt dispatch
+		reg.suppressVanadisRes = false
+		reg.suppressVanadisErr = errors.New("db check err")
+		disp.directMessageCalls = nil
+		if err := srv.dispatchDeploymentSuccessPrompt(ctx, validThread, "vanadis", "azylman/aerial", "abc1234", 55, "dep-1"); err != nil {
+			t.Fatalf("dispatchDeploymentSuccessPrompt fallback failed: %v", err)
+		}
+		if len(disp.PromptCalls()) != 1 {
+			t.Fatalf("expected 1 /prompt call on fallback, got %d", len(disp.PromptCalls()))
+		}
+	})
+}
+
+type mockVanadisPgxRow struct {
+	scanFn func(dest ...any) error
+}
+
+func (r mockVanadisPgxRow) Scan(dest ...any) error {
+	if r.scanFn != nil {
+		return r.scanFn(dest...)
+	}
+	return nil
+}
+
+type mockVanadisPgxRows struct {
+	pgx.Rows
+	items   []VanadisChunkSummary
+	idx     int
+	scanErr error
+	rowsErr error
+}
+
+func (r *mockVanadisPgxRows) Close()     {}
+func (r *mockVanadisPgxRows) Err() error { return r.rowsErr }
+func (r *mockVanadisPgxRows) Next() bool {
+	if r.idx < len(r.items) {
+		r.idx++
+		return true
+	}
+	return false
+}
+func (r *mockVanadisPgxRows) Scan(dest ...any) error {
+	if r.scanErr != nil {
+		return r.scanErr
+	}
+	it := r.items[r.idx-1]
+	*(dest[0].(*string)) = it.ID
+	*(dest[1].(*int)) = it.ChunkIndex
+	*(dest[2].(*string)) = it.Title
+	*(dest[3].(*string)) = it.Status
+	*(dest[4].(*int)) = it.PRNumber
+	*(dest[5].(*string)) = it.DiffStat
+	return nil
+}
+
+type mockVanadisPgxTx struct {
+	pgx.Tx
+	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
+	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	commitErr  error
+	rbErr      error
+}
+
+func (t *mockVanadisPgxTx) Commit(ctx context.Context) error { return t.commitErr }
+func (t *mockVanadisPgxTx) Rollback(ctx context.Context) error {
+	if t.rbErr != nil {
+		return t.rbErr
+	}
+	return pgx.ErrTxClosed
+}
+func (t *mockVanadisPgxTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return t.queryRowFn(ctx, sql, args...)
+}
+func (t *mockVanadisPgxTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if t.execFn != nil {
+		return t.execFn(ctx, sql, args...)
+	}
+	return pgconn.NewCommandTag("UPDATE 1"), nil
+}
+func (t *mockVanadisPgxTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return t.queryFn(ctx, sql, args...)
+}
+
+type mockVanadisPgxPool struct {
+	beginFn    func(ctx context.Context) (pgx.Tx, error)
+	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
+	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func (p *mockVanadisPgxPool) Begin(ctx context.Context) (pgx.Tx, error) {
+	return p.beginFn(ctx)
+}
+func (p *mockVanadisPgxPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return p.queryRowFn(ctx, sql, args...)
+}
+func (p *mockVanadisPgxPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if p.execFn != nil {
+		return p.execFn(ctx, sql, args...)
+	}
+	return pgconn.NewCommandTag("UPDATE 1"), nil
+}
+func (p *mockVanadisPgxPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return p.queryFn(ctx, sql, args...)
+}
+
+func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
+	ctx := context.Background()
+
+	// Typed nil pool guard
+	nilReg := NewPostgresPRRegistry((*pgxpool.Pool)(nil))
+	if res, err := nilReg.AdvanceVanadisChunkByPR(ctx, "aerial", 1); err != nil || res.Matched {
+		t.Fatalf("expected empty result on nil pool, got %+v, err=%v", res, err)
+	}
+	if sup, err := nilReg.ShouldSuppressVanadisDeployWake(ctx, "aerial", 1); err != nil || sup {
+		t.Fatalf("expected false on nil pool, got %v, err=%v", sup, err)
+	}
+	if failed, err := nilReg.FailVanadisChunkByPR(ctx, "aerial", 1); err != nil || failed {
+		t.Fatalf("expected false on nil pool, got %v, err=%v", failed, err)
+	}
+
+	mockPool := &mockVanadisPgxPool{}
+	reg := NewPostgresPRRegistry(mockPool)
+
+	// 1. ShouldSuppressVanadisDeployWake
+	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
+		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+			*(dest[0].(*bool)) = true
+			return nil
+		}}
+	}
+	if sup, err := reg.ShouldSuppressVanadisDeployWake(ctx, "aerial", 10); err != nil || !sup {
+		t.Fatalf("expected true, got %v, err=%v", sup, err)
+	}
+	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
+		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+			return errors.New("query err")
+		}}
+	}
+	if _, err := reg.ShouldSuppressVanadisDeployWake(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected error from ShouldSuppressVanadisDeployWake")
+	}
+
+	// 2. FailVanadisChunkByPR
+	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
+		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+			return pgx.ErrNoRows
+		}}
+	}
+	if failed, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err != nil || failed {
+		t.Fatalf("expected false on ErrNoRows, got %v, err=%v", failed, err)
+	}
+	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
+		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+			return errors.New("scan err")
+		}}
+	}
+	if _, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected error on scan err")
+	}
+	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
+		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+			*(dest[0].(*string)) = "build-fail-1"
+			return nil
+		}}
+	}
+	mockPool.execFn = func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		return pgconn.CommandTag{}, errors.New("exec build fail err")
+	}
+	if _, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected error on exec build fail err")
+	}
+	mockPool.execFn = nil
+	if failed, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err != nil || !failed {
+		t.Fatalf("expected true on FailVanadisChunkByPR success, got %v, err=%v", failed, err)
+	}
+
+	// 3. AdvanceVanadisChunkByPR branches
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return nil, errors.New("begin tx err")
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected begin tx error")
+	}
+
+	populateChunkRow := func(cStatus, bStatus string, chunkIdx int) func(ctx context.Context, sql string, args ...any) pgx.Row {
+		return func(ctx context.Context, sql string, args ...any) pgx.Row {
+			return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+				*(dest[0].(*string)) = fmt.Sprintf("chunk-%d", chunkIdx)
+				*(dest[1].(*string)) = "build-100"
+				*(dest[2].(*int)) = chunkIdx
+				*(dest[3].(*string)) = fmt.Sprintf("Title %d", chunkIdx)
+				*(dest[4].(*string)) = cStatus
+				*(dest[5].(*string)) = "azylman/aerial"
+				*(dest[6].(*string)) = "123456789012345678"
+				*(dest[7].(*int)) = 2
+				*(dest[8].(*string)) = "Test Objective"
+				*(dest[9].(*string)) = bStatus
+				return nil
+			}}
+		}
+	}
+
+	// ErrNoRows
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			rbErr: errors.New("rb warning"),
+			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				return mockVanadisPgxRow{scanFn: func(dest ...any) error { return pgx.ErrNoRows }}
+			},
+		}, nil
+	}
+	if res, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err != nil || res.Matched {
+		t.Fatalf("expected Matched=false on ErrNoRows, got %+v, err=%v", res, err)
+	}
+
+	// Select error
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				return mockVanadisPgxRow{scanFn: func(dest ...any) error { return errors.New("select err") }}
+			},
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected select error")
+	}
+
+	// Cancelled build or already merged chunk
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{queryRowFn: populateChunkRow("merged", "running", 0)}, nil
+	}
+	if res, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err != nil || !res.Matched || res.Advanced {
+		t.Fatalf("expected Matched=true Advanced=false on already merged chunk, got %+v, err=%v", res, err)
+	}
+
+	// Update chunk error
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 0),
+			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				return pgconn.CommandTag{}, errors.New("update chunk err")
+			},
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected update chunk error")
+	}
+
+	// Query all chunks error, scan error, rows.Err()
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 0),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return nil, errors.New("query chunks err")
+			},
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected query chunks error")
+	}
+
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 0),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockVanadisPgxRows{items: []VanadisChunkSummary{{ID: "chunk-0"}}, scanErr: errors.New("scan chunk err")}, nil
+			},
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected scan chunk error")
+	}
+
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 0),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockVanadisPgxRows{items: []VanadisChunkSummary{{ID: "chunk-0"}}, rowsErr: errors.New("rows iter err")}, nil
+			},
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected rows iter error")
+	}
+
+	// Mid-run advancement (including fallbackIdx when earlier chunk is unmerged) + commit error & success
+	twoChunks := []VanadisChunkSummary{
+		{ID: "chunk-0", ChunkIndex: 0, Title: "Title 0", Status: "pending"},
+		{ID: "chunk-1", ChunkIndex: 1, Title: "Title 1", Status: "pr_open"},
+	}
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 1),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockVanadisPgxRows{items: twoChunks}, nil
+			},
+			commitErr: errors.New("commit mid-run err"),
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected commit mid-run error")
+	}
+
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 0),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockVanadisPgxRows{items: twoChunks}, nil
+			},
+		}, nil
+	}
+	resMid, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
+	if err != nil || !resMid.Advanced || resMid.BuildCompleted || resMid.NextChunkIndex != 1 {
+		t.Fatalf("expected mid-run advance to chunk 1, got %+v, err=%v", resMid, err)
+	}
+
+	// Build completion (all chunks merged): update build error, commit error, and success
+	allMergedChunks := []VanadisChunkSummary{
+		{ID: "chunk-0", ChunkIndex: 0, Title: "Title 0", Status: "merged", PRNumber: 9},
+		{ID: "chunk-1", ChunkIndex: 1, Title: "Title 1", Status: "pr_open", PRNumber: 10},
+	}
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		calls := 0
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 1),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockVanadisPgxRows{items: allMergedChunks}, nil
+			},
+			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				calls++
+				if calls == 2 {
+					return pgconn.CommandTag{}, errors.New("update build completed err")
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected update build completed error")
+	}
+
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 1),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockVanadisPgxRows{items: allMergedChunks}, nil
+			},
+			commitErr: errors.New("commit completed err"),
+		}, nil
+	}
+	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
+		t.Fatal("expected commit completed error")
+	}
+
+	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
+		return &mockVanadisPgxTx{
+			queryRowFn: populateChunkRow("pr_open", "running", 1),
+			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockVanadisPgxRows{items: allMergedChunks}, nil
+			},
+		}, nil
+	}
+	resDone, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
+	if err != nil || !resDone.Advanced || !resDone.BuildCompleted || resDone.BuildStatus != "completed" || resDone.NextChunkIndex != -1 {
+		t.Fatalf("expected build completed, got %+v, err=%v", resDone, err)
+	}
+}
+

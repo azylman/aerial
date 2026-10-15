@@ -1382,6 +1382,12 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "aerial core vanadis touched",
+			repoPath: "/share/aerial",
+			files:    []string{"vanadis/main.go"},
+			expected: true,
+		},
+		{
 			name:     "aerial core Dockerfile touched",
 			repoPath: "/share/aerial",
 			files:    []string{"Dockerfile"},
