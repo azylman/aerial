@@ -523,6 +523,11 @@ func TestIsCoreAerialContainer_TableDriven(t *testing.T) {
 			},
 			wantCore: true,
 		},
+		{
+			name:      "image containing agentsview is excluded",
+			container: DockerContainerJSON{Image: "ghcr.io/azylman/agentsview:latest"},
+			wantCore:  false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -557,6 +562,10 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "lint job", jobName: "GolangCI Lint Run", expected: "lint"},
 		{name: "validate-config job", jobName: "validate-config", expected: "config"},
 		{name: "Validate Configuration job", jobName: "Validate Configuration", expected: "config"},
+		{name: "parentheses sidecar aura-farming", jobName: "Build & Push Sidecar Images to GHCR (aura-farming)", expected: "aura-farming"},
+		{name: "parentheses sidecar banana", jobName: "Build & Push Sidecar Images to GHCR (banana)", expected: "banana"},
+		{name: "hangar service", jobName: "Build hangar", expected: "hangar"},
+		{name: "docs service", jobName: "Build docs", expected: "docs"},
 		{name: "unrelated job", jobName: "Cleanup Stale Artifacts", expected: ""},
 	}
 
@@ -743,6 +752,32 @@ func TestBuildContainerChips_TableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "deduplicates running brain containers with future and current created",
+			containers: []DockerContainerJSON{
+				{
+					ID:      "c1",
+					Names:   []string{"/aerial-brain"},
+					State:   "running",
+					Created: refTime.Add(1 * time.Hour).Unix(),
+					Labels:  map[string]string{"com.docker.compose.service": "brain"},
+				},
+				{
+					ID:      "c2",
+					Names:   []string{"/aerial-brain"},
+					State:   "running",
+					Created: refTime.Unix(),
+					Labels:  map[string]string{"com.docker.compose.service": "brain"},
+				},
+			},
+			now:     refTime,
+			wantLen: 1,
+			validate: func(t *testing.T, chips []MatrixJobChip) {
+				if chips[0].Duration != "0s" {
+					t.Errorf("expected Duration '0s', got %q", chips[0].Duration)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -818,6 +853,89 @@ func TestGetContainerCommit_TableDriven(t *testing.T) {
 				},
 			},
 			expected: "short",
+		},
+		{
+			name: "core container with nil labels returns empty",
+			containers: []DockerContainerJSON{
+				{Names: []string{"/aerial-brain"}, Labels: nil},
+			},
+			expected: "",
+		},
+		{
+			name: "short org.opencontainers.image.revision returned untruncated",
+			containers: []DockerContainerJSON{
+				{
+					Names:  []string{"/aerial-brain"},
+					Labels: map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "123456"},
+				},
+			},
+			expected: "123456",
+		},
+		{
+			name: "long aerial.commit_sha truncated to 7 chars",
+			containers: []DockerContainerJSON{
+				{
+					Names:  []string{"/aerial-brain"},
+					Labels: map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef012345"},
+				},
+			},
+			expected: "abcdef0",
+		},
+		{
+			name: "long vcs-ref truncated to 7 chars",
+			containers: []DockerContainerJSON{
+				{
+					Names:  []string{"/aerial-brain"},
+					Labels: map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "9876543210"},
+				},
+			},
+			expected: "9876543",
+		},
+		{
+			name: "auxiliary sidecars ignored before brain",
+			containers: []DockerContainerJSON{
+				{
+					ID:    "c-agentsview",
+					Names: []string{"/aerial-agentsview"},
+					Image: "ghcr.io/azylman/agentsview:latest",
+					Labels: map[string]string{
+						"com.docker.compose.project":        "aerial",
+						"com.docker.compose.service":        "agentsview",
+						"org.opencontainers.image.revision": "080b49fb7a7c1d8f206549e8ee4eaf9cf50a5c20",
+					},
+				},
+				{
+					ID:    "c-watchtower",
+					Names: []string{"/aerial-watchtower"},
+					Image: "containrrr/watchtower:latest",
+					Labels: map[string]string{
+						"com.docker.compose.project":        "aerial",
+						"com.docker.compose.service":        "watchtower",
+						"org.opencontainers.image.revision": "ace93994711edfe47036e2d2ee5f5d531df013ed",
+					},
+				},
+				{
+					ID:    "c-autoheal",
+					Names: []string{"/aerial-autoheal"},
+					Image: "willfarrell/autoheal:latest",
+					Labels: map[string]string{
+						"com.docker.compose.project":        "aerial",
+						"com.docker.compose.service":        "autoheal",
+						"org.opencontainers.image.revision": "autohealsha1234",
+					},
+				},
+				{
+					ID:    "c-brain",
+					Names: []string{"/aerial-brain"},
+					Image: "ghcr.io/azylman/aerial-brain:latest",
+					Labels: map[string]string{
+						"com.docker.compose.project": "aerial",
+						"com.docker.compose.service": "brain",
+						"aerial.commit_sha":          "e056544d32a5f9d8a4cc50915a20db5eaea7db1e",
+					},
+				},
+			},
+			expected: "e056544",
 		},
 	}
 
@@ -1314,108 +1432,23 @@ func TestCalculateDeployStatus_Pulling(t *testing.T) {
 	}
 }
 
-func TestMergeClusterDeployments_ConcurrentPipelines(t *testing.T) {
+func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
+	t.Parallel()
 	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	runs := []GitHubRun{
-		{
-			ID:         201,
-			HeadSHA:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			Status:     "in_progress",
-			CreatedAt:  refTime.Add(-5 * time.Minute),
-			UpdatedAt:  refTime.Add(-1 * time.Minute),
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/201",
-			HeadCommit: &struct {
-				Message   string    `json:"message"`
-				Timestamp time.Time `json:"timestamp"`
-			}{
-				Message:   "feat: build feature B",
-				Timestamp: refTime.Add(-5 * time.Minute),
-			},
-		},
-	}
-	jobs := map[int64][]GitHubJob{
-		201: {
-			{
-				ID:        1,
-				RunID:     201,
-				Name:      "build (dashboard)",
-				Status:    "in_progress",
-				StartedAt: refTime.Add(-4 * time.Minute),
-			},
-		},
-	}
-	gitSync := GitSyncStatusResponse{
-		Status: "synced",
-		Reconciliation: &ReconciliationStatus{
-			Active:         true,
-			State:          "swapping",
-			Stage:          "swapping",
-			CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			TargetServices: []string{"proxy"},
-			StartedAt:      refTime.Add(-2 * time.Minute),
-		},
+	now := time.Now().UTC()
+
+	var cardinalityRuns []GitHubRun
+	for i := 1; i <= 8; i++ {
+		cardinalityRuns = append(cardinalityRuns, GitHubRun{
+			ID:        int64(600 + i),
+			HeadSHA:   fmt.Sprintf("%07d000000000000000000000000000000000", i),
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(time.Duration(-i) * time.Minute),
+			UpdatedAt: refTime.Add(time.Duration(-i) * time.Minute),
+		})
 	}
 
-	deps := MergeClusterDeploymentsWithHangar(runs, jobs, gitSync, nil, "aaaaaaaa", refTime)
-	if len(deps) != 2 {
-		t.Fatalf("expected 2 concurrent deployments, got %d", len(deps))
-	}
-
-	// Deterministic precedence: swapping (rank 6) > building (rank 4)
-	if deps[0].Stage != "swapping" || deps[0].Commit != "aaaaaaa" {
-		t.Errorf("expected deps[0] to be swapping/aaaaaaa, got stage=%q commit=%q", deps[0].Stage, deps[0].Commit)
-	}
-	if deps[1].Stage != "building" || deps[1].Commit != "bbbbbbb" {
-		t.Errorf("expected deps[1] to be building/bbbbbbb, got stage=%q commit=%q", deps[1].Stage, deps[1].Commit)
-	}
-}
-
-func TestMergeClusterDeployments_AwaitingPullBridge(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	runs := []GitHubRun{
-		{
-			ID:         301,
-			HeadSHA:    "cccccccccccccccccccccccccccccccccccccccc",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-10 * time.Minute),
-			UpdatedAt:  refTime.Add(-5 * time.Minute),
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/301",
-			HeadCommit: &struct {
-				Message   string    `json:"message"`
-				Timestamp time.Time `json:"timestamp"`
-			}{
-				Message:   "chore: updated docs",
-				Timestamp: refTime.Add(-10 * time.Minute),
-			},
-		},
-	}
-
-	deps := MergeClusterDeploymentsWithHangar(runs, nil, GitSyncStatusResponse{}, nil, "oldcommit", refTime)
-	if len(deps) != 1 {
-		t.Fatalf("expected 1 deployment in bridge state, got %d", len(deps))
-	}
-	dep := deps[0]
-	if dep.Commit != "ccccccc" {
-		t.Errorf("expected commit ccccccc, got %q", dep.Commit)
-	}
-	if dep.Stage != "awaiting_pull" {
-		t.Errorf("expected stage awaiting_pull, got %q", dep.Stage)
-	}
-	if len(dep.Steps) < 5 {
-		t.Fatalf("expected 5 steps, got %d", len(dep.Steps))
-	}
-	if dep.Steps[1].Status != "completed" {
-		t.Errorf("expected Step 2 (CI Build) completed, got %q", dep.Steps[1].Status)
-	}
-	if dep.Steps[2].Status != "active" {
-		t.Errorf("expected Step 3 (Hangar Sync) active, got %q", dep.Steps[2].Status)
-	}
-}
-
-func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	runs := []GitHubRun{
+	sortRuns := []GitHubRun{
 		{
 			ID:         100,
 			HeadSHA:    "1111111111111111111111111111111111111111",
@@ -1447,8 +1480,7 @@ func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
 			UpdatedAt: refTime.Add(-1 * time.Minute),
 		},
 	}
-
-	gitSync := GitSyncStatusResponse{
+	sortGitSync := GitSyncStatusResponse{
 		Status: "synced",
 		Reconciliation: &ReconciliationStatus{
 			Active:    true,
@@ -1457,11 +1489,10 @@ func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
 			StartedAt: refTime.Add(-30 * time.Second),
 		},
 	}
-
-	containers := []DockerContainerJSON{
+	sortContainers := []DockerContainerJSON{
 		{
 			Names:   []string{"/aerial-proxy"},
-			Created: refTime.Add(-40 * time.Second).Unix(), // uptime 40s < 120s -> swapping
+			Created: refTime.Add(-40 * time.Second).Unix(),
 			State:   "running",
 			Labels: map[string]string{
 				"com.docker.compose.project":        "aerial",
@@ -1471,7 +1502,7 @@ func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
 		},
 		{
 			Names:   []string{"/aerial-brain"},
-			Created: refTime.Add(-300 * time.Second).Unix(), // uptime 300s -> live grace
+			Created: refTime.Add(-300 * time.Second).Unix(),
 			State:   "running",
 			Labels: map[string]string{
 				"com.docker.compose.project":        "aerial",
@@ -1481,185 +1512,555 @@ func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
 		},
 	}
 
-	expectedStages := []string{"swapping", "pulling", "building", "awaiting_pull", "queued"}
-	for i := 0; i < 10; i++ {
-		deps := MergeClusterDeploymentsWithHangar(runs, nil, gitSync, containers, "6666666", refTime)
-		if len(deps) != len(expectedStages) {
-			t.Fatalf("iteration %d: expected %d deployments, got %d", i, len(expectedStages), len(deps))
-		}
-		for idx, expStage := range expectedStages {
-			if deps[idx].Stage != expStage {
-				t.Fatalf("iteration %d at index %d: expected stage %q, got %q (commit %s)", i, idx, expStage, deps[idx].Stage, deps[idx].Commit)
-			}
-		}
-	}
-}
-
-func TestMergeClusterDeployments_MultiCommitContainerGrouping(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	containers := []DockerContainerJSON{
+	tests := []struct {
+		name          string
+		runs          []GitHubRun
+		jobs          map[int64][]GitHubJob
+		gitSync       GitSyncStatusResponse
+		containers    []DockerContainerJSON
+		currentCommit string
+		refTime       time.Time
+		check         func(t *testing.T, deps []DeploymentStatus)
+	}{
 		{
-			Names:   []string{"/aerial-brain"},
-			Created: refTime.Add(-300 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "brain",
-				"org.opencontainers.image.revision": "aaaaaaa123456789",
+			name: "ConcurrentPipelines",
+			runs: []GitHubRun{
+				{
+					ID:        201,
+					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					Status:    "in_progress",
+					CreatedAt: refTime.Add(-5 * time.Minute),
+					UpdatedAt: refTime.Add(-1 * time.Minute),
+					HTMLURL:   "https://github.com/azylman/aerial/actions/runs/201",
+					HeadCommit: &struct {
+						Message   string    `json:"message"`
+						Timestamp time.Time `json:"timestamp"`
+					}{
+						Message:   "feat: build feature B",
+						Timestamp: refTime.Add(-5 * time.Minute),
+					},
+				},
+			},
+			jobs: map[int64][]GitHubJob{
+				201: {
+					{
+						ID:        1,
+						RunID:     201,
+						Name:      "build (dashboard)",
+						Status:    "in_progress",
+						StartedAt: refTime.Add(-4 * time.Minute),
+					},
+				},
+			},
+			gitSync: GitSyncStatusResponse{
+				Status: "synced",
+				Reconciliation: &ReconciliationStatus{
+					Active:         true,
+					State:          "swapping",
+					Stage:          "swapping",
+					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					TargetServices: []string{"proxy"},
+					StartedAt:      refTime.Add(-2 * time.Minute),
+				},
+			},
+			currentCommit: "aaaaaaaa",
+			refTime:       refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 2 {
+					t.Fatalf("expected 2 concurrent deployments, got %d", len(deps))
+				}
+				if deps[0].Stage != "swapping" || deps[0].Commit != "aaaaaaa" {
+					t.Errorf("expected deps[0] to be swapping/aaaaaaa, got stage=%q commit=%q", deps[0].Stage, deps[0].Commit)
+				}
+				if deps[1].Stage != "building" || deps[1].Commit != "bbbbbbb" {
+					t.Errorf("expected deps[1] to be building/bbbbbbb, got stage=%q commit=%q", deps[1].Stage, deps[1].Commit)
+				}
 			},
 		},
 		{
-			Names:   []string{"/aerial-proxy"},
-			Created: refTime.Add(-30 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "proxy",
-				"org.opencontainers.image.revision": "bbbbbbb123456789",
+			name: "AwaitingPullBridge",
+			runs: []GitHubRun{
+				{
+					ID:         301,
+					HeadSHA:    "cccccccccccccccccccccccccccccccccccccccc",
+					Status:     "completed",
+					Conclusion: "success",
+					CreatedAt:  refTime.Add(-10 * time.Minute),
+					UpdatedAt:  refTime.Add(-5 * time.Minute),
+					HTMLURL:    "https://github.com/azylman/aerial/actions/runs/301",
+					HeadCommit: &struct {
+						Message   string    `json:"message"`
+						Timestamp time.Time `json:"timestamp"`
+					}{
+						Message:   "chore: updated docs",
+						Timestamp: refTime.Add(-10 * time.Minute),
+					},
+				},
+			},
+			currentCommit: "oldcommit",
+			refTime:       refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 1 {
+					t.Fatalf("expected 1 deployment in bridge state, got %d", len(deps))
+				}
+				dep := deps[0]
+				if dep.Commit != "ccccccc" {
+					t.Errorf("expected commit ccccccc, got %q", dep.Commit)
+				}
+				if dep.Stage != "awaiting_pull" {
+					t.Errorf("expected stage awaiting_pull, got %q", dep.Stage)
+				}
+				if len(dep.Steps) < 5 {
+					t.Fatalf("expected 5 steps, got %d", len(dep.Steps))
+				}
+				if dep.Steps[1].Status != "completed" {
+					t.Errorf("expected Step 2 (CI Build) completed, got %q", dep.Steps[1].Status)
+				}
+				if dep.Steps[2].Status != "active" {
+					t.Errorf("expected Step 3 (Hangar Sync) active, got %q", dep.Steps[2].Status)
+				}
+			},
+		},
+		{
+			name:          "DeterministicSort",
+			runs:          sortRuns,
+			gitSync:       sortGitSync,
+			containers:    sortContainers,
+			currentCommit: "6666666",
+			refTime:       refTime,
+			check: func(t *testing.T, _ []DeploymentStatus) {
+				expectedStages := []string{"swapping", "pulling", "building", "awaiting_pull", "queued"}
+				for i := 0; i < 10; i++ {
+					deps := MergeClusterDeploymentsWithHangar(sortRuns, nil, sortGitSync, sortContainers, "6666666", refTime)
+					if len(deps) != len(expectedStages) {
+						t.Fatalf("iteration %d: expected %d deployments, got %d", i, len(expectedStages), len(deps))
+					}
+					for idx, expStage := range expectedStages {
+						if deps[idx].Stage != expStage {
+							t.Fatalf("iteration %d at index %d: expected stage %q, got %q (commit %s)", i, idx, expStage, deps[idx].Stage, deps[idx].Commit)
+						}
+					}
+				}
+			},
+		},
+		{
+			name: "MultiCommitContainerGrouping",
+			runs: []GitHubRun{
+				{
+					ID:         1,
+					HeadSHA:    "aaaaaaa123456789",
+					Status:     "completed",
+					Conclusion: "success",
+					CreatedAt:  refTime.Add(-10 * time.Minute),
+					UpdatedAt:  refTime.Add(-5 * time.Minute),
+				},
+				{
+					ID:         2,
+					HeadSHA:    "bbbbbbb123456789",
+					Status:     "completed",
+					Conclusion: "success",
+					CreatedAt:  refTime.Add(-2 * time.Minute),
+					UpdatedAt:  refTime.Add(-1 * time.Minute),
+				},
+			},
+			containers: []DockerContainerJSON{
+				{
+					Names:   []string{"/aerial-brain"},
+					Created: refTime.Add(-300 * time.Second).Unix(),
+					State:   "running",
+					Labels: map[string]string{
+						"com.docker.compose.project":        "aerial",
+						"com.docker.compose.service":        "brain",
+						"org.opencontainers.image.revision": "aaaaaaa123456789",
+					},
+				},
+				{
+					Names:   []string{"/aerial-proxy"},
+					Created: refTime.Add(-30 * time.Second).Unix(),
+					State:   "running",
+					Labels: map[string]string{
+						"com.docker.compose.project":        "aerial",
+						"com.docker.compose.service":        "proxy",
+						"org.opencontainers.image.revision": "bbbbbbb123456789",
+					},
+				},
+			},
+			currentCommit: "aaaaaaa",
+			refTime:       refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 2 {
+					t.Fatalf("expected 2 deployments, got %d", len(deps))
+				}
+				if deps[0].Commit != "bbbbbbb" || deps[0].Stage != "swapping" {
+					t.Errorf("expected deps[0] to be bbbbbbb in swapping, got %s in %s", deps[0].Commit, deps[0].Stage)
+				}
+				if deps[1].Commit != "aaaaaaa" || deps[1].Stage != "live" {
+					t.Errorf("expected deps[1] to be aaaaaaa in live, got %s in %s", deps[1].Commit, deps[1].Stage)
+				}
+			},
+		},
+		{
+			name: "ChipScoping",
+			runs: []GitHubRun{
+				{
+					ID:        401,
+					HeadSHA:   "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					Status:    "in_progress",
+					CreatedAt: refTime.Add(-2 * time.Minute),
+					UpdatedAt: refTime.Add(-1 * time.Minute),
+				},
+			},
+			jobs: map[int64][]GitHubJob{
+				401: {
+					{
+						ID:        1,
+						RunID:     401,
+						Name:      "build (brain)",
+						Status:    "in_progress",
+						StartedAt: refTime.Add(-90 * time.Second),
+					},
+				},
+			},
+			containers: []DockerContainerJSON{
+				{
+					Names:   []string{"/aerial-brain"},
+					Created: refTime.Add(-30 * time.Second).Unix(),
+					State:   "running",
+					Labels: map[string]string{
+						"com.docker.compose.project":        "aerial",
+						"com.docker.compose.service":        "brain",
+						"org.opencontainers.image.revision": "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					},
+				},
+			},
+			currentCommit: "7777777",
+			refTime:       refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 1 {
+					t.Fatalf("expected 1 combined deployment, got %d", len(deps))
+				}
+				dep := deps[0]
+				hasCI := false
+				hasContainer := false
+				for _, chip := range dep.MatrixJobs {
+					if chip.Type == "ci" {
+						hasCI = true
+					}
+					if chip.Type == "container" {
+						hasContainer = true
+					}
+				}
+				if !hasCI {
+					t.Errorf("expected CI matrix chip with Type == 'ci', but none found: %+v", dep.MatrixJobs)
+				}
+				if !hasContainer {
+					t.Errorf("expected container chip with Type == 'container', but none found: %+v", dep.MatrixJobs)
+				}
+			},
+		},
+		{
+			name: "SafeNilHandling",
+			runs: []GitHubRun{
+				{
+					ID:         501,
+					HeadSHA:    "",
+					HeadCommit: nil,
+					Status:     "queued",
+					CreatedAt:  now.Add(-10 * time.Second),
+				},
+				{
+					ID:         502,
+					HeadSHA:    "abc",
+					HeadCommit: nil,
+					Status:     "in_progress",
+					CreatedAt:  now.Add(-20 * time.Second),
+				},
+				{
+					ID:         503,
+					HeadSHA:    "not-a-valid-hex-sha!@#$%^&*()",
+					HeadCommit: nil,
+					Status:     "completed",
+					Conclusion: "failure",
+					CreatedAt:  now.Add(-30 * time.Second),
+					UpdatedAt:  now.Add(-25 * time.Second),
+				},
+			},
+			refTime: time.Time{},
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 3 {
+					t.Fatalf("expected 3 deployments from safe nil handling test, got %d", len(deps))
+				}
+			},
+		},
+		{
+			name:    "CardinalityClamp",
+			runs:    cardinalityRuns,
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 5 {
+					t.Fatalf("expected cardinality clamped to 5, got %d", len(deps))
+				}
+			},
+		},
+		{
+			name: "PullingNotPromotedToSwapping",
+			gitSync: GitSyncStatusResponse{
+				Status: "synced",
+				Reconciliation: &ReconciliationStatus{
+					Active:         true,
+					State:          "pulling",
+					CommitSHA:      "7777777777777777777777777777777777777777",
+					StartedAt:      refTime.Add(-15 * time.Second),
+					TargetServices: []string{"aerial-dashboard"},
+				},
+			},
+			containers: []DockerContainerJSON{
+				{
+					Names:   []string{"/aerial-dashboard"},
+					Created: refTime.Add(-300 * time.Second).Unix(),
+					State:   "running",
+					Labels: map[string]string{
+						"org.opencontainers.image.revision": "7777777777777777777777777777777777777777",
+					},
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) == 0 {
+					t.Fatalf("expected 1 deployment, got 0")
+				}
+				dep := deps[0]
+				if dep.Stage != "pulling" {
+					t.Fatalf("expected stage pulling (not promoted to swapping), got %q", dep.Stage)
+				}
+				if dep.Steps[2].Status != "active" {
+					t.Errorf("expected Step 3 (Hangar Sync) active, got %q", dep.Steps[2].Status)
+				}
+				if dep.Steps[3].Status != "pending" {
+					t.Errorf("expected Step 4 (Container Swap) pending, got %q", dep.Steps[3].Status)
+				}
+			},
+		},
+		{
+			name: "DegradedAndFailedBranches_DegradedContainer",
+			runs: []GitHubRun{
+				{
+					ID:         801,
+					HeadSHA:    "8888888888888888888888888888888888888888",
+					Status:     "completed",
+					Conclusion: "success",
+					CreatedAt:  refTime.Add(-5 * time.Minute),
+					UpdatedAt:  refTime.Add(-2 * time.Minute),
+				},
+			},
+			containers: []DockerContainerJSON{
+				{
+					Names:   []string{"/aerial-dashboard"},
+					Created: refTime.Add(-60 * time.Second).Unix(),
+					State:   "exited",
+					Labels: map[string]string{
+						"org.opencontainers.image.revision": "8888888888888888888888888888888888888888",
+					},
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) == 0 || deps[0].Stage != "degraded" {
+					t.Fatalf("expected degraded stage for exited container, got %+v", deps)
+				}
+				if deps[0].Steps[4].Status != "failed" {
+					t.Errorf("expected health check failed for degraded, got %q", deps[0].Steps[4].Status)
+				}
+			},
+		},
+		{
+			name: "DegradedAndFailedBranches_HangarFailedWithError",
+			gitSync: GitSyncStatusResponse{
+				Reconciliation: &ReconciliationStatus{
+					State:     "failed",
+					CommitSHA: "9999999999999999999999999999999999999999",
+					Error:     "failed to pull image: auth expired",
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) == 0 || deps[0].Stage != "failed" {
+					t.Fatalf("expected failed stage for Hangar error, got %+v", deps)
+				}
+				if !strings.Contains(deps[0].CommitMsg, "auth expired") {
+					t.Errorf("expected error in CommitMsg, got %q", deps[0].CommitMsg)
+				}
+			},
+		},
+		{
+			name: "DegradedAndFailedBranches_HangarFailedWithoutError",
+			gitSync: GitSyncStatusResponse{
+				Reconciliation: &ReconciliationStatus{
+					State:     "failed",
+					CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) == 0 || deps[0].Stage != "failed" {
+					t.Fatalf("expected failed stage, got %+v", deps)
+				}
+			},
+		},
+		{
+			name: "MultiRunSameCommitAndSortTies_SameCommit",
+			runs: []GitHubRun{
+				{
+					ID:         111,
+					HeadSHA:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					Status:     "completed",
+					Conclusion: "success",
+					CreatedAt:  refTime.Add(-10 * time.Minute),
+					UpdatedAt:  refTime.Add(-5 * time.Minute),
+				},
+				{
+					ID:        112,
+					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					Status:    "in_progress",
+					CreatedAt: refTime.Add(-1 * time.Minute),
+					UpdatedAt: refTime.Add(-30 * time.Second),
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 1 {
+					t.Fatalf("expected 1 deduplicated deployment, got %d", len(deps))
+				}
+				if deps[0].Stage != "building" {
+					t.Errorf("expected higher stage building to win, got %q", deps[0].Stage)
+				}
+			},
+		},
+		{
+			name: "MultiRunSameCommitAndSortTies_SortTiesLexicographical",
+			runs: []GitHubRun{
+				{
+					ID:        201,
+					HeadSHA:   "ffffffffffffffffffffffffffffffffffffffff",
+					Status:    "in_progress",
+					CreatedAt: refTime.Add(-2 * time.Minute),
+					UpdatedAt: refTime.Add(-1 * time.Minute),
+				},
+				{
+					ID:        202,
+					HeadSHA:   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+					Status:    "in_progress",
+					CreatedAt: refTime.Add(-2 * time.Minute),
+					UpdatedAt: refTime.Add(-1 * time.Minute),
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 2 {
+					t.Fatalf("expected 2 deployments, got %d", len(deps))
+				}
+				if deps[0].Commit != "eeeeeee" || deps[1].Commit != "fffffff" {
+					t.Errorf("expected lexicographical sort order eeeeeee < fffffff, got %s, %s", deps[0].Commit, deps[1].Commit)
+				}
+			},
+		},
+		{
+			name: "MultiRunSameCommitAndSortTies_FailedPrecedesDegraded",
+			runs: []GitHubRun{
+				{
+					ID:         301,
+					HeadSHA:    "1111111111111111111111111111111111111111",
+					Status:     "completed",
+					Conclusion: "failure",
+					CreatedAt:  refTime.Add(-5 * time.Minute),
+					UpdatedAt:  refTime.Add(-5 * time.Minute),
+				},
+				{
+					ID:         302,
+					HeadSHA:    "2222222222222222222222222222222222222222",
+					Status:     "completed",
+					Conclusion: "success",
+					CreatedAt:  refTime.Add(-5 * time.Minute),
+					UpdatedAt:  refTime.Add(-5 * time.Minute),
+				},
+			},
+			containers: []DockerContainerJSON{
+				{
+					Names:   []string{"/aerial-proxy"},
+					Created: refTime.Add(-5 * time.Minute).Unix(),
+					State:   "exited",
+					Labels: map[string]string{
+						"org.opencontainers.image.revision": "2222222222222222222222222222222222222222",
+					},
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 2 {
+					t.Fatalf("expected 2 deployments, got %d", len(deps))
+				}
+				if deps[0].Stage != "failed" || deps[1].Stage != "degraded" {
+					t.Errorf("expected failed to precede degraded, got %s, %s", deps[0].Stage, deps[1].Stage)
+				}
+			},
+		},
+		{
+			name: "MultiRunSameCommitAndSortTies_ExpiredIgnored",
+			runs: []GitHubRun{
+				{
+					ID:         401,
+					HeadSHA:    "3333333333333333333333333333333333333333",
+					Status:     "completed",
+					Conclusion: "success",
+					CreatedAt:  refTime.Add(-40 * time.Minute),
+					UpdatedAt:  refTime.Add(-35 * time.Minute),
+				},
+			},
+			refTime: refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 0 {
+					t.Errorf("expected expired run to be ignored, got %d deployments", len(deps))
+				}
+			},
+		},
+		{
+			name: "UnparentedContainersDoNotSpawnCards",
+			containers: []DockerContainerJSON{
+				{
+					ID:      "c-postgres",
+					Names:   []string{"/aerial-postgres"},
+					Created: refTime.Add(-30 * time.Second).Unix(),
+					State:   "running",
+					Labels: map[string]string{
+						"com.docker.compose.service": "postgres",
+					},
+				},
+				{
+					ID:      "c-vector",
+					Names:   []string{"/aerial-vector"},
+					Created: refTime.Add(-10 * time.Second).Unix(),
+					State:   "exited",
+					Labels: map[string]string{
+						"com.docker.compose.service": "vector",
+					},
+				},
+			},
+			currentCommit: "livecommit",
+			refTime:       refTime,
+			check: func(t *testing.T, deps []DeploymentStatus) {
+				if len(deps) != 0 {
+					t.Fatalf("expected 0 deployments for unparented containers in strictly top-down pipeline, got %d: %+v", len(deps), deps)
+				}
 			},
 		},
 	}
-	parentRuns := []GitHubRun{
-		{
-			ID:         1,
-			HeadSHA:    "aaaaaaa123456789",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-10 * time.Minute),
-			UpdatedAt:  refTime.Add(-5 * time.Minute),
-		},
-		{
-			ID:         2,
-			HeadSHA:    "bbbbbbb123456789",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-2 * time.Minute),
-			UpdatedAt:  refTime.Add(-1 * time.Minute),
-		},
-	}
 
-	deps := MergeClusterDeploymentsWithHangar(parentRuns, nil, GitSyncStatusResponse{}, containers, "aaaaaaa", refTime)
-	if len(deps) != 2 {
-		t.Fatalf("expected 2 deployments, got %d", len(deps))
-	}
-	// Newer commit B is swapping (rank 6)
-	if deps[0].Commit != "bbbbbbb" || deps[0].Stage != "swapping" {
-		t.Errorf("expected deps[0] to be bbbbbbb in swapping, got %s in %s", deps[0].Commit, deps[0].Stage)
-	}
-	// Earlier commit A maintains live grace (rank 0)
-	if deps[1].Commit != "aaaaaaa" || deps[1].Stage != "live" {
-		t.Errorf("expected deps[1] to be aaaaaaa in live, got %s in %s", deps[1].Commit, deps[1].Stage)
-	}
-}
-
-func TestMergeClusterDeployments_ChipScoping(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	runs := []GitHubRun{
-		{
-			ID:        401,
-			HeadSHA:   "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			Status:    "in_progress",
-			CreatedAt: refTime.Add(-2 * time.Minute),
-			UpdatedAt: refTime.Add(-1 * time.Minute),
-		},
-	}
-	jobs := map[int64][]GitHubJob{
-		401: {
-			{
-				ID:        1,
-				RunID:     401,
-				Name:      "build (brain)",
-				Status:    "in_progress",
-				StartedAt: refTime.Add(-90 * time.Second),
-			},
-		},
-	}
-	containers := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-brain"},
-			Created: refTime.Add(-30 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "brain",
-				"org.opencontainers.image.revision": "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			},
-		},
-	}
-
-	deps := MergeClusterDeploymentsWithHangar(runs, jobs, GitSyncStatusResponse{}, containers, "7777777", refTime)
-	if len(deps) != 1 {
-		t.Fatalf("expected 1 combined deployment, got %d", len(deps))
-	}
-	dep := deps[0]
-	hasCI := false
-	hasContainer := false
-	for _, chip := range dep.MatrixJobs {
-		if chip.Type == "ci" {
-			hasCI = true
-		}
-		if chip.Type == "container" {
-			hasContainer = true
-		}
-	}
-	if !hasCI {
-		t.Errorf("expected CI matrix chip with Type == 'ci', but none found: %+v", dep.MatrixJobs)
-	}
-	if !hasContainer {
-		t.Errorf("expected container chip with Type == 'container', but none found: %+v", dep.MatrixJobs)
-	}
-}
-
-func TestMergeClusterDeployments_SafeNilHandling(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         501,
-			HeadSHA:    "",
-			HeadCommit: nil,
-			Status:     "queued",
-			CreatedAt:  now.Add(-10 * time.Second),
-		},
-		{
-			ID:         502,
-			HeadSHA:    "abc", // < 7 chars
-			HeadCommit: nil,
-			Status:     "in_progress",
-			CreatedAt:  now.Add(-20 * time.Second),
-		},
-		{
-			ID:         503,
-			HeadSHA:    "not-a-valid-hex-sha!@#$%^&*()",
-			HeadCommit: nil,
-			Status:     "completed",
-			Conclusion: "failure",
-			CreatedAt:  now.Add(-30 * time.Second),
-			UpdatedAt:  now.Add(-25 * time.Second),
-		},
-	}
-
-	deps := MergeClusterDeploymentsWithHangar(runs, nil, GitSyncStatusResponse{}, nil, "", time.Time{})
-	if len(deps) != 3 {
-		t.Fatalf("expected 3 deployments from safe nil handling test, got %d", len(deps))
-	}
-}
-
-func TestMergeClusterDeployments_CardinalityClamp(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	var runs []GitHubRun
-	for i := 1; i <= 8; i++ {
-		runs = append(runs, GitHubRun{
-			ID:        int64(600 + i),
-			HeadSHA:   fmt.Sprintf("%07d000000000000000000000000000000000", i),
-			Status:    "in_progress",
-			CreatedAt: refTime.Add(time.Duration(-i) * time.Minute),
-			UpdatedAt: refTime.Add(time.Duration(-i) * time.Minute),
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, tt.refTime)
+			tt.check(t, deps)
 		})
-	}
-
-	deps := MergeClusterDeploymentsWithHangar(runs, nil, GitSyncStatusResponse{}, nil, "", refTime)
-	if len(deps) != 5 {
-		t.Fatalf("expected cardinality clamped to 5, got %d", len(deps))
 	}
 }
 
@@ -1759,216 +2160,6 @@ func TestIsDeployOngoing_TableDriven(t *testing.T) {
 				t.Errorf("IsDeployOngoing(%v) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestMergeClusterDeployments_PullingNotPromotedToSwapping(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	gitSync := GitSyncStatusResponse{
-		Status: "synced",
-		Reconciliation: &ReconciliationStatus{
-			Active:         true,
-			State:          "pulling",
-			CommitSHA:      "7777777777777777777777777777777777777777",
-			StartedAt:      refTime.Add(-15 * time.Second),
-			TargetServices: []string{"aerial-dashboard"},
-		},
-	}
-
-	// Existing containers with uptime > 120s and healthy status (not starting)
-	containers := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-dashboard"},
-			Created: refTime.Add(-300 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"org.opencontainers.image.revision": "7777777777777777777777777777777777777777",
-			},
-		},
-	}
-
-	deps := MergeClusterDeploymentsWithHangar(nil, nil, gitSync, containers, "", refTime)
-	if len(deps) == 0 {
-		t.Fatalf("expected 1 deployment, got 0")
-	}
-	dep := deps[0]
-	if dep.Stage != "pulling" {
-		t.Fatalf("expected stage pulling (not promoted to swapping), got %q", dep.Stage)
-	}
-	if dep.Steps[2].Status != "active" {
-		t.Errorf("expected Step 3 (Hangar Sync) active, got %q", dep.Steps[2].Status)
-	}
-	if dep.Steps[3].Status != "pending" {
-		t.Errorf("expected Step 4 (Container Swap) pending, got %q", dep.Steps[3].Status)
-	}
-}
-
-func TestMergeClusterDeployments_DegradedAndFailedBranches(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-
-	// Test degraded container
-	degradedContainers := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-dashboard"},
-			Created: refTime.Add(-60 * time.Second).Unix(),
-			State:   "exited",
-			Labels: map[string]string{
-				"org.opencontainers.image.revision": "8888888888888888888888888888888888888888",
-			},
-		},
-	}
-	parentRun := []GitHubRun{
-		{
-			ID:         801,
-			HeadSHA:    "8888888888888888888888888888888888888888",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-5 * time.Minute),
-			UpdatedAt:  refTime.Add(-2 * time.Minute),
-		},
-	}
-	deps := MergeClusterDeploymentsWithHangar(parentRun, nil, GitSyncStatusResponse{}, degradedContainers, "", refTime)
-	if len(deps) == 0 || deps[0].Stage != "degraded" {
-		t.Fatalf("expected degraded stage for exited container, got %+v", deps)
-	}
-	if deps[0].Steps[4].Status != "failed" {
-		t.Errorf("expected health check failed for degraded, got %q", deps[0].Steps[4].Status)
-	}
-
-	// Test Hangar reconciliation failed with error
-	gitSyncFailed := GitSyncStatusResponse{
-		Reconciliation: &ReconciliationStatus{
-			State:     "failed",
-			CommitSHA: "9999999999999999999999999999999999999999",
-			Error:     "failed to pull image: auth expired",
-		},
-	}
-	depsFailed := MergeClusterDeploymentsWithHangar(nil, nil, gitSyncFailed, nil, "", refTime)
-	if len(depsFailed) == 0 || depsFailed[0].Stage != "failed" {
-		t.Fatalf("expected failed stage for Hangar error, got %+v", depsFailed)
-	}
-	if !strings.Contains(depsFailed[0].CommitMsg, "auth expired") {
-		t.Errorf("expected error in CommitMsg, got %q", depsFailed[0].CommitMsg)
-	}
-
-	// Test Hangar reconciliation failed without error message
-	gitSyncFailedNoErr := GitSyncStatusResponse{
-		Reconciliation: &ReconciliationStatus{
-			State:     "failed",
-			CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		},
-	}
-	depsFailedNoErr := MergeClusterDeploymentsWithHangar(nil, nil, gitSyncFailedNoErr, nil, "", refTime)
-	if len(depsFailedNoErr) == 0 || depsFailedNoErr[0].Stage != "failed" {
-		t.Fatalf("expected failed stage, got %+v", depsFailedNoErr)
-	}
-}
-
-func TestMergeClusterDeployments_MultiRunSameCommitAndSortTies(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-
-	// Two runs for same commit: older completed/success vs newer in_progress
-	sameCommitRuns := []GitHubRun{
-		{
-			ID:         111,
-			HeadSHA:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-10 * time.Minute),
-			UpdatedAt:  refTime.Add(-5 * time.Minute),
-		},
-		{
-			ID:        112,
-			HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			Status:    "in_progress",
-			CreatedAt: refTime.Add(-1 * time.Minute),
-			UpdatedAt: refTime.Add(-30 * time.Second),
-		},
-	}
-	depsSame := MergeClusterDeploymentsWithHangar(sameCommitRuns, nil, GitSyncStatusResponse{}, nil, "", refTime)
-	if len(depsSame) != 1 {
-		t.Fatalf("expected 1 deduplicated deployment, got %d", len(depsSame))
-	}
-	// in_progress (building, rank 4) > awaiting_pull (rank 3)
-	if depsSame[0].Stage != "building" {
-		t.Errorf("expected higher stage building to win, got %q", depsSame[0].Stage)
-	}
-
-	// Test sort ties: same stage, same StartedAt, different commits -> lexicographical sort
-	sameStageRuns := []GitHubRun{
-		{
-			ID:        201,
-			HeadSHA:   "ffffffffffffffffffffffffffffffffffffffff",
-			Status:    "in_progress",
-			CreatedAt: refTime.Add(-2 * time.Minute),
-			UpdatedAt: refTime.Add(-1 * time.Minute),
-		},
-		{
-			ID:        202,
-			HeadSHA:   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-			Status:    "in_progress",
-			CreatedAt: refTime.Add(-2 * time.Minute),
-			UpdatedAt: refTime.Add(-1 * time.Minute),
-		},
-	}
-	depsTies := MergeClusterDeploymentsWithHangar(sameStageRuns, nil, GitSyncStatusResponse{}, nil, "", refTime)
-	if len(depsTies) != 2 {
-		t.Fatalf("expected 2 deployments, got %d", len(depsTies))
-	}
-	if depsTies[0].Commit != "eeeeeee" || depsTies[1].Commit != "fffffff" {
-		t.Errorf("expected lexicographical sort order eeeeeee < fffffff, got %s, %s", depsTies[0].Commit, depsTies[1].Commit)
-	}
-
-	failedDegradedRuns := []GitHubRun{
-		{
-			ID:         301,
-			HeadSHA:    "1111111111111111111111111111111111111111",
-			Status:     "completed",
-			Conclusion: "failure",
-			CreatedAt:  refTime.Add(-5 * time.Minute),
-			UpdatedAt:  refTime.Add(-5 * time.Minute),
-		},
-		{
-			ID:         302,
-			HeadSHA:    "2222222222222222222222222222222222222222",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-5 * time.Minute),
-			UpdatedAt:  refTime.Add(-5 * time.Minute),
-		},
-	}
-	degradedCont := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-proxy"},
-			Created: refTime.Add(-5 * time.Minute).Unix(),
-			State:   "exited",
-			Labels: map[string]string{
-				"org.opencontainers.image.revision": "2222222222222222222222222222222222222222",
-			},
-		},
-	}
-	depsTieRanks := MergeClusterDeploymentsWithHangar(failedDegradedRuns, nil, GitSyncStatusResponse{}, degradedCont, "", refTime)
-	if len(depsTieRanks) != 2 {
-		t.Fatalf("expected 2 deployments, got %d", len(depsTieRanks))
-	}
-	if depsTieRanks[0].Stage != "failed" || depsTieRanks[1].Stage != "degraded" {
-		t.Errorf("expected failed to precede degraded, got %s, %s", depsTieRanks[0].Stage, depsTieRanks[1].Stage)
-	}
-
-	// Test expired runs (>30m) ignored
-	expiredRun := []GitHubRun{
-		{
-			ID:         401,
-			HeadSHA:    "3333333333333333333333333333333333333333",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-40 * time.Minute),
-			UpdatedAt:  refTime.Add(-35 * time.Minute),
-		},
-	}
-	depsExpired := MergeClusterDeploymentsWithHangar(expiredRun, nil, GitSyncStatusResponse{}, nil, "", refTime)
-	if len(depsExpired) != 0 {
-		t.Errorf("expected expired run to be ignored, got %d deployments", len(depsExpired))
 	}
 }
 
@@ -2190,38 +2381,6 @@ func TestPure_TargetedCoverageBoost(t *testing.T) {
 	}
 }
 
-func TestMergeClusterDeployments_UnparentedContainersDoNotSpawnCards(t *testing.T) {
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	// Containers for postgres, vector, or unexpected local restarts without GitHub runs or Hangar reconciliation
-	unparentedContainers := []DockerContainerJSON{
-		{
-			ID:      "c-postgres",
-			Names:   []string{"/aerial-postgres"},
-			Created: refTime.Add(-30 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.service": "postgres",
-			},
-		},
-		{
-			ID:      "c-vector",
-			Names:   []string{"/aerial-vector"},
-			Created: refTime.Add(-10 * time.Second).Unix(),
-			State:   "exited",
-			Labels: map[string]string{
-				"com.docker.compose.service": "vector",
-			},
-		},
-	}
-
-	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, unparentedContainers, "livecommit", refTime)
-	if len(deps) != 0 {
-		t.Fatalf("expected 0 deployments for unparented containers in strictly top-down pipeline, got %d: %+v", len(deps), deps)
-	}
-}
-
-
-
 func TestExtractAerialServiceName(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -2383,7 +2542,6 @@ func TestBuildContainerChips_NomadContainers(t *testing.T) {
 	}
 }
 
-
 func TestParseNomadClusterState(t *testing.T) {
 	now := time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC)
 
@@ -2508,20 +2666,20 @@ func TestParseNomadClusterState(t *testing.T) {
 		}
 		allocs := []NomadAllocItem{
 			{
-				ID:           "alloc-proxy",
-				JobID:        "proxy",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-100 * time.Second).UnixNano(),
+				ID:               "alloc-proxy",
+				JobID:            "proxy",
+				ClientStatus:     "running",
+				CreateTime:       now.Add(-100 * time.Second).UnixNano(),
 				DeploymentStatus: nil,
 				TaskStates: map[string]NomadTaskState{
 					"proxy-task": {State: "running", Failed: false},
 				},
 			},
 			{
-				ID:           "alloc-gateway",
-				JobID:        "gateway",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-100 * time.Second).UnixNano(),
+				ID:               "alloc-gateway",
+				JobID:            "gateway",
+				ClientStatus:     "running",
+				CreateTime:       now.Add(-100 * time.Second).UnixNano(),
 				DeploymentStatus: nil,
 				TaskStates: map[string]NomadTaskState{
 					"gateway-task": {State: "pending", Failed: false},

@@ -171,11 +171,6 @@ func FormatUptimeString(sec int) string {
 	return fmt.Sprintf("%dh", sec/3600)
 }
 
-// formatUptimeString provides internal backward compatibility.
-func formatUptimeString(sec int) string {
-	return FormatUptimeString(sec)
-}
-
 // ExtractAerialServiceName extracts the canonical Aerial service name and returns whether
 // the container belongs to the Aerial stack (either Docker Compose or Nomad managed).
 func ExtractAerialServiceName(c DockerContainerJSON) (string, bool) {
@@ -576,31 +571,6 @@ func SanitizeEnvVars(envVars []string) []string {
 		}
 	}
 	return cleaned
-}
-
-// Backward-compatible unexported forwarders ensuring all existing test callers in main_test.go compile and pass unchanged.
-func isCoreAerialContainer(c DockerContainerJSON) bool {
-	return IsCoreAerialContainer(c)
-}
-
-func getContainerCommit(containers []DockerContainerJSON) string {
-	return GetContainerCommit(containers)
-}
-
-func extractServiceNameFromJobName(jobName string) string {
-	return ExtractServiceNameFromJobName(jobName)
-}
-
-func parseMatrixJobChips(jobs []GitHubJob) []MatrixJobChip {
-	return ParseMatrixJobChips(jobs, time.Now().UTC())
-}
-
-func buildContainerChips(rawContainers []DockerContainerJSON) []MatrixJobChip {
-	return BuildContainerChips(rawContainers, time.Now().UTC())
-}
-
-func getMimeType(filename string) string {
-	return GetMimeType(filename)
 }
 
 var stageRank = map[string]int{
@@ -1449,5 +1419,3 @@ func ParseNomadClusterState(jobsData, allocsData []byte, now time.Time) ([]Servi
 
 	return services, nil
 }
-
-
