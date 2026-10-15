@@ -87,6 +87,15 @@ type RouterYAMLConfig struct {
 
 var webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
 
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
 func LoadConfig(configPath string) Config {
 	var fileCfg RouterYAMLConfig
@@ -101,7 +110,6 @@ func LoadConfig(configPath string) Config {
 			targetPath = webhooksRouterFallbackConfigPath
 		}
 	}
-
 	if targetPath != "" {
 		if data, err := os.ReadFile(targetPath); err == nil {
 			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
@@ -110,70 +118,7 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" && fileCfg.Port != "" {
-		port = fileCfg.Port
-	}
-	if port == "" {
-		port = "4020"
-	}
-
-	infURL := os.Getenv("INFISICAL_URL")
-	if infURL == "" {
-		infURL = os.Getenv("INFISICAL_HOST_URL")
-	}
-	if infURL == "" && fileCfg.InfisicalURL != "" {
-		infURL = fileCfg.InfisicalURL
-	}
-	if infURL == "" {
-		infURL = "http://infisical.aerial"
-	}
-
-	clientID := os.Getenv("INFISICAL_CLIENT_ID")
-	if clientID == "" {
-		clientID = os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_ID")
-	}
-
-	clientSecret := os.Getenv("INFISICAL_CLIENT_SECRET")
-	if clientSecret == "" {
-		clientSecret = os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET")
-	}
-
-	projectID := os.Getenv("INFISICAL_PROJECT_ID")
-	if projectID == "" {
-		projectID = os.Getenv("INFISICAL_WORKSPACE_ID")
-	}
-
-	envName := os.Getenv("INFISICAL_ENVIRONMENT")
-	if envName == "" && fileCfg.InfisicalEnvironment != "" {
-		envName = fileCfg.InfisicalEnvironment
-	}
-	if envName == "" {
-		envName = "prod"
-	}
-
-	nomadAddr := os.Getenv("NOMAD_ADDR")
-	if nomadAddr == "" && fileCfg.NomadAddr != "" {
-		nomadAddr = fileCfg.NomadAddr
-	}
-	if nomadAddr == "" {
-		nomadAddr = "http://127.0.0.1:4646"
-	}
-
-	ghToken := os.Getenv("GITHUB_PAT")
-	if ghToken == "" {
-		ghToken = os.Getenv("GITHUB_TOKEN")
-	}
-
-	ghAPI := os.Getenv("GITHUB_API_URL")
-	if ghAPI == "" {
-		ghAPI = "https://api.github.com"
-	}
-
-	pgURL := os.Getenv("POSTGRES_URL")
-	if pgURL == "" {
-		pgURL = os.Getenv("DATABASE_URL")
-	}
+	pgURL := firstNonEmpty(os.Getenv("POSTGRES_URL"), os.Getenv("DATABASE_URL"))
 	if pgURL == "" {
 		hostResolves := func(host string) bool {
 			ctxLookup, cancelLookup := context.WithTimeout(context.Background(), 2*time.Second)
@@ -190,48 +135,21 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 
-	hangarURL := os.Getenv("HANGAR_URL")
-	if hangarURL == "" && fileCfg.HangarURL != "" {
-		hangarURL = fileCfg.HangarURL
-	}
-	if hangarURL == "" {
-		hangarURL = "http://127.0.0.1:8087"
-	}
-
-	brainURL := os.Getenv("BRAIN_INTERNAL_URL")
-	if brainURL == "" {
-		brainURL = os.Getenv("BRAIN_URL")
-	}
-	if brainURL == "" && fileCfg.BrainURL != "" {
-		brainURL = fileCfg.BrainURL
-	}
-	if brainURL == "" {
-		brainURL = "http://127.0.0.1:8088"
-	}
-
-	systemChanID := os.Getenv("SYSTEM_CHANNEL_ID")
-	if systemChanID == "" {
-		systemChanID = os.Getenv("DISCORD_CHANNEL_ID")
-	}
-	if systemChanID == "" && fileCfg.SystemChannelID != "" {
-		systemChanID = fileCfg.SystemChannelID
-	}
-
 	return Config{
-		Port:                  port,
-		InfisicalURL:          strings.TrimRight(infURL, "/"),
-		InfisicalClientID:     clientID,
-		InfisicalClientSecret: clientSecret,
-		InfisicalProjectID:    projectID,
-		InfisicalEnvironment:  envName,
-		NomadAddr:             strings.TrimRight(nomadAddr, "/"),
+		Port:                  firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
+		InfisicalURL:          strings.TrimRight(firstNonEmpty(os.Getenv("INFISICAL_URL"), os.Getenv("INFISICAL_HOST_URL"), fileCfg.InfisicalURL, "http://infisical.aerial"), "/"),
+		InfisicalClientID:     firstNonEmpty(os.Getenv("INFISICAL_CLIENT_ID"), os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_ID")),
+		InfisicalClientSecret: firstNonEmpty(os.Getenv("INFISICAL_CLIENT_SECRET"), os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET")),
+		InfisicalProjectID:    firstNonEmpty(os.Getenv("INFISICAL_PROJECT_ID"), os.Getenv("INFISICAL_WORKSPACE_ID")),
+		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "prod"),
+		NomadAddr:             strings.TrimRight(firstNonEmpty(os.Getenv("NOMAD_ADDR"), fileCfg.NomadAddr, "http://127.0.0.1:4646"), "/"),
 		NomadToken:            os.Getenv("NOMAD_TOKEN"),
-		GitHubToken:           ghToken,
-		GitHubAPIURL:          strings.TrimRight(ghAPI, "/"),
+		GitHubToken:           firstNonEmpty(os.Getenv("GITHUB_PAT"), os.Getenv("GITHUB_TOKEN")),
+		GitHubAPIURL:          strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		PostgresURL:           pgURL,
-		HangarURL:             strings.TrimRight(hangarURL, "/"),
-		BrainURL:              strings.TrimRight(brainURL, "/"),
-		SystemChannelID:       strings.TrimSpace(systemChanID),
+		HangarURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HANGAR_URL"), fileCfg.HangarURL, "http://127.0.0.1:8087"), "/"),
+		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), fileCfg.SystemChannelID)),
 	}
 }
 
@@ -254,31 +172,19 @@ type InfisicalWebhookPayload struct {
 }
 
 func (p *InfisicalWebhookPayload) GetWorkspaceID(fallback string) string {
-	if p.WorkspaceID != "" {
-		return p.WorkspaceID
-	}
-	if p.ProjectID != "" {
-		return p.ProjectID
-	}
+	var dataWS, dataProj string
 	if p.Data != nil {
-		if p.Data.WorkspaceID != "" {
-			return p.Data.WorkspaceID
-		}
-		if p.Data.ProjectID != "" {
-			return p.Data.ProjectID
-		}
+		dataWS, dataProj = p.Data.WorkspaceID, p.Data.ProjectID
 	}
-	return fallback
+	return firstNonEmpty(p.WorkspaceID, p.ProjectID, dataWS, dataProj, fallback)
 }
 
 func (p *InfisicalWebhookPayload) GetEnvironment(fallback string) string {
-	if p.Environment != "" {
-		return p.Environment
+	var dataEnv string
+	if p.Data != nil {
+		dataEnv = p.Data.Environment
 	}
-	if p.Data != nil && p.Data.Environment != "" {
-		return p.Data.Environment
-	}
-	return fallback
+	return firstNonEmpty(p.Environment, dataEnv, fallback)
 }
 
 type UniversalAuthLoginResponse struct {
@@ -307,6 +213,30 @@ type RiverInserter interface {
 	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
 }
 
+type riverJobArgsWithOpts interface {
+	river.JobArgs
+	InsertOpts() river.InsertOpts
+}
+
+func defaultRiverInsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByPeriod: 15 * time.Minute},
+	}
+}
+
+func (s *RouterServer) insertRiverJob(ctx context.Context, args riverJobArgsWithOpts) error {
+	opts := args.InsertOpts()
+	res, err := s.riverClient.Insert(ctx, args, &opts)
+	if err != nil {
+		return err
+	}
+	if res != nil && res.UniqueSkippedAsDuplicate {
+		RecordUniqueSkipped(args.Kind())
+	}
+	return nil
+}
+
 // GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
 type GitHubWebhookArgs struct {
 	Event    string `json:"event"`
@@ -314,19 +244,8 @@ type GitHubWebhookArgs struct {
 	Body     []byte `json:"body"`
 }
 
-func (GitHubWebhookArgs) Kind() string {
-	return "github_webhook"
-}
-
-func (GitHubWebhookArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		MaxAttempts: 5,
-		UniqueOpts: river.UniqueOpts{
-			ByArgs:   true,
-			ByPeriod: 15 * time.Minute,
-		},
-	}
-}
+func (GitHubWebhookArgs) Kind() string                 { return "github_webhook" }
+func (GitHubWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
 
 // GitHubWebhookWorker processes GitHub webhook events asynchronously from River.
 type GitHubWebhookWorker struct {
@@ -339,8 +258,7 @@ func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWeb
 		return errors.New("router server not configured on worker")
 	}
 	log.Printf("[webhooks-router] [river] processing github job id=%d event=%s delivery=%s", job.ID, job.Args.Event, job.Args.Delivery)
-	_, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body)
-	if err != nil {
+	if _, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body); err != nil {
 		log.Printf("[webhooks-router] [river] error processing github job id=%d event=%s delivery=%s: %v", job.ID, job.Args.Event, job.Args.Delivery, err)
 		return err
 	}
@@ -361,19 +279,8 @@ type HangarWebhookArgs struct {
 	Event          HangarDeployEvent `json:"event"`
 }
 
-func (HangarWebhookArgs) Kind() string {
-	return "hangar_webhook"
-}
-
-func (HangarWebhookArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		MaxAttempts: 5,
-		UniqueOpts: river.UniqueOpts{
-			ByArgs:   true,
-			ByPeriod: 15 * time.Minute,
-		},
-	}
-}
+func (HangarWebhookArgs) Kind() string                 { return "hangar_webhook" }
+func (HangarWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
 
 // HangarWebhookWorker processes Hangar deployment and sync webhook events from River.
 type HangarWebhookWorker struct {
@@ -386,8 +293,7 @@ func (w *HangarWebhookWorker) Work(ctx context.Context, job *river.Job[HangarWeb
 		return errors.New("router server not configured on worker")
 	}
 	log.Printf("[webhooks-router] [river] processing hangar job id=%d event=%s job_name=%s", job.ID, job.Args.Event.Event, job.Args.Event.JobName)
-	_, err := w.server.ProcessHangarEvent(ctx, job.Args.Event)
-	if err != nil {
+	if _, err := w.server.ProcessHangarEvent(ctx, job.Args.Event); err != nil {
 		log.Printf("[webhooks-router] [river] error processing hangar job id=%d: %v", job.ID, err)
 		return err
 	}
@@ -403,19 +309,8 @@ type NomadEventArgs struct {
 	Index          uint64          `json:"index,omitempty"`
 }
 
-func (NomadEventArgs) Kind() string {
-	return "nomad_event"
-}
-
-func (NomadEventArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		MaxAttempts: 5,
-		UniqueOpts: river.UniqueOpts{
-			ByArgs:   true,
-			ByPeriod: 15 * time.Minute,
-		},
-	}
-}
+func (NomadEventArgs) Kind() string                 { return "nomad_event" }
+func (NomadEventArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
 
 // NomadEventWorker processes Nomad deployment and allocation events from River.
 type NomadEventWorker struct {
@@ -428,8 +323,7 @@ func (w *NomadEventWorker) Work(ctx context.Context, job *river.Job[NomadEventAr
 		return errors.New("router server not configured on worker")
 	}
 	log.Printf("[webhooks-router] [river] processing nomad job id=%d topic=%s type=%s", job.ID, job.Args.Topic, job.Args.Type)
-	err := w.server.ProcessNomadEvent(ctx, job.Args.Topic, job.Args.Type, job.Args.Payload)
-	if err != nil {
+	if err := w.server.ProcessNomadEvent(ctx, job.Args.Topic, job.Args.Type, job.Args.Payload); err != nil {
 		log.Printf("[webhooks-router] [river] error processing nomad job id=%d: %v", job.ID, err)
 		return err
 	}
@@ -444,19 +338,8 @@ type NomadCrashAlertArgs struct {
 	StatusDesc string `json:"status_desc"`
 }
 
-func (NomadCrashAlertArgs) Kind() string {
-	return "nomad_crash_alert"
-}
-
-func (NomadCrashAlertArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		MaxAttempts: 5,
-		UniqueOpts: river.UniqueOpts{
-			ByArgs:   true,
-			ByPeriod: 15 * time.Minute,
-		},
-	}
-}
+func (NomadCrashAlertArgs) Kind() string                 { return "nomad_crash_alert" }
+func (NomadCrashAlertArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
 
 // NomadCrashAlertWorker processes unmanaged Nomad job crash alerts from River.
 type NomadCrashAlertWorker struct {
@@ -473,14 +356,12 @@ func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCr
 		jobID = job.ID
 	}
 	log.Printf("[webhooks-router] [river] processing nomad crash alert job id=%d job_id=%s alloc_id=%s", jobID, job.Args.JobID, job.Args.AllocID)
-	err := w.server.ProcessCrashAlert(ctx, job.Args)
-	if err != nil {
+	if err := w.server.ProcessCrashAlert(ctx, job.Args); err != nil {
 		log.Printf("[webhooks-router] [river] error processing nomad crash alert job id=%d: %v", jobID, err)
 		return err
 	}
 	return nil
 }
-
 
 // normalizeRepo ensures repository names are normalized with the owner prefix.
 func normalizeRepo(repo string) string {
@@ -496,21 +377,36 @@ func normalizeRepo(repo string) string {
 
 // cleanRepoName strips the owner prefix (e.g. "azylman/") for concise Discord notifications.
 func cleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	return strings.TrimPrefix(repo, "azylman/")
+	return strings.TrimPrefix(strings.TrimSpace(repo), "azylman/")
 }
 
 // formatDirectMessagePrefix formats the bold PR and repo prefix for direct Discord messages.
 func formatDirectMessagePrefix(prNumber int, repo string) string {
 	repoName := cleanRepoName(repo)
-	if prNumber > 0 && repoName != "" {
+	switch {
+	case prNumber > 0 && repoName != "":
 		return fmt.Sprintf("**(PR: #%d, repo: %s)** ", prNumber, repoName)
-	} else if repoName != "" {
+	case repoName != "":
 		return fmt.Sprintf("**(repo: %s)** ", repoName)
-	} else if prNumber > 0 {
+	case prNumber > 0:
 		return fmt.Sprintf("**(PR: #%d)** ", prNumber)
+	default:
+		return ""
 	}
-	return ""
+}
+
+func dedupeTrimmedStrings(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	var out []string
+	for _, item := range items {
+		if clean := strings.TrimSpace(item); clean != "" {
+			if _, exists := seen[clean]; !exists {
+				seen[clean] = struct{}{}
+				out = append(out, clean)
+			}
+		}
+	}
+	return out
 }
 
 // RegisteredPR holds basic identification for an active pull request.
@@ -570,114 +466,79 @@ func NewPostgresPRRegistry(pool *pgxpool.Pool) *PostgresPRRegistry {
 	return &PostgresPRRegistry{pool: pool}
 }
 
-func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
+func (r *PostgresPRRegistry) execReturningTargetID(ctx context.Context, repo string, prNumber int, opName, query string, extraArgs ...any) (string, error) {
 	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return "", nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-		UPDATE pr_registry
-		SET status = 'merged',
-			merge_sha = CASE WHEN $1 != '' THEN $1 ELSE merge_sha END,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3
-		RETURNING target_id;
-	`
+	args := append([]any{repo, prNumber}, extraArgs...)
 	var targetID string
-	err := r.pool.QueryRow(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber).Scan(&targetID)
+	err := r.pool.QueryRow(qCtx, query, args...).Scan(&targetID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("update pr merged: %w", err)
+		return "", fmt.Errorf("%s: %w", opName, err)
 	}
 	return targetID, nil
+}
+
+func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo string, prNumber int, opName, query string) (string, bool, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return "", false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("%s: %w", opName, err)
+	}
+	return targetID, true, nil
+}
+
+func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
+	query := `UPDATE pr_registry SET status = 'merged', merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	return r.execReturningTargetID(ctx, repo, prNumber, "update pr merged", query, strings.TrimSpace(mergeSHA))
 }
 
 func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (string, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return "", nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `
-		UPDATE pr_registry
-		SET status = 'closed',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2
-		RETURNING target_id;
-	`
-	var targetID string
-	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("update pr closed unmerged: %w", err)
-	}
-	return targetID, nil
+	query := `UPDATE pr_registry SET status = 'closed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	return r.execReturningTargetID(ctx, repo, prNumber, "update pr closed unmerged", query)
 }
 
 func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return "", nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	return r.execReturningTargetID(ctx, repo, prNumber, "update pr sync", query, strings.TrimSpace(headSHA))
+}
 
-	query := `
-		UPDATE pr_registry
-		SET head_sha = $1,
-			status = 'open',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3
-		RETURNING target_id;
-	`
-	var targetID string
-	err := r.pool.QueryRow(qCtx, query, strings.TrimSpace(headSHA), repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("update pr sync: %w", err)
-	}
-	return targetID, nil
+func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
+	query := `UPDATE pr_registry SET merge_sha = $3, status = 'merged', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	return r.execReturningTargetID(ctx, repo, prNumber, "backfill push merge_sha", query, strings.TrimSpace(mergeSHA))
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return "", false, nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	query := `UPDATE pr_registry SET status = 'ci_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('ci_failed', 'merged', 'closed') RETURNING target_id;`
+	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition ci_failed", query)
+}
 
-	query := `
-		UPDATE pr_registry
-		SET status = 'ci_failed',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('ci_failed', 'merged', 'closed')
-		RETURNING target_id;
-	`
-	var targetID string
-	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		log.Printf("[webhooks-router] [registry] ci_failed transition skipped (already terminal or untracked): repo=%s pr=%d", repo, prNumber)
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("atomic transition ci_failed: %w", err)
-	}
-	return targetID, true, nil
+func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	query := `UPDATE pr_registry SET status = 'conflict', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status != 'conflict' AND status NOT IN ('merged', 'closed') RETURNING target_id;`
+	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition conflict", query)
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	query := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status = 'deploying' RETURNING target_id;`
+	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition deploy_failed", query)
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
@@ -690,56 +551,19 @@ func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Conte
 	defer cancel()
 
 	query := `
-		UPDATE pr_registry
-		SET status = 'ci_failed',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = (
-			SELECT id FROM pr_registry
-			WHERE repo = $1 AND head_sha = $2 AND status NOT IN ('ci_failed', 'merged', 'closed')
-			ORDER BY updated_at DESC
-			LIMIT 1
-		)
-		RETURNING target_id, pr_number;
-	`
+		UPDATE pr_registry SET status = 'ci_failed', updated_at = CURRENT_TIMESTAMP
+		WHERE id = (SELECT id FROM pr_registry WHERE repo = $1 AND head_sha = $2 AND status NOT IN ('ci_failed', 'merged', 'closed') ORDER BY updated_at DESC LIMIT 1)
+		RETURNING target_id, pr_number;`
 	var targetID string
 	var prNumber int
 	err := r.pool.QueryRow(qCtx, query, repo, headSHA).Scan(&targetID, &prNumber)
 	if errors.Is(err, pgx.ErrNoRows) {
-		log.Printf("[webhooks-router] [registry] ci_failed by head_sha skipped (already terminal or untracked): repo=%s sha=%s", repo, headSHA)
 		return "", 0, false, nil
 	}
 	if err != nil {
 		return "", 0, false, fmt.Errorf("atomic transition ci_failed by head_sha: %w", err)
 	}
 	return targetID, prNumber, true, nil
-}
-
-func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return "", nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `
-		UPDATE pr_registry
-		SET merge_sha = $1,
-			status = 'merged',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3
-		RETURNING target_id;
-	`
-	var targetID string
-	err := r.pool.QueryRow(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("backfill push merge_sha: %w", err)
-	}
-	return targetID, nil
 }
 
 func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha string) (int, string, string, error) {
@@ -751,13 +575,7 @@ func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sh
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-		SELECT pr_number, branch, target_id
-		FROM pr_registry
-		WHERE repo = $1 AND (merge_sha = $2 OR head_sha = $2)
-		ORDER BY updated_at DESC
-		LIMIT 1;
-	`
+	query := `SELECT pr_number, branch, target_id FROM pr_registry WHERE repo = $1 AND (merge_sha = $2 OR head_sha = $2) ORDER BY updated_at DESC LIMIT 1;`
 	var prNum int
 	var branch, targetID string
 	err := r.pool.QueryRow(qCtx, query, repo, sha).Scan(&prNum, &branch, &targetID)
@@ -778,12 +596,7 @@ func (r *PostgresPRRegistry) ResolvePRByNumber(ctx context.Context, repo string,
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-		SELECT target_id, branch, head_sha, COALESCE(merge_sha, '')
-		FROM pr_registry
-		WHERE repo = $1 AND pr_number = $2
-		LIMIT 1;
-	`
+	query := `SELECT target_id, branch, head_sha, COALESCE(merge_sha, '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
 	var targetID, branch, headSHA, mergeSHA string
 	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID, &branch, &headSHA, &mergeSHA)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -803,12 +616,7 @@ func (r *PostgresPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]Re
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-		SELECT pr_number, branch, target_id, head_sha
-		FROM pr_registry
-		WHERE repo = $1 AND status NOT IN ('merged', 'closed', 'conflict')
-		ORDER BY pr_number ASC;
-	`
+	query := `SELECT pr_number, branch, target_id, head_sha FROM pr_registry WHERE repo = $1 AND status NOT IN ('merged', 'closed', 'conflict') ORDER BY pr_number ASC;`
 	rows, err := r.pool.Query(qCtx, query, repo)
 	if err != nil {
 		return nil, fmt.Errorf("list open prs: %w", err)
@@ -826,48 +634,8 @@ func (r *PostgresPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]Re
 	return prs, rows.Err()
 }
 
-func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return "", false, nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `
-		UPDATE pr_registry
-		SET status = 'conflict',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2 AND status != 'conflict' AND status NOT IN ('merged', 'closed')
-		RETURNING target_id;
-	`
-	var targetID string
-	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("atomic transition conflict: %w", err)
-	}
-	return targetID, true, nil
-}
-
 func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (string, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 || len(jobs) == 0 {
-		return "", nil
-	}
-	var cleanJobs []string
-	seen := make(map[string]struct{})
-	for _, j := range jobs {
-		cj := strings.TrimSpace(j)
-		if cj != "" {
-			if _, exists := seen[cj]; !exists {
-				seen[cj] = struct{}{}
-				cleanJobs = append(cleanJobs, cj)
-			}
-		}
-	}
+	cleanJobs := dedupeTrimmedStrings(jobs)
 	if len(cleanJobs) == 0 {
 		return "", nil
 	}
@@ -875,33 +643,14 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 	if err != nil {
 		jobsJSON = []byte("[]")
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	query := `
 		UPDATE pr_registry
 		SET status = 'deploying',
-			metadata = jsonb_set(
-				COALESCE(metadata, '{}'::jsonb),
-				'{jobs}',
-				(
-					SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
-					FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || $1::jsonb) AS elem
-				)
-			),
+			metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || $3::jsonb) AS elem)),
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3 AND status NOT IN ('closed', 'conflict', 'deployed')
-		RETURNING target_id;
-	`
-	var targetID string
-	err = r.pool.QueryRow(qCtx, query, jobsJSON, repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("transition deploying: %w", err)
-	}
-	return targetID, nil
+		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('closed', 'conflict', 'deployed')
+		RETURNING target_id;`
+	return r.execReturningTargetID(ctx, repo, prNumber, "transition deploying", query, jobsJSON)
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
@@ -926,10 +675,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		SELECT id, target_id, pr_number, COALESCE(NULLIF(merge_sha, ''), head_sha), repo, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
 		WHERE status IN ('deploying', 'merged') AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
-		ORDER BY updated_at DESC
-		LIMIT 1
-		FOR UPDATE
-	`
+		ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`
 
 	var id int64
 	var targetID, mergeSHA, repoOut string
@@ -949,31 +695,20 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 			log.Printf("[webhooks-router] [registry] failed to unmarshal metadata for job deploy: %v", err)
 		}
 	}
-	if meta == nil {
-		meta = make(map[string]interface{})
-	}
 
-	jobs := extractJobsFromMetadata(meta)
 	var remaining []string
-	for _, j := range jobs {
+	for _, j := range extractJobsFromMetadata(meta) {
 		if !strings.EqualFold(j, jobName) {
 			remaining = append(remaining, j)
 		}
 	}
 
 	if len(remaining) > 0 {
-		// More jobs are still deploying for this PR; update remaining jobs in metadata and remain in deploying state
 		remainingJSON, err := json.Marshal(remaining)
 		if err != nil {
 			remainingJSON = []byte("[]")
 		}
-		updateQuery := `
-			UPDATE pr_registry
-			SET status = 'deploying',
-			    metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb),
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = $2 AND status IN ('deploying', 'merged')
-		`
+		updateQuery := `UPDATE pr_registry SET status = 'deploying', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb), updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status IN ('deploying', 'merged')`
 		if _, err := tx.Exec(qCtx, updateQuery, remainingJSON, id); err != nil {
 			return "", 0, "", "", false, fmt.Errorf("update remaining jobs: %w", err)
 		}
@@ -983,14 +718,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		return "", 0, "", "", false, nil
 	}
 
-	// All candidate jobs for this PR have successfully deployed!
-	updateQuery := `
-		UPDATE pr_registry
-		SET status = 'deployed',
-		    metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb),
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status IN ('deploying', 'merged')
-	`
+	updateQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IN ('deploying', 'merged')`
 	tag, err := tx.Exec(qCtx, updateQuery, id)
 	if err != nil {
 		return "", 0, "", "", false, fmt.Errorf("update pr deployed: %w", err)
@@ -998,38 +726,10 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	if tag.RowsAffected() == 0 {
 		return "", 0, "", "", false, nil
 	}
-
 	if err := tx.Commit(qCtx); err != nil {
 		return "", 0, "", "", false, fmt.Errorf("commit pr deployed tx: %w", err)
 	}
-
 	return targetID, prNum, mergeSHA, repoOut, true, nil
-}
-
-func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return "", false, nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `
-		UPDATE pr_registry
-		SET status = 'deploy_failed',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2 AND status = 'deploying'
-		RETURNING target_id;
-	`
-	var targetID string
-	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("atomic transition deploy_failed: %w", err)
-	}
-	return targetID, true, nil
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
@@ -1040,13 +740,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	selectQuery := `
-		SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo
-		FROM pr_registry
-		WHERE status IN ('deploying', 'merged') AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
-		ORDER BY updated_at DESC
-		LIMIT 1;
-	`
+	selectQuery := `SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo FROM pr_registry WHERE status IN ('deploying', 'merged') AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1) ORDER BY updated_at DESC LIMIT 1;`
 	var id int64
 	var targetID, mergeSHA, repoOut string
 	var prNum int
@@ -1058,12 +752,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 		return "", 0, "", "", false, fmt.Errorf("select deploying pr for failure: %w", err)
 	}
 
-	updateQuery := `
-		UPDATE pr_registry
-		SET status = 'deploy_failed',
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status IN ('deploying', 'merged');
-	`
+	updateQuery := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IN ('deploying', 'merged');`
 	tag, err := r.pool.Exec(qCtx, updateQuery, id)
 	if err != nil {
 		return "", 0, "", "", false, fmt.Errorf("update pr deploy_failed: %w", err)
@@ -1071,7 +760,6 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	if tag.RowsAffected() == 0 {
 		return "", 0, "", "", false, nil
 	}
-
 	return targetID, prNum, mergeSHA, repoOut, true, nil
 }
 
@@ -1086,8 +774,7 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 			CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0
 			OR COALESCE(metadata->>'job', '') != ''
 		))
-		ORDER BY id ASC;
-	`
+		ORDER BY id ASC;`
 	rows, err := r.pool.Query(qCtx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list deploying prs: %w", err)
@@ -1122,17 +809,7 @@ func (r *PostgresPRRegistry) GetRecentChannelContext(ctx context.Context, target
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-		SELECT author_name, content, COALESCE(response_text, '')
-		FROM (
-			SELECT author_name, content, response_text, created_at
-			FROM messages
-			WHERE thread_id = $1
-			ORDER BY created_at DESC
-			LIMIT $2
-		) sub
-		ORDER BY created_at ASC;
-	`
+	query := `SELECT author_name, content, COALESCE(response_text, '') FROM (SELECT author_name, content, response_text, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at DESC LIMIT $2) sub ORDER BY created_at ASC;`
 	rows, err := r.pool.Query(qCtx, query, targetID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get recent channel context: %w", err)
@@ -1165,10 +842,7 @@ func is4xxClientError(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	if re4xx.MatchString(msg) || strings.Contains(msg, "invalid discord snowflake") {
-		return true
-	}
-	return false
+	return re4xx.MatchString(msg) || strings.Contains(msg, "invalid discord snowflake")
 }
 
 type GitPushEventRequest struct {
@@ -1239,243 +913,127 @@ func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttem
 	d.maxAttempts = maxAttempts
 }
 
-func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	bodyBytes, err := json.Marshal(req)
+func (d *DefaultOutboundDispatcher) postHangar(ctx context.Context, endpointPath, opName, targetDesc string, payload any) ([]byte, bool, error) {
+	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal git push request: %w", err)
+		return nil, false, fmt.Errorf("marshal %s request: %w", opName, err)
 	}
-
-	endpoint := fmt.Sprintf("%s/events/git_push", d.hangarURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.hangarURL+endpointPath, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("create git push request: %w", err)
+		return nil, false, fmt.Errorf("create %s request: %w", opName, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := d.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("git push request failed: %w", err)
+		return nil, false, fmt.Errorf("%s request failed: %w", opName, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		if readErr == nil && isHangarUnmanagedError(respBody) {
-			log.Printf("[webhooks-router] [dispatcher] hangar confirmed repo %s is not managed by hangar (skipping): %s", req.Repo, string(respBody))
-			return nil
+			log.Printf("[webhooks-router] [dispatcher] hangar confirmed %s (skipping): %s", targetDesc, string(respBody))
+			return nil, true, nil
 		}
-		return fmt.Errorf("hangar git push returned 404: %s", string(respBody))
+		return nil, false, fmt.Errorf("hangar %s returned 404: %s", opName, string(respBody))
 	}
+	respBody, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			return fmt.Errorf("hangar git push returned status %d (read error: %w)", resp.StatusCode, readErr)
+			return nil, false, fmt.Errorf("hangar %s returned status %d (read error: %w)", opName, resp.StatusCode, readErr)
 		}
-		return fmt.Errorf("hangar git push returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, false, fmt.Errorf("hangar %s returned status %d: %s", opName, resp.StatusCode, string(respBody))
 	}
-	return nil
+	return respBody, false, nil
+}
+
+func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
+	_, _, err := d.postHangar(ctx, "/events/git_push", "git push", "repo "+req.Repo+" is not managed by hangar", req)
+	return err
 }
 
 func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
-	bodyBytes, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal image ready request: %w", err)
+	respBody, skipped, err := d.postHangar(ctx, "/events/image_ready", "image ready", "image "+req.Image+" has no matching nomad jobs", req)
+	if err != nil || skipped {
+		return nil, err
 	}
-
-	endpoint := fmt.Sprintf("%s/events/image_ready", d.hangarURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("create image ready request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("image ready request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr == nil && isHangarUnmanagedError(respBody) {
-			log.Printf("[webhooks-router] [dispatcher] hangar confirmed image %s has no matching nomad jobs (skipping): %s", req.Image, string(respBody))
-			return nil, nil
-		}
-		return nil, fmt.Errorf("hangar image ready returned 404: %s", string(respBody))
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("hangar image ready returned status %d (read error: %w)", resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("hangar image ready returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	var res ImageReadyEventResponse
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := json.Unmarshal(respBody, &res); err != nil {
 		log.Printf("[webhooks-router] [dispatcher] warning decoding image ready response for %s: %v", req.Image, err)
 		return nil, nil
 	}
 	return res.MatchedJobs, nil
 }
 
-func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
-	if !IsValidDiscordSnowflake(req.ChannelID) {
-		return fmt.Errorf("invalid discord snowflake channel id: %q", req.ChannelID)
+func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endpointPath, reqLabel, statusLabel, channelID string, maxAttempts int, defaultDelay time.Duration, expBackoff bool, payload any) error {
+	if !IsValidDiscordSnowflake(channelID) {
+		return fmt.Errorf("invalid discord snowflake channel id: %q", channelID)
 	}
-
-	bodyBytes, err := json.Marshal(req)
+	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal prompt request: %w", err)
+		return fmt.Errorf("marshal %s request: %w", reqLabel, err)
 	}
-
-	endpoint := fmt.Sprintf("%s/prompt", d.brainURL)
 	delay := d.retryDelay
 	if delay <= 0 {
-		delay = 1500 * time.Millisecond
+		delay = defaultDelay
 	}
-
-	maxAttempts := d.maxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 6
 	}
+	endpoint := d.brainURL + endpointPath
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 		if err != nil {
-			return fmt.Errorf("create prompt request: %w", err)
+			return fmt.Errorf("create %s request: %w", reqLabel, err)
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 
 		resp, err := d.httpClient.Do(httpReq)
 		if err != nil {
-			lastErr = fmt.Errorf("prompt request failed (attempt %d/%d): %w", attempt, maxAttempts, err)
-			if attempt < maxAttempts {
-				select {
-				case <-time.After(delay):
-					delay = time.Duration(float64(delay) * 1.5)
-					if delay > 5*time.Second {
+			lastErr = fmt.Errorf("%s request failed (attempt %d/%d): %w", reqLabel, attempt, maxAttempts, err)
+		} else {
+			respBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				respBody = []byte(fmt.Sprintf("error reading body: %v", readErr))
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return nil
+			}
+			if resp.StatusCode < 500 {
+				return fmt.Errorf("%s returned status %d: %s", statusLabel, resp.StatusCode, string(respBody))
+			}
+			lastErr = fmt.Errorf("%s returned status %d (attempt %d/%d): %s", statusLabel, resp.StatusCode, attempt, maxAttempts, string(respBody))
+		}
+		if attempt < maxAttempts {
+			select {
+			case <-time.After(delay):
+				if expBackoff {
+					if delay = time.Duration(float64(delay) * 1.5); delay > 5*time.Second {
 						delay = 5 * time.Second
 					}
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
 				}
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			return lastErr
 		}
-
-		respBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			respBody = []byte(fmt.Sprintf("error reading body: %v", readErr))
-		}
-		resp.Body.Close()
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
-		}
-
-		if resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("brain prompt returned status %d (attempt %d/%d): %s", resp.StatusCode, attempt, maxAttempts, string(respBody))
-			if attempt < maxAttempts {
-				select {
-				case <-time.After(delay):
-					delay = time.Duration(float64(delay) * 1.5)
-					if delay > 5*time.Second {
-						delay = 5 * time.Second
-					}
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			return lastErr
-		}
-
-		// Non-5xx and non-2xx (e.g. 4xx client errors) - do not retry
-		return fmt.Errorf("brain prompt returned status %d: %s", resp.StatusCode, string(respBody))
 	}
-
 	return lastErr
 }
 
+func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
+	return d.postBrainWithRetry(ctx, "/prompt", "prompt", "brain prompt", req.ChannelID, d.maxAttempts, 1500*time.Millisecond, true, req)
+}
+
 func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
-	if !IsValidDiscordSnowflake(req.ChannelID) {
-		return fmt.Errorf("invalid discord snowflake channel id: %q", req.ChannelID)
-	}
-
-	bodyBytes, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshal direct message request: %w", err)
-	}
-
-	endpoint := fmt.Sprintf("%s/discord/message", d.brainURL)
-	delay := d.retryDelay
-	if delay <= 0 {
-		delay = 500 * time.Millisecond
-	}
-
-	const maxAttempts = 3
-	var lastErr error
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return fmt.Errorf("create direct message request: %w", err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		resp, err := d.httpClient.Do(httpReq)
-		if err != nil {
-			lastErr = fmt.Errorf("direct message request failed (attempt %d/%d): %w", attempt, maxAttempts, err)
-			if attempt < maxAttempts {
-				select {
-				case <-time.After(delay):
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			return lastErr
-		}
-
-		respBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			respBody = []byte(fmt.Sprintf("error reading body: %v", readErr))
-		}
-		resp.Body.Close()
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
-		}
-
-		if resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("brain internal message returned status %d (attempt %d/%d): %s", resp.StatusCode, attempt, maxAttempts, string(respBody))
-			if attempt < maxAttempts {
-				select {
-				case <-time.After(delay):
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			return lastErr
-		}
-
-		// Non-5xx and non-2xx (e.g. 4xx client errors) - do not retry
-		return fmt.Errorf("brain internal message returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return lastErr
+	return d.postBrainWithRetry(ctx, "/discord/message", "direct message", "brain internal message", req.ChannelID, 3, 500*time.Millisecond, false, req)
 }
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
@@ -1506,29 +1064,11 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 }
 
 // SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
-func (s *RouterServer) SetConflictCheckDelay(d time.Duration) {
-	s.conflictCheckDelay = d
-}
-
-// SetRiverClient assigns the RiverInserter instance to RouterServer.
-func (s *RouterServer) SetRiverClient(rc RiverInserter) {
-	s.riverClient = rc
-}
-
-// SetRegistry assigns the PRRegistryUpdater instance to RouterServer.
-func (s *RouterServer) SetRegistry(reg PRRegistryUpdater) {
-	s.registry = reg
-}
-
-// SetDispatcher assigns the OutboundDispatcher instance to RouterServer.
-func (s *RouterServer) SetDispatcher(d OutboundDispatcher) {
-	s.dispatcher = d
-}
-
-// GetDispatcher returns the OutboundDispatcher configured on RouterServer.
-func (s *RouterServer) GetDispatcher() OutboundDispatcher {
-	return s.dispatcher
-}
+func (s *RouterServer) SetConflictCheckDelay(d time.Duration)     { s.conflictCheckDelay = d }
+func (s *RouterServer) SetRiverClient(rc RiverInserter)            { s.riverClient = rc }
+func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)          { s.registry = reg }
+func (s *RouterServer) SetDispatcher(d OutboundDispatcher)         { s.dispatcher = d }
+func (s *RouterServer) GetDispatcher() OutboundDispatcher          { return s.dispatcher }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1536,6 +1076,45 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("[webhooks-router] JSON encode error: %v", err)
 	}
+}
+
+func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+		return nil, false
+	}
+	return body, true
+}
+
+func readWebhookJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, allowEmpty bool, dst any) bool {
+	body, ok := readWebhookBody(w, r, maxBytes)
+	if !ok {
+		return false
+	}
+	if len(body) == 0 && allowEmpty {
+		return true
+	}
+	if err := json.Unmarshal(body, dst); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		return false
+	}
+	return true
+}
+
+func runBackgroundSync(name string, fn func(ctx context.Context) error) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[webhooks-router] PANIC recovered in %s: %v", name, r)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := fn(ctx); err != nil {
+			log.Printf("[webhooks-router] Background %s failed: %v", name, err)
+		}
+	}()
 }
 
 // Routes initializes and returns the HTTP mux for the service.
@@ -1583,20 +1162,10 @@ func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+	var payload InfisicalWebhookPayload
+	if !readWebhookJSON(w, r, 1<<20, true, &payload) {
 		return
 	}
-
-	var payload InfisicalWebhookPayload
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &payload); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
-			return
-		}
-	}
-
 	workspaceID := payload.GetWorkspaceID(s.cfg.InfisicalProjectID)
 	envName := payload.GetEnvironment(s.cfg.InfisicalEnvironment)
 
@@ -1606,19 +1175,9 @@ func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Req
 		"targetVariable": TargetNomadVariable,
 		"environment":    envName,
 	})
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] PANIC recovered in infisical webhook sync: %v", r)
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := s.SyncSecrets(ctx, workspaceID, envName); err != nil {
-			log.Printf("[webhooks-router] Background sync failed: %v", err)
-		}
-	}()
+	runBackgroundSync("infisical webhook sync", func(ctx context.Context) error {
+		return s.SyncSecrets(ctx, workspaceID, envName)
+	})
 }
 
 type GenericWebhookPayload struct {
@@ -1628,21 +1187,11 @@ type GenericWebhookPayload struct {
 }
 
 func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+	var payload GenericWebhookPayload
+	if !readWebhookJSON(w, r, 1<<20, true, &payload) {
 		return
 	}
 
-	var payload GenericWebhookPayload
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &payload); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
-			return
-		}
-	}
-
-	// If direct secrets map was supplied in payload, write directly to Nomad variables
 	if len(payload.Secrets) > 0 {
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"status":         "accepted",
@@ -1650,31 +1199,14 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 			"targetVariable": TargetNomadVariable,
 			"keyCount":       len(payload.Secrets),
 		})
-
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] PANIC recovered in direct generic sync: %v", r)
-				}
-			}()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := s.putNomadVariable(ctx, payload.Secrets); err != nil {
-				log.Printf("[webhooks-router] Background direct sync failed: %v", err)
-			}
-		}()
+		runBackgroundSync("direct generic sync", func(ctx context.Context) error {
+			return s.putNomadVariable(ctx, payload.Secrets)
+		})
 		return
 	}
 
-	workspaceID := payload.WorkspaceID
-	if workspaceID == "" {
-		workspaceID = s.cfg.InfisicalProjectID
-	}
-
-	envName := payload.Environment
-	if envName == "" {
-		envName = s.cfg.InfisicalEnvironment
-	}
+	workspaceID := firstNonEmpty(payload.WorkspaceID, s.cfg.InfisicalProjectID)
+	envName := firstNonEmpty(payload.Environment, s.cfg.InfisicalEnvironment)
 
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":         "accepted",
@@ -1682,19 +1214,9 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 		"targetVariable": TargetNomadVariable,
 		"environment":    envName,
 	})
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] PANIC recovered in generic webhook sync: %v", r)
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := s.SyncSecrets(ctx, workspaceID, envName); err != nil {
-			log.Printf("[webhooks-router] Background sync failed: %v", err)
-		}
-	}()
+	runBackgroundSync("generic webhook sync", func(ctx context.Context) error {
+		return s.SyncSecrets(ctx, workspaceID, envName)
+	})
 }
 
 // Hangar Webhook Payloads and Resolution Types
@@ -1715,23 +1237,14 @@ type HangarDeployEvent struct {
 }
 
 func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
-		return
-	}
-
 	var evt HangarDeployEvent
-	if err := json.Unmarshal(body, &evt); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+	if !readWebhookJSON(w, r, 1<<20, false, &evt) {
 		return
 	}
-
 	if strings.TrimSpace(evt.Event) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
 		return
 	}
-
 	if strings.TrimSpace(evt.JobName) == "" {
 		if strings.HasPrefix(evt.Event, "sync_") {
 			evt.JobName = "git-sync"
@@ -1742,31 +1255,14 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	}
 
 	if s.riverClient != nil {
-		var idempotencyKey string
+		idempotencyKey := randomNonce()
 		if evt.CommitSHA != "" && evt.JobName != "" {
 			idempotencyKey = fmt.Sprintf("%s:%s:%s:%s", evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
-		} else {
-			idempotencyKey = randomNonce()
 		}
-		args := HangarWebhookArgs{
-			IdempotencyKey: idempotencyKey,
-			Event:          evt,
-		}
-		opts := &river.InsertOpts{
-			MaxAttempts: 5,
-			UniqueOpts: river.UniqueOpts{
-				ByArgs:   true,
-				ByPeriod: 15 * time.Minute,
-			},
-		}
-		res, err := s.riverClient.Insert(r.Context(), args, opts)
-		if err != nil {
+		if err := s.insertRiverJob(r.Context(), HangarWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
 			log.Printf("[webhooks-router] [hangar] ERROR: failed to insert job into river: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
-		}
-		if res != nil && res.UniqueSkippedAsDuplicate {
-			RecordUniqueSkipped("hangar_webhook")
 		}
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"status":   "accepted",
@@ -1780,7 +1276,6 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		log.Printf("[webhooks-router] [hangar] error processing hangar event: %v", err)
 	}
-
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "accepted",
 		"event":     processed.Event,
@@ -1796,18 +1291,15 @@ func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, s
 	if repo == "" || sha == "" || isZeroSHA(sha) {
 		return 0, "", "", nil
 	}
-
 	repo = normalizeRepo(repo)
 
-	// 1. Check local pr_registry by SHA (matches head_sha or merge_sha)
 	if s.registry != nil {
 		prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, repo, sha)
 		if err != nil {
 			log.Printf("[webhooks-router] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
 		} else if prNum > 0 {
 			if targetID == "" {
-				tID, _, _, _, errNum := s.registry.ResolvePRByNumber(ctx, repo, prNum)
-				if errNum == nil && tID != "" {
+				if tID, _, _, _, errNum := s.registry.ResolvePRByNumber(ctx, repo, prNum); errNum == nil && tID != "" {
 					targetID = tID
 				}
 			}
@@ -1815,31 +1307,22 @@ func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, s
 		}
 	}
 
-	// 2. Fall back to GitHub API commit PR lookup
 	prNum, branch, err := s.resolvePRFromCommitSHA(ctx, repo, sha)
-	if err != nil {
-		log.Printf("[webhooks-router] [github] failed resolving PR for commit %s via GitHub API: %v", sha, err)
+	if err != nil || prNum == 0 {
 		return 0, "", "", err
-	}
-	if prNum == 0 {
-		return 0, "", "", nil
 	}
 
 	var targetID string
 	if s.registry != nil {
-		tID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
-		if err == nil && tID != "" {
+		if tID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum); err == nil && tID != "" {
 			targetID = tID
 		}
-		// Backfill merge_sha if it was missing
-		backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha)
-		if err != nil {
+		if backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha); err != nil {
 			log.Printf("[webhooks-router] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
 		} else if targetID == "" && backfillTID != "" {
 			targetID = backfillTID
 		}
 	}
-
 	return prNum, targetID, branch, nil
 }
 
@@ -1848,25 +1331,61 @@ func (s *RouterServer) ResolveThreadForPR(ctx context.Context, repo string, prNu
 	if s.registry == nil || prNum <= 0 {
 		return "", nil
 	}
-	repo = normalizeRepo(repo)
-	targetID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
+	targetID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(repo), prNum)
 	return targetID, err
+}
+
+func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
+	lines := []string{header}
+	if clean := strings.TrimSpace(details); clean != "" {
+		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(clean)))
+	}
+	if cleanExtra := strings.TrimSpace(extraLine); cleanExtra != "" {
+		lines = append(lines, cleanExtra)
+	}
+	if footer != "" {
+		lines = append(lines, footer)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *RouterServer) dispatchDirectMessage(ctx context.Context, targetID, label, content string) error {
+	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+		return nil
+	}
+	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: content}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] error dispatching %s direct message: %v", label, err)
+		return fmt.Errorf("dispatch %s direct message: %w", label, err)
+	}
+	return nil
+}
+
+func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string) error {
+	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+		return nil
+	}
+	if dmMsg != "" {
+		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] warning dispatching %s direct message: %v", label, err)
+		}
+	}
+	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{ChannelID: targetID, Prompt: prompt}); err != nil {
+		log.Printf("[webhooks-router] [dispatcher] error dispatching %s prompt: %v", label, err)
+		return fmt.Errorf("dispatch %s prompt: %w", label, err)
+	}
+	return nil
 }
 
 func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
 	if evt.CommitSHA != "" && evt.PRNumber == 0 {
-		prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA)
-		if err != nil {
+		if prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA); err != nil {
 			log.Printf("[webhooks-router] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
 		} else if prNum > 0 {
 			evt.PRNumber = prNum
-			if evt.TargetID == "" {
-				evt.TargetID = targetID
-			}
+			evt.TargetID = firstNonEmpty(evt.TargetID, targetID)
 		}
 	} else if evt.PRNumber > 0 && evt.TargetID == "" {
-		targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber)
-		if err != nil {
+		if targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber); err != nil {
 			log.Printf("[webhooks-router] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		} else if targetID != "" {
 			evt.TargetID = targetID
@@ -1876,157 +1395,59 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	log.Printf("[webhooks-router] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
-	if s.registry != nil && evt.PRNumber > 0 {
-		if evt.Event == "deploy_started" {
-			if evt.JobName != "" {
-				if _, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
-					log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
-				}
-			}
-			log.Printf("[webhooks-router] [registry] pr %s#%d deployment started for job %s", evt.Repo, evt.PRNumber, evt.JobName)
-		} else if evt.Event == "deploy_success" {
-			log.Printf("[webhooks-router] [registry] pr %s#%d deployed successfully for job %s", evt.Repo, evt.PRNumber, evt.JobName)
-		} else if evt.Event == "deploy_rollback" {
-			log.Printf("[webhooks-router] [registry] pr %s#%d deployment rolled back for job %s", evt.Repo, evt.PRNumber, evt.JobName)
+	if s.registry != nil && evt.PRNumber > 0 && evt.Event == "deploy_started" && evt.JobName != "" {
+		if _, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
+			log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
 		}
 	}
 
-	if evt.Event == "deploy_started" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		targetID := evt.TargetID
-		msg := fmt.Sprintf("🚀 %sStarting deploy for %s", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
-		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-			ChannelID: targetID,
-			Content:   msg,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_started direct message: %v", err)
-			return &evt, fmt.Errorf("dispatch deploy_started direct message: %w", err)
-		}
-		log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_started direct message for job %s to %s", evt.JobName, targetID)
-	} else if evt.Event == "deploy_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
-			return &evt, err
-		}
-	} else if evt.Event == "deploy_rollback" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
+	if !IsValidDiscordSnowflake(evt.TargetID) || s.dispatcher == nil {
+		return &evt, nil
+	}
+
+	prefix := formatDirectMessagePrefix(evt.PRNumber, evt.Repo)
+	switch evt.Event {
+	case "deploy_started":
+		return &evt, s.dispatchDirectMessage(ctx, evt.TargetID, "deploy_started", fmt.Sprintf("🚀 %sStarting deploy for %s", prefix, evt.JobName))
+	case "deploy_success":
+		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
+	case "deploy_rollback", "deploy_failed":
 		targetID := evt.TargetID
 		if s.registry != nil && evt.PRNumber > 0 {
 			tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
-			if err != nil {
-				log.Printf("[webhooks-router] [registry] error transitioning deploy_rollback: %v", err)
+			if err != nil || !updated {
 				return &evt, err
-			} else if !updated {
-				return &evt, nil
-			} else if tID != "" {
-				targetID = tID
 			}
+			targetID = firstNonEmpty(tID, targetID)
 		}
-		dmMsg := fmt.Sprintf("💥 %sDeployment failed and rolled back for %s. Following up...", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
-		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-			ChannelID: targetID,
-			Content:   dmMsg,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] warning dispatching deploy_rollback direct message: %v", err)
+		actionDesc, fixDesc := "Deployment failed", "deployment failure"
+		if evt.Event == "deploy_rollback" {
+			actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
 		}
-		lines := []string{
-			fmt.Sprintf("Deployment failed and rolled back for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
-		}
-		if cleanDetails := strings.TrimSpace(evt.Details); cleanDetails != "" {
-			lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
-		}
-		lines = append(lines, "Please investigate and fix the deployment rollback failure.")
-		prompt := strings.Join(lines, "\n")
-		if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
-			ChannelID: targetID,
-			Prompt:    prompt,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_rollback prompt: %v", err)
-			return &evt, fmt.Errorf("dispatch deploy_rollback prompt: %w", err)
-		}
-	} else if evt.Event == "deploy_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		targetID := evt.TargetID
-		if s.registry != nil && evt.PRNumber > 0 {
-			tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
-			if err != nil {
-				log.Printf("[webhooks-router] [registry] error transitioning deploy_failed: %v", err)
-				return &evt, err
-			} else if !updated {
-				return &evt, nil
-			} else if tID != "" {
-				targetID = tID
-			}
-		}
-		dmMsg := fmt.Sprintf("💥 %sDeployment failed for %s. Following up...", formatDirectMessagePrefix(evt.PRNumber, evt.Repo), evt.JobName)
-		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-			ChannelID: targetID,
-			Content:   dmMsg,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] warning dispatching deploy_failed direct message: %v", err)
-		}
-		lines := []string{
-			fmt.Sprintf("Deployment failed for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
-		}
-		if cleanDetails := strings.TrimSpace(evt.Details); cleanDetails != "" {
-			lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
-		}
-		lines = append(lines, "Please investigate and fix the deployment failure.")
-		prompt := strings.Join(lines, "\n")
-		if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
-			ChannelID: targetID,
-			Prompt:    prompt,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_failed prompt: %v", err)
-			return &evt, fmt.Errorf("dispatch deploy_failed prompt: %w", err)
-		}
-	} else if evt.Event == "sync_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		targetID := evt.TargetID
-		msg := fmt.Sprintf("🔄 %sGit file sync completed", formatDirectMessagePrefix(evt.PRNumber, evt.Repo))
-		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-			ChannelID: targetID,
-			Content:   msg,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching sync_success direct message: %v", err)
-			return &evt, fmt.Errorf("dispatch sync_success direct message: %w", err)
-		}
-	} else if evt.Event == "sync_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
-		targetID := evt.TargetID
-		dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", formatDirectMessagePrefix(evt.PRNumber, evt.Repo))
-		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-			ChannelID: targetID,
-			Content:   dmMsg,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] warning dispatching sync_failed direct message: %v", err)
-		}
-		lines := []string{
-			fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber),
-		}
+		dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
+		prompt := formatErrorDetailsBlock(
+			fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
+			evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
+		)
+		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt)
+	case "sync_success":
+		return &evt, s.dispatchDirectMessage(ctx, evt.TargetID, "sync_success", fmt.Sprintf("🔄 %sGit file sync completed", prefix))
+	case "sync_failed":
+		header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber)
 		if evt.PRNumber == 0 {
-			lines[0] = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
+			header = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
 		}
-		if cleanDetails := strings.TrimSpace(evt.Details); cleanDetails != "" {
-			lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
-		}
-		lines = append(lines, "Please investigate and fix the git sync failure.")
-		prompt := strings.Join(lines, "\n")
-		if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
-			ChannelID: targetID,
-			Prompt:    prompt,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching sync_failed prompt: %v", err)
-			return &evt, fmt.Errorf("dispatch sync_failed prompt: %w", err)
-		}
+		dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
+		prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
+		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt)
 	}
-
 	return &evt, nil
 }
 
 const maxPromptRunes = 1500
 
 func truncatePromptDetails(s string) string {
-	s = strings.ReplaceAll(s, "```", "'''")
-	runes := []rune(s)
-	if len(runes) <= maxPromptRunes {
-		return s
-	}
-	return string(runes[:maxPromptRunes]) + "... (truncated)"
+	return truncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
 }
 
 func truncatePromptRunes(s string, maxRunes int) string {
@@ -2038,11 +1459,8 @@ func truncatePromptRunes(s string, maxRunes int) string {
 }
 
 func sanitizeChannelContextText(s string) string {
-	s = strings.ReplaceAll(s, "\r", "")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "</CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]")
-	s = strings.ReplaceAll(s, "<CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]")
-	return strings.TrimSpace(s)
+	r := strings.NewReplacer("\r", "", "\n", " ", "</CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]", "<CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]")
+	return strings.TrimSpace(r.Replace(s))
 }
 
 func formatChannelContext(msgs []ChannelMessageContext) string {
@@ -2052,10 +1470,7 @@ func formatChannelContext(msgs []ChannelMessageContext) string {
 
 	var bullets []string
 	for _, m := range msgs {
-		author := strings.TrimSpace(m.AuthorName)
-		if author == "" {
-			author = "User"
-		}
+		author := firstNonEmpty(strings.TrimSpace(m.AuthorName), "User")
 		if cleanContent := sanitizeChannelContextText(m.Content); cleanContent != "" {
 			bullets = append(bullets, fmt.Sprintf("- [%s]: %s", author, truncatePromptRunes(cleanContent, 300)))
 		}
@@ -2064,7 +1479,6 @@ func formatChannelContext(msgs []ChannelMessageContext) string {
 		}
 	}
 
-	// Iterate backwards from the most recent bullet to ensure the latest conversation context is preserved
 	totalRunes := 0
 	truncated := false
 	var selectedBullets []string
@@ -2079,14 +1493,11 @@ func formatChannelContext(msgs []ChannelMessageContext) string {
 		selectedBullets = append(selectedBullets, b)
 	}
 
-	// Reverse selected bullets so they render in chronological order (oldest to newest)
 	for i, j := 0, len(selectedBullets)-1; i < j; i, j = i+1, j-1 {
 		selectedBullets[i], selectedBullets[j] = selectedBullets[j], selectedBullets[i]
 	}
 
-	var lines []string
-	lines = append(lines, "Recent Discord channel context:")
-	lines = append(lines, "<CHANNEL_CONTEXT>")
+	lines := []string{"Recent Discord channel context:", "<CHANNEL_CONTEXT>"}
 	if truncated {
 		lines = append(lines, "... (older context truncated)")
 	}
@@ -2102,98 +1513,48 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 
 	var contextMsgs []ChannelMessageContext
 	if s.registry != nil {
-		msgs, err := s.registry.GetRecentChannelContext(ctx, targetID, 20)
-		if err != nil {
+		if msgs, err := s.registry.GetRecentChannelContext(ctx, targetID, 20); err != nil {
 			log.Printf("[webhooks-router] [registry] warning fetching channel context for %s: %v", targetID, err)
 		} else {
 			contextMsgs = msgs
 		}
 	}
 
-	var lines []string
-	header := fmt.Sprintf("Continuous Delivery deployment completed for job %s (PR #%d, commit: %s).", jobName, prNum, commitSHA)
-	if repo != "" && refID != "" {
-		header = fmt.Sprintf("Continuous Delivery deployment completed for job %s on %s (PR #%d, commit: %s, ref: %s).", jobName, repo, prNum, commitSHA, refID)
-	} else if repo != "" {
-		header = fmt.Sprintf("Continuous Delivery deployment completed for job %s on %s (PR #%d, commit: %s).", jobName, repo, prNum, commitSHA)
-	} else if refID != "" {
-		header = fmt.Sprintf("Continuous Delivery deployment completed for job %s (PR #%d, commit: %s, ref: %s).", jobName, prNum, commitSHA, refID)
+	repoPart := ""
+	if repo != "" {
+		repoPart = " on " + repo
 	}
-	lines = append(lines, header)
-
+	refPart := ""
+	if refID != "" {
+		refPart = ", ref: " + refID
+	}
+	header := fmt.Sprintf("Continuous Delivery deployment completed for job %s%s (PR #%d, commit: %s%s).", jobName, repoPart, prNum, commitSHA, refPart)
+	lines := []string{header}
 	if ctxStr := formatChannelContext(contextMsgs); ctxStr != "" {
 		lines = append(lines, "", ctxStr)
 	}
-
 	lines = append(lines, "", "Directive: Based on the recent conversation context above, suggest logical next steps if any work or follow-ups remain; otherwise, celebrate completion.")
-	prompt := strings.Join(lines, "\n")
-
-	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
-		ChannelID: targetID,
-		Prompt:    prompt,
-	}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_success prompt: %v", err)
-		return fmt.Errorf("dispatch deploy_success prompt: %w", err)
-	}
-	log.Printf("[webhooks-router] [dispatcher] successfully dispatched deploy_success prompt for job %s to %s", jobName, targetID)
-	return nil
+	return s.dispatchAlertWithPrompt(ctx, targetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 
 func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, checkName, repo, headSHA string, prNum int, details, checkURL string) error {
-	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
-		return nil
-	}
 	dmMsg := fmt.Sprintf("❌ %sCI check %q failed. Following up...", formatDirectMessagePrefix(prNum, repo), checkName)
-	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-		ChannelID: targetID,
-		Content:   dmMsg,
-	}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] warning dispatching ci_failed direct message: %v", err)
-	}
-	lines := []string{
-		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
-	}
-	if cleanDetails := strings.TrimSpace(details); cleanDetails != "" {
-		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
-	}
+	var urlLine string
 	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
-		lines = append(lines, fmt.Sprintf("Check URL: %s", cleanURL))
+		urlLine = "Check URL: " + cleanURL
 	}
-	lines = append(lines, "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix.")
-	prompt := strings.Join(lines, "\n")
-
-	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
-		ChannelID: targetID,
-		Prompt:    prompt,
-	}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error dispatching ci_failed prompt: %v", err)
-		return fmt.Errorf("dispatch ci_failed prompt: %w", err)
-	}
-	log.Printf("[webhooks-router] [dispatcher] successfully dispatched ci_failed prompt for PR #%d to %s", prNum, targetID)
-	return nil
+	prompt := formatErrorDetailsBlock(
+		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
+		details, urlLine,
+		"Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix.",
+	)
+	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt)
 }
 
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
-	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
-		return nil
-	}
 	dmMsg := fmt.Sprintf("⛔ %sMerge conflict detected. Following up...", formatDirectMessagePrefix(prNum, repo))
-	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-		ChannelID: targetID,
-		Content:   dmMsg,
-	}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] warning dispatching conflict direct message: %v", err)
-	}
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
-	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{
-		ChannelID: targetID,
-		Prompt:    prompt,
-	}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error dispatching conflict prompt: %v", err)
-		return fmt.Errorf("dispatch conflict prompt: %w", err)
-	}
-	log.Printf("[webhooks-router] [dispatcher] successfully dispatched conflict prompt for PR #%d to %s", prNum, targetID)
-	return nil
+	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt)
 }
 
 // GitHubPRDetails encapsulates mergeability information returned by GitHub's Pull Request API.
@@ -2203,21 +1564,11 @@ type GitHubPRDetails struct {
 	MergeableState string `json:"mergeable_state"`
 }
 
-func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber int) (*GitHubPRDetails, error) {
-	if repo == "" || prNumber <= 0 {
-		return nil, fmt.Errorf("invalid repo or prNumber for pr details")
-	}
-	if !strings.Contains(repo, "/") {
-		repo = "azylman/" + repo
-	}
-	apiURL := s.cfg.GitHubAPIURL
-	if apiURL == "" {
-		apiURL = "https://api.github.com"
-	}
-	endpoint := fmt.Sprintf("%s/repos/%s/pulls/%d", apiURL, repo, prNumber)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
+	apiURL := firstNonEmpty(s.cfg.GitHubAPIURL, "https://api.github.com")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create github pr details request: %w", err)
+		return fmt.Errorf("create github api request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if s.cfg.GitHubToken != "" {
@@ -2225,24 +1576,35 @@ func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("github pr details request failed: %w", err)
+		return fmt.Errorf("github api request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden {
 		remaining := resp.Header.Get("X-RateLimit-Remaining")
-		return nil, fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
+		return fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github pr details returned status %d", resp.StatusCode)
+		return fmt.Errorf("github api returned status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read github pr details response: %w", err)
+		return fmt.Errorf("read github api response: %w", err)
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("unmarshal github api response: %w", err)
+	}
+	return nil
+}
+
+func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber int) (*GitHubPRDetails, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return nil, fmt.Errorf("invalid repo or prNumber for pr details")
 	}
 	var details GitHubPRDetails
-	if err := json.Unmarshal(body, &details); err != nil {
-		return nil, fmt.Errorf("unmarshal github pr details: %w", err)
+	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, prNumber), 1<<20, &details); err != nil {
+		return nil, err
 	}
 	return &details, nil
 }
@@ -2255,16 +1617,11 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 	if err != nil {
 		return fmt.Errorf("list open prs: %w", err)
 	}
-	if len(openPRs) == 0 {
-		return nil
-	}
-
 	for _, pr := range openPRs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		var details *GitHubPRDetails
-		// Polling retry for mergeable: null (GitHub computes asynchronously)
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
 				delay := s.conflictCheckDelay
@@ -2294,19 +1651,14 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		if details == nil {
 			continue
 		}
-
-		isConflict := (details.Mergeable != nil && !*details.Mergeable) || details.MergeableState == "dirty"
-		if isConflict {
+		if (details.Mergeable != nil && !*details.Mergeable) || details.MergeableState == "dirty" {
 			targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
 			if trErr != nil {
 				log.Printf("[webhooks-router] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
 				continue
 			}
 			if updated {
-				if targetID == "" {
-					targetID = pr.TargetID
-				}
-				log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to conflict (target_id=%s)", repo, pr.PRNumber, targetID)
+				targetID = firstNonEmpty(targetID, pr.TargetID)
 				if err := s.dispatchConflictPrompt(ctx, targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber); err != nil {
 					log.Printf("[webhooks-router] [registry] error dispatching conflict prompt for PR #%d: %v", pr.PRNumber, err)
 				}
@@ -2330,85 +1682,66 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 		log.Printf("[webhooks-router] [dispatcher] error dispatching git_push to hangar for %s: %v", repo, err)
 		return fmt.Errorf("dispatch git_push to hangar: %w", err)
 	}
-	log.Printf("[webhooks-router] [dispatcher] successfully dispatched git_push to hangar for %s (%s)", repo, commit)
 	return nil
 }
 
 func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
-	if s.dispatcher == nil {
+	if s.dispatcher == nil || conclusion != "success" || !(headBranch == "main" || strings.HasPrefix(headBranch, "refs/heads/main")) {
 		return nil
 	}
-	if conclusion != "success" || !(headBranch == "main" || strings.HasPrefix(headBranch, "refs/heads/main")) {
-		return nil
-	}
-
 	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
 	if err != nil {
 		log.Printf("[webhooks-router] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
 		return fmt.Errorf("resolve workflow run images: %w", err)
 	}
 	if len(images) == 0 {
-		log.Printf("[webhooks-router] [dispatcher] no built images detected for workflow run %d (%s)", runID, repo)
 		return nil
 	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	seenJobs := make(map[string]struct{})
-	var allMatchedJobs []string
+	var rawJobs []string
 	errCh := make(chan error, len(images))
 
 	for _, img := range images {
 		wg.Add(1)
 		go func(imageRef string) {
 			defer wg.Done()
-			req := ImageReadyEventRequest{
+			matchedJobs, err := s.dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{
 				Image:     imageRef,
 				Repo:      repo,
 				CommitSHA: headSHA,
 				PRNumber:  prNum,
 				TargetID:  targetID,
-			}
-			matchedJobs, err := s.dispatcher.DispatchImageReady(ctx, req)
+			})
 			if err != nil {
 				log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
 				errCh <- err
-			} else {
-				log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s (matched: %v)", imageRef, matchedJobs)
-				if len(matchedJobs) > 0 {
-					mu.Lock()
-					for _, j := range matchedJobs {
-						cleanJ := strings.TrimSpace(j)
-						if cleanJ != "" {
-							if _, ok := seenJobs[cleanJ]; !ok {
-								seenJobs[cleanJ] = struct{}{}
-								allMatchedJobs = append(allMatchedJobs, cleanJ)
-							}
-						}
-					}
-					mu.Unlock()
-				}
+				return
+			}
+			if len(matchedJobs) > 0 {
+				mu.Lock()
+				rawJobs = append(rawJobs, matchedJobs...)
+				mu.Unlock()
 			}
 		}(img)
 	}
 	wg.Wait()
 	close(errCh)
 
-	if len(allMatchedJobs) > 0 && s.registry != nil && prNum > 0 {
+	if allMatchedJobs := dedupeTrimmedStrings(rawJobs); len(allMatchedJobs) > 0 && s.registry != nil && prNum > 0 {
 		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, allMatchedJobs); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 			return fmt.Errorf("transition pr deploying: %w", err)
 		}
-		log.Printf("[webhooks-router] [dispatcher] pr %s#%d transitioned to deploying with jobs: %v", repo, prNum, allMatchedJobs)
 	}
 
-	var firstErr error
 	for err := range errCh {
-		if firstErr == nil {
-			firstErr = err
+		if err != nil {
+			return err
 		}
 	}
-	return firstErr
+	return nil
 }
 
 // GitHub Webhook Payloads and Resolution Types
@@ -2507,8 +1840,6 @@ type GitHubWorkflowJobItem struct {
 	Steps      []GitHubWorkflowJobStep `json:"steps,omitempty"`
 }
 
-// hasExecutedBuildStep verifies that if steps are present and a build/push step is defined,
-// that step actually concluded with success rather than being skipped.
 type hangarJSONResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message"`
@@ -2523,33 +1854,25 @@ func isHangarUnmanagedError(body []byte) bool {
 		return true
 	}
 	msg := strings.ToLower(hResp.Message)
-	return strings.Contains(msg, "is not managed by hangar") || strings.Contains(msg, "not managed by hangar") || strings.Contains(msg, "no nomad jobs found")
+	return strings.Contains(msg, "not managed by hangar") || strings.Contains(msg, "no nomad jobs found")
 }
 
+// hasExecutedBuildStep verifies that if steps are present and a build/push step is defined,
+// that step actually concluded with success rather than being skipped.
 func hasExecutedBuildStep(steps []GitHubWorkflowJobStep) bool {
-	if len(steps) == 0 {
-		return true
-	}
-	var pushSteps []GitHubWorkflowJobStep
+	hasPushStep := false
 	for _, step := range steps {
 		nameLower := strings.ToLower(step.Name)
-		if (strings.Contains(nameLower, "build") && strings.Contains(nameLower, "push")) ||
-			(strings.Contains(nameLower, "build") && strings.Contains(nameLower, "publish")) ||
-			strings.Contains(nameLower, "docker push") ||
-			strings.Contains(nameLower, "push image") ||
-			strings.Contains(nameLower, "push docker") {
-			pushSteps = append(pushSteps, step)
+		isPush := (strings.Contains(nameLower, "build") && (strings.Contains(nameLower, "push") || strings.Contains(nameLower, "publish"))) ||
+			strings.Contains(nameLower, "docker push") || strings.Contains(nameLower, "push image") || strings.Contains(nameLower, "push docker")
+		if isPush {
+			hasPushStep = true
+			if step.Conclusion == "success" {
+				return true
+			}
 		}
 	}
-	if len(pushSteps) == 0 {
-		return true
-	}
-	for _, ps := range pushSteps {
-		if ps.Conclusion == "success" {
-			return true
-		}
-	}
-	return false
+	return !hasPushStep
 }
 
 type GitHubWorkflowJobsResponse struct {
@@ -2558,7 +1881,6 @@ type GitHubWorkflowJobsResponse struct {
 }
 
 var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*(?:Push|Publish)(?:\s+(?:Sidecar\s+)?(?:Container\s+)?Images?(?:\s+to\s+GHCR)?)?\s*\(([^)]+)\)`)
-
 
 type GitHubCommit struct {
 	ID      string `json:"id"`
@@ -2603,15 +1925,7 @@ type GitHubCommitPRItem struct {
 }
 
 func isZeroSHA(sha string) bool {
-	if sha == "" {
-		return true
-	}
-	for i := 0; i < len(sha); i++ {
-		if sha[i] != '0' {
-			return false
-		}
-	}
-	return true
+	return strings.Trim(sha, "0") == ""
 }
 
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
@@ -2622,35 +1936,19 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 	}
 	delivery := r.Header.Get("X-GitHub-Delivery")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 5<<20))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+	body, ok := readWebhookBody(w, r, 5<<20)
+	if !ok {
 		return
 	}
-
 	if s.riverClient == nil {
 		log.Printf("[webhooks-router] [github] ERROR: river client not initialized")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "river queue not initialized"})
 		return
 	}
-
-	args := GitHubWebhookArgs{
-		Event:    event,
-		Delivery: delivery,
-		Body:     body,
-	}
-
-	// Synchronously persist to durable storage (PostgreSQL river_job table)
-	// before acknowledging to GitHub (transactional outbox invariant).
-	opts := args.InsertOpts()
-	res, err := s.riverClient.Insert(r.Context(), args, &opts)
-	if err != nil {
+	if err := s.insertRiverJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
 		log.Printf("[webhooks-router] [github] ERROR: failed to insert job into river: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 		return
-	}
-	if res != nil && res.UniqueSkippedAsDuplicate {
-		RecordUniqueSkipped("github_webhook")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -2660,14 +1958,83 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEvent, prs []GitHubCheckRunPR, payloadSource string) {
+	if len(prs) > 0 {
+		res.PRNumber = prs[0].Number
+		if res.Branch == "" {
+			res.Branch = prs[0].Head.Ref
+		}
+		res.ResolutionSource = payloadSource
+		if s.registry != nil && res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+			if _, _, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err == nil && targetID != "" {
+				res.TargetID = targetID
+			}
+		}
+		return
+	}
+	if res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
+		return
+	}
+	if s.registry != nil {
+		if prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err != nil {
+			log.Printf("[webhooks-router] [registry] %s failed resolving PR by SHA %s locally: %v", res.Event, res.HeadSHA, err)
+		} else if prNum > 0 {
+			res.PRNumber = prNum
+			if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
+				res.Branch = firstNonEmpty(branch, res.Branch)
+			}
+			res.TargetID = targetID
+			res.ResolutionSource = "local_pr_registry"
+			return
+		}
+	}
+	if prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA); err != nil {
+		log.Printf("[webhooks-router] [github] %s failed resolving PR for commit %s: %v", res.Event, res.HeadSHA, err)
+	} else {
+		res.PRNumber = prNum
+		if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
+			res.Branch = firstNonEmpty(branch, res.Branch)
+		}
+		res.ResolutionSource = "commit_sha_lookup"
+	}
+}
+
+func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") {
+		return nil
+	}
+	if res.PRNumber > 0 {
+		targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
+		if err != nil {
+			return err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		if updated {
+			return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
+		}
+		return nil
+	}
+	if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+		targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
+		if err != nil {
+			return err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		if prNum > 0 && res.PRNumber == 0 {
+			res.PRNumber = prNum
+		}
+		if updated {
+			return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
+		}
+	}
+	return nil
+}
+
 func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery string, body []byte) (*ResolvedGitHubEvent, error) {
 	if s.onProcessed != nil {
 		defer s.onProcessed(event, delivery)
 	}
-	res := &ResolvedGitHubEvent{
-		Event:    event,
-		Delivery: delivery,
-	}
+	res := &ResolvedGitHubEvent{Event: event, Delivery: delivery}
 
 	switch event {
 	case "ping":
@@ -2675,12 +2042,10 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		if err := json.Unmarshal(body, &p); err != nil {
 			return nil, fmt.Errorf("unmarshal ping payload: %w", err)
 		}
-		repo := ""
 		if p.Repo != nil {
-			repo = p.Repo.FullName
+			res.Repo = p.Repo.FullName
 		}
-		res.Repo = repo
-		log.Printf("[webhooks-router] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, repo, p.Zen, delivery)
+		log.Printf("[webhooks-router] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, res.Repo, p.Zen, delivery)
 		return res, nil
 
 	case "pull_request":
@@ -2703,60 +2068,37 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
 
 		if s.registry != nil && res.PRNumber > 0 {
-			if res.Action == "closed" {
+			switch res.Action {
+			case "closed":
 				if p.PullRequest.Merged {
 					targetID, err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA)
 					if err != nil {
-						log.Printf("[webhooks-router] [registry] error updating pr merged: %v", err)
 						return nil, err
 					}
-					if targetID != "" && res.TargetID == "" {
-						res.TargetID = targetID
-					}
-					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
-
-					if IsValidDiscordSnowflake(res.TargetID) && s.dispatcher != nil {
-						msg := fmt.Sprintf("🔀 %sMerged into main", formatDirectMessagePrefix(res.PRNumber, res.Repo))
-						if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-							ChannelID: res.TargetID,
-							Content:   msg,
-						}); err != nil {
-							log.Printf("[webhooks-router] [dispatcher] error dispatching pr_merged direct message: %v", err)
-							return nil, err
-						}
+					res.TargetID = firstNonEmpty(res.TargetID, targetID)
+					if err := s.dispatchDirectMessage(ctx, res.TargetID, "pr_merged", fmt.Sprintf("🔀 %sMerged into main", formatDirectMessagePrefix(res.PRNumber, res.Repo))); err != nil {
+						return nil, err
 					}
 				} else {
 					targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
 					if err != nil {
-						log.Printf("[webhooks-router] [registry] error updating pr closed: %v", err)
 						return nil, err
 					}
-					if targetID != "" && res.TargetID == "" {
-						res.TargetID = targetID
-					}
-					log.Printf("[webhooks-router] [registry] pr %s#%d updated to closed (unmerged, target_id=%s)", res.Repo, res.PRNumber, res.TargetID)
+					res.TargetID = firstNonEmpty(res.TargetID, targetID)
 				}
-			} else if res.Action == "synchronize" {
+			case "synchronize":
 				targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 				if err != nil {
-					log.Printf("[webhooks-router] [registry] error updating pr synchronize: %v", err)
 					return nil, err
 				}
-				if targetID != "" && res.TargetID == "" {
-					res.TargetID = targetID
-				}
-				log.Printf("[webhooks-router] [registry] pr %s#%d synchronized (head_sha=%s, status=open, target_id=%s)", res.Repo, res.PRNumber, res.HeadSHA, res.TargetID)
-			} else if res.Action == "auto_merge_disabled" {
+				res.TargetID = firstNonEmpty(res.TargetID, targetID)
+			case "auto_merge_disabled":
 				targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, res.Repo, res.PRNumber)
 				if err != nil {
-					log.Printf("[webhooks-router] [registry] error transitioning pr auto_merge_disabled to conflict: %v", err)
 					return nil, err
 				}
-				if targetID != "" && res.TargetID == "" {
-					res.TargetID = targetID
-				}
+				res.TargetID = firstNonEmpty(res.TargetID, targetID)
 				if updated {
-					log.Printf("[webhooks-router] [registry] pr %s#%d auto_merge_disabled transitioned to conflict (target_id=%s)", res.Repo, res.PRNumber, res.TargetID)
 					if err := s.dispatchConflictPrompt(ctx, res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber); err != nil {
 						return nil, err
 					}
@@ -2776,95 +2118,14 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		res.HeadSHA = p.CheckRun.HeadSHA
 		res.Status = p.CheckRun.Status
 		res.Conclusion = p.CheckRun.Conclusion
-
-		if len(p.CheckRun.PullRequests) > 0 {
-			res.PRNumber = p.CheckRun.PullRequests[0].Number
-			res.Branch = p.CheckRun.PullRequests[0].Head.Ref
-			res.ResolutionSource = "check_run_payload"
-			if s.registry != nil && res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-				if _, _, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err == nil && targetID != "" {
-					res.TargetID = targetID
-				}
-			}
-		} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-			if s.registry != nil {
-				prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] check_run failed resolving PR by SHA %s locally: %v", res.HeadSHA, err)
-				} else if prNum > 0 {
-					res.PRNumber = prNum
-					res.Branch = branch
-					res.TargetID = targetID
-					res.ResolutionSource = "local_pr_registry"
-				}
-			}
-
-			if res.PRNumber == 0 {
-				prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [github] check_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
-				} else {
-					res.PRNumber = prNum
-					res.Branch = branch
-					res.ResolutionSource = "commit_sha_lookup"
-				}
-			}
-		}
+		s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
 		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
-		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
-			var details string
-			if strings.TrimSpace(p.CheckRun.Output.Text) != "" {
-				details = strings.TrimSpace(p.CheckRun.Output.Text)
-			} else if strings.TrimSpace(p.CheckRun.Output.Summary) != "" {
-				details = strings.TrimSpace(p.CheckRun.Output.Summary)
-			} else if strings.TrimSpace(p.CheckRun.Output.Title) != "" {
-				details = strings.TrimSpace(p.CheckRun.Output.Title)
-			}
-			checkURL := strings.TrimSpace(p.CheckRun.HTMLURL)
-			if checkURL == "" {
-				checkURL = strings.TrimSpace(p.CheckRun.DetailsURL)
-			}
-
-			if res.PRNumber > 0 {
-				targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] error transitioning pr ci_failed: %v", err)
-					return nil, err
-				}
-				if targetID != "" && res.TargetID == "" {
-					res.TargetID = targetID
-				}
-				if updated {
-					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (check=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
-					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL); err != nil {
-						return nil, err
-					}
-				}
-			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] error transitioning head_sha ci_failed: %v", err)
-					return nil, err
-				}
-				if targetID != "" && res.TargetID == "" {
-					res.TargetID = targetID
-				}
-				if prNum > 0 && res.PRNumber == 0 {
-					res.PRNumber = prNum
-				}
-				if updated {
-					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (check=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
-					pr := res.PRNumber
-					if pr == 0 {
-						pr = prNum
-					}
-					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL); err != nil {
-						return nil, err
-					}
-				}
-			}
+		details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
+		checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
+		if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
+			return nil, err
 		}
 		return res, nil
 
@@ -2880,96 +2141,19 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		res.Branch = p.WorkflowRun.HeadBranch
 		res.Status = p.WorkflowRun.Status
 		res.Conclusion = p.WorkflowRun.Conclusion
-
-		if len(p.WorkflowRun.PullRequests) > 0 {
-			res.PRNumber = p.WorkflowRun.PullRequests[0].Number
-			res.ResolutionSource = "workflow_run_payload"
-			if s.registry != nil && res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-				if _, _, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err == nil && targetID != "" {
-					res.TargetID = targetID
-				}
-			}
-		} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-			if s.registry != nil {
-				prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] workflow_run failed resolving PR by SHA %s locally: %v", res.HeadSHA, err)
-				} else if prNum > 0 {
-					res.PRNumber = prNum
-					if res.Branch == "" {
-						res.Branch = branch
-					}
-					res.TargetID = targetID
-					res.ResolutionSource = "local_pr_registry"
-				}
-			}
-
-			if res.PRNumber == 0 {
-				prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [github] workflow_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
-				} else {
-					res.PRNumber = prNum
-					if res.Branch == "" {
-						res.Branch = branch
-					}
-					res.ResolutionSource = "commit_sha_lookup"
-				}
-			}
-		}
+		s.resolveEventPR(ctx, res, p.WorkflowRun.PullRequests, "workflow_run_payload")
 		log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
-		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
-			details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
-			checkURL := strings.TrimSpace(p.WorkflowRun.HTMLURL)
-
-			if res.PRNumber > 0 {
-				targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] error transitioning pr ci_failed: %v", err)
-					return nil, err
-				}
-				if targetID != "" && res.TargetID == "" {
-					res.TargetID = targetID
-				}
-				if updated {
-					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (workflow=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
-					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL); err != nil {
-						return nil, err
-					}
-				}
-			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] error transitioning head_sha ci_failed: %v", err)
-					return nil, err
-				}
-				if targetID != "" && res.TargetID == "" {
-					res.TargetID = targetID
-				}
-				if prNum > 0 && res.PRNumber == 0 {
-					res.PRNumber = prNum
-				}
-				if updated {
-					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (workflow=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
-					pr := res.PRNumber
-					if pr == 0 {
-						pr = prNum
-					}
-					if err := s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL); err != nil {
-						return nil, err
-					}
-				}
-			}
+		details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
+		if err := s.handleCIFailureTransition(ctx, res, details, strings.TrimSpace(p.WorkflowRun.HTMLURL)); err != nil {
+			return nil, err
 		}
-
-		if p.Action == "completed" && p.WorkflowRun.Status == "completed" && p.WorkflowRun.Conclusion == "success" && (p.WorkflowRun.HeadBranch == "main" || strings.HasPrefix(p.WorkflowRun.HeadBranch, "refs/heads/main")) {
+		if p.Action == "completed" && p.WorkflowRun.Status == "completed" {
 			if err := s.dispatchWorkflowRunImages(ctx, res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 				return nil, err
 			}
 		}
-
 		return res, nil
 
 	case "push":
@@ -2980,60 +2164,26 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		res.Repo = p.Repository.FullName
 		res.Branch = p.Ref
 
-		// Guard: Devil's Advocate requirements:
-		// 1. Branch deletion / zero SHA guard
-		// 2. Non-branch push (e.g. tag pushes)
 		if p.Deleted || isZeroSHA(p.After) {
-			log.Printf("[webhooks-router] [github] [push] branch deletion detected on ref %s (repo %s), skipping PR resolution", p.Ref, res.Repo)
 			res.ResolutionSource = "branch_deleted"
 			return res, nil
 		}
 		if !strings.HasPrefix(p.Ref, "refs/heads/") {
-			log.Printf("[webhooks-router] [github] [push] non-branch push on ref %s (repo %s), skipping PR resolution", p.Ref, res.Repo)
 			res.ResolutionSource = "non_branch_ref"
 			return res, nil
 		}
-
 		res.HeadSHA = p.After
 		if p.HeadCommit != nil && p.HeadCommit.ID != "" {
 			res.HeadSHA = p.HeadCommit.ID
 		}
-
 		if !strings.HasPrefix(p.Ref, "refs/heads/main") {
-			log.Printf("[webhooks-router] [github] [push] non-main branch push on ref %s (repo %s), skipping PR merge resolution", p.Ref, res.Repo)
 			res.ResolutionSource = "non_main_branch"
 			return res, nil
 		}
 
-		if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-			if s.registry != nil {
-				prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] push failed resolving PR by SHA %s locally: %v", res.HeadSHA, err)
-				} else if prNum > 0 {
-					res.PRNumber = prNum
-					res.MergeSHA = res.HeadSHA
-					res.TargetID = targetID
-					if branch != "" {
-						res.Branch = branch
-					}
-					res.ResolutionSource = "local_pr_registry"
-				}
-			}
-
-			if res.PRNumber == 0 {
-				prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
-				if err != nil {
-					log.Printf("[webhooks-router] [github] push failed resolving PR for commit %s: %v", res.HeadSHA, err)
-				} else {
-					res.PRNumber = prNum
-					res.MergeSHA = res.HeadSHA
-					if branch != "" {
-						res.Branch = branch
-					}
-					res.ResolutionSource = "commit_sha_lookup"
-				}
-			}
+		s.resolveEventPR(ctx, res, nil, "")
+		if res.PRNumber > 0 {
+			res.MergeSHA = res.HeadSHA
 		}
 		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
 			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, delivery)
@@ -3041,29 +2191,23 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
 			targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
 			if err != nil {
-				log.Printf("[webhooks-router] [registry] error backfilling push merge_sha: %v", err)
 				return nil, err
 			}
-			if targetID != "" && res.TargetID == "" {
-				res.TargetID = targetID
-			}
-			log.Printf("[webhooks-router] [registry] pr %s#%d backfilled merge_sha (%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
+			res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		}
 
 		if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 			return nil, err
 		}
-		if strings.HasPrefix(p.Ref, "refs/heads/main") {
-			if s.conflictCheckDelay > 0 {
-				select {
-				case <-time.After(s.conflictCheckDelay):
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
+		if s.conflictCheckDelay > 0 {
+			select {
+			case <-time.After(s.conflictCheckDelay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
-			if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
-				log.Printf("[webhooks-router] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
-			}
+		}
+		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
+			log.Printf("[webhooks-router] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
 		}
 		return res, nil
 
@@ -3075,135 +2219,45 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 }
 
 func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha string) (int, string, error) {
+	repo = normalizeRepo(repo)
 	if repo == "" || sha == "" || isZeroSHA(sha) {
 		return 0, "", fmt.Errorf("invalid repo or sha for pr resolution")
 	}
-
-	if !strings.Contains(repo, "/") {
-		repo = "azylman/" + repo
-	}
-
-	apiURL := s.cfg.GitHubAPIURL
-	if apiURL == "" {
-		apiURL = "https://api.github.com"
-	}
-
-	endpoint := fmt.Sprintf("%s/repos/%s/commits/%s/pulls", apiURL, repo, url.PathEscape(sha))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return 0, "", fmt.Errorf("create github api request: %w", err)
-	}
-
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if s.cfg.GitHubToken != "" {
-		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return 0, "", fmt.Errorf("github api request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden {
-		remaining := resp.Header.Get("X-RateLimit-Remaining")
-		log.Printf("[webhooks-router] [github] WARN: GitHub API 403 Forbidden (rate-limited? X-RateLimit-Remaining=%s)", remaining)
-		return 0, "", fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, "", fmt.Errorf("github api returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return 0, "", fmt.Errorf("read github api response: %w", err)
-	}
-
 	var prs []GitHubCommitPRItem
-	if err := json.Unmarshal(body, &prs); err != nil {
-		return 0, "", fmt.Errorf("unmarshal github api prs: %w", err)
+	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/commits/%s/pulls", repo, url.PathEscape(sha)), 1<<20, &prs); err != nil {
+		return 0, "", err
 	}
-
 	if len(prs) == 0 {
 		return 0, "", fmt.Errorf("no pull requests associated with commit %s", sha)
 	}
-
 	selected := prs[0]
 	for _, item := range prs[1:] {
-		if selected.State != "closed" && item.State == "closed" {
-			selected = item
-		} else if selected.State == item.State && item.Number > selected.Number {
+		if (selected.State != "closed" && item.State == "closed") || (selected.State == item.State && item.Number > selected.Number) {
 			selected = item
 		}
 	}
-
 	return selected.Number, selected.Head.Ref, nil
 }
 
 func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
+	repo = normalizeRepo(repo)
 	if repo == "" || runID <= 0 {
 		return nil, fmt.Errorf("invalid repo or runID for workflow run images resolution")
 	}
-
-	repo = normalizeRepo(repo)
-
-	apiURL := s.cfg.GitHubAPIURL
-	if apiURL == "" {
-		apiURL = "https://api.github.com"
-	}
-
-	endpoint := fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs?per_page=100", apiURL, repo, runID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create github api request: %w", err)
-	}
-
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if s.cfg.GitHubToken != "" {
-		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("github api request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden {
-		remaining := resp.Header.Get("X-RateLimit-Remaining")
-		log.Printf("[webhooks-router] [github] WARN: GitHub API 403 Forbidden in resolveWorkflowRunImages (rate-limited? X-RateLimit-Remaining=%s)", remaining)
-		return nil, fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github api returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read github api response: %w", err)
-	}
-
 	var jobsResp GitHubWorkflowJobsResponse
-	if err := json.Unmarshal(body, &jobsResp); err != nil {
-		return nil, fmt.Errorf("unmarshal github api workflow jobs: %w", err)
+	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, runID), 5<<20, &jobsResp); err != nil {
+		return nil, err
 	}
 
 	owner := "azylman"
-	parts := strings.Split(repo, "/")
-	if len(parts) == 2 {
+	if parts := strings.Split(repo, "/"); len(parts) == 2 {
 		owner = strings.ToLower(parts[0])
 	}
 
-	seen := make(map[string]struct{})
-	var images []string
-
+	cleanRepo := strings.ToLower(repo)
+	var rawImages []string
 	for _, job := range jobsResp.Jobs {
-		if job.Status != "completed" || job.Conclusion != "success" {
-			continue
-		}
-		if !hasExecutedBuildStep(job.Steps) {
+		if job.Status != "completed" || job.Conclusion != "success" || !hasExecutedBuildStep(job.Steps) {
 			continue
 		}
 		m := buildJobRegex.FindStringSubmatch(job.Name)
@@ -3211,34 +2265,22 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 			continue
 		}
 		service := strings.TrimSpace(m[1])
-		var img string
-		cleanRepo := strings.ToLower(repo)
-		if strings.HasSuffix(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar") {
-			if strings.HasPrefix(service, "orin-") {
-				img = fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service)
-			} else {
-				img = fmt.Sprintf("ghcr.io/%s/aerial-sidecar-%s:latest", owner, service)
-			}
-		} else if strings.HasSuffix(cleanRepo, "mirrormere") || strings.Contains(cleanRepo, "mirrormere") {
-			img = fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service)
-		} else {
-			img = fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service)
-		}
-		if _, exists := seen[img]; !exists {
-			seen[img] = struct{}{}
-			images = append(images, img)
+		switch {
+		case (strings.HasSuffix(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar")) && !strings.HasPrefix(service, "orin-"):
+			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/aerial-sidecar-%s:latest", owner, service))
+		case strings.HasSuffix(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar") || strings.HasSuffix(cleanRepo, "mirrormere") || strings.Contains(cleanRepo, "mirrormere"):
+			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
+		default:
+			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service))
 		}
 	}
-
-	return images, nil
+	return dedupeTrimmedStrings(rawImages), nil
 }
 
 func (s *RouterServer) getInfisicalToken(ctx context.Context) (string, error) {
 	if s.cfg.InfisicalClientID == "" || s.cfg.InfisicalClientSecret == "" {
 		return "", fmt.Errorf("infisical client ID or client secret not configured")
 	}
-
-	loginURL := fmt.Sprintf("%s/api/v1/auth/universal-auth/login", s.cfg.InfisicalURL)
 	payload, err := json.Marshal(map[string]string{
 		"clientId":     s.cfg.InfisicalClientID,
 		"clientSecret": s.cfg.InfisicalClientSecret,
@@ -3246,8 +2288,7 @@ func (s *RouterServer) getInfisicalToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, strings.NewReader(string(payload)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.InfisicalURL+"/api/v1/auth/universal-auth/login", bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
@@ -3260,48 +2301,38 @@ func (s *RouterServer) getInfisicalToken(ctx context.Context) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return "", fmt.Errorf("reading infisical login response: %w", readErr)
-		}
-		return "", fmt.Errorf("infisical login returned status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("infisical login returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
 	}
-
 	var loginResp UniversalAuthLoginResponse
 	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
 		return "", fmt.Errorf("decoding infisical login response: %w", err)
 	}
-
-	token := loginResp.AccessToken
-	if token == "" {
-		token = loginResp.Token
-	}
+	token := firstNonEmpty(loginResp.AccessToken, loginResp.Token)
 	if token == "" {
 		return "", fmt.Errorf("empty access token in infisical login response")
 	}
-
 	return token, nil
 }
 
+func readBodyString(r io.Reader) string {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return ""
+	}
+	return string(body)
+}
+
 func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspaceID, envName string) (map[string]string, error) {
-	if workspaceID == "" {
-		workspaceID = s.cfg.InfisicalProjectID
+	params := url.Values{
+		"workspaceId": {firstNonEmpty(workspaceID, s.cfg.InfisicalProjectID)},
+		"environment": {firstNonEmpty(envName, s.cfg.InfisicalEnvironment)},
+		"secretPath":  {"/"},
 	}
-	if envName == "" {
-		envName = s.cfg.InfisicalEnvironment
-	}
-
-	params := url.Values{}
-	params.Set("workspaceId", workspaceID)
-	params.Set("environment", envName)
-	params.Set("secretPath", "/")
-
-	fetchURL := fmt.Sprintf("%s/api/v3/secrets/raw?%s", s.cfg.InfisicalURL, params.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.InfisicalURL+"/api/v3/secrets/raw?"+params.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -3310,18 +2341,12 @@ func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspa
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("reading infisical fetch response: %w", readErr)
-		}
-		return nil, fmt.Errorf("infisical fetch returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("infisical fetch returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
 	}
-
 	var secretsResp InfisicalSecretsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&secretsResp); err != nil {
 		return nil, fmt.Errorf("decoding infisical secrets response: %w", err)
 	}
-
 	items := make(map[string]string, len(secretsResp.Secrets))
 	for _, item := range secretsResp.Secrets {
 		items[item.SecretKey] = item.SecretValue
@@ -3330,18 +2355,11 @@ func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspa
 }
 
 func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]string) error {
-	reqURL := fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable)
-
-	nomadVar := NomadVariable{
-		Path:  TargetNomadVariable,
-		Items: items,
-	}
-	data, err := json.Marshal(nomadVar)
+	data, err := json.Marshal(NomadVariable{Path: TargetNomadVariable, Items: items})
 	if err != nil {
 		return err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, strings.NewReader(string(data)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -3357,37 +2375,25 @@ func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return fmt.Errorf("reading nomad put var response: %w", readErr)
-		}
-		return fmt.Errorf("nomad put variable returned status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("nomad put variable returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
 	}
-
 	return nil
 }
 
 // SyncSecrets coordinates fetching secrets from Infisical and synchronizing directly to Nomad.
 func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName string) error {
 	log.Printf("[webhooks-router] Initiating secret sync to %s (env: %s)", TargetNomadVariable, envName)
-
 	token, err := s.getInfisicalToken(ctx)
 	if err != nil {
-		log.Printf("[webhooks-router] ERROR authenticating with infisical: %v", err)
 		return err
 	}
-
 	newItems, err := s.fetchInfisicalSecrets(ctx, token, workspaceID, envName)
 	if err != nil {
-		log.Printf("[webhooks-router] ERROR fetching secrets from infisical: %v", err)
 		return err
 	}
-
 	if err := s.putNomadVariable(ctx, newItems); err != nil {
-		log.Printf("[webhooks-router] ERROR updating nomad variable %s: %v", TargetNomadVariable, err)
 		return err
 	}
-
 	log.Printf("[webhooks-router] Successfully synchronized %d secrets to %s", len(newItems), TargetNomadVariable)
 	return nil
 }
