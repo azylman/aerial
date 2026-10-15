@@ -116,7 +116,7 @@ echo "${CYAN}⚡ [Aerial Coverage] Starting monorepo coverage measurement...${NC
 if [ -n "$TARGET_SERVICE" ]; then
     ALL_GO_SERVICES="$TARGET_SERVICE"
 else
-    ALL_GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar"
+    ALL_GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar vanadis"
 fi
 
 # Target Minimum Monorepo Coverage Threshold (Uniform 95.0% floor)

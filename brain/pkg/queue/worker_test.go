@@ -4236,8 +4236,317 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	}
 }
 
+func TestWorker_VanadisBurstHelpers(t *testing.T) {
+	t.Parallel()
 
+	if got := extractBurstModel(nil); got != "" {
+		t.Errorf("expected empty model for nil burst, got %q", got)
+	}
+	if got := extractBurstModel([]db.Message{{ID: "m1"}, {ID: "m2", Metadata: db.MessageMetadata{Model: "  gemini-4-flash  "}}}); got != "gemini-4-flash" {
+		t.Errorf("expected 'gemini-4-flash', got %q", got)
+	}
 
+	if got := extractBurstVanadisChunkID(nil); got != "" {
+		t.Errorf("expected empty chunk ID for nil burst, got %q", got)
+	}
+	if got := extractBurstVanadisChunkID([]db.Message{{ID: "m1"}, {ID: "m2", Metadata: db.MessageMetadata{VanadisChunkID: "  chunk-42  "}}}); got != "chunk-42" {
+		t.Errorf("expected 'chunk-42', got %q", got)
+	}
 
+	if isLowEffortBurst(nil) {
+		t.Errorf("expected false for nil burst")
+	}
+	if isLowEffortBurst([]db.Message{{ID: "m1", Effort: "high", Metadata: db.MessageMetadata{Model: "gemini-3.1-pro"}}}) {
+		t.Errorf("expected false for high effort non-flash non-vanadis burst")
+	}
+	if !isLowEffortBurst([]db.Message{{ID: "m1", Effort: " LOW "}}) {
+		t.Errorf("expected true for Effort=low")
+	}
+	if !isLowEffortBurst([]db.Message{{ID: "m1", Metadata: db.MessageMetadata{VanadisChunkID: "chunk-1"}}}) {
+		t.Errorf("expected true when VanadisChunkID is set")
+	}
+	if !isLowEffortBurst([]db.Message{{ID: "m1", Metadata: db.MessageMetadata{Model: "Gemini-4-Flash"}}}) {
+		t.Errorf("expected true when Model contains flash")
+	}
+}
 
+func TestWorker_VanadisSilentTurnExitGuard_RetriesThenSucceeds(t *testing.T) {
+	t.Parallel()
+	store := db.NewFakeStore()
+	ctx := context.Background()
+
+	buildID := "build-guard-1"
+	chunkID := "chunk-guard-1"
+	threadID := "1542423172400291873"
+	sessionID := "a1111111-2222-3333-4444-555555555555"
+
+	err := store.CreateVanadisBuild(ctx, db.VanadisBuild{
+		ID:        buildID,
+		Repo:      "aerial",
+		ThreadID:  threadID,
+		Objective: "Test guard",
+		Status:    "running",
+	}, []db.VanadisChunk{
+		{
+			ID:           chunkID,
+			BuildID:      buildID,
+			ChunkIndex:   0,
+			Title:        "Chunk 0",
+			Instructions: "do work",
+			Status:       "running",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVanadisBuild failed: %v", err)
+	}
+
+	var mu sync.Mutex
+	var prompts []string
+	var models []string
+	doneCh := make(chan string, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		MaxAttempts:    2,
+		BackoffBase:    1 * time.Millisecond,
+		TimeoutMinutes: 1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			prompts = append(prompts, prompt)
+			models = append(models, model)
+			attempt := len(prompts)
+			mu.Unlock()
+
+			if attempt == 2 {
+				_ = store.AttachVanadisChunkPR(ctx, chunkID, 777, "1 file changed")
+			}
+			return mockJSONResponse(sessionID, "Completed work"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, chID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, chID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			doneCh <- status
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:       "msg-vanadis-guard-1",
+		ThreadID: threadID,
+		Content:  "Execute chunk 0",
+		Status:   db.StatusPending,
+		Metadata: db.MessageMetadata{
+			Model:          "gemini-4-flash",
+			VanadisChunkID: chunkID,
+		},
+	}
+	_ = store.InsertMessage(ctx, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case status := <-doneCh:
+		if status != db.StatusCompleted {
+			t.Fatalf("expected StatusCompleted, got %s", status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for message completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(prompts) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", len(prompts))
+	}
+	if !strings.Contains(prompts[1], "[SYSTEM GUARD]") || !strings.Contains(prompts[1], "--vanadis-chunk "+chunkID) {
+		t.Errorf("expected retry prompt to contain [SYSTEM GUARD] and --vanadis-chunk %s, got:\n%s", chunkID, prompts[1])
+	}
+	if models[0] != "gemini-4-flash" {
+		t.Errorf("expected model 'gemini-4-flash', got %q", models[0])
+	}
+
+	storedMsg, err := store.GetMessage(ctx, msg.ID)
+	if err != nil || storedMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if storedMsg.RetryCount != 1 {
+		t.Errorf("expected RetryCount=1, got %d", storedMsg.RetryCount)
+	}
+}
+
+func TestWorker_VanadisSilentTurnExitGuard_ExhaustsAttempts(t *testing.T) {
+	t.Parallel()
+	store := db.NewFakeStore()
+	ctx := context.Background()
+
+	buildID := "build-exhaust-1"
+	chunkID := "chunk-exhaust-1"
+	threadID := "1542423172400291873"
+	sessionID := "a1111111-2222-3333-4444-555555555555"
+
+	err := store.CreateVanadisBuild(ctx, db.VanadisBuild{
+		ID:        buildID,
+		Repo:      "aerial",
+		ThreadID:  threadID,
+		Objective: "Test exhaust guard",
+		Status:    "running",
+	}, []db.VanadisChunk{
+		{
+			ID:           chunkID,
+			BuildID:      buildID,
+			ChunkIndex:   0,
+			Title:        "Chunk 0",
+			Instructions: "do work",
+			Status:       "running",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVanadisBuild failed: %v", err)
+	}
+
+	doneCh := make(chan string, 1)
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		MaxAttempts:    2,
+		BackoffBase:    1 * time.Millisecond,
+		TimeoutMinutes: 1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			// Exits cleanly without ever opening a PR
+			return mockJSONResponse(sessionID, "I finished thinking but forgot to submit PR"), "", 0, nil
+		},
+		NotifierFunc: func(agyBin, apiKey, errDetail string) string {
+			return "Failed: " + errDetail
+		},
+		DeliveryFunc: func(s *discordgo.Session, chID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, chID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			doneCh <- status
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:       "msg-vanadis-exhaust-1",
+		ThreadID: threadID,
+		Content:  "Execute chunk 0",
+		Status:   db.StatusPending,
+		Metadata: db.MessageMetadata{
+			VanadisChunkID: chunkID,
+		},
+	}
+	_ = store.InsertMessage(ctx, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case status := <-doneCh:
+		if status != db.StatusFailed {
+			t.Fatalf("expected StatusFailed, got %s", status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for message failure")
+	}
+
+	chunk, err := store.GetVanadisChunk(ctx, chunkID)
+	if err != nil || chunk == nil {
+		t.Fatalf("GetVanadisChunk failed: %v", err)
+	}
+	if chunk.Status != "failed" {
+		t.Errorf("expected chunk status 'failed', got %q", chunk.Status)
+	}
+
+	build, _, err := store.GetVanadisBuild(ctx, buildID)
+	if err != nil || build == nil {
+		t.Fatalf("GetVanadisBuild failed: %v", err)
+	}
+	if build.Status != "failed" {
+		t.Errorf("expected build status 'failed', got %q", build.Status)
+	}
+
+	storedMsg, err := store.GetMessage(ctx, msg.ID)
+	if err != nil || storedMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if storedMsg.Status != db.StatusFailed || !strings.Contains(storedMsg.ErrorMessage, "exited without opening a PR") {
+		t.Errorf("unexpected stored message status=%q error=%q", storedMsg.Status, storedMsg.ErrorMessage)
+	}
+}
+
+func TestWorker_FailVanadisChunkIfRunning(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// 1. Nil receiver and empty burst safety
+	var nilTE *turnExecution
+	nilTE.failVanadisChunkIfRunning()
+
+	emptyTE := &turnExecution{}
+	emptyTE.failVanadisChunkIfRunning()
+
+	// 2. Direct failBurst marks running chunk and build as failed
+	store := db.NewFakeStore()
+	if err := store.CreateVanadisBuild(ctx, db.VanadisBuild{
+		ID:        "build-fb-1",
+		Repo:      "aerial",
+		ThreadID:  "123",
+		Objective: "obj",
+		Status:    "running",
+	}, []db.VanadisChunk{
+		{ID: "chunk-fb-1", BuildID: "build-fb-1", ChunkIndex: 0, Title: "t", Instructions: "do work", Status: "pending"},
+	}); err != nil {
+		t.Fatalf("CreateVanadisBuild failed: %v", err)
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:       "msg-fb-1",
+		ThreadID: "123",
+		Status:   db.StatusProcessing,
+		Metadata: db.MessageMetadata{VanadisChunkID: "chunk-fb-1"},
+	}
+	_ = store.InsertMessage(ctx, msg)
+
+	te := &turnExecution{
+		pool:       pool,
+		burst:      []db.Message{msg},
+		threadID:   "123",
+		stopTyping: func() {},
+	}
+	te.failBurst(errors.New("lease error"))
+
+	c, _ := store.GetVanadisChunk(ctx, "chunk-fb-1")
+	b, _, _ := store.GetVanadisBuild(ctx, "build-fb-1")
+	if c == nil || c.Status != "failed" {
+		t.Errorf("expected chunk status 'failed' after failBurst, got %+v", c)
+	}
+	if b == nil || b.Status != "failed" {
+		t.Errorf("expected build status 'failed' after failBurst, got %+v", b)
+	}
+
+	// 3. Already pr_opened chunk is NOT overwritten to failed
+	_ = store.AttachVanadisChunkPR(ctx, "chunk-fb-1", 101, "diff")
+	_ = store.UpdateVanadisBuildStatus(ctx, "build-fb-1", "running")
+	te.failVanadisChunkIfRunning()
+	cAfter, _ := store.GetVanadisChunk(ctx, "chunk-fb-1")
+	bAfter, _, _ := store.GetVanadisBuild(ctx, "build-fb-1")
+	if cAfter.Status != "pr_opened" || bAfter.Status != "running" {
+		t.Errorf("expected pr_opened chunk and running build to remain untouched, got chunk=%q build=%q", cAfter.Status, bAfter.Status)
+	}
+
+	// 4. Error branches in failVanadisChunkIfRunning (UpdateVanadisChunkStatus / UpdateVanadisBuildStatus errors)
+	_ = store.UpdateVanadisChunkStatus(ctx, "chunk-fb-1", "running")
+	store.FailNext("UpdateVanadisChunkStatus", errors.New("chunk update err"))
+	store.FailNext("UpdateVanadisBuildStatus", errors.New("build update err"))
+	te.failVanadisChunkIfRunning()
+}
 

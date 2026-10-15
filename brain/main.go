@@ -45,9 +45,12 @@ import (
 )
 
 type PromptRequest struct {
-	Prompt    string `json:"prompt"`
-	ChannelID string `json:"channel_id"`
-	MessageID string `json:"message_id,omitempty"`
+	Prompt         string `json:"prompt"`
+	ChannelID      string `json:"channel_id"`
+	MessageID      string `json:"message_id,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Effort         string `json:"effort,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -103,6 +106,13 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			msgID = uuid.New().String()
 		}
 
+		model := strings.TrimSpace(req.Model)
+		vanadisChunkID := strings.TrimSpace(req.VanadisChunkID)
+		effort := strings.TrimSpace(req.Effort)
+		if effort == "" && (vanadisChunkID != "" || strings.Contains(strings.ToLower(model), "flash")) {
+			effort = "low"
+		}
+
 		msg := db.Message{
 			ID:         msgID,
 			ThreadID:   channelID,
@@ -112,8 +122,13 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Content:    req.Prompt,
 			Summary:    db.CleanTaskSummary(req.Prompt),
 			Status:     db.StatusPending,
-			CreatedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
+			Effort:     effort,
+			Metadata: db.MessageMetadata{
+				Model:          model,
+				VanadisChunkID: vanadisChunkID,
+			},
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
 		}
 
 		if store == nil {

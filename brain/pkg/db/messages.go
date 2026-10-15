@@ -36,6 +36,8 @@ type MessageMetadata struct {
 	ReplyingToAuthor  string   `json:"replying_to_author,omitempty"`
 	ReplyingToContent string   `json:"replying_to_content,omitempty"`
 	Attachments       []string `json:"attachments,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	VanadisChunkID    string   `json:"vanadis_chunk_id,omitempty"`
 }
 
 // IsEmpty returns true if all metadata fields are zero/empty.
@@ -54,7 +56,9 @@ func (m MessageMetadata) IsEmpty() bool {
 		len(m.MentionRoleIDs) == 0 &&
 		m.ReplyingToAuthor == "" &&
 		m.ReplyingToContent == "" &&
-		len(m.Attachments) == 0
+		len(m.Attachments) == 0 &&
+		m.Model == "" &&
+		m.VanadisChunkID == ""
 }
 
 // Value implements driver.Valuer for PostgreSQL JSONB and SQLite TEXT.
