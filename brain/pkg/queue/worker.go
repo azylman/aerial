@@ -447,6 +447,61 @@ func isRateLimitError(errDetail string, extraStrs ...string) bool {
 	return false
 }
 
+func extractBurstModel(burst []db.Message) string {
+	for _, m := range burst {
+		if model := strings.TrimSpace(m.Metadata.Model); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+func extractBurstVanadisChunkID(burst []db.Message) string {
+	for _, m := range burst {
+		if chunkID := strings.TrimSpace(m.Metadata.VanadisChunkID); chunkID != "" {
+			return chunkID
+		}
+	}
+	return ""
+}
+
+func isLowEffortBurst(burst []db.Message) bool {
+	for _, m := range burst {
+		if strings.EqualFold(strings.TrimSpace(m.Effort), "low") ||
+			strings.TrimSpace(m.Metadata.VanadisChunkID) != "" ||
+			strings.Contains(strings.ToLower(strings.TrimSpace(m.Metadata.Model)), "flash") {
+			return true
+		}
+	}
+	return false
+}
+
+func (te *turnExecution) failVanadisChunkIfRunning() {
+	if te == nil {
+		return
+	}
+	chunkID := extractBurstVanadisChunkID(te.burst)
+	if chunkID == "" || te.store() == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	chunk, err := te.store().GetVanadisChunk(ctx, chunkID)
+	if err != nil || chunk == nil {
+		return
+	}
+	if chunk.Status == "running" || chunk.Status == "pending" {
+		if uErr := te.store().UpdateVanadisChunkStatus(ctx, chunkID, "failed"); uErr != nil {
+			log.Printf("[VanadisGuard] Warning: failed to mark chunk %s as failed: %v", chunkID, uErr)
+		}
+		if chunk.BuildID != "" {
+			if bErr := te.store().UpdateVanadisBuildStatus(ctx, chunk.BuildID, "failed"); bErr != nil {
+				log.Printf("[VanadisGuard] Warning: failed to mark build %s as failed: %v", chunk.BuildID, bErr)
+			}
+		}
+	}
+}
+
 func (p *WorkerPool) processBurst(burst []db.Message) {
 	if len(burst) == 0 {
 		return
@@ -534,6 +589,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			te.turnStatus = "failed"
 			te.turnError = errMsg
 			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+			te.failVanadisChunkIfRunning()
 			for _, m := range te.burst {
 				te.updateMessageStatus(m.ID, db.StatusFailed, errMsg)
 				if m.ScheduleRunID != "" {
@@ -566,13 +622,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}
 
 	// 1. Resolve active execution pool (primary vs low effort)
-	isLowEffort := false
-	for _, m := range te.burst {
-		if strings.EqualFold(strings.TrimSpace(m.Effort), "low") {
-			isLowEffort = true
-			break
-		}
-	}
+	isLowEffort := isLowEffortBurst(te.burst)
 	activePool := te.pool.processPool
 	if isLowEffort && te.pool.lowEffortProcessPool != nil {
 		activePool = te.pool.lowEffortProcessPool
@@ -1557,15 +1607,12 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		// Check if any message in the burst requested low effort routing
-		isLowEffort := false
-		for _, m := range te.burst {
-			if strings.EqualFold(strings.TrimSpace(m.Effort), "low") {
-				isLowEffort = true
-				break
-			}
-		}
+		isLowEffort := isLowEffortBurst(te.burst)
 		if isLowEffort && strings.TrimSpace(lowEffortModel) != "" {
 			currentModel = lowEffortModel
+		}
+		if reqModel := extractBurstModel(te.burst); reqModel != "" {
+			currentModel = reqModel
 		}
 
 		if overrideModel != "" {
@@ -1593,6 +1640,7 @@ func (te *turnExecution) executeWithRetries() {
 							log.Printf("[WorkerPool] Failed to deliver quota pause message to thread %s: %v", te.threadID, err)
 						}
 					}
+					te.failVanadisChunkIfRunning()
 					for _, m := range te.burst {
 						te.updateMessageStatus(m.ID, db.StatusFailed, reason)
 						if m.ScheduleRunID != "" {
@@ -1900,6 +1948,7 @@ func (te *turnExecution) executeWithRetries() {
 					te.turnStatus = "failed"
 					te.turnError = reason
 					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+					te.failVanadisChunkIfRunning()
 					for _, m := range te.burst {
 						te.updateMessageStatus(m.ID, db.StatusFailed, reason)
 						if m.ScheduleRunID != "" {
@@ -1986,6 +2035,7 @@ func (te *turnExecution) executeWithRetries() {
 				te.turnStatus = "failed"
 				te.turnError = reason
 				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+				te.failVanadisChunkIfRunning()
 				for _, m := range te.burst {
 					te.updateMessageStatus(m.ID, db.StatusFailed, reason)
 					if m.ScheduleRunID != "" {
@@ -2097,6 +2147,7 @@ func (te *turnExecution) executeWithRetries() {
 				te.turnStatus = "timeout"
 				te.turnError = sanitizedErr
 				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+				te.failVanadisChunkIfRunning()
 				for _, m := range te.burst {
 					te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
 					if m.ScheduleRunID != "" {
@@ -2254,81 +2305,109 @@ func (te *turnExecution) executeWithRetries() {
 						metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
 					}
 
-					te.stopTyping()
-					if te.statusUpdater != nil {
-						te.statusUpdater.Stop()
-						te.statusUpdater.DeleteStatusMessage()
+					// Silent Turn Exit Guard for Vanadis chunks:
+					vanadisGuardFailed := false
+					if vanadisChunkID := extractBurstVanadisChunkID(te.burst); vanadisChunkID != "" && te.store() != nil {
+						chunk, cErr := te.store().GetVanadisChunk(context.Background(), vanadisChunkID)
+						if cErr == nil && chunk != nil && (chunk.Status == "running" || chunk.Status == "pending") {
+							if attempt < maxAttempts {
+								log.Printf("[VanadisGuard] Turn for chunk %s in thread %s exited with status=%q (no PR opened on attempt %d/%d); retrying turn.",
+									vanadisChunkID, te.threadID, chunk.Status, attempt, maxAttempts)
+								for _, m := range te.burst {
+									te.incrementMessageRetry(m.ID, "vanadis chunk exited without opening a PR")
+								}
+								if te.statusUpdater != nil {
+									te.statusUpdater.Reset()
+								}
+								promptToSend = fmt.Sprintf("%s\n\n[SYSTEM GUARD]: Your previous turn for Vanadis chunk %s exited without opening a Pull Request (chunk status is still '%s'). Complete the implementation, run verification, and submit the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> <commit_msg> --vanadis-chunk %s' before ending your turn.", te.turnPrompt, vanadisChunkID, chunk.Status, vanadisChunkID)
+								continue
+							}
+							log.Printf("[VanadisGuard] Turn for chunk %s in thread %s exhausted all %d attempts without opening a PR; marking chunk and build failed.",
+								vanadisChunkID, te.threadID, maxAttempts)
+							te.failVanadisChunkIfRunning()
+							lastErrDetail = fmt.Sprintf("vanadis chunk %s exited without opening a PR", vanadisChunkID)
+							errDetail = lastErrDetail
+							vanadisGuardFailed = true
+						}
 					}
 
-					responseText := resp.Response
-					baseDir := "/root/.gemini/antigravity-cli/brain"
-					if te.currentSessionID != "" {
-						baseDir = filepath.Join(baseDir, te.currentSessionID)
-					}
-
-					cleanText, attachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
-					attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
-
-					if strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
-						log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
-						lastErrDetail = "agent produced empty response"
-						errDetail = lastErrDetail
-					} else {
-						var deliveryErr error
-						if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
-							deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
-						} else if te.pool.cfg.DeliveryFunc != nil {
-							deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
-						}
-						if deliveryErr != nil {
-							log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
+					if !vanadisGuardFailed {
+						te.stopTyping()
+						if te.statusUpdater != nil {
+							te.statusUpdater.Stop()
+							te.statusUpdater.DeleteStatusMessage()
 						}
 
-						// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
-						resp.Usage.InputTokens += accumulatedUsage.InputTokens
-						resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
-						resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
-						resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
-						resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
+						responseText := resp.Response
+						baseDir := "/root/.gemini/antigravity-cli/brain"
+						if te.currentSessionID != "" {
+							baseDir = filepath.Join(baseDir, te.currentSessionID)
+						}
 
-						// Mark all messages in the burst as completed with unpacked clean text
-						metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
-						tokenChannel := te.effectiveName
-						if tokenChannel == "" {
-							if te.triggerType == "schedule" {
-								tokenChannel = "schedule"
-							} else if te.triggerType == "http" {
-								tokenChannel = "http"
-							} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
-								tokenChannel = te.threadID
+						cleanText, attachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
+						attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
+
+						if strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
+							log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
+							lastErrDetail = "agent produced empty response"
+							errDetail = lastErrDetail
+						} else {
+							var deliveryErr error
+							if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
+								deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
+							} else if te.pool.cfg.DeliveryFunc != nil {
+								deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
 							}
-						}
-						metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
-						te.turnStatus = "success"
-						te.turnResponseText = cleanText
-						te.turnTokenUsage = resp.Usage
-						te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-						for _, m := range te.burst {
-							te.updateMessageCompleted(m.ID, cleanText)
-							if m.ScheduleRunID != "" {
-								te.updateScheduleRunStatus(db.UpdateRunParams{
-									RunID:       m.ScheduleRunID,
-									MessageID:   m.ID,
-									Status:      "completed",
-									CompletedAt: time.Now().UTC(),
-									DurationMs:  time.Since(te.execStart).Milliseconds(),
-									Model:       currentModel,
-								})
+							if deliveryErr != nil {
+								log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
 							}
-							if te.pool.cfg.OnMessageCompleted != nil {
-								te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+
+							// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
+							resp.Usage.InputTokens += accumulatedUsage.InputTokens
+							resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
+							resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
+							resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
+							resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
+
+							// Mark all messages in the burst as completed with unpacked clean text
+							metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
+							tokenChannel := te.effectiveName
+							if tokenChannel == "" {
+								if te.triggerType == "schedule" {
+									tokenChannel = "schedule"
+								} else if te.triggerType == "http" {
+									tokenChannel = "http"
+								} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
+									tokenChannel = te.threadID
+								}
 							}
+							metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
+							te.turnStatus = "success"
+							te.turnResponseText = cleanText
+							te.turnTokenUsage = resp.Usage
+							te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+							for _, m := range te.burst {
+								te.updateMessageCompleted(m.ID, cleanText)
+								if m.ScheduleRunID != "" {
+									te.updateScheduleRunStatus(db.UpdateRunParams{
+										RunID:       m.ScheduleRunID,
+										MessageID:   m.ID,
+										Status:      "completed",
+										CompletedAt: time.Now().UTC(),
+										DurationMs:  time.Since(te.execStart).Milliseconds(),
+										Model:       currentModel,
+									})
+								}
+								if te.pool.cfg.OnMessageCompleted != nil {
+									te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+								}
+							}
+							log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
+
+							te.checkTurnEndRotation(activePool, nil)
+
+							return
 						}
-						log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
-
-						te.checkTurnEndRotation(activePool, nil)
-
-						return
 					}
 				}
 			}
@@ -2499,6 +2578,7 @@ func (te *turnExecution) executeWithRetries() {
 			}
 		}
 
+		te.failVanadisChunkIfRunning()
 		for _, m := range te.burst {
 			te.incrementMessageRetry(m.ID, errDetail)
 			te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
@@ -2570,6 +2650,7 @@ func (te *turnExecution) executeWithRetries() {
 	te.turnError = sanitizedErr
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
+	te.failVanadisChunkIfRunning()
 	for _, m := range te.burst {
 		te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
 		if m.ScheduleRunID != "" {
@@ -2693,6 +2774,7 @@ func (te *turnExecution) failBurst(err error) {
 	te.turnStatus = "failed"
 	te.turnError = err.Error()
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+	te.failVanadisChunkIfRunning()
 	for _, m := range te.burst {
 		te.updateMessageStatus(m.ID, db.StatusFailed, err.Error())
 		if m.ScheduleRunID != "" {

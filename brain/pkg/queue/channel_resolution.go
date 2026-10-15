@@ -296,7 +296,7 @@ func containsToken(s, token string) bool {
 }
 
 func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string) bool {
-	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" {
+	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" || strings.TrimSpace(m.Metadata.VanadisChunkID) != "" {
 		return true
 	}
 

@@ -122,6 +122,28 @@ func TestHandlePromptValidation(t *testing.T) {
 	if msg.ThreadID != "1542423172400291873" || msg.Content != "Test valid prompt" {
 		t.Errorf("Unexpected message fields in DB: %+v", msg)
 	}
+
+	// Test prompt payload with model and vanadis_chunk_id sets low effort and metadata
+	vanadisPayload, _ := json.Marshal(map[string]string{
+		"prompt":           "Execute chunk 1",
+		"channel_id":       "1542423172400291873",
+		"message_id":       "msg-vanadis-1",
+		"model":            "gemini-4-flash",
+		"vanadis_chunk_id": "chunk-1",
+	})
+	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(vanadisPayload))
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("Expected status 202 StatusAccepted for vanadis prompt, got %d", w.Code)
+	}
+	vMsg, err := store.GetMessage(context.Background(), "msg-vanadis-1")
+	if err != nil || vMsg == nil {
+		t.Fatalf("Failed to retrieve vanadis message: %v", err)
+	}
+	if vMsg.Effort != "low" || vMsg.Metadata.Model != "gemini-4-flash" || vMsg.Metadata.VanadisChunkID != "chunk-1" {
+		t.Errorf("Expected Effort='low', Metadata.Model='gemini-4-flash', Metadata.VanadisChunkID='chunk-1', got Effort=%q Metadata=%+v", vMsg.Effort, vMsg.Metadata)
+	}
 }
 
 func TestHandleDirectMessage(t *testing.T) {
