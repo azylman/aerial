@@ -4722,6 +4722,7 @@ func (e *pushEventTestEnv) collectEvents(count int, timeout time.Duration) []Han
 }
 
 func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("validation and routing", func(t *testing.T) {
