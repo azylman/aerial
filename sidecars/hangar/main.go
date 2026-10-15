@@ -145,12 +145,13 @@ type ReconciliationStatus struct {
 
 // ConfigSyncContext holds context for configuration sync events.
 type ConfigSyncContext struct {
-	Repo         string
-	CommitSHA    string
-	PRNumber     int
-	TargetID     string
-	ChangedFiles []string
-	DiffGated    bool
+	Repo             string
+	CommitSHA        string
+	PRNumber         int
+	TargetID         string
+	ChangedFiles     []string
+	DiffGated        bool
+	SkipPendingNomad bool
 }
 
 
@@ -1489,6 +1490,12 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 				continue
 			}
 
+			if content, readErr := os.ReadFile(fullPath); readErr == nil {
+				if d.shouldDeferNomadJob(recCtx, change.JobName, string(content), false) {
+					continue
+				}
+			}
+
 			if valErr := d.ValidateNomadJob(recCtx, fullPath); valErr != nil {
 				log.Printf("[Hangar:Nomad] ERROR: Validation failed for %s: %v", change.Path, valErr)
 				return valErr
@@ -1914,6 +1921,10 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string, syncCtx ...C
 				default:
 				}
 			}
+		}
+
+		if len(syncCtx) > 0 && syncCtx[0].SkipPendingNomad {
+			return res
 		}
 
 		nomadChanges, errNomad := d.HasNomadChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
@@ -2810,6 +2821,24 @@ func splitLines(s string) []string {
 	return lines
 }
 
+func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec string, checkRepoBuilds bool) bool {
+	for _, img := range ExtractNomadJobImages(jobSpec) {
+		srcRepo := ImageSourceRepo(img)
+		if srcRepo != "" {
+			if checkRepoBuilds && d.CheckGitHubRepoBuildInProgress(ctx, srcRepo) {
+				log.Printf("[Hangar:GitPush] Job %s deferred: source repo %s has builds in progress", jobName, srcRepo)
+				return true
+			}
+			dgst, dgstErr := d.GetRemoteImageDigest(ctx, img)
+			if dgstErr != nil || dgst == "" {
+				log.Printf("[Hangar:GitPush] Job %s deferred: image %s not ready in registry (%v)", jobName, img, dgstErr)
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) ([]string, error) {
 	var repo, commit, targetID string
 	var prNumber int
@@ -2846,6 +2875,11 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 		fullPath := filepath.Join(repoPath, ch.Path)
 		if !IsSafeJobPath(repoPath, fullPath) {
 			continue
+		}
+		if content, readErr := os.ReadFile(fullPath); readErr == nil {
+			if d.shouldDeferNomadJob(ctx, ch.JobName, string(content), false) {
+				continue
+			}
 		}
 		if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
 			return applied, errVal
@@ -2911,10 +2945,11 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 	commitSHA := req.Commit
 	sc := ConfigSyncContext{
-		Repo:      req.Repo,
-		CommitSHA: commitSHA,
-		PRNumber:  req.PRNumber,
-		TargetID:  req.TargetID,
+		Repo:             req.Repo,
+		CommitSHA:        commitSHA,
+		PRNumber:         req.PRNumber,
+		TargetID:         req.TargetID,
+		SkipPendingNomad: true,
 	}
 	res := d.SyncRepo(ctx, repoPath, sc)
 	if res.Error != "" {
@@ -2971,24 +3006,47 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 	if isAerialCore {
 		changedFiles, errDiff := d.getChangedFiles(ctx, repoPath, res.PreviousHead, res.CurrentHead)
-		if errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles) {
+		containersBuilding := errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles)
+		if containersBuilding {
 			resp.ContainersBuilding = true
-			resp.Message = "repository synced; container build changes detected, deferring rollout until image_ready"
-			log.Printf("[Hangar:GitPush] Container build changes detected in %s (%d files). Deferring Nomad rollout.", repoPath, len(changedFiles))
-			return resp, http.StatusOK
 		}
 
 		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			var immediateChanges []NomadFileChange
+			for _, ch := range nomadChanges {
+				if ch.Action != "delete" {
+					fullPath := filepath.Join(repoPath, ch.Path)
+					if content, readErr := os.ReadFile(fullPath); readErr == nil {
+						jobSpec := string(content)
+						if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
+							resp.ContainersBuilding = true
+							log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
+							continue
+						}
+					}
+				}
+				immediateChanges = append(immediateChanges, ch)
+			}
+			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			resp.AppliedJobs = applied
 			if errRec != nil {
 				resp.Status = "error"
 				resp.Message = fmt.Sprintf("failed applying nomad changes: %v", errRec)
 				return resp, http.StatusInternalServerError
 			}
-			resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
+			if resp.ContainersBuilding {
+				resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s), deferred container build rollout until image_ready", len(applied))
+			} else {
+				resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
+			}
+			return resp, http.StatusOK
+		}
+
+		if containersBuilding {
+			resp.Message = "repository synced; container build changes detected, deferring rollout until image_ready"
+			log.Printf("[Hangar:GitPush] Container build changes detected in %s (%d files). Deferring Nomad rollout.", repoPath, len(changedFiles))
 			return resp, http.StatusOK
 		}
 
@@ -3045,25 +3103,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 					continue
 				}
 
-				images := ExtractNomadJobImages(string(content))
-				jobDeferred := false
-
-				for _, img := range images {
-					srcRepo := ImageSourceRepo(img)
-					if srcRepo != "" {
-						if d.CheckGitHubRepoBuildInProgress(ctx, srcRepo) {
-							jobDeferred = true
-							log.Printf("[Hangar:GitPush] Job %s deferred: source repo %s has builds in progress", ch.JobName, srcRepo)
-							break
-						}
-						dgst, dgstErr := d.GetRemoteImageDigest(ctx, img)
-						if dgstErr != nil || dgst == "" {
-							jobDeferred = true
-							log.Printf("[Hangar:GitPush] Job %s deferred: image %s not ready in registry (%v)", ch.JobName, img, dgstErr)
-							break
-						}
-					}
-				}
+				jobDeferred := d.shouldDeferNomadJob(ctx, ch.JobName, string(content), true)
 
 				if jobDeferred {
 					deferredJobs = append(deferredJobs, ch.JobName)

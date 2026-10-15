@@ -9307,3 +9307,70 @@ func TestExecuteGitPushEvent_AerialConfig_DiffGating(t *testing.T) {
 		t.Fatalf("expected zero var put calls for untouched service configs, got: %v", varPutJobs)
 	}
 }
+
+func TestExecuteGitPushEvent_MixedBuildAndNomadDeferral(t *testing.T) {
+	ctx := context.Background()
+	aerialDir := filepath.Join(t.TempDir(), "aerial")
+	jobsDir := filepath.Join(aerialDir, "nomad", "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0755)
+	_ = os.WriteFile(filepath.Join(jobsDir, "vanadis.nomad"), []byte(`job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`), 0644)
+	_ = os.WriteFile(filepath.Join(jobsDir, "coverage-ingest.nomad"), []byte(`job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`), 0644)
+
+	var revParseCount int
+	var mu sync.Mutex
+	var appliedPaths []string
+
+	d := NewDaemon(DaemonConfig{
+		Repos:      []string{aerialDir},
+		ComposeDir: aerialDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "HEAD" && revParseCount == 0 {
+					revParseCount++
+					return []byte("sha_before"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+				return []byte("vanadis/Dockerfile\nnomad/jobs/vanadis.nomad\nnomad/jobs/coverage-ingest.nomad\n"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("A\tnomad/jobs/vanadis.nomad\nM\tnomad/jobs/coverage-ingest.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		RegistryClient: &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.String(), "actions/runs") {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`))}, nil
+			}
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`))}, nil
+		}}},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				mu.Lock()
+				appliedPaths = append(appliedPaths, args[len(args)-1])
+				mu.Unlock()
+			}
+			return []byte("Evaluation ID: 999"), nil, nil
+		},
+	})
+
+	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "sha_after", PRNumber: 719, TargetID: "1560318118792790111"})
+	if code != http.StatusOK || !resp.ContainersBuilding || !resp.NomadChanged || len(resp.AppliedJobs) != 1 || resp.AppliedJobs[0] != "coverage-ingest" {
+		t.Fatalf("unexpected git push response (%d): %+v", code, resp)
+	}
+	if pending := d.drainPendingNomadChanges(); len(pending) != 0 {
+		t.Fatalf("expected zero pendingNomadChanges queued after ExecuteGitPushEvent, got %+v", pending)
+	}
+	if err := d.ReconcileNomadChanges(ctx, aerialDir, []NomadFileChange{{Path: "nomad/jobs/vanadis.nomad", Action: "apply", JobName: "vanadis"}}); err != nil {
+		t.Fatalf("unexpected error in ReconcileNomadChanges: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range appliedPaths {
+		if strings.Contains(p, "vanadis.nomad") {
+			t.Fatalf("expected vanadis.nomad to be deferred when image is missing in registry, got: %v", appliedPaths)
+		}
+	}
+}
