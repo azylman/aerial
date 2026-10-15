@@ -3,7 +3,7 @@ set -euo pipefail
 
 # scripts/aerial-build.sh - CLI client for Vanadis Autonomous Build Queue Orchestrator
 
-VANADIS_URL="${VANADIS_URL:-http://vanadis.aerial:4025}"
+VANADIS_URL="${VANADIS_URL:-http://vanadis.aerial}"
 VANADIS_URL="${VANADIS_URL%/}"
 VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL:-http://127.0.0.1:4025}"
 VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL%/}"
@@ -18,7 +18,7 @@ Commands:
   cancel <build_id>                 Cancel an active Vanadis build run
 
 Environment:
-  VANADIS_URL          Vanadis base URL (default: http://vanadis.aerial:4025, fallback: http://127.0.0.1:4025)
+  VANADIS_URL          Vanadis base URL (default: http://vanadis.aerial, fallback: http://127.0.0.1:4025)
   DISCORD_THREAD_ID    Automatically injected as thread_id when omitted from plan.json
   DISCORD_CHANNEL_ID   Fallback thread_id when DISCORD_THREAD_ID is unset
 EOF

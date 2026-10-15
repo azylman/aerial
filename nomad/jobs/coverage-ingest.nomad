@@ -83,12 +83,14 @@ fi
 echo "🔄 [coverage-ingest] Requesting live runtime flush on registered services..."
 for flush_url in \
   "http://webhooks-router.aerial/debug/coverage/flush" \
+  "http://vanadis.aerial/debug/coverage/flush" \
   "http://hangar.aerial/debug/coverage/flush" \
   "http://scheduler-mcp.aerial/debug/coverage/flush" \
   "http://discord-mcp.aerial/debug/coverage/flush" \
   "http://dashboard.aerial/debug/coverage/flush" \
   "http://brain.aerial/debug/coverage/flush" \
   "http://127.0.0.1:4020/debug/coverage/flush" \
+  "http://127.0.0.1:4025/debug/coverage/flush" \
   "http://127.0.0.1:8087/debug/coverage/flush" \
   "http://127.0.0.1:4005/debug/coverage/flush" \
   "http://127.0.0.1:4001/debug/coverage/flush" \
