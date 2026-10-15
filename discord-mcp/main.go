@@ -124,7 +124,10 @@ func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, del
 	return false
 }
 
-var writeCountersDirFn = coverage.WriteCountersDir
+var (
+	writeCountersDirFn = coverage.WriteCountersDir
+	writeMetaDirFn     = coverage.WriteMetaDir
+)
 
 // StartProxyServer sets up the HTTP proxy mux and starts the server.
 func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
@@ -141,6 +144,9 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	})
 	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
 		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeMetaDirFn(dir); err != nil {
+				log.Printf("[discord-mcp] coverage meta flush error: %v", err)
+			}
 			if err := writeCountersDirFn(dir); err != nil {
 				log.Printf("[discord-mcp] coverage flush error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)

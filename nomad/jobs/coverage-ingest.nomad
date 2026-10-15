@@ -64,14 +64,15 @@ EOH
 #!/bin/sh
 set -eu
 
-echo "📦 [coverage-ingest] Installing postgresql client..."
-apk add --no-cache postgresql-client >/dev/null 2>&1
+echo "📦 [coverage-ingest] Installing postgresql client and curl..."
+apk add --no-cache postgresql-client curl >/dev/null 2>&1
 
 COVERAGE_DIR="/share/coverage"
 SOURCE_DIR="/share/aerial"
 
 mkdir -p "$COVERAGE_DIR" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
-find "$COVERAGE_DIR" -type f -mtime +2 -delete 2>/dev/null || true
+find "$COVERAGE_DIR" -type f -name "covcounters.*" -mtime +2 -delete 2>/dev/null || true
+find "$COVERAGE_DIR" -type f -name "covmeta.*" -mtime +7 -delete 2>/dev/null || true
 
 if [ ! -d "$COVERAGE_DIR" ]; then
   echo "ℹ️ [coverage-ingest] No coverage directory found at $COVERAGE_DIR."
@@ -100,6 +101,18 @@ done
 for svc_path in "$COVERAGE_DIR"/*; do
   [ -d "$svc_path" ] || continue
   svc_name="$(basename "$svc_path")"
+
+  # Prune orphan counter files lacking a matching covmeta.<hash>
+  for cf in "$svc_path"/covcounters.*; do
+    [ -f "$cf" ] || continue
+    base="$(basename "$cf")"
+    rest="$${base#covcounters.}"
+    hash="$${rest%%.*}"
+    if [ ! -f "$svc_path/covmeta.$hash" ]; then
+      echo "🧹 [coverage-ingest] Removing orphan counter file $base for $svc_name (missing covmeta.$hash)"
+      rm -f "$cf"
+    fi
+  done
 
   # Check if any counter files exist
   count=$(find "$svc_path" -maxdepth 1 -name "covcounters.*" 2>/dev/null | wc -l)

@@ -2952,6 +2952,8 @@ func TestServerEndpointsAndLifecycle(t *testing.T) {
 		routes := NewRouterServer(Config{}, nil).Routes()
 		oldFn := writeCountersDirFn
 		t.Cleanup(func() { writeCountersDirFn = oldFn })
+		oldMetaFn := writeMetaDirFn
+		t.Cleanup(func() { writeMetaDirFn = oldMetaFn })
 
 		t.Setenv("GOCOVERDIR", "")
 		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusOK {
@@ -2963,9 +2965,21 @@ func TestServerEndpointsAndLifecycle(t *testing.T) {
 			called = true
 			return nil
 		}
+		metaCalled := false
+		writeMetaDirFn = func(dir string) error {
+			metaCalled = true
+			return nil
+		}
 		t.Setenv("GOCOVERDIR", t.TempDir())
-		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusOK || !called {
-			t.Errorf("expected 200 OK and called=true with GOCOVERDIR, got code=%d called=%v", rec.Code, called)
+		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusOK || !called || !metaCalled {
+			t.Errorf("expected 200 OK, called=true, metaCalled=true with GOCOVERDIR, got code=%d called=%v metaCalled=%v", rec.Code, called, metaCalled)
+		}
+
+		writeMetaDirFn = func(dir string) error {
+			return errors.New("simulated meta flush error")
+		}
+		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusOK {
+			t.Errorf("expected 200 OK when meta flush errors, got %d", rec.Code)
 		}
 
 		writeCountersDirFn = func(dir string) error {
