@@ -769,6 +769,13 @@ func TestParseImageReference_TableDriven(t *testing.T) {
 			input:   ":latest",
 			wantErr: true,
 		},
+		{
+			name:     "nomad image_tag variable interpolation normalized to latest",
+			input:    "ghcr.io/azylman/aerial-vanadis:${var.image_tag}",
+			wantReg:  "ghcr.io",
+			wantRepo: "azylman/aerial-vanadis",
+			wantTag:  "latest",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1231,6 +1238,16 @@ task "voice" {
 			expected: []string{"ghcr.io/azylman/orin-voice:latest"},
 		},
 		{
+			name: "parameterized image_tag normalized to latest",
+			content: `
+task "vanadis" {
+  config {
+    image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}"
+  }
+}`,
+			expected: []string{"ghcr.io/azylman/aerial-vanadis:latest"},
+		},
+		{
 			name: "no images",
 			content: `
 job "raw-exec-job" {
@@ -1254,6 +1271,20 @@ job "raw-exec-job" {
 				}
 			}
 		})
+	}
+}
+
+func TestJobUsesRepoImage_TableDriven(t *testing.T) {
+	specAerial := `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`
+	specExternal := `job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`
+	if !JobUsesRepoImage(specAerial, "azylman/aerial") {
+		t.Errorf("expected JobUsesRepoImage true for aerial-vanadis")
+	}
+	if JobUsesRepoImage(specExternal, "azylman/aerial") {
+		t.Errorf("expected JobUsesRepoImage false for golang:1.27.1-alpine")
+	}
+	if JobUsesRepoImage(specAerial, "") {
+		t.Errorf("expected JobUsesRepoImage false for empty targetRepo")
 	}
 }
 

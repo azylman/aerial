@@ -364,6 +364,9 @@ func ParseImageReference(ref string) (registry, repository, tag string, err erro
 			if tag == "" || strings.Contains(tag, "/") {
 				return "", "", "", fmt.Errorf("invalid tag in image reference: %q", ref)
 			}
+			if tag == "${var.image_tag}" {
+				tag = "latest"
+			}
 		} else {
 			tag = "latest"
 			namePart = trimmed
@@ -599,6 +602,7 @@ func ExtractJobName(content string, fallbackFileName string) string {
 }
 
 // ExtractNomadJobImages extracts all Docker container image references from a Nomad job specification.
+// Normalizes Nomad ${var.image_tag} interpolations to "latest".
 func ExtractNomadJobImages(content string) []string {
 	var images []string
 	seen := make(map[string]struct{})
@@ -619,6 +623,7 @@ func ExtractNomadJobImages(content string) []string {
 					rest := val[qStart+1:]
 					if qEnd := strings.IndexByte(rest, quote); qEnd != -1 {
 						img := strings.TrimSpace(rest[:qEnd])
+						img = strings.ReplaceAll(img, "${var.image_tag}", "latest")
 						if img != "" {
 							if _, exists := seen[img]; !exists {
 								seen[img] = struct{}{}
@@ -631,6 +636,20 @@ func ExtractNomadJobImages(content string) []string {
 		}
 	}
 	return images
+}
+
+// JobUsesRepoImage returns true if any container image referenced in jobSpec belongs to targetRepo (e.g. "azylman/aerial").
+func JobUsesRepoImage(jobSpec, targetRepo string) bool {
+	target := strings.TrimSpace(strings.ToLower(targetRepo))
+	if target == "" {
+		return false
+	}
+	for _, img := range ExtractNomadJobImages(jobSpec) {
+		if strings.EqualFold(ImageSourceRepo(img), target) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasNomadJobVariable returns true if the Nomad job specification content declares the specified input variable.
