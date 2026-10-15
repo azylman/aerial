@@ -8495,14 +8495,12 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	}
 
 	// 2. With GOCOVERDIR + mock success -> 200 OK
-	oldFn := writeCountersDirFn
-	defer func() { writeCountersDirFn = oldFn }()
+	oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
+	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
 
-	called := false
-	writeCountersDirFn = func(dir string) error {
-		called = true
-		return nil
-	}
+	called, metaCalled := false, false
+	writeCountersDirFn = func(dir string) error { called = true; return nil }
+	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
 	_ = os.Setenv("GOCOVERDIR", t.TempDir())
 
 	resp2, err2 := http.Get(ts.URL + "/debug/coverage/flush")
@@ -8510,11 +8508,15 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err2)
 	}
 	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK with GOCOVERDIR, got: %d", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusOK || !called || !metaCalled {
+		t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", resp2.StatusCode, called, metaCalled)
 	}
-	if !called {
-		t.Errorf("expected writeCountersDirFn to be called")
+
+	writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
+	if resp2b, err2b := http.Get(ts.URL + "/debug/coverage/flush"); err2b != nil || resp2b.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK when meta flush errors, got resp=%v err=%v", resp2b, err2b)
+	} else {
+		resp2b.Body.Close()
 	}
 
 	// 3. With GOCOVERDIR + mock error -> 500 Internal Server Error

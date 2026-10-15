@@ -113,10 +113,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeResponse(w, r, []byte(`{"status":"ok"}`))
 }
 
-var writeCountersDirFn = coverage.WriteCountersDir
+var (
+	writeCountersDirFn = coverage.WriteCountersDir
+	writeMetaDirFn     = coverage.WriteMetaDir
+)
 
 func (s *Server) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
 	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+		if err := writeMetaDirFn(dir); err != nil {
+			log.Printf("[scheduler-mcp] coverage meta flush error: %v", err)
+		}
 		if err := writeCountersDirFn(dir); err != nil {
 			log.Printf("[scheduler-mcp] coverage flush error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)

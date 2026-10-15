@@ -1894,7 +1894,10 @@ func NewDashboardConfigFromEnv() DashboardConfig {
 	return cfg
 }
 
-var writeCountersDirFn = coverage.WriteCountersDir
+var (
+	writeCountersDirFn = coverage.WriteCountersDir
+	writeMetaDirFn     = coverage.WriteMetaDir
+)
 
 // SetupDashboardMux configures the HTTP router and route handlers.
 func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handler {
@@ -1909,8 +1912,11 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(cfg.BrainURL))
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
 	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
-	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
+	coverageFlush := func(w http.ResponseWriter, r *http.Request) {
 		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+			if err := writeMetaDirFn(dir); err != nil {
+				log.Printf("[dashboard] coverage meta flush error: %v", err)
+			}
 			if err := writeCountersDirFn(dir); err != nil {
 				log.Printf("[dashboard] coverage flush error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1919,18 +1925,9 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 		}
 		w.WriteHeader(http.StatusOK)
 		writeResponse(w, r, []byte("ok\n"))
-	})
-	mux.HandleFunc("/dashboard/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-			if err := writeCountersDirFn(dir); err != nil {
-				log.Printf("[dashboard] coverage flush error: %v", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		writeResponse(w, r, []byte("ok\n"))
-	})
+	}
+	mux.HandleFunc("/debug/coverage/flush", coverageFlush)
+	mux.HandleFunc("/dashboard/debug/coverage/flush", coverageFlush)
 
 	if assetReg != nil {
 		mux.HandleFunc("/", assetReg.ServeHTTP)

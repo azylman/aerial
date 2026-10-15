@@ -1555,10 +1555,16 @@ func (s *RouterServer) Routes() http.Handler {
 	return mux
 }
 
-var writeCountersDirFn = coverage.WriteCountersDir
+var (
+	writeCountersDirFn = coverage.WriteCountersDir
+	writeMetaDirFn     = coverage.WriteMetaDir
+)
 
 func (s *RouterServer) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
 	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+		if err := writeMetaDirFn(dir); err != nil {
+			log.Printf("[webhooks-router] coverage meta flush error: %v", err)
+		}
 		if err := writeCountersDirFn(dir); err != nil {
 			log.Printf("[webhooks-router] coverage flush error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
