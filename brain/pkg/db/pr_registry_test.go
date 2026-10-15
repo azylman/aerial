@@ -111,6 +111,17 @@ func runPRRegistryTests(t *testing.T, store Store) {
 		t.Fatalf("Expected status 'deploying', got %v (err: %v)", deploying, err)
 	}
 
+	// UpsertPR when already deploying/merged/deployed should preserve terminal/in-flight status instead of resetting to 'open'
+	recReupsert := rec
+	recReupsert.Status = "open"
+	if err := store.UpsertPR(ctx, recReupsert); err != nil {
+		t.Fatalf("UpsertPR on deploying PR failed: %v", err)
+	}
+	afterReupsert, err := store.GetPRByNumber(ctx, "aerial", 101)
+	if err != nil || afterReupsert.Status != "deploying" {
+		t.Fatalf("Expected UpsertPR to preserve 'deploying' status, got %+v (err: %v)", afterReupsert, err)
+	}
+
 	err = store.UpdatePRStatus(ctx, "aerial", 9999, "deploying")
 	if !errors.Is(err, ErrPRNotFound) {
 		t.Errorf("Expected ErrPRNotFound on UpdatePRStatus for non-existent PR, got %v", err)

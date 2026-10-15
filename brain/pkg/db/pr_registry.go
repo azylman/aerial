@@ -66,7 +66,7 @@ func (s *SQLStore) UpsertPR(ctx context.Context, record PRRecord) error {
 			head_sha = EXCLUDED.head_sha,
 			target_id = EXCLUDED.target_id,
 			title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END,
-			status = CASE WHEN EXCLUDED.status != '' THEN EXCLUDED.status ELSE pr_registry.status END,
+			status = CASE WHEN pr_registry.status IN ('merged', 'deploying', 'deployed') THEN pr_registry.status WHEN EXCLUDED.status != '' THEN EXCLUDED.status ELSE pr_registry.status END,
 			metadata = CASE WHEN EXCLUDED.metadata != '{}' THEN EXCLUDED.metadata ELSE pr_registry.metadata END,
 			updated_at = CURRENT_TIMESTAMP;
 	`

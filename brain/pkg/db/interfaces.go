@@ -178,6 +178,16 @@ type PRRegistryStore interface {
 	AtomicTransitionPRStatusByMergeSHA(ctx context.Context, repo string, mergeSHA string, toStatus, notStatus string) (*PRRecord, error)
 }
 
+// VanadisStore handles persistent tracking for Vanadis multi-chunk builds and chunks.
+type VanadisStore interface {
+	CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error
+	GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
+	GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error)
+	UpdateVanadisChunkStatus(ctx context.Context, chunkID, status string) error
+	AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int, diffStat string) error
+	UpdateVanadisBuildStatus(ctx context.Context, buildID, status string) error
+}
+
 // Store unifies all repository capabilities under a single interface.
 type Store interface {
 	FactStore
@@ -186,6 +196,7 @@ type Store interface {
 	SessionStore
 	TranscriptStore
 	PRRegistryStore
+	VanadisStore
 	WithTx(ctx context.Context, fn func(txStore Store) error) error
 	Close() error
 }

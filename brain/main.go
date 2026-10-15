@@ -940,13 +940,15 @@ func handleTasks(store db.Store) http.HandlerFunc {
 }
 
 type PRRegisterRequest struct {
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
-	Branch   string `json:"branch"`
-	HeadSHA  string `json:"head_sha"`
-	TargetID string `json:"target_id"`
-	Title    string `json:"title,omitempty"`
-	Metadata string `json:"metadata,omitempty"`
+	Repo           string `json:"repo"`
+	PRNumber       int    `json:"pr_number"`
+	Branch         string `json:"branch"`
+	HeadSHA        string `json:"head_sha"`
+	TargetID       string `json:"target_id"`
+	Title          string `json:"title,omitempty"`
+	Metadata       string `json:"metadata,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	DiffStat       string `json:"diff_stat,omitempty"`
 }
 
 func handlePRRegister(store db.Store) http.HandlerFunc {
@@ -1026,6 +1028,14 @@ func handlePRRegister(store db.Store) http.HandlerFunc {
 			log.Printf("[HTTP] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
 			return
+		}
+
+		if chunkID := strings.TrimSpace(req.VanadisChunkID); chunkID != "" {
+			if err := store.AttachVanadisChunkPR(r.Context(), chunkID, req.PRNumber, strings.TrimSpace(req.DiffStat)); err != nil {
+				log.Printf("[HTTP] Failed to attach PR #%d to Vanadis chunk %s: %v", req.PRNumber, chunkID, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to attach PR to Vanadis chunk"})
+				return
+			}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{

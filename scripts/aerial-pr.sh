@@ -98,7 +98,8 @@ run_preflight_verification() {
     return 0
 }
 
-# Pre-dispatch global flag parsing (allows --repo before or after command)
+# Pre-dispatch global flag parsing (allows --repo and --vanadis-chunk before or after command)
+VANADIS_CHUNK_ID="${VANADIS_CHUNK_ID:-}"
 PRE_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -114,6 +115,18 @@ while [ $# -gt 0 ]; do
         --repo=*)
             REPO_NAME="$(normalize_repo "${1#*=}")"
             REPO_NAME_EXPLICIT=1
+            shift 1
+            ;;
+        --vanadis-chunk)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: $1 requires a chunk ID argument." >&2
+                exit 1
+            fi
+            VANADIS_CHUNK_ID="$2"
+            shift 2
+            ;;
+        --vanadis-chunk=*)
+            VANADIS_CHUNK_ID="${1#*=}"
             shift 1
             ;;
         *)
@@ -693,6 +706,7 @@ submit_scratch() {
     local commit_msg=""
     local pr_body=""
     local pr_body_file=""
+    local vanadis_chunk_id="${VANADIS_CHUNK_ID:-}"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -708,6 +722,18 @@ submit_scratch() {
             --repo=*)
                 REPO_NAME="$(normalize_repo "${1#*=}")"
                 REPO_NAME_EXPLICIT=1
+                shift 1
+                ;;
+            --vanadis-chunk)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a chunk ID argument." >&2
+                    exit 1
+                fi
+                vanadis_chunk_id="$2"
+                shift 2
+                ;;
+            --vanadis-chunk=*)
+                vanadis_chunk_id="${1#*=}"
                 shift 1
                 ;;
             --async|-a)
@@ -1006,6 +1032,9 @@ submit_scratch() {
         meta_json=$(jq -n --argjson jobs "$changed_jobs_json" '{jobs: $jobs}')
     fi
 
+    local diff_stat=""
+    diff_stat=$(git show --stat --format="" HEAD 2>/dev/null || true)
+
     local reg_payload
     reg_payload=$(jq -n \
         --arg repo "${REPO_NAME}" \
@@ -1015,7 +1044,9 @@ submit_scratch() {
         --arg target_id "$target_id" \
         --arg title "$clean_title" \
         --arg metadata "$meta_json" \
-        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $metadata}')
+        --arg vanadis_chunk_id "$vanadis_chunk_id" \
+        --arg diff_stat "$diff_stat" \
+        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $metadata, vanadis_chunk_id: $vanadis_chunk_id, diff_stat: $diff_stat}')
 
     local reg_resp
     reg_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \

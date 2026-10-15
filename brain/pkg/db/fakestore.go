@@ -22,6 +22,7 @@ var (
 	_ FactStore       = (*FakeStore)(nil)
 	_ TranscriptStore = (*FakeStore)(nil)
 	_ PRRegistryStore = (*FakeStore)(nil)
+	_ VanadisStore    = (*FakeStore)(nil)
 )
 
 type threadSummaryRecord struct {
@@ -64,6 +65,10 @@ type FakeStore struct {
 	// PRRegistryStore state
 	prRecords map[string]*PRRecord
 	nextPRID  int64
+
+	// VanadisStore state
+	vanadisBuilds map[string]*VanadisBuild
+	vanadisChunks map[string]*VanadisChunk
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
@@ -83,6 +88,8 @@ func NewFakeStore() *FakeStore {
 		sessionSummaries: make(map[string]*SessionSummary),
 		transcriptSteps:  make(map[string][]TranscriptStep),
 		prRecords:        make(map[string]*PRRecord),
+		vanadisBuilds:    make(map[string]*VanadisBuild),
+		vanadisChunks:    make(map[string]*VanadisChunk),
 	}
 }
 
@@ -1960,7 +1967,7 @@ func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 		if record.Title != "" {
 			existing.Title = record.Title
 		}
-		if record.Status != "" {
+		if record.Status != "" && existing.Status != "merged" && existing.Status != "deploying" && existing.Status != "deployed" {
 			existing.Status = record.Status
 		}
 		if record.Metadata != "" && record.Metadata != "{}" {
@@ -2184,3 +2191,252 @@ func (f *FakeStore) AtomicTransitionPRStatusByMergeSHA(ctx context.Context, repo
 	cp := *target
 	return &cp, nil
 }
+
+func cloneVanadisChunk(c *VanadisChunk) VanadisChunk {
+	cp := *c
+	if c.TargetFiles != nil {
+		cp.TargetFiles = append([]string(nil), c.TargetFiles...)
+	} else {
+		cp.TargetFiles = []string{}
+	}
+	return cp
+}
+
+// CreateVanadisBuild inserts a VanadisBuild and its ordered VanadisChunks in FakeStore.
+func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.checkClosedAndFail("CreateVanadisBuild"); err != nil {
+		return err
+	}
+
+	buildID := strings.TrimSpace(build.ID)
+	if buildID == "" {
+		return fmt.Errorf("build id cannot be empty")
+	}
+	repo := normalizeRepo(build.Repo)
+	if repo == "" {
+		return fmt.Errorf("repo cannot be empty")
+	}
+	threadID := strings.TrimSpace(build.ThreadID)
+	if threadID == "" {
+		return fmt.Errorf("thread_id cannot be empty")
+	}
+	objective := strings.TrimSpace(build.Objective)
+	if objective == "" {
+		return fmt.Errorf("objective cannot be empty")
+	}
+	if _, exists := f.vanadisBuilds[buildID]; exists {
+		return fmt.Errorf("vanadis build %s already exists", buildID)
+	}
+
+	seenChunkIDs := make(map[string]bool, len(chunks))
+	seenIndices := make(map[int]bool, len(chunks))
+	for i, c := range chunks {
+		cid := strings.TrimSpace(c.ID)
+		if cid == "" {
+			return fmt.Errorf("chunk[%d] id cannot be empty", i)
+		}
+		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
+			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
+		}
+		if strings.TrimSpace(c.Title) == "" {
+			return fmt.Errorf("chunk[%d] title cannot be empty", i)
+		}
+		if strings.TrimSpace(c.Instructions) == "" {
+			return fmt.Errorf("chunk[%d] instructions cannot be empty", i)
+		}
+		if _, exists := f.vanadisChunks[cid]; exists || seenChunkIDs[cid] {
+			return fmt.Errorf("vanadis chunk %s already exists", cid)
+		}
+		if seenIndices[c.ChunkIndex] {
+			return fmt.Errorf("duplicate chunk_index %d in build %s", c.ChunkIndex, buildID)
+		}
+		seenChunkIDs[cid] = true
+		seenIndices[c.ChunkIndex] = true
+	}
+
+	now := time.Now()
+	tier := build.Tier
+	if tier <= 0 {
+		tier = 2
+	}
+	status := strings.TrimSpace(build.Status)
+	if status == "" {
+		status = "running"
+	}
+
+	f.vanadisBuilds[buildID] = &VanadisBuild{
+		ID:        buildID,
+		Repo:      repo,
+		ThreadID:  threadID,
+		Tier:      tier,
+		Objective: objective,
+		Status:    status,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	for _, c := range chunks {
+		cid := strings.TrimSpace(c.ID)
+		cStatus := strings.TrimSpace(c.Status)
+		if cStatus == "" {
+			cStatus = "pending"
+		}
+		files := make([]string, 0, len(c.TargetFiles))
+		files = append(files, c.TargetFiles...)
+		f.vanadisChunks[cid] = &VanadisChunk{
+			ID:           cid,
+			BuildID:      buildID,
+			ChunkIndex:   c.ChunkIndex,
+			Title:        strings.TrimSpace(c.Title),
+			Instructions: strings.TrimSpace(c.Instructions),
+			TargetFiles:  files,
+			Status:       cStatus,
+			PRNumber:     c.PRNumber,
+			DiffStat:     c.DiffStat,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+	}
+	return nil
+}
+
+// GetVanadisBuild retrieves a VanadisBuild and its ordered VanadisChunks by buildID.
+func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.checkClosedAndFail("GetVanadisBuild"); err != nil {
+		return nil, nil, err
+	}
+
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return nil, nil, fmt.Errorf("build id cannot be empty")
+	}
+
+	b, exists := f.vanadisBuilds[buildID]
+	if !exists {
+		return nil, nil, ErrVanadisBuildNotFound
+	}
+	bCopy := *b
+
+	chunks := make([]VanadisChunk, 0)
+	for _, c := range f.vanadisChunks {
+		if c.BuildID == buildID {
+			chunks = append(chunks, cloneVanadisChunk(c))
+		}
+	}
+	sort.Slice(chunks, func(i, j int) bool {
+		return chunks[i].ChunkIndex < chunks[j].ChunkIndex
+	})
+
+	return &bCopy, chunks, nil
+}
+
+// GetVanadisChunk retrieves a single VanadisChunk by chunkID.
+func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.checkClosedAndFail("GetVanadisChunk"); err != nil {
+		return nil, err
+	}
+
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return nil, fmt.Errorf("chunk id cannot be empty")
+	}
+
+	c, exists := f.vanadisChunks[chunkID]
+	if !exists {
+		return nil, ErrVanadisChunkNotFound
+	}
+	cp := cloneVanadisChunk(c)
+	return &cp, nil
+}
+
+// UpdateVanadisChunkStatus updates the lifecycle status of a VanadisChunk.
+func (f *FakeStore) UpdateVanadisChunkStatus(ctx context.Context, chunkID, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.checkClosedAndFail("UpdateVanadisChunkStatus"); err != nil {
+		return err
+	}
+
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return fmt.Errorf("chunk id cannot be empty")
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return fmt.Errorf("status cannot be empty")
+	}
+
+	c, exists := f.vanadisChunks[chunkID]
+	if !exists {
+		return ErrVanadisChunkNotFound
+	}
+	c.Status = status
+	c.UpdatedAt = time.Now()
+	return nil
+}
+
+// AttachVanadisChunkPR links an opened Pull Request and diff stat to a VanadisChunk and marks it 'pr_opened'.
+func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int, diffStat string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.checkClosedAndFail("AttachVanadisChunkPR"); err != nil {
+		return err
+	}
+
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return fmt.Errorf("chunk id cannot be empty")
+	}
+	if prNumber <= 0 {
+		return fmt.Errorf("pr_number must be greater than 0")
+	}
+
+	c, exists := f.vanadisChunks[chunkID]
+	if !exists {
+		return ErrVanadisChunkNotFound
+	}
+	c.PRNumber = prNumber
+	c.DiffStat = diffStat
+	c.Status = "pr_opened"
+	c.UpdatedAt = time.Now()
+	return nil
+}
+
+// UpdateVanadisBuildStatus updates the lifecycle status of a VanadisBuild.
+func (f *FakeStore) UpdateVanadisBuildStatus(ctx context.Context, buildID, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.checkClosedAndFail("UpdateVanadisBuildStatus"); err != nil {
+		return err
+	}
+
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return fmt.Errorf("build id cannot be empty")
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return fmt.Errorf("status cannot be empty")
+	}
+
+	b, exists := f.vanadisBuilds[buildID]
+	if !exists {
+		return ErrVanadisBuildNotFound
+	}
+	b.Status = status
+	b.UpdatedAt = time.Now()
+	return nil
+}
+
