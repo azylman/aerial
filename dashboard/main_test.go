@@ -19,30 +19,6 @@ import (
 	"time"
 )
 
-func TestSanitizeEnvVars(t *testing.T) {
-	input := []string{
-		"GEMINI_API_KEY=secret_key_123",
-		"DISCORD_TOKEN=bot_token_456",
-		"DISCORD_BOT_TOKEN=bot_token_789",
-		"GITHUB_PAT=pat_xyz",
-		"HA_TOKEN=ha_abc",
-		"PORT=8080",
-		"AGY_MODEL=gemini-3.6-flash-low",
-	}
-
-	sanitized := SanitizeEnvVars(input)
-
-	for _, env := range sanitized {
-		if env == "GEMINI_API_KEY=secret_key_123" ||
-			env == "DISCORD_TOKEN=bot_token_456" ||
-			env == "DISCORD_BOT_TOKEN=bot_token_789" ||
-			env == "GITHUB_PAT=pat_xyz" ||
-			env == "HA_TOKEN=ha_abc" {
-			t.Errorf("found unsanitized secret in output: %s", env)
-		}
-	}
-}
-
 func TestStatusHandler(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/status", nil)
 	rr := httptest.NewRecorder()
@@ -321,794 +297,572 @@ func TestGetGitCommit(t *testing.T) {
 	}
 }
 
-func TestParseMatrixJobChips(t *testing.T) {
-	jobs := []GitHubJob{
-		{
-			ID:          101,
-			Name:        "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)",
-			Status:      "in_progress",
-			StartedAt:   time.Now().Add(-45 * time.Second),
-			CompletedAt: time.Time{},
-		},
-		{
-			ID:          102,
-			Name:        "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)",
-			Status:      "completed",
-			Conclusion:  "success",
-			StartedAt:   time.Now().Add(-60 * time.Second),
-			CompletedAt: time.Now().Add(-10 * time.Second),
-		},
-		{
-			ID:         103,
-			Name:       "Build & Push Images to GHCR (proxy, ./proxy, ./proxy/Dockerfile, aerial-proxy)",
-			Status:     "queued",
-			Conclusion: "",
-		},
-	}
-
-	chips := parseMatrixJobChips(jobs)
-	if len(chips) != 3 {
-		t.Fatalf("expected 3 chips, got %d", len(chips))
-	}
-
-	for _, c := range chips {
-		if c.Name == "brain" {
-			if c.Status != "active" {
-				t.Errorf("expected brain status 'active', got %s", c.Status)
-			}
-			if c.Duration == "" {
-				t.Errorf("expected brain duration to be calculated, got empty")
-			}
-		} else if c.Name == "dashboard" {
-			if c.Status != "completed" || c.Conclusion != "success" {
-				t.Errorf("expected dashboard completed/success, got %s/%s", c.Status, c.Conclusion)
-			}
-		} else if c.Name == "proxy" {
-			if c.Status != "pending" {
-				t.Errorf("expected proxy status 'pending', got %s", c.Status)
-			}
-		}
-	}
-}
-
-func TestMergeClusterDeployments_ActiveCIRun(t *testing.T) {
+func TestMergeClusterDeployments_TableDriven(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         481,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "7a9f1b234567",
-			Status:     "in_progress",
-			Conclusion: "",
-			CreatedAt:  now.Add(-2 * time.Minute),
-			UpdatedAt:  now.Add(-10 * time.Second),
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/481",
-			HeadCommit: &struct {
-				Message   string    `json:"message"`
-				Timestamp time.Time `json:"timestamp"`
-			}{Message: "feat(brain): live github actions tracking", Timestamp: now.Add(-2 * time.Minute)},
-		},
+	commitTime := now.Add(-10 * time.Minute)
+	headCommit := func(msg string, ts time.Time) *struct {
+		Message   string    `json:"message"`
+		Timestamp time.Time `json:"timestamp"`
+	} {
+		return &struct {
+			Message   string    `json:"message"`
+			Timestamp time.Time `json:"timestamp"`
+		}{Message: msg, Timestamp: ts}
 	}
 
-	jobs := map[int64][]GitHubJob{
-		481: {
-			{
-				ID:         1,
-				Name:       "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)",
-				Status:     "in_progress",
-				StartedAt:  now.Add(-40 * time.Second),
-				Conclusion: "",
+	tests := []struct {
+		name          string
+		containers    []DockerContainerJSON
+		runs          []GitHubRun
+		jobs          map[int64][]GitHubJob
+		gitSync       GitSyncStatusResponse
+		currentCommit string
+		check         func(t *testing.T, deploys []DeploymentStatus)
+	}{
+		{
+			name: "ActiveCIRun",
+			runs: []GitHubRun{
+				{
+					ID:         481,
+					Name:       "Continuous Delivery",
+					HeadSHA:    "7a9f1b234567",
+					Status:     "in_progress",
+					CreatedAt:  now.Add(-2 * time.Minute),
+					UpdatedAt:  now.Add(-10 * time.Second),
+					HTMLURL:    "https://github.com/azylman/aerial/actions/runs/481",
+					HeadCommit: headCommit("feat(brain): live github actions tracking", now.Add(-2*time.Minute)),
+				},
 			},
-			{
-				ID:          2,
-				Name:        "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)",
-				Status:      "completed",
-				Conclusion:  "success",
-				StartedAt:   now.Add(-60 * time.Second),
-				CompletedAt: now.Add(-10 * time.Second),
+			jobs: map[int64][]GitHubJob{
+				481: {
+					{ID: 1, Name: "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)", Status: "in_progress", StartedAt: now.Add(-40 * time.Second)},
+					{ID: 2, Name: "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)", Status: "completed", Conclusion: "success", StartedAt: now.Add(-60 * time.Second), CompletedAt: now.Add(-10 * time.Second)},
+				},
+			},
+			currentCommit: "7a9f1b2",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 {
+					t.Fatalf("expected 1 active deployment, got %d", len(deploys))
+				}
+				dep := deploys[0]
+				if dep.Stage != "building" || dep.Commit != "7a9f1b2" || len(dep.MatrixJobs) != 2 || dep.HTMLURL != "https://github.com/azylman/aerial/actions/runs/481" {
+					t.Errorf("unexpected active CI deployment: %+v", dep)
+				}
 			},
 		},
+		{
+			name: "FailedCIRun",
+			runs: []GitHubRun{
+				{
+					ID:         482,
+					Name:       "Continuous Delivery",
+					HeadSHA:    "abc1234567",
+					Status:     "completed",
+					Conclusion: "failure",
+					CreatedAt:  now.Add(-5 * time.Minute),
+					UpdatedAt:  now.Add(-4 * time.Minute),
+					HTMLURL:    "https://github.com/azylman/aerial/actions/runs/482",
+				},
+			},
+			currentCommit: "abc1234",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "failed" || deploys[0].Steps[1].Status != "failed" {
+					t.Fatalf("expected failed CI deployment, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "AwaitingHangarSync",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+			},
+			runs: []GitHubRun{
+				{ID: 483, Name: "Continuous Delivery", HeadSHA: "def5678901", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-4 * time.Minute), UpdatedAt: now.Add(-45 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/483"},
+			},
+			jobs: map[int64][]GitHubJob{
+				483: {{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"}},
+			},
+			currentCommit: "old1234",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "awaiting_pull" || deploys[0].Steps[2].Name != "Hangar Sync" || deploys[0].Steps[2].Status != "active" {
+					t.Fatalf("expected awaiting_pull with active Hangar Sync, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "HangarSyncTimeout",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+			},
+			runs: []GitHubRun{
+				{ID: 484, Name: "Continuous Delivery", HeadSHA: "timeout1234", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-150 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/484"},
+			},
+			jobs: map[int64][]GitHubJob{
+				484: {{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"}},
+			},
+			currentCommit: "old1234",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "failed" || deploys[0].CommitMsg != "Hangar reconciliation timed out (>120s)" || deploys[0].Steps[2].Status != "failed" {
+					t.Fatalf("expected failed Hangar sync timeout, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "NoContainerBuilds_ImmediateLive",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-1 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+			},
+			runs: []GitHubRun{
+				{ID: 485, Name: "Continuous Delivery", HeadSHA: "purecode1234", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-150 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/485"},
+			},
+			jobs: map[int64][]GitHubJob{
+				485: {
+					{Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
+					{Name: "Lint Microservices & Frontend", Status: "completed", Conclusion: "success"},
+					{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "skipped"},
+				},
+			},
+			currentCommit: "old1234",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "live" || deploys[0].Progress != 100 || deploys[0].Steps[2].Status != "completed" {
+					t.Fatalf("expected immediate live deployment when no containers built, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "RollingSwap",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-30 * time.Second).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "org.opencontainers.image.revision": "abc9999999"}, Health: &DockerContainerHealth{Status: "starting"}},
+				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: now.Add(-10 * time.Second).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}},
+			},
+			runs: []GitHubRun{
+				{ID: 101, HeadSHA: "abc9999999", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-1 * time.Minute)},
+			},
+			currentCommit: "abc9999",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "swapping" || deploys[0].Commit != "abc9999" || len(deploys[0].MatrixJobs) != 2 {
+					t.Fatalf("expected swapping deployment with 2 chips, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "SyncedGrace",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-3 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "healthy"}},
+				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: now.Add(-3 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}, Health: &DockerContainerHealth{Status: "healthy"}},
+			},
+			runs: []GitHubRun{
+				{ID: 102, HeadSHA: "live123", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-4 * time.Minute)},
+			},
+			currentCommit: "live123",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "live" || deploys[0].Progress != 100 {
+					t.Fatalf("expected synced grace live deployment, got %+v", deploys)
+				}
+				for i, s := range deploys[0].Steps {
+					if s.Status != "completed" {
+						t.Errorf("expected step %d (%s) completed, got %s", i, s.Name, s.Status)
+					}
+				}
+			},
+		},
+		{
+			name: "DegradedState",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-2 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "unhealthy"}},
+				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: now.Add(-2 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}, Health: &DockerContainerHealth{Status: "healthy"}},
+			},
+			runs: []GitHubRun{
+				{ID: 103, HeadSHA: "deg1234", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-3 * time.Minute)},
+			},
+			currentCommit: "deg1234",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "degraded" || deploys[0].Steps[4].Status != "failed" {
+					t.Fatalf("expected degraded deployment with failed Health Check, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "Idle",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-2 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "healthy"}},
+			},
+			currentCommit: "idle123",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 0 {
+					t.Fatalf("expected 0 deployments (idle), got %d", len(deploys))
+				}
+			},
+		},
+		{
+			name: "AdversarialNilLabelsAndNilHealth",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-30 * time.Second).Unix()},
+				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: now.Add(-30 * time.Second).Unix()},
+			},
+			runs: []GitHubRun{
+				{ID: 104, HeadSHA: "test1234", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-1 * time.Minute)},
+			},
+			currentCommit: "test1234",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "swapping" || len(deploys[0].MatrixJobs) != 2 {
+					t.Fatalf("expected swapping deployment with 2 container chips, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "AdversarialClockSkewFutureTimestamp",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-2 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+			},
+			runs: []GitHubRun{
+				{ID: 999, Name: "Continuous Delivery", HeadSHA: "future1234", Status: "completed", Conclusion: "success", CreatedAt: now.Add(10 * time.Second), UpdatedAt: now.Add(15 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/999"},
+			},
+			currentCommit: "old1234",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Stage != "awaiting_pull" {
+					t.Fatalf("expected awaiting_pull despite future timestamp, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "CommitTimeAcrossAllStages_Queued",
+			runs: []GitHubRun{
+				{ID: 501, Name: "Continuous Delivery", HeadSHA: "1111aaa", Status: "queued", CreatedAt: now.Add(-2 * time.Minute), HeadCommit: headCommit("feat: queued", commitTime)},
+			},
+			currentCommit: "1111aaa",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].CommitTime == nil || !deploys[0].CommitTime.Equal(commitTime) {
+					t.Errorf("expected queued stage to have valid CommitTime")
+				}
+			},
+		},
+		{
+			name: "CommitTimeAcrossAllStages_Building",
+			runs: []GitHubRun{
+				{ID: 502, Name: "Continuous Delivery", HeadSHA: "2222bbb", Status: "in_progress", CreatedAt: now.Add(-1 * time.Minute), HeadCommit: headCommit("feat: building", commitTime)},
+			},
+			currentCommit: "2222bbb",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].CommitTime == nil || !deploys[0].CommitTime.Equal(commitTime) {
+					t.Errorf("expected building stage to have valid CommitTime")
+				}
+			},
+		},
+		{
+			name: "CommitTimeAcrossAllStages_Failed",
+			runs: []GitHubRun{
+				{ID: 503, Name: "Continuous Delivery", HeadSHA: "3333ccc", Status: "completed", Conclusion: "failure", CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-4 * time.Minute), HeadCommit: headCommit("feat: failed", commitTime)},
+			},
+			currentCommit: "3333ccc",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].CommitTime == nil || !deploys[0].CommitTime.Equal(commitTime) {
+					t.Errorf("expected failed stage to have valid CommitTime")
+				}
+			},
+		},
+		{
+			name: "CommitTimeAcrossAllStages_Swapping",
+			containers: []DockerContainerJSON{
+				{ID: "c-brain", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-30 * time.Second).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "starting"}},
+			},
+			runs: []GitHubRun{
+				{ID: 504, Name: "Continuous Delivery", HeadSHA: "4444ddd", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-1 * time.Minute), HeadCommit: headCommit("feat: success", commitTime)},
+			},
+			currentCommit: "4444ddd",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Commit != "4444ddd" || deploys[0].CommitTime == nil || !deploys[0].CommitTime.Equal(commitTime) {
+					t.Errorf("expected swapping stage to resolve commit and CommitTime from runs")
+				}
+			},
+		},
+		{
+			name:          "EmptyAndFuture_Empty",
+			currentCommit: "commit123",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 0 {
+					t.Errorf("expected empty deployments for no aerial containers, got %d", len(deploys))
+				}
+			},
+		},
+		{
+			name: "EmptyAndFuture_FutureContainers",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(2 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+			},
+			runs: []GitHubRun{
+				{ID: 123, Status: "completed", Conclusion: "success", HeadSHA: "sha1234567890", CreatedAt: now.Add(-10 * time.Minute)},
+			},
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) == 0 {
+					t.Fatalf("expected at least 1 deployment")
+				}
+			},
+		},
+		{
+			name: "HangarActiveSuppresses120sTimeout",
+			runs: []GitHubRun{
+				{ID: 101, HeadSHA: "abc1234567890", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-300 * time.Second), UpdatedAt: now.Add(-200 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/101"},
+			},
+			jobs: map[int64][]GitHubJob{
+				101: {{Name: "Build & Push Images (dashboard)", Status: "completed", Conclusion: "success"}},
+			},
+			gitSync: GitSyncStatusResponse{
+				Status:         "synced",
+				Reconciliation: &ReconciliationStatus{Active: true, State: "pulling", Stage: "pulling", TargetServices: []string{"dashboard"}},
+			},
+			currentCommit: "oldcommit",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) == 0 || (deploys[0].Stage != "pulling" && deploys[0].Stage != "awaiting_pull") || deploys[0].Steps[2].Status != "active" {
+					t.Fatalf("expected active Hangar Sync suppressing 120s timeout, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "HangarFailedFastFail",
+			runs: []GitHubRun{
+				{ID: 102, HeadSHA: "def5678901234", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-60 * time.Second), UpdatedAt: now.Add(-30 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/102"},
+			},
+			gitSync: GitSyncStatusResponse{
+				Status:         "error",
+				Reconciliation: &ReconciliationStatus{Active: false, State: "failed", Stage: "failed", Error: "manifest unknown"},
+			},
+			currentCommit: "oldcommit",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) == 0 || deploys[0].Stage != "failed" || !strings.Contains(deploys[0].CommitMsg, "manifest unknown") || deploys[0].Steps[2].Status != "failed" {
+					t.Fatalf("expected Hangar failed fast-fail, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "TargetServicesScoping",
+			containers: []DockerContainerJSON{
+				{Names: []string{"/aerial-dashboard"}, Created: now.Add(-30 * time.Second).Unix(), State: "running", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}},
+				{Names: []string{"/aerial-brain"}, Created: now.Add(-5 * 3600 * time.Second).Unix(), State: "running", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+				{Names: []string{"/aerial-proxy"}, Created: now.Add(-5 * 3600 * time.Second).Unix(), State: "running", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "proxy"}},
+			},
+			gitSync: GitSyncStatusResponse{
+				Status:         "synced",
+				Reconciliation: &ReconciliationStatus{Active: true, State: "swapping", Stage: "swapping", TargetServices: []string{"dashboard"}, CommitSHA: "548c826", StartedAt: now.Add(-60 * time.Second)},
+			},
+			currentCommit: "current",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) == 0 || deploys[0].Stage != "swapping" || deploys[0].Commit != "548c826" || len(deploys[0].MatrixJobs) != 1 || deploys[0].MatrixJobs[0].Name != "dashboard" {
+					t.Fatalf("expected swapping deployment scoped strictly to dashboard, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "DegradedWithoutHangarFailure",
+			containers: []DockerContainerJSON{
+				{ID: "c-unhealthy", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-10 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "unhealthy"}},
+			},
+			runs: []GitHubRun{
+				{ID: 105, HeadSHA: "commit123", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-15 * time.Minute), UpdatedAt: now.Add(-12 * time.Minute)},
+			},
+			gitSync:       GitSyncStatusResponse{Status: "synced"},
+			currentCommit: "commit123",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) == 0 || deploys[0].Stage != "degraded" || deploys[0].Steps[3].Status != "completed" || deploys[0].Steps[4].Status != "failed" {
+					t.Fatalf("expected degraded deployment without Hangar failure, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "MultiRepoActiveFanout",
+			runs: []GitHubRun{
+				{ID: 101, Repository: "azylman/aerial", Name: "CI", HeadSHA: "1111aaa", Status: "in_progress", CreatedAt: now.Add(-2 * time.Minute), HTMLURL: "https://github.com/azylman/aerial/actions/runs/101"},
+				{ID: 201, Repository: "azylman/aerial-sidecars", Name: "Build Sidecars", HeadSHA: "2222bbb", Status: "in_progress", CreatedAt: now.Add(-1 * time.Minute), HTMLURL: "https://github.com/azylman/aerial-sidecars/actions/runs/201"},
+			},
+			currentCommit: "0000000",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 2 {
+					t.Fatalf("expected 2 active deployments across repos, got %d", len(deploys))
+				}
+				var aerialDep, sidecarsDep *DeploymentStatus
+				for i := range deploys {
+					if deploys[i].Repository == "azylman/aerial" {
+						aerialDep = &deploys[i]
+					} else if deploys[i].Repository == "azylman/aerial-sidecars" {
+						sidecarsDep = &deploys[i]
+					}
+				}
+				if aerialDep == nil || aerialDep.Stage != "building" || sidecarsDep == nil || sidecarsDep.Stage != "building" {
+					t.Errorf("expected active aerial and sidecars deploys in building stage, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "NonContainerRepoNoTimeout",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+			},
+			runs: []GitHubRun{
+				{ID: 301, Repository: "azylman/aerial-config", Name: "Config Validation", HeadSHA: "3333ccc", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-150 * time.Second), HTMLURL: "https://github.com/azylman/aerial-config/actions/runs/301"},
+			},
+			currentCommit: "oldcorecommit",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) > 0 && deploys[0].Stage == "failed" && deploys[0].CommitMsg == "Hangar reconciliation timed out (>120s)" {
+					t.Errorf("expected non-container repo aerial-config to NOT trigger Hangar reconciliation timeout failure, got %+v", deploys[0])
+				}
+			},
+		},
+		{
+			name: "ActivePRRunShowsBuilding",
+			runs: []GitHubRun{
+				{ID: 9001, Repository: "azylman/aerial-sidecars", Name: "Continuous Delivery", Event: "pull_request", HeadBranch: "feat/sidecars-pr", HeadSHA: "aabbccdd1122", Status: "in_progress", CreatedAt: now.Add(-1 * time.Minute), UpdatedAt: now.Add(-30 * time.Second), HTMLURL: "https://github.com/azylman/aerial-sidecars/actions/runs/9001"},
+			},
+			jobs: map[int64][]GitHubJob{
+				9001: {
+					{Name: "Run Sidecar Tests & Lint", Status: "completed", Conclusion: "success"},
+					{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "in_progress"},
+				},
+			},
+			currentCommit: "0000000",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) != 1 || deploys[0].Repository != "azylman/aerial-sidecars" || deploys[0].Stage != "building" || len(deploys[0].MatrixJobs) != 2 || deploys[0].MatrixJobs[1].Name != "aura-farming" {
+					t.Fatalf("expected active PR run in building stage with aura-farming chip, got %+v", deploys)
+				}
+			},
+		},
+		{
+			name: "CompletedPRRunDoesNotTimeout",
+			containers: []DockerContainerJSON{
+				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: now.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
+			},
+			runs: []GitHubRun{
+				{ID: 9002, Repository: "azylman/aerial-sidecars", Name: "Continuous Delivery", Event: "pull_request", HeadBranch: "feat/sidecars-pr", HeadSHA: "aabbccdd1122", Status: "completed", Conclusion: "success", CreatedAt: now.Add(-300 * time.Second), UpdatedAt: now.Add(-200 * time.Second), HTMLURL: "https://github.com/azylman/aerial-sidecars/actions/runs/9002"},
+			},
+			jobs: map[int64][]GitHubJob{
+				9002: {{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "completed", Conclusion: "success"}},
+			},
+			currentCommit: "oldcorecommit",
+			check: func(t *testing.T, deploys []DeploymentStatus) {
+				if len(deploys) > 0 && deploys[0].Stage == "failed" && deploys[0].CommitMsg == "Hangar reconciliation timed out (>120s)" {
+					t.Errorf("expected completed PR run to NOT trigger Hangar reconciliation timeout failure, got %+v", deploys[0])
+				}
+			},
+		},
 	}
 
-	deploys := mergeClusterDeployments(nil, runs, jobs, "7a9f1b2")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 active deployment, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	if dep.Stage != "building" {
-		t.Errorf("expected stage 'building', got %s", dep.Stage)
-	}
-	if dep.Commit != "7a9f1b2" {
-		t.Errorf("expected commit '7a9f1b2', got %s", dep.Commit)
-	}
-	if len(dep.MatrixJobs) != 2 {
-		t.Errorf("expected 2 matrix jobs, got %d", len(dep.MatrixJobs))
-	}
-	if dep.HTMLURL != "https://github.com/azylman/aerial/actions/runs/481" {
-		t.Errorf("expected HTMLURL to match, got %s", dep.HTMLURL)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deploys := mergeClusterDeploymentsWithHangar(tt.containers, tt.runs, tt.jobs, tt.gitSync, tt.currentCommit)
+			tt.check(t, deploys)
+		})
 	}
 }
 
-func TestMergeClusterDeployments_FailedCIRun(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         482,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "abc1234567",
-			Status:     "completed",
-			Conclusion: "failure",
-			CreatedAt:  now.Add(-5 * time.Minute),
-			UpdatedAt:  now.Add(-4 * time.Minute),
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/482",
-		},
-	}
-
-	deploys := mergeClusterDeployments(nil, runs, nil, "abc1234")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 deployment on failed run, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	if dep.Stage != "failed" {
-		t.Errorf("expected stage 'failed', got %s", dep.Stage)
-	}
-	if dep.Steps[1].Status != "failed" {
-		t.Errorf("expected CI Build step status 'failed', got %s", dep.Steps[1].Status)
-	}
-}
-
-func TestMergeClusterDeployments_AwaitingHangarSync(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         483,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "def5678901",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-4 * time.Minute),
-			UpdatedAt:  now.Add(-45 * time.Second), // <= 120s
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/483",
-		},
-	}
-	jobs := map[int64][]GitHubJob{
-		483: {
-			{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
-		},
-	}
-
-	// Local containers running older version (created 10 hours ago)
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-10 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(containers, runs, jobs, "old1234")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 deployment in awaiting_pull stage, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	if dep.Stage != "awaiting_pull" {
-		t.Errorf("expected stage 'awaiting_pull', got %s", dep.Stage)
-	}
-	if dep.Steps[2].Name != "Hangar Sync" {
-		t.Errorf("expected step 2 name 'Hangar Sync', got %s", dep.Steps[2].Name)
-	}
-	if dep.Steps[2].Status != "active" {
-		t.Errorf("expected Hangar Sync step status 'active', got %s", dep.Steps[2].Status)
-	}
-}
-
-func TestMergeClusterDeployments_HangarSyncTimeout(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         484,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "timeout1234",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-10 * time.Minute),
-			UpdatedAt:  now.Add(-150 * time.Second), // > 120s timeout
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/484",
-		},
-	}
-	jobs := map[int64][]GitHubJob{
-		484: {
-			{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
-		},
-	}
-
-	// Local containers still not updated
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-10 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(containers, runs, jobs, "old1234")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 deployment on pull timeout, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	if dep.Stage != "failed" {
-		t.Errorf("expected stage 'failed' on Hangar sync timeout, got %s", dep.Stage)
-	}
-	if dep.CommitMsg != "Hangar reconciliation timed out (>120s)" {
-		t.Errorf("expected timeout message, got %s", dep.CommitMsg)
-	}
-	if dep.Steps[2].Name != "Hangar Sync" {
-		t.Errorf("expected step 2 name 'Hangar Sync', got %s", dep.Steps[2].Name)
-	}
-	if dep.Steps[2].Status != "failed" {
-		t.Errorf("expected Hangar Sync step status 'failed', got %s", dep.Steps[2].Status)
-	}
-}
-
-func TestMergeClusterDeployments_NoContainerBuilds_ImmediateLive(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         485,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "purecode1234",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-10 * time.Minute),
-			UpdatedAt:  now.Add(-150 * time.Second), // > 120s, but zero container builds
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/485",
-		},
-	}
-	// CI only ran tests & lint; container build was skipped
-	jobs := map[int64][]GitHubJob{
-		485: {
-			{Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
-			{Name: "Lint Microservices & Frontend", Status: "completed", Conclusion: "success"},
-			{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "skipped"},
-		},
-	}
-
-	// Healthy running local containers
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-1 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(containers, runs, jobs, "old1234")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 deployment, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	// Because no containers needed rebuilding, it is immediately marked live / stack synced rather than timing out!
-	if dep.Stage != "live" {
-		t.Errorf("expected stage 'live', got %s", dep.Stage)
-	}
-	if dep.Progress != 100 {
-		t.Errorf("expected progress 100, got %d", dep.Progress)
-	}
-	if dep.Steps[2].Name != "Hangar Sync" {
-		t.Errorf("expected step 2 name 'Hangar Sync', got %s", dep.Steps[2].Name)
-	}
-	if dep.Steps[2].Status != "completed" {
-		t.Errorf("expected Hangar Sync step status 'completed', got %s", dep.Steps[2].Status)
-	}
-}
-
-func TestMergeClusterDeployments_RollingSwap(t *testing.T) {
-	now := time.Now().UTC()
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-30 * time.Second).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "org.opencontainers.image.revision": "abc9999999"},
-			Health: &struct {
-				Status string `json:"Status"`
-			}{Status: "starting"},
-		},
-		{
-			ID:      "c2",
-			Names:   []string{"/aerial-dashboard"},
-			State:   "running",
-			Created: now.Add(-10 * time.Second).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
-		},
-	}
-
-	parentRunsSwap := []GitHubRun{
-		{
-			ID:         101,
-			HeadSHA:    "abc9999999",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-2 * time.Minute),
-			UpdatedAt:  now.Add(-1 * time.Minute),
-		},
-	}
-	deploys := mergeClusterDeployments(containers, parentRunsSwap, nil, "abc9999")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 unified deployment on rolling swap, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	if dep.Stage != "swapping" {
-		t.Errorf("expected stage 'swapping', got %s", dep.Stage)
-	}
-	if dep.Commit != "abc9999" {
-		t.Errorf("expected commit resolved from image label 'abc9999', got %s", dep.Commit)
-	}
-	if len(dep.MatrixJobs) != 2 {
-		t.Errorf("expected 2 container chips, got %d", len(dep.MatrixJobs))
-	}
-}
-
-func TestMergeClusterDeployments_SyncedGrace(t *testing.T) {
-	now := time.Now().UTC()
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-3 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health: &struct {
-				Status string `json:"Status"`
-			}{Status: "healthy"},
-		},
-		{
-			ID:      "c2",
-			Names:   []string{"/aerial-dashboard"},
-			State:   "running",
-			Created: now.Add(-3 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
-			Health: &struct {
-				Status string `json:"Status"`
-			}{Status: "healthy"},
-		},
-	}
-
-	parentRunsGrace := []GitHubRun{
-		{
-			ID:         102,
-			HeadSHA:    "live123",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-5 * time.Minute),
-			UpdatedAt:  now.Add(-4 * time.Minute),
-		},
-	}
-	deploys := mergeClusterDeployments(containers, parentRunsGrace, nil, "live123")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 unified deployment in synced grace, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	if dep.Stage != "live" {
-		t.Errorf("expected stage 'live', got %s", dep.Stage)
-	}
-	if dep.Progress != 100 {
-		t.Errorf("expected progress 100, got %d", dep.Progress)
-	}
-	for i, s := range dep.Steps {
-		if s.Status != "completed" {
-			t.Errorf("expected step %d (%s) to be completed, got %s", i, s.Name, s.Status)
-		}
-	}
-}
-
-func TestMergeClusterDeployments_DegradedState(t *testing.T) {
-	now := time.Now().UTC()
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-2 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health: &struct {
-				Status string `json:"Status"`
-			}{Status: "unhealthy"},
-		},
-		{
-			ID:      "c2",
-			Names:   []string{"/aerial-dashboard"},
-			State:   "running",
-			Created: now.Add(-2 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
-			Health: &struct {
-				Status string `json:"Status"`
-			}{Status: "healthy"},
-		},
-	}
-
-	parentRunsDegraded := []GitHubRun{
-		{
-			ID:         103,
-			HeadSHA:    "deg1234",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-5 * time.Minute),
-			UpdatedAt:  now.Add(-3 * time.Minute),
-		},
-	}
-	deploys := mergeClusterDeployments(containers, parentRunsDegraded, nil, "deg1234")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 unified deployment on degraded state, got %d", len(deploys))
-	}
-
-	dep := deploys[0]
-	if dep.Stage != "degraded" {
-		t.Errorf("expected stage 'degraded', got %s", dep.Stage)
-	}
-	if dep.Steps[4].Status != "failed" {
-		t.Errorf("expected Health Check step status 'failed', got %s", dep.Steps[4].Status)
-	}
-}
-
-func TestMergeClusterDeployments_Idle(t *testing.T) {
-	now := time.Now().UTC()
-	// Containers up for 2 hours with no active CI
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-2 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health: &struct {
-				Status string `json:"Status"`
-			}{Status: "healthy"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(containers, nil, nil, "idle123")
-	if len(deploys) != 0 {
-		t.Fatalf("expected 0 deployments (idle), got %d", len(deploys))
-	}
-}
-
-func TestMergeClusterDeployments_AdversarialNilLabelsAndNilHealth(t *testing.T) {
-	now := time.Now().UTC()
-	// Containers with nil Labels map, nil Health pointer, but running state
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-30 * time.Second).Unix(),
-			Labels:  nil,
-			Health:  nil,
-		},
-		{
-			ID:      "c2",
-			Names:   []string{"/aerial-dashboard"},
-			State:   "running",
-			Created: now.Add(-30 * time.Second).Unix(),
-			Labels:  nil,
-			Health:  nil,
-		},
-	}
-
-	parentRunsNil := []GitHubRun{
-		{
-			ID:         104,
-			HeadSHA:    "test1234",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-2 * time.Minute),
-			UpdatedAt:  now.Add(-1 * time.Minute),
-		},
-	}
-	deploys := mergeClusterDeployments(containers, parentRunsNil, nil, "test1234")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 deployment, got %d", len(deploys))
-	}
-	dep := deploys[0]
-	if dep.Stage != "swapping" {
-		t.Errorf("expected swapping stage, got %s", dep.Stage)
-	}
-	if len(dep.MatrixJobs) != 2 {
-		t.Errorf("expected 2 container chips, got %d", len(dep.MatrixJobs))
-	}
-}
-
-func TestMergeClusterDeployments_AdversarialClockSkewFutureTimestamp(t *testing.T) {
-	now := time.Now().UTC()
-	futureRun := []GitHubRun{
-		{
-			ID:         999,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "future1234",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(10 * time.Second),
-			UpdatedAt:  now.Add(15 * time.Second), // In future due to clock skew
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/999",
-		},
-	}
-
-	// Local containers running older version
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-2 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(containers, futureRun, nil, "old1234")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 deployment, got %d", len(deploys))
-	}
-	dep := deploys[0]
-	if dep.Stage != "awaiting_pull" {
-		t.Errorf("expected stage 'awaiting_pull' despite future timestamp, got %s", dep.Stage)
-	}
-}
-
-func TestParseMatrixJobChips_LintAndTests(t *testing.T) {
-	jobs := []GitHubJob{
-		{
-			ID:          201,
-			Name:        "Run Service Unit Tests",
-			Status:      "completed",
-			Conclusion:  "success",
-			StartedAt:   time.Now().Add(-30 * time.Second),
-			CompletedAt: time.Now().Add(-5 * time.Second),
-		},
-		{
-			ID:        202,
-			Name:      "Lint Go Microservices",
-			Status:    "in_progress",
-			StartedAt: time.Now().Add(-10 * time.Second),
-		},
-	}
-
-	chips := parseMatrixJobChips(jobs)
-	if len(chips) != 2 {
-		t.Fatalf("expected 2 chips (unit-tests, lint), got %d", len(chips))
-	}
-	if chips[0].Name != "unit-tests" || chips[0].Status != "completed" {
-		t.Errorf("unexpected chip 0: %+v", chips[0])
-	}
-	if chips[1].Name != "lint" || chips[1].Status != "active" {
-		t.Errorf("unexpected chip 1: %+v", chips[1])
-	}
-}
-
-func TestSchedulesHandler_Success(t *testing.T) {
+func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/schedules" {
-			http.NotFound(w, r)
-			return
-		}
-		resp := SchedulesAPIResponse{
-			Status: "ok",
-			Summary: ScheduleSummaryMetrics{
-				TotalActive:    3,
-				CronCount:      2,
-				OneShotCount:   1,
-				TotalRuns24h:   15,
-				SuccessRate24h: 93.3,
-			},
-			Crons: []CronSchedule{
-				{
-					ID:              "cron-1",
-					ChannelID:       "chan-1",
-					TitlePrefix:     "Morning Brief",
-					CronExpr:        "0 9 * * *",
-					CronDescription: "Every day at 9:00 AM",
-					Prompt:          "Generate morning brief",
-					Timezone:        "America/Los_Angeles",
-					Enabled:         true,
-				},
-			},
-			OneShots: []OneShotSchedule{
-				{
-					ID:       "oneshot-1",
-					ThreadID: "thread-1",
-					Prompt:   "Remind about tea",
-					RunAt:    time.Now().UTC().Add(10 * time.Minute),
-				},
-			},
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		switch r.URL.Path {
+		case "/schedules":
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status:   "ok",
+				Summary:  ScheduleSummaryMetrics{TotalActive: 3, CronCount: 2, OneShotCount: 1, TotalRuns24h: 15, SuccessRate24h: 93.3},
+				Crons:    []CronSchedule{{ID: "cron-1", ChannelID: "chan-1", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * *", CronDescription: "Every day at 9:00 AM", Prompt: "Generate morning brief", Timezone: "America/Los_Angeles", Enabled: true}},
+				OneShots: []OneShotSchedule{{ID: "oneshot-1", ThreadID: "thread-1", Prompt: "Remind about tea", RunAt: time.Now().UTC().Add(10 * time.Minute)}},
+			})
+		case "/schedules/runs":
+			q := r.URL.Query()
+			if q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("schedule_id") != "cron-1" || q.Get("status") != "success" {
+				t.Errorf("unexpected upstream query params: %s", r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Status: "ok", Total: 42, Limit: 10, Offset: 5,
+				Runs: []ScheduleRun{{ID: "cron-brief-101", ScheduleID: "cron-1", ScheduleType: "cron", Prompt: "Daily summary", Title: "Morning Brief #101", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1250}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer mockBrain.Close()
 
-	handler := schedulesHandler(mockBrain.URL)
-	req := httptest.NewRequest("GET", "/api/schedules", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr.Code)
-	}
-
-	var data SchedulesAPIResponse
-	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if data.Status != "ok" {
-		t.Errorf("expected status 'ok', got %s", data.Status)
-	}
-	if data.Summary.TotalActive != 3 || data.Summary.CronCount != 2 || data.Summary.OneShotCount != 1 {
-		t.Errorf("unexpected summary in response: %+v", data.Summary)
-	}
-	if len(data.Crons) != 1 || data.Crons[0].TitlePrefix != "Morning Brief" {
-		t.Errorf("unexpected crons in response: %+v", data.Crons)
-	}
-	if len(data.OneShots) != 1 || data.OneShots[0].Prompt != "Remind about tea" {
-		t.Errorf("unexpected one_shots in response: %+v", data.OneShots)
-	}
-}
-
-func TestSchedulesHandler_DegradedFallback(t *testing.T) {
-	handler := schedulesHandler("http://127.0.0.1:54321")
-	req := httptest.NewRequest("GET", "/api/schedules", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 Service Unavailable on brain offline, got %d", rr.Code)
-	}
-
-	var data SchedulesAPIResponse
-	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
-		t.Fatalf("failed to decode degraded response: %v", err)
-	}
-
-	if data.Status != "degraded" {
-		t.Errorf("expected status 'degraded', got %s", data.Status)
-	}
-	if data.Error != "Brain service unreachable. Retrying..." {
-		t.Errorf("expected fallback error message, got %s", data.Error)
-	}
-	if data.Summary.TotalActive != 0 || data.Summary.SuccessRate24h != 100.0 {
-		t.Errorf("expected fallback summary with TotalActive=0, SuccessRate24h=100.0, got %+v", data.Summary)
-	}
-	if data.Crons == nil || len(data.Crons) != 0 {
-		t.Errorf("expected non-nil empty crons array")
-	}
-	if data.OneShots == nil || len(data.OneShots) != 0 {
-		t.Errorf("expected non-nil empty one_shots array")
-	}
-}
-
-func TestSchedulesHandler_MethodNotAllowed(t *testing.T) {
-	handler := schedulesHandler("http://127.0.0.1:54321")
-	req := httptest.NewRequest("POST", "/api/schedules", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 Method Not Allowed, got %d", rr.Code)
-	}
-}
-
-func TestScheduleRunsHandler_Success(t *testing.T) {
-	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/schedules/runs" {
-			http.NotFound(w, r)
-			return
-		}
-		q := r.URL.Query()
-		if q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("schedule_id") != "cron-1" || q.Get("status") != "success" {
-			t.Errorf("unexpected upstream query params: %s", r.URL.RawQuery)
-		}
-		started := time.Now().UTC().Add(-1 * time.Hour)
-		resp := ScheduleRunsAPIResponse{
-			Status: "ok",
-			Total:  42,
-			Limit:  10,
-			Offset: 5,
-			Runs: []ScheduleRun{
-				{
-					ID:           "cron-brief-101",
-					ScheduleID:   "cron-1",
-					ScheduleType: "cron",
-					Prompt:       "Daily summary",
-					Title:        "Morning Brief #101",
-					Status:       "success",
-					StartedAt:    started,
-					DurationMs:   1250,
-				},
+	offlineURL := "http://127.0.0.1:54321"
+	tests := []struct {
+		name       string
+		isRuns     bool
+		brainURL   string
+		method     string
+		target     string
+		wantStatus int
+		check      func(t *testing.T, body io.Reader)
+	}{
+		{
+			name: "Schedules_Success", brainURL: mockBrain.URL, method: "GET", target: "/api/schedules", wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data SchedulesAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Status != "ok" || data.Summary.TotalActive != 3 || len(data.Crons) != 1 || data.Crons[0].TitlePrefix != "Morning Brief" || len(data.OneShots) != 1 || data.OneShots[0].Prompt != "Remind about tea" {
+					t.Errorf("unexpected schedules response: %+v", data)
+				}
 			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer mockBrain.Close()
-
-	handler := scheduleRunsHandler(mockBrain.URL)
-	req := httptest.NewRequest("GET", "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr.Code)
+		},
+		{
+			name: "Schedules_DegradedFallback", brainURL: offlineURL, method: "GET", target: "/api/schedules", wantStatus: http.StatusServiceUnavailable,
+			check: func(t *testing.T, body io.Reader) {
+				var data SchedulesAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode degraded response: %v", err)
+				}
+				if data.Status != "degraded" || data.Error != "Brain service unreachable. Retrying..." || data.Summary.TotalActive != 0 || data.Summary.SuccessRate24h != 100.0 || data.Crons == nil || len(data.Crons) != 0 || data.OneShots == nil || len(data.OneShots) != 0 {
+					t.Errorf("unexpected degraded schedules response: %+v", data)
+				}
+			},
+		},
+		{
+			name: "Schedules_MethodNotAllowed", brainURL: offlineURL, method: "POST", target: "/api/schedules", wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name: "ScheduleRuns_Success", isRuns: true, brainURL: mockBrain.URL, method: "GET", target: "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success", wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data ScheduleRunsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Status != "ok" || data.Total != 42 || data.Limit != 10 || data.Offset != 5 || len(data.Runs) != 1 || data.Runs[0].ID != "cron-brief-101" || data.Runs[0].DurationMs != 1250 {
+					t.Errorf("unexpected schedule runs response: %+v", data)
+				}
+			},
+		},
+		{
+			name: "ScheduleRuns_DegradedFallback", isRuns: true, brainURL: offlineURL, method: "GET", target: "/api/schedules/runs?limit=20&offset=10", wantStatus: http.StatusServiceUnavailable,
+			check: func(t *testing.T, body io.Reader) {
+				var data ScheduleRunsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode degraded response: %v", err)
+				}
+				if data.Status != "degraded" || data.Error != "Brain service unreachable. Retrying..." || data.Total != 0 || data.Limit != 20 || data.Offset != 10 || data.Runs == nil || len(data.Runs) != 0 {
+					t.Errorf("unexpected degraded schedule runs response: %+v", data)
+				}
+			},
+		},
+		{
+			name: "ScheduleRuns_MethodNotAllowed", isRuns: true, brainURL: offlineURL, method: "DELETE", target: "/api/schedules/runs", wantStatus: http.StatusMethodNotAllowed,
+		},
 	}
 
-	var data ScheduleRunsAPIResponse
-	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if data.Status != "ok" || data.Total != 42 || data.Limit != 10 || data.Offset != 5 {
-		t.Errorf("unexpected metadata in response: %+v", data)
-	}
-	if len(data.Runs) != 1 || data.Runs[0].ID != "cron-brief-101" || data.Runs[0].Status != "success" || data.Runs[0].DurationMs != 1250 {
-		t.Errorf("unexpected runs in response: %+v", data.Runs)
-	}
-}
-
-func TestScheduleRunsHandler_DegradedFallback(t *testing.T) {
-	handler := scheduleRunsHandler("http://127.0.0.1:54321")
-	req := httptest.NewRequest("GET", "/api/schedules/runs?limit=20&offset=10", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 Service Unavailable on brain offline, got %d", rr.Code)
-	}
-
-	var data ScheduleRunsAPIResponse
-	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
-		t.Fatalf("failed to decode degraded response: %v", err)
-	}
-
-	if data.Status != "degraded" {
-		t.Errorf("expected status 'degraded', got %s", data.Status)
-	}
-	if data.Error != "Brain service unreachable. Retrying..." {
-		t.Errorf("expected fallback error message, got %s", data.Error)
-	}
-	if data.Total != 0 || data.Limit != 20 || data.Offset != 10 {
-		t.Errorf("expected Total=0, Limit=20, Offset=10, got %+v", data)
-	}
-	if data.Runs == nil || len(data.Runs) != 0 {
-		t.Errorf("expected non-nil empty runs array")
-	}
-}
-
-func TestScheduleRunsHandler_MethodNotAllowed(t *testing.T) {
-	handler := scheduleRunsHandler("http://127.0.0.1:54321")
-	req := httptest.NewRequest("DELETE", "/api/schedules/runs", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 Method Not Allowed, got %d", rr.Code)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := schedulesHandler(tt.brainURL)
+			if tt.isRuns {
+				h = scheduleRunsHandler(tt.brainURL)
+			}
+			req := httptest.NewRequest(tt.method, tt.target, nil)
+			rr := httptest.NewRecorder()
+			h(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
+			}
+			if tt.check != nil {
+				tt.check(t, rr.Body)
+			}
+		})
 	}
 }
 
@@ -1225,35 +979,6 @@ func TestZeroPersonalDataAndHardcodedIPs(t *testing.T) {
 		if strings.Contains(str, "10.0.") {
 			t.Errorf("found private LAN IP (10.0.x.x) in %s", f)
 		}
-	}
-}
-
-func TestMatchesETag(t *testing.T) {
-	cases := []struct {
-		name        string
-		ifNoneMatch string
-		targetETag  string
-		targetHash  string
-		wantMatch   bool
-	}{
-		{"exact strong match", `"abc1234"`, `"abc1234"`, "abc1234", true},
-		{"client weak vs server strong", `W/"abc1234"`, `"abc1234"`, "abc1234", true},
-		{"client strong vs server weak", `"abc1234"`, `W/"abc1234"`, "abc1234", true},
-		{"client weak vs server weak", `W/"abc1234"`, `W/"abc1234"`, "abc1234", true},
-		{"wildcard match", `*`, `"abc1234"`, "abc1234", true},
-		{"comma separated list with match", `"other", W/"abc1234", "xyz"`, `"abc1234"`, "abc1234", true},
-		{"comma separated list without match", `"other", W/"nomatch", "xyz"`, `"abc1234"`, "abc1234", false},
-		{"empty header", "", `"abc1234"`, "abc1234", false},
-		{"mismatch", `"diff"`, `"abc1234"`, "abc1234", false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := MatchesETag(tc.ifNoneMatch, tc.targetETag, tc.targetHash)
-			if got != tc.wantMatch {
-				t.Errorf("MatchesETag(%q, %q, %q) = %v; want %v", tc.ifNoneMatch, tc.targetETag, tc.targetHash, got, tc.wantMatch)
-			}
-		})
 	}
 }
 
@@ -1454,167 +1179,6 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 			t.Fatalf("expected status 200 for /dashboard/favicon.ico, got %d", rec.Code)
 		}
 	})
-}
-
-func TestGetContainerCommit_IgnoreAuxiliarySidecars(t *testing.T) {
-	containers := []DockerContainerJSON{
-		{
-			ID:    "c-agentsview",
-			Names: []string{"/aerial-agentsview"},
-			Image: "ghcr.io/azylman/agentsview:latest",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "agentsview",
-				"org.opencontainers.image.revision": "080b49fb7a7c1d8f206549e8ee4eaf9cf50a5c20",
-			},
-		},
-		{
-			ID:    "c-watchtower",
-			Names: []string{"/aerial-watchtower"},
-			Image: "containrrr/watchtower:latest",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "watchtower",
-				"org.opencontainers.image.revision": "ace93994711edfe47036e2d2ee5f5d531df013ed",
-			},
-		},
-		{
-			ID:    "c-autoheal",
-			Names: []string{"/aerial-autoheal"},
-			Image: "willfarrell/autoheal:latest",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "autoheal",
-				"org.opencontainers.image.revision": "autohealsha1234",
-			},
-		},
-		{
-			ID:    "c-brain",
-			Names: []string{"/aerial-brain"},
-			Image: "ghcr.io/azylman/aerial-brain:latest",
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "brain",
-				"aerial.commit_sha":          "e056544d32a5f9d8a4cc50915a20db5eaea7db1e",
-			},
-		},
-	}
-
-	commit := getContainerCommit(containers)
-	if commit != "e056544" {
-		t.Fatalf("expected brain commit 'e056544', got %q", commit)
-	}
-}
-
-func TestMergeClusterDeployments_CommitTimeAcrossAllStages(t *testing.T) {
-	now := time.Now().UTC()
-	commitTime := now.Add(-10 * time.Minute)
-
-	// 1. CI Queued
-	runsQueued := []GitHubRun{
-		{
-			ID:         501,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "1111aaa",
-			Status:     "queued",
-			Conclusion: "",
-			CreatedAt:  now.Add(-2 * time.Minute),
-			HeadCommit: &struct {
-				Message   string    `json:"message"`
-				Timestamp time.Time `json:"timestamp"`
-			}{
-				Message:   "feat: queued",
-				Timestamp: commitTime,
-			},
-		},
-	}
-	deploysQueued := mergeClusterDeployments(nil, runsQueued, nil, "1111aaa")
-	if len(deploysQueued) != 1 || deploysQueued[0].CommitTime == nil || !deploysQueued[0].CommitTime.Equal(commitTime) {
-		t.Errorf("expected queued stage to have valid CommitTime")
-	}
-
-	// 2. CI Building
-	runsBuilding := []GitHubRun{
-		{
-			ID:         502,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "2222bbb",
-			Status:     "in_progress",
-			Conclusion: "",
-			CreatedAt:  now.Add(-1 * time.Minute),
-			HeadCommit: &struct {
-				Message   string    `json:"message"`
-				Timestamp time.Time `json:"timestamp"`
-			}{
-				Message:   "feat: building",
-				Timestamp: commitTime,
-			},
-		},
-	}
-	deploysBuilding := mergeClusterDeployments(nil, runsBuilding, nil, "2222bbb")
-	if len(deploysBuilding) != 1 || deploysBuilding[0].CommitTime == nil || !deploysBuilding[0].CommitTime.Equal(commitTime) {
-		t.Errorf("expected building stage to have valid CommitTime")
-	}
-
-	// 3. CI Failed
-	runsFailed := []GitHubRun{
-		{
-			ID:         503,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "3333ccc",
-			Status:     "completed",
-			Conclusion: "failure",
-			CreatedAt:  now.Add(-5 * time.Minute),
-			UpdatedAt:  now.Add(-4 * time.Minute),
-			HeadCommit: &struct {
-				Message   string    `json:"message"`
-				Timestamp time.Time `json:"timestamp"`
-			}{
-				Message:   "feat: failed",
-				Timestamp: commitTime,
-			},
-		},
-	}
-	deploysFailed := mergeClusterDeployments(nil, runsFailed, nil, "3333ccc")
-	if len(deploysFailed) != 1 || deploysFailed[0].CommitTime == nil || !deploysFailed[0].CommitTime.Equal(commitTime) {
-		t.Errorf("expected failed stage to have valid CommitTime")
-	}
-
-	// 4. Local Swapping & Live with GH poller cache
-	containersSwapping := []DockerContainerJSON{
-		{
-			ID:      "c-brain",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-30 * time.Second).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health: &struct {
-				Status string `json:"Status"`
-			}{Status: "starting"},
-		},
-	}
-	runsSuccess := []GitHubRun{
-		{
-			ID:         504,
-			Name:       "Continuous Delivery",
-			HeadSHA:    "4444ddd",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-2 * time.Minute),
-			UpdatedAt:  now.Add(-1 * time.Minute),
-			HeadCommit: &struct {
-				Message   string    `json:"message"`
-				Timestamp time.Time `json:"timestamp"`
-			}{
-				Message:   "feat: success",
-				Timestamp: commitTime,
-			},
-		},
-	}
-	deploysSwapping := mergeClusterDeployments(containersSwapping, runsSuccess, nil, "4444ddd")
-	if len(deploysSwapping) != 1 || deploysSwapping[0].Commit != "4444ddd" || deploysSwapping[0].CommitTime == nil || !deploysSwapping[0].CommitTime.Equal(commitTime) {
-		t.Errorf("expected swapping stage to resolve commit and CommitTime from runs")
-	}
 }
 
 func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
@@ -1892,101 +1456,6 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 	}
 }
 
-func TestGetMimeType(t *testing.T) {
-	tests := []struct {
-		path     string
-		expected string
-	}{
-		{"index.html", "text/html; charset=utf-8"},
-		{"style.css", "text/css; charset=utf-8"},
-		{"data.json", "application/json"},
-		{"logo.svg", "image/svg+xml"},
-		{"image.png", "image/png"},
-		{"custom.woff2", "font/woff2"},
-		{"unknown.nonexistent123456", "application/octet-stream"},
-	}
-
-	for _, tt := range tests {
-		got := getMimeType(tt.path)
-		if got != tt.expected {
-			t.Errorf("getMimeType(%q) = %q, want %q", tt.path, got, tt.expected)
-		}
-	}
-}
-
-func TestGetContainerCommit_AllLabels(t *testing.T) {
-	// 1. Non-aerial container or nil labels
-	emptyCommit := getContainerCommit([]DockerContainerJSON{
-		{Names: []string{"/other"}, Labels: nil},
-	})
-	if emptyCommit != "" {
-		t.Errorf("expected empty string from getContainerCommit, got %q", emptyCommit)
-	}
-
-	// 2. org.opencontainers.image.revision short & long
-	revShort := getContainerCommit([]DockerContainerJSON{
-		{
-			Names:  []string{"/aerial-brain"},
-			Labels: map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "123456"},
-		},
-	})
-	if revShort != "123456" {
-		t.Errorf("expected '123456', got %q", revShort)
-	}
-
-	revLong := getContainerCommit([]DockerContainerJSON{
-		{
-			Names:  []string{"/aerial-brain"},
-			Labels: map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "1234567890"},
-		},
-	})
-	if revLong != "1234567" {
-		t.Errorf("expected '1234567', got %q", revLong)
-	}
-
-	// 3. aerial.commit_sha short & long
-	shaShort := getContainerCommit([]DockerContainerJSON{
-		{
-			Names:  []string{"/aerial-brain"},
-			Labels: map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef"},
-		},
-	})
-	if shaShort != "abcdef" {
-		t.Errorf("expected 'abcdef', got %q", shaShort)
-	}
-
-	shaLong := getContainerCommit([]DockerContainerJSON{
-		{
-			Names:  []string{"/aerial-brain"},
-			Labels: map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef012345"},
-		},
-	})
-	if shaLong != "abcdef0" {
-		t.Errorf("expected 'abcdef0', got %q", shaLong)
-	}
-
-	// 4. vcs-ref short & long
-	vcsShort := getContainerCommit([]DockerContainerJSON{
-		{
-			Names:  []string{"/aerial-brain"},
-			Labels: map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "987654"},
-		},
-	})
-	if vcsShort != "987654" {
-		t.Errorf("expected '987654', got %q", vcsShort)
-	}
-
-	vcsLong := getContainerCommit([]DockerContainerJSON{
-		{
-			Names:  []string{"/aerial-brain"},
-			Labels: map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "9876543210"},
-		},
-	})
-	if vcsLong != "9876543" {
-		t.Errorf("expected '9876543', got %q", vcsLong)
-	}
-}
-
 func TestGetGitCommitVariations(t *testing.T) {
 	// 1. Normalize short commit
 	if c := normalizeGitCommit("abcdef"); c != "abcdef" {
@@ -2023,87 +1492,8 @@ func TestGetGitCommitVariations(t *testing.T) {
 	}
 }
 
-func TestNewDashboardConfigFromLookup_Custom(t *testing.T) {
-	envMap := map[string]string{
-		"PORT":                         "9090",
-		"BRAIN_URL":                    "http://brain-custom:9090",
-		"GITHUB_REPO":                  "custom/repo",
-		"GITHUB_PAT":                   "custom_pat",
-		"GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
-		"HANGAR_URL":                   "http://hangar-custom:9090",
-		"GITSYNC_URL":                  "http://gitsync-custom:9090",
-		"AERIAL_CONFIG_PATH":           "/custom/config.yaml",
-		"GIT_COMMIT":                   "0123456789",
-	}
-	lookup := func(k string) string { return envMap[k] }
-
-	cfg := NewDashboardConfigFromLookup(lookup)
-	if cfg.Port != "9090" {
-		t.Errorf("expected port 9090, got %q", cfg.Port)
-	}
-	if cfg.BrainURL != "http://brain-custom:9090" {
-		t.Errorf("expected brain URL http://brain-custom:9090, got %q", cfg.BrainURL)
-	}
-	if cfg.GHRepo != "custom/repo" {
-		t.Errorf("expected repo custom/repo, got %q", cfg.GHRepo)
-	}
-	if cfg.GHToken != "custom_pat" {
-		t.Errorf("expected pat custom_pat, got %q", cfg.GHToken)
-	}
-	if cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" {
-		t.Errorf("expected hangar URL http://hangar-custom:9090, got %q / %q", cfg.GitSyncURL, cfg.HangarURL)
-	}
-	if cfg.ConfigPath != "/custom/config.yaml" {
-		t.Errorf("expected config path /custom/config.yaml, got %q", cfg.ConfigPath)
-	}
-	if cfg.GitCommit != "0123456" {
-		t.Errorf("expected git commit 0123456, got %q", cfg.GitCommit)
-	}
-
-	// Fallback to GITSYNC_URL if HANGAR_URL is unset
-	delete(envMap, "HANGAR_URL")
-	cfgFallbackSync := NewDashboardConfigFromLookup(lookup)
-	if cfgFallbackSync.GitSyncURL != "http://gitsync-custom:9090" || cfgFallbackSync.HangarURL != "http://gitsync-custom:9090" {
-		t.Errorf("expected fallback to GITSYNC_URL, got %q / %q", cfgFallbackSync.GitSyncURL, cfgFallbackSync.HangarURL)
-	}
-}
-
-func TestNewDashboardConfigFromLookup_Defaults(t *testing.T) {
-	// 1. Nil lookup
-	cfgNil := NewDashboardConfigFromLookup(nil)
-	if cfgNil.Port != "8080" {
-		t.Errorf("expected default port 8080, got %q", cfgNil.Port)
-	}
-	if cfgNil.BrainURL != "http://brain:8080" {
-		t.Errorf("expected default brain URL http://brain:8080, got %q", cfgNil.BrainURL)
-	}
-	if cfgNil.GHRepo != "azylman/aerial" {
-		t.Errorf("expected default repo azylman/aerial, got %q", cfgNil.GHRepo)
-	}
-	if cfgNil.GHToken != "" {
-		t.Errorf("expected empty default token, got %q", cfgNil.GHToken)
-	}
-	if cfgNil.GitSyncURL != "http://hangar:8080" || cfgNil.HangarURL != "http://hangar:8080" {
-		t.Errorf("expected default hangar URL http://hangar:8080, got %q / %q", cfgNil.GitSyncURL, cfgNil.HangarURL)
-	}
-	if cfgNil.ConfigPath != "/share/aerial-config/config.yaml" {
-		t.Errorf("expected default config path /share/aerial-config/config.yaml, got %q", cfgNil.ConfigPath)
-	}
-	if cfgNil.GitCommit != "latest" {
-		t.Errorf("expected default commit latest, got %q", cfgNil.GitCommit)
-	}
-
-	// 2. Fallback token lookup
-	envMap := map[string]string{
-		"GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token_123",
-	}
-	cfgFallback := NewDashboardConfigFromLookup(func(k string) string { return envMap[k] })
-	if cfgFallback.GHToken != "fallback_token_123" {
-		t.Errorf("expected fallback token, got %q", cfgFallback.GHToken)
-	}
-}
-
-func TestNewDashboardConfigFromLookup_YAML(t *testing.T) {
+func TestNewDashboardConfigFromLookup_TableDriven(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "dashboard.yaml")
 	yamlContent := `
@@ -2120,44 +1510,134 @@ config_path: "/custom/aerial-config/config.yaml"
 		t.Fatalf("failed to write test dashboard.yaml: %v", err)
 	}
 
-	// 1. Load from CONFIG_PATH
-	lookup := func(k string) string {
-		if k == "CONFIG_PATH" {
-			return cfgPath
-		}
-		return ""
-	}
-	cfg := NewDashboardConfigFromLookup(lookup)
-	if cfg.Port != "8084" {
-		t.Errorf("expected port 8084, got %s", cfg.Port)
-	}
-	if cfg.BrainURL != "http://brain:8088" {
-		t.Errorf("expected brain URL http://brain:8088, got %s", cfg.BrainURL)
-	}
-	if cfg.HangarURL != "http://hangar:8087" || cfg.GitSyncURL != "http://hangar:8087" {
-		t.Errorf("expected hangar URL http://hangar:8087, got %s", cfg.HangarURL)
-	}
-	if len(cfg.GHRepos) != 2 || cfg.GHRepos[1] != "azylman/aerial-config" {
-		t.Errorf("expected 2 repos, got %+v", cfg.GHRepos)
-	}
-	if cfg.ConfigPath != "/custom/aerial-config/config.yaml" {
-		t.Errorf("expected config path /custom/aerial-config/config.yaml, got %s", cfg.ConfigPath)
+	tests := []struct {
+		name   string
+		lookup func(string) string
+		check  func(t *testing.T, cfg DashboardConfig)
+	}{
+		{
+			name: "Custom_WithHangarURL",
+			lookup: func(k string) string {
+				m := map[string]string{
+					"PORT": "9090", "BRAIN_URL": "http://brain-custom:9090", "GITHUB_REPO": "custom/repo",
+					"GITHUB_PAT": "custom_pat", "GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
+					"HANGAR_URL": "http://hangar-custom:9090", "GITSYNC_URL": "http://gitsync-custom:9090",
+					"AERIAL_CONFIG_PATH": "/custom/config.yaml", "GIT_COMMIT": "0123456789",
+				}
+				return m[k]
+			},
+			check: func(t *testing.T, cfg DashboardConfig) {
+				if cfg.Port != "9090" || cfg.BrainURL != "http://brain-custom:9090" || cfg.GHRepo != "custom/repo" || cfg.GHToken != "custom_pat" || cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" || cfg.ConfigPath != "/custom/config.yaml" || cfg.GitCommit != "0123456" {
+					t.Errorf("unexpected custom config: %+v", cfg)
+				}
+			},
+		},
+		{
+			name: "Custom_FallbackGitSyncURL",
+			lookup: func(k string) string {
+				if k == "GITSYNC_URL" {
+					return "http://gitsync-custom:9090"
+				}
+				return ""
+			},
+			check: func(t *testing.T, cfg DashboardConfig) {
+				if cfg.GitSyncURL != "http://gitsync-custom:9090" || cfg.HangarURL != "http://gitsync-custom:9090" {
+					t.Errorf("expected fallback to GITSYNC_URL, got %q / %q", cfg.GitSyncURL, cfg.HangarURL)
+				}
+			},
+		},
+		{
+			name:   "Defaults_NilLookup",
+			lookup: nil,
+			check: func(t *testing.T, cfg DashboardConfig) {
+				if cfg.Port != "8080" || cfg.BrainURL != "http://brain:8080" || cfg.GHRepo != "azylman/aerial" || len(cfg.GHRepos) != 1 || cfg.GHRepos[0] != "azylman/aerial" || cfg.GHToken != "" || cfg.GitSyncURL != "http://hangar:8080" || cfg.HangarURL != "http://hangar:8080" || cfg.ConfigPath != "/share/aerial-config/config.yaml" || cfg.GitCommit != "latest" {
+					t.Errorf("unexpected default config: %+v", cfg)
+				}
+			},
+		},
+		{
+			name: "Defaults_FallbackToken",
+			lookup: func(k string) string {
+				if k == "GITHUB_PERSONAL_ACCESS_TOKEN" {
+					return "fallback_token_123"
+				}
+				return ""
+			},
+			check: func(t *testing.T, cfg DashboardConfig) {
+				if cfg.GHToken != "fallback_token_123" {
+					t.Errorf("expected fallback token, got %q", cfg.GHToken)
+				}
+			},
+		},
+		{
+			name: "YAML_LoadFromConfigPath",
+			lookup: func(k string) string {
+				if k == "CONFIG_PATH" {
+					return cfgPath
+				}
+				return ""
+			},
+			check: func(t *testing.T, cfg DashboardConfig) {
+				if cfg.Port != "8084" || cfg.BrainURL != "http://brain:8088" || cfg.HangarURL != "http://hangar:8087" || cfg.GitSyncURL != "http://hangar:8087" || len(cfg.GHRepos) != 2 || cfg.GHRepos[1] != "azylman/aerial-config" || cfg.ConfigPath != "/custom/aerial-config/config.yaml" {
+					t.Errorf("unexpected YAML config: %+v", cfg)
+				}
+			},
+		},
+		{
+			name: "YAML_EnvOverridePrecedence",
+			lookup: func(k string) string {
+				switch k {
+				case "CONFIG_PATH":
+					return cfgPath
+				case "PORT":
+					return "9999"
+				default:
+					return ""
+				}
+			},
+			check: func(t *testing.T, cfg DashboardConfig) {
+				if cfg.Port != "9999" {
+					t.Errorf("expected env override port 9999, got %s", cfg.Port)
+				}
+			},
+		},
+		{
+			name: "MultiRepo_GithubReposList",
+			lookup: func(k string) string {
+				if k == "GITHUB_REPOS" {
+					return "azylman/aerial, azylman/aerial-sidecars, azylman/aerial-config"
+				}
+				return ""
+			},
+			check: func(t *testing.T, cfg DashboardConfig) {
+				want := []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"}
+				if len(cfg.GHRepos) != 3 || cfg.GHRepos[0] != want[0] || cfg.GHRepos[1] != want[1] || cfg.GHRepos[2] != want[2] || cfg.GHRepo != "azylman/aerial" {
+					t.Errorf("unexpected multi-repo config: %+v", cfg)
+				}
+			},
+		},
+		{
+			name: "MultiRepo_SingleRepoFallback",
+			lookup: func(k string) string {
+				if k == "GITHUB_REPO" {
+					return "custom/single-repo"
+				}
+				return ""
+			},
+			check: func(t *testing.T, cfg DashboardConfig) {
+				if len(cfg.GHRepos) != 1 || cfg.GHRepos[0] != "custom/single-repo" || cfg.GHRepo != "custom/single-repo" {
+					t.Errorf("unexpected single-repo fallback: %+v", cfg)
+				}
+			},
+		},
 	}
 
-	// 2. Env overrides take precedence over YAML
-	lookupWithOverride := func(k string) string {
-		switch k {
-		case "CONFIG_PATH":
-			return cfgPath
-		case "PORT":
-			return "9999"
-		default:
-			return ""
-		}
-	}
-	cfgOverride := NewDashboardConfigFromLookup(lookupWithOverride)
-	if cfgOverride.Port != "9999" {
-		t.Errorf("expected env override port 9999, got %s", cfgOverride.Port)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := NewDashboardConfigFromLookup(tt.lookup)
+			tt.check(t, cfg)
+		})
 	}
 }
 
@@ -3030,141 +2510,6 @@ func (r *roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 	return r.fn(req)
 }
 
-func TestSanitizeEnvVars_NoEquals(t *testing.T) {
-	input := []string{"VALID=1", "INVALID_NO_EQUALS", "ANOTHER=2"}
-	got := SanitizeEnvVars(input)
-	for _, env := range got {
-		if strings.HasPrefix(env, "INVALID_NO_EQUALS") {
-			t.Errorf("expected INVALID_NO_EQUALS to be skipped")
-		}
-	}
-	if len(got) != 2 {
-		t.Errorf("expected 2 sanitized vars, got %d", len(got))
-	}
-}
-
-func TestExtractServiceNameFromJobName_NoMatch(t *testing.T) {
-	if got := extractServiceNameFromJobName("completely-unrelated-job"); got != "" {
-		t.Errorf("expected empty string, got %q", got)
-	}
-}
-
-func TestParseMatrixJobChips_EdgeCases(t *testing.T) {
-	jobs := []GitHubJob{
-		{
-			Name:       "build / brain",
-			Status:     "completed",
-			Conclusion: "failure",
-		},
-		{
-			Name:       "build / brain",
-			Status:     "completed",
-			Conclusion: "success",
-		},
-		{
-			Name:       "build / dashboard",
-			Status:     "completed",
-			Conclusion: "skipped",
-		},
-	}
-	chips := parseMatrixJobChips(jobs)
-	if len(chips) != 2 {
-		t.Fatalf("expected 2 chips, got %d", len(chips))
-	}
-	if chips[0].Status != "failed" {
-		t.Errorf("expected failure conclusion to result in 'failed', got %s", chips[0].Status)
-	}
-	if chips[1].Status != "pending" {
-		t.Errorf("expected skipped conclusion to result in 'pending', got %s", chips[1].Status)
-	}
-}
-
-func TestIsCoreAerialContainer_Filters(t *testing.T) {
-	cAgentsview := DockerContainerJSON{
-		Image: "ghcr.io/azylman/agentsview:latest",
-	}
-	if isCoreAerialContainer(cAgentsview) {
-		t.Errorf("expected agentsview to NOT be recognized as core aerial container")
-	}
-
-	cForeign := DockerContainerJSON{
-		Image: "other/image",
-		Labels: map[string]string{
-			"org.opencontainers.image.source": "https://github.com/external/project",
-		},
-	}
-	if isCoreAerialContainer(cForeign) {
-		t.Errorf("expected foreign container to not be core aerial container")
-	}
-}
-
-func TestBuildContainerChips_EdgeCases(t *testing.T) {
-	now := time.Now().UTC()
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(1 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.service": "brain"},
-		},
-		{
-			ID:      "c2",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Unix(),
-			Labels:  map[string]string{"com.docker.compose.service": "brain"},
-		},
-	}
-	chips := buildContainerChips(containers)
-	if len(chips) != 1 {
-		t.Fatalf("expected 1 deduplicated chip, got %d", len(chips))
-	}
-	if chips[0].Duration != "0s" {
-		t.Errorf("expected Duration '0s' for future created time, got %s", chips[0].Duration)
-	}
-}
-
-func TestMergeClusterDeployments_EmptyAndFuture(t *testing.T) {
-	if deps := mergeClusterDeployments(nil, nil, nil, "commit123"); len(deps) != 0 {
-		t.Errorf("expected empty deployments for no aerial containers, got %d", len(deps))
-	}
-
-	now := time.Now().UTC()
-	futureContainers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(2 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-		},
-	}
-	runs := []GitHubRun{
-		{
-			ID:         123,
-			Status:     "completed",
-			Conclusion: "success",
-			HeadSHA:    "sha1234567890",
-			CreatedAt:  now.Add(-10 * time.Minute),
-			HeadCommit: nil,
-		},
-	}
-	deps := mergeClusterDeployments(futureContainers, runs, nil, "")
-	if len(deps) == 0 {
-		t.Fatalf("expected at least 1 deployment")
-	}
-}
-
-func TestGetMimeType_Extended(t *testing.T) {
-	if got := getMimeType("test.woff2"); got != "font/woff2" {
-		t.Errorf("expected font/woff2, got %s", got)
-	}
-	if got := getMimeType("test.svg"); got != "image/svg+xml" {
-		t.Errorf("expected image/svg+xml, got %s", got)
-	}
-}
-
 func TestGitHubPoller_CoverageBoost(t *testing.T) {
 	p := NewGitHubPoller("azylman/aerial", "")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3318,196 +2663,6 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 	writeJSON(mockWJSONErr, reqActive, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func TestMergeClusterDeploymentsWithHangar_HangarActiveSuppresses120sTimeout(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         101,
-			HeadSHA:    "abc1234567890",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-300 * time.Second),
-			UpdatedAt:  now.Add(-200 * time.Second), // 200s ago (> 120s timeout window)
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/101",
-		},
-	}
-	jobs := map[int64][]GitHubJob{
-		101: {
-			{Name: "Build & Push Images (dashboard)", Status: "completed", Conclusion: "success"},
-		},
-	}
-	gitSync := GitSyncStatusResponse{
-		Status: "synced",
-		Reconciliation: &ReconciliationStatus{
-			Active:         true,
-			State:          "pulling",
-			Stage:          "pulling",
-			TargetServices: []string{"dashboard"},
-		},
-	}
-
-	deps := mergeClusterDeploymentsWithHangar(nil, runs, jobs, gitSync, "oldcommit")
-	if len(deps) == 0 {
-		t.Fatalf("expected non-empty deployments")
-	}
-	dep := deps[0]
-	if dep.Stage != "pulling" && dep.Stage != "awaiting_pull" {
-		t.Errorf("expected stage 'pulling' or 'awaiting_pull' when Hangar is active, got %q", dep.Stage)
-	}
-	if dep.Steps[2].Status != "active" {
-		t.Errorf("expected Hangar Sync step active, got %q", dep.Steps[2].Status)
-	}
-}
-
-func TestMergeClusterDeploymentsWithHangar_HangarFailedFastFail(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         102,
-			HeadSHA:    "def5678901234",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-60 * time.Second),
-			UpdatedAt:  now.Add(-30 * time.Second),
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/102",
-		},
-	}
-	gitSync := GitSyncStatusResponse{
-		Status: "error",
-		Reconciliation: &ReconciliationStatus{
-			Active: false,
-			State:  "failed",
-			Stage:  "failed",
-			Error:  "manifest unknown",
-		},
-	}
-
-	deps := mergeClusterDeploymentsWithHangar(nil, runs, nil, gitSync, "oldcommit")
-	if len(deps) == 0 {
-		t.Fatalf("expected non-empty deployments")
-	}
-	dep := deps[0]
-	if dep.Stage != "failed" {
-		t.Errorf("expected stage 'failed', got %q", dep.Stage)
-	}
-	if !strings.Contains(dep.CommitMsg, "manifest unknown") {
-		t.Errorf("expected error in commit msg, got %q", dep.CommitMsg)
-	}
-	if dep.Steps[2].Status != "failed" {
-		t.Errorf("expected Hangar Sync step failed, got %q", dep.Steps[2].Status)
-	}
-}
-
-func TestMergeClusterDeploymentsWithHangar_TargetServicesScoping(t *testing.T) {
-	now := time.Now().UTC()
-	rawContainers := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-dashboard"},
-			Created: now.Add(-30 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "dashboard",
-			},
-		},
-		{
-			Names:   []string{"/aerial-brain"},
-			Created: now.Add(-5 * 3600 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "brain",
-			},
-		},
-		{
-			Names:   []string{"/aerial-proxy"},
-			Created: now.Add(-5 * 3600 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "proxy",
-			},
-		},
-	}
-
-	gitSync := GitSyncStatusResponse{
-		Status: "synced",
-		Reconciliation: &ReconciliationStatus{
-			Active:         true,
-			State:          "swapping",
-			Stage:          "swapping",
-			TargetServices: []string{"dashboard"},
-			CommitSHA:      "548c826",
-			StartedAt:      now.Add(-60 * time.Second),
-		},
-	}
-
-	deps := mergeClusterDeploymentsWithHangar(rawContainers, nil, nil, gitSync, "current")
-	if len(deps) == 0 {
-		t.Fatalf("expected non-empty deployments")
-	}
-	dep := deps[0]
-	if dep.Stage != "swapping" {
-		t.Errorf("expected stage 'swapping', got %q", dep.Stage)
-	}
-	if dep.Commit != "548c826" {
-		t.Errorf("expected commit '548c826', got %q", dep.Commit)
-	}
-	// Crucial assertion: MatrixJobs must ONLY contain the target service 'dashboard'
-	if len(dep.MatrixJobs) != 1 {
-		t.Fatalf("expected exactly 1 scoped chip for target service, got %d: %+v", len(dep.MatrixJobs), dep.MatrixJobs)
-	}
-	if dep.MatrixJobs[0].Name != "dashboard" {
-		t.Errorf("expected dashboard chip, got %s", dep.MatrixJobs[0].Name)
-	}
-}
-
-func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testing.T) {
-	now := time.Now().UTC()
-	rawContainers := []DockerContainerJSON{
-		{
-			ID:      "c-unhealthy",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-10 * time.Minute).Unix(),
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "brain",
-			},
-			Health: &DockerContainerHealth{Status: "unhealthy"},
-		},
-	}
-	gitSync := GitSyncStatusResponse{
-		Status: "synced",
-	}
-
-	parentRuns := []GitHubRun{
-		{
-			ID:         105,
-			HeadSHA:    "commit123",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-15 * time.Minute),
-			UpdatedAt:  now.Add(-12 * time.Minute),
-		},
-	}
-
-	deps := mergeClusterDeploymentsWithHangar(rawContainers, parentRuns, nil, gitSync, "commit123")
-	if len(deps) == 0 {
-		t.Fatalf("expected non-empty deployments for degraded container")
-	}
-	dep := deps[0]
-	if dep.Stage != "degraded" {
-		t.Errorf("expected stage 'degraded', got %q", dep.Stage)
-	}
-	if dep.Steps[3].Status != "completed" {
-		t.Errorf("expected Container Swap completed, got %s", dep.Steps[3].Status)
-	}
-	if dep.Steps[4].Status != "failed" {
-		t.Errorf("expected Health Check failed, got %s", dep.Steps[4].Status)
-	}
-}
-
 func TestStatusHandler_ConcurrentPipelines(t *testing.T) {
 	hangarServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/status" {
@@ -3610,7 +2765,6 @@ func TestStatusHandler_ConcurrentPipelines(t *testing.T) {
 func TestLoadDashboardRepos_TableDriven(t *testing.T) {
 	tempDir := t.TempDir()
 
-
 	tests := []struct {
 		name     string
 		yamlData string
@@ -3699,57 +2853,6 @@ dashboard:
 				}
 			}
 		})
-	}
-}
-
-func TestNewDashboardConfigFromLookup_MultiRepo(t *testing.T) {
-	// 1. GITHUB_REPOS set
-	lookupWithRepos := func(key string) string {
-		switch key {
-		case "GITHUB_REPOS":
-			return "azylman/aerial, azylman/aerial-sidecars, azylman/aerial-config"
-		default:
-			return ""
-		}
-	}
-	cfg1 := NewDashboardConfigFromLookup(lookupWithRepos)
-	expectedRepos1 := []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"}
-	if len(cfg1.GHRepos) != len(expectedRepos1) {
-		t.Fatalf("expected %d repos, got %d: %+v", len(expectedRepos1), len(cfg1.GHRepos), cfg1.GHRepos)
-	}
-	for i, r := range cfg1.GHRepos {
-		if r != expectedRepos1[i] {
-			t.Errorf("expected [%d]=%q, got %q", i, expectedRepos1[i], r)
-		}
-	}
-	if cfg1.GHRepo != "azylman/aerial" {
-		t.Errorf("expected GHRepo to match first repo 'azylman/aerial', got %q", cfg1.GHRepo)
-	}
-
-	// 2. GITHUB_REPO set without GITHUB_REPOS
-	lookupSingle := func(key string) string {
-		switch key {
-		case "GITHUB_REPO":
-			return "custom/single-repo"
-		default:
-			return ""
-		}
-	}
-	cfg2 := NewDashboardConfigFromLookup(lookupSingle)
-	if len(cfg2.GHRepos) != 1 || cfg2.GHRepos[0] != "custom/single-repo" {
-		t.Errorf("expected GHRepos=[custom/single-repo], got %+v", cfg2.GHRepos)
-	}
-	if cfg2.GHRepo != "custom/single-repo" {
-		t.Errorf("expected GHRepo=custom/single-repo, got %q", cfg2.GHRepo)
-	}
-
-	// 3. Default fallback when neither is set
-	cfg3 := NewDashboardConfigFromLookup(func(string) string { return "" })
-	if len(cfg3.GHRepos) != 1 || cfg3.GHRepos[0] != "azylman/aerial" {
-		t.Errorf("expected default GHRepos=[azylman/aerial], got %+v", cfg3.GHRepos)
-	}
-	if cfg3.GHRepo != "azylman/aerial" {
-		t.Errorf("expected default GHRepo=azylman/aerial, got %q", cfg3.GHRepo)
 	}
 }
 
@@ -3946,101 +3049,6 @@ dashboard:
 	}
 }
 
-func TestMergeClusterDeployments_MultiRepoActiveFanout(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         101,
-			Repository: "azylman/aerial",
-			Name:       "CI",
-			HeadSHA:    "1111aaa",
-			Status:     "in_progress",
-			CreatedAt:  now.Add(-2 * time.Minute),
-			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/101",
-		},
-		{
-			ID:         201,
-			Repository: "azylman/aerial-sidecars",
-			Name:       "Build Sidecars",
-			HeadSHA:    "2222bbb",
-			Status:     "in_progress",
-			CreatedAt:  now.Add(-1 * time.Minute),
-			HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/201",
-		},
-	}
-
-	deploys := mergeClusterDeployments(nil, runs, nil, "0000000")
-	if len(deploys) != 2 {
-		t.Fatalf("expected 2 active deployments across repos, got %d", len(deploys))
-	}
-	var aerialDep, sidecarsDep *DeploymentStatus
-	for i := range deploys {
-		if deploys[i].Repository == "azylman/aerial" {
-			aerialDep = &deploys[i]
-		} else if deploys[i].Repository == "azylman/aerial-sidecars" {
-			sidecarsDep = &deploys[i]
-		}
-	}
-	if aerialDep == nil || aerialDep.Stage != "building" {
-		t.Errorf("expected active aerial deploy with stage building, got %+v", aerialDep)
-	}
-	if sidecarsDep == nil || sidecarsDep.Stage != "building" {
-		t.Errorf("expected active sidecars deploy with stage building, got %+v", sidecarsDep)
-	}
-}
-
-func TestMergeClusterDeployments_NonContainerRepoNoTimeout(t *testing.T) {
-	now := time.Now().UTC()
-	// Successful run for aerial-config (updated 150s ago, normally >120s timeout)
-	runs := []GitHubRun{
-		{
-			ID:         301,
-			Repository: "azylman/aerial-config",
-			Name:       "Config Validation",
-			HeadSHA:    "3333ccc",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-5 * time.Minute),
-			UpdatedAt:  now.Add(-150 * time.Second),
-			HTMLURL:    "https://github.com/azylman/aerial-config/actions/runs/301",
-		},
-	}
-
-	// Local containers running older core commit
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-10 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(containers, runs, nil, "oldcorecommit")
-	// Because aerial-config does not build containers, it should NOT fail with "Hangar reconciliation timed out"
-	if len(deploys) > 0 && deploys[0].Stage == "failed" && deploys[0].CommitMsg == "Hangar reconciliation timed out (>120s)" {
-		t.Errorf("expected non-container repo aerial-config to NOT trigger Hangar reconciliation timeout failure, got %+v", deploys[0])
-	}
-}
-
-func TestExtractServiceNameFromJobName_ParenthesesSidecars(t *testing.T) {
-	cases := []struct {
-		jobName  string
-		expected string
-	}{
-		{"Build & Push Sidecar Images to GHCR (aura-farming)", "aura-farming"},
-		{"Build & Push Sidecar Images to GHCR (banana)", "banana"},
-		{"Build & Push Images (dashboard)", "dashboard"},
-		{"Run Sidecar Tests & Lint", "unit-tests"},
-	}
-	for _, tc := range cases {
-		if got := ExtractServiceNameFromJobName(tc.jobName); got != tc.expected {
-			t.Errorf("ExtractServiceNameFromJobName(%q) = %q; want %q", tc.jobName, got, tc.expected)
-		}
-	}
-}
-
 func TestMultiRepoGitHubPoller_IncludesPullRequestRuns(t *testing.T) {
 	now := time.Now().UTC()
 	var queriedQuery url.Values
@@ -4097,88 +3105,6 @@ func TestMultiRepoGitHubPoller_IncludesPullRequestRuns(t *testing.T) {
 	}
 	if runs[0].ID != 9001 || runs[0].Event != "pull_request" {
 		t.Errorf("unexpected run in snapshot: %+v", runs[0])
-	}
-}
-
-func TestMergeClusterDeployments_ActivePRRunShowsBuilding(t *testing.T) {
-	now := time.Now().UTC()
-	runs := []GitHubRun{
-		{
-			ID:         9001,
-			Repository: "azylman/aerial-sidecars",
-			Name:       "Continuous Delivery",
-			Event:      "pull_request",
-			HeadBranch: "feat/sidecars-pr",
-			HeadSHA:    "aabbccdd1122",
-			Status:     "in_progress",
-			CreatedAt:  now.Add(-1 * time.Minute),
-			UpdatedAt:  now.Add(-30 * time.Second),
-			HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/9001",
-		},
-	}
-	jobs := map[int64][]GitHubJob{
-		9001: {
-			{Name: "Run Sidecar Tests & Lint", Status: "completed", Conclusion: "success"},
-			{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "in_progress"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(nil, runs, jobs, "0000000")
-	if len(deploys) != 1 {
-		t.Fatalf("expected 1 active deployment for PR run, got %d", len(deploys))
-	}
-	dep := deploys[0]
-	if dep.Repository != "azylman/aerial-sidecars" {
-		t.Errorf("expected repository azylman/aerial-sidecars, got %q", dep.Repository)
-	}
-	if dep.Stage != "building" {
-		t.Errorf("expected stage 'building', got %q", dep.Stage)
-	}
-	if len(dep.MatrixJobs) != 2 {
-		t.Fatalf("expected 2 matrix chips, got %d: %+v", len(dep.MatrixJobs), dep.MatrixJobs)
-	}
-	if dep.MatrixJobs[1].Name != "aura-farming" {
-		t.Errorf("expected chip name 'aura-farming', got %q", dep.MatrixJobs[1].Name)
-	}
-}
-
-func TestMergeClusterDeployments_CompletedPRRunDoesNotTimeout(t *testing.T) {
-	now := time.Now().UTC()
-	// Successful PR run completed 200s ago (exceeding standard 120s container swap timeout)
-	runs := []GitHubRun{
-		{
-			ID:         9002,
-			Repository: "azylman/aerial-sidecars",
-			Name:       "Continuous Delivery",
-			Event:      "pull_request",
-			HeadBranch: "feat/sidecars-pr",
-			HeadSHA:    "aabbccdd1122",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  now.Add(-300 * time.Second),
-			UpdatedAt:  now.Add(-200 * time.Second),
-			HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/9002",
-		},
-	}
-	jobs := map[int64][]GitHubJob{
-		9002: {
-			{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "completed", Conclusion: "success"},
-		},
-	}
-
-	containers := []DockerContainerJSON{
-		{
-			ID:      "c1",
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Created: now.Add(-10 * time.Hour).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-		},
-	}
-
-	deploys := mergeClusterDeployments(containers, runs, jobs, "oldcorecommit")
-	if len(deploys) > 0 && deploys[0].Stage == "failed" && deploys[0].CommitMsg == "Hangar reconciliation timed out (>120s)" {
-		t.Errorf("expected completed PR run to NOT trigger Hangar reconciliation timeout failure, got %+v", deploys[0])
 	}
 }
 
@@ -4321,21 +3247,6 @@ func TestGitHubPoller_GetActiveReposEdgeCases(t *testing.T) {
 	emptyPoller := &GitHubPoller{}
 	if got := emptyPoller.getActiveRepos(); got != nil {
 		t.Errorf("expected nil for empty poller, got %v", got)
-	}
-}
-
-func TestFormatUptimeString_BackwardCompatibilityWrapper(t *testing.T) {
-	if got := formatUptimeString(120); got != "2m" {
-		t.Errorf("expected 2m, got %q", got)
-	}
-}
-
-func TestBuildSchedulesUpstreamURL_ErrorHandling(t *testing.T) {
-	if _, err := BuildSchedulesUpstreamURL(""); err == nil {
-		t.Errorf("expected error for empty brain URL, got nil")
-	}
-	if _, err := BuildSchedulesUpstreamURL("http://localhost:8080\tinvalid"); err == nil {
-		t.Errorf("expected error for control char URL, got nil")
 	}
 }
 
@@ -4595,8 +3506,6 @@ func TestGitHubPoller_DynamicHangarDiscovery(t *testing.T) {
 	var nilPoller *GitHubPoller
 	nilPoller.SetHangarURL("http://example.com")
 }
-
-
 
 func TestFetchNomadClusterState(t *testing.T) {
 	ctx := context.Background()

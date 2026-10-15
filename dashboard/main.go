@@ -914,15 +914,6 @@ func (p *GitHubPoller) GetSnapshot() ([]GitHubRun, map[int64][]GitHubJob) {
 	return runs, jobs
 }
 
-func mergeClusterDeployments(
-	rawContainers []DockerContainerJSON,
-	runs []GitHubRun,
-	jobs map[int64][]GitHubJob,
-	currentCommit string,
-) []DeploymentStatus {
-	return mergeClusterDeploymentsWithHangar(rawContainers, runs, jobs, GitSyncStatusResponse{}, currentCommit)
-}
-
 func mergeClusterDeploymentsWithHangar(
 	rawContainers []DockerContainerJSON,
 	runs []GitHubRun,
@@ -1684,7 +1675,7 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 			Data:        finalBytes,
 			Hash:        hashStr,
 			ETag:        etag,
-			ContentType: getMimeType(cleanPath),
+			ContentType: GetMimeType(cleanPath),
 		}
 
 		return nil
