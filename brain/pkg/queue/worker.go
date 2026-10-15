@@ -39,6 +39,7 @@ type turnExecution struct {
 	turnCount           int
 	lease               runner.SessionLease
 	isCold              bool
+	isEphemeral         bool
 	policy              config.ChannelPolicy
 	effectiveID         string
 	effectiveName       string
@@ -175,6 +176,9 @@ func (te *turnExecution) incrementMessageRetry(id, errorMsg string) {
 }
 
 func (te *turnExecution) saveSessionID(threadID, sessionID string) {
+	if te == nil || te.isEphemeral {
+		return
+	}
 	if s := te.store(); s != nil {
 		if err := s.SaveSessionID(context.Background(), threadID, sessionID); err != nil {
 			log.Printf("[Worker] Warning saving session ID for thread %s: %v", threadID, err)
@@ -183,7 +187,7 @@ func (te *turnExecution) saveSessionID(threadID, sessionID string) {
 }
 
 func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
-	if te == nil {
+	if te == nil || te.isEphemeral {
 		return
 	}
 	if s := te.store(); s != nil {
@@ -270,6 +274,9 @@ func (te *turnExecution) getSessionTurnCount(threadID string) (int, error) {
 }
 
 func (te *turnExecution) incrementSessionTurnCount(threadID string) (int, error) {
+	if te == nil || te.isEphemeral {
+		return 0, nil
+	}
 	if s := te.store(); s != nil {
 		return s.IncrementSessionTurnCount(context.Background(), threadID)
 	}
@@ -617,12 +624,15 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	if !te.resolveTurnPolicy() {
 		return
 	}
+	isLowEffort := isLowEffortBurst(te.burst)
+	te.isEphemeral = isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil
 	if te.evaluateAmbientWake() {
 		return
 	}
 
 	// 1. Resolve active execution pool (primary vs low effort)
-	isLowEffort := isLowEffortBurst(te.burst)
+	isLowEffort = isLowEffortBurst(te.burst)
+	te.isEphemeral = isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil
 	activePool := te.pool.processPool
 	if isLowEffort && te.pool.lowEffortProcessPool != nil {
 		activePool = te.pool.lowEffortProcessPool
@@ -661,12 +671,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	te.currentSessionID = lease.SessionID()
 	te.previousSessionID = lease.PreviousSessionID()
 	te.isCold = lease.IsCold()
+	te.isEphemeral = lease.IsEphemeral() || (isLowEffort && te.pool.lowEffortProcessPool != nil)
 	te.turnCount = lease.TurnCount()
 
 	if te.currentSessionID != "" && te.isCold {
-		if !(isLowEffort && te.pool.lowEffortProcessPool != nil) {
-			te.saveSessionID(te.threadID, te.currentSessionID)
-		}
+		te.saveSessionID(te.threadID, te.currentSessionID)
 	}
 
 
@@ -1283,7 +1292,7 @@ func (te *turnExecution) buildTurnPrompt() {
 	}
 
 	snap, _ := resolveChannelSnapshot(te.pool.getDiscordSession(), te.threadID)
-	isColdStart := te.isCold
+	isColdStart := te.isCold && !te.isEphemeral
 
 	// Policy mode dictates conversational engagement contract:
 	// - Channel Mode: Aerial wakes selectively. Ambient chatter bypasses session memory,
@@ -1358,7 +1367,7 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 	}
 
-	hasHistoryNeed := isChannelMode || isColdStart || te.wakeIdx > 0 || len(te.burst) > 1
+	hasHistoryNeed := !te.isEphemeral && (isChannelMode || isColdStart || te.wakeIdx > 0 || len(te.burst) > 1)
 
 	var lookbackMsgs []HistoryMessage
 	if hasHistoryNeed {
@@ -1700,11 +1709,9 @@ func (te *turnExecution) executeWithRetries() {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
-			if te.lease.SessionID() != "" && te.lease.SessionID() != te.currentSessionID {
-				if !(isLowEffort && te.pool.lowEffortProcessPool != nil && te.currentSessionID != "") {
-					te.currentSessionID = te.lease.SessionID()
-					te.saveSessionID(te.threadID, te.currentSessionID)
-				}
+			if te.lease.SessionID() != "" && te.lease.SessionID() != te.currentSessionID && !te.isEphemeral {
+				te.currentSessionID = te.lease.SessionID()
+				te.saveSessionID(te.threadID, te.currentSessionID)
 			}
 			sink := newDiscordTurnSink(te.statusUpdater)
 			sessIDToSend := te.currentSessionID
@@ -1763,8 +1770,8 @@ func (te *turnExecution) executeWithRetries() {
 		runCancel()
 
 		if outcome.SessionID != "" && outcome.SessionID != te.currentSessionID && outcome.SessionID != te.previousSessionID {
-			if isLowEffort && te.pool.lowEffortProcessPool != nil && te.currentSessionID != "" {
-				log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with low effort session %s", te.currentSessionID, te.threadID, outcome.SessionID)
+			if te.isEphemeral {
+				log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, outcome.SessionID)
 			} else {
 				te.currentSessionID = outcome.SessionID
 				te.saveSessionID(te.threadID, te.currentSessionID)
@@ -2193,8 +2200,8 @@ func (te *turnExecution) executeWithRetries() {
 					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
 				} else {
 					if extSess != "" && extSess != te.currentSessionID {
-						if isLowEffort && te.pool.lowEffortProcessPool != nil && te.currentSessionID != "" {
-							log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with low effort session %s", te.currentSessionID, te.threadID, extSess)
+						if te.isEphemeral {
+							log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, extSess)
 						} else {
 							log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", te.threadID, te.currentSessionID, extSess)
 							te.currentSessionID = extSess
@@ -2462,6 +2469,7 @@ func (te *turnExecution) executeWithRetries() {
 				newLease, lErr := leasedPool.AcquireLease(te.pool.ctx, te.threadID)
 				if lErr == nil {
 					te.lease = newLease
+					te.isEphemeral = newLease.IsEphemeral() || (isLowEffort && te.pool.lowEffortProcessPool != nil)
 					te.currentSessionID = newLease.SessionID()
 				}
 			}

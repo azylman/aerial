@@ -858,6 +858,10 @@ func (l *unifiedSessionLease) IsCold() bool {
 	return l.isCold
 }
 
+func (l *unifiedSessionLease) IsEphemeral() bool {
+	return false
+}
+
 func (l *unifiedSessionLease) TurnCount() int {
 	return l.turnCount
 }

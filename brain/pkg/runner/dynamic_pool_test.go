@@ -646,6 +646,7 @@ type fakeSessionLease struct {
 func (f *fakeSessionLease) SessionID() string         { return f.sessID }
 func (f *fakeSessionLease) PreviousSessionID() string { return "" }
 func (f *fakeSessionLease) IsCold() bool              { return false }
+func (f *fakeSessionLease) IsEphemeral() bool         { return false }
 func (f *fakeSessionLease) TurnCount() int            { return 1 }
 func (f *fakeSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
 	return &TurnResult{Response: "fake lease ok"}, nil

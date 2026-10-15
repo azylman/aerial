@@ -979,11 +979,19 @@ func TestInterchangeablePool_AcquireLease_Lifecycle(t *testing.T) {
 		t.Fatalf("AcquireLease error: %v", err)
 	}
 
-	if lease.SessionID() == "" {
+	firstSessionID := lease.SessionID()
+	if firstSessionID == "" {
 		t.Error("expected non-empty SessionID")
 	}
-	_ = lease.PreviousSessionID()
-	_ = lease.IsCold()
+	if lease.PreviousSessionID() != "" {
+		t.Errorf("expected empty PreviousSessionID on ephemeral lease, got %q", lease.PreviousSessionID())
+	}
+	if lease.IsCold() {
+		t.Error("expected IsCold() == false on ephemeral lease")
+	}
+	if !lease.IsEphemeral() {
+		t.Error("expected IsEphemeral() == true on interchangeable lease")
+	}
 	_ = lease.TurnCount()
 
 	turnCtx := &TurnContext{
@@ -1003,14 +1011,57 @@ func TestInterchangeablePool_AcquireLease_Lifecycle(t *testing.T) {
 	if err := lease.Release(); err != nil {
 		t.Fatalf("unexpected Release error: %v", err)
 	}
+	pool.WaitBackground()
 	if pool.AvailableCount() != availBefore+1 {
-		t.Errorf("expected worker to be returned to pool, avail: %d", pool.AvailableCount())
+		t.Errorf("expected worker to be returned to pool after rotation, avail: %d", pool.AvailableCount())
 	}
 
 	// Idempotent double release
 	if err := lease.Release(); err != nil {
 		t.Errorf("unexpected error on second Release: %v", err)
 	}
+
+	// Verify ThreadSummary is stripped on Execute
+	leaseSum, err := pool.AcquireLease(ctx, "target-key")
+	if err != nil {
+		t.Fatalf("AcquireLease for summary check error: %v", err)
+	}
+	_, _ = leaseSum.Execute(ctx, &TurnContext{
+		TurnID:        "turn-sum",
+		Prompt:        "custom-prompt",
+		ThreadSummary: "should-be-stripped",
+		Ctx:           ctx,
+	})
+	_ = leaseSum.Release()
+	pool.WaitBackground()
+
+	// Verify nil safety on interchangeableSessionLease
+	var nilLease *interchangeableSessionLease
+	if nilLease.SessionID() != "" || nilLease.TurnCount() != 0 || nilLease.PreviousSessionID() != "" || nilLease.IsCold() || !nilLease.IsEphemeral() {
+		t.Error("unexpected nilLease state")
+	}
+	if _, err := nilLease.Execute(ctx, nil); err == nil {
+		t.Error("expected error from nilLease.Execute")
+	}
+	if err := nilLease.Release(); err != nil {
+		t.Errorf("unexpected error from nilLease.Release: %v", err)
+	}
+
+	// Verify that releasing all workers and acquiring again yields a rotated session
+	lease2, err := pool.AcquireLease(ctx, "target-key")
+	if err != nil {
+		t.Fatalf("second AcquireLease error: %v", err)
+	}
+	lease3, err := pool.AcquireLease(ctx, "target-key")
+	if err != nil {
+		t.Fatalf("third AcquireLease error: %v", err)
+	}
+	if lease2.SessionID() == firstSessionID || lease3.SessionID() == firstSessionID {
+		t.Errorf("expected first worker session %s to have been rotated upon Release, got %s and %s", firstSessionID, lease2.SessionID(), lease3.SessionID())
+	}
+	_ = lease2.Release()
+	_ = lease3.Release()
+	pool.WaitBackground()
 }
 
 func TestInterchangeablePool_AcquireLease_ErrorBranches(t *testing.T) {

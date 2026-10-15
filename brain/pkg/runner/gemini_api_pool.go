@@ -1453,6 +1453,10 @@ func (l *geminiSessionLease) IsCold() bool {
 	return l.isCold
 }
 
+func (l *geminiSessionLease) IsEphemeral() bool {
+	return false
+}
+
 func (l *geminiSessionLease) TurnCount() int {
 	return l.turnCount
 }

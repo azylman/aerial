@@ -562,34 +562,54 @@ type interchangeableSessionLease struct {
 var _ SessionLease = (*interchangeableSessionLease)(nil)
 
 func (l *interchangeableSessionLease) SessionID() string {
+	if l == nil || l.inner == nil {
+		return ""
+	}
 	return l.inner.SessionID()
 }
 
 func (l *interchangeableSessionLease) PreviousSessionID() string {
-	return l.inner.PreviousSessionID()
+	return ""
 }
 
 func (l *interchangeableSessionLease) IsCold() bool {
-	return l.inner.IsCold()
+	return false
+}
+
+func (l *interchangeableSessionLease) IsEphemeral() bool {
+	return true
 }
 
 func (l *interchangeableSessionLease) TurnCount() int {
+	if l == nil || l.inner == nil {
+		return 0
+	}
 	return l.inner.TurnCount()
 }
 
 func (l *interchangeableSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
+	if l == nil || l.inner == nil {
+		return nil, errors.New("interchangeable session lease is uninitialized")
+	}
+	if turn != nil && turn.ThreadSummary != "" {
+		turnCopy := *turn
+		turnCopy.ThreadSummary = ""
+		return l.inner.Execute(ctx, &turnCopy)
+	}
 	return l.inner.Execute(ctx, turn)
 }
 
 func (l *interchangeableSessionLease) Release() error {
+	if l == nil {
+		return nil
+	}
 	var err error
 	l.once.Do(func() {
-		err = l.inner.Release()
-		if !l.pool.closed.Load() {
-			select {
-			case l.pool.available <- l.workerKey:
-			default:
-			}
+		if l.inner != nil {
+			err = l.inner.Release()
+		}
+		if l.pool != nil {
+			l.pool.rotateAndRelease(l.workerKey)
 		}
 	})
 	return err

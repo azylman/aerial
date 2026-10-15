@@ -262,6 +262,10 @@ func (l *testSessionLease) IsCold() bool {
 	return l.isCold
 }
 
+func (l *testSessionLease) IsEphemeral() bool {
+	return false
+}
+
 func (l *testSessionLease) TurnCount() int {
 	return l.turnCount
 }

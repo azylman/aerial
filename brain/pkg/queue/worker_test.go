@@ -2865,6 +2865,171 @@ func TestWorker_DualPoolRouting_LowEffortAndFallback(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testing.T) {
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	primarySessUUID := "11111111-1111-1111-1111-111111111111"
+	prevSessUUID := "99999999-9999-9999-9999-999999999999"
+
+	var spawnSeq int
+	var mu sync.Mutex
+	var capturedPrompts []string
+
+	lowSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			mu.Lock()
+			spawnSeq++
+			seq := spawnSeq
+			mu.Unlock()
+			sessUUID := fmt.Sprintf("22222222-2222-2222-2222-%012d", seq)
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", sessUUID)))
+				buf := make([]byte, 16384)
+				for {
+					n, rErr := inR.Read(buf)
+					if rErr != nil {
+						return
+					}
+					if n > 0 {
+						mu.Lock()
+						capturedPrompts = append(capturedPrompts, string(buf[:n]))
+						mu.Unlock()
+						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessUUID)))
+					}
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345 + seq), nil
+		},
+	}
+	primarySpawner := runner.NewMockSpawner()
+
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
+
+	lowUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowUnderlying.Close()
+
+	lowPool := runner.NewInterchangeablePool(lowUnderlying, runner.InterchangeablePoolConfig{
+		WorkerCount: 1,
+		KeyPrefix:   "discord:worker",
+	})
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+		d.LowEffortModel = "gemini-3.8-flash-low"
+	})
+
+	doneCh := make(chan struct{}, 2)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		HistoryFetcher: func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
+			return []HistoryMessage{
+				{ID: "hist-1", AuthorName: "alex", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			}, nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "1560318118792790111"
+	ctx := context.Background()
+	_ = store.SaveSessionID(ctx, threadID, prevSessUUID)
+	_ = store.RotateSessionID(ctx, threadID, primarySessUUID)
+	_ = store.SaveThreadSummary(ctx, threadID, "Cached summary that must not be injected", "hist-1")
+
+	msg1 := db.Message{
+		ID:        "msg-ephem-1",
+		ThreadID:  threadID,
+		Content:   "execute vanadis chunk 1",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(ctx, msg1)
+	pool.Enqueue(msg1)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for ephemeral turn 1")
+	}
+
+	lowPool.WaitBackground()
+
+	msg2 := db.Message{
+		ID:        "msg-ephem-2",
+		ThreadID:  threadID,
+		Content:   "execute vanadis chunk 2",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(ctx, msg2)
+	pool.Enqueue(msg2)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for ephemeral turn 2")
+	}
+
+	lowPool.WaitBackground()
+
+	mu.Lock()
+	prompts := append([]string(nil), capturedPrompts...)
+	spawns := spawnSeq
+	mu.Unlock()
+
+	if len(prompts) != 2 {
+		t.Fatalf("expected 2 captured prompts, got %d", len(prompts))
+	}
+	for i, p := range prompts {
+		if strings.Contains(p, "<THREAD_SUMMARY>") || strings.Contains(p, "Cached summary that must not be injected") {
+			t.Errorf("turn %d prompt unexpectedly contained <THREAD_SUMMARY>: %s", i+1, p)
+		}
+		if strings.Contains(p, "<CHANNEL_HISTORY>") || strings.Contains(p, "prior chat history should not be injected") {
+			t.Errorf("turn %d prompt unexpectedly contained <CHANNEL_HISTORY>: %s", i+1, p)
+		}
+		if strings.Contains(p, "<PREVIOUS_SESSION>") || strings.Contains(p, prevSessUUID) {
+			t.Errorf("turn %d prompt unexpectedly contained <PREVIOUS_SESSION>: %s", i+1, p)
+		}
+	}
+	if spawns < 2 {
+		t.Errorf("expected worker daemon rotation between turns (spawns >= 2), got %d", spawns)
+	}
+
+	currentSess, err := store.GetSessionID(ctx, threadID)
+	if err != nil {
+		t.Fatalf("failed to get session ID: %v", err)
+	}
+	if currentSess != primarySessUUID {
+		t.Errorf("expected primary session %s to be untouched, got %s", primarySessUUID, currentSess)
+	}
+	turnCount, err := store.GetSessionTurnCount(ctx, threadID)
+	if err != nil {
+		t.Fatalf("failed to get turn count: %v", err)
+	}
+	if turnCount != 0 {
+		t.Errorf("expected primary session turn count to remain 0 across ephemeral turns, got %d", turnCount)
+	}
+}
+
 func TestWorker_SessionAntiFlapping_ProtectsPrimarySession(t *testing.T) {
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
