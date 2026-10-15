@@ -4643,14 +4643,24 @@ func TestCheckGitHubRepoBuildInProgress_TableDriven(t *testing.T) {
 	}
 }
 
-func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
-	ctx := context.Background()
+type pushEventTestEnv struct {
+	tmpDir          string
+	aerialDir       string
+	aerialConfigDir string
+	mirrormereDir   string
+	repos           []string
+	daemon          *SyncDaemon
+	evtCh           chan HangarDeployEvent
+}
 
+func newPushEventTestEnv(t *testing.T, opts ...func(*DaemonConfig)) *pushEventTestEnv {
+	t.Helper()
 	tmpDir := t.TempDir()
 	aerialDir := filepath.Join(tmpDir, "aerial")
 	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
 	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
 	_ = os.MkdirAll(aerialDir, 0755)
+	_ = os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0755)
 	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
 	_ = os.MkdirAll(mirrormereDir, 0755)
 	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0755)
@@ -4658,295 +4668,727 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(mirrormereDir, ".git"), 0755)
 
 	repos := []string{aerialDir, aerialConfigDir, mirrormereDir}
-	var revParseCount int
+	evtCh := make(chan HangarDeployEvent, 50)
 
-	d := NewDaemon(DaemonConfig{
+	cfg := DaemonConfig{
 		Repos:      repos,
 		ComposeDir: aerialDir,
 		ConfigDir:  aerialConfigDir,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			select {
+			case evtCh <- evt:
+			default:
+			}
+			return nil
+		},
 		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
 			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseCount++
-					if revParseCount == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "fetch" {
-				return []byte(""), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "merge" {
-				return []byte(""), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
-				if strings.Contains(dir, "aerial") && !strings.Contains(dir, "aerial-config") {
-					return []byte("brain/main.go\n"), nil, nil
-				}
-				return []byte(""), nil, nil
+				return []byte("sha_after\n"), nil, nil
 			}
 			return []byte(""), nil, nil
 		},
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Evaluation ID: 12345"), nil, nil
+			return []byte("Evaluation ID: default-123"), nil, nil
 		},
-	})
-
-	// 1. Missing repo
-	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{})
-	if code != http.StatusBadRequest || resp.Status != "error" {
-		t.Errorf("expected 400 Bad Request for missing repo, got %d (%s)", code, resp.Status)
+	}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
-	// 2. Non-main branch
-	respIgnored, codeIgnored := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/feature-branch",
-	})
-	if codeIgnored != http.StatusOK || respIgnored.Status != "ignored" {
-		t.Errorf("expected 200 ignored for non-main branch, got %d (%s)", codeIgnored, respIgnored.Status)
-	}
-
-	// 3. Unmanaged repository
-	respNotFound, codeNotFound := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "nonexistent-repo",
-		Ref:  "refs/heads/main",
-	})
-	if codeNotFound != http.StatusNotFound || respNotFound.Status != "error" {
-		t.Errorf("expected 404 for unmanaged repo, got %d (%s)", codeNotFound, respNotFound.Status)
-	}
-
-	// 4. Aerial monorepo push with container build changes (brain/main.go)
-	respAerialBuild, codeAerialBuild := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
-	})
-	if codeAerialBuild != http.StatusOK || respAerialBuild.Status != "accepted" || !respAerialBuild.ContainersBuilding {
-		t.Errorf("expected accepted with ContainersBuilding=true for aerial monorepo build changes, got code %d, status %s, building %v", codeAerialBuild, respAerialBuild.Status, respAerialBuild.ContainersBuilding)
-	}
-
-	// 5. Aerial monorepo push with non-build changes only (nomad job changed)
-	var revParseAerialNomad int
-	dNomadAerial := NewDaemon(DaemonConfig{
-		Repos:      repos,
-		ComposeDir: aerialDir,
-		ConfigDir:  aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseAerialNomad++
-					if revParseAerialNomad == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
-				return []byte("nomad/jobs/migrate.nomad\n"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M nomad/jobs/migrate.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Evaluation ID: migrate-123"), nil, nil
-		},
-	})
-	_ = os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0755)
-	_ = os.WriteFile(filepath.Join(aerialDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
-
-	evtChAerial := make(chan HangarDeployEvent, 10)
-	dNomadAerial.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
-		evtChAerial <- evt
-		return nil
-	}
-	respAerialNomad, codeAerialNomad := dNomadAerial.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:     "aerial",
-		Ref:      "refs/heads/main",
-		PRNumber: 611,
-		TargetID: "1555422677936644147",
-	})
-	if codeAerialNomad != http.StatusOK || respAerialNomad.Status != "accepted" || respAerialNomad.ContainersBuilding || !respAerialNomad.NomadChanged {
-		t.Errorf("expected accepted with NomadChanged=true for aerial nomad change, got code %d, status %s, nomadChanged %v", codeAerialNomad, respAerialNomad.Status, respAerialNomad.NomadChanged)
-	}
-	var foundAerialDeployEvt bool
-	for !foundAerialDeployEvt {
-		select {
-		case evt := <-evtChAerial:
-			if evt.PRNumber != 611 || evt.TargetID != "1555422677936644147" {
-				t.Errorf("expected PRNumber 611 and TargetID 1555422677936644147, got %+v", evt)
-			}
-			if evt.JobName == "migrate" {
-				foundAerialDeployEvt = true
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for migrate deploy event from dNomadAerial")
-		}
-	}
-
-	// 6. Aerial-config push with deferred nomad job due to active build
-	jobWithAerialImg := `job "webhooks-router" {
-		task "router" {
-			config {
-				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
-			}
-		}
-	}`
-	_ = os.WriteFile(filepath.Join(aerialConfigDir, "jobs", "webhooks-router.nomad"), []byte(jobWithAerialImg), 0644)
-
-	var revParseConfigDef int
-	dConfigDeferred := NewDaemon(DaemonConfig{
-		Repos:      repos,
-		ComposeDir: aerialDir,
-		ConfigDir:  aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseConfigDef++
-					if revParseConfigDef == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		RegistryClient: &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					if strings.Contains(req.URL.String(), "actions/runs") {
-						return &http.Response{
-							StatusCode: http.StatusOK,
-							Header:     make(http.Header),
-							Body:       ioNopCloser(strings.NewReader(`{"total_count": 1, "workflow_runs": [{}]}`)),
-						}, nil
-					}
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       ioNopCloser(strings.NewReader(`{}`)),
-					}, nil
-				},
-			},
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Evaluation ID: 12345"), nil, nil
-		},
-	})
-
-	respConfigDef, codeConfigDef := dConfigDeferred.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial-config",
-		Ref:  "refs/heads/main",
-	})
-	if codeConfigDef != http.StatusOK || !respConfigDef.ContainersBuilding || len(respConfigDef.AppliedJobs) != 0 {
-		t.Errorf("expected job deferred when image source repo is building, got code %d, building %v, applied %v", codeConfigDef, respConfigDef.ContainersBuilding, respConfigDef.AppliedJobs)
-	}
-
-	// 7. Aerial-config push with image ready (applies Nomad job)
-	var revParseConfigApp int
-	dConfigApplied := NewDaemon(DaemonConfig{
-		Repos:      repos,
-		ComposeDir: aerialDir,
-		ConfigDir:  aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseConfigApp++
-					if revParseConfigApp == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		RegistryClient: &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					if strings.Contains(req.URL.String(), "actions/runs") {
-						return &http.Response{
-							StatusCode: http.StatusOK,
-							Header:     make(http.Header),
-							Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
-						}, nil
-					}
-					resp := &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       ioNopCloser(strings.NewReader(`{}`)),
-					}
-					resp.Header.Set("Docker-Content-Digest", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-					return resp, nil
-				},
-			},
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Evaluation ID: applied-123"), nil, nil
-		},
-	})
-
-	evtChConfig := make(chan HangarDeployEvent, 10)
-	dConfigApplied.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
-		evtChConfig <- evt
-		return nil
-	}
-	respConfigApp, codeConfigApp := dConfigApplied.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:     "aerial-config",
-		Ref:      "refs/heads/main",
-		PRNumber: 255,
-		TargetID: "1555422677936644147",
-	})
-	if codeConfigApp != http.StatusOK || respConfigApp.ContainersBuilding || len(respConfigApp.AppliedJobs) != 1 {
-		t.Errorf("expected job applied when image ready, got code %d, building %v, applied %v", codeConfigApp, respConfigApp.ContainersBuilding, respConfigApp.AppliedJobs)
-	}
-	var foundConfigDeployEvt bool
-	for !foundConfigDeployEvt {
-		select {
-		case evt := <-evtChConfig:
-			if evt.PRNumber != 255 || evt.TargetID != "1555422677936644147" {
-				t.Errorf("expected config deploy event with PRNumber 255 and TargetID 1555422677936644147, got %+v", evt)
-			}
-			if evt.JobName == "webhooks-router" {
-				foundConfigDeployEvt = true
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for webhooks-router deploy event from dConfigApplied")
-		}
-	}
-
-	// 8. Push to peripheral repo (mirrormere)
-	respMirror, codeMirror := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "mirrormere",
-		Ref:  "refs/heads/main",
-	})
-	if codeMirror != http.StatusOK || respMirror.Status != "accepted" {
-		t.Errorf("expected 200 accepted for mirrormere push, got %d (%s)", codeMirror, respMirror.Status)
+	d := NewDaemon(cfg)
+	return &pushEventTestEnv{
+		tmpDir:          tmpDir,
+		aerialDir:       aerialDir,
+		aerialConfigDir: aerialConfigDir,
+		mirrormereDir:   mirrormereDir,
+		repos:           repos,
+		daemon:          d,
+		evtCh:           evtCh,
 	}
 }
+
+func (e *pushEventTestEnv) collectEvents(count int, timeout time.Duration) []HangarDeployEvent {
+	var evts []HangarDeployEvent
+	deadline := time.After(timeout)
+	for i := 0; i < count; i++ {
+		select {
+		case evt := <-e.evtCh:
+			evts = append(evts, evt)
+		case <-deadline:
+			return evts
+		}
+	}
+	return evts
+}
+
+func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("validation and routing", func(t *testing.T) {
+		t.Parallel()
+		env := newPushEventTestEnv(t)
+
+		// 1. Missing repo
+		resp, code := env.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{})
+		if code != http.StatusBadRequest || resp.Status != "error" {
+			t.Errorf("expected 400 Bad Request for missing repo, got %d (%s)", code, resp.Status)
+		}
+
+		// 2. Non-main branch
+		respIgnored, codeIgnored := env.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial",
+			Ref:  "refs/heads/feature-branch",
+		})
+		if codeIgnored != http.StatusOK || respIgnored.Status != "ignored" {
+			t.Errorf("expected 200 ignored for non-main branch, got %d (%s)", codeIgnored, respIgnored.Status)
+		}
+
+		// 3. Unmanaged repository
+		respNotFound, codeNotFound := env.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "nonexistent-repo",
+			Ref:  "refs/heads/main",
+		})
+		if codeNotFound != http.StatusNotFound || respNotFound.Status != "error" {
+			t.Errorf("expected 404 for unmanaged repo, got %d (%s)", codeNotFound, respNotFound.Status)
+		}
+
+		// 4. SyncRepo failure
+		envSyncFail := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return nil, []byte("fatal: remote not found"), errors.New("sync failed")
+			}
+		})
+		respSyncFail, codeSyncFail := envSyncFail.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial",
+			Ref:  "refs/heads/main",
+		})
+		if codeSyncFail != http.StatusInternalServerError || respSyncFail.Status != "error" {
+			t.Errorf("expected 500 sync error, got code %d (%s)", codeSyncFail, respSyncFail.Status)
+		}
+
+		// 5. Push to peripheral repo (mirrormere)
+		respMirror, codeMirror := env.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "mirrormere",
+			Ref:  "refs/heads/main",
+		})
+		if codeMirror != http.StatusOK || respMirror.Status != "accepted" || respMirror.Message != "repository synced" {
+			t.Errorf("expected 200 accepted for mirrormere push, got %d (%+v)", codeMirror, respMirror)
+		}
+	})
+
+	t.Run("event dispatching and fallback commit", func(t *testing.T) {
+		t.Parallel()
+
+		// 1. Successful sync with TargetID dispatches sync_success
+		envSuccess := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					return []byte("sha_sync_ok"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+		})
+
+		resp, code := envSuccess.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:     "aerial",
+			Ref:      "refs/heads/main",
+			Commit:   "commit_12345",
+			TargetID: "1555405874565091380",
+			PRNumber: 542,
+		})
+		if code != http.StatusOK || resp.Status != "accepted" {
+			t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
+		}
+		evts := envSuccess.collectEvents(1, 2*time.Second)
+		if len(evts) == 0 {
+			t.Fatal("timed out waiting for sync_success event")
+		}
+		if evts[0].Event != "sync_success" || evts[0].TargetID != "1555405874565091380" || evts[0].PRNumber != 542 {
+			t.Errorf("unexpected sync_success event payload: %+v", evts[0])
+		}
+
+		// 2. Failed sync with TargetID dispatches sync_failed
+		envFail := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && (args[0] == "fetch" || args[0] == "pull") {
+					return nil, []byte("fatal: remote error"), fmt.Errorf("git fetch failed")
+				}
+				return []byte(""), nil, nil
+			}
+		})
+		respFail, codeFail := envFail.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:     "aerial",
+			Ref:      "refs/heads/main",
+			Commit:   "commit_fail",
+			TargetID: "1555405874565091380",
+			PRNumber: 542,
+		})
+		if codeFail != http.StatusInternalServerError || respFail.Status != "error" {
+			t.Fatalf("expected 500 error, got %d (%s)", codeFail, respFail.Status)
+		}
+		failEvts := envFail.collectEvents(1, 2*time.Second)
+		if len(failEvts) == 0 || failEvts[0].Event != "sync_failed" || failEvts[0].Status != "failed" || failEvts[0].TargetID != "1555405874565091380" {
+			t.Errorf("unexpected sync_failed event payload: %+v", failEvts)
+		}
+
+		// 3. Fallback: Empty CurrentHead falls back to req.Commit
+		envFallback := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return []byte(""), nil, nil
+			}
+		})
+		respFallback, codeFallback := envFallback.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:     "aerial",
+			Ref:      "refs/heads/main",
+			Commit:   "commit_req_fallback",
+			TargetID: "1555405874565091380",
+			PRNumber: 542,
+		})
+		if codeFallback != http.StatusOK || respFallback.Status != "accepted" {
+			t.Fatalf("expected 200 accepted, got %d (%s)", codeFallback, respFallback.Status)
+		}
+		fallbackEvts := envFallback.collectEvents(1, 2*time.Second)
+		if len(fallbackEvts) == 0 || fallbackEvts[0].CommitSHA != "commit_req_fallback" {
+			t.Errorf("expected CommitSHA commit_req_fallback, got %+v", fallbackEvts)
+		}
+
+		// 4. Empty TargetID still dispatches sync_success
+		respEmpty, codeEmpty := envSuccess.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:     "aerial",
+			Ref:      "refs/heads/main",
+			Commit:   "commit_empty_target",
+			TargetID: "",
+			PRNumber: 0,
+		})
+		if codeEmpty != http.StatusOK || respEmpty.Status != "accepted" {
+			t.Fatalf("expected 200 accepted for empty TargetID, got %d (%s)", codeEmpty, respEmpty.Status)
+		}
+		emptyEvts := envSuccess.collectEvents(1, 2*time.Second)
+		if len(emptyEvts) == 0 || emptyEvts[0].Event != "sync_success" || emptyEvts[0].TargetID != "" || emptyEvts[0].CommitSHA != "sha_sync_ok" {
+			t.Errorf("unexpected empty TargetID event: %+v", emptyEvts)
+		}
+	})
+
+	t.Run("aerial core diff branches and deferral", func(t *testing.T) {
+		t.Parallel()
+
+		// 1. Build changes (brain/main.go)
+		var revParseCount int
+		envBuild := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseCount++
+						if revParseCount == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+					return []byte("brain/main.go\nDockerfile\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+		})
+		respBuild, codeBuild := envBuild.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial",
+			Ref:  "refs/heads/main",
+		})
+		if codeBuild != http.StatusOK || !respBuild.ContainersBuilding {
+			t.Errorf("expected accepted with ContainersBuilding=true, got code %d, resp %+v", codeBuild, respBuild)
+		}
+
+		// 2. Aerial Core non-build nomad change applied directly
+		var revParseNomad int
+		envNomad := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseNomad++
+						if revParseNomad == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+					return []byte("nomad/jobs/migrate.nomad\n"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("M nomad/jobs/migrate.nomad\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				return []byte("Evaluation ID: migrate-123"), nil, nil
+			}
+		})
+		_ = os.WriteFile(filepath.Join(envNomad.aerialDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
+		respNomad, codeNomad := envNomad.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:     "aerial",
+			Ref:      "refs/heads/main",
+			PRNumber: 611,
+			TargetID: "1555422677936644147",
+		})
+		if codeNomad != http.StatusOK || respNomad.ContainersBuilding || !respNomad.NomadChanged || len(respNomad.AppliedJobs) != 1 {
+			t.Errorf("expected accepted with NomadChanged=true and applied job, got code %d, resp %+v", codeNomad, respNomad)
+		}
+		nomadEvts := envNomad.collectEvents(2, 2*time.Second)
+		var foundMigrate bool
+		for _, evt := range nomadEvts {
+			if evt.JobName == "migrate" {
+				foundMigrate = true
+				if evt.PRNumber != 611 || evt.TargetID != "1555422677936644147" {
+					t.Errorf("expected PRNumber 611 and TargetID 1555422677936644147, got %+v", evt)
+				}
+			}
+		}
+		if !foundMigrate {
+			t.Errorf("missing migrate deploy event in: %+v", nomadEvts)
+		}
+
+		// 3. Aerial Core Nomad apply failure returns 500
+		var revParseFail int
+		envNomadFail := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseFail++
+						if revParseFail == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+					return []byte("nomad/jobs/migrate.nomad\n"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("M nomad/jobs/migrate.nomad\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+					return nil, []byte("validate error"), errors.New("invalid job")
+				}
+				return []byte("OK"), nil, nil
+			}
+		})
+		_ = os.WriteFile(filepath.Join(envNomadFail.aerialDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
+		respFail, codeFail := envNomadFail.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial",
+			Ref:  "refs/heads/main",
+		})
+		if codeFail != http.StatusInternalServerError || respFail.Status != "error" {
+			t.Errorf("expected 500 when nomad apply fails, got code %d (%s)", codeFail, respFail.Status)
+		}
+
+		// 4. Aerial Core no changes
+		envNoChange := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					return []byte("sha1"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" {
+					return []byte("docs/index.html\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+		})
+		respNoChange, codeNoChange := envNoChange.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial",
+			Ref:  "refs/heads/main",
+		})
+		if codeNoChange != http.StatusOK || respNoChange.Status != "accepted" {
+			t.Errorf("expected 200 accepted for core no changes, got %d (%+v)", codeNoChange, respNoChange)
+		}
+
+		// 5. Mixed aerial core build + nomad deferral (404 manifest deferral)
+		var revParseMixed int
+		var appliedPaths []string
+		var mu sync.Mutex
+		envMixed := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" && revParseMixed == 0 {
+						revParseMixed++
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+					return []byte("vanadis/Dockerfile\nnomad/jobs/vanadis.nomad\nnomad/jobs/coverage-ingest.nomad\n"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("A\tnomad/jobs/vanadis.nomad\nM\tnomad/jobs/coverage-ingest.nomad\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.RegistryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+				if strings.Contains(req.URL.String(), "actions/runs") {
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`))}, nil
+				}
+				return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`))}, nil
+			}}}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+					mu.Lock()
+					appliedPaths = append(appliedPaths, args[len(args)-1])
+					mu.Unlock()
+				}
+				return []byte("Evaluation ID: 999"), nil, nil
+			}
+		})
+		_ = os.WriteFile(filepath.Join(envMixed.aerialDir, "nomad", "jobs", "vanadis.nomad"), []byte(`job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`), 0644)
+		_ = os.WriteFile(filepath.Join(envMixed.aerialDir, "nomad", "jobs", "coverage-ingest.nomad"), []byte(`job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`), 0644)
+
+		respMixed, codeMixed := envMixed.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:     "azylman/aerial",
+			Ref:      "refs/heads/main",
+			Commit:   "sha_after",
+			PRNumber: 719,
+			TargetID: "1560318118792790111",
+		})
+		if codeMixed != http.StatusOK || !respMixed.ContainersBuilding || !respMixed.NomadChanged || len(respMixed.AppliedJobs) != 1 || respMixed.AppliedJobs[0] != "coverage-ingest" {
+			t.Fatalf("unexpected git push response (%d): %+v", codeMixed, respMixed)
+		}
+		if pending := envMixed.daemon.drainPendingNomadChanges(); len(pending) != 0 {
+			t.Fatalf("expected zero pendingNomadChanges queued after ExecuteGitPushEvent, got %+v", pending)
+		}
+		if err := envMixed.daemon.ReconcileNomadChanges(ctx, envMixed.aerialDir, []NomadFileChange{{Path: "nomad/jobs/vanadis.nomad", Action: "apply", JobName: "vanadis"}}); err != nil {
+			t.Fatalf("unexpected error in ReconcileNomadChanges: %v", err)
+		}
+		mu.Lock()
+		for _, p := range appliedPaths {
+			if strings.Contains(p, "vanadis.nomad") {
+				t.Fatalf("expected vanadis.nomad to be deferred when image is missing in registry, got: %v", appliedPaths)
+			}
+		}
+		mu.Unlock()
+	})
+
+	t.Run("aerial-config diff gating, notices, and deploy events", func(t *testing.T) {
+		t.Parallel()
+
+		// 1. Config sync notices: nomad var put fails gracefully with 200 OK
+		envNotices := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "log" {
+					return []byte("sha123\x002026-10-05T00:00:00Z"), nil, nil
+				}
+				if len(args) > 0 && args[0] == "pull" {
+					return []byte("Already up to date."), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 2 && args[0] == "var" && args[1] == "put" {
+					return nil, []byte("nomad var put permission denied"), errors.New("var put failed")
+				}
+				return []byte(""), nil, nil
+			}
+		})
+		respNotices, codeNotices := envNotices.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:   "azylman/aerial-config",
+			Commit: "sha123",
+		})
+		if codeNotices != http.StatusOK {
+			t.Fatalf("expected 200 OK even with config sync notice, got %d (%+v)", codeNotices, respNotices)
+		}
+
+		// 2. Diff gating: untouched service configs skip nomad var put
+		var muGating sync.Mutex
+		var varPutJobs []string
+		envGating := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.NomadAddr = "http://127.0.0.1:4646"
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "log" {
+					return []byte("sha_curr\x002026-10-05T00:00:00Z"), nil, nil
+				}
+				if len(args) > 0 && args[0] == "rev-parse" {
+					return []byte("sha_curr\n"), nil, nil
+				}
+				if len(args) > 0 && args[0] == "pull" {
+					return []byte("Updating sha_prev..sha_curr"), nil, nil
+				}
+				if len(args) > 0 && args[0] == "diff" && args[1] == "--name-only" {
+					return []byte("services/hangar/hangar.yaml\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 4 && args[0] == "var" && args[1] == "put" {
+					muGating.Lock()
+					varPutJobs = append(varPutJobs, args[3])
+					muGating.Unlock()
+				}
+				return []byte("ok"), nil, nil
+			}
+		})
+		_ = os.MkdirAll(filepath.Join(envGating.aerialConfigDir, "services", "voice"), 0755)
+		_ = os.MkdirAll(filepath.Join(envGating.aerialConfigDir, "services", "hangar"), 0755)
+		_ = os.WriteFile(filepath.Join(envGating.aerialConfigDir, "services", "voice", "voice.yaml"), []byte("model: small.en\n"), 0644)
+		hangarContent := "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n"
+		_ = os.WriteFile(filepath.Join(envGating.aerialConfigDir, "services", "hangar", "hangar.yaml"), []byte(hangarContent), 0644)
+
+		respGating, codeGating := envGating.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:   "azylman/aerial-config",
+			Commit: "sha_curr",
+		})
+		if codeGating != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d (%+v)", codeGating, respGating)
+		}
+		muGating.Lock()
+		if len(varPutJobs) != 0 {
+			t.Fatalf("expected zero var put calls for untouched service configs, got: %v", varPutJobs)
+		}
+		muGating.Unlock()
+
+		// 3. Deferred nomad job due to active build vs Image Ready
+		jobWithAerialImg := `job "webhooks-router" {
+			task "router" {
+				config {
+					image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+				}
+			}
+		}`
+		_ = os.WriteFile(filepath.Join(envNotices.aerialConfigDir, "jobs", "webhooks-router.nomad"), []byte(jobWithAerialImg), 0644)
+
+		var revParseConfigDef int
+		envDef := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseConfigDef++
+						if revParseConfigDef == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.RegistryClient = &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						if strings.Contains(req.URL.String(), "actions/runs") {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     make(http.Header),
+								Body:       ioNopCloser(strings.NewReader(`{"total_count": 1, "workflow_runs": [{}]}`)),
+							}, nil
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{}`)),
+						}, nil
+					},
+				},
+			}
+		})
+		_ = os.WriteFile(filepath.Join(envDef.aerialConfigDir, "jobs", "webhooks-router.nomad"), []byte(jobWithAerialImg), 0644)
+		respDef, codeDef := envDef.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial-config",
+			Ref:  "refs/heads/main",
+		})
+		if codeDef != http.StatusOK || !respDef.ContainersBuilding || len(respDef.AppliedJobs) != 0 {
+			t.Errorf("expected job deferred when image source repo is building, got code %d, building %v, applied %v", codeDef, respDef.ContainersBuilding, respDef.AppliedJobs)
+		}
+
+		// 4. Image ready applies Nomad job and dispatches deploy_started
+		var revParseConfigApp int
+		envApp := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseConfigApp++
+						if revParseConfigApp == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.RegistryClient = &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						if strings.Contains(req.URL.String(), "actions/runs") {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     make(http.Header),
+								Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
+							}, nil
+						}
+						resp := &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{}`)),
+						}
+						resp.Header.Set("Docker-Content-Digest", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+						return resp, nil
+					},
+				},
+			}
+		})
+		_ = os.WriteFile(filepath.Join(envApp.aerialConfigDir, "jobs", "webhooks-router.nomad"), []byte(jobWithAerialImg), 0644)
+		respApp, codeApp := envApp.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:     "aerial-config",
+			Ref:      "refs/heads/main",
+			Commit:   "commit_abc123",
+			PRNumber: 255,
+			TargetID: "1555422677936644147",
+		})
+		if codeApp != http.StatusOK || respApp.ContainersBuilding || len(respApp.AppliedJobs) != 1 {
+			t.Errorf("expected job applied when image ready, got code %d, building %v, applied %v", codeApp, respApp.ContainersBuilding, respApp.AppliedJobs)
+		}
+		appEvts := envApp.collectEvents(2, 2*time.Second)
+		var hasSyncSuccess, hasDeployStarted bool
+		for _, evt := range appEvts {
+			if evt.Event == "sync_success" {
+				hasSyncSuccess = true
+			}
+			if evt.Event == "deploy_started" && evt.JobName == "webhooks-router" {
+				hasDeployStarted = true
+				if evt.PRNumber != 255 || evt.TargetID != "1555422677936644147" || evt.CommitSHA != "commit_abc123" || evt.Status != "started" {
+					t.Errorf("unexpected deploy_started payload: %+v", evt)
+				}
+			}
+		}
+		if !hasSyncSuccess || !hasDeployStarted {
+			t.Errorf("expected sync_success and deploy_started, got: %+v", appEvts)
+		}
+
+		// 5. Deploy failed dispatches deploy_failed
+		var revParseDeployFail int
+		envDeployFail := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseDeployFail++
+						if revParseDeployFail == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+					return nil, []byte("driver error: failed to place allocation"), errors.New("nomad run failed")
+				}
+				return []byte("OK"), nil, nil
+			}
+		})
+		_ = os.WriteFile(filepath.Join(envDeployFail.aerialConfigDir, "jobs", "webhooks-router.nomad"), []byte(`job "webhooks-router" {}`), 0644)
+		respDepFail, codeDepFail := envDeployFail.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo:   "aerial-config",
+			Ref:    "refs/heads/main",
+			Commit: "fail_commit_123",
+		})
+		if codeDepFail != http.StatusOK || len(respDepFail.AppliedJobs) != 0 {
+			t.Errorf("expected 200 with 0 applied jobs, got %d (%+v)", codeDepFail, respDepFail)
+		}
+		failEvtsAll := envDeployFail.collectEvents(3, 2*time.Second)
+		var hasDepFail bool
+		for _, evt := range failEvtsAll {
+			if evt.Event == "deploy_failed" {
+				hasDepFail = true
+				if evt.Status != "failed" || !strings.Contains(evt.Details, "driver error") {
+					t.Errorf("expected failed status and driver error details, got: %+v", evt)
+				}
+			}
+		}
+		if !hasDepFail {
+			t.Errorf("missing deploy_failed event in: %+v", failEvtsAll)
+		}
+
+		// 6. Complex aerial-config diff: deleted, deferred, unreadable, invalid, run-failed
+		_ = os.WriteFile(filepath.Join(envNotices.aerialConfigDir, "jobs", "deferred.nomad"), []byte(`job "deferred" { task "t" { config { image = "ghcr.io/azylman/aerial-brain:latest" } } }`), 0644)
+		_ = os.WriteFile(filepath.Join(envNotices.aerialConfigDir, "jobs", "invalid.nomad"), []byte(`invalid syntax`), 0644)
+		_ = os.WriteFile(filepath.Join(envNotices.aerialConfigDir, "jobs", "broken.nomad"), []byte(`job "broken" {}`), 0644)
+
+		var revParseComplex int
+		envComplex := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseComplex++
+						if revParseComplex == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("D jobs/deleted.nomad\nM jobs/deferred.nomad\nM jobs/invalid.nomad\nM jobs/nonexistent.nomad\nM jobs/broken.nomad\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+					if strings.Contains(args[len(args)-1], "invalid.nomad") {
+						return nil, []byte("syntax error"), errors.New("invalid job")
+					}
+				}
+				if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+					if strings.Contains(args[len(args)-1], "broken.nomad") {
+						return nil, []byte("run error"), errors.New("run failed")
+					}
+				}
+				return []byte("OK"), nil, nil
+			}
+		})
+		respComplex, codeComplex := envComplex.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial-config",
+			Ref:  "refs/heads/main",
+		})
+		if codeComplex != http.StatusOK || !respComplex.NomadChanged {
+			t.Errorf("expected 200 with NomadChanged=true for complex aerial-config, got %d (%+v)", codeComplex, respComplex)
+		}
+
+		// 7. Config diff error returns 500
+		var revParseDiffErr int
+		envDiffErr := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					if len(args) >= 2 && args[1] == "HEAD" {
+						revParseDiffErr++
+						if revParseDiffErr == 1 {
+							return []byte("sha_before"), nil, nil
+						}
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 1 && (args[0] == "diff" || args[0] == "diff-tree") {
+					return nil, []byte("diff fail"), errors.New("diff failed")
+				}
+				return []byte(""), nil, nil
+			}
+		})
+		respDiffErr, codeDiffErr := envDiffErr.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+			Repo: "aerial-config",
+			Ref:  "refs/heads/main",
+		})
+		if codeDiffErr != http.StatusInternalServerError || respDiffErr.Status != "error" {
+			t.Errorf("expected 500 error on diff failure, got %d (%+v)", codeDiffErr, respDiffErr)
+		}
+	})
+}
+
 
 func TestExecuteImageReadyEvent_TableDriven(t *testing.T) {
 	ctx := context.Background()
@@ -5286,193 +5728,6 @@ func TestApplyNomadChangesDirectly_Comprehensive(t *testing.T) {
 	}
 }
 
-func TestExecuteGitPushEvent_AdditionalBranches(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	aerialCoreDir := filepath.Join(tmpDir, "aerial")
-	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
-	_ = os.MkdirAll(filepath.Join(aerialCoreDir, ".git"), 0755)
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
-
-	// 1. SyncRepo failure
-	dSyncFail := NewDaemon(DaemonConfig{
-		Repos: []string{aerialCoreDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: remote not found"), errors.New("sync failed")
-		},
-	})
-	resp, code := dSyncFail.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusInternalServerError || resp.Status != "error" {
-		t.Errorf("expected 500 sync error, got code %d (%s)", code, resp.Status)
-	}
-
-	// 2. Aerial Core with Nomad changes failure in applyNomadChangesDirectly
-	var revParseAerial int
-	dAerialNomadFail := NewDaemon(DaemonConfig{
-		Repos:      []string{aerialCoreDir},
-		ComposeDir: aerialCoreDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseAerial++
-					if revParseAerial == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
-				return []byte("nomad/jobs/migrate.nomad\n"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M nomad/jobs/migrate.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
-				return nil, []byte("validate error"), errors.New("invalid job")
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-	_ = os.MkdirAll(filepath.Join(aerialCoreDir, "nomad", "jobs"), 0755)
-	_ = os.WriteFile(filepath.Join(aerialCoreDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
-
-	respAerialFail, codeAerialFail := dAerialNomadFail.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
-	})
-	if codeAerialFail != http.StatusInternalServerError || respAerialFail.Status != "error" {
-		t.Errorf("expected 500 when nomad apply fails, got code %d (%s)", codeAerialFail, respAerialFail.Status)
-	}
-
-	// 3. Aerial config with deleted nomad jobs and stopped successfully
-	var revParseConfigDel int
-	dConfigDel := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialConfigDir},
-		ConfigDir: aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseConfigDel++
-					if revParseConfigDel == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("D jobs/old-service.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Stop evaluation ID: stop-123"), nil, nil
-		},
-	})
-	respDel, codeDel := dConfigDel.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial-config",
-		Ref:  "refs/heads/main",
-	})
-	if codeDel != http.StatusOK || respDel.Status != "accepted" {
-		t.Errorf("expected 200 on config delete, got %d (%s)", codeDel, respDel.Status)
-	}
-
-	// 4. Aerial config with nomad job validate error
-	jobBad := `job "broken" {}`
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
-	_ = os.WriteFile(filepath.Join(aerialConfigDir, "jobs", "broken.nomad"), []byte(jobBad), 0644)
-
-	var revParseConfigBad int
-	dConfigBad := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialConfigDir},
-		ConfigDir: aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseConfigBad++
-					if revParseConfigBad == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M jobs/broken.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
-				return nil, []byte("syntax error"), errors.New("validate fail")
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-	respBad, codeBad := dConfigBad.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial-config",
-		Ref:  "refs/heads/main",
-	})
-	if codeBad != http.StatusOK || len(respBad.AppliedJobs) != 0 {
-		t.Errorf("expected 200 with 0 applied jobs on validation failure, got %d (applied: %v)", codeBad, respBad.AppliedJobs)
-	}
-
-	// 5. Aerial config with nomad job run error
-	var revParseConfigRunErr int
-	dConfigRunErr := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialConfigDir},
-		ConfigDir: aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseConfigRunErr++
-					if revParseConfigRunErr == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M jobs/broken.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-				return nil, []byte("nomad unreachable"), errors.New("run fail")
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-	respRunErr, codeRunErr := dConfigRunErr.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial-config",
-		Ref:  "refs/heads/main",
-	})
-	if codeRunErr != http.StatusOK || len(respRunErr.AppliedJobs) != 0 {
-		t.Errorf("expected 200 with 0 applied jobs on run failure, got %d (applied: %v)", codeRunErr, respRunErr.AppliedJobs)
-	}
-}
-
 func TestExecutors_DirectCoverage(t *testing.T) {
 	ctx := context.Background()
 
@@ -5644,376 +5899,6 @@ func TestValidateNomadConfig_NilExecutor(t *testing.T) {
 	err := d.ValidateNomadConfig(context.Background(), "/path")
 	if err == nil {
 		t.Errorf("expected error for nil nomad executor")
-	}
-}
-
-func TestExecuteGitPushEvent_DispatchesDeployStarted(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
-
-	jobFile := filepath.Join(aerialConfigDir, "jobs", "webhooks-router.nomad")
-	_ = os.WriteFile(jobFile, []byte(`job "webhooks-router" {}`), 0644)
-
-	evtCh := make(chan HangarDeployEvent, 10)
-	var revParseCount int
-
-	d := NewDaemon(DaemonConfig{
-		Repos:                  []string{aerialConfigDir},
-		ConfigDir:              aerialConfigDir,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseCount++
-					if revParseCount == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-				return []byte("Evaluation ID: run-ok"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
-				return []byte(`{
-					"ID": "webhooks-router",
-					"JobVersion": 1,
-					"LatestDeployment": {
-						"ID": "dep-git-push-1",
-						"JobVersion": 1,
-						"Status": "successful",
-						"StatusDescription": "Deployment completed successfully"
-					}
-				}`), nil, nil
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-
-	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:   "aerial-config",
-		Ref:    "refs/heads/main",
-		Commit: "commit_abc123",
-	})
-	if code != http.StatusOK || resp.Status != "accepted" {
-		t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
-	}
-
-	// 1. Wait for sync_success (git-sync) and deploy_started (webhooks-router)
-	var receivedEvts []HangarDeployEvent
-	for i := 0; i < 2; i++ {
-		select {
-		case evt := <-evtCh:
-			receivedEvts = append(receivedEvts, evt)
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for event %d", i+1)
-		}
-	}
-
-	var deployStartedEvt *HangarDeployEvent
-	var syncSuccessEvt *HangarDeployEvent
-	for i := range receivedEvts {
-		if receivedEvts[i].Event == "deploy_started" {
-			deployStartedEvt = &receivedEvts[i]
-		} else if receivedEvts[i].Event == "sync_success" {
-			syncSuccessEvt = &receivedEvts[i]
-		}
-	}
-	if syncSuccessEvt == nil {
-		t.Fatalf("missing sync_success event in received: %+v", receivedEvts)
-	}
-	if deployStartedEvt == nil {
-		t.Fatalf("missing deploy_started event in received: %+v", receivedEvts)
-	}
-	if deployStartedEvt.JobName != "webhooks-router" {
-		t.Errorf("expected job_name webhooks-router, got %q", deployStartedEvt.JobName)
-	}
-	if deployStartedEvt.Repo != "aerial-config" {
-		t.Errorf("expected repo aerial-config, got %q", deployStartedEvt.Repo)
-	}
-	if deployStartedEvt.CommitSHA != "commit_abc123" {
-		t.Errorf("expected commit_sha commit_abc123, got %q", deployStartedEvt.CommitSHA)
-	}
-	if deployStartedEvt.Status != "started" {
-		t.Errorf("expected status started, got %q", deployStartedEvt.Status)
-	}
-
-	// 2. Ensure deployment observation is delegated to webhooks-router
-	select {
-	case evt := <-evtCh:
-		t.Fatalf("unexpected event from Hangar: %+v (deploy observation is delegated to webhooks-router)", evt)
-	case <-time.After(50 * time.Millisecond):
-		// Expected: no further events dispatched
-	}
-}
-
-func TestExecuteGitPushEvent_DispatchesSyncSuccessAndFailure(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	aerialDir := filepath.Join(tmpDir, "aerial")
-	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0755)
-
-	evtCh := make(chan HangarDeployEvent, 10)
-
-	// 1. Successful sync with TargetID dispatches sync_success
-	dSuccess := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialDir},
-		ConfigDir: aerialDir,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				return []byte("sha_sync_ok"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-	})
-
-	resp, code := dSuccess.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:     "aerial",
-		Ref:      "refs/heads/main",
-		Commit:   "commit_12345",
-		TargetID: "1555405874565091380",
-		PRNumber: 542,
-	})
-	if code != http.StatusOK || resp.Status != "accepted" {
-		t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
-	}
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "sync_success" {
-			t.Errorf("expected sync_success, got %q", evt.Event)
-		}
-		if evt.TargetID != "1555405874565091380" {
-			t.Errorf("expected TargetID 1555405874565091380, got %q", evt.TargetID)
-		}
-		if evt.PRNumber != 542 {
-			t.Errorf("expected PRNumber 542, got %d", evt.PRNumber)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for sync_success event")
-	}
-
-	// 2. Failed sync with TargetID dispatches sync_failed
-	dFail := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialDir},
-		ConfigDir: aerialDir,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && (args[0] == "fetch" || args[0] == "pull") {
-				return nil, []byte("fatal: remote error"), fmt.Errorf("git fetch failed")
-			}
-			return []byte(""), nil, nil
-		},
-	})
-
-	respFail, codeFail := dFail.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:     "aerial",
-		Ref:      "refs/heads/main",
-		Commit:   "commit_fail",
-		TargetID: "1555405874565091380",
-		PRNumber: 542,
-	})
-	if codeFail != http.StatusInternalServerError || respFail.Status != "error" {
-		t.Fatalf("expected 500 error, got %d (%s)", codeFail, respFail.Status)
-	}
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "sync_failed" {
-			t.Errorf("expected sync_failed, got %q", evt.Event)
-		}
-		if evt.TargetID != "1555405874565091380" {
-			t.Errorf("expected TargetID 1555405874565091380, got %q", evt.TargetID)
-		}
-		if evt.Status != "failed" {
-			t.Errorf("expected status failed, got %q", evt.Status)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for sync_failed event")
-	}
-
-	// 3. Successful sync with empty CurrentHead falls back to req.Commit
-	dFallback := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialDir},
-		ConfigDir: aerialDir,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte(""), nil, nil
-		},
-	})
-
-	respFallback, codeFallback := dFallback.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:     "aerial",
-		Ref:      "refs/heads/main",
-		Commit:   "commit_req_fallback",
-		TargetID: "1555405874565091380",
-		PRNumber: 542,
-	})
-	if codeFallback != http.StatusOK || respFallback.Status != "accepted" {
-		t.Fatalf("expected 200 accepted, got %d (%s)", codeFallback, respFallback.Status)
-	}
-
-	select {
-	case evt := <-evtCh:
-		if evt.CommitSHA != "commit_req_fallback" {
-			t.Errorf("expected CommitSHA commit_req_fallback, got %q", evt.CommitSHA)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for fallback commit sync_success event")
-	}
-
-	// 4. Successful sync with empty TargetID still dispatches sync_success (for late resolution)
-	respEmpty, codeEmpty := dSuccess.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:     "aerial",
-		Ref:      "refs/heads/main",
-		Commit:   "commit_empty_target",
-		TargetID: "",
-		PRNumber: 0,
-	})
-	if codeEmpty != http.StatusOK || respEmpty.Status != "accepted" {
-		t.Fatalf("expected 200 accepted for empty TargetID, got %d (%s)", codeEmpty, respEmpty.Status)
-	}
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "sync_success" {
-			t.Errorf("expected sync_success, got %q", evt.Event)
-		}
-		if evt.TargetID != "" {
-			t.Errorf("expected empty TargetID, got %q", evt.TargetID)
-		}
-		if evt.CommitSHA != "sha_sync_ok" {
-			t.Errorf("expected CommitSHA sha_sync_ok, got %q", evt.CommitSHA)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for empty TargetID sync_success event")
-	}
-}
-
-func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
-
-	jobFile := filepath.Join(aerialConfigDir, "jobs", "webhooks-router.nomad")
-	_ = os.WriteFile(jobFile, []byte(`job "webhooks-router" {}`), 0644)
-
-	evtCh := make(chan HangarDeployEvent, 10)
-	var revParseCount int
-
-	d := NewDaemon(DaemonConfig{
-		Repos:                  []string{aerialConfigDir},
-		ConfigDir:              aerialConfigDir,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				if len(args) >= 2 && args[1] == "HEAD" {
-					revParseCount++
-					if revParseCount == 1 {
-						return []byte("sha_before"), nil, nil
-					}
-					return []byte("sha_after"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-				return nil, []byte("driver error: failed to place allocation"), errors.New("nomad run failed")
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-
-	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo:   "aerial-config",
-		Ref:    "refs/heads/main",
-		Commit: "fail_commit_123",
-	})
-	if code != http.StatusOK {
-		t.Fatalf("expected 200 accepted response, got %d", code)
-	}
-	if len(resp.AppliedJobs) != 0 {
-		t.Errorf("expected 0 applied jobs on run failure, got %v", resp.AppliedJobs)
-	}
-
-	// Collect all three dispatched events: sync_success (git-sync), deploy_started (webhooks-router), deploy_failed (webhooks-router)
-	var received []HangarDeployEvent
-	for i := 0; i < 3; i++ {
-		select {
-		case evt := <-evtCh:
-			received = append(received, evt)
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for event %d", i+1)
-		}
-	}
-
-	hasSyncSuccess := false
-	hasStarted := false
-	hasFailed := false
-	for _, evt := range received {
-		if evt.Event == "sync_success" {
-			hasSyncSuccess = true
-		}
-		if evt.Event == "deploy_started" {
-			hasStarted = true
-		}
-		if evt.Event == "deploy_failed" {
-			hasFailed = true
-			if evt.Status != "failed" {
-				t.Errorf("expected status failed, got %q", evt.Status)
-			}
-			if !strings.Contains(evt.Details, "driver error") {
-				t.Errorf("expected details to contain error message, got %q", evt.Details)
-			}
-		}
-	}
-	if !hasSyncSuccess {
-		t.Errorf("missing sync_success event in received: %+v", received)
-	}
-	if !hasStarted {
-		t.Errorf("missing deploy_started event in received: %+v", received)
-	}
-	if !hasFailed {
-		t.Errorf("missing deploy_failed event in received: %+v", received)
 	}
 }
 
@@ -6322,230 +6207,6 @@ func TestReconcileNomadChanges_LifecycleEvents(t *testing.T) {
 		t.Fatalf("unexpected event from Hangar: %+v (deploy observation is delegated to webhooks-router)", evt)
 	case <-time.After(50 * time.Millisecond):
 		// Expected: no further events dispatched
-	}
-}
-
-func TestExecuteGitPushEvent_ComprehensiveEdgeCases(t *testing.T) {
-	ctx := context.Background()
-
-	// 1. Missing repo
-	d := NewDaemon(DaemonConfig{})
-	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{})
-	if code != http.StatusBadRequest || resp.Status != "error" {
-		t.Errorf("expected 400 error for missing repo, got %d (%s)", code, resp.Status)
-	}
-
-	// 2. Non-main branch push ignored
-	resp, code = d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/feature-123",
-	})
-	if code != http.StatusOK || resp.Status != "ignored" {
-		t.Errorf("expected 200 ignored for non-main branch, got %d (%s)", code, resp.Status)
-	}
-
-	// 3. Unmanaged repo
-	resp, code = d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "unknown-repo",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusNotFound || resp.Status != "error" {
-		t.Errorf("expected 404 for unmanaged repo, got %d (%s)", code, resp.Status)
-	}
-
-	// 4. Git sync error
-	tmpDir := t.TempDir()
-	aerialCoreDir := filepath.Join(tmpDir, "aerial")
-	_ = os.MkdirAll(filepath.Join(aerialCoreDir, ".git"), 0755)
-
-	dSyncErr := NewDaemon(DaemonConfig{
-		Repos: []string{aerialCoreDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: remote error"), errors.New("sync failed")
-		},
-	})
-	resp, code = dSyncErr.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusInternalServerError || resp.Status != "error" {
-		t.Errorf("expected 500 error for failed git sync, got %d (%s)", code, resp.Status)
-	}
-
-	// 5. Aerial Core: Container build changes detected
-	var revParse5 int
-	dCoreBuild := NewDaemon(DaemonConfig{
-		Repos: []string{aerialCoreDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				revParse5++
-				if revParse5 == 1 {
-					return []byte("sha_before"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
-				return []byte("brain/main.go\nDockerfile\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-	})
-	resp, code = dCoreBuild.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusOK || !resp.ContainersBuilding {
-		t.Errorf("expected 200 with ContainersBuilding=true, got %d (%+v)", code, resp)
-	}
-
-	// 6. Aerial Core: Nomad changes with apply error
-	_ = os.MkdirAll(filepath.Join(aerialCoreDir, "nomad", "jobs"), 0755)
-	_ = os.WriteFile(filepath.Join(aerialCoreDir, "nomad", "jobs", "test.nomad"), []byte(`job "test" {}`), 0644)
-	var revParse6 int
-	dCoreNomadErr := NewDaemon(DaemonConfig{
-		Repos: []string{aerialCoreDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				revParse6++
-				if revParse6 == 1 {
-					return []byte("sha_before"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
-				return []byte("README.md\n"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("M nomad/jobs/test.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-				return nil, []byte("run failure"), errors.New("nomad run failed")
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-	resp, code = dCoreNomadErr.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusInternalServerError || resp.Status != "error" {
-		t.Errorf("expected 500 error for nomad apply error, got %d (%+v)", code, resp)
-	}
-
-	// 7. Aerial Core: No changes
-	dCoreNoChange := NewDaemon(DaemonConfig{
-		Repos: []string{aerialCoreDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				return []byte("sha1"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" {
-				return []byte("docs/index.html\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-	})
-	resp, code = dCoreNoChange.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusOK || resp.Status != "accepted" {
-		t.Errorf("expected 200 accepted for core no changes, got %d (%+v)", code, resp)
-	}
-
-	// 8. Aerial Config: Delete job action, deferred job, unreadable file, invalid job
-	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
-	_ = os.WriteFile(filepath.Join(aerialConfigDir, "jobs", "deferred.nomad"), []byte(`job "deferred" { task "t" { config { image = "ghcr.io/azylman/aerial-brain:latest" } } }`), 0644)
-	_ = os.WriteFile(filepath.Join(aerialConfigDir, "jobs", "invalid.nomad"), []byte(`invalid syntax`), 0644)
-
-	var revParse8 int
-	dConfigComplex := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialConfigDir},
-		ConfigDir: aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
-					return []byte("sha_after"), nil, nil
-				}
-				revParse8++
-				if revParse8 == 1 {
-					return []byte("sha_before"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("D jobs/deleted.nomad\nM jobs/deferred.nomad\nM jobs/invalid.nomad\nM jobs/nonexistent.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
-				if strings.Contains(args[len(args)-1], "invalid.nomad") {
-					return nil, []byte("syntax error"), errors.New("invalid job")
-				}
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-	resp, code = dConfigComplex.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial-config",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusOK || !resp.NomadChanged {
-		t.Errorf("expected 200 with NomadChanged=true for aerial-config, got %d (%+v)", code, resp)
-	}
-
-	// 9. Aerial Config: No changes
-	dConfigNoChange := NewDaemon(DaemonConfig{
-		Repos:     []string{aerialConfigDir},
-		ConfigDir: aerialConfigDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				return []byte("sha1"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" {
-				return []byte(""), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-	})
-	resp, code = dConfigNoChange.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "aerial-config",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusOK || resp.Status != "accepted" {
-		t.Errorf("expected 200 accepted for config no changes, got %d (%+v)", code, resp)
-	}
-
-	// 10. Generic third-party repo
-	otherRepoDir := filepath.Join(tmpDir, "other-repo")
-	_ = os.MkdirAll(filepath.Join(otherRepoDir, ".git"), 0755)
-	dOther := NewDaemon(DaemonConfig{
-		Repos: []string{otherRepoDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				return []byte("sha1"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-	})
-	resp, code = dOther.ExecuteGitPushEvent(ctx, GitPushEventRequest{
-		Repo: "other-repo",
-		Ref:  "refs/heads/main",
-	})
-	if code != http.StatusOK || resp.Message != "repository synced" {
-		t.Errorf("expected 200 'repository synced' for other repo, got %d (%+v)", code, resp)
 	}
 }
 
@@ -8936,43 +8597,6 @@ func TestExecuteImageReadyEvent_JobFileValidationAndReadErrors(t *testing.T) {
 	}
 }
 
-func TestExecuteGitPushEvent_ConfigSyncNotices(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	configDir := filepath.Join(tmpDir, "aerial-config")
-	_ = os.MkdirAll(filepath.Join(configDir, ".git"), 0755)
-
-	d := NewDaemon(DaemonConfig{
-		ConfigDir: configDir,
-		Repos:     []string{configDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "log" {
-				return []byte("sha123\x002026-10-05T00:00:00Z"), nil, nil
-			}
-			if len(args) > 0 && args[0] == "pull" {
-				return []byte("Already up to date."), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "var" && args[1] == "put" {
-				return nil, []byte("nomad var put permission denied"), errors.New("var put failed")
-			}
-			return []byte(""), nil, nil
-		},
-	})
-
-	req := GitPushEventRequest{
-		Repo:   "azylman/aerial-config",
-		Commit: "sha123",
-	}
-	resp, code := d.ExecuteGitPushEvent(ctx, req)
-	if code != http.StatusOK {
-		t.Fatalf("expected 200 OK even with config sync notice, got %d (%+v)", code, resp)
-	}
-}
-
-
 func TestSyncBrainConfigToNomad_DiffGated(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -9239,138 +8863,4 @@ func TestSyncServiceConfigsToNomad_DiffGated(t *testing.T) {
 		t.Fatalf("expected deploy_started event exclusively for orin-voice, got %+v", events)
 	}
 	mu.Unlock()
-}
-
-func TestExecuteGitPushEvent_AerialConfig_DiffGating(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	configDir := filepath.Join(tmpDir, "aerial-config")
-	_ = os.MkdirAll(filepath.Join(configDir, ".git"), 0755)
-	_ = os.MkdirAll(filepath.Join(configDir, "services", "voice"), 0755)
-	_ = os.MkdirAll(filepath.Join(configDir, "services", "hangar"), 0755)
-
-	voiceYaml := filepath.Join(configDir, "services", "voice", "voice.yaml")
-	_ = os.WriteFile(voiceYaml, []byte("model: small.en\n"), 0644)
-	hangarYaml := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
-	hangarContent := `service_configs:
-  - rel_path: "services/voice/voice.yaml"
-    nomad_var: "nomad/jobs/orin-voice"
-    var_key: "CONFIG_YAML"
-`
-	_ = os.WriteFile(hangarYaml, []byte(hangarContent), 0644)
-
-	var mu sync.Mutex
-	var varPutJobs []string
-
-	d := NewDaemon(DaemonConfig{
-		NomadAddr: "http://127.0.0.1:4646",
-		ConfigDir: configDir,
-		Repos:     []string{configDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "log" {
-				return []byte("sha_curr\x002026-10-05T00:00:00Z"), nil, nil
-			}
-			if len(args) > 0 && args[0] == "rev-parse" {
-				return []byte("sha_curr\n"), nil, nil
-			}
-			if len(args) > 0 && args[0] == "pull" {
-				return []byte("Updating sha_prev..sha_curr"), nil, nil
-			}
-			if len(args) > 0 && args[0] == "diff" && args[1] == "--name-only" {
-				return []byte("services/hangar/hangar.yaml\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 4 && args[0] == "var" && args[1] == "put" {
-				mu.Lock()
-				varPutJobs = append(varPutJobs, args[3])
-				mu.Unlock()
-			}
-			return []byte("ok"), nil, nil
-		},
-	})
-
-	req := GitPushEventRequest{
-		Repo:   "azylman/aerial-config",
-		Commit: "sha_curr",
-	}
-
-	resp, code := d.ExecuteGitPushEvent(ctx, req)
-	if code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d (%+v)", code, resp)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(varPutJobs) != 0 {
-		t.Fatalf("expected zero var put calls for untouched service configs, got: %v", varPutJobs)
-	}
-}
-
-func TestExecuteGitPushEvent_MixedBuildAndNomadDeferral(t *testing.T) {
-	ctx := context.Background()
-	aerialDir := filepath.Join(t.TempDir(), "aerial")
-	jobsDir := filepath.Join(aerialDir, "nomad", "jobs")
-	_ = os.MkdirAll(jobsDir, 0755)
-	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0755)
-	_ = os.WriteFile(filepath.Join(jobsDir, "vanadis.nomad"), []byte(`job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`), 0644)
-	_ = os.WriteFile(filepath.Join(jobsDir, "coverage-ingest.nomad"), []byte(`job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`), 0644)
-
-	var revParseCount int
-	var mu sync.Mutex
-	var appliedPaths []string
-
-	d := NewDaemon(DaemonConfig{
-		Repos:      []string{aerialDir},
-		ComposeDir: aerialDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 1 && args[0] == "rev-parse" {
-				if len(args) >= 2 && args[1] == "HEAD" && revParseCount == 0 {
-					revParseCount++
-					return []byte("sha_before"), nil, nil
-				}
-				return []byte("sha_after"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
-				return []byte("vanadis/Dockerfile\nnomad/jobs/vanadis.nomad\nnomad/jobs/coverage-ingest.nomad\n"), nil, nil
-			}
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
-				return []byte("A\tnomad/jobs/vanadis.nomad\nM\tnomad/jobs/coverage-ingest.nomad\n"), nil, nil
-			}
-			return []byte(""), nil, nil
-		},
-		RegistryClient: &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.String(), "actions/runs") {
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`))}, nil
-			}
-			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`))}, nil
-		}}},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-				mu.Lock()
-				appliedPaths = append(appliedPaths, args[len(args)-1])
-				mu.Unlock()
-			}
-			return []byte("Evaluation ID: 999"), nil, nil
-		},
-	})
-
-	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "sha_after", PRNumber: 719, TargetID: "1560318118792790111"})
-	if code != http.StatusOK || !resp.ContainersBuilding || !resp.NomadChanged || len(resp.AppliedJobs) != 1 || resp.AppliedJobs[0] != "coverage-ingest" {
-		t.Fatalf("unexpected git push response (%d): %+v", code, resp)
-	}
-	if pending := d.drainPendingNomadChanges(); len(pending) != 0 {
-		t.Fatalf("expected zero pendingNomadChanges queued after ExecuteGitPushEvent, got %+v", pending)
-	}
-	if err := d.ReconcileNomadChanges(ctx, aerialDir, []NomadFileChange{{Path: "nomad/jobs/vanadis.nomad", Action: "apply", JobName: "vanadis"}}); err != nil {
-		t.Fatalf("unexpected error in ReconcileNomadChanges: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	for _, p := range appliedPaths {
-		if strings.Contains(p, "vanadis.nomad") {
-			t.Fatalf("expected vanadis.nomad to be deferred when image is missing in registry, got: %v", appliedPaths)
-		}
-	}
 }
