@@ -551,6 +551,29 @@ type BrainPromptRequest struct {
 	Silent    bool   `json:"silent,omitempty"`
 }
 
+// StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
+type StatusWidgetChunk struct {
+	Index         int      `json:"index"`
+	Repo          string   `json:"repo"`
+	Title         string   `json:"title"`
+	Status        string   `json:"status"`
+	PRNumber      int      `json:"pr_number,omitempty"`
+	DiffStat      string   `json:"diff_stat,omitempty"`
+	DeployingJobs []string `json:"deploying_jobs,omitempty"`
+}
+
+// StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
+type StatusWidgetRequest struct {
+	ChannelID string              `json:"channel_id"`
+	MessageID string              `json:"message_id,omitempty"`
+	ID        string              `json:"id"`
+	Tier      int                 `json:"tier,omitempty"`
+	Title     string              `json:"title"`
+	Status    string              `json:"status"`
+	Banner    string              `json:"banner,omitempty"`
+	Chunks    []StatusWidgetChunk `json:"chunks"`
+}
+
 // VanadisServer manages HTTP endpoints and River worker coordination for Vanadis builds.
 type VanadisServer struct {
 	cfg         Config
@@ -577,6 +600,80 @@ func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
 
 // SetRiverClient updates the RiverInserter backing the server.
 func (s *VanadisServer) SetRiverClient(rc RiverInserter) { s.riverClient = rc }
+
+func (s *VanadisServer) syncBuildWidget(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, banner string) {
+	if s == nil || s.httpClient == nil {
+		return
+	}
+	brainURL := strings.TrimRight(firstNonEmpty(s.cfg.BrainURL, "http://127.0.0.1:8088"), "/")
+	wChunks := make([]StatusWidgetChunk, len(chunks))
+	for i, c := range chunks {
+		wChunks[i] = StatusWidgetChunk{
+			Index:    c.ChunkIndex,
+			Repo:     c.Repo,
+			Title:    c.Title,
+			Status:   c.Status,
+			PRNumber: c.PRNumber,
+			DiffStat: c.DiffStat,
+		}
+	}
+
+	payload := StatusWidgetRequest{
+		ChannelID: build.ThreadID,
+		MessageID: build.StatusMessageID,
+		ID:        build.ID,
+		Tier:      build.Tier,
+		Title:     build.Objective,
+		Status:    build.Status,
+		Banner:    banner,
+		Chunks:    wChunks,
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[vanadis] warning: failed to marshal widget request for build %s: %v", build.ID, err)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+"/discord/widget", bytes.NewReader(bodyBytes))
+	if err != nil {
+		log.Printf("[vanadis] warning: failed to create widget request for build %s: %v", build.ID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		log.Printf("[vanadis] warning: post discord widget failed for build %s: %v", build.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		if readErr != nil {
+			log.Printf("[vanadis] warning: discord widget returned status %d for build %s (read error: %v)", resp.StatusCode, build.ID, readErr)
+			return
+		}
+		log.Printf("[vanadis] warning: discord widget returned status %d for build %s: %s", resp.StatusCode, build.ID, strings.TrimSpace(string(respBody)))
+		return
+	}
+
+	var res struct {
+		Status    string `json:"status"`
+		MessageID string `json:"message_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		log.Printf("[vanadis] warning: failed to decode widget response for build %s: %v", build.ID, err)
+		return
+	}
+
+	if res.MessageID != "" && res.MessageID != build.StatusMessageID && s.store != nil {
+		if err := s.store.UpdateBuildStatusMessageID(ctx, build.ID, res.MessageID); err != nil {
+			log.Printf("[vanadis] warning: failed to persist status_message_id for build %s: %v", build.ID, err)
+		}
+	}
+}
 
 func (s *VanadisServer) insertRiverJob(ctx context.Context, args ExecuteChunkArgs) error {
 	if s.riverClient == nil {
@@ -626,6 +723,8 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "running"); err != nil {
 		return fmt.Errorf("update chunk %s status to running: %w", chunk.ID, err)
 	}
+	chunks[activeIdx].Status = "running"
+	s.syncBuildWidget(ctx, *build, chunks, "")
 
 	prompt, err := FormatChunkPrompt(*build, chunks, activeIdx)
 	if err != nil {
@@ -647,6 +746,10 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 			if bErr := s.store.UpdateBuildStatus(ctx, build.ID, "failed"); bErr != nil {
 				log.Printf("[vanadis] failed marking build %s failed on final attempt: %v", build.ID, bErr)
 			}
+			build.Status = "failed"
+			chunks[activeIdx].Status = "failed"
+			failBanner := fmt.Sprintf("⚠️ Chunk %d execution failed: %v", chunkIndex+1, err)
+			s.syncBuildWidget(ctx, *build, chunks, failBanner)
 		}
 		return err
 	}
@@ -878,6 +981,11 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	s.syncBuildWidget(r.Context(), build, chunks, "")
+	if updatedBuild, _, gErr := s.store.GetBuild(r.Context(), buildID); gErr == nil && updatedBuild != nil {
+		build.StatusMessageID = updatedBuild.StatusMessageID
+	}
+
 	if err := s.insertRiverJob(r.Context(), ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0}); err != nil {
 		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
 			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
@@ -887,14 +995,15 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"status":         "accepted",
-		"build_id":       build.ID,
-		"repo":           build.Repo,
-		"thread_id":      build.ThreadID,
-		"tier":           build.Tier,
-		"chunk_count":    len(chunks),
-		"first_chunk_id": chunks[0].ID,
-		"chunks":         chunks,
+		"status":            "accepted",
+		"build_id":          build.ID,
+		"repo":              build.Repo,
+		"thread_id":         build.ThreadID,
+		"tier":              build.Tier,
+		"status_message_id": build.StatusMessageID,
+		"chunk_count":       len(chunks),
+		"first_chunk_id":    chunks[0].ID,
+		"chunks":            chunks,
 	})
 }
 
@@ -922,7 +1031,8 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "build id is required"})
 			return
 		}
-		if existing, _, gErr := s.store.GetBuild(r.Context(), buildID); gErr == nil && existing != nil && (existing.Status == "completed" || existing.Status == "failed") {
+		existing, existingChunks, gErr := s.store.GetBuild(r.Context(), buildID)
+		if gErr == nil && existing != nil && (existing.Status == "completed" || existing.Status == "failed") {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("cannot cancel build in terminal status %q", existing.Status)})
 			return
 		}
@@ -933,6 +1043,10 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
+		}
+		if existing != nil {
+			existing.Status = "cancelled"
+			s.syncBuildWidget(r.Context(), *existing, existingChunks, "")
 		}
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":   "cancelled",

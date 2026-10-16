@@ -4660,6 +4660,147 @@ func TestHandlePRRegister(t *testing.T) {
 			t.Errorf("Expected 500 when AttachVanadisChunkPR fails, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	}
+
+	// 9. Registration with pool and standalone PR delivers widget and updates message_id
+	{
+		var deliveredReq discord.StatusWidgetRequest
+		testPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
+				deliveredReq = r
+				return "msg-widget-standalone-1", nil
+			},
+		})
+		poolHandler := handlePRRegister(store, testPool)
+
+		payload := `{"repo":"aerial","pr_number":601,"branch":"feat/standalone","head_sha":"sha601","target_id":"1555405874565091380","title":"feat: standalone pr","diff_stat":"+10 -2"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		poolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK with pool, got %d (%s)", rec.Code, rec.Body.String())
+		}
+		if deliveredReq.ID != "pr-aerial-601" || deliveredReq.ChannelID != "1555405874565091380" || deliveredReq.Title != "feat: standalone pr" {
+			t.Errorf("Unexpected delivered widget request: %+v", deliveredReq)
+		}
+		prInStore, err := store.GetPRByNumber(context.Background(), "aerial", 601)
+		if err != nil || prInStore.StatusMessageID != "msg-widget-standalone-1" {
+			t.Errorf("Expected status_message_id msg-widget-standalone-1 in store, got %+v (err: %v)", prInStore, err)
+		}
+	}
+
+	// 10. Registration with pool and Vanadis chunk delivers Vanadis widget and updates build status_message_id
+	{
+		err := store.CreateVanadisBuild(context.Background(), db.VanadisBuild{
+			ID:        "build-reg-widget",
+			Repo:      "aerial",
+			ThreadID:  "1555405874565091380",
+			Objective: "Build widget delivery test",
+			Status:    "running",
+			Tier:      2,
+		}, []db.VanadisChunk{
+			{
+				ID:           "chunk-reg-widget-0",
+				ChunkIndex:   0,
+				Title:        "Chunk Zero",
+				Instructions: "Do zero",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CreateVanadisBuild failed: %v", err)
+		}
+
+		var deliveredVanadisReq discord.StatusWidgetRequest
+		testPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
+				deliveredVanadisReq = r
+				return "msg-build-widget-1", nil
+			},
+		})
+		poolHandler := handlePRRegister(store, testPool)
+
+		payload := `{"repo":"aerial","pr_number":602,"branch":"feat/vanadis-widget","head_sha":"sha602","target_id":"1555405874565091380","title":"feat: vanadis widget","vanadis_chunk_id":"chunk-reg-widget-0","diff_stat":"+50 -1"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		poolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK with pool and vanadis, got %d (%s)", rec.Code, rec.Body.String())
+		}
+		if deliveredVanadisReq.ID != "build-reg-widget" || deliveredVanadisReq.ChannelID != "1555405874565091380" {
+			t.Errorf("Unexpected delivered vanadis widget request: %+v", deliveredVanadisReq)
+		}
+		buildInStore, _, err := store.GetVanadisBuild(context.Background(), "build-reg-widget")
+		if err != nil || buildInStore.StatusMessageID != "msg-build-widget-1" {
+			t.Errorf("Expected status_message_id msg-build-widget-1 in store, got %+v (err: %v)", buildInStore, err)
+		}
+	}
+
+	// 11. Registration with pool covering warning/fallback branches (empty title, store/delivery errors)
+	{
+		errPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
+				return "", errors.New("widget delivery failed")
+			},
+		})
+		errPoolHandler := handlePRRegister(store, errPool)
+
+		// 11a. Standalone PR with empty title + widget delivery error
+		payloadEmptyTitle := `{"repo":"aerial","pr_number":603,"branch":"feat/empty-title","head_sha":"sha603","target_id":"1555405874565091380"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payloadEmptyTitle))
+		rec := httptest.NewRecorder()
+		errPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK even when widget delivery fails, got %d", rec.Code)
+		}
+
+		// 11b. Standalone PR with GetPRByNumber error + UpdatePRStatusMessageID error
+		okPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
+				return "msg-new-id", nil
+			},
+		})
+		okPoolHandler := handlePRRegister(store, okPool)
+		store.FailNext("GetPRByNumber", errors.New("get pr failed"))
+		store.FailNext("UpdatePRStatusMessageID", errors.New("update msg id failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payloadEmptyTitle))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when GetPRByNumber/UpdatePRStatusMessageID fail, got %d", rec.Code)
+		}
+
+		// 11c. Vanadis chunk widget with GetVanadisChunk error, GetVanadisBuild error, DeliverStatusWidget error, and UpdateVanadisBuildStatusMessageID error
+		vanadisPayload := `{"repo":"aerial","pr_number":604,"branch":"feat/v-err","head_sha":"sha604","target_id":"1555405874565091380","vanadis_chunk_id":"chunk-reg-widget-0"}`
+		store.FailNext("GetVanadisChunk", errors.New("get chunk failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when GetVanadisChunk fails, got %d", rec.Code)
+		}
+
+		store.FailNext("GetVanadisBuild", errors.New("get build failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when GetVanadisBuild fails, got %d", rec.Code)
+		}
+
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		errPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when Vanadis DeliverStatusWidget fails, got %d", rec.Code)
+		}
+
+		store.FailNext("UpdateVanadisBuildStatusMessageID", errors.New("update build msg id failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when UpdateVanadisBuildStatusMessageID fails, got %d", rec.Code)
+		}
+	}
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {

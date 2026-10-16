@@ -1080,3 +1080,72 @@ func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
 		t.Fatalf("unexpected RunApp error: %v", err)
 	}
 }
+
+func TestSyncBuildWidget(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil server or client
+	var nilSrv *VanadisServer
+	nilSrv.syncBuildWidget(ctx, VanadisBuild{}, nil, "")
+
+	store := newMemoryVanadisStore()
+	store.builds["b1"] = VanadisBuild{ID: "b1", ThreadID: "1555405874565091380"}
+
+	// 2. Successful widget post and persistence of new message_id
+	var postedReq StatusWidgetRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/discord/widget" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&postedReq)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "delivered",
+			"message_id": "msg-new-widget-42",
+		})
+	}))
+	defer ts.Close()
+
+	srv := &VanadisServer{
+		cfg: Config{BrainURL: ts.URL},
+		httpClient: ts.Client(),
+		store: store,
+	}
+
+	build := VanadisBuild{
+		ID: "b1",
+		ThreadID: "1555405874565091380",
+		Objective: "Test Obj",
+		Status: "running",
+		Tier: 2,
+	}
+	chunks := []VanadisChunk{
+		{ChunkIndex: 0, Title: "Chunk 0", Status: "running", Repo: "aerial"},
+	}
+
+	srv.syncBuildWidget(ctx, build, chunks, "test banner")
+	if postedReq.ID != "b1" || postedReq.Banner != "test banner" {
+		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
+	}
+	if store.builds["b1"].StatusMessageID != "msg-new-widget-42" {
+		t.Errorf("Expected store status_message_id msg-new-widget-42, got %q", store.builds["b1"].StatusMessageID)
+	}
+
+	// 3. Error decoding response
+	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{invalid-json"))
+	}))
+	defer tsBadJSON.Close()
+
+	srvBadJSON := &VanadisServer{
+		cfg: Config{BrainURL: tsBadJSON.URL},
+		httpClient: tsBadJSON.Client(),
+		store: store,
+	}
+	srvBadJSON.syncBuildWidget(ctx, build, chunks, "")
+
+	// 4. Persistence failure in store
+	store.updateBuildErr = errors.New("simulated store failure")
+	srv.syncBuildWidget(ctx, build, chunks, "")
+}
