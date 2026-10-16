@@ -13,17 +13,21 @@ func runVanadisTests(t *testing.T, store Store) {
 
 	// 1. Validation errors on CreateVanadisBuild
 	validBuild := VanadisBuild{
-		ID:        "build-101",
-		Repo:      "aerial",
-		ThreadID:  "1555405874565091380",
-		Objective: "Implement vanadis build queue",
+		ID:            "build-101",
+		Repo:          "aerial",
+		ThreadID:      "1555405874565091380",
+		Objective:     "Implement vanadis build queue",
+		SharedContext: "Shared context for build 101",
 	}
 	validChunk := VanadisChunk{
-		ID:           "chunk-101-0",
-		ChunkIndex:   0,
-		Title:        "Task 1: Schema and store",
-		Instructions: "Add vanadis_builds and vanadis_chunks tables",
-		TargetFiles:  []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"},
+		ID:                 "chunk-101-0",
+		ChunkIndex:         0,
+		Title:              "Task 1: Schema and store",
+		Instructions:       "Add vanadis_builds and vanadis_chunks tables",
+		TargetFiles:        []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"},
+		TargetSymbols:      []string{"VanadisBuild", "VanadisChunk"},
+		Effort:             "medium",
+		AcceptanceCriteria: []string{"Unit tests pass", "Coverage >= 95%"},
 	}
 
 	badBuildCases := []struct {
@@ -39,6 +43,8 @@ func runVanadisTests(t *testing.T, store Store) {
 		{"mismatched chunk build_id", validBuild, []VanadisChunk{{ID: "c1", BuildID: "other-build", Title: "t", Instructions: "i"}}},
 		{"empty chunk title", validBuild, []VanadisChunk{{ID: "c1", Title: "", Instructions: "i"}}},
 		{"empty chunk instructions", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: ""}}},
+		{"invalid chunk effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "ultra"}}},
+		{"numeric chunk effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "10"}}},
 	}
 
 	for _, tc := range badBuildCases {
@@ -50,12 +56,15 @@ func runVanadisTests(t *testing.T, store Store) {
 	// 2. CreateVanadisBuild with multiple chunks (inserted out of chunk_index order to test ordering)
 	chunks := []VanadisChunk{
 		{
-			ID:           "chunk-101-1",
-			BuildID:      "build-101",
-			ChunkIndex:   1,
-			Title:        "Task 2: River worker",
-			Instructions: "Implement VanadisWorker",
-			TargetFiles:  []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`},
+			ID:                 "chunk-101-1",
+			BuildID:            "build-101",
+			ChunkIndex:         1,
+			Title:              "Task 2: River worker",
+			Instructions:       "Implement VanadisWorker",
+			TargetFiles:        []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`},
+			TargetSymbols:      []string{`Sym,with"quote`},
+			Effort:             "HIGH",
+			AcceptanceCriteria: []string{"Worker processes chunk successfully"},
 		},
 		validChunk,
 		{
@@ -64,6 +73,7 @@ func runVanadisTests(t *testing.T, store Store) {
 			Title:        "Task 3: Verification",
 			Instructions: "Run tests",
 			TargetFiles:  nil,
+			Effort:       "", // should default to "low"
 			Status:       "queued",
 			PRNumber:     42,
 			DiffStat:     "1 file changed",
@@ -100,29 +110,47 @@ func runVanadisTests(t *testing.T, store Store) {
 	if err != nil {
 		t.Fatalf("GetVanadisBuild failed: %v", err)
 	}
-	if gotBuild.ID != "build-101" || gotBuild.Repo != "azylman/aerial" || gotBuild.ThreadID != "1555405874565091380" || gotBuild.Tier != 2 || gotBuild.Status != "running" {
+	if gotBuild.ID != "build-101" || gotBuild.Repo != "azylman/aerial" || gotBuild.ThreadID != "1555405874565091380" || gotBuild.Tier != 2 || gotBuild.Status != "running" || gotBuild.SharedContext != "Shared context for build 101" {
 		t.Errorf("unexpected build fields: %+v", gotBuild)
 	}
 	if len(gotChunks) != 3 {
 		t.Fatalf("expected 3 chunks, got %d", len(gotChunks))
 	}
-	if gotChunks[0].ID != "chunk-101-0" || gotChunks[0].ChunkIndex != 0 || gotChunks[0].Status != "pending" {
+	if gotChunks[0].ID != "chunk-101-0" || gotChunks[0].ChunkIndex != 0 || gotChunks[0].Status != "pending" || gotChunks[0].Effort != "medium" {
 		t.Errorf("unexpected chunk[0]: %+v", gotChunks[0])
 	}
 	if !reflect.DeepEqual(gotChunks[0].TargetFiles, []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"}) {
 		t.Errorf("unexpected chunk[0] TargetFiles: %#v", gotChunks[0].TargetFiles)
 	}
-	if gotChunks[1].ID != "chunk-101-1" || gotChunks[1].ChunkIndex != 1 {
+	if !reflect.DeepEqual(gotChunks[0].TargetSymbols, []string{"VanadisBuild", "VanadisChunk"}) {
+		t.Errorf("unexpected chunk[0] TargetSymbols: %#v", gotChunks[0].TargetSymbols)
+	}
+	if !reflect.DeepEqual(gotChunks[0].AcceptanceCriteria, []string{"Unit tests pass", "Coverage >= 95%"}) {
+		t.Errorf("unexpected chunk[0] AcceptanceCriteria: %#v", gotChunks[0].AcceptanceCriteria)
+	}
+	if gotChunks[1].ID != "chunk-101-1" || gotChunks[1].ChunkIndex != 1 || gotChunks[1].Effort != "high" {
 		t.Errorf("unexpected chunk[1]: %+v", gotChunks[1])
 	}
 	if !reflect.DeepEqual(gotChunks[1].TargetFiles, []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`}) {
 		t.Errorf("unexpected chunk[1] TargetFiles: %#v", gotChunks[1].TargetFiles)
 	}
-	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 {
+	if !reflect.DeepEqual(gotChunks[1].TargetSymbols, []string{`Sym,with"quote`}) {
+		t.Errorf("unexpected chunk[1] TargetSymbols: %#v", gotChunks[1].TargetSymbols)
+	}
+	if !reflect.DeepEqual(gotChunks[1].AcceptanceCriteria, []string{"Worker processes chunk successfully"}) {
+		t.Errorf("unexpected chunk[1] AcceptanceCriteria: %#v", gotChunks[1].AcceptanceCriteria)
+	}
+	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 || gotChunks[2].Effort != "low" {
 		t.Errorf("unexpected chunk[2]: %+v", gotChunks[2])
 	}
 	if len(gotChunks[2].TargetFiles) != 0 {
 		t.Errorf("expected empty TargetFiles on chunk[2], got %#v", gotChunks[2].TargetFiles)
+	}
+	if len(gotChunks[2].TargetSymbols) != 0 {
+		t.Errorf("expected empty TargetSymbols on chunk[2], got %#v", gotChunks[2].TargetSymbols)
+	}
+	if len(gotChunks[2].AcceptanceCriteria) != 0 {
+		t.Errorf("expected empty AcceptanceCriteria on chunk[2], got %#v", gotChunks[2].AcceptanceCriteria)
 	}
 
 	// Non-existent and empty build ID
@@ -138,8 +166,14 @@ func runVanadisTests(t *testing.T, store Store) {
 	if err != nil {
 		t.Fatalf("GetVanadisChunk failed: %v", err)
 	}
-	if gotChunk0.Title != "Task 1: Schema and store" || gotChunk0.BuildID != "build-101" {
+	if gotChunk0.Title != "Task 1: Schema and store" || gotChunk0.BuildID != "build-101" || gotChunk0.Effort != "medium" {
 		t.Errorf("unexpected chunk from GetVanadisChunk: %+v", gotChunk0)
+	}
+	if !reflect.DeepEqual(gotChunk0.TargetSymbols, []string{"VanadisBuild", "VanadisChunk"}) {
+		t.Errorf("unexpected chunk0 TargetSymbols: %#v", gotChunk0.TargetSymbols)
+	}
+	if !reflect.DeepEqual(gotChunk0.AcceptanceCriteria, []string{"Unit tests pass", "Coverage >= 95%"}) {
+		t.Errorf("unexpected chunk0 AcceptanceCriteria: %#v", gotChunk0.AcceptanceCriteria)
 	}
 	if _, err := store.GetVanadisChunk(ctx, "nonexistent-chunk"); !errors.Is(err, ErrVanadisChunkNotFound) {
 		t.Errorf("expected ErrVanadisChunkNotFound, got %v", err)
@@ -409,12 +443,15 @@ func TestVanadis_SQLStore_PostgresBranches(t *testing.T) {
 		Objective: "pg branch",
 	}, []VanadisChunk{
 		{
-			ID:           "c-pg-1",
-			ChunkIndex:   0,
-			Repo:         "aerial-config",
-			Title:        "t1",
-			Instructions: "i1",
-			TargetFiles:  nil,
+			ID:                 "c-pg-1",
+			ChunkIndex:         0,
+			Repo:               "aerial-config",
+			Title:              "t1",
+			Instructions:       "i1",
+			TargetFiles:        nil,
+			TargetSymbols:      []string{"sym1"},
+			Effort:             "high",
+			AcceptanceCriteria: []string{"ac1"},
 		},
 	})
 	if err != nil {
@@ -422,3 +459,31 @@ func TestVanadis_SQLStore_PostgresBranches(t *testing.T) {
 	}
 }
 
+
+func TestNormalizeVanadisEffort(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		input       string
+		expected    string
+		expectError bool
+	}{
+		{"", "low", false},
+		{"   ", "low", false},
+		{"low", "low", false},
+		{"LOW", "low", false},
+		{"  Medium  ", "medium", false},
+		{"high", "high", false},
+		{"HIGH", "high", false},
+		{"invalid", "", true},
+		{"unknown", "", true},
+	}
+	for _, tc := range cases {
+		got, err := normalizeVanadisEffort(tc.input)
+		if (err != nil) != tc.expectError {
+			t.Errorf("normalizeVanadisEffort(%q) error = %v, expectError = %v", tc.input, err, tc.expectError)
+		}
+		if got != tc.expected {
+			t.Errorf("normalizeVanadisEffort(%q) = %q, expected %q", tc.input, got, tc.expected)
+		}
+	}
+}

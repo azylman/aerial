@@ -2226,6 +2226,19 @@ func cloneVanadisChunk(c *VanadisChunk) VanadisChunk {
 	} else {
 		cp.TargetFiles = []string{}
 	}
+	if c.TargetSymbols != nil {
+		cp.TargetSymbols = append([]string(nil), c.TargetSymbols...)
+	} else {
+		cp.TargetSymbols = []string{}
+	}
+	if c.AcceptanceCriteria != nil {
+		cp.AcceptanceCriteria = append([]string(nil), c.AcceptanceCriteria...)
+	} else {
+		cp.AcceptanceCriteria = []string{}
+	}
+	if strings.TrimSpace(cp.Effort) == "" {
+		cp.Effort = "low"
+	}
 	return cp
 }
 
@@ -2274,6 +2287,9 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		if strings.TrimSpace(c.Instructions) == "" {
 			return fmt.Errorf("chunk[%d] instructions cannot be empty", i)
 		}
+		if _, err := normalizeVanadisEffort(c.Effort); err != nil {
+			return fmt.Errorf("chunk[%d] %w", i, err)
+		}
 		if _, exists := f.vanadisChunks[cid]; exists || seenChunkIDs[cid] {
 			return fmt.Errorf("vanadis chunk %s already exists", cid)
 		}
@@ -2300,6 +2316,7 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		ThreadID:        threadID,
 		Tier:            tier,
 		Objective:       objective,
+		SharedContext:   strings.TrimSpace(build.SharedContext),
 		Status:          status,
 		StatusMessageID: strings.TrimSpace(build.StatusMessageID),
 		CreatedAt:       now,
@@ -2318,19 +2335,31 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		}
 		files := make([]string, 0, len(c.TargetFiles))
 		files = append(files, c.TargetFiles...)
+		symbols := make([]string, 0, len(c.TargetSymbols))
+		symbols = append(symbols, c.TargetSymbols...)
+		criteria := make([]string, 0, len(c.AcceptanceCriteria))
+		criteria = append(criteria, c.AcceptanceCriteria...)
+		effort, err := normalizeVanadisEffort(c.Effort)
+		if err != nil {
+			return fmt.Errorf("chunk %s: %w", cid, err)
+		}
+
 		f.vanadisChunks[cid] = &VanadisChunk{
-			ID:           cid,
-			BuildID:      buildID,
-			ChunkIndex:   c.ChunkIndex,
-			Repo:         chunkRepo,
-			Title:        strings.TrimSpace(c.Title),
-			Instructions: strings.TrimSpace(c.Instructions),
-			TargetFiles:  files,
-			Status:       cStatus,
-			PRNumber:     c.PRNumber,
-			DiffStat:     c.DiffStat,
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			ID:                 cid,
+			BuildID:            buildID,
+			ChunkIndex:         c.ChunkIndex,
+			Repo:               chunkRepo,
+			Title:              strings.TrimSpace(c.Title),
+			Instructions:       strings.TrimSpace(c.Instructions),
+			TargetFiles:        files,
+			TargetSymbols:      symbols,
+			Effort:             effort,
+			AcceptanceCriteria: criteria,
+			Status:             cStatus,
+			PRNumber:           c.PRNumber,
+			DiffStat:           c.DiffStat,
+			CreatedAt:          now,
+			UpdatedAt:          now,
 		}
 	}
 	return nil
