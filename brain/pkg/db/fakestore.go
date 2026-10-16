@@ -1970,6 +1970,9 @@ func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 		if record.Status != "" && existing.Status != "merged" && existing.Status != "deploying" && existing.Status != "deployed" {
 			existing.Status = record.Status
 		}
+		if record.StatusMessageID != "" {
+			existing.StatusMessageID = record.StatusMessageID
+		}
 		if record.Metadata != "" && record.Metadata != "{}" {
 			existing.Metadata = record.Metadata
 		}
@@ -1988,18 +1991,19 @@ func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 	}
 
 	rec := &PRRecord{
-		ID:        f.nextPRID,
-		Repo:      repo,
-		PRNumber:  record.PRNumber,
-		Branch:    branch,
-		HeadSHA:   headSHA,
-		MergeSHA:  record.MergeSHA,
-		TargetID:  targetID,
-		Status:    status,
-		Title:     record.Title,
-		Metadata:  meta,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:              f.nextPRID,
+		Repo:            repo,
+		PRNumber:        record.PRNumber,
+		Branch:          branch,
+		HeadSHA:         headSHA,
+		MergeSHA:        record.MergeSHA,
+		TargetID:        targetID,
+		Status:          status,
+		Title:           record.Title,
+		StatusMessageID: strings.TrimSpace(record.StatusMessageID),
+		Metadata:        meta,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	f.prRecords[key] = rec
 	return nil
@@ -2128,6 +2132,29 @@ func (f *FakeStore) UpdatePRStatus(ctx context.Context, repo string, prNumber in
 		return ErrPRNotFound
 	}
 	rec.Status = status
+	rec.UpdatedAt = time.Now()
+	return nil
+}
+
+// UpdatePRStatusMessageID updates the status_message_id of a PR in FakeStore.
+func (f *FakeStore) UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return sql.ErrConnDone
+	}
+	if err, ok := f.failNext["UpdatePRStatusMessageID"]; ok {
+		delete(f.failNext, "UpdatePRStatusMessageID")
+		return err
+	}
+
+	key := prKey(repo, prNumber)
+	rec, exists := f.prRecords[key]
+	if !exists {
+		return ErrPRNotFound
+	}
+	rec.StatusMessageID = strings.TrimSpace(messageID)
 	rec.UpdatedAt = time.Now()
 	return nil
 }
@@ -2268,18 +2295,23 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 	}
 
 	f.vanadisBuilds[buildID] = &VanadisBuild{
-		ID:        buildID,
-		Repo:      repo,
-		ThreadID:  threadID,
-		Tier:      tier,
-		Objective: objective,
-		Status:    status,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:              buildID,
+		Repo:            repo,
+		ThreadID:        threadID,
+		Tier:            tier,
+		Objective:       objective,
+		Status:          status,
+		StatusMessageID: strings.TrimSpace(build.StatusMessageID),
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	for _, c := range chunks {
 		cid := strings.TrimSpace(c.ID)
+		chunkRepo := normalizeRepo(c.Repo)
+		if chunkRepo == "" {
+			chunkRepo = repo
+		}
 		cStatus := strings.TrimSpace(c.Status)
 		if cStatus == "" {
 			cStatus = "pending"
@@ -2290,6 +2322,7 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 			ID:           cid,
 			BuildID:      buildID,
 			ChunkIndex:   c.ChunkIndex,
+			Repo:         chunkRepo,
 			Title:        strings.TrimSpace(c.Title),
 			Instructions: strings.TrimSpace(c.Instructions),
 			TargetFiles:  files,
@@ -2436,6 +2469,29 @@ func (f *FakeStore) UpdateVanadisBuildStatus(ctx context.Context, buildID, statu
 		return ErrVanadisBuildNotFound
 	}
 	b.Status = status
+	b.UpdatedAt = time.Now()
+	return nil
+}
+
+// UpdateVanadisBuildStatusMessageID updates the status_message_id of a VanadisBuild.
+func (f *FakeStore) UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.checkClosedAndFail("UpdateVanadisBuildStatusMessageID"); err != nil {
+		return err
+	}
+
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return fmt.Errorf("build id cannot be empty")
+	}
+
+	b, exists := f.vanadisBuilds[buildID]
+	if !exists {
+		return ErrVanadisBuildNotFound
+	}
+	b.StatusMessageID = strings.TrimSpace(messageID)
 	b.UpdatedAt = time.Now()
 	return nil
 }

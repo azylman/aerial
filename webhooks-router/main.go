@@ -453,6 +453,7 @@ type DeployingPR struct {
 type VanadisChunkSummary struct {
 	ID         string `json:"id"`
 	ChunkIndex int    `json:"chunk_index"`
+	Repo       string `json:"repo,omitempty"`
 	Title      string `json:"title"`
 	Status     string `json:"status"`
 	PRNumber   int    `json:"pr_number,omitempty"`
@@ -469,6 +470,7 @@ type VanadisAdvancementResult struct {
 	Tier             int                   `json:"tier"`
 	Objective        string                `json:"objective"`
 	BuildStatus      string                `json:"build_status"`
+	StatusMessageID  string                `json:"status_message_id,omitempty"`
 	MergedChunkIndex int                   `json:"merged_chunk_index"`
 	MergedChunkTitle string                `json:"merged_chunk_title"`
 	NextChunkIndex   int                   `json:"next_chunk_index"`
@@ -906,16 +908,16 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 	}()
 
 	selectChunkQuery := `
-		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.repo, b.thread_id, b.tier, b.objective, b.status
+		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.repo, b.thread_id, b.tier, b.objective, b.status, b.status_message_id
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE b.repo = $1 AND c.pr_number = $2
+		WHERE c.repo = $1 AND c.pr_number = $2
 		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
 
-	var chunkID, buildID, cTitle, cStatus, bRepo, threadID, objective, bStatus string
+	var chunkID, buildID, cTitle, cStatus, bRepo, threadID, objective, bStatus, bStatusMsgID string
 	var chunkIdx, tier int
 	err = tx.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
-		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &bRepo, &threadID, &tier, &objective, &bStatus,
+		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &bRepo, &threadID, &tier, &objective, &bStatus, &bStatusMsgID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &VanadisAdvancementResult{Matched: false}, nil
@@ -934,6 +936,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 			Tier:             tier,
 			Objective:        objective,
 			BuildStatus:      bStatus,
+			StatusMessageID:  bStatusMsgID,
 			MergedChunkIndex: chunkIdx,
 			MergedChunkTitle: cTitle,
 			NextChunkIndex:   -1,
@@ -945,7 +948,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 		return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
 	}
 
-	allChunksQuery := `SELECT id, chunk_index, title, status, COALESCE(pr_number, 0), diff_stat FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
+	allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), diff_stat FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
 	rows, err := tx.Query(qCtx, allChunksQuery, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("query vanadis build chunks: %w", err)
@@ -953,7 +956,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 	var allChunks []VanadisChunkSummary
 	for rows.Next() {
 		var cs VanadisChunkSummary
-		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Title, &cs.Status, &cs.PRNumber, &cs.DiffStat); scanErr != nil {
+		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &cs.DiffStat); scanErr != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan vanadis build chunk: %w", scanErr)
 		}
@@ -995,6 +998,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 			Tier:             tier,
 			Objective:        objective,
 			BuildStatus:      bStatus,
+			StatusMessageID:  bStatusMsgID,
 			MergedChunkIndex: chunkIdx,
 			MergedChunkTitle: cTitle,
 			NextChunkIndex:   nextChunkIdx,
@@ -1019,6 +1023,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 		Tier:             tier,
 		Objective:        objective,
 		BuildStatus:      "completed",
+		StatusMessageID:  bStatusMsgID,
 		MergedChunkIndex: chunkIdx,
 		MergedChunkTitle: cTitle,
 		NextChunkIndex:   -1,
@@ -1040,7 +1045,7 @@ func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context
 			SELECT 1
 			FROM vanadis_chunks c
 			JOIN vanadis_builds b ON c.build_id = b.id
-			WHERE b.repo = $1 AND c.pr_number = $2
+			WHERE c.repo = $1 AND c.pr_number = $2
 			  AND (
 				  b.status = 'running'
 				  OR EXISTS (
@@ -1068,7 +1073,7 @@ func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo stri
 		UPDATE vanadis_chunks c
 		SET status = 'failed', updated_at = CURRENT_TIMESTAMP
 		FROM vanadis_builds b
-		WHERE c.build_id = b.id AND b.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
+		WHERE c.build_id = b.id AND c.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
 		RETURNING c.build_id;`
 	var buildID string
 	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&buildID)
