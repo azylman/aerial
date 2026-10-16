@@ -1,4 +1,4 @@
-h1:gXnQzivixdsfHD/MAYGLecI9PLus8lGY1p2Si5PiuqA=
+h1:2sBkoapK8onL+mPhSA2OlQ88qiY6p9Dmf3zUrUH6O3A=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -7,3 +7,4 @@ h1:gXnQzivixdsfHD/MAYGLecI9PLus8lGY1p2Si5PiuqA=
 20261016042557_vanadis_chunk_repo_and_widget_msg_id.sql h1:uNdhXjIcU1fxAFSRxk3s6xDZzPHnC1aeLEDe+X2haJA=
 20261016164005_add_vanadis_structured_context_fields.sql h1:E+rQbT1s935jDSx4LJNKhabIbfz24DxUFfxs0jlWT5k=
 20261016173130_add_vanadis_build_title.sql h1:XIzSE8fI8otW2fvWmEIz6XgyVOl31bL+/6+WjY56gec=
+20261016182900_add_vanadis_chunk_started_at.sql h1:vVc9g7NHipBvMppj/DP8hEgwogulvqHA6r2F0YjpnDM=

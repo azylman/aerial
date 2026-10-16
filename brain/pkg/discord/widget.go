@@ -11,13 +11,15 @@ import (
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 type StatusWidgetChunk struct {
-	Index         int      `json:"index"`
-	Repo          string   `json:"repo"`
-	Title         string   `json:"title"`
-	Status        string   `json:"status"`
-	PRNumber      int      `json:"pr_number,omitempty"`
-	DiffStat      string   `json:"diff_stat,omitempty"`
-	DeployingJobs []string `json:"deploying_jobs,omitempty"`
+	Index         int       `json:"index"`
+	Repo          string    `json:"repo"`
+	Title         string    `json:"title"`
+	Status        string    `json:"status"`
+	PRNumber      int       `json:"pr_number,omitempty"`
+	DiffStat      string    `json:"diff_stat,omitempty"`
+	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
+	StartedAt     time.Time `json:"started_at,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 }
 
 // StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
@@ -86,6 +88,49 @@ func NormalizeRepo(repo string) (fullRepo string, shortRepo string) {
 		return "azylman/" + parts[0], parts[0]
 	}
 	return trimmed, parts[len(parts)-1]
+}
+
+// FormatChunkDuration formats a chunk execution duration into a concise human-readable string.
+func FormatChunkDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSecs := int(d.Round(time.Second).Seconds())
+	if totalSecs < 60 {
+		return fmt.Sprintf("%ds", totalSecs)
+	}
+	if totalSecs < 3600 {
+		mins := totalSecs / 60
+		secs := totalSecs % 60
+		if secs == 0 {
+			return fmt.Sprintf("%dm", mins)
+		}
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	}
+	hours := totalSecs / 3600
+	mins := (totalSecs % 3600) / 60
+	if mins == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh %dm", hours, mins)
+}
+
+func formatChunkRuntimeSuffix(c StatusWidgetChunk) string {
+	if c.StartedAt.IsZero() {
+		return ""
+	}
+	norm := strings.ToLower(strings.TrimSpace(c.Status))
+	switch norm {
+	case "running", "coding", "pr_opened", "open", "deploying":
+		return fmt.Sprintf(" *(started <t:%d:R>)*", c.StartedAt.Unix())
+	case "merged", "deployed", "completed", "success", "failed", "conflict", "closed", "error", "cancelled":
+		if c.UpdatedAt.IsZero() {
+			return ""
+		}
+		return fmt.Sprintf(" *(%s)*", FormatChunkDuration(c.UpdatedAt.Sub(c.StartedAt)))
+	default:
+		return ""
+	}
 }
 
 // BuildStatusWidgetComponents constructs a Components V2 Container message component.
@@ -168,7 +213,7 @@ func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]disc
 			repoTag = "aerial"
 		}
 
-		rowText := fmt.Sprintf("%s **`%s`**: %s", badge, repoTag, strings.TrimSpace(c.Title))
+		rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
 
 		if c.PRNumber > 0 && fullRepo != "" {
 			prURL := fmt.Sprintf("https://github.com/%s/pull/%d", fullRepo, c.PRNumber)

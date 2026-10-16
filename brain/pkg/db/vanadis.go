@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
@@ -164,8 +165,8 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 		}
 
 		chunkQuery := `
-			INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, diff_stat, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+			INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, diff_stat, started_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		`
 		for _, c := range chunks {
 			chunkID := strings.TrimSpace(c.ID)
@@ -186,6 +187,12 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 			var prNum sql.NullInt64
 			if c.PRNumber > 0 {
 				prNum = sql.NullInt64{Int64: int64(c.PRNumber), Valid: true}
+			}
+			var startedAt sql.NullTime
+			if !c.StartedAt.IsZero() {
+				startedAt = sql.NullTime{Time: c.StartedAt.UTC(), Valid: true}
+			} else if cStatus == "running" || cStatus == "coding" {
+				startedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
 			}
 
 			var targetFilesArg, targetSymbolsArg, acceptanceCriteriaArg any
@@ -214,7 +221,7 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 			}
 
 			if _, err := execDB.ExecContext(ctx, chunkQuery,
-				chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, targetFilesArg, targetSymbolsArg, cEffort, acceptanceCriteriaArg, cStatus, prNum, c.DiffStat,
+				chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, targetFilesArg, targetSymbolsArg, cEffort, acceptanceCriteriaArg, cStatus, prNum, c.DiffStat, startedAt,
 			); err != nil {
 				return fmt.Errorf("failed to insert vanadis chunk %s: %w", chunkID, err)
 			}
@@ -251,7 +258,7 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 	}
 
 	chunksQuery := `
-		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE build_id = $1
 		ORDER BY chunk_index ASC;
@@ -265,6 +272,7 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 	chunks := make([]VanadisChunk, 0)
 	for rows.Next() {
 		var c VanadisChunk
+		var startedAt sql.NullTime
 		var rawTargetFiles, rawTargetSymbols, rawAcceptanceCriteria string
 		var targetFilesDest, targetSymbolsDest, acceptanceCriteriaDest any
 		if s.isPostgres {
@@ -277,9 +285,12 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 			acceptanceCriteriaDest = &rawAcceptanceCriteria
 		}
 		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetFilesDest, targetSymbolsDest, &c.Effort, acceptanceCriteriaDest, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
+			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetFilesDest, targetSymbolsDest, &c.Effort, acceptanceCriteriaDest, &c.Status, &c.PRNumber, &c.DiffStat, &startedAt, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
+		}
+		if startedAt.Valid {
+			c.StartedAt = startedAt.Time
 		}
 		if !s.isPostgres {
 			c.TargetFiles = parsePostgresTextArray(rawTargetFiles)
@@ -320,11 +331,12 @@ func (s *SQLStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanadi
 	}
 
 	query := `
-		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE id = $1;
 	`
 	var c VanadisChunk
+	var startedAt sql.NullTime
 	var rawTargetFiles, rawTargetSymbols, rawAcceptanceCriteria string
 	var targetFilesDest, targetSymbolsDest, acceptanceCriteriaDest any
 	if s.isPostgres {
@@ -338,13 +350,16 @@ func (s *SQLStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanadi
 	}
 
 	err := s.db.QueryRowContext(ctx, query, chunkID).Scan(
-		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetFilesDest, targetSymbolsDest, &c.Effort, acceptanceCriteriaDest, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
+		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetFilesDest, targetSymbolsDest, &c.Effort, acceptanceCriteriaDest, &c.Status, &c.PRNumber, &c.DiffStat, &startedAt, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrVanadisChunkNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vanadis chunk: %w", err)
+	}
+	if startedAt.Valid {
+		c.StartedAt = startedAt.Time
 	}
 	if !s.isPostgres {
 		c.TargetFiles = parsePostgresTextArray(rawTargetFiles)
@@ -384,7 +399,9 @@ func (s *SQLStore) UpdateVanadisChunkStatus(ctx context.Context, chunkID, status
 
 	query := `
 		UPDATE vanadis_chunks
-		SET status = $1, updated_at = CURRENT_TIMESTAMP
+		SET status = $1,
+		    started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END,
+		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $2;
 	`
 	res, err := s.db.ExecContext(ctx, query, status, chunkID)
@@ -417,7 +434,11 @@ func (s *SQLStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prN
 
 	query := `
 		UPDATE vanadis_chunks
-		SET pr_number = $1, diff_stat = $2, status = 'pr_opened', updated_at = CURRENT_TIMESTAMP
+		SET pr_number = $1,
+		    diff_stat = $2,
+		    status = 'pr_opened',
+		    started_at = COALESCE(started_at, created_at, CURRENT_TIMESTAMP),
+		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $3;
 	`
 	res, err := s.db.ExecContext(ctx, query, prNumber, diffStat, chunkID)

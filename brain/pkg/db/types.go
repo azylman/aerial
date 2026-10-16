@@ -32,6 +32,7 @@ type VanadisChunk struct {
 	Status             string    `json:"status"`
 	PRNumber           int       `json:"pr_number,omitempty"`
 	DiffStat           string    `json:"diff_stat,omitempty"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }

@@ -2348,6 +2348,10 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		if err != nil {
 			return fmt.Errorf("chunk %s: %w", cid, err)
 		}
+		startedAt := c.StartedAt
+		if startedAt.IsZero() && (cStatus == "running" || cStatus == "coding") {
+			startedAt = now
+		}
 
 		f.vanadisChunks[cid] = &VanadisChunk{
 			ID:                 cid,
@@ -2363,6 +2367,7 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 			Status:             cStatus,
 			PRNumber:           c.PRNumber,
 			DiffStat:           c.DiffStat,
+			StartedAt:          startedAt,
 			CreatedAt:          now,
 			UpdatedAt:          now,
 		}
@@ -2451,6 +2456,9 @@ func (f *FakeStore) UpdateVanadisChunkStatus(ctx context.Context, chunkID, statu
 		return ErrVanadisChunkNotFound
 	}
 	c.Status = status
+	if (status == "running" || status == "coding") && c.StartedAt.IsZero() {
+		c.StartedAt = time.Now()
+	}
 	c.UpdatedAt = time.Now()
 	return nil
 }
@@ -2479,6 +2487,13 @@ func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, pr
 	c.PRNumber = prNumber
 	c.DiffStat = diffStat
 	c.Status = "pr_opened"
+	if c.StartedAt.IsZero() {
+		if !c.CreatedAt.IsZero() {
+			c.StartedAt = c.CreatedAt
+		} else {
+			c.StartedAt = time.Now()
+		}
+	}
 	c.UpdatedAt = time.Now()
 	return nil
 }

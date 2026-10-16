@@ -488,3 +488,100 @@ func TestIsMessageNotFound(t *testing.T) {
 	}
 }
 
+func TestFormatChunkDuration(t *testing.T) {
+	tests := []struct {
+		dur  time.Duration
+		want string
+	}{
+		{-10 * time.Second, "0s"},
+		{0, "0s"},
+		{45 * time.Second, "45s"},
+		{3 * time.Minute, "3m"},
+		{4*time.Minute + 12*time.Second, "4m 12s"},
+		{1 * time.Hour, "1h"},
+		{2*time.Hour + 15*time.Minute + 20*time.Second, "2h 15m"},
+	}
+
+	for _, tt := range tests {
+		if got := FormatChunkDuration(tt.dur); got != tt.want {
+			t.Errorf("FormatChunkDuration(%v) = %q, want %q", tt.dur, got, tt.want)
+		}
+	}
+}
+
+func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
+	now := time.Unix(1760000500, 0)
+	start := time.Unix(1760000000, 0)
+	completedAt := start.Add(4*time.Minute + 12*time.Second)
+
+	req := StatusWidgetRequest{
+		ChannelID: "1542423172400291873",
+		ID:        "build-runtimes",
+		Tier:      3,
+		Title:     "Add Chunk Runtime Tracking To Status Cards",
+		Status:    "running",
+		Chunks: []StatusWidgetChunk{
+			{
+				Index:     0,
+				Repo:      "aerial",
+				Title:     "Completed chunk with duration",
+				Status:    "merged",
+				PRNumber:  748,
+				StartedAt: start,
+				UpdatedAt: completedAt,
+			},
+			{
+				Index:     1,
+				Repo:      "aerial",
+				Title:     "Active chunk with relative timestamp",
+				Status:    "running",
+				StartedAt: start,
+				UpdatedAt: start,
+			},
+			{
+				Index:     2,
+				Repo:      "aerial",
+				Title:     "Pending chunk with no runtime",
+				Status:    "pending",
+				StartedAt: start,
+				UpdatedAt: start,
+			},
+			{
+				Index:     3,
+				Repo:      "aerial",
+				Title:     "Completed chunk missing UpdatedAt",
+				Status:    "merged",
+				StartedAt: start,
+			},
+		},
+	}
+
+	comps, err := BuildStatusWidgetComponents(req, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents failed: %v", err)
+	}
+	container := comps[0].(*discordgo.Container)
+
+	c0Sec := container.Components[1].(*discordgo.Section)
+	c0Text := c0Sec.Components[0].(*discordgo.TextDisplay)
+	if c0Text.Content != "✅ **`aerial`**: Completed chunk with duration *(4m 12s)*" {
+		t.Errorf("unexpected chunk 0 text: %q", c0Text.Content)
+	}
+
+	c1Text := container.Components[2].(*discordgo.TextDisplay)
+	if c1Text.Content != "🔨 **`aerial`**: Active chunk with relative timestamp *(started <t:1760000000:R>)*" {
+		t.Errorf("unexpected chunk 1 text: %q", c1Text.Content)
+	}
+
+	c2Text := container.Components[3].(*discordgo.TextDisplay)
+	if c2Text.Content != "⏳ **`aerial`**: Pending chunk with no runtime" {
+		t.Errorf("unexpected chunk 2 text: %q", c2Text.Content)
+	}
+
+	c3Text := container.Components[4].(*discordgo.TextDisplay)
+	if c3Text.Content != "✅ **`aerial`**: Completed chunk missing UpdatedAt" {
+		t.Errorf("unexpected chunk 3 text: %q", c3Text.Content)
+	}
+}
+
+
