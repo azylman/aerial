@@ -248,6 +248,7 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - **Banning Closure Tables in Tests**: Unit tests must avoid anonymous closure tables (`run: func(t *testing.T)`) unless explicitly testing concurrency barriers or mutex locks. Prefer clean data-only table structs with shared test assertion bodies to keep tests concise, readable, and debuggable.
 3. **Vanadis Multi-Chunk Build Authoring Runbook (`scripts/aerial-build.sh enqueue <plan.json>`)**:
    - For multi-step autonomous builds spanning multiple PRs or services, author a declarative build plan JSON and enqueue via `scripts/aerial-build.sh enqueue <plan.json>`.
+   - **`title` (5–7 Word Phrase Convention)**: Both the top-level build `title` (`CreateBuildRequest.Title`) and every chunk `title` (`CreateChunkInput.Title`) should be a concise **5–7 word phrase** describing the build or chunk for Discord status card headers and chunk rows.
    - **`shared_context`**: Populate with architectural topology, service invariants, database connections, and shared technical decisions that every chunk worker must know.
    - **`target_files`**: Specify exact files each chunk modifies or creates so workers focus immediately on their workspace perimeter.
    - **`target_symbols`**: Specify the key functions, structs, interfaces, or tables touched in this chunk to prevent broad exploratory grepping.

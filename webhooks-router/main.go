@@ -468,6 +468,7 @@ type VanadisAdvancementResult struct {
 	Repo             string                `json:"repo"`
 	ThreadID         string                `json:"thread_id"`
 	Tier             int                   `json:"tier"`
+	Title            string                `json:"title"`
 	Objective        string                `json:"objective"`
 	BuildStatus      string                `json:"build_status"`
 	StatusMessageID  string                `json:"status_message_id,omitempty"`
@@ -931,16 +932,16 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 	}()
 
 	selectChunkQuery := `
-		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.repo, b.thread_id, b.tier, b.objective, b.status, b.status_message_id
+		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.repo, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
 		WHERE c.repo = $1 AND c.pr_number = $2
 		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
 
-	var chunkID, buildID, cTitle, cStatus, bRepo, threadID, objective, bStatus, bStatusMsgID string
+	var chunkID, buildID, cTitle, cStatus, bRepo, threadID, bTitle, objective, bStatus, bStatusMsgID string
 	var chunkIdx, tier int
 	err = tx.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
-		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &bRepo, &threadID, &tier, &objective, &bStatus, &bStatusMsgID,
+		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &bRepo, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &VanadisAdvancementResult{Matched: false}, nil
@@ -957,6 +958,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 			Repo:             bRepo,
 			ThreadID:         threadID,
 			Tier:             tier,
+			Title:            bTitle,
 			Objective:        objective,
 			BuildStatus:      bStatus,
 			StatusMessageID:  bStatusMsgID,
@@ -1019,6 +1021,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 			Repo:             bRepo,
 			ThreadID:         threadID,
 			Tier:             tier,
+			Title:            bTitle,
 			Objective:        objective,
 			BuildStatus:      bStatus,
 			StatusMessageID:  bStatusMsgID,
@@ -1044,6 +1047,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 		Repo:             bRepo,
 		ThreadID:         threadID,
 		Tier:             tier,
+		Title:            bTitle,
 		Objective:        objective,
 		BuildStatus:      "completed",
 		StatusMessageID:  bStatusMsgID,
@@ -1717,16 +1721,16 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 
 	// 1. Check if (repo, prNumber) belongs to a vanadis_chunks row
 	selectChunkQuery := `
-		SELECT c.id, c.build_id, b.repo, b.thread_id, b.tier, b.objective, b.status, b.status_message_id
+		SELECT c.id, c.build_id, b.repo, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
 		WHERE c.repo = $1 AND c.pr_number = $2
 		ORDER BY c.updated_at DESC LIMIT 1`
 
-	var cID, buildID, bRepo, threadID, objective, bStatus, bStatusMsgID string
+	var cID, buildID, bRepo, threadID, bTitle, objective, bStatus, bStatusMsgID string
 	var tier int
 	err := pgReg.pool.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
-		&cID, &buildID, &bRepo, &threadID, &tier, &objective, &bStatus, &bStatusMsgID,
+		&cID, &buildID, &bRepo, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
 	)
 	if err == nil && buildID != "" {
 		// Parent Vanadis build found
@@ -1784,7 +1788,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 			MessageID: bStatusMsgID,
 			ID:        buildID,
 			Tier:      tier,
-			Title:     objective,
+			Title:     firstNonEmpty(bTitle, objective),
 			Status:    widgetStatus,
 			Banner:    banner,
 			Chunks:    wChunks,

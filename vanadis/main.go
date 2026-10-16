@@ -163,6 +163,7 @@ type VanadisBuild struct {
 	Repo            string    `json:"repo"`
 	ThreadID        string    `json:"thread_id"`
 	Tier            int       `json:"tier"`
+	Title           string    `json:"title"`
 	Objective       string    `json:"objective"`
 	SharedContext   string    `json:"shared_context,omitempty"`
 	Status          string    `json:"status"`
@@ -250,6 +251,7 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 	if objective == "" {
 		return errors.New("objective cannot be empty")
 	}
+	buildTitle := firstNonEmpty(strings.TrimSpace(build.Title), objective)
 	tier := build.Tier
 	if tier <= 0 {
 		tier = 2
@@ -290,10 +292,10 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 	statusMessageID := strings.TrimSpace(build.StatusMessageID)
 	sharedContext := strings.TrimSpace(build.SharedContext)
 	buildQuery := `
-		INSERT INTO vanadis_builds (id, repo, thread_id, tier, objective, shared_context, status, status_message_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO vanadis_builds (id, repo, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 	`
-	if _, err := tx.Exec(ctx, buildQuery, buildID, repo, threadID, tier, objective, sharedContext, status, statusMessageID); err != nil {
+	if _, err := tx.Exec(ctx, buildQuery, buildID, repo, threadID, tier, buildTitle, objective, sharedContext, status, statusMessageID); err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
 	}
 
@@ -358,13 +360,13 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	}
 
 	buildQuery := `
-		SELECT id, repo, thread_id, tier, objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
+		SELECT id, repo, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
 		FROM vanadis_builds
 		WHERE id = $1;
 	`
 	var b VanadisBuild
 	err := s.db.QueryRow(ctx, buildQuery, buildID).Scan(
-		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
+		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrBuildNotFound
@@ -516,6 +518,9 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	var sb strings.Builder
 	sb.WriteString("[VANADIS BUILD CHUNK EXECUTION]\n")
 	fmt.Fprintf(&sb, "Build ID: %s\n", build.ID)
+	if bTitle := strings.TrimSpace(build.Title); bTitle != "" {
+		fmt.Fprintf(&sb, "Build Title: %s\n", bTitle)
+	}
 	fmt.Fprintf(&sb, "Repository: %s\n", activeRepo)
 	fmt.Fprintf(&sb, "Tier: %d\n", build.Tier)
 	fmt.Fprintf(&sb, "Overall Objective: %s\n\n", build.Objective)
@@ -691,7 +696,7 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, build VanadisBuild,
 		MessageID: build.StatusMessageID,
 		ID:        build.ID,
 		Tier:      build.Tier,
-		Title:     build.Objective,
+		Title:     firstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    build.Status,
 		Banner:    banner,
 		Chunks:    wChunks,
@@ -886,6 +891,7 @@ type CreateBuildRequest struct {
 	Repo          string             `json:"repo"`
 	ThreadID      string             `json:"thread_id"`
 	Tier          int                `json:"tier"`
+	Title         string             `json:"title"`
 	Objective     string             `json:"objective"`
 	SharedContext string             `json:"shared_context,omitempty"`
 	Chunks        []CreateChunkInput `json:"chunks"`
@@ -1004,6 +1010,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		Repo:          repo,
 		ThreadID:      threadID,
 		Tier:          tier,
+		Title:         firstNonEmpty(strings.TrimSpace(req.Title), objective),
 		Objective:     objective,
 		SharedContext: strings.TrimSpace(req.SharedContext),
 		Status:        "running",
