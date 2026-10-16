@@ -1574,145 +1574,181 @@ brain_internal_url: "http://brain.cluster:8088/internal/reload"
 	}
 }
 
-func TestDaemonLifecycleAndHTTP(t *testing.T) {
-	tempDir := t.TempDir()
-	cfg := DaemonConfig{
-		Port:       "0",
-		Repos:      []string{tempDir},
-		Interval:   50 * time.Millisecond,
-		ComposeDir: tempDir,
-		ConfigDir:  tempDir,
-	}
-
-	daemon := NewDaemon(cfg)
-	if daemon.interval != 50*time.Millisecond {
-		t.Errorf("expected interval 50ms, got %v", daemon.interval)
-	}
-
-	defaultDaemon := NewDaemon(DaemonConfig{Interval: 0})
-	if defaultDaemon.interval != 60*time.Second {
-		t.Errorf("expected default interval 60s, got %v", defaultDaemon.interval)
-	}
-
-	mux := SetupMux(daemon)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	// 1. GET /health
-	resp, err := http.Get(srv.URL + "/health")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /health failed: %v, status=%d", err, resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// 2. GET /metrics
-	respMetrics, err := http.Get(srv.URL + "/metrics")
-	if err != nil || respMetrics.StatusCode != http.StatusOK {
-		t.Fatalf("GET /metrics failed: %v, status=%d", err, respMetrics.StatusCode)
-	}
-	respMetrics.Body.Close()
-
-	// 3. /status endpoint method validation
-	respBadMethod, _ := http.Post(srv.URL+"/status", "application/json", nil)
-	if respBadMethod.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on POST /status, got %d", respBadMethod.StatusCode)
-	}
-	respBadMethod.Body.Close()
-
-	// 4. /sync endpoint method validation
-	respBadSync, _ := http.Get(srv.URL + "/sync")
-	if respBadSync.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on GET /sync, got %d", respBadSync.StatusCode)
-	}
-	respBadSync.Body.Close()
-
-	// 5. POST /sync success
-	respSync, err := http.Post(srv.URL+"/sync", "application/json", nil)
-	if err != nil || respSync.StatusCode != http.StatusOK {
-		t.Fatalf("POST /sync failed: %v, status=%d", err, respSync.StatusCode)
-	}
-	respSync.Body.Close()
-
-	// 5b. POST /sync error
-	daemon.triggerFn = func() ([]RepoSyncResult, error) {
-		return nil, errors.New("mock trigger sync failure")
-	}
-	respSyncErr, err := http.Post(srv.URL+"/sync", "application/json", nil)
-	if err != nil || respSyncErr.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on POST /sync error, got %v (status=%d)", err, respSyncErr.StatusCode)
-	}
-	respSyncErr.Body.Close()
-	daemon.triggerFn = nil
-
-	// 5c. /reconcile endpoint method validation
-	respBadReconcile, _ := http.Get(srv.URL + "/reconcile")
-	if respBadReconcile.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on GET /reconcile, got %d", respBadReconcile.StatusCode)
-	}
-	respBadReconcile.Body.Close()
-
-	// 5d. POST /reconcile async success
-	respReconcile, err := http.Post(srv.URL+"/reconcile", "application/json", nil)
-	if err != nil || respReconcile.StatusCode != http.StatusAccepted {
-		t.Fatalf("POST /reconcile failed: %v, status=%d", err, respReconcile.StatusCode)
-	}
-	respReconcile.Body.Close()
-
-	// 5e. POST /reconcile?sync=true success
-	daemon.reconcileFn = func(ctx context.Context) error {
-		return nil
-	}
-	respReconcileSync, err := http.Post(srv.URL+"/reconcile?sync=true", "application/json", nil)
-	if err != nil || respReconcileSync.StatusCode != http.StatusOK {
-		t.Fatalf("POST /reconcile?sync=true failed: %v, status=%d", err, respReconcileSync.StatusCode)
-	}
-	respReconcileSync.Body.Close()
-
-	// 5f. POST /reconcile?sync=true error
-	daemon.reconcileFn = func(ctx context.Context) error {
-		return errors.New("mock reconcile compose failure")
-	}
-	respReconcileErr, err := http.Post(srv.URL+"/reconcile?sync=true", "application/json", nil)
-	if err != nil || respReconcileErr.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on POST /reconcile?sync=true error, got %v (status=%d)", err, respReconcileErr.StatusCode)
-	}
-	respReconcileErr.Body.Close()
-	daemon.reconcileFn = nil
-
-	// 6. Test RunDaemon graceful cancel
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- RunDaemon(ctx, DaemonConfig{
-			Port:     "0",
-			Interval: 100 * time.Millisecond,
-		})
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	select {
-	case runErr := <-done:
-		if runErr != nil {
-			t.Errorf("RunDaemon returned error: %v", runErr)
+func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
+	t.Run("NewDaemon interval configuration", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			interval time.Duration
+			want     time.Duration
+		}{
+			{"custom interval", 50 * time.Millisecond, 50 * time.Millisecond},
+			{"default fallback", 0, 60 * time.Second},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if d := NewDaemon(DaemonConfig{Interval: tc.interval}); d.interval != tc.want {
+					t.Errorf("expected interval %v, got %v", tc.want, d.interval)
+				}
+			})
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("RunDaemon did not shut down in time")
-	}
-
-	// 7. Test RunDaemon server error (invalid port)
-	errBadPort := RunDaemon(context.Background(), DaemonConfig{
-		Port: "invalid-port-string",
 	})
-	if errBadPort == nil {
-		t.Errorf("expected error on invalid port, got nil")
-	}
+
+	t.Run("SetupMux endpoints and HTTP methods", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		jobsDir := filepath.Join(tmpDir, "jobs")
+		_ = os.MkdirAll(jobsDir, 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
+		_ = os.WriteFile(filepath.Join(jobsDir, "test.nomad"), []byte(`job "test" { task "t" { config { image = "ghcr.io/azylman/aerial:latest" } } }`), 0644)
+
+		tests := []struct {
+			name        string
+			method      string
+			path        string
+			body        string
+			contentType string
+			setup       func(d *SyncDaemon)
+			wantCode    int
+		}{
+			{name: "GET /health 200", method: http.MethodGet, path: "/health", wantCode: http.StatusOK},
+			{name: "GET /metrics 200", method: http.MethodGet, path: "/metrics", wantCode: http.StatusOK},
+			{name: "GET /status 200", method: http.MethodGet, path: "/status", wantCode: http.StatusOK},
+			{name: "POST /status 405", method: http.MethodPost, path: "/status", wantCode: http.StatusMethodNotAllowed},
+			{name: "GET /sync 405", method: http.MethodGet, path: "/sync", wantCode: http.StatusMethodNotAllowed},
+			{name: "POST /sync 200", method: http.MethodPost, path: "/sync", wantCode: http.StatusOK},
+			{name: "POST /sync 500", method: http.MethodPost, path: "/sync", setup: func(d *SyncDaemon) {
+				d.triggerFn = func() ([]RepoSyncResult, error) { return nil, errors.New("fail") }
+			}, wantCode: http.StatusInternalServerError},
+			{name: "GET /reconcile 405", method: http.MethodGet, path: "/reconcile", wantCode: http.StatusMethodNotAllowed},
+			{name: "POST /reconcile 202 async", method: http.MethodPost, path: "/reconcile", wantCode: http.StatusAccepted},
+			{name: "POST /reconcile?sync=true 200", method: http.MethodPost, path: "/reconcile?sync=true", setup: func(d *SyncDaemon) {
+				d.reconcileFn = func(ctx context.Context) error { return nil }
+			}, wantCode: http.StatusOK},
+			{name: "POST /reconcile?sync=true 500", method: http.MethodPost, path: "/reconcile?sync=true", setup: func(d *SyncDaemon) {
+				d.reconcileFn = func(ctx context.Context) error { return errors.New("fail") }
+			}, wantCode: http.StatusInternalServerError},
+			{name: "POST /reconcile JSON sync=true 200", method: http.MethodPost, path: "/reconcile", body: `{"sync":true}`, contentType: "application/json", setup: func(d *SyncDaemon) {
+				d.reconcileFn = func(ctx context.Context) error { return nil }
+			}, wantCode: http.StatusOK},
+			{name: "POST /reconcile JSON sync=false 202", method: http.MethodPost, path: "/reconcile", body: `{"sync":false}`, contentType: "application/json", wantCode: http.StatusAccepted},
+			{name: "POST /events/git_push 200", method: http.MethodPost, path: "/events/git_push", body: `{"repo":"` + tmpDir + `","ref":"refs/heads/main"}`, contentType: "application/json", wantCode: http.StatusOK},
+			{name: "GET /events/git_push 405", method: http.MethodGet, path: "/events/git_push", wantCode: http.StatusMethodNotAllowed},
+			{name: "POST /events/git_push bad JSON 400", method: http.MethodPost, path: "/events/git_push", body: `bad`, wantCode: http.StatusBadRequest},
+			{name: "POST /events/image_ready 202", method: http.MethodPost, path: "/events/image_ready", body: `{"image":"ghcr.io/azylman/aerial:latest"}`, contentType: "application/json", wantCode: http.StatusAccepted},
+			{name: "GET /events/image_ready 405", method: http.MethodGet, path: "/events/image_ready", wantCode: http.StatusMethodNotAllowed},
+			{name: "POST /events/image_ready bad JSON 400", method: http.MethodPost, path: "/events/image_ready", body: `{bad`, wantCode: http.StatusBadRequest},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				d := NewDaemon(DaemonConfig{
+					Repos:     []string{tmpDir},
+					ConfigDir: tmpDir,
+					GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						return []byte("abc1234"), nil, nil
+					},
+					NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+						return []byte("OK"), nil, nil
+					},
+				})
+				if tc.setup != nil {
+					tc.setup(d)
+				}
+				handler := SetupMux(d)
+				var req *http.Request
+				if tc.body != "" {
+					req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+				} else {
+					req = httptest.NewRequest(tc.method, tc.path, nil)
+				}
+				if tc.contentType != "" {
+					req.Header.Set("Content-Type", tc.contentType)
+				}
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				if rec.Code != tc.wantCode {
+					t.Errorf("%s %s returned %d; want %d", tc.method, tc.path, rec.Code, tc.wantCode)
+				}
+			})
+		}
+	})
+
+	t.Run("RunDaemon lifecycle", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			run     func(t *testing.T) error
+			wantErr bool
+		}{
+			{
+				name: "invalid port string fatal error",
+				run: func(t *testing.T) error {
+					return RunDaemon(context.Background(), DaemonConfig{Port: "invalid-port-string"})
+				},
+				wantErr: true,
+			},
+			{
+				name: "invalid negative port fatal error",
+				run: func(t *testing.T) error {
+					return RunDaemon(context.Background(), DaemonConfig{Port: "-1"})
+				},
+				wantErr: true,
+			},
+			{
+				name: "normal lifecycle with PAT and deterministic sync signaling",
+				run: func(t *testing.T) error {
+					t.Setenv("DOCKER_CONFIG", t.TempDir())
+					repoDir := filepath.Join(t.TempDir(), "repo")
+					_ = os.MkdirAll(filepath.Join(repoDir, ".git"), 0755)
+
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					started := make(chan struct{}, 1)
+
+					cfg := DaemonConfig{
+						Port:       "0",
+						PAT:        "ghp_dummy_token_1234567890",
+						Interval:   time.Hour,
+						Repos:      []string{repoDir},
+						ComposeDir: t.TempDir(),
+						ConfigDir:  t.TempDir(),
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							select {
+							case started <- struct{}{}:
+							default:
+							}
+							return []byte("abc1234"), nil, nil
+						},
+						ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							return []byte("ok"), nil, nil
+						},
+					}
+
+					go func() {
+						select {
+						case <-started:
+							cancel()
+						case <-time.After(2 * time.Second):
+							cancel()
+						}
+					}()
+
+					return RunDaemon(ctx, cfg)
+				},
+				wantErr: false,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				err := tc.run(t)
+				if tc.wantErr && err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				if !tc.wantErr && err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			})
+		}
+	})
 }
 
-// TestComposeGraph_NoGitsyncDependents parses docker-compose.yml to assert that zero services
-// declare a dependency on gitsync. This guarantees indegree(gitsync) == 0 so that external
-// compose commands targeting any other service (or gitops reconcile commands) will never recreate gitsync.
+
 func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 	composePath := filepath.Join("..", "..", "docker-compose.yml")
 	data, err := os.ReadFile(composePath)
@@ -2927,80 +2963,6 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 	}
 }
 
-func TestDefaultComposeExecutor(t *testing.T) {
-	tempDir := t.TempDir()
-	binDir := filepath.Join(tempDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("failed to create bin dir: %v", err)
-	}
-
-	if runtime.GOOS == "windows" {
-		fakeDocker := filepath.Join(binDir, "docker.cmd")
-		scriptContent := "@echo off\r\n" +
-			"set \"arg=%*\"\r\n" +
-			"echo %arg% | findstr /i \"version\" >nul && (\r\n" +
-			"  echo Docker Compose mock v2.0\r\n" +
-			"  exit /b 0\r\n" +
-			")\r\n" +
-			"echo %arg% | findstr /i \"sleep\" >nul && goto do_sleep\r\n" +
-			"echo unknown cmd >&2\r\n" +
-			"exit /b 1\r\n" +
-			":do_sleep\r\n" +
-			"goto do_sleep\r\n"
-		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
-			t.Fatalf("failed to write fake docker: %v", err)
-		}
-	} else {
-		fakeDocker := filepath.Join(binDir, "docker")
-		scriptContent := "#!/bin/sh\ncase \"$*\" in\n  *\"version\"*) echo \"Docker Compose mock v2.0\"; exit 0;;\n  *\"sleep\"*) trap 'exit 0' TERM INT; while :; do sleep 0.05; done;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
-		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
-			t.Fatalf("failed to write fake docker: %v", err)
-		}
-	}
-
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
-
-	ctx := context.Background()
-	stdout, stderr, err := defaultComposeExecutor(ctx, tempDir, "version")
-	if err != nil {
-		t.Fatalf("defaultComposeExecutor failed: %v (stderr: %s)", err, stderr)
-	}
-	if !strings.Contains(string(stdout), "Docker Compose mock") {
-		t.Errorf("unexpected stdout: %s", stdout)
-	}
-
-	// Test cancellation
-	cancelCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, _, errCancel := defaultComposeExecutor(cancelCtx, tempDir, "sleep")
-	if errCancel == nil {
-		t.Errorf("expected error from canceled context, got nil")
-	}
-}
-
-func TestGetComposeExecutor(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	if nilDaemon.getComposeExecutor() == nil {
-		t.Errorf("expected non-nil default executor for nil daemon")
-	}
-
-	d := &SyncDaemon{}
-	if d.getComposeExecutor() == nil {
-		t.Errorf("expected non-nil default executor when composeExecutor is nil")
-	}
-
-	customCalled := false
-	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		customCalled = true
-		return []byte("custom"), nil, nil
-	}
-	execFn := d.getComposeExecutor()
-	_, _, _ = execFn(context.Background(), "")
-	if !customCalled {
-		t.Errorf("expected custom compose executor to be invoked")
-	}
-}
 
 func TestResolveChannelID_TableDriven(t *testing.T) {
 	tests := []struct {
@@ -3166,117 +3128,6 @@ func TestResolveChannelID_TableDriven(t *testing.T) {
 	}
 }
 
-func TestSetupMux_Extended(t *testing.T) {
-	d := NewDaemon(DaemonConfig{})
-	handler := SetupMux(d)
-
-	// 1. /health
-	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
-	recHealth := httptest.NewRecorder()
-	handler.ServeHTTP(recHealth, reqHealth)
-	if recHealth.Code != http.StatusOK {
-		t.Errorf("expected 200 from /health, got %d", recHealth.Code)
-	}
-
-	// 2. /status GET
-	reqStatus := httptest.NewRequest(http.MethodGet, "/status", nil)
-	recStatus := httptest.NewRecorder()
-	handler.ServeHTTP(recStatus, reqStatus)
-	if recStatus.Code != http.StatusOK {
-		t.Errorf("expected 200 from /status, got %d", recStatus.Code)
-	}
-
-	// /status method not allowed
-	reqStatusPost := httptest.NewRequest(http.MethodPost, "/status", nil)
-	recStatusPost := httptest.NewRecorder()
-	handler.ServeHTTP(recStatusPost, reqStatusPost)
-	if recStatusPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 from POST /status, got %d", recStatusPost.Code)
-	}
-
-	// 3. /sync method not allowed
-	reqSyncGet := httptest.NewRequest(http.MethodGet, "/sync", nil)
-	recSyncGet := httptest.NewRecorder()
-	handler.ServeHTTP(recSyncGet, reqSyncGet)
-	if recSyncGet.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 from GET /sync, got %d", recSyncGet.Code)
-	}
-
-	// /sync POST success
-	reqSyncPost := httptest.NewRequest(http.MethodPost, "/sync", nil)
-	recSyncPost := httptest.NewRecorder()
-	handler.ServeHTTP(recSyncPost, reqSyncPost)
-	if recSyncPost.Code != http.StatusOK {
-		t.Errorf("expected 200 from POST /sync, got %d", recSyncPost.Code)
-	}
-
-	// /sync POST error branch
-	dErr := NewDaemon(DaemonConfig{})
-	dErr.triggerFn = func() ([]RepoSyncResult, error) {
-		return nil, errors.New("sync trigger failed mock")
-	}
-	handlerErr := SetupMux(dErr)
-	recSyncErr := httptest.NewRecorder()
-	handlerErr.ServeHTTP(recSyncErr, reqSyncPost)
-	if recSyncErr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 from failing /sync, got %d", recSyncErr.Code)
-	}
-
-	// 4. /reconcile method not allowed
-	reqRecGet := httptest.NewRequest(http.MethodGet, "/reconcile", nil)
-	recRecGet := httptest.NewRecorder()
-	handler.ServeHTTP(recRecGet, reqRecGet)
-	if recRecGet.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 from GET /reconcile, got %d", recRecGet.Code)
-	}
-
-	// 5. /reconcile POST async success
-	reqRecPost := httptest.NewRequest(http.MethodPost, "/reconcile", nil)
-	recRecPost := httptest.NewRecorder()
-	handler.ServeHTTP(recRecPost, reqRecPost)
-	if recRecPost.Code != http.StatusAccepted {
-		t.Errorf("expected 202 from POST /reconcile, got %d", recRecPost.Code)
-	}
-
-	// 6. /reconcile POST sync success (query param)
-	dSync := NewDaemon(DaemonConfig{})
-	dSync.reconcileFn = func(ctx context.Context) error { return nil }
-	handlerSync := SetupMux(dSync)
-	reqRecSync := httptest.NewRequest(http.MethodPost, "/reconcile?sync=true", nil)
-	recRecSync := httptest.NewRecorder()
-	handlerSync.ServeHTTP(recRecSync, reqRecSync)
-	if recRecSync.Code != http.StatusOK {
-		t.Errorf("expected 200 from POST /reconcile?sync=true, got %d", recRecSync.Code)
-	}
-
-	// 7. /reconcile POST sync error (query param)
-	dSyncErr := NewDaemon(DaemonConfig{})
-	dSyncErr.reconcileFn = func(ctx context.Context) error { return errors.New("compose fail") }
-	handlerSyncErr := SetupMux(dSyncErr)
-	recRecSyncErr := httptest.NewRecorder()
-	handlerSyncErr.ServeHTTP(recRecSyncErr, reqRecSync)
-	if recRecSyncErr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 from failing /reconcile?sync=true, got %d", recRecSyncErr.Code)
-	}
-
-	// 8. /reconcile POST sync with JSON body {"sync": true}
-	reqRecJSONSync := httptest.NewRequest(http.MethodPost, "/reconcile", strings.NewReader(`{"sync": true}`))
-	reqRecJSONSync.Header.Set("Content-Type", "application/json")
-	recRecJSONSync := httptest.NewRecorder()
-	handlerSync.ServeHTTP(recRecJSONSync, reqRecJSONSync)
-	if recRecJSONSync.Code != http.StatusOK {
-		t.Errorf("expected 200 from POST /reconcile JSON sync=true, got %d", recRecJSONSync.Code)
-	}
-
-	// 9. /reconcile POST async with JSON body {"sync": false}
-	reqRecJSONAsync := httptest.NewRequest(http.MethodPost, "/reconcile", strings.NewReader(`{"sync": false}`))
-	reqRecJSONAsync.Header.Set("Content-Type", "application/json")
-	recRecJSONAsync := httptest.NewRecorder()
-	handlerSync.ServeHTTP(recRecJSONAsync, reqRecJSONAsync)
-	if recRecJSONAsync.Code != http.StatusAccepted {
-		t.Errorf("expected 202 from POST /reconcile JSON sync=false, got %d", recRecJSONAsync.Code)
-	}
-}
 
 func TestTriggerReconcile_TableDriven(t *testing.T) {
 	ctx := context.Background()
@@ -3323,54 +3174,6 @@ func TestTriggerReconcile_TableDriven(t *testing.T) {
 }
 
 
-func TestRunDaemon_ServerFatalError(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	err := RunDaemon(ctx, DaemonConfig{
-		Port: "-1",
-	})
-	if err == nil {
-		t.Errorf("expected server fatal error on port -1, got nil")
-	}
-}
-
-func TestRunDaemon_NormalLifecycle(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen failed: %v", err)
-	}
-	port := fmt.Sprintf("%d", l.Addr().(*net.TCPAddr).Port)
-	_ = l.Close()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- RunDaemon(ctx, DaemonConfig{
-			Port:       port,
-			PAT:        "ghp_dummy_token_1234567890",
-			Interval:   time.Hour,
-			ComposeDir: t.TempDir(),
-			ConfigDir:  t.TempDir(),
-			ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				return []byte("ok"), nil, nil
-			},
-		})
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("RunDaemon returned unexpected error: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Errorf("RunDaemon timed out shutting down")
-	}
-}
 
 func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 	tempDir := t.TempDir()
@@ -3457,294 +3260,338 @@ func ioNopCloser(r io.Reader) io.ReadCloser {
 	return io.NopCloser(r)
 }
 
-func TestDefaultDockerExecutor_Coverage(t *testing.T) {
-	tempDir := t.TempDir()
-	binDir := filepath.Join(tempDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("failed to create bin dir: %v", err)
-	}
-
-	if runtime.GOOS == "windows" {
-		fakeDocker := filepath.Join(binDir, "docker.cmd")
-		scriptContent := "@echo off\r\n" +
-			"set \"arg=%*\"\r\n" +
-			"echo %arg% | findstr /i \"version\" >nul && (\r\n" +
-			"  echo Docker mock v24.0\r\n" +
-			"  exit /b 0\r\n" +
-			")\r\n" +
-			"echo %arg% | findstr /i \"sleep\" >nul && goto do_sleep\r\n" +
-			"echo unknown cmd >&2\r\n" +
-			"exit /b 1\r\n" +
-			":do_sleep\r\n" +
-			"goto do_sleep\r\n"
-		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
-			t.Fatalf("failed to write fake docker: %v", err)
+func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
+	t.Run("defaultComposeExecutor and defaultDockerExecutor CLI mocking", func(t *testing.T) {
+		tempDir := t.TempDir()
+		binDir := filepath.Join(tempDir, "bin")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("failed to create bin dir: %v", err)
 		}
-	} else {
-		fakeDocker := filepath.Join(binDir, "docker")
-		scriptContent := "#!/bin/sh\ncase \"$*\" in\n  *\"version\"*) echo \"Docker mock v24.0\"; exit 0;;\n  *\"sleep\"*) trap 'exit 0' TERM INT; while :; do sleep 0.05; done;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
-		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
-			t.Fatalf("failed to write fake docker: %v", err)
+
+		if runtime.GOOS == "windows" {
+			script := "@echo off\r\nset \"arg=%*\"\r\necho %arg% | findstr /i \"waitloop\" >nul && goto do_wait\r\necho %arg% | findstr /i \"compose\" >nul && (echo Docker Compose mock v2.0 & exit /b 0)\r\necho %arg% | findstr /i \"version\" >nul && (echo Docker mock v24.0 & exit /b 0)\r\necho unknown cmd >&2\r\nexit /b 1\r\n:do_wait\r\ngoto do_wait\r\n"
+			_ = os.WriteFile(filepath.Join(binDir, "docker.cmd"), []byte(script), 0755)
+		} else {
+			script := "#!/bin/sh\ncase \"$*\" in\n  *\"waitloop\"*) trap 'exit 0' TERM INT; while :; do :; done;;\n  *\"compose\"*) echo \"Docker Compose mock v2.0\"; exit 0;;\n  *\"version\"*) echo \"Docker mock v24.0\"; exit 0;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
+			_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0755)
 		}
-	}
 
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+		origPath := os.Getenv("PATH")
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 
-	// 1. Success execution
-	stdout, _, err := defaultDockerExecutor(context.Background(), "version")
-	if err != nil || !strings.Contains(string(stdout), "Docker mock v24.0") {
-		t.Errorf("expected mock output, got err=%v, stdout=%s", err, string(stdout))
-	}
+		tests := []struct {
+			name    string
+			execFn  func() ([]byte, []byte, error)
+			wantOut string
+			wantErr bool
+		}{
+			{name: "compose executor success", execFn: func() ([]byte, []byte, error) { return defaultComposeExecutor(context.Background(), tempDir, "version") }, wantOut: "Docker Compose mock"},
+			{name: "compose executor cancel", execFn: func() ([]byte, []byte, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				defer cancel()
+				return defaultComposeExecutor(ctx, tempDir, "waitloop")
+			}, wantErr: true},
+			{name: "docker executor success", execFn: func() ([]byte, []byte, error) { return defaultDockerExecutor(context.Background(), "version") }, wantOut: "Docker mock v24.0"},
+			{name: "docker executor cancel", execFn: func() ([]byte, []byte, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				defer cancel()
+				return defaultDockerExecutor(ctx, "waitloop")
+			}, wantErr: true},
+			{name: "docker executor unknown cmd error", execFn: func() ([]byte, []byte, error) { return defaultDockerExecutor(context.Background(), "unknown") }, wantErr: true},
+		}
 
-	// 2. Cancellation execution
-	cancelCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, _, _ = defaultDockerExecutor(cancelCtx, "sleep")
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				stdout, stderr, err := tc.execFn()
+				if tc.wantErr && err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				if !tc.wantErr && err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				if tc.wantOut != "" && !strings.Contains(string(stdout), tc.wantOut) && !strings.Contains(string(stderr), tc.wantOut) {
+					t.Errorf("expected output to contain %q, stdout: %s, stderr: %s", tc.wantOut, stdout, stderr)
+				}
+			})
+		}
+	})
 
-	// 3. Error execution
-	_, stderr, err := defaultDockerExecutor(context.Background(), "unknown")
-	if err == nil || !strings.Contains(string(stderr), "unknown cmd") {
-		t.Errorf("expected error from unknown command, got err=%v, stderr=%s", err, string(stderr))
-	}
+	t.Run("daemon executor resolution branches", func(t *testing.T) {
+		// 1. getGitExecutor
+		var nilDaemon *SyncDaemon
+		if nilDaemon.getGitExecutor() == nil || (&SyncDaemon{}).getGitExecutor() == nil {
+			t.Errorf("expected non-nil default git executor")
+		}
+		customGit := false
+		dCustomGit := &SyncDaemon{gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) { customGit = true; return nil, nil, nil }}
+		_, _, _ = dCustomGit.getGitExecutor()(context.Background(), "")
+		if !customGit {
+			t.Errorf("expected custom git executor to be called")
+		}
+		if defaultExec := (&SyncDaemon{pat: "pat"}).getGitExecutor(); defaultExec != nil {
+			_, _, _ = defaultExec(context.Background(), t.TempDir(), "version")
+		}
+
+		// 2. getDockerExecutor
+		if nilDaemon.getDockerExecutor() == nil || (&SyncDaemon{}).getDockerExecutor() == nil {
+			t.Errorf("expected non-nil default docker executor")
+		}
+		customDocker := false
+		dCustomDocker := &SyncDaemon{dockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) { customDocker = true; return nil, nil, nil }}
+		_, _, _ = dCustomDocker.getDockerExecutor()(context.Background(), "")
+		if !customDocker {
+			t.Errorf("expected custom docker executor to be called")
+		}
+
+		// 3. getComposeExecutor
+		if nilDaemon.getComposeExecutor() == nil || (&SyncDaemon{}).getComposeExecutor() == nil {
+			t.Errorf("expected non-nil default compose executor")
+		}
+		customCompose := false
+		dCustomCompose := &SyncDaemon{composeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) { customCompose = true; return nil, nil, nil }}
+		_, _, _ = dCustomCompose.getComposeExecutor()(context.Background(), "", "")
+		if !customCompose {
+			t.Errorf("expected custom compose executor to be called")
+		}
+
+		// 4. getDeployDispatcher
+		if fnNil := nilDaemon.getDeployDispatcher(); fnNil == nil || fnNil(context.Background(), HangarDeployEvent{}) == nil {
+			t.Errorf("expected error from deploy dispatcher on nil daemon")
+		}
+		if fn := (&SyncDaemon{}).getDeployDispatcher(); fn == nil || fn(context.Background(), HangarDeployEvent{}) == nil {
+			t.Errorf("expected error from deploy dispatcher when deployDispatcher is nil")
+		}
+		customDisp := false
+		dCustomDisp := &SyncDaemon{deployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error { customDisp = true; return nil }}
+		if err := dCustomDisp.getDeployDispatcher()(context.Background(), HangarDeployEvent{}); err != nil || !customDisp {
+			t.Errorf("expected custom deploy dispatcher to be called: %v", err)
+		}
+	})
+
+	t.Run("runGitCommand variations", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			action func(t *testing.T)
+		}{
+			{name: "normal version", action: func(t *testing.T) { _, _, _ = runGitCommand(context.Background(), "", "", "version") }},
+			{name: "with dir init", action: func(t *testing.T) { _, _, _ = runGitCommand(context.Background(), t.TempDir(), "", "init") }},
+			{name: "with pat version", action: func(t *testing.T) { _, _, _ = runGitCommand(context.Background(), "", "mock-pat", "version") }},
+			{name: "canceled context", action: func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				_, _, _ = runGitCommand(ctx, "", "", "status")
+			}},
+		} {
+			t.Run(tc.name, tc.action)
+		}
+	})
+
+	t.Run("defaultNomadExecutor variations", func(t *testing.T) {
+		if nomadExec := defaultNomadExecutor("http://127.0.0.1:4646", "secret-token"); nomadExec != nil {
+			_, _, _ = nomadExec(context.Background(), "version")
+			cancelCtx, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, _, _ = nomadExec(cancelCtx, "version")
+		}
+	})
+
+	t.Run("defaultDeployDispatcher HTTP handling", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			d       *SyncDaemon
+			wantErr bool
+		}{
+			{name: "invalid router URL", d: &SyncDaemon{webhooksRouterURL: "://invalid-router-url"}, wantErr: true},
+			{name: "HTTP 500 server error response", d: func() *SyncDaemon {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+				}))
+				t.Cleanup(srv.Close)
+				return &SyncDaemon{webhooksRouterURL: srv.URL}
+			}(), wantErr: true},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				err := tc.d.defaultDeployDispatcher(context.Background(), HangarDeployEvent{JobName: "test"})
+				if tc.wantErr && err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				if !tc.wantErr && err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("DispatchDeployEvent safeguards and synchronization", func(t *testing.T) {
+		var nilDaemon *SyncDaemon
+		nilDaemon.DispatchDeployEvent(HangarDeployEvent{})
+
+		panicked := make(chan struct{}, 1)
+		dPanic := NewDaemon(DaemonConfig{
+			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+				defer func() { panicked <- struct{}{} }()
+				panic("simulated panic in dispatcher")
+			},
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				panic("simulated panic in monitor")
+			},
+		})
+		dPanic.DispatchDeployEvent(HangarDeployEvent{JobName: "test-panic"})
+
+		select {
+		case <-panicked:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for deploy dispatcher panic recovery")
+		}
+	})
 }
 
-func TestGetGitExecutor_Branches(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	if nilDaemon.getGitExecutor() == nil {
-		t.Errorf("expected non-nil default git executor for nil daemon")
-	}
-
-	d := &SyncDaemon{}
-	if d.getGitExecutor() == nil {
-		t.Errorf("expected non-nil executor when gitExecutor is nil")
-	}
-
-	customCalled := false
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		customCalled = true
-		return []byte("custom-git"), nil, nil
-	}
-	execFn := d.getGitExecutor()
-	_, _, _ = execFn(context.Background(), "")
-	if !customCalled {
-		t.Errorf("expected custom git executor to be called")
-	}
-}
-
-func TestGetDockerExecutor_Branches(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	if nilDaemon.getDockerExecutor() == nil {
-		t.Errorf("expected non-nil default docker executor for nil daemon")
-	}
-
-	d := &SyncDaemon{}
-	if d.getDockerExecutor() == nil {
-		t.Errorf("expected non-nil executor when dockerExecutor is nil")
-	}
-
-	customCalled := false
-	d.dockerExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		customCalled = true
-		return []byte("custom-docker"), nil, nil
-	}
-	execFn := d.getDockerExecutor()
-	_, _, _ = execFn(context.Background(), "")
-	if !customCalled {
-		t.Errorf("expected custom docker executor to be called")
-	}
-}
-
-func TestGetComposeExecutor_Branches(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	if nilDaemon.getComposeExecutor() == nil {
-		t.Errorf("expected non-nil default compose executor for nil daemon")
-	}
-
-	d := &SyncDaemon{}
-	if d.getComposeExecutor() == nil {
-		t.Errorf("expected non-nil executor when composeExecutor is nil")
-	}
-
-	customCalled := false
-	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		customCalled = true
-		return []byte("custom-compose"), nil, nil
-	}
-	execFn := d.getComposeExecutor()
-	_, _, _ = execFn(context.Background(), "", "")
-	if !customCalled {
-		t.Errorf("expected custom compose executor to be called")
-	}
-}
-
-
-func TestRunGitCommand_CancelCoverage(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _, _ = runGitCommand(ctx, "", "", "status")
-}
 
 func TestEnsureDockerAuth_TableDriven(t *testing.T) {
-	dummyPAT := "dummy-pat-for-test-only"
+	dummyPAT := "ghp_mock_token_12345"
 
-	// 1. Nil daemon returns nil
-	var nilDaemon *SyncDaemon
-	if err := nilDaemon.EnsureDockerAuth(); err != nil {
-		t.Errorf("expected nil error for nil daemon, got %v", err)
-	}
-
-	// 2. Empty PAT daemon returns nil
-	emptyPATDaemon := &SyncDaemon{pat: ""}
-	if err := emptyPATDaemon.EnsureDockerAuth(); err != nil {
-		t.Errorf("expected nil error for empty PAT daemon, got %v", err)
-	}
-
-	// 3. EnsureDockerAuthPath unit branches
-	t.Run("empty pat is no-op", func(t *testing.T) {
-		err := EnsureDockerAuthPath("", "https://github.com/azylman/aerial-config.git", nil, nil, nil, nil)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("mkdir failure returns error", func(t *testing.T) {
-		errMkdir := errors.New("disk permission denied")
-		err := EnsureDockerAuthPath(
-			dummyPAT,
-			"https://github.com/azylman/aerial-config.git",
-			func(string) string { return "/mock/docker" },
-			nil,
-			nil,
-			func(string, os.FileMode) error { return errMkdir },
-		)
-		if err == nil || !strings.Contains(err.Error(), "disk permission denied") {
-			t.Fatalf("expected wrapped mkdir error, got %v", err)
-		}
-	})
-
-	t.Run("read error other than not-exist returns error", func(t *testing.T) {
-		errRead := errors.New("read fault")
-		err := EnsureDockerAuthPath(
-			dummyPAT,
-			"https://github.com/azylman/aerial-config.git",
-			func(string) string { return "/mock/docker" },
-			func(string) ([]byte, error) { return nil, errRead },
-			nil,
-			func(string, os.FileMode) error { return nil },
-		)
-		if err == nil || !strings.Contains(err.Error(), "read fault") {
-			t.Fatalf("expected wrapped read error, got %v", err)
-		}
-	})
-
-	t.Run("write failure returns error", func(t *testing.T) {
-		errWrite := errors.New("write fault")
-		err := EnsureDockerAuthPath(
-			dummyPAT,
-			"https://github.com/azylman/aerial-config.git",
-			func(string) string { return "/mock/docker" },
-			func(string) ([]byte, error) { return nil, os.ErrNotExist },
-			func(string, []byte, os.FileMode) error { return errWrite },
-			func(string, os.FileMode) error { return nil },
-		)
-		if err == nil || !strings.Contains(err.Error(), "write fault") {
-			t.Fatalf("expected wrapped write error, got %v", err)
-		}
-	})
-
-	t.Run("successful write creates valid docker config file with 0600 mode", func(t *testing.T) {
-		var writtenPath string
-		var writtenData []byte
-		var writtenMode os.FileMode
-
-		err := EnsureDockerAuthPath(
-			dummyPAT,
-			"https://github.com/custom-org/aerial-config.git",
-			func(k string) string {
-				if k == "DOCKER_CONFIG" {
-					return "/mock/docker"
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "nil daemon and empty PAT daemon return nil",
+			run: func(t *testing.T) {
+				var nilDaemon *SyncDaemon
+				if err := nilDaemon.EnsureDockerAuth(); err != nil {
+					t.Errorf("expected nil error for nil daemon, got %v", err)
 				}
-				return ""
+				if err := (&SyncDaemon{pat: ""}).EnsureDockerAuth(); err != nil {
+					t.Errorf("expected nil error for empty PAT daemon, got %v", err)
+				}
+				if err := NewDaemon(DaemonConfig{PAT: ""}).EnsureDockerAuth(); err != nil {
+					t.Errorf("expected nil error for empty PAT via NewDaemon, got %v", err)
+				}
 			},
-			func(string) ([]byte, error) { return nil, os.ErrNotExist },
-			func(path string, data []byte, mode os.FileMode) error {
-				writtenPath = path
-				writtenData = data
-				writtenMode = mode
-				return nil
+		},
+		{
+			name: "empty PAT in EnsureDockerAuthPath is no-op",
+			run: func(t *testing.T) {
+				if err := EnsureDockerAuthPath("", "https://github.com/azylman/aerial-config.git", nil, nil, nil, nil); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
 			},
-			func(string, os.FileMode) error { return nil },
-		)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if filepath.ToSlash(writtenPath) != "/mock/docker/config.json" {
-			t.Errorf("expected /mock/docker/config.json, got %s", writtenPath)
-		}
-		if writtenMode != 0600 {
-			t.Errorf("expected 0600 mode, got %v", writtenMode)
-		}
-
-		var parsed struct {
-			Auths map[string]struct {
-				Auth string `json:"auth"`
-			} `json:"auths"`
-		}
-		if err := json.Unmarshal(writtenData, &parsed); err != nil {
-			t.Fatalf("failed to unmarshal written config: %v", err)
-		}
-		entry, ok := parsed.Auths["ghcr.io"]
-		if !ok {
-			t.Fatalf("expected ghcr.io entry in auths")
-		}
-		expectedAuth := base64.StdEncoding.EncodeToString([]byte("custom-org:" + dummyPAT))
-		if entry.Auth != expectedAuth {
-			t.Errorf("auth mismatch: got %q, want %q", entry.Auth, expectedAuth)
-		}
-	})
-
-	// 4. Integration test using temporary directory
-	t.Run("filesystem integration test via daemon EnsureDockerAuth", func(t *testing.T) {
-		tempDir := t.TempDir()
-		t.Setenv("DOCKER_CONFIG", tempDir)
-
-		d := &SyncDaemon{
-			pat: dummyPAT,
-			configDir: "/share/aerial-config",
-			repoUrls: map[string]string{
-				"/share/aerial-config": "https://github.com/azylman/aerial-config.git",
+		},
+		{
+			name: "mkdir failure returns error",
+			run: func(t *testing.T) {
+				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/azylman/aerial-config.git", func(string) string { return "/mock/docker" }, nil, nil, func(string, os.FileMode) error { return errors.New("disk permission denied") })
+				if err == nil || !strings.Contains(err.Error(), "disk permission denied") {
+					t.Fatalf("expected wrapped mkdir error, got %v", err)
+				}
 			},
-		}
+		},
+		{
+			name: "read error other than not-exist returns error",
+			run: func(t *testing.T) {
+				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/azylman/aerial-config.git", func(string) string { return "/mock/docker" }, func(string) ([]byte, error) { return nil, errors.New("read fault") }, nil, func(string, os.FileMode) error { return nil })
+				if err == nil || !strings.Contains(err.Error(), "read fault") {
+					t.Fatalf("expected wrapped read error, got %v", err)
+				}
+			},
+		},
+		{
+			name: "write failure returns error",
+			run: func(t *testing.T) {
+				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/azylman/aerial-config.git", func(string) string { return "/mock/docker" }, func(string) ([]byte, error) { return nil, os.ErrNotExist }, func(string, []byte, os.FileMode) error { return errors.New("write fault") }, func(string, os.FileMode) error { return nil })
+				if err == nil || !strings.Contains(err.Error(), "write fault") {
+					t.Fatalf("expected wrapped write error, got %v", err)
+				}
+			},
+		},
+		{
+			name: "successful write creates valid docker config file with 0600 mode",
+			run: func(t *testing.T) {
+				var writtenPath string
+				var writtenData []byte
+				var writtenMode os.FileMode
 
-		if err := d.EnsureDockerAuth(); err != nil {
-			t.Fatalf("daemon.EnsureDockerAuth failed: %v", err)
-		}
+				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/custom-org/aerial-config.git", func(k string) string {
+					if k == "DOCKER_CONFIG" {
+						return "/mock/docker"
+					}
+					return ""
+				}, func(string) ([]byte, error) { return nil, os.ErrNotExist }, func(path string, data []byte, mode os.FileMode) error {
+					writtenPath, writtenData, writtenMode = path, data, mode
+					return nil
+				}, func(string, os.FileMode) error { return nil })
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if filepath.ToSlash(writtenPath) != "/mock/docker/config.json" || writtenMode != 0600 {
+					t.Errorf("expected /mock/docker/config.json and 0600, got %s and %v", writtenPath, writtenMode)
+				}
 
-		cfgFile := filepath.Join(tempDir, "config.json")
-		data, err := os.ReadFile(cfgFile)
-		if err != nil {
-			t.Fatalf("failed to read written docker config: %v", err)
-		}
+				var parsed struct {
+					Auths map[string]struct {
+						Auth string `json:"auth"`
+					} `json:"auths"`
+				}
+				if err := json.Unmarshal(writtenData, &parsed); err != nil {
+					t.Fatalf("failed to unmarshal written config: %v", err)
+				}
+				if entry, ok := parsed.Auths["ghcr.io"]; !ok || entry.Auth != base64.StdEncoding.EncodeToString([]byte("custom-org:"+dummyPAT)) {
+					t.Errorf("unexpected ghcr auth entry: %+v", entry)
+				}
+			},
+		},
+		{
+			name: "filesystem integration with real callbacks writing .docker/config.json",
+			run: func(t *testing.T) {
+				tmpDir := t.TempDir()
+				lookup := func(k string) string {
+					if k == "DOCKER_CONFIG" {
+						return filepath.Join(tmpDir, ".docker")
+					}
+					return ""
+				}
+				if err := EnsureDockerAuthPath("ghp_mock_token_12345", "", lookup, nil, nil, nil); err != nil {
+					t.Fatalf("expected success writing docker config, got %v", err)
+				}
+				content, err := os.ReadFile(filepath.Join(tmpDir, ".docker", "config.json"))
+				if err != nil || !strings.Contains(string(content), "ghcr.io") {
+					t.Errorf("expected docker config with ghcr.io, got %s, err: %v", string(content), err)
+				}
+			},
+		},
+		{
+			name: "filesystem integration test via daemon EnsureDockerAuth",
+			run: func(t *testing.T) {
+				tempDir := t.TempDir()
+				t.Setenv("DOCKER_CONFIG", tempDir)
 
-		var parsed map[string]any
-		if err := json.Unmarshal(data, &parsed); err != nil {
-			t.Fatalf("failed to unmarshal written config: %v", err)
-		}
-		auths, ok := parsed["auths"].(map[string]any)
-		if !ok {
-			t.Fatalf("expected auths map in config")
-		}
-		ghcrEntry, ok := auths["ghcr.io"].(map[string]any)
-		if !ok {
-			t.Fatalf("expected ghcr.io in auths")
-		}
-		expectedAuth := base64.StdEncoding.EncodeToString([]byte("azylman:" + dummyPAT))
-		if ghcrEntry["auth"] != expectedAuth {
-			t.Errorf("auth mismatch: got %v, want %s", ghcrEntry["auth"], expectedAuth)
-		}
-	})
+				d := &SyncDaemon{
+					pat:       dummyPAT,
+					configDir: "/share/aerial-config",
+					repoUrls: map[string]string{
+						"/share/aerial-config": "https://github.com/azylman/aerial-config.git",
+					},
+				}
+
+				if err := d.EnsureDockerAuth(); err != nil {
+					t.Fatalf("daemon.EnsureDockerAuth failed: %v", err)
+				}
+
+				data, err := os.ReadFile(filepath.Join(tempDir, "config.json"))
+				if err != nil || !strings.Contains(string(data), base64.StdEncoding.EncodeToString([]byte("azylman:"+dummyPAT))) {
+					t.Errorf("expected valid auth in written config, got %s, err: %v", string(data), err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
+	}
 }
+
 
 type mockErrReadCloser struct{}
 
@@ -3774,53 +3621,154 @@ func (m *mockErrResponseWriter) Write(p []byte) (int, error) {
 
 func (m *mockErrResponseWriter) WriteHeader(statusCode int) {}
 
-func TestHangar_Helpers(t *testing.T) {
-	// 1. closeWarn
-	closeWarn(nil, "nil closer")
-	closeWarn(io.NopCloser(strings.NewReader("")), "valid closer")
-	closeWarn(&mockErrReadCloser{}, "err closer")
+func TestHangarHelpers_TableDriven(t *testing.T) {
+	t.Run("closeWarn", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			closer io.Closer
+		}{
+			{"nil closer", nil},
+			{"valid NopCloser", io.NopCloser(strings.NewReader(""))},
+			{"mock error closer", &mockErrReadCloser{}},
+		} {
+			t.Run(tc.name, func(t *testing.T) { closeWarn(tc.closer, tc.name) })
+		}
+	})
 
-	// 2. isClientDisconnect
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	if isClientDisconnect(req, nil) {
-		t.Errorf("expected false for nil err")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	reqCanceled := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(ctx)
-	if !isClientDisconnect(reqCanceled, errors.New("err")) {
-		t.Errorf("expected true for canceled ctx")
-	}
-	if !isClientDisconnect(req, syscall.EPIPE) {
-		t.Errorf("expected true for EPIPE")
-	}
-	if !isClientDisconnect(req, syscall.ECONNRESET) {
-		t.Errorf("expected true for ECONNRESET")
-	}
-	if !isClientDisconnect(req, net.ErrClosed) {
-		t.Errorf("expected true for net.ErrClosed")
-	}
+	t.Run("isClientDisconnect", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	// 3. writeResponse
-	rec := httptest.NewRecorder()
-	writeResponse(rec, req, []byte("ok"))
-	if rec.Body.String() != "ok" {
-		t.Errorf("expected ok, got %s", rec.Body.String())
-	}
-	mockErr := &mockErrResponseWriter{err: errors.New("fail")}
-	writeResponse(mockErr, req, []byte("fail"))
+		for _, tc := range []struct {
+			name string
+			req  *http.Request
+			err  error
+			want bool
+		}{
+			{name: "nil error", req: httptest.NewRequest(http.MethodGet, "/health", nil), err: nil, want: false},
+			{name: "canceled request context", req: httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(canceledCtx), err: errors.New("err"), want: true},
+			{name: "syscall EPIPE", req: httptest.NewRequest(http.MethodGet, "/health", nil), err: syscall.EPIPE, want: true},
+			{name: "syscall ECONNRESET", req: httptest.NewRequest(http.MethodGet, "/health", nil), err: syscall.ECONNRESET, want: true},
+			{name: "net ErrClosed", req: httptest.NewRequest(http.MethodGet, "/health", nil), err: net.ErrClosed, want: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := isClientDisconnect(tc.req, tc.err); got != tc.want {
+					t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
 
-	// 4. writeJSON
-	recJSON := httptest.NewRecorder()
-	writeJSON(recJSON, req, http.StatusOK, map[string]string{"foo": "bar"})
-	if recJSON.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", recJSON.Code)
-	}
-	recErrJSON := httptest.NewRecorder()
-	writeJSON(recErrJSON, req, http.StatusOK, make(chan int))
-	if recErrJSON.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", recErrJSON.Code)
-	}
+	t.Run("writeResponse", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		for _, tc := range []struct {
+			name string
+			w    http.ResponseWriter
+			body []byte
+			want string
+		}{
+			{name: "standard ResponseRecorder", w: httptest.NewRecorder(), body: []byte("ok"), want: "ok"},
+			{name: "mock error response writer", w: &mockErrResponseWriter{err: errors.New("fail")}, body: []byte("fail")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				writeResponse(tc.w, req, tc.body)
+				if rec, ok := tc.w.(*httptest.ResponseRecorder); ok && tc.want != "" {
+					if rec.Body.String() != tc.want {
+						t.Errorf("expected body %q, got %q", tc.want, rec.Body.String())
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("writeJSON", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		for _, tc := range []struct {
+			name     string
+			data     any
+			wantCode int
+		}{
+			{name: "valid JSON map returns 200", data: map[string]string{"foo": "bar"}, wantCode: http.StatusOK},
+			{name: "unserializable data returns 500", data: make(chan int), wantCode: http.StatusInternalServerError},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				writeJSON(rec, req, http.StatusOK, tc.data)
+				if rec.Code != tc.wantCode {
+					t.Errorf("expected status %d, got %d", tc.wantCode, rec.Code)
+				}
+			})
+		}
+	})
+
+	t.Run("pure edge helpers from coverage boosters", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dummyGit := filepath.Join(tmpDir, "git.exe")
+		_ = os.WriteFile(dummyGit, []byte("echo"), 0755)
+		_ = resolveGitBinInternal(func(k string) string {
+			if k == "ProgramFiles" { return tmpDir }
+			return ""
+		}, nil, func(string) (string, error) { return "", errors.New("not found") }, "windows")
+
+		for _, tc := range []struct {
+			name        string
+			raw         string
+			wantReg     string
+			wantRepo    string
+			wantTag     string
+			expectError bool
+		}{
+			{name: "docker.io library image", raw: "docker.io/myimage:v1", wantReg: "registry-1.docker.io", wantRepo: "library/myimage", wantTag: "v1"},
+			{name: "index.docker.io owner image", raw: "index.docker.io/owner/image:latest", wantReg: "registry-1.docker.io", wantRepo: "owner/image", wantTag: "latest"},
+			{name: "empty repository returns error", raw: "myregistry.com/:v1", expectError: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				reg, repo, tag, err := ParseImageReference(tc.raw)
+				if tc.expectError {
+					if err == nil { t.Errorf("expected error for %s, got nil", tc.raw) }
+					return
+				}
+				if err != nil || reg != tc.wantReg || repo != tc.wantRepo || tag != tc.wantTag {
+					t.Errorf("ParseImageReference(%q) = (%q, %q, %q, %v); want (%q, %q, %q, nil)", tc.raw, reg, repo, tag, err, tc.wantReg, tc.wantRepo, tc.wantTag)
+				}
+			})
+		}
+
+		if _, svc, _, pErr := ParseWwwAuthenticate("Bearer realm=\"https://example.com\",service=\"test\",trailingnoparam"); pErr != nil || svc != "test" {
+			t.Errorf("unexpected ParseWwwAuthenticate error: %v, svc=%s", pErr, svc)
+		}
+
+		if !ContainsDigest([]string{"repo/img@sha256:1234567890abcdef"}, "sha256:1234567890abcdef") {
+			t.Errorf("expected ContainsDigest to match")
+		}
+
+		if resolved := ResolveRepoPath("aerial", []string{"/mnt/data/supervisor/share/aerial"}); resolved != "/mnt/data/supervisor/share/aerial" {
+			t.Errorf("expected /mnt/data/supervisor/share/aerial, got %s", resolved)
+		}
+
+		gitDirFile := filepath.Join(tmpDir, "repo-rel")
+		_ = os.MkdirAll(gitDirFile, 0755)
+		_ = os.WriteFile(filepath.Join(gitDirFile, ".git"), []byte("gitdir: relative/git\n"), 0644)
+		if resGit, errGit := resolveGitDir(gitDirFile); errGit != nil || !strings.HasSuffix(resGit, "relative/git") {
+			t.Errorf("unexpected resolveGitDir with relative target: %s, %v", resGit, errGit)
+		}
+
+		gitDirNon := filepath.Join(tmpDir, "repo-non")
+		_ = os.MkdirAll(gitDirNon, 0755)
+		_ = os.WriteFile(filepath.Join(gitDirNon, ".git"), []byte("something else\n"), 0644)
+		if resGitNon, errGitNon := resolveGitDir(gitDirNon); errGitNon != nil || resGitNon != filepath.Join(gitDirNon, ".git") {
+			t.Errorf("unexpected resolveGitDir with non-gitdir content: %s, %v", resGitNon, errGitNon)
+		}
+
+		srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer srvErr.Close()
+
+		dHooks := &SyncDaemon{}
+		dHooks.sendWebhook(context.Background(), srvErr.Client(), srvErr.URL, "test content")
+		dHooks.postChannelMessage(context.Background(), srvErr.Client(), "secret-token", "12345", "test message")
+	})
 }
 
 
@@ -5981,162 +5929,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) {
 }
 
 
-func TestSetupMux_PushEventsEndpoints(t *testing.T) {
-	tmpDir := t.TempDir()
-	jobsDir := filepath.Join(tmpDir, "jobs")
-	_ = os.MkdirAll(jobsDir, 0755)
-	_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
-
-	job1 := `job "webhooks-router" {
-		task "router" {
-			config {
-				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
-			}
-		}
-	}`
-	_ = os.WriteFile(filepath.Join(jobsDir, "webhooks-router.nomad"), []byte(job1), 0644)
-
-	d := NewDaemon(DaemonConfig{
-		Repos:     []string{tmpDir},
-		ConfigDir: tmpDir,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte("abc1234"), nil, nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("OK"), nil, nil
-		},
-	})
-
-	mux := SetupMux(d)
-
-	// 1. POST /events/git_push
-	wPush := httptest.NewRecorder()
-	rPush := httptest.NewRequest(http.MethodPost, "/events/git_push", strings.NewReader(`{"repo":"`+tmpDir+`","ref":"refs/heads/main"}`))
-	rPush.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(wPush, rPush)
-	if wPush.Code != http.StatusOK {
-		t.Errorf("POST /events/git_push returned %d; want 200", wPush.Code)
-	}
-
-	// 2. GET /events/git_push -> 405
-	wPushGet := httptest.NewRecorder()
-	rPushGet := httptest.NewRequest(http.MethodGet, "/events/git_push", nil)
-	mux.ServeHTTP(wPushGet, rPushGet)
-	if wPushGet.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET /events/git_push returned %d; want 405", wPushGet.Code)
-	}
-
-	// 3. POST /events/git_push bad JSON -> 400
-	wPushBad := httptest.NewRecorder()
-	rPushBad := httptest.NewRequest(http.MethodPost, "/events/git_push", strings.NewReader(`invalid-json`))
-	mux.ServeHTTP(wPushBad, rPushBad)
-	if wPushBad.Code != http.StatusBadRequest {
-		t.Errorf("POST /events/git_push bad JSON returned %d; want 400", wPushBad.Code)
-	}
-
-	// 4. POST /events/image_ready
-	wImg := httptest.NewRecorder()
-	rImg := httptest.NewRequest(http.MethodPost, "/events/image_ready", strings.NewReader(`{"image":"ghcr.io/azylman/aerial-webhooks-router:latest"}`))
-	rImg.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(wImg, rImg)
-	if wImg.Code != http.StatusAccepted {
-		t.Errorf("POST /events/image_ready returned %d; want 202 (Accepted)", wImg.Code)
-	}
-
-	// 5. GET /events/image_ready -> 405
-	wImgGet := httptest.NewRecorder()
-	rImgGet := httptest.NewRequest(http.MethodGet, "/events/image_ready", nil)
-	mux.ServeHTTP(wImgGet, rImgGet)
-	if wImgGet.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET /events/image_ready returned %d; want 405", wImgGet.Code)
-	}
-
-	// 6. POST /events/image_ready bad JSON -> 400
-	wImgBad := httptest.NewRecorder()
-	rImgBad := httptest.NewRequest(http.MethodPost, "/events/image_ready", strings.NewReader(`{invalid`))
-	mux.ServeHTTP(wImgBad, rImgBad)
-	if wImgBad.Code != http.StatusBadRequest {
-		t.Errorf("POST /events/image_ready bad JSON returned %d; want 400", wImgBad.Code)
-	}
-}
-
-func TestExecutors_DirectCoverage(t *testing.T) {
-	ctx := context.Background()
-
-	// runGitCommand
-	out, _, err := runGitCommand(ctx, "", "", "version")
-	if err != nil || !strings.Contains(string(out), "git version") {
-		t.Logf("runGitCommand git version output: %s (err: %v)", string(out), err)
-	}
-
-	// defaultNomadExecutor
-	nomadExec := defaultNomadExecutor("http://127.0.0.1:4646", "secret-token")
-	if nomadExec != nil {
-		_, _, _ = nomadExec(ctx, "version")
-	}
-
-	// defaultDockerExecutor
-	_, _, _ = defaultDockerExecutor(ctx, "version")
-
-	// defaultComposeExecutor
-	_, _, _ = defaultComposeExecutor(ctx, t.TempDir(), "version")
-}
-
-func TestEnsureDockerAuth_AllCases(t *testing.T) {
-	// 1. Empty PAT -> no-op nil
-	dEmpty := NewDaemon(DaemonConfig{PAT: ""})
-	if err := dEmpty.EnsureDockerAuth(); err != nil {
-		t.Errorf("expected nil for empty PAT, got %v", err)
-	}
-
-	// 2. Valid PAT -> writes config file successfully
-	tmpDir := t.TempDir()
-	lookup := func(k string) string {
-		if k == "DOCKER_CONFIG" {
-			return filepath.Join(tmpDir, ".docker")
-		}
-		return ""
-	}
-	if err := EnsureDockerAuthPath("ghp_mock_token_12345", "", lookup, nil, nil, nil); err != nil {
-		t.Errorf("expected success writing docker config, got %v", err)
-	}
-	configPath := filepath.Join(tmpDir, ".docker", "config.json")
-	content, err := os.ReadFile(configPath)
-	if err != nil || !strings.Contains(string(content), "ghcr.io") {
-		t.Errorf("expected docker config with ghcr.io, got %s, err: %v", string(content), err)
-	}
-}
-
-func TestExecutorsAndDispatchers_EdgeCoverage(t *testing.T) {
-	// 1. defaultNomadExecutor
-	nomadExec := defaultNomadExecutor("http://127.0.0.1:4646", "secret-token")
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _, _ = nomadExec(cancelCtx, "version")
-
-	// 2. runGitCommand
-	ctx := context.Background()
-	_, _, _ = runGitCommand(ctx, "", "", "version")
-
-	cancelCtxGit, cancelGit := context.WithCancel(context.Background())
-	cancelGit()
-	_, _, _ = runGitCommand(cancelCtxGit, "", "", "status")
-
-	// 3. DispatchDeployEvent & MonitorDeploymentAsync nil / panic safeguards
-	var nilDaemon *SyncDaemon
-	nilDaemon.DispatchDeployEvent(HangarDeployEvent{})
-
-	dPanic := NewDaemon(DaemonConfig{
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			panic("simulated panic in dispatcher")
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			panic("simulated panic in monitor")
-		},
-	})
-	dPanic.DispatchDeployEvent(HangarDeployEvent{JobName: "test-panic"})
-	time.Sleep(50 * time.Millisecond)
-}
 
 func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	_ = context.Background()
@@ -6540,164 +6332,6 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	})
 }
 
-
-func TestRunGitCommand_WithDir(t *testing.T) {
-	dir := t.TempDir()
-	stdout, _, err := runGitCommand(context.Background(), dir, "", "init")
-	if err != nil {
-		t.Logf("runGitCommand init: %v, stdout: %s", err, string(stdout))
-	}
-}
-
-func TestGetDeployDispatcher_Branches(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	fnNil := nilDaemon.getDeployDispatcher()
-	if fnNil == nil {
-		t.Fatalf("expected non-nil dispatcher function for nil daemon")
-	}
-	if err := fnNil(context.Background(), HangarDeployEvent{}); err == nil {
-		t.Errorf("expected error from deploy dispatcher on nil daemon")
-	}
-
-	d := &SyncDaemon{}
-	fn := d.getDeployDispatcher()
-	if fn == nil {
-		t.Fatalf("expected non-nil dispatcher function when deployDispatcher is nil")
-	}
-	if err := fn(context.Background(), HangarDeployEvent{}); err == nil {
-		t.Errorf("expected error from deploy dispatcher when deployDispatcher is nil")
-	}
-
-	customCalled := false
-	d.deployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
-		customCalled = true
-		return nil
-	}
-	fnCustom := d.getDeployDispatcher()
-	if err := fnCustom(context.Background(), HangarDeployEvent{}); err != nil {
-		t.Errorf("unexpected error from custom deploy dispatcher: %v", err)
-	}
-	if !customCalled {
-		t.Errorf("expected custom deploy dispatcher to be called")
-	}
-}
-
-func TestDefaultDeployDispatcher_InvalidURL(t *testing.T) {
-	d := &SyncDaemon{
-		webhooksRouterURL: "://invalid-router-url",
-	}
-	err := d.defaultDeployDispatcher(context.Background(), HangarDeployEvent{})
-	if err == nil {
-		t.Errorf("expected error for invalid router URL")
-	}
-}
-
-func TestRunGitCommand_WithPat(t *testing.T) {
-	stdout, _, err := runGitCommand(context.Background(), "", "mock-pat", "version")
-	if err != nil {
-		t.Logf("runGitCommand version: %v, stdout: %s", err, string(stdout))
-	}
-}
-
-func TestCoverageBoosters(t *testing.T) {
-	t.Parallel()
-
-	// 1. ResolveGitBinInternal default fileExists fallback using os.Stat
-	tmpDir := t.TempDir()
-	dummyGit := filepath.Join(tmpDir, "git.exe")
-	if err := os.WriteFile(dummyGit, []byte("echo"), 0755); err != nil {
-		t.Fatalf("failed creating dummy git: %v", err)
-	}
-	res := resolveGitBinInternal(
-		func(k string) string {
-			if k == "ProgramFiles" {
-				return tmpDir
-			}
-			return ""
-		},
-		nil, // nil fileExists -> falls back to os.Stat
-		func(string) (string, error) { return "", errors.New("not found") },
-		"windows",
-	)
-	_ = res
-
-	// 2. ParseImageReference edge cases
-	reg, repo, tag, err := ParseImageReference("docker.io/myimage:v1")
-	if err != nil || reg != "registry-1.docker.io" || repo != "library/myimage" || tag != "v1" {
-		t.Errorf("unexpected ParseImageReference result: %s, %s, %s, %v", reg, repo, tag, err)
-	}
-	reg, repo, tag, err = ParseImageReference("index.docker.io/owner/image:latest")
-	if err != nil || reg != "registry-1.docker.io" || repo != "owner/image" || tag != "latest" {
-		t.Errorf("unexpected ParseImageReference result: %s, %s, %s, %v", reg, repo, tag, err)
-	}
-	_, _, _, err = ParseImageReference("myregistry.com/:v1")
-	if err == nil {
-		t.Errorf("expected error for empty repository, got nil")
-	}
-
-	// 3. ParseWwwAuthenticate with trailing param without '='
-	_, svc, _, pErr := ParseWwwAuthenticate("Bearer realm=\"https://example.com\",service=\"test\",trailingnoparam")
-	if pErr != nil || svc != "test" {
-		t.Errorf("unexpected ParseWwwAuthenticate error: %v, svc=%s", pErr, svc)
-	}
-
-	// 4. ContainsDigest with 2-part @ split
-	if !ContainsDigest([]string{"repo/img@sha256:1234567890abcdef"}, "sha256:1234567890abcdef") {
-		t.Errorf("expected ContainsDigest to match")
-	}
-
-	// 5. ResolveRepoPath suffix match
-	resolved := ResolveRepoPath("aerial", []string{"/mnt/data/supervisor/share/aerial"})
-	if resolved != "/mnt/data/supervisor/share/aerial" {
-		t.Errorf("expected /mnt/data/supervisor/share/aerial, got %s", resolved)
-	}
-
-	// 6. defaultDeployDispatcher error status code
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("internal dispatcher error"))
-	}))
-	defer srv.Close()
-
-	dDisp := &SyncDaemon{webhooksRouterURL: srv.URL}
-	if err := dDisp.defaultDeployDispatcher(context.Background(), HangarDeployEvent{JobName: "test"}); err == nil {
-		t.Errorf("expected error from dispatcher, got nil")
-	}
-
-	// 7. resolveGitDir relative path and non-gitdir content
-	gitDirFile := filepath.Join(tmpDir, "repo-rel")
-	_ = os.MkdirAll(gitDirFile, 0755)
-	_ = os.WriteFile(filepath.Join(gitDirFile, ".git"), []byte("gitdir: relative/git\n"), 0644)
-	resGit, errGit := resolveGitDir(gitDirFile)
-	if errGit != nil || !strings.HasSuffix(resGit, "relative/git") {
-		t.Errorf("unexpected resolveGitDir with relative target: %s, %v", resGit, errGit)
-	}
-
-	gitDirNon := filepath.Join(tmpDir, "repo-non")
-	_ = os.MkdirAll(gitDirNon, 0755)
-	_ = os.WriteFile(filepath.Join(gitDirNon, ".git"), []byte("something else\n"), 0644)
-	resGitNon, errGitNon := resolveGitDir(gitDirNon)
-	if errGitNon != nil || resGitNon != filepath.Join(gitDirNon, ".git") {
-		t.Errorf("unexpected resolveGitDir with non-gitdir content: %s, %v", resGitNon, errGitNon)
-	}
-
-	// 8. getGitExecutor default execution
-	dGit := &SyncDaemon{pat: "dummy-pat"}
-	execFn := dGit.getGitExecutor()
-	if execFn != nil {
-		_, _, _ = execFn(context.Background(), tmpDir, "version")
-	}
-
-	// 9. postChannelMessage and sendWebhook with mock error server
-	srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-	}))
-	defer srvErr.Close()
-
-	dHooks := &SyncDaemon{}
-	dHooks.sendWebhook(context.Background(), srvErr.Client(), srvErr.URL, "test content")
-	dHooks.postChannelMessage(context.Background(), srvErr.Client(), "secret-token", "12345", "test message")
-}
 
 
 func TestGetRemoteImageRevision_TableDriven(t *testing.T) {
