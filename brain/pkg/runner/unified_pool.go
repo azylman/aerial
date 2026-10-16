@@ -172,11 +172,37 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	return nil
 }
 
+type vanadisChunkIDCtxKey struct{}
+
+// WithVanadisChunkID attaches a Vanadis chunk ID to ctx for daemon environment provisioning.
+func WithVanadisChunkID(ctx context.Context, chunkID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	trimmed := sanitizeEnvValue(chunkID)
+	if trimmed == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, vanadisChunkIDCtxKey{}, trimmed)
+}
+
+// VanadisChunkIDFromContext extracts a Vanadis chunk ID from ctx if present.
+func VanadisChunkIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(vanadisChunkIDCtxKey{}).(string); ok {
+		return sanitizeEnvValue(v)
+	}
+	return ""
+}
+
 // GetOrCreate retrieves an active StreamingDaemon for targetKey, or starts one via singleflight.
 // If sessionID is non-empty, it is passed to the daemon config to resume an existing conversation.
 // If initialTurns is provided, the first value is passed to DaemonConfig.InitialTurnCount on fresh spawn.
 func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, sessionID string, initialTurns ...int) (*StreamingDaemon, error) {
 	trimmedSess := strings.TrimSpace(sessionID)
+	vanadisChunkID := VanadisChunkIDFromContext(ctx)
 	p.mu.RLock()
 	if p.closed {
 		p.mu.RUnlock()
@@ -184,14 +210,19 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 	}
 	if d, exists := p.daemons[targetKey]; exists {
 		should, _ := p.ShouldRotate(d)
-		if isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
+		if isDaemonMatch(d, trimmedSess, vanadisChunkID) && (trimmedSess != "" || !should) {
 			p.mu.RUnlock()
 			return d, nil
 		}
 	}
 	p.mu.RUnlock()
 
-	res, err, _ := p.sf.Do(targetKey, func() (any, error) {
+	sfKey := targetKey
+	if vanadisChunkID != "" {
+		sfKey = targetKey + "\x00" + vanadisChunkID
+	}
+
+	res, err, _ := p.sf.Do(sfKey, func() (any, error) {
 		p.mu.Lock()
 		if p.closed {
 			p.mu.Unlock()
@@ -199,9 +230,12 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		}
 		if d, exists := p.daemons[targetKey]; exists && d != nil {
 			should, rotReason := p.ShouldRotate(d)
-			if isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
+			if isDaemonMatch(d, trimmedSess, vanadisChunkID) && (trimmedSess != "" || !should) {
 				p.mu.Unlock()
 				return d, nil
+			}
+			if !should && trimmedSess == "" && d.SessionID() != "" && !strings.Contains(targetKey, ":") {
+				trimmedSess = d.SessionID()
 			}
 			delete(p.daemons, targetKey)
 			p.bgWg.Add(1)
@@ -217,17 +251,25 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		}
 		p.mu.Unlock()
 
-		daemonEnv := p.cfg.Env
+		daemonEnv := filterVanadisChunkEnv(p.cfg.Env)
 		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
 			geminiDir := filepath.Join(home, ".gemini")
 			if err := os.MkdirAll(geminiDir, 0755); err != nil {
 				return nil, fmt.Errorf("failed to create runtime home directory %q: %w", geminiDir, err)
 			}
 			daemonEnv = BuildAgyEnv(AgyEnvInput{
-				BaseEnv:  p.cfg.Env,
-				HomeDir:  home,
-				TargetID: targetKey,
-				Timezone: p.cfg.Timezone,
+				BaseEnv:        p.cfg.Env,
+				HomeDir:        home,
+				TargetID:       targetKey,
+				Timezone:       p.cfg.Timezone,
+				VanadisChunkID: vanadisChunkID,
+			})
+		} else if vanadisChunkID != "" {
+			daemonEnv = BuildAgyEnv(AgyEnvInput{
+				BaseEnv:        p.cfg.Env,
+				TargetID:       targetKey,
+				Timezone:       p.cfg.Timezone,
+				VanadisChunkID: vanadisChunkID,
 			})
 		}
 
@@ -239,6 +281,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		daemonCfg := DaemonConfig{
 			ThreadID:                targetKey,
 			SessionID:               trimmedSess,
+			VanadisChunkID:          vanadisChunkID,
 			InitialTurnCount:        initTurnCount,
 			Model:                   p.cfg.Model,
 			AgyBin:                  p.cfg.AgyBin,
@@ -268,6 +311,15 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 				log.Printf("[UnifiedProcessPool] Warning: failed closing daemon after pool closed: %v", closeErr)
 			}
 			return nil, fmt.Errorf("process pool is closed")
+		}
+		if prev, exists := p.daemons[targetKey]; exists && prev != nil && prev != daemon {
+			p.bgWg.Add(1)
+			go func(oldD *StreamingDaemon, tKey string) {
+				defer p.bgWg.Done()
+				if err := oldD.Close(); err != nil {
+					log.Printf("[UnifiedProcessPool] Error closing superseded daemon for %s: %v", tKey, err)
+				}
+			}(prev, targetKey)
 		}
 		p.daemons[targetKey] = daemon
 		p.mu.Unlock()
@@ -312,8 +364,15 @@ func (p *UnifiedProcessPool) EvictSession(targetKey string) error {
 	return nil
 }
 
-func isDaemonMatch(d *StreamingDaemon, trimmedSess string) bool {
+func isDaemonMatch(d *StreamingDaemon, trimmedSess string, vanadisChunkID ...string) bool {
 	if d == nil || d.State() == StateClosed || d.IsDirty() {
+		return false
+	}
+	wantChunk := ""
+	if len(vanadisChunkID) > 0 {
+		wantChunk = sanitizeEnvValue(vanadisChunkID[0])
+	}
+	if d.VanadisChunkID() != wantChunk {
 		return false
 	}
 	if trimmedSess == "" {
@@ -981,6 +1040,18 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	defer func() {
 		turn.Sink = origSink
 	}()
+
+	reqChunkID := sanitizeEnvValue(turn.VanadisChunkID)
+	if reqChunkID == "" {
+		reqChunkID = VanadisChunkIDFromContext(ctx)
+	}
+	if l.pool != nil && (l.daemon == nil || l.daemon.VanadisChunkID() != reqChunkID) {
+		refreshed, err := l.pool.GetOrCreate(WithVanadisChunkID(ctx, reqChunkID), l.targetKey, l.sessionID, l.turnCount)
+		if err != nil {
+			return nil, err
+		}
+		l.daemon = refreshed
+	}
 
 	if err := l.daemon.Send(compiledPrompt, turn); err != nil {
 		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") {

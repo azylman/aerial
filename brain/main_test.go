@@ -1550,13 +1550,23 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 		t.Errorf("Expected 500 for nil store, got %d", wNilStore.Code)
 	}
 
-	// 6. Nil pool handling (store succeeds, pool nil returns 202)
+	// 6. Nil pool handling (store succeeds, pool nil returns 202) and vanadis_chunk_id metadata propagation
 	handlerNilPool := handlePrompt(store, nil)
-	reqNilPool := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil pool","channel_id":"1542423172400291873"}`))
+	reqNilPool := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`))
 	wNilPool := httptest.NewRecorder()
 	handlerNilPool(wNilPool, reqNilPool)
 	if wNilPool.Code != http.StatusAccepted {
 		t.Errorf("Expected 202 for nil pool when store succeeds, got %d", wNilPool.Code)
+	}
+	msgs, _ := store.GetRecentThreadMessages(context.Background(), "1542423172400291873", 10)
+	foundChunkMeta := false
+	for _, m := range msgs {
+		if m.ID == "msg-vanadis-chunk" && m.Metadata.VanadisChunkID == "chunk-abc-99" {
+			foundChunkMeta = true
+		}
+	}
+	if !foundChunkMeta {
+		t.Errorf("Expected persisted message msg-vanadis-chunk to carry VanadisChunkID=chunk-abc-99, got %+v", msgs)
 	}
 }
 

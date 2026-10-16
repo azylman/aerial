@@ -178,12 +178,13 @@ func TestBuildAgyEnv(t *testing.T) {
 		{
 			name: "Full Configuration",
 			input: AgyEnvInput{
-				BaseEnv:  []string{"CUSTOM_BASE=1"},
-				HomeDir:  "/custom/home",
-				APIKey:   "secret-token-123",
-				TargetID: "target-agent",
-				Timezone: "America/Los_Angeles",
-				ExtraEnv: []string{"EXTRA_KEY=foo"},
+				BaseEnv:        []string{"CUSTOM_BASE=1", "AERIAL_VANADIS_CHUNK_ID=stale-chunk"},
+				HomeDir:        "/custom/home",
+				APIKey:         "secret-token-123",
+				TargetID:       "target-agent",
+				Timezone:       "America/Los_Angeles",
+				VanadisChunkID: "chunk-live-42\r\n",
+				ExtraEnv:       []string{"EXTRA_KEY=foo"},
 			},
 			contains: []string{
 				"CUSTOM_BASE=1",
@@ -197,17 +198,23 @@ func TestBuildAgyEnv(t *testing.T) {
 				"GOOGLE_GENAI_API_KEY=secret-token-123",
 				"AERIAL_TARGET_ID=target-agent",
 				"TZ=America/Los_Angeles",
+				"AERIAL_VANADIS_CHUNK_ID=chunk-live-42",
 				"EXTRA_KEY=foo",
+			},
+			notContains: []string{
+				"AERIAL_VANADIS_CHUNK_ID=stale-chunk",
 			},
 		},
 		{
-			name: "Ambient API Keys Filtered When APIKey Is Empty",
+			name: "Ambient API Keys And Stale Vanadis Chunk Env Filtered When Empty",
 			input: AgyEnvInput{
 				BaseEnv: []string{
 					"CUSTOM_BASE=1",
 					"GEMINI_API_KEY=ambient-key",
 					"ANTIGRAVITY_API_KEY=ambient-key",
 					"GOOGLE_GENAI_API_KEY=ambient-key",
+					"AERIAL_VANADIS_CHUNK_ID=stale-chunk",
+					"VANADIS_CHUNK_ID=stale-legacy-chunk",
 					"OTHER_ENV=kept",
 				},
 				APIKey: "",
@@ -220,6 +227,8 @@ func TestBuildAgyEnv(t *testing.T) {
 				"GEMINI_API_KEY",
 				"ANTIGRAVITY_API_KEY",
 				"GOOGLE_GENAI_API_KEY",
+				"AERIAL_VANADIS_CHUNK_ID",
+				"VANADIS_CHUNK_ID",
 			},
 		},
 	}

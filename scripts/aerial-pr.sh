@@ -99,7 +99,7 @@ run_preflight_verification() {
 }
 
 # Pre-dispatch global flag parsing (allows --repo and --vanadis-chunk before or after command)
-VANADIS_CHUNK_ID="${VANADIS_CHUNK_ID:-}"
+VANADIS_CHUNK_ID="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"
 PRE_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -745,7 +745,7 @@ submit_scratch() {
     local commit_msg=""
     local pr_body=""
     local pr_body_file=""
-    local vanadis_chunk_id="${VANADIS_CHUNK_ID:-}"
+    local vanadis_chunk_id="${VANADIS_CHUNK_ID:-${AERIAL_VANADIS_CHUNK_ID:-}}"
 
     while [ $# -gt 0 ]; do
         case "$1" in

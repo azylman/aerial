@@ -42,12 +42,13 @@ func BuildAgyArgs(input AgyArgsInput) []string {
 
 // AgyEnvInput holds environment configuration parameters.
 type AgyEnvInput struct {
-	BaseEnv  []string
-	HomeDir  string
-	APIKey   string
-	TargetID string
-	Timezone string
-	ExtraEnv []string
+	BaseEnv        []string
+	HomeDir        string
+	APIKey         string
+	TargetID       string
+	Timezone       string
+	VanadisChunkID string
+	ExtraEnv       []string
 }
 
 // FilterAgyBaseEnv removes ambient GEMINI_API_KEY, ANTIGRAVITY_API_KEY, and GOOGLE_GENAI_API_KEY
@@ -88,11 +89,37 @@ func filterHomeEnv(env []string) []string {
 	return filtered
 }
 
+// filterVanadisChunkEnv removes any pre-existing AERIAL_VANADIS_CHUNK_ID or VANADIS_CHUNK_ID
+// from an environment slice so non-chunk turns never inherit stale chunk IDs.
+func filterVanadisChunkEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok {
+			filtered = append(filtered, e)
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if upper == "AERIAL_VANADIS_CHUNK_ID" || upper == "VANADIS_CHUNK_ID" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
+func sanitizeEnvValue(val string) string {
+	val = strings.ReplaceAll(val, "\r", "")
+	val = strings.ReplaceAll(val, "\n", "")
+	val = strings.ReplaceAll(val, "\x00", "")
+	return strings.TrimSpace(val)
+}
+
 // BuildAgyEnv constructs the process environment slice for agy execution.
 func BuildAgyEnv(input AgyEnvInput) []string {
 	var cmdEnv []string
 	if len(input.BaseEnv) > 0 {
-		base := input.BaseEnv
+		base := filterVanadisChunkEnv(input.BaseEnv)
 		if strings.TrimSpace(input.APIKey) == "" {
 			base = FilterAgyBaseEnv(base)
 		}
@@ -130,6 +157,10 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 
 	if tz := strings.TrimSpace(input.Timezone); tz != "" {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
+	}
+
+	if chunkID := sanitizeEnvValue(input.VanadisChunkID); chunkID != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_VANADIS_CHUNK_ID="+chunkID)
 	}
 
 	if len(input.ExtraEnv) > 0 {

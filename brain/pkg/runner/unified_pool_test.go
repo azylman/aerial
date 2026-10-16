@@ -3296,3 +3296,197 @@ func TestUnifiedProcessPool_AcquireLease_DefersRotationToTurnEndEvenIfExceeded(t
 		t.Errorf("expected rotatedOld %q, got %q", existingSessID, rotatedOld)
 	}
 }
+
+func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
+	t.Parallel()
+
+	// Exercise nil/empty guards on context helpers, daemon getter, and env filter
+	if got := VanadisChunkIDFromContext(nil); got != "" {
+		t.Fatalf("expected empty chunk ID from nil context, got %q", got)
+	}
+	nilCtxWithChunk := WithVanadisChunkID(nil, "chunk-from-nil\r\n")
+	if got := VanadisChunkIDFromContext(nilCtxWithChunk); got != "chunk-from-nil" {
+		t.Fatalf("expected chunk-from-nil, got %q", got)
+	}
+	emptyChunkCtx := WithVanadisChunkID(context.Background(), "   \r\n ")
+	if got := VanadisChunkIDFromContext(emptyChunkCtx); got != "" {
+		t.Fatalf("expected empty chunk ID for whitespace input, got %q", got)
+	}
+	var nilDaemon *StreamingDaemon
+	if got := nilDaemon.VanadisChunkID(); got != "" {
+		t.Fatalf("expected empty chunk ID from nil daemon, got %q", got)
+	}
+	filteredEnv := filterVanadisChunkEnv([]string{"NO_EQUALS_ENTRY", "AERIAL_VANADIS_CHUNK_ID=stale", "VANADIS_CHUNK_ID=stale2", "KEEP_ME=1"})
+	if len(filteredEnv) != 2 || filteredEnv[0] != "NO_EQUALS_ENTRY" || filteredEnv[1] != "KEEP_ME=1" {
+		t.Fatalf("unexpected filteredEnv: %v", filteredEnv)
+	}
+
+	throwaway := NewThrowawayTurnSink()
+	throwaway.OnTurnStarted()
+	throwaway.OnThinking()
+	throwaway.OnToolCall("tool", "cmd")
+	throwaway.OnToolCompleted("tool", "srv", 0, "ok")
+	throwaway.OnSkillActivated("skill", "src")
+	throwaway.OnTextDelta("delta")
+	throwaway.OnResult(&TurnResult{Response: "ok"})
+	throwaway.OnError(errors.New("err"))
+
+	var mu sync.Mutex
+	var spawnedEnvs [][]string
+	var spawnedSessions []string
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			mu.Lock()
+			envCopy := append([]string(nil), cfg.Env...)
+			spawnedEnvs = append(spawnedEnvs, envCopy)
+			spawnedSessions = append(spawnedSessions, cfg.SessionID)
+			pid := 510 + len(spawnedEnvs)
+			mu.Unlock()
+
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = uuid.New().String()
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						return
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: pid}, nil
+		},
+	}
+
+	pinnedSessID := uuid.New().String()
+	pool := NewUnifiedProcessPool(PoolConfig{
+		GeminiHomeDir: t.TempDir(),
+		Env:           []string{"AERIAL_VANADIS_CHUNK_ID=stale-parent", "BASE_VAR=1"},
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			return SessionRecord{
+				ActiveSessionID:   pinnedSessID,
+				PreviousSessionID: "prev-sess-1",
+				TurnCount:         0,
+			}, nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// 1. Pre-warm / non-chunk turn spawns with no AERIAL_VANADIS_CHUNK_ID
+	lease0, err := pool.AcquireLease(ctx, "thread-vanadis")
+	if err != nil {
+		t.Fatalf("AcquireLease 0 error: %v", err)
+	}
+	if lease0.IsEphemeral() {
+		t.Fatalf("expected non-ephemeral lease")
+	}
+	if lease0.PreviousSessionID() != "prev-sess-1" || !lease0.IsCold() || lease0.TurnCount() != 0 {
+		t.Fatalf("unexpected initial lease metadata: prev=%q cold=%v count=%d", lease0.PreviousSessionID(), lease0.IsCold(), lease0.TurnCount())
+	}
+	if _, err := lease0.Execute(ctx, nil); err == nil {
+		t.Fatalf("expected error for nil TurnContext")
+	}
+	if _, err := lease0.Execute(ctx, &TurnContext{
+		TurnID:              "t0",
+		Prompt:              "warmup",
+		ChannelInstructions: "chan-rules",
+		ThreadSummary:       "summary-text",
+		CoordinationContext: "coord-text",
+	}); err != nil {
+		t.Fatalf("Execute 0 error: %v", err)
+	}
+	_ = lease0.Release()
+
+	// 2. Chunk 1 turn refreshes daemon with AERIAL_VANADIS_CHUNK_ID=chunk-1 while preserving SessionID
+	ctxChunk1 := WithVanadisChunkID(ctx, "chunk-1")
+	lease1, err := pool.AcquireLease(ctxChunk1, "thread-vanadis")
+	if err != nil {
+		t.Fatalf("AcquireLease 1 error: %v", err)
+	}
+	if lease1.SessionID() != pinnedSessID {
+		t.Fatalf("expected pinned session %q to be preserved across chunk refresh, got %q", pinnedSessID, lease1.SessionID())
+	}
+	if _, err := lease1.Execute(ctxChunk1, &TurnContext{TurnID: "t1", Prompt: "chunk 1 work", VanadisChunkID: "chunk-1", Ctx: ctxChunk1}); err != nil {
+		t.Fatalf("Execute 1 error: %v", err)
+	}
+	_ = lease1.Release()
+
+	// 3. Subsequent non-chunk AcquireLease followed by TurnContext.VanadisChunkID override inside Execute
+	lease2, err := pool.AcquireLease(ctx, "thread-vanadis")
+	if err != nil {
+		t.Fatalf("AcquireLease 2 error: %v", err)
+	}
+	if _, err := lease2.Execute(ctx, &TurnContext{TurnID: "t2", Prompt: "chunk 2 via turn field", VanadisChunkID: "chunk-2", Ctx: ctx}); err != nil {
+		t.Fatalf("Execute 2 error: %v", err)
+	}
+	_ = lease2.Release()
+
+	// 4. Direct GetOrCreate with empty sessionID preserves existing warm daemon's SessionID when refreshing chunk env
+	d3, err := pool.GetOrCreate(ctx, "thread-vanadis", "")
+	if err != nil {
+		t.Fatalf("GetOrCreate 3 error: %v", err)
+	}
+	if d3.SessionID() != pinnedSessID || d3.VanadisChunkID() != "" {
+		t.Fatalf("expected preserved session %q and empty chunk ID, got sess=%q chunk=%q", pinnedSessID, d3.SessionID(), d3.VanadisChunkID())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(spawnedEnvs) != 5 {
+		t.Fatalf("expected 5 daemon spawns (initial, chunk-1, post-chunk, chunk-2-exec, direct-clean), got %d", len(spawnedEnvs))
+	}
+	for _, kv := range spawnedEnvs[0] {
+		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
+			t.Errorf("spawn 0 should not have AERIAL_VANADIS_CHUNK_ID, got %q", kv)
+		}
+	}
+	foundChunk1 := false
+	for _, kv := range spawnedEnvs[1] {
+		if kv == "AERIAL_VANADIS_CHUNK_ID=chunk-1" {
+			foundChunk1 = true
+		}
+	}
+	if !foundChunk1 {
+		t.Errorf("spawn 1 missing AERIAL_VANADIS_CHUNK_ID=chunk-1 in env: %v", spawnedEnvs[1])
+	}
+	for _, kv := range spawnedEnvs[2] {
+		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
+			t.Errorf("spawn 2 should scrub AERIAL_VANADIS_CHUNK_ID after chunk completes, got %q", kv)
+		}
+	}
+	foundChunk2 := false
+	for _, kv := range spawnedEnvs[3] {
+		if kv == "AERIAL_VANADIS_CHUNK_ID=chunk-2" {
+			foundChunk2 = true
+		}
+	}
+	if !foundChunk2 {
+		t.Errorf("spawn 3 missing AERIAL_VANADIS_CHUNK_ID=chunk-2 in env: %v", spawnedEnvs[3])
+	}
+	for _, kv := range spawnedEnvs[4] {
+		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
+			t.Errorf("spawn 4 should scrub AERIAL_VANADIS_CHUNK_ID on direct refresh, got %q", kv)
+		}
+	}
+	for i, s := range spawnedSessions {
+		if s != pinnedSessID {
+			t.Errorf("spawn %d expected SessionID %q, got %q", i, pinnedSessID, s)
+		}
+	}
+}
+

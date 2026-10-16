@@ -860,7 +860,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if err := worker.Work(ctx, job); err != nil {
 		t.Fatalf("unexpected worker error: %v", err)
 	}
-	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "high" || gotPrompts[0].ChannelID != "thread-777" {
+	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "high" || gotPrompts[0].ChannelID != "thread-777" || gotPrompts[0].VanadisChunkID != "c-1" {
 		t.Fatalf("unexpected dispatched prompts: %+v", gotPrompts)
 	}
 

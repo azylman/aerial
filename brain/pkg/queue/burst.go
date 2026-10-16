@@ -227,6 +227,13 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", cleanGlobalName))
 	sb.WriteString(fmt.Sprintf("- author_bot: %t\n", m.Metadata.AuthorBot))
 	sb.WriteString(fmt.Sprintf("- is_admin: %t\n", m.Metadata.IsAdmin))
+	if m.Metadata.VanadisChunkID != "" {
+		cleanChunkID := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.VanadisChunkID, "\n", " "), "\r", "")
+		cleanChunkID = strings.TrimSpace(sanitizer.SanitizePromptTags(cleanChunkID))
+		if cleanChunkID != "" {
+			sb.WriteString(fmt.Sprintf("- vanadis_chunk_id: %s\n", cleanChunkID))
+		}
+	}
 
 	if m.Metadata.ReplyingToAuthor != "" || m.Metadata.ReplyingToContent != "" {
 		sb.WriteString("- replying_to:\n")
