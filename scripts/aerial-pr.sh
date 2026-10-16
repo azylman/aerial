@@ -652,12 +652,18 @@ merge_pr() {
 }
 
 resolve_target_id() {
-    local explicit="${1:-}"
-    if [ -n "$explicit" ]; then
-        echo "$explicit"
-        return
+    if [ -n "${1:-}" ]; then echo "$1"; return; fi
+    if [ -n "${AERIAL_TARGET_ID:-}" ] && [[ "${AERIAL_TARGET_ID}" != *:* ]]; then echo "${AERIAL_TARGET_ID}"; return; fi
+    if [ -n "${DISCORD_THREAD_ID:-}" ]; then echo "${DISCORD_THREAD_ID}"; return; fi
+    if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then echo "${DISCORD_CHANNEL_ID}"; return; fi
+    local tfile="${ANTIGRAVITY_APP_DATA_DIR:-}/brain/${ANTIGRAVITY_CONVERSATION_ID:-}/.system_generated/logs/transcript.jsonl"
+    if [ -f "$tfile" ]; then
+        local tid
+        tid=$(head -n 1 "$tfile" 2>/dev/null | grep -oE 'thread_id: [0-9]{17,20}' | head -n 1 | awk '{print $2}' || true)
+        [ -z "$tid" ] && tid=$(head -n 1 "$tfile" 2>/dev/null | grep -oE 'channel_id: [0-9]{17,20}' | head -n 1 | awk '{print $2}' || true)
+        if [ -n "$tid" ]; then echo "$tid"; return; fi
     fi
-    echo "${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-1542423172400291873}}}"
+    echo "1542423172400291873"
 }
 
 enable_github_auto_merge() {
