@@ -1160,12 +1160,16 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 								DiffStat: c.DiffStat,
 							}
 						}
+						buildTitle := strings.TrimSpace(build.Title)
+						if buildTitle == "" {
+							buildTitle = build.Objective
+						}
 						widgetReq := discord.StatusWidgetRequest{
 							ID:        build.ID,
 							ChannelID: build.ThreadID,
 							MessageID: build.StatusMessageID,
 							Tier:      build.Tier,
-							Title:     build.Objective,
+							Title:     buildTitle,
 							Status:    build.Status,
 							Chunks:    widgetChunks,
 						}

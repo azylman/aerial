@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS vanadis_builds (
 	repo TEXT NOT NULL,
 	thread_id TEXT NOT NULL,
 	tier INTEGER NOT NULL DEFAULT 2,
+	title TEXT NOT NULL DEFAULT '',
 	objective TEXT NOT NULL,
 	shared_context TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL DEFAULT 'running',

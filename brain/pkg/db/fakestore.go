@@ -2309,12 +2309,17 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 	if status == "" {
 		status = "running"
 	}
+	buildTitle := strings.TrimSpace(build.Title)
+	if buildTitle == "" {
+		buildTitle = objective
+	}
 
 	f.vanadisBuilds[buildID] = &VanadisBuild{
 		ID:              buildID,
 		Repo:            repo,
 		ThreadID:        threadID,
 		Tier:            tier,
+		Title:           buildTitle,
 		Objective:       objective,
 		SharedContext:   strings.TrimSpace(build.SharedContext),
 		Status:          status,
@@ -2384,6 +2389,9 @@ func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanad
 		return nil, nil, ErrVanadisBuildNotFound
 	}
 	bCopy := *b
+	if strings.TrimSpace(bCopy.Title) == "" {
+		bCopy.Title = bCopy.Objective
+	}
 
 	chunks := make([]VanadisChunk, 0)
 	for _, c := range f.vanadisChunks {

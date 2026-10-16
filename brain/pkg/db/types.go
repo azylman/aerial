@@ -8,6 +8,7 @@ type VanadisBuild struct {
 	Repo            string    `json:"repo"`
 	ThreadID        string    `json:"thread_id"`
 	Tier            int       `json:"tier"`
+	Title           string    `json:"title"`
 	Objective       string    `json:"objective"`
 	SharedContext   string    `json:"shared_context,omitempty"`
 	Status          string    `json:"status"`

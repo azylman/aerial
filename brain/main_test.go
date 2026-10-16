@@ -4699,6 +4699,7 @@ func TestHandlePRRegister(t *testing.T) {
 			ID:        "build-reg-widget",
 			Repo:      "aerial",
 			ThreadID:  "1555405874565091380",
+			Title:     "Update Database Schema And Widget Card",
 			Objective: "Build widget delivery test",
 			Status:    "running",
 			Tier:      2,
@@ -4730,7 +4731,7 @@ func TestHandlePRRegister(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("Expected 200 OK with pool and vanadis, got %d (%s)", rec.Code, rec.Body.String())
 		}
-		if deliveredVanadisReq.ID != "build-reg-widget" || deliveredVanadisReq.ChannelID != "1555405874565091380" {
+		if deliveredVanadisReq.ID != "build-reg-widget" || deliveredVanadisReq.ChannelID != "1555405874565091380" || deliveredVanadisReq.Title != "Update Database Schema And Widget Card" {
 			t.Errorf("Unexpected delivered vanadis widget request: %+v", deliveredVanadisReq)
 		}
 		buildInStore, _, err := store.GetVanadisBuild(context.Background(), "build-reg-widget")
