@@ -23,51 +23,19 @@ import (
 func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 	t.Run("SanitizeLog", func(t *testing.T) {
 		tests := []struct {
-			name     string
-			input    string
-			expected string
+			name, input, expected string
 		}{
-			{
-				name:     "clean string",
-				input:    "repository synced cleanly",
-				expected: "repository synced cleanly",
-			},
-			{
-				name:     "github pat",
-				input:    "failed with token github_pat_11AAAA_secret_token_123",
-				expected: "failed with token [REDACTED_TOKEN]",
-			},
-			{
-				name:     "classic ghp token",
-				input:    "cloning with ghp_1234567890abcdef1234567890abcdef12",
-				expected: "cloning with [REDACTED_TOKEN]",
-			},
-			{
-				name:     "basic auth header",
-				input:    "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0",
-				expected: "AUTHORIZATION: [REDACTED_TOKEN]",
-			},
-			{
-				name:     "postgres connection string",
-				input:    "connecting to postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
-				expected: "connecting to [REDACTED_TOKEN]?sslmode=disable",
-			},
-			{
-				name:     "anthropic api key",
-				input:    "using sk-ant-api03-1234567890abcdef-secret",
-				expected: "using [REDACTED_TOKEN]",
-			},
-			{
-				name:     "google api key",
-				input:    "key AIzaSyD1234567890abcdefghijklmnopqrstuv",
-				expected: "key [REDACTED_TOKEN]",
-			},
+			{"clean string", "repository synced cleanly", "repository synced cleanly"},
+			{"github pat", "failed with token github_pat_11AAAA_secret_token_123", "failed with token [REDACTED_TOKEN]"},
+			{"classic ghp token", "cloning with ghp_1234567890abcdef1234567890abcdef12", "cloning with [REDACTED_TOKEN]"},
+			{"basic auth header", "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0", "AUTHORIZATION: [REDACTED_TOKEN]"},
+			{"postgres connection string", "connecting to postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable", "connecting to [REDACTED_TOKEN]?sslmode=disable"},
+			{"anthropic api key", "using sk-ant-api03-1234567890abcdef-secret", "using [REDACTED_TOKEN]"},
+			{"google api key", "key AIzaSyD1234567890abcdefghijklmnopqrstuv", "key [REDACTED_TOKEN]"},
 		}
-
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				got := SanitizeLog(tt.input)
-				if got != tt.expected {
+				if got := SanitizeLog(tt.input); got != tt.expected {
 					t.Errorf("SanitizeLog() = %q, want %q", got, tt.expected)
 				}
 			})
@@ -76,11 +44,10 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 
 	t.Run("SanitizeAll", func(t *testing.T) {
 		tests := []struct {
-			name       string
-			daemon     *SyncDaemon
-			raw        string
-			shouldHide []string
-			shouldKeep []string
+			name                   string
+			daemon                 *SyncDaemon
+			raw                    string
+			shouldHide, shouldKeep []string
 		}{
 			{
 				name: "redacts secrets len >= 4 and preserves short strings",
@@ -88,28 +55,13 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 					pat:               "ghp_myPersonalAccessToken12345",
 					discordToken:      "my_discord_secret_token",
 					discordWebhookURL: "https://discord.com/api/webhooks/999/super_secret_webhook",
-					extraSecrets: []string{
-						"pg_super_secret_password",
-						"ha_long_lived_access_token_12345",
-						"AIzaSyTestApiKeyForGemini1234567890",
-						"abc", // length < 4, should NOT be added or sanitized as literal secret
-					},
+					extraSecrets:      []string{"pg_super_secret_password", "ha_long_lived_access_token_12345", "AIzaSyTestApiKeyForGemini1234567890", "abc"},
 				},
-				raw: "Connect to postgres://user:pg_super_secret_password@db:5432 with ghp_myPersonalAccessToken12345 and token my_discord_secret_token or webhook https://discord.com/api/webhooks/999/super_secret_webhook. Also ha_long_lived_access_token_12345 and key AIzaSyTestApiKeyForGemini1234567890 and normal word abc.",
-				shouldHide: []string{
-					"pg_super_secret_password",
-					"ghp_myPersonalAccessToken12345",
-					"my_discord_secret_token",
-					"super_secret_webhook",
-					"ha_long_lived_access_token_12345",
-					"AIzaSyTestApiKeyForGemini1234567890",
-				},
-				shouldKeep: []string{
-					"abc",
-				},
+				raw:        "Connect to postgres://user:pg_super_secret_password@db:5432 with ghp_myPersonalAccessToken12345 and token my_discord_secret_token or webhook https://discord.com/api/webhooks/999/super_secret_webhook. Also ha_long_lived_access_token_12345 and key AIzaSyTestApiKeyForGemini1234567890 and normal word abc.",
+				shouldHide: []string{"pg_super_secret_password", "ghp_myPersonalAccessToken12345", "my_discord_secret_token", "super_secret_webhook", "ha_long_lived_access_token_12345", "AIzaSyTestApiKeyForGemini1234567890"},
+				shouldKeep: []string{"abc"},
 			},
 		}
-
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				sanitized := tt.daemon.SanitizeAll(tt.raw)
@@ -129,73 +81,47 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 
 	t.Run("BuildGitEnv", func(t *testing.T) {
 		tests := []struct {
-			name        string
-			pat         string
-			baseEnv     []string
-			verifyFound func(t *testing.T, env []string)
+			name            string
+			pat             string
+			wantAuthHeader  bool
+			forbidGitConfig bool
 		}{
-			{
-				name:    "non-empty PAT produces basic auth GIT_CONFIG",
-				pat:     "my_test_pat",
-				baseEnv: os.Environ(),
-				verifyFound: func(t *testing.T, env []string) {
-					foundAuth := false
-					for _, e := range env {
-						if strings.HasPrefix(e, "GIT_CONFIG_VALUE_0=") {
-							foundAuth = true
-							if !strings.Contains(e, "AUTHORIZATION: basic ") {
-								t.Errorf("expected basic auth header, got %s", e)
-							}
-						}
-					}
-					if !foundAuth {
-						t.Errorf("BuildGitEnv() did not produce GIT_CONFIG_VALUE_0 auth header")
-					}
-				},
-			},
-			{
-				name:    "empty PAT omits GIT_CONFIG auth variables",
-				pat:     "",
-				baseEnv: os.Environ(),
-				verifyFound: func(t *testing.T, env []string) {
-					for _, e := range env {
-						if strings.HasPrefix(e, "GIT_CONFIG_COUNT=") || strings.HasPrefix(e, "GIT_CONFIG_KEY_") || strings.HasPrefix(e, "GIT_CONFIG_VALUE_") {
-							t.Errorf("unexpected auth GIT_CONFIG in empty PAT env: %s", e)
-						}
-					}
-				},
-			},
+			{"non-empty PAT produces basic auth GIT_CONFIG", "my_test_pat", true, false},
+			{"empty PAT omits GIT_CONFIG auth variables", "", false, true},
 		}
-
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				env := BuildGitEnv(tt.pat, tt.baseEnv)
-				tt.verifyFound(t, env)
+				env := BuildGitEnv(tt.pat, os.Environ())
+				foundAuth := false
+				for _, e := range env {
+					if strings.HasPrefix(e, "GIT_CONFIG_VALUE_0=") {
+						foundAuth = true
+						if tt.wantAuthHeader && !strings.Contains(e, "AUTHORIZATION: basic ") {
+							t.Errorf("expected basic auth header, got %s", e)
+						}
+					}
+					if tt.forbidGitConfig && (strings.HasPrefix(e, "GIT_CONFIG_COUNT=") || strings.HasPrefix(e, "GIT_CONFIG_KEY_") || strings.HasPrefix(e, "GIT_CONFIG_VALUE_")) {
+						t.Errorf("unexpected auth GIT_CONFIG in empty PAT env: %s", e)
+					}
+				}
+				if tt.wantAuthHeader && !foundAuth {
+					t.Errorf("BuildGitEnv() did not produce GIT_CONFIG_VALUE_0 auth header")
+				}
 			})
 		}
 	})
 
 	t.Run("scrubComposeEnv", func(t *testing.T) {
 		tests := []struct {
-			name     string
-			input    []string
-			expected []string
+			name            string
+			input, expected []string
 		}{
 			{
-				name: "filters internal directories and invalid keys while preserving compose project",
-				input: []string{
-					"INVALID_NO_EQUALS",
-					"AERIAL_CONFIG_DIR=/dir/config",
-					"AERIAL_PROJECT_DIR=/dir/project",
-					"GOOD_VAR=123",
-					"COMPOSE_PROJECT_NAME=aerial",
-				},
-				expected: []string{
-					"COMPOSE_PROJECT_NAME=aerial",
-				},
+				name:     "filters internal directories and invalid keys while preserving compose project",
+				input:    []string{"INVALID_NO_EQUALS", "AERIAL_CONFIG_DIR=/dir/config", "AERIAL_PROJECT_DIR=/dir/project", "GOOD_VAR=123", "COMPOSE_PROJECT_NAME=aerial"},
+				expected: []string{"COMPOSE_PROJECT_NAME=aerial"},
 			},
 		}
-
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				out := scrubComposeEnv(tt.input)
@@ -214,136 +140,88 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 
 func TestGetComposeArgs_TableDriven(t *testing.T) {
 	tests := []struct {
-		name    string
-		subArgs []string
-		setup   func(t *testing.T) (composeDir string, configDir string, check func(t *testing.T, args []string, composeDir, configDir string))
+		name                    string
+		subArgs                 []string
+		writeBaseCompose        bool
+		writeConfigOverride     bool
+		sameComposeAndConfigDir bool
+		writeLocalOverride      bool
+		writeEnvFile            bool
+		wantFFlags              int
+		checkExactArgs          bool
 	}{
-		{
-			name:    "base_only",
-			subArgs: []string{"config", "--quiet"},
-			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
-				composeDir := t.TempDir()
-				configDir := t.TempDir()
-				baseFile := filepath.Join(composeDir, "docker-compose.yml")
-				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-					t.Fatal(err)
-				}
-				expectedPrefix := []string{
-					"--project-name", "aerial",
-					"--project-directory", composeDir,
-					"-f", baseFile,
-					"config", "--quiet",
-				}
-				return composeDir, configDir, func(t *testing.T, args []string, _, _ string) {
-					if len(args) != len(expectedPrefix) {
-						t.Fatalf("expected %d args, got %d: %v", len(expectedPrefix), len(args), args)
-					}
-					for i := range expectedPrefix {
-						if args[i] != expectedPrefix[i] {
-							t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedPrefix[i])
-						}
-					}
-				}
-			},
-		},
-		{
-			name:    "with_config_override",
-			subArgs: []string{"up", "-d", "--no-recreate", "gitsync"},
-			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
-				composeDir := t.TempDir()
-				configDir := t.TempDir()
-				baseFile := filepath.Join(composeDir, "docker-compose.yml")
-				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-					t.Fatal(err)
-				}
-				overrideFile := filepath.Join(configDir, "docker-compose.override.yml")
-				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
-					t.Fatal(err)
-				}
-				expectedArgs := []string{
-					"--project-name", "aerial",
-					"--project-directory", composeDir,
-					"-f", baseFile,
-					"-f", filepath.Clean(overrideFile),
-					"up", "-d", "--no-recreate", "gitsync",
-				}
-				return composeDir, configDir, func(t *testing.T, args []string, _, _ string) {
-					if len(args) != len(expectedArgs) {
-						t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(args), args)
-					}
-					for i := range expectedArgs {
-						if args[i] != expectedArgs[i] {
-							t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedArgs[i])
-						}
-					}
-				}
-			},
-		},
-		{
-			name:    "deduplication",
-			subArgs: []string{"config"},
-			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
-				composeDir := t.TempDir()
-				baseFile := filepath.Join(composeDir, "docker-compose.yml")
-				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-					t.Fatal(err)
-				}
-				overrideFile := filepath.Join(composeDir, "docker-compose.override.yml")
-				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
-					t.Fatal(err)
-				}
-				return composeDir, composeDir, func(t *testing.T, args []string, _, _ string) {
-					fCount := 0
-					for _, a := range args {
-						if a == "-f" {
-							fCount++
-						}
-					}
-					if fCount != 2 {
-						t.Fatalf("expected exactly 2 -f flags (base + deduplicated override), got %d: %v", fCount, args)
-					}
-				}
-			},
-		},
-		{
-			name:    "with_env_file",
-			subArgs: []string{"config"},
-			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
-				composeDir := t.TempDir()
-				configDir := t.TempDir()
-				baseFile := filepath.Join(composeDir, "docker-compose.yml")
-				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-					t.Fatal(err)
-				}
-				envFile := filepath.Join(composeDir, ".env")
-				if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0644); err != nil {
-					t.Fatal(err)
-				}
-				return composeDir, configDir, func(t *testing.T, args []string, _, _ string) {
-					hasEnvFile := false
-					for i, a := range args {
-						if a == "--env-file" && i+1 < len(args) && args[i+1] == envFile {
-							hasEnvFile = true
-							break
-						}
-					}
-					if !hasEnvFile {
-						t.Fatalf("expected --env-file %s in args, got: %v", envFile, args)
-					}
-				}
-			},
-		},
+		{name: "base_only", subArgs: []string{"config", "--quiet"}, writeBaseCompose: true, wantFFlags: 1, checkExactArgs: true},
+		{name: "with_config_override", subArgs: []string{"up", "-d", "--no-recreate", "gitsync"}, writeBaseCompose: true, writeConfigOverride: true, wantFFlags: 2, checkExactArgs: true},
+		{name: "deduplication", subArgs: []string{"config"}, writeBaseCompose: true, writeLocalOverride: true, sameComposeAndConfigDir: true, wantFFlags: 2},
+		{name: "with_env_file", subArgs: []string{"config"}, writeBaseCompose: true, writeEnvFile: true, wantFFlags: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			composeDir, configDir, check := tc.setup(t)
-			daemon := &SyncDaemon{
-				composeDir: composeDir,
-				configDir:  configDir,
+			composeDir := t.TempDir()
+			configDir := t.TempDir()
+			if tc.sameComposeAndConfigDir {
+				configDir = composeDir
 			}
+			baseFile := filepath.Join(composeDir, "docker-compose.yml")
+			if tc.writeBaseCompose {
+				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			overrideFile := filepath.Join(configDir, "docker-compose.override.yml")
+			if tc.writeConfigOverride {
+				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.writeLocalOverride {
+				localOverride := filepath.Join(composeDir, "docker-compose.override.yml")
+				if err := os.WriteFile(localOverride, []byte("services: { brain: {} }"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			envFile := filepath.Join(composeDir, ".env")
+			if tc.writeEnvFile {
+				if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			daemon := &SyncDaemon{composeDir: composeDir, configDir: configDir}
 			args := daemon.getComposeArgs(composeDir, tc.subArgs...)
-			check(t, args, composeDir, configDir)
+
+			fCount := 0
+			hasEnvFile := false
+			for i, a := range args {
+				if a == "-f" {
+					fCount++
+				}
+				if a == "--env-file" && i+1 < len(args) && args[i+1] == envFile {
+					hasEnvFile = true
+				}
+			}
+			if fCount != tc.wantFFlags {
+				t.Fatalf("expected %d -f flags, got %d: %v", tc.wantFFlags, fCount, args)
+			}
+			if tc.writeEnvFile && !hasEnvFile {
+				t.Fatalf("expected --env-file %s in args, got: %v", envFile, args)
+			}
+			if tc.checkExactArgs {
+				want := []string{"--project-name", "aerial", "--project-directory", composeDir, "-f", baseFile}
+				if tc.writeConfigOverride {
+					want = append(want, "-f", filepath.Clean(overrideFile))
+				}
+				want = append(want, tc.subArgs...)
+				if len(args) != len(want) {
+					t.Fatalf("expected %d args, got %d: %v", len(want), len(args), args)
+				}
+				for i := range want {
+					if args[i] != want[i] {
+						t.Errorf("arg[%d] = %q, want %q", i, args[i], want[i])
+					}
+				}
+			}
 		})
 	}
 }
@@ -353,70 +231,25 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 		tests := []struct {
 			name        string
 			pat         string
-			gitExecutor func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error)
+			gitOut      string
+			gitErr      error
 			wantSha     string
 			wantErr     bool
-			checkTime   func(t *testing.T, tm *time.Time)
+			wantNilTime bool
+			wantYear    int
 		}{
-			{
-				name: "git_error",
-				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-					return nil, nil, errors.New("git error")
-				},
-				wantErr: true,
-				checkTime: func(t *testing.T, tm *time.Time) {
-					if tm != nil {
-						t.Errorf("expected nil time on error, got %v", tm)
-					}
-				},
-			},
-			{
-				name: "output_without_null_delimiter",
-				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-					return []byte("abc1234"), nil, nil
-				},
-				wantSha: "abc1234",
-				wantErr: false,
-				checkTime: func(t *testing.T, tm *time.Time) {
-					if tm != nil {
-						t.Errorf("expected nil time without delimiter, got %v", tm)
-					}
-				},
-			},
-			{
-				name: "output_with_invalid_rfc3339_date",
-				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-					return []byte("abc1234\x00invalid-date"), nil, nil
-				},
-				wantSha: "abc1234",
-				wantErr: false,
-				checkTime: func(t *testing.T, tm *time.Time) {
-					if tm != nil {
-						t.Errorf("expected nil time on invalid date, got %v", tm)
-					}
-				},
-			},
-			{
-				name: "output_with_valid_rfc3339_date_and_pat",
-				pat:  "my_pat",
-				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-					return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
-				},
-				wantSha: "1122334455667788990011223344556677889900",
-				wantErr: false,
-				checkTime: func(t *testing.T, tm *time.Time) {
-					if tm == nil || tm.Year() != 2026 {
-						t.Errorf("expected valid time with year 2026, got %v", tm)
-					}
-				},
-			},
+			{"git_error", "", "", errors.New("git error"), "", true, true, 0},
+			{"output_without_null_delimiter", "", "abc1234", nil, "abc1234", false, true, 0},
+			{"output_with_invalid_rfc3339_date", "", "abc1234\x00invalid-date", nil, "abc1234", false, true, 0},
+			{"output_with_valid_rfc3339_date_and_pat", "my_pat", "1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z", nil, "1122334455667788990011223344556677889900", false, false, 2026},
 		}
-
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
 				d := &SyncDaemon{
-					pat:         tc.pat,
-					gitExecutor: tc.gitExecutor,
+					pat: tc.pat,
+					gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						return []byte(tc.gitOut), nil, tc.gitErr
+					},
 				}
 				sha, tm, err := d.getRepoCommit(context.Background(), "/repo", "HEAD")
 				if (err != nil) != tc.wantErr {
@@ -425,55 +258,128 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 				if sha != tc.wantSha {
 					t.Errorf("getRepoCommit() sha = %q, want %q", sha, tc.wantSha)
 				}
-				if tc.checkTime != nil {
-					tc.checkTime(t, tm)
+				if tc.wantNilTime && tm != nil {
+					t.Errorf("expected nil time, got %v", tm)
+				}
+				if !tc.wantNilTime && (tm == nil || tm.Year() != tc.wantYear) {
+					t.Errorf("expected valid time with year %d, got %v", tc.wantYear, tm)
 				}
 			})
 		}
 	})
 
 	t.Run("GetStatus", func(t *testing.T) {
+		now := time.Now()
+		past := now.Add(-10 * time.Minute)
+		sha1 := "1111111111111111111111111111111111111111"
+		sha2 := "2222222222222222222222222222222222222222"
+		shaSync := "abc1234567890abcdef1234567890abcdef12"
+
 		tests := []struct {
-			name  string
-			check func(t *testing.T)
+			name               string
+			repos              []string
+			failRepo           string
+			seedLastSyncRepo   string
+			headOut            string
+			originMainOut      string
+			originMainErr      bool
+			fetchHeadOut       string
+			fetchHeadErr       bool
+			testHTTPEndpoint   bool
+			wantStatus         string
+			wantRepo           string
+			wantDiskCommit     string
+			wantRemoteCommit   string
+			wantRepoSyncStatus string
 		}{
 			{
-				name: "synced_and_http_endpoint",
-				check: func(t *testing.T) {
-					fakeRepo := "/mock/repo/aerial"
-					daemon := &SyncDaemon{
-						repos: []string{fakeRepo},
-						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							return []byte("abc1234567890abcdef1234567890abcdef12\x002026-09-12T12:00:00Z"), nil, nil
-						},
-					}
+				name: "synced_and_http_endpoint", repos: []string{"/mock/repo/aerial"},
+				headOut: shaSync + "\x002026-09-12T12:00:00Z", testHTTPEndpoint: true,
+				wantStatus: "synced", wantRepo: "/mock/repo/aerial", wantDiskCommit: shaSync, wantRepoSyncStatus: "synced",
+			},
+			{
+				name: "error_status_when_one_repo_fails_with_lastSyncTimes", repos: []string{"/repo/ok", "/repo/failing"},
+				failRepo: "/repo/failing", seedLastSyncRepo: "/repo/ok",
+				headOut: sha1 + "\x002026-09-12T12:00:00Z", wantStatus: "error",
+			},
+			{
+				name: "lagging_status_when_remote_sha_differs_and_timestamp_older", repos: []string{"/mock/local"},
+				headOut: sha1 + "\x002026-09-12T12:00:00Z", originMainOut: sha2 + "\x002035-01-01T12:00:00Z",
+				wantStatus: "lagging",
+			},
+			{
+				name: "origin_main_error_fallback_to_fetch_head", repos: []string{"/mock/repo"},
+				headOut: sha1 + "\x00" + now.Format(time.RFC3339), originMainErr: true, fetchHeadOut: sha2 + "\x00" + past.Format(time.RFC3339),
+				wantStatus: "synced", wantRepo: "/mock/repo", wantRemoteCommit: sha2,
+			},
+			{
+				name: "origin_main_and_fetch_head_failing_fallback_to_disk_sha", repos: []string{"/mock/repo"},
+				headOut: sha1 + "\x00" + now.Format(time.RFC3339), originMainErr: true, fetchHeadErr: true,
+				wantStatus: "synced", wantRepo: "/mock/repo", wantRemoteCommit: sha1,
+			},
+			{
+				name: "clean_status_synced", repos: []string{"/repo/ok"},
+				headOut: sha1 + "\x002026-09-12T12:00:00Z", wantStatus: "synced", wantRepo: "/repo/ok",
+			},
+		}
 
-					ctx := context.Background()
-					status := daemon.GetStatus(ctx)
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				daemon := &SyncDaemon{
+					repos: tc.repos,
+					gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						if tc.failRepo != "" && dir == tc.failRepo {
+							return nil, []byte("error"), errors.New("failed")
+						}
+						ref := args[len(args)-1]
+						if ref == "origin/main" || ref == "@{u}" {
+							if tc.originMainErr {
+								return nil, nil, errors.New("no origin/main")
+							}
+							if tc.originMainOut != "" {
+								return []byte(tc.originMainOut), nil, nil
+							}
+						}
+						if ref == "FETCH_HEAD" {
+							if tc.fetchHeadErr {
+								return nil, nil, errors.New("remote ref not found")
+							}
+							if tc.fetchHeadOut != "" {
+								return []byte(tc.fetchHeadOut), nil, nil
+							}
+						}
+						return []byte(tc.headOut), nil, nil
+					},
+				}
+				if tc.seedLastSyncRepo != "" {
+					daemon.lastSyncTimes = map[string]time.Time{tc.seedLastSyncRepo: time.Now().Add(-1 * time.Hour)}
+				}
 
-					if status.Status != "synced" {
-						t.Errorf("expected status 'synced', got %q", status.Status)
-					}
-					if status.MaxLagSeconds != 0 {
-						t.Errorf("expected max_lag_seconds 0, got %d", status.MaxLagSeconds)
-					}
-					repoSt, ok := status.Repos[fakeRepo]
+				status := daemon.GetStatus(context.Background())
+				if status.Status != tc.wantStatus {
+					t.Errorf("expected status %q, got %q", tc.wantStatus, status.Status)
+				}
+				if tc.wantRepo != "" {
+					repoSt, ok := status.Repos[tc.wantRepo]
 					if !ok {
-						t.Fatalf("expected repo %s in status response", fakeRepo)
+						t.Fatalf("expected repo %s in status response", tc.wantRepo)
 					}
-					if repoSt.DiskCommit != "abc1234567890abcdef1234567890abcdef12" {
-						t.Errorf("expected disk commit 'abc1234567890abcdef1234567890abcdef12', got %q", repoSt.DiskCommit)
+					if tc.wantDiskCommit != "" && repoSt.DiskCommit != tc.wantDiskCommit {
+						t.Errorf("expected disk commit %q, got %q", tc.wantDiskCommit, repoSt.DiskCommit)
 					}
-					if repoSt.SyncStatus != "synced" {
-						t.Errorf("expected repo sync_status 'synced', got %q", repoSt.SyncStatus)
+					if tc.wantRemoteCommit != "" && repoSt.RemoteCommit != tc.wantRemoteCommit {
+						t.Errorf("expected remote commit %q, got %q", tc.wantRemoteCommit, repoSt.RemoteCommit)
 					}
-
+					if tc.wantRepoSyncStatus != "" && repoSt.SyncStatus != tc.wantRepoSyncStatus {
+						t.Errorf("expected repo sync_status %q, got %q", tc.wantRepoSyncStatus, repoSt.SyncStatus)
+					}
+				}
+				if tc.testHTTPEndpoint {
 					mux := http.NewServeMux()
 					mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 						w.Header().Set("Content-Type", "application/json")
 						_ = json.NewEncoder(w).Encode(daemon.GetStatus(r.Context()))
 					})
-
 					server := httptest.NewServer(mux)
 					defer server.Close()
 
@@ -482,148 +388,23 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 						t.Fatalf("GET /status failed: %v", err)
 					}
 					defer resp.Body.Close()
-
 					if resp.StatusCode != http.StatusOK {
 						t.Errorf("expected status 200, got %d", resp.StatusCode)
 					}
-
 					var jsonResp GitSyncStatusResponse
 					if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
 						t.Fatalf("failed to decode JSON: %v", err)
 					}
-
-					if jsonResp.Status != "synced" {
-						t.Errorf("expected json status 'synced', got %q", jsonResp.Status)
+					if jsonResp.Status != tc.wantStatus {
+						t.Errorf("expected json status %q, got %q", tc.wantStatus, jsonResp.Status)
 					}
-				},
-			},
-			{
-				name: "error_status_when_one_repo_fails_with_lastSyncTimes",
-				check: func(t *testing.T) {
-					pastTime := time.Now().Add(-1 * time.Hour)
-					daemon := &SyncDaemon{
-						repos: []string{
-							"/repo/ok",
-							"/repo/failing",
-						},
-						lastSyncTimes: map[string]time.Time{
-							"/repo/ok": pastTime,
-						},
-						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if dir == "/repo/failing" {
-								return nil, []byte("error"), errors.New("failed")
-							}
-							return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
-						},
-					}
-
-					status := daemon.GetStatus(context.Background())
-					if status.Status != "error" {
-						t.Errorf("expected overall status 'error' when one repo fails, got %q", status.Status)
-					}
-				},
-			},
-			{
-				name: "lagging_status_when_remote_sha_differs_and_timestamp_older",
-				check: func(t *testing.T) {
-					fakeRepo := "/mock/local"
-					remoteSha := "2222222222222222222222222222222222222222"
-					localSha := "1111111111111111111111111111111111111111"
-
-					d := NewDaemon(DaemonConfig{
-						Repos: []string{fakeRepo},
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							ref := args[len(args)-1]
-							if ref == "@{u}" || strings.Contains(ref, "origin/") {
-								return []byte(remoteSha + "\x002035-01-01T12:00:00Z"), nil, nil
-							}
-							return []byte(localSha + "\x002026-09-12T12:00:00Z"), nil, nil
-						},
-					})
-
-					stLagging := d.GetStatus(context.Background())
-					if stLagging.Status != "lagging" {
-						t.Errorf("expected lagging status, got %s", stLagging.Status)
-					}
-				},
-			},
-			{
-				name: "origin_main_error_fallback_to_fetch_head",
-				check: func(t *testing.T) {
-					fakeRepo := "/mock/repo"
-					now := time.Now()
-					past := now.Add(-10 * time.Minute)
-
-					d := NewDaemon(DaemonConfig{
-						Repos: []string{fakeRepo},
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							ref := args[len(args)-1]
-							if ref == "origin/main" {
-								return nil, nil, errors.New("no origin/main")
-							}
-							if ref == "FETCH_HEAD" {
-								return []byte("2222222222222222222222222222222222222222\x00" + past.Format(time.RFC3339)), nil, nil
-							}
-							return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
-						},
-					})
-					st := d.GetStatus(context.Background())
-					if st.Repos[fakeRepo].RemoteCommit != "2222222222222222222222222222222222222222" {
-						t.Errorf("expected FETCH_HEAD fallback, got %s", st.Repos[fakeRepo].RemoteCommit)
-					}
-				},
-			},
-			{
-				name: "origin_main_and_fetch_head_failing_fallback_to_disk_sha",
-				check: func(t *testing.T) {
-					fakeRepo := "/mock/repo"
-					now := time.Now()
-
-					dFallbackDisk := NewDaemon(DaemonConfig{
-						Repos: []string{fakeRepo},
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							ref := args[len(args)-1]
-							if ref == "origin/main" || ref == "FETCH_HEAD" {
-								return nil, nil, errors.New("remote ref not found")
-							}
-							return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
-						},
-					})
-					st2 := dFallbackDisk.GetStatus(context.Background())
-					if st2.Repos[fakeRepo].RemoteCommit != "1111111111111111111111111111111111111111" {
-						t.Errorf("expected diskSha fallback, got %s", st2.Repos[fakeRepo].RemoteCommit)
-					}
-				},
-			},
-			{
-				name: "clean_status_synced",
-				check: func(t *testing.T) {
-					cleanDaemon := &SyncDaemon{
-						repos: []string{"/repo/ok"},
-						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
-						},
-					}
-					cleanStatus := cleanDaemon.GetStatus(context.Background())
-					if cleanStatus.Status != "synced" {
-						t.Errorf("expected clean status 'synced', got %q", cleanStatus.Status)
-					}
-					if len(cleanStatus.Repos) != 1 {
-						t.Errorf("expected 1 repo status, got %d", len(cleanStatus.Repos))
-					}
-				},
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, tc.check)
+				}
+			})
 		}
 	})
 
 	t.Run("resolveGitDir", func(t *testing.T) {
 		tempDir := t.TempDir()
-
-		// Setup dirs
 		standardRepo := filepath.Join(tempDir, "standard")
 		_ = os.MkdirAll(filepath.Join(standardRepo, ".git"), 0755)
 
@@ -642,42 +423,15 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(plainFileRepo, ".git"), []byte("not_a_gitdir"), 0644)
 
 		tests := []struct {
-			name        string
-			repoPath    string
-			wantGitDir  string
-			wantErr     bool
+			name, repoPath, wantGitDir string
+			wantErr                    bool
 		}{
-			{
-				name:       "nonexistent_directory",
-				repoPath:   filepath.Join(tempDir, "nonexistent"),
-				wantErr:    true,
-			},
-			{
-				name:       "standard_git_directory",
-				repoPath:   standardRepo,
-				wantGitDir: filepath.Join(standardRepo, ".git"),
-				wantErr:    false,
-			},
-			{
-				name:       "worktree_absolute_gitdir",
-				repoPath:   worktreeRepo,
-				wantGitDir: targetGitDir,
-				wantErr:    false,
-			},
-			{
-				name:       "worktree_relative_gitdir",
-				repoPath:   relWorktreeRepo,
-				wantGitDir: targetGitDir,
-				wantErr:    false,
-			},
-			{
-				name:       "worktree_without_gitdir_prefix",
-				repoPath:   plainFileRepo,
-				wantGitDir: filepath.Join(plainFileRepo, ".git"),
-				wantErr:    false,
-			},
+			{"nonexistent_directory", filepath.Join(tempDir, "nonexistent"), "", true},
+			{"standard_git_directory", standardRepo, filepath.Join(standardRepo, ".git"), false},
+			{"worktree_absolute_gitdir", worktreeRepo, targetGitDir, false},
+			{"worktree_relative_gitdir", relWorktreeRepo, targetGitDir, false},
+			{"worktree_without_gitdir_prefix", plainFileRepo, filepath.Join(plainFileRepo, ".git"), false},
 		}
-
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
 				gitDir, err := resolveGitDir(tc.repoPath)
@@ -704,13 +458,10 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 	})
 
 	t.Run("StartReconcilerLoop_debounce_and_execution", func(t *testing.T) {
-		oldDebounce := reconcilerDebounceDuration
-		oldCooldown := reconcilerMinCooldown
-		reconcilerDebounceDuration = 5 * time.Millisecond
-		reconcilerMinCooldown = 5 * time.Millisecond
+		oldDebounce, oldCooldown := reconcilerDebounceDuration, reconcilerMinCooldown
+		reconcilerDebounceDuration, reconcilerMinCooldown = 5*time.Millisecond, 5*time.Millisecond
 		defer func() {
-			reconcilerDebounceDuration = oldDebounce
-			reconcilerMinCooldown = oldCooldown
+			reconcilerDebounceDuration, reconcilerMinCooldown = oldDebounce, oldCooldown
 		}()
 
 		tempDir := t.TempDir()
@@ -737,23 +488,20 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 		loopCtx, loopCancel := context.WithCancel(context.Background())
 		d.StartReconcilerLoop(loopCtx)
 
-		// First trigger
-		d.TriggerReconcile(context.Background(), true)
+		_ = d.TriggerReconcile(context.Background(), true)
 		select {
 		case <-nomadExecuted:
 		case <-time.After(2 * time.Second):
 			t.Fatal("timed out waiting for nomad executor signal on first trigger")
 		}
 
-		// Second trigger with updated lastReconcile to test cooldown path
 		d.SetLastReconcile(time.Now())
-		d.TriggerReconcile(context.Background(), true)
+		_ = d.TriggerReconcile(context.Background(), true)
 		select {
 		case <-nomadExecuted:
 		case <-time.After(2 * time.Second):
 			t.Fatal("timed out waiting for nomad executor signal on second trigger")
 		}
-
 		loopCancel()
 	})
 
@@ -762,10 +510,7 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 		defer cancel()
 
 		triggered := make(chan struct{}, 1)
-		d := NewDaemon(DaemonConfig{
-			Interval:   5 * time.Millisecond,
-			ComposeDir: t.TempDir(),
-		})
+		d := NewDaemon(DaemonConfig{Interval: 5 * time.Millisecond, ComposeDir: t.TempDir()})
 		d.triggerFn = func() ([]RepoSyncResult, error) {
 			select {
 			case triggered <- struct{}{}:
@@ -785,9 +530,7 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 
 	t.Run("DaemonLoops_graceful_cancel", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		d := NewDaemon(DaemonConfig{
-			Interval: 10 * time.Millisecond,
-		})
+		d := NewDaemon(DaemonConfig{Interval: 10 * time.Millisecond})
 		d.StartPeriodicLoop(ctx)
 		d.StartReconcilerLoop(ctx)
 		cancel()
@@ -797,508 +540,224 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 	t.Run("EnsureRepo", func(t *testing.T) {
 		tests := []struct {
-			name  string
-			check func(t *testing.T)
+			name               string
+			emptyArgs          bool
+			seedRegularFile    bool
+			seedNonEmptyDir    bool
+			cloneCreatesGitDir bool
+			callTwice          bool
+			gitErrOnCmd        map[string]error
+			wantCloneCalled    bool
+			wantMinGitCalls    int
+			wantErr            bool
 		}{
-			{
-				name: "empty_path_or_url_noop",
-				check: func(t *testing.T) {
-					daemon := &SyncDaemon{}
-					if err := daemon.EnsureRepo(context.Background(), "", ""); err != nil {
-						t.Errorf("EnsureRepo with empty strings failed: %v", err)
-					}
-				},
-			},
-			{
-				name: "regular_file_not_a_directory_error",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-					filePath := filepath.Join(tempDir, "file-not-dir")
-					_ = os.WriteFile(filePath, []byte("regular file"), 0644)
-					d := NewDaemon(DaemonConfig{})
-					err := d.EnsureRepo(context.Background(), filePath, "https://github.com/example/repo.git")
-					if err == nil {
-						t.Errorf("expected error when repoPath is a regular file")
-					}
-				},
-			},
-			{
-				name: "empty_directory_clone_success_and_second_call_noop",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					bareRemote := "https://example.com/repo.git"
-					localClone := filepath.Join(tempBase, "local")
-					cloneCalled := false
-
-					daemon := &SyncDaemon{
-						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 && args[0] == "clone" {
-								cloneCalled = true
-								targetPath := args[len(args)-1]
-								_ = os.MkdirAll(filepath.Join(targetPath, ".git"), 0755)
-							}
-							return nil, nil, nil
-						},
-					}
-
-					ctx := context.Background()
-					if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
-						t.Fatalf("EnsureRepo failed: %v", err)
-					}
-					if !cloneCalled {
-						t.Errorf("expected clone to be called on empty directory")
-					}
-
-					// Second call should be a no-op since .git now exists
-					if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
-						t.Fatalf("EnsureRepo second call failed: %v", err)
-					}
-				},
-			},
-			{
-				name: "clone_error",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-					d := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							return nil, []byte("fatal: repository not found"), errors.New("clone failed")
-						},
-					})
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					defer cancel()
-					err := d.EnsureRepo(ctx, filepath.Join(tempDir, "empty"), "file:///nonexistent-repo-url-xyz")
-					if err == nil {
-						t.Errorf("expected error from clone, got nil")
-					}
-				},
-			},
-			{
-				name: "non_empty_directory_adoption_success",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					adoptDir := filepath.Join(tempBase, "adopt")
-					_ = os.MkdirAll(adoptDir, 0755)
-					_ = os.WriteFile(filepath.Join(adoptDir, "existing.txt"), []byte("pre-existing content"), 0644)
-
-					var calls []string
-					d := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 {
-								calls = append(calls, args[0])
-							}
-							return nil, nil, nil
-						},
-					})
-					if err := d.EnsureRepo(context.Background(), adoptDir, "https://github.com/example/repo.git"); err != nil {
-						t.Fatalf("EnsureRepo adoption failed: %v", err)
-					}
-					if len(calls) < 4 {
-						t.Errorf("expected at least 4 git calls during adoption, got %d (%v)", len(calls), calls)
-					}
-				},
-			},
-			{
-				name: "adoption_git_init_failure",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-					adoptDir := filepath.Join(tempDir, "adopt")
-					_ = os.MkdirAll(adoptDir, 0755)
-					_ = os.WriteFile(filepath.Join(adoptDir, "file.txt"), []byte("data"), 0644)
-
-					dInitFail := &SyncDaemon{
-						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 && args[0] == "init" {
-								return nil, []byte("fatal: init error"), errors.New("init error")
-							}
-							return nil, nil, nil
-						},
-					}
-					if err := dInitFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
-						t.Errorf("expected error on init failure")
-					}
-				},
-			},
-			{
-				name: "adoption_git_remote_add_nonfatal_warning_when_fetch_succeeds_and_fails",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-
-					// Case A: remote add warning, fetch succeeds -> EnsureRepo succeeds
-					dRemoteSuccess := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 {
-								if args[0] == "init" {
-									return nil, nil, nil
-								}
-								if args[0] == "remote" {
-									return nil, []byte("fatal: remote origin already exists"), errors.New("already exists")
-								}
-								if args[0] == "fetch" {
-									return nil, nil, nil
-								}
-								if args[0] == "reset" {
-									return nil, nil, nil
-								}
-							}
-							return nil, nil, nil
-						},
-					})
-					nonEmptyDir1 := filepath.Join(tempDir, "nonempty1")
-					_ = os.MkdirAll(nonEmptyDir1, 0755)
-					_ = os.WriteFile(filepath.Join(nonEmptyDir1, "file.txt"), []byte("data"), 0644)
-					if err := dRemoteSuccess.EnsureRepo(context.Background(), nonEmptyDir1, "https://github.com/org/repo.git"); err != nil {
-						t.Fatalf("expected already exists remote error to be non-fatal when fetch succeeds, got %v", err)
-					}
-
-					// Case B: remote add warning, fetch fails -> EnsureRepo fails
-					dRemoteFail := &SyncDaemon{
-						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 && args[0] == "remote" {
-								return nil, []byte("remote origin exists"), errors.New("remote exists")
-							}
-							if len(args) > 0 && args[0] == "fetch" {
-								return nil, []byte("fatal: fetch error"), errors.New("fetch error")
-							}
-							return nil, nil, nil
-						},
-					}
-					nonEmptyDir2 := filepath.Join(tempDir, "nonempty2")
-					_ = os.MkdirAll(nonEmptyDir2, 0755)
-					_ = os.WriteFile(filepath.Join(nonEmptyDir2, "file.txt"), []byte("data"), 0644)
-					if err := dRemoteFail.EnsureRepo(context.Background(), nonEmptyDir2, "https://example.com/repo.git"); err == nil {
-						t.Errorf("expected error on fetch failure after remote add warning")
-					}
-				},
-			},
-			{
-				name: "adoption_git_reset_soft_failure",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-					nonEmptyDir := filepath.Join(tempDir, "nonempty")
-					_ = os.MkdirAll(nonEmptyDir, 0755)
-					_ = os.WriteFile(filepath.Join(nonEmptyDir, "file.txt"), []byte("data"), 0644)
-
-					dResetFail := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 {
-								if args[0] == "reset" && len(args) > 1 && args[1] == "--soft" {
-									return nil, []byte("soft reset failed"), errors.New("soft reset error")
-								}
-								if args[0] == "reset" {
-									return nil, []byte("fatal: reset error"), errors.New("reset error")
-								}
-							}
-							return nil, nil, nil
-						},
-					})
-					if err := dResetFail.EnsureRepo(context.Background(), nonEmptyDir, "https://github.com/org/repo.git"); err == nil {
-						t.Fatalf("expected git reset --soft error, got nil")
-					}
-				},
-			},
+			{name: "empty_path_or_url_noop", emptyArgs: true},
+			{name: "regular_file_not_a_directory_error", seedRegularFile: true, wantErr: true},
+			{name: "empty_directory_clone_success_and_second_call_noop", cloneCreatesGitDir: true, callTwice: true, wantCloneCalled: true},
+			{name: "clone_error", gitErrOnCmd: map[string]error{"clone": errors.New("clone failed")}, wantErr: true},
+			{name: "non_empty_directory_adoption_success", seedNonEmptyDir: true, wantMinGitCalls: 4},
+			{name: "adoption_git_init_failure", seedNonEmptyDir: true, gitErrOnCmd: map[string]error{"init": errors.New("init error")}, wantErr: true},
+			{name: "adoption_git_remote_add_nonfatal_warning_when_fetch_succeeds", seedNonEmptyDir: true, gitErrOnCmd: map[string]error{"remote": errors.New("already exists")}},
+			{name: "adoption_git_remote_add_warning_and_fetch_fails", seedNonEmptyDir: true, gitErrOnCmd: map[string]error{"remote": errors.New("remote exists"), "fetch": errors.New("fetch error")}, wantErr: true},
+			{name: "adoption_git_reset_soft_failure", seedNonEmptyDir: true, gitErrOnCmd: map[string]error{"reset": errors.New("reset error")}, wantErr: true},
 		}
 
 		for _, tc := range tests {
-			t.Run(tc.name, tc.check)
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.emptyArgs {
+					d := &SyncDaemon{}
+					if err := d.EnsureRepo(context.Background(), "", ""); err != nil {
+						t.Errorf("EnsureRepo with empty strings failed: %v", err)
+					}
+					return
+				}
+
+				tempDir := t.TempDir()
+				repoPath := filepath.Join(tempDir, "repo")
+				if tc.seedRegularFile {
+					_ = os.WriteFile(repoPath, []byte("regular file"), 0644)
+				}
+				if tc.seedNonEmptyDir {
+					_ = os.MkdirAll(repoPath, 0755)
+					_ = os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("data"), 0644)
+				}
+
+				var calls []string
+				cloneCalled := false
+				d := NewDaemon(DaemonConfig{
+					GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						if len(args) > 0 {
+							cmd := args[0]
+							calls = append(calls, cmd)
+							if cmd == "clone" && tc.cloneCreatesGitDir {
+								cloneCalled = true
+								_ = os.MkdirAll(filepath.Join(args[len(args)-1], ".git"), 0755)
+							}
+							if err, ok := tc.gitErrOnCmd[cmd]; ok && err != nil {
+								return nil, []byte("fatal: " + err.Error()), err
+							}
+						}
+						return nil, nil, nil
+					},
+				})
+
+				err := d.EnsureRepo(context.Background(), repoPath, "https://github.com/example/repo.git")
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("EnsureRepo() error = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.wantCloneCalled && !cloneCalled {
+					t.Errorf("expected clone to be called")
+				}
+				if tc.wantMinGitCalls > 0 && len(calls) < tc.wantMinGitCalls {
+					t.Errorf("expected at least %d git calls, got %d (%v)", tc.wantMinGitCalls, len(calls), calls)
+				}
+				if tc.callTwice {
+					if err := d.EnsureRepo(context.Background(), repoPath, "https://github.com/example/repo.git"); err != nil {
+						t.Fatalf("EnsureRepo second call failed: %v", err)
+					}
+				}
+			})
 		}
 	})
 
 	t.Run("SyncRepo", func(t *testing.T) {
+		head1 := "1111111111111111111111111111111111111111"
+		head2 := "2222222222222222222222222222222222222222"
+
 		tests := []struct {
-			name  string
-			check func(t *testing.T)
+			name              string
+			emptyPath         bool
+			nonexistentPath   bool
+			seedGitDir        bool
+			seedNonEmptyNoGit bool
+			seedIndexLock     bool
+			withRepoURL       bool
+			initHead          string
+			fetchHead         string
+			diffOut           string
+			revParseErrOnCall int
+			fetchErr          error
+			mergeErr          error
+			resetErr          error
+			failAllGit        bool
+			wantEmptyRepo     bool
+			wantAnyErr        bool
+			wantErrSubstr     string
+			wantChanged       bool
+			wantPrevHead      string
+			wantCurrHead      string
 		}{
-			{
-				name: "empty_repo_path",
-				check: func(t *testing.T) {
-					daemon := &SyncDaemon{}
-					emptyRes := daemon.SyncRepo(context.Background(), "")
-					if emptyRes.Repo != "" {
-						t.Errorf("expected empty repo result")
-					}
-				},
-			},
-			{
-				name: "nonexistent_repo_path",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					daemon := &SyncDaemon{}
-					invalidRes := daemon.SyncRepo(context.Background(), filepath.Join(tempBase, "nonexistent"))
-					if invalidRes.Error == "" {
-						t.Errorf("expected error on nonexistent repo")
-					}
-				},
-			},
-			{
-				name: "index_lock_active_guard",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					localClone := filepath.Join(tempBase, "local")
-					_ = os.MkdirAll(filepath.Join(localClone, ".git"), 0755)
-					lockFile := filepath.Join(localClone, ".git", "index.lock")
-					_ = os.WriteFile(lockFile, []byte(""), 0644)
+			{name: "empty_repo_path", emptyPath: true, wantEmptyRepo: true},
+			{name: "nonexistent_repo_path", nonexistentPath: true, wantAnyErr: true},
+			{name: "index_lock_active_guard", seedGitDir: true, seedIndexLock: true, wantErrSubstr: "index.lock active"},
+			{name: "up_to_date", seedGitDir: true, withRepoURL: true, initHead: head1, fetchHead: head1, diffOut: "docker-compose.yml\n", wantChanged: false, wantPrevHead: head1, wantCurrHead: head1},
+			{name: "fast_forward_update_with_diff", seedGitDir: true, withRepoURL: true, initHead: head1, fetchHead: head2, diffOut: "docker-compose.yml\n", wantChanged: true, wantPrevHead: head1, wantCurrHead: head2},
+			{name: "empty_git_rev_parse_head_error", seedGitDir: true, revParseErrOnCall: 1, wantAnyErr: true},
+			{name: "fetch_error", seedGitDir: true, initHead: head1, fetchErr: errors.New("fetch failed"), wantErrSubstr: "fetch failed"},
+			{name: "ensure_repo_failure_warning_uninitialized", seedNonEmptyNoGit: true, withRepoURL: true, failAllGit: true, wantAnyErr: true},
+			{name: "merge_conflict_reset_recovery", seedGitDir: true, initHead: head1, fetchHead: head2, mergeErr: errors.New("exit status 128"), wantChanged: true, wantPrevHead: head1, wantCurrHead: head2},
+			{name: "recovery_reset_hard_failure", seedGitDir: true, initHead: head1, fetchHead: head1, mergeErr: errors.New("merge conflict"), resetErr: errors.New("reset failed"), wantErrSubstr: "reset failed"},
+			{name: "post_merge_rev_parse_failure", seedGitDir: true, initHead: head1, fetchHead: head1, revParseErrOnCall: 2, wantAnyErr: true},
+		}
 
-					daemon := &SyncDaemon{}
-					resLock := daemon.SyncRepo(context.Background(), localClone)
-					if resLock.Error != "index.lock active" {
-						t.Errorf("expected 'index.lock active', got %q", resLock.Error)
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.emptyPath {
+					d := &SyncDaemon{}
+					if res := d.SyncRepo(context.Background(), ""); res.Repo != "" {
+						t.Errorf("expected empty repo result, got %+v", res)
 					}
-				},
-			},
-			{
-				name: "up_to_date_and_fast_forward_update_with_diff",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					localClone := filepath.Join(tempBase, "local")
-					_ = os.MkdirAll(filepath.Join(localClone, ".git"), 0755)
+					return
+				}
 
-					simCurrentHead := "1111111111111111111111111111111111111111"
-					simFetchHead := "1111111111111111111111111111111111111111"
+				tempDir := t.TempDir()
+				repoPath := filepath.Join(tempDir, "local")
+				if tc.nonexistentPath {
+					repoPath = filepath.Join(tempDir, "nonexistent")
+				}
+				if tc.seedGitDir {
+					_ = os.MkdirAll(filepath.Join(repoPath, ".git"), 0755)
+				}
+				if tc.seedNonEmptyNoGit {
+					_ = os.MkdirAll(repoPath, 0755)
+					_ = os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("content"), 0644)
+				}
+				if tc.seedIndexLock {
+					_ = os.WriteFile(filepath.Join(repoPath, ".git", "index.lock"), []byte(""), 0644)
+				}
 
-					daemon := &SyncDaemon{
-						repos:       []string{localClone},
-						repoUrls:    map[string]string{localClone: "https://example.com/repo.git"},
-						reconcileCh: make(chan struct{}, 1),
-						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) == 0 {
-								return nil, nil, nil
-							}
-							switch args[0] {
-							case "config":
-								return nil, nil, nil
-							case "rev-parse":
-								if len(args) > 1 && args[1] == "FETCH_HEAD" {
-									return []byte(simFetchHead + "\n"), nil, nil
-								}
-								return []byte(simCurrentHead + "\n"), nil, nil
-							case "fetch":
-								return nil, nil, nil
-							case "merge":
-								simCurrentHead = simFetchHead
-								return []byte("Updating " + simCurrentHead + "\n"), nil, nil
-							case "diff":
-								return []byte("docker-compose.yml\n"), nil, nil
-							}
-							return nil, nil, nil
-						},
-					}
+				currentHead := tc.initHead
+				revParseCount := 0
+				var repoURLs map[string]string
+				if tc.withRepoURL {
+					repoURLs = map[string]string{repoPath: "https://example.com/repo.git"}
+				}
 
-					ctx := context.Background()
-					// 1. Up to date
-					res := daemon.SyncRepo(ctx, localClone)
-					if res.Error != "" {
-						t.Fatalf("SyncRepo failed: %s", res.Error)
-					}
-					if res.Changed {
-						t.Errorf("expected changed=false when up to date")
-					}
-					if res.PreviousHead != res.CurrentHead {
-						t.Errorf("expected PreviousHead == CurrentHead, got %s != %s", res.PreviousHead, res.CurrentHead)
-					}
-
-					// 2. Remote update exists
-					simFetchHead = "2222222222222222222222222222222222222222"
-					res2 := daemon.SyncRepo(ctx, localClone)
-					if res2.Error != "" {
-						t.Fatalf("SyncRepo failed on update: %s", res2.Error)
-					}
-					if !res2.Changed {
-						t.Errorf("expected changed=true after remote update")
-					}
-					if res2.PreviousHead == res2.CurrentHead {
-						t.Errorf("expected PreviousHead != CurrentHead, got %s == %s", res2.PreviousHead, res2.CurrentHead)
-					}
-					if res2.PreviousHead != "1111111111111111111111111111111111111111" || res2.CurrentHead != "2222222222222222222222222222222222222222" {
-						t.Errorf("unexpected heads: prev=%s curr=%s", res2.PreviousHead, res2.CurrentHead)
-					}
-				},
-			},
-			{
-				name: "empty_git_rev_parse_head_error",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					emptyGitRepo := filepath.Join(tempBase, "emptygit")
-					_ = os.MkdirAll(filepath.Join(emptyGitRepo, ".git"), 0755)
-					daemonEmpty := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							return nil, []byte("fatal: ambiguous argument 'HEAD'"), errors.New("exit status 128")
-						},
-					})
-					resEmpty := daemonEmpty.SyncRepo(context.Background(), emptyGitRepo)
-					if resEmpty.Error == "" {
-						t.Errorf("expected error on empty git repo without commits")
-					}
-				},
-			},
-			{
-				name: "fetch_error",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					brokenOriginRepo := filepath.Join(tempBase, "brokenorigin")
-					_ = os.MkdirAll(filepath.Join(brokenOriginRepo, ".git"), 0755)
-					daemonBroken := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 {
-								switch args[0] {
-								case "config":
-									return nil, nil, nil
-								case "rev-parse":
-									return []byte("1111111111111111111111111111111111111111"), nil, nil
-								case "fetch":
-									return nil, []byte("fatal: unable to access"), errors.New("fetch failed")
-								case "pull":
-									return nil, []byte("fatal: unable to access"), errors.New("pull failed")
-								}
-							}
-							return nil, nil, nil
-						},
-					})
-
-					resBroken := daemonBroken.SyncRepo(context.Background(), brokenOriginRepo)
-					if !strings.Contains(resBroken.Error, "fetch failed") {
-						t.Errorf("expected fetch failed error on broken remote, got: %s", resBroken.Error)
-					}
-				},
-			},
-			{
-				name: "ensure_repo_failure_warning_uninitialized",
-				check: func(t *testing.T) {
-					tempBase := t.TempDir()
-					failDir := filepath.Join(tempBase, "fail_adopt")
-					daemonEnsureFail := NewDaemon(DaemonConfig{
-						Repos:    []string{failDir},
-						RepoURLs: map[string]string{failDir: "http://invalid-non-routable-domain-1234567.com/repo.git"},
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				d := &SyncDaemon{
+					repos:         []string{repoPath},
+					repoUrls:      repoURLs,
+					reconcileCh:   make(chan struct{}, 1),
+					lastSyncTimes: make(map[string]time.Time),
+					gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						if tc.failAllGit {
 							return nil, []byte("fatal: clone failed"), errors.New("clone failed")
-						},
-					})
-					_ = os.MkdirAll(failDir, 0755)
-					_ = os.WriteFile(filepath.Join(failDir, "file.txt"), []byte("content"), 0644)
-					_ = daemonEnsureFail.SyncRepo(context.Background(), failDir)
-				},
-			},
-			{
-				name: "merge_conflict_reset_recovery",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-					localDir := filepath.Join(tempDir, "local")
-					_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
-					head1 := "1111111111111111111111111111111111111111"
-					head2 := "2222222222222222222222222222222222222222"
-					currentHead := head1
-
-					gitMock := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						}
 						if len(args) == 0 {
 							return nil, nil, nil
 						}
 						switch args[0] {
-						case "config":
-							return nil, nil, nil
 						case "rev-parse":
 							if len(args) > 1 && args[1] == "FETCH_HEAD" {
-								return []byte(head2), nil, nil
+								return []byte(tc.fetchHead + "\n"), nil, nil
 							}
-							return []byte(currentHead), nil, nil
-						case "fetch":
-							return nil, nil, nil
+							revParseCount++
+							if tc.revParseErrOnCall > 0 && revParseCount >= tc.revParseErrOnCall {
+								return nil, []byte("fatal: rev-parse failed"), errors.New("rev-parse error")
+							}
+							return []byte(currentHead + "\n"), nil, nil
+						case "fetch", "pull":
+							if tc.fetchErr != nil {
+								return nil, []byte("fatal: unable to access"), tc.fetchErr
+							}
 						case "merge":
-							return nil, []byte("fatal: Not possible to fast-forward, aborting."), errors.New("exit status 128")
+							if tc.mergeErr != nil {
+								return nil, []byte("fatal: conflict"), tc.mergeErr
+							}
+							currentHead = tc.fetchHead
+							return []byte("Updating " + currentHead + "\n"), nil, nil
 						case "reset":
-							currentHead = head2
-							return []byte("HEAD is now at " + head2), nil, nil
-						case "clean":
-							return nil, nil, nil
+							if tc.resetErr != nil {
+								return nil, []byte("fatal: reset failed"), tc.resetErr
+							}
+							currentHead = tc.fetchHead
+							return []byte("HEAD is now at " + currentHead), nil, nil
+						case "diff":
+							return []byte(tc.diffOut), nil, nil
 						}
 						return nil, nil, nil
-					}
+					},
+				}
 
-					d := NewDaemon(DaemonConfig{
-						GitExecutor: gitMock,
-					})
-					res := d.SyncRepo(context.Background(), localDir)
-					if res.Error != "" {
-						t.Fatalf("SyncRepo failed unexpectedly during reset recovery: %s", res.Error)
-					}
-					if !res.Changed {
-						t.Errorf("expected Changed to be true after reset recovery")
-					}
-					if currentHead != head2 {
-						t.Errorf("expected HEAD to be reset to %s, got %s", head2, currentHead)
-					}
-				},
-			},
-			{
-				name: "recovery_reset_hard_failure",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-					localDir := filepath.Join(tempDir, "local")
-					_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
-					dResetFail := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 {
-								switch args[0] {
-								case "config":
-									return nil, nil, nil
-								case "rev-parse":
-									return []byte("1111111111111111111111111111111111111111"), nil, nil
-								case "fetch":
-									return nil, nil, nil
-								case "merge":
-									return nil, []byte("fatal: conflict"), errors.New("merge conflict")
-								case "reset":
-									return nil, []byte("fatal: reset failed"), errors.New("reset failed")
-								}
-							}
-							return nil, nil, nil
-						},
-					})
-					res := dResetFail.SyncRepo(context.Background(), localDir)
-					if !strings.Contains(res.Error, "reset failed") {
-						t.Errorf("expected reset failed error, got %s", res.Error)
-					}
-				},
-			},
-			{
-				name: "post_merge_rev_parse_failure",
-				check: func(t *testing.T) {
-					tempDir := t.TempDir()
-					localDir := filepath.Join(tempDir, "local")
-					_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
-					revParseCount := 0
-					dRevParseFail := NewDaemon(DaemonConfig{
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							if len(args) > 0 {
-								switch args[0] {
-								case "config":
-									return nil, nil, nil
-								case "rev-parse":
-									revParseCount++
-									if revParseCount > 1 {
-										return nil, []byte("fatal: rev-parse failed"), errors.New("rev-parse error")
-									}
-									return []byte("1111111111111111111111111111111111111111"), nil, nil
-								case "fetch":
-									return nil, nil, nil
-								case "merge":
-									return []byte("Already up to date."), nil, nil
-								}
-							}
-							return nil, nil, nil
-						},
-					})
-					res2 := dRevParseFail.SyncRepo(context.Background(), localDir)
-					if res2.Error == "" {
-						t.Errorf("expected error when post-merge rev-parse fails")
-					}
-				},
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, tc.check)
+				res := d.SyncRepo(context.Background(), repoPath)
+				if tc.wantAnyErr && res.Error == "" {
+					t.Fatalf("expected non-empty error, got empty")
+				}
+				if tc.wantErrSubstr != "" && !strings.Contains(res.Error, tc.wantErrSubstr) {
+					t.Fatalf("expected error containing %q, got %q", tc.wantErrSubstr, res.Error)
+				}
+				if !tc.wantAnyErr && tc.wantErrSubstr == "" && res.Error != "" {
+					t.Fatalf("unexpected error: %s", res.Error)
+				}
+				if res.Changed != tc.wantChanged {
+					t.Errorf("Changed = %v, want %v", res.Changed, tc.wantChanged)
+				}
+				if tc.wantPrevHead != "" && res.PreviousHead != tc.wantPrevHead {
+					t.Errorf("PreviousHead = %q, want %q", res.PreviousHead, tc.wantPrevHead)
+				}
+				if tc.wantCurrHead != "" && res.CurrentHead != tc.wantCurrHead {
+					t.Errorf("CurrentHead = %q, want %q", res.CurrentHead, tc.wantCurrHead)
+				}
+			})
 		}
 	})
 
@@ -1314,21 +773,14 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 		d := NewDaemon(DaemonConfig{
 			Repos: []string{localDir},
 			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				if len(args) == 0 {
-					return nil, nil, nil
-				}
-				switch args[0] {
-				case "config":
-					return nil, nil, nil
-				case "rev-parse":
-					return []byte(currentHead), nil, nil
-				case "fetch":
-					return nil, nil, nil
-				case "merge":
-					currentHead = head2
-					return []byte("Updating " + head2), nil, nil
-				case "diff":
-					return nil, nil, nil
+				if len(args) > 0 {
+					switch args[0] {
+					case "rev-parse":
+						return []byte(currentHead), nil, nil
+					case "merge":
+						currentHead = head2
+						return []byte("Updating " + head2), nil, nil
+					}
 				}
 				return nil, nil, nil
 			},
@@ -1344,112 +796,7 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 }
 
 func TestNewConfigFromLookup_TableDriven(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) (lookup func(string) string, verify func(t *testing.T, cfg DaemonConfig))
-	}{
-		{
-			name: "custom environment lookup with extra secrets",
-			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
-				envMap := map[string]string{
-					"PORT":                   "9090",
-					"SYNC_REPOS":             "/path/a, /path/b",
-					"SYNC_INTERVAL":          "30s",
-					"GITHUB_PAT":             "my_secret_pat",
-					"AERIAL_CONFIG_REPO_URL": "https://github.com/custom/config.git",
-					"AERIAL_PROJECT_DIR":     "/custom/aerial",
-					"AERIAL_CONFIG_DIR":      "/custom/config",
-					"DISCORD_BOT_TOKEN":      "bot_token",
-					"DISCORD_CHANNEL":        "custom-channel",
-					"DISCORD_WEBHOOK_URL":    "https://discord.com/api/webhooks/123/abc",
-					"BRAIN_INTERNAL_URL":     "http://brain:9999/reload",
-					"POSTGRES_PASSWORD":      "pg_pass",
-					"HA_TOKEN":               "ha_tok",
-					"GEMINI_API_KEY":         "gem_key",
-				}
-				lookup := func(k string) string { return envMap[k] }
-				verify := func(t *testing.T, cfg DaemonConfig) {
-					if cfg.Port != "9090" {
-						t.Errorf("expected port 9090, got %q", cfg.Port)
-					}
-					if len(cfg.Repos) != 2 || cfg.Repos[0] != "/path/a" || cfg.Repos[1] != "/path/b" {
-						t.Errorf("unexpected repos: %v", cfg.Repos)
-					}
-					if cfg.Interval != 30*time.Second {
-						t.Errorf("expected interval 30s, got %v", cfg.Interval)
-					}
-					if cfg.PAT != "my_secret_pat" {
-						t.Errorf("expected pat my_secret_pat, got %q", cfg.PAT)
-					}
-					if cfg.ComposeDir != "/custom/aerial" {
-						t.Errorf("expected composeDir /custom/aerial, got %q", cfg.ComposeDir)
-					}
-					if cfg.ConfigDir != "/custom/config" {
-						t.Errorf("expected configDir /custom/config, got %q", cfg.ConfigDir)
-					}
-					if cfg.DiscordToken != "bot_token" {
-						t.Errorf("expected discordToken bot_token, got %q", cfg.DiscordToken)
-					}
-					if cfg.DiscordChannel != "custom-channel" {
-						t.Errorf("expected discordChannel custom-channel, got %q", cfg.DiscordChannel)
-					}
-					if cfg.DiscordWebhookURL != "https://discord.com/api/webhooks/123/abc" {
-						t.Errorf("expected discordWebhookURL https://discord.com/api/webhooks/123/abc, got %q", cfg.DiscordWebhookURL)
-					}
-					if cfg.BrainInternalURL != "http://brain:9999/reload" {
-						t.Errorf("expected brainInternalURL http://brain:9999/reload, got %q", cfg.BrainInternalURL)
-					}
-					if len(cfg.ExtraSecrets) != 4 {
-						t.Errorf("expected 4 extraSecrets, got %d (%v)", len(cfg.ExtraSecrets), cfg.ExtraSecrets)
-					}
-				}
-				return lookup, verify
-			},
-		},
-		{
-			name: "empty lookup defaults",
-			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
-				lookup := func(string) string { return "" }
-				verify := func(t *testing.T, cfg DaemonConfig) {
-					if cfg.Port != "8087" {
-						t.Errorf("expected default port 8087, got %q", cfg.Port)
-					}
-					if cfg.Interval != 60*time.Second {
-						t.Errorf("expected default interval 60s, got %v", cfg.Interval)
-					}
-					if cfg.ComposeDir != "/share/aerial" {
-						t.Errorf("expected default composeDir /share/aerial, got %q", cfg.ComposeDir)
-					}
-					if cfg.ConfigDir != "/share/aerial-config" {
-						t.Errorf("expected default configDir /share/aerial-config, got %q", cfg.ConfigDir)
-					}
-					if cfg.BrainInternalURL != "http://brain:8088/internal/reload" {
-						t.Errorf("expected default brainInternalURL http://brain:8088/internal/reload, got %q", cfg.BrainInternalURL)
-					}
-					if len(cfg.ExtraSecrets) != 0 {
-						t.Errorf("expected 0 extraSecrets with empty lookup, got %v", cfg.ExtraSecrets)
-					}
-				}
-				return lookup, verify
-			},
-		},
-		{
-			name: "nil lookup defaults",
-			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
-				return nil, func(t *testing.T, _ DaemonConfig) {
-					cfg := NewConfigFromLookup(nil)
-					if cfg.Port != "8087" {
-						t.Errorf("expected default port 8087 with nil lookup, got %q", cfg.Port)
-					}
-				}
-			},
-		},
-		{
-			name: "CONFIG_PATH YAML loading and service configs",
-			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
-				tmpDir := t.TempDir()
-				cfgPath := filepath.Join(tmpDir, "hangar.yaml")
-				yamlData := `
+	baseYAML := `
 port: "8087"
 sync_interval: "45s"
 sync_repos:
@@ -1462,114 +809,143 @@ service_configs:
     nomad_var: "nomad/jobs/orin-voice"
     var_key: "CONFIG_YAML"
 `
-				if err := os.WriteFile(cfgPath, []byte(yamlData), 0644); err != nil {
-					t.Fatalf("failed to write test yaml: %v", err)
-				}
-				lookup := func(k string) string {
-					if k == "CONFIG_PATH" {
-						return cfgPath
-					}
-					return ""
-				}
-				verify := func(t *testing.T, cfg DaemonConfig) {
-					if cfg.Port != "8087" {
-						t.Errorf("expected port 8087, got %q", cfg.Port)
-					}
-					if cfg.Interval != 45*time.Second {
-						t.Errorf("expected interval 45s, got %v", cfg.Interval)
-					}
-					if len(cfg.Repos) != 2 || cfg.Repos[0] != "/repo/a" || cfg.Repos[1] != "/repo/b" {
-						t.Errorf("unexpected repos from yaml: %v", cfg.Repos)
-					}
-					if cfg.NomadAddr != "http://nomad.cluster:4646" {
-						t.Errorf("expected nomadAddr http://nomad.cluster:4646, got %q", cfg.NomadAddr)
-					}
-					if cfg.BrainInternalURL != "http://brain.cluster:8088/internal/reload" {
-						t.Errorf("expected brainInternalURL http://brain.cluster:8088/internal/reload, got %q", cfg.BrainInternalURL)
-					}
-					if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != "services/voice/voice.yaml" {
-						t.Errorf("expected 1 serviceConfig from yaml, got %v", cfg.ServiceConfigs)
-					}
-				}
-				return lookup, verify
+	tests := []struct {
+		name                     string
+		nilLookup                bool
+		useFromEnv               bool
+		yamlContent              string
+		env                      map[string]string
+		wantPort                 string
+		wantNonEmptyPort         bool
+		wantRepos                []string
+		wantInterval             time.Duration
+		wantPAT                  string
+		wantComposeDir           string
+		wantConfigDir            string
+		wantDiscordToken         string
+		wantDiscordChannel       string
+		wantDiscordWebhook       string
+		wantNomadAddr            string
+		wantBrainURL             string
+		wantExtraSecretsLen      int
+		checkExtraSecrets        bool
+		wantServiceConfigRelPath string
+	}{
+		{
+			name: "custom environment lookup with extra secrets",
+			env: map[string]string{
+				"PORT": "9090", "SYNC_REPOS": "/path/a, /path/b", "SYNC_INTERVAL": "30s",
+				"GITHUB_PAT": "my_secret_pat", "AERIAL_CONFIG_REPO_URL": "https://github.com/custom/config.git",
+				"AERIAL_PROJECT_DIR": "/custom/aerial", "AERIAL_CONFIG_DIR": "/custom/config",
+				"DISCORD_BOT_TOKEN": "bot_token", "DISCORD_CHANNEL": "custom-channel",
+				"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/123/abc",
+				"BRAIN_INTERNAL_URL":  "http://brain:9999/reload",
+				"POSTGRES_PASSWORD":   "pg_pass", "HA_TOKEN": "ha_tok", "GEMINI_API_KEY": "gem_key",
 			},
+			wantPort: "9090", wantRepos: []string{"/path/a", "/path/b"}, wantInterval: 30 * time.Second,
+			wantPAT: "my_secret_pat", wantComposeDir: "/custom/aerial", wantConfigDir: "/custom/config",
+			wantDiscordToken: "bot_token", wantDiscordChannel: "custom-channel",
+			wantDiscordWebhook: "https://discord.com/api/webhooks/123/abc", wantBrainURL: "http://brain:9999/reload",
+			wantExtraSecretsLen: 4, checkExtraSecrets: true,
 		},
 		{
-			name: "env overrides take precedence over CONFIG_PATH YAML",
-			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
-				tmpDir := t.TempDir()
-				cfgPath := filepath.Join(tmpDir, "hangar.yaml")
-				yamlData := `
-port: "8087"
-sync_interval: "45s"
-sync_repos:
-  - "/repo/a"
-  - "/repo/b"
-nomad_addr: "http://nomad.cluster:4646"
-brain_internal_url: "http://brain.cluster:8088/internal/reload"
-`
-				if err := os.WriteFile(cfgPath, []byte(yamlData), 0644); err != nil {
-					t.Fatalf("failed to write test yaml: %v", err)
-				}
-				lookup := func(k string) string {
-					switch k {
-					case "CONFIG_PATH":
-						return cfgPath
-					case "PORT":
-						return "9999"
-					case "SYNC_INTERVAL":
-						return "10s"
-					case "SYNC_REPOS":
-						return "/override/repo"
-					case "NOMAD_ADDR":
-						return "http://override.nomad:4646"
-					case "BRAIN_INTERNAL_URL":
-						return "http://override.brain:8088/reload"
-					default:
-						return ""
-					}
-				}
-				verify := func(t *testing.T, cfg DaemonConfig) {
-					if cfg.Port != "9999" {
-						t.Errorf("expected port override 9999, got %q", cfg.Port)
-					}
-					if cfg.Interval != 10*time.Second {
-						t.Errorf("expected interval override 10s, got %v", cfg.Interval)
-					}
-					if len(cfg.Repos) != 1 || cfg.Repos[0] != "/override/repo" {
-						t.Errorf("expected repos override, got %v", cfg.Repos)
-					}
-					if cfg.NomadAddr != "http://override.nomad:4646" {
-						t.Errorf("expected nomadAddr override, got %q", cfg.NomadAddr)
-					}
-					if cfg.BrainInternalURL != "http://override.brain:8088/reload" {
-						t.Errorf("expected brainInternalURL override, got %q", cfg.BrainInternalURL)
-					}
-				}
-				return lookup, verify
-			},
+			name: "empty lookup defaults", env: map[string]string{},
+			wantPort: "8087", wantInterval: 60 * time.Second, wantComposeDir: "/share/aerial",
+			wantConfigDir: "/share/aerial-config", wantBrainURL: "http://brain:8088/internal/reload",
+			wantExtraSecretsLen: 0, checkExtraSecrets: true,
+		},
+		{name: "nil lookup defaults", nilLookup: true, wantPort: "8087"},
+		{
+			name: "CONFIG_PATH YAML loading and service configs", yamlContent: baseYAML,
+			wantPort: "8087", wantInterval: 45 * time.Second, wantRepos: []string{"/repo/a", "/repo/b"},
+			wantNomadAddr: "http://nomad.cluster:4646", wantBrainURL: "http://brain.cluster:8088/internal/reload",
+			wantServiceConfigRelPath: "services/voice/voice.yaml",
 		},
 		{
-			name: "NewConfigFromEnv smoke check",
-			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
-				return nil, func(t *testing.T, _ DaemonConfig) {
-					cfg := NewConfigFromEnv()
-					if cfg.Port == "" {
-						t.Errorf("expected non-empty port from NewConfigFromEnv, got %q", cfg.Port)
-					}
-				}
+			name: "env overrides take precedence over CONFIG_PATH YAML", yamlContent: baseYAML,
+			env: map[string]string{
+				"PORT": "9999", "SYNC_INTERVAL": "10s", "SYNC_REPOS": "/override/repo",
+				"NOMAD_ADDR": "http://override.nomad:4646", "BRAIN_INTERNAL_URL": "http://override.brain:8088/reload",
 			},
+			wantPort: "9999", wantInterval: 10 * time.Second, wantRepos: []string{"/override/repo"},
+			wantNomadAddr: "http://override.nomad:4646", wantBrainURL: "http://override.brain:8088/reload",
 		},
+		{name: "NewConfigFromEnv smoke check", useFromEnv: true, wantNonEmptyPort: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lookup, verify := tt.setup(t)
 			var cfg DaemonConfig
-			if lookup != nil {
-				cfg = NewConfigFromLookup(lookup)
+			if tt.useFromEnv {
+				cfg = NewConfigFromEnv()
+			} else if tt.nilLookup {
+				cfg = NewConfigFromLookup(nil)
+			} else {
+				envMap := make(map[string]string, len(tt.env)+1)
+				for k, v := range tt.env {
+					envMap[k] = v
+				}
+				if tt.yamlContent != "" {
+					cfgPath := filepath.Join(t.TempDir(), "hangar.yaml")
+					if err := os.WriteFile(cfgPath, []byte(tt.yamlContent), 0644); err != nil {
+						t.Fatalf("failed to write test yaml: %v", err)
+					}
+					envMap["CONFIG_PATH"] = cfgPath
+				}
+				cfg = NewConfigFromLookup(func(k string) string { return envMap[k] })
 			}
-			verify(t, cfg)
+
+			if tt.wantNonEmptyPort && cfg.Port == "" {
+				t.Errorf("expected non-empty port, got %q", cfg.Port)
+			}
+			if tt.wantPort != "" && cfg.Port != tt.wantPort {
+				t.Errorf("Port = %q, want %q", cfg.Port, tt.wantPort)
+			}
+			if len(tt.wantRepos) > 0 {
+				if len(cfg.Repos) != len(tt.wantRepos) {
+					t.Fatalf("Repos = %v, want %v", cfg.Repos, tt.wantRepos)
+				}
+				for i := range tt.wantRepos {
+					if cfg.Repos[i] != tt.wantRepos[i] {
+						t.Errorf("Repos[%d] = %q, want %q", i, cfg.Repos[i], tt.wantRepos[i])
+					}
+				}
+			}
+			if tt.wantInterval != 0 && cfg.Interval != tt.wantInterval {
+				t.Errorf("Interval = %v, want %v", cfg.Interval, tt.wantInterval)
+			}
+			if tt.wantPAT != "" && cfg.PAT != tt.wantPAT {
+				t.Errorf("PAT = %q, want %q", cfg.PAT, tt.wantPAT)
+			}
+			if tt.wantComposeDir != "" && cfg.ComposeDir != tt.wantComposeDir {
+				t.Errorf("ComposeDir = %q, want %q", cfg.ComposeDir, tt.wantComposeDir)
+			}
+			if tt.wantConfigDir != "" && cfg.ConfigDir != tt.wantConfigDir {
+				t.Errorf("ConfigDir = %q, want %q", cfg.ConfigDir, tt.wantConfigDir)
+			}
+			if tt.wantDiscordToken != "" && cfg.DiscordToken != tt.wantDiscordToken {
+				t.Errorf("DiscordToken = %q, want %q", cfg.DiscordToken, tt.wantDiscordToken)
+			}
+			if tt.wantDiscordChannel != "" && cfg.DiscordChannel != tt.wantDiscordChannel {
+				t.Errorf("DiscordChannel = %q, want %q", cfg.DiscordChannel, tt.wantDiscordChannel)
+			}
+			if tt.wantDiscordWebhook != "" && cfg.DiscordWebhookURL != tt.wantDiscordWebhook {
+				t.Errorf("DiscordWebhookURL = %q, want %q", cfg.DiscordWebhookURL, tt.wantDiscordWebhook)
+			}
+			if tt.wantNomadAddr != "" && cfg.NomadAddr != tt.wantNomadAddr {
+				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tt.wantNomadAddr)
+			}
+			if tt.wantBrainURL != "" && cfg.BrainInternalURL != tt.wantBrainURL {
+				t.Errorf("BrainInternalURL = %q, want %q", cfg.BrainInternalURL, tt.wantBrainURL)
+			}
+			if tt.checkExtraSecrets && len(cfg.ExtraSecrets) != tt.wantExtraSecretsLen {
+				t.Errorf("len(ExtraSecrets) = %d, want %d (%v)", len(cfg.ExtraSecrets), tt.wantExtraSecretsLen, cfg.ExtraSecrets)
+			}
+			if tt.wantServiceConfigRelPath != "" {
+				if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != tt.wantServiceConfigRelPath {
+					t.Errorf("ServiceConfigs = %v, want RelPath %q", cfg.ServiceConfigs, tt.wantServiceConfigRelPath)
+				}
+			}
 		})
 	}
 }
@@ -1747,7 +1123,6 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 		}
 	})
 }
-
 
 func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 	composePath := filepath.Join("..", "..", "docker-compose.yml")
@@ -2730,8 +2105,8 @@ func TestSyncServiceConfigsToNomad_TableDriven(t *testing.T) {
 				if tc.daemonSetup != nil {
 					tc.daemonSetup(env.daemon)
 				}
-			err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir)
-			if tc.wantErrSub != "" {
+				err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir)
+				if tc.wantErrSub != "" {
 					if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
 						t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
 					}
@@ -2923,7 +2298,6 @@ func TestSyncServiceConfigsToNomad_TableDriven(t *testing.T) {
 	})
 }
 
-
 func TestRepoLock_ThreadSafety(t *testing.T) {
 	daemon := NewDaemon(DaemonConfig{})
 
@@ -2962,7 +2336,6 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 		t.Errorf("expected counter %d, got %d", iterations, counter)
 	}
 }
-
 
 func TestResolveChannelID_TableDriven(t *testing.T) {
 	tests := []struct {
@@ -3128,7 +2501,6 @@ func TestResolveChannelID_TableDriven(t *testing.T) {
 	}
 }
 
-
 func TestTriggerReconcile_TableDriven(t *testing.T) {
 	ctx := context.Background()
 
@@ -3172,8 +2544,6 @@ func TestTriggerReconcile_TableDriven(t *testing.T) {
 		t.Errorf("expected reconcileCh to be initialized")
 	}
 }
-
-
 
 func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 	tempDir := t.TempDir()
@@ -3247,7 +2617,6 @@ func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 	}
 }
 
-
 type roundTripperFunc struct {
 	fn func(req *http.Request) (*http.Response, error)
 }
@@ -3285,7 +2654,9 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			wantOut string
 			wantErr bool
 		}{
-			{name: "compose executor success", execFn: func() ([]byte, []byte, error) { return defaultComposeExecutor(context.Background(), tempDir, "version") }, wantOut: "Docker Compose mock"},
+			{name: "compose executor success", execFn: func() ([]byte, []byte, error) {
+				return defaultComposeExecutor(context.Background(), tempDir, "version")
+			}, wantOut: "Docker Compose mock"},
 			{name: "compose executor cancel", execFn: func() ([]byte, []byte, error) {
 				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 				defer cancel()
@@ -3323,7 +2694,10 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			t.Errorf("expected non-nil default git executor")
 		}
 		customGit := false
-		dCustomGit := &SyncDaemon{gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) { customGit = true; return nil, nil, nil }}
+		dCustomGit := &SyncDaemon{gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			customGit = true
+			return nil, nil, nil
+		}}
 		_, _, _ = dCustomGit.getGitExecutor()(context.Background(), "")
 		if !customGit {
 			t.Errorf("expected custom git executor to be called")
@@ -3337,7 +2711,10 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			t.Errorf("expected non-nil default docker executor")
 		}
 		customDocker := false
-		dCustomDocker := &SyncDaemon{dockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) { customDocker = true; return nil, nil, nil }}
+		dCustomDocker := &SyncDaemon{dockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			customDocker = true
+			return nil, nil, nil
+		}}
 		_, _, _ = dCustomDocker.getDockerExecutor()(context.Background(), "")
 		if !customDocker {
 			t.Errorf("expected custom docker executor to be called")
@@ -3348,7 +2725,10 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			t.Errorf("expected non-nil default compose executor")
 		}
 		customCompose := false
-		dCustomCompose := &SyncDaemon{composeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) { customCompose = true; return nil, nil, nil }}
+		dCustomCompose := &SyncDaemon{composeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			customCompose = true
+			return nil, nil, nil
+		}}
 		_, _, _ = dCustomCompose.getComposeExecutor()(context.Background(), "", "")
 		if !customCompose {
 			t.Errorf("expected custom compose executor to be called")
@@ -3447,7 +2827,6 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 		}
 	})
 }
-
 
 func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 	dummyPAT := "ghp_mock_token_12345"
@@ -3592,7 +2971,6 @@ func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 	}
 }
 
-
 type mockErrReadCloser struct{}
 
 func (e *mockErrReadCloser) Read(p []byte) (int, error) {
@@ -3706,7 +3084,9 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 		dummyGit := filepath.Join(tmpDir, "git.exe")
 		_ = os.WriteFile(dummyGit, []byte("echo"), 0755)
 		_ = resolveGitBinInternal(func(k string) string {
-			if k == "ProgramFiles" { return tmpDir }
+			if k == "ProgramFiles" {
+				return tmpDir
+			}
 			return ""
 		}, nil, func(string) (string, error) { return "", errors.New("not found") }, "windows")
 
@@ -3725,7 +3105,9 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				reg, repo, tag, err := ParseImageReference(tc.raw)
 				if tc.expectError {
-					if err == nil { t.Errorf("expected error for %s, got nil", tc.raw) }
+					if err == nil {
+						t.Errorf("expected error for %s, got nil", tc.raw)
+					}
 					return
 				}
 				if err != nil || reg != tc.wantReg || repo != tc.wantRepo || tag != tc.wantTag {
@@ -3771,7 +3153,6 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 	})
 }
 
-
 func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
 	d := &SyncDaemon{}
 	started := make(chan struct{})
@@ -3790,10 +3171,10 @@ func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
 }
 
 type mockOCIOptions struct {
-	ProbeErr       error
-	ProbeStatus    int
-	ProbeHeaders   map[string]string
-	ProbeBody      string
+	ProbeErr     error
+	ProbeStatus  int
+	ProbeHeaders map[string]string
+	ProbeBody    string
 
 	ChallengeAuthHeader string
 
@@ -4186,7 +3567,6 @@ func TestGetRemoteImageDigest_TableDriven(t *testing.T) {
 		})
 	}
 }
-
 
 func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 	ctx := context.Background()
@@ -5454,7 +4834,6 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 	})
 }
 
-
 type imageReadyTestEnv struct {
 	t           *testing.T
 	ctx         context.Context
@@ -5928,8 +5307,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) {
 	})
 }
 
-
-
 func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	_ = context.Background()
 
@@ -6332,8 +5709,6 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	})
 }
 
-
-
 func TestGetRemoteImageRevision_TableDriven(t *testing.T) {
 	t.Parallel()
 	expectedSHA := "0123456789abcdef0123456789abcdef01234567"
@@ -6696,10 +6071,10 @@ func TestFetchRegistryWithAuth_TableDriven(t *testing.T) {
 			wantErrSubstr: "failed parsing token realm",
 		},
 		{
-			name:          "token request non-200 returns error",
-			targetURL:     "https://ghcr.io/v2/foo/manifests/latest",
-			registry:      "ghcr.io",
-			repository:    "foo",
+			name:       "token request non-200 returns error",
+			targetURL:  "https://ghcr.io/v2/foo/manifests/latest",
+			registry:   "ghcr.io",
+			repository: "foo",
 			clientOpts: mockOCIOptions{
 				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
 				TokenStatus:         http.StatusForbidden,
@@ -6708,10 +6083,10 @@ func TestFetchRegistryWithAuth_TableDriven(t *testing.T) {
 			wantErrSubstr: "returned HTTP 403",
 		},
 		{
-			name:          "token request malformed JSON returns error",
-			targetURL:     "https://ghcr.io/v2/foo/manifests/latest",
-			registry:      "ghcr.io",
-			repository:    "foo",
+			name:       "token request malformed JSON returns error",
+			targetURL:  "https://ghcr.io/v2/foo/manifests/latest",
+			registry:   "ghcr.io",
+			repository: "foo",
 			clientOpts: mockOCIOptions{
 				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
 				TokenStatus:         http.StatusOK,
@@ -6720,10 +6095,10 @@ func TestFetchRegistryWithAuth_TableDriven(t *testing.T) {
 			wantErrSubstr: "failed decoding token",
 		},
 		{
-			name:          "token request empty token returns error",
-			targetURL:     "https://ghcr.io/v2/foo/manifests/latest",
-			registry:      "ghcr.io",
-			repository:    "foo",
+			name:       "token request empty token returns error",
+			targetURL:  "https://ghcr.io/v2/foo/manifests/latest",
+			registry:   "ghcr.io",
+			repository: "foo",
 			clientOpts: mockOCIOptions{
 				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
 				TokenStatus:         http.StatusOK,
@@ -6732,10 +6107,10 @@ func TestFetchRegistryWithAuth_TableDriven(t *testing.T) {
 			wantErrSubstr: "empty bearer token returned",
 		},
 		{
-			name:          "token request empty token json object returns error",
-			targetURL:     "https://ghcr.io/v2/repo/manifests/latest",
-			registry:      "ghcr.io",
-			repository:    "repo",
+			name:       "token request empty token json object returns error",
+			targetURL:  "https://ghcr.io/v2/repo/manifests/latest",
+			registry:   "ghcr.io",
+			repository: "repo",
 			clientOpts: mockOCIOptions{
 				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
 				TokenStatus:         http.StatusOK,
