@@ -170,8 +170,14 @@ type GitSyncStatusResponse = HangarStatusResponse
 // DockerExecutor executes docker CLI commands.
 type DockerExecutor func(ctx context.Context, args ...string) (stdout []byte, stderr []byte, err error)
 
-func defaultDockerExecutor(ctx context.Context, args ...string) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, "docker", args...)
+func runSubprocess(ctx context.Context, bin, dir string, env []string, waitDelay time.Duration, args ...string) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
+	}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
 			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -181,13 +187,17 @@ func defaultDockerExecutor(ctx context.Context, args ...string) ([]byte, []byte,
 		}
 		return nil
 	}
-	cmd.WaitDelay = 10 * time.Second
+	cmd.WaitDelay = waitDelay
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func defaultDockerExecutor(ctx context.Context, args ...string) ([]byte, []byte, error) {
+	return runSubprocess(ctx, "docker", "", nil, 10*time.Second, args...)
 }
 
 // scrubComposeEnv filters out container-internal path overrides (AERIAL_CONFIG_DIR, AERIAL_PROJECT_DIR)
@@ -201,25 +211,7 @@ type ComposeExecutor func(ctx context.Context, dir string, args ...string) (stdo
 
 func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
 	cmdArgs := append([]string{"compose"}, args...)
-	cmd := exec.CommandContext(ctx, "docker", cmdArgs...)
-	cmd.Dir = dir
-	cmd.Env = scrubComposeEnv(os.Environ())
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-				return cmd.Process.Kill()
-			}
-			return nil
-		}
-		return nil
-	}
-	cmd.WaitDelay = 10 * time.Second
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.Bytes(), stderr.Bytes(), err
+	return runSubprocess(ctx, "docker", dir, scrubComposeEnv(os.Environ()), 10*time.Second, cmdArgs...)
 }
 
 // GitExecutor executes git CLI commands.
@@ -233,34 +225,20 @@ func defaultNomadExecutor(nomadAddr, nomadToken string) NomadExecutor {
 		opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
-		cmd := exec.CommandContext(opCtx, "nomad", args...)
-		cmd.Env = scrubComposeEnv(os.Environ())
+		env := scrubComposeEnv(os.Environ())
 		if nomadAddr != "" {
-			cmd.Env = append(cmd.Env, "NOMAD_ADDR="+nomadAddr)
+			env = append(env, "NOMAD_ADDR="+nomadAddr)
 		}
 		if nomadToken != "" {
-			cmd.Env = append(cmd.Env, "NOMAD_TOKEN="+nomadToken)
+			env = append(env, "NOMAD_TOKEN="+nomadToken)
 		}
-		cmd.Cancel = func() error {
-			if cmd.Process != nil {
-				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-					return cmd.Process.Kill()
-				}
-				return nil
-			}
-			return nil
-		}
-		cmd.WaitDelay = 5 * time.Second
 
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		sanitizedStderr := SanitizeLog(stderr.String())
+		stdout, stderr, err := runSubprocess(opCtx, "nomad", "", env, 5*time.Second, args...)
+		sanitizedStderr := SanitizeLog(string(stderr))
 		if nomadToken != "" {
 			sanitizedStderr = strings.ReplaceAll(sanitizedStderr, nomadToken, "[REDACTED_NOMAD_TOKEN]")
 		}
-		return stdout.Bytes(), []byte(sanitizedStderr), err
+		return stdout, []byte(sanitizedStderr), err
 	}
 }
 
@@ -277,27 +255,8 @@ type NomadChangeEvent struct {
 
 func runGitCommand(ctx context.Context, dir, pat string, args ...string) ([]byte, []byte, error) {
 	gitBin := ResolveGitBin(os.Getenv)
-	cmd := exec.CommandContext(ctx, gitBin, args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = BuildGitEnv(pat, os.Environ())
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-				return cmd.Process.Kill()
-			}
-			return nil
-		}
-		return nil
-	}
-	cmd.WaitDelay = 10 * time.Second
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.Bytes(), stderr.Bytes(), err
+	env := BuildGitEnv(pat, os.Environ())
+	return runSubprocess(ctx, gitBin, dir, env, 10*time.Second, args...)
 }
 
 // SyncDaemon coordinates periodic and on-demand repository synchronizations.
@@ -733,94 +692,10 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 	}
 
 	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tag)
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, manifestURL, nil)
+	resp, _, err := d.doRegistryRequestWithAuth(ctx, http.MethodHead, manifestURL, registry, repository, acceptManifestHeaders, "")
 	if err != nil {
-		return "", fmt.Errorf("failed to create manifest request for %s: %w", imageRef, err)
+		return "", err
 	}
-	req.Header.Set("Accept", acceptManifestHeaders)
-
-	resp, err := d.getRegistryClient().Do(req)
-	if err != nil {
-		return "", fmt.Errorf("manifest HEAD request failed for %s: %w", imageRef, err)
-	}
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		authHeader := resp.Header.Get("Www-Authenticate")
-		closeWarn(resp.Body, "unauthorized manifest response body")
-
-		realm, service, scope, pErr := ParseWwwAuthenticate(authHeader)
-		if pErr != nil {
-			return "", fmt.Errorf("failed parsing Www-Authenticate header for %s: %w", imageRef, pErr)
-		}
-		if scope == "" {
-			scope = fmt.Sprintf("repository:%s:pull", repository)
-		}
-
-		tokURL, uErr := url.Parse(realm)
-		if uErr != nil {
-			return "", fmt.Errorf("failed parsing token realm %q: %w", realm, uErr)
-		}
-		q := tokURL.Query()
-		if service != "" {
-			q.Set("service", service)
-		}
-		if scope != "" {
-			q.Set("scope", scope)
-		}
-		tokURL.RawQuery = q.Encode()
-
-		tokReq, tErr := http.NewRequestWithContext(ctx, http.MethodGet, tokURL.String(), nil)
-		if tErr != nil {
-			return "", fmt.Errorf("failed creating token request for %s: %w", imageRef, tErr)
-		}
-
-		if registry == "ghcr.io" && d != nil && strings.TrimSpace(d.pat) != "" {
-			username := ResolveRegistryUser("", os.Getenv)
-			tokReq.SetBasicAuth(username, d.pat)
-		}
-
-		tokResp, dErr := d.getRegistryClient().Do(tokReq)
-		if dErr != nil {
-			return "", fmt.Errorf("token request failed for %s: %w", imageRef, dErr)
-		}
-		defer tokResp.Body.Close()
-
-		if tokResp.StatusCode != http.StatusOK {
-			closeWarn(tokResp.Body, "token error response body")
-			return "", fmt.Errorf("token request for %s returned HTTP %d", imageRef, tokResp.StatusCode)
-		}
-
-		var tokPayload struct {
-			Token       string `json:"token"`
-			AccessToken string `json:"access_token"`
-		}
-		decErr := json.NewDecoder(tokResp.Body).Decode(&tokPayload)
-		closeWarn(tokResp.Body, "token response body")
-		if decErr != nil {
-			return "", fmt.Errorf("failed decoding token for %s: %w", imageRef, decErr)
-		}
-
-		bearerToken := tokPayload.Token
-		if bearerToken == "" {
-			bearerToken = tokPayload.AccessToken
-		}
-		if bearerToken == "" {
-			return "", fmt.Errorf("empty bearer token returned for %s", imageRef)
-		}
-
-		authReq, aErr := http.NewRequestWithContext(ctx, http.MethodHead, manifestURL, nil)
-		if aErr != nil {
-			return "", fmt.Errorf("failed creating authenticated manifest request for %s: %w", imageRef, aErr)
-		}
-		authReq.Header.Set("Accept", acceptManifestHeaders)
-		authReq.Header.Set("Authorization", "Bearer "+bearerToken)
-
-		resp, err = d.getRegistryClient().Do(authReq)
-		if err != nil {
-			return "", fmt.Errorf("authenticated manifest HEAD request failed for %s: %w", imageRef, err)
-		}
-	}
-
 	defer closeWarn(resp.Body, "manifest response body")
 
 	if resp.StatusCode != http.StatusOK {
@@ -845,45 +720,30 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 	return digest, nil
 }
 
-// fetchRegistryWithAuth performs an HTTP request against a container registry, handling OAuth2/Bearer
-// token challenges automatically and reusing existingBearer if still valid.
-func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
-	var resp *http.Response
+func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed creating request for %s: %w", targetURL, err)
+	}
+	if acceptHeader != "" {
+		req.Header.Set("Accept", acceptHeader)
+	}
+	if existingBearer != "" {
+		req.Header.Set("Authorization", "Bearer "+existingBearer)
+	}
+
+	resp, err := d.getRegistryClient().Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("request failed for %s: %w", targetURL, err)
+	}
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, existingBearer, nil
+	}
 
 	if existingBearer != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed creating authenticated request for %s: %w", targetURL, err)
-		}
-		if acceptHeader != "" {
-			req.Header.Set("Accept", acceptHeader)
-		}
-		req.Header.Set("Authorization", "Bearer "+existingBearer)
-
-		resp, err = d.getRegistryClient().Do(req)
-		if err != nil {
-			return nil, "", fmt.Errorf("authenticated request failed for %s: %w", targetURL, err)
-		}
-		if resp.StatusCode != http.StatusUnauthorized {
-			return resp, existingBearer, nil
-		}
 		closeWarn(resp.Body, "unauthorized response body with existing bearer")
 	} else {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed creating probe request for %s: %w", targetURL, err)
-		}
-		if acceptHeader != "" {
-			req.Header.Set("Accept", acceptHeader)
-		}
-
-		resp, err = d.getRegistryClient().Do(req)
-		if err != nil {
-			return nil, "", fmt.Errorf("probe request failed for %s: %w", targetURL, err)
-		}
-		if resp.StatusCode != http.StatusUnauthorized {
-			return resp, "", nil
-		}
 		closeWarn(resp.Body, "unauthorized probe response body")
 	}
 
@@ -946,9 +806,9 @@ func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, targetURL, regis
 		return nil, "", fmt.Errorf("empty bearer token returned for %s", targetURL)
 	}
 
-	authReq, aErr := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	authReq, aErr := http.NewRequestWithContext(ctx, method, targetURL, nil)
 	if aErr != nil {
-		return nil, "", fmt.Errorf("failed creating final authenticated request for %s: %w", targetURL, aErr)
+		return nil, "", fmt.Errorf("failed creating authenticated request for %s: %w", targetURL, aErr)
 	}
 	if acceptHeader != "" {
 		authReq.Header.Set("Accept", acceptHeader)
@@ -963,6 +823,30 @@ func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, targetURL, regis
 	return finalResp, token, nil
 }
 
+// fetchRegistryWithAuth performs an HTTP request against a container registry, handling OAuth2/Bearer
+// token challenges automatically and reusing existingBearer if still valid.
+func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
+	return d.doRegistryRequestWithAuth(ctx, http.MethodGet, targetURL, registry, repository, acceptHeader, existingBearer)
+}
+
+func (d *SyncDaemon) fetchRegistryBytes(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer, label string) ([]byte, string, error) {
+	resp, token, err := d.fetchRegistryWithAuth(ctx, targetURL, registry, repository, acceptHeader, existingBearer)
+	if err != nil {
+		return nil, "", err
+	}
+	defer closeWarn(resp.Body, label+" response body")
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("%s request returned HTTP %d", label, resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read %s body: %w", label, err)
+	}
+	return bodyBytes, token, nil
+}
+
 // GetRemoteImageRevision retrieves the git commit revision associated with an OCI/Docker container image
 // by inspecting manifest annotations or configuration blob labels.
 func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string) (string, error) {
@@ -972,19 +856,9 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 	}
 
 	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tagOrDigest)
-	resp, bearerToken, err := d.fetchRegistryWithAuth(ctx, manifestURL, registry, repository, acceptManifestHeaders, "")
+	bodyBytes, bearerToken, err := d.fetchRegistryBytes(ctx, manifestURL, registry, repository, acceptManifestHeaders, "", fmt.Sprintf("manifest for %s", imageRef))
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch manifest for %s: %w", imageRef, err)
-	}
-	defer closeWarn(resp.Body, "manifest response body")
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("manifest request for %s returned HTTP %d", imageRef, resp.StatusCode)
-	}
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", fmt.Errorf("failed to read manifest body for %s: %w", imageRef, err)
+		return "", err
 	}
 
 	// Check if this is an OCI Image Index or Docker Manifest List
@@ -995,19 +869,9 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 		}
 
 		childURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, childDigest)
-		childResp, childToken, childErr := d.fetchRegistryWithAuth(ctx, childURL, registry, repository, acceptManifestHeaders, bearerToken)
+		childBytes, childToken, childErr := d.fetchRegistryBytes(ctx, childURL, registry, repository, acceptManifestHeaders, bearerToken, fmt.Sprintf("child manifest for %s (%s)", imageRef, childDigest))
 		if childErr != nil {
-			return "", fmt.Errorf("failed to fetch child manifest %s for %s: %w", childDigest, imageRef, childErr)
-		}
-		defer closeWarn(childResp.Body, "child manifest response body")
-
-		if childResp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("child manifest request for %s (%s) returned HTTP %d", imageRef, childDigest, childResp.StatusCode)
-		}
-
-		childBytes, readErr := io.ReadAll(io.LimitReader(childResp.Body, 1<<20))
-		if readErr != nil {
-			return "", fmt.Errorf("failed to read child manifest body for %s: %w", imageRef, readErr)
+			return "", childErr
 		}
 
 		bodyBytes = childBytes
@@ -1030,19 +894,9 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 
 	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", registry, repository, configDigest)
 	const acceptBlobHeaders = "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json, application/octet-stream"
-	blobResp, _, blobErr := d.fetchRegistryWithAuth(ctx, blobURL, registry, repository, acceptBlobHeaders, bearerToken)
+	blobBytes, _, blobErr := d.fetchRegistryBytes(ctx, blobURL, registry, repository, acceptBlobHeaders, bearerToken, fmt.Sprintf("config blob for %s (%s)", imageRef, configDigest))
 	if blobErr != nil {
-		return "", fmt.Errorf("failed to fetch config blob %s for %s: %w", configDigest, imageRef, blobErr)
-	}
-	defer closeWarn(blobResp.Body, "config blob response body")
-
-	if blobResp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("config blob request for %s (%s) returned HTTP %d", imageRef, configDigest, blobResp.StatusCode)
-	}
-
-	blobBytes, readErr := io.ReadAll(io.LimitReader(blobResp.Body, 1<<20))
-	if readErr != nil {
-		return "", fmt.Errorf("failed to read config blob body for %s: %w", imageRef, readErr)
+		return "", blobErr
 	}
 
 	rev := ExtractRevisionFromConfigJSON(blobBytes)
@@ -1176,22 +1030,28 @@ func (d *SyncDaemon) SendDiscordAlert(ctx context.Context, title, repoPath, faul
 	d.postChannelMessage(alertCtx, client, token, channelID, content)
 }
 
-func (d *SyncDaemon) sendWebhook(ctx context.Context, client *http.Client, webhookURL, content string) {
+func (d *SyncDaemon) postDiscordJSON(ctx context.Context, client *http.Client, targetURL, authHeader, content string) (*http.Response, error) {
 	payloadBytes, err := json.Marshal(map[string]string{"content": content})
 	if err != nil {
-		log.Printf("[Hangar:Discord] Error marshaling webhook payload: %s", d.SanitizeAll(err.Error()))
-		return
+		return nil, fmt.Errorf("error marshaling discord payload: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(payloadBytes))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(payloadBytes))
 	if err != nil {
-		log.Printf("[Hangar:Discord] Error creating webhook request: %s", d.SanitizeAll(err.Error()))
-		return
+		return nil, fmt.Errorf("error creating discord request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
 
-	resp, err := client.Do(req)
+	return client.Do(req)
+}
+
+func (d *SyncDaemon) sendWebhook(ctx context.Context, client *http.Client, webhookURL, content string) {
+	resp, err := d.postDiscordJSON(ctx, client, webhookURL, "", content)
 	if err != nil {
-		log.Printf("[Hangar:Discord] Webhook dispatch failed: %s", d.SanitizeAll(err.Error()))
+		log.Printf("[Hangar:Discord] %s", d.SanitizeAll(err.Error()))
 		return
 	}
 	defer closeWarn(resp.Body, "webhook response body")
@@ -1278,23 +1138,10 @@ func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, 
 
 func (d *SyncDaemon) postChannelMessage(ctx context.Context, client *http.Client, token, channelID, content string) {
 	url := fmt.Sprintf("https://discord.com/api/v10/channels/%s/messages", channelID)
-	payloadBytes, err := json.Marshal(map[string]string{"content": content})
+	authHeader := "Bot " + strings.TrimPrefix(token, "Bot ")
+	resp, err := d.postDiscordJSON(ctx, client, url, authHeader, content)
 	if err != nil {
-		log.Printf("[Hangar:Discord] Error marshaling channel message payload: %s", d.SanitizeAll(err.Error()))
-		return
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
-	if err != nil {
-		log.Printf("[Hangar:Discord] Error creating message request: %s", d.SanitizeAll(err.Error()))
-		return
-	}
-	req.Header.Set("Authorization", "Bot "+strings.TrimPrefix(token, "Bot "))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[Hangar:Discord] Channel message dispatch failed: %s", d.SanitizeAll(err.Error()))
+		log.Printf("[Hangar:Discord] %s", d.SanitizeAll(err.Error()))
 		return
 	}
 	defer closeWarn(resp.Body, "channel message response body")
@@ -2694,54 +2541,41 @@ func (d *SyncDaemon) CheckGitHubRepoBuildInProgress(ctx context.Context, repoSlu
 		return false
 	}
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?status=in_progress&per_page=5", slug)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		log.Printf("[Hangar:GitHub] Warning: failed to create actions request for %s: %v", slug, err)
-		return false
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if strings.TrimSpace(d.pat) != "" {
-		req.Header.Set("Authorization", "Bearer "+d.pat)
-	}
-
 	client := d.getRegistryClient()
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[Hangar:GitHub] Warning: actions API request failed for %s: %v", slug, err)
+	checkStatus := func(status string) bool {
+		apiURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?status=%s&per_page=5", slug, status)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+		if err != nil {
+			log.Printf("[Hangar:GitHub] Warning: failed to create actions request for %s: %v", slug, err)
+			return false
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		if strings.TrimSpace(d.pat) != "" {
+			req.Header.Set("Authorization", "Bearer "+d.pat)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[Hangar:GitHub] Warning: actions API request failed for %s: %v", slug, err)
+			return false
+		}
+		defer closeWarn(resp.Body, "github actions response body")
+
+		if resp.StatusCode == http.StatusOK {
+			var data struct {
+				TotalCount int `json:"total_count"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&data); err == nil && data.TotalCount > 0 {
+				log.Printf("[Hangar:GitHub] %d %s workflow run(s) for %s", data.TotalCount, status, slug)
+				return true
+			}
+		}
 		return false
 	}
-	defer closeWarn(resp.Body, "github actions response body")
 
-	if resp.StatusCode == http.StatusOK {
-		var data struct {
-			TotalCount int `json:"total_count"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&data); err == nil && data.TotalCount > 0 {
-			log.Printf("[Hangar:GitHub] %d active workflow run(s) in progress for %s", data.TotalCount, slug)
+	for _, status := range []string{"in_progress", "queued"} {
+		if checkStatus(status) {
 			return true
-		}
-	}
-
-	// Also check queued runs
-	apiQueuedURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?status=queued&per_page=5", slug)
-	reqQ, errQ := http.NewRequestWithContext(ctx, http.MethodGet, apiQueuedURL, nil)
-	if errQ == nil {
-		reqQ.Header.Set("Accept", "application/vnd.github+json")
-		if strings.TrimSpace(d.pat) != "" {
-			reqQ.Header.Set("Authorization", "Bearer "+d.pat)
-		}
-		if respQ, errQDo := client.Do(reqQ); errQDo == nil {
-			defer closeWarn(respQ.Body, "github queued actions response body")
-			if respQ.StatusCode == http.StatusOK {
-				var dataQ struct {
-					TotalCount int `json:"total_count"`
-				}
-				if err := json.NewDecoder(respQ.Body).Decode(&dataQ); err == nil && dataQ.TotalCount > 0 {
-					log.Printf("[Hangar:GitHub] %d queued workflow run(s) for %s", dataQ.TotalCount, slug)
-					return true
-				}
-			}
 		}
 	}
 
