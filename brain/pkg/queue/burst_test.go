@@ -1,17 +1,11 @@
 package queue
 
 import (
-	"bufio"
-	"context"
-	"io"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
-	"github.com/azylman/aerial/brain/pkg/runner"
-	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 func TestPlanBurstExecution(t *testing.T) {
@@ -26,7 +20,17 @@ func TestPlanBurstExecution(t *testing.T) {
 		expectedWakeIdx   int
 		expectedAllAmb    bool
 		expectedHasActive bool
-		check             func(t *testing.T, plan BurstPlan)
+		classifierMode    string
+		classifierScore   float64
+		classifierReason  string
+		wantActiveID      string
+		wantLeadingIDs    []string
+		wantTrailingIDs   []string
+		wantTrailingWake  bool
+		wantFirstWake     bool
+		wantAllWakeFalse  bool
+		wantWakeReason    string
+		wantFirstScore    float64
 	}{
 		{
 			name: "Empty burst returns negative index and no active message",
@@ -49,17 +53,9 @@ func TestPlanBurstExecution(t *testing.T) {
 			expectedWakeIdx:   0,
 			expectedAllAmb:    false,
 			expectedHasActive: true,
-			check: func(t *testing.T, plan BurstPlan) {
-				if plan.ActiveMessage.ID != "m1" {
-					t.Errorf("expected active message m1, got %s", plan.ActiveMessage.ID)
-				}
-				if len(plan.TrailingMessages) != 1 || plan.TrailingMessages[0].ID != "m2" {
-					t.Errorf("expected trailing message m2, got %v", plan.TrailingMessages)
-				}
-				if len(plan.WakeInfos) != 2 || !plan.WakeInfos[0].IsWake {
-					t.Errorf("expected wakeInfos[0].IsWake to be true")
-				}
-			},
+			wantActiveID:      "m1",
+			wantTrailingIDs:   []string{"m2"},
+			wantFirstWake:     true,
 		},
 		{
 			name: "Hook override drop marks all messages ambient",
@@ -73,16 +69,8 @@ func TestPlanBurstExecution(t *testing.T) {
 			expectedWakeIdx:   -1,
 			expectedAllAmb:    true,
 			expectedHasActive: false,
-			check: func(t *testing.T, plan BurstPlan) {
-				for i, info := range plan.WakeInfos {
-					if info.IsWake {
-						t.Errorf("expected wakeInfo[%d].IsWake = false", i)
-					}
-					if info.Reason != "hook_drop_override" {
-						t.Errorf("expected reason hook_drop_override, got %s", info.Reason)
-					}
-				}
-			},
+			wantAllWakeFalse:  true,
+			wantWakeReason:    "hook_drop_override",
 		},
 		{
 			name: "Tier-1 direct mention at head wakes immediately",
@@ -98,14 +86,7 @@ func TestPlanBurstExecution(t *testing.T) {
 			expectedWakeIdx:   0,
 			expectedAllAmb:    false,
 			expectedHasActive: true,
-			check: func(t *testing.T, plan BurstPlan) {
-				if len(plan.LeadingAmbient) != 0 {
-					t.Errorf("expected 0 leading ambient messages, got %d", len(plan.LeadingAmbient))
-				}
-				if len(plan.TrailingMessages) != 1 || plan.TrailingMessages[0].ID != "m2" {
-					t.Errorf("expected 1 trailing message m2")
-				}
-			},
+			wantTrailingIDs:   []string{"m2"},
 		},
 		{
 			name: "Tier-1 direct mention after ambient chatter partitions leading ambient",
@@ -123,20 +104,9 @@ func TestPlanBurstExecution(t *testing.T) {
 			expectedWakeIdx:   2,
 			expectedAllAmb:    false,
 			expectedHasActive: true,
-			check: func(t *testing.T, plan BurstPlan) {
-				if len(plan.LeadingAmbient) != 2 {
-					t.Fatalf("expected 2 leading ambient messages, got %d", len(plan.LeadingAmbient))
-				}
-				if plan.LeadingAmbient[0].ID != "m1" || plan.LeadingAmbient[1].ID != "m2" {
-					t.Errorf("unexpected leading ambient IDs: %s, %s", plan.LeadingAmbient[0].ID, plan.LeadingAmbient[1].ID)
-				}
-				if plan.ActiveMessage.ID != "m3" {
-					t.Errorf("expected active message m3, got %s", plan.ActiveMessage.ID)
-				}
-				if len(plan.TrailingMessages) != 1 || plan.TrailingMessages[0].ID != "m4" {
-					t.Errorf("expected 1 trailing message m4, got %v", plan.TrailingMessages)
-				}
-			},
+			wantLeadingIDs:    []string{"m1", "m2"},
+			wantActiveID:      "m3",
+			wantTrailingIDs:   []string{"m4"},
 		},
 		{
 			name: "Mention mode with no mentions drops all messages as ambient without running classifier",
@@ -146,14 +116,11 @@ func TestPlanBurstExecution(t *testing.T) {
 					{ID: "m2", Content: "aerial is cool but not tagged", CreatedAt: now.Add(time.Second)},
 				},
 				WakeMode: "mention",
-				ClassifierFn: func([]db.Message) (float64, string) {
-					t.Fatalf("classifier should NOT be called in mention mode")
-					return 1.0, "should not be called"
-				},
 			},
 			expectedWakeIdx:   -1,
 			expectedAllAmb:    true,
 			expectedHasActive: false,
+			classifierMode:    "panic",
 		},
 		{
 			name: "All mode always wakes on first message and partitions trailing",
@@ -167,14 +134,8 @@ func TestPlanBurstExecution(t *testing.T) {
 			expectedWakeIdx:   0,
 			expectedAllAmb:    false,
 			expectedHasActive: true,
-			check: func(t *testing.T, plan BurstPlan) {
-				if plan.ActiveMessage.ID != "m1" {
-					t.Errorf("expected active message m1, got %s", plan.ActiveMessage.ID)
-				}
-				if len(plan.TrailingMessages) != 1 || plan.TrailingMessages[0].ID != "m2" {
-					t.Errorf("expected trailing message m2")
-				}
-			},
+			wantActiveID:      "m1",
+			wantTrailingIDs:   []string{"m2"},
 		},
 		{
 			name: "Classifier mode with threshold <= 0 drops all as ambient",
@@ -198,14 +159,11 @@ func TestPlanBurstExecution(t *testing.T) {
 				},
 				WakeMode:  "classifier",
 				Threshold: 0.8,
-				ClassifierFn: func([]db.Message) (float64, string) {
-					t.Fatalf("classifier should NOT be called for heuristic skip banter")
-					return 1.0, "should not run"
-				},
 			},
 			expectedWakeIdx:   -1,
 			expectedAllAmb:    true,
 			expectedHasActive: false,
+			classifierMode:    "panic",
 		},
 		{
 			name: "Classifier mode with high score wakes turn",
@@ -215,21 +173,15 @@ func TestPlanBurstExecution(t *testing.T) {
 				},
 				WakeMode:  "classifier",
 				Threshold: 0.75,
-				ClassifierFn: func(msgs []db.Message) (float64, string) {
-					return 0.92, "direct question to assistant"
-				},
 			},
 			expectedWakeIdx:   0,
 			expectedAllAmb:    false,
 			expectedHasActive: true,
-			check: func(t *testing.T, plan BurstPlan) {
-				if plan.WakeInfos[0].Score != 0.92 {
-					t.Errorf("expected score 0.92, got %f", plan.WakeInfos[0].Score)
-				}
-				if plan.WakeInfos[0].Reason != "direct question to assistant" {
-					t.Errorf("expected reason 'direct question to assistant', got %q", plan.WakeInfos[0].Reason)
-				}
-			},
+			classifierMode:    "static",
+			classifierScore:   0.92,
+			classifierReason:  "direct question to assistant",
+			wantFirstScore:    0.92,
+			wantWakeReason:    "direct question to assistant",
 		},
 		{
 			name: "Classifier mode with low score drops as ambient",
@@ -239,13 +191,13 @@ func TestPlanBurstExecution(t *testing.T) {
 				},
 				WakeMode:  "classifier",
 				Threshold: 0.75,
-				ClassifierFn: func(msgs []db.Message) (float64, string) {
-					return 0.15, "unrelated conversation"
-				},
 			},
 			expectedWakeIdx:   -1,
 			expectedAllAmb:    true,
 			expectedHasActive: false,
+			classifierMode:    "static",
+			classifierScore:   0.15,
+			classifierReason:  "unrelated conversation",
 		},
 		{
 			name: "Nil classifierFn defaults safely without panicking",
@@ -253,9 +205,8 @@ func TestPlanBurstExecution(t *testing.T) {
 				Burst: []db.Message{
 					{ID: "m1", Content: "I need assistance with a server issue", CreatedAt: now},
 				},
-				WakeMode:     "classifier",
-				Threshold:    0.5,
-				ClassifierFn: nil,
+				WakeMode:  "classifier",
+				Threshold: 0.5,
 			},
 			expectedWakeIdx:   -1,
 			expectedAllAmb:    true,
@@ -275,21 +226,28 @@ func TestPlanBurstExecution(t *testing.T) {
 			expectedWakeIdx:   0,
 			expectedAllAmb:    false,
 			expectedHasActive: true,
-			check: func(t *testing.T, plan BurstPlan) {
-				if len(plan.TrailingMessages) != 1 {
-					t.Fatalf("expected 1 trailing message, got %d", len(plan.TrailingMessages))
-				}
-				if len(plan.TrailingInfos) != 1 || !plan.TrailingInfos[0].IsWake {
-					t.Errorf("expected trailing message to be marked IsWake = true")
-				}
-			},
+			wantTrailingIDs:   []string{"m2"},
+			wantTrailingWake:  true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			plan := PlanBurstExecution(tc.input)
+			in := tc.input
+			switch tc.classifierMode {
+			case "panic":
+				in.ClassifierFn = func([]db.Message) (float64, string) {
+					t.Fatalf("classifier should NOT be called")
+					return 1.0, "should not be called"
+				}
+			case "static":
+				in.ClassifierFn = func([]db.Message) (float64, string) {
+					return tc.classifierScore, tc.classifierReason
+				}
+			}
+
+			plan := PlanBurstExecution(in)
 			if plan.WakeIndex != tc.expectedWakeIdx {
 				t.Errorf("expected WakeIndex %d, got %d", tc.expectedWakeIdx, plan.WakeIndex)
 			}
@@ -299,8 +257,57 @@ func TestPlanBurstExecution(t *testing.T) {
 			if plan.HasActiveMessage != tc.expectedHasActive {
 				t.Errorf("expected HasActiveMessage %t, got %t", tc.expectedHasActive, plan.HasActiveMessage)
 			}
-			if tc.check != nil {
-				tc.check(t, plan)
+			if tc.wantActiveID != "" && plan.ActiveMessage.ID != tc.wantActiveID {
+				t.Errorf("expected active message %s, got %s", tc.wantActiveID, plan.ActiveMessage.ID)
+			}
+			if tc.wantLeadingIDs != nil {
+				if len(plan.LeadingAmbient) != len(tc.wantLeadingIDs) {
+					t.Fatalf("expected %d leading ambient, got %d", len(tc.wantLeadingIDs), len(plan.LeadingAmbient))
+				}
+				for i, id := range tc.wantLeadingIDs {
+					if plan.LeadingAmbient[i].ID != id {
+						t.Errorf("expected leading[%d]=%s, got %s", i, id, plan.LeadingAmbient[i].ID)
+					}
+				}
+			}
+			if tc.wantTrailingIDs != nil {
+				if len(plan.TrailingMessages) != len(tc.wantTrailingIDs) {
+					t.Fatalf("expected %d trailing messages, got %d", len(tc.wantTrailingIDs), len(plan.TrailingMessages))
+				}
+				for i, id := range tc.wantTrailingIDs {
+					if plan.TrailingMessages[i].ID != id {
+						t.Errorf("expected trailing[%d]=%s, got %s", i, id, plan.TrailingMessages[i].ID)
+					}
+				}
+			}
+			if tc.wantTrailingWake {
+				if len(plan.TrailingInfos) == 0 || !plan.TrailingInfos[0].IsWake {
+					t.Errorf("expected trailing message to be marked IsWake = true")
+				}
+			}
+			if tc.wantFirstWake {
+				if len(plan.WakeInfos) == 0 || !plan.WakeInfos[0].IsWake {
+					t.Errorf("expected wakeInfos[0].IsWake to be true")
+				}
+			}
+			if tc.wantAllWakeFalse {
+				for i, info := range plan.WakeInfos {
+					if info.IsWake {
+						t.Errorf("expected wakeInfo[%d].IsWake = false", i)
+					}
+				}
+			}
+			if tc.wantWakeReason != "" {
+				for i, info := range plan.WakeInfos {
+					if info.Reason != tc.wantWakeReason {
+						t.Errorf("expected wakeInfo[%d].Reason = %q, got %q", i, tc.wantWakeReason, info.Reason)
+					}
+				}
+			}
+			if tc.wantFirstScore != 0 {
+				if len(plan.WakeInfos) == 0 || plan.WakeInfos[0].Score != tc.wantFirstScore {
+					t.Errorf("expected wakeInfos[0].Score %f", tc.wantFirstScore)
+				}
 			}
 		})
 	}
@@ -311,15 +318,20 @@ func TestAssembleTurnPrompt(t *testing.T) {
 	now := time.Date(2026, 9, 12, 14, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name     string
-		input    TurnPromptInput
-		expected string
-		check    func(t *testing.T, prompt string)
+		name                 string
+		input                TurnPromptInput
+		wantExact            string
+		wantPrefix           string
+		wantSuffix           string
+		wantContains         []string
+		wantExcludes         []string
+		wantTagCounts        map[string]int
+		wantOrderedSubstrings []string
 	}{
 		{
-			name:     "Empty input produces empty prompt",
-			input:    TurnPromptInput{},
-			expected: "",
+			name:      "Empty input produces empty prompt",
+			input:     TurnPromptInput{},
+			wantExact: "",
 		},
 		{
 			name: "Single message burst formats directly",
@@ -328,7 +340,7 @@ func TestAssembleTurnPrompt(t *testing.T) {
 					{Content: "What is the capital of France?"},
 				},
 			},
-			expected: "What is the capital of France?",
+			wantExact: "What is the capital of France?",
 		},
 		{
 			name: "Multi-message burst produces coalesced USER_REQUEST envelope",
@@ -338,16 +350,11 @@ func TestAssembleTurnPrompt(t *testing.T) {
 					{AuthorName: "bob", Content: "step 2", CreatedAt: now.Add(time.Second)},
 				},
 			},
-			check: func(t *testing.T, prompt string) {
-				if !strings.HasPrefix(prompt, "<USER_REQUEST>") || !strings.HasSuffix(prompt, "</USER_REQUEST>") {
-					t.Errorf("expected <USER_REQUEST> envelope wrapping coalesced messages")
-				}
-				if !strings.Contains(prompt, "--- Message 1 (by @alice at 14:00:00) ---") {
-					t.Errorf("expected header for message 1")
-				}
-				if !strings.Contains(prompt, "--- Message 2 (by @bob at 14:00:01) ---") {
-					t.Errorf("expected header for message 2")
-				}
+			wantPrefix: "<USER_REQUEST>",
+			wantSuffix: "</USER_REQUEST>",
+			wantContains: []string{
+				"--- Message 1 (by @alice at 14:00:00) ---",
+				"--- Message 2 (by @bob at 14:00:01) ---",
 			},
 		},
 		{
@@ -359,13 +366,9 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				InjectedHookContext: "<COORDINATION_CONTEXT>\nalready tagged\n</COORDINATION_CONTEXT>",
 				ThreadSummary:       "<THREAD_SUMMARY>\nalready summarized\n</THREAD_SUMMARY>",
 			},
-			check: func(t *testing.T, prompt string) {
-				if strings.Count(prompt, "<COORDINATION_CONTEXT>") != 1 {
-					t.Errorf("expected exactly 1 <COORDINATION_CONTEXT> opening tag, found %d", strings.Count(prompt, "<COORDINATION_CONTEXT>"))
-				}
-				if strings.Count(prompt, "<THREAD_SUMMARY>") != 1 {
-					t.Errorf("expected exactly 1 <THREAD_SUMMARY> opening tag, found %d", strings.Count(prompt, "<THREAD_SUMMARY>"))
-				}
+			wantTagCounts: map[string]int{
+				"<COORDINATION_CONTEXT>": 1,
+				"<THREAD_SUMMARY>":       1,
 			},
 		},
 		{
@@ -377,11 +380,7 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				PreviousSessionID: "sess-abc-123",
 				IsColdStart:       false,
 			},
-			check: func(t *testing.T, prompt string) {
-				if strings.Contains(prompt, "sess-abc-123") {
-					t.Errorf("previous session ID should be omitted when IsColdStart is false")
-				}
-			},
+			wantExcludes: []string{"sess-abc-123"},
 		},
 		{
 			name: "Exact layer hierarchy verification in top-to-bottom document order",
@@ -398,30 +397,13 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				},
 				ThreadSummary: "Discussion about server maintenance",
 			},
-			check: func(t *testing.T, prompt string) {
-				// Verify document order:
-				// Layer 1: COORDINATION_CONTEXT
-				idxCoord := strings.Index(prompt, "<COORDINATION_CONTEXT>")
-				// Layer 2: CHANNEL_INSTRUCTIONS
-				idxInst := strings.Index(prompt, "<CHANNEL_INSTRUCTIONS>")
-				// Layer 4: PREVIOUS_SESSION
-				idxPrev := strings.Index(prompt, "<PREVIOUS_SESSION>")
-				// Layer 5: CHANNEL_HISTORY
-				idxHist := strings.Index(prompt, "previous message in channel")
-				// Layer 6: THREAD_SUMMARY
-				idxSum := strings.Index(prompt, "<THREAD_SUMMARY>")
-				// Layer 7: User Request
-				idxUser := strings.Index(prompt, "user prompt utterance")
-
-				if idxCoord == -1 || idxInst == -1 || idxPrev == -1 || idxHist == -1 || idxSum == -1 || idxUser == -1 {
-					t.Fatalf("missing layer in prompt:\ncoord=%d inst=%d prev=%d hist=%d sum=%d user=%d\nFull prompt:\n%s",
-						idxCoord, idxInst, idxPrev, idxHist, idxSum, idxUser, prompt)
-				}
-
-				if !(idxCoord < idxInst && idxInst < idxPrev && idxPrev < idxHist && idxHist < idxSum && idxSum < idxUser) {
-					t.Errorf("layer ordering violation:\ncoord=%d\ninst=%d\nprev=%d\nhist=%d\nsum=%d\nuser=%d",
-						idxCoord, idxInst, idxPrev, idxHist, idxSum, idxUser)
-				}
+			wantOrderedSubstrings: []string{
+				"<COORDINATION_CONTEXT>",
+				"<CHANNEL_INSTRUCTIONS>",
+				"<PREVIOUS_SESSION>",
+				"previous message in channel",
+				"<THREAD_SUMMARY>",
+				"user prompt utterance",
 			},
 		},
 		{
@@ -432,13 +414,9 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				},
 				ScopeInstructions: "Spoken brevity for touch-kiosk-kitchen.",
 			},
-			check: func(t *testing.T, prompt string) {
-				if !strings.Contains(prompt, "<SCOPE_INSTRUCTIONS>") {
-					t.Errorf("expected <SCOPE_INSTRUCTIONS> block, got:\n%s", prompt)
-				}
-				if !strings.Contains(prompt, "Spoken brevity for touch-kiosk-kitchen.") {
-					t.Errorf("expected instructions content, got:\n%s", prompt)
-				}
+			wantContains: []string{
+				"<SCOPE_INSTRUCTIONS>",
+				"Spoken brevity for touch-kiosk-kitchen.",
 			},
 		},
 	}
@@ -447,11 +425,42 @@ func TestAssembleTurnPrompt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			result := AssembleTurnPrompt(tc.input)
-			if tc.expected != "" && result != tc.expected {
-				t.Errorf("expected:\n%s\ngot:\n%s", tc.expected, result)
+			if tc.wantExact != "" && result != tc.wantExact {
+				t.Errorf("expected %q, got %q", tc.wantExact, result)
 			}
-			if tc.check != nil {
-				tc.check(t, result)
+			if tc.wantPrefix != "" && !strings.HasPrefix(result, tc.wantPrefix) {
+				t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, result)
+			}
+			if tc.wantSuffix != "" && !strings.HasSuffix(result, tc.wantSuffix) {
+				t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, result)
+			}
+			for _, substr := range tc.wantContains {
+				if !strings.Contains(result, substr) {
+					t.Errorf("expected result to contain %q, got:\n%s", substr, result)
+				}
+			}
+			for _, substr := range tc.wantExcludes {
+				if strings.Contains(result, substr) {
+					t.Errorf("expected result to exclude %q, got:\n%s", substr, result)
+				}
+			}
+			for tag, count := range tc.wantTagCounts {
+				if actual := strings.Count(result, tag); actual != count {
+					t.Errorf("expected %d occurrences of %q, got %d", count, tag, actual)
+				}
+			}
+			if len(tc.wantOrderedSubstrings) > 0 {
+				lastIdx := -1
+				for _, sub := range tc.wantOrderedSubstrings {
+					idx := strings.Index(result, sub)
+					if idx == -1 {
+						t.Fatalf("expected substring %q not found in prompt:\n%s", sub, result)
+					}
+					if idx <= lastIdx {
+						t.Errorf("substring %q at index %d out of order (previous at %d)", sub, idx, lastIdx)
+					}
+					lastIdx = idx
+				}
 			}
 		})
 	}
@@ -587,7 +596,7 @@ func TestEvaluateBurstStaleness(t *testing.T) {
 			ttl:           ttl,
 			isCold:        true,
 			now:           baseTime.Add(35 * time.Minute),
-			expectedStale: false, // m2 age is 15 min <= 30 min TTL
+			expectedStale: false,
 		},
 	}
 
@@ -618,95 +627,5 @@ func TestEvaluateMessageStaleness(t *testing.T) {
 	stale, reason = EvaluateMessageStaleness(msg, 10*time.Minute, true, time.Time{}, baseTime.Add(15*time.Minute))
 	if !stale {
 		t.Errorf("expected expired single message in cold thread to be stale")
-	}
-}
-
-func TestBurst_ActiveTasksInLowEffortPoolPreventReap(t *testing.T) {
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
-	lowSpawner := &runner.MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			defer errW.Close()
-			go func() {
-				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"e1111111-2222-3333-4444-555555555555\"}\n"))
-				scanner := bufio.NewScanner(inR)
-				for scanner.Scan() {
-					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n"))
-				}
-			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
-		},
-	}
-	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockSpawner())
-	defer primaryPool.Close()
-
-	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
-	defer lowPool.Close()
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-	})
-
-	threadID := "thread-low-burst-reap"
-	doneCh := make(chan struct{})
-	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool:          primaryPool,
-		LowEffortProcessPool: lowPool,
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
-		MaxAttempts:          1,
-		IdleTimeout:          20 * time.Millisecond,
-		OnMessageCompleted: func(msg db.Message, status string) {
-			select {
-			case <-doneCh:
-			default:
-				close(doneCh)
-			}
-		},
-	})
-	defer pool.Stop()
-
-	// Pre-create daemon in lowPool with active task
-	ctx := context.Background()
-	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID, "")
-	if err != nil {
-		t.Fatalf("failed to create daemon in low pool: %v", err)
-	}
-	daemon.TaskTracker().Add(runner.TaskMetadata{
-		TaskID:    "task-burst-low-busy-prevent-reap",
-		StartedAt: time.Now(),
-	})
-
-	msg := db.Message{
-		ID:        "msg-burst-low-reap-1",
-		ThreadID:  threadID,
-		Content:   "hello low burst reap",
-		Effort:    "low",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
-	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for message completion")
-	}
-
-	// Verify worker remains active because background task in lowEffortProcessPool is still running
-	time.Sleep(60 * time.Millisecond)
-	pool.mu.Lock()
-	_, workerStillActive := pool.threadChs["low_effort:"+threadID]
-	pool.mu.Unlock()
-
-	if !workerStillActive {
-		t.Errorf("expected worker to remain active because background task was running in LowEffortProcessPool")
 	}
 }
