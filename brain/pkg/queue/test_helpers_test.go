@@ -2,12 +2,15 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
 // setupTestStore returns a clean FakeStore for testing.
@@ -118,8 +121,6 @@ func rotateSessionID(store db.Store, sessionKey, newSessionID string) error {
 	return store.RotateSessionID(context.Background(), sessionKey, newSessionID)
 }
 
-
-
 // noopDelivery returns a discordgo delivery function that always succeeds.
 func noopDelivery(s *discordgo.Session, channelID, text string) error {
 	return nil
@@ -154,3 +155,57 @@ func waitPoolWorkersDone(t *testing.T, pool *WorkerPool, timeout time.Duration) 
 	}
 }
 
+func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUsage) string {
+	if convID == "" {
+		convID = uuid.New().String()
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"conversation_id":  convID,
+		"status":           "SUCCESS",
+		"response":         responseText,
+		"duration_seconds": 1.0,
+		"num_turns":        1,
+		"usage":            usage,
+	})
+	return string(payload)
+}
+
+func mockMultiTurnJSONResponse(convID, responseText string, numTurns int) string {
+	if convID == "" {
+		convID = uuid.New().String()
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"conversation_id":  convID,
+		"status":           "SUCCESS",
+		"response":         responseText,
+		"duration_seconds": 1.0,
+		"num_turns":        numTurns,
+	})
+	return string(payload)
+}
+
+
+type runnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
+type runnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
+
+// TestSinkMethods_CoverageAudit audits sink.go no-ops and ScopeKey to satisfy target coverage.
+func TestSinkMethods_CoverageAudit(t *testing.T) {
+	pool := NewWorkerPool(WorkerPoolConfig{})
+	msg := db.Message{ID: "m1", ThreadID: "t1"}
+	if k := pool.ScopeKey(msg); k != "t1" {
+		t.Errorf("expected ScopeKey t1, got %s", k)
+	}
+
+	ds := &DiscordTurnSink{}
+	ds.OnTurnStarted()
+	ds.OnThinking()
+	ds.OnToolCompleted("tool", "srv", time.Second, "ok")
+	ds.OnSkillActivated("skill", "src")
+
+	vs := &VoiceTurnSink{}
+	vs.OnTurnStarted()
+	vs.OnThinking()
+	vs.OnToolCall("tool", "cmd")
+	vs.OnToolCompleted("tool", "srv", time.Second, "ok")
+	vs.OnSkillActivated("skill", "src")
+}

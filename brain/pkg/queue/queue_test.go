@@ -8638,459 +8638,264 @@ func (m *mockWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *
 }
 
 func TestOnWakeHook(t *testing.T) {
-	t.Run("WakeOverride", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var classifierCalled bool
-		cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-			classifierCalled = true
-			return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
-		}))
-
-		var hookCalled bool
-		var capturedReq *WakeRequest
-		mockDisp := &mockWebhookDispatcher{
-			callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-				hookCalled = true
-				capturedReq = req
-				return &WakeResponse{Override: "wake", Reason: "hook_priority_wake"}, nil
+	t.Run("OverridesAndTimeoutFallbacks", func(t *testing.T) {
+		tests := []struct {
+			name             string
+			hookResp         *WakeResponse
+			hookErr          error
+			timeoutAction    string
+			classifierResp   string
+			classifierCode   bool
+			messages         []db.Message
+			expectExit       bool
+			expectWakeIdx    int
+			expectClassifier bool
+			expectHookCall   bool
+			verify           func(t *testing.T, store db.Store, te *turnExecution, capturedReq *WakeRequest)
+		}{
+			{
+				name:     "WakeOverride",
+				hookResp: &WakeResponse{Override: "wake", Reason: "hook_priority_wake"},
+				classifierResp: `{"confidence": 0.10, "reason": "ambient banter"}`,
+				messages: []db.Message{{
+					ID:         "msg-wake-1",
+					ThreadID:   "chan-general",
+					AuthorName: "user-alpha",
+					Content:    "hello world",
+					Status:     db.StatusProcessing,
+				}},
+				expectExit:       false,
+				expectWakeIdx:    0,
+				expectClassifier: false,
+				expectHookCall:   true,
+				verify: func(t *testing.T, store db.Store, te *turnExecution, capturedReq *WakeRequest) {
+					if capturedReq == nil {
+						t.Fatalf("expected capturedReq to be populated")
+					}
+					if capturedReq.ChannelID != "chan-general" {
+						t.Errorf("expected ChannelID 'chan-general', got %q", capturedReq.ChannelID)
+					}
+					if capturedReq.ThreadID != "chan-general" {
+						t.Errorf("expected ThreadID 'chan-general', got %q", capturedReq.ThreadID)
+					}
+					if capturedReq.Message.ID != "msg-wake-1" {
+						t.Errorf("expected Message ID 'msg-wake-1', got %q", capturedReq.Message.ID)
+					}
+					if capturedReq.Timestamp.IsZero() {
+						t.Errorf("expected non-zero Timestamp in WakeRequest")
+					}
+					if len(te.wakeInfos) == 0 || !te.wakeInfos[0].IsWake {
+						t.Errorf("expected wakeInfo[0].isWake = true")
+					}
+				},
 			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			Classifier:        cls,
-			WebhookDispatcher: mockDisp,
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-wake-1",
-			ThreadID:   "chan-general",
-			AuthorName: "user-alpha",
-			Content:    "hello world",
-			Status:     db.StatusProcessing,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		te := &turnExecution{
-			pool:        pool,
-			burst:       []db.Message{msg},
-			threadID:    "chan-general",
-			effectiveID: "chan-general",
-			triggerType: "message",
-			execStart:   now,
-			policy: config.ChannelPolicy{
-				Mode:                 "channel",
-				WakeMode:             "classifier",
-				AmbientWakeThreshold: ptrFloat(0.80),
-				Hooks: config.ChannelHooksConfig{
-					OnWake: &config.WebhookEndpoint{
-						URL:       "http://sidecar.local/wake",
-						TimeoutMs: 1000,
+			{
+				name:     "WakeOverride_MultiMessageBurstAndTurnCount",
+				hookResp: &WakeResponse{Override: "wake", Reason: "hook_wake_override"},
+				messages: []db.Message{
+					{
+						ID:         "msg-wake-multi-1",
+						ThreadID:   "chan-multi-test",
+						AuthorName: "user-alpha",
+						Content:    "first message wakes",
+						Status:     db.StatusProcessing,
 					},
+					{
+						ID:         "msg-wake-multi-2",
+						ThreadID:   "chan-multi-test",
+						AuthorName: "user-beta",
+						Content:    "second trailing message",
+						Status:     db.StatusProcessing,
+					},
+				},
+				expectExit:       false,
+				expectWakeIdx:    0,
+				expectClassifier: false,
+				expectHookCall:   true,
+				verify: func(t *testing.T, store db.Store, te *turnExecution, capturedReq *WakeRequest) {
+					if len(te.burst) != 1 || te.burst[0].ID != "msg-wake-multi-1" {
+						t.Errorf("expected active burst to be partitioned to first message, got %+v", te.burst)
+					}
+					if len(te.trailingMsgs) != 1 || te.trailingMsgs[0].ID != "msg-wake-multi-2" {
+						t.Errorf("expected trailingMsgs to contain second message, got %+v", te.trailingMsgs)
+					}
+					turnCount, err := getSessionTurnCount(store, "chan-multi-test")
+					if err != nil {
+						t.Fatalf("failed to get session turn count: %v", err)
+					}
+					if turnCount != 1 {
+						t.Errorf("expected session turn count to increment to 1, got %d", turnCount)
+					}
+				},
+			},
+			{
+				name:           "DropOverride",
+				hookResp:       &WakeResponse{Override: "drop", Reason: "hook_drop_override"},
+				classifierResp: `{"confidence": 0.95, "reason": "strong intent"}`,
+				messages: []db.Message{{
+					ID:         "msg-drop-1",
+					ThreadID:   "chan-general",
+					AuthorName: "user-bravo",
+					Content:    "random chit-chat",
+					Status:     db.StatusProcessing,
+				}},
+				expectExit:       true,
+				expectWakeIdx:    -1,
+				expectClassifier: false,
+				expectHookCall:   true,
+				verify: func(t *testing.T, store db.Store, te *turnExecution, capturedReq *WakeRequest) {
+					saved, err := getMessage(store, "msg-drop-1")
+					if err != nil || saved == nil {
+						t.Fatalf("Failed to retrieve msg-drop-1: %v", err)
+					}
+					if saved.Status != db.StatusCompleted {
+						t.Errorf("expected message status COMPLETED, got %s", saved.Status)
+					}
+					if !strings.Contains(saved.ErrorMessage, "[AMBIENT") {
+						t.Errorf("expected message ErrorMessage to contain [AMBIENT, got %q", saved.ErrorMessage)
+					}
+				},
+			},
+			{
+				name:             "TimeoutFallback_Classify",
+				hookErr:          context.DeadlineExceeded,
+				timeoutAction:    "classify",
+				classifierResp:   `{"confidence": 0.92, "reason": "classified wake"}`,
+				messages: []db.Message{{
+					ID:         "msg-timeout-1",
+					ThreadID:   "chan-general",
+					AuthorName: "user-charlie",
+					Content:    "please help me calculate total memory usage",
+					Status:     db.StatusProcessing,
+				}},
+				expectExit:       false,
+				expectWakeIdx:    0,
+				expectClassifier: true,
+				expectHookCall:   true,
+			},
+			{
+				name:             "TimeoutFallback_Wake",
+				hookErr:          errors.New("connection refused"),
+				timeoutAction:    "wake",
+				classifierResp:   `{"confidence": 0.10, "reason": "ambient"}`,
+				messages: []db.Message{{
+					ID:         "msg-timeout-2",
+					ThreadID:   "chan-general",
+					AuthorName: "user-delta",
+					Content:    "query for bot",
+					Status:     db.StatusProcessing,
+				}},
+				expectExit:       false,
+				expectWakeIdx:    0,
+				expectClassifier: false,
+				expectHookCall:   true,
+			},
+			{
+				name:             "TimeoutFallback_Drop",
+				hookErr:          errors.New("timeout reached"),
+				timeoutAction:    "drop",
+				classifierResp:   `{"confidence": 0.95, "reason": "strong intent"}`,
+				messages: []db.Message{{
+					ID:         "msg-timeout-drop",
+					ThreadID:   "chan-general",
+					AuthorName: "user-echo",
+					Content:    "drop me on error",
+					Status:     db.StatusProcessing,
+				}},
+				expectExit:       true,
+				expectWakeIdx:    -1,
+				expectClassifier: false,
+				expectHookCall:   true,
+				verify: func(t *testing.T, store db.Store, te *turnExecution, capturedReq *WakeRequest) {
+					saved, err := getMessage(store, "msg-timeout-drop")
+					if err != nil || saved == nil {
+						t.Fatalf("Failed to retrieve msg-timeout-drop: %v", err)
+					}
+					if saved.Status != db.StatusCompleted {
+						t.Errorf("expected message status COMPLETED, got %s", saved.Status)
+					}
 				},
 			},
 		}
 
-		shouldExit := te.evaluateAmbientWake()
-		if shouldExit {
-			t.Fatalf("expected shouldExit = false for wake override, got true")
-		}
-		if !hookCalled {
-			t.Fatalf("expected CallWakeHook to be called")
-		}
-		if capturedReq == nil {
-			t.Fatalf("expected capturedReq to be populated")
-		}
-		if capturedReq.ChannelID != "chan-general" {
-			t.Errorf("expected ChannelID 'chan-general', got %q", capturedReq.ChannelID)
-		}
-		if capturedReq.ThreadID != "chan-general" {
-			t.Errorf("expected ThreadID 'chan-general', got %q", capturedReq.ThreadID)
-		}
-		if capturedReq.Message.ID != "msg-wake-1" {
-			t.Errorf("expected Message ID 'msg-wake-1', got %q", capturedReq.Message.ID)
-		}
-		if capturedReq.Timestamp.IsZero() {
-			t.Errorf("expected non-zero Timestamp in WakeRequest")
-		}
-		if classifierCalled {
-			t.Errorf("classifier should NOT have been invoked when on_wake returned wake override")
-		}
-		if te.wakeIdx != 0 {
-			t.Errorf("expected wakeIdx = 0, got %d", te.wakeIdx)
-		}
-		if len(te.wakeInfos) == 0 || !te.wakeInfos[0].IsWake {
-			t.Errorf("expected wakeInfo[0].isWake = true")
-		}
-	})
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				store := setupTestStore(t)
+				var classifierCalled bool
+				var cls *classifier.Classifier
+				if tc.classifierResp != "" {
+					cls = classifier.NewClassifier(
+						classifier.WithModel("test-flash"),
+						classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+							classifierCalled = true
+							return tc.classifierResp, nil
+						}),
+					)
+				}
 
-	t.Run("WakeOverride_MultiMessageBurstAndTurnCount", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var hookCalled bool
-		mockDisp := &mockWebhookDispatcher{
-			callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-				hookCalled = true
-				return &WakeResponse{Override: "wake", Reason: "hook_wake_override"}, nil
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			WebhookDispatcher: mockDisp,
-		})
-
-		now := time.Now().UTC()
-		msg1 := db.Message{
-			ID:         "msg-wake-multi-1",
-			ThreadID:   "chan-multi-test",
-			AuthorName: "user-alpha",
-			Content:    "first message wakes",
-			Status:     db.StatusProcessing,
-			CreatedAt:  now,
-		}
-		msg2 := db.Message{
-			ID:         "msg-wake-multi-2",
-			ThreadID:   "chan-multi-test",
-			AuthorName: "user-beta",
-			Content:    "second trailing message",
-			Status:     db.StatusProcessing,
-			CreatedAt:  now.Add(time.Second),
-		}
-		_ = insertMessage(store, msg1)
-		_ = insertMessage(store, msg2)
-
-		te := &turnExecution{
-			pool:        pool,
-			burst:       []db.Message{msg1, msg2},
-			threadID:    "chan-multi-test",
-			effectiveID: "chan-multi-test",
-			triggerType: "message",
-			execStart:   now,
-			policy: config.ChannelPolicy{
-				Mode:                 "channel",
-				WakeMode:             "classifier",
-				AmbientWakeThreshold: ptrFloat(0.80),
-				Hooks: config.ChannelHooksConfig{
-					OnWake: &config.WebhookEndpoint{
-						URL: "http://sidecar.local/wake",
+				var hookCalled bool
+				var capturedReq *WakeRequest
+				mockDisp := &mockWebhookDispatcher{
+					callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
+						hookCalled = true
+						capturedReq = req
+						return tc.hookResp, tc.hookErr
 					},
-				},
-			},
-		}
+				}
 
-		shouldExit := te.evaluateAmbientWake()
-		if shouldExit {
-			t.Fatalf("expected shouldExit = false for wake override")
-		}
-		if !hookCalled {
-			t.Fatalf("expected CallWakeHook to be called")
-		}
-		if len(te.burst) != 1 || te.burst[0].ID != "msg-wake-multi-1" {
-			t.Errorf("expected active burst to be partitioned to first message, got %+v", te.burst)
-		}
-		if len(te.trailingMsgs) != 1 || te.trailingMsgs[0].ID != "msg-wake-multi-2" {
-			t.Errorf("expected trailingMsgs to contain second message, got %+v", te.trailingMsgs)
-		}
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:             store,
+					Classifier:        cls,
+					WebhookDispatcher: mockDisp,
+				})
 
-		turnCount, err := getSessionTurnCount(store, "chan-multi-test")
-		if err != nil {
-			t.Fatalf("failed to get session turn count: %v", err)
-		}
-		if turnCount != 1 {
-			t.Errorf("expected session turn count to increment to 1, got %d", turnCount)
-		}
-	})
+				now := time.Now().UTC()
+				msgs := make([]db.Message, len(tc.messages))
+				for i, m := range tc.messages {
+					m.CreatedAt = now.Add(time.Duration(i) * time.Second)
+					msgs[i] = m
+					_ = insertMessage(store, m)
+				}
 
-	t.Run("DropOverride", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var classifierCalled bool
-		cls := classifier.NewClassifier(
-			classifier.WithModel("test-flash"),
-			classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-				classifierCalled = true
-				return `{"confidence": 0.95, "reason": "strong intent"}`, nil
-			}),
-		)
-
-		var hookCalled bool
-		mockDisp := &mockWebhookDispatcher{
-			callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-				hookCalled = true
-				return &WakeResponse{Override: "drop", Reason: "hook_drop_override"}, nil
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			Classifier:        cls,
-			WebhookDispatcher: mockDisp,
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-drop-1",
-			ThreadID:   "chan-general",
-			AuthorName: "user-bravo",
-			Content:    "random chit-chat",
-			Status:     db.StatusProcessing,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		te := &turnExecution{
-			pool:        pool,
-			burst:       []db.Message{msg},
-			threadID:    "chan-general",
-			effectiveID: "chan-general",
-			triggerType: "message",
-			execStart:   now,
-			policy: config.ChannelPolicy{
-				Mode:                 "channel",
-				WakeMode:             "classifier",
-				AmbientWakeThreshold: ptrFloat(0.80),
-				Hooks: config.ChannelHooksConfig{
-					OnWake: &config.WebhookEndpoint{
-						URL:       "http://sidecar.local/wake",
-						TimeoutMs: 1000,
+				threadID := msgs[0].ThreadID
+				te := &turnExecution{
+					pool:        pool,
+					burst:       msgs,
+					threadID:    threadID,
+					effectiveID: threadID,
+					triggerType: "message",
+					execStart:   now,
+					policy: config.ChannelPolicy{
+						Mode:                 "channel",
+						WakeMode:             "classifier",
+						AmbientWakeThreshold: ptrFloat(0.80),
+						Hooks: config.ChannelHooksConfig{
+							OnWake: &config.WebhookEndpoint{
+								URL:             "http://sidecar.local/wake",
+								TimeoutMs:       1000,
+								OnTimeoutAction: tc.timeoutAction,
+							},
+						},
 					},
-				},
-			},
-		}
+				}
 
-		shouldExit := te.evaluateAmbientWake()
-		if !shouldExit {
-			t.Fatalf("expected shouldExit = true for drop override, got false")
-		}
-		if !hookCalled {
-			t.Fatalf("expected CallWakeHook to be called")
-		}
-		if classifierCalled {
-			t.Errorf("classifier should NOT have been invoked when on_wake returned drop override")
-		}
-		if te.wakeIdx != -1 {
-			t.Errorf("expected wakeIdx = -1, got %d", te.wakeIdx)
-		}
-
-		saved, err := getMessage(store, "msg-drop-1")
-		if err != nil || saved == nil {
-			t.Fatalf("Failed to retrieve msg-drop-1: %v", err)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("expected message status COMPLETED, got %s", saved.Status)
-		}
-		if !strings.Contains(saved.ErrorMessage, "[AMBIENT") {
-			t.Errorf("expected message ErrorMessage to contain [AMBIENT, got %q", saved.ErrorMessage)
-		}
-	})
-
-	t.Run("TimeoutFallback_Classify", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var classifierCalled bool
-		cls := classifier.NewClassifier(
-			classifier.WithModel("test-flash"),
-			classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-				classifierCalled = true
-				return `{"confidence": 0.92, "reason": "classified wake"}`, nil
-			}),
-		)
-
-		mockDisp := &mockWebhookDispatcher{
-			callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-				return nil, context.DeadlineExceeded
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			Classifier:        cls,
-			WebhookDispatcher: mockDisp,
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-timeout-1",
-			ThreadID:   "chan-general",
-			AuthorName: "user-charlie",
-			Content:    "please help me calculate total memory usage",
-			Status:     db.StatusProcessing,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		te := &turnExecution{
-			pool:        pool,
-			burst:       []db.Message{msg},
-			threadID:    "chan-general",
-			effectiveID: "chan-general",
-			triggerType: "message",
-			execStart:   now,
-			policy: config.ChannelPolicy{
-				Mode:                 "channel",
-				WakeMode:             "classifier",
-				AmbientWakeThreshold: ptrFloat(0.80),
-				Hooks: config.ChannelHooksConfig{
-					OnWake: &config.WebhookEndpoint{
-						URL:             "http://sidecar.local/wake",
-						TimeoutMs:       500,
-						OnTimeoutAction: "classify",
-					},
-				},
-			},
-		}
-
-		shouldExit := te.evaluateAmbientWake()
-		if shouldExit {
-			t.Fatalf("expected shouldExit = false after classifier wake, got true")
-		}
-		if !classifierCalled {
-			t.Errorf("expected classifier to be invoked on timeout with on_timeout=classify")
-		}
-		if te.wakeIdx != 0 {
-			t.Errorf("expected wakeIdx = 0, got %d", te.wakeIdx)
-		}
-	})
-
-	t.Run("TimeoutFallback_Wake", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var classifierCalled bool
-		cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-			classifierCalled = true
-			return `{"confidence": 0.10, "reason": "ambient"}`, nil
-		}))
-
-		mockDisp := &mockWebhookDispatcher{
-			callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-				return nil, errors.New("connection refused")
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			Classifier:        cls,
-			WebhookDispatcher: mockDisp,
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-timeout-2",
-			ThreadID:   "chan-general",
-			AuthorName: "user-delta",
-			Content:    "query for bot",
-			Status:     db.StatusProcessing,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		te := &turnExecution{
-			pool:        pool,
-			burst:       []db.Message{msg},
-			threadID:    "chan-general",
-			effectiveID: "chan-general",
-			triggerType: "message",
-			execStart:   now,
-			policy: config.ChannelPolicy{
-				Mode:                 "channel",
-				WakeMode:             "classifier",
-				AmbientWakeThreshold: ptrFloat(0.80),
-				Hooks: config.ChannelHooksConfig{
-					OnWake: &config.WebhookEndpoint{
-						URL:             "http://sidecar.local/wake",
-						TimeoutMs:       500,
-						OnTimeoutAction: "wake",
-					},
-				},
-			},
-		}
-
-		shouldExit := te.evaluateAmbientWake()
-		if shouldExit {
-			t.Fatalf("expected shouldExit = false after on_timeout=wake, got true")
-		}
-		if classifierCalled {
-			t.Errorf("classifier should NOT have been invoked on timeout with on_timeout=wake")
-		}
-		if te.wakeIdx != 0 {
-			t.Errorf("expected wakeIdx = 0, got %d", te.wakeIdx)
-		}
-	})
-
-	t.Run("TimeoutFallback_Drop", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var classifierCalled bool
-		cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-			classifierCalled = true
-			return `{"confidence": 0.95, "reason": "strong intent"}`, nil
-		}))
-
-		mockDisp := &mockWebhookDispatcher{
-			callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-				return nil, errors.New("timeout reached")
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			Classifier:        cls,
-			WebhookDispatcher: mockDisp,
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-timeout-drop",
-			ThreadID:   "chan-general",
-			AuthorName: "user-echo",
-			Content:    "drop me on error",
-			Status:     db.StatusProcessing,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		te := &turnExecution{
-			pool:        pool,
-			burst:       []db.Message{msg},
-			threadID:    "chan-general",
-			effectiveID: "chan-general",
-			triggerType: "message",
-			execStart:   now,
-			policy: config.ChannelPolicy{
-				Mode:                 "channel",
-				WakeMode:             "classifier",
-				AmbientWakeThreshold: ptrFloat(0.80),
-				Hooks: config.ChannelHooksConfig{
-					OnWake: &config.WebhookEndpoint{
-						URL:             "http://sidecar.local/wake",
-						TimeoutMs:       500,
-						OnTimeoutAction: "drop",
-					},
-				},
-			},
-		}
-
-		shouldExit := te.evaluateAmbientWake()
-		if !shouldExit {
-			t.Fatalf("expected shouldExit = true after on_timeout=drop, got false")
-		}
-		if classifierCalled {
-			t.Errorf("classifier should NOT have been invoked on timeout with on_timeout=drop")
-		}
-		if te.wakeIdx != -1 {
-			t.Errorf("expected wakeIdx = -1, got %d", te.wakeIdx)
-		}
-
-		saved, err := getMessage(store, "msg-timeout-drop")
-		if err != nil || saved == nil {
-			t.Fatalf("Failed to retrieve msg-timeout-drop: %v", err)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("expected message status COMPLETED, got %s", saved.Status)
+				shouldExit := te.evaluateAmbientWake()
+				if shouldExit != tc.expectExit {
+					t.Fatalf("expected shouldExit = %v, got %v", tc.expectExit, shouldExit)
+				}
+				if hookCalled != tc.expectHookCall {
+					t.Errorf("expected hookCalled = %v, got %v", tc.expectHookCall, hookCalled)
+				}
+				if classifierCalled != tc.expectClassifier {
+					t.Errorf("expected classifierCalled = %v, got %v", tc.expectClassifier, classifierCalled)
+				}
+				if te.wakeIdx != tc.expectWakeIdx {
+					t.Errorf("expected wakeIdx = %d, got %d", tc.expectWakeIdx, te.wakeIdx)
+				}
+				if tc.verify != nil {
+					tc.verify(t, store, te, capturedReq)
+				}
+			})
 		}
 	})
 
@@ -9114,7 +8919,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
+			Store:             store,
 			SessionManager:    sessMgr,
 			TimeoutMinutes:    1,
 			WebhookDispatcher: mockDisp,
@@ -9232,7 +9037,7 @@ func TestOnWakeHook(t *testing.T) {
 			Title:        "Scheduled Run",
 			Prompt:       "prompt",
 			StartedAt:    time.Now().UTC(),
-			Status:      "pending",
+			Status:       "pending",
 		})
 
 		var capturedReq *WakeRequest
@@ -9244,7 +9049,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
+			Store:             store,
 			WebhookDispatcher: mockDispWithCapture,
 		})
 
@@ -9261,12 +9066,12 @@ func TestOnWakeHook(t *testing.T) {
 		_ = insertMessage(store, schedMsg)
 
 		teFallback := &turnExecution{
-			pool:          pool,
-			burst:         []db.Message{schedMsg},
-			threadID:      "chan-fallback",
-			effectiveID:   "", // triggers channelID == "" -> te.threadID fallback
-			triggerType:   "message",
-			execStart:     now,
+			pool:        pool,
+			burst:       []db.Message{schedMsg},
+			threadID:    "chan-fallback",
+			effectiveID: "", // triggers channelID == "" -> te.threadID fallback
+			triggerType: "message",
+			execStart:   now,
 			policy: config.ChannelPolicy{
 				Mode: "channel",
 				Hooks: config.ChannelHooksConfig{
@@ -9296,7 +9101,7 @@ func TestOnWakeHook(t *testing.T) {
 
 		// Edge case: nil pool in markAmbientBurst and evaluateAmbientWake
 		teNil := &turnExecution{
-			pool: nil,
+			pool:  nil,
 			burst: []db.Message{{ID: "m-nil"}},
 			policy: config.ChannelPolicy{
 				Mode: "channel",
@@ -9312,628 +9117,287 @@ func TestOnWakeHook(t *testing.T) {
 }
 
 func TestPreTurnHook(t *testing.T) {
-	t.Run("Approved_WithInjectedContext", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		var mu sync.Mutex
-		runnerCalls := 0
-		var capturedPrompt string
-
-		var hookCalls int
-		var capturedReq *PreTurnRequest
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				mu.Lock()
-				hookCalls++
-				capturedReq = req
-				mu.Unlock()
-				return &PreTurnResponse{
-					Allow:           true,
-					InjectedContext: "system instructions: be concise",
-					Metadata:        map[string]any{"lease_token": "token-123"},
-				}, nil
+	t.Run("HookActionsAndFallbacks", func(t *testing.T) {
+		tests := []struct {
+			name           string
+			hookRespFunc   func(callCount int) (*PreTurnResponse, error)
+			timeoutAction  string
+			initialRetry   int
+			scheduleRun    bool
+			expectRunner   int
+			expectHookCall int
+			verify         func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest)
+		}{
+			{
+				name: "Approved_WithInjectedContext",
+				hookRespFunc: func(int) (*PreTurnResponse, error) {
+					return &PreTurnResponse{
+						Allow:           true,
+						InjectedContext: "system instructions: be concise",
+						Metadata:        map[string]any{"lease_token": "token-123"},
+					}, nil
+				},
+				expectRunner:   1,
+				expectHookCall: 1,
+				verify: func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest) {
+					if capturedReq == nil {
+						t.Fatalf("expected capturedReq to be populated")
+					}
+					if capturedReq.ChannelID != "chan-preturn" || capturedReq.ThreadID != "chan-preturn" {
+						t.Errorf("channel/thread ID mismatch: got %q, %q", capturedReq.ChannelID, capturedReq.ThreadID)
+					}
+					if capturedReq.BurstCount != 1 || capturedReq.RetryCount != 0 || capturedReq.Timestamp.IsZero() {
+						t.Errorf("request metadata mismatch: %+v", capturedReq)
+					}
+					if !strings.Contains(capturedPrompt, "<COORDINATION_CONTEXT>\nsystem instructions: be concise\n</COORDINATION_CONTEXT>") {
+						t.Errorf("expected prompt to contain COORDINATION_CONTEXT, got:\n%s", capturedPrompt)
+					}
+					saved, err := getMessage(store, "msg-preturn-test")
+					if err != nil || saved == nil || saved.Status != db.StatusCompleted {
+						t.Errorf("expected msg-preturn-test StatusCompleted, got %+v (err %v)", saved, err)
+					}
+				},
 			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			SessionManager:    sessMgr,
-			TimeoutMinutes:    1,
-			MaxAttempts:       3,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				mu.Lock()
-				runnerCalls++
-				capturedPrompt = prompt
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "Turn response"), "", 0, nil
+			{
+				name: "Rejected_DropAction",
+				hookRespFunc: func(int) (*PreTurnResponse, error) {
+					return &PreTurnResponse{
+						Allow:  false,
+						Action: "drop",
+						Reason: "resource busy",
+					}, nil
+				},
+				expectRunner:   0,
+				expectHookCall: 1,
+				verify: func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest) {
+					saved, err := getMessage(store, "msg-preturn-test")
+					if err != nil || saved == nil {
+						t.Fatalf("failed to retrieve message: %v", err)
+					}
+					if saved.Status != db.StatusCompleted {
+						t.Errorf("expected StatusCompleted for dropped message, got %s", saved.Status)
+					}
+					if !strings.Contains(saved.ErrorMessage, "resource busy") {
+						t.Errorf("expected ErrorMessage to contain 'resource busy', got %q", saved.ErrorMessage)
+					}
+				},
 			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
+			{
+				name: "Rejected_RetryAction",
+				hookRespFunc: func(callCount int) (*PreTurnResponse, error) {
+					if callCount == 1 {
+						return &PreTurnResponse{
+							Allow:             false,
+							Action:            "retry",
+							RetryAfterSeconds: 1,
+							Reason:            "sidecar lock wait",
+						}, nil
+					}
+					return &PreTurnResponse{Allow: true}, nil
+				},
+				expectRunner:   1,
+				expectHookCall: 2,
+				verify: func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest) {
+					saved, err := getMessage(store, "msg-preturn-test")
+					if err != nil || saved == nil {
+						t.Fatalf("failed to retrieve message: %v", err)
+					}
+					if saved.RetryCount != 1 {
+						t.Errorf("expected RetryCount 1, got %d", saved.RetryCount)
+					}
+					if saved.Status != db.StatusCompleted {
+						t.Errorf("expected StatusCompleted after retry execution, got %s", saved.Status)
+					}
+				},
 			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL:       "http://sidecar.local/pre-turn",
-							TimeoutMs: 1500,
-						},
-					},
-				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-preturn-1",
-			ThreadID:   "chan-preturn",
-			AuthorName: "user-alpha",
-			Content:    "test prompt for pre-turn",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		if err := insertMessage(store, msg); err != nil {
-			t.Fatalf("failed to insert message: %v", err)
-		}
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		if hookCalls != 1 {
-			t.Fatalf("expected 1 pre-turn hook call, got %d", hookCalls)
-		}
-		if capturedReq == nil {
-			t.Fatalf("expected capturedReq to be populated")
-		}
-		if capturedReq.ChannelID != "chan-preturn" {
-			t.Errorf("expected ChannelID 'chan-preturn', got %q", capturedReq.ChannelID)
-		}
-		if capturedReq.ThreadID != "chan-preturn" {
-			t.Errorf("expected ThreadID 'chan-preturn', got %q", capturedReq.ThreadID)
-		}
-		if capturedReq.BurstCount != 1 {
-			t.Errorf("expected BurstCount 1, got %d", capturedReq.BurstCount)
-		}
-		if len(capturedReq.Messages) != 1 || capturedReq.Messages[0].ID != "msg-preturn-1" {
-			t.Errorf("expected Messages to contain msg-preturn-1, got %+v", capturedReq.Messages)
-		}
-		if capturedReq.RetryCount != 0 {
-			t.Errorf("expected RetryCount 0, got %d", capturedReq.RetryCount)
-		}
-		if capturedReq.Timestamp.IsZero() {
-			t.Errorf("expected non-zero Timestamp in PreTurnRequest")
-		}
-		if runnerCalls != 1 {
-			t.Fatalf("expected 1 runner call, got %d", runnerCalls)
-		}
-		if !strings.Contains(capturedPrompt, "<COORDINATION_CONTEXT>\nsystem instructions: be concise\n</COORDINATION_CONTEXT>") {
-			t.Errorf("expected prompt to contain COORDINATION_CONTEXT, got:\n%s", capturedPrompt)
-		}
-
-		saved, err := getMessage(store, "msg-preturn-1")
-		if err != nil || saved == nil {
-			t.Fatalf("failed to retrieve message: %v", err)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("expected StatusCompleted, got %s", saved.Status)
-		}
-	})
-
-	t.Run("Rejected_DropAction", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		var mu sync.Mutex
-		runnerCalls := 0
-		hookCalls := 0
-
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				mu.Lock()
-				hookCalls++
-				mu.Unlock()
-				return &PreTurnResponse{
-					Allow:  false,
-					Action: "drop",
-					Reason: "resource busy",
-				}, nil
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			SessionManager:    sessMgr,
-			TimeoutMinutes:    1,
-			MaxAttempts:       3,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				mu.Lock()
-				runnerCalls++
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "Should not be called"), "", 0, nil
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL: "http://sidecar.local/pre-turn",
-						},
-					},
-				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-preturn-drop",
-			ThreadID:   "chan-drop",
-			AuthorName: "user-beta",
-			Content:    "drop me please",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		if hookCalls != 1 {
-			t.Errorf("expected 1 hook call, got %d", hookCalls)
-		}
-		if runnerCalls != 0 {
-			t.Errorf("expected 0 runner calls on drop, got %d", runnerCalls)
-		}
-
-		saved, err := getMessage(store, "msg-preturn-drop")
-		if err != nil || saved == nil {
-			t.Fatalf("failed to retrieve message: %v", err)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("expected StatusCompleted for dropped message, got %s", saved.Status)
-		}
-		if !strings.Contains(saved.ErrorMessage, "resource busy") {
-			t.Errorf("expected ErrorMessage to contain 'resource busy', got %q", saved.ErrorMessage)
-		}
-	})
-
-	t.Run("Rejected_RetryAction", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		var mu sync.Mutex
-		runnerCalls := 0
-		hookCalls := 0
-
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				mu.Lock()
-				hookCalls++
-				currentCalls := hookCalls
-				mu.Unlock()
-				if currentCalls == 1 {
+			{
+				name: "RetryExhaustion",
+				hookRespFunc: func(int) (*PreTurnResponse, error) {
 					return &PreTurnResponse{
 						Allow:             false,
 						Action:            "retry",
 						RetryAfterSeconds: 1,
-						Reason:            "sidecar lock wait",
 					}, nil
-				}
-				return &PreTurnResponse{
-					Allow: true,
-				}, nil
+				},
+				initialRetry:   2,
+				scheduleRun:    true,
+				expectRunner:   0,
+				expectHookCall: 1,
+				verify: func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest) {
+					saved, err := getMessage(store, "msg-preturn-test")
+					if err != nil || saved == nil {
+						t.Fatalf("failed to retrieve message: %v", err)
+					}
+					if saved.Status != db.StatusFailed {
+						t.Errorf("expected StatusFailed on retry exhaustion, got %s", saved.Status)
+					}
+					if !strings.Contains(saved.ErrorMessage, "[EXHAUSTED_PRE_TURN_RETRIES]") {
+						t.Errorf("expected ErrorMessage to contain [EXHAUSTED_PRE_TURN_RETRIES], got %q", saved.ErrorMessage)
+					}
+					if r, _ := getScheduleRun(store, "run-exhaust-1"); r == nil || r.Status != "failed" {
+						t.Errorf("expected schedule run status 'failed', got %+v", r)
+					}
+				},
+			},
+			{
+				name: "TimeoutFallback_Drop",
+				hookRespFunc: func(int) (*PreTurnResponse, error) {
+					return nil, context.DeadlineExceeded
+				},
+				timeoutAction:  "drop",
+				expectRunner:   0,
+				expectHookCall: 1,
+				verify: func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest) {
+					saved, err := getMessage(store, "msg-preturn-test")
+					if err != nil || saved == nil || saved.Status != db.StatusCompleted || !strings.Contains(saved.ErrorMessage, "pre_turn_timeout_drop") {
+						t.Errorf("expected StatusCompleted with pre_turn_timeout_drop, got %+v", saved)
+					}
+				},
+			},
+			{
+				name: "TimeoutFallback_Proceed",
+				hookRespFunc: func(int) (*PreTurnResponse, error) {
+					return nil, errors.New("webhook connection failed")
+				},
+				timeoutAction:  "proceed",
+				expectRunner:   1,
+				expectHookCall: 1,
+				verify: func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest) {
+					saved, err := getMessage(store, "msg-preturn-test")
+					if err != nil || saved == nil || saved.Status != db.StatusCompleted {
+						t.Errorf("expected StatusCompleted, got %+v", saved)
+					}
+				},
+			},
+			{
+				name: "TimeoutFallback_Retry",
+				hookRespFunc: func(int) (*PreTurnResponse, error) {
+					return nil, errors.New("gateway timeout")
+				},
+				timeoutAction:  "retry",
+				expectRunner:   0,
+				expectHookCall: 1,
+				verify: func(t *testing.T, store db.Store, runnerCalls int, capturedPrompt string, capturedReq *PreTurnRequest) {
+					saved, err := getMessage(store, "msg-preturn-test")
+					if err != nil || saved == nil || saved.RetryCount != 1 || saved.Status != db.StatusPending {
+						t.Errorf("expected StatusPending with RetryCount 1, got %+v", saved)
+					}
+				},
 			},
 		}
 
-		completedChan := make(chan struct{})
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			SessionManager:     sessMgr,
-			TimeoutMinutes:     1,
-			MaxAttempts:        3,
-			RetryDelayOverride: 10 * time.Millisecond,
-			WebhookDispatcher:  mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				mu.Lock()
-				runnerCalls++
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "ok"), "", 0, nil
-			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
-			},
-			OnMessageCompleted: func(m db.Message, status string) {
-				if m.ID == "msg-preturn-retry" && status == db.StatusCompleted {
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				store := setupTestStore(t)
+				tmpDir := t.TempDir()
+				sessMgr := session.New(tmpDir, "")
+
+				var mu sync.Mutex
+				var runnerCalls int
+				var capturedPrompt string
+				var hookCalls int
+				var capturedReq *PreTurnRequest
+				completedChan := make(chan struct{})
+
+				mockDisp := &mockWebhookDispatcher{
+					callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
+						mu.Lock()
+						hookCalls++
+						cnt := hookCalls
+						capturedReq = req
+						mu.Unlock()
+						return tc.hookRespFunc(cnt)
+					},
+				}
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:              store,
+					SessionManager:     sessMgr,
+					TimeoutMinutes:     1,
+					MaxAttempts:        3,
+					RetryDelayOverride: 10 * time.Millisecond,
+					WebhookDispatcher:  mockDisp,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						capturedPrompt = prompt
+						mu.Unlock()
+						return mockJSONResponse(sessionID, "Turn proceeded"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					OnMessageCompleted: func(m db.Message, status string) {
+						if m.ID == "msg-preturn-test" {
+							select {
+							case <-completedChan:
+							default:
+								close(completedChan)
+							}
+						}
+					},
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:     "channel",
+							WakeMode: "all",
+							Hooks: config.ChannelHooksConfig{
+								PreTurn: &config.WebhookEndpoint{
+									URL:             "http://sidecar.local/pre-turn",
+									TimeoutMs:       1500,
+									OnTimeoutAction: tc.timeoutAction,
+								},
+							},
+						}
+					},
+				})
+
+				now := time.Now().UTC()
+				msg := db.Message{
+					ID:         "msg-preturn-test",
+					ThreadID:   "chan-preturn",
+					AuthorName: "user-alpha",
+					Content:    "test prompt for pre-turn",
+					Status:     db.StatusPending,
+					RetryCount: tc.initialRetry,
+					CreatedAt:  now,
+				}
+				if tc.scheduleRun {
+					msg.ScheduleRunID = "run-exhaust-1"
+					_ = createScheduleRun(store, db.ScheduleRun{
+						ID:           "run-exhaust-1",
+						ScheduleID:   "sched-1",
+						ScheduleType: "cron",
+						Status:       "running",
+						StartedAt:    now,
+					})
+				}
+				_ = insertMessage(store, msg)
+
+				pool.processBurst([]db.Message{msg})
+
+				if tc.name == "Rejected_RetryAction" {
 					select {
 					case <-completedChan:
-					default:
-						close(completedChan)
+					case <-time.After(5 * time.Second):
+						t.Fatalf("timed out waiting for message completion after retry")
 					}
 				}
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL: "http://sidecar.local/pre-turn",
-						},
-					},
-				}
-			},
-		})
 
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-preturn-retry",
-			ThreadID:   "chan-retry",
-			AuthorName: "user-gamma",
-			Content:    "retry me",
-			Status:     db.StatusPending,
-			RetryCount: 0,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		if hookCalls != 1 {
-			t.Errorf("expected initial 1 hook call, got %d", hookCalls)
-		}
-		if runnerCalls != 0 {
-			t.Errorf("expected 0 runner calls on initial retry, got %d", runnerCalls)
-		}
-		mu.Unlock()
-
-		// Wait for time.AfterFunc to re-enqueue, execute, and complete
-		select {
-		case <-completedChan:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for message completion after retry")
-		}
-
-		mu.Lock()
-		if runnerCalls != 1 {
-			t.Fatalf("expected runner to be called after re-enqueue, got %d calls", runnerCalls)
-		}
-		mu.Unlock()
-
-		saved, err := getMessage(store, "msg-preturn-retry")
-		if err != nil || saved == nil {
-			t.Fatalf("failed to retrieve message: %v", err)
-		}
-		if saved.RetryCount != 1 {
-			t.Errorf("expected RetryCount 1, got %d", saved.RetryCount)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("expected StatusCompleted after retry execution, got %s", saved.Status)
-		}
-	})
-
-	t.Run("RetryExhaustion", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		var mu sync.Mutex
-		runnerCalls := 0
-		var completedCalled bool
-		var completedStatus string
-
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				return &PreTurnResponse{
-					Allow:             false,
-					Action:            "retry",
-					RetryAfterSeconds: 1,
-				}, nil
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			SessionManager:    sessMgr,
-			TimeoutMinutes:    1,
-			MaxAttempts:       3,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 				mu.Lock()
-				runnerCalls++
+				rc := runnerCalls
+				hc := hookCalls
+				cp := capturedPrompt
+				cr := capturedReq
 				mu.Unlock()
-				return mockJSONResponse(sessionID, "ok"), "", 0, nil
-			},
-			OnMessageCompleted: func(msg db.Message, status string) {
-				mu.Lock()
-				completedCalled = true
-				completedStatus = status
-				mu.Unlock()
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL: "http://sidecar.local/pre-turn",
-						},
-					},
+
+				if hc != tc.expectHookCall {
+					t.Errorf("expected hookCalls = %d, got %d", tc.expectHookCall, hc)
 				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:             "msg-preturn-exhaust",
-			ThreadID:       "chan-exhaust",
-			AuthorName:     "user-delta",
-			Content:        "exhaust me",
-			Status:         db.StatusPending,
-			RetryCount:     2, // 2 + 1 >= 3 (MaxAttempts)
-			ScheduleRunID:  "run-exhaust-1",
-			CreatedAt:      now,
-		}
-		_ = insertMessage(store, msg)
-		_ = createScheduleRun(store, db.ScheduleRun{
-			ID:           "run-exhaust-1",
-			ScheduleID:   "sched-1",
-			ScheduleType: "cron",
-			Status:       "running",
-			StartedAt:    now,
-		})
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		if runnerCalls != 0 {
-			t.Errorf("expected 0 runner calls on exhaustion, got %d", runnerCalls)
-		}
-		if !completedCalled || completedStatus != db.StatusFailed {
-			t.Errorf("expected OnMessageCompleted to be called with FAILED, got called=%v status=%q", completedCalled, completedStatus)
-		}
-		mu.Unlock()
-
-		saved, err := getMessage(store, "msg-preturn-exhaust")
-		if err != nil || saved == nil {
-			t.Fatalf("failed to retrieve message: %v", err)
-		}
-		if saved.Status != db.StatusFailed {
-			t.Errorf("expected StatusFailed on retry exhaustion, got %s", saved.Status)
-		}
-		if !strings.Contains(saved.ErrorMessage, "[EXHAUSTED_PRE_TURN_RETRIES]") {
-			t.Errorf("expected ErrorMessage to contain [EXHAUSTED_PRE_TURN_RETRIES], got %q", saved.ErrorMessage)
-		}
-
-		var runStatus string
-		if r, _ := getScheduleRun(store, "run-exhaust-1"); r != nil {
-			runStatus = r.Status
-		}
-		if runStatus != "failed" {
-			t.Errorf("expected schedule run status 'failed', got %q", runStatus)
-		}
-	})
-
-	t.Run("TimeoutFallback_Drop", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var mu sync.Mutex
-		runnerCalls := 0
-
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				return nil, context.DeadlineExceeded
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			TimeoutMinutes:    1,
-			MaxAttempts:       3,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				mu.Lock()
-				runnerCalls++
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "ok"), "", 0, nil
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL:             "http://sidecar.local/pre-turn",
-							OnTimeoutAction: "drop",
-						},
-					},
+				if rc != tc.expectRunner {
+					t.Errorf("expected runnerCalls = %d, got %d", tc.expectRunner, rc)
 				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-preturn-timeout-drop",
-			ThreadID:   "chan-timeout-drop",
-			AuthorName: "user-epsilon",
-			Content:    "timeout drop",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		if runnerCalls != 0 {
-			t.Errorf("expected 0 runner calls on timeout drop, got %d", runnerCalls)
-		}
-		mu.Unlock()
-
-		saved, err := getMessage(store, "msg-preturn-timeout-drop")
-		if err != nil || saved == nil {
-			t.Fatalf("failed to retrieve message: %v", err)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("expected StatusCompleted on timeout drop, got %s", saved.Status)
-		}
-		if !strings.Contains(saved.ErrorMessage, "pre_turn_timeout_drop") {
-			t.Errorf("expected ErrorMessage to contain 'pre_turn_timeout_drop', got %q", saved.ErrorMessage)
-		}
-	})
-
-	t.Run("TimeoutFallback_Proceed", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		var mu sync.Mutex
-		runnerCalls := 0
-
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				return nil, errors.New("webhook connection failed")
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			SessionManager:    sessMgr,
-			TimeoutMinutes:    1,
-			MaxAttempts:       3,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				mu.Lock()
-				runnerCalls++
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "Turn proceeded"), "", 0, nil
-			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL:             "http://sidecar.local/pre-turn",
-							OnTimeoutAction: "proceed",
-						},
-					},
+				if tc.verify != nil {
+					tc.verify(t, store, rc, cp, cr)
 				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-preturn-timeout-proceed",
-			ThreadID:   "chan-timeout-proceed",
-			AuthorName: "user-zeta",
-			Content:    "timeout proceed",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		if runnerCalls != 1 {
-			t.Errorf("expected 1 runner call on timeout proceed, got %d", runnerCalls)
-		}
-		mu.Unlock()
-
-		saved, err := getMessage(store, "msg-preturn-timeout-proceed")
-		if err != nil || saved == nil {
-			t.Fatalf("failed to retrieve message: %v", err)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("expected StatusCompleted, got %s", saved.Status)
-		}
-	})
-
-	t.Run("TimeoutFallback_Retry", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var mu sync.Mutex
-		runnerCalls := 0
-
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				return nil, errors.New("gateway timeout")
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			TimeoutMinutes:    1,
-			MaxAttempts:       3,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				mu.Lock()
-				runnerCalls++
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "ok"), "", 0, nil
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL:             "http://sidecar.local/pre-turn",
-							OnTimeoutAction: "retry",
-						},
-					},
-				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-preturn-timeout-retry",
-			ThreadID:   "chan-timeout-retry",
-			AuthorName: "user-eta",
-			Content:    "timeout retry",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		if runnerCalls != 0 {
-			t.Errorf("expected 0 runner calls on timeout retry, got %d", runnerCalls)
-		}
-		mu.Unlock()
-
-		saved, err := getMessage(store, "msg-preturn-timeout-retry")
-		if err != nil || saved == nil {
-			t.Fatalf("failed to retrieve message: %v", err)
-		}
-		if saved.RetryCount != 1 {
-			t.Errorf("expected RetryCount 1, got %d", saved.RetryCount)
-		}
-		if saved.Status != db.StatusPending {
-			t.Errorf("expected StatusPending, got %s", saved.Status)
+			})
 		}
 	})
 
@@ -10015,29 +9479,8 @@ func TestPreTurnHook(t *testing.T) {
 	})
 }
 
-func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUsage) string {
-	if convID == "" {
-		convID = uuid.New().String()
-	}
-	payload, _ := json.Marshal(map[string]interface{}{
-		"conversation_id":  convID,
-		"status":           "SUCCESS",
-		"response":         responseText,
-		"duration_seconds": 1.0,
-		"num_turns":        1,
-		"usage":            usage,
-	})
-	return string(payload)
-}
-
 func TestPostTurnHook(t *testing.T) {
-	t.Run("SuccessfulTurn", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var mu sync.Mutex
-		var postCalled bool
-		var postReqReceived *PostTurnRequest
-
+	t.Run("HookOutcomes", func(t *testing.T) {
 		expectedUsage := runner.TokenUsage{
 			InputTokens:     100,
 			OutputTokens:    50,
@@ -10047,227 +9490,150 @@ func TestPostTurnHook(t *testing.T) {
 		}
 		expectedResponse := "Clean success response from runner"
 
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				return &PreTurnResponse{
+		tests := []struct {
+			name        string
+			preTurnResp *PreTurnResponse
+			runnerFunc  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error)
+			verify      func(t *testing.T, req *PostTurnRequest)
+		}{
+			{
+				name: "SuccessfulTurn",
+				preTurnResp: &PreTurnResponse{
 					Allow: true,
 					Metadata: map[string]any{
 						"lease_id":   "lease-abc",
 						"turn_epoch": float64(42),
 					},
-				}, nil
+				},
+				runnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					return mockJSONResponseWithUsage(sessionID, expectedResponse, expectedUsage), "", 0, nil
+				},
+				verify: func(t *testing.T, req *PostTurnRequest) {
+					if req.Status != "success" {
+						t.Errorf("expected status 'success', got %q", req.Status)
+					}
+					if req.ResponseText != expectedResponse {
+						t.Errorf("expected response text %q, got %q", expectedResponse, req.ResponseText)
+					}
+					if req.TokenUsage != expectedUsage {
+						t.Errorf("expected token usage %+v, got %+v", expectedUsage, req.TokenUsage)
+					}
+					if req.Metadata == nil || req.Metadata["lease_id"] != "lease-abc" || req.Metadata["turn_epoch"] != float64(42) {
+						t.Errorf("expected echoed metadata, got %+v", req.Metadata)
+					}
+					if req.Error != "" {
+						t.Errorf("expected empty error on success, got %q", req.Error)
+					}
+				},
 			},
-			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-				mu.Lock()
-				postCalled = true
-				reqCopy := *req
-				postReqReceived = &reqCopy
-				mu.Unlock()
-				return &PostTurnResponse{Acknowledged: true}, nil
+			{
+				name: "FailedTurn_AgyError",
+				runnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					return "", "non-transient runner failed: syntax error in script", 1, fmt.Errorf("exit status 1")
+				},
+				verify: func(t *testing.T, req *PostTurnRequest) {
+					if req.Status != "failed" {
+						t.Errorf("expected status 'failed', got %q", req.Status)
+					}
+					if !strings.Contains(req.Error, "syntax error") {
+						t.Errorf("expected error to contain 'syntax error', got %q", req.Error)
+					}
+					if req.ResponseText != "" {
+						t.Errorf("expected empty response text on failure, got %q", req.ResponseText)
+					}
+				},
+			},
+			{
+				name: "RunnerPanicRecovery",
+				runnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					panic("simulated runner crash inside runner function")
+				},
+				verify: func(t *testing.T, req *PostTurnRequest) {
+					if req.Status != "failed" {
+						t.Errorf("expected status 'failed', got %q", req.Status)
+					}
+					if !strings.Contains(req.Error, "simulated runner crash") {
+						t.Errorf("expected error to contain panic message, got %q", req.Error)
+					}
+				},
 			},
 		}
 
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			TimeoutMinutes:    1,
-			MaxAttempts:       1,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				return mockJSONResponseWithUsage(sessionID, expectedResponse, expectedUsage), "", 0, nil
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn: &config.WebhookEndpoint{
-							URL: "http://sidecar.local/pre-turn",
-						},
-						PostTurn: &config.WebhookEndpoint{
-							URL: "http://sidecar.local/post-turn",
-						},
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				store := setupTestStore(t)
+				var mu sync.Mutex
+				var postCalled bool
+				var postReqReceived *PostTurnRequest
+
+				mockDisp := &mockWebhookDispatcher{
+					callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
+						if tc.preTurnResp != nil {
+							return tc.preTurnResp, nil
+						}
+						return &PreTurnResponse{Allow: true}, nil
+					},
+					callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
+						mu.Lock()
+						postCalled = true
+						reqCopy := *req
+						postReqReceived = &reqCopy
+						mu.Unlock()
+						return &PostTurnResponse{Acknowledged: true}, nil
 					},
 				}
-			},
-		})
 
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-postturn-success",
-			ThreadID:   "chan-postturn-success",
-			AuthorName: "user-alpha",
-			Content:    "run success turn",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		defer mu.Unlock()
-		if !postCalled {
-			t.Fatalf("expected post_turn hook to be called on successful turn")
-		}
-		if postReqReceived == nil {
-			t.Fatalf("expected post_turn request to be captured")
-		}
-		if postReqReceived.Status != "success" {
-			t.Errorf("expected status 'success', got %q", postReqReceived.Status)
-		}
-		if postReqReceived.ResponseText != expectedResponse {
-			t.Errorf("expected response text %q, got %q", expectedResponse, postReqReceived.ResponseText)
-		}
-		if postReqReceived.TokenUsage != expectedUsage {
-			t.Errorf("expected token usage %+v, got %+v", expectedUsage, postReqReceived.TokenUsage)
-		}
-		if postReqReceived.Metadata == nil || postReqReceived.Metadata["lease_id"] != "lease-abc" || postReqReceived.Metadata["turn_epoch"] != float64(42) {
-			t.Errorf("expected echoed metadata, got %+v", postReqReceived.Metadata)
-		}
-		if postReqReceived.ChannelID != "chan-postturn-success" {
-			t.Errorf("expected channel ID 'chan-postturn-success', got %q", postReqReceived.ChannelID)
-		}
-		if postReqReceived.ThreadID != "chan-postturn-success" {
-			t.Errorf("expected thread ID 'chan-postturn-success', got %q", postReqReceived.ThreadID)
-		}
-		if postReqReceived.Error != "" {
-			t.Errorf("expected empty error on success, got %q", postReqReceived.Error)
-		}
-		if postReqReceived.DurationMs < 0 {
-			t.Errorf("expected durationMs >= 0, got %d", postReqReceived.DurationMs)
-		}
-	})
-
-	t.Run("FailedTurn_AgyError", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var mu sync.Mutex
-		var postCalled bool
-		var postReqReceived *PostTurnRequest
-
-		mockDisp := &mockWebhookDispatcher{
-			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-				mu.Lock()
-				postCalled = true
-				reqCopy := *req
-				postReqReceived = &reqCopy
-				mu.Unlock()
-				return &PostTurnResponse{Acknowledged: true}, nil
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			TimeoutMinutes:    1,
-			MaxAttempts:       1,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				return "", "non-transient runner failed: syntax error in script", 1, fmt.Errorf("exit status 1")
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PostTurn: &config.WebhookEndpoint{
-							URL: "http://sidecar.local/post-turn",
-						},
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:             store,
+					TimeoutMinutes:    1,
+					MaxAttempts:       1,
+					WebhookDispatcher: mockDisp,
+					RunnerFunc:        tc.runnerFunc,
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:     "channel",
+							WakeMode: "all",
+							Hooks: config.ChannelHooksConfig{
+								PreTurn: &config.WebhookEndpoint{
+									URL: "http://sidecar.local/pre-turn",
+								},
+								PostTurn: &config.WebhookEndpoint{
+									URL: "http://sidecar.local/post-turn",
+								},
+							},
+						}
 					},
+				})
+
+				now := time.Now().UTC()
+				msg := db.Message{
+					ID:         "msg-postturn-test",
+					ThreadID:   "chan-postturn-test",
+					AuthorName: "user-alpha",
+					Content:    "run postturn test",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
 				}
-			},
-		})
+				_ = insertMessage(store, msg)
 
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-postturn-failed",
-			ThreadID:   "chan-postturn-failed",
-			AuthorName: "user-beta",
-			Content:    "fail turn",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
+				pool.processBurst([]db.Message{msg})
 
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		defer mu.Unlock()
-		if !postCalled {
-			t.Fatalf("expected post_turn hook to be called on failed turn")
-		}
-		if postReqReceived.Status != "failed" {
-			t.Errorf("expected status 'failed', got %q", postReqReceived.Status)
-		}
-		if !strings.Contains(postReqReceived.Error, "syntax error") {
-			t.Errorf("expected error to contain 'syntax error', got %q", postReqReceived.Error)
-		}
-		if postReqReceived.ResponseText != "" {
-			t.Errorf("expected empty response text on failure, got %q", postReqReceived.ResponseText)
-		}
-	})
-
-	t.Run("RunnerPanicRecovery", func(t *testing.T) {
-		store := setupTestStore(t)
-
-		var mu sync.Mutex
-		var postCalled bool
-		var postReqReceived *PostTurnRequest
-
-		mockDisp := &mockWebhookDispatcher{
-			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
 				mu.Lock()
-				postCalled = true
-				reqCopy := *req
-				postReqReceived = &reqCopy
-				mu.Unlock()
-				return &PostTurnResponse{Acknowledged: true}, nil
-			},
-		}
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			TimeoutMinutes:    1,
-			MaxAttempts:       1,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				panic("simulated runner crash inside runner function")
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PostTurn: &config.WebhookEndpoint{
-							URL: "http://sidecar.local/post-turn",
-						},
-					},
+				defer mu.Unlock()
+				if !postCalled {
+					t.Fatalf("expected post_turn hook to be called")
 				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msg := db.Message{
-			ID:         "msg-postturn-panic",
-			ThreadID:   "chan-postturn-panic",
-			AuthorName: "user-gamma",
-			Content:    "panic turn",
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-		}
-		_ = insertMessage(store, msg)
-
-		pool.processBurst([]db.Message{msg})
-
-		mu.Lock()
-		defer mu.Unlock()
-		if !postCalled {
-			t.Fatalf("expected post_turn hook to be called on panic recovery")
-		}
-		if postReqReceived.Status != "failed" {
-			t.Errorf("expected status 'failed', got %q", postReqReceived.Status)
-		}
-		if !strings.Contains(postReqReceived.Error, "simulated runner crash") {
-			t.Errorf("expected error to contain panic message, got %q", postReqReceived.Error)
+				if postReqReceived == nil {
+					t.Fatalf("expected post_turn request to be captured")
+				}
+				if postReqReceived.ChannelID != "chan-postturn-test" || postReqReceived.ThreadID != "chan-postturn-test" {
+					t.Errorf("channel/thread ID mismatch: got %q, %q", postReqReceived.ChannelID, postReqReceived.ThreadID)
+				}
+				if postReqReceived.DurationMs < 0 {
+					t.Errorf("expected durationMs >= 0, got %d", postReqReceived.DurationMs)
+				}
+				tc.verify(t, postReqReceived)
+			})
 		}
 	})
 
@@ -10298,10 +9664,8 @@ func TestPostTurnHook(t *testing.T) {
 					case <-turn1PostStarted:
 						// Already closed (turn 2)
 					default:
-						// Turn 1
 						close(turn1PostStarted)
-						// Simulate post_turn teardown work while holding lock
-						time.Sleep(5 * time.Millisecond)
+						time.Sleep(50 * time.Millisecond)
 						mu.Lock()
 						turn1PostFinished = true
 						mu.Unlock()
@@ -10478,24 +9842,9 @@ func TestPostTurnHook(t *testing.T) {
 	})
 }
 
-func mockMultiTurnJSONResponse(convID, responseText string, numTurns int) string {
-	if convID == "" {
-		convID = uuid.New().String()
-	}
-	payload, _ := json.Marshal(map[string]interface{}{
-		"conversation_id":  convID,
-		"status":           "SUCCESS",
-		"response":         responseText,
-		"duration_seconds": 1.0,
-		"num_turns":        numTurns,
-	})
-	return string(payload)
-}
-
 func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-
 	tempDir := t.TempDir()
 	convID := "c2222222-2222-3333-4444-555555555555"
 
@@ -10518,6 +9867,7 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
+	expected := "Wait for background task task-645 to complete."
 	sessMgr := session.New(tempDir, "")
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: sessMgr,
@@ -10526,8 +9876,7 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			finalOutput := "Wait for background task task-645 to complete."
-			return mockMultiTurnJSONResponse(convID, finalOutput, 2), "", 0, nil
+			return mockMultiTurnJSONResponse(convID, expected, 2), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -10536,9 +9885,7 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 			mu.Unlock()
 			return nil
 		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
+		TypingFunc: noopTyping,
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			close(doneCh)
 		},
@@ -10557,631 +9904,378 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := insertMessage(store, msg); err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
-
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message processing")
-	}
+	waitForCompletion(t, doneCh, 3*time.Second, "message processing")
 
 	mu.Lock()
 	defer mu.Unlock()
-
-	if !deliveryCalled {
-		t.Errorf("Expected DeliveryFunc to be called for final output text")
+	if !deliveryCalled || deliveredText != expected {
+		t.Errorf("Delivered text mismatch: called=%v, got=%q, want=%q", deliveryCalled, deliveredText, expected)
 	}
-	expected := "Wait for background task task-645 to complete."
-	if deliveredText != expected {
-		t.Errorf("Expected delivered text %q, got: %q", expected, deliveredText)
-	}
-
 	dbMsg, err := getMessage(store, "msg-delivered-1")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("GetMessage failed: %v", err)
-	}
-	if dbMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected status COMPLETED, got: %s", dbMsg.Status)
-	}
-	if dbMsg.ResponseText != expected {
-		t.Errorf("Expected DB response text %q, got: %q", expected, dbMsg.ResponseText)
+	if err != nil || dbMsg == nil || dbMsg.Status != db.StatusCompleted || dbMsg.ResponseText != expected {
+		t.Errorf("DB response mismatch: %+v (err %v)", dbMsg, err)
 	}
 }
 
-func TestSession_RotationAtStepLimit_PreFlight(t *testing.T) {
+func TestSession_RotationThresholds(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, "")
-
-	oldSessionID := "sess-step-limit-old"
-	sessDir, err := sessMgr.EnsureSessionDir(oldSessionID)
-	if err != nil {
-		t.Fatalf("failed to create session dir: %v", err)
-	}
-
-	// Create transcript with step_index reaching session.DefaultMaxSessionSteps
-	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-	transcriptContent := fmt.Sprintf(`{"step_index": 0, "type": "USER_INPUT"}
-{"step_index": %d, "type": "PLANNER_RESPONSE"}
-`, session.DefaultMaxSessionSteps-1)
-	if err := os.WriteFile(tPath, []byte(transcriptContent), 0644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	_ = saveSessionID(store, "thread-step-limit-test", oldSessionID)
-	_, _ = incrementSessionTurnCount(store, "thread-step-limit-test") // turn 1
-
-	var mu sync.Mutex
-	var gotSessionID string
-	doneCh := make(chan struct{})
-
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
-	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			gotSessionID = sessionID
-			mu.Unlock()
-			return mockJSONResponse(sessionID, "OK"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-step-rot", ThreadID: "thread-step-limit-test", Content: "Run tool steps"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message")
-	}
-
-	// Queue preserves session; session lifecycle is delegated to the pool
-	mu.Lock()
-	if gotSessionID != oldSessionID {
-		t.Errorf("Expected session to be preserved (%q), got: %q", oldSessionID, gotSessionID)
-	}
-	mu.Unlock()
-
-	curSess, _ := getSessionID(store, "thread-step-limit-test")
-	if curSess != oldSessionID {
-		t.Errorf("Expected session in store to remain %q, got %q", oldSessionID, curSess)
-	}
-}
-
-func TestSession_RotationAtByteLimit_PreFlight(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, "")
-
-	oldSessionID := "sess-byte-limit-old"
-	sessDir, err := sessMgr.EnsureSessionDir(oldSessionID)
-	if err != nil {
-		t.Fatalf("failed to create session dir: %v", err)
-	}
-
-	// Create transcript file exceeding session.DefaultMaxTranscriptBytes
-	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-	blob := make([]byte, session.DefaultMaxTranscriptBytes+1024)
-	for i := range blob {
-		blob[i] = 'A'
-	}
-	if err := os.WriteFile(tPath, blob, 0644); err != nil {
-		t.Fatalf("failed to write bloated transcript: %v", err)
-	}
-
-	_ = saveSessionID(store, "thread-byte-limit-test", oldSessionID)
-	_, _ = incrementSessionTurnCount(store, "thread-byte-limit-test") // turn 1
-
-	var mu sync.Mutex
-	var gotSessionID string
-	doneCh := make(chan struct{})
-
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
-	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			gotSessionID = sessionID
-			mu.Unlock()
-			return mockJSONResponse(sessionID, "OK"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-byte-rot", ThreadID: "thread-byte-limit-test", Content: "Run heavy output"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message")
-	}
-
-	// Queue preserves session; session lifecycle is delegated to the pool
-	mu.Lock()
-	if gotSessionID != oldSessionID {
-		t.Errorf("Expected session to be preserved (%q), got: %q", oldSessionID, gotSessionID)
-	}
-	mu.Unlock()
-
-	curSess, _ := getSessionID(store, "thread-byte-limit-test")
-	if curSess != oldSessionID {
-		t.Errorf("Expected session in store to remain %q, got %q", oldSessionID, curSess)
-	}
-}
-
-func TestSession_RotationAtLimit_PostExecution(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, "")
-
-	executedSessionID := uuid.New().String()
-	sessDir, err := sessMgr.EnsureSessionDir(executedSessionID)
-	if err != nil {
-		t.Fatalf("failed to create session dir: %v", err)
-	}
-
-	doneCh := make(chan struct{})
-
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
-	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			// During execution, write transcript that hits session.DefaultMaxSessionSteps
-			tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-			content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}%s`, session.DefaultMaxSessionSteps, "\n")
-			_ = os.WriteFile(tPath, []byte(content), 0644)
-			return mockJSONResponse(executedSessionID, "Execution finished with many steps"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-post-rot", ThreadID: "thread-post-rot-test", Content: "Initial turn"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message")
-	}
-
-	// In post-execution, queue worker preserves session; session lifecycle is delegated to the pool
-	curSess, _ := getSessionID(store, "thread-post-rot-test")
-	if curSess != executedSessionID {
-		t.Errorf("Expected session to be preserved post execution (%q), got: %q", executedSessionID, curSess)
-	}
-}
-
-func TestWatchdog_RotationCircuitBreaker_OnBloat(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, "")
-
-	bloatedSessionID := "sess-wd-bloat"
-	sessDir, err := sessMgr.EnsureSessionDir(bloatedSessionID)
-	if err != nil {
-		t.Fatalf("failed to create session dir: %v", err)
-	}
-
-	_ = saveSessionID(store, "thread-wd-bloat", bloatedSessionID)
-
-	var mu sync.Mutex
-	var attempts []string
-	doneCh := make(chan struct{}, 1)
-
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
-	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    2,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			mu.Lock()
-			attempts = append(attempts, sessionID)
-			currentAttempt := len(attempts)
-			mu.Unlock()
-
-			if currentAttempt == 1 {
-				// During attempt 1, write a bloated transcript (exceeding session.DefaultMaxTranscriptBytes)
+	tests := []struct {
+		name       string
+		preSetup   func(t *testing.T, sessMgr *session.Manager, store db.Store, oldSessionID string)
+		runnerFunc func(sessDir string, oldSessionID string, mu *sync.Mutex, attempts *[]string) runnerFunc
+		watchdogFn func(sessDir string, oldSessionID string, mu *sync.Mutex, attempts *[]string) runnerWithOptionsFunc
+		verify     func(t *testing.T, store db.Store, oldSessionID string, attempts []string)
+	}{
+		{
+			name: "StepLimit_PreFlight",
+			preSetup: func(t *testing.T, sessMgr *session.Manager, store db.Store, oldSessionID string) {
+				sessDir, _ := sessMgr.EnsureSessionDir(oldSessionID)
 				tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-				blob := make([]byte, session.DefaultMaxTranscriptBytes+2048)
+				content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\\n", session.DefaultMaxSessionSteps)
+				_ = os.WriteFile(tPath, []byte(content), 0644)
+				_ = saveSessionID(store, "thread-rot-threshold", oldSessionID)
+				_, _ = incrementSessionTurnCount(store, "thread-rot-threshold")
+			},
+			runnerFunc: func(sessDir string, oldSessionID string, mu *sync.Mutex, attempts *[]string) runnerFunc {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					mu.Lock()
+					*attempts = append(*attempts, sessionID)
+					mu.Unlock()
+					return mockJSONResponse(sessionID, "OK"), "", 0, nil
+				}
+			},
+			verify: func(t *testing.T, store db.Store, oldSessionID string, attempts []string) {
+				if len(attempts) != 1 || attempts[0] != oldSessionID {
+					t.Errorf("Expected session %q preserved in runner, got: %v", oldSessionID, attempts)
+				}
+				curSess, _ := getSessionID(store, "thread-rot-threshold")
+				if curSess != oldSessionID {
+					t.Errorf("Expected session in store to remain %q, got %q", oldSessionID, curSess)
+				}
+			},
+		},
+		{
+			name: "ByteLimit_PreFlight",
+			preSetup: func(t *testing.T, sessMgr *session.Manager, store db.Store, oldSessionID string) {
+				sessDir, _ := sessMgr.EnsureSessionDir(oldSessionID)
+				tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+				blob := make([]byte, session.DefaultMaxTranscriptBytes+1024)
+				for i := range blob {
+					blob[i] = 'A'
+				}
 				_ = os.WriteFile(tPath, blob, 0644)
-				return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+				_ = saveSessionID(store, "thread-rot-threshold", oldSessionID)
+				_, _ = incrementSessionTurnCount(store, "thread-rot-threshold")
+			},
+			runnerFunc: func(sessDir string, oldSessionID string, mu *sync.Mutex, attempts *[]string) runnerFunc {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					mu.Lock()
+					*attempts = append(*attempts, sessionID)
+					mu.Unlock()
+					return mockJSONResponse(sessionID, "OK"), "", 0, nil
+				}
+			},
+			verify: func(t *testing.T, store db.Store, oldSessionID string, attempts []string) {
+				if len(attempts) != 1 || attempts[0] != oldSessionID {
+					t.Errorf("Expected session %q preserved in runner, got: %v", oldSessionID, attempts)
+				}
+				curSess, _ := getSessionID(store, "thread-rot-threshold")
+				if curSess != oldSessionID {
+					t.Errorf("Expected session in store to remain %q, got %q", oldSessionID, curSess)
+				}
+			},
+		},
+		{
+			name: "StepLimit_PostExecution",
+			preSetup: func(t *testing.T, sessMgr *session.Manager, store db.Store, oldSessionID string) {
+				_, _ = sessMgr.EnsureSessionDir(oldSessionID)
+			},
+			runnerFunc: func(sessDir string, oldSessionID string, mu *sync.Mutex, attempts *[]string) runnerFunc {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+					content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\\n", session.DefaultMaxSessionSteps)
+					_ = os.WriteFile(tPath, []byte(content), 0644)
+					return mockJSONResponse(oldSessionID, "Execution finished with many steps"), "", 0, nil
+				}
+			},
+			verify: func(t *testing.T, store db.Store, oldSessionID string, attempts []string) {
+				curSess, _ := getSessionID(store, "thread-rot-threshold")
+				if curSess != oldSessionID {
+					t.Errorf("Expected session to be preserved post execution (%q), got: %q", oldSessionID, curSess)
+				}
+			},
+		},
+		{
+			name: "WatchdogCircuitBreaker_OnBloat",
+			preSetup: func(t *testing.T, sessMgr *session.Manager, store db.Store, oldSessionID string) {
+				_, _ = sessMgr.EnsureSessionDir(oldSessionID)
+				_ = saveSessionID(store, "thread-rot-threshold", oldSessionID)
+			},
+			watchdogFn: func(sessDir string, oldSessionID string, mu *sync.Mutex, attempts *[]string) runnerWithOptionsFunc {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					mu.Lock()
+					*attempts = append(*attempts, sessionID)
+					currentAttempt := len(*attempts)
+					mu.Unlock()
+
+					if currentAttempt == 1 {
+						tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+						blob := make([]byte, session.DefaultMaxTranscriptBytes+2048)
+						_ = os.WriteFile(tPath, blob, 0644)
+						return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+					}
+					return mockJSONResponse(sessionID, "Recovered on warm retry"), "", 0, nil
+				}
+			},
+			verify: func(t *testing.T, store db.Store, oldSessionID string, attempts []string) {
+				if len(attempts) != 2 {
+					t.Fatalf("Expected 2 attempts, got %d", len(attempts))
+				}
+				if attempts[0] != oldSessionID || attempts[1] != oldSessionID {
+					t.Errorf("Expected both attempts to preserve session %q, got: %v", oldSessionID, attempts)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			tmpDir := t.TempDir()
+			sessMgr := session.New(tmpDir, "")
+
+			sessionID := "sess-rot-" + strings.ToLower(tc.name)
+			sessDir, _ := sessMgr.EnsureSessionDir(sessionID)
+			if tc.preSetup != nil {
+				tc.preSetup(t, sessMgr, store, sessionID)
 			}
 
-			// Attempt 2 succeeds
-			return mockJSONResponse(sessionID, "Recovered on warm retry"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
+			var mu sync.Mutex
+			var attempts []string
+			doneCh := make(chan struct{}, 1)
 
-	msg := db.Message{ID: "msg-wd-bloat", ThreadID: "thread-wd-bloat", Content: "Run long task"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
+			appCfg := config.NewFromData(&config.ConfigData{
+				Channels: map[string]config.ChannelPolicy{
+					"default": {Mode: "thread"},
+				},
+			})
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message completed")
-	}
+			poolCfg := WorkerPoolConfig{
+				SessionManager: sessMgr,
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    5 * time.Millisecond,
+				MaxAttempts:    2,
+				DeliveryFunc:   noopDelivery,
+				TypingFunc:     noopTyping,
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					select {
+					case doneCh <- struct{}{}:
+					default:
+					}
+				},
+			}
+			if tc.runnerFunc != nil {
+				poolCfg.RunnerFunc = tc.runnerFunc(sessDir, sessionID, &mu, &attempts)
+			}
+			if tc.watchdogFn != nil {
+				poolCfg.RunnerWithOptionsFunc = tc.watchdogFn(sessDir, sessionID, &mu, &attempts)
+			}
 
-	// Watchdog timeout retries preserve session; session lifecycle is delegated to the pool
-	mu.Lock()
-	defer mu.Unlock()
-	if len(attempts) != 2 {
-		t.Fatalf("Expected 2 attempts, got %d", len(attempts))
-	}
-	if attempts[0] != bloatedSessionID {
-		t.Errorf("Expected attempt 1 to use session %q, got %q", bloatedSessionID, attempts[0])
-	}
-	if attempts[1] != bloatedSessionID {
-		t.Errorf("Expected attempt 2 to preserve session (%q), got: %q", bloatedSessionID, attempts[1])
+			pool := New(appCfg, poolCfg)
+			pool.Start()
+			defer pool.Stop()
+
+			msg := db.Message{ID: "msg-rot-" + tc.name, ThreadID: "thread-rot-threshold", Content: "Run rotation test"}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
+
+			waitForCompletion(t, doneCh, 3*time.Second, "rotation threshold message")
+
+			mu.Lock()
+			attCopy := append([]string(nil), attempts...)
+			mu.Unlock()
+
+			tc.verify(t, store, sessionID, attCopy)
+		})
 	}
 }
 
 func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 	t.Parallel()
 
-	// 1. Channel mode pre-flight byte limit
-	t.Run("ChannelMode_PreFlight_ByteLimit", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		oldSess := "sess-chan-byte"
-		sessDir, _ := sessMgr.EnsureSessionDir(oldSess)
-		tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-		_ = os.WriteFile(tPath, make([]byte, session.DefaultMaxTranscriptBytes+100), 0644)
-
-		_ = saveSessionID(store, "chan-byte-test", oldSess)
-		_, _ = incrementSessionTurnCount(store, "chan-byte-test")
-
-		var mu sync.Mutex
-		var gotSessionID string
-		doneCh := make(chan struct{})
-
-		appCfg := config.NewFromData(&config.ConfigData{
-			Channels: map[string]config.ChannelPolicy{
-				"default": {Mode: "channel"},
-			},
-		})
-
-		pool := New(appCfg, WorkerPoolConfig{
-			SessionManager: sessMgr,
-			Store:          store,
-			TimeoutMinutes: 1,
-			BackoffBase:    10 * time.Millisecond,
-			MaxAttempts:    1,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-				mu.Lock()
-				gotSessionID = sessionID
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "OK"), "", 0, nil
-			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
-			},
-			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-				return func() {}
-			},
-			OnMessageCompleted: func(msg db.Message, finalStatus string) {
-				close(doneCh)
-			},
-		})
-		pool.Start()
-		defer pool.Stop()
-
-		msg := db.Message{ID: "msg-chan-b", ThreadID: "chan-byte-test", Content: "<@aerial> hello world"}
-		_ = insertMessage(store, msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-doneCh:
-		case <-time.After(3 * time.Second):
-			t.Fatal("Timeout waiting for message")
-		}
-
-		mu.Lock()
-		if gotSessionID != oldSess {
-			t.Errorf("Expected session to be preserved (%q) in channel mode byte limit, got: %q", oldSess, gotSessionID)
-		}
-		mu.Unlock()
-	})
-
-	// 2. Channel mode pre-flight step limit
-	t.Run("ChannelMode_PreFlight_StepLimit", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		oldSess := "sess-chan-step"
-		sessDir, _ := sessMgr.EnsureSessionDir(oldSess)
-		tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-		content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", session.DefaultMaxSessionSteps)
-		_ = os.WriteFile(tPath, []byte(content), 0644)
-
-		_ = saveSessionID(store, "chan-step-test", oldSess)
-		_, _ = incrementSessionTurnCount(store, "chan-step-test")
-
-		var mu sync.Mutex
-		var gotSessionID string
-		doneCh := make(chan struct{})
-
-		appCfg := config.NewFromData(&config.ConfigData{
-			Channels: map[string]config.ChannelPolicy{
-				"default": {Mode: "channel"},
-			},
-		})
-
-		pool := New(appCfg, WorkerPoolConfig{
-			SessionManager: sessMgr,
-			Store:          store,
-			TimeoutMinutes: 1,
-			BackoffBase:    10 * time.Millisecond,
-			MaxAttempts:    1,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-				mu.Lock()
-				gotSessionID = sessionID
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "OK"), "", 0, nil
-			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
-			},
-			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-				return func() {}
-			},
-			OnMessageCompleted: func(msg db.Message, finalStatus string) {
-				close(doneCh)
-			},
-		})
-		pool.Start()
-		defer pool.Stop()
-
-		msg := db.Message{ID: "msg-chan-s", ThreadID: "chan-step-test", Content: "<@aerial> wake up"}
-		_ = insertMessage(store, msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-doneCh:
-		case <-time.After(3 * time.Second):
-			t.Fatal("Timeout waiting for message")
-		}
-
-		mu.Lock()
-		if gotSessionID != oldSess {
-			t.Errorf("Expected session to be preserved (%q) in channel mode step limit, got: %q", oldSess, gotSessionID)
-		}
-		mu.Unlock()
-	})
-
-	// 3. Post-execution byte limit rotation
-	t.Run("PostExecution_ByteLimit", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		executedSessionID := uuid.New().String()
-		sessDir, _ := sessMgr.EnsureSessionDir(executedSessionID)
-
-		doneCh := make(chan struct{})
-		appCfg := config.NewFromData(&config.ConfigData{
-			Channels: map[string]config.ChannelPolicy{
-				"default": {Mode: "thread"},
-			},
-		})
-
-		pool := New(appCfg, WorkerPoolConfig{
-			SessionManager: sessMgr,
-			Store:          store,
-			TimeoutMinutes: 1,
-			BackoffBase:    10 * time.Millisecond,
-			MaxAttempts:    1,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+	tests := []struct {
+		name       string
+		mode       string
+		threadID   string
+		setupSess  func(sessDir string)
+		runnerFunc func(sessDir string, sessionID string, mu *sync.Mutex, attempts *[]string) runnerFunc
+		watchdogFn func(sessDir string, sessionID string, mu *sync.Mutex, attempts *[]string) runnerWithOptionsFunc
+		verify     func(t *testing.T, store db.Store, sessionID string, attempts []string)
+	}{
+		{
+			name:     "ChannelMode_PreFlight_ByteLimit",
+			mode:     "channel",
+			threadID: "chan-byte-test",
+			setupSess: func(sessDir string) {
 				tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-				_ = os.WriteFile(tPath, make([]byte, session.DefaultMaxTranscriptBytes+500), 0644)
-				return mockJSONResponse(executedSessionID, "Execution heavy output"), "", 0, nil
-			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
-			},
-			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-				return func() {}
-			},
-			OnMessageCompleted: func(msg db.Message, finalStatus string) {
-				close(doneCh)
-			},
-		})
-		pool.Start()
-		defer pool.Stop()
-
-		msg := db.Message{ID: "msg-post-byte", ThreadID: "thread-post-byte-test", Content: "Run byte heavy"}
-		_ = insertMessage(store, msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-doneCh:
-		case <-time.After(3 * time.Second):
-			t.Fatal("Timeout waiting for message")
-		}
-
-		curSess, _ := getSessionID(store, "thread-post-byte-test")
-		if curSess != executedSessionID {
-			t.Errorf("Expected session to be preserved post execution (%q), got: %q", executedSessionID, curSess)
-		}
-	})
-
-	// 4. Watchdog step limit circuit breaker
-	t.Run("Watchdog_StepLimit", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, "")
-
-		bloatedSessionID := "sess-wd-steplimit"
-		sessDir, _ := sessMgr.EnsureSessionDir(bloatedSessionID)
-		_ = saveSessionID(store, "thread-wd-step", bloatedSessionID)
-
-		var mu sync.Mutex
-		var attempts []string
-		doneCh := make(chan struct{}, 1)
-
-		appCfg := config.NewFromData(&config.ConfigData{
-			Channels: map[string]config.ChannelPolicy{
-				"default": {Mode: "thread"},
-			},
-		})
-
-		pool := New(appCfg, WorkerPoolConfig{
-			SessionManager: sessMgr,
-			Store:          store,
-			TimeoutMinutes: 1,
-			BackoffBase:    5 * time.Millisecond,
-			MaxAttempts:    2,
-			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-				mu.Lock()
-				attempts = append(attempts, sessionID)
-				currentAttempt := len(attempts)
-				mu.Unlock()
-
-				if currentAttempt == 1 {
-					tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-					content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", session.DefaultMaxSessionSteps)
-					_ = os.WriteFile(tPath, []byte(content), 0644)
-					return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+				blob := make([]byte, session.DefaultMaxTranscriptBytes+1024)
+				for i := range blob {
+					blob[i] = 'A'
 				}
+				_ = os.WriteFile(tPath, blob, 0644)
+			},
+			verify: func(t *testing.T, store db.Store, sessionID string, attempts []string) {
+				if len(attempts) != 1 || attempts[0] != sessionID {
+					t.Errorf("Expected session %q preserved, got: %v", sessionID, attempts)
+				}
+			},
+		},
+		{
+			name:     "ChannelMode_PreFlight_StepLimit",
+			mode:     "channel",
+			threadID: "chan-step-test",
+			setupSess: func(sessDir string) {
+				tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+				content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\\n", session.DefaultMaxSessionSteps)
+				_ = os.WriteFile(tPath, []byte(content), 0644)
+			},
+			verify: func(t *testing.T, store db.Store, sessionID string, attempts []string) {
+				if len(attempts) != 1 || attempts[0] != sessionID {
+					t.Errorf("Expected session %q preserved, got: %v", sessionID, attempts)
+				}
+			},
+		},
+		{
+			name:     "PostExecution_ByteLimit",
+			mode:     "thread",
+			threadID: "thread-post-byte-test",
+			runnerFunc: func(sessDir string, sessionID string, mu *sync.Mutex, attempts *[]string) runnerFunc {
+				return func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+					_ = os.WriteFile(tPath, make([]byte, session.DefaultMaxTranscriptBytes+500), 0644)
+					return mockJSONResponse(sessionID, "Execution heavy output"), "", 0, nil
+				}
+			},
+			verify: func(t *testing.T, store db.Store, sessionID string, attempts []string) {
+				curSess, _ := getSessionID(store, "thread-post-byte-test")
+				if curSess != sessionID {
+					t.Errorf("Expected session preserved post execution (%q), got: %q", sessionID, curSess)
+				}
+			},
+		},
+		{
+			name:     "Watchdog_StepLimit",
+			mode:     "thread",
+			threadID: "thread-wd-step",
+			watchdogFn: func(sessDir string, sessionID string, mu *sync.Mutex, attempts *[]string) runnerWithOptionsFunc {
+				return func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					mu.Lock()
+					*attempts = append(*attempts, sID)
+					currentAttempt := len(*attempts)
+					mu.Unlock()
 
-				return mockJSONResponse(sessionID, "Recovered on warm retry"), "", 0, nil
+					if currentAttempt == 1 {
+						tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+						content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\\n", session.DefaultMaxSessionSteps)
+						_ = os.WriteFile(tPath, []byte(content), 0644)
+						return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+					}
+					return mockJSONResponse(sID, "Recovered on warm retry"), "", 0, nil
+				}
 			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
+			verify: func(t *testing.T, store db.Store, sessionID string, attempts []string) {
+				if len(attempts) != 2 {
+					t.Fatalf("Expected 2 attempts, got %d", len(attempts))
+				}
+				if attempts[1] != sessionID {
+					t.Errorf("Expected attempt 2 to preserve session %q, got: %q", sessionID, attempts[1])
+				}
 			},
-			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-				return func() {}
-			},
-			OnMessageCompleted: func(msg db.Message, finalStatus string) {
-				doneCh <- struct{}{}
-			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			tmpDir := t.TempDir()
+			sessMgr := session.New(tmpDir, "")
+
+			sessionID := "sess-" + strings.ToLower(tc.name)
+			sessDir, _ := sessMgr.EnsureSessionDir(sessionID)
+			_ = saveSessionID(store, tc.threadID, sessionID)
+			_, _ = incrementSessionTurnCount(store, tc.threadID)
+
+			if tc.setupSess != nil {
+				tc.setupSess(sessDir)
+			}
+
+			var mu sync.Mutex
+			var attempts []string
+			doneCh := make(chan struct{}, 1)
+
+			appCfg := config.NewFromData(&config.ConfigData{
+				Channels: map[string]config.ChannelPolicy{
+					"default": {Mode: tc.mode},
+				},
+			})
+
+			poolCfg := WorkerPoolConfig{
+				SessionManager: sessMgr,
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    10 * time.Millisecond,
+				MaxAttempts:    2,
+				DeliveryFunc:   noopDelivery,
+				TypingFunc:     noopTyping,
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					select {
+					case doneCh <- struct{}{}:
+					default:
+					}
+				},
+			}
+			if tc.runnerFunc != nil {
+				poolCfg.RunnerFunc = tc.runnerFunc(sessDir, sessionID, &mu, &attempts)
+			} else if tc.watchdogFn != nil {
+				poolCfg.RunnerWithOptionsFunc = tc.watchdogFn(sessDir, sessionID, &mu, &attempts)
+			} else {
+				poolCfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					mu.Lock()
+					attempts = append(attempts, sID)
+					mu.Unlock()
+					return mockJSONResponse(sID, "OK"), "", 0, nil
+				}
+			}
+
+			pool := New(appCfg, poolCfg)
+			pool.Start()
+			defer pool.Stop()
+
+			msg := db.Message{ID: "msg-" + tc.name, ThreadID: tc.threadID, Content: "<@aerial> run"}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
+
+			waitForCompletion(t, doneCh, 3*time.Second, "channel mode rotation test")
+
+			mu.Lock()
+			attCopy := append([]string(nil), attempts...)
+			mu.Unlock()
+
+			tc.verify(t, store, sessionID, attCopy)
 		})
-		pool.Start()
-		defer pool.Stop()
-
-		msg := db.Message{ID: "msg-wd-step-test", ThreadID: "thread-wd-step", Content: "Run long task with steps"}
-		_ = insertMessage(store, msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-doneCh:
-		case <-time.After(3 * time.Second):
-			t.Fatal("Timeout waiting for message completed")
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-		if len(attempts) != 2 {
-			t.Fatalf("Expected 2 attempts, got %d", len(attempts))
-		}
-		if attempts[1] != bloatedSessionID {
-			t.Errorf("Expected attempt 2 to preserve session (%q), got: %q", bloatedSessionID, attempts[1])
-		}
-	})
+	}
 }
+
 func TestWorkerPool_MultiTurn_TranscriptSilent_PreservesSubstantiveRunnerResponse(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-
 	tempDir := t.TempDir()
 	convID := "c3333333-3333-4444-5555-666666666666"
 
@@ -11190,7 +10284,6 @@ func TestWorkerPool_MultiTurn_TranscriptSilent_PreservesSubstantiveRunnerRespons
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
 
-	// Verify worker delivers runner response verbatim even if transcript contains empty/silent trailing steps
 	transcriptContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check deployment"}
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]}
 {"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All containers deployed"}
@@ -11221,9 +10314,7 @@ func TestWorkerPool_MultiTurn_TranscriptSilent_PreservesSubstantiveRunnerRespons
 			mu.Unlock()
 			return nil
 		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
+		TypingFunc: noopTyping,
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			close(doneCh)
 		},
@@ -11242,42 +10333,18 @@ func TestWorkerPool_MultiTurn_TranscriptSilent_PreservesSubstantiveRunnerRespons
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := insertMessage(store, msg); err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
-
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message processing")
-	}
+	waitForCompletion(t, doneCh, 3*time.Second, "message processing")
 
 	mu.Lock()
 	defer mu.Unlock()
-
 	if deliveredText != expectedText {
 		t.Errorf("Delivered text mismatch:\ngot:  %q\nwant: %q", deliveredText, expectedText)
 	}
-
 	dbMsg, err := getMessage(store, "msg-substantive-fallback-1")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("GetMessage failed: %v", err)
-	}
-	if dbMsg.ResponseText != expectedText {
-		t.Errorf("DB response text mismatch:\ngot:  %q\nwant: %q", dbMsg.ResponseText, expectedText)
+	if err != nil || dbMsg == nil || dbMsg.ResponseText != expectedText {
+		t.Errorf("DB response text mismatch: %+v (err %v)", dbMsg, err)
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
