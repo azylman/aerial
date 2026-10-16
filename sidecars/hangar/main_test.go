@@ -228,11 +228,6 @@ func TestGetComposeArgs_WithConfigOverride(t *testing.T) {
 }
 
 // Verify ReconcileNomadJobs alias
-func TestReconcileNomadJobs_Alias(t *testing.T) {
-	d := &SyncDaemon{}
-	_ = d.ReconcileNomadJobs(context.Background(), t.TempDir(), nil)
-}
-
 func TestGetComposeArgs_Deduplication(t *testing.T) {
 	composeDir := t.TempDir()
 
@@ -2842,145 +2837,6 @@ func TestScrubComposeEnv_Extended(t *testing.T) {
 }
 
 
-func TestHasNomadConfigChanges_Coverage(t *testing.T) {
-	d := &SyncDaemon{}
-
-	// 1. Canceled context
-	ctxCancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	changed, err := d.HasNomadConfigChanges(ctxCancelled, "/path", "v1", "v2")
-	if err == nil || changed {
-		t.Errorf("expected context error, got %v, %v", changed, err)
-	}
-
-	// 2. Empty or matching heads / empty repoPath
-	cases := []struct {
-		repo, prev, curr string
-	}{
-		{"/path", "", "v2"},
-		{"/path", "v1", ""},
-		{"/path", "v1", "v1"},
-		{"", "v1", "v2"},
-	}
-	for _, c := range cases {
-		got, err := d.HasNomadConfigChanges(context.Background(), c.repo, c.prev, c.curr)
-		if err != nil || got {
-			t.Errorf("expected false, nil for %v, got %v, %v", c, got, err)
-		}
-	}
-
-	// 3. Diff returns nomad config change
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return []byte("nomad/nomad.hcl\nmain.go\n"), nil, nil
-	}
-	got, err := d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
-	if err != nil || !got {
-		t.Errorf("expected true, nil, got %v, %v", got, err)
-	}
-
-	// 4. Diff returns no nomad config change
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return []byte("README.md\ndocker-compose.yml\n"), nil, nil
-	}
-	got, err = d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
-	if err != nil || got {
-		t.Errorf("expected false, nil, got %v, %v", got, err)
-	}
-
-	// 5. Diff fails, fallback diff-tree succeeds with nomad config changes
-	callCount := 0
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		callCount++
-		if callCount == 1 {
-			return nil, []byte("fatal: ambiguous argument"), errors.New("diff failed")
-		}
-		return []byte("nomad/client.hcl\n"), nil, nil
-	}
-	got, err = d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
-	if err != nil || !got {
-		t.Errorf("expected fallback true, nil, got %v, %v", got, err)
-	}
-
-	// 6. Diff fails, fallback diff-tree fails (fail safe to false)
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return nil, []byte("fatal: repo corrupt"), errors.New("diff failed")
-	}
-	got, err = d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
-	if err != nil || got {
-		t.Errorf("expected fail-safe false, nil, got %v, %v", got, err)
-	}
-}
-
-func TestValidateNomadConfig_Coverage(t *testing.T) {
-	d := &SyncDaemon{}
-
-	// 1. Success
-	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		return []byte("Configuration is valid!\n"), nil, nil
-	}
-	if err := d.ValidateNomadConfig(context.Background(), "/tmp/nomad"); err != nil {
-		t.Errorf("expected nil, got %v", err)
-	}
-
-	// 2. Failure
-	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		return nil, []byte("syntax error on line 12"), errors.New("exit 1")
-	}
-	if err := d.ValidateNomadConfig(context.Background(), "/tmp/nomad"); err == nil {
-		t.Errorf("expected validation error, got nil")
-	}
-}
-
-func TestReconcileNomadServer_Coverage(t *testing.T) {
-	tmpDir := t.TempDir()
-	d := &SyncDaemon{}
-
-	// 1. Missing directory (no-op)
-	if err := d.reconcileNomadServer(context.Background(), tmpDir); err != nil {
-		t.Errorf("expected nil for missing nomad dir, got %v", err)
-	}
-
-	// Create nomad dir
-	nomadDir := filepath.Join(tmpDir, "nomad")
-	_ = os.MkdirAll(nomadDir, 0755)
-
-	// 2. Validation failure aborts restart
-	restartCalled := false
-	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		return nil, []byte("invalid config syntax"), errors.New("validation failed")
-	}
-	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		restartCalled = true
-		return []byte("restarted"), nil, nil
-	}
-	if err := d.reconcileNomadServer(context.Background(), tmpDir); err == nil {
-		t.Errorf("expected validation error, got nil")
-	}
-	if restartCalled {
-		t.Errorf("expected restart to be aborted on validation error")
-	}
-
-	// 3. Validation success, restart succeeds
-	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		return []byte("Configuration is valid!\n"), nil, nil
-	}
-	restartCalled = false
-	if err := d.reconcileNomadServer(context.Background(), tmpDir); err != nil {
-		t.Errorf("expected nil, got %v", err)
-	}
-	if !restartCalled {
-		t.Errorf("expected restart to be called on successful validation")
-	}
-
-	// 4. Validation success, restart fails
-	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return nil, []byte("container restart failed"), errors.New("exit 1")
-	}
-	if err := d.reconcileNomadServer(context.Background(), tmpDir); err == nil {
-		t.Errorf("expected restart error, got nil")
-	}
-}
-
 func TestGetRepoCommit_DetailedCoverage(t *testing.T) {
 	d := &SyncDaemon{}
 
@@ -3122,27 +2978,6 @@ func TestGetComposeExecutor_Branches(t *testing.T) {
 	_, _, _ = execFn(context.Background(), "", "")
 	if !customCalled {
 		t.Errorf("expected custom compose executor to be called")
-	}
-}
-
-func TestPendingNomadServerRestart(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	nilDaemon.recordPendingNomadServerRestart()
-	if nilDaemon.consumePendingNomadServerRestart() {
-		t.Errorf("expected false for nil daemon")
-	}
-
-	d := &SyncDaemon{}
-	if d.consumePendingNomadServerRestart() {
-		t.Errorf("expected false initially")
-	}
-
-	d.recordPendingNomadServerRestart()
-	if !d.consumePendingNomadServerRestart() {
-		t.Errorf("expected true after recording restart")
-	}
-	if d.consumePendingNomadServerRestart() {
-		t.Errorf("expected false on subsequent consume")
 	}
 }
 
@@ -4176,113 +4011,6 @@ func TestGetStatus_PopulatesAndCachesGitHubRepo(t *testing.T) {
 	}
 }
 
-func TestNomadValidationAndReconciliation_Hermetic(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	jobFile := filepath.Join(tmpDir, "test.nomad")
-	jobContent := `job "test" { group "g" { task "t" { config { image = "test:latest" } } } }`
-	if err := os.WriteFile(jobFile, []byte(jobContent), 0644); err != nil {
-		t.Fatalf("failed to write job file: %v", err)
-	}
-
-	var executedArgs [][]string
-	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		executedArgs = append(executedArgs, args)
-		if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
-			if strings.Contains(args[len(args)-1], "invalid") {
-				return nil, []byte("syntax error on line 1"), errors.New("exit 1")
-			}
-			return []byte("Job validation successful\n"), nil, nil
-		}
-		if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-			return []byte("Evaluation ID: abc-123\n"), nil, nil
-		}
-		if len(args) >= 2 && args[0] == "job" && args[1] == "stop" {
-			return []byte("Job stop scheduled\n"), nil, nil
-		}
-		return nil, nil, nil
-	}
-
-	d := NewDaemon(DaemonConfig{
-		NomadExecutor: mockNomad,
-		ConfigDir:     tmpDir,
-	})
-
-	// 1. Validation test
-	if err := d.ValidateNomadJob(context.Background(), jobFile); err != nil {
-		t.Errorf("expected ValidateNomadJob to succeed, got %v", err)
-	}
-
-	invalidJobFile := filepath.Join(tmpDir, "invalid.nomad")
-	if err := d.ValidateNomadJob(context.Background(), invalidJobFile); err == nil {
-		t.Errorf("expected ValidateNomadJob to fail for invalid job, got nil")
-	}
-
-	// 2. Reconciliation test (apply + delete)
-	changes := []NomadFileChange{
-		{Path: "test.nomad", Action: "apply", JobName: "test"},
-		{Path: "old.nomad", Action: "delete", JobName: "old-job"},
-	}
-
-	if err := d.ReconcileNomadChanges(context.Background(), tmpDir, changes); err != nil {
-		t.Fatalf("expected ReconcileNomadChanges to succeed, got %v", err)
-	}
-
-	// Verify executed commands: stop should run before apply (teardown first)
-	var foundStop, foundRun bool
-	var stopIdx, runIdx int
-	for idx, call := range executedArgs {
-		if len(call) >= 2 && call[0] == "job" && call[1] == "stop" && call[len(call)-1] == "old-job" {
-			foundStop = true
-			stopIdx = idx
-		}
-		if len(call) >= 2 && call[0] == "job" && call[1] == "run" && strings.HasSuffix(call[len(call)-1], "test.nomad") {
-			foundRun = true
-			runIdx = idx
-		}
-	}
-
-	if !foundStop {
-		t.Errorf("expected nomad job stop to be called for old-job")
-	}
-	if !foundRun {
-		t.Errorf("expected nomad job run to be called for test.nomad")
-	}
-	if foundStop && foundRun && stopIdx > runIdx {
-		t.Errorf("expected teardown (stop) to execute before application (run), stopIdx=%d, runIdx=%d", stopIdx, runIdx)
-	}
-}
-
-func TestNomadHasChanges_Hermetic(t *testing.T) {
-	t.Parallel()
-
-	mockGit := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		output := "M\tjobs/infisical.nomad\nD\tjobs/legacy.nomad\nM\tdocker-compose.yml\n"
-		return []byte(output), nil, nil
-	}
-
-	d := NewDaemon(DaemonConfig{
-		GitExecutor: mockGit,
-	})
-
-	changes, err := d.HasNomadChanges(context.Background(), "/share/aerial-config", "HEAD~1", "HEAD")
-	if err != nil {
-		t.Fatalf("HasNomadChanges returned error: %v", err)
-	}
-
-	if len(changes) != 2 {
-		t.Fatalf("expected 2 nomad changes, got %d: %+v", len(changes), changes)
-	}
-
-	if changes[0].Path != "jobs/infisical.nomad" || changes[0].Action != "apply" {
-		t.Errorf("unexpected change 0: %+v", changes[0])
-	}
-	if changes[1].Path != "jobs/legacy.nomad" || changes[1].Action != "delete" {
-		t.Errorf("unexpected change 1: %+v", changes[1])
-	}
-}
-
 func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
 	t.Parallel()
 
@@ -4363,292 +4091,6 @@ func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
 	if restartedJob != "mirrormere-core" {
 		t.Errorf("expected restarted job 'mirrormere-core', got %q", restartedJob)
 	}
-}
-
-func TestNomadOrchestration_UnitSuite(t *testing.T) {
-	t.Parallel()
-
-	// 1. defaultNomadExecutor execution & token scrubbing
-	execFn := defaultNomadExecutor("http://127.0.0.1:4646", "secret-nomad-token")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_, _, _ = execFn(ctx, "version")
-
-	// 2. getNomadExecutor coverage
-	var nilDaemon *SyncDaemon
-	if nilDaemon.getNomadExecutor() == nil {
-		t.Errorf("expected non-nil default executor from nil daemon")
-	}
-
-	dDefault := &SyncDaemon{
-		nomadAddr:  "http://localhost:4646",
-		nomadToken: "tok",
-	}
-	if dDefault.getNomadExecutor() == nil {
-		t.Errorf("expected non-nil executor from dDefault")
-	}
-
-	customCalled := false
-	dCustom := &SyncDaemon{
-		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			customCalled = true
-			return []byte("custom"), nil, nil
-		},
-	}
-	out, _, _ := dCustom.getNomadExecutor()(ctx, "test")
-	if !customCalled || string(out) != "custom" {
-		t.Errorf("expected custom nomad executor to be invoked")
-	}
-
-	// 3. Pending Nomad change recording and draining
-	d := NewDaemon(DaemonConfig{})
-	if len(d.drainPendingNomadChanges()) != 0 {
-		t.Errorf("expected empty pending changes initially")
-	}
-	d.recordPendingNomadChanges("/repo/a", []NomadFileChange{
-		{JobName: "job-a", Path: "jobs/job-a.nomad", Action: "apply"},
-	})
-	d.recordPendingNomadChanges("/repo/b", []NomadFileChange{
-		{JobName: "job-b", Path: "jobs/job-b.nomad", Action: "delete"},
-	})
-	pending := d.drainPendingNomadChanges()
-	if len(pending) != 2 {
-		t.Fatalf("expected 2 pending changes, got %d", len(pending))
-	}
-	if len(d.drainPendingNomadChanges()) != 0 {
-		t.Errorf("expected pending changes to be drained")
-	}
-
-	// 4. ExecuteNomadTeardowns
-	d.ExecuteNomadTeardowns(ctx, nil)
-
-	var stoppedJobs []string
-	dTeardown := NewDaemon(DaemonConfig{
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 4 && args[0] == "job" && args[1] == "stop" {
-				stoppedJobs = append(stoppedJobs, args[3])
-				if args[3] == "fail-job" {
-					return []byte("err-out"), []byte("err-bytes"), errors.New("stop error")
-				}
-				return []byte("ok"), nil, nil
-			}
-			return nil, nil, nil
-		},
-	})
-	dTeardown.ExecuteNomadTeardowns(ctx, []NomadChangeEvent{
-		{
-			RepoPath: "/repo",
-			Changes: []NomadFileChange{
-				{JobName: "normal-job", Action: "delete"},
-				{JobName: "fail-job", Action: "delete"},
-				{JobName: "apply-job", Action: "apply"},
-			},
-		},
-	})
-	if len(stoppedJobs) != 2 {
-		t.Errorf("expected 2 jobs stopped, got %v", stoppedJobs)
-	}
-
-	// 5. ValidateNomadJob
-	dValSuccess := NewDaemon(DaemonConfig{
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Job syntax is valid"), nil, nil
-		},
-	})
-	if err := dValSuccess.ValidateNomadJob(ctx, "job.nomad"); err != nil {
-		t.Errorf("expected valid job, got %v", err)
-	}
-
-	dValFail := NewDaemon(DaemonConfig{
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("syntax error on line 5"), errors.New("exit status 1")
-		},
-	})
-	if err := dValFail.ValidateNomadJob(ctx, "job.nomad"); err == nil {
-		t.Errorf("expected validation error, got nil")
-	}
-
-	// 6. ReconcileNomadChanges & ReconcilePendingNomad
-	tmpDir := t.TempDir()
-	jobsDir := filepath.Join(tmpDir, "jobs")
-	_ = os.MkdirAll(jobsDir, 0755)
-	validJobFile := filepath.Join(jobsDir, "valid.nomad")
-	_ = os.WriteFile(validJobFile, []byte(`job "valid" {}`), 0644)
-	invalidJobFile := filepath.Join(jobsDir, "invalid.nomad")
-	_ = os.WriteFile(invalidJobFile, []byte(`job "invalid" {}`), 0644)
-	runFailJobFile := filepath.Join(jobsDir, "runfail.nomad")
-	_ = os.WriteFile(runFailJobFile, []byte(`job "runfail" {}`), 0644)
-
-	var runJobs []string
-	dReconcile := NewDaemon(DaemonConfig{
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 3 && args[0] == "job" && args[1] == "validate" {
-				if strings.Contains(args[2], "invalid.nomad") {
-					return nil, []byte("invalid HCL"), errors.New("val error")
-				}
-				return []byte("valid"), nil, nil
-			}
-			if len(args) >= 4 && args[0] == "job" && args[1] == "run" {
-				if strings.Contains(args[3], "runfail.nomad") {
-					return []byte("fail"), []byte("alloc failed"), errors.New("run error")
-				}
-				runJobs = append(runJobs, args[3])
-				return []byte("Evaluation ID: 12345"), nil, nil
-			}
-			if len(args) >= 4 && args[0] == "job" && args[1] == "stop" {
-				if args[3] == "stop-fail" {
-					return nil, []byte("stop fail"), errors.New("stop error")
-				}
-				return []byte("stopped"), nil, nil
-			}
-			return nil, nil, nil
-		},
-	})
-
-	// Empty changes
-	if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, nil); err != nil {
-		t.Errorf("expected nil for empty changes: %v", err)
-	}
-
-	// Delete change (success & failure branch)
-	_ = dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
-		{JobName: "stop-ok", Action: "delete"},
-		{JobName: "stop-fail", Action: "delete"},
-	})
-
-	// Apply change missing from disk (notice)
-	_ = dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
-		{JobName: "missing", Path: "jobs/missing.nomad", Action: "apply"},
-	})
-
-	// Apply change validation failure
-	if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
-		{JobName: "invalid", Path: "jobs/invalid.nomad", Action: "apply"},
-	}); err == nil {
-		t.Errorf("expected validation error for invalid.nomad")
-	}
-
-	// Apply change run failure
-	if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
-		{JobName: "runfail", Path: "jobs/runfail.nomad", Action: "apply"},
-	}); err == nil {
-		t.Errorf("expected run error for runfail.nomad")
-	}
-
-	// Apply change success
-	if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
-		{JobName: "valid", Path: "jobs/valid.nomad", Action: "apply"},
-	}); err != nil {
-		t.Errorf("expected success for valid.nomad, got %v", err)
-	}
-
-	// ReconcilePendingNomad
-	dReconcile.recordPendingNomadChanges(tmpDir, []NomadFileChange{
-		{JobName: "valid", Path: "jobs/valid.nomad", Action: "apply"},
-	})
-	if err := dReconcile.ReconcilePendingNomad(ctx); err != nil {
-		t.Errorf("expected success in ReconcilePendingNomad, got %v", err)
-	}
-
-	// CheckAndReconcileNomadImages throttle & edge cases
-	dReconcile.configDir = tmpDir
-	// Already called recently
-	dReconcile.lastNomadImagePoll = time.Now()
-	if err := dReconcile.CheckAndReconcileNomadImages(ctx); err != nil {
-		t.Errorf("expected nil when throttled: %v", err)
-	}
-
-	// Missing jobs directory
-	dMissingDir := NewDaemon(DaemonConfig{ConfigDir: filepath.Join(tmpDir, "nonexistent")})
-	if err := dMissingDir.CheckAndReconcileNomadImages(ctx); err != nil {
-		t.Errorf("expected nil for missing jobs dir: %v", err)
-	}
-
-	// 7. HasNomadChanges branches
-	// Canceled ctx
-	canceledCtx, cancelNow := context.WithCancel(context.Background())
-	cancelNow()
-	if _, err := d.HasNomadChanges(canceledCtx, "/repo", "a", "b"); err == nil {
-		t.Errorf("expected context error")
-	}
-
-	// Empty repo or empty/equal heads
-	if ch, err := d.HasNomadChanges(ctx, "", "a", "b"); err != nil || ch != nil {
-		t.Errorf("expected nil for empty repo")
-	}
-	if ch, err := d.HasNomadChanges(ctx, "/repo", "", "b"); err != nil || ch != nil {
-		t.Errorf("expected nil for empty prevHead")
-	}
-	if ch, err := d.HasNomadChanges(ctx, "/repo", "a", ""); err != nil || ch != nil {
-		t.Errorf("expected nil for empty currHead")
-	}
-	if ch, err := d.HasNomadChanges(ctx, "/repo", "a", "a"); err != nil || ch != nil {
-		t.Errorf("expected nil for identical heads")
-	}
-
-	// Git error, fallback success
-	dFallback := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "diff" {
-				return nil, []byte("fatal: ambiguous argument"), errors.New("diff error")
-			}
-			if len(args) > 0 && args[0] == "diff-tree" {
-				return []byte("M\tjobs/app.nomad\n"), nil, nil
-			}
-			return nil, nil, nil
-		},
-	})
-	ch, err := dFallback.HasNomadChanges(ctx, "/repo", "head1", "head2")
-	if err != nil || len(ch) != 1 || ch[0].JobName != "app" {
-		t.Errorf("expected fallback diff-tree to succeed with 1 change, got %v (err=%v)", ch, err)
-	}
-
-	// Git error, fallback error
-	dFallbackErr := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: bad object"), errors.New("git error")
-		},
-	})
-	ch, err = dFallbackErr.HasNomadChanges(ctx, "/repo", "head1", "head2")
-	if err != nil || ch != nil {
-		t.Errorf("expected nil changes and nil error when fallback fails, got %v (err=%v)", ch, err)
-	}
-
-	// Git error with canceled context during diff
-	dDiffCancel := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			cancelNow()
-			return nil, []byte("interrupted"), errors.New("signal: killed")
-		},
-	})
-	if _, err := dDiffCancel.HasNomadChanges(canceledCtx, "/repo", "head1", "head2"); err == nil {
-		t.Errorf("expected error on canceled ctx in diff fallback")
-	}
-
-	// Git fallback error with canceled context
-	dFallbackCancel := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "diff" {
-				return nil, nil, errors.New("diff err")
-			}
-			return nil, nil, errors.New("tree err")
-		},
-	})
-	if _, err := dFallbackCancel.HasNomadChanges(canceledCtx, "/repo", "head1", "head2"); err == nil {
-		t.Errorf("expected error on canceled ctx in diff-tree fallback")
-	}
-
-	// 8. defaultDockerExecutor & defaultComposeExecutor & runGitCommand & defaultNomadExecutor
-	_, _, _ = defaultDockerExecutor(ctx, "version")
-	_, _, _ = defaultComposeExecutor(ctx, "/nonexistent", "version")
-	_, _, _ = runGitCommand(ctx, "/nonexistent", "dummy-pat", "status")
-	execNomad := defaultNomadExecutor("http://127.0.0.1:4646", "dummy-nomad-token")
-	_, _, _ = execNomad(ctx, "version")
-	execNomadNoTok := defaultNomadExecutor("", "")
-	_, _, _ = execNomadNoTok(ctx, "version")
-	cancCtx, cancelNomad := context.WithCancel(context.Background())
-	cancelNomad()
-	_, _, _ = execNomad(cancCtx, "version")
 }
 
 func TestSyncDaemon_RemainingHelpers(t *testing.T) {
@@ -6299,170 +5741,6 @@ func TestSetupMux_PushEventsEndpoints(t *testing.T) {
 	}
 }
 
-func TestGetChangedFiles_Comprehensive(t *testing.T) {
-	ctx := context.Background()
-	d := &SyncDaemon{}
-
-	// 1. Empty heads
-	files, err := d.getChangedFiles(ctx, "/tmp", "", "sha2")
-	if err != nil || files != nil {
-		t.Errorf("expected nil files and err, got files=%v err=%v", files, err)
-	}
-	files, err = d.getChangedFiles(ctx, "/tmp", "sha1", "")
-	if err != nil || files != nil {
-		t.Errorf("expected nil files and err, got files=%v err=%v", files, err)
-	}
-	files, err = d.getChangedFiles(ctx, "/tmp", "sha1", "sha1")
-	if err != nil || files != nil {
-		t.Errorf("expected nil files and err, got files=%v err=%v", files, err)
-	}
-
-	// 2. Diff success
-	dSuccess := &SyncDaemon{
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte("file1.go\n\nfile2.hcl\n"), nil, nil
-		},
-	}
-	files, err = dSuccess.getChangedFiles(ctx, "/tmp", "sha1", "sha2")
-	if err != nil || len(files) != 2 || files[0] != "file1.go" || files[1] != "file2.hcl" {
-		t.Errorf("expected 2 files, got %v (err: %v)", files, err)
-	}
-
-	// 3. Diff fails, diff-tree fallback succeeds
-	dFallback := &SyncDaemon{
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "diff" {
-				return nil, []byte("fatal: bad object"), errors.New("diff failed")
-			}
-			if len(args) > 0 && args[0] == "diff-tree" {
-				return []byte("fallback.txt\n"), nil, nil
-			}
-			return nil, nil, nil
-		},
-	}
-	files, err = dFallback.getChangedFiles(ctx, "/tmp", "sha1", "sha2")
-	if err != nil || len(files) != 1 || files[0] != "fallback.txt" {
-		t.Errorf("expected fallback.txt, got %v (err: %v)", files, err)
-	}
-
-	// 4. Diff fails and diff-tree fallback fails
-	dFallbackFail := &SyncDaemon{
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: bad object"), errors.New("git error")
-		},
-	}
-	files, err = dFallbackFail.getChangedFiles(ctx, "/tmp", "sha1", "sha2")
-	if err == nil || files != nil {
-		t.Errorf("expected error from fallback, got nil (files: %v)", files)
-	}
-}
-
-func TestApplyNomadChangesDirectly_Comprehensive(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-
-	validJobPath := filepath.Join(tmpDir, "jobs", "test.nomad")
-	_ = os.MkdirAll(filepath.Dir(validJobPath), 0755)
-	_ = os.WriteFile(validJobPath, []byte(`job "test" {}`), 0644)
-
-	// 1. Delete action with stop error and success
-	d := &SyncDaemon{
-		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "stop" {
-				return nil, []byte("stop error"), errors.New("stop fail")
-			}
-			return []byte("ok"), nil, nil
-		},
-	}
-	applied, err := d.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
-		{Action: "delete", JobName: "deleted-job", Path: "jobs/del.nomad"},
-	})
-	if err != nil || len(applied) != 0 {
-		t.Errorf("expected nil error on delete, got applied=%v err=%v", applied, err)
-	}
-
-	// 2. Unsafe job path
-	applied, err = d.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
-		{Action: "update", JobName: "evil", Path: "../evil.nomad"},
-	})
-	if err != nil || len(applied) != 0 {
-		t.Errorf("expected ignored unsafe path, got applied=%v err=%v", applied, err)
-	}
-
-	// 3. Validation error
-	dValFail := &SyncDaemon{
-		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
-				return nil, []byte("invalid syntax"), errors.New("validate fail")
-			}
-			return []byte("ok"), nil, nil
-		},
-	}
-	applied, err = dValFail.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
-		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
-	})
-	if err == nil {
-		t.Errorf("expected validation error, got nil (applied: %v)", applied)
-	}
-
-	// 4. Run error
-	dRunFail := &SyncDaemon{
-		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-				return nil, []byte("run error"), errors.New("run fail")
-			}
-			return []byte("ok"), nil, nil
-		},
-	}
-	applied, err = dRunFail.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
-		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
-	})
-	if err == nil {
-		t.Errorf("expected run error, got nil (applied: %v)", applied)
-	}
-
-	// 5. Success
-	dSuccess := &SyncDaemon{
-		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Evaluation ID: eval-123"), nil, nil
-		},
-	}
-	applied, err = dSuccess.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
-		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
-	})
-	if err != nil || len(applied) != 1 || applied[0] != "test" {
-		t.Errorf("expected applied job [test], got %v (err: %v)", applied, err)
-	}
-
-	// 6. Metadata propagation (TargetID and PRNumber)
-	evtCh := make(chan HangarDeployEvent, 1)
-	dMeta := &SyncDaemon{
-		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Evaluation ID: eval-123"), nil, nil
-		},
-		deployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-	}
-	applied, err = dMeta.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
-		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
-	}, "azylman/aerial", "headsha123", "1555422677936644147", "123")
-	if err != nil || len(applied) != 1 || applied[0] != "test" {
-		t.Fatalf("expected applied job [test], got %v (err: %v)", applied, err)
-	}
-
-	var capturedEvt HangarDeployEvent
-	select {
-	case capturedEvt = <-evtCh:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for deploy event")
-	}
-	if capturedEvt.PRNumber != 123 || capturedEvt.TargetID != "1555422677936644147" || capturedEvt.Repo != "azylman/aerial" || capturedEvt.CommitSHA != "headsha123" {
-		t.Errorf("expected metadata propagated, got %+v", capturedEvt)
-	}
-}
-
 func TestExecutors_DirectCoverage(t *testing.T) {
 	ctx := context.Background()
 
@@ -6609,34 +5887,6 @@ job "svc" {
 	}
 }
 
-func TestHasNomadConfigChanges_ContextError(t *testing.T) {
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	d := &SyncDaemon{}
-	got, err := d.HasNomadConfigChanges(canceledCtx, "/some/path", "v1", "v2")
-	if err == nil || got {
-		t.Errorf("expected ctx error, got %v, %v", got, err)
-	}
-
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return nil, []byte("error"), errors.New("fail")
-	}
-	// Fallback path with canceled context
-	got, err = d.HasNomadConfigChanges(canceledCtx, "/some/path", "v1", "v2")
-	if err == nil || got {
-		t.Errorf("expected ctx error in fallback, got %v, %v", got, err)
-	}
-}
-
-func TestValidateNomadConfig_NilExecutor(t *testing.T) {
-	d := &SyncDaemon{}
-	err := d.ValidateNomadConfig(context.Background(), "/path")
-	if err == nil {
-		t.Errorf("expected error for nil nomad executor")
-	}
-}
-
 func TestEnsureDockerAuth_AllCases(t *testing.T) {
 	// 1. Empty PAT -> no-op nil
 	dEmpty := NewDaemon(DaemonConfig{PAT: ""})
@@ -6702,101 +5952,6 @@ func TestDaemonLoops_GracefulCancel(t *testing.T) {
 	d.StartReconcilerLoop(ctx)
 	cancel()
 	time.Sleep(50 * time.Millisecond)
-}
-
-func TestReconcileNomadChanges_SkipPurgeWhenDefinedInOtherRepo(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	repoA := filepath.Join(tempDir, "aerial-config")
-	repoB := filepath.Join(tempDir, "aerial")
-
-	jobsDirA := filepath.Join(repoA, "jobs")
-	nomadJobsDirB := filepath.Join(repoB, "nomad", "jobs")
-
-	if err := os.MkdirAll(jobsDirA, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(nomadJobsDirB, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	jobSpecBrain := `job "brain" { type = "service" }`
-	if err := os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(jobSpecBrain), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var stoppedJobs []string
-	var mu sync.Mutex
-
-	d := NewDaemon(DaemonConfig{
-		Repos:      []string{repoA, repoB},
-		ConfigDir:  repoA,
-		ComposeDir: repoB,
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			if len(args) >= 3 && args[0] == "job" && args[1] == "stop" {
-				stoppedJobs = append(stoppedJobs, args[len(args)-1])
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-
-	// Case 1: Job brain deleted in repoA, but exists in repoB -> should NOT be stopped
-	err := d.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
-		{
-			Path:    "jobs/brain.nomad",
-			Action:  "delete",
-			JobName: "brain",
-		},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	mu.Lock()
-	if len(stoppedJobs) > 0 {
-		t.Errorf("expected 0 stopped jobs for brain, got %v", stoppedJobs)
-	}
-	stoppedJobs = nil
-	mu.Unlock()
-
-	// Case 2: Job truly_deleted deleted in repoA and not in repoB -> SHOULD be stopped
-	err = d.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
-		{
-			Path:    "jobs/truly_deleted.nomad",
-			Action:  "delete",
-			JobName: "truly_deleted",
-		},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	mu.Lock()
-	if len(stoppedJobs) != 1 || stoppedJobs[0] != "truly_deleted" {
-		t.Errorf("expected truly_deleted to be stopped, got %v", stoppedJobs)
-	}
-	stoppedJobs = nil
-	mu.Unlock()
-
-	// Case 3: ExecuteNomadTeardowns with both jobs
-	pending := []NomadChangeEvent{
-		{
-			RepoPath: repoA,
-			Changes: []NomadFileChange{
-				{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
-				{Path: "jobs/old_orphan.nomad", Action: "delete", JobName: "old_orphan"},
-			},
-		},
-	}
-	d.ExecuteNomadTeardowns(ctx, pending)
-
-	mu.Lock()
-	if len(stoppedJobs) != 1 || stoppedJobs[0] != "old_orphan" {
-		t.Errorf("expected only old_orphan to be stopped in teardowns, got %v", stoppedJobs)
-	}
-	mu.Unlock()
 }
 
 func TestImageRolloutQueue_TableDriven(t *testing.T) {
@@ -7221,18 +6376,6 @@ func TestRunGitCommand_WithDir(t *testing.T) {
 	}
 }
 
-func TestDefaultNomadExecutor_AddrAndToken(t *testing.T) {
-	execNoAddrTok := defaultNomadExecutor("", "")
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _, _ = execNoAddrTok(cancelCtx, "version")
-
-	execAddrTok := defaultNomadExecutor("http://127.0.0.1:4646", "secret-token")
-	cancelCtx2, cancel2 := context.WithCancel(context.Background())
-	cancel2()
-	_, _, _ = execAddrTok(cancelCtx2, "version")
-}
-
 func TestGetDeployDispatcher_Branches(t *testing.T) {
 	var nilDaemon *SyncDaemon
 	fnNil := nilDaemon.getDeployDispatcher()
@@ -7288,66 +6431,6 @@ func TestRunGitCommand_WithPat(t *testing.T) {
 	stdout, _, err := runGitCommand(context.Background(), "", "mock-pat", "version")
 	if err != nil {
 		t.Logf("runGitCommand version: %v, stdout: %s", err, string(stdout))
-	}
-}
-
-func TestNomadChanges_CancelledContext(t *testing.T) {
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	dFail := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			cancel()
-			return nil, nil, errors.New("git fail")
-		},
-	})
-	hasCfg, errCfg := dFail.HasNomadConfigChanges(cancelCtx, "/repo", "c1", "c2")
-	if !errors.Is(errCfg, context.Canceled) || hasCfg {
-		t.Errorf("expected context.Canceled from HasNomadConfigChanges, got %v, %v", hasCfg, errCfg)
-	}
-
-	cancelCtx2, cancel2 := context.WithCancel(context.Background())
-	dFail2 := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			cancel2()
-			return nil, nil, errors.New("git fail")
-		},
-	})
-	changes, errChanges := dFail2.HasNomadChanges(cancelCtx2, "/repo", "c1", "c2")
-	if !errors.Is(errChanges, context.Canceled) || changes != nil {
-		t.Errorf("expected context.Canceled from HasNomadChanges, got %v, %v", changes, errChanges)
-	}
-}
-
-func TestNomadChanges_FallbackCancelledContext(t *testing.T) {
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	callCount := 0
-	dFail := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			callCount++
-			if callCount == 2 {
-				cancel()
-			}
-			return nil, nil, errors.New("git fail")
-		},
-	})
-	hasCfg, errCfg := dFail.HasNomadConfigChanges(cancelCtx, "/repo", "c1", "c2")
-	if !errors.Is(errCfg, context.Canceled) || hasCfg {
-		t.Errorf("expected context.Canceled from HasNomadConfigChanges fallback, got %v, %v", hasCfg, errCfg)
-	}
-
-	cancelCtx2, cancel2 := context.WithCancel(context.Background())
-	callCount2 := 0
-	dFail2 := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			callCount2++
-			if callCount2 == 2 {
-				cancel2()
-			}
-			return nil, nil, errors.New("git fail")
-		},
-	})
-	changes, errChanges := dFail2.HasNomadChanges(cancelCtx2, "/repo", "c1", "c2")
-	if !errors.Is(errChanges, context.Canceled) || changes != nil {
-		t.Errorf("expected context.Canceled from HasNomadChanges fallback, got %v, %v", changes, errChanges)
 	}
 }
 
@@ -7912,60 +6995,6 @@ func TestFetchRegistryWithAuth_TableDriven(t *testing.T) {
 	}
 }
 
-func TestIsHangarRequest_Direct(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	jobsDir := filepath.Join(tmpDir, "nomad", "jobs")
-	if err := os.MkdirAll(jobsDir, 0755); err != nil {
-		t.Fatalf("failed creating jobs dir: %v", err)
-	}
-	hangarJobHCL := `
-job "hangar" {
-  group "hangar" {
-    task "hangar" {
-      config {
-        image = "ghcr.io/custom/worker:v1"
-      }
-    }
-  }
-}
-`
-	if err := os.WriteFile(filepath.Join(jobsDir, "hangar.nomad"), []byte(hangarJobHCL), 0644); err != nil {
-		t.Fatalf("failed writing job file: %v", err)
-	}
-
-	d := &SyncDaemon{
-		repos: []string{tmpDir},
-	}
-
-	// 1. Direct hangar image match
-	if !d.isHangarRequest(ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial/hangar:latest"}) {
-		t.Fatal("expected isHangarRequest true for hangar image")
-	}
-
-	// 2. Matching nomad job that is a hangar job
-	if !d.isHangarRequest(ImageReadyEventRequest{Image: "ghcr.io/custom/worker:v1"}) {
-		t.Fatal("expected isHangarRequest true for job named hangar")
-	}
-
-	// 3. Unrelated image
-	if d.isHangarRequest(ImageReadyEventRequest{Image: "ghcr.io/custom/other:v1"}) {
-		t.Fatal("expected isHangarRequest false for unrelated image")
-	}
-}
-
-
-func TestDefaultNomadExecutor_ExtraBranches(t *testing.T) {
-	t.Parallel()
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	execFn := defaultNomadExecutor("http://127.0.0.1:4646", "dummy-secret-token")
-	_, _, _ = execFn(cancelCtx, "status")
-	_, _, _ = defaultDockerExecutor(cancelCtx, "version")
-	_, _, _ = defaultComposeExecutor(cancelCtx, "", "version")
-	_, _, _ = runGitCommand(cancelCtx, "", "", "version")
-}
-
 func TestCoverageFlushEndpoint(t *testing.T) {
 	mux := SetupMux(&SyncDaemon{})
 	ts := httptest.NewServer(mux)
@@ -8031,47 +7060,864 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	}
 }
 
+func TestNomadChangeDetection_TableDriven(t *testing.T) {
 
+	t.Run("HasNomadConfigChanges_table", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			repo        string
+			prev        string
+			curr        string
+			cancelEarly bool
+			gitExec     GitExecutor
+			wantChanged bool
+			wantErr     bool
+		}{
+			{name: "pre-canceled context returns error", repo: "/path", prev: "v1", curr: "v2", cancelEarly: true, wantErr: true},
+			{name: "empty repo path", repo: "", prev: "v1", curr: "v2"},
+			{name: "empty prev head", repo: "/path", prev: "", curr: "v2"},
+			{name: "empty curr head", repo: "/path", prev: "v1", curr: ""},
+			{name: "identical heads", repo: "/path", prev: "v1", curr: "v1"},
+			{
+				name: "diff detects nomad config change",
+				repo: "/path", prev: "v1", curr: "v2",
+				gitExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("nomad/nomad.hcl\nmain.go\n"), nil, nil
+				},
+				wantChanged: true,
+			},
+			{
+				name: "diff detects no nomad config change",
+				repo: "/path", prev: "v1", curr: "v2",
+				gitExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("README.md\ndocker-compose.yml\n"), nil, nil
+				},
+			},
+			{
+				name: "diff fails and fallback diff-tree succeeds with config changes",
+				repo: "/path", prev: "v1", curr: "v2",
+				gitExec: func() GitExecutor {
+					call := 0
+					return func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						call++
+						if call == 1 {
+							return nil, []byte("fatal: ambiguous"), errors.New("diff failed")
+						}
+						return []byte("nomad/client.hcl\n"), nil, nil
+					}
+				}(),
+				wantChanged: true,
+			},
+			{
+				name: "diff fails and fallback fails with normal error (fail-safe false)",
+				repo: "/path", prev: "v1", curr: "v2",
+				gitExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("fatal: repo corrupt"), errors.New("git fail")
+				},
+			},
+		}
 
-func TestReconcilePendingNomad_PipesPRMetadata(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tmpDir, "bot.nomad"), []byte(`job "bot" {}`), 0644)
-
-	evtCh := make(chan HangarDeployEvent, 10)
-
-	d := NewDaemon(DaemonConfig{
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte("Evaluation ID: run-bot"), nil, nil
-		},
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if tc.cancelEarly {
+					cancel()
+				}
+				d := &SyncDaemon{gitExecutor: tc.gitExec}
+				got, err := d.HasNomadConfigChanges(ctx, tc.repo, tc.prev, tc.curr)
+				if (err != nil) != tc.wantErr || got != tc.wantChanged {
+					t.Fatalf("HasNomadConfigChanges() = (%v, %v), want (%v, wantErr:%v)", got, err, tc.wantChanged, tc.wantErr)
+				}
+			})
+		}
 	})
 
-	d.recordPendingNomadChanges(tmpDir, []NomadFileChange{
-		{
-			Path:    "bot.nomad",
-			Action:  "apply",
-			JobName: "bot",
-		},
-	}, "azylman/aerial", "sha-pending-123", "thread-777", "616")
-
-	if err := d.ReconcilePendingNomad(ctx); err != nil {
-		t.Fatalf("ReconcilePendingNomad failed: %v", err)
-	}
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "deploy_started" {
-			t.Errorf("expected deploy_started, got %q", evt.Event)
+	t.Run("HasNomadConfigChanges_context_cancellation_paths", func(t *testing.T) {
+		// 1. Context canceled during primary git diff
+		ctx1, cancel1 := context.WithCancel(context.Background())
+		d1 := &SyncDaemon{
+			gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				cancel1()
+				return nil, []byte("interrupted"), errors.New("signal: killed")
+			},
 		}
-		if evt.Repo != "azylman/aerial" || evt.CommitSHA != "sha-pending-123" || evt.PRNumber != 616 || evt.TargetID != "thread-777" {
-			t.Errorf("expected PR provenance in deploy_started, got %+v", evt)
+		if got, err := d1.HasNomadConfigChanges(ctx1, "/repo", "c1", "c2"); !errors.Is(err, context.Canceled) || got {
+			t.Fatalf("expected context.Canceled during primary diff, got (%v, %v)", got, err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for deploy_started from ReconcilePendingNomad")
-	}
+
+		// 2. Context canceled during fallback diff-tree
+		ctx2, cancel2 := context.WithCancel(context.Background())
+		calls2 := 0
+		d2 := &SyncDaemon{
+			gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				calls2++
+				if calls2 == 1 {
+					return nil, []byte("primary failed"), errors.New("diff failed")
+				}
+				cancel2()
+				return nil, []byte("fallback interrupted"), errors.New("signal: killed")
+			},
+		}
+		if got, err := d2.HasNomadConfigChanges(ctx2, "/repo", "c1", "c2"); !errors.Is(err, context.Canceled) || got {
+			t.Fatalf("expected context.Canceled during fallback diff-tree, got (%v, %v)", got, err)
+		}
+	})
+
+	t.Run("HasNomadChanges_table", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			repo        string
+			prev        string
+			curr        string
+			cancelEarly bool
+			gitExec     GitExecutor
+			wantCount   int
+			wantErr     bool
+		}{
+			{name: "pre-canceled context returns error", repo: "/repo", prev: "a", curr: "b", cancelEarly: true, wantErr: true},
+			{name: "empty repo path", repo: "", prev: "a", curr: "b"},
+			{name: "empty prev head", repo: "/repo", prev: "", curr: "b"},
+			{name: "empty curr head", repo: "/repo", prev: "a", curr: ""},
+			{name: "identical heads", repo: "/repo", prev: "a", curr: "a"},
+			{
+				name: "git diff success with multiple changes",
+				repo: "/share/aerial-config", prev: "HEAD~1", curr: "HEAD",
+				gitExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("M\tjobs/infisical.nomad\nD\tjobs/legacy.nomad\nM\tdocker-compose.yml\n"), nil, nil
+				},
+				wantCount: 2,
+			},
+			{
+				name: "git diff fails, fallback diff-tree succeeds",
+				repo: "/repo", prev: "head1", curr: "head2",
+				gitExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					if len(args) > 0 && args[0] == "diff" {
+						return nil, []byte("fatal: ambiguous"), errors.New("diff error")
+					}
+					return []byte("M\tjobs/app.nomad\n"), nil, nil
+				},
+				wantCount: 1,
+			},
+			{
+				name: "git diff fails, fallback diff-tree fails (fail-safe nil)",
+				repo: "/repo", prev: "head1", curr: "head2",
+				gitExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("fatal: bad object"), errors.New("git error")
+				},
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if tc.cancelEarly {
+					cancel()
+				}
+				d := &SyncDaemon{gitExecutor: tc.gitExec}
+				changes, err := d.HasNomadChanges(ctx, tc.repo, tc.prev, tc.curr)
+				if (err != nil) != tc.wantErr || len(changes) != tc.wantCount {
+					t.Fatalf("HasNomadChanges() = (%v, %v), want (count:%d, wantErr:%v)", changes, err, tc.wantCount, tc.wantErr)
+				}
+			})
+		}
+	})
+
+	t.Run("HasNomadChanges_context_cancellation_paths", func(t *testing.T) {
+		// 1. Context canceled during primary git diff
+		ctx1, cancel1 := context.WithCancel(context.Background())
+		d1 := &SyncDaemon{
+			gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				cancel1()
+				return nil, []byte("interrupted"), errors.New("signal: killed")
+			},
+		}
+		if ch, err := d1.HasNomadChanges(ctx1, "/repo", "c1", "c2"); !errors.Is(err, context.Canceled) || ch != nil {
+			t.Fatalf("expected context.Canceled during primary diff, got (%v, %v)", ch, err)
+		}
+
+		// 2. Context canceled during fallback diff-tree
+		ctx2, cancel2 := context.WithCancel(context.Background())
+		calls2 := 0
+		d2 := &SyncDaemon{
+			gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				calls2++
+				if calls2 == 1 {
+					return nil, []byte("diff err"), errors.New("diff err")
+				}
+				cancel2()
+				return nil, []byte("fallback interrupted"), errors.New("signal: killed")
+			},
+		}
+		if ch, err := d2.HasNomadChanges(ctx2, "/repo", "c1", "c2"); !errors.Is(err, context.Canceled) || ch != nil {
+			t.Fatalf("expected context.Canceled during fallback diff-tree, got (%v, %v)", ch, err)
+		}
+	})
+
+	t.Run("getChangedFiles_branches", func(t *testing.T) {
+		ctx := context.Background()
+		d := &SyncDaemon{}
+
+		for _, heads := range [][2]string{{"", "sha2"}, {"sha1", ""}, {"sha1", "sha1"}} {
+			files, err := d.getChangedFiles(ctx, "/tmp", heads[0], heads[1])
+			if err != nil || files != nil {
+				t.Fatalf("expected nil for heads %v, got (%v, %v)", heads, files, err)
+			}
+		}
+
+		dSuccess := &SyncDaemon{
+			gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return []byte("file1.go\n\nfile2.hcl\n"), nil, nil
+			},
+		}
+		if files, err := dSuccess.getChangedFiles(ctx, "/tmp", "sha1", "sha2"); err != nil || len(files) != 2 || files[0] != "file1.go" || files[1] != "file2.hcl" {
+			t.Fatalf("unexpected files from diff: %v, %v", files, err)
+		}
+
+		dFallback := &SyncDaemon{
+			gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "diff" {
+					return nil, []byte("bad"), errors.New("fail")
+				}
+				return []byte("fallback.txt\n"), nil, nil
+			},
+		}
+		if files, err := dFallback.getChangedFiles(ctx, "/tmp", "sha1", "sha2"); err != nil || len(files) != 1 || files[0] != "fallback.txt" {
+			t.Fatalf("unexpected files from fallback: %v, %v", files, err)
+		}
+
+		dFallbackFail := &SyncDaemon{
+			gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return nil, []byte("bad"), errors.New("fail")
+			},
+		}
+		if files, err := dFallbackFail.getChangedFiles(ctx, "/tmp", "sha1", "sha2"); err == nil || files != nil {
+			t.Fatalf("expected error from fallback failure, got (%v, %v)", files, err)
+		}
+	})
+
+	t.Run("ParseNomadGitStatus_whitespace_and_entries", func(t *testing.T) {
+		changes := ParseNomadGitStatus("\n\n   \n\t\nM jobs/app.nomad\nD jobs/old.nomad\n")
+		if len(changes) != 2 || changes[0].JobName != "app" || changes[0].Action != "apply" || changes[1].JobName != "old" || changes[1].Action != "delete" {
+			t.Fatalf("unexpected ParseNomadGitStatus result: %+v", changes)
+		}
+	})
 }
 
+func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
+
+	t.Run("defaultNomadExecutor_and_accessors", func(t *testing.T) {
+		ctx := context.Background()
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		// 1. defaultNomadExecutor: with and without addr/token (normal + canceled context)
+		for _, cfg := range [][2]string{{"", ""}, {"http://127.0.0.1:4646", "secret-token"}} {
+			fn := defaultNomadExecutor(cfg[0], cfg[1])
+			_, _, _ = fn(ctx, "version")
+			_, _, _ = fn(cancelCtx, "version")
+		}
+
+		// Additional pre-canceled coverage for default executors
+		_, _, _ = defaultDockerExecutor(cancelCtx, "version")
+		_, _, _ = defaultComposeExecutor(cancelCtx, "", "version")
+		_, _, _ = runGitCommand(cancelCtx, "", "", "version")
+
+		// 2. getNomadExecutor on nil, default, and custom daemon
+		var nilDaemon *SyncDaemon
+		if nilDaemon.getNomadExecutor() == nil {
+			t.Fatal("expected non-nil executor from nil daemon")
+		}
+		dDefault := &SyncDaemon{nomadAddr: "http://localhost:4646", nomadToken: "tok"}
+		if dDefault.getNomadExecutor() == nil {
+			t.Fatal("expected non-nil executor from default daemon")
+		}
+		customCalled := false
+		dCustom := &SyncDaemon{
+			nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				customCalled = true
+				return []byte("custom"), nil, nil
+			},
+		}
+		if out, _, err := dCustom.getNomadExecutor()(ctx, "test"); err != nil || !customCalled || string(out) != "custom" {
+			t.Fatalf("expected custom executor invocation, got out=%s customCalled=%v err=%v", string(out), customCalled, err)
+		}
+	})
+
+	t.Run("ValidateNomadConfig_table", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			nomadExec NomadExecutor
+			wantErr   bool
+		}{
+			{name: "nil executor returns error", nomadExec: nil, wantErr: true},
+			{
+				name: "validation success",
+				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					return []byte("Configuration is valid!\n"), nil, nil
+				},
+			},
+			{
+				name: "validation failure",
+				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("syntax error"), errors.New("exit 1")
+				},
+				wantErr: true,
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				d := &SyncDaemon{nomadExecutor: tc.nomadExec}
+				if err := d.ValidateNomadConfig(context.Background(), "/tmp/nomad"); (err != nil) != tc.wantErr {
+					t.Fatalf("ValidateNomadConfig() error = %v, wantErr %v", err, tc.wantErr)
+				}
+			})
+		}
+	})
+
+	t.Run("reconcileNomadServer_table", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dNoop := &SyncDaemon{}
+		if err := dNoop.reconcileNomadServer(context.Background(), tmpDir); err != nil {
+			t.Fatalf("expected nil for missing nomad dir: %v", err)
+		}
+
+		nomadDir := filepath.Join(tmpDir, "nomad")
+		if err := os.MkdirAll(nomadDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		tests := []struct {
+			name         string
+			valExec      NomadExecutor
+			composeExec  ComposeExecutor
+			wantErr      bool
+			expectCalled bool
+		}{
+			{
+				name: "validation failure aborts compose restart",
+				valExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("syntax error"), errors.New("val fail")
+				},
+				composeExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("restarted"), nil, nil
+				},
+				wantErr:      true,
+				expectCalled: false,
+			},
+			{
+				name: "validation success and restart success",
+				valExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					return []byte("valid"), nil, nil
+				},
+				composeExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("restarted"), nil, nil
+				},
+				wantErr:      false,
+				expectCalled: true,
+			},
+			{
+				name: "validation success and restart failure",
+				valExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					return []byte("valid"), nil, nil
+				},
+				composeExec: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("compose down"), errors.New("compose fail")
+				},
+				wantErr:      true,
+				expectCalled: true,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				called := false
+				d := &SyncDaemon{
+					nomadExecutor: tc.valExec,
+					composeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						called = true
+						return tc.composeExec(ctx, dir, args...)
+					},
+				}
+				err := d.reconcileNomadServer(context.Background(), tmpDir)
+				if (err != nil) != tc.wantErr || called != tc.expectCalled {
+					t.Fatalf("reconcileNomadServer() err=%v (wantErr:%v), restartCalled=%v (expectCalled:%v)", err, tc.wantErr, called, tc.expectCalled)
+				}
+			})
+		}
+	})
+
+	t.Run("PendingNomadServerRestart_lifecycle", func(t *testing.T) {
+		var nilDaemon *SyncDaemon
+		nilDaemon.recordPendingNomadServerRestart()
+		if nilDaemon.consumePendingNomadServerRestart() {
+			t.Fatal("expected false for nil daemon")
+		}
+
+		d := &SyncDaemon{}
+		if d.consumePendingNomadServerRestart() {
+			t.Fatal("expected false initially")
+		}
+		d.recordPendingNomadServerRestart()
+		if !d.consumePendingNomadServerRestart() {
+			t.Fatal("expected true after recording restart")
+		}
+		if d.consumePendingNomadServerRestart() {
+			t.Fatal("expected false on second consume")
+		}
+	})
+
+	t.Run("IsHangarRequest_table", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		jobsDir := filepath.Join(tmpDir, "nomad", "jobs")
+		if err := os.MkdirAll(jobsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		hcl := `job "hangar" { group "g" { task "t" { config { image = "ghcr.io/custom/worker:v1" } } } }`
+		if err := os.WriteFile(filepath.Join(jobsDir, "hangar.nomad"), []byte(hcl), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		d := &SyncDaemon{repos: []string{tmpDir}}
+		tests := []struct {
+			image string
+			want  bool
+		}{
+			{"ghcr.io/azylman/aerial/hangar:latest", true},
+			{"ghcr.io/custom/worker:v1", true},
+			{"ghcr.io/custom/other:v1", false},
+		}
+		for _, tc := range tests {
+			if got := d.isHangarRequest(ImageReadyEventRequest{Image: tc.image}); got != tc.want {
+				t.Fatalf("isHangarRequest(%q) = %v, want %v", tc.image, got, tc.want)
+			}
+		}
+	})
+}
+
+func TestNomadJobReconciliation_TableDriven(t *testing.T) {
+
+	t.Run("ReconcileNomadJobs_alias", func(t *testing.T) {
+		d := &SyncDaemon{}
+		_ = d.ReconcileNomadJobs(context.Background(), t.TempDir(), nil)
+	})
+
+	t.Run("ValidateNomadJob_hermetic", func(t *testing.T) {
+		ctx := context.Background()
+		tmpDir := t.TempDir()
+		jobFile := filepath.Join(tmpDir, "test.nomad")
+		if err := os.WriteFile(jobFile, []byte(`job "test" {}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		dSuccess := NewDaemon(DaemonConfig{
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				return []byte("Job validation successful\n"), nil, nil
+			},
+		})
+		if err := dSuccess.ValidateNomadJob(ctx, jobFile); err != nil {
+			t.Fatalf("expected ValidateNomadJob success: %v", err)
+		}
+
+		dFail := NewDaemon(DaemonConfig{
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				return nil, []byte("syntax error"), errors.New("exit 1")
+			},
+		})
+		if err := dFail.ValidateNomadJob(ctx, filepath.Join(tmpDir, "invalid.nomad")); err == nil {
+			t.Fatal("expected ValidateNomadJob error, got nil")
+		}
+	})
+
+	t.Run("applyNomadChangesDirectly_branches", func(t *testing.T) {
+		ctx := context.Background()
+		tmpDir := t.TempDir()
+		validJobPath := filepath.Join(tmpDir, "jobs", "test.nomad")
+		if err := os.MkdirAll(filepath.Dir(validJobPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(validJobPath, []byte(`job "test" {}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		tests := []struct {
+			name        string
+			changes     []NomadFileChange
+			nomadExec   NomadExecutor
+			wantApplied []string
+			wantErr     bool
+		}{
+			{
+				name:    "delete action with stop error and success",
+				changes: []NomadFileChange{{Action: "delete", JobName: "del", Path: "jobs/del.nomad"}},
+				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("stop error"), errors.New("stop fail")
+				},
+				wantApplied: nil,
+			},
+			{
+				name:        "unsafe job path is ignored",
+				changes:     []NomadFileChange{{Action: "update", JobName: "evil", Path: "../evil.nomad"}},
+				wantApplied: nil,
+			},
+			{
+				name:    "validation error returns error",
+				changes: []NomadFileChange{{Action: "update", JobName: "test", Path: "jobs/test.nomad"}},
+				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+						return nil, []byte("invalid"), errors.New("val fail")
+					}
+					return []byte("ok"), nil, nil
+				},
+				wantErr: true,
+			},
+			{
+				name:    "run error returns error",
+				changes: []NomadFileChange{{Action: "update", JobName: "test", Path: "jobs/test.nomad"}},
+				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+						return nil, []byte("run error"), errors.New("run fail")
+					}
+					return []byte("ok"), nil, nil
+				},
+				wantErr: true,
+			},
+			{
+				name:    "success applies job",
+				changes: []NomadFileChange{{Action: "update", JobName: "test", Path: "jobs/test.nomad"}},
+				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					return []byte("Evaluation ID: eval-123"), nil, nil
+				},
+				wantApplied: []string{"test"},
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				d := &SyncDaemon{nomadExecutor: tc.nomadExec}
+				applied, err := d.applyNomadChangesDirectly(ctx, tmpDir, tc.changes)
+				if (err != nil) != tc.wantErr || len(applied) != len(tc.wantApplied) {
+					t.Fatalf("applyNomadChangesDirectly() = (%v, %v), want (%v, wantErr:%v)", applied, err, tc.wantApplied, tc.wantErr)
+				}
+			})
+		}
+
+		// Metadata propagation branch
+		evtCh := make(chan HangarDeployEvent, 1)
+		dMeta := &SyncDaemon{
+			nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				return []byte("Evaluation ID: eval-123"), nil, nil
+			},
+			deployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+				evtCh <- evt
+				return nil
+			},
+		}
+		applied, err := dMeta.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
+			{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
+		}, "azylman/aerial", "headsha123", "1555422677936644147", "123")
+		if err != nil || len(applied) != 1 || applied[0] != "test" {
+			t.Fatalf("applyNomadChangesDirectly with metadata failed: %v, %v", applied, err)
+		}
+		select {
+		case evt := <-evtCh:
+			if evt.PRNumber != 123 || evt.TargetID != "1555422677936644147" || evt.Repo != "azylman/aerial" || evt.CommitSHA != "headsha123" {
+				t.Fatalf("unexpected metadata: %+v", evt)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for deploy event")
+		}
+	})
+
+	t.Run("ReconcileNomadChanges_teardown_order_and_cases", func(t *testing.T) {
+		ctx := context.Background()
+		tmpDir := t.TempDir()
+		jobsDir := filepath.Join(tmpDir, "jobs")
+		if err := os.MkdirAll(jobsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		validJobFile := filepath.Join(jobsDir, "valid.nomad")
+		_ = os.WriteFile(validJobFile, []byte(`job "valid" {}`), 0644)
+		invalidJobFile := filepath.Join(jobsDir, "invalid.nomad")
+		_ = os.WriteFile(invalidJobFile, []byte(`job "invalid" {}`), 0644)
+		runFailJobFile := filepath.Join(jobsDir, "runfail.nomad")
+		_ = os.WriteFile(runFailJobFile, []byte(`job "runfail" {}`), 0644)
+
+		var executedCalls [][]string
+		var mu sync.Mutex
+		dReconcile := NewDaemon(DaemonConfig{
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				mu.Lock()
+				executedCalls = append(executedCalls, args)
+				mu.Unlock()
+				if len(args) >= 3 && args[0] == "job" && args[1] == "validate" {
+					if strings.Contains(args[2], "invalid.nomad") {
+						return nil, []byte("invalid HCL"), errors.New("val error")
+					}
+					return []byte("valid"), nil, nil
+				}
+				if len(args) >= 4 && args[0] == "job" && args[1] == "run" {
+					if strings.Contains(args[3], "runfail.nomad") {
+						return []byte("fail"), []byte("alloc failed"), errors.New("run error")
+					}
+					return []byte("Evaluation ID: 12345"), nil, nil
+				}
+				if len(args) >= 4 && args[0] == "job" && args[1] == "stop" {
+					if args[3] == "stop-fail" {
+						return nil, []byte("stop fail"), errors.New("stop error")
+					}
+					return []byte("stopped"), nil, nil
+				}
+				return nil, nil, nil
+			},
+		})
+
+		// Empty changes
+		if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, nil); err != nil {
+			t.Fatalf("expected nil for empty changes: %v", err)
+		}
+
+		// Delete change (success & failure branch)
+		_ = dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
+			{JobName: "stop-ok", Action: "delete"},
+			{JobName: "stop-fail", Action: "delete"},
+		})
+
+		// Apply change missing from disk (notice)
+		_ = dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
+			{JobName: "missing", Path: "jobs/missing.nomad", Action: "apply"},
+		})
+
+		// Apply change validation failure
+		if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
+			{JobName: "invalid", Path: "jobs/invalid.nomad", Action: "apply"},
+		}); err == nil {
+			t.Fatal("expected validation error for invalid.nomad")
+		}
+
+		// Apply change run failure
+		if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
+			{JobName: "runfail", Path: "jobs/runfail.nomad", Action: "apply"},
+		}); err == nil {
+			t.Fatal("expected run error for runfail.nomad")
+		}
+
+		// Combined apply and delete: verify stop runs before run (teardown first)
+		mu.Lock()
+		executedCalls = nil
+		mu.Unlock()
+
+		changes := []NomadFileChange{
+			{Path: "jobs/valid.nomad", Action: "apply", JobName: "valid"},
+			{Path: "jobs/old.nomad", Action: "delete", JobName: "old-job"},
+		}
+		if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, changes); err != nil {
+			t.Fatalf("expected ReconcileNomadChanges success: %v", err)
+		}
+
+		mu.Lock()
+		var foundStop, foundRun bool
+		var stopIdx, runIdx int
+		for idx, call := range executedCalls {
+			if len(call) >= 4 && call[0] == "job" && call[1] == "stop" && call[3] == "old-job" {
+				foundStop = true
+				stopIdx = idx
+			}
+			if len(call) >= 4 && call[0] == "job" && call[1] == "run" && strings.HasSuffix(call[3], "valid.nomad") {
+				foundRun = true
+				runIdx = idx
+			}
+		}
+		mu.Unlock()
+
+		if !foundStop || !foundRun || stopIdx > runIdx {
+			t.Fatalf("expected teardown before run, stopIdx=%d, runIdx=%d, stop=%v, run=%v", stopIdx, runIdx, foundStop, foundRun)
+		}
+	})
+
+	t.Run("ExecuteNomadTeardowns_and_cross_repo_purge_protection", func(t *testing.T) {
+		ctx := context.Background()
+		dBasic := NewDaemon(DaemonConfig{})
+		dBasic.ExecuteNomadTeardowns(ctx, nil)
+
+		var stoppedJobs []string
+		var mu sync.Mutex
+		dTeardown := NewDaemon(DaemonConfig{
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if len(args) >= 4 && args[0] == "job" && args[1] == "stop" {
+					stoppedJobs = append(stoppedJobs, args[3])
+					if args[3] == "fail-job" {
+						return []byte("err-out"), []byte("err-bytes"), errors.New("stop error")
+					}
+					return []byte("ok"), nil, nil
+				}
+				return nil, nil, nil
+			},
+		})
+		dTeardown.ExecuteNomadTeardowns(ctx, []NomadChangeEvent{
+			{
+				RepoPath: "/repo",
+				Changes: []NomadFileChange{
+					{JobName: "normal-job", Action: "delete"},
+					{JobName: "fail-job", Action: "delete"},
+					{JobName: "apply-job", Action: "apply"},
+				},
+			},
+		})
+		mu.Lock()
+		if len(stoppedJobs) != 2 {
+			t.Fatalf("expected 2 jobs stopped, got %v", stoppedJobs)
+		}
+		mu.Unlock()
+
+		// Cross-repo purge protection (SkipPurgeWhenDefinedInOtherRepo)
+		tempDir := t.TempDir()
+		repoA := filepath.Join(tempDir, "aerial-config")
+		repoB := filepath.Join(tempDir, "aerial")
+		jobsDirA := filepath.Join(repoA, "jobs")
+		nomadJobsDirB := filepath.Join(repoB, "nomad", "jobs")
+		if err := os.MkdirAll(jobsDirA, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(nomadJobsDirB, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(`job "brain" {}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		mu.Lock()
+		stoppedJobs = nil
+		mu.Unlock()
+
+		dCross := NewDaemon(DaemonConfig{
+			Repos:      []string{repoA, repoB},
+			ConfigDir:  repoA,
+			ComposeDir: repoB,
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if len(args) >= 3 && args[0] == "job" && args[1] == "stop" {
+					stoppedJobs = append(stoppedJobs, args[len(args)-1])
+				}
+				return []byte("OK"), nil, nil
+			},
+		})
+
+		// Job brain deleted in repoA, but exists in repoB -> should NOT be stopped
+		if err := dCross.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
+			{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		mu.Lock()
+		if len(stoppedJobs) > 0 {
+			t.Fatalf("expected 0 stopped jobs for brain, got %v", stoppedJobs)
+		}
+		stoppedJobs = nil
+		mu.Unlock()
+
+		// Job truly_deleted deleted in repoA and not in repoB -> SHOULD be stopped
+		if err := dCross.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
+			{Path: "jobs/truly_deleted.nomad", Action: "delete", JobName: "truly_deleted"},
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		mu.Lock()
+		if len(stoppedJobs) != 1 || stoppedJobs[0] != "truly_deleted" {
+			t.Fatalf("expected truly_deleted to be stopped, got %v", stoppedJobs)
+		}
+		stoppedJobs = nil
+		mu.Unlock()
+
+		// ExecuteNomadTeardowns with both jobs
+		dCross.ExecuteNomadTeardowns(ctx, []NomadChangeEvent{
+			{
+				RepoPath: repoA,
+				Changes: []NomadFileChange{
+					{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
+					{Path: "jobs/old_orphan.nomad", Action: "delete", JobName: "old_orphan"},
+				},
+			},
+		})
+		mu.Lock()
+		if len(stoppedJobs) != 1 || stoppedJobs[0] != "old_orphan" {
+			t.Fatalf("expected only old_orphan stopped in teardowns, got %v", stoppedJobs)
+		}
+		mu.Unlock()
+	})
+
+	t.Run("ReconcilePendingNomad_table", func(t *testing.T) {
+		ctx := context.Background()
+
+		// 1. Empty queue
+		dEmpty := NewDaemon(DaemonConfig{})
+		if err := dEmpty.ReconcilePendingNomad(ctx); err != nil {
+			t.Fatalf("expected nil for empty queue, got %v", err)
+		}
+
+		// 2. Pending nomad change recording and draining
+		if len(dEmpty.drainPendingNomadChanges()) != 0 {
+			t.Fatal("expected empty pending changes initially")
+		}
+		dEmpty.recordPendingNomadChanges("/repo/a", []NomadFileChange{
+			{JobName: "job-a", Path: "jobs/job-a.nomad", Action: "apply"},
+		})
+		dEmpty.recordPendingNomadChanges("/repo/b", []NomadFileChange{
+			{JobName: "job-b", Path: "jobs/job-b.nomad", Action: "delete"},
+		})
+		if drained := dEmpty.drainPendingNomadChanges(); len(drained) != 2 || len(dEmpty.drainPendingNomadChanges()) != 0 {
+			t.Fatalf("unexpected drain result: len=%d", len(drained))
+		}
+
+		// 3. Valid pending job with PR metadata
+		tmpDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(tmpDir, "bot.nomad"), []byte(`job "bot" {}`), 0644)
+		evtCh := make(chan HangarDeployEvent, 10)
+		dMeta := NewDaemon(DaemonConfig{
+			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+				evtCh <- evt
+				return nil
+			},
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				return []byte("Evaluation ID: run-bot"), nil, nil
+			},
+		})
+		dMeta.recordPendingNomadChanges(tmpDir, []NomadFileChange{
+			{Path: "bot.nomad", Action: "apply", JobName: "bot"},
+		}, "azylman/aerial", "sha-pending-123", "thread-777", "616")
+
+		if err := dMeta.ReconcilePendingNomad(ctx); err != nil {
+			t.Fatalf("ReconcilePendingNomad failed: %v", err)
+		}
+		select {
+		case evt := <-evtCh:
+			if evt.Event != "deploy_started" || evt.Repo != "azylman/aerial" || evt.CommitSHA != "sha-pending-123" || evt.PRNumber != 616 || evt.TargetID != "thread-777" {
+				t.Fatalf("expected PR provenance in deploy_started, got %+v", evt)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for deploy_started")
+		}
+
+		// 4. Pending job fails validation (error aggregation)
+		invalidDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(invalidDir, "invalid.nomad"), []byte(`job "invalid" {}`), 0644)
+		dFailVal := NewDaemon(DaemonConfig{
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 3 && args[0] == "job" && args[1] == "validate" {
+					return nil, []byte("syntax error"), errors.New("val fail")
+				}
+				return []byte("ok"), nil, nil
+			},
+		})
+		dFailVal.recordPendingNomadChanges(invalidDir, []NomadFileChange{
+			{Path: "invalid.nomad", Action: "apply", JobName: "invalid"},
+		})
+		if err := dFailVal.ReconcilePendingNomad(ctx); err == nil {
+			t.Fatal("expected error aggregation when pending nomad job fails validation, got nil")
+		}
+	})
+}
