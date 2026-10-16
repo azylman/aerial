@@ -5891,456 +5891,457 @@ func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
 	}
 }
 
-func TestResolveBotRoleIDs(t *testing.T) {
-	t.Parallel()
-	// Nil session/state safety
-	if roles := ResolveBotRoleIDs(nil, "guild-1", "bot-1"); roles != nil {
-		t.Errorf("Expected nil for nil session, got %v", roles)
-	}
+func TestResolveBotRoleIDsSuite(t *testing.T) {
+	origFetcher := guildMemberFetcher
+	defer func() { guildMemberFetcher = origFetcher }()
 
-	s := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-	s.State.User = &discordgo.User{
-		ID:       "bot-1",
-		Username: "Aerial",
-	}
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "NilSessionAndStateResolution",
+			run: func(t *testing.T) {
+				if roles := ResolveBotRoleIDs(nil, "guild-suite-1", "bot-suite-1"); roles != nil {
+					t.Errorf("Expected nil for nil session, got %v", roles)
+				}
 
-	guild := &discordgo.Guild{
-		ID: "guild-1",
-		Roles: []*discordgo.Role{
-			{ID: "role-aerial-managed", Name: "Aerial", Managed: true},
-			{ID: "role-gundam-alt", Name: "Gundam"},
-			{ID: "role-unrelated", Name: "Member"},
+				s := &discordgo.Session{
+					State: discordgo.NewState(),
+				}
+				s.State.User = &discordgo.User{
+					ID:       "bot-suite-1",
+					Username: "Aerial",
+				}
+
+				guild := &discordgo.Guild{
+					ID: "guild-suite-1",
+					Roles: []*discordgo.Role{
+						{ID: "role-aerial-managed", Name: "Aerial", Managed: true},
+						{ID: "role-gundam-alt", Name: "Gundam"},
+						{ID: "role-unrelated", Name: "Member"},
+					},
+					Members: []*discordgo.Member{
+						{
+							User:  &discordgo.User{ID: "bot-suite-1"},
+							Roles: []string{"role-assigned-1"},
+						},
+					},
+				}
+				_ = s.State.GuildAdd(guild)
+
+				roles := ResolveBotRoleIDs(s, "guild-suite-1", "bot-suite-1")
+				expected := []string{"role-aerial-managed", "role-assigned-1", "role-gundam-alt"}
+				sort.Strings(roles)
+				sort.Strings(expected)
+				if strings.Join(roles, ",") != strings.Join(expected, ",") {
+					t.Errorf("Expected roles %v, got %v", expected, roles)
+				}
+			},
 		},
-		Members: []*discordgo.Member{
-			{
-				User:  &discordgo.User{ID: "bot-1"},
-				Roles: []string{"role-assigned-1"},
+		{
+			name: "RESTFallbackAndCaching",
+			run: func(t *testing.T) {
+				var fetchCalls int32
+				guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
+					atomic.AddInt32(&fetchCalls, 1)
+					if guildID == "guild-suite-rest" && userID == "bot-suite-rest" {
+						return &discordgo.Member{
+							GuildID: guildID,
+							User:    &discordgo.User{ID: userID},
+							Roles:   []string{"mock-role-robot-123"},
+						}, nil
+					}
+					return nil, errors.New("not found")
+				}
+
+				s := &discordgo.Session{
+					State: discordgo.NewState(),
+				}
+				s.State.User = &discordgo.User{
+					ID:       "bot-suite-rest",
+					Username: "Aerial",
+				}
+
+				guild := &discordgo.Guild{
+					ID: "guild-suite-rest",
+					Roles: []*discordgo.Role{
+						{ID: "role-aerial-managed", Name: "Aerial", Managed: true},
+					},
+				}
+				_ = s.State.GuildAdd(guild)
+
+				roles := ResolveBotRoleIDs(s, "guild-suite-rest", "bot-suite-rest")
+				expected := []string{"mock-role-robot-123", "role-aerial-managed"}
+				sort.Strings(roles)
+				sort.Strings(expected)
+				if strings.Join(roles, ",") != strings.Join(expected, ",") {
+					t.Fatalf("First call expected %v, got %v", expected, roles)
+				}
+				if atomic.LoadInt32(&fetchCalls) != 1 {
+					t.Fatalf("Expected 1 fetch call, got %d", atomic.LoadInt32(&fetchCalls))
+				}
+
+				roles2 := ResolveBotRoleIDs(s, "guild-suite-rest", "bot-suite-rest")
+				sort.Strings(roles2)
+				if strings.Join(roles2, ",") != strings.Join(expected, ",") {
+					t.Fatalf("Second call expected %v, got %v", expected, roles2)
+				}
+				if atomic.LoadInt32(&fetchCalls) != 1 {
+					t.Fatalf("Expected fetcher not to be called again (cache hit), but fetchCalls=%d", atomic.LoadInt32(&fetchCalls))
+				}
+			},
+		},
+		{
+			name: "SingleflightDeduplication",
+			run: func(t *testing.T) {
+				var fetchCalls int32
+				blockCh := make(chan struct{})
+				guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
+					atomic.AddInt32(&fetchCalls, 1)
+					<-blockCh
+					return &discordgo.Member{
+						GuildID: guildID,
+						User:    &discordgo.User{ID: userID},
+						Roles:   []string{"mock-role-robot-123"},
+					}, nil
+				}
+
+				s := &discordgo.Session{
+					State: discordgo.NewState(),
+				}
+				s.State.User = &discordgo.User{ID: "bot-suite-sf", Username: "Aerial"}
+				guild := &discordgo.Guild{
+					ID: "guild-suite-sf",
+				}
+				_ = s.State.GuildAdd(guild)
+
+				var wg sync.WaitGroup
+				numCallers := 10
+				wg.Add(numCallers)
+
+				for i := 0; i < numCallers; i++ {
+					go func() {
+						defer wg.Done()
+						roles := ResolveBotRoleIDs(s, "guild-suite-sf", "bot-suite-sf")
+						if len(roles) != 1 || roles[0] != "mock-role-robot-123" {
+							t.Errorf("Expected role mock-role-robot-123, got %v", roles)
+						}
+					}()
+				}
+
+				time.Sleep(20 * time.Millisecond)
+				close(blockCh)
+				wg.Wait()
+
+				if calls := atomic.LoadInt32(&fetchCalls); calls != 1 {
+					t.Fatalf("Expected exactly 1 singleflight REST call for 10 concurrent requests, got %d", calls)
+				}
+			},
+		},
+		{
+			name: "CooldownAndUncachedGuild",
+			run: func(t *testing.T) {
+				var fetchCalls int32
+				shouldFail := true
+				guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
+					atomic.AddInt32(&fetchCalls, 1)
+					if shouldFail {
+						return nil, errors.New("simulated 429 rate limit")
+					}
+					return &discordgo.Member{
+						GuildID: guildID,
+						User:    &discordgo.User{ID: userID},
+						Roles:   []string{"mock-role-robot-123"},
+					}, nil
+				}
+
+				s := &discordgo.Session{
+					State: discordgo.NewState(),
+				}
+				s.State.User = &discordgo.User{ID: "bot-suite-cd", Username: "Aerial"}
+
+				// Note: Guild is NOT in s.State, testing fallback for uncached guild
+				// 1. First call fails and sets cooldown
+				roles := ResolveBotRoleIDs(s, "guild-suite-uncached", "bot-suite-cd")
+				if len(roles) != 0 {
+					t.Fatalf("expected empty roles on failure, got %v", roles)
+				}
+				if atomic.LoadInt32(&fetchCalls) != 1 {
+					t.Fatalf("expected 1 fetch call, got %d", fetchCalls)
+				}
+
+				// 2. Second call while in cooldown skips REST call
+				roles2 := ResolveBotRoleIDs(s, "guild-suite-uncached", "bot-suite-cd")
+				if len(roles2) != 0 {
+					t.Fatalf("expected empty roles, got %v", roles2)
+				}
+				if atomic.LoadInt32(&fetchCalls) != 1 {
+					t.Fatalf("expected fetchCalls to stay 1 due to cooldown, got %d", fetchCalls)
+				}
+
+				// 3. Test cooldown helper direct invocation for map pruning
+				for i := 0; i < 150; i++ {
+					setRESTCooldown(fmt.Sprintf("suite-key-%d", i), -1*time.Minute)
+				}
+				setRESTCooldown("suite-key-active", 1*time.Minute)
+				if !isRESTInCooldown("suite-key-active") {
+					t.Fatalf("expected suite-key-active to be in cooldown")
+				}
+				if isRESTInCooldown("suite-key-expired") {
+					t.Fatalf("expected suite-key-expired not to be in cooldown")
+				}
 			},
 		},
 	}
-	_ = s.State.GuildAdd(guild)
 
-	roles := ResolveBotRoleIDs(s, "guild-1", "bot-1")
-	expected := []string{"role-aerial-managed", "role-assigned-1", "role-gundam-alt"}
-	sort.Strings(roles)
-	sort.Strings(expected)
-	if strings.Join(roles, ",") != strings.Join(expected, ",") {
-		t.Errorf("Expected roles %v, got %v", expected, roles)
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
 	}
 }
 
-func TestResolveBotRoleIDs_RESTFallback(t *testing.T) {
-	origFetcher := guildMemberFetcher
-	defer func() { guildMemberFetcher = origFetcher }()
-
-	var fetchCalls int32
-	guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
-		atomic.AddInt32(&fetchCalls, 1)
-		if guildID == "guild-1" && userID == "bot-1" {
-			return &discordgo.Member{
-				GuildID: guildID,
-				User:    &discordgo.User{ID: userID},
-				Roles:   []string{"mock-role-robot-123"},
-			}, nil
-		}
-		return nil, errors.New("not found")
-	}
-
-	s := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-	s.State.User = &discordgo.User{
-		ID:       "bot-1",
-		Username: "Aerial",
-	}
-
-	guild := &discordgo.Guild{
-		ID: "guild-1",
-		Roles: []*discordgo.Role{
-			{ID: "role-aerial-managed", Name: "Aerial", Managed: true},
-		},
-	}
-	_ = s.State.GuildAdd(guild)
-
-	roles := ResolveBotRoleIDs(s, "guild-1", "bot-1")
-	expected := []string{"mock-role-robot-123", "role-aerial-managed"}
-	sort.Strings(roles)
-	sort.Strings(expected)
-	if strings.Join(roles, ",") != strings.Join(expected, ",") {
-		t.Fatalf("First call expected %v, got %v", expected, roles)
-	}
-	if atomic.LoadInt32(&fetchCalls) != 1 {
-		t.Fatalf("Expected 1 fetch call, got %d", atomic.LoadInt32(&fetchCalls))
-	}
-
-	roles2 := ResolveBotRoleIDs(s, "guild-1", "bot-1")
-	sort.Strings(roles2)
-	if strings.Join(roles2, ",") != strings.Join(expected, ",") {
-		t.Fatalf("Second call expected %v, got %v", expected, roles2)
-	}
-	if atomic.LoadInt32(&fetchCalls) != 1 {
-		t.Fatalf("Expected fetcher not to be called again (cache hit), but fetchCalls=%d", atomic.LoadInt32(&fetchCalls))
-	}
-}
-
-func TestResolveBotRoleIDs_SingleflightDeduplication(t *testing.T) {
-	origFetcher := guildMemberFetcher
-	defer func() { guildMemberFetcher = origFetcher }()
-
-	var fetchCalls int32
-	blockCh := make(chan struct{})
-	guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
-		atomic.AddInt32(&fetchCalls, 1)
-		<-blockCh
-		return &discordgo.Member{
-			GuildID: guildID,
-			User:    &discordgo.User{ID: userID},
-			Roles:   []string{"mock-role-robot-123"},
-		}, nil
-	}
-
-	s := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-	s.State.User = &discordgo.User{ID: "bot-sf", Username: "Aerial"}
-	guild := &discordgo.Guild{
-		ID: "guild-sf",
-	}
-	_ = s.State.GuildAdd(guild)
-
-	var wg sync.WaitGroup
-	numCallers := 10
-	wg.Add(numCallers)
-
-	for i := 0; i < numCallers; i++ {
-		go func() {
-			defer wg.Done()
-			roles := ResolveBotRoleIDs(s, "guild-sf", "bot-sf")
-			if len(roles) != 1 || roles[0] != "mock-role-robot-123" {
-				t.Errorf("Expected role mock-role-robot-123, got %v", roles)
-			}
-		}()
-	}
-
-	time.Sleep(20 * time.Millisecond)
-	close(blockCh)
-	wg.Wait()
-
-	if calls := atomic.LoadInt32(&fetchCalls); calls != 1 {
-		t.Fatalf("Expected exactly 1 singleflight REST call for 10 concurrent requests, got %d", calls)
-	}
-}
-
-func TestResolveBotRoleIDs_CooldownAndUncachedGuild(t *testing.T) {
-	origFetcher := guildMemberFetcher
-	defer func() { guildMemberFetcher = origFetcher }()
-
-	var fetchCalls int32
-	shouldFail := true
-	guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
-		atomic.AddInt32(&fetchCalls, 1)
-		if shouldFail {
-			return nil, errors.New("simulated 429 rate limit")
-		}
-		return &discordgo.Member{
-			GuildID: guildID,
-			User:    &discordgo.User{ID: userID},
-			Roles:   []string{"mock-role-robot-123"},
-		}, nil
-	}
-
-	s := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-	s.State.User = &discordgo.User{ID: "bot-cd", Username: "Aerial"}
-
-	// Note: Guild is NOT in s.State, testing fallback for uncached guild
-	// 1. First call fails and sets cooldown
-	roles := ResolveBotRoleIDs(s, "guild-uncached", "bot-cd")
-	if len(roles) != 0 {
-		t.Fatalf("expected empty roles on failure, got %v", roles)
-	}
-	if atomic.LoadInt32(&fetchCalls) != 1 {
-		t.Fatalf("expected 1 fetch call, got %d", fetchCalls)
-	}
-
-	// 2. Second call while in cooldown skips REST call
-	roles2 := ResolveBotRoleIDs(s, "guild-uncached", "bot-cd")
-	if len(roles2) != 0 {
-		t.Fatalf("expected empty roles, got %v", roles2)
-	}
-	if atomic.LoadInt32(&fetchCalls) != 1 {
-		t.Fatalf("expected fetchCalls to stay 1 due to cooldown, got %d", fetchCalls)
-	}
-
-	// 3. Test cooldown helper direct invocation for map pruning
-	for i := 0; i < 150; i++ {
-		setRESTCooldown(fmt.Sprintf("key-%d", i), -1*time.Minute)
-	}
-	setRESTCooldown("key-active", 1*time.Minute)
-	if !isRESTInCooldown("key-active") {
-		t.Fatalf("expected key-active to be in cooldown")
-	}
-	if isRESTInCooldown("key-expired") {
-		t.Fatalf("expected key-expired not to be in cooldown")
-	}
-}
-
-func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
+func TestProcessBurst_QuotaPause_Suite(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	var runnerCalls int
-	var deliveredTexts []string
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "SchedulesOneShotAndNotifies",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				var runnerCalls int
+				var deliveredTexts []string
+				var mu sync.Mutex
+				doneCh := make(chan struct{})
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return "", "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.", 1, errors.New("exit 1")
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return "", "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.", 1, errors.New("exit 1")
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveredTexts = append(deliveredTexts, text)
+						mu.Unlock()
+						return nil
+					},
+					OnMessageCompleted: func(m db.Message, status string) {
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				threadID := "chan-quota-suite-1"
+				msg := db.Message{
+					ID:        "msg-quota-suite-1",
+					ThreadID:  threadID,
+					Content:   "<@bot> can you analyze our code coverage?",
+					Status:    db.StatusPending,
+					CreatedAt: time.Now().UTC(),
+					UpdatedAt: time.Now().UTC(),
+				}
+				_ = insertMessage(store, msg)
+				pool.Enqueue(msg)
+
+				waitForCompletion(t, doneCh, 5*time.Second, "quota pause completion")
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if runnerCalls != 1 {
+					t.Fatalf("Expected exactly 1 runner call (fail-fast), got %d", runnerCalls)
+				}
+				if len(deliveredTexts) != 1 {
+					t.Fatalf("Expected 1 delivered notice, got %d", len(deliveredTexts))
+				}
+				notice := deliveredTexts[0]
+				if !strings.Contains(notice, "16m 58s") {
+					t.Errorf("Expected '16m 58s' in notice, got: %s", notice)
+				}
+				if !strings.Contains(notice, "<t:") || !strings.Contains(notice, ":R>") {
+					t.Errorf("Expected relative Discord timestamp in notice, got: %s", notice)
+				}
+				if !strings.Contains(notice, "automatically scheduled a retry") {
+					t.Errorf("Expected auto-retry confirmation in notice, got: %s", notice)
+				}
+
+				oneShots, err := store.GetAllOneShotSchedules(context.Background(), threadID)
+				if err != nil || len(oneShots) == 0 {
+					t.Fatalf("Error querying one_shot_schedules: %v (count=%d)", err, len(oneShots))
+				}
+				schedPrompt := oneShots[0].Prompt
+				runAt := oneShots[0].RunAt
+				if !strings.Contains(schedPrompt, "[QUOTA_RETRY]") || !strings.Contains(schedPrompt, "code coverage") {
+					t.Errorf("Expected retry prompt with [QUOTA_RETRY] and coverage query, got: %q", schedPrompt)
+				}
+				if time.Until(runAt) < 16*time.Minute {
+					t.Errorf("Expected runAt to be at least 16m in the future, got %v (runAt: %s)", time.Until(runAt), runAt)
+				}
+
+				dbMsg, _ := getMessage(store, msg.ID)
+				if dbMsg.Status != db.StatusFailed {
+					t.Errorf("Expected message status FAILED, got %s", dbMsg.Status)
+				}
+				if !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
+					t.Errorf("Expected [QUOTA_PAUSED] in error message, got: %s", dbMsg.ErrorMessage)
+				}
+			},
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredTexts = append(deliveredTexts, text)
-			mu.Unlock()
-			return nil
+		{
+			name: "CircuitBreakerDoesNotReschedule",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				var runnerCalls int
+				var deliveredTexts []string
+				var mu sync.Mutex
+				doneCh := make(chan struct{})
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return "", "Individual quota reached. Resets in 10m.", 1, errors.New("exit 1")
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveredTexts = append(deliveredTexts, text)
+						mu.Unlock()
+						return nil
+					},
+					OnMessageCompleted: func(m db.Message, status string) {
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				threadID := "chan-circuit-suite-1"
+				msg := db.Message{
+					ID:            "msg-circuit-suite-1",
+					ThreadID:      threadID,
+					ScheduleRunID: "run-sched-previous-1",
+					Content:       "[QUOTA_RETRY] Previous failed question",
+					Status:        db.StatusPending,
+					CreatedAt:     time.Now().UTC(),
+					UpdatedAt:     time.Now().UTC(),
+				}
+				_ = insertMessage(store, msg)
+				pool.Enqueue(msg)
+
+				waitForCompletion(t, doneCh, 5*time.Second, "circuit breaker completion")
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				oneShots, _ := store.GetAllOneShotSchedules(context.Background(), threadID)
+				if len(oneShots) != 0 {
+					t.Fatalf("Expected 0 one-shot schedules created on circuit breaker, got %d", len(oneShots))
+				}
+				if len(deliveredTexts) != 1 {
+					t.Fatalf("Expected 1 delivered text, got %d", len(deliveredTexts))
+				}
+				if !strings.Contains(deliveredTexts[0], "paused automated retries") {
+					t.Errorf("Expected circuit breaker notice in delivery, got: %s", deliveredTexts[0])
+				}
+			},
 		},
-		OnMessageCompleted: func(m db.Message, status string) {
-			close(doneCh)
+		{
+			name: "TrailingBurstSuppression",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				var runnerCalls int
+				var mu sync.Mutex
+				completedMsgs := make(map[string]string)
+				var completedCount int
+				doneCh := make(chan struct{})
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{Mode: "channel"}
+					},
+					DeliveryFunc: noopDelivery,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return "", "Individual quota reached. Resets in 16m58s.", 1, errors.New("exit 1")
+					},
+					OnMessageCompleted: func(m db.Message, status string) {
+						mu.Lock()
+						completedMsgs[m.ID] = status
+						completedCount++
+						if completedCount == 2 {
+							close(doneCh)
+						}
+						mu.Unlock()
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				threadID := "chan-burst-suppress-suite-1"
+				t0 := time.Now().UTC()
+				msg1 := db.Message{
+					ID:        "msg-burst-suite-1",
+					ThreadID:  threadID,
+					Content:   "<@aerial> Question 1",
+					Status:    db.StatusPending,
+					CreatedAt: t0,
+					UpdatedAt: t0,
+				}
+				msg2 := db.Message{
+					ID:        "msg-burst-suite-2",
+					ThreadID:  threadID,
+					Content:   "<@aerial> Question 2",
+					Status:    db.StatusPending,
+					CreatedAt: t0.Add(100 * time.Millisecond),
+					UpdatedAt: t0.Add(100 * time.Millisecond),
+				}
+				_ = insertMessage(store, msg1)
+				_ = insertMessage(store, msg2)
+
+				pool.processBurst([]db.Message{msg1, msg2})
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if runnerCalls != 1 {
+					t.Fatalf("Expected runner called only once, got %d", runnerCalls)
+				}
+				m2, _ := getMessage(store, msg2.ID)
+				if m2.Status != db.StatusFailed {
+					t.Errorf("Expected msg2 status FAILED, got %s", m2.Status)
+				}
+				if !strings.Contains(m2.ErrorMessage, "Trailing message suppressed") {
+					t.Errorf("Expected trailing suppression error on msg2, got: %s", m2.ErrorMessage)
+				}
+			},
 		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	threadID := "chan-quota-1"
-	msg := db.Message{
-		ID:        "msg-quota-1",
-		ThreadID:  threadID,
-		Content:   "<@bot> can you analyze our code coverage?",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message to complete")
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	// 1. Must fail-fast: exactly 1 runner call, zero retries
-	if runnerCalls != 1 {
-		t.Fatalf("Expected exactly 1 runner call (fail-fast), got %d", runnerCalls)
-	}
-
-	// 2. Must deliver transparent notification with countdown and epoch timestamp
-	if len(deliveredTexts) != 1 {
-		t.Fatalf("Expected 1 delivered notice, got %d", len(deliveredTexts))
-	}
-	notice := deliveredTexts[0]
-	if !strings.Contains(notice, "16m 58s") {
-		t.Errorf("Expected '16m 58s' in notice, got: %s", notice)
-	}
-	if !strings.Contains(notice, "<t:") || !strings.Contains(notice, ":R>") {
-		t.Errorf("Expected relative Discord timestamp in notice, got: %s", notice)
-	}
-	if !strings.Contains(notice, "automatically scheduled a retry") {
-		t.Errorf("Expected auto-retry confirmation in notice, got: %s", notice)
-	}
-
-	// 3. One-shot schedule must be inserted into database for this thread with future run_at
-	oneShots, err := store.GetAllOneShotSchedules(context.Background(), threadID)
-	if err != nil || len(oneShots) == 0 {
-		t.Fatalf("Error querying one_shot_schedules: %v (count=%d)", err, len(oneShots))
-	}
-	schedPrompt := oneShots[0].Prompt
-	runAt := oneShots[0].RunAt
-	if !strings.Contains(schedPrompt, "[QUOTA_RETRY]") || !strings.Contains(schedPrompt, "code coverage") {
-		t.Errorf("Expected retry prompt with [QUOTA_RETRY] and coverage query, got: %q", schedPrompt)
-	}
-	if time.Until(runAt) < 16*time.Minute {
-		t.Errorf("Expected runAt to be at least 16m in the future, got %v (runAt: %s)", time.Until(runAt), runAt)
-	}
-
-	// 4. Triggering message marked FAILED with [QUOTA_PAUSED]
-	dbMsg, _ := getMessage(store, msg.ID)
-	if dbMsg.Status != db.StatusFailed {
-		t.Errorf("Expected message status FAILED, got %s", dbMsg.Status)
-	}
-	if !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
-		t.Errorf("Expected [QUOTA_PAUSED] in error message, got: %s", dbMsg.ErrorMessage)
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
 	}
 }
 
-func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var runnerCalls int
-	var deliveredTexts []string
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return "", "Individual quota reached. Resets in 10m.", 1, errors.New("exit 1")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredTexts = append(deliveredTexts, text)
-			mu.Unlock()
-			return nil
-		},
-		OnMessageCompleted: func(m db.Message, status string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	threadID := "chan-circuit-1"
-	// Message was already generated by an automated retry
-	msg := db.Message{
-		ID:            "msg-circuit-1",
-		ThreadID:      threadID,
-		ScheduleRunID: "run-sched-previous-1",
-		Content:       "[QUOTA_RETRY] Previous failed question",
-		Status:        db.StatusPending,
-		CreatedAt:     time.Now().UTC(),
-		UpdatedAt:     time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message completion")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Circuit breaker: must NOT insert another one-shot schedule!
-	oneShots, _ := store.GetAllOneShotSchedules(context.Background(), threadID)
-	schedCount := len(oneShots)
-	if schedCount != 0 {
-		t.Fatalf("Expected 0 one-shot schedules created on circuit breaker, got %d", schedCount)
-	}
-
-	// Must notify user with circuit breaker warning
-	if len(deliveredTexts) != 1 {
-		t.Fatalf("Expected 1 delivered text, got %d", len(deliveredTexts))
-	}
-	if !strings.Contains(deliveredTexts[0], "paused automated retries") {
-		t.Errorf("Expected circuit breaker notice in delivery, got: %s", deliveredTexts[0])
-	}
-}
-
-func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var runnerCalls int
-	var mu sync.Mutex
-	completedMsgs := make(map[string]string)
-	var completedCount int
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{Mode: "channel"}
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return "", "Individual quota reached. Resets in 16m58s.", 1, errors.New("exit 1")
-		},
-		OnMessageCompleted: func(m db.Message, status string) {
-			mu.Lock()
-			completedMsgs[m.ID] = status
-			completedCount++
-			if completedCount == 2 {
-				close(doneCh)
-			}
-			mu.Unlock()
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	threadID := "chan-burst-suppress-1"
-	t0 := time.Now().UTC()
-	msg1 := db.Message{
-		ID:        "msg-burst-1",
-		ThreadID:  threadID,
-		Content:   "<@aerial> Question 1",
-		Status:    db.StatusPending,
-		CreatedAt: t0,
-		UpdatedAt: t0,
-	}
-	msg2 := db.Message{
-		ID:        "msg-burst-2",
-		ThreadID:  threadID,
-		Content:   "<@aerial> Question 2",
-		Status:    db.StatusPending,
-		CreatedAt: t0.Add(100 * time.Millisecond),
-		UpdatedAt: t0.Add(100 * time.Millisecond),
-	}
-	_ = insertMessage(store, msg1)
-	_ = insertMessage(store, msg2)
-
-	// Simulate burst arrival
-	pool.processBurst([]db.Message{msg1, msg2})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Only message 1 should have invoked runner; message 2 must be suppressed
-	if runnerCalls != 1 {
-		t.Fatalf("Expected runner called only once, got %d", runnerCalls)
-	}
-
-	// Message 2 should be marked failed with trailing suppression reason
-	m2, _ := getMessage(store, msg2.ID)
-	if m2.Status != db.StatusFailed {
-		t.Errorf("Expected msg2 status FAILED, got %s", m2.Status)
-	}
-	if !strings.Contains(m2.ErrorMessage, "Trailing message suppressed") {
-		t.Errorf("Expected trailing suppression error on msg2, got: %s", m2.ErrorMessage)
-	}
-}
 
 
 
@@ -6751,1232 +6752,745 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	})
 }
 
-func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
+func TestProcessBurst_ErrorClassificationMatrix(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
 
-	store := setupTestStore(t)
+	tests := []struct {
+		name                 string
+		threadID             string
+		existingSession      bool
+		setupFiles           func(t *testing.T, tmpDir string) string
+		runnerFunc           func(attempts *int, validUUID string) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error)
+		expectedAttempts     int
+		expectedStatus       string
+		checkLatchedCleared  bool
+		checkNoticeDelivered bool
+		prohibitUnavailable  bool
+	}{
+		{
+			name:     "ColdStart429_RetriesTransiently",
+			threadID: "thread-cold-429",
+			setupFiles: func(t *testing.T, tmpDir string) string {
+				validUUID := uuid.New().String()
+				pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
+				_ = os.MkdirAll(filepath.Dir(pbPath), 0755)
+				_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
+				return validUUID
+			},
+			runnerFunc: func(attempts *int, validUUID string) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					*attempts++
+					if *attempts < 3 {
+						return "", "HTTP 429: Resource has been exhausted (e.g. check quota)", 1, fmt.Errorf("exit status 1")
+					}
+					return fmt.Sprintf(`{"conversation_id":%q,"response":"Success after 429 backoff"}`, validUUID), "", 0, nil
+				}
+			},
+			expectedAttempts: 3,
+			expectedStatus:   db.StatusCompleted,
+		},
+		{
+			name:            "NonTransient_FailsFastOnAttempt1",
+			threadID:        "thread-fast-fail",
+			existingSession: true,
+			runnerFunc: func(attempts *int, validUUID string) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					*attempts++
+					return "", "Error: invalid api key provided", 1, fmt.Errorf("exit status 1")
+				}
+			},
+			expectedAttempts:     1,
+			expectedStatus:       db.StatusFailed,
+			checkLatchedCleared:  true,
+			checkNoticeDelivered: true,
+			prohibitUnavailable:  true,
+		},
+		{
+			name:     "Exit0_NonTransientJSON_FailsFastOnAttempt1",
+			threadID: "thread-flag-fail",
+			runnerFunc: func(attempts *int, validUUID string) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					*attempts++
+					return `{"status":"ERROR","error":"unknown flag: --unsupported-flag"}`, "", 0, nil
+				}
+			},
+			expectedAttempts: 1,
+			expectedStatus:   db.StatusFailed,
+		},
+		{
+			name:     "UnknownError_RetriesTransientByDefault",
+			threadID: "thread-unknown-retry",
+			setupFiles: func(t *testing.T, tmpDir string) string {
+				validUUID := uuid.New().String()
+				pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
+				_ = os.MkdirAll(filepath.Dir(pbPath), 0755)
+				_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
+				return validUUID
+			},
+			runnerFunc: func(attempts *int, validUUID string) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					*attempts++
+					if *attempts < 3 {
+						return "", "some mysterious unexpected exit from child process", 1, fmt.Errorf("exit status 1")
+					}
+					return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Success on attempt 3!"}`, validUUID), "", 0, nil
+				}
+			},
+			expectedAttempts: 3,
+			expectedStatus:   db.StatusCompleted,
+		},
+		{
+			name:     "ColdStartContextWindow_FailsFast",
+			threadID: "thread-ctx-cold",
+			runnerFunc: func(attempts *int, validUUID string) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					*attempts++
+					return `{"status":"ERROR","error":"maximum context length exceeded"}`, "", 0, nil
+				}
+			},
+			expectedAttempts: 1,
+			expectedStatus:   db.StatusFailed,
+		},
+	}
 
-	var mu sync.Mutex
-	attempts := 0
-	doneCh := make(chan struct{}, 1)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			store := setupTestStore(t)
 
-	validUUID := uuid.New().String()
-	pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
-	_ = os.MkdirAll(filepath.Dir(pbPath), 0755)
-	_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			attempts++
-			curr := attempts
-			mu.Unlock()
-
-			if curr < 3 {
-				// Cold start 429 returns transient error on attempts 1 and 2
-				return "", "HTTP 429: Resource has been exhausted (e.g. check quota)", 1, fmt.Errorf("exit status 1")
+			var validUUID string
+			if tt.setupFiles != nil {
+				validUUID = tt.setupFiles(t, tmpDir)
 			}
-			// Attempt 3 succeeds with valid JSON and conversation ID
-			return fmt.Sprintf(`{"conversation_id":%q,"response":"Success after 429 backoff"}`, validUUID), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-cold-429", ThreadID: "thread-cold-429", Content: "Hello 429"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message to complete")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if attempts != 3 {
-		t.Errorf("Expected exactly 3 attempts (2 retries on 429 then success), got %d attempts", attempts)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-cold-429")
-	if dbMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected message status to be COMPLETED, got %s", dbMsg.Status)
-	}
-}
-
-func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	existingSess := uuid.New().String()
-	_ = saveSessionID(store, "thread-fast-fail", existingSess)
-
-	var mu sync.Mutex
-	attempts := 0
-	var deliveredText string
-	doneCh := make(chan struct{}, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			attempts++
-			mu.Unlock()
-			return "", "Error: invalid api key provided", 1, fmt.Errorf("exit status 1")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredText = text
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-auth-fail", ThreadID: "thread-fast-fail", Content: "Run with bad auth"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message to fail fast")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if attempts != 1 {
-		t.Errorf("Expected exactly 1 attempt for non-transient error, got %d", attempts)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-auth-fail")
-	if dbMsg.Status != db.StatusFailed {
-		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
-	}
-
-	savedSess, _ := getSessionID(store, "thread-fast-fail")
-	if savedSess != "" {
-		t.Errorf("Expected latched session in DB to be cleared on non-transient fail-fast, got %q", savedSess)
-	}
-
-	if strings.Contains(deliveredText, "temporarily unavailable") {
-		t.Errorf("Expected non-transient failure NOT to gaslight user with temporary model unavailability, got: %s", deliveredText)
-	}
-	if deliveredText == "" {
-		t.Errorf("Expected delivery notification to be sent to user")
-	}
-}
-
-func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	var mu sync.Mutex
-	attempts := 0
-	doneCh := make(chan struct{}, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			attempts++
-			mu.Unlock()
-			return `{"status":"ERROR","error":"unknown flag: --unsupported-flag"}`, "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-flag-fail", ThreadID: "thread-flag-fail", Content: "Run with bad flag"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message to fail fast")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if attempts != 1 {
-		t.Errorf("Expected exactly 1 attempt for exit 0 non-transient error, got %d", attempts)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-flag-fail")
-	if dbMsg.Status != db.StatusFailed {
-		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
-	}
-}
-
-func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	var mu sync.Mutex
-	attempts := 0
-	doneCh := make(chan struct{}, 1)
-
-	validUUID := uuid.New().String()
-	pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
-	_ = os.MkdirAll(filepath.Dir(pbPath), 0755)
-	_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			attempts++
-			curr := attempts
-			mu.Unlock()
-
-			if curr < 3 {
-				// Unclassified internal error defaults to transient
-				return "", "some mysterious unexpected exit from child process", 1, fmt.Errorf("exit status 1")
+			if tt.existingSession {
+				_ = saveSessionID(store, tt.threadID, uuid.New().String())
 			}
-			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Success on attempt 3!"}`, validUUID), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
 
-	msg := db.Message{ID: "msg-unknown-retry", ThreadID: "thread-unknown-retry", Content: "Run unknown error"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
+			var mu sync.Mutex
+			attempts := 0
+			var deliveredText string
+			doneCh := make(chan struct{}, 1)
 
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message to complete")
-	}
+			runner := tt.runnerFunc(&attempts, validUUID)
 
-	mu.Lock()
-	defer mu.Unlock()
+			pool := NewWorkerPool(WorkerPoolConfig{
+				SessionManager: session.New(tmpDir, ""),
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    10 * time.Millisecond,
+				MaxAttempts:    3,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					mu.Lock()
+					defer mu.Unlock()
+					return runner(ctx, agyBin, prompt, sessionID, apiKey, model, timeoutMinutes)
+				},
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					mu.Lock()
+					deliveredText = text
+					mu.Unlock()
+					return nil
+				},
+				TypingFunc: noopTyping,
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					doneCh <- struct{}{}
+				},
+			})
+			pool.Start()
+			defer pool.Stop()
 
-	if attempts != 3 {
-		t.Errorf("Expected 3 attempts (transient-by-default retry), got %d", attempts)
-	}
+			msg := db.Message{ID: "msg-" + tt.name, ThreadID: tt.threadID, Content: "prompt " + tt.name}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
 
-	dbMsg, _ := getMessage(store, "msg-unknown-retry")
-	if dbMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected message status to be COMPLETED, got %s", dbMsg.Status)
-	}
-}
+			waitForCompletion(t, doneCh, 5*time.Second, tt.name)
 
-func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	var mu sync.Mutex
-	attempts := 0
-	doneCh := make(chan struct{}, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
-			attempts++
-			mu.Unlock()
-			return `{"status":"ERROR","error":"maximum context length exceeded"}`, "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
+			defer mu.Unlock()
 
-	msg := db.Message{ID: "msg-ctx-cold", ThreadID: "thread-ctx-cold", Content: "Massive prompt"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
+			if attempts != tt.expectedAttempts {
+				t.Errorf("Expected %d attempts, got %d", tt.expectedAttempts, attempts)
+			}
 
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for cold start context window fail-fast")
-	}
+			dbMsg, _ := getMessage(store, msg.ID)
+			if dbMsg.Status != tt.expectedStatus {
+				t.Errorf("Expected message status %s, got %s", tt.expectedStatus, dbMsg.Status)
+			}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if attempts != 1 {
-		t.Errorf("Expected exactly 1 attempt on cold start context window exceeded, got %d", attempts)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-ctx-cold")
-	if dbMsg.Status != db.StatusFailed {
-		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
+			if tt.checkLatchedCleared {
+				savedSess, _ := getSessionID(store, tt.threadID)
+				if savedSess != "" {
+					t.Errorf("Expected latched session to be cleared, got %q", savedSess)
+				}
+			}
+			if tt.checkNoticeDelivered && deliveredText == "" {
+				t.Errorf("Expected delivery notification to be sent to user")
+			}
+			if tt.prohibitUnavailable && strings.Contains(deliveredText, "temporarily unavailable") {
+				t.Errorf("Expected non-transient failure NOT to gaslight user with temporary model unavailability, got: %s", deliveredText)
+			}
+		})
 	}
 }
 
-func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
+func TestGetSessionLastActivity_Suite(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, "")
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "ChecksBothDBAndDiskLogs",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				tmpDir := t.TempDir()
+				sessMgr := session.New(tmpDir, "")
 
-	threadID := "thread-act-1"
-	sessionID := "sess-act-uuid-1"
+				threadID := "thread-act-1"
+				sessionID := "sess-act-uuid-1"
 
-	// 1. Initially empty thread -> cold thread, zero time
-	act, isCold, err := GetSessionLastActivity(store, threadID, sessMgr)
-	if err != nil || !isCold || !act.IsZero() {
-		t.Fatalf("expected cold thread with zero time, got act=%v, isCold=%v, err=%v", act, isCold, err)
+				// 1. Initially empty thread -> cold thread, zero time
+				act, isCold, err := GetSessionLastActivity(store, threadID, sessMgr)
+				if err != nil || !isCold || !act.IsZero() {
+					t.Fatalf("expected cold thread with zero time, got act=%v, isCold=%v, err=%v", act, isCold, err)
+				}
+
+				// 2. Insert session with updated_at = 20m ago
+				tSess := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
+				store.SetSessionInfo(db.SessionInfo{
+					ThreadID:          threadID,
+					InternalSessionID: sessionID,
+					TurnCount:         1,
+					CreatedAt:         tSess,
+					UpdatedAt:         tSess,
+				})
+
+				act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
+				if err != nil || isCold {
+					t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
+				}
+				if !act.Equal(tSess) {
+					t.Errorf("expected session updated_at %v, got %v", tSess, act)
+				}
+
+				// 3. Insert completed message with updated_at = 10m ago (newer than session updated_at)
+				tMsg := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+				_ = insertMessage(store, db.Message{
+					ID:           "msg-1",
+					ThreadID:     threadID,
+					Status:       db.StatusCompleted,
+					ResponseText: "some answer",
+					CreatedAt:    tMsg,
+					UpdatedAt:    tMsg,
+				})
+
+				act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
+				if err != nil || isCold {
+					t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
+				}
+				if !act.Equal(tMsg) {
+					t.Errorf("expected msg updated_at %v, got %v", tMsg, act)
+				}
+
+				// 4. Create on-disk task log with timestamp = 2m ago (newer than DB)
+				tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID, ".system_generated", "tasks")
+				if err := os.MkdirAll(tasksDir, 0755); err != nil {
+					t.Fatalf("failed to create tasksDir: %v", err)
+				}
+				tDisk := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+				taskLog := filepath.Join(tasksDir, "task-1.log")
+				if err := os.WriteFile(taskLog, []byte("build output\n"), 0644); err != nil {
+					t.Fatalf("failed to write taskLog: %v", err)
+				}
+				_ = os.Chtimes(taskLog, tDisk, tDisk)
+
+				act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
+				if err != nil || isCold {
+					t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
+				}
+				if !act.Equal(tDisk) {
+					t.Errorf("expected disk activity %v to win, got %v", tDisk, act)
+				}
+			},
+		},
+		{
+			name: "RotatedSessionNotNew",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				threadID := "thread-rotated-1"
+
+				store.SetSessionInfo(db.SessionInfo{
+					ThreadID:          threadID,
+					InternalSessionID: "",
+					TurnCount:         0,
+					UpdatedAt:         time.Now().UTC().Add(-15 * time.Minute),
+				})
+
+				tCompleted := time.Now().UTC().Add(-4 * time.Minute).Truncate(time.Second)
+				_ = insertMessage(store, db.Message{
+					ID:           "msg-prev",
+					ThreadID:     threadID,
+					Status:       db.StatusCompleted,
+					ResponseText: "previous answer",
+					CreatedAt:    tCompleted,
+					UpdatedAt:    tCompleted,
+				})
+
+				act, isCold, err := GetSessionLastActivity(store, threadID)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if isCold {
+					t.Errorf("expected isCold=false for rotated session with completed turns, got true")
+				}
+				if !act.Equal(tCompleted) {
+					t.Errorf("expected lastActivity %v, got %v", tCompleted, act)
+				}
+			},
+		},
+		{
+			name: "IgnoresExpiredStaleSentinel",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				threadID := "thread-stale-sentinel"
+
+				_ = insertMessage(store, db.Message{
+					ID:           "msg-stale-drop",
+					ThreadID:     threadID,
+					Status:       db.StatusCompleted,
+					ResponseText: "[EXPIRED_STALE]",
+				})
+				_ = insertMessage(store, db.Message{
+					ID:           "msg-ambient",
+					ThreadID:     threadID,
+					Status:       db.StatusCompleted,
+					ResponseText: "[AMBIENT: IGNORED]",
+				})
+
+				act, isCold, err := GetSessionLastActivity(store, threadID)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if !isCold {
+					t.Errorf("expected isCold=true when only stale/ambient messages exist, got false")
+				}
+				if !act.IsZero() {
+					t.Errorf("expected zero activity time, got %v", act)
+				}
+			},
+		},
+		{
+			name: "FailOpenOnDBError",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				_ = store.Close()
+
+				act, isCold, err := GetSessionLastActivity(store, "thread-closed")
+				if err == nil {
+					t.Fatalf("expected error from closed DB, got nil")
+				}
+				if isCold {
+					t.Errorf("expected isCold=false on DB error, got true")
+				}
+				if !act.IsZero() {
+					t.Errorf("expected zero activity time on DB error, got %v", act)
+				}
+			},
+		},
 	}
 
-	// 2. Insert session with updated_at = 20m ago
-	tSess := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
-	store.SetSessionInfo(db.SessionInfo{
-		ThreadID:          threadID,
-		InternalSessionID: sessionID,
-		TurnCount:         1,
-		CreatedAt:         tSess,
-		UpdatedAt:         tSess,
-	})
-
-	act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
-	if err != nil || isCold {
-		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
-	}
-	if !act.Equal(tSess) {
-		t.Errorf("expected session updated_at %v, got %v", tSess, act)
-	}
-
-	// 3. Insert completed message with updated_at = 10m ago (newer than session updated_at)
-	tMsg := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
-	_ = insertMessage(store, db.Message{
-		ID:           "msg-1",
-		ThreadID:     threadID,
-		Status:       db.StatusCompleted,
-		ResponseText: "some answer",
-		CreatedAt:    tMsg,
-		UpdatedAt:    tMsg,
-	})
-
-	act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
-	if err != nil || isCold {
-		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
-	}
-	if !act.Equal(tMsg) {
-		t.Errorf("expected msg updated_at %v, got %v", tMsg, act)
-	}
-
-	// 4. Create on-disk task log with timestamp = 2m ago (newer than DB)
-	tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID, ".system_generated", "tasks")
-	if err := os.MkdirAll(tasksDir, 0755); err != nil {
-		t.Fatalf("failed to create tasksDir: %v", err)
-	}
-	tDisk := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
-	taskLog := filepath.Join(tasksDir, "task-1.log")
-	if err := os.WriteFile(taskLog, []byte("build output\n"), 0644); err != nil {
-		t.Fatalf("failed to write taskLog: %v", err)
-	}
-	_ = os.Chtimes(taskLog, tDisk, tDisk)
-
-	act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
-	if err != nil || isCold {
-		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
-	}
-	if !act.Equal(tDisk) {
-		t.Errorf("expected disk activity %v to win, got %v", tDisk, act)
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
 	}
 }
 
-func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
+func TestProcessBurst_StalenessMatrix(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	threadID := "thread-rotated-1"
-
-	// Session has reached turn limit and rotated: internal_session_id is "", turn_count is 0
-	store.SetSessionInfo(db.SessionInfo{
-		ThreadID:          threadID,
-		InternalSessionID: "",
-		TurnCount:         0,
-		UpdatedAt:         time.Now().UTC().Add(-15 * time.Minute),
-	})
-
-	// But messages table has prior completed turn from 4 minutes ago
-	tCompleted := time.Now().UTC().Add(-4 * time.Minute).Truncate(time.Second)
-	_ = insertMessage(store, db.Message{
-		ID:           "msg-prev",
-		ThreadID:     threadID,
-		Status:       db.StatusCompleted,
-		ResponseText: "previous answer",
-		CreatedAt:    tCompleted,
-		UpdatedAt:    tCompleted,
-	})
-
-	act, isCold, err := GetSessionLastActivity(store, threadID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		name                 string
+		threadID             string
+		sessionID            string
+		msgAge               time.Duration
+		retryCount           int
+		restartCount         int
+		setupState           func(t *testing.T, store *db.FakeStore, threadID, sessionID string, tmpDir string)
+		expectRunnerCalls    int
+		expectStatus         string
+		expectExpiredStale   bool
+		prohibitExpiredStale bool
+	}{
+		{
+			name:      "ExistingSessionRecentDiskActivity_Retained",
+			threadID:  "thread-burst-disk-active",
+			sessionID: "sess-burst-disk-active",
+			msgAge:    35 * time.Minute,
+			setupState: func(t *testing.T, store *db.FakeStore, threadID, sessionID string, tmpDir string) {
+				_ = saveSessionID(store, threadID, sessionID)
+				tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID, ".system_generated", "tasks")
+				_ = os.MkdirAll(tasksDir, 0755)
+				tDisk := time.Now().UTC().Add(-5 * time.Minute)
+				taskLog := filepath.Join(tasksDir, "task-1.log")
+				_ = os.WriteFile(taskLog, []byte("running build"), 0644)
+				_ = os.Chtimes(taskLog, tDisk, tDisk)
+			},
+			expectRunnerCalls:    1,
+			expectStatus:         db.StatusCompleted,
+			prohibitExpiredStale: true,
+		},
+		{
+			name:     "ExistingSessionRecentDBActivity_Retained",
+			threadID: "thread-burst-db-active",
+			msgAge:   35 * time.Minute,
+			setupState: func(t *testing.T, store *db.FakeStore, threadID, sessionID string, tmpDir string) {
+				tPrev := time.Now().UTC().Add(-5 * time.Minute)
+				_ = insertMessage(store, db.Message{
+					ID:           "msg-prev-active",
+					ThreadID:     threadID,
+					Status:       db.StatusCompleted,
+					ResponseText: "Finished earlier turn",
+					CreatedAt:    tPrev,
+					UpdatedAt:    tPrev,
+				})
+			},
+			expectRunnerCalls: 1,
+		},
+		{
+			name:      "ExistingSessionInactive_Dropped",
+			threadID:  "thread-burst-inactive",
+			sessionID: "sess-burst-inactive",
+			msgAge:    35 * time.Minute,
+			setupState: func(t *testing.T, store *db.FakeStore, threadID, sessionID string, tmpDir string) {
+				tInactive := time.Now().UTC().Add(-45 * time.Minute)
+				store.SetSessionInfo(db.SessionInfo{
+					ThreadID:          threadID,
+					InternalSessionID: sessionID,
+					TurnCount:         1,
+					UpdatedAt:         tInactive,
+				})
+				_ = insertMessage(store, db.Message{
+					ID:           "msg-old-completed",
+					ThreadID:     threadID,
+					Status:       db.StatusCompleted,
+					ResponseText: "old answer",
+					CreatedAt:    tInactive,
+					UpdatedAt:    tInactive,
+				})
+			},
+			expectRunnerCalls:  0,
+			expectExpiredStale: true,
+		},
+		{
+			name:               "NewSession_Dropped",
+			threadID:           "thread-new-drop",
+			msgAge:             31 * time.Minute,
+			expectRunnerCalls:  0,
+			expectExpiredStale: true,
+		},
+		{
+			name:      "HardCeiling_Dropped",
+			threadID:  "thread-hard-ceiling",
+			sessionID: "sess-ceiling",
+			msgAge:    130 * time.Minute,
+			setupState: func(t *testing.T, store *db.FakeStore, threadID, sessionID string, tmpDir string) {
+				store.SetSessionInfo(db.SessionInfo{
+					ThreadID:          threadID,
+					InternalSessionID: sessionID,
+					TurnCount:         1,
+					UpdatedAt:         time.Now().UTC(),
+				})
+				_ = insertMessage(store, db.Message{
+					ID:           "msg-recent",
+					ThreadID:     threadID,
+					Status:       db.StatusCompleted,
+					ResponseText: "recent turn",
+					CreatedAt:    time.Now().UTC(),
+					UpdatedAt:    time.Now().UTC(),
+				})
+			},
+			expectRunnerCalls:  0,
+			expectExpiredStale: true,
+		},
+		{
+			name:                 "RecoveredMessage_Retained",
+			threadID:             "thread-recovered-msg",
+			sessionID:            "sess-rec",
+			msgAge:               45 * time.Minute,
+			retryCount:           1,
+			expectRunnerCalls:    1,
+			prohibitExpiredStale: true,
+		},
+		{
+			name:                 "RestartedMessage_Retained",
+			threadID:             "thread-restarted-staleness",
+			sessionID:            "d2222222-2222-3333-4444-555555555555",
+			msgAge:               45 * time.Minute,
+			restartCount:         1,
+			expectRunnerCalls:    1,
+			prohibitExpiredStale: true,
+		},
+		{
+			name:               "RestartedMessage_HardCeiling_Dropped",
+			threadID:           "thread-restarted-hard-ceiling",
+			msgAge:             130 * time.Minute,
+			restartCount:       2,
+			expectRunnerCalls:  0,
+			expectExpiredStale: true,
+		},
 	}
-	if isCold {
-		t.Errorf("expected isCold=false for rotated session with completed turns, got true")
-	}
-	if !act.Equal(tCompleted) {
-		t.Errorf("expected lastActivity %v, got %v", tCompleted, act)
-	}
-}
 
-func TestGetSessionLastActivity_IgnoresExpiredStaleSentinel(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			tmpDir := t.TempDir()
 
-	threadID := "thread-stale-sentinel"
+			if tt.setupState != nil {
+				tt.setupState(t, store, tt.threadID, tt.sessionID, tmpDir)
+			}
 
-	// Message completed with [EXPIRED_STALE]
-	_ = insertMessage(store, db.Message{
-		ID:           "msg-stale-drop",
-		ThreadID:     threadID,
-		Status:       db.StatusCompleted,
-		ResponseText: "[EXPIRED_STALE]",
-	})
+			var runnerCalls int
+			var mu sync.Mutex
+			doneCh := make(chan struct{})
 
-	// Also insert ambient evaluated message
-	_ = insertMessage(store, db.Message{
-		ID:           "msg-ambient",
-		ThreadID:     threadID,
-		Status:       db.StatusCompleted,
-		ResponseText: "[AMBIENT: IGNORED]",
-	})
+			sessIDToReturn := tt.sessionID
+			if sessIDToReturn == "" {
+				sessIDToReturn = "sess-fallback"
+			}
 
-	// No real completed messages -> should be cold thread
-	act, isCold, err := GetSessionLastActivity(store, threadID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !isCold {
-		t.Errorf("expected isCold=true when only stale/ambient messages exist, got false")
-	}
-	if !act.IsZero() {
-		t.Errorf("expected zero activity time, got %v", act)
-	}
-}
+			pool := NewWorkerPool(WorkerPoolConfig{
+				SessionManager: session.New(tmpDir, ""),
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    10 * time.Millisecond,
+				MaxAttempts:    3,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					mu.Lock()
+					runnerCalls++
+					mu.Unlock()
+					return mockJSONResponse(sessIDToReturn, "executed"), "", 0, nil
+				},
+				DeliveryFunc: noopDelivery,
+				TypingFunc:   noopTyping,
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					close(doneCh)
+				},
+			})
+			pool.Start()
+			defer pool.Stop()
 
-func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
+			msg := db.Message{
+				ID:           "msg-" + tt.name,
+				ThreadID:     tt.threadID,
+				AuthorID:     "user-1",
+				Content:      "prompt " + tt.name,
+				Status:       db.StatusPending,
+				RetryCount:   tt.retryCount,
+				RestartCount: tt.restartCount,
+				CreatedAt:    time.Now().UTC().Add(-tt.msgAge),
+			}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
 
-	tmpDir := t.TempDir()
+			waitForCompletion(t, doneCh, 3*time.Second, tt.name)
 
-	threadID := "thread-burst-disk-active"
-	sessionID := "sess-burst-disk-active"
-
-	// Session registered in DB
-	_ = saveSessionID(store, threadID, sessionID)
-
-	// Task log active 5m ago
-	tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID, ".system_generated", "tasks")
-	_ = os.MkdirAll(tasksDir, 0755)
-	tDisk := time.Now().UTC().Add(-5 * time.Minute)
-	taskLog := filepath.Join(tasksDir, "task-1.log")
-	_ = os.WriteFile(taskLog, []byte("running build"), 0644)
-	_ = os.Chtimes(taskLog, tDisk, tDisk)
-
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
-			runnerCalls++
+			calls := runnerCalls
 			mu.Unlock()
-			return mockJSONResponse(sessionID, "retained and executed"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
 
-	// Message created 35 minutes ago (> 30m default staleness TTL)
-	msg := db.Message{
-		ID:        "msg-old-retained",
-		ThreadID:  threadID,
-		AuthorID:  "user-1",
-		Content:   "Please continue the task",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
+			if calls != tt.expectRunnerCalls {
+				t.Errorf("Expected %d runner calls, got %d", tt.expectRunnerCalls, calls)
+			}
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message processing")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 1 {
-		t.Errorf("Expected 1 runner call for message in active session, got %d", calls)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-old-retained")
-	if dbMsg.Status != db.StatusCompleted || dbMsg.ResponseText == "[EXPIRED_STALE]" {
-		t.Errorf("Expected message to be completed normally, got status=%s, response=%s", dbMsg.Status, dbMsg.ResponseText)
+			dbMsg, _ := getMessage(store, msg.ID)
+			if tt.expectStatus != "" && dbMsg.Status != tt.expectStatus {
+				t.Errorf("Expected message status %s, got %s", tt.expectStatus, dbMsg.Status)
+			}
+			if tt.expectExpiredStale && dbMsg.ResponseText != "[EXPIRED_STALE]" {
+				t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
+			}
+			if tt.prohibitExpiredStale && dbMsg.ResponseText == "[EXPIRED_STALE]" {
+				t.Errorf("Expected response NOT to be [EXPIRED_STALE]")
+			}
+		})
 	}
 }
 
-func TestProcessBurst_Staleness_ExistingSessionRecentDBActivity_Retained(t *testing.T) {
+func TestRecoverInterrupted_PoisonPillSuite(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	threadID := "thread-burst-db-active"
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "PreservesExecutionRetryBudget",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				threadID := "thread-retry-budget"
+				msg := db.Message{
+					ID:           "msg-restarted-budget",
+					ThreadID:     threadID,
+					AuthorID:     "user-1",
+					Content:      "turn interrupted by container restart",
+					Status:       db.StatusProcessing,
+					RestartCount: 2,
+					RetryCount:   0,
+					CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+					UpdatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+				}
+				if err := insertMessage(store, msg); err != nil {
+					t.Fatalf("InsertMessage failed: %v", err)
+				}
 
-	// Previous message completed 5 minutes ago
-	tPrev := time.Now().UTC().Add(-5 * time.Minute)
-	_ = insertMessage(store, db.Message{
-		ID:           "msg-prev-active",
-		ThreadID:     threadID,
-		Status:       db.StatusCompleted,
-		ResponseText: "Finished earlier turn",
-		CreatedAt:    tPrev,
-		UpdatedAt:    tPrev,
-	})
+				var runnerCalls int
+				var mu sync.Mutex
+				doneCh := make(chan struct{})
 
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return "", "transient connection error", 1, errors.New("exit status 1")
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					OnMessageCompleted: func(msg db.Message, finalStatus string) {
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("sess-new", "done"), "", 0, nil
+				RecoverInterrupted(store, pool)
+
+				waitForCompletion(t, doneCh, 5*time.Second, "retry budget processing")
+
+				mu.Lock()
+				calls := runnerCalls
+				mu.Unlock()
+
+				if calls != 3 {
+					t.Errorf("Expected 3 runner execution attempts (full retry budget), got %d", calls)
+				}
+
+				dbMsg, err := getMessage(store, "msg-restarted-budget")
+				if err != nil || dbMsg == nil {
+					t.Fatalf("Failed to fetch message: %v", err)
+				}
+				if dbMsg.Status != db.StatusFailed {
+					t.Errorf("Expected final status %s, got %s", db.StatusFailed, dbMsg.Status)
+				}
+				if dbMsg.RestartCount != 3 {
+					t.Errorf("Expected final restart_count 3, got %d", dbMsg.RestartCount)
+				}
+				if dbMsg.RetryCount != 3 {
+					t.Errorf("Expected final retry_count 3, got %d", dbMsg.RetryCount)
+				}
+			},
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
+		{
+			name: "RestartPoisonPill_Boundaries",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+
+				msgPoison := db.Message{
+					ID:           "msg-poison-restart",
+					ThreadID:     "thread-poison-restart",
+					AuthorID:     "user-1",
+					Content:      "crash-looping container trigger",
+					Status:       db.StatusProcessing,
+					RestartCount: DefaultMaxRestarts,
+					RetryCount:   0,
+					CreatedAt:    time.Now().UTC().Add(-15 * time.Minute),
+				}
+				msgValid := db.Message{
+					ID:           "msg-valid-restart",
+					ThreadID:     "thread-valid-restart",
+					AuthorID:     "user-2",
+					Content:      "valid restart message",
+					Status:       db.StatusProcessing,
+					RestartCount: DefaultMaxRestarts - 1,
+					RetryCount:   0,
+					CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+				}
+
+				_ = insertMessage(store, msgPoison)
+				_ = insertMessage(store, msgValid)
+
+				var mu sync.Mutex
+				var completedIDs []string
+				var wg sync.WaitGroup
+				wg.Add(1)
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						return mockJSONResponse("d1111111-2222-3333-4444-555555555555", "Processed OK"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					OnMessageCompleted: func(msg db.Message, finalStatus string) {
+						mu.Lock()
+						completedIDs = append(completedIDs, msg.ID)
+						mu.Unlock()
+						wg.Done()
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+				pool.SetDiscordSession(&discordgo.Session{})
+
+				RecoverInterrupted(store, pool)
+
+				wg.Wait()
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if len(completedIDs) != 1 || completedIDs[0] != "msg-valid-restart" {
+					t.Errorf("Expected only msg-valid-restart to complete, got: %v", completedIDs)
+				}
+
+				poisonDB, err := getMessage(store, "msg-poison-restart")
+				if err != nil || poisonDB == nil {
+					t.Fatalf("Failed to query poison message: %v", err)
+				}
+				if poisonDB.Status != db.StatusFailed {
+					t.Errorf("Expected poison pill status FAILED, got: %s", poisonDB.Status)
+				}
+				if !strings.Contains(poisonDB.ErrorMessage, "exceeded restart limit") {
+					t.Errorf("Expected error to mention exceeded restart limit, got: %s", poisonDB.ErrorMessage)
+				}
+
+				validDB, err := getMessage(store, "msg-valid-restart")
+				if err != nil || validDB == nil {
+					t.Fatalf("Failed to query valid message: %v", err)
+				}
+				if validDB.Status != db.StatusCompleted {
+					t.Errorf("Expected valid message status COMPLETED, got: %s", validDB.Status)
+				}
+				if validDB.RestartCount != DefaultMaxRestarts {
+					t.Errorf("Expected valid message restart_count %d, got %d", DefaultMaxRestarts, validDB.RestartCount)
+				}
+			},
 		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// Message created 35 minutes ago (> 30m TTL)
-	msg := db.Message{
-		ID:        "msg-db-active-retained",
-		ThreadID:  threadID,
-		AuthorID:  "user-1",
-		Content:   "Next step please",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message processing")
 	}
 
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 1 {
-		t.Errorf("Expected 1 runner call for message with recent DB activity, got %d", calls)
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
 	}
 }
 
-func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	threadID := "thread-burst-inactive"
-	sessionID := "sess-burst-inactive"
-
-	// Session registered, but updated_at is 45m ago
-	tInactive := time.Now().UTC().Add(-45 * time.Minute)
-	store.SetSessionInfo(db.SessionInfo{
-		ThreadID:          threadID,
-		InternalSessionID: sessionID,
-		TurnCount:         1,
-		UpdatedAt:         tInactive,
-	})
-
-	// Previous turn completed 45m ago
-	_ = insertMessage(store, db.Message{
-		ID:           "msg-old-completed",
-		ThreadID:     threadID,
-		Status:       db.StatusCompleted,
-		ResponseText: "old answer",
-		CreatedAt:    tInactive,
-		UpdatedAt:    tInactive,
-	})
-
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse(sessionID, "should not execute"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// Message created 35m ago (> 30m TTL) and session inactive for 45m (> 30m TTL)
-	msg := db.Message{
-		ID:        "msg-inactive-dropped",
-		ThreadID:  threadID,
-		AuthorID:  "user-1",
-		Content:   "old prompt",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for stale message drop")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 0 {
-		t.Errorf("Expected 0 runner calls for inactive session, got %d", calls)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-inactive-dropped")
-	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
-	}
-}
-
-func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	threadID := "thread-new-drop"
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("sess-new", "should not run"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// New thread, message 31m old
-	msg := db.Message{
-		ID:        "msg-new-stale",
-		ThreadID:  threadID,
-		AuthorID:  "user-1",
-		Content:   "brand new thread message",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC().Add(-31 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for new thread stale drop")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 0 {
-		t.Errorf("Expected 0 runner calls, got %d", calls)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-new-stale")
-	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
-	}
-}
-
-func TestGetSessionLastActivity_FailOpenOnDBError(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	_ = store.Close()
-
-	// When DB is closed, GetSessionLastActivity returns error
-	act, isCold, err := GetSessionLastActivity(store, "thread-closed")
-	if err == nil {
-		t.Fatalf("expected error from closed DB, got nil")
-	}
-	if isCold {
-		t.Errorf("expected isCold=false on DB error, got true")
-	}
-	if !act.IsZero() {
-		t.Errorf("expected zero activity time on DB error, got %v", act)
-	}
-}
-
-func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	threadID := "thread-hard-ceiling"
-
-	// Session is actively running right now (updated 1 minute ago)
-	store.SetSessionInfo(db.SessionInfo{
-		ThreadID:          threadID,
-		InternalSessionID: "sess-ceiling",
-		TurnCount:         1,
-		UpdatedAt:         time.Now().UTC(),
-	})
-	_ = insertMessage(store, db.Message{
-		ID:           "msg-recent",
-		ThreadID:     threadID,
-		Status:       db.StatusCompleted,
-		ResponseText: "recent turn",
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
-	})
-
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("sess-ceiling", "should not run"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// Message is 2 hours 10 minutes old (> MaxMessageAbsoluteAge)
-	msg := db.Message{
-		ID:        "msg-poison-pill",
-		ThreadID:  threadID,
-		AuthorID:  "user-1",
-		Content:   "very old command that survived in queue",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC().Add(-130 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for hard ceiling drop")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 0 {
-		t.Errorf("Expected 0 runner calls for message older than MaxMessageAbsoluteAge, got %d", calls)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-poison-pill")
-	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
-	}
-}
-
-func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	threadID := "thread-recovered-msg"
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("sess-rec", "recovered execution done"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// Recovered message during restart has RetryCount > 0, age is 45m (> 30m)
-	msg := db.Message{
-		ID:         "msg-recovered-1",
-		ThreadID:   threadID,
-		AuthorID:   "user-1",
-		Content:    "interrupted turn resumed",
-		Status:     db.StatusPending,
-		RetryCount: 1,
-		CreatedAt:  time.Now().UTC().Add(-45 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for recovered message processing")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 1 {
-		t.Errorf("Expected 1 runner call for recovered message with RetryCount > 0, got %d", calls)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-recovered-1")
-	if dbMsg.ResponseText == "[EXPIRED_STALE]" {
-		t.Errorf("Recovered message should NOT be marked [EXPIRED_STALE]")
-	}
-}
-
-func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	threadID := "thread-retry-budget"
-	msg := db.Message{
-		ID:           "msg-restarted-budget",
-		ThreadID:     threadID,
-		AuthorID:     "user-1",
-		Content:      "turn interrupted by container restart",
-		Status:       db.StatusProcessing,
-		RestartCount: 2,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-		UpdatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-	}
-	if err := insertMessage(store, msg); err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
-
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			// Simulate runner failure (exit code 1) on every attempt
-			return "", "transient connection error", 1, errors.New("exit status 1")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// RecoverInterrupted should reset status to PENDING and increment restart_count to 3, leaving retry_count at 0
-	RecoverInterrupted(store, pool)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message processing")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	// Crucial invariant: The turn must get all 3 execution attempts despite having restarted twice!
-	if calls != 3 {
-		t.Errorf("Expected 3 runner execution attempts (full retry budget), got %d", calls)
-	}
-
-	dbMsg, err := getMessage(store, "msg-restarted-budget")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("Failed to fetch message: %v", err)
-	}
-	if dbMsg.Status != db.StatusFailed {
-		t.Errorf("Expected final status %s, got %s", db.StatusFailed, dbMsg.Status)
-	}
-	if dbMsg.RestartCount != 3 {
-		t.Errorf("Expected final restart_count 3, got %d", dbMsg.RestartCount)
-	}
-	if dbMsg.RetryCount != 3 {
-		t.Errorf("Expected final retry_count 3 (after 3 failed execution attempts), got %d", dbMsg.RetryCount)
-	}
-}
-
-func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	// msgPoison has StatusProcessing and RestartCount >= DefaultMaxRestarts (3)
-	msgPoison := db.Message{
-		ID:           "msg-poison-restart",
-		ThreadID:     "thread-poison-restart",
-		AuthorID:     "user-1",
-		Content:      "crash-looping container trigger",
-		Status:       db.StatusProcessing,
-		RestartCount: DefaultMaxRestarts,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-15 * time.Minute),
-	}
-
-	// msgValid has StatusProcessing and RestartCount < DefaultMaxRestarts (2)
-	msgValid := db.Message{
-		ID:           "msg-valid-restart",
-		ThreadID:     "thread-valid-restart",
-		AuthorID:     "user-2",
-		Content:      "valid restart message",
-		Status:       db.StatusProcessing,
-		RestartCount: DefaultMaxRestarts - 1,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-	}
-
-	_ = insertMessage(store, msgPoison)
-	_ = insertMessage(store, msgValid)
-
-	var mu sync.Mutex
-	var deliveredNotifs []string
-	var completedIDs []string
-	var wg sync.WaitGroup
-	wg.Add(1) // Only msgValid should be completed by worker pool
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse("d1111111-2222-3333-4444-555555555555", "Processed OK"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotifs = append(deliveredNotifs, text)
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			mu.Lock()
-			completedIDs = append(completedIDs, msg.ID)
-			mu.Unlock()
-			wg.Done()
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-	pool.SetDiscordSession(&discordgo.Session{})
-
-	RecoverInterrupted(store, pool)
-
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Verify only msgValid was processed
-	if len(completedIDs) != 1 || completedIDs[0] != "msg-valid-restart" {
-		t.Errorf("Expected only msg-valid-restart to complete, got: %v", completedIDs)
-	}
-
-	// Verify msgPoison was dropped and marked FAILED with restart limit error
-	poisonDB, err := getMessage(store, "msg-poison-restart")
-	if err != nil || poisonDB == nil {
-		t.Fatalf("Failed to query poison message: %v", err)
-	}
-	if poisonDB.Status != db.StatusFailed {
-		t.Errorf("Expected poison pill status FAILED, got: %s", poisonDB.Status)
-	}
-	if !strings.Contains(poisonDB.ErrorMessage, "exceeded restart limit") {
-		t.Errorf("Expected error to mention exceeded restart limit, got: %s", poisonDB.ErrorMessage)
-	}
-
-	// Verify msgValid was successfully completed and restart_count incremented
-	validDB, err := getMessage(store, "msg-valid-restart")
-	if err != nil || validDB == nil {
-		t.Fatalf("Failed to query valid message: %v", err)
-	}
-	if validDB.Status != db.StatusCompleted {
-		t.Errorf("Expected valid message status COMPLETED, got: %s", validDB.Status)
-	}
-	if validDB.RestartCount != DefaultMaxRestarts {
-		t.Errorf("Expected valid message restart_count %d, got %d", DefaultMaxRestarts, validDB.RestartCount)
-	}
-}
-
-func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	threadID := "thread-restarted-staleness"
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("d2222222-2222-3333-4444-555555555555", "execution done"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// Restarted message has RestartCount > 0, RetryCount == 0, age is 45m (> 30m)
-	msg := db.Message{
-		ID:           "msg-restarted-retained",
-		ThreadID:     threadID,
-		AuthorID:     "user-1",
-		Content:      "turn interrupted by restart resumed",
-		Status:       db.StatusPending,
-		RestartCount: 1,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-45 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for restarted message processing")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 1 {
-		t.Errorf("Expected 1 runner call for restarted message with RestartCount > 0, got %d", calls)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-restarted-retained")
-	if dbMsg.ResponseText == "[EXPIRED_STALE]" {
-		t.Errorf("Restarted message should NOT be marked [EXPIRED_STALE]")
-	}
-}
-
-func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	threadID := "thread-restarted-hard-ceiling"
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("sess-restart-drop", "unexpected"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// Restarted message has RestartCount > 0, but age is 130m (> 2h MaxMessageAbsoluteAge)
-	msg := db.Message{
-		ID:           "msg-restarted-hard-ceiling",
-		ThreadID:     threadID,
-		AuthorID:     "user-1",
-		Content:      "stuck across multiple restarts for over 2 hours",
-		Status:       db.StatusPending,
-		RestartCount: 2,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-130 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message drop")
-	}
-
-	mu.Lock()
-	calls := runnerCalls
-	mu.Unlock()
-
-	if calls != 0 {
-		t.Errorf("Expected 0 runner calls for message exceeding MaxMessageAbsoluteAge (hard ceiling), got %d", calls)
-	}
-
-	dbMsg, _ := getMessage(store, "msg-restarted-hard-ceiling")
-	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
-	}
-}
 
 func TestWorkerPool_EffortRouting(t *testing.T) {
 	t.Parallel()
@@ -8340,351 +7854,347 @@ func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *t
 	}
 }
 
-func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *testing.T) {
+func TestRecoverInterrupted_PoisonPillAndStrandedSuite(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	// Message that ran for 5 minutes before being killed by deployment
-	msg := db.Message{
-		ID:           "msg-long-running",
-		ThreadID:     "thread-long",
-		AuthorID:     "user-1",
-		Content:      "long task",
-		Status:       db.StatusProcessing,
-		RestartCount: DefaultMaxRestarts, // normally 3, would trigger poison pill if instant crash
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-		UpdatedAt:    time.Now().UTC().Add(-5 * time.Minute), // Last active 5m ago (> 30s)
-	}
-	_ = insertMessage(store, msg)
-	store.SetMessageUpdatedAt(msg.ID, time.Now().UTC().Add(-5*time.Minute))
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "LongRunningTask_DeploymentVelocityProtection",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				msg := db.Message{
+					ID:           "msg-long-running",
+					ThreadID:     "thread-long",
+					AuthorID:     "user-1",
+					Content:      "long task",
+					Status:       db.StatusProcessing,
+					RestartCount: DefaultMaxRestarts,
+					RetryCount:   0,
+					CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+					UpdatedAt:    time.Now().UTC().Add(-5 * time.Minute),
+				}
+				_ = insertMessage(store, msg)
+				store.SetMessageUpdatedAt(msg.ID, time.Now().UTC().Add(-5*time.Minute))
 
-	var mu sync.Mutex
-	var completedIDs []string
-	doneCh := make(chan struct{})
+				var mu sync.Mutex
+				var completedIDs []string
+				doneCh := make(chan struct{})
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "Recovered successfully"), "", 0, nil
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store: store,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "Recovered successfully"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					OnMessageCompleted: func(m db.Message, finalStatus string) {
+						mu.Lock()
+						completedIDs = append(completedIDs, m.ID)
+						mu.Unlock()
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				RecoverInterrupted(store, pool)
+
+				waitForCompletion(t, doneCh, 3*time.Second, "long running task recovery")
+
+				updated, _ := getMessage(store, "msg-long-running")
+				if updated.Status != db.StatusCompleted {
+					t.Errorf("Expected long running task to be completed, got %s", updated.Status)
+				}
+				if updated.RestartCount != 4 {
+					t.Errorf("Expected restart_count 4 after recovery, got %d", updated.RestartCount)
+				}
+			},
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(m db.Message, finalStatus string) {
-			mu.Lock()
-			completedIDs = append(completedIDs, m.ID)
-			mu.Unlock()
-			close(doneCh)
+		{
+			name: "PoisonPill_HardCeiling",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				msg := db.Message{
+					ID:           "msg-hard-ceiling",
+					ThreadID:     "thread-ceiling",
+					AuthorID:     "user-1",
+					Content:      "hard ceiling test",
+					Status:       db.StatusProcessing,
+					RestartCount: 5,
+					RetryCount:   0,
+					CreatedAt:    time.Now().UTC().Add(-20 * time.Minute),
+				}
+				_ = insertMessage(store, msg)
+				store.SetMessageUpdatedAt(msg.ID, time.Now().UTC().Add(-5*time.Minute))
+
+				var deliveredNotifs []string
+				var mu sync.Mutex
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store: store,
+					NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+						return "Poison pill dropped"
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveredNotifs = append(deliveredNotifs, text)
+						mu.Unlock()
+						return nil
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				RecoverInterrupted(store, pool)
+
+				updated, _ := getMessage(store, "msg-hard-ceiling")
+				if updated.Status != db.StatusFailed {
+					t.Errorf("Expected hard ceiling message to be marked FAILED, got %s", updated.Status)
+				}
+				if !strings.Contains(updated.ErrorMessage, "poison pill") {
+					t.Errorf("Expected poison pill error message, got %s", updated.ErrorMessage)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if len(deliveredNotifs) == 0 {
+					t.Errorf("Expected poison pill notification delivered to Discord")
+				}
+			},
 		},
-	})
-	pool.Start()
-	defer pool.Stop()
+		{
+			name: "DiscordSessionDeliversPoisonNotice",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				msg := db.Message{
+					ID:           "msg-delivery-check",
+					ThreadID:     "thread-delivery-check",
+					AuthorID:     "user-1",
+					Content:      "poison message",
+					Status:       db.StatusProcessing,
+					RestartCount: DefaultMaxRestarts,
+					RetryCount:   0,
+					CreatedAt:    time.Now().UTC(),
+					UpdatedAt:    time.Now().UTC(),
+				}
+				_ = insertMessage(store, msg)
 
-	RecoverInterrupted(store, pool)
+				var capturedSession *discordgo.Session
+				var deliveredThreadID string
+				var deliveredText string
+				var mu sync.Mutex
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for long-running task to be recovered and completed")
+				mockSession := &discordgo.Session{
+					State: discordgo.NewState(),
+				}
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store: store,
+					NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+						return "Poison pill notice"
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						capturedSession = s
+						deliveredThreadID = channelID
+						deliveredText = text
+						mu.Unlock()
+						return nil
+					},
+				})
+				pool.SetDiscordSession(mockSession)
+				pool.Start()
+				defer pool.Stop()
+
+				RecoverInterrupted(store, pool)
+
+				mu.Lock()
+				defer mu.Unlock()
+				if capturedSession != mockSession {
+					t.Errorf("Expected DeliveryFunc to receive mockSession %p, got %p", mockSession, capturedSession)
+				}
+				if deliveredThreadID != "thread-delivery-check" {
+					t.Errorf("Expected thread-delivery-check, got %s", deliveredThreadID)
+				}
+				if deliveredText != "Poison pill notice" {
+					t.Errorf("Expected poison notice, got %s", deliveredText)
+				}
+			},
+		},
+		{
+			name: "CoverageEdgeCases",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				msg := db.Message{
+					ID:           "msg-edge-case-cov",
+					ThreadID:     "thread-cov",
+					AuthorID:     "user-1",
+					Content:      "short",
+					Status:       db.StatusProcessing,
+					RestartCount: DefaultMaxRestarts,
+					RetryCount:   0,
+					CreatedAt:    time.Now().UTC(),
+					UpdatedAt:    time.Now().UTC(),
+				}
+				_ = insertMessage(store, msg)
+
+				mockSess := &discordgo.Session{State: discordgo.NewState()}
+				appCfg := config.NewFromData(&config.ConfigData{
+					Model:  "test-model",
+					AgyBin: "agy-custom",
+					APIKey: "custom-api-key",
+				})
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:       store,
+					MaxAttempts: 0,
+					NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+						if apiKey != "custom-api-key" || agyBin != "agy-custom" {
+							t.Errorf("expected apiKey custom-api-key and agyBin agy-custom, got %s / %s", apiKey, agyBin)
+						}
+						return "Poison notice"
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						return errors.New("discord delivery failed")
+					},
+				})
+				pool.appCfg = appCfg
+				pool.SetDiscordSession(mockSess)
+
+				if pool.DiscordSession() != mockSess {
+					t.Errorf("expected DiscordSession() to return mockSession")
+				}
+
+				RecoverInterrupted(store, pool)
+
+				updated, _ := getMessage(store, "msg-edge-case-cov")
+				if updated.Status != db.StatusFailed {
+					t.Errorf("expected status FAILED, got %s", updated.Status)
+				}
+			},
+		},
+		{
+			name: "DropsSupersededMessages",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				t1 := time.Now().UTC().Add(-20 * time.Minute)
+				t2 := time.Now().UTC().Add(-10 * time.Minute)
+
+				msgOld := db.Message{
+					ID:        "msg-stranded-old",
+					ThreadID:  "thread-superseded",
+					GuildID:   "g1",
+					Status:    db.StatusPending,
+					CreatedAt: t1,
+				}
+				msgNewer := db.Message{
+					ID:           "msg-completed-newer",
+					ThreadID:     "thread-superseded",
+					GuildID:      "g1",
+					Status:       db.StatusCompleted,
+					ResponseText: "Already answered newer question!",
+					CreatedAt:    t2,
+				}
+
+				_ = insertMessage(store, msgOld)
+				_ = insertMessage(store, msgNewer)
+
+				var recoveredIDs []string
+				var mu sync.Mutex
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    1,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						return mockJSONResponse("sess-1", "OK"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					OnMessageCompleted: func(msg db.Message, finalStatus string) {
+						mu.Lock()
+						recoveredIDs = append(recoveredIDs, msg.ID)
+						mu.Unlock()
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				RecoverInterrupted(store, pool)
+
+				mu.Lock()
+				recCount := len(recoveredIDs)
+				mu.Unlock()
+
+				if recCount != 0 {
+					t.Fatalf("expected 0 recovered messages, got %d (%v)", recCount, recoveredIDs)
+				}
+
+				updated, err := getMessage(store, "msg-stranded-old")
+				if err != nil {
+					t.Fatalf("failed to get message: %v", err)
+				}
+				if updated.Status != db.StatusCompleted {
+					t.Errorf("expected status %s, got %s", db.StatusCompleted, updated.Status)
+				}
+				if updated.ResponseText != "[EXPIRED_STALE]" {
+					t.Errorf("expected response_text '[EXPIRED_STALE]', got %q", updated.ResponseText)
+				}
+			},
+		},
+		{
+			name: "DropsStrandedPendingOlderThanTTL",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				msgPending := db.Message{
+					ID:            "msg-stranded-pending",
+					ThreadID:      "thread-expired-pending",
+					GuildID:       "g1",
+					Status:        db.StatusPending,
+					ScheduleRunID: "run-stranded-1",
+					CreatedAt:     time.Now().UTC().Add(-45 * time.Minute),
+				}
+				_ = insertMessage(store, msgPending)
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					StalenessTTL:   30 * time.Minute,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    1,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						return mockJSONResponse("sess-1", "OK"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				RecoverInterrupted(store, pool)
+
+				updated, err := getMessage(store, "msg-stranded-pending")
+				if err != nil {
+					t.Fatalf("failed to get message: %v", err)
+				}
+				if updated.Status != db.StatusCompleted {
+					t.Errorf("expected status %s, got %s", db.StatusCompleted, updated.Status)
+				}
+				if updated.ResponseText != "[EXPIRED_STALE]" {
+					t.Errorf("expected response_text '[EXPIRED_STALE]', got %q", updated.ResponseText)
+				}
+			},
+		},
 	}
 
-	updated, _ := getMessage(store, "msg-long-running")
-	if updated.Status != db.StatusCompleted {
-		t.Errorf("Expected long running task to be completed, got %s", updated.Status)
-	}
-	if updated.RestartCount != 4 {
-		t.Errorf("Expected restart_count 4 after recovery, got %d", updated.RestartCount)
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
 	}
 }
 
-func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	// Message that has restarted 5 times (hard cap) even though UpdatedAt was > 30s ago
-	msg := db.Message{
-		ID:           "msg-hard-ceiling",
-		ThreadID:     "thread-ceiling",
-		AuthorID:     "user-1",
-		Content:      "hard ceiling test",
-		Status:       db.StatusProcessing,
-		RestartCount: 5,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-20 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	store.SetMessageUpdatedAt(msg.ID, time.Now().UTC().Add(-5*time.Minute))
-
-	var deliveredNotifs []string
-	var mu sync.Mutex
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			return "Poison pill dropped"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotifs = append(deliveredNotifs, text)
-			mu.Unlock()
-			return nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	RecoverInterrupted(store, pool)
-
-	updated, _ := getMessage(store, "msg-hard-ceiling")
-	if updated.Status != db.StatusFailed {
-		t.Errorf("Expected hard ceiling message to be marked FAILED, got %s", updated.Status)
-	}
-	if !strings.Contains(updated.ErrorMessage, "poison pill") {
-		t.Errorf("Expected poison pill error message, got %s", updated.ErrorMessage)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(deliveredNotifs) == 0 {
-		t.Errorf("Expected poison pill notification delivered to Discord")
-	}
-}
-
-func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	msg := db.Message{
-		ID:           "msg-delivery-check",
-		ThreadID:     "thread-delivery-check",
-		AuthorID:     "user-1",
-		Content:      "poison message",
-		Status:       db.StatusProcessing,
-		RestartCount: DefaultMaxRestarts,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(), // instant crash (< 30s)
-	}
-	_ = insertMessage(store, msg)
-
-	var capturedSession *discordgo.Session
-	var deliveredThreadID string
-	var deliveredText string
-	var mu sync.Mutex
-
-	mockSession := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			return "Poison pill notice"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			capturedSession = s
-			deliveredThreadID = channelID
-			deliveredText = text
-			mu.Unlock()
-			return nil
-		},
-	})
-	pool.SetDiscordSession(mockSession)
-	pool.Start()
-	defer pool.Stop()
-
-	RecoverInterrupted(store, pool)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if capturedSession != mockSession {
-		t.Errorf("Expected DeliveryFunc to receive mockSession %p, got %p", mockSession, capturedSession)
-	}
-	if deliveredThreadID != "thread-delivery-check" {
-		t.Errorf("Expected thread-delivery-check, got %s", deliveredThreadID)
-	}
-	if deliveredText != "Poison pill notice" {
-		t.Errorf("Expected poison notice, got %s", deliveredText)
-	}
-}
-
-func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	msg := db.Message{
-		ID:           "msg-edge-case-cov",
-		ThreadID:     "thread-cov",
-		AuthorID:     "user-1",
-		Content:      "short",
-		Status:       db.StatusProcessing,
-		RestartCount: DefaultMaxRestarts,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-
-	mockSess := &discordgo.Session{State: discordgo.NewState()}
-	appCfg := config.NewFromData(&config.ConfigData{
-		Model:  "test-model",
-		AgyBin: "agy-custom",
-		APIKey: "custom-api-key",
-	})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts: 0, // covers maxAttempts <= 0 fallback
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			if apiKey != "custom-api-key" || agyBin != "agy-custom" {
-				t.Errorf("expected apiKey custom-api-key and agyBin agy-custom, got %s / %s", apiKey, agyBin)
-			}
-			return "Poison notice"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			// Return error to cover failed delivery branch
-			return errors.New("discord delivery failed")
-		},
-	})
-	pool.appCfg = appCfg
-	pool.SetDiscordSession(mockSess)
-
-	// Exercise DiscordSession() getter
-	if pool.DiscordSession() != mockSess {
-		t.Errorf("expected DiscordSession() to return mockSession")
-	}
-
-	RecoverInterrupted(store, pool)
-
-	updated, _ := getMessage(store, "msg-edge-case-cov")
-	if updated.Status != db.StatusFailed {
-		t.Errorf("expected status FAILED, got %s", updated.Status)
-	}
-}
-
-func TestRecoverInterrupted_DropsSupersededMessages(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	t1 := time.Now().UTC().Add(-20 * time.Minute)
-	t2 := time.Now().UTC().Add(-10 * time.Minute)
-
-	// msgOld was stranded in PENDING at t1
-	msgOld := db.Message{
-		ID:        "msg-stranded-old",
-		ThreadID:  "thread-superseded",
-		GuildID:   "g1",
-		Status:    db.StatusPending,
-		CreatedAt: t1,
-	}
-	// msgNewer was sent at t2 and already COMPLETED
-	msgNewer := db.Message{
-		ID:           "msg-completed-newer",
-		ThreadID:     "thread-superseded",
-		GuildID:      "g1",
-		Status:       db.StatusCompleted,
-		ResponseText: "Already answered newer question!",
-		CreatedAt:    t2,
-	}
-
-	_ = insertMessage(store, msgOld)
-	_ = insertMessage(store, msgNewer)
-
-	var recoveredIDs []string
-	var mu sync.Mutex
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse("sess-1", "OK"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			mu.Lock()
-			recoveredIDs = append(recoveredIDs, msg.ID)
-			mu.Unlock()
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	RecoverInterrupted(store, pool)
-
-	mu.Lock()
-	recCount := len(recoveredIDs)
-	mu.Unlock()
-
-	if recCount != 0 {
-		t.Fatalf("expected 0 recovered messages, got %d (%v)", recCount, recoveredIDs)
-	}
-
-	updated, err := getMessage(store, "msg-stranded-old")
-	if err != nil {
-		t.Fatalf("failed to get message: %v", err)
-	}
-	if updated.Status != db.StatusCompleted {
-		t.Errorf("expected status %s, got %s", db.StatusCompleted, updated.Status)
-	}
-	if updated.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("expected response_text '[EXPIRED_STALE]', got %q", updated.ResponseText)
-	}
-}
-
-func TestRecoverInterrupted_DropsStrandedPendingOlderThanTTL(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	// Pending message created 45 minutes ago (exceeds default 30m TTL)
-	msgPending := db.Message{
-		ID:            "msg-stranded-pending",
-		ThreadID:      "thread-expired-pending",
-		GuildID:       "g1",
-		Status:        db.StatusPending,
-		ScheduleRunID: "run-stranded-1",
-		CreatedAt:     time.Now().UTC().Add(-45 * time.Minute),
-	}
-	_ = insertMessage(store, msgPending)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		StalenessTTL:   30 * time.Minute,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse("sess-1", "OK"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	RecoverInterrupted(store, pool)
-
-	updated, err := getMessage(store, "msg-stranded-pending")
-	if err != nil {
-		t.Fatalf("failed to get message: %v", err)
-	}
-	if updated.Status != db.StatusCompleted {
-		t.Errorf("expected status %s, got %s", db.StatusCompleted, updated.Status)
-	}
-	if updated.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("expected response_text '[EXPIRED_STALE]', got %q", updated.ResponseText)
-	}
-}
 
 func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 	t.Parallel()
@@ -8719,701 +8229,386 @@ func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
+func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	var capturedDesc string
-	var deliveredNotif string
-	var mu sync.Mutex
-	doneCh := make(chan struct{}, 1)
+	tests := []struct {
+		name                 string
+		threadID             string
+		maxAttempts          int
+		preSetup             func(store db.Store, threadID string)
+		runnerStderr         string
+		runnerErr            error
+		runnerExitCode       int
+		expectNotifierCalled bool
+		expectedDescContains string
+		notifierReturn       string
+		expectDeliveredNotice string
+		expectUnavailableMsg bool
+	}{
+		{
+			name:                 "WatchdogExhaustion_InvokesNotifierFunc",
+			threadID:             "thread-wd-1",
+			maxAttempts:          1,
+			runnerStderr:         "inactivity timeout exceeded [watchdog]",
+			runnerErr:            errors.New("watchdog timeout"),
+			runnerExitCode:       1,
+			expectNotifierCalled: true,
+			expectedDescContains: "execution timed out",
+			notifierReturn:       "DEADASS TIMED OUT 💀",
+			expectDeliveredNotice: "DEADASS TIMED OUT 💀",
+		},
+		{
+			name:                 "NonTransient_InvokesNotifierFunc",
+			threadID:             "thread-nt-1",
+			maxAttempts:          3,
+			runnerStderr:         "Error: unknown flag: --bogus-flag",
+			runnerErr:            errors.New("exit status 1"),
+			runnerExitCode:       1,
+			expectNotifierCalled: true,
+			expectedDescContains: "non-transient error",
+			notifierReturn:       "UNACCEPTABLE GARBAGE DETECTED 🔥",
+			expectDeliveredNotice: "UNACCEPTABLE GARBAGE DETECTED 🔥",
+		},
+		{
+			name:                 "RetryExhaustion_InvokesNotifierFunc",
+			threadID:             "thread-exhaust-1",
+			maxAttempts:          2,
+			runnerStderr:         "connection reset by peer",
+			runnerErr:            errors.New("network drop"),
+			runnerExitCode:       1,
+			expectNotifierCalled: true,
+			expectedDescContains: "exhausting 2 attempts",
+			notifierReturn:       "ROASTED TO ASHES 🤘",
+			expectDeliveredNotice: "ROASTED TO ASHES 🤘",
+		},
+		{
+			name:                 "RateLimitBypassesNotifierFunc",
+			threadID:             "thread-rl-1",
+			maxAttempts:          1,
+			runnerStderr:         "Error 429: Too Many Requests",
+			runnerErr:            errors.New("rate limit"),
+			runnerExitCode:       1,
+			expectNotifierCalled: false,
+			expectUnavailableMsg: true,
+		},
+		{
+			name:                 "Watchdog_RateLimitBypassesNotifier",
+			threadID:             "thread-wd-rl",
+			maxAttempts:          1,
+			runnerStderr:         "inactivity timeout exceeded: [watchdog] Resource has been exhausted (quota limit reached)",
+			runnerErr:            context.DeadlineExceeded,
+			runnerExitCode:       124,
+			expectNotifierCalled: false,
+			expectUnavailableMsg: true,
+		},
+		{
+			name:        "SessionCorruption_RateLimitBypassesNotifier",
+			threadID:    "thread-sc-rl",
+			maxAttempts: 1,
+			preSetup: func(store db.Store, threadID string) {
+				_ = rotateSessionID(store, threadID, "sess-existing-1")
+			},
+			runnerStderr:         "conversation not found: 429 rate limit exceeded",
+			runnerErr:            errors.New("rate limited corruption"),
+			runnerExitCode:       1,
+			expectNotifierCalled: false,
+			expectUnavailableMsg: true,
+		},
+	}
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    1,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "", "inactivity timeout exceeded [watchdog]", 1, errors.New("watchdog timeout")
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			if tt.preSetup != nil {
+				tt.preSetup(store, tt.threadID)
+			}
+
+			var capturedDesc string
+			var deliveredNotif string
+			var mu sync.Mutex
+			notifierCalled := false
+			doneCh := make(chan struct{}, 1)
+
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:          store,
+				MaxAttempts:    tt.maxAttempts,
+				TimeoutMinutes: 1,
+				BackoffBase:    5 * time.Millisecond,
+				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					return "", tt.runnerStderr, tt.runnerExitCode, tt.runnerErr
+				},
+				NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+					mu.Lock()
+					notifierCalled = true
+					capturedDesc = contextDescription
+					mu.Unlock()
+					return tt.notifierReturn
+				},
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					mu.Lock()
+					deliveredNotif = text
+					mu.Unlock()
+					return nil
+				},
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					doneCh <- struct{}{}
+				},
+			})
+			pool.Start()
+			defer pool.Stop()
+
+			msg := db.Message{ID: "msg-" + tt.name, ThreadID: tt.threadID, Content: "test content"}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
+
+			waitForCompletion(t, doneCh, 3*time.Second, tt.name)
+
 			mu.Lock()
-			capturedDesc = contextDescription
-			mu.Unlock()
-			return "DEADASS TIMED OUT 💀"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotif = text
-			mu.Unlock()
-			return nil
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
+			defer mu.Unlock()
+
+			if notifierCalled != tt.expectNotifierCalled {
+				t.Errorf("Expected notifierCalled=%t, got %t", tt.expectNotifierCalled, notifierCalled)
+			}
+			if tt.expectedDescContains != "" && !strings.Contains(capturedDesc, tt.expectedDescContains) {
+				t.Errorf("Expected NotifierFunc description to contain %q, got: %q", tt.expectedDescContains, capturedDesc)
+			}
+			if tt.expectDeliveredNotice != "" && deliveredNotif != tt.expectDeliveredNotice {
+				t.Errorf("Expected delivered notice %q, got: %q", tt.expectDeliveredNotice, deliveredNotif)
+			}
+			if tt.expectUnavailableMsg && deliveredNotif != notifier.ModelUnavailableMessage() {
+				t.Errorf("Expected ModelUnavailableMessage, got: %q", deliveredNotif)
+			}
+		})
+	}
+
+	t.Run("NonTransient_LongSnippetAndDeliveryErr", func(t *testing.T) {
+		store := setupTestStore(t)
+		var capturedDesc string
+		var mu sync.Mutex
+		doneCh := make(chan struct{}, 1)
+
+		longError := strings.Repeat("VeryBadError-", 50)
+		pool := NewWorkerPool(WorkerPoolConfig{
+			Store:          store,
+			MaxAttempts:    1,
+			TimeoutMinutes: 1,
+			BackoffBase:    5 * time.Millisecond,
+			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return "", longError, 1, errors.New("fatal command syntax")
+			},
+			NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+				mu.Lock()
+				capturedDesc = contextDescription
+				mu.Unlock()
+				return "DEADASS BROKEN 💀"
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return errors.New("discord delivery network failed")
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				doneCh <- struct{}{}
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-nt-long", ThreadID: "thread-nt-long", Content: "long err test"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		waitForCompletion(t, doneCh, 3*time.Second, "long snippet test")
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len([]rune(capturedDesc)) > 350 {
+			t.Errorf("Expected truncated description, got length %d: %q", len([]rune(capturedDesc)), capturedDesc)
+		}
 	})
-	pool.Start()
-	defer pool.Stop()
 
-	msg := db.Message{ID: "msg-wd-exhaust", ThreadID: "thread-wd-1", Content: "heavy command"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
+	t.Run("New_NotifierRunnerFuncWrapped", func(t *testing.T) {
+		store := setupTestStore(t)
+		runnerCalled := false
+		pool := New(nil, WorkerPoolConfig{
+			Store: store,
+			NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+				runnerCalled = true
+				return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
+			},
+		})
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for watchdog exhaustion")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.Contains(capturedDesc, "execution timed out") {
-		t.Errorf("Expected NotifierFunc to receive timeout description, got: %q", capturedDesc)
-	}
-	if deliveredNotif != "DEADASS TIMED OUT 💀" {
-		t.Errorf("Expected delivered notice from NotifierFunc, got: %q", deliveredNotif)
-	}
+		if pool.cfg.NotifierFunc == nil {
+			t.Fatal("Expected NotifierFunc to be initialized")
+		}
+		res := pool.cfg.NotifierFunc("agy", "key", "test description")
+		if !runnerCalled {
+			t.Errorf("Expected NotifierRunnerFunc to be invoked")
+		}
+		if res != "DYNAMIC FALLBACK NOTICE" {
+			t.Errorf("Expected dynamic fallback notice, got: %q", res)
+		}
+	})
 }
 
-func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
+func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	var capturedDesc string
-	var deliveredNotif string
-	var mu sync.Mutex
-	doneCh := make(chan struct{}, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    3,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "", "Error: unknown flag: --bogus-flag", 1, errors.New("exit status 1")
+	tests := []struct {
+		name                 string
+		threadID             string
+		scheduleRunID        string
+		maxAttempts          int
+		backoffBase          time.Duration
+		runnerWithOptions    func(poolPtr **WorkerPool, deliveredCalled *bool, mu *sync.Mutex) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error)
+		expectDeliveredCheck bool
+	}{
+		{
+			name:          "Watchdog_CancelledDuringBackoff",
+			threadID:      "thread-wd-cancel",
+			scheduleRunID: "run-wd-cancel",
+			maxAttempts:   3,
+			backoffBase:   500 * time.Millisecond,
+			runnerWithOptions: func(poolPtr **WorkerPool, deliveredCalled *bool, mu *sync.Mutex) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					go func() {
+						time.Sleep(10 * time.Millisecond)
+						(*poolPtr).cancel()
+					}()
+					return "", "inactivity timeout exceeded: [watchdog] hung process", 124, context.DeadlineExceeded
+				}
+			},
 		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			mu.Lock()
-			capturedDesc = contextDescription
-			mu.Unlock()
-			return "UNACCEPTABLE GARBAGE DETECTED 🔥"
+		{
+			name:                 "Watchdog_CancelledPostWatchdog",
+			threadID:             "thread-wd-post-cancel",
+			maxAttempts:          1,
+			backoffBase:          5 * time.Millisecond,
+			expectDeliveredCheck: true,
+			runnerWithOptions: func(poolPtr **WorkerPool, deliveredCalled *bool, mu *sync.Mutex) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					(*poolPtr).cancel()
+					return "", "inactivity timeout exceeded: [watchdog] single attempt cancel", 124, context.DeadlineExceeded
+				}
+			},
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotif = text
-			mu.Unlock()
-			return nil
+		{
+			name:                 "NonTransient_CancelledDuringTurn",
+			threadID:             "thread-nt-cancel",
+			maxAttempts:          1,
+			backoffBase:          5 * time.Millisecond,
+			expectDeliveredCheck: true,
+			runnerWithOptions: func(poolPtr **WorkerPool, deliveredCalled *bool, mu *sync.Mutex) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					(*poolPtr).cancel()
+					return "", "Fatal: invalid prompt parameters", 2, errors.New("non transient err")
+				}
+			},
 		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
+		{
+			name:          "RetryExhaustion_CancelledWithScheduleRunID",
+			threadID:      "thread-exh-cancel",
+			scheduleRunID: "run-exh-cancel",
+			maxAttempts:   2,
+			backoffBase:   5 * time.Millisecond,
+			runnerWithOptions: func(poolPtr **WorkerPool, deliveredCalled *bool, mu *sync.Mutex) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					(*poolPtr).cancel()
+					return "", "connection timed out", 1, errors.New("timeout")
+				}
+			},
 		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-nt-notif", ThreadID: "thread-nt-1", Content: "fatal command"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for non-transient failure")
+		{
+			name:          "RateLimit_CancelledDuringBackoff",
+			threadID:      "thread-rl-cancel",
+			scheduleRunID: "run-rl-cancel",
+			maxAttempts:   3,
+			backoffBase:   500 * time.Millisecond,
+			runnerWithOptions: func(poolPtr **WorkerPool, deliveredCalled *bool, mu *sync.Mutex) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					go func() {
+						time.Sleep(10 * time.Millisecond)
+						(*poolPtr).cancel()
+					}()
+					return "", "Error 429: Resource has been exhausted (quota exceeded)", 1, errors.New("rate limited")
+				}
+			},
+		},
+		{
+			name:          "Transient_CancelledDuringBackoff",
+			threadID:      "thread-tr-cancel",
+			scheduleRunID: "run-tr-cancel",
+			maxAttempts:   3,
+			backoffBase:   500 * time.Millisecond,
+			runnerWithOptions: func(poolPtr **WorkerPool, deliveredCalled *bool, mu *sync.Mutex) func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					go func() {
+						time.Sleep(10 * time.Millisecond)
+						(*poolPtr).cancel()
+					}()
+					return "", "connection reset by peer", 1, errors.New("transient network drop")
+				}
+			},
+		},
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.Contains(capturedDesc, "non-transient error") {
-		t.Errorf("Expected NotifierFunc to receive non-transient description, got: %q", capturedDesc)
-	}
-	if deliveredNotif != "UNACCEPTABLE GARBAGE DETECTED 🔥" {
-		t.Errorf("Expected delivered notice from NotifierFunc, got: %q", deliveredNotif)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			var pool *WorkerPool
+			deliveredCalled := false
+			var mu sync.Mutex
 
-func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
+			pool = NewWorkerPool(WorkerPoolConfig{
+				Store:                 store,
+				MaxAttempts:           tt.maxAttempts,
+				TimeoutMinutes:        1,
+				BackoffBase:           tt.backoffBase,
+				RunnerWithOptionsFunc: tt.runnerWithOptions(&pool, &deliveredCalled, &mu),
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					mu.Lock()
+					deliveredCalled = true
+					mu.Unlock()
+					return nil
+				},
+			})
+			pool.Start()
+			defer pool.Stop()
 
-	var capturedDesc string
-	var deliveredNotif string
-	var mu sync.Mutex
-	doneCh := make(chan struct{}, 1)
+			if tt.scheduleRunID != "" {
+				_ = createScheduleRun(store, db.ScheduleRun{
+					ID:           tt.scheduleRunID,
+					ScheduleID:   "sched-" + tt.name,
+					ScheduleType: "cron",
+					Status:       "running",
+					StartedAt:    time.Now().UTC(),
+				})
+			}
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    2,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "", "connection reset by peer", 1, errors.New("network drop")
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			mu.Lock()
-			capturedDesc = contextDescription
-			mu.Unlock()
-			return "ROASTED TO ASHES 🤘"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotif = text
-			mu.Unlock()
-			return nil
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
+			msgID := "msg-" + tt.name
+			msg := db.Message{ID: msgID, ThreadID: tt.threadID, Content: "cancel test", ScheduleRunID: tt.scheduleRunID}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
 
-	msg := db.Message{ID: "msg-exhaust-notif", ThreadID: "thread-exhaust-1", Content: "flake command"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
+			waitPoolWorkersDone(t, pool, 2*time.Second)
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for retry exhaustion")
-	}
+			if tt.expectDeliveredCheck {
+				mu.Lock()
+				if deliveredCalled {
+					t.Errorf("DeliveryFunc should not be called when pool is cancelled")
+				}
+				mu.Unlock()
+			}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.Contains(capturedDesc, "exhausting 2 attempts") {
-		t.Errorf("Expected NotifierFunc to receive exhaustion description, got: %q", capturedDesc)
-	}
-	if deliveredNotif != "ROASTED TO ASHES 🤘" {
-		t.Errorf("Expected delivered notice from NotifierFunc, got: %q", deliveredNotif)
-	}
-}
-
-func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	notifierCalled := false
-	var deliveredNotif string
-	var mu sync.Mutex
-	doneCh := make(chan struct{}, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    1,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "", "Error 429: Too Many Requests", 1, errors.New("rate limit")
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			mu.Lock()
-			notifierCalled = true
-			mu.Unlock()
-			return "SHOULD NOT BE CALLED"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotif = text
-			mu.Unlock()
-			return nil
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-rl-bypass", ThreadID: "thread-rl-1", Content: "rate limited turn"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for rate limit failure")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if notifierCalled {
-		t.Errorf("NotifierFunc should NOT have been called on rate limit error")
-	}
-	if deliveredNotif != notifier.ModelUnavailableMessage() {
-		t.Errorf("Expected ModelUnavailableMessage on rate limit, got: %q", deliveredNotif)
+			dbMsg, _ := getMessage(store, msgID)
+			if dbMsg != nil && dbMsg.Status != db.StatusPending {
+				t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
+			}
+		})
 	}
 }
 
-func TestWorkerPool_Watchdog_RateLimitBypassesNotifier(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	notifierCalled := false
-	var deliveredNotif string
-	var mu sync.Mutex
-	doneCh := make(chan struct{}, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    1,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "", "inactivity timeout exceeded: [watchdog] Resource has been exhausted (quota limit reached)", 124, context.DeadlineExceeded
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			mu.Lock()
-			notifierCalled = true
-			mu.Unlock()
-			return "SHOULD NOT BE CALLED"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotif = text
-			mu.Unlock()
-			return nil
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-wd-rl-bypass", ThreadID: "thread-wd-rl", Content: "watchdog quota test"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for watchdog rate limit failure")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if notifierCalled {
-		t.Errorf("NotifierFunc should NOT have been called on rate limit error during watchdog")
-	}
-	if deliveredNotif != notifier.ModelUnavailableMessage() {
-		t.Errorf("Expected ModelUnavailableMessage on watchdog rate limit, got: %q", deliveredNotif)
-	}
-}
-
-func waitPoolWorkersDone(t *testing.T, pool *WorkerPool, timeout time.Duration) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() {
-		pool.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		t.Fatal("timed out waiting for worker pool goroutines to exit")
-	}
-}
-
-func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var pool *WorkerPool
-	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    3,
-		TimeoutMinutes: 1,
-		BackoffBase:    500 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			go func() {
-				time.Sleep(10 * time.Millisecond)
-				pool.cancel()
-			}()
-			return "", "inactivity timeout exceeded: [watchdog] hung process", 124, context.DeadlineExceeded
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	runID := "run-wd-cancel"
-	_ = createScheduleRun(store, db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "sched-1",
-		ScheduleType: "cron",
-		Status:       "running",
-		StartedAt:    time.Now().UTC(),
-	})
-	msg := db.Message{ID: "msg-wd-cancel", ThreadID: "thread-wd-cancel", Content: "wd cancel test", ScheduleRunID: runID}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	waitPoolWorkersDone(t, pool, 2*time.Second)
-
-	dbMsg, _ := getMessage(store, "msg-wd-cancel")
-	if dbMsg.Status != db.StatusPending {
-		t.Errorf("Expected status PENDING after pool cancel during watchdog backoff, got: %s", dbMsg.Status)
-	}
-}
-
-func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var pool *WorkerPool
-	deliveredCalled := false
-	var mu sync.Mutex
-
-	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    1,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			pool.cancel()
-			return "", "inactivity timeout exceeded: [watchdog] single attempt cancel", 124, context.DeadlineExceeded
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredCalled = true
-			mu.Unlock()
-			return nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-wd-post-cancel", ThreadID: "thread-wd-post-cancel", Content: "wd post cancel"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	waitPoolWorkersDone(t, pool, 2*time.Second)
-
-	mu.Lock()
-	if deliveredCalled {
-		t.Errorf("DeliveryFunc should not be called when pool is cancelled")
-	}
-	mu.Unlock()
-
-	dbMsg, _ := getMessage(store, "msg-wd-post-cancel")
-	if dbMsg != nil && dbMsg.Status != db.StatusPending {
-		t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
-	}
-}
-
-func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var pool *WorkerPool
-	deliveredCalled := false
-	var mu sync.Mutex
-
-	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    1,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			pool.cancel()
-			return "", "Fatal: invalid prompt parameters", 2, errors.New("non transient err")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredCalled = true
-			mu.Unlock()
-			return nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-nt-cancel", ThreadID: "thread-nt-cancel", Content: "nt cancel"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	waitPoolWorkersDone(t, pool, 2*time.Second)
-
-	mu.Lock()
-	if deliveredCalled {
-		t.Errorf("DeliveryFunc should not be called when pool is cancelled during non-transient error")
-	}
-	mu.Unlock()
-
-	dbMsg, _ := getMessage(store, "msg-nt-cancel")
-	if dbMsg != nil && dbMsg.Status != db.StatusPending {
-		t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
-	}
-}
-
-func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var capturedDesc string
-	var mu sync.Mutex
-	doneCh := make(chan struct{}, 1)
-
-	longError := strings.Repeat("VeryBadError-", 50)
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    1,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "", longError, 1, errors.New("fatal command syntax")
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			mu.Lock()
-			capturedDesc = contextDescription
-			mu.Unlock()
-			return "DEADASS BROKEN 💀"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return errors.New("discord delivery network failed")
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-nt-long", ThreadID: "thread-nt-long", Content: "long err test"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for non-transient completion")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len([]rune(capturedDesc)) > 350 {
-		t.Errorf("Expected truncated description, got length %d: %q", len([]rune(capturedDesc)), capturedDesc)
-	}
-}
-
-func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var pool *WorkerPool
-	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    2,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			pool.cancel()
-			return "", "connection timed out", 1, errors.New("timeout")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return errors.New("delivery error")
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	runID := "run-exh-cancel"
-	_ = createScheduleRun(store, db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "sched-exh",
-		ScheduleType: "cron",
-		Status:       "running",
-		StartedAt:    time.Now().UTC(),
-	})
-	msg := db.Message{ID: "msg-exh-cancel", ThreadID: "thread-exh-cancel", Content: "exh cancel test", ScheduleRunID: runID}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	waitPoolWorkersDone(t, pool, 2*time.Second)
-
-	dbMsg, _ := getMessage(store, "msg-exh-cancel")
-	if dbMsg != nil && dbMsg.Status != db.StatusPending {
-		t.Errorf("Expected status PENDING after cancel, got: %s", dbMsg.Status)
-	}
-}
-
-func TestWorkerPool_New_NotifierRunnerFuncWrapped(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	runnerCalled := false
-	pool := New(nil, WorkerPoolConfig{
-		Store: store,
-		NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			runnerCalled = true
-			return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
-		},
-	})
-
-	if pool.cfg.NotifierFunc == nil {
-		t.Fatal("Expected NotifierFunc to be initialized")
-	}
-	res := pool.cfg.NotifierFunc("agy", "key", "test description")
-	if !runnerCalled {
-		t.Errorf("Expected NotifierRunnerFunc to be invoked")
-	}
-	if res != "DYNAMIC FALLBACK NOTICE" {
-		t.Errorf("Expected dynamic fallback notice, got: %q", res)
-	}
-}
-
-func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var pool *WorkerPool
-	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    3,
-		TimeoutMinutes: 1,
-		BackoffBase:    500 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			go func() {
-				time.Sleep(10 * time.Millisecond)
-				pool.cancel()
-			}()
-			return "", "Error 429: Resource has been exhausted (quota exceeded)", 1, errors.New("rate limited")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	runID := "run-rl-cancel"
-	_ = createScheduleRun(store, db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "sched-rl",
-		ScheduleType: "cron",
-		Status:       "running",
-		StartedAt:    time.Now().UTC(),
-	})
-	msg := db.Message{ID: "msg-rl-cancel", ThreadID: "thread-rl-cancel", Content: "rl cancel test", ScheduleRunID: runID}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	waitPoolWorkersDone(t, pool, 2*time.Second)
-
-	dbMsg, err := getMessage(store, "msg-rl-cancel")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("GetMessage failed: %v", err)
-	}
-	if dbMsg.Status != db.StatusPending {
-		t.Errorf("Expected status PENDING after pool cancel during quota backoff, got: %s", dbMsg.Status)
-	}
-}
-
-func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var pool *WorkerPool
-	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    3,
-		TimeoutMinutes: 1,
-		BackoffBase:    500 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			go func() {
-				time.Sleep(10 * time.Millisecond)
-				pool.cancel()
-			}()
-			return "", "connection reset by peer", 1, errors.New("transient network drop")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	runID := "run-tr-cancel"
-	_ = createScheduleRun(store, db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "sched-tr",
-		ScheduleType: "cron",
-		Status:       "running",
-		StartedAt:    time.Now().UTC(),
-	})
-	msg := db.Message{ID: "msg-tr-cancel", ThreadID: "thread-tr-cancel", Content: "tr cancel test", ScheduleRunID: runID}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	waitPoolWorkersDone(t, pool, 2*time.Second)
-
-	dbMsg, err := getMessage(store, "msg-tr-cancel")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("GetMessage failed: %v", err)
-	}
-	if dbMsg.Status != db.StatusPending {
-		t.Errorf("Expected status PENDING after pool cancel during transient backoff, got: %s", dbMsg.Status)
-	}
-}
-
-func TestWorkerPool_SessionCorruption_RateLimitBypassesNotifier(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	_ = rotateSessionID(store, "thread-sc-rl", "sess-existing-1")
-
-	notifierCalled := false
-	var deliveredNotif string
-	var mu sync.Mutex
-	doneCh := make(chan struct{}, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MaxAttempts:    1,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "", "conversation not found: 429 rate limit exceeded", 1, errors.New("rate limited corruption")
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			mu.Lock()
-			notifierCalled = true
-			mu.Unlock()
-			return "SHOULD NOT BE CALLED"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotif = text
-			mu.Unlock()
-			return nil
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-sc-rl", ThreadID: "thread-sc-rl", Content: "corrupt test"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for session corruption completion")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if notifierCalled {
-		t.Errorf("NotifierFunc should not be called when session corruption has rate limit")
-	}
-	if deliveredNotif != notifier.ModelUnavailableMessage() {
-		t.Errorf("Expected ModelUnavailableMessage, got: %q", deliveredNotif)
-	}
-}
 
 type mockWebhookDispatcher struct {
 	callWakeHookFunc     func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error)
