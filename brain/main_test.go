@@ -4734,7 +4734,74 @@ func TestHandlePRRegister(t *testing.T) {
 		}
 	}
 
-} 
+	// 11. Registration with pool covering warning/fallback branches (empty title, store/delivery errors)
+	{
+		errPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
+				return "", errors.New("widget delivery failed")
+			},
+		})
+		errPoolHandler := handlePRRegister(store, errPool)
+
+		// 11a. Standalone PR with empty title + widget delivery error
+		payloadEmptyTitle := `{"repo":"aerial","pr_number":603,"branch":"feat/empty-title","head_sha":"sha603","target_id":"1555405874565091380"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payloadEmptyTitle))
+		rec := httptest.NewRecorder()
+		errPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK even when widget delivery fails, got %d", rec.Code)
+		}
+
+		// 11b. Standalone PR with GetPRByNumber error + UpdatePRStatusMessageID error
+		okPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
+				return "msg-new-id", nil
+			},
+		})
+		okPoolHandler := handlePRRegister(store, okPool)
+		store.FailNext("GetPRByNumber", errors.New("get pr failed"))
+		store.FailNext("UpdatePRStatusMessageID", errors.New("update msg id failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payloadEmptyTitle))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when GetPRByNumber/UpdatePRStatusMessageID fail, got %d", rec.Code)
+		}
+
+		// 11c. Vanadis chunk widget with GetVanadisChunk error, GetVanadisBuild error, DeliverStatusWidget error, and UpdateVanadisBuildStatusMessageID error
+		vanadisPayload := `{"repo":"aerial","pr_number":604,"branch":"feat/v-err","head_sha":"sha604","target_id":"1555405874565091380","vanadis_chunk_id":"chunk-reg-widget-0"}`
+		store.FailNext("GetVanadisChunk", errors.New("get chunk failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when GetVanadisChunk fails, got %d", rec.Code)
+		}
+
+		store.FailNext("GetVanadisBuild", errors.New("get build failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when GetVanadisBuild fails, got %d", rec.Code)
+		}
+
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		errPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when Vanadis DeliverStatusWidget fails, got %d", rec.Code)
+		}
+
+		store.FailNext("UpdateVanadisBuildStatusMessageID", errors.New("update build msg id failed"))
+		req = httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(vanadisPayload))
+		rec = httptest.NewRecorder()
+		okPoolHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK when UpdateVanadisBuildStatusMessageID fails, got %d", rec.Code)
+		}
+	}
+}
 
 func TestCoverageFlushEndpoint(t *testing.T) {
 	mux := SetupBrainMuxWithEmbedder(nil, nil, nil)
