@@ -368,6 +368,11 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	}
 
 	if _, err := d.stdin.Write(encoded); err != nil {
+		d.inflightMu.Lock()
+		if len(d.inflight) > 0 && d.inflight[len(d.inflight)-1] == turnCtx {
+			d.inflight = d.inflight[:len(d.inflight)-1]
+		}
+		d.inflightMu.Unlock()
 		d.mu.Lock()
 		d.dirty = true
 		d.state = StateClosed
