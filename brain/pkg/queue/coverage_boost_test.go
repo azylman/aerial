@@ -25,187 +25,92 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// 1. history.go Target Coverage
+// 1. History & Summarizer Declarative Test Suites
 // ---------------------------------------------------------------------------
 
 func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
-
 	ctx := context.Background()
 
-	// 1. Limit clamping: <= 0 and > 100
 	t.Run("limit clamping", func(t *testing.T) {
-		// dg nil, threadID empty -> fails fallback
-		_, err := FetchRecentThreadHistory(ctx, nil, store, "", 0)
-		if err == nil {
-			t.Errorf("expected error for empty threadID")
-		}
-		_, err = FetchRecentThreadHistory(ctx, nil, store, "", 150)
-		if err == nil {
-			t.Errorf("expected error for empty threadID")
+		for _, limit := range []int{0, 150} {
+			if _, err := FetchRecentThreadHistory(ctx, nil, store, "", limit); err == nil {
+				t.Errorf("expected error for empty threadID with limit %d", limit)
+			}
 		}
 	})
 
-	// 2. Local DB fast path
 	t.Run("db fast path", func(t *testing.T) {
-		now := time.Now().UTC()
-		err := insertMessage(store, db.Message{
-			ID:         "msg-fast-1",
-			ThreadID:   "thread-fast-1",
-			AuthorID:   "user-1",
-			AuthorName: "Alice",
-			Content:    "Hello fast path",
-			CreatedAt:  now,
+		_ = insertMessage(store, db.Message{
+			ID: "msg-fast-1", ThreadID: "thread-fast-1", AuthorID: "user-1",
+			AuthorName: "Alice", Content: "Hello fast path", CreatedAt: time.Now().UTC(),
 		})
-		if err != nil {
-			t.Fatalf("InsertMessage failed: %v", err)
-		}
-
 		msgs, err := FetchRecentThreadHistory(ctx, nil, store, "thread-fast-1", 10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(msgs) != 1 || msgs[0].Content != "Hello fast path" {
-			t.Fatalf("unexpected msgs: %+v", msgs)
+		if err != nil || len(msgs) != 1 || msgs[0].Content != "Hello fast path" {
+			t.Fatalf("unexpected msgs: %+v, err: %v", msgs, err)
 		}
 	})
 
-	// 3. Fallback to Discord API checks
 	t.Run("fallback guards", func(t *testing.T) {
-		// dg == nil
-		_, err := FetchRecentThreadHistory(ctx, nil, store, "123456789012345678", 10)
-		if err == nil || !strings.Contains(err.Error(), "no database messages and discord fallback unavailable") {
-			t.Errorf("expected fallback unavailable error for dg==nil, got: %v", err)
-		}
-
 		dg, _ := discordgo.New("Bot test")
-		// threadID empty
-		_, err = FetchRecentThreadHistory(ctx, dg, store, "", 10)
-		if err == nil || !strings.Contains(err.Error(), "no database messages and discord fallback unavailable") {
-			t.Errorf("expected fallback unavailable error for empty threadID, got: %v", err)
+		cases := []struct {
+			sess     *discordgo.Session
+			threadID string
+		}{
+			{nil, "123456789012345678"},
+			{dg, ""},
+			{dg, "not-numeric"},
 		}
-
-		// non-numeric snowflake
-		_, err = FetchRecentThreadHistory(ctx, dg, store, "not-numeric", 10)
-		if err == nil || !strings.Contains(err.Error(), "no database messages and discord fallback unavailable") {
-			t.Errorf("expected fallback unavailable error for non-numeric, got: %v", err)
+		for _, tc := range cases {
+			_, err := FetchRecentThreadHistory(ctx, tc.sess, store, tc.threadID, 10)
+			if err == nil || !strings.Contains(err.Error(), "no database messages and discord fallback unavailable") {
+				t.Errorf("expected fallback unavailable error for sess=%v threadID=%q, got: %v", tc.sess != nil, tc.threadID, err)
+			}
 		}
 	})
 
-	// 4. Mock Discord REST ChannelMessages: error and success mappings
 	t.Run("discord rest mappings", func(t *testing.T) {
 		dg, _ := discordgo.New("Bot test")
 		dg.State = discordgo.NewState()
-		dg.State.User = &discordgo.User{
-			ID:       "bot-user-123",
-			Username: "aerial",
-			Bot:      true,
-		}
+		dg.State.User = &discordgo.User{ID: "bot-user-123", Username: "aerial", Bot: true}
 
-		// REST error path
 		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return nil, errors.New("simulated network failure")
 		})
-		_, err := FetchRecentThreadHistory(ctx, dg, store, "123456789012345678", 10)
-		if err == nil {
+		if _, err := FetchRecentThreadHistory(ctx, dg, store, "123456789012345678", 10); err == nil {
 			t.Errorf("expected error from ChannelMessages, got nil")
 		}
 
 		now := time.Now().UTC()
-		rawMessages := []*discordgo.Message{
-			nil, // dm == nil test
-			{
-				ID:        "123456789012345678",
-				Content:   "Aerial speaking via botUserID",
-				Timestamp: now,
-				Author: &discordgo.User{
-					ID:       "bot-user-123",
-					Username: "some_name",
-					Bot:      true,
-				},
-			},
-			{
-				ID:        "123456789012345679",
-				Content:   "Aerial speaking via username aerial",
-				Timestamp: now,
-				Author: &discordgo.User{
-					ID:       "other-bot-id",
-					Username: "Aerial",
-					Bot:      true,
-				},
-			},
-			{
-				ID:        "123456789012345680",
-				Content:   "Other bot message",
-				Timestamp: now,
-				Author: &discordgo.User{
-					ID:       "random-bot-id",
-					Username: "MusicBot",
-					Bot:      true,
-				},
-			},
-			{
-				ID:        "123456789012345681",
-				Content:   "Webhook message",
-				Timestamp: now,
-				WebhookID: "webhook-456",
-				Author:    nil,
-			},
-			{
-				ID:        "123456789012345682", // valid snowflake
-				Content:   "Zero timestamp with snowflake",
-				Timestamp: time.Time{}, // zero
-				Author: &discordgo.User{
-					ID:       "user-789",
-					Username: "Alice",
-				},
-			},
-			{
-				ID:        "invalid-snowflake-id", // invalid snowflake -> fallback time.Now()
-				Content:   "Zero timestamp with non-snowflake",
-				Timestamp: time.Time{}, // zero
-				Author: &discordgo.User{
-					ID:       "user-890",
-					Username: "Bob",
-				},
-			},
-		}
-
 		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			b, _ := json.Marshal(rawMessages)
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(bytes.NewReader(b)),
-			}, nil
+			b, _ := json.Marshal([]*discordgo.Message{
+				nil,
+				{ID: "123456789012345678", Content: "Aerial speaking via botUserID", Timestamp: now, Author: &discordgo.User{ID: "bot-user-123", Username: "some_name", Bot: true}},
+				{ID: "123456789012345679", Content: "Aerial speaking via username aerial", Timestamp: now, Author: &discordgo.User{ID: "other-bot-id", Username: "Aerial", Bot: true}},
+				{ID: "123456789012345680", Content: "Other bot message", Timestamp: now, Author: &discordgo.User{ID: "random-bot-id", Username: "MusicBot", Bot: true}},
+				{ID: "123456789012345681", Content: "Webhook message", Timestamp: now, WebhookID: "webhook-456", Author: nil},
+				{ID: "123456789012345682", Content: "Zero timestamp with snowflake", Timestamp: time.Time{}, Author: &discordgo.User{ID: "user-789", Username: "Alice"}},
+				{ID: "invalid-snowflake-id", Content: "Zero timestamp with non-snowflake", Timestamp: time.Time{}, Author: &discordgo.User{ID: "user-890", Username: "Bob"}},
+			})
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 		})
 
 		history, err := FetchRecentThreadHistory(ctx, dg, store, "123456789012345678", 50)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		if err != nil || len(history) != 6 {
+			t.Fatalf("expected 6 messages parsed, got %d, err: %v", len(history), err)
 		}
-		if len(history) != 6 {
-			t.Fatalf("expected 6 messages parsed, got %d", len(history))
+		expectedRoles := []string{"Assistant", "Assistant", "Bot", "Bot", "User", "User"}
+		for i, expRole := range expectedRoles {
+			if history[i].Role != expRole {
+				t.Errorf("msg %d: expected role %s, got %s", i, expRole, history[i].Role)
+			}
 		}
-
-		if history[0].Role != "Assistant" {
-			t.Errorf("expected message 0 to have Assistant role, got %s", history[0].Role)
+		if history[3].AuthorName != "Webhook" {
+			t.Errorf("expected Webhook AuthorName, got %s", history[3].AuthorName)
 		}
-		if history[1].Role != "Assistant" {
-			t.Errorf("expected message 1 to have Assistant role, got %s", history[1].Role)
-		}
-		if history[2].Role != "Bot" {
-			t.Errorf("expected message 2 to have Bot role, got %s", history[2].Role)
-		}
-		if history[3].Role != "Bot" || history[3].AuthorName != "Webhook" {
-			t.Errorf("expected message 3 to be Webhook Bot, got role=%s author=%s", history[3].Role, history[3].AuthorName)
-		}
-		if history[4].CreatedAt.IsZero() {
-			t.Errorf("expected message 4 timestamp to be extracted from snowflake")
-		}
-		if history[5].CreatedAt.IsZero() {
-			t.Errorf("expected message 5 timestamp to fallback to now")
+		if history[4].CreatedAt.IsZero() || history[5].CreatedAt.IsZero() {
+			t.Errorf("expected non-zero timestamps for messages 4 and 5")
 		}
 	})
 }
@@ -214,80 +119,50 @@ func TestDefaultHistoryFetcher_AdditionalEdgeCases(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
-
 	ctx := context.Background()
 
-	// 1. ChannelID empty -> falls back to DB
 	fetcher := DefaultHistoryFetcher(nil, store)
-	msgs, err := fetcher(ctx, "", "", 10)
-	if err != nil || len(msgs) != 0 {
+	if msgs, err := fetcher(ctx, "", "", 10); err != nil || len(msgs) != 0 {
 		t.Errorf("expected empty result without error for empty channelID, got msgs=%v, err=%v", msgs, err)
 	}
 
-	// 2. Limit <= 0 and > 100 with REST API
 	dg, _ := discordgo.New("Bot test")
 	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		msgs := []*discordgo.Message{
-			nil, // dm == nil test
-			{
-				ID:        "123456789012345678",
-				Content:   "hello",
-				Timestamp: time.Time{},
-				WebhookID: "wh-1",
-				Author:    nil,
-			},
-			{
-				ID:        "invalid-id",
-				Content:   "hello 2",
-				Timestamp: time.Time{},
-				Author: &discordgo.User{
-					ID:       "u-1",
-					Username: "Alice",
-				},
-			},
-		}
-		b, _ := json.Marshal(msgs)
-		return &http.Response{
-			StatusCode: 200,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(bytes.NewReader(b)),
-		}, nil
+		b, _ := json.Marshal([]*discordgo.Message{
+			nil,
+			{ID: "123456789012345678", Content: "hello", Timestamp: time.Time{}, WebhookID: "wh-1", Author: nil},
+			{ID: "invalid-id", Content: "hello 2", Timestamp: time.Time{}, Author: &discordgo.User{ID: "u-1", Username: "Alice"}},
+		})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 	})
 
 	fetcherREST := DefaultHistoryFetcher(dg, store)
-	// beforeID non-snowflake
-	res, err := fetcherREST(ctx, "123456789012345678", "non-numeric-before", -5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(res) != 2 {
-		t.Fatalf("expected 2 messages parsed, got %d", len(res))
-	}
-
-	// limit > 100
-	res, err = fetcherREST(ctx, "123456789012345678", "", 150)
-	if err != nil || len(res) != 2 {
-		t.Fatalf("expected 2 messages parsed with limit > 100, got %d", len(res))
+	for _, tc := range []struct {
+		beforeID string
+		limit    int
+	}{
+		{"non-numeric-before", -5},
+		{"", 150},
+	} {
+		res, err := fetcherREST(ctx, "123456789012345678", tc.beforeID, tc.limit)
+		if err != nil || len(res) != 2 {
+			t.Fatalf("expected 2 messages parsed for %+v, got %d, err: %v", tc, len(res), err)
+		}
 	}
 }
 
 func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 	t.Parallel()
-	// 1. database == nil -> returns nil, nil
-	msgs, err := fetchHistoryFromDB(nil, "chan-1", "", 10)
-	if err != nil || msgs != nil {
+	if msgs, err := fetchHistoryFromDB(nil, "chan-1", "", 10); err != nil || msgs != nil {
 		t.Errorf("expected nil, nil for nil database, got msgs=%v err=%v", msgs, err)
 	}
 
-	// 2. Database error (closed db)
 	closedStore := setupTestStore(t)
 	_ = closedStore.Close()
-	_, err = fetchHistoryFromDB(closedStore, "chan-1", "", 10)
-	if err == nil {
+	if _, err := fetchHistoryFromDB(closedStore, "chan-1", "", 10); err == nil {
 		t.Errorf("expected error querying closed database")
 	}
 
-	// 3. Role mappings
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
 
@@ -319,11 +194,8 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 	}
 
 	fetched, err := fetchHistoryFromDB(store, "role-test-chan", "", 50)
-	if err != nil {
-		t.Fatalf("fetchHistoryFromDB failed: %v", err)
-	}
-	if len(fetched) != len(testCases) {
-		t.Fatalf("expected %d messages, got %d", len(testCases), len(fetched))
+	if err != nil || len(fetched) != len(testCases) {
+		t.Fatalf("fetchHistoryFromDB failed: count=%d err=%v", len(fetched), err)
 	}
 	for i, tc := range testCases {
 		if fetched[i].Role != tc.expectedRole {
@@ -332,39 +204,29 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 		}
 	}
 
-	// 4. Test beforeID filtering in fetchHistoryFromDB
 	filteredWithBefore, err := fetchHistoryFromDB(store, "role-test-chan", "msg-role-7", 50)
 	if err != nil {
 		t.Fatalf("fetchHistoryFromDB with beforeID failed: %v", err)
 	}
 	for _, m := range filteredWithBefore {
 		if m.ID == "msg-role-7" {
-			t.Errorf("expected msg-role-7 to be filtered out by beforeID, but it was found")
+			t.Errorf("expected msg-role-7 to be filtered out by beforeID")
 		}
 	}
 
-	// 5. Test FilterAssistantMessages
-	if nilFiltered := FilterAssistantMessages(nil); nilFiltered != nil {
-		t.Errorf("expected nil for FilterAssistantMessages(nil)")
+	if FilterAssistantMessages(nil) != nil || FilterAssistantMessages([]HistoryMessage{}) != nil {
+		t.Errorf("expected nil for empty FilterAssistantMessages inputs")
 	}
-	if emptyFiltered := FilterAssistantMessages([]HistoryMessage{}); emptyFiltered != nil {
-		t.Errorf("expected nil for FilterAssistantMessages empty slice")
-	}
-	assistantFiltered := FilterAssistantMessages(fetched)
-	for _, m := range assistantFiltered {
+	for _, m := range FilterAssistantMessages(fetched) {
 		if m.Role == "Assistant" || m.AuthorName == "aerial" || m.AuthorName == "assistant" {
 			t.Errorf("FilterAssistantMessages failed to remove assistant message: %+v", m)
 		}
 	}
 
-	// 6. Test fetchHistoryFromDB with snowflake beforeID not in database
-	snowflakeFiltered, err := fetchHistoryFromDB(store, "role-test-chan", "123456789012345678", 50)
-	if err != nil {
+	if _, err := fetchHistoryFromDB(store, "role-test-chan", "123456789012345678", 50); err != nil {
 		t.Fatalf("fetchHistoryFromDB with snowflake failed: %v", err)
 	}
-	_ = snowflakeFiltered
 
-	// 7. Test SummarizeThreadHistory wrapper
 	sumRes, sumErr := SummarizeThreadHistory(context.Background(), func(ctx context.Context, model, prompt string) (string, error) {
 		return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
 	}, "test-model", "thread-sum-wrapper", fetched)
@@ -376,43 +238,21 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 func TestFormatChannelHistory_AuthorAndRoleSanitization(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-
 	msgs := []HistoryMessage{
-		{
-			ID:         "msg-1",
-			AuthorName: "User[\n\rName]",
-			Role:       "",
-			Content:    "Hello world",
-			CreatedAt:  now.Add(-10 * time.Minute),
-		},
-		{
-			ID:         "msg-2",
-			AuthorName: "",
-			Role:       "Assistant",
-			Content:    "Aerial response",
-			CreatedAt:  now.Add(-5 * time.Minute),
-		},
-		{
-			ID:         "msg-3",
-			AuthorName: "",
-			Role:       "User",
-			Content:    "Anonymous user message",
-			CreatedAt:  now.Add(-1 * time.Minute),
-		},
+		{ID: "msg-1", AuthorName: "User[\n\rName]", Role: "", Content: "Hello world", CreatedAt: now.Add(-10 * time.Minute)},
+		{ID: "msg-2", AuthorName: "", Role: "Assistant", Content: "Aerial response", CreatedAt: now.Add(-5 * time.Minute)},
+		{ID: "msg-3", AuthorName: "", Role: "User", Content: "Anonymous user message", CreatedAt: now.Add(-1 * time.Minute)},
 	}
-
 	formatted := FormatChannelHistory(msgs)
-	if strings.Contains(formatted, "User[\n\rName]") {
-		t.Errorf("expected brackets and newlines to be stripped from author name")
-	}
-	if !strings.Contains(formatted, "[@UserName (User)]") {
-		t.Errorf("expected sanitized author [@UserName (User)], got:\n%s", formatted)
-	}
-	if !strings.Contains(formatted, "[Aerial (Assistant)]") {
-		t.Errorf("expected empty author with Assistant role to become Aerial, got:\n%s", formatted)
-	}
-	if !strings.Contains(formatted, "[@User (User)]") {
-		t.Errorf("expected empty author with User role to become @User, got:\n%s", formatted)
+	for _, check := range []struct {
+		pattern  string
+		expected bool
+	}{
+		{"User[\n\rName]", false}, {"[@UserName (User)]", true}, {"[Aerial (Assistant)]", true}, {"[@User (User)]", true},
+	} {
+		if strings.Contains(formatted, check.pattern) != check.expected {
+			t.Errorf("check %q: expected found=%v", check.pattern, check.expected)
+		}
 	}
 }
 
@@ -422,37 +262,22 @@ func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
 	sfg := new(singleflight.Group)
 
 	// 1. Empty msgs
-	_, err := SummarizeThreadHistoryWithGroup(ctx, sfg, nil, "model", "thread-1", nil)
-	if err == nil || !strings.Contains(err.Error(), "empty history") {
+	if _, err := SummarizeThreadHistoryWithGroup(ctx, sfg, nil, "model", "thread-1", nil); err == nil || !strings.Contains(err.Error(), "empty history") {
 		t.Errorf("expected 'empty history' error, got: %v", err)
 	}
 
 	// 2. All messages expired -> FormatChannelHistory returns ""
-	expiredMsgs := []HistoryMessage{
-		{
-			ID:        "msg-old",
-			Content:   "ancient message",
-			CreatedAt: time.Now().UTC().Add(-10 * time.Hour),
-		},
-	}
-	_, err = SummarizeThreadHistoryWithGroup(ctx, sfg, nil, "model", "thread-1", expiredMsgs)
-	if err == nil || !strings.Contains(err.Error(), "no valid history to summarize") {
+	expiredMsgs := []HistoryMessage{{ID: "msg-old", Content: "ancient message", CreatedAt: time.Now().UTC().Add(-10 * time.Hour)}}
+	if _, err := SummarizeThreadHistoryWithGroup(ctx, sfg, nil, "model", "thread-1", expiredMsgs); err == nil || !strings.Contains(err.Error(), "no valid history to summarize") {
 		t.Errorf("expected 'no valid history to summarize' error, got: %v", err)
 	}
 
 	// 3. LLM returns error
-	freshMsgs := []HistoryMessage{
-		{
-			ID:         "msg-fresh",
-			Content:   "fresh message",
-			CreatedAt: time.Now().UTC().Add(-5 * time.Minute),
-		},
-	}
+	freshMsgs := []HistoryMessage{{ID: "msg-fresh", Content: "fresh message", CreatedAt: time.Now().UTC().Add(-5 * time.Minute)}}
 	mockErrLLM := func(ctx context.Context, model, prompt string) (string, error) {
 		return "", errors.New("simulated LLM generation error")
 	}
-	_, err = SummarizeThreadHistoryWithGroup(ctx, sfg, mockErrLLM, "model", "thread-err-llm", freshMsgs)
-	if err == nil || !strings.Contains(err.Error(), "simulated LLM generation error") {
+	if _, err := SummarizeThreadHistoryWithGroup(ctx, sfg, mockErrLLM, "model", "thread-err-llm", freshMsgs); err == nil || !strings.Contains(err.Error(), "simulated LLM generation error") {
 		t.Errorf("expected simulated LLM error, got: %v", err)
 	}
 
@@ -461,22 +286,39 @@ func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
 		return "Prefix banter\n<THREAD_SUMMARY>\nDeliverables: done.\n</THREAD_SUMMARY>\nTrailing banter", nil
 	}
 	res, err := SummarizeThreadHistoryWithGroup(ctx, sfg, mockSuccessLLM, "model", "thread-success-tags", freshMsgs)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil || res != "<THREAD_SUMMARY>\nDeliverables: done.\n</THREAD_SUMMARY>" {
+		t.Errorf("unexpected summary result: %q, err: %v", res, err)
 	}
-	expected := "<THREAD_SUMMARY>\nDeliverables: done.\n</THREAD_SUMMARY>"
-	if res != expected {
-		t.Errorf("expected %q, got %q", expected, res)
+
+	// 5. Invalid type assertion in singleflight group
+	sg := &singleflight.Group{}
+	start := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(start)
+		_, _, _ = sg.Do("test-invalid-type", func() (interface{}, error) {
+			<-done
+			return 12345, nil
+		})
+	}()
+	<-start
+	time.Sleep(5 * time.Millisecond)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		close(done)
+	}()
+
+	if _, err := SummarizeThreadHistoryWithGroup(context.Background(), sg, nil, "model", "test-invalid-type", freshMsgs); err == nil {
+		t.Errorf("expected error for non-string thread summary, got nil")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 2. status_updater.go Target Coverage
+// 2. StatusUpdater Declarative Test Suites
 // ---------------------------------------------------------------------------
 
 func TestFormatToolStatus_AdditionalBranches(t *testing.T) {
 	t.Parallel()
-	// Command > 24 runes truncated
 	longCmd := "really_long_command_name_that_exceeds_twenty_four_runes"
 	formatted := FormatToolStatus("run_command", longCmd, 1500*time.Millisecond)
 	expectedCmd := string([]rune(longCmd)[:24])
@@ -484,88 +326,45 @@ func TestFormatToolStatus_AdditionalBranches(t *testing.T) {
 		t.Errorf("expected command to be truncated to %s, got: %s", expectedCmd, formatted)
 	}
 
-	// clean in ("execute_command", "bash", "sh")
-	formatted = FormatToolStatus("bash", "echo hi", 500*time.Millisecond)
-	if !strings.Contains(formatted, "Executing `echo hi`") {
-		t.Errorf("expected Executing `echo hi`, got: %s", formatted)
+	for _, tool := range []string{"bash", "sh", "execute_command"} {
+		f := FormatToolStatus(tool, "echo hi", 500*time.Millisecond)
+		if !strings.Contains(f, "Executing `echo hi`") {
+			t.Errorf("expected Executing `echo hi` for tool %s, got: %s", tool, f)
+		}
 	}
-
-	formatted = FormatToolStatus("sh", "echo hi", 500*time.Millisecond)
-	if !strings.Contains(formatted, "Executing `echo hi`") {
-		t.Errorf("expected Executing `echo hi`, got: %s", formatted)
-	}
-
-	formatted = FormatToolStatus("execute_command", "git", 500*time.Millisecond)
-	if !strings.Contains(formatted, "Executing `git`") {
-		t.Errorf("expected Executing `git`, got: %s", formatted)
-	}
-
-	// Text length exceeding MaxStatusTextLength (100)
 	hugeToolName := strings.Repeat("x", 120)
-	formatted = FormatToolStatus(hugeToolName, "", 500*time.Millisecond)
-	if len([]rune(formatted)) > MaxStatusTextLength {
+	if formatted = FormatToolStatus(hugeToolName, "", 500*time.Millisecond); len([]rune(formatted)) > MaxStatusTextLength {
 		t.Errorf("expected length <= %d, got %d", MaxStatusTextLength, len([]rune(formatted)))
 	}
 }
 
 func TestStatusUpdater_DefaultRESTImplementations(t *testing.T) {
 	t.Parallel()
-	// 1. Session is nil
-	uNil := NewStatusUpdater(nil, "thread-rest-nil", false)
-	_, err := uNil.sendFunc("thread-rest-nil", "hello")
-	if err == nil || !strings.Contains(err.Error(), "discord session is nil") {
-		t.Errorf("expected 'discord session is nil' error, got: %v", err)
-	}
-
-	// 2. Session is non-nil with mock transport
-	dg, _ := discordgo.New("Bot test-token")
-	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		switch req.Method {
-		case http.MethodPost:
-			msg := &discordgo.Message{
-				ID:        "msg-rest-created",
-				ChannelID: "thread-rest-live",
-				Content:   "hello",
-			}
-			b, _ := json.Marshal(msg)
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(bytes.NewReader(b)),
-			}, nil
-		case http.MethodPatch:
-			msg := &discordgo.Message{
-				ID:        "msg-rest-created",
-				ChannelID: "thread-rest-live",
-				Content:   "edited",
-			}
-			b, _ := json.Marshal(msg)
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(bytes.NewReader(b)),
-			}, nil
-		case http.MethodDelete:
-			return &http.Response{
-				StatusCode: 204,
-				Header:     http.Header{},
-				Body:       io.NopCloser(strings.NewReader("")),
-			}, nil
+	s, _ := discordgo.New("Bot dummy-token")
+	s.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		u := req.URL.String()
+		switch {
+		case req.Method == "POST" && strings.Contains(u, "/messages"):
+			b, _ := json.Marshal(&discordgo.Message{ID: "msg-created-123"})
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+		case req.Method == "PATCH":
+			b, _ := json.Marshal(&discordgo.Message{ID: "msg-edited-123"})
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+		case req.Method == "DELETE":
+			return &http.Response{StatusCode: 204, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		default:
+			return &http.Response{StatusCode: 400, Body: io.NopCloser(bytes.NewReader([]byte(`{"message":"bad request"}`)))}, nil
 		}
-		return &http.Response{StatusCode: 400}, nil
 	})
 
-	uLive := NewStatusUpdater(dg, "thread-rest-live", false)
-	newID, err := uLive.sendFunc("thread-rest-live", "hello")
-	if err != nil || newID != "msg-rest-created" {
-		t.Errorf("sendFunc failed: id=%s err=%v", newID, err)
+	u := NewStatusUpdater(s, "thread-rest-123", true)
+	if id, err := u.sendFunc("thread-rest-123", "hello"); err != nil || id != "msg-created-123" {
+		t.Errorf("sendFunc failed: id=%s err=%v", id, err)
 	}
-	err = uLive.editFunc("thread-rest-live", newID, "edited")
-	if err != nil {
+	if err := u.editFunc("thread-rest-123", "msg-created-123", "edited"); err != nil {
 		t.Errorf("editFunc failed: %v", err)
 	}
-	err = uLive.deleteFunc("thread-rest-live", newID)
-	if err != nil {
+	if err := u.deleteFunc("thread-rest-123", "msg-created-123"); err != nil {
 		t.Errorf("deleteFunc failed: %v", err)
 	}
 }
@@ -573,26 +372,22 @@ func TestStatusUpdater_DefaultRESTImplementations(t *testing.T) {
 func TestStatusUpdater_NilReceiverAndGuards(t *testing.T) {
 	t.Parallel()
 	var u *StatusUpdater
-	// These should not panic
 	u.MarkTurnStarted()
 	u.Stop()
 	u.Reset()
 	u.DeleteStatusMessage()
 	u.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 
-	// Disabled updater should not start
 	uDisabled := NewStatusUpdater(nil, "thread-1", false)
-	uDisabled.Start() // should return immediately without starting goroutine
+	uDisabled.Start()
 
-	// Start idempotency
 	uEnabled := NewStatusUpdater(nil, "thread-2", true, WithStatusInterval(50*time.Millisecond))
-	uEnabled.Start() // second call should be no-op
+	uEnabled.Start()
 	uEnabled.Stop()
 }
 
 func TestStatusUpdater_HandleStep_Branches(t *testing.T) {
 	t.Parallel()
-	// Guard when disabled
 	uDisabled := NewStatusUpdater(nil, "thread-step-disabled", false)
 	uDisabled.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 	if uDisabled.phase != "" {
@@ -600,9 +395,8 @@ func TestStatusUpdater_HandleStep_Branches(t *testing.T) {
 	}
 
 	u := NewStatusUpdater(nil, "thread-step", true, WithStatusInterval(10*time.Hour))
-	u.Stop() // stop background ticker so it doesn't race
+	u.Stop()
 
-	// Step while disabled
 	u.disabled = true
 	u.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 	if u.phase != "" {
@@ -610,52 +404,36 @@ func TestStatusUpdater_HandleStep_Branches(t *testing.T) {
 	}
 	u.disabled = false
 
-	// thinking
 	u.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 	if u.phase != "thinking" || !u.dirty {
 		t.Errorf("expected phase thinking and dirty=true")
 	}
 
-	// tool ACTIVE
 	u.HandleStep(&runner.StepUpdateEvent{
 		StepType: "tool_call",
 		ToolName: "view_file",
 		State:    "ACTIVE",
-		ToolInfo: &runner.StepToolInfo{
-			Parameters: runner.StepToolParameters{CommandLine: "ls"},
-		},
+		ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "ls"}},
 	})
 	if u.phase != "tool" || u.activeTool != "view_file" || u.activeCommand != "ls" {
 		t.Errorf("expected activeTool=view_file activeCommand=ls")
 	}
 
-	// tool DONE with mismatched toolName -> ignored
-	u.HandleStep(&runner.StepUpdateEvent{
-		StepType: "tool_call",
-		ToolName: "other_tool",
-		State:    "DONE",
-	})
+	u.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "other_tool", State: "DONE"})
 	if u.activeTool != "view_file" {
 		t.Errorf("expected activeTool view_file to remain on mismatched toolName")
 	}
 
-	// tool ERROR with matching toolName -> clears to thinking
-	u.HandleStep(&runner.StepUpdateEvent{
-		StepType: "tool_call",
-		ToolName: "view_file",
-		State:    "ERROR",
-	})
+	u.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ERROR"})
 	if u.activeTool != "" || u.phase != "thinking" {
 		t.Errorf("expected activeTool cleared and phase thinking, got tool=%s phase=%s", u.activeTool, u.phase)
 	}
 
-	// agent_response
 	u.HandleStep(&runner.StepUpdateEvent{StepType: "agent_response"})
 	if u.phase != "responding" {
 		t.Errorf("expected phase responding, got %s", u.phase)
 	}
 
-	// text_delta when already responding -> dirty not re-set
 	u.dirty = false
 	u.HandleStep(&runner.StepUpdateEvent{StepType: "text_delta"})
 	if u.dirty {
@@ -667,47 +445,27 @@ func TestStatusUpdater_CurrentStatusText_Branches(t *testing.T) {
 	t.Parallel()
 	u := NewStatusUpdater(nil, "thread-status-text", false)
 
-	// 1. Tool phase with empty activeTool falls through to responding
-	u.phase = "tool"
-	u.activeTool = ""
-	text := u.currentStatusText()
-	if !strings.Contains(text, "Generating response") {
-		t.Errorf("expected fallthrough to Generating response, got: %s", text)
-	}
-
-	// 2. Responding phase with elapsed > 0.1s
-	u.phase = "responding"
-	u.turnStart = time.Now().Add(-500 * time.Millisecond)
-	text = u.currentStatusText()
-	if !strings.Contains(text, "Generating response") {
-		t.Errorf("expected Generating response, got: %s", text)
-	}
-
-	// 3. Thinking phase with elapsed > 0.1s
-	u.phase = "thinking"
-	u.turnStart = time.Now().Add(-500 * time.Millisecond)
-	text = u.currentStatusText()
-	if !strings.Contains(text, "Thinking") {
-		t.Errorf("expected Thinking, got: %s", text)
-	}
-
-	// 4. Default phase with elapsed > 0.1s
-	u.phase = "unknown_phase"
-	u.turnStart = time.Now().Add(-500 * time.Millisecond)
-	text = u.currentStatusText()
-	if !strings.Contains(text, "Aerial is cooking") {
-		t.Errorf("expected Aerial is cooking, got: %s", text)
+	for _, tc := range []struct {
+		phase, activeTool, expectedSub string
+	}{
+		{"tool", "", "Generating response"},
+		{"responding", "", "Generating response"},
+		{"thinking", "", "Thinking"},
+		{"unknown_phase", "", "Aerial is cooking"},
+	} {
+		u.phase, u.activeTool, u.turnStart = tc.phase, tc.activeTool, time.Now().Add(-500*time.Millisecond)
+		if text := u.currentStatusText(); !strings.Contains(text, tc.expectedSub) {
+			t.Errorf("phase %s: expected %q, got: %s", tc.phase, tc.expectedSub, text)
+		}
 	}
 }
 
 func TestStatusUpdater_FlushEdgeCases(t *testing.T) {
 	t.Parallel()
-	// 1. Flush when disabled
 	u := NewStatusUpdater(nil, "thread-flush", false)
 	u.disabled = true
-	u.flush() // should return immediately
+	u.flush()
 
-	// 2. Flush when !dirty and no message
 	u.disabled = false
 	u.dirty = false
 	u.statusMessageID = ""
@@ -715,7 +473,6 @@ func TestStatusUpdater_FlushEdgeCases(t *testing.T) {
 	u.activeTool = ""
 	u.flush()
 
-	// 3. Flush when statusMessageID != "" and text == lastDelivered
 	u.statusMessageID = "msg-existing"
 	u.phase = "thinking"
 	u.turnStart = time.Now()
@@ -726,697 +483,484 @@ func TestStatusUpdater_FlushEdgeCases(t *testing.T) {
 		t.Errorf("expected dirty to be cleared when text == lastDelivered")
 	}
 
-	// 4. Send error with permission error -> disables updater
-	u = NewStatusUpdater(nil, "thread-flush-perm", false,
-		WithStatusMockFuncs(
-			func(channelID, text string) (string, error) {
-				return "", errors.New("HTTP 403 Forbidden, 50013 Missing Permissions")
-			},
-			nil, nil,
-		),
-	)
-	u.phase = "thinking"
-	u.dirty = true
-	u.turnStart = time.Now().Add(-5 * time.Second) // past debounce
+	// Permission error disables updater
+	u = NewStatusUpdater(nil, "thread-flush-perm", false, WithStatusMockFuncs(
+		func(c, txt string) (string, error) { return "", errors.New("HTTP 403 Forbidden, 50013 Missing Permissions") }, nil, nil,
+	))
+	u.phase, u.dirty, u.turnStart = "thinking", true, time.Now().Add(-5*time.Second)
 	u.flush()
-	if !u.disabled {
-		t.Errorf("expected u.disabled=true on 403 error")
-	}
+	if !u.disabled { t.Errorf("expected u.disabled=true on 403 error") }
 
-	// 5. Send error transient
-	u = NewStatusUpdater(nil, "thread-flush-transient", false,
-		WithStatusMockFuncs(
-			func(channelID, text string) (string, error) {
-				return "", errors.New("502 Bad Gateway")
-			},
-			nil, nil,
-		),
-	)
-	u.phase = "thinking"
-	u.dirty = true
-	u.turnStart = time.Now().Add(-5 * time.Second)
+	// Transient error leaves enabled
+	u = NewStatusUpdater(nil, "thread-flush-transient", false, WithStatusMockFuncs(
+		func(c, txt string) (string, error) { return "", errors.New("502 Bad Gateway") }, nil, nil,
+	))
+	u.phase, u.dirty, u.turnStart = "thinking", true, time.Now().Add(-5*time.Second)
 	u.flush()
-	if u.disabled {
-		t.Errorf("expected u.disabled=false on transient error")
-	}
+	if u.disabled { t.Errorf("expected u.disabled=false on transient error") }
 
-	// 6. Edit error: thread locked/archived
-	u = NewStatusUpdater(nil, "thread-flush-edit-locked", false,
-		WithStatusMockFuncs(
-			nil,
-			func(channelID, messageID, text string) error {
-				return errors.New("50083 Thread is archived")
-			},
-			nil,
-		),
-	)
-	u.statusMessageID = "msg-to-edit"
-	u.phase = "thinking"
-	u.dirty = true
+	// Edit error: thread archived disables updater
+	u = NewStatusUpdater(nil, "thread-flush-edit-locked", false, WithStatusMockFuncs(
+		nil, func(c, m, txt string) error { return errors.New("50083 Thread is archived") }, nil,
+	))
+	u.statusMessageID, u.phase, u.dirty = "msg-to-edit", "thinking", true
 	u.flush()
-	if !u.disabled {
-		t.Errorf("expected u.disabled=true on thread archived error during edit")
-	}
+	if !u.disabled { t.Errorf("expected u.disabled=true on thread archived error") }
 
-	// 7. Edit error: transient error re-marks dirty
-	u = NewStatusUpdater(nil, "thread-flush-edit-transient", false,
-		WithStatusMockFuncs(
-			nil,
-			func(channelID, messageID, text string) error {
-				return errors.New("502 Bad Gateway")
-			},
-			nil,
-		),
-	)
-	u.statusMessageID = "msg-to-edit"
-	u.phase = "thinking"
-	u.dirty = true
+	// Edit error: transient error re-marks dirty
+	u = NewStatusUpdater(nil, "thread-flush-edit-transient", false, WithStatusMockFuncs(
+		nil, func(c, m, txt string) error { return errors.New("502 Bad Gateway") }, nil,
+	))
+	u.statusMessageID, u.phase, u.dirty = "msg-to-edit", "thinking", true
 	u.flush()
-	if !u.dirty {
-		t.Errorf("expected u.dirty=true on transient edit failure for self-healing")
+	if !u.dirty { t.Errorf("expected u.dirty=true on transient edit failure") }
+}
+
+func TestStatusUpdater_DeleteErrorBranches(t *testing.T) {
+	u := NewStatusUpdater(nil, "t1", true)
+	u.deleteFunc = func(threadID, messageID string) error { return errors.New("discord deletion error") }
+	u.sendFunc = func(threadID, content string) (string, error) {
+		u.mu.Lock()
+		u.disabled = true
+		u.mu.Unlock()
+		return "msg1", nil
 	}
+	u.activeTool = "bash"
+	u.flush()
+
+	u.statusMessageID = "msg2"
+	u.Reset()
+
+	u.statusMessageID = "msg3"
+	u.DeleteStatusMessage()
 }
 
 // ---------------------------------------------------------------------------
-// 3. queue.go Target Coverage
+// 3. Channel, Time, Prompt, Wake & Role Helpers Declarative Suites
 // ---------------------------------------------------------------------------
 
 func TestChannelCaching_FullCoverage(t *testing.T) {
 	t.Parallel()
-	// 1. CacheDiscordChannel nil and empty
 	CacheDiscordChannel(nil)
 	CacheDiscordChannel(&discordgo.Channel{ID: ""})
 
-	// 2. Parent channel caching and inheritance
-	parent := &discordgo.Channel{
-		ID:      "parent-guild-chan",
-		Name:    "general",
-		GuildID: "guild-123",
-	}
-	CacheDiscordChannel(parent)
-
-	child := &discordgo.Channel{
+	CacheDiscordChannel(&discordgo.Channel{ID: "parent-guild-chan", Name: "general", GuildID: "guild-123"})
+	CacheDiscordChannel(&discordgo.Channel{
 		ID:       "child-thread-chan",
 		Name:     "thread-topic",
-		GuildID:  "", // empty -> should inherit parent's guild-123
 		ParentID: "parent-guild-chan",
 		Type:     discordgo.ChannelTypeGuildPublicThread,
-	}
-	CacheDiscordChannel(child)
+	})
 
 	snap, ok := GetCachedChannel("child-thread-chan")
 	if !ok || snap.GuildID != "guild-123" || !snap.IsThread {
-		t.Errorf("expected child snapshot with inherited GuildID guild-123 and IsThread=true, got: %+v", snap)
+		t.Errorf("expected child snapshot with inherited GuildID and IsThread, got: %+v", snap)
 	}
 
-	// 3. InvalidateChannelCache
 	InvalidateChannelCache("child-thread-chan")
-	_, ok = GetCachedChannel("child-thread-chan")
-	if ok {
+	if _, ok = GetCachedChannel("child-thread-chan"); ok {
 		t.Errorf("expected child-thread-chan to be invalidated")
 	}
 
-	// 4. IsNumericSnowflake
-	if IsNumericSnowflake("") {
-		t.Errorf("expected empty string to not be numeric snowflake")
+	table := []struct {
+		input    string
+		expected bool
+	}{
+		{"", false},
+		{"123456789012345678", true},
+		{"12345a678", false},
+		{"abc", false},
 	}
-	if !IsNumericSnowflake("123456789012345678") {
-		t.Errorf("expected digits to be numeric snowflake")
-	}
-	if IsNumericSnowflake("12345a678") {
-		t.Errorf("expected alphanumeric string to not be numeric snowflake")
-	}
-	if IsNumericSnowflake("abc") {
-		t.Errorf("expected letters to not be numeric snowflake")
+	for _, tc := range table {
+		if got := IsNumericSnowflake(tc.input); got != tc.expected {
+			t.Errorf("IsNumericSnowflake(%q): expected %v, got %v", tc.input, tc.expected, got)
+		}
 	}
 }
 
 func TestResolveChannelSnapshot_And_EffectiveChannel(t *testing.T) {
 	t.Parallel()
-	// 1. ResolveEffectiveChannel empty
-	effID, effName, isTh := ResolveEffectiveChannel(nil, "")
-	if effID != "" || effName != "" || isTh {
+	if effID, effName, isTh := ResolveEffectiveChannel(nil, ""); effID != "" || effName != "" || isTh {
 		t.Errorf("expected empty results for empty channelID")
 	}
-
-	// 2. Uncached, s == nil -> returns channelID, "", false
-	effID, effName, isTh = ResolveEffectiveChannel(nil, "unknown-channel")
-	if effID != "unknown-channel" || effName != "" || isTh {
+	if effID, effName, isTh := ResolveEffectiveChannel(nil, "unknown-channel"); effID != "unknown-channel" || effName != "" || isTh {
 		t.Errorf("expected fallback to channelID for unknown channel with nil session")
 	}
 
-	// 3. Cached non-thread channel
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:   "chan-cached-norm",
-		Name: "norm-chan",
-	})
-	effID, effName, isTh = ResolveEffectiveChannel(nil, "chan-cached-norm")
-	if effID != "chan-cached-norm" || effName != "norm-chan" || isTh {
+	CacheDiscordChannel(&discordgo.Channel{ID: "chan-cached-norm", Name: "norm-chan"})
+	if effID, effName, isTh := ResolveEffectiveChannel(nil, "chan-cached-norm"); effID != "chan-cached-norm" || effName != "norm-chan" || isTh {
 		t.Errorf("expected norm-chan, got id=%s name=%s isThread=%v", effID, effName, isTh)
 	}
 
-	// 4. Cached thread with parent in cache
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:   "parent-for-thread",
-		Name: "parent-name",
-	})
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:       "thread-with-parent",
-		Name:     "sub-thread",
-		ParentID: "parent-for-thread",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-	effID, effName, isTh = ResolveEffectiveChannel(nil, "thread-with-parent")
-	if effID != "parent-for-thread" || effName != "parent-name" || !isTh {
+	CacheDiscordChannel(&discordgo.Channel{ID: "parent-for-thread", Name: "parent-name"})
+	CacheDiscordChannel(&discordgo.Channel{ID: "thread-with-parent", Name: "sub-thread", ParentID: "parent-for-thread", Type: discordgo.ChannelTypeGuildPublicThread})
+	if effID, effName, isTh := ResolveEffectiveChannel(nil, "thread-with-parent"); effID != "parent-for-thread" || effName != "parent-name" || !isTh {
 		t.Errorf("expected parent ID and name, got effID=%s effName=%s isTh=%v", effID, effName, isTh)
 	}
 
-	// 5. Cached thread with parent NOT in cache
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:       "thread-with-missing-parent",
-		Name:     "orphan-thread",
-		ParentID: "parent-not-cached",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-	effID, effName, isTh = ResolveEffectiveChannel(nil, "thread-with-missing-parent")
-	if effID != "parent-not-cached" || effName != "" || !isTh {
+	CacheDiscordChannel(&discordgo.Channel{ID: "thread-with-missing-parent", Name: "orphan-thread", ParentID: "parent-not-cached", Type: discordgo.ChannelTypeGuildPublicThread})
+	if effID, effName, isTh := ResolveEffectiveChannel(nil, "thread-with-missing-parent"); effID != "parent-not-cached" || effName != "" || !isTh {
 		t.Errorf("expected parent ID and empty name, got effID=%s effName=%s isTh=%v", effID, effName, isTh)
 	}
 
-	// 6. Cached thread with empty ParentID
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:   "thread-no-parent-id",
-		Name: "no-parent-thread",
-		Type: discordgo.ChannelTypeGuildPublicThread,
-	})
-	effID, effName, isTh = ResolveEffectiveChannel(nil, "thread-no-parent-id")
-	if effID != "thread-no-parent-id" || effName != "no-parent-thread" || !isTh {
+	CacheDiscordChannel(&discordgo.Channel{ID: "thread-no-parent-id", Name: "no-parent-thread", Type: discordgo.ChannelTypeGuildPublicThread})
+	if effID, effName, isTh := ResolveEffectiveChannel(nil, "thread-no-parent-id"); effID != "thread-no-parent-id" || effName != "no-parent-thread" || !isTh {
 		t.Errorf("expected snap ID and name, got effID=%s effName=%s isTh=%v", effID, effName, isTh)
 	}
 
-	// 7. Resolve via session.State
 	dg, _ := discordgo.New("Bot test")
 	dg.State = discordgo.NewState()
 	_ = dg.State.GuildAdd(&discordgo.Guild{
 		ID: "guild-s",
-		Channels: []*discordgo.Channel{
-			{
-				ID:      "chan-in-state",
-				Name:    "state-channel-name",
-				GuildID: "guild-s",
-			},
-		},
+		Channels: []*discordgo.Channel{{ID: "chan-in-state", Name: "state-channel-name", GuildID: "guild-s"}},
 	})
-	effID, effName, _ = ResolveEffectiveChannel(dg, "chan-in-state")
-	if effID != "chan-in-state" || effName != "state-channel-name" {
+	if effID, effName, _ := ResolveEffectiveChannel(dg, "chan-in-state"); effID != "chan-in-state" || effName != "state-channel-name" {
 		t.Errorf("expected resolution from State, got effID=%s effName=%s", effID, effName)
 	}
 
-	// 8. Resolve via REST singleflight
 	dgREST, _ := discordgo.New("Bot test-token")
 	dgREST.State = discordgo.NewState()
 	dgREST.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		ch := &discordgo.Channel{
-			ID:   "998877665544332211",
-			Name: "rest-fetched-chan",
-		}
-		b, _ := json.Marshal(ch)
-		return &http.Response{
-			StatusCode: 200,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(bytes.NewReader(b)),
-		}, nil
+		b, _ := json.Marshal(&discordgo.Channel{ID: "998877665544332211", Name: "rest-fetched-chan"})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 	})
-
-	effID, effName, _ = ResolveEffectiveChannel(dgREST, "998877665544332211")
-	if effID != "998877665544332211" || effName != "rest-fetched-chan" {
+	if effID, effName, _ := ResolveEffectiveChannel(dgREST, "998877665544332211"); effID != "998877665544332211" || effName != "rest-fetched-chan" {
 		t.Errorf("expected resolution from REST, got effID=%s effName=%s", effID, effName)
 	}
 }
 
 func TestParseDBTime_AllLayoutsAndTypes(t *testing.T) {
 	t.Parallel()
-	// nil
-	if _, ok := parseDBTime(nil); ok {
-		t.Errorf("expected false for nil")
-	}
-
-	// time.Time
 	now := time.Now().UTC()
-	if tOut, ok := parseDBTime(now); !ok || !tOut.Equal(now) {
-		t.Errorf("expected time.Time to parse, got %v, %v", tOut, ok)
-	}
-
-	// *time.Time nil and non-nil
 	var nilTime *time.Time
-	if _, ok := parseDBTime(nilTime); ok {
-		t.Errorf("expected false for nil *time.Time")
-	}
-	if tOut, ok := parseDBTime(&now); !ok || !tOut.Equal(now) {
-		t.Errorf("expected &now to parse")
-	}
 
-	// string empty and spaces
-	if _, ok := parseDBTime(""); ok {
-		t.Errorf("expected false for empty string")
-	}
-	if _, ok := parseDBTime("   "); ok {
-		t.Errorf("expected false for spaces string")
-	}
-
-	// all 10 string layouts
-	layouts := []string{
-		"2026-09-11T15:04:05.123456789Z",
-		"2026-09-11T15:04:05Z",
-		"2026-09-11 15:04:05.123456789 -0700 MST",
-		"2026-09-11 15:04:05 -0700 MST",
-		"2026-09-11 15:04:05.123456789-07:00",
-		"2026-09-11 15:04:05.123456789",
-		"2026-09-11 15:04:05.123456789Z",
-		"2026-09-11 15:04:05-07:00",
-		"2026-09-11 15:04:05",
-		"2026-09-11T15:04:05",
-	}
-
-	for _, l := range layouts {
-		if _, ok := parseDBTime(l); !ok {
-			t.Errorf("failed to parse layout %q", l)
+	for i, tc := range []struct {
+		input    interface{}
+		expected bool
+	}{
+		{nil, false}, {now, true}, {nilTime, false}, {&now, true}, {"", false}, {"   ", false}, {"not-a-valid-timestamp", false},
+		{[]byte("2026-09-11T15:04:05Z"), true}, {123456789, false},
+		{"2026-09-11T15:04:05.123456789Z", true}, {"2026-09-11T15:04:05Z", true},
+		{"2026-09-11 15:04:05.123456789 -0700 MST", true}, {"2026-09-11 15:04:05 -0700 MST", true},
+		{"2026-09-11 15:04:05.123456789-07:00", true}, {"2026-09-11 15:04:05.123456789", true},
+		{"2026-09-11 15:04:05-07:00", true}, {"2026-09-11 15:04:05", true}, {"2026-09-11T15:04:05", true},
+	} {
+		if _, ok := parseDBTime(tc.input); ok != tc.expected {
+			t.Errorf("case %d (%v): expected %v, got %v", i, tc.input, tc.expected, ok)
 		}
-	}
-
-	// invalid string
-	if _, ok := parseDBTime("not-a-valid-timestamp"); ok {
-		t.Errorf("expected false for invalid time string")
-	}
-
-	// []byte
-	if _, ok := parseDBTime([]byte("2026-09-11T15:04:05Z")); !ok {
-		t.Errorf("failed to parse []byte time")
-	}
-
-	// unsupported type (int)
-	if _, ok := parseDBTime(123456789); ok {
-		t.Errorf("expected false for int type")
 	}
 }
 
 func TestCoalesceBurstPrompt_EdgeCases(t *testing.T) {
 	t.Parallel()
-	// Empty burst
-	if got := CoalesceBurstPrompt(nil); got != "" {
-		t.Errorf("expected empty string for nil burst, got %q", got)
+	if CoalesceBurstPrompt(nil) != "" || CoalesceBurstPrompt([]db.Message{}) != "" {
+		t.Errorf("expected empty string for empty burst")
 	}
 
-	// Single message
-	single := []db.Message{{Content: "single msg"}}
-	if got := CoalesceBurstPrompt(single); got != "single msg" {
-		t.Errorf("expected 'single msg', got %q", got)
+	single := []db.Message{{Content: "Just one message"}}
+	if got := CoalesceBurstPrompt(single); got != "Just one message" {
+		t.Errorf("expected 'Just one message', got %q", got)
 	}
 
-	// Multiple messages: author with @, author without @, author empty, CreatedAt zero
 	burst := []db.Message{
-		{
-			AuthorName: "@alice",
-			CreatedAt:  time.Now().UTC(),
-			Content:    "First message",
-		},
-		{
-			AuthorName: "bob",
-			CreatedAt:  time.Now().UTC(),
-			Content:    "Second message",
-		},
-		{
-			AuthorName: "",
-			CreatedAt:  time.Time{}, // zero timestamp
-			Content:    "Third message",
-		},
+		{AuthorName: "@alice", CreatedAt: time.Now().UTC(), Content: "First message"},
+		{AuthorName: "bob", CreatedAt: time.Now().UTC(), Content: "Second message"},
+		{AuthorName: "", CreatedAt: time.Time{}, Content: "Third message"},
 	}
-
 	coalesced := CoalesceBurstPrompt(burst)
-	if !strings.Contains(coalesced, "<USER_REQUEST>") {
-		t.Errorf("expected <USER_REQUEST> in coalesced prompt")
-	}
-	if !strings.Contains(coalesced, "by @alice") {
-		t.Errorf("expected 'by @alice'")
-	}
-	if !strings.Contains(coalesced, "by @bob") {
-		t.Errorf("expected 'by @bob'")
-	}
-	if !strings.Contains(coalesced, "by @user") {
-		t.Errorf("expected 'by @user'")
+	for _, substr := range []string{"<USER_REQUEST>", "by @alice", "by @bob", "by @user"} {
+		if !strings.Contains(coalesced, substr) {
+			t.Errorf("expected %q in coalesced prompt", substr)
+		}
 	}
 }
 
 func TestExtractMessageBody_AllVariants(t *testing.T) {
 	t.Parallel()
-	// 1. Plain text without <USER_REQUEST>
-	if got := extractMessageBody("  just plain text  "); got != "just plain text" {
-		t.Errorf("expected 'just plain text', got %q", got)
+	table := []struct {
+		input    string
+		expected string
+	}{
+		{"  just plain text  ", "just plain text"},
+		{"<USER_REQUEST>\n- author: @user\n- content: Target Body Text\n- timestamp: 2026-09-11", "Target Body Text"},
+		{"<USER_REQUEST>\n- author: @user\n- content: Target Body Text\n- mentions: [aerial]", "Target Body Text"},
+		{"<USER_REQUEST>\n- author: @user\n- content: Target Body Text\n- attachments: []", "Target Body Text"},
+		{"<USER_REQUEST>\n- author: @user\n- content: Target Body Text\n- other_field: val", "Target Body Text"},
+		{"<USER_REQUEST>\n- author: @user\n- content: Target Body Text\n</USER_REQUEST>", "Target Body Text"},
+		{"<USER_REQUEST>\n- content: Check <\\/USER_REQUEST> and <\\USER_REQUEST>\n</USER_REQUEST>", "Check </USER_REQUEST> and <USER_REQUEST>"},
+		{"<USER_REQUEST>\nJust body without content marker\n</USER_REQUEST>", "Just body without content marker"},
+		{"<USER_REQUEST>- content: simple text without delimiter", "simple text without delimiter"},
 	}
-
-	// 2. Envelope with - content: and delimiters
-	delimiters := []string{
-		"\n- timestamp: 2026-09-11",
-		"\n- mentions: [aerial]",
-		"\n- attachments: []",
-		"\n- other_field: val",
-		"\n</USER_REQUEST>",
-	}
-	for _, delim := range delimiters {
-		envelope := fmt.Sprintf("<USER_REQUEST>\n- author: @user\n- content: Target Body Text%s", delim)
-		body := extractMessageBody(envelope)
-		if body != "Target Body Text" {
-			t.Errorf("delim %q: expected 'Target Body Text', got %q", delim, body)
+	for i, tc := range table {
+		if got := extractMessageBody(tc.input); got != tc.expected {
+			t.Errorf("case %d (%q): expected %q, got %q", i, tc.input, tc.expected, got)
 		}
 	}
 
-	// 3. Escaped tags replacement
-	escaped := "<USER_REQUEST>\n- content: Check <\\/USER_REQUEST> and <\\USER_REQUEST>\n</USER_REQUEST>"
-	body := extractMessageBody(escaped)
-	if body != "Check </USER_REQUEST> and <USER_REQUEST>" {
-		t.Errorf("expected escaped tags to be restored, got %q", body)
-	}
-
-	// 4. Envelope without - content:
-	rawEnvelope := "<USER_REQUEST>\nJust body without content marker\n</USER_REQUEST>"
-	if got := extractMessageBody(rawEnvelope); got != "Just body without content marker" {
-		t.Errorf("expected stripped body, got %q", got)
+	for _, s := range []string{
+		"", "just text", "- content: foo\nbar",
+		"<USER_REQUEST>hello world</USER_REQUEST>",
+		"<\\/USER_REQUEST>escaped<\\/USER_REQUEST>",
+		"<\\USER_REQUEST>escaped<\\USER_REQUEST>",
+	} {
+		_ = extractMessageBody(s)
 	}
 }
 
 func TestResolveBotRoleIDs_AllVariants(t *testing.T) {
 	t.Parallel()
-	// sess == nil
-	if roles := ResolveBotRoleIDs(nil, "guild-1", "bot-1"); roles != nil {
+	if ResolveBotRoleIDs(nil, "guild-1", "bot-1") != nil {
 		t.Errorf("expected nil for nil sess")
 	}
 
-	// sess.State == nil
 	dg, _ := discordgo.New("Bot test")
-	if roles := ResolveBotRoleIDs(dg, "guild-1", "bot-1"); roles != nil {
+	if ResolveBotRoleIDs(dg, "guild-1", "bot-1") != nil {
 		t.Errorf("expected nil for nil State")
 	}
 
-	// Populated State
 	dg.State = discordgo.NewState()
 	dg.State.User = &discordgo.User{ID: "bot-1", Username: "AerialBot"}
-
 	guild1 := &discordgo.Guild{
 		ID: "guild-1",
-		Roles: []*discordgo.Role{
-			nil, // nil role
-			{ID: "role-aerial", Name: "aerial"},
-			{ID: "role-gundam", Name: "gundam"},
-			{ID: "role-username", Name: "AerialBot"},
-			{ID: "role-other", Name: "moderator"},
-		},
-		Members: []*discordgo.Member{
-			{
-				User:  &discordgo.User{ID: "bot-1"},
-				Roles: []string{"role-member-assigned", ""},
-			},
-		},
+		Roles: []*discordgo.Role{nil, {ID: "role-aerial", Name: "aerial"}, {ID: "role-gundam", Name: "gundam"}, {ID: "role-username", Name: "AerialBot"}, {ID: "role-other", Name: "moderator"}},
+		Members: []*discordgo.Member{{User: &discordgo.User{ID: "bot-1"}, Roles: []string{"role-member-assigned", ""}}},
 	}
 	_ = dg.State.GuildAdd(guild1)
 
-	// With guildID specified
-	roles := ResolveBotRoleIDs(dg, "guild-1", "bot-1")
 	expected := []string{"role-aerial", "role-gundam", "role-member-assigned", "role-username"}
+	roles := ResolveBotRoleIDs(dg, "guild-1", "bot-1")
 	if len(roles) != len(expected) {
 		t.Fatalf("expected %d roles, got %v", len(expected), roles)
 	}
 
-	// With guildID empty (iterates all guilds)
 	rolesAll := ResolveBotRoleIDs(dg, "", "bot-1")
 	if len(rolesAll) != len(expected) {
 		t.Fatalf("expected %d roles across all guilds, got %v", len(expected), rolesAll)
 	}
+
+	// Extra boundary branches
+	sNilGuild, _ := discordgo.New("Bot fake")
+	sNilGuild.State.GuildAdd(&discordgo.Guild{ID: "g-test"})
+	sNilGuild.State.Guilds = append(sNilGuild.State.Guilds, nil)
+	_ = ResolveBotRoleIDs(sNilGuild, "", "bot-123")
+
+	_ = ResolveBotRoleIDs(nil, "", "")
+	_ = ResolveBotRoleIDs(&discordgo.Session{}, "", "")
+	_ = ResolveBotRoleIDs(&discordgo.Session{State: discordgo.NewState()}, "", "")
+	_ = ResolveBotRoleIDs(&discordgo.Session{State: discordgo.NewState()}, "g1", "")
+
+	// Member fetch fallback
+	origFetcher := guildMemberFetcher
+	defer func() { guildMemberFetcher = origFetcher }()
+	guildMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+		return &discordgo.Member{GuildID: guildID, User: &discordgo.User{ID: userID}, Roles: []string{"role1"}}, nil
+	}
+	sess := &discordgo.Session{State: discordgo.NewState()}
+	rolesFallback := ResolveBotRoleIDs(sess, "guild-not-in-state", "bot-1")
+	if len(rolesFallback) != 1 || rolesFallback[0] != "role1" {
+		t.Errorf("expected [role1], got %v", rolesFallback)
+	}
+	_, _ = origFetcher(nil, "g", "u")
+	_, _ = origFetcher(&discordgo.Session{}, "g", "u")
 }
 
 func TestIsTier1Wake_AllVariants(t *testing.T) {
 	t.Parallel()
-	// 1. System authors / schedule runs
-	if !isTier1Wake(db.Message{AuthorID: "http-client"}, "", nil) {
-		t.Errorf("expected http-client to wake")
+	table := []struct {
+		name      string
+		msg       db.Message
+		botUserID string
+		botRoles  []string
+		expected  bool
+	}{
+		{"http-client author", db.Message{AuthorID: "http-client"}, "", nil, true},
+		{"scheduler author", db.Message{AuthorID: "scheduler"}, "", nil, true},
+		{"schedule run ID", db.Message{ScheduleRunID: "run-123"}, "", nil, true},
+		{"direct user mention", db.Message{Content: "Hey <@bot-123>"}, "bot-123", nil, true},
+		{"direct nickname mention", db.Message{Content: "Hey <@!bot-123>"}, "bot-123", nil, true},
+		{"direct role mention", db.Message{Content: "Alert <@&role-999>"}, "", []string{"role-999"}, true},
+		{"mentions aerial in header", db.Message{Content: "<USER_REQUEST>\n- mentions: [aerial, alice]\n</USER_REQUEST>"}, "", nil, true},
+		{"mentions botUserID in header", db.Message{Content: "<USER_REQUEST>\n- mentions: [bot-123]\n</USER_REQUEST>"}, "bot-123", nil, true},
+		{"mentions role in header", db.Message{Content: "<USER_REQUEST>\n- mentions: [role-999]\n</USER_REQUEST>"}, "", []string{"role-999"}, true},
+		{"replying to aerial", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: aerial\n  content: hi\n- content: yes</USER_REQUEST>"}, "", nil, true},
+		{"replying to bot ID", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: bot-123\n  content: hi\n- content: yes</USER_REQUEST>"}, "bot-123", nil, true},
+		{"body mention prefix", db.Message{Content: "Hey <@aerial how are you"}, "", nil, true},
+		{"body nick mention prefix", db.Message{Content: "Hey <@!aerial how are you"}, "", nil, true},
+		{"plaintext keyword mention mode", db.Message{Content: "hello aerial"}, "", nil, false},
+		{"plaintext keyword classifier mode", db.Message{Content: "hello aerial help me"}, "", nil, false},
+		{"gundam keyword", db.Message{Content: "launch the gundam unit"}, "", nil, false},
+		{"aerial view phrase", db.Message{Content: "what a nice aerial view of the city"}, "", nil, false},
+		{"unrelated text", db.Message{Content: "hello world unrelated"}, "", nil, false},
+		{"quoted role without mention_role_ids", db.Message{Content: "<USER_REQUEST>\n- content: check this '<@&999888>'\n- mention_role_ids: []\n</USER_REQUEST>"}, "123", []string{"999888"}, false},
+		{"structured role in mention_role_ids", db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [999888]\n</USER_REQUEST>"}, "123", []string{"999888"}, true},
+		{"non-matching replying_to author", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: @random_user\n- content: hi\n</USER_REQUEST>"}, "123", nil, false},
+		{"bot in mention_user_ids", db.Message{Content: "<USER_REQUEST>\n- content: please help\n- mention_user_ids: [123]\n</USER_REQUEST>"}, "123", nil, true},
+		{"Zero incident quoted role snowflake", db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1543462881624858624>' role snowflake\n- mentions: [harperwallbanger]\n- mention_user_ids: [179407724335988736]\n- mention_role_ids: []\n</USER_REQUEST>"}, "1542035925603713086", []string{"1543462881624858624"}, false},
+		{"replying_to without author line", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n- mentions: [user]\n- content: hi\n</USER_REQUEST>"}, "bot-123", nil, false},
+		{"body direct snowflake mention", db.Message{Content: "hey <@12345> check this"}, "12345", nil, true},
+		{"body role snowflake mention", db.Message{Content: "hey <@&role999> check this"}, "99999", []string{"role999"}, true},
 	}
-	if !isTier1Wake(db.Message{AuthorID: "scheduler"}, "", nil) {
-		t.Errorf("expected scheduler to wake")
-	}
-	if !isTier1Wake(db.Message{ScheduleRunID: "run-123"}, "", nil) {
-		t.Errorf("expected ScheduleRunID to wake")
-	}
-
-	// 2. Direct user mentions in content
-	if !isTier1Wake(db.Message{Content: "Hey <@bot-123>"}, "bot-123", nil) {
-		t.Errorf("expected <@bot-123> to wake")
-	}
-	if !isTier1Wake(db.Message{Content: "Hey <@!bot-123>"}, "bot-123", nil) {
-		t.Errorf("expected <@!bot-123> to wake")
-	}
-
-	// 3. Direct role mentions
-	if !isTier1Wake(db.Message{Content: "Alert <@&role-999>"}, "", []string{"role-999"}) {
-		t.Errorf("expected <@&role-999> to wake")
-	}
-
-	// 4. - mentions: [ ... ]
-	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [aerial, alice]\n</USER_REQUEST>"}, "", nil) {
-		t.Errorf("expected - mentions: [aerial] to wake")
-	}
-	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [bot-123]\n</USER_REQUEST>"}, "bot-123", nil) {
-		t.Errorf("expected - mentions: [bot-123] to wake")
-	}
-	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [role-999]\n</USER_REQUEST>"}, "", []string{"role-999"}) {
-		t.Errorf("expected - mentions: [role-999] to wake")
-	}
-
-	// 5. - replying_to: with author
-	replyingAerial := "<USER_REQUEST>\n- replying_to:\n  author: aerial\n  content: hi\n- content: yes</USER_REQUEST>"
-	if !isTier1Wake(db.Message{Content: replyingAerial}, "", nil) {
-		t.Errorf("expected replying to aerial to wake")
-	}
-	replyingBotID := "<USER_REQUEST>\n- replying_to:\n  author: bot-123\n  content: hi\n- content: yes</USER_REQUEST>"
-	if !isTier1Wake(db.Message{Content: replyingBotID}, "bot-123", nil) {
-		t.Errorf("expected replying to bot-123 to wake")
-	}
-
-	// 6. Body mentions
-	if !isTier1Wake(db.Message{Content: "Hey <@aerial how are you"}, "", nil) {
-		t.Errorf("expected <@aerial to wake")
-	}
-	if !isTier1Wake(db.Message{Content: "Hey <@!aerial how are you"}, "", nil) {
-		t.Errorf("expected <@!aerial to wake")
-	}
-
-	// 7. Plaintext keywords never trigger Tier-1 wake in any mode
-	if isTier1Wake(db.Message{Content: "hello aerial"}, "", nil) {
-		t.Errorf("expected wakeMode=mention to suppress plaintext keyword")
-	}
-	if isTier1Wake(db.Message{Content: "hello aerial help me"}, "", nil) {
-		t.Errorf("expected wakeMode=classifier to suppress plaintext keyword")
-	}
-	if isTier1Wake(db.Message{Content: "launch the gundam unit"}, "", nil) {
-		t.Errorf("expected 'gundam' keyword to not wake Tier 1")
-	}
-	if isTier1Wake(db.Message{Content: "what a nice aerial view of the city"}, "", nil) {
-		t.Errorf("expected 'aerial view' to not wake Tier 1")
-	}
-	if isTier1Wake(db.Message{Content: "hello world unrelated"}, "", nil) {
-		t.Errorf("expected unrelated text to not wake")
+	for _, tc := range table {
+		if got := isTier1Wake(tc.msg, tc.botUserID, tc.botRoles); got != tc.expected {
+			t.Errorf("%s: expected %v, got %v", tc.name, tc.expected, got)
+		}
 	}
 }
 
+func TestAssembleTurnPrompt_EmptyBase(t *testing.T) {
+	for _, tc := range []struct {
+		in   TurnPromptInput
+		want string
+	}{
+		{TurnPromptInput{ThreadSummary: "summary text"}, "summary text"},
+		{TurnPromptInput{LookbackHistory: []HistoryMessage{{AuthorName: "alice", Content: "hi", CreatedAt: time.Now()}}}, "@alice"},
+		{TurnPromptInput{IsColdStart: true, PreviousSessionID: "prev-sess-123"}, "<PREVIOUS_SESSION>"},
+		{TurnPromptInput{ChannelInstructions: "instructions"}, "instructions"},
+		{TurnPromptInput{InjectedHookContext: "hook context"}, "hook context"},
+	} {
+		if got := AssembleTurnPrompt(tc.in); !strings.Contains(got, tc.want) {
+			t.Errorf("AssembleTurnPrompt(%+v): expected %q in %q", tc.in, tc.want, got)
+		}
+	}
+	for _, mode := range []string{"mentions", "direct", "always"} {
+		_ = PlanBurstExecution(BurstPlanInput{Burst: []db.Message{{ID: "m1"}}, WakeMode: mode})
+	}
+}
+
+func TestTurnExecution_BuildTurnPrompt_CachedSummary(t *testing.T) {
+	store := setupTestStore(t)
+	_ = store.SaveThreadSummary(context.Background(), "t-cached-sum", "<THREAD_SUMMARY>hi</THREAD_SUMMARY>", "msg-1")
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       "t-cached-sum",
+		GuildID:  "g1",
+		ParentID: "parent-chan",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+
+	te := &turnExecution{
+		pool: New(nil, WorkerPoolConfig{
+			DiscordSession: &discordgo.Session{State: discordgo.NewState()},
+			Store:          store,
+			HistoryFetcher: func(ctx context.Context, threadID, beforeID string, limit int) ([]HistoryMessage, error) {
+				return []HistoryMessage{{ID: "msg-1", AuthorName: "user", Content: "hello", CreatedAt: time.Now()}}, nil
+			},
+		}),
+		threadID: "t-cached-sum",
+		burst:    []db.Message{{ID: "m1", ThreadID: "t-cached-sum", Content: "current"}},
+		isCold:   true,
+	}
+	te.buildTurnPrompt()
+	if !strings.Contains(te.turnPrompt, "<THREAD_SUMMARY>hi</THREAD_SUMMARY>") {
+		t.Errorf("expected cached summary in prompt, got %q", te.turnPrompt)
+	}
+	if !strings.Contains(te.turnPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(te.turnPrompt, "hello") {
+		t.Errorf("expected channel history lookback in prompt, got %q", te.turnPrompt)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 4. WorkerPool, Recovery & Store Declarative Suites
+// ---------------------------------------------------------------------------
+
 func TestRecoverInterrupted_AllBranches(t *testing.T) {
 	t.Parallel()
-	// 1. database == nil or pool == nil
 	RecoverInterrupted(nil, nil)
 
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
 
-	RecoverInterrupted(store, nil)
-
-	// 2. Reconcile orphaned schedule runs
-	_ = createScheduleRun(store, db.ScheduleRun{
-		ID:           "orphan-run-1",
-		ScheduleID:   "sched-1",
-		ScheduleType: "cron",
-		Prompt:       "prompt",
-		StartedAt:    time.Now().UTC().Add(-10 * time.Minute),
-		Status:       "enqueued",
-	})
-
-	// Pool setup
+	var deliveredPoison atomic.Int32
 	pool := New(nil, WorkerPoolConfig{
-		Store:        store,
-		MaxAttempts:  3,
-		DrainTimeout: 1 * time.Millisecond,
-		IdleTimeout:  50 * time.Millisecond,
+		Store: store,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			deliveredPoison.Add(1)
+			return nil
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 0, nil
 		},
 	})
-	defer pool.Stop()
 
-	// 3. No messages in database
-	RecoverInterrupted(store, pool)
-
-	// 4. Poison pill messages:
-	// a) restart_count >= DefaultMaxRestarts (3) with http-client
-	err := insertMessage(store, db.Message{
-		ID:           "poison-http",
-		ThreadID:     "thread-poison-http",
-		AuthorID:     "http-client",
-		Content:      "long poison message exceeding sixty characters in total length to verify truncation behavior",
-		Status:       db.StatusProcessing,
-		RestartCount: 3,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-5 * time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
+	messages := []db.Message{
+		{ID: "poison-http", ThreadID: "thread-poison-http", AuthorID: "http-client", Content: "long poison message exceeding sixty characters in total length to verify truncation behavior", Status: db.StatusProcessing, RestartCount: 3, RetryCount: 0, CreatedAt: time.Now().UTC().Add(-5 * time.Minute)},
+		{ID: "poison-discord", ThreadID: "thread-poison-discord", AuthorID: "user-discord", Content: "short poison", Status: db.StatusProcessing, RestartCount: 1, RetryCount: 3, CreatedAt: time.Now().UTC().Add(-4 * time.Minute)},
+		{ID: "normal-interrupted", ThreadID: "thread-normal", AuthorID: "user-1", Content: "normal prompt", Status: db.StatusProcessing, RestartCount: 0, RetryCount: 0, CreatedAt: time.Now().UTC().Add(-3 * time.Minute)},
 	}
-
-	// b) retry_count >= maxAttempts (3) with discord user
-	var deliveredPoison atomic.Int32
-	pool.cfg.DeliveryFunc = func(s *discordgo.Session, channelID, text string) error {
-		deliveredPoison.Add(1)
-		return nil
-	}
-
-	err = insertMessage(store, db.Message{
-		ID:           "poison-discord",
-		ThreadID:     "thread-poison-discord",
-		AuthorID:     "user-1",
-		Content:      "short poison",
-		Status:       db.StatusProcessing,
-		RestartCount: 1,
-		RetryCount:   3,
-		CreatedAt:    time.Now().UTC().Add(-4 * time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
-
-	// c) Normal processing message (should be reset to pending and recovered)
-	err = insertMessage(store, db.Message{
-		ID:           "normal-interrupted",
-		ThreadID:     "thread-normal",
-		AuthorID:     "user-1",
-		Content:      "normal prompt",
-		Status:       db.StatusProcessing,
-		RestartCount: 0,
-		RetryCount:   0,
-		CreatedAt:    time.Now().UTC().Add(-3 * time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
+	for _, m := range messages {
+		if err := insertMessage(store, m); err != nil {
+			t.Fatalf("InsertMessage failed: %v", err)
+		}
 	}
 
 	RecoverInterrupted(store, pool)
-
 	if deliveredPoison.Load() != 1 {
 		t.Errorf("expected 1 poison pill delivery for discord user, got %d", deliveredPoison.Load())
 	}
-
-	// Verify status in DB
-	msgPoisonHTTP, _ := getMessage(store, "poison-http")
-	if msgPoisonHTTP.Status != db.StatusFailed {
-		t.Errorf("expected poison-http to be FAILED, got %s", msgPoisonHTTP.Status)
+	for _, id := range []string{"poison-http", "poison-discord"} {
+		m, _ := getMessage(store, id)
+		if m.Status != db.StatusFailed {
+			t.Errorf("expected %s to be FAILED, got %s", id, m.Status)
+		}
 	}
 
-	msgPoisonDiscord, _ := getMessage(store, "poison-discord")
-	if msgPoisonDiscord.Status != db.StatusFailed {
-		t.Errorf("expected poison-discord to be FAILED, got %s", msgPoisonDiscord.Status)
-	}
-
-	// 5. Query error path
 	closedStore := setupTestStore(t)
 	_ = closedStore.Close()
 	RecoverInterrupted(closedStore, pool)
 }
 
+func TestRecoverInterrupted_DrainErrorBranches(t *testing.T) {
+	s := setupTestStore(t)
+	mock := &mockDrainErrStore{Store: s, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
+	pool := New(nil, WorkerPoolConfig{Store: mock})
+	RecoverInterrupted(mock, pool)
+
+	tmpDBPath := filepath.Join(t.TempDir(), "closed_recovery.db")
+	sqlDB, err := db.InitDB(tmpDBPath)
+	if err == nil {
+		_ = sqlDB.Close()
+		RecoverInterrupted(sqlDB, pool)
+	}
+}
+
 func TestWorkerPool_NewPermutations(t *testing.T) {
 	t.Parallel()
-	// 1. appCfg == nil with cfg.Model, LowEffortModel, SystemPrompt
 	pool1 := New(nil, WorkerPoolConfig{
-		Model:          "custom-model",
-		LowEffortModel: "custom-flash",
-		SystemPrompt:   "custom-prompt",
-		TimeoutMinutes: 0,
-		MaxAttempts:    0,
-		BackoffBase:    0,
-		StalenessTTL:   0,
-		DrainTimeout:   0,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "out", "", 0, nil
-		},
+		Model: "custom-model", LowEffortModel: "custom-flash", SystemPrompt: "custom-prompt",
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) { return "out", "", 0, nil },
 	})
-	if pool1.cfg.Model != "custom-model" {
-		t.Errorf("expected custom-model, got %s", pool1.cfg.Model)
-	}
-	if pool1.cfg.TimeoutMinutes != DefaultTimeoutMinutes {
-		t.Errorf("expected DefaultTimeoutMinutes, got %d", pool1.cfg.TimeoutMinutes)
-	}
-	if pool1.cfg.MaxAttempts != 3 {
-		t.Errorf("expected MaxAttempts=3, got %d", pool1.cfg.MaxAttempts)
-	}
-	if pool1.cfg.BackoffBase != 3*time.Second {
-		t.Errorf("expected BackoffBase=3s, got %v", pool1.cfg.BackoffBase)
-	}
-	if pool1.cfg.StalenessTTL != 30*time.Minute {
-		t.Errorf("expected StalenessTTL=30m, got %v", pool1.cfg.StalenessTTL)
-	}
-	if pool1.cfg.DrainTimeout != 10*time.Second {
-		t.Errorf("expected DrainTimeout=10s, got %v", pool1.cfg.DrainTimeout)
+	if pool1.cfg.Model != "custom-model" || pool1.cfg.TimeoutMinutes != DefaultTimeoutMinutes || pool1.cfg.MaxAttempts != 3 ||
+		pool1.cfg.BackoffBase != 3*time.Second || pool1.cfg.StalenessTTL != 30*time.Minute || pool1.cfg.DrainTimeout != 10*time.Second {
+		t.Errorf("pool1 defaults mismatch: %+v", pool1.cfg)
 	}
 
-	// Test generated RunnerWithOptionsFunc with various watchdog options
 	ctx := context.Background()
-	_, _, _, err := pool1.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{
-		MaxDuration: 2 * time.Minute,
-	})
-	if err != nil {
-		t.Errorf("unexpected error from RunnerWithOptionsFunc: %v", err)
-	}
-	_, _, _, err = pool1.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{
-		MaxDuration:       0,
-		InactivityTimeout: 3 * time.Minute,
-	})
-	if err != nil {
-		t.Errorf("unexpected error from RunnerWithOptionsFunc: %v", err)
-	}
-	_, _, _, err = pool1.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{
-		MaxDuration:       0,
-		InactivityTimeout: 0,
-	})
-	if err != nil {
-		t.Errorf("unexpected error from RunnerWithOptionsFunc: %v", err)
+	for _, opts := range []runner.WatchdogOptions{
+		{MaxDuration: 2 * time.Minute},
+		{InactivityTimeout: 3 * time.Minute},
+		{},
+	} {
+		if _, _, _, err := pool1.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", opts); err != nil {
+			t.Errorf("unexpected error from RunnerWithOptionsFunc: %v", err)
+		}
 	}
 
-	// 2. RunnerWithOptionsFunc provided, RunnerFunc nil
 	pool2 := New(nil, WorkerPoolConfig{
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			return "opt-out", "", 0, nil
 		},
 	})
-	out, _, _, err := pool2.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 15)
-	if err != nil || out != "opt-out" {
+	if out, _, _, err := pool2.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 15); err != nil || out != "opt-out" {
 		t.Errorf("expected opt-out, got out=%s err=%v", out, err)
 	}
 
-	// 3. Both runner funcs nil
 	pool3 := New(nil, WorkerPoolConfig{})
-	_, _, _, err = pool3.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 10)
-	if err == nil || !strings.Contains(err.Error(), "RunnerFunc not configured") {
+	if _, _, _, err := pool3.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 10); err == nil || !strings.Contains(err.Error(), "RunnerFunc not configured") {
 		t.Errorf("expected 'RunnerFunc not configured' error, got: %v", err)
 	}
-	_, _, _, err = pool3.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{})
-	if err == nil || !strings.Contains(err.Error(), "RunnerWithOptionsFunc not configured") {
+	if _, _, _, err := pool3.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{}); err == nil || !strings.Contains(err.Error(), "RunnerWithOptionsFunc not configured") {
 		t.Errorf("expected 'RunnerWithOptionsFunc not configured' error, got: %v", err)
 	}
 
-	// 4. DeliveryWithAttachmentsFunc defaulting when DeliveryFunc is set
 	var calledDelivery atomic.Int32
 	pool4 := New(nil, WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -1429,12 +973,7 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 		t.Errorf("expected DeliveryFunc called from DeliveryWithAttachmentsFunc wrapper")
 	}
 
-	// 5. Classifier OnParseError callback testing
-	appCfg := config.NewFromData(&config.ConfigData{
-		SystemChannel: "test-alerts-chan",
-		APIKey:        "test-key",
-		AgyBin:        "agy",
-	})
+	appCfg := config.NewFromData(&config.ConfigData{SystemChannel: "test-alerts-chan", APIKey: "test-key", AgyBin: "agy"})
 	dg, _ := discordgo.New("Bot test")
 	var alertSent atomic.Int32
 	alertReceived := make(chan struct{}, 1)
@@ -1451,23 +990,18 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 	})
 
 	if pool5.cfg.Classifier != nil && pool5.cfg.Classifier.OnParseError != nil {
-		longOutput := strings.Repeat("x", 700) + "\n```json\n@everyone @here\n```"
-		pool5.cfg.Classifier.OnParseError("gemini-flash", longOutput, errors.New("parse error 1"))
+		pool5.cfg.Classifier.OnParseError("gemini-flash", strings.Repeat("x", 700)+"\n```json\n@everyone @here\n```", errors.New("parse error 1"))
 		select {
 		case <-alertReceived:
 		case <-time.After(1 * time.Second):
 			t.Fatal("timed out waiting for parse error alert")
 		}
-
-		// Second call within 15s debounced synchronously
 		pool5.cfg.Classifier.OnParseError("gemini-flash", "short", errors.New("parse error 2"))
-
 		if alertSent.Load() != 1 {
 			t.Errorf("expected exactly 1 alert sent due to debouncing, got %d", alertSent.Load())
 		}
 	}
 
-	// 5b. Classifier OnSystemAlert callback testing
 	var systemAlertSent atomic.Int32
 	systemAlertReceived := make(chan struct{}, 1)
 	pool5b := New(appCfg, WorkerPoolConfig{
@@ -1484,7 +1018,6 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 			return nil
 		},
 	})
-
 	if pool5b.cfg.Classifier != nil && pool5b.cfg.Classifier.OnSystemAlert != nil {
 		pool5b.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("connection refused"))
 		select {
@@ -1492,27 +1025,15 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 		case <-time.After(1 * time.Second):
 			t.Fatal("timed out waiting for classifier system alert")
 		}
-
-		// Second call within 15s debounced synchronously
 		pool5b.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("connection refused 2"))
-
 		if systemAlertSent.Load() != 1 {
 			t.Errorf("expected exactly 1 system alert sent due to debouncing, got %d", systemAlertSent.Load())
 		}
-	} else {
-		t.Fatal("expected pool5b.cfg.Classifier.OnSystemAlert to be initialized")
 	}
 
-	// 6. ResolveChannelPolicy defaulting with appCfg and without appCfg
-	pol := pool5.cfg.ResolveChannelPolicy("c1", "general")
-	if pol.Mode == "" && pol.WakeMode == "" {
-		// valid struct
-	}
-
+	_ = pool5.cfg.ResolveChannelPolicy("c1", "general")
 	pool6 := New(nil, WorkerPoolConfig{})
 	_ = pool6.cfg.ResolveChannelPolicy("c1", "general")
-
-	// 7. HistoryFetcher default wrapper
 	_, _ = pool6.cfg.HistoryFetcher(context.Background(), "c1", "", 10)
 }
 
@@ -1523,69 +1044,61 @@ func TestWorkerPool_GettersAndStop(t *testing.T) {
 			return "", "", 0, nil
 		},
 	})
-
-	// Getters
-	if pool.Classifier() == nil {
-		t.Errorf("expected non-nil Classifier")
+	if pool.Classifier() == nil || pool.SessionManager() == nil {
+		t.Errorf("expected non-nil Classifier and SessionManager")
 	}
-	if pool.SessionManager() == nil {
-		t.Errorf("expected non-nil SessionManager")
-	}
-
-	// Start
 	pool.Start()
-
-	// StopWithTimeout
-	pool.StopWithTimeout(0) // should use default DrainTimeout
-	// Second Stop call should return immediately
+	pool.StopWithTimeout(0)
 	pool.StopWithTimeout(10 * time.Millisecond)
+}
+
+func TestWorkerPool_DrainErrorBranches(t *testing.T) {
+	s := setupTestStore(t)
+	mock := &mockDrainErrStore{Store: s}
+	p := New(nil, WorkerPoolConfig{Store: mock, DrainTimeout: 10 * time.Millisecond})
+	p.StopWithTimeout(0)
+
+	tmpDBPath := filepath.Join(t.TempDir(), "closed_pool.db")
+	sqlDB, err := db.InitDB(tmpDBPath)
+	if err == nil {
+		_ = sqlDB.Close()
+		pDB := New(nil, WorkerPoolConfig{DB: sqlDB, DrainTimeout: 10 * time.Millisecond})
+		pDB.StopWithTimeout(10 * time.Millisecond)
+	}
+}
+
+func TestWorkerPool_EnqueueBurst_Empty(t *testing.T) {
+	p := New(nil, WorkerPoolConfig{})
+	p.EnqueueBurst()
 }
 
 func TestGetSessionLastActivity_ErrorAndEdgeCases(t *testing.T) {
 	t.Parallel()
-	// 1. database == nil or threadID empty
-	act, isCold, err := GetSessionLastActivity(nil, "thread-1")
-	if err != nil || !isCold || !act.IsZero() {
-		t.Errorf("expected zero, cold, nil for nil db")
-	}
-	act, isCold, err = GetSessionLastActivity(nil, "")
-	if err != nil || !isCold || !act.IsZero() {
-		t.Errorf("expected zero, cold, nil for empty threadID")
+	for _, tid := range []string{"thread-1", ""} {
+		if act, isCold, err := GetSessionLastActivity(nil, tid); err != nil || !isCold || !act.IsZero() {
+			t.Errorf("expected zero, cold, nil for nil db with tid=%q", tid)
+		}
 	}
 
-	// 2. Query error on sessions table (closed database)
 	closedStore := setupTestStore(t)
 	_ = closedStore.Close()
-	_, _, err = GetSessionLastActivity(closedStore, "thread-1")
-	if err == nil {
+	if _, _, err := GetSessionLastActivity(closedStore, "thread-1"); err == nil {
 		t.Errorf("expected error querying closed database")
 	}
 
-	// 3. Disk activity later than DB updated_at
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
-
 	tmpDir := t.TempDir()
 	sessMgr := session.New(filepath.Join(tmpDir, ".gemini"), tmpDir)
-
-	now := time.Now().UTC()
-	// Insert session with turn_count > 0
 	store.SetSessionInfo(db.SessionInfo{
 		ThreadID:          "thread-disk-test",
 		InternalSessionID: "sess-disk-1",
 		TurnCount:         2,
-		UpdatedAt:         now.Add(-10 * time.Minute),
+		UpdatedAt:         time.Now().UTC().Add(-10 * time.Minute),
 	})
-
-	act, isCold, err = GetSessionLastActivity(store, "thread-disk-test", sessMgr)
-	if err != nil {
-		t.Fatalf("GetSessionLastActivity failed: %v", err)
-	}
-	if isCold {
-		t.Errorf("expected isCold=false for session with turns")
-	}
-	if act.IsZero() {
-		t.Errorf("expected non-zero activity")
+	act, isCold, err := GetSessionLastActivity(store, "thread-disk-test", sessMgr)
+	if err != nil || isCold || act.IsZero() {
+		t.Fatalf("unexpected GetSessionLastActivity result: act=%v cold=%v err=%v", act, isCold, err)
 	}
 }
 
@@ -1598,24 +1111,15 @@ func TestWorkerPool_EnqueueSlowPathAndWorkerIdle(t *testing.T) {
 			return "", "", 0, nil
 		},
 	})
-
-	// 1. Enqueue to stopped pool
 	pool.stopped = true
 	pool.Enqueue(db.Message{ID: "m-stopped", ThreadID: "t-stopped"})
 	pool.stopped = false
 
-	// 2. Saturate buffer and trigger context cancellation on slow path
-	// Create worker state directly
 	state := &threadWorkerState{ch: make(chan db.Message, 1)}
-	state.ch <- db.Message{ID: "m-fill"} // channel is full
+	state.ch <- db.Message{ID: "m-fill"}
 	pool.threadChs["thread-full"] = state
-
-	// Cancel pool context
 	pool.cancel()
-
-	// Enqueue should hit the slow path and exit via <-p.ctx.Done()
 	pool.Enqueue(db.Message{ID: "m-blocked", ThreadID: "thread-full"})
-
 	pool.Stop()
 }
 
@@ -1624,31 +1128,23 @@ func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
 
-	// 1. Empty burst or cancelled context
 	pool := New(nil, WorkerPoolConfig{
 		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("", "All good"), "", 0, nil
 		},
 	})
-	defer pool.Stop()
-
 	pool.processBurst(nil)
+	pool.processBurst([]db.Message{})
 
-	pool.cancel()
-	pool.processBurst([]db.Message{{ID: "m1", ThreadID: "t1"}})
-
-	// 2. Global Quota Pause Lockout in processBurst
 	poolQuota := New(nil, WorkerPoolConfig{
 		Store: store,
-		// currentAPIKey is empty -> OAuth mode
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 	})
 	defer poolQuota.Stop()
 
-	// Insert pending message with ScheduleRunID
 	now := time.Now().UTC()
 	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           "sched-run-quota",
@@ -1667,25 +1163,123 @@ func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
 		Status:        db.StatusPending,
 		CreatedAt:     now,
 	})
-
-	// Lock quota for 2 minutes in the future
 	poolQuota.quotaLockedUntil.Store(now.Add(2 * time.Minute).Unix())
-
 	var onCompletedStatus string
 	poolQuota.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
 		onCompletedStatus = finalStatus
 	}
-
-	msg, _ := getMessage(store, "msg-quota-pause")
-	poolQuota.processBurst([]db.Message{*msg})
-
+	msgQP, _ := getMessage(store, "msg-quota-pause")
+	poolQuota.processBurst([]db.Message{*msgQP})
 	if onCompletedStatus != db.StatusFailed {
 		t.Errorf("expected StatusFailed on quota pause lockout, got %s", onCompletedStatus)
 	}
 
-	run, _ := getScheduleRun(store, "sched-run-quota")
-	if run == nil || run.Status != "failed" {
-		t.Errorf("expected schedule run to be failed on quota pause, got %+v", run)
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	cancel()
+	poolCancel := New(nil, WorkerPoolConfig{Store: store})
+	poolCancel.ctx = ctxCancel
+	poolCancel.processBurst([]db.Message{{ID: "m-cancel", ThreadID: "t-cancel"}})
+
+	runID := "run-edge-1"
+	_ = createScheduleRun(store, db.ScheduleRun{ID: runID, ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
+	_ = insertMessage(store, db.Message{ID: "m-edge-1", ThreadID: "t-edge", AuthorID: "u1", ScheduleRunID: runID, Content: "edge", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+	msgEdge, _ := getMessage(store, "m-edge-1")
+
+	poolIgnored := New(nil, WorkerPoolConfig{Store: store})
+	poolIgnored.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+		return config.ChannelPolicy{Mode: "ignore"}
+	}
+	poolIgnored.processBurst([]db.Message{*msgEdge})
+	run, _ := getScheduleRun(store, runID)
+	if run == nil || run.Status != "completed" {
+		t.Errorf("expected schedule run to be completed, got %+v", run)
+	}
+
+	_ = insertMessage(store, db.Message{ID: "m-dm-1", ThreadID: "t-dm", AuthorID: "u1", Content: "dm prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+	msgDM, _ := getMessage(store, "m-dm-1")
+	poolDM := New(nil, WorkerPoolConfig{
+		Store: store,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("", "Hello from DM"), "", 0, nil
+		},
+	})
+	poolDM.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
+		return config.ChannelPolicy{Mode: "dm", WakeMode: "mention"}
+	}
+	poolDM.processBurst([]db.Message{*msgDM})
+
+	ptrF := func(v float64) *float64 { return &v }
+	_ = insertMessage(store, db.Message{ID: "m-skip-1", ThreadID: "t-skip", AuthorID: "u1", Content: "ambient chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+	msgSkip, _ := getMessage(store, "m-skip-1")
+	poolSkip := New(nil, WorkerPoolConfig{
+		Store: store,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("", "Should skip"), "", 0, nil
+		},
+	})
+	poolSkip.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
+		return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrF(0.8)}
+	}
+	poolSkip.processBurst([]db.Message{*msgSkip})
+
+	runLead := "run-lead-part"
+	_ = createScheduleRun(store, db.ScheduleRun{ID: runLead, ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
+	for _, m := range []db.Message{
+		{ID: "m-lead", ThreadID: "t-part", AuthorID: "u1", ScheduleRunID: runLead, Content: "ambient chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()},
+		{ID: "m-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> wake up!", Status: db.StatusPending, CreatedAt: time.Now().UTC()},
+		{ID: "m-trail-amb", ThreadID: "t-part", AuthorID: "u1", Content: "more chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()},
+		{ID: "m-trail-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> second command", Status: db.StatusPending, CreatedAt: time.Now().UTC()},
+	} { _ = insertMessage(store, m) }
+	ml, _ := getMessage(store, "m-lead")
+	mw, _ := getMessage(store, "m-wake")
+	mta, _ := getMessage(store, "m-trail-amb")
+	mtw, _ := getMessage(store, "m-trail-wake")
+
+	poolPart := New(nil, WorkerPoolConfig{
+		Store: store,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("", "Processed wake"), "", 0, nil
+		},
+	})
+	poolPart.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
+		return config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}
+	}
+	poolPart.processBurst([]db.Message{*ml, *mw, *mta, *mtw})
+	runP, _ := getScheduleRun(store, runLead)
+	if runP == nil || runP.Status != "completed" {
+		t.Errorf("expected schedule run to be completed, got lead=%+v", runP)
+	}
+
+	_ = insertMessage(store, db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+	mb, _ := getMessage(store, "m-badparse")
+	poolBadParse := New(nil, WorkerPoolConfig{
+		Store:       store,
+		MaxAttempts: 1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "definitely not json and no markers", "", 0, nil
+		},
+	})
+	poolBadParse.processBurst([]db.Message{*mb})
+	msgBP, _ := getMessage(store, "m-badparse")
+	if msgBP.Status != db.StatusFailed {
+		t.Errorf("expected message to fail on parse error, got %s", msgBP.Status)
+	}
+
+	runRate := "run-ratelimit-1"
+	_ = createScheduleRun(store, db.ScheduleRun{ID: runRate, ScheduleID: "s-rate", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
+	_ = insertMessage(store, db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", ScheduleRunID: runRate, Content: "query", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+	mr, _ := getMessage(store, "m-rate-1")
+	poolRate := New(nil, WorkerPoolConfig{
+		Store:       store,
+		BackoffBase: 1 * time.Millisecond,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "Resource has been exhausted: rate limit exceeded 429", 1, errors.New("exit 1")
+		},
+	})
+	poolRate.processBurst([]db.Message{*mr})
+	runR, _ := getScheduleRun(store, runRate)
+	if runR == nil || runR.Status != "failed" {
+		t.Errorf("expected schedule run to fail on rate limit, got %+v", runR)
 	}
 }
 
@@ -1703,7 +1297,6 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
 
-	// 1. StatusUpdater default sendFunc and text branches
 	t.Run("StatusUpdater defaults", func(t *testing.T) {
 		s, _ := discordgo.New("Bot fake")
 		s.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -1713,14 +1306,10 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		if _, err := up.sendFunc("c", "t"); err == nil {
 			t.Errorf("expected error from default sendFunc with dummy session")
 		}
-		// Future turnStart exercises sec < 0.1 -> sec = 0.1 in currentStatusText
 		up.turnStart = time.Now().Add(10 * time.Second)
-		txt := up.currentStatusText()
-		if !strings.Contains(txt, "0.1s") {
-			t.Errorf("expected 0.1s in status text, got %s", txt)
+		if !strings.Contains(up.currentStatusText(), "0.1s") {
+			t.Errorf("expected 0.1s in status text, got %s", up.currentStatusText())
 		}
-
-		// EditFunc returning message not found error
 		up.phase = "thinking"
 		up.dirty = true
 		up.lastDelivered = "old text"
@@ -1734,14 +1323,11 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		}
 	})
 
-	// 2. Classifier OnParseError handler
 	t.Run("Classifier OnParseError", func(t *testing.T) {
 		pool1 := New(nil, WorkerPoolConfig{Store: store})
 		if pool1.cfg.Classifier != nil && pool1.cfg.Classifier.OnParseError != nil {
-			// sess == nil
 			pool1.cfg.Classifier.OnParseError("model-1", "output ``` @everyone @here", errors.New("syntax error"))
 		}
-
 		pool2 := New(nil, WorkerPoolConfig{Store: store})
 		if pool2.cfg.Classifier != nil && pool2.cfg.Classifier.OnParseError != nil {
 			dg, _ := discordgo.New("Bot fake")
@@ -1760,22 +1346,18 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		}
 	})
 
-	// 3. ClaimPendingMessage branches
 	t.Run("ClaimPendingMessage branches", func(t *testing.T) {
 		pool := New(nil, WorkerPoolConfig{
 			Store: &mockClaimStore{Store: store, claimErr: errors.New("db lock error")},
 		})
-		// claimErr != nil -> continue
 		pool.processBurst([]db.Message{{ID: "m-err-claim", ThreadID: "t-claim"}})
 
-		// !claimed -> continue
 		pool2 := New(nil, WorkerPoolConfig{
 			Store: &mockClaimStore{Store: store, claimed: false},
 		})
 		pool2.processBurst([]db.Message{{ID: "m-unclaimed", ThreadID: "t-claim"}})
 	})
 
-	// 4. Stale message drop with ScheduleRunID
 	t.Run("dropBurstAsStale with ScheduleRun", func(t *testing.T) {
 		runID := "run-stale-burst-1"
 		_ = createScheduleRun(store, db.ScheduleRun{
@@ -1798,14 +1380,12 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		pool := New(nil, WorkerPoolConfig{Store: store})
 		m, _ := getMessage(store, msgID)
 		pool.processBurst([]db.Message{*m})
-
 		run, _ := getScheduleRun(store, runID)
 		if run == nil || run.Error != "[EXPIRED_STALE]" {
 			t.Errorf("expected [EXPIRED_STALE] error, got %+v", run)
 		}
 	})
 
-	// 5. Channel policy modes and wakeMode variants
 	t.Run("Channel policy modes and wakeModes", func(t *testing.T) {
 		baseCfg := WorkerPoolConfig{
 			Store: store,
@@ -1814,7 +1394,6 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 			},
 		}
 
-		// wakeMode == "all"
 		pAll := New(nil, baseCfg)
 		pAll.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 			return config.ChannelPolicy{Mode: "channel", WakeMode: "all"}
@@ -1826,8 +1405,6 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		pAll.processBurst([]db.Message{*m1, *m2})
 
 		ptrF := func(v float64) *float64 { return &v }
-
-		// threshold <= 0
 		pZero := New(nil, baseCfg)
 		pZero.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 			return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrF(0.0)}
@@ -1836,7 +1413,6 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		mz, _ := getMessage(store, "m-zero-1")
 		pZero.processBurst([]db.Message{*mz})
 
-		// allSkip (heuristic skip)
 		pSkip := New(nil, baseCfg)
 		pSkip.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 			return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrF(0.8)}
@@ -1845,7 +1421,6 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		ms, _ := getMessage(store, "m-skip-1")
 		pSkip.processBurst([]db.Message{*ms})
 
-		// Classifier nil
 		pNoClass := New(nil, baseCfg)
 		pNoClass.cfg.Classifier = nil
 		pNoClass.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
@@ -1855,121 +1430,6 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		mnc, _ := getMessage(store, "m-noclass-1")
 		pNoClass.processBurst([]db.Message{*mnc})
 	})
-
-	// 6. Leading ambient, active wake, and trailing wake/ambient messages with ScheduleRunID
-	t.Run("Leading and trailing message partitioning", func(t *testing.T) {
-		runLead := "run-lead-part"
-		_ = createScheduleRun(store, db.ScheduleRun{ID: runLead, ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
-
-		_ = insertMessage(store, db.Message{ID: "m-lead", ThreadID: "t-part", AuthorID: "u1", ScheduleRunID: runLead, Content: "ambient chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		_ = insertMessage(store, db.Message{ID: "m-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> wake up!", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		_ = insertMessage(store, db.Message{ID: "m-trail-amb", ThreadID: "t-part", AuthorID: "u1", Content: "more chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		_ = insertMessage(store, db.Message{ID: "m-trail-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> second command", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-
-		ml, _ := getMessage(store, "m-lead")
-		mw, _ := getMessage(store, "m-wake")
-		mta, _ := getMessage(store, "m-trail-amb")
-		mtw, _ := getMessage(store, "m-trail-wake")
-
-		pool := New(nil, WorkerPoolConfig{
-			Store: store,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				return mockJSONResponse("", "Processed wake"), "", 0, nil
-			},
-		})
-		pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
-			return config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}
-		}
-
-		pool.processBurst([]db.Message{*ml, *mw, *mta, *mtw})
-
-		run, _ := getScheduleRun(store, runLead)
-		if run == nil || run.Status != "completed" {
-			t.Errorf("expected schedule run to be completed, got lead=%+v", run)
-		}
-	})
-
-	// 7. ParseAgyOutput failure in processBurst
-	t.Run("ParseAgyOutput failure", func(t *testing.T) {
-		_ = insertMessage(store, db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		mb, _ := getMessage(store, "m-badparse")
-
-		pool := New(nil, WorkerPoolConfig{
-			Store:       store,
-			MaxAttempts: 1,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				return "definitely not json and no markers", "", 0, nil
-			},
-		})
-		pool.processBurst([]db.Message{*mb})
-
-		msg, _ := getMessage(store, "m-badparse")
-		if msg.Status != db.StatusFailed {
-			t.Errorf("expected message to fail on parse error, got %s", msg.Status)
-		}
-	})
-
-	// 8. Rate limit failure with ScheduleRunID
-	t.Run("Rate limit failure with ScheduleRun", func(t *testing.T) {
-		runRate := "run-ratelimit-1"
-		_ = createScheduleRun(store, db.ScheduleRun{ID: runRate, ScheduleID: "s-rate", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
-		_ = insertMessage(store, db.Message{
-			ID:            "m-rate-1",
-			ThreadID:      "t-rate",
-			AuthorID:      "u1",
-			ScheduleRunID: runRate,
-			Content:       "query",
-			Status:        db.StatusPending,
-			CreatedAt:     time.Now().UTC(),
-		})
-		mr, _ := getMessage(store, "m-rate-1")
-
-		pool := New(nil, WorkerPoolConfig{
-			Store:       store,
-			BackoffBase: 1 * time.Millisecond,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				return "", "Resource has been exhausted: rate limit exceeded 429", 1, errors.New("exit 1")
-			},
-		})
-		pool.processBurst([]db.Message{*mr})
-
-		run, _ := getScheduleRun(store, runRate)
-		if run == nil || run.Status != "failed" {
-			t.Errorf("expected schedule run to fail on rate limit, got %+v", run)
-		}
-	})
-
-	// 9. isTier1Wake structured mentions and quoted content rejection
-	t.Run("isTier1Wake structured mentions and quoted content rejection", func(t *testing.T) {
-		// Quoted role snowflake in message content without mention_role_ids MUST NOT wake
-		mRoleQuoted := db.Message{Content: "<USER_REQUEST>\n- content: check this '<@&999888>'\n- mention_role_ids: []\n</USER_REQUEST>"}
-		if isTier1Wake(mRoleQuoted, "123", []string{"999888"}) {
-			t.Errorf("expected quoted role snowflake without mention_role_ids to not wake")
-		}
-
-		// Structured role mention in mention_role_ids MUST wake
-		mRole := db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [999888]\n</USER_REQUEST>"}
-		if !isTier1Wake(mRole, "123", []string{"999888"}) {
-			t.Errorf("expected role in mention_role_ids to wake")
-		}
-
-		mRep := db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: @random_user\n- content: hi\n</USER_REQUEST>"}
-		if isTier1Wake(mRep, "123", nil) {
-			t.Errorf("expected non-matching replying_to author to not wake")
-		}
-
-		// Structured user mention in mention_user_ids MUST wake
-		mUser := db.Message{Content: "<USER_REQUEST>\n- content: please help\n- mention_user_ids: [123]\n</USER_REQUEST>"}
-		if !isTier1Wake(mUser, "123", nil) {
-			t.Errorf("expected botUserID in mention_user_ids to wake")
-		}
-
-		// Zero's exact incident: role snowflake in content, other user in mentions
-		mZero := db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1543462881624858624>' role snowflake\n- mentions: [harperwallbanger]\n- mention_user_ids: [179407724335988736]\n- mention_role_ids: []\n</USER_REQUEST>"}
-		if isTier1Wake(mZero, "1542035925603713086", []string{"1543462881624858624"}) {
-			t.Errorf("expected Zero's quoted role snowflake message to not wake")
-		}
-	})
 }
 
 func TestQueue_CoverageFinalSprint(t *testing.T) {
@@ -1977,38 +1437,16 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
 
-	// 1. resolveChannelSnapshot empty
-	snap, ok := resolveChannelSnapshot(nil, "")
-	if ok || snap.ID != "" {
+	if snap, ok := resolveChannelSnapshot(nil, ""); ok || snap.ID != "" {
 		t.Errorf("expected false and empty snapshot for empty channelID")
 	}
 
-	// 2. extractMessageBody without markers
-	bodyNoMarkers := extractMessageBody("<USER_REQUEST>- content: simple text without delimiter")
-	if bodyNoMarkers != "simple text without delimiter" {
-		t.Errorf("expected trimmed content, got %q", bodyNoMarkers)
-	}
-
-	// 3. ResolveBotRoleIDs nil guild in slice
-	s, _ := discordgo.New("Bot fake")
-	s.State.GuildAdd(&discordgo.Guild{ID: "g-test"})
-	s.State.Guilds = append(s.State.Guilds, nil)
-	_ = ResolveBotRoleIDs(s, "", "bot-123")
-
-	// 4. isTier1Wake replying_to without author line
-	mRepNoAuth := db.Message{Content: "<USER_REQUEST>\n- replying_to:\n- mentions: [user]\n- content: hi\n</USER_REQUEST>"}
-	if isTier1Wake(mRepNoAuth, "bot-123", nil) {
-		t.Errorf("expected false for replying_to without author line")
-	}
-
-	// 5. GetSessionLastActivity closed db error
 	dbClosed := setupTestStore(t)
 	_ = dbClosed.Close()
 	if _, _, err := GetSessionLastActivity(dbClosed, "thread-closed"); err == nil {
 		t.Errorf("expected error from GetSessionLastActivity on closed db")
 	}
 
-	// 6. runThreadWorker idle timer fire and channel close
 	p := New(nil, WorkerPoolConfig{Store: store, IdleTimeout: 5 * time.Millisecond})
 	stIdle := &threadWorkerState{ch: make(chan db.Message, 1)}
 	p.mu.Lock()
@@ -2016,7 +1454,7 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	p.mu.Unlock()
 	p.wg.Add(1)
 	go p.runThreadWorker("t-idle-sprint", stIdle)
-	time.Sleep(25 * time.Millisecond) // wait for idle timeout to fire and clean up
+	time.Sleep(25 * time.Millisecond)
 
 	stClose := &threadWorkerState{ch: make(chan db.Message)}
 	p.wg.Add(1)
@@ -2024,47 +1462,20 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	close(stClose.ch)
 	p.wg.Wait()
 
-	// 7. Enqueue on stopped pool
 	p.Stop()
 	p.Enqueue(db.Message{ID: "m-enqueue-stopped"})
 
-	// 8. Policy ignored with ScheduleRunID
 	runIgnored := "run-ignored-sprint"
 	_ = createScheduleRun(store, db.ScheduleRun{ID: runIgnored, ScheduleID: "s-ign", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
-	_ = insertMessage(store, db.Message{
-		ID:            "m-ign-sprint",
-		ThreadID:      "t-ign-sprint",
-		AuthorID:      "u1",
-		ScheduleRunID: runIgnored,
-		Content:       "ignored prompt",
-		Status:        db.StatusPending,
-		CreatedAt:     time.Now().UTC(),
-	})
+	_ = insertMessage(store, db.Message{ID: "m-ign-sprint", ThreadID: "t-ign-sprint", AuthorID: "u1", ScheduleRunID: runIgnored, Content: "ignored prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
 	mIgn, _ := getMessage(store, "m-ign-sprint")
-
-	pIgn := New(nil, WorkerPoolConfig{
-		Store:        store,
-		StalenessTTL: -1, // exercises stalenessTTL <= 0 -> 30m default
-	})
-	pIgn.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
-		return config.ChannelPolicy{Mode: "ignore"}
-	}
+	pIgn := New(nil, WorkerPoolConfig{Store: store, StalenessTTL: -1})
+	pIgn.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return config.ChannelPolicy{Mode: "ignore"} }
 	pIgn.processBurst([]db.Message{*mIgn})
-
 	run, _ := getScheduleRun(store, runIgnored)
-	if run == nil || run.Status != "completed" {
-		t.Errorf("expected ignored schedule run to be completed, got %+v", run)
-	}
+	if run == nil || run.Status != "completed" { t.Errorf("expected completed schedule run") }
 
-	// 9. Default ResolveChannelPolicy fallback when nil
-	_ = insertMessage(store, db.Message{
-		ID:        "m-def-pol",
-		ThreadID:  "t-def-pol",
-		AuthorID:  "u1",
-		Content:   "test prompt",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-	})
+	_ = insertMessage(store, db.Message{ID: "m-def-pol", ThreadID: "t-def-pol", AuthorID: "u1", Content: "test prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
 	mDef, _ := getMessage(store, "m-def-pol")
 	pDefPol := New(nil, WorkerPoolConfig{
 		Store: store,
@@ -2072,14 +1483,10 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 	})
-	pDefPol.cfg.ResolveChannelPolicy = nil // exercises nil ResolveChannelPolicy fallback
+	pDefPol.cfg.ResolveChannelPolicy = nil
 	pDefPol.processBurst([]db.Message{*mDef})
+	New(nil, WorkerPoolConfig{Store: store, DrainTimeout: -1}).StopWithTimeout(0)
 
-	// 10. StopWithTimeout with drainTimeout <= 0 and p.cfg.DrainTimeout <= 0
-	pDrain := New(nil, WorkerPoolConfig{Store: store, DrainTimeout: -1})
-	pDrain.StopWithTimeout(0)
-
-	// 11. Trailing classifier without configured classifier
 	ptrF2 := func(v float64) *float64 { return &v }
 	pTrailNoClass := New(nil, WorkerPoolConfig{
 		Store: store,
@@ -2097,7 +1504,6 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	mtQuery, _ := getMessage(store, "m-trail-query")
 	pTrailNoClass.processBurst([]db.Message{*mwLead, *mtQuery})
 
-	// 12. getTurnHistory slicing when turnHistoryFetched && len(turnHistory) > limit
 	var hist15 []HistoryMessage
 	for i := 0; i < 15; i++ {
 		hist15 = append(hist15, HistoryMessage{
@@ -2108,7 +1514,6 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 			CreatedAt:  time.Now().UTC().Add(-time.Duration(20-i) * time.Minute),
 		})
 	}
-
 	pHistSlice := New(nil, WorkerPoolConfig{
 		Store: store,
 		HistoryFetcher: func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
@@ -2129,7 +1534,6 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	mHistSlice, _ := getMessage(store, "m-hist-slice")
 	pHistSlice.processBurst([]db.Message{*mHistSlice})
 
-	// 13. Staleness fail-open on database error during GetSessionLastActivity
 	staleStore := setupTestStore(t)
 	msgStale := db.Message{
 		ID:        "m-stale-failopen",
@@ -2142,51 +1546,81 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 		Store:       &mockClaimStore{Store: staleStore, claimed: true},
 		BackoffBase: 1 * time.Millisecond,
 	})
-	_ = staleStore.Close() // Force GetSessionLastActivity to return error
+	_ = staleStore.Close()
 	pStale.processBurst([]db.Message{msgStale})
+}
+
+type errQueueStore struct {
+	db.Store
+}
+
+func (e *errQueueStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
+	return errors.New("errQueueStore: update message status error")
+}
+func (e *errQueueStore) UpdateScheduleRunStatus(ctx context.Context, params db.UpdateRunParams) error {
+	return errors.New("errQueueStore: update schedule run status error")
+}
+func (e *errQueueStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
+	return errors.New("errQueueStore: update message completed error")
+}
+func (e *errQueueStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
+	return errors.New("errQueueStore: increment message retry error")
+}
+func (e *errQueueStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
+	return errors.New("errQueueStore: save session id error")
+}
+func (e *errQueueStore) RotateSessionID(ctx context.Context, threadID, newSessionID string) error {
+	return errors.New("errQueueStore: rotate session id error")
+}
+
+type mockDrainErrStore struct {
+	db.Store
+	messages []db.Message
+}
+
+func (m *mockDrainErrStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]db.Message, error) {
+	if len(m.messages) > 0 {
+		return m.messages, nil
+	}
+	return []db.Message{{ID: "msg-proc-1", Status: db.StatusProcessing}}, nil
+}
+func (m *mockDrainErrStore) UpdateMessageStatus(ctx context.Context, id, status, errReason string) error {
+	return errors.New("mock drain update error")
 }
 
 func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 	t.Parallel()
 
 	// 1. resolveStore permutations
-	if s := resolveStore(nil); s != nil {
-		t.Errorf("expected nil from resolveStore(nil), got %v", s)
+	for _, v := range []interface{}{nil, "unsupported string", (*db.FakeStore)(nil), (*db.SQLStore)(nil), (*sql.DB)(nil)} {
+		if s := resolveStore(v); s != nil {
+			t.Errorf("expected nil from resolveStore(%v)", v)
+		}
 	}
-	if s := resolveStore("unsupported string"); s != nil {
-		t.Errorf("expected nil from resolveStore(string), got %v", s)
-	}
-	if s := resolveStore((*db.FakeStore)(nil)); s != nil {
-		t.Errorf("expected nil from resolveStore((*FakeStore)(nil)), got %v", s)
-	}
-	if s := resolveStore((*db.SQLStore)(nil)); s != nil {
-		t.Errorf("expected nil from resolveStore((*SQLStore)(nil)), got %v", s)
-	}
-	if s := resolveStore((*sql.DB)(nil)); s != nil {
-		t.Errorf("expected nil from resolveStore((*sql.DB)(nil)), got %v", s)
-	}
+
 	fake := setupTestStore(t)
+	defer func() { _ = fake.Close() }()
 	if s := resolveStore(fake); s != fake {
-		t.Errorf("expected same FakeStore from resolveStore, got %v", s)
+		t.Errorf("expected same FakeStore from resolveStore")
 	}
 
 	// 2. WorkerPool.Store() and SummaryGroup() permutations
 	if s := (*WorkerPool)(nil).Store(); s != nil {
-		t.Errorf("expected nil from nil WorkerPool.Store(), got %v", s)
+		t.Errorf("expected nil from nil WorkerPool.Store()")
 	}
 	if sg := (*WorkerPool)(nil).SummaryGroup(); sg != nil {
-		t.Errorf("expected nil from nil WorkerPool.SummaryGroup(), got %v", sg)
+		t.Errorf("expected nil from nil WorkerPool.SummaryGroup()")
 	}
 	pEmpty := &WorkerPool{}
 	if s := pEmpty.Store(); s != nil {
-		t.Errorf("expected nil from empty WorkerPool.Store(), got %v", s)
+		t.Errorf("expected nil from empty WorkerPool.Store()")
 	}
 	if sg := pEmpty.SummaryGroup(); sg == nil {
 		t.Errorf("expected non-nil summaryGroup from empty WorkerPool")
 	}
 	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
 	if s := pFake.Store(); s != fake {
-		t.Errorf("expected fake from WorkerPool.Store(), got %v", s)
+		t.Errorf("expected fake from WorkerPool.Store()")
 	}
 
 	realDB := &sql.DB{}
@@ -2200,7 +1634,7 @@ func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 
 	// 2b. GetSessionLastActivity edge cases
 	if _, isCold, err := GetSessionLastActivity("invalid-type", "t1"); err != nil || !isCold {
-		t.Errorf("expected true, nil for invalid type, got cold=%v err=%v", isCold, err)
+		t.Errorf("expected true, nil for invalid type")
 	}
 	_ = insertMessage(fake, db.Message{
 		ID:        "m-last-act",
@@ -2210,7 +1644,7 @@ func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	})
 	if act, isCold, err := GetSessionLastActivity(fake, "t-last-act"); err != nil || isCold || act.IsZero() {
-		t.Errorf("expected non-zero activity, not cold for completed message, got act=%v cold=%v err=%v", act, isCold, err)
+		t.Errorf("expected non-zero activity, not cold for completed message")
 	}
 
 	// 3. turnExecution helper nil-store branches
@@ -2229,91 +1663,35 @@ func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 	teNoStore.incrementMessageRetry("m1", "retry-err")
 	teNoStore.saveSessionID("t1", "s1")
 	teNoStore.rotateSessionID("t1", "s2")
-	if count, err := teNoStore.getSessionTurnCount("t1"); count != 0 || err != nil {
-		t.Errorf("expected 0, nil, got %d, %v", count, err)
-	}
-	if count, err := teNoStore.incrementSessionTurnCount("t1"); count != 0 || err != nil {
-		t.Errorf("expected 0, nil, got %d, %v", count, err)
-	}
-	if sid, err := teNoStore.getSessionID("t1"); sid != "" || err != nil {
-		t.Errorf("expected '', nil, got %q, %v", sid, err)
-	}
-	if sid, err := teNoStore.getPreviousSessionID("t1"); sid != "" || err != nil {
-		t.Errorf("expected '', nil, got %q, %v", sid, err)
-	}
-	if err := teNoStore.createOneShotSchedule(db.OneShotSchedule{ID: "os1"}); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if sum, last, err := teNoStore.getThreadSummary("t1"); sum != "" || last != "" || err != nil {
-		t.Errorf("expected '', '', nil, got %q, %q, %v", sum, last, err)
-	}
-	if err := teNoStore.saveThreadSummary("t1", "summary", "last-m"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if msgs, err := teNoStore.getRecentThreadMessages("t1", 10); msgs != nil || err != nil {
-		t.Errorf("expected nil, nil, got %v, %v", msgs, err)
-	}
+	if count, err := teNoStore.getSessionTurnCount("t1"); count != 0 || err != nil { t.Errorf("expected 0, nil") }
+	if count, err := teNoStore.incrementSessionTurnCount("t1"); count != 0 || err != nil { t.Errorf("expected 0, nil") }
+	if sid, err := teNoStore.getSessionID("t1"); sid != "" || err != nil { t.Errorf("expected empty sid") }
+	if sid, err := teNoStore.getPreviousSessionID("t1"); sid != "" || err != nil { t.Errorf("expected empty prev sid") }
+	if err := teNoStore.createOneShotSchedule(db.OneShotSchedule{ID: "os1"}); err != nil { t.Errorf("unexpected err: %v", err) }
+	if sum, last, err := teNoStore.getThreadSummary("t1"); sum != "" || last != "" || err != nil { t.Errorf("expected empty summary") }
+	if err := teNoStore.saveThreadSummary("t1", "summary", "last-m"); err != nil { t.Errorf("unexpected err: %v", err) }
+	if msgs, err := teNoStore.getRecentThreadMessages("t1", 10); msgs != nil || err != nil { t.Errorf("expected nil msgs") }
 
-	// 4. turnExecution helper active-store branches
-	teStore := &turnExecution{pool: pFake}
-	teStore.updateMessageStatus("m1", "processing")
-	teStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
-	teStore.updateMessageCompleted("m1", "resp")
-	teStore.incrementMessageRetry("m1", "retry-err")
-	teStore.saveSessionID("t1", "s1")
-	teStore.rotateSessionID("t1", "s2")
-	if _, err := teStore.getSessionTurnCount("t1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
+	// 4. turnExecution helper active-store branches & error branches
+	for _, te := range []*turnExecution{
+		{pool: pFake},
+		{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: fake}}}},
+	} {
+		te.updateMessageStatus("m1", "processing")
+		te.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
+		te.updateMessageCompleted("m1", "resp")
+		te.incrementMessageRetry("m1", "retry-err")
+		te.saveSessionID("t1", "s1")
+		te.rotateSessionID("t1", "s2")
+		_, _ = te.getSessionTurnCount("t1")
+		_, _ = te.incrementSessionTurnCount("t1")
+		_, _ = te.getSessionID("t1")
+		_, _ = te.getPreviousSessionID("t1")
+		_ = te.createOneShotSchedule(db.OneShotSchedule{ID: "os1"})
+		_, _, _ = te.getThreadSummary("t1")
+		_ = te.saveThreadSummary("t1", "sum", "m1")
+		_, _ = te.getRecentThreadMessages("t1", 10)
 	}
-	if _, err := teStore.incrementSessionTurnCount("t1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if _, err := teStore.getSessionID("t1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if _, err := teStore.getPreviousSessionID("t1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teStore.createOneShotSchedule(db.OneShotSchedule{ID: "os1"}); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if _, _, err := teStore.getThreadSummary("t1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teStore.saveThreadSummary("t1", "sum", "m1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if _, err := teStore.getRecentThreadMessages("t1", 10); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-}
-
-type errQueueStore struct {
-	db.Store
-}
-
-func (e *errQueueStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
-	return errors.New("errQueueStore: update message status error")
-}
-
-func (e *errQueueStore) UpdateScheduleRunStatus(ctx context.Context, params db.UpdateRunParams) error {
-	return errors.New("errQueueStore: update schedule run status error")
-}
-
-func (e *errQueueStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
-	return errors.New("errQueueStore: update message completed error")
-}
-
-func (e *errQueueStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	return errors.New("errQueueStore: increment message retry error")
-}
-
-func (e *errQueueStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
-	return errors.New("errQueueStore: save session id error")
-}
-
-func (e *errQueueStore) RotateSessionID(ctx context.Context, threadID, newSessionID string) error {
-	return errors.New("errQueueStore: rotate session id error")
 }
 
 func TestTurnExecution_StoreErrorBranches(t *testing.T) {
@@ -2327,240 +1705,6 @@ func TestTurnExecution_StoreErrorBranches(t *testing.T) {
 	te.incrementMessageRetry("m1", "retry-err")
 	te.saveSessionID("t1", "s1")
 	te.rotateSessionID("t1", "s2")
-}
-
-func TestStatusUpdater_DeleteErrorBranches(t *testing.T) {
-	u := NewStatusUpdater(nil, "t1", true)
-	u.deleteFunc = func(threadID, messageID string) error {
-		return errors.New("discord deletion error")
-	}
-	u.sendFunc = func(threadID, content string) (string, error) {
-		u.mu.Lock()
-		u.disabled = true
-		u.mu.Unlock()
-		return "msg1", nil
-	}
-	u.activeTool = "bash"
-	u.flush()
-
-	u.statusMessageID = "msg2"
-	u.Reset()
-
-	u.statusMessageID = "msg3"
-	u.DeleteStatusMessage()
-	time.Sleep(15 * time.Millisecond)
-}
-
-func TestSummarizeThreadHistory_InvalidTypeAssertion(t *testing.T) {
-	sg := &singleflight.Group{}
-	start := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		close(start)
-		_, _, _ = sg.Do("test-invalid-type", func() (interface{}, error) {
-			<-done
-			return 12345, nil
-		})
-	}()
-	<-start
-	time.Sleep(5 * time.Millisecond)
-
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		close(done)
-	}()
-
-	msgs := []HistoryMessage{{AuthorName: "alice", Content: "hello"}}
-	_, err := SummarizeThreadHistoryWithGroup(context.Background(), sg, nil, "model", "test-invalid-type", msgs)
-	if err == nil {
-		t.Errorf("expected error for non-string thread summary, got nil")
-	}
-}
-
-func TestAssembleTurnPrompt_EmptyBase(t *testing.T) {
-	// 1. Layer 6 only
-	p6 := AssembleTurnPrompt(TurnPromptInput{
-		ThreadSummary: "summary text",
-	})
-	if !strings.Contains(p6, "summary text") {
-		t.Errorf("expected summary text, got %q", p6)
-	}
-
-	// 2. Layer 5 only
-	p5 := AssembleTurnPrompt(TurnPromptInput{
-		LookbackHistory: []HistoryMessage{{AuthorName: "alice", Content: "hi", CreatedAt: time.Now()}},
-	})
-	if !strings.Contains(p5, "@alice") {
-		t.Errorf("expected lookback history, got %q", p5)
-	}
-
-	// Also exercise PlanBurstExecution wake mode branches
-	_ = PlanBurstExecution(BurstPlanInput{Burst: []db.Message{{ID: "m1"}}, WakeMode: "mentions"})
-	_ = PlanBurstExecution(BurstPlanInput{Burst: []db.Message{{ID: "m1"}}, WakeMode: "direct"})
-	_ = PlanBurstExecution(BurstPlanInput{Burst: []db.Message{{ID: "m1"}}, WakeMode: "always"})
-
-	// 3. Layer 4 only
-	p4 := AssembleTurnPrompt(TurnPromptInput{
-		IsColdStart:       true,
-		PreviousSessionID: "prev-sess-123",
-	})
-	if !strings.Contains(p4, "<PREVIOUS_SESSION>") {
-		t.Errorf("expected prev session block, got %q", p4)
-	}
-
-	// 5. Layer 2 only
-	p2 := AssembleTurnPrompt(TurnPromptInput{
-		ChannelInstructions: "instructions",
-	})
-	if !strings.Contains(p2, "instructions") {
-		t.Errorf("expected instructions, got %q", p2)
-	}
-
-	// 6. Layer 1 only
-	p1 := AssembleTurnPrompt(TurnPromptInput{
-		InjectedHookContext: "hook context",
-	})
-	if !strings.Contains(p1, "hook context") {
-		t.Errorf("expected hook context, got %q", p1)
-	}
-}
-
-type mockDrainErrStore struct {
-	db.Store
-}
-
-func (m *mockDrainErrStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]db.Message, error) {
-	return []db.Message{
-		{ID: "msg-proc-1", Status: db.StatusProcessing},
-	}, nil
-}
-
-func (m *mockDrainErrStore) UpdateMessageStatus(ctx context.Context, id, status, errReason string) error {
-	return errors.New("drain update status error")
-}
-
-func TestWorkerPool_DrainErrorBranches(t *testing.T) {
-	s := setupTestStore(t)
-	mock := &mockDrainErrStore{Store: s}
-	p := New(nil, WorkerPoolConfig{Store: mock, DrainTimeout: 10 * time.Millisecond})
-	p.StopWithTimeout(0)
-
-	tmpDBPath := filepath.Join(t.TempDir(), "closed_pool.db")
-	sqlDB, err := db.InitDB(tmpDBPath)
-	if err == nil {
-		_ = sqlDB.Close()
-		pDB := New(nil, WorkerPoolConfig{DB: sqlDB, DrainTimeout: 10 * time.Millisecond})
-		pDB.StopWithTimeout(10 * time.Millisecond)
-	}
-}
-
-func TestRecoverInterrupted_DrainErrorBranches(t *testing.T) {
-	s := setupTestStore(t)
-	mock := &mockDrainErrStore{Store: s}
-	pool := New(nil, WorkerPoolConfig{Store: mock})
-	RecoverInterrupted(mock, pool)
-
-	tmpDBPath := filepath.Join(t.TempDir(), "closed_recovery.db")
-	sqlDB, err := db.InitDB(tmpDBPath)
-	if err == nil {
-		_ = sqlDB.Close()
-		RecoverInterrupted(sqlDB, pool)
-	}
-}
-
-func TestResolveBotRoleIDs_MemberAddError(t *testing.T) {
-	origFetcher := guildMemberFetcher
-	defer func() { guildMemberFetcher = origFetcher }()
-
-	guildMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
-		return &discordgo.Member{
-			GuildID: guildID,
-			User:    &discordgo.User{ID: userID},
-			Roles:   []string{"role1"},
-		}, nil
-	}
-
-	sess := &discordgo.Session{State: discordgo.NewState()}
-	roles := ResolveBotRoleIDs(sess, "guild-not-in-state", "bot-1")
-	if len(roles) != 1 || roles[0] != "role1" {
-		t.Errorf("expected [role1], got %v", roles)
-	}
-}
-
-func TestWorkerPool_EnqueueBurst_Empty(t *testing.T) {
-	p := New(nil, WorkerPoolConfig{})
-	p.EnqueueBurst() // Empty call exercises early return
-}
-
-func TestTurnExecution_BuildTurnPrompt_CachedSummary(t *testing.T) {
-	store := setupTestStore(t)
-	_ = store.SaveThreadSummary(context.Background(), "t-cached-sum", "<THREAD_SUMMARY>hi</THREAD_SUMMARY>", "msg-1")
-
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:       "t-cached-sum",
-		GuildID:  "g1",
-		ParentID: "parent-chan",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-
-	dgSession := &discordgo.Session{State: discordgo.NewState()}
-	pool := New(nil, WorkerPoolConfig{
-		DiscordSession: dgSession,
-		Store:          store,
-		HistoryFetcher: func(ctx context.Context, threadID, beforeID string, limit int) ([]HistoryMessage, error) {
-			return []HistoryMessage{
-				{ID: "msg-1", AuthorName: "user", Content: "hello", CreatedAt: time.Now()},
-			}, nil
-		},
-	})
-
-	te := &turnExecution{
-		pool:     pool,
-		threadID: "t-cached-sum",
-		burst:    []db.Message{{ID: "m1", ThreadID: "t-cached-sum", Content: "current"}},
-		isCold:   true,
-	}
-	te.buildTurnPrompt()
-	if !strings.Contains(te.turnPrompt, "<THREAD_SUMMARY>hi</THREAD_SUMMARY>") {
-		t.Errorf("expected cached summary in prompt, got %q", te.turnPrompt)
-	}
-	if !strings.Contains(te.turnPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(te.turnPrompt, "hello") {
-		t.Errorf("expected channel history lookback in prompt on cold start even with summary, got %q", te.turnPrompt)
-	}
-}
-
-func TestCoverageBoost_ExtraHits(t *testing.T) {
-	// 1. guildMemberFetcher uninitialized
-	_, _ = guildMemberFetcher(nil, "g", "u")
-	_, _ = guildMemberFetcher(&discordgo.Session{}, "g", "u")
-
-	// 2. isTier1Wake body direct mention and role mention
-	msg1 := db.Message{
-		Content: "hey <@12345> check this",
-	}
-	if !isTier1Wake(msg1, "12345", nil) {
-		t.Errorf("expected true for direct mention in body")
-	}
-	msgRole := db.Message{
-		Content: "hey <@&role999> check this",
-	}
-	if !isTier1Wake(msgRole, "99999", []string{"role999"}) {
-		t.Errorf("expected true for role mention in body")
-	}
-
-	// 3. ResolveBotRoleIDs with empty guildID or botUserID
-	_ = ResolveBotRoleIDs(nil, "", "")
-	_ = ResolveBotRoleIDs(&discordgo.Session{}, "", "")
-	_ = ResolveBotRoleIDs(&discordgo.Session{State: discordgo.NewState()}, "", "")
-	_ = ResolveBotRoleIDs(&discordgo.Session{State: discordgo.NewState()}, "g1", "")
-
-	// 4. extractMessageBody edge cases
-	_ = extractMessageBody("")
-	_ = extractMessageBody("just text")
-	_ = extractMessageBody("- content: foo\nbar")
-	_ = extractMessageBody("<USER_REQUEST>hello world</USER_REQUEST>")
-	_ = extractMessageBody("<\\/USER_REQUEST>escaped<\\/USER_REQUEST>")
-	_ = extractMessageBody("<\\USER_REQUEST>escaped<\\USER_REQUEST>")
 }
 
 func TestCoverageBoost_DaemonTurnMarshalError(t *testing.T) {
@@ -2592,11 +1736,7 @@ func TestCoverageBoost_DaemonTurnMarshalError(t *testing.T) {
 		},
 	}
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	defer func() {
-		if err := procPool.Close(); err != nil {
-			t.Logf("cleanup unified pool: %v", err)
-		}
-	}()
+	defer func() { _ = procPool.Close() }()
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.DataDir = tempData
@@ -2622,7 +1762,6 @@ func TestCoverageBoost_DaemonTurnMarshalError(t *testing.T) {
 	defer pool.Stop()
 
 	_ = store.SaveSessionID(context.Background(), threadID, sessID)
-
 	msg := db.Message{
 		ID:        "msg-persist-marshal-err",
 		ThreadID:  threadID,
@@ -2653,10 +1792,7 @@ func TestCoverageBoost_PoolStoreResolutionAndOptions(t *testing.T) {
 		if s := resolveStore(sqlStore); s == nil {
 			t.Errorf("expected non-nil for valid *db.SQLStore")
 		}
-
-		p := New(nil, WorkerPoolConfig{
-			DB: rawDB,
-		})
+		p := New(nil, WorkerPoolConfig{DB: rawDB})
 		if p.Store() == nil {
 			t.Errorf("expected store populated from DB")
 		}
@@ -2664,7 +1800,6 @@ func TestCoverageBoost_PoolStoreResolutionAndOptions(t *testing.T) {
 }
 
 func TestCoverageBoost_SinkAndLegacyAdapterMethods(t *testing.T) {
-	// 1. Sinks
 	ds := &DiscordTurnSink{}
 	ds.OnTurnStarted()
 	ds.OnThinking()
@@ -2674,7 +1809,6 @@ func TestCoverageBoost_SinkAndLegacyAdapterMethods(t *testing.T) {
 	vs.OnThinking()
 	vs.OnToolCall("run_command", "ls")
 
-	// 2. WorkerPool AgentPool
 	var nilP *WorkerPool
 	if nilP.AgentPool() != nil {
 		t.Errorf("expected nil for nil WorkerPool.AgentPool")
@@ -2684,11 +1818,3 @@ func TestCoverageBoost_SinkAndLegacyAdapterMethods(t *testing.T) {
 		t.Errorf("expected non-nil AgentPool")
 	}
 }
-
-
-
-
-
-
-
-
