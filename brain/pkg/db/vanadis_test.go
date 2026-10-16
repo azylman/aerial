@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func runVanadisTests(t *testing.T, store Store) {
@@ -54,6 +55,7 @@ func runVanadisTests(t *testing.T, store Store) {
 	}
 
 	// 2. CreateVanadisBuild with multiple chunks (inserted out of chunk_index order to test ordering)
+	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
 	chunks := []VanadisChunk{
 		{
 			ID:                 "chunk-101-1",
@@ -77,6 +79,7 @@ func runVanadisTests(t *testing.T, store Store) {
 			Status:       "queued",
 			PRNumber:     42,
 			DiffStat:     "1 file changed",
+			StartedAt:    explicitStart,
 		},
 	}
 
@@ -114,7 +117,7 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("unexpected build fields: %+v", gotBuild)
 	}
 
-	// Verify explicit Title on CreateVanadisBuild is preserved independently of Objective
+	// Verify explicit Title on CreateVanadisBuild is preserved independently of Objective, and chunk created with 'running' gets StartedAt
 	titledBuild := VanadisBuild{
 		ID:        "build-titled-102",
 		Repo:      "aerial",
@@ -122,20 +125,30 @@ func runVanadisTests(t *testing.T, store Store) {
 		Title:     "Redesign Vanadis Build Status Cards",
 		Objective: "Detailed objective for redesigning the cards",
 	}
-	if err := store.CreateVanadisBuild(ctx, titledBuild, nil); err != nil {
+	runningChunk := VanadisChunk{
+		ID:           "chunk-102-0",
+		ChunkIndex:   0,
+		Title:        "Already running chunk",
+		Instructions: "Run immediately",
+		Status:       "running",
+	}
+	if err := store.CreateVanadisBuild(ctx, titledBuild, []VanadisChunk{runningChunk}); err != nil {
 		t.Fatalf("CreateVanadisBuild with explicit Title failed: %v", err)
 	}
-	gotTitledBuild, _, err := store.GetVanadisBuild(ctx, "build-titled-102")
+	gotTitledBuild, gotTitledChunks, err := store.GetVanadisBuild(ctx, "build-titled-102")
 	if err != nil {
 		t.Fatalf("GetVanadisBuild for build-titled-102 failed: %v", err)
 	}
 	if gotTitledBuild.Title != "Redesign Vanadis Build Status Cards" || gotTitledBuild.Objective != "Detailed objective for redesigning the cards" {
 		t.Errorf("expected explicit Title and Objective preserved, got %+v", gotTitledBuild)
 	}
+	if len(gotTitledChunks) != 1 || gotTitledChunks[0].StartedAt.IsZero() {
+		t.Errorf("expected chunk created with status 'running' to have non-zero StartedAt, got %+v", gotTitledChunks)
+	}
 	if len(gotChunks) != 3 {
 		t.Fatalf("expected 3 chunks, got %d", len(gotChunks))
 	}
-	if gotChunks[0].ID != "chunk-101-0" || gotChunks[0].ChunkIndex != 0 || gotChunks[0].Status != "pending" || gotChunks[0].Effort != "medium" {
+	if gotChunks[0].ID != "chunk-101-0" || gotChunks[0].ChunkIndex != 0 || gotChunks[0].Status != "pending" || gotChunks[0].Effort != "medium" || !gotChunks[0].StartedAt.IsZero() {
 		t.Errorf("unexpected chunk[0]: %+v", gotChunks[0])
 	}
 	if !reflect.DeepEqual(gotChunks[0].TargetFiles, []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"}) {
@@ -159,7 +172,7 @@ func runVanadisTests(t *testing.T, store Store) {
 	if !reflect.DeepEqual(gotChunks[1].AcceptanceCriteria, []string{"Worker processes chunk successfully"}) {
 		t.Errorf("unexpected chunk[1] AcceptanceCriteria: %#v", gotChunks[1].AcceptanceCriteria)
 	}
-	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 || gotChunks[2].Effort != "low" {
+	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 || gotChunks[2].Effort != "low" || !gotChunks[2].StartedAt.Equal(explicitStart) {
 		t.Errorf("unexpected chunk[2]: %+v", gotChunks[2])
 	}
 	if len(gotChunks[2].TargetFiles) != 0 {
@@ -185,7 +198,7 @@ func runVanadisTests(t *testing.T, store Store) {
 	if err != nil {
 		t.Fatalf("GetVanadisChunk failed: %v", err)
 	}
-	if gotChunk0.Title != "Task 1: Schema and store" || gotChunk0.BuildID != "build-101" || gotChunk0.Effort != "medium" {
+	if gotChunk0.Title != "Task 1: Schema and store" || gotChunk0.BuildID != "build-101" || gotChunk0.Effort != "medium" || !gotChunk0.StartedAt.IsZero() {
 		t.Errorf("unexpected chunk from GetVanadisChunk: %+v", gotChunk0)
 	}
 	if !reflect.DeepEqual(gotChunk0.TargetSymbols, []string{"VanadisBuild", "VanadisChunk"}) {
@@ -206,9 +219,11 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Fatalf("UpdateVanadisChunkStatus failed: %v", err)
 	}
 	gotChunk0After, err := store.GetVanadisChunk(ctx, "chunk-101-0")
-	if err != nil || gotChunk0After.Status != "running" {
-		t.Fatalf("expected chunk status 'running', got %+v (err: %v)", gotChunk0After, err)
+	if err != nil || gotChunk0After.Status != "running" || gotChunk0After.StartedAt.IsZero() {
+		t.Fatalf("expected chunk status 'running' with non-zero StartedAt, got %+v (err: %v)", gotChunk0After, err)
 	}
+	initialStartedAt := gotChunk0After.StartedAt
+
 	if err := store.UpdateVanadisChunkStatus(ctx, "nonexistent-chunk", "running"); !errors.Is(err, ErrVanadisChunkNotFound) {
 		t.Errorf("expected ErrVanadisChunkNotFound, got %v", err)
 	}
@@ -219,7 +234,7 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("expected error for empty status in UpdateVanadisChunkStatus")
 	}
 
-	// 6. AttachVanadisChunkPR
+	// 6. AttachVanadisChunkPR (verify StartedAt is preserved on chunk-101-0, and populated if zero on chunk-101-1)
 	if err := store.AttachVanadisChunkPR(ctx, "chunk-101-0", 512, "3 files changed, 120 insertions(+)"); err != nil {
 		t.Fatalf("AttachVanadisChunkPR failed: %v", err)
 	}
@@ -229,6 +244,25 @@ func runVanadisTests(t *testing.T, store Store) {
 	}
 	if gotChunk0PR.PRNumber != 512 || gotChunk0PR.DiffStat != "3 files changed, 120 insertions(+)" || gotChunk0PR.Status != "pr_opened" {
 		t.Errorf("unexpected chunk after AttachVanadisChunkPR: %+v", gotChunk0PR)
+	}
+	if !gotChunk0PR.StartedAt.Equal(initialStartedAt) {
+		t.Errorf("expected StartedAt %v preserved after AttachVanadisChunkPR, got %v", initialStartedAt, gotChunk0PR.StartedAt)
+	}
+	// Transitioning to 'merged' also preserves StartedAt
+	if err := store.UpdateVanadisChunkStatus(ctx, "chunk-101-0", "merged"); err != nil {
+		t.Fatalf("UpdateVanadisChunkStatus to merged failed: %v", err)
+	}
+	gotChunk0Merged, err := store.GetVanadisChunk(ctx, "chunk-101-0")
+	if err != nil || !gotChunk0Merged.StartedAt.Equal(initialStartedAt) {
+		t.Errorf("expected StartedAt %v preserved on merged, got %+v (err: %v)", initialStartedAt, gotChunk0Merged, err)
+	}
+	// AttachVanadisChunkPR on a chunk that never entered 'running' still populates StartedAt
+	if err := store.AttachVanadisChunkPR(ctx, "chunk-101-1", 513, "1 file changed"); err != nil {
+		t.Fatalf("AttachVanadisChunkPR on chunk-101-1 failed: %v", err)
+	}
+	gotChunk1PR, err := store.GetVanadisChunk(ctx, "chunk-101-1")
+	if err != nil || gotChunk1PR.StartedAt.IsZero() {
+		t.Errorf("expected non-zero StartedAt on chunk-101-1 after AttachVanadisChunkPR, got %+v (err: %v)", gotChunk1PR, err)
 	}
 	if err := store.AttachVanadisChunkPR(ctx, "nonexistent-chunk", 512, "diff"); !errors.Is(err, ErrVanadisChunkNotFound) {
 		t.Errorf("expected ErrVanadisChunkNotFound on AttachVanadisChunkPR, got %v", err)

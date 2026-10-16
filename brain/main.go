@@ -1152,12 +1152,14 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 								cRepo = build.Repo
 							}
 							widgetChunks[i] = discord.StatusWidgetChunk{
-								Index:    c.ChunkIndex,
-								Repo:     cRepo,
-								Title:    c.Title,
-								Status:   c.Status,
-								PRNumber: c.PRNumber,
-								DiffStat: c.DiffStat,
+								Index:     c.ChunkIndex,
+								Repo:      cRepo,
+								Title:     c.Title,
+								Status:    c.Status,
+								PRNumber:  c.PRNumber,
+								DiffStat:  c.DiffStat,
+								StartedAt: c.StartedAt,
+								UpdatedAt: c.UpdatedAt,
 							}
 						}
 						buildTitle := strings.TrimSpace(build.Title)
@@ -1192,8 +1194,11 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 					log.Printf("[HTTP] [pr_register] info loading PR %s#%d for widget: %v", req.Repo, req.PRNumber, err)
 				}
 				msgID := ""
+				var prStartedAt, prUpdatedAt time.Time
 				if existingPR != nil {
 					msgID = existingPR.StatusMessageID
+					prStartedAt = existingPR.CreatedAt
+					prUpdatedAt = existingPR.UpdatedAt
 				}
 				widgetReq := discord.StatusWidgetRequest{
 					ID:        fmt.Sprintf("pr-%s-%d", req.Repo, req.PRNumber),
@@ -1203,12 +1208,14 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 					Status:    "open",
 					Chunks: []discord.StatusWidgetChunk{
 						{
-							Index:    0,
-							Repo:     req.Repo,
-							Title:    prTitle,
-							Status:   "open",
-							PRNumber: req.PRNumber,
-							DiffStat: req.DiffStat,
+							Index:     0,
+							Repo:      req.Repo,
+							Title:     prTitle,
+							Status:    "open",
+							PRNumber:  req.PRNumber,
+							DiffStat:  req.DiffStat,
+							StartedAt: prStartedAt,
+							UpdatedAt: prUpdatedAt,
 						},
 					},
 				}
