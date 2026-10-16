@@ -191,8 +191,10 @@ func VanadisChunkIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	v, _ := ctx.Value(vanadisChunkIDCtxKey{}).(string)
-	return sanitizeEnvValue(v)
+	if v, ok := ctx.Value(vanadisChunkIDCtxKey{}).(string); ok {
+		return sanitizeEnvValue(v)
+	}
+	return ""
 }
 
 // GetOrCreate retrieves an active StreamingDaemon for targetKey, or starts one via singleflight.
