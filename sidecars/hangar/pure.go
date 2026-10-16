@@ -685,9 +685,53 @@ type NomadFileChange struct {
 	JobName string
 }
 
+// IsMigrationFile returns true if p is a file residing under brain/pkg/db/migrations/.
+func IsMigrationFile(p string) bool {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return false
+	}
+	clean := strings.ReplaceAll(trimmed, "\\", "/")
+	clean = path.Clean(clean)
+	clean = strings.TrimPrefix(clean, "/")
+	clean = strings.TrimPrefix(clean, "./")
+	return strings.HasPrefix(clean, "brain/pkg/db/migrations/") && clean != "brain/pkg/db/migrations/"
+}
+
+// HasMigrationChanges returns true if any changed file in changedFiles resides under brain/pkg/db/migrations/.
+func HasMigrationChanges(changedFiles []string) bool {
+	for _, f := range changedFiles {
+		if IsMigrationFile(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureDBMigrateNomadChange ensures nomad/jobs/db-migrate.nomad is present at index 0 of changes as an apply action.
+func EnsureDBMigrateNomadChange(changes []NomadFileChange) []NomadFileChange {
+	if len(changes) > 0 && (changes[0].JobName == "db-migrate" || filepath.ToSlash(changes[0].Path) == "nomad/jobs/db-migrate.nomad") && changes[0].Action == "apply" {
+		return changes
+	}
+	out := make([]NomadFileChange, 0, len(changes)+1)
+	out = append(out, NomadFileChange{
+		Path:    "nomad/jobs/db-migrate.nomad",
+		Action:  "apply",
+		JobName: "db-migrate",
+	})
+	for _, ch := range changes {
+		if ch.JobName == "db-migrate" || filepath.ToSlash(ch.Path) == "nomad/jobs/db-migrate.nomad" {
+			continue
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
 // ParseNomadGitStatus parses git diff --name-status output and classifies changed Nomad jobs.
 func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 	var changes []NomadFileChange
+	hasMigrations := false
 	scanner := bufio.NewScanner(strings.NewReader(gitStatusOutput))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -716,9 +760,15 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 					JobName: ExtractJobName("", newPath),
 				})
 			}
+			if IsMigrationFile(newPath) {
+				hasMigrations = true
+			}
 			continue
 		}
 		filePath := parts[len(parts)-1]
+		if !strings.HasPrefix(status, "D") && IsMigrationFile(filePath) {
+			hasMigrations = true
+		}
 		if !IsNomadJobFile(filePath) {
 			continue
 		}
@@ -731,6 +781,9 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 			Action:  action,
 			JobName: ExtractJobName("", filePath),
 		})
+	}
+	if hasMigrations {
+		changes = EnsureDBMigrateNomadChange(changes)
 	}
 	return changes
 }

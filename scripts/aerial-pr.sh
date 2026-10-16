@@ -706,6 +706,39 @@ enable_github_auto_merge() {
     fi
 }
 
+register_pr_in_brain() {
+    local brain_reg_url="$1"
+    local reg_payload="$2"
+    local pr_num="$3"
+    local target_id="$4"
+    local max_attempts="${AERIAL_PR_REGISTER_RETRIES:-3}"
+    local delay="${AERIAL_PR_REGISTER_RETRY_DELAY:-1}"
+    local attempt=1
+    local reg_resp=""
+
+    while [ "$attempt" -le "$max_attempts" ]; do
+        reg_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
+            -H "Content-Type: application/json" \
+            -d "$reg_payload" \
+            "$brain_reg_url" 2>/dev/null || true)
+        if [ -n "$reg_resp" ] && echo "$reg_resp" | jq -e '.status == "registered"' >/dev/null 2>&1; then
+            echo "🗄️ [aerial-pr] Registered PR #${pr_num} in PostgreSQL pr_registry (target: ${target_id})." >&2
+            return 0
+        fi
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            echo "⚠️ [aerial-pr] Warning: PR #${pr_num} registration attempt ${attempt}/${max_attempts} failed (${brain_reg_url}): ${reg_resp:-unreachable}. Retrying in ${delay}s..." >&2
+            if [ "$delay" -gt 0 ] 2>/dev/null; then
+                sleep "$delay"
+                delay=$((delay * 2))
+            fi
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    echo "❌ [aerial-pr] ERROR: Failed to register PR #${pr_num} in brain pr_registry (${brain_reg_url}) after ${max_attempts} attempts: ${reg_resp:-unreachable}" >&2
+    return 1
+}
+
 submit_scratch() {
     local target_id="$(resolve_target_id)"
     local scratch_dir=""
@@ -1054,15 +1087,12 @@ submit_scratch() {
         --arg diff_stat "$diff_stat" \
         '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $metadata, vanadis_chunk_id: $vanadis_chunk_id, diff_stat: $diff_stat}')
 
-    local reg_resp
-    reg_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
-        -H "Content-Type: application/json" \
-        -d "$reg_payload" \
-        "$brain_reg_url" 2>/dev/null || true)
-    if [ -n "$reg_resp" ] && echo "$reg_resp" | jq -e '.status == "registered"' >/dev/null 2>&1; then
-        echo "🗄️ [aerial-pr] Registered PR #${pr_num} in PostgreSQL pr_registry (target: ${target_id})." >&2
-    else
-        echo "⚠️ [aerial-pr] Warning: Could not register PR in brain pr_registry (${brain_reg_url}): ${reg_resp:-unreachable}" >&2
+    if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
+        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+            SCRATCH_DIR_CLEANUP=""
+        fi
+        exit 1
     fi
 
     # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately

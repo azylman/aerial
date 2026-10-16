@@ -3718,6 +3718,42 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
 			}
 		}
 		mu.Unlock()
+
+		// 6. Aerial Core migration change immediately runs db-migrate while deferring container build
+		var revParseMig int
+		var migAppliedPaths []string
+		envMig := newPushEventTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "HEAD" && revParseMig == 0 {
+					revParseMig++
+					return []byte("sha_before_mig"), nil, nil
+				}
+				if len(args) >= 1 && args[0] == "rev-parse" {
+					return []byte("sha_after_mig"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+					return []byte("brain/pkg/db/migrations/20261016182900_add_started_at.sql\nbrain/pkg/db/vanadis.go\n"), nil, nil
+				}
+				if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+					return []byte("A\tbrain/pkg/db/migrations/20261016182900_add_started_at.sql\nM\tbrain/pkg/db/vanadis.go\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+					migAppliedPaths = append(migAppliedPaths, args[len(args)-1])
+				}
+				return []byte("Evaluation ID: db-migrate-eval"), nil, nil
+			}
+		})
+		_ = os.WriteFile(filepath.Join(envMig.aerialDir, "nomad", "jobs", "db-migrate.nomad"), []byte(`job "db-migrate" { type = "batch" task "atlas" { config { image = "arigaio/atlas:1.3.3" } } }`), 0644)
+		respMig, codeMig := envMig.daemon.ExecuteGitPushEvent(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "sha_after_mig", PRNumber: 751, TargetID: "1560698400780062884"})
+		if codeMig != http.StatusOK || !respMig.ContainersBuilding || !respMig.NomadChanged || len(respMig.AppliedJobs) != 1 || respMig.AppliedJobs[0] != "db-migrate" {
+			t.Fatalf("expected db-migrate applied immediately with ContainersBuilding=true, got (%d): %+v", codeMig, respMig)
+		}
+		if len(migAppliedPaths) != 1 || !strings.HasSuffix(filepath.ToSlash(migAppliedPaths[0]), "nomad/jobs/db-migrate.nomad") {
+			t.Fatalf("expected nomad/jobs/db-migrate.nomad to be executed, got: %v", migAppliedPaths)
+		}
 	})
 
 	t.Run("aerial-config diff gating, notices, and deploy events", func(t *testing.T) {
