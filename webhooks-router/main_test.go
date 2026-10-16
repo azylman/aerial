@@ -3622,10 +3622,11 @@ func (r *mockVanadisPgxRows) Scan(dest ...any) error {
 	it := r.items[r.idx-1]
 	*(dest[0].(*string)) = it.ID
 	*(dest[1].(*int)) = it.ChunkIndex
-	*(dest[2].(*string)) = it.Title
-	*(dest[3].(*string)) = it.Status
-	*(dest[4].(*int)) = it.PRNumber
-	*(dest[5].(*string)) = it.DiffStat
+	*(dest[2].(*string)) = it.Repo
+	*(dest[3].(*string)) = it.Title
+	*(dest[4].(*string)) = it.Status
+	*(dest[5].(*int)) = it.PRNumber
+	*(dest[6].(*string)) = it.DiffStat
 	return nil
 }
 
@@ -3773,6 +3774,7 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 				*(dest[7].(*int)) = 2
 				*(dest[8].(*string)) = "Test Objective"
 				*(dest[9].(*string)) = bStatus
+				*(dest[10].(*string)) = "msg-12345"
 				return nil
 			}}
 		}

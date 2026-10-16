@@ -133,22 +133,27 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 		}
 		execDB := txSQL.db
 
+		buildStatusMessageID := strings.TrimSpace(build.StatusMessageID)
 		buildQuery := `
-			INSERT INTO vanadis_builds (id, repo, thread_id, tier, objective, status, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+			INSERT INTO vanadis_builds (id, repo, thread_id, tier, objective, status, status_message_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		`
-		if _, err := execDB.ExecContext(ctx, buildQuery, buildID, repo, threadID, tier, objective, status); err != nil {
+		if _, err := execDB.ExecContext(ctx, buildQuery, buildID, repo, threadID, tier, objective, status, buildStatusMessageID); err != nil {
 			return fmt.Errorf("failed to insert vanadis build: %w", err)
 		}
 
 		chunkQuery := `
-			INSERT INTO vanadis_chunks (id, build_id, chunk_index, title, instructions, target_files, status, pr_number, diff_stat, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+			INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, status, pr_number, diff_stat, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		`
 		for _, c := range chunks {
 			chunkID := strings.TrimSpace(c.ID)
 			title := strings.TrimSpace(c.Title)
 			instructions := strings.TrimSpace(c.Instructions)
+			chunkRepo := normalizeRepo(c.Repo)
+			if chunkRepo == "" {
+				chunkRepo = repo
+			}
 			cStatus := strings.TrimSpace(c.Status)
 			if cStatus == "" {
 				cStatus = "pending"
@@ -170,7 +175,7 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 			}
 
 			if _, err := execDB.ExecContext(ctx, chunkQuery,
-				chunkID, buildID, c.ChunkIndex, title, instructions, targetFilesArg, cStatus, prNum, c.DiffStat,
+				chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, targetFilesArg, cStatus, prNum, c.DiffStat,
 			); err != nil {
 				return fmt.Errorf("failed to insert vanadis chunk %s: %w", chunkID, err)
 			}
@@ -191,13 +196,13 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 	}
 
 	buildQuery := `
-		SELECT id, repo, thread_id, tier, objective, status, created_at, updated_at
+		SELECT id, repo, thread_id, tier, objective, status, status_message_id, created_at, updated_at
 		FROM vanadis_builds
 		WHERE id = $1;
 	`
 	var b VanadisBuild
 	err := s.db.QueryRowContext(ctx, buildQuery, buildID).Scan(
-		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Objective, &b.Status, &b.CreatedAt, &b.UpdatedAt,
+		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Objective, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrVanadisBuildNotFound
@@ -207,7 +212,7 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 	}
 
 	chunksQuery := `
-		SELECT id, build_id, chunk_index, title, instructions, target_files, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE build_id = $1
 		ORDER BY chunk_index ASC;
@@ -229,7 +234,7 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 			targetDest = &rawTargetFiles
 		}
 		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Title, &c.Instructions, targetDest, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
+			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetDest, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
 		}
@@ -259,7 +264,7 @@ func (s *SQLStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanadi
 	}
 
 	query := `
-		SELECT id, build_id, chunk_index, title, instructions, target_files, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE id = $1;
 	`
@@ -273,7 +278,7 @@ func (s *SQLStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanadi
 	}
 
 	err := s.db.QueryRowContext(ctx, query, chunkID).Scan(
-		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Title, &c.Instructions, targetDest, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
+		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetDest, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrVanadisChunkNotFound
@@ -379,6 +384,36 @@ func (s *SQLStore) UpdateVanadisBuildStatus(ctx context.Context, buildID, status
 	res, err := s.db.ExecContext(ctx, query, status, buildID)
 	if err != nil {
 		return fmt.Errorf("failed to update vanadis build status: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrVanadisBuildNotFound
+	}
+	return nil
+}
+
+// UpdateVanadisBuildStatusMessageID updates the status_message_id of a VanadisBuild.
+func (s *SQLStore) UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database connection is nil")
+	}
+
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return fmt.Errorf("build id cannot be empty")
+	}
+
+	query := `
+		UPDATE vanadis_builds
+		SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $2;
+	`
+	res, err := s.db.ExecContext(ctx, query, strings.TrimSpace(messageID), buildID)
+	if err != nil {
+		return fmt.Errorf("failed to update vanadis build status_message_id: %w", err)
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {

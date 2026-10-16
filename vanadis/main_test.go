@@ -62,14 +62,15 @@ func (r *mockRows) Scan(dest ...any) error {
 	*(dest[0].(*string)) = c.ID
 	*(dest[1].(*string)) = c.BuildID
 	*(dest[2].(*int)) = c.ChunkIndex
-	*(dest[3].(*string)) = c.Title
-	*(dest[4].(*string)) = c.Instructions
-	*(dest[5].(*[]string)) = c.TargetFiles
-	*(dest[6].(*string)) = c.Status
-	*(dest[7].(*int)) = c.PRNumber
-	*(dest[8].(*string)) = c.DiffStat
-	*(dest[9].(*time.Time)) = c.CreatedAt
-	*(dest[10].(*time.Time)) = c.UpdatedAt
+	*(dest[3].(*string)) = c.Repo
+	*(dest[4].(*string)) = c.Title
+	*(dest[5].(*string)) = c.Instructions
+	*(dest[6].(*[]string)) = c.TargetFiles
+	*(dest[7].(*string)) = c.Status
+	*(dest[8].(*int)) = c.PRNumber
+	*(dest[9].(*string)) = c.DiffStat
+	*(dest[10].(*time.Time)) = c.CreatedAt
+	*(dest[11].(*time.Time)) = c.UpdatedAt
 	return nil
 }
 
@@ -203,6 +204,19 @@ func (m *memoryVanadisStore) UpdateBuildStatus(_ context.Context, buildID, statu
 		return ErrBuildNotFound
 	}
 	b.Status = status
+	m.builds[buildID] = b
+	return nil
+}
+
+func (m *memoryVanadisStore) UpdateBuildStatusMessageID(_ context.Context, buildID, messageID string) error {
+	if m.updateBuildErr != nil {
+		return m.updateBuildErr
+	}
+	b, ok := m.builds[buildID]
+	if !ok {
+		return ErrBuildNotFound
+	}
+	b.StatusMessageID = messageID
 	m.builds[buildID] = b
 	return nil
 }
@@ -484,8 +498,9 @@ func TestPostgresVanadisStore(t *testing.T) {
 		*(dest[3].(*int)) = 2
 		*(dest[4].(*string)) = "Objective"
 		*(dest[5].(*string)) = "running"
-		*(dest[6].(*time.Time)) = time.Now()
+		*(dest[6].(*string)) = "msg-1"
 		*(dest[7].(*time.Time)) = time.Now()
+		*(dest[8].(*time.Time)) = time.Now()
 		return nil
 	}
 
@@ -582,6 +597,20 @@ func TestPostgresVanadisStore(t *testing.T) {
 	if err := execErrStore.UpdateBuildStatus(ctx, "b-1", "completed"); err == nil {
 		t.Fatal("expected exec error on UpdateBuildStatus")
 	}
+
+	// UpdateBuildStatusMessageID tests
+	if err := store.UpdateBuildStatusMessageID(ctx, "", "msg-1"); err == nil {
+		t.Fatal("expected empty build id error")
+	}
+	if err := store.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1"); err != nil {
+		t.Fatalf("unexpected UpdateBuildStatusMessageID error: %v", err)
+	}
+	if err := zeroRowsStore.UpdateBuildStatusMessageID(ctx, "b-404", "msg-1"); !errors.Is(err, ErrBuildNotFound) {
+		t.Fatalf("expected ErrBuildNotFound, got %v", err)
+	}
+	if err := execErrStore.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1"); err == nil {
+		t.Fatal("expected exec error on UpdateBuildStatusMessageID")
+	}
 }
 
 func TestFormatChunkPrompt(t *testing.T) {
@@ -647,11 +676,12 @@ func TestFormatChunkPrompt(t *testing.T) {
 	for _, want := range []string{
 		"[VANADIS BUILD CHUNK EXECUTION]",
 		"Build ID: build-999",
-		"[Chunk 1/3] Task 1: Schema (PR #101)",
+		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)",
 		"DiffStat: 1 file changed, 25 insertions(+)",
 		"=== Active Chunk (Chunk 2 of 3) ===",
+		"Repository: azylman/aerial",
 		"Target Files: vanadis/main.go, vanadis/main_test.go",
-		"- [Chunk 3/3] Task 3: Webhook Advancement",
+		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)",
 		"--vanadis-chunk build-999-chunk-2",
 	} {
 		if !strings.Contains(p1, want) {

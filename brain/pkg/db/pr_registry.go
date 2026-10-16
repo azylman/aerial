@@ -53,25 +53,27 @@ func (s *SQLStore) UpsertPR(ctx context.Context, record PRRecord) error {
 	if status == "" {
 		status = "open"
 	}
+	statusMessageID := strings.TrimSpace(record.StatusMessageID)
 	meta := strings.TrimSpace(record.Metadata)
 	if meta == "" {
 		meta = "{}"
 	}
 
 	query := `
-		INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, status_message_id, metadata, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT (repo, pr_number) DO UPDATE SET
 			branch = EXCLUDED.branch,
 			head_sha = EXCLUDED.head_sha,
 			target_id = EXCLUDED.target_id,
 			title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END,
 			status = CASE WHEN pr_registry.status IN ('merged', 'deploying', 'deployed') THEN pr_registry.status WHEN EXCLUDED.status != '' THEN EXCLUDED.status ELSE pr_registry.status END,
+			status_message_id = CASE WHEN EXCLUDED.status_message_id != '' THEN EXCLUDED.status_message_id ELSE pr_registry.status_message_id END,
 			metadata = CASE WHEN EXCLUDED.metadata != '{}' THEN EXCLUDED.metadata ELSE pr_registry.metadata END,
 			updated_at = CURRENT_TIMESTAMP;
 	`
 
-	_, err := s.db.ExecContext(ctx, query, repo, record.PRNumber, branch, headSHA, targetID, record.Title, status, meta)
+	_, err := s.db.ExecContext(ctx, query, repo, record.PRNumber, branch, headSHA, targetID, record.Title, status, statusMessageID, meta)
 	if err != nil {
 		return fmt.Errorf("failed to upsert pr record: %w", err)
 	}
@@ -90,14 +92,14 @@ func (s *SQLStore) GetPRByNumber(ctx context.Context, repo string, prNumber int)
 	}
 
 	query := `
-		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, metadata, created_at, updated_at
+		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, status_message_id, metadata, created_at, updated_at
 		FROM pr_registry
 		WHERE repo = $1 AND pr_number = $2;
 	`
 
 	var r PRRecord
 	err := s.db.QueryRowContext(ctx, query, repo, prNumber).Scan(
-		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
+		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.StatusMessageID, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrPRNotFound
@@ -120,7 +122,7 @@ func (s *SQLStore) GetPRByHeadSHA(ctx context.Context, repo string, headSHA stri
 	}
 
 	query := `
-		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, metadata, created_at, updated_at
+		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, status_message_id, metadata, created_at, updated_at
 		FROM pr_registry
 		WHERE repo = $1 AND head_sha = $2
 		ORDER BY updated_at DESC
@@ -129,7 +131,7 @@ func (s *SQLStore) GetPRByHeadSHA(ctx context.Context, repo string, headSHA stri
 
 	var r PRRecord
 	err := s.db.QueryRowContext(ctx, query, repo, headSHA).Scan(
-		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
+		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.StatusMessageID, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrPRNotFound
@@ -152,7 +154,7 @@ func (s *SQLStore) GetPRByMergeSHA(ctx context.Context, repo string, mergeSHA st
 	}
 
 	query := `
-		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, metadata, created_at, updated_at
+		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, status_message_id, metadata, created_at, updated_at
 		FROM pr_registry
 		WHERE repo = $1 AND merge_sha = $2
 		ORDER BY updated_at DESC
@@ -161,7 +163,7 @@ func (s *SQLStore) GetPRByMergeSHA(ctx context.Context, repo string, mergeSHA st
 
 	var r PRRecord
 	err := s.db.QueryRowContext(ctx, query, repo, mergeSHA).Scan(
-		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
+		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.StatusMessageID, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrPRNotFound
@@ -234,6 +236,37 @@ func (s *SQLStore) UpdatePRStatus(ctx context.Context, repo string, prNumber int
 	return nil
 }
 
+// UpdatePRStatusMessageID updates the status_message_id of a PR in pr_registry.
+func (s *SQLStore) UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("database connection is nil")
+	}
+
+	repo = normalizeRepo(repo)
+	if repo == "" {
+		return fmt.Errorf("repo cannot be empty")
+	}
+
+	query := `
+		UPDATE pr_registry
+		SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $2 AND pr_number = $3;
+	`
+
+	res, err := s.db.ExecContext(ctx, query, strings.TrimSpace(messageID), repo, prNumber)
+	if err != nil {
+		return fmt.Errorf("failed to update pr status_message_id: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrPRNotFound
+	}
+	return nil
+}
+
 // AtomicTransitionPRStatus conditionally transitions PR status if it is not already in notStatus (CAS gate).
 func (s *SQLStore) AtomicTransitionPRStatus(ctx context.Context, repo string, prNumber int, toStatus, notStatus string) (*PRRecord, error) {
 	if s == nil || s.db == nil {
@@ -249,12 +282,12 @@ func (s *SQLStore) AtomicTransitionPRStatus(ctx context.Context, repo string, pr
 		UPDATE pr_registry
 		SET status = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $2 AND pr_number = $3 AND status != $4
-		RETURNING id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, metadata, created_at, updated_at;
+		RETURNING id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, status_message_id, metadata, created_at, updated_at;
 	`
 
 	var r PRRecord
 	err := s.db.QueryRowContext(ctx, query, toStatus, repo, prNumber, notStatus).Scan(
-		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
+		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.StatusMessageID, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // No transition occurred (already in terminal state or not found)
@@ -280,12 +313,12 @@ func (s *SQLStore) AtomicTransitionPRStatusByMergeSHA(ctx context.Context, repo 
 		UPDATE pr_registry
 		SET status = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $2 AND merge_sha = $3 AND status != $4
-		RETURNING id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, metadata, created_at, updated_at;
+		RETURNING id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, status_message_id, metadata, created_at, updated_at;
 	`
 
 	var r PRRecord
 	err := s.db.QueryRowContext(ctx, query, toStatus, repo, mergeSHA, notStatus).Scan(
-		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
+		&r.ID, &r.Repo, &r.PRNumber, &r.Branch, &r.HeadSHA, &r.MergeSHA, &r.TargetID, &r.Status, &r.Title, &r.StatusMessageID, &r.Metadata, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // No transition occurred (already in terminal state or not found)

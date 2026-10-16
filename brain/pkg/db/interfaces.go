@@ -152,18 +152,19 @@ type TranscriptStore interface {
 
 // PRRecord encapsulates a tracked Pull Request and deployment lifecycle state.
 type PRRecord struct {
-	ID        int64     `json:"id"`
-	Repo      string    `json:"repo"`
-	PRNumber  int       `json:"pr_number"`
-	Branch    string    `json:"branch"`
-	HeadSHA   string    `json:"head_sha"`
-	MergeSHA  string    `json:"merge_sha,omitempty"`
-	TargetID  string    `json:"target_id"`
-	Status    string    `json:"status"`
-	Title     string    `json:"title"`
-	Metadata  string    `json:"metadata"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID              int64     `json:"id"`
+	Repo            string    `json:"repo"`
+	PRNumber        int       `json:"pr_number"`
+	Branch          string    `json:"branch"`
+	HeadSHA         string    `json:"head_sha"`
+	MergeSHA        string    `json:"merge_sha,omitempty"`
+	TargetID        string    `json:"target_id"`
+	Status          string    `json:"status"`
+	Title           string    `json:"title"`
+	StatusMessageID string    `json:"status_message_id,omitempty"`
+	Metadata        string    `json:"metadata"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // PRRegistryStore handles persistent tracking and atomic state transitions for PRs and deployments.
@@ -174,6 +175,7 @@ type PRRegistryStore interface {
 	GetPRByMergeSHA(ctx context.Context, repo string, mergeSHA string) (*PRRecord, error)
 	UpdatePRMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string) error
+	UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error
 	AtomicTransitionPRStatus(ctx context.Context, repo string, prNumber int, toStatus, notStatus string) (*PRRecord, error)
 	AtomicTransitionPRStatusByMergeSHA(ctx context.Context, repo string, mergeSHA string, toStatus, notStatus string) (*PRRecord, error)
 }
@@ -186,6 +188,7 @@ type VanadisStore interface {
 	UpdateVanadisChunkStatus(ctx context.Context, chunkID, status string) error
 	AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int, diffStat string) error
 	UpdateVanadisBuildStatus(ctx context.Context, buildID, status string) error
+	UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
 }
 
 // Store unifies all repository capabilities under a single interface.

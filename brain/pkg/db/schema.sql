@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS pr_registry (
     target_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',
     title TEXT NOT NULL DEFAULT '',
+    status_message_id TEXT NOT NULL DEFAULT '',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -312,6 +313,7 @@ CREATE TABLE IF NOT EXISTS vanadis_builds (
     tier INTEGER NOT NULL DEFAULT 2,
     objective TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'running',
+    status_message_id TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -324,6 +326,7 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     id TEXT PRIMARY KEY,
     build_id TEXT NOT NULL REFERENCES vanadis_builds(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
+    repo TEXT NOT NULL DEFAULT 'azylman/aerial',
     title TEXT NOT NULL,
     instructions TEXT NOT NULL,
     target_files TEXT[] NOT NULL DEFAULT '{}',
@@ -336,4 +339,4 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_build_status ON vanadis_chunks (build_id, status);
-CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_pr_number ON vanadis_chunks (pr_number) WHERE pr_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_pr_number ON vanadis_chunks (repo, pr_number) WHERE pr_number IS NOT NULL;
