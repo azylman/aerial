@@ -96,93 +96,278 @@ func mockJSONResponse(convID, responseText string) string {
 	return string(payload)
 }
 
-func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
+func TestQueueLifecycleAndRetryMatrix(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	var deliveredText string
-	var deliveredChannel string
-	var mu sync.Mutex
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "SuccessLifecycleAndSessionSaving",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				var deliveredText string
+				var deliveredChannel string
+				var mu sync.Mutex
+				doneCh := make(chan struct{})
+				tmpHome := t.TempDir()
 
-	doneCh := make(chan struct{})
+				pool := NewWorkerPool(WorkerPoolConfig{
+					SessionManager: session.New(tmpHome, ""),
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+						sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "f1111111-2222-3333-4444-555555555555")
+						_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+						_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+						now := time.Now()
+						_ = os.Chtimes(sessDir, now, now)
+						return mockJSONResponse("f1111111-2222-3333-4444-555555555555", "Clean output response"), "", 0, nil
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveredChannel = channelID
+						deliveredText = text
+						mu.Unlock()
+						return nil
+					},
+					TypingFunc: noopTyping,
+					OnMessageCompleted: func(msg db.Message, finalStatus string) {
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
 
-	tmpHome := t.TempDir()
+				msg := db.Message{
+					ID:         "msg-101",
+					ThreadID:   "thread-202",
+					GuildID:    "guild-303",
+					AuthorID:   "user-404",
+					AuthorName: "User",
+					Content:    "Hello Aerial",
+					Status:     db.StatusPending,
+					CreatedAt:  time.Now().UTC(),
+					UpdatedAt:  time.Now().UTC(),
+				}
+				if err := insertMessage(store, msg); err != nil {
+					t.Fatalf("Failed to insert message: %v", err)
+				}
+				pool.Enqueue(msg)
+				waitForCompletion(t, doneCh, 3*time.Second, "message processing")
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpHome, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "f1111111-2222-3333-4444-555555555555")
-			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
-			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
-			now := time.Now()
-			_ = os.Chtimes(sessDir, now, now)
-			return mockJSONResponse("f1111111-2222-3333-4444-555555555555", "Clean output response"), "", 0, nil
+				dbMsg, err := getMessage(store, "msg-101")
+				if err != nil || dbMsg == nil {
+					t.Fatalf("Failed to get message: %v", err)
+				}
+				if dbMsg.Status != db.StatusCompleted {
+					t.Errorf("Expected status COMPLETED, got: %s", dbMsg.Status)
+				}
+				savedSess, err := getSessionID(store, "thread-202")
+				if err != nil || savedSess != "f1111111-2222-3333-4444-555555555555" {
+					t.Errorf("Expected saved session f1111111-2222-3333-4444-555555555555, got: %s (err: %v)", savedSess, err)
+				}
+				mu.Lock()
+				if deliveredChannel != "thread-202" || deliveredText != "Clean output response" {
+					t.Errorf("Unexpected delivery: channel=%q, text=%q", deliveredChannel, deliveredText)
+				}
+				mu.Unlock()
+			},
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredChannel = channelID
-			deliveredText = text
-			mu.Unlock()
-			return nil
+		{
+			name: "TransientRetryPreservesSession",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				_ = saveSessionID(store, "thread-retry", "b1111111-2222-3333-4444-555555555555")
+
+				attemptCount := 0
+				var receivedSessions []string
+				var mu sync.Mutex
+				doneCh := make(chan struct{})
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+						mu.Lock()
+						attemptCount++
+						receivedSessions = append(receivedSessions, sessionID)
+						curAttempt := attemptCount
+						mu.Unlock()
+
+						if curAttempt < 3 {
+							return "", "Error 503: high demand unavailable", 1, fmt.Errorf("503")
+						}
+						return mockJSONResponse("b1111111-2222-3333-4444-555555555555", "Success after retries!"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					OnMessageCompleted: func(msg db.Message, finalStatus string) {
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				msg := db.Message{ID: "msg-retry-1", ThreadID: "thread-retry", Content: "Hello"}
+				_ = insertMessage(store, msg)
+				pool.Enqueue(msg)
+				waitForCompletion(t, doneCh, 3*time.Second, "retry completion")
+
+				mu.Lock()
+				if attemptCount != 3 {
+					t.Errorf("Expected 3 attempts, got %d", attemptCount)
+				}
+				for i, sess := range receivedSessions {
+					if sess != "b1111111-2222-3333-4444-555555555555" {
+						t.Errorf("Attempt %d did not preserve session UUID: got %q", i+1, sess)
+					}
+				}
+				mu.Unlock()
+
+				dbMsg, _ := getMessage(store, "msg-retry-1")
+				if dbMsg.Status != db.StatusCompleted || dbMsg.RetryCount != 2 {
+					t.Errorf("Expected status COMPLETED and retry_count 2, got status=%s, count=%d", dbMsg.Status, dbMsg.RetryCount)
+				}
+			},
 		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
+		{
+			name: "SessionCorruptionRecovery",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				_ = saveSessionID(store, "thread-corrupt", "a1111111-2222-3333-4444-555555555555")
+
+				var notifiedMessages []string
+				var sessionIDsPassed []string
+				var mu sync.Mutex
+				doneCh := make(chan struct{})
+				tmpHome := t.TempDir()
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					SessionManager: session.New(tmpHome, ""),
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+						mu.Lock()
+						sessionIDsPassed = append(sessionIDsPassed, sessionID)
+						mu.Unlock()
+
+						if sessionID == "a1111111-2222-3333-4444-555555555555" {
+							return "", "Error: failed to load conversation: session corrupted", 1, fmt.Errorf("corrupt")
+						}
+						sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "d8b5e679-7425-40de-944b-e07fc1f90ae7")
+						_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+						_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+						now := time.Now()
+						_ = os.Chtimes(sessDir, now, now)
+						return mockJSONResponse("d8b5e679-7425-40de-944b-e07fc1f90ae7", "Clean output after session reset"), "", 0, nil
+					},
+					NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+						return "I refreshed our conversation! 🔄"
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						notifiedMessages = append(notifiedMessages, text)
+						mu.Unlock()
+						return nil
+					},
+					TypingFunc: noopTyping,
+					OnMessageCompleted: func(msg db.Message, finalStatus string) {
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				msg := db.Message{ID: "msg-corrupt-1", ThreadID: "thread-corrupt", GuildID: "guild-1", Content: "Hello"}
+				_ = insertMessage(store, msg)
+				pool.Enqueue(msg)
+				waitForCompletion(t, doneCh, 3*time.Second, "session corruption recovery")
+
+				mu.Lock()
+				if len(sessionIDsPassed) != 2 {
+					t.Fatalf("Expected 2 attempts, got %d", len(sessionIDsPassed))
+				}
+				if sessionIDsPassed[0] != "a1111111-2222-3333-4444-555555555555" || sessionIDsPassed[1] != "" {
+					t.Errorf("Expected broken session on attempt 1, then empty session on attempt 2: got %v", sessionIDsPassed)
+				}
+				if len(notifiedMessages) < 2 {
+					t.Fatalf("Expected notification + final reply, got %d messages", len(notifiedMessages))
+				}
+				mu.Unlock()
+
+				finalSess, _ := getSessionID(store, "thread-corrupt")
+				if finalSess != "d8b5e679-7425-40de-944b-e07fc1f90ae7" {
+					t.Errorf("Expected final session d8b5e679-7425-40de-944b-e07fc1f90ae7, got: %s", finalSess)
+				}
+			},
 		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
+		{
+			name: "TotalExhaustion",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				var mu sync.Mutex
+				var deliveredNotifications []string
+				doneCh := make(chan struct{})
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					BackoffBase:    10 * time.Millisecond,
+					MaxAttempts:    3,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+						return "", "status: unavailable 503", 1, fmt.Errorf("unavailable")
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveredNotifications = append(deliveredNotifications, text)
+						mu.Unlock()
+						return nil
+					},
+					TypingFunc: noopTyping,
+					OnMessageCompleted: func(msg db.Message, finalStatus string) {
+						close(doneCh)
+					},
+				})
+				pool.Start()
+				defer pool.Stop()
+
+				msg := db.Message{ID: "msg-exhaust", ThreadID: "thread-exhaust", GuildID: "guild-1", Content: "Hello"}
+				_ = insertMessage(store, msg)
+				pool.Enqueue(msg)
+				waitForCompletion(t, doneCh, 3*time.Second, "message exhaustion")
+
+				dbMsg, _ := getMessage(store, "msg-exhaust")
+				if dbMsg.Status != db.StatusFailed {
+					t.Errorf("Expected status FAILED, got: %s", dbMsg.Status)
+				}
+				if dbMsg.RetryCount != 3 {
+					t.Errorf("Expected retry_count 3, got: %d", dbMsg.RetryCount)
+				}
+
+				mu.Lock()
+				expectedNotif := notifier.ModelUnavailableMessage()
+				if len(deliveredNotifications) != 1 || deliveredNotifications[0] != expectedNotif {
+					t.Errorf("Expected failure notification %q, got: %v", expectedNotif, deliveredNotifications)
+				}
+				mu.Unlock()
+			},
 		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{
-		ID:         "msg-101",
-		ThreadID:   "thread-202",
-		GuildID:    "guild-303",
-		AuthorID:   "user-404",
-		AuthorName: "User",
-		Content:    "Hello Aerial",
-		Status:     db.StatusPending,
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
-	}
-	if err := insertMessage(store, msg); err != nil {
-		t.Fatalf("Failed to insert message: %v", err)
 	}
 
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message processing")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.run(t)
+		})
 	}
-
-	// Verify DB state
-	dbMsg, err := getMessage(store, "msg-101")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("Failed to get message: %v", err)
-	}
-	if dbMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected status COMPLETED, got: %s", dbMsg.Status)
-	}
-
-	// Verify Session saved
-	savedSess, err := getSessionID(store, "thread-202")
-	if err != nil || savedSess != "f1111111-2222-3333-4444-555555555555" {
-		t.Errorf("Expected saved session f1111111-2222-3333-4444-555555555555, got: %s (err: %v)", savedSess, err)
-	}
-
-	// Verify Delivery
-	mu.Lock()
-	if deliveredChannel != "thread-202" || deliveredText != "Clean output response" {
-		t.Errorf("Unexpected delivery: channel=%q, text=%q", deliveredChannel, deliveredText)
-	}
-	mu.Unlock()
 }
 
 func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
@@ -292,214 +477,6 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 	if b1StartIndex < 0 {
 		t.Errorf("Thread B did not execute! Order: %v", executionOrder)
 	}
-}
-
-func TestQueueTransientRetryPreservesSession(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	_ = saveSessionID(store, "thread-retry", "b1111111-2222-3333-4444-555555555555")
-
-	attemptCount := 0
-	var receivedSessions []string
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			attemptCount++
-			receivedSessions = append(receivedSessions, sessionID)
-			curAttempt := attemptCount
-			mu.Unlock()
-
-			if curAttempt < 3 {
-				return "", "Error 503: high demand unavailable", 1, fmt.Errorf("503")
-			}
-			return mockJSONResponse("b1111111-2222-3333-4444-555555555555", "Success after retries!"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-retry-1", ThreadID: "thread-retry", Content: "Hello"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for retry completion")
-	}
-
-	mu.Lock()
-	if attemptCount != 3 {
-		t.Errorf("Expected 3 attempts, got %d", attemptCount)
-	}
-	for i, sess := range receivedSessions {
-		if sess != "b1111111-2222-3333-4444-555555555555" {
-			t.Errorf("Attempt %d did not preserve session UUID: got %q", i+1, sess)
-		}
-	}
-	mu.Unlock()
-
-	dbMsg, _ := getMessage(store, "msg-retry-1")
-	if dbMsg.Status != db.StatusCompleted || dbMsg.RetryCount != 2 {
-		t.Errorf("Expected status COMPLETED and retry_count 2, got status=%s, count=%d", dbMsg.Status, dbMsg.RetryCount)
-	}
-}
-
-func TestQueueSessionCorruptionRecovery(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	_ = saveSessionID(store, "thread-corrupt", "a1111111-2222-3333-4444-555555555555")
-
-	var notifiedMessages []string
-	var sessionIDsPassed []string
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	tmpHome := t.TempDir()
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpHome, ""),
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			sessionIDsPassed = append(sessionIDsPassed, sessionID)
-			mu.Unlock()
-
-			if sessionID == "a1111111-2222-3333-4444-555555555555" {
-				return "", "Error: failed to load conversation: session corrupted", 1, fmt.Errorf("corrupt")
-			}
-			sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "d8b5e679-7425-40de-944b-e07fc1f90ae7")
-			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
-			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
-			now := time.Now()
-			_ = os.Chtimes(sessDir, now, now)
-			return mockJSONResponse("d8b5e679-7425-40de-944b-e07fc1f90ae7", "Clean output after session reset"), "", 0, nil
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			return "I refreshed our conversation! ???"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			notifiedMessages = append(notifiedMessages, text)
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-corrupt-1", ThreadID: "thread-corrupt", GuildID: "guild-1", Content: "Hello"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for session corruption recovery")
-	}
-
-	mu.Lock()
-	if len(sessionIDsPassed) != 2 {
-		t.Fatalf("Expected 2 attempts, got %d", len(sessionIDsPassed))
-	}
-	if sessionIDsPassed[0] != "a1111111-2222-3333-4444-555555555555" || sessionIDsPassed[1] != "" {
-		t.Errorf("Expected broken session on attempt 1, then empty session on attempt 2: got %v", sessionIDsPassed)
-	}
-	if len(notifiedMessages) < 2 {
-		t.Fatalf("Expected notification + final reply, got %d messages", len(notifiedMessages))
-	}
-	mu.Unlock()
-
-	// Verify session in DB updated to fresh session
-	finalSess, _ := getSessionID(store, "thread-corrupt")
-	if finalSess != "d8b5e679-7425-40de-944b-e07fc1f90ae7" {
-		t.Errorf("Expected final session d8b5e679-7425-40de-944b-e07fc1f90ae7, got: %s", finalSess)
-	}
-}
-
-func TestQueueTotalExhaustion(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var mu sync.Mutex
-	var deliveredNotifications []string
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    3,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "", "status: unavailable 503", 1, fmt.Errorf("unavailable")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredNotifications = append(deliveredNotifications, text)
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-exhaust", ThreadID: "thread-exhaust", GuildID: "guild-1", Content: "Hello"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message exhaustion")
-	}
-
-	dbMsg, _ := getMessage(store, "msg-exhaust")
-	if dbMsg.Status != db.StatusFailed {
-		t.Errorf("Expected status FAILED, got: %s", dbMsg.Status)
-	}
-	if dbMsg.RetryCount != 3 {
-		t.Errorf("Expected retry_count 3, got: %d", dbMsg.RetryCount)
-	}
-
-	mu.Lock()
-	expectedNotif := notifier.ModelUnavailableMessage()
-	if len(deliveredNotifications) != 1 || deliveredNotifications[0] != expectedNotif {
-		t.Errorf("Expected failure notification %q, got: %v", expectedNotif, deliveredNotifications)
-	}
-	mu.Unlock()
 }
 
 func TestRecoverInterrupted(t *testing.T) {
@@ -823,263 +800,158 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
+func TestQueueScheduleRunLifecycle(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			time.Sleep(10 * time.Millisecond)
-			return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "Success output"), "", 0, nil
+	tests := []struct {
+		name       string
+		runID      string
+		scheduleID string
+		threadID   string
+		runnerFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
+		verify     func(t *testing.T, store db.Store, runID, schedID string)
+	}{
+		{
+			name:       "Success",
+			runID:      "run-lifecycle-success-1",
+			scheduleID: "cron-s-1",
+			threadID:   "thread-sched-s",
+			runnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				time.Sleep(10 * time.Millisecond)
+				return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "Success output"), "", 0, nil
+			},
+			verify: func(t *testing.T, store db.Store, runID, schedID string) {
+				runs, total, err := getScheduleRunsPaginated(store, 10, 0, schedID, "")
+				if err != nil || total != 1 || len(runs) != 1 {
+					t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
+				}
+				r := runs[0]
+				if r.Status != "completed" {
+					t.Errorf("Expected status 'completed', got %q", r.Status)
+				}
+				if r.MessageID != "msg-" + runID {
+					t.Errorf("Expected message_id 'msg-%s', got %q", runID, r.MessageID)
+				}
+				if r.CompletedAt == nil {
+					t.Errorf("Expected CompletedAt to be set, got nil")
+				}
+				if r.DurationMs <= 0 {
+					t.Errorf("Expected DurationMs > 0, got %d", r.DurationMs)
+				}
+				if r.Error != "" {
+					t.Errorf("Expected Error to be empty, got %q", r.Error)
+				}
+			},
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
+		{
+			name:       "Failure",
+			runID:      "run-lifecycle-fail-1",
+			scheduleID: "cron-f-1",
+			threadID:   "thread-sched-f",
+			runnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				return "", "Fatal execution error: out of memory", 1, fmt.Errorf("out of memory")
+			},
+			verify: func(t *testing.T, store db.Store, runID, schedID string) {
+				runs, total, err := getScheduleRunsPaginated(store, 10, 0, schedID, "")
+				if err != nil || total != 1 || len(runs) != 1 {
+					t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
+				}
+				r := runs[0]
+				if r.Status != "failed" {
+					t.Errorf("Expected status 'failed', got %q", r.Status)
+				}
+				if r.CompletedAt == nil {
+					t.Errorf("Expected CompletedAt to be set, got nil")
+				}
+				if r.Error == "" {
+					t.Errorf("Expected Error to be set on failure, got empty string")
+				}
+			},
 		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
+		{
+			name:       "PanicRecovery",
+			runID:      "run-panic-1",
+			scheduleID: "cron-panic-sched",
+			threadID:   "thread-panic",
+			runnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				panic("simulated critical worker panic")
+			},
+			verify: func(t *testing.T, store db.Store, runID, schedID string) {
+				dbMsg, err := getMessage(store, "msg-"+runID)
+				if err != nil || dbMsg == nil {
+					t.Fatalf("Failed to get message: %v", err)
+				}
+				if dbMsg.Status != db.StatusFailed {
+					t.Errorf("Expected message status FAILED, got %s", dbMsg.Status)
+				}
+				runs, _, err := getScheduleRunsPaginated(store, 10, 0, schedID, "")
+				if err != nil || len(runs) != 1 {
+					t.Fatalf("Failed to get schedule run: %v", err)
+				}
+				if runs[0].Status != "failed" {
+					t.Errorf("Expected schedule run status 'failed', got %q", runs[0].Status)
+				}
+				if runs[0].Error == "" || runs[0].CompletedAt == nil {
+					t.Errorf("Expected Error and CompletedAt to be set on panic, got error=%q completedAt=%v", runs[0].Error, runs[0].CompletedAt)
+				}
+			},
 		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	runID := "run-lifecycle-success-1"
-	run := db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "cron-s-1",
-		ScheduleType: "cron",
-		TargetID:     "chan-1",
-		ThreadID:     "thread-sched-s",
-		Title:        "Morning Sync",
-		Prompt:       "Sync prompt",
-		Status:       "enqueued",
-		StartedAt:    time.Now().UTC().Add(-1 * time.Second),
-	}
-	if err := createScheduleRun(store, run); err != nil {
-		t.Fatalf("Failed to create schedule run: %v", err)
 	}
 
-	msg := db.Message{
-		ID:            "msg-sched-s-1",
-		ThreadID:      "thread-sched-s",
-		GuildID:       "scheduled",
-		AuthorID:      "scheduler",
-		Content:       "Sync prompt",
-		Status:        db.StatusPending,
-		ScheduleRunID: runID,
-		CreatedAt:     time.Now().UTC(),
-	}
-	if err := insertMessage(store, msg); err != nil {
-		t.Fatalf("Failed to insert message: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			doneCh := make(chan struct{})
 
-	pool.Enqueue(msg)
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    10 * time.Millisecond,
+				MaxAttempts:    1,
+				RunnerFunc:     tc.runnerFunc,
+				DeliveryFunc:   noopDelivery,
+				TypingFunc:     noopTyping,
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					close(doneCh)
+				},
+			})
+			pool.Start()
+			defer pool.Stop()
 
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for schedule message execution")
-	}
+			run := db.ScheduleRun{
+				ID:           tc.runID,
+				ScheduleID:   tc.scheduleID,
+				ScheduleType: "cron",
+				TargetID:     "chan-1",
+				ThreadID:     tc.threadID,
+				Title:        tc.name + " Routine",
+				Prompt:       "Sync prompt",
+				Status:       "enqueued",
+				StartedAt:    time.Now().UTC().Add(-1 * time.Second),
+			}
+			if err := createScheduleRun(store, run); err != nil {
+				t.Fatalf("Failed to create schedule run: %v", err)
+			}
 
-	// Verify schedule run status transitioned to completed
-	runs, total, err := getScheduleRunsPaginated(store, 10, 0, "cron-s-1", "")
-	if err != nil || total != 1 || len(runs) != 1 {
-		t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
-	}
+			msg := db.Message{
+				ID:            "msg-" + tc.runID,
+				ThreadID:      tc.threadID,
+				GuildID:       "scheduled",
+				AuthorID:      "scheduler",
+				Content:       "Sync prompt",
+				Status:        db.StatusPending,
+				ScheduleRunID: tc.runID,
+				CreatedAt:     time.Now().UTC(),
+			}
+			if err := insertMessage(store, msg); err != nil {
+				t.Fatalf("Failed to insert message: %v", err)
+			}
 
-	r := runs[0]
-	if r.Status != "completed" {
-		t.Errorf("Expected status 'completed', got %q", r.Status)
-	}
-	if r.MessageID != "msg-sched-s-1" {
-		t.Errorf("Expected message_id 'msg-sched-s-1', got %q", r.MessageID)
-	}
-	if r.CompletedAt == nil {
-		t.Errorf("Expected CompletedAt to be set, got nil")
-	}
-	if r.DurationMs <= 0 {
-		t.Errorf("Expected DurationMs > 0, got %d", r.DurationMs)
-	}
-	if r.Error != "" {
-		t.Errorf("Expected Error to be empty, got %q", r.Error)
-	}
-}
-
-func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    2,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "", "Fatal execution error: out of memory", 1, fmt.Errorf("out of memory")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	runID := "run-lifecycle-fail-1"
-	run := db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "cron-f-1",
-		ScheduleType: "cron",
-		TargetID:     "chan-1",
-		ThreadID:     "thread-sched-f",
-		Title:        "Failing Routine",
-		Prompt:       "Fail prompt",
-		Status:       "enqueued",
-		StartedAt:    time.Now().UTC().Add(-1 * time.Second),
-	}
-	if err := createScheduleRun(store, run); err != nil {
-		t.Fatalf("Failed to create schedule run: %v", err)
-	}
-
-	msg := db.Message{
-		ID:            "msg-sched-f-1",
-		ThreadID:      "thread-sched-f",
-		GuildID:       "scheduled",
-		AuthorID:      "scheduler",
-		Content:       "Fail prompt",
-		Status:        db.StatusPending,
-		ScheduleRunID: runID,
-		CreatedAt:     time.Now().UTC(),
-	}
-	if err := insertMessage(store, msg); err != nil {
-		t.Fatalf("Failed to insert message: %v", err)
-	}
-
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for failing message processing")
-	}
-
-	// Verify schedule run status transitioned to failed with error
-	runs, total, err := getScheduleRunsPaginated(store, 10, 0, "cron-f-1", "")
-	if err != nil || total != 1 || len(runs) != 1 {
-		t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
-	}
-
-	r := runs[0]
-	if r.Status != "failed" {
-		t.Errorf("Expected status 'failed', got %q", r.Status)
-	}
-	if r.CompletedAt == nil {
-		t.Errorf("Expected CompletedAt to be set, got nil")
-	}
-	if r.Error == "" {
-		t.Errorf("Expected Error to be set on failure, got empty string")
-	}
-}
-
-func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			panic("simulated critical worker panic")
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	runID := "run-panic-1"
-	run := db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "cron-panic-sched",
-		ScheduleType: "cron",
-		TargetID:     "chan-1",
-		ThreadID:     "thread-panic",
-		Title:        "Panic Routine",
-		Prompt:       "Panic prompt",
-		Status:       "enqueued",
-		StartedAt:    time.Now().UTC(),
-	}
-	if err := createScheduleRun(store, run); err != nil {
-		t.Fatalf("Failed to create schedule run: %v", err)
-	}
-
-	msg := db.Message{
-		ID:            "msg-panic-1",
-		ThreadID:      "thread-panic",
-		GuildID:       "scheduled",
-		AuthorID:      "scheduler",
-		Content:       "Panic prompt",
-		Status:        db.StatusPending,
-		ScheduleRunID: runID,
-		CreatedAt:     time.Now().UTC(),
-	}
-	if err := insertMessage(store, msg); err != nil {
-		t.Fatalf("Failed to insert message: %v", err)
-	}
-
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for panic recovery")
-	}
-
-	// Verify message in DB was marked FAILED
-	dbMsg, err := getMessage(store, "msg-panic-1")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("Failed to get message: %v", err)
-	}
-	if dbMsg.Status != db.StatusFailed {
-		t.Errorf("Expected message status FAILED, got %s", dbMsg.Status)
-	}
-
-	// Verify schedule run was marked failed with panic info
-	runs, _, err := getScheduleRunsPaginated(store, 10, 0, "cron-panic-sched", "")
-	if err != nil || len(runs) != 1 {
-		t.Fatalf("Failed to get schedule run: %v", err)
-	}
-	if runs[0].Status != "failed" {
-		t.Errorf("Expected schedule run status 'failed', got %q", runs[0].Status)
-	}
-	if runs[0].Error == "" || runs[0].CompletedAt == nil {
-		t.Errorf("Expected Error and CompletedAt to be set on panic, got error=%q completedAt=%v", runs[0].Error, runs[0].CompletedAt)
+			pool.Enqueue(msg)
+			waitForCompletion(t, doneCh, 3*time.Second, "schedule message execution")
+			tc.verify(t, store, tc.runID, tc.scheduleID)
+		})
 	}
 }
 
@@ -1391,173 +1263,98 @@ func TestQueueBurstCoalescing(t *testing.T) {
 
 func TestQueueStalenessDrop(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	var runnerCalls int
-	var deliveryCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
+	tests := []struct {
+		name             string
+		stalenessTTL     time.Duration
+		messageAge       time.Duration
+		expectExecution  bool
+		expectResponseText string
+	}{
+		{
+			name:             "WithinDefault30mTTL",
+			stalenessTTL:     0, // default 30m
+			messageAge:       10 * time.Minute,
+			expectExecution:  true,
+			expectResponseText: "",
+		},
+		{
+			name:             "ExceedsDefault30mTTL",
+			stalenessTTL:     0, // default 30m
+			messageAge:       31 * time.Minute,
+			expectExecution:  false,
+			expectResponseText: "[EXPIRED_STALE]",
+		},
+		{
+			name:             "ExceedsCustom10mTTL",
+			stalenessTTL:     10 * time.Minute,
+			messageAge:       12 * time.Minute,
+			expectExecution:  false,
+			expectResponseText: "[EXPIRED_STALE]",
+		},
+	}
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			var runnerCalls int
+			var mu sync.Mutex
+			doneCh := make(chan struct{})
+
+			cfg := WorkerPoolConfig{
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    10 * time.Millisecond,
+				MaxAttempts:    1,
+				StalenessTTL:   tc.stalenessTTL,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					mu.Lock()
+					runnerCalls++
+					mu.Unlock()
+					return mockJSONResponse("", "OK"), "", 0, nil
+				},
+				DeliveryFunc: noopDelivery,
+				TypingFunc:   noopTyping,
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					close(doneCh)
+				},
+			}
+			pool := NewWorkerPool(cfg)
+			pool.Start()
+			defer pool.Stop()
+
+			msg := db.Message{
+				ID:        "msg-stale-test",
+				ThreadID:  "thread-stale-test",
+				AuthorID:  "user-1",
+				Content:   "Staleness test prompt",
+				Status:    db.StatusPending,
+				CreatedAt: time.Now().UTC().Add(-tc.messageAge),
+			}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
+			waitForCompletion(t, doneCh, 3*time.Second, "stale message processing")
+
 			mu.Lock()
-			runnerCalls++
+			if tc.expectExecution && runnerCalls != 1 {
+				t.Errorf("Expected 1 runner call, got %d", runnerCalls)
+			} else if !tc.expectExecution && runnerCalls != 0 {
+				t.Errorf("Expected 0 runner calls, got %d", runnerCalls)
+			}
 			mu.Unlock()
-			return mockJSONResponse("", "Should not run"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveryCalls++
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
 
-	// 1. Message created 10 minutes ago should NOT be dropped with default 30-minute TTL
-	validCreatedAt := time.Now().UTC().Add(-10 * time.Minute)
-	msgValid := db.Message{
-		ID:        "msg-valid-1",
-		ThreadID:  "thread-valid",
-		AuthorID:  "user-1",
-		Content:   "Recent prompt within 30m window",
-		Status:    db.StatusPending,
-		CreatedAt: validCreatedAt,
-	}
-	_ = insertMessage(store, msgValid)
-	pool.Enqueue(msgValid)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for valid message processing")
-	}
-
-	mu.Lock()
-	if runnerCalls != 1 {
-		t.Errorf("Expected 1 runner call for 10-minute-old message (within 30m TTL), got %d", runnerCalls)
-	}
-	mu.Unlock()
-
-	// 2. Message created 31 minutes ago SHOULD be dropped as [EXPIRED_STALE]
-	doneChStale := make(chan struct{})
-	pool.mu.Lock()
-	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
-		close(doneChStale)
-	}
-	pool.mu.Unlock()
-
-	staleCreatedAt := time.Now().UTC().Add(-31 * time.Minute)
-	msgStale := db.Message{
-		ID:        "msg-stale-1",
-		ThreadID:  "thread-stale",
-		AuthorID:  "user-1",
-		Content:   "Old stale prompt",
-		Status:    db.StatusPending,
-		CreatedAt: staleCreatedAt,
-	}
-	_ = insertMessage(store, msgStale)
-	pool.Enqueue(msgStale)
-
-	select {
-	case <-doneChStale:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for stale message processing")
-	}
-
-	mu.Lock()
-	if runnerCalls != 1 {
-		t.Errorf("Expected runner calls to remain 1 after stale message, got %d", runnerCalls)
-	}
-	mu.Unlock()
-
-	// Verify message marked COMPLETED with [EXPIRED_STALE]
-	dbMsg, err := getMessage(store, "msg-stale-1")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("Failed to query stale message: %v", err)
-	}
-	if dbMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected status COMPLETED, got %s", dbMsg.Status)
-	}
-	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("Expected response text '[EXPIRED_STALE]', got %q", dbMsg.ResponseText)
-	}
-}
-
-func TestQueueCustomStalenessTTL(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var runnerCalls int
-	var mu sync.Mutex
-	doneCh := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		StalenessTTL:   10 * time.Minute,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "OK"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// 12-minute old message with 10-minute StalenessTTL should be dropped
-	msg := db.Message{
-		ID:        "msg-custom-stale",
-		ThreadID:  "thread-custom-stale",
-		AuthorID:  "user-1",
-		Content:   "Should be stale for 10m TTL",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC().Add(-12 * time.Minute),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for custom stale message processing")
-	}
-
-	mu.Lock()
-	if runnerCalls != 0 {
-		t.Errorf("Expected 0 runner calls for custom stale message, got %d", runnerCalls)
-	}
-	mu.Unlock()
-
-	dbMsg, err := getMessage(store, "msg-custom-stale")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("Failed to query custom stale message: %v", err)
-	}
-	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
-		t.Errorf("Expected response text '[EXPIRED_STALE]', got %q", dbMsg.ResponseText)
+			dbMsg, err := getMessage(store, "msg-stale-test")
+			if err != nil || dbMsg == nil {
+				t.Fatalf("Failed to query message: %v", err)
+			}
+			if dbMsg.Status != db.StatusCompleted {
+				t.Errorf("Expected status COMPLETED, got %s", dbMsg.Status)
+			}
+			if tc.expectResponseText != "" && dbMsg.ResponseText != tc.expectResponseText {
+				t.Errorf("Expected response text %q, got %q", tc.expectResponseText, dbMsg.ResponseText)
+			}
+		})
 	}
 }
 
@@ -1685,268 +1482,152 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	}
 }
 
-func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
+func TestSessionRotationOnIdleTimeout(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
 
-	store := setupTestStore(t)
-
-	channelID := "channel-idle-rot-test"
-	initialSessionID := "sess-channel-old-999"
-	_ = saveSessionID(store, channelID, initialSessionID)
-	_, _ = incrementSessionTurnCount(store, channelID)
-
-	// Set updated_at and created_at to 25 hours ago to simulate an idle session
-	idleTime := time.Now().UTC().Add(-25 * time.Hour)
-	store.SetSessionInfo(db.SessionInfo{
-		ThreadID:          channelID,
-		InternalSessionID: initialSessionID,
-		TurnCount:         1,
-		CreatedAt:         idleTime,
-		UpdatedAt:         idleTime,
-	})
-
-	sessMgr := session.New(tmpDir, "")
-	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
-	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
-	_ = os.MkdirAll(cliPbDir, 0755)
-	pbFile := filepath.Join(cliPbDir, initialSessionID+".pb")
-	_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
-	_ = os.Chtimes(pbFile, idleTime, idleTime)
-	_ = os.Chtimes(cliPbDir, idleTime, idleTime)
-	_ = filepath.Walk(sessDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil {
-			_ = os.Chtimes(path, idleTime, idleTime)
-		}
-		return nil
-	})
-
-	var mu sync.Mutex
-	var capturedSessionIDs []string
-	var completedCh chan struct{}
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode: "channel",
-			}
+	tests := []struct {
+		name        string
+		channelMode string
+		channelID   string
+		initialSess string
+	}{
+		{
+			name:        "ChannelSession",
+			channelMode: "channel",
+			channelID:   "channel-rotation-test",
+			initialSess: "sess-channel-old-999",
 		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			capturedSessionIDs = append(capturedSessionIDs, sessionID)
-			mu.Unlock()
-			if sessionID == "" {
-				sessionID = uuid.New().String()
-			}
-			_, _ = sessMgr.EnsureSessionDir(sessionID)
-			_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
-			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
-			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
+		{
+			name:        "ThreadSession",
+			channelMode: "thread",
+			channelID:   "thread-idle-rot-test",
+			initialSess: "sess-thread-old-888",
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			mu.Lock()
-			ch := completedCh
-			mu.Unlock()
-			if ch != nil {
-				select {
-				case ch <- struct{}{}:
-				default:
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			store := setupTestStore(t)
+
+			_ = saveSessionID(store, tc.channelID, tc.initialSess)
+			_, _ = incrementSessionTurnCount(store, tc.channelID)
+
+			idleTime := time.Now().UTC().Add(-25 * time.Hour)
+			store.SetSessionInfo(db.SessionInfo{
+				ThreadID:          tc.channelID,
+				InternalSessionID: tc.initialSess,
+				TurnCount:         1,
+				CreatedAt:         idleTime,
+				UpdatedAt:         idleTime,
+			})
+
+			sessMgr := session.New(tmpDir, "")
+			sessDir, _ := sessMgr.EnsureSessionDir(tc.initialSess)
+			cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+			_ = os.MkdirAll(cliPbDir, 0755)
+			pbFile := filepath.Join(cliPbDir, tc.initialSess+".pb")
+			_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
+			_ = os.Chtimes(pbFile, idleTime, idleTime)
+			_ = os.Chtimes(cliPbDir, idleTime, idleTime)
+			_ = filepath.Walk(sessDir, func(path string, info os.FileInfo, err error) error {
+				if err == nil {
+					_ = os.Chtimes(path, idleTime, idleTime)
 				}
-			}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
+				return nil
+			})
 
-	// 1. Send Turn 1 after 25h of idle time
-	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-idle-1", ThreadID: channelID, Content: "<@aerial> wake up", CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg1)
-	pool.Enqueue(msg1)
-	<-completedCh
+			var mu sync.Mutex
+			var capturedSessionIDs []string
+			var completedCh chan struct{}
 
-	mu.Lock()
-	if len(capturedSessionIDs) != 1 {
-		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
-	}
-	// The runner should have received initialSessionID because worker does not rotate on idle timeout
-	if capturedSessionIDs[0] != initialSessionID {
-		t.Errorf("Expected session %q preserved, got: %q", initialSessionID, capturedSessionIDs[0])
-	}
-	mu.Unlock()
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:          store,
+				SessionManager: sessMgr,
+				TimeoutMinutes: 1,
+				BackoffBase:    10 * time.Millisecond,
+				MaxAttempts:    1,
+				ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
+					return config.ChannelPolicy{
+						Mode: tc.channelMode,
+					}
+				},
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+					mu.Lock()
+					capturedSessionIDs = append(capturedSessionIDs, sessionID)
+					mu.Unlock()
+					if sessionID == "" {
+						sessionID = uuid.New().String()
+					}
+					_, _ = sessMgr.EnsureSessionDir(sessionID)
+					_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+					stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
+					return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
+				},
+				DeliveryFunc: noopDelivery,
+				TypingFunc:   noopTyping,
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					mu.Lock()
+					ch := completedCh
+					mu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- struct{}{}:
+						default:
+						}
+					}
+				},
+			})
+			pool.Start()
+			defer pool.Stop()
 
-	// Turn count should now be 2
-	c1, _ := getSessionTurnCount(store, channelID)
-	if c1 != 2 {
-		t.Errorf("Expected turn_count=2, got %d", c1)
-	}
+			// 1. Send Turn 1 after 25h of idle time
+			completedCh = make(chan struct{}, 1)
+			msg1 := db.Message{ID: "m-idle-1", ThreadID: tc.channelID, Content: "<@aerial> wake up", CreatedAt: time.Now().UTC()}
+			_ = insertMessage(store, msg1)
+			pool.Enqueue(msg1)
+			<-completedCh
 
-	currSessID, _ := getSessionID(store, channelID)
-	if currSessID != initialSessionID {
-		t.Errorf("Expected session %q, got: %s", initialSessionID, currSessID)
-	}
-
-	// 2. Send Turn 2 immediately (5 seconds later). It should NOT rotate!
-	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-idle-2", ThreadID: channelID, Content: "<@aerial> follow up", CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg2)
-	pool.Enqueue(msg2)
-	<-completedCh
-
-	mu.Lock()
-	if len(capturedSessionIDs) != 2 {
-		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
-	}
-	if capturedSessionIDs[1] != initialSessionID {
-		t.Errorf("Expected Turn 2 to retain session ID %q, got: %q", initialSessionID, capturedSessionIDs[1])
-	}
-	mu.Unlock()
-
-	c2, _ := getSessionTurnCount(store, channelID)
-	if c2 != 3 {
-		t.Errorf("Expected turn_count=3 after Turn 2, got %d", c2)
-	}
-}
-
-func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	threadID := "thread-idle-rot-test"
-	initialSessionID := "sess-thread-old-888"
-	_ = saveSessionID(store, threadID, initialSessionID)
-	_, _ = incrementSessionTurnCount(store, threadID)
-
-	idleTime := time.Now().UTC().Add(-25 * time.Hour)
-	store.SetSessionInfo(db.SessionInfo{
-		ThreadID:          threadID,
-		InternalSessionID: initialSessionID,
-		TurnCount:         1,
-		CreatedAt:         idleTime,
-		UpdatedAt:         idleTime,
-	})
-
-	sessMgr := session.New(tmpDir, "")
-	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
-	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
-	_ = os.MkdirAll(cliPbDir, 0755)
-	pbFile := filepath.Join(cliPbDir, initialSessionID+".pb")
-	_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
-	_ = os.Chtimes(pbFile, idleTime, idleTime)
-	_ = os.Chtimes(cliPbDir, idleTime, idleTime)
-	_ = filepath.Walk(sessDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil {
-			_ = os.Chtimes(path, idleTime, idleTime)
-		}
-		return nil
-	})
-
-	var mu sync.Mutex
-	var capturedSessionIDs []string
-	var completedCh chan struct{}
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode: "thread",
-			}
-		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
-			capturedSessionIDs = append(capturedSessionIDs, sessionID)
-			mu.Unlock()
-			if sessionID == "" {
-				sessionID = uuid.New().String()
+			if len(capturedSessionIDs) != 1 {
+				t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
 			}
-			_, _ = sessMgr.EnsureSessionDir(sessionID)
-			_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
-			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
-			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			if capturedSessionIDs[0] != tc.initialSess {
+				t.Errorf("Expected session %q preserved, got: %q", tc.initialSess, capturedSessionIDs[0])
+			}
+			mu.Unlock()
+
+			c1, _ := getSessionTurnCount(store, tc.channelID)
+			if c1 != 2 {
+				t.Errorf("Expected turn_count=2, got %d", c1)
+			}
+			currSessID, _ := getSessionID(store, tc.channelID)
+			if currSessID != tc.initialSess {
+				t.Errorf("Expected session %q, got: %s", tc.initialSess, currSessID)
+			}
+
+			// 2. Send Turn 2 immediately. It should retain the session ID.
+			completedCh = make(chan struct{}, 1)
+			msg2 := db.Message{ID: "m-idle-2", ThreadID: tc.channelID, Content: "<@aerial> follow up", CreatedAt: time.Now().UTC()}
+			_ = insertMessage(store, msg2)
+			pool.Enqueue(msg2)
+			<-completedCh
+
 			mu.Lock()
-			ch := completedCh
-			mu.Unlock()
-			if ch != nil {
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
+			if len(capturedSessionIDs) != 2 {
+				t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
 			}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
+			if capturedSessionIDs[1] != tc.initialSess {
+				t.Errorf("Expected Turn 2 to retain session ID %q, got: %q", tc.initialSess, capturedSessionIDs[1])
+			}
+			mu.Unlock()
 
-	// 1. Send Turn 1 after 25h of idle time
-	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-th-idle-1", ThreadID: threadID, Content: "Hello thread", CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg1)
-	pool.Enqueue(msg1)
-	<-completedCh
-
-	mu.Lock()
-	if len(capturedSessionIDs) != 1 {
-		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
-	}
-	if capturedSessionIDs[0] != initialSessionID {
-		t.Errorf("Expected session %q preserved, got: %q", initialSessionID, capturedSessionIDs[0])
-	}
-	mu.Unlock()
-
-	c1, _ := getSessionTurnCount(store, threadID)
-	if c1 != 2 {
-		t.Errorf("Expected turn_count=2, got %d", c1)
-	}
-
-	currSessID, _ := getSessionID(store, threadID)
-	if currSessID != initialSessionID {
-		t.Errorf("Expected session %q, got: %s", initialSessionID, currSessID)
-	}
-
-	// 2. Send Turn 2 immediately. It should retain the session ID.
-	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-th-idle-2", ThreadID: threadID, Content: "Hello thread again", CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg2)
-	pool.Enqueue(msg2)
-	<-completedCh
-
-	mu.Lock()
-	if len(capturedSessionIDs) != 2 {
-		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
-	}
-	if capturedSessionIDs[1] != initialSessionID {
-		t.Errorf("Expected Turn 2 in thread mode to retain session ID %q, got: %q", initialSessionID, capturedSessionIDs[1])
-	}
-	mu.Unlock()
-
-	c2, _ := getSessionTurnCount(store, threadID)
-	if c2 != 3 {
-		t.Errorf("Expected turn_count=3 after Turn 2, got %d", c2)
+			c2, _ := getSessionTurnCount(store, tc.channelID)
+			if c2 != 3 {
+				t.Errorf("Expected turn_count=3 after Turn 2, got %d", c2)
+			}
+		})
 	}
 }
 
@@ -2111,293 +1792,200 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestQueueIgnoredChannelPolicy(t *testing.T) {
+func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
 
-	var mu sync.Mutex
-	runnerCalls := 0
-	deliveryCalls := 0
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "Should not execute"), "", 0, nil
+	tests := []struct {
+		name                 string
+		setupDiscord         func() *discordgo.Session
+		resolvePolicy        func(threadID, channelName string) config.ChannelPolicy
+		message              db.Message
+		expectRunnerCalls    int
+		expectDeliveryCalls  int
+		expectStatus         string
+		expectErrorMessage   string
+		expectResponseText   string
+		nilOnMessageCompleted bool
+	}{
+		{
+			name: "IgnoredChannelPolicy",
+			resolvePolicy: func(threadID, channelName string) config.ChannelPolicy {
+				if threadID == "chan-ignored-123" {
+					return config.ChannelPolicy{Mode: "ignore"}
+				}
+				return config.ChannelPolicy{Mode: "threads"}
+			},
+			message: db.Message{
+				ID:        "msg-ignored-1",
+				ThreadID:  "chan-ignored-123",
+				Content:   "Hello ignored room",
+				CreatedAt: time.Now().UTC(),
+			},
+			expectRunnerCalls:   0,
+			expectDeliveryCalls: 0,
+			expectStatus:        db.StatusCompleted,
+			expectErrorMessage:  "[IGNORE]",
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveryCalls++
-			mu.Unlock()
-			return nil
-		},
-		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
-			if threadID == "chan-ignored-123" {
+		{
+			name: "IgnoredChannelPolicy_NilCallback",
+			resolvePolicy: func(threadID, channelName string) config.ChannelPolicy {
 				return config.ChannelPolicy{Mode: "ignore"}
-			}
-			return config.ChannelPolicy{Mode: "threads"}
+			},
+			message: db.Message{
+				ID:        "msg-nil-cb-1",
+				ThreadID:  "chan-ignored-nil-cb",
+				Content:   "Testing nil callback safety",
+				CreatedAt: time.Now().UTC(),
+			},
+			expectRunnerCalls:     0,
+			expectDeliveryCalls:   0,
+			expectStatus:          db.StatusCompleted,
+			nilOnMessageCompleted: true,
 		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	doneCh := make(chan struct{})
-	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
-		close(doneCh)
-	}
-
-	msg := db.Message{
-		ID:        "msg-ignored-1",
-		ThreadID:  "chan-ignored-123",
-		Content:   "Hello ignored room",
-		CreatedAt: time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("Timed out waiting for message completion in ignored channel")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if runnerCalls != 0 {
-		t.Errorf("Expected 0 runner calls for ignored channel, got %d", runnerCalls)
-	}
-	if deliveryCalls != 0 {
-		t.Errorf("Expected 0 delivery calls for ignored channel, got %d", deliveryCalls)
-	}
-
-	savedMsg, err := getMessage(store, "msg-ignored-1")
-	if err != nil || savedMsg == nil {
-		t.Fatalf("Failed to retrieve message: %v", err)
-	}
-	if savedMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
-	}
-	if savedMsg.ErrorMessage != "[IGNORE]" {
-		t.Errorf("Expected message error detail '[IGNORE]', got %q", savedMsg.ErrorMessage)
-	}
-}
-
-func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse("", "Should not execute"), "", 0, nil
+		{
+			name: "ThreadInheritsParentChannelPolicy",
+			setupDiscord: func() *discordgo.Session {
+				dg := &discordgo.Session{
+					State: discordgo.NewState(),
+				}
+				_ = dg.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+				chanSpam := &discordgo.Channel{
+					ID:      "parent-spam-id",
+					GuildID: "guild-1",
+					Name:    "spam",
+					Type:    discordgo.ChannelTypeGuildText,
+				}
+				_ = dg.State.ChannelAdd(chanSpam)
+				threadInSpam := &discordgo.Channel{
+					ID:       "thread-in-spam-id",
+					GuildID:  "guild-1",
+					ParentID: "parent-spam-id",
+					Name:     "Spam Discussion Thread",
+					Type:     discordgo.ChannelTypeGuildPublicThread,
+				}
+				_ = dg.State.ChannelAdd(threadInSpam)
+				return dg
+			},
+			resolvePolicy: func(threadID, channelName string) config.ChannelPolicy {
+				if threadID == "parent-spam-id" || channelName == "spam" {
+					return config.ChannelPolicy{Mode: "ignore"}
+				}
+				return config.ChannelPolicy{Mode: "threads"}
+			},
+			message: db.Message{
+				ID:        "msg-thread-spam-1",
+				ThreadID:  "thread-in-spam-id",
+				Content:   "Hello in thread in spam",
+				CreatedAt: time.Now().UTC(),
+			},
+			expectRunnerCalls:   0,
+			expectDeliveryCalls: 0,
+			expectStatus:        db.StatusCompleted,
+			expectErrorMessage:  "[IGNORE]",
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{Mode: "ignore"}
-		},
-		// OnMessageCompleted is intentionally nil (matching production default)
-		OnMessageCompleted: nil,
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{
-		ID:        "msg-nil-cb-1",
-		ThreadID:  "chan-ignored-nil-cb",
-		Content:   "Testing nil callback safety",
-		CreatedAt: time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	// Poll database for completion
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		m, err := getMessage(store, "msg-nil-cb-1")
-		if err == nil && m != nil && m.Status == db.StatusCompleted {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	savedMsg, err := getMessage(store, "msg-nil-cb-1")
-	if err != nil || savedMsg == nil {
-		t.Fatalf("Failed to retrieve message: %v", err)
-	}
-	if savedMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
-	}
-}
-
-func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	dg := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-	_ = dg.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
-
-	// Parent channel #spam (ignored)
-	chanSpam := &discordgo.Channel{
-		ID:      "parent-spam-id",
-		GuildID: "guild-1",
-		Name:    "spam",
-		Type:    discordgo.ChannelTypeGuildText,
-	}
-	_ = dg.State.ChannelAdd(chanSpam)
-
-	// Thread spawned inside #spam
-	threadInSpam := &discordgo.Channel{
-		ID:       "thread-in-spam-id",
-		GuildID:  "guild-1",
-		ParentID: "parent-spam-id",
-		Name:     "Spam Discussion Thread",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	}
-	_ = dg.State.ChannelAdd(threadInSpam)
-
-	var mu sync.Mutex
-	runnerCalls := 0
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "Should not execute"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
-			if threadID == "parent-spam-id" || channelName == "spam" {
+		{
+			name: "HTTPClient_NotDroppedByDefaultDenyIgnore",
+			resolvePolicy: func(threadID, channelName string) config.ChannelPolicy {
 				return config.ChannelPolicy{Mode: "ignore"}
+			},
+			message: db.Message{
+				ID:        "msg-http-prompt-1",
+				ThreadID:  "synthetic-http-thread-uuid",
+				AuthorID:  "http-client",
+				Content:   "Explain Kubernetes architecture",
+				CreatedAt: time.Now().UTC(),
+			},
+			expectRunnerCalls:   1,
+			expectDeliveryCalls: 1,
+			expectStatus:        db.StatusCompleted,
+			expectResponseText:  "HTTP prompt execution response",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			var mu sync.Mutex
+			runnerCalls := 0
+			deliveryCalls := 0
+			doneCh := make(chan struct{})
+
+			cfg := WorkerPoolConfig{
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    10 * time.Millisecond,
+				MaxAttempts:    1,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					mu.Lock()
+					runnerCalls++
+					mu.Unlock()
+					resp := "HTTP prompt execution response"
+					if tc.expectRunnerCalls == 0 {
+						resp = "Should not execute"
+					}
+					return mockJSONResponse("", resp), "", 0, nil
+				},
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					mu.Lock()
+					deliveryCalls++
+					mu.Unlock()
+					return nil
+				},
+				ResolveChannelPolicy: tc.resolvePolicy,
 			}
-			return config.ChannelPolicy{Mode: "threads"}
-		},
-	})
-	pool.SetDiscordSession(dg)
-	pool.Start()
-	defer pool.Stop()
+			if !tc.nilOnMessageCompleted {
+				cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
+					close(doneCh)
+				}
+			}
 
-	doneCh := make(chan struct{})
-	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
-		close(doneCh)
-	}
+			pool := NewWorkerPool(cfg)
+			if tc.setupDiscord != nil {
+				pool.SetDiscordSession(tc.setupDiscord())
+			}
+			pool.Start()
+			defer pool.Stop()
 
-	msg := db.Message{
-		ID:        "msg-thread-spam-1",
-		ThreadID:  "thread-in-spam-id",
-		Content:   "Hello in thread in spam",
-		CreatedAt: time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
+			_ = insertMessage(store, tc.message)
+			pool.Enqueue(tc.message)
 
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("Timed out waiting for message completion")
-	}
+			if !tc.nilOnMessageCompleted {
+				waitForCompletion(t, doneCh, 5*time.Second, "channel policy message completion")
+			} else {
+				deadline := time.Now().Add(3 * time.Second)
+				for time.Now().Before(deadline) {
+					m, err := getMessage(store, tc.message.ID)
+					if err == nil && m != nil && m.Status == tc.expectStatus {
+						break
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if runnerCalls != 0 {
-		t.Errorf("Expected 0 runner calls because thread parent #spam is ignored, got %d", runnerCalls)
-	}
-
-	savedMsg, err := getMessage(store, "msg-thread-spam-1")
-	if err != nil || savedMsg == nil {
-		t.Fatalf("Failed to retrieve message: %v", err)
-	}
-	if savedMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
-	}
-	if savedMsg.ErrorMessage != "[IGNORE]" {
-		t.Errorf("Expected message error detail '[IGNORE]', got %q", savedMsg.ErrorMessage)
-	}
-}
-
-func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var mu sync.Mutex
-	runnerCalls := 0
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "HTTP prompt execution response"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
-			// In default-deny mode, all unrecognized Discord channels resolve to ignore
-			return config.ChannelPolicy{Mode: "ignore"}
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
+			defer mu.Unlock()
+			if runnerCalls != tc.expectRunnerCalls {
+				t.Errorf("Expected %d runner calls, got %d", tc.expectRunnerCalls, runnerCalls)
+			}
+			if deliveryCalls != tc.expectDeliveryCalls {
+				t.Errorf("Expected %d delivery calls, got %d", tc.expectDeliveryCalls, deliveryCalls)
+			}
 
-	doneCh := make(chan struct{})
-	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
-		close(doneCh)
-	}
-
-	msg := db.Message{
-		ID:        "msg-http-prompt-1",
-		ThreadID:  "synthetic-http-thread-uuid",
-		AuthorID:  "http-client",
-		Content:   "Explain Kubernetes architecture",
-		CreatedAt: time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("Timed out waiting for HTTP prompt message completion")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if runnerCalls != 1 {
-		t.Errorf("Expected 1 runner call for HTTP prompt client despite default-deny ignore mode, got %d", runnerCalls)
-	}
-
-	savedMsg, err := getMessage(store, "msg-http-prompt-1")
-	if err != nil || savedMsg == nil {
-		t.Fatalf("Failed to retrieve message: %v", err)
-	}
-	if savedMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
-	}
-	if savedMsg.ResponseText != "HTTP prompt execution response" {
-		t.Errorf("Expected response text 'HTTP prompt execution response', got %q", savedMsg.ResponseText)
+			savedMsg, err := getMessage(store, tc.message.ID)
+			if err != nil || savedMsg == nil {
+				t.Fatalf("Failed to retrieve message: %v", err)
+			}
+			if savedMsg.Status != tc.expectStatus {
+				t.Errorf("Expected status %s, got %s", tc.expectStatus, savedMsg.Status)
+			}
+			if tc.expectErrorMessage != "" && savedMsg.ErrorMessage != tc.expectErrorMessage {
+				t.Errorf("Expected error message %q, got %q", tc.expectErrorMessage, savedMsg.ErrorMessage)
+			}
+			if tc.expectResponseText != "" && savedMsg.ResponseText != tc.expectResponseText {
+				t.Errorf("Expected response text %q, got %q", tc.expectResponseText, savedMsg.ResponseText)
+			}
+		})
 	}
 }
 
@@ -2405,419 +1993,661 @@ func ptrFloat(f float64) *float64 {
 	return &f
 }
 
-func TestProcessBurst_PureAmbient(t *testing.T) {
+func TestProcessBurst_AmbientAndWakeMatrix(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
 
-	store := setupTestStore(t)
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "PureAmbient",
+			run: func(t *testing.T) {
+				tmpDir := t.TempDir()
+				store := setupTestStore(t)
 
-	sessionID := uuid.New().String()
-	if err := saveSessionID(store, "chan-lounge", sessionID); err != nil {
-		t.Fatalf("Failed to save session ID: %v", err)
-	}
-	sessMgr := session.New(tmpDir, "")
-	_, err := sessMgr.EnsureSessionDir(sessionID)
-	if err != nil {
-		t.Fatalf("EnsureSessionDir failed: %v", err)
-	}
-	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
-	_ = os.MkdirAll(cliPbDir, 0755)
-	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+				sessionID := uuid.New().String()
+				if err := saveSessionID(store, "chan-lounge", sessionID); err != nil {
+					t.Fatalf("Failed to save session ID: %v", err)
+				}
+				sessMgr := session.New(tmpDir, "")
+				_, err := sessMgr.EnsureSessionDir(sessionID)
+				if err != nil {
+					t.Fatalf("EnsureSessionDir failed: %v", err)
+				}
+				cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+				_ = os.MkdirAll(cliPbDir, 0755)
+				_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
 
-	var mu sync.Mutex
-	runnerCalls := 0
-	deliveryCalls := 0
-	typingCalls := 0
+				var mu sync.Mutex
+				runnerCalls := 0
+				deliveryCalls := 0
+				typingCalls := 0
 
-	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		return `{"confidence": 0.25, "reason": "casual chit-chat"}`, nil
-	}))
+				cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					return `{"confidence": 0.25, "reason": "casual chit-chat"}`, nil
+				}))
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
-		Classifier:     cls,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "Should not run"), "", 0, nil
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					SessionManager: sessMgr,
+					TimeoutMinutes: 1,
+					Classifier:     cls,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return mockJSONResponse("", "Should not run"), "", 0, nil
+					},
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveryCalls++
+						mu.Unlock()
+						return nil
+					},
+					TypingFunc: func(s *discordgo.Session, channelID string) func() {
+						mu.Lock()
+						typingCalls++
+						mu.Unlock()
+						return func() {}
+					},
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:                 "channel",
+							AmbientWakeThreshold: ptrFloat(0.80),
+						}
+					},
+				})
+
+				now := time.Now().UTC()
+				msg1 := db.Message{
+					ID:         "msg-amb-1",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Alice",
+					Content:    "Hello everyone",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
+				}
+				msg2 := db.Message{
+					ID:         "msg-amb-2",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Bob",
+					Content:    "Nice weather today",
+					Status:     db.StatusPending,
+					CreatedAt:  now.Add(5 * time.Second),
+				}
+				_ = insertMessage(store, msg1)
+				_ = insertMessage(store, msg2)
+
+				pool.processBurst([]db.Message{msg1, msg2})
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if runnerCalls != 0 {
+					t.Errorf("Expected 0 runner calls for pure ambient burst, got %d", runnerCalls)
+				}
+				if deliveryCalls != 0 {
+					t.Errorf("Expected 0 delivery calls for pure ambient burst, got %d", deliveryCalls)
+				}
+				if typingCalls != 0 {
+					t.Errorf("Expected 0 typing calls for pure ambient burst, got %d", typingCalls)
+				}
+
+				turnCount, err := getSessionTurnCount(store, "chan-lounge")
+				if err != nil {
+					t.Fatalf("GetSessionTurnCount error: %v", err)
+				}
+				if turnCount != 0 {
+					t.Errorf("Expected turn_count to remain 0, got %d", turnCount)
+				}
+
+				for _, id := range []string{"msg-amb-1", "msg-amb-2"} {
+					saved, err := getMessage(store, id)
+					if err != nil || saved == nil {
+						t.Fatalf("Failed to retrieve %s: %v", id, err)
+					}
+					if saved.Status != db.StatusCompleted {
+						t.Errorf("Expected status COMPLETED for %s, got %s", id, saved.Status)
+					}
+					if !strings.Contains(saved.ErrorMessage, `[AMBIENT score=0.25/0.80 reason="casual chit-chat"]`) {
+						t.Errorf("Expected telemetry in error_message for %s, got %q", id, saved.ErrorMessage)
+					}
+				}
+			},
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveryCalls++
-			mu.Unlock()
-			return nil
+		{
+			name: "Tier1Wake",
+			run: func(t *testing.T) {
+				tmpDir := t.TempDir()
+				store := setupTestStore(t)
+
+				sessionID := uuid.New().String()
+				sessMgr := session.New(tmpDir, "")
+				_, _ = sessMgr.EnsureSessionDir(sessionID)
+
+				var mu sync.Mutex
+				runnerCalls := 0
+				deliveryCalls := 0
+				deliveredText := ""
+				typingCalls := 0
+
+				s := &discordgo.Session{
+					State: discordgo.NewState(),
+				}
+				s.State.User = &discordgo.User{ID: "bot-aerial-id", Username: "Aerial"}
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					SessionManager: sessMgr,
+					DiscordSession: s,
+					TimeoutMinutes: 1,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return mockJSONResponse("", "I am Aerial, here to help!"), "", 0, nil
+					},
+					DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveryCalls++
+						deliveredText = text
+						mu.Unlock()
+						return nil
+					},
+					TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+						mu.Lock()
+						typingCalls++
+						mu.Unlock()
+						return func() {}
+					},
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:                 "channel",
+							AmbientWakeThreshold: ptrFloat(0.80),
+						}
+					},
+				})
+
+				now := time.Now().UTC()
+				msg := db.Message{
+					ID:         "msg-tier1-1",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Alice",
+					Content:    "<@bot-aerial-id> can you help me with this bug?",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
+				}
+				_ = insertMessage(store, msg)
+
+				pool.processBurst([]db.Message{msg})
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if runnerCalls != 1 {
+					t.Errorf("Expected 1 runner call for Tier 1 wake, got %d", runnerCalls)
+				}
+				if typingCalls == 0 {
+					t.Errorf("Expected typing indicator to be started for Tier 1 wake")
+				}
+				if deliveryCalls != 1 || deliveredText != "I am Aerial, here to help!" {
+					t.Errorf("Expected 1 delivery with response, got calls=%d, text=%q", deliveryCalls, deliveredText)
+				}
+
+				turnCount, err := getSessionTurnCount(store, "chan-lounge")
+				if err != nil {
+					t.Fatalf("GetSessionTurnCount error: %v", err)
+				}
+				if turnCount != 1 {
+					t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
+				}
+
+				saved, err := getMessage(store, "msg-tier1-1")
+				if err != nil || saved == nil {
+					t.Fatalf("Failed to retrieve message: %v", err)
+				}
+				if saved.Status != db.StatusCompleted {
+					t.Errorf("Expected status COMPLETED, got %s", saved.Status)
+				}
+				if saved.ResponseText != "I am Aerial, here to help!" {
+					t.Errorf("Expected response text, got %q", saved.ResponseText)
+				}
+			},
 		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			mu.Lock()
-			typingCalls++
-			mu.Unlock()
-			return func() {}
+		{
+			name: "Tier2Wake",
+			run: func(t *testing.T) {
+				tmpDir := t.TempDir()
+				store := setupTestStore(t)
+
+				sessionID := uuid.New().String()
+				_ = saveSessionID(store, "chan-lounge", sessionID)
+				sessMgr := session.New(tmpDir, "")
+				_, _ = sessMgr.EnsureSessionDir(sessionID)
+
+				var mu sync.Mutex
+				runnerCalls := 0
+				deliveryCalls := 0
+				deliveredText := ""
+				typingCalls := 0
+
+				cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					return `{"confidence": 0.90, "reason": "user is asking for system health report"}`, nil
+				}))
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					SessionManager: sessMgr,
+					TimeoutMinutes: 1,
+					Classifier:     cls,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return mockJSONResponse("", "All systems operational."), "", 0, nil
+					},
+					DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+						mu.Lock()
+						deliveryCalls++
+						deliveredText = text
+						mu.Unlock()
+						return nil
+					},
+					TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+						mu.Lock()
+						typingCalls++
+						mu.Unlock()
+						return func() {}
+					},
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:                 "channel",
+							AmbientWakeThreshold: ptrFloat(0.80),
+						}
+					},
+				})
+
+				now := time.Now().UTC()
+				msg := db.Message{
+					ID:         "msg-tier2-1",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Alice",
+					Content:    "Does anyone know if all services are healthy?",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
+				}
+				_ = insertMessage(store, msg)
+
+				pool.processBurst([]db.Message{msg})
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if runnerCalls != 1 {
+					t.Errorf("Expected 1 runner call for Tier 2 wake, got %d", runnerCalls)
+				}
+				if typingCalls == 0 {
+					t.Errorf("Expected typing indicator to be started for Tier 2 wake")
+				}
+				if deliveryCalls != 1 || deliveredText != "All systems operational." {
+					t.Errorf("Expected 1 delivery, got calls=%d, text=%q", deliveryCalls, deliveredText)
+				}
+
+				turnCount, err := getSessionTurnCount(store, "chan-lounge")
+				if err != nil {
+					t.Fatalf("GetSessionTurnCount error: %v", err)
+				}
+				if turnCount != 1 {
+					t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
+				}
+
+				saved, err := getMessage(store, "msg-tier2-1")
+				if err != nil || saved == nil {
+					t.Fatalf("Failed to retrieve message: %v", err)
+				}
+				if saved.Status != db.StatusCompleted {
+					t.Errorf("Expected status COMPLETED, got %s", saved.Status)
+				}
+			},
 		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode:                 "channel",
-				AmbientWakeThreshold: ptrFloat(0.80),
-			}
+		{
+			name: "MixedBurst",
+			run: func(t *testing.T) {
+				tmpDir := t.TempDir()
+				store := setupTestStore(t)
+
+				sessionID := uuid.New().String()
+				_ = saveSessionID(store, "chan-lounge", sessionID)
+				sessMgr := session.New(tmpDir, "")
+				_, _ = sessMgr.EnsureSessionDir(sessionID)
+				cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+				_ = os.MkdirAll(cliPbDir, 0755)
+				_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+
+				var mu sync.Mutex
+				runnerCalls := 0
+				var receivedPrompt string
+
+				cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					return `{"confidence": 0.15, "reason": "unrelated lunch discussion"}`, nil
+				}))
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					SessionManager: sessMgr,
+					TimeoutMinutes: 1,
+					Classifier:     cls,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						receivedPrompt = prompt
+						mu.Unlock()
+						return mockJSONResponse("", "Done deploying!"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:                 "channel",
+							AmbientWakeThreshold: ptrFloat(0.80),
+						}
+					},
+				})
+
+				now := time.Now().UTC()
+				msg1 := db.Message{
+					ID:         "msg-mixed-1",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Alice",
+					Content:    "I had tacos for lunch today",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
+				}
+				msg2 := db.Message{
+					ID:         "msg-mixed-2",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Bob",
+					Content:    "<@aerial> please deploy the backend",
+					Status:     db.StatusPending,
+					CreatedAt:  now.Add(2 * time.Second),
+				}
+				_ = insertMessage(store, msg1)
+				_ = insertMessage(store, msg2)
+
+				pool.processBurst([]db.Message{msg1, msg2})
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if runnerCalls != 1 {
+					t.Errorf("Expected exactly 1 runner call for mixed burst, got %d", runnerCalls)
+				}
+				if !strings.Contains(receivedPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(receivedPrompt, "I had tacos for lunch today") {
+					t.Errorf("Runner prompt should contain ambient message in CHANNEL_HISTORY, got: %s", receivedPrompt)
+				}
+				if !strings.Contains(receivedPrompt, "please deploy the backend") {
+					t.Errorf("Runner prompt should contain Wake2, got: %s", receivedPrompt)
+				}
+
+				m1Saved, _ := getMessage(store, "msg-mixed-1")
+				if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
+					t.Errorf("Expected msg1 to be COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
+				}
+				m2Saved, _ := getMessage(store, "msg-mixed-2")
+				if m2Saved == nil || m2Saved.Status != db.StatusCompleted || m2Saved.ResponseText != "Done deploying!" {
+					t.Errorf("Expected msg2 to be COMPLETED with response text, got: %+v", m2Saved)
+				}
+
+				turnCount, _ := getSessionTurnCount(store, "chan-lounge")
+				if turnCount != 1 {
+					t.Errorf("Expected turn_count = 1 after mixed burst, got %d", turnCount)
+				}
+			},
 		},
-	})
+		{
+			name: "SessionRotationBeforeLeadingAmbient",
+			run: func(t *testing.T) {
+				tmpDir := t.TempDir()
+				store := setupTestStore(t)
 
-	now := time.Now().UTC()
-	msg1 := db.Message{
-		ID:         "msg-amb-1",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Alice",
-		Content:    "Hello everyone",
-		Status:     db.StatusPending,
-		CreatedAt:  now,
-	}
-	msg2 := db.Message{
-		ID:         "msg-amb-2",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Bob",
-		Content:    "Nice weather today",
-		Status:     db.StatusPending,
-		CreatedAt:  now.Add(5 * time.Second),
-	}
-	_ = insertMessage(store, msg1)
-	_ = insertMessage(store, msg2)
+				channelID := "chan-rot-ambient"
+				initialSessionID := uuid.New().String()
+				_ = saveSessionID(store, channelID, initialSessionID)
+				sessMgr := session.New(tmpDir, "")
+				_, _ = sessMgr.EnsureSessionDir(initialSessionID)
+				cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+				_ = os.MkdirAll(cliPbDir, 0755)
+				_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
 
-	pool.processBurst([]db.Message{msg1, msg2})
+				const previousTurns = 5
+				for i := 0; i < previousTurns; i++ {
+					_, _ = incrementSessionTurnCount(store, channelID)
+				}
 
-	mu.Lock()
-	defer mu.Unlock()
+				var mu sync.Mutex
+				runnerCalls := 0
+				var passedSessID string
 
-	if runnerCalls != 0 {
-		t.Errorf("Expected 0 runner calls for pure ambient burst, got %d", runnerCalls)
-	}
-	if deliveryCalls != 0 {
-		t.Errorf("Expected 0 delivery calls for pure ambient burst, got %d", deliveryCalls)
-	}
-	if typingCalls != 0 {
-		t.Errorf("Expected 0 typing calls for pure ambient burst, got %d", typingCalls)
-	}
+				cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
+				}))
 
-	turnCount, err := getSessionTurnCount(store, "chan-lounge")
-	if err != nil {
-		t.Fatalf("GetSessionTurnCount error: %v", err)
-	}
-	if turnCount != 0 {
-		t.Errorf("Expected turn_count to remain 0, got %d", turnCount)
-	}
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					SessionManager: sessMgr,
+					TimeoutMinutes: 1,
+					Classifier:     cls,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						passedSessID = sessID
+						mu.Unlock()
+						return mockJSONResponse("c9b5e679-7425-40de-944b-e07fc1f90ae7", "I am answering your question!"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:                 "channel",
+							AmbientWakeThreshold: ptrFloat(0.80),
+						}
+					},
+				})
 
-	for _, id := range []string{"msg-amb-1", "msg-amb-2"} {
-		saved, err := getMessage(store, id)
-		if err != nil || saved == nil {
-			t.Fatalf("Failed to retrieve %s: %v", id, err)
-		}
-		if saved.Status != db.StatusCompleted {
-			t.Errorf("Expected status COMPLETED for %s, got %s", id, saved.Status)
-		}
-		if !strings.Contains(saved.ErrorMessage, "[AMBIENT score=0.25/0.80 reason=\"casual chit-chat\"]") {
-			t.Errorf("Expected telemetry in error_message for %s, got %q", id, saved.ErrorMessage)
-		}
-	}
-}
+				now := time.Now().UTC()
+				msg1 := db.Message{
+					ID:         "msg-rot-amb-1",
+					ThreadID:   channelID,
+					AuthorName: "Alice",
+					Content:    "Random ambient chatter before question",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
+				}
+				msg2 := db.Message{
+					ID:         "msg-rot-wake-2",
+					ThreadID:   channelID,
+					AuthorName: "Bob",
+					Content:    "Hey <@aerial>, what is 2+2?",
+					Status:     db.StatusPending,
+					CreatedAt:  now.Add(2 * time.Second),
+				}
+				_ = insertMessage(store, msg1)
+				_ = insertMessage(store, msg2)
 
-func TestProcessBurst_Tier1Wake(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
+				pool.processBurst([]db.Message{msg1, msg2})
 
-	store := setupTestStore(t)
+				mu.Lock()
+				defer mu.Unlock()
 
-	sessionID := uuid.New().String()
-	sessMgr := session.New(tmpDir, "")
-	_, _ = sessMgr.EnsureSessionDir(sessionID)
+				if runnerCalls != 1 {
+					t.Errorf("Expected 1 runner call, got %d", runnerCalls)
+				}
+				if passedSessID != initialSessionID {
+					t.Errorf("Expected RunnerFunc to be called with session ID %q, got %q", initialSessionID, passedSessID)
+				}
 
-	var mu sync.Mutex
-	runnerCalls := 0
-	deliveryCalls := 0
-	deliveredText := ""
-	typingCalls := 0
+				oldSessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
+				oldTranscriptPath := filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl")
+				dataOld, _ := os.ReadFile(oldTranscriptPath)
+				if strings.Contains(string(dataOld), "Random ambient chatter before question") {
+					t.Errorf("Ambient message should NOT have been written to old session directory")
+				}
 
-	s := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-	s.State.User = &discordgo.User{ID: "bot-aerial-id", Username: "Aerial"}
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		DiscordSession: s,
-		TimeoutMinutes: 1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "I am Aerial, here to help!"), "", 0, nil
+				m1Saved, _ := getMessage(store, "msg-rot-amb-1")
+				if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
+					t.Errorf("Expected leading ambient message to be marked COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
+				}
+			},
 		},
-		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveryCalls++
-			deliveredText = text
-			mu.Unlock()
-			return nil
+		{
+			name: "TrailingAmbient",
+			run: func(t *testing.T) {
+				tmpDir := t.TempDir()
+				store := setupTestStore(t)
+
+				sessionID := uuid.New().String()
+				_ = saveSessionID(store, "chan-lounge", sessionID)
+				sessMgr := session.New(tmpDir, "")
+				_, _ = sessMgr.EnsureSessionDir(sessionID)
+				cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+				_ = os.MkdirAll(cliPbDir, 0755)
+				_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+
+				var mu sync.Mutex
+				runnerCalls := 0
+				var receivedPrompt string
+
+				cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
+				}))
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					SessionManager: sessMgr,
+					TimeoutMinutes: 1,
+					Classifier:     cls,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						receivedPrompt = prompt
+						mu.Unlock()
+						return mockJSONResponse(sessionID, "Aerial answer"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:                 "channel",
+							AmbientWakeThreshold: ptrFloat(0.80),
+						}
+					},
+				})
+
+				now := time.Now().UTC()
+				msg1 := db.Message{
+					ID:         "msg-trail-wake-1",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Alice",
+					Content:    "<@aerial> explain gravity",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
+				}
+				msg2 := db.Message{
+					ID:         "msg-trail-amb-2",
+					ThreadID:   "chan-lounge",
+					AuthorName: "Bob",
+					Content:    "I love physics too",
+					Status:     db.StatusPending,
+					CreatedAt:  now.Add(2 * time.Second),
+				}
+				_ = insertMessage(store, msg1)
+				_ = insertMessage(store, msg2)
+
+				pool.processBurst([]db.Message{msg1, msg2})
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if runnerCalls != 1 {
+					t.Errorf("Expected 1 runner call for wake message, got %d", runnerCalls)
+				}
+				if strings.Contains(receivedPrompt, "I love physics too") {
+					t.Errorf("Runner prompt should NOT contain trailing ambient message, got: %s", receivedPrompt)
+				}
+
+				m2Saved, _ := getMessage(store, "msg-trail-amb-2")
+				if m2Saved == nil || m2Saved.Status != db.StatusCompleted || !strings.Contains(m2Saved.ErrorMessage, "[AMBIENT score=") {
+					t.Errorf("Expected trailing ambient msg to be COMPLETED with [AMBIENT score=...], got: %+v", m2Saved)
+				}
+			},
 		},
-		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
-			mu.Lock()
-			typingCalls++
-			mu.Unlock()
-			return func() {}
+		{
+			name: "AmbientWakePromptDefault",
+			run: func(t *testing.T) {
+				store := setupTestStore(t)
+				var capturedPrompt string
+				var mu sync.Mutex
+
+				cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					mu.Lock()
+					capturedPrompt = prompt
+					mu.Unlock()
+					return `{"confidence": 0.95, "reason": "matches aviation directive"}`, nil
+				}))
+
+				runnerCalls := 0
+				pool := NewWorkerPool(WorkerPoolConfig{
+					Store:          store,
+					TimeoutMinutes: 1,
+					Classifier:     cls,
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						mu.Lock()
+						runnerCalls++
+						mu.Unlock()
+						return mockJSONResponse("", "Aviation response"), "", 0, nil
+					},
+					DeliveryFunc: noopDelivery,
+					TypingFunc:   noopTyping,
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{
+							Mode:                 "channel",
+							AmbientWakeThreshold: ptrFloat(0.80),
+						}
+					},
+				})
+
+				now := time.Now().UTC()
+				msg := db.Message{
+					ID:         "msg-aviation-1",
+					ThreadID:   "chan-aviation",
+					AuthorName: "Pilot",
+					Content:    "What is the stall speed of a Cessna 172?",
+					Status:     db.StatusPending,
+					CreatedAt:  now,
+				}
+				_ = insertMessage(store, msg)
+
+				pool.processBurst([]db.Message{msg})
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if !strings.Contains(capturedPrompt, classifier.DefaultAmbientWakePrompt) {
+					t.Errorf("Expected classifier prompt to contain DefaultAmbientWakePrompt, got:\n%s", capturedPrompt)
+				}
+				if runnerCalls != 1 {
+					t.Errorf("Expected 1 runner call, got %d", runnerCalls)
+				}
+			},
 		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode:                 "channel",
-				AmbientWakeThreshold: ptrFloat(0.80),
-			}
-		},
-	})
-
-	now := time.Now().UTC()
-	msg := db.Message{
-		ID:         "msg-tier1-1",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Alice",
-		Content:    "<@bot-aerial-id> can you help me with this bug?",
-		Status:     db.StatusPending,
-		CreatedAt:  now,
-	}
-	_ = insertMessage(store, msg)
-
-	pool.processBurst([]db.Message{msg})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if runnerCalls != 1 {
-		t.Errorf("Expected 1 runner call for Tier 1 wake, got %d", runnerCalls)
-	}
-	if typingCalls == 0 {
-		t.Errorf("Expected typing indicator to be started for Tier 1 wake")
-	}
-	if deliveryCalls != 1 || deliveredText != "I am Aerial, here to help!" {
-		t.Errorf("Expected 1 delivery with response, got calls=%d, text=%q", deliveryCalls, deliveredText)
 	}
 
-	turnCount, err := getSessionTurnCount(store, "chan-lounge")
-	if err != nil {
-		t.Fatalf("GetSessionTurnCount error: %v", err)
-	}
-	if turnCount != 1 {
-		t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
-	}
-
-	saved, err := getMessage(store, "msg-tier1-1")
-	if err != nil || saved == nil {
-		t.Fatalf("Failed to retrieve message: %v", err)
-	}
-	if saved.Status != db.StatusCompleted {
-		t.Errorf("Expected status COMPLETED, got %s", saved.Status)
-	}
-	if saved.ResponseText != "I am Aerial, here to help!" {
-		t.Errorf("Expected response text, got %q", saved.ResponseText)
-	}
-}
-
-func TestProcessBurst_Tier2Wake(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	sessionID := uuid.New().String()
-	_ = saveSessionID(store, "chan-lounge", sessionID)
-	sessMgr := session.New(tmpDir, "")
-	_, _ = sessMgr.EnsureSessionDir(sessionID)
-
-	var mu sync.Mutex
-	runnerCalls := 0
-	deliveryCalls := 0
-	deliveredText := ""
-	typingCalls := 0
-
-	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		return `{"confidence": 0.90, "reason": "user is asking for system health report"}`, nil
-	}))
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
-		Classifier:     cls,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "All systems operational."), "", 0, nil
-		},
-		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveryCalls++
-			deliveredText = text
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
-			mu.Lock()
-			typingCalls++
-			mu.Unlock()
-			return func() {}
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode:                 "channel",
-				AmbientWakeThreshold: ptrFloat(0.80),
-			}
-		},
-	})
-
-	now := time.Now().UTC()
-	// Unaddressed message: no mention, no keyword
-	msg := db.Message{
-		ID:         "msg-tier2-1",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Alice",
-		Content:    "Does anyone know if all services are healthy?",
-		Status:     db.StatusPending,
-		CreatedAt:  now,
-	}
-	_ = insertMessage(store, msg)
-
-	pool.processBurst([]db.Message{msg})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if runnerCalls != 1 {
-		t.Errorf("Expected 1 runner call for Tier 2 wake, got %d", runnerCalls)
-	}
-	if typingCalls == 0 {
-		t.Errorf("Expected typing indicator to be started for Tier 2 wake")
-	}
-	if deliveryCalls != 1 || deliveredText != "All systems operational." {
-		t.Errorf("Expected 1 delivery, got calls=%d, text=%q", deliveryCalls, deliveredText)
-	}
-
-	turnCount, err := getSessionTurnCount(store, "chan-lounge")
-	if err != nil {
-		t.Fatalf("GetSessionTurnCount error: %v", err)
-	}
-	if turnCount != 1 {
-		t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
-	}
-
-	saved, err := getMessage(store, "msg-tier2-1")
-	if err != nil || saved == nil {
-		t.Fatalf("Failed to retrieve message: %v", err)
-	}
-	if saved.Status != db.StatusCompleted {
-		t.Errorf("Expected status COMPLETED, got %s", saved.Status)
-	}
-}
-
-func TestProcessBurst_MixedBurst(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	sessionID := uuid.New().String()
-	_ = saveSessionID(store, "chan-lounge", sessionID)
-	sessMgr := session.New(tmpDir, "")
-	_, _ = sessMgr.EnsureSessionDir(sessionID)
-	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
-	_ = os.MkdirAll(cliPbDir, 0755)
-	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
-
-	var mu sync.Mutex
-	runnerCalls := 0
-	var receivedPrompt string
-
-	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		// msg1 is ambient banter
-		return `{"confidence": 0.15, "reason": "unrelated lunch discussion"}`, nil
-	}))
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
-		Classifier:     cls,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			receivedPrompt = prompt
-			mu.Unlock()
-			return mockJSONResponse("", "Done deploying!"), "", 0, nil
-		},
-		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode:                 "channel",
-				AmbientWakeThreshold: ptrFloat(0.80),
-			}
-		},
-	})
-
-	now := time.Now().UTC()
-	// Ambient1
-	msg1 := db.Message{
-		ID:         "msg-mixed-1",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Alice",
-		Content:    "I had tacos for lunch today",
-		Status:     db.StatusPending,
-		CreatedAt:  now,
-	}
-	// Wake2 (Tier 1 mention wake)
-	msg2 := db.Message{
-		ID:         "msg-mixed-2",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Bob",
-		Content:    "<@aerial> please deploy the backend",
-		Status:     db.StatusPending,
-		CreatedAt:  now.Add(2 * time.Second),
-	}
-	_ = insertMessage(store, msg1)
-	_ = insertMessage(store, msg2)
-
-	pool.processBurst([]db.Message{msg1, msg2})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if runnerCalls != 1 {
-		t.Errorf("Expected exactly 1 runner call for mixed burst, got %d", runnerCalls)
-	}
-	if !strings.Contains(receivedPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(receivedPrompt, "I had tacos for lunch today") {
-		t.Errorf("Runner prompt should contain ambient message in CHANNEL_HISTORY, got: %s", receivedPrompt)
-	}
-	if !strings.Contains(receivedPrompt, "please deploy the backend") {
-		t.Errorf("Runner prompt should contain Wake2, got: %s", receivedPrompt)
-	}
-
-
-
-	// Verify DB statuses
-	m1Saved, _ := getMessage(store, "msg-mixed-1")
-	if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
-		t.Errorf("Expected msg1 to be COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
-	}
-	m2Saved, _ := getMessage(store, "msg-mixed-2")
-	if m2Saved == nil || m2Saved.Status != db.StatusCompleted || m2Saved.ResponseText != "Done deploying!" {
-		t.Errorf("Expected msg2 to be COMPLETED with response text, got: %+v", m2Saved)
-	}
-
-	turnCount, _ := getSessionTurnCount(store, "chan-lounge")
-	if turnCount != 1 {
-		t.Errorf("Expected turn_count = 1 after mixed burst, got %d", turnCount)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.run(t)
+		})
 	}
 }
 
@@ -2888,262 +2718,6 @@ Please formulate your response and output it clearly.
 
 	if isTier1Wake(msg, "bot-aerial-id", nil) {
 		t.Errorf("Expected isTier1Wake to be FALSE when replying to @bob whose content contains 'aerial photo'")
-	}
-}
-
-func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	channelID := "chan-rot-ambient"
-	initialSessionID := uuid.New().String()
-	_ = saveSessionID(store, channelID, initialSessionID)
-	sessMgr := session.New(tmpDir, "")
-	_, _ = sessMgr.EnsureSessionDir(initialSessionID)
-	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
-	_ = os.MkdirAll(cliPbDir, 0755)
-	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
-
-	// Seed turn_count for the thread.
-	const previousTurns = 5
-	for i := 0; i < previousTurns; i++ {
-		_, _ = incrementSessionTurnCount(store, channelID)
-	}
-
-	var mu sync.Mutex
-	runnerCalls := 0
-	var passedSessID string
-
-	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
-	}))
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
-		Classifier:     cls,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			passedSessID = sessID
-			mu.Unlock()
-			return mockJSONResponse("c9b5e679-7425-40de-944b-e07fc1f90ae7", "I am answering your question!"), "", 0, nil
-		},
-		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode:                 "channel",
-				AmbientWakeThreshold: ptrFloat(0.80),
-			}
-		},
-	})
-
-	now := time.Now().UTC()
-	msg1 := db.Message{
-		ID:         "msg-rot-amb-1",
-		ThreadID:   channelID,
-		AuthorName: "Alice",
-		Content:    "Random ambient chatter before question",
-		Status:     db.StatusPending,
-		CreatedAt:  now,
-	}
-	msg2 := db.Message{
-		ID:         "msg-rot-wake-2",
-		ThreadID:   channelID,
-		AuthorName: "Bob",
-		Content:    "Hey <@aerial>, what is 2+2?",
-		Status:     db.StatusPending,
-		CreatedAt:  now.Add(2 * time.Second),
-	}
-	_ = insertMessage(store, msg1)
-	_ = insertMessage(store, msg2)
-
-	pool.processBurst([]db.Message{msg1, msg2})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if runnerCalls != 1 {
-		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
-	}
-
-	if passedSessID != initialSessionID {
-		t.Errorf("Expected RunnerFunc to be called with session ID %q, got %q", initialSessionID, passedSessID)
-	}
-
-	// Verify that Ambient1 was NOT written to the old session directory, but marked COMPLETED in DB!
-	oldSessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
-	oldTranscriptPath := filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl")
-	dataOld, _ := os.ReadFile(oldTranscriptPath)
-	if strings.Contains(string(dataOld), "Random ambient chatter before question") {
-		t.Errorf("Ambient message should NOT have been written to old session directory")
-	}
-
-	m1Saved, _ := getMessage(store, "msg-rot-amb-1")
-	if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
-		t.Errorf("Expected leading ambient message to be marked COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
-	}
-}
-
-func TestProcessBurst_TrailingAmbient(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	store := setupTestStore(t)
-
-	sessionID := uuid.New().String()
-	_ = saveSessionID(store, "chan-lounge", sessionID)
-	sessMgr := session.New(tmpDir, "")
-	_, _ = sessMgr.EnsureSessionDir(sessionID)
-	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
-	_ = os.MkdirAll(cliPbDir, 0755)
-	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
-
-	var mu sync.Mutex
-	runnerCalls := 0
-	var receivedPrompt string
-
-	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
-	}))
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
-		Classifier:     cls,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			receivedPrompt = prompt
-			mu.Unlock()
-			return mockJSONResponse(sessionID, "Aerial answer"), "", 0, nil
-		},
-		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode:                 "channel",
-				AmbientWakeThreshold: ptrFloat(0.80),
-			}
-		},
-	})
-
-	now := time.Now().UTC()
-	// Burst: [Wake1, Ambient2]
-	msg1 := db.Message{
-		ID:         "msg-trail-wake-1",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Alice",
-		Content:    "<@aerial> explain gravity",
-		Status:     db.StatusPending,
-		CreatedAt:  now,
-	}
-	msg2 := db.Message{
-		ID:         "msg-trail-amb-2",
-		ThreadID:   "chan-lounge",
-		AuthorName: "Bob",
-		Content:    "I love physics too",
-		Status:     db.StatusPending,
-		CreatedAt:  now.Add(2 * time.Second),
-	}
-	_ = insertMessage(store, msg1)
-	_ = insertMessage(store, msg2)
-
-	pool.processBurst([]db.Message{msg1, msg2})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if runnerCalls != 1 {
-		t.Errorf("Expected 1 runner call for wake message, got %d", runnerCalls)
-	}
-	// Prompt should only contain Wake1, NOT Ambient2!
-	if strings.Contains(receivedPrompt, "I love physics too") {
-		t.Errorf("Runner prompt should NOT contain trailing ambient message, got: %s", receivedPrompt)
-	}
-
-
-
-	// Ambient2 in DB should have [AMBIENT score=...]
-	m2Saved, _ := getMessage(store, "msg-trail-amb-2")
-	if m2Saved == nil || m2Saved.Status != db.StatusCompleted || !strings.Contains(m2Saved.ErrorMessage, "[AMBIENT score=") {
-		t.Errorf("Expected trailing ambient msg to be COMPLETED with [AMBIENT score=...], got: %+v", m2Saved)
-	}
-}
-
-func TestProcessBurst_AmbientWakePromptDefault(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var capturedPrompt string
-	var mu sync.Mutex
-
-	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		mu.Lock()
-		capturedPrompt = prompt
-		mu.Unlock()
-		return `{"confidence": 0.95, "reason": "matches aviation directive"}`, nil
-	}))
-
-	runnerCalls := 0
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		TimeoutMinutes: 1,
-		Classifier:     cls,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			mu.Unlock()
-			return mockJSONResponse("", "Aviation response"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{
-				Mode:                 "channel",
-				AmbientWakeThreshold: ptrFloat(0.80),
-			}
-		},
-	})
-
-	now := time.Now().UTC()
-	msg := db.Message{
-		ID:         "msg-aviation-1",
-		ThreadID:   "chan-aviation",
-		AuthorName: "Pilot",
-		Content:    "What is the stall speed of a Cessna 172?",
-		Status:     db.StatusPending,
-		CreatedAt:  now,
-	}
-	_ = insertMessage(store, msg)
-
-	pool.processBurst([]db.Message{msg})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if !strings.Contains(capturedPrompt, classifier.DefaultAmbientWakePrompt) {
-		t.Errorf("Expected classifier prompt to contain DefaultAmbientWakePrompt, got:\n%s", capturedPrompt)
-	}
-	if runnerCalls != 1 {
-		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
 	}
 }
 
