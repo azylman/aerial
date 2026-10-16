@@ -9,120 +9,167 @@ import (
 )
 
 func TestWorkerPool_DeliverDirect(t *testing.T) {
-	t.Run("nil pool returns error", func(t *testing.T) {
-		var p *WorkerPool
-		err := p.DeliverDirect("123456789012345678", "hello")
-		if err == nil {
-			t.Fatal("expected error for nil pool, got nil")
-		}
-		if err.Error() != "worker pool is nil" {
-			t.Fatalf("expected 'worker pool is nil', got %q", err.Error())
-		}
-	})
+	dummySession := &discordgo.Session{}
+	customErr := errors.New("custom delivery error")
 
-	t.Run("nil session with nil DeliveryFunc returns discord session is not connected", func(t *testing.T) {
-		p := &WorkerPool{}
-		err := p.DeliverDirect("123456789012345678", "hello")
-		if err == nil {
-			t.Fatal("expected error for nil session and nil DeliveryFunc, got nil")
-		}
-		if err.Error() != "discord session is not connected" {
-			t.Fatalf("expected 'discord session is not connected', got %q", err.Error())
-		}
-	})
+	tests := []struct {
+		name              string
+		nilPool           bool
+		nilSession        bool
+		useDeliveryFunc   bool
+		funcErr           error
+		channelID         string
+		text              string
+		expectErrContains string
+		expectErr         error
+	}{
+		{
+			name:              "nil pool returns error",
+			nilPool:           true,
+			channelID:         "123456789012345678",
+			text:              "hello",
+			expectErrContains: "worker pool is nil",
+		},
+		{
+			name:              "nil session with nil DeliveryFunc returns discord session is not connected",
+			nilSession:        true,
+			channelID:         "123456789012345678",
+			text:              "hello",
+			expectErrContains: "discord session is not connected",
+		},
+		{
+			name:            "injected DeliveryFunc is invoked with channelID and text",
+			useDeliveryFunc: true,
+			channelID:       "123456789012345678",
+			text:            "test message",
+		},
+		{
+			name:            "session error propagation",
+			useDeliveryFunc: true,
+			funcErr:         customErr,
+			channelID:       "123456789012345678",
+			text:            "test message",
+			expectErr:       customErr,
+		},
+	}
 
-	t.Run("injected DeliveryFunc is invoked with channelID and text", func(t *testing.T) {
-		var capturedChannelID, capturedText string
-		var capturedSession *discordgo.Session
-		invoked := false
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.nilPool {
+				var p *WorkerPool
+				err := p.DeliverDirect(tc.channelID, tc.text)
+				if err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
+			if tc.nilSession {
+				p := &WorkerPool{}
+				err := p.DeliverDirect(tc.channelID, tc.text)
+				if err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
 
-		dummySession := &discordgo.Session{}
-		p := &WorkerPool{
-			cfg: WorkerPoolConfig{
-				DiscordSession: dummySession,
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					invoked = true
-					capturedSession = s
-					capturedChannelID = channelID
-					capturedText = text
-					return nil
+			var capturedChannelID, capturedText string
+			var capturedSession *discordgo.Session
+			invoked := false
+
+			p := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					DiscordSession: dummySession,
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						invoked = true
+						capturedSession = s
+						capturedChannelID = channelID
+						capturedText = text
+						return tc.funcErr
+					},
 				},
-			},
-		}
-
-		err := p.DeliverDirect("123456789012345678", "test message")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !invoked {
-			t.Fatal("expected DeliveryFunc to be invoked")
-		}
-		if capturedSession != dummySession {
-			t.Fatalf("expected session %v, got %v", dummySession, capturedSession)
-		}
-		if capturedChannelID != "123456789012345678" {
-			t.Fatalf("expected channelID '123456789012345678', got %q", capturedChannelID)
-		}
-		if capturedText != "test message" {
-			t.Fatalf("expected text 'test message', got %q", capturedText)
-		}
-	})
-
-	t.Run("session error propagation", func(t *testing.T) {
-		expectedErr := errors.New("custom delivery error")
-		p := &WorkerPool{
-			cfg: WorkerPoolConfig{
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					return expectedErr
-				},
-			},
-		}
-
-		err := p.DeliverDirect("123456789012345678", "test message")
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !errors.Is(err, expectedErr) {
-			t.Fatalf("expected error %v, got %v", expectedErr, err)
-		}
-	})
+			}
+			err := p.DeliverDirect(tc.channelID, tc.text)
+			if tc.expectErr != nil {
+				if !errors.Is(err, tc.expectErr) {
+					t.Fatalf("expected error %v, got %v", tc.expectErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !invoked || capturedSession != dummySession || capturedChannelID != tc.channelID || capturedText != tc.text {
+				t.Fatalf("unexpected invocation state: invoked=%v chan=%q text=%q", invoked, capturedChannelID, capturedText)
+			}
+		})
+	}
 }
 
 func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
-	t.Run("nil pool returns error", func(t *testing.T) {
-		var p *WorkerPool
-		_, err := p.DeliverStatusWidget(discord.StatusWidgetRequest{})
-		if err == nil || err.Error() != "worker pool is nil" {
-			t.Fatalf("expected 'worker pool is nil', got %v", err)
-		}
-	})
+	tests := []struct {
+		name               string
+		nilPool            bool
+		nilSession         bool
+		useDeliveryFunc    bool
+		widgetMsgID        string
+		req                discord.StatusWidgetRequest
+		expectErrContains  string
+		expectMsgID        string
+	}{
+		{
+			name:              "nil pool returns error",
+			nilPool:           true,
+			req:               discord.StatusWidgetRequest{},
+			expectErrContains: "worker pool is nil",
+		},
+		{
+			name:              "nil session with nil WidgetDeliveryFunc returns discord session is not connected",
+			nilSession:        true,
+			req:               discord.StatusWidgetRequest{ChannelID: "chan-1"},
+			expectErrContains: "discord session is not connected",
+		},
+		{
+			name:            "injected WidgetDeliveryFunc is invoked",
+			useDeliveryFunc: true,
+			widgetMsgID:     "widget-msg-123",
+			req:             discord.StatusWidgetRequest{ChannelID: "chan-1"},
+			expectMsgID:     "widget-msg-123",
+		},
+	}
 
-	t.Run("injected WidgetDeliveryFunc is invoked", func(t *testing.T) {
-		invoked := false
-		p := &WorkerPool{
-			cfg: WorkerPoolConfig{
-				WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-					invoked = true
-					return "widget-msg-123", nil
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.nilPool {
+				var p *WorkerPool
+				_, err := p.DeliverStatusWidget(tc.req)
+				if err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
+			if tc.nilSession {
+				p := &WorkerPool{}
+				_, err := p.DeliverStatusWidget(tc.req)
+				if err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
+
+			p := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+						return tc.widgetMsgID, nil
+					},
 				},
-			},
-		}
-
-		msgID, err := p.DeliverStatusWidget(discord.StatusWidgetRequest{ChannelID: "chan-1"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !invoked || msgID != "widget-msg-123" {
-			t.Fatalf("expected invoked and msgID 'widget-msg-123', got %v, %s", invoked, msgID)
-		}
-	})
-
-	t.Run("nil session with nil WidgetDeliveryFunc returns discord session is not connected", func(t *testing.T) {
-		p := &WorkerPool{}
-		_, err := p.DeliverStatusWidget(discord.StatusWidgetRequest{ChannelID: "chan-1"})
-		if err == nil || err.Error() != "discord session is not connected" {
-			t.Fatalf("expected 'discord session is not connected', got %v", err)
-		}
-	})
+			}
+			msgID, err := p.DeliverStatusWidget(tc.req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if msgID != tc.expectMsgID {
+				t.Fatalf("expected msgID %q, got %s", tc.expectMsgID, msgID)
+			}
+		})
+	}
 }
-

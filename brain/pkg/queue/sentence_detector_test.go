@@ -8,9 +8,10 @@ import (
 
 func TestSentenceDetector_TableDriven(t *testing.T) {
 	tests := []struct {
-		name     string
-		chunks   []string
-		expected []string
+		name              string
+		chunks            []string
+		expected          []string
+		minExpectedChunks int
 	}{
 		{
 			name:     "single complete sentence",
@@ -72,6 +73,11 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 			chunks:   []string{"", "   ", "First sentence.   ", "", "  ", ".", "  "},
 			expected: []string{"First sentence."},
 		},
+		{
+			name:              "soft ceiling run on clause split",
+			chunks:            []string{strings.Repeat("word ", 26) + ", " + "this is a very long run-on clause that just keeps going and going and going without any period"},
+			minExpectedChunks: 2,
+		},
 	}
 
 	for _, tc := range tests {
@@ -87,6 +93,13 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 			}
 			sd.Flush(emit)
 
+			if tc.minExpectedChunks > 0 {
+				if len(got) < tc.minExpectedChunks {
+					t.Fatalf("expected at least %d chunks, got %d: %v", tc.minExpectedChunks, len(got), got)
+				}
+				return
+			}
+
 			if len(got) == 0 && len(tc.expected) == 0 {
 				return
 			}
@@ -94,26 +107,6 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.expected)
 			}
 		})
-	}
-}
-
-func TestSentenceDetector_SoftCeilingRunOn(t *testing.T) {
-	sd := NewSentenceDetector()
-	var got []string
-	emit := func(s string) {
-		got = append(got, s)
-	}
-
-	// Generate a 200+ char run-on clause without a period, but with a comma after char 130
-	part1 := strings.Repeat("word ", 26) // ~130 chars
-	part2 := "this is a very long run-on clause that just keeps going and going and going without any period"
-	full := part1 + ", " + part2
-
-	sd.Feed(full, emit)
-	sd.Flush(emit)
-
-	if len(got) < 2 {
-		t.Fatalf("expected soft ceiling to split run-on clause, got %d chunks: %v", len(got), got)
 	}
 }
 
