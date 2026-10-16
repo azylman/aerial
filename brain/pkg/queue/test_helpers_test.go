@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1049,4 +1051,47 @@ func TestSinkMethods_CoverageAudit(t *testing.T) {
 	vs.OnToolCall("tool", "cmd")
 	vs.OnToolCompleted("tool", "srv", time.Second, "ok")
 	vs.OnSkillActivated("skill", "src")
+	_, _ = getPreviousSessionID(nil, "")
+}
+
+// scriptedDaemonTurnDef defines the behavior of a scripted daemon conversation turn.
+type scriptedDaemonTurnDef struct {
+	conversationID string
+	responses      []string // Raw NDJSON lines emitted in order for each input turn
+}
+
+// newScriptedDaemonSpawner returns a MockDaemonSpawner that responds with pre-scripted events.
+func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *runner.MockDaemonSpawner {
+	return &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+
+			convID := conversationID
+			if convID == "" {
+				convID = cfg.SessionID
+			}
+			if convID == "" {
+				convID = uuid.New().String()
+			}
+
+			go func() {
+				defer outW.Close()
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", convID)
+				scanner := bufio.NewScanner(inR)
+				idx := 0
+				for scanner.Scan() {
+					if idx < len(turnResponses) {
+						_, _ = outW.Write([]byte(turnResponses[idx]))
+						idx++
+					} else {
+						_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n"))
+					}
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
 }
