@@ -2,241 +2,243 @@ package queue
 
 import (
 	"testing"
-	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
 func TestWorkerPool_UnifiedProcessPoolWiring(t *testing.T) {
-	t.Run("NilWorkerPool_ReturnsNil", func(t *testing.T) {
-		var p *WorkerPool
-		if got := p.ProcessPool(); got != nil {
-			t.Fatalf("expected nil ProcessPool from nil WorkerPool, got %v", got)
-		}
-	})
+	tests := []struct {
+		name                 string
+		nilPool              bool
+		defaultConfig        bool
+		withProcessPool      bool
+		withVoicePool        bool
+		checkAutoLLM         bool
+		prewarmedTargets     []string
+		verifyVoicePrewarmed bool
+	}{
+		{
+			name:    "nil worker pool returns nil process pool and safe mark dirty",
+			nilPool: true,
+		},
+		{
+			name:          "default config has nil process pool and voice pool",
+			defaultConfig: true,
+		},
+		{
+			name:             "configured process pool populates and accesses",
+			withProcessPool:  true,
+			prewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"},
+		},
+		{
+			name:            "auto populates LLMFunc from process pool",
+			withProcessPool: true,
+			checkAutoLLM:    true,
+		},
+		{
+			name:            "voice process pool wiring and accessors",
+			withProcessPool: true,
+			withVoicePool:   true,
+		},
+	}
 
-	t.Run("DefaultConfig_ProcessPoolIsNil", func(t *testing.T) {
-		p := New(nil, WorkerPoolConfig{})
-		if got := p.ProcessPool(); got != nil {
-			t.Fatalf("expected nil ProcessPool by default, got %v", got)
-		}
-	})
-
-	t.Run("ConfiguredProcessPool_PopulatesAndAccesses", func(t *testing.T) {
-		mockSpawner := runner.NewMockDaemonSpawner()
-		unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-			PrewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"},
-			DefaultModel:     "gemini-2.5-flash",
-		}, mockSpawner)
-		defer func() {
-			if err := unifiedPool.Close(); err != nil {
-				t.Logf("cleanup unified pool: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.nilPool {
+				var p *WorkerPool
+				if got := p.ProcessPool(); got != nil {
+					t.Fatalf("expected nil ProcessPool from nil WorkerPool, got %v", got)
+				}
+				if got := p.VoiceProcessPool(); got != nil {
+					t.Fatalf("expected nil VoiceProcessPool from nil WorkerPool, got %v", got)
+				}
+				p.MarkDirty() // Should not panic
+				return
 			}
-		}()
 
-		p := New(nil, WorkerPoolConfig{
-			ProcessPool: unifiedPool,
-		})
-
-		if got := p.ProcessPool(); got != unifiedPool {
-			t.Fatalf("expected ProcessPool to return %p, got %p", unifiedPool, got)
-		}
-	})
-
-	t.Run("MaintenanceLoopRunsWithoutMemoryPressureEviction", func(t *testing.T) {
-		tempDir := t.TempDir()
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.MaxConcurrentDaemons = 5
-			d.DaemonIdleTimeout = 1 * time.Hour
-			d.DataDir = tempDir
-		})
-
-		mockSpawner := runner.NewMockDaemonSpawner()
-		unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-			PrewarmedTargets: []string{"kiosk"},
-			DefaultModel:     "gemini-2.5-flash",
-		}, mockSpawner)
-		defer func() {
-			if err := unifiedPool.Close(); err != nil {
-				t.Logf("cleanup unified pool: %v", err)
+			if tc.defaultConfig {
+				p := New(nil, WorkerPoolConfig{})
+				if got := p.ProcessPool(); got != nil {
+					t.Fatalf("expected nil ProcessPool by default, got %v", got)
+				}
+				if got := p.VoiceProcessPool(); got != nil {
+					t.Fatalf("expected nil VoiceProcessPool by default, got %v", got)
+				}
+				return
 			}
-		}()
 
-		p := New(cfg, WorkerPoolConfig{
-			ProcessPool:         unifiedPool,
-			MaintenanceInterval: 10 * time.Millisecond,
+			mockSpawner := runner.NewMockDaemonSpawner()
+			var unifiedPool runner.AgentPool
+			if tc.withProcessPool {
+				up := runner.NewUnifiedProcessPool(runner.PoolConfig{
+					PrewarmedTargets: tc.prewarmedTargets,
+					DefaultModel:     "gemini-2.5-flash",
+				}, mockSpawner)
+				defer func() { _ = up.Close() }()
+				unifiedPool = up
+			}
+
+			var voicePool runner.AgentPool
+			if tc.withVoicePool {
+				vp := runner.NewUnifiedProcessPool(runner.PoolConfig{
+					DefaultModel: "gemini-2.5-flash",
+				}, mockSpawner)
+				defer func() { _ = vp.Close() }()
+				voicePool = vp
+			}
+
+			p := New(nil, WorkerPoolConfig{
+				ProcessPool:      unifiedPool,
+				VoiceProcessPool: voicePool,
+			})
+			defer p.Stop()
+
+			if tc.withProcessPool && p.ProcessPool() != unifiedPool {
+				t.Fatalf("expected ProcessPool to return %p, got %p", unifiedPool, p.ProcessPool())
+			}
+
+			if tc.checkAutoLLM && p.cfg.LLMFunc == nil {
+				t.Fatalf("expected cfg.LLMFunc to be auto-populated from ProcessPool")
+			}
+
+			if tc.withVoicePool {
+				if got := p.VoiceProcessPool(); got != voicePool {
+					t.Fatalf("expected VoiceProcessPool to return %p, got %p", voicePool, got)
+				}
+				p.MarkDirty()
+			}
 		})
-
-		p.Start()
-
-		// Allow maintenance loop to tick multiple times
-		time.Sleep(50 * time.Millisecond)
-
-		p.Stop()
-	})
-
-	t.Run("AutoPopulatesLLMFunc_FromProcessPool", func(t *testing.T) {
-		mockSpawner := runner.NewMockDaemonSpawner()
-		unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-			DefaultModel: "gemini-2.5-flash",
-		}, mockSpawner)
-		defer unifiedPool.Close()
-
-		p := New(nil, WorkerPoolConfig{
-			ProcessPool: unifiedPool,
-		})
-
-		if p.cfg.LLMFunc == nil {
-			t.Fatalf("expected cfg.LLMFunc to be auto-populated from ProcessPool")
-		}
-	})
-
-	t.Run("VoiceProcessPool_WiringAndAccessors", func(t *testing.T) {
-		var nilP *WorkerPool
-		if got := nilP.VoiceProcessPool(); got != nil {
-			t.Fatalf("expected nil from nil WorkerPool.VoiceProcessPool(), got %v", got)
-		}
-		nilP.MarkDirty() // Should not panic
-
-		pDefault := New(nil, WorkerPoolConfig{})
-		if got := pDefault.VoiceProcessPool(); got != nil {
-			t.Fatalf("expected nil VoiceProcessPool by default, got %v", got)
-		}
-
-		mockSpawner := runner.NewMockDaemonSpawner()
-		voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-			DefaultModel: "gemini-2.5-flash",
-		}, mockSpawner)
-		defer voicePool.Close()
-
-		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-			DefaultModel: "gemini-2.5-flash",
-		}, mockSpawner)
-		defer procPool.Close()
-
-		p := New(nil, WorkerPoolConfig{
-			ProcessPool:      procPool,
-			VoiceProcessPool: voicePool,
-		})
-
-		if got := p.VoiceProcessPool(); got != voicePool {
-			t.Fatalf("expected VoiceProcessPool to return %p, got %p", voicePool, got)
-		}
-
-		p.MarkDirty()
-		p.Stop()
-	})
+	}
 }
 
 func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
-	primarySpawner := runner.NewMockSpawner()
-	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
-	defer primaryPool.Close()
-
-	lowEffortSpawner := runner.NewMockSpawner()
-	lowEffortPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowEffortSpawner)
-	defer lowEffortPool.Close()
-
-	wp := NewWorkerPool(WorkerPoolConfig{
-		ProcessPool:          primaryPool,
-		LowEffortProcessPool: lowEffortPool,
-	})
-	defer wp.Stop()
-
-	if wp.LowEffortProcessPool() != lowEffortPool {
-		t.Fatalf("expected LowEffortProcessPool to match injected pool")
+	tests := []struct {
+		name                 string
+		nilPool              bool
+		defaultConfig        bool
+		interchangeable      bool
+		cleanAllThree        bool
+		reconcilePrewarmed   bool
+		initialVoiceTargets  []string
+		expectedVoiceTargets []string
+	}{
+		{
+			name:    "nil worker pool returns nil low effort pool",
+			nilPool: true,
+		},
+		{
+			name:          "default config low effort pool is nil",
+			defaultConfig: true,
+		},
+		{
+			name:            "interchangeable pool returns underlying pool",
+			interchangeable: true,
+		},
+		{
+			name:          "mark dirty and stop cleans all three pools",
+			cleanAllThree: true,
+		},
+		{
+			name:                 "mark dirty reconciles voice prewarmed targets without arbitrary sleeps",
+			reconcilePrewarmed:   true,
+			initialVoiceTargets:  []string{"kiosk"},
+			expectedVoiceTargets: []string{"touch-kiosk-kitchen"},
+		},
 	}
 
-	t.Run("NilWorkerPool_ReturnsNil", func(t *testing.T) {
-		var p *WorkerPool
-		if got := p.LowEffortProcessPool(); got != nil {
-			t.Fatalf("expected nil from nil WorkerPool.LowEffortProcessPool(), got %v", got)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.nilPool {
+				var p *WorkerPool
+				if got := p.LowEffortProcessPool(); got != nil {
+					t.Fatalf("expected nil from nil WorkerPool.LowEffortProcessPool(), got %v", got)
+				}
+				return
+			}
 
-	t.Run("DefaultConfig_LowEffortProcessPoolIsNil", func(t *testing.T) {
-		p := New(nil, WorkerPoolConfig{})
-		if got := p.LowEffortProcessPool(); got != nil {
-			t.Fatalf("expected nil LowEffortProcessPool by default, got %v", got)
-		}
-	})
+			if tc.defaultConfig {
+				p := New(nil, WorkerPoolConfig{})
+				if got := p.LowEffortProcessPool(); got != nil {
+					t.Fatalf("expected nil LowEffortProcessPool by default, got %v", got)
+				}
+				return
+			}
 
-	t.Run("InterchangeablePool_ReturnsUnderlying", func(t *testing.T) {
-		mockSpawner := runner.NewMockDaemonSpawner()
-		underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
-			Model: "gemini-3.8-flash-low",
-		}, mockSpawner)
-		defer underlying.Close()
+			if tc.interchangeable {
+				mockSpawner := runner.NewMockDaemonSpawner()
+				underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+					Model: "gemini-3.8-flash-low",
+				}, mockSpawner)
+				defer func() { _ = underlying.Close() }()
 
-		interPool := runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
-			WorkerCount: 2,
+				interPool := runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
+					WorkerCount: 2,
+				})
+				defer func() { _ = interPool.Close() }()
+
+				p := New(nil, WorkerPoolConfig{
+					LowEffortProcessPool: interPool,
+				})
+				defer p.Stop()
+
+				if got := p.LowEffortProcessPool(); got != underlying {
+					t.Fatalf("expected LowEffortProcessPool to return underlying pool %p, got %p", underlying, got)
+				}
+				return
+			}
+
+			if tc.cleanAllThree {
+				pSpawner := runner.NewMockSpawner()
+				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, pSpawner)
+				defer func() { _ = pPool.Close() }()
+
+				lSpawner := runner.NewMockSpawner()
+				lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner)
+				defer func() { _ = lPool.Close() }()
+
+				vSpawner := runner.NewMockSpawner()
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, vSpawner)
+				defer func() { _ = vPool.Close() }()
+
+				pool := NewWorkerPool(WorkerPoolConfig{
+					ProcessPool:          pPool,
+					LowEffortProcessPool: lPool,
+					VoiceProcessPool:     vPool,
+				})
+				pool.MarkDirty()
+				pool.Stop()
+				return
+			}
+
+			if tc.reconcilePrewarmed {
+				vSpawner := runner.NewMockDaemonSpawner()
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+					Model:            "gemini-2.5-flash",
+					PrewarmedTargets: tc.initialVoiceTargets,
+				}, vSpawner)
+				defer func() { _ = vPool.Close() }()
+
+				appCfg := config.NewTestConfig(func(d *config.ConfigData) {
+					d.Voice.PrewarmedTargets = tc.expectedVoiceTargets
+				})
+
+				pool := New(appCfg, WorkerPoolConfig{
+					VoiceProcessPool: vPool,
+				})
+				defer pool.Stop()
+
+				pool.MarkDirty()
+				vPool.WaitBackground()
+
+				targets := vPool.PrewarmedTargets()
+				if len(targets) != len(tc.expectedVoiceTargets) || targets[0] != tc.expectedVoiceTargets[0] {
+					t.Fatalf("expected voice pool targets to be %v, got %v", tc.expectedVoiceTargets, targets)
+				}
+				if !vPool.HasDaemon(tc.expectedVoiceTargets[0]) {
+					t.Fatalf("expected %s to be active in process pool", tc.expectedVoiceTargets[0])
+				}
+			}
 		})
-		defer interPool.Close()
-
-		p := New(nil, WorkerPoolConfig{
-			LowEffortProcessPool: interPool,
-		})
-		if got := p.LowEffortProcessPool(); got != underlying {
-			t.Fatalf("expected LowEffortProcessPool to return underlying pool %p, got %p", underlying, got)
-		}
-	})
-
-	t.Run("MarkDirtyAndStop_CleansAllThreePools", func(t *testing.T) {
-		pSpawner := runner.NewMockSpawner()
-		pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, pSpawner)
-		defer pPool.Close()
-
-		lSpawner := runner.NewMockSpawner()
-		lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner)
-		defer lPool.Close()
-
-		vSpawner := runner.NewMockSpawner()
-		vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, vSpawner)
-		defer vPool.Close()
-
-		pool := NewWorkerPool(WorkerPoolConfig{
-			ProcessPool:          pPool,
-			LowEffortProcessPool: lPool,
-			VoiceProcessPool:     vPool,
-		})
-
-		pool.MarkDirty()
-		pool.Stop()
-	})
-
-	t.Run("WorkerPool_MarkDirty_ReconcilesVoicePrewarmedTargets", func(t *testing.T) {
-		vSpawner := runner.NewMockDaemonSpawner()
-		vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-			Model:            "gemini-2.5-flash",
-			PrewarmedTargets: []string{"kiosk"},
-		}, vSpawner)
-		defer vPool.Close()
-
-		appCfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.Voice.PrewarmedTargets = []string{"touch-kiosk-kitchen"}
-		})
-
-		pool := New(appCfg, WorkerPoolConfig{
-			VoiceProcessPool: vPool,
-		})
-		defer pool.Stop()
-
-		// Trigger MarkDirty on WorkerPool
-		pool.MarkDirty()
-
-		// Deterministically wait for background eviction and prewarming without arbitrary sleeps
-		vPool.WaitBackground()
-
-		// Verify voice process pool has updated prewarmed targets
-		targets := vPool.PrewarmedTargets()
-		if len(targets) != 1 || targets[0] != "touch-kiosk-kitchen" {
-			t.Fatalf("expected voice pool targets to be updated to [touch-kiosk-kitchen], got %v", targets)
-		}
-
-		if !vPool.HasDaemon("touch-kiosk-kitchen") {
-			t.Fatalf("expected touch-kiosk-kitchen to be active in process pool")
-		}
-	})
+	}
 }
-

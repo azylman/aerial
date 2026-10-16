@@ -28,48 +28,107 @@ func (m *mockErrSessionStore) FindUnrotatedSessions(ctx context.Context, minTurn
 	return nil, nil
 }
 
-func TestWorkerPool_CheckUnrotatedSessions_NilAndErrorHandling(t *testing.T) {
-	// 1. Nil WorkerPool should not panic
-	var nilPool *WorkerPool
-	nilPool.checkUnrotatedSessions(context.Background(), make(map[string]int))
-
-	// 2. WorkerPool with nil Store should not panic
-	poolNoStore := &WorkerPool{cfg: WorkerPoolConfig{}}
-	poolNoStore.checkUnrotatedSessions(context.Background(), make(map[string]int))
-
-	// 3. Store error should be handled gracefully without panic or alert
-	var alertCalled bool
-	storeWithErr := &mockErrSessionStore{
-		findErr: errors.New("database connection failed"),
+func TestWorkerPool_CheckUnrotatedSessions_Scenarios(t *testing.T) {
+	tests := []struct {
+		name              string
+		nilPool           bool
+		nilStore          bool
+		storeErr          error
+		cancelContext     bool
+		dormantBackdate   time.Duration
+		sessionTurns      []int
+		expectAlertCalls  int
+		expectReportCount int
+		expectOverflowMsg string
+	}{
+		{name: "nil worker pool", nilPool: true},
+		{name: "nil store", nilStore: true},
+		{name: "store error handled gracefully", storeErr: errors.New("database connection failed")},
+		{name: "cancelled context exits early", cancelContext: true},
+		{name: "excludes dormant sessions older than horizon", sessionTurns: []int{15}, dormantBackdate: 3 * time.Hour},
+		{name: "top 5 display cap with overflow message", sessionTurns: []int{10, 11, 12, 13, 14, 15, 16}, expectAlertCalls: 1, expectReportCount: 7, expectOverflowMsg: "...and 2 more runaway session(s)"},
 	}
-	poolErr := &WorkerPool{
-		cfg: WorkerPoolConfig{
-			Store: storeWithErr,
-			SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
-				alertCalled = true
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.nilPool {
+				var nilPool *WorkerPool
+				nilPool.checkUnrotatedSessions(context.Background(), make(map[string]int))
+				return
+			}
+			if tc.nilStore {
+				p := &WorkerPool{cfg: WorkerPoolConfig{}}
+				p.checkUnrotatedSessions(context.Background(), make(map[string]int))
+				return
+			}
+
+			ctx := context.Background()
+			if tc.cancelContext {
+				cCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cCtx
+			}
+
+			var mu sync.Mutex
+			var alertCalls int
+			var lastBody string
+			recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				alertCalls++
+				lastBody = alertBody
 				return nil
-			},
-		},
-	}
-	poolErr.checkUnrotatedSessions(context.Background(), make(map[string]int))
-	if alertCalled {
-		t.Error("expected no system alert when store returns an error")
+			}
+
+			var store db.Store
+			if tc.storeErr != nil {
+				store = &mockErrSessionStore{findErr: tc.storeErr}
+			} else {
+				fake := db.NewFakeStore()
+				defer func() { _ = fake.Close() }()
+				store = fake
+				for i, turns := range tc.sessionTurns {
+					thID := fmt.Sprintf("th-scen-%d", i+1)
+					_ = fake.SaveSessionID(context.Background(), thID, fmt.Sprintf("sess-scen-%d", i+1))
+					for j := 0; j < turns; j++ {
+						_, _ = fake.IncrementSessionTurnCount(context.Background(), thID)
+					}
+					if tc.dormantBackdate > 0 {
+						fake.SetSessionUpdatedAt(thID, time.Now().UTC().Add(-tc.dormantBackdate))
+					}
+				}
+			}
+
+			pool := &WorkerPool{cfg: WorkerPoolConfig{Store: store, SystemAlertFunc: recordAlert}}
+			lastReported := make(map[string]int)
+			pool.checkUnrotatedSessions(ctx, lastReported)
+
+			mu.Lock()
+			calls := alertCalls
+			body := lastBody
+			mu.Unlock()
+
+			if calls != tc.expectAlertCalls {
+				t.Fatalf("expected %d alert calls, got %d", tc.expectAlertCalls, calls)
+			}
+			if tc.expectReportCount > 0 && len(lastReported) != tc.expectReportCount {
+				t.Fatalf("expected %d recorded sessions, got %d", tc.expectReportCount, len(lastReported))
+			}
+			if tc.expectOverflowMsg != "" && !strings.Contains(body, tc.expectOverflowMsg) {
+				t.Fatalf("expected overflow message %q in alert body:\n%s", tc.expectOverflowMsg, body)
+			}
+		})
 	}
 }
 
 func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T) {
 	fake := db.NewFakeStore()
 	defer func() { _ = fake.Close() }()
-
 	ctx := context.Background()
 
-	var (
-		mu         sync.Mutex
-		alertCalls int
-		lastTitle  string
-		lastBody   string
-	)
-
+	var mu sync.Mutex
+	var alertCalls int
+	var lastTitle, lastBody string
 	recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
 		mu.Lock()
 		defer mu.Unlock()
@@ -79,13 +138,7 @@ func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T)
 		return nil
 	}
 
-	p := &WorkerPool{
-		cfg: WorkerPoolConfig{
-			Store:           fake,
-			SystemAlertFunc: recordAlert,
-		},
-	}
-
+	p := &WorkerPool{cfg: WorkerPoolConfig{Store: fake, SystemAlertFunc: recordAlert}}
 	lastReported := make(map[string]int)
 
 	// Step 1: Session below limit (5 turns) -> no alert
@@ -93,139 +146,63 @@ func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T)
 	for i := 0; i < 5; i++ {
 		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
 	}
-
 	p.checkUnrotatedSessions(ctx, lastReported)
-
 	mu.Lock()
-	if alertCalls != 0 {
-		t.Fatalf("expected 0 alerts for 5 turns, got %d", alertCalls)
+	if alertCalls != 0 || len(lastReported) != 0 {
+		t.Fatalf("expected 0 alerts, got %d", alertCalls)
 	}
 	mu.Unlock()
-	if len(lastReported) != 0 {
-		t.Fatalf("expected lastReported to be empty, got %v", lastReported)
-	}
 
 	// Step 2: Session breaches limit (9 turns) -> 1 alert sent
 	for i := 0; i < 4; i++ {
 		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
 	}
-
 	p.checkUnrotatedSessions(ctx, lastReported)
-
 	mu.Lock()
-	if alertCalls != 1 {
-		t.Fatalf("expected 1 alert for 9 turns, got %d", alertCalls)
-	}
-	if !strings.Contains(lastBody, "th-test") || !strings.Contains(lastBody, "**9** turns") {
-		t.Errorf("unexpected alert body: %s", lastBody)
-	}
-	if lastTitle != "Unrotated Runaway Sessions" {
-		t.Errorf("unexpected title: %s", lastTitle)
+	if alertCalls != 1 || !strings.Contains(lastBody, "th-test") || !strings.Contains(lastBody, "**9** turns") || lastTitle != "Unrotated Runaway Sessions" {
+		t.Fatalf("unexpected alert state: calls=%d body=%s title=%s", alertCalls, lastBody, lastTitle)
 	}
 	mu.Unlock()
-
 	if lastReported["th-test"] != 9 {
 		t.Errorf("expected lastReported['th-test']=9, got %d", lastReported["th-test"])
 	}
 
 	// Step 3: Session is dormant (still 9 turns) -> deduplication skips alert
 	p.checkUnrotatedSessions(ctx, lastReported)
-
 	mu.Lock()
 	if alertCalls != 1 {
-		t.Fatalf("expected alertCalls to remain 1 (deduplicated), got %d", alertCalls)
+		t.Fatalf("expected alertCalls to remain 1, got %d", alertCalls)
 	}
 	mu.Unlock()
 
 	// Step 4: Session takes another turn unrotated (10 turns) -> 2nd alert sent
 	_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
-
 	p.checkUnrotatedSessions(ctx, lastReported)
-
 	mu.Lock()
-	if alertCalls != 2 {
-		t.Fatalf("expected alertCalls to be 2 for 10 turns, got %d", alertCalls)
-	}
-	if !strings.Contains(lastBody, "**10** turns") {
-		t.Errorf("expected alert to report 10 turns, got: %s", lastBody)
+	if alertCalls != 2 || !strings.Contains(lastBody, "**10** turns") {
+		t.Fatalf("expected 2 alerts with 10 turns, got calls=%d body=%s", alertCalls, lastBody)
 	}
 	mu.Unlock()
-
 	if lastReported["th-test"] != 10 {
 		t.Errorf("expected lastReported['th-test']=10, got %d", lastReported["th-test"])
 	}
 
-	// Step 5: Session rotates -> turn count reset to 0 in DB
+	// Step 5: Session rotates -> turn count reset to 0 in DB and pruned from lastReported
 	_ = fake.RotateSessionID(ctx, "th-test", "sess-fresh")
-
 	p.checkUnrotatedSessions(ctx, lastReported)
-
 	mu.Lock()
 	if alertCalls != 2 {
-		t.Fatalf("expected no new alert on rotated session, got %d calls", alertCalls)
+		t.Fatalf("expected no new alert on rotated session, got %d", alertCalls)
 	}
 	mu.Unlock()
-
-	// Verify pruned from lastReported map
 	if _, exists := lastReported["th-test"]; exists {
-		t.Errorf("expected rotated session 'th-test' to be pruned from lastReported, but was present: %v", lastReported)
-	}
-}
-
-func TestWorkerPool_CheckUnrotatedSessions_Top5Cap(t *testing.T) {
-	fake := db.NewFakeStore()
-	defer func() { _ = fake.Close() }()
-
-	ctx := context.Background()
-
-	var (
-		mu       sync.Mutex
-		lastBody string
-	)
-
-	recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
-		mu.Lock()
-		defer mu.Unlock()
-		lastBody = alertBody
-		return nil
-	}
-
-	p := &WorkerPool{
-		cfg: WorkerPoolConfig{
-			Store:           fake,
-			SystemAlertFunc: recordAlert,
-		},
-	}
-
-	// Insert 7 unrotated sessions (threads 1 to 7)
-	for i := 1; i <= 7; i++ {
-		thID := fmt.Sprintf("th-%d", i)
-		_ = fake.SaveSessionID(ctx, thID, fmt.Sprintf("sess-%d", i))
-		for j := 0; j < 9+i; j++ {
-			_, _ = fake.IncrementSessionTurnCount(ctx, thID)
-		}
-	}
-
-	lastReported := make(map[string]int)
-	p.checkUnrotatedSessions(ctx, lastReported)
-
-	mu.Lock()
-	body := lastBody
-	mu.Unlock()
-
-	if !strings.Contains(body, "...and 2 more runaway session(s)") {
-		t.Errorf("expected overflow indicator for top 5 cap, got:\n%s", body)
-	}
-	// Verify that all 7 were recorded in lastReported
-	if len(lastReported) != 7 {
-		t.Errorf("expected all 7 unrotated sessions recorded in lastReported, got %d", len(lastReported))
+		t.Errorf("expected rotated session pruned from lastReported: %v", lastReported)
 	}
 }
 
 func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
 	fake := db.NewFakeStore()
 	defer func() { _ = fake.Close() }()
-
 	ctx := context.Background()
 	_ = fake.SaveSessionID(ctx, "th-ticker-test", "sess-ticker")
 	for i := 0; i < 11; i++ {
@@ -233,164 +210,74 @@ func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
 	}
 
 	alertCh := make(chan string, 5)
-
-	recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
-		select {
-		case alertCh <- alertBody:
-		default:
-		}
-		return nil
-	}
-
 	p := NewWorkerPool(WorkerPoolConfig{
 		Store:               fake,
 		MaintenanceInterval: 10 * time.Millisecond,
-		SystemAlertFunc:     recordAlert,
+		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+			select {
+			case alertCh <- alertBody:
+			default:
+			}
+			return nil
+		},
 	})
 	p.Start()
 
 	select {
 	case body := <-alertCh:
 		if !strings.Contains(body, "th-ticker-test") || !strings.Contains(body, "**11** turns") {
-			t.Errorf("unexpected alert body from maintenance ticker: %s", body)
+			t.Errorf("unexpected alert body: %s", body)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for maintenance ticker to fire unrotated session check")
 	}
-
 	p.StopWithTimeout(1 * time.Second)
 }
 
-func TestWorkerPool_CheckUnrotatedSessions_ContextCancelled(t *testing.T) {
-	fake := db.NewFakeStore()
-	defer func() { _ = fake.Close() }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	p := &WorkerPool{
-		cfg: WorkerPoolConfig{Store: fake},
-	}
-	lastReported := make(map[string]int)
-	p.checkUnrotatedSessions(ctx, lastReported)
-	if len(lastReported) != 0 {
-		t.Errorf("expected empty lastReported on cancelled context, got %d entries", len(lastReported))
-	}
-}
-
-func TestWorkerPool_CheckUnrotatedSessions_ExcludesDormantSessions(t *testing.T) {
-	fake := db.NewFakeStore()
-	defer func() { _ = fake.Close() }()
-
-	ctx := context.Background()
-
-	var alertCalled bool
-	recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
-		alertCalled = true
-		return nil
-	}
-
-	p := &WorkerPool{
-		cfg: WorkerPoolConfig{
-			Store:           fake,
-			SystemAlertFunc: recordAlert,
+func TestFormatUnrotatedSessionLine(t *testing.T) {
+	tests := []struct {
+		name        string
+		cachedChans []*discordgo.Channel
+		session     db.SessionInfo
+		expected    string
+	}{
+		{
+			name:     "non-numeric snowflake fallback",
+			session:  db.SessionInfo{ThreadID: "th-custom-session", TurnCount: 9, InternalSessionID: "sess-uuid-1234"},
+			expected: "- Thread `th-custom-session`: **9** turns (session: `sess-uuid-1234`)",
+		},
+		{
+			name:        "channel snowflake resolved via cache",
+			cachedChans: []*discordgo.Channel{{ID: "1464358486849622120", Type: discordgo.ChannelTypeGuildText, Name: "general"}},
+			session:     db.SessionInfo{ThreadID: "1464358486849622120", TurnCount: 10, InternalSessionID: "sess-chan-5678"},
+			expected:    "- Channel <#1464358486849622120>: **10** turns (session: `sess-chan-5678`)",
+		},
+		{
+			name: "thread snowflake with parent channel",
+			cachedChans: []*discordgo.Channel{
+				{ID: "1542423172400291873", Type: discordgo.ChannelTypeGuildText, Name: "aerial-dev"},
+				{ID: "1557949887948005398", ParentID: "1542423172400291873", Type: discordgo.ChannelTypeGuildPublicThread, Name: "Resolve Notification Snowflake IDs"},
+			},
+			session:  db.SessionInfo{ThreadID: "1557949887948005398", TurnCount: 12, InternalSessionID: "sess-thread-9999"},
+			expected: "- Thread <#1557949887948005398> (in <#1542423172400291873>): **12** turns (session: `sess-thread-9999`)",
+		},
+		{
+			name:        "thread snowflake without parent channel",
+			cachedChans: []*discordgo.Channel{{ID: "1557949887948005399", Type: discordgo.ChannelTypeGuildPublicThread, Name: "Orphan Thread"}},
+			session:     db.SessionInfo{ThreadID: "1557949887948005399", TurnCount: 15, InternalSessionID: "sess-orphan-0000"},
+			expected:    "- Thread <#1557949887948005399>: **15** turns (session: `sess-orphan-0000`)",
 		},
 	}
 
-	// Seed an unrotated session with 15 turns
-	_ = fake.SaveSessionID(ctx, "th-dormant", "sess-dormant")
-	for i := 0; i < 15; i++ {
-		_, _ = fake.IncrementSessionTurnCount(ctx, "th-dormant")
-	}
-
-	// Backdate session UpdatedAt to 3 hours ago (beyond 2-hour default horizon)
-	dormantTime := time.Now().UTC().Add(-3 * time.Hour)
-	fake.SetSessionUpdatedAt("th-dormant", dormantTime)
-
-	lastReported := make(map[string]int)
-	p.checkUnrotatedSessions(ctx, lastReported)
-
-	if alertCalled {
-		t.Error("expected no system alert for dormant session older than 2 hours")
-	}
-	if len(lastReported) != 0 {
-		t.Errorf("expected lastReported to remain empty for dormant session, got %v", lastReported)
-	}
-}
-
-func TestFormatUnrotatedSessionLine(t *testing.T) {
-	// 1. Non-numeric snowflake (fallback format)
-	nonSnowflake := db.SessionInfo{
-		ThreadID:          "th-custom-session",
-		TurnCount:         9,
-		InternalSessionID: "sess-uuid-1234",
-	}
-	if got := formatUnrotatedSessionLine(nil, nonSnowflake); got != "- Thread `th-custom-session`: **9** turns (session: `sess-uuid-1234`)" {
-		t.Errorf("unexpected non-snowflake line: %q", got)
-	}
-
-	// 2. Channel snowflake resolved via cache
-	chanID := "1464358486849622120"
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:   chanID,
-		Type: discordgo.ChannelTypeGuildText,
-		Name: "general",
-	})
-	defer InvalidateChannelCache(chanID)
-
-	chanSession := db.SessionInfo{
-		ThreadID:          chanID,
-		TurnCount:         10,
-		InternalSessionID: "sess-chan-5678",
-	}
-	if got := formatUnrotatedSessionLine(nil, chanSession); got != "- Channel <#1464358486849622120>: **10** turns (session: `sess-chan-5678`)" {
-		t.Errorf("unexpected channel line: %q", got)
-	}
-
-	// 3. Thread snowflake with parent channel
-	threadID := "1557949887948005398"
-	parentID := "1542423172400291873"
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:   parentID,
-		Type: discordgo.ChannelTypeGuildText,
-		Name: "aerial-dev",
-	})
-	defer InvalidateChannelCache(parentID)
-
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:       threadID,
-		ParentID: parentID,
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-		Name:     "Resolve Notification Snowflake IDs",
-	})
-	defer InvalidateChannelCache(threadID)
-
-	threadSession := db.SessionInfo{
-		ThreadID:          threadID,
-		TurnCount:         12,
-		InternalSessionID: "sess-thread-9999",
-	}
-	expectedThread := "- Thread <#1557949887948005398> (in <#1542423172400291873>): **12** turns (session: `sess-thread-9999`)"
-	if got := formatUnrotatedSessionLine(nil, threadSession); got != expectedThread {
-		t.Errorf("unexpected thread line with parent: %q, expected: %q", got, expectedThread)
-	}
-
-	// 4. Thread snowflake without parent channel
-	orphanID := "1557949887948005399"
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:   orphanID,
-		Type: discordgo.ChannelTypeGuildPublicThread,
-		Name: "Orphan Thread",
-	})
-	defer InvalidateChannelCache(orphanID)
-
-	orphanThreadSession := db.SessionInfo{
-		ThreadID:          orphanID,
-		TurnCount:         15,
-		InternalSessionID: "sess-orphan-0000",
-	}
-	expectedOrphan := "- Thread <#1557949887948005399>: **15** turns (session: `sess-orphan-0000`)"
-	if got := formatUnrotatedSessionLine(nil, orphanThreadSession); got != expectedOrphan {
-		t.Errorf("unexpected thread line without parent: %q, expected: %q", got, expectedOrphan)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, ch := range tc.cachedChans {
+				CacheDiscordChannel(ch)
+				defer InvalidateChannelCache(ch.ID)
+			}
+			if got := formatUnrotatedSessionLine(nil, tc.session); got != tc.expected {
+				t.Errorf("got %q, want %q", got, tc.expected)
+			}
+		})
 	}
 }
