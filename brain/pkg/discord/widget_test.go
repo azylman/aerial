@@ -162,7 +162,7 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 	}
 
 	header, ok := container.Components[0].(*discordgo.TextDisplay)
-	if !ok || !strings.Contains(header.Content, "Vanadis Build `build-1792124461-490d903b` · Tier 3") {
+	if !ok || header.Content != "### 🛠️ Discord status tracker widget" {
 		t.Errorf("unexpected header: %+v", header)
 	}
 
@@ -171,29 +171,33 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 		t.Errorf("unexpected banner: %+v", banner)
 	}
 
-	// Chunk 1 has PRNumber > 0 and Repo, so it's a Section with Button
+	// Chunk 1 has PRNumber > 0 and Repo, so it's a Section with Button, without [index] or diff_stat
 	c1Sec, ok := container.Components[2].(*discordgo.Section)
 	if !ok {
 		t.Fatalf("expected chunk 1 to be *discordgo.Section, got %T", container.Components[2])
+	}
+	c1Text := c1Sec.Components[0].(*discordgo.TextDisplay)
+	if c1Text.Content != "✅ **`aerial`**: Schema migration" {
+		t.Errorf("unexpected chunk 1 row text: %q", c1Text.Content)
 	}
 	btn, ok := c1Sec.Accessory.(*discordgo.Button)
 	if !ok || btn.URL != "https://github.com/azylman/aerial/pull/735" || btn.Label != "PR #735 ↗" {
 		t.Errorf("unexpected button accessory: %+v", c1Sec.Accessory)
 	}
 
-	// Chunk 2 has DeployingJobs
+	// Chunk 2 has PRNumber > 0, no DeployingJobs rendered in row
 	c2Sec, ok := container.Components[3].(*discordgo.Section)
 	if !ok {
 		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", container.Components[3])
 	}
 	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
-	if !strings.Contains(c2Text.Content, "Deploying: `aerial-brain`, `webhooks-router`") {
-		t.Errorf("expected deploying jobs in chunk 2, got: %s", c2Text.Content)
+	if c2Text.Content != "🚀 **`aerial`**: Silent prompt" {
+		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
 	}
 
 	// Chunk 3 has no PRNumber, so it's a TextDisplay
 	c3Text, ok := container.Components[4].(*discordgo.TextDisplay)
-	if !ok || !strings.Contains(c3Text.Content, "Stateless widget endpoint") {
+	if !ok || c3Text.Content != "🔨 **`aerial`**: Stateless widget endpoint" {
 		t.Errorf("unexpected chunk 3 component: %+v", container.Components[4])
 	}
 
@@ -201,6 +205,25 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 	footer, ok := container.Components[5].(*discordgo.TextDisplay)
 	if !ok || footer.Content != "*Updated <t:1760000000:R>*" {
 		t.Errorf("unexpected footer: %+v", footer)
+	}
+
+	// Empty Title fallback on VanadisBuild header + empty chunk Repo fallback
+	emptyTitleComps, err := BuildStatusWidgetComponents(StatusWidgetRequest{
+		ID:     "build-empty-title",
+		Status: "running",
+		Chunks: []StatusWidgetChunk{{Title: "Fallback repo chunk", Status: "pending"}},
+	}, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents empty title failed: %v", err)
+	}
+	emptyContainer := emptyTitleComps[0].(*discordgo.Container)
+	emptyHeader := emptyContainer.Components[0].(*discordgo.TextDisplay)
+	if emptyHeader.Content != "### 🛠️ Vanadis Build" {
+		t.Errorf("expected fallback header '### 🛠️ Vanadis Build', got %q", emptyHeader.Content)
+	}
+	fallbackChunk := emptyContainer.Components[1].(*discordgo.TextDisplay)
+	if fallbackChunk.Content != "⏳ **`aerial`**: Fallback repo chunk" {
+		t.Errorf("expected fallback chunk '⏳ **`aerial`**: Fallback repo chunk', got %q", fallbackChunk.Content)
 	}
 }
 

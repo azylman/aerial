@@ -105,13 +105,32 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("expected build-dup-chunk to be rolled back (ErrVanadisBuildNotFound), got %v", err)
 	}
 
-	// 3. GetVanadisBuild
+	// 3. GetVanadisBuild (verify Title defaults to Objective when omitted)
 	gotBuild, gotChunks, err := store.GetVanadisBuild(ctx, "build-101")
 	if err != nil {
 		t.Fatalf("GetVanadisBuild failed: %v", err)
 	}
-	if gotBuild.ID != "build-101" || gotBuild.Repo != "azylman/aerial" || gotBuild.ThreadID != "1555405874565091380" || gotBuild.Tier != 2 || gotBuild.Status != "running" || gotBuild.SharedContext != "Shared context for build 101" {
+	if gotBuild.ID != "build-101" || gotBuild.Repo != "azylman/aerial" || gotBuild.ThreadID != "1555405874565091380" || gotBuild.Tier != 2 || gotBuild.Title != "Implement vanadis build queue" || gotBuild.Objective != "Implement vanadis build queue" || gotBuild.Status != "running" || gotBuild.SharedContext != "Shared context for build 101" {
 		t.Errorf("unexpected build fields: %+v", gotBuild)
+	}
+
+	// Verify explicit Title on CreateVanadisBuild is preserved independently of Objective
+	titledBuild := VanadisBuild{
+		ID:        "build-titled-102",
+		Repo:      "aerial",
+		ThreadID:  "1555405874565091380",
+		Title:     "Redesign Vanadis Build Status Cards",
+		Objective: "Detailed objective for redesigning the cards",
+	}
+	if err := store.CreateVanadisBuild(ctx, titledBuild, nil); err != nil {
+		t.Fatalf("CreateVanadisBuild with explicit Title failed: %v", err)
+	}
+	gotTitledBuild, _, err := store.GetVanadisBuild(ctx, "build-titled-102")
+	if err != nil {
+		t.Fatalf("GetVanadisBuild for build-titled-102 failed: %v", err)
+	}
+	if gotTitledBuild.Title != "Redesign Vanadis Build Status Cards" || gotTitledBuild.Objective != "Detailed objective for redesigning the cards" {
+		t.Errorf("expected explicit Title and Objective preserved, got %+v", gotTitledBuild)
 	}
 	if len(gotChunks) != 3 {
 		t.Fatalf("expected 3 chunks, got %d", len(gotChunks))

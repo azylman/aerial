@@ -97,15 +97,10 @@ func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]disc
 	var headerText string
 	isBuild := strings.HasPrefix(req.ID, "build-") || len(req.Chunks) > 1 || req.Tier > 0
 	if isBuild {
-		tierPart := ""
-		if req.Tier > 0 {
-			tierPart = fmt.Sprintf(" · Tier %d", req.Tier)
-		}
-		idPart := strings.TrimSpace(req.ID)
-		if idPart != "" {
-			headerText = fmt.Sprintf("### 🛠️ Vanadis Build `%s`%s\n%s", idPart, tierPart, strings.TrimSpace(req.Title))
+		if trimmedTitle := strings.TrimSpace(req.Title); trimmedTitle != "" {
+			headerText = fmt.Sprintf("### 🛠️ %s", trimmedTitle)
 		} else {
-			headerText = fmt.Sprintf("### 🛠️ Vanadis Build%s\n%s", tierPart, strings.TrimSpace(req.Title))
+			headerText = "### 🛠️ Vanadis Build"
 		}
 	} else {
 		// Standalone PR
@@ -173,20 +168,7 @@ func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]disc
 			repoTag = "aerial"
 		}
 
-		idx := c.Index
-		var rowText string
-		if idx > 0 {
-			rowText = fmt.Sprintf("%s **[%d] `%s`**: %s", badge, idx, repoTag, strings.TrimSpace(c.Title))
-		} else {
-			rowText = fmt.Sprintf("%s **`%s`**: %s", badge, repoTag, strings.TrimSpace(c.Title))
-		}
-
-		if strings.TrimSpace(c.DiffStat) != "" {
-			rowText += fmt.Sprintf(" (%s)", strings.TrimSpace(c.DiffStat))
-		}
-		if len(c.DeployingJobs) > 0 {
-			rowText += fmt.Sprintf("\n> 🚀 Deploying: `%s`", strings.Join(c.DeployingJobs, "`, `"))
-		}
+		rowText := fmt.Sprintf("%s **`%s`**: %s", badge, repoTag, strings.TrimSpace(c.Title))
 
 		if c.PRNumber > 0 && fullRepo != "" {
 			prURL := fmt.Sprintf("https://github.com/%s/pull/%d", fullRepo, c.PRNumber)
