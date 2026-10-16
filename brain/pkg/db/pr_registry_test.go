@@ -127,14 +127,30 @@ func runPRRegistryTests(t *testing.T, store Store) {
 		t.Errorf("Expected ErrPRNotFound on UpdatePRStatus for non-existent PR, got %v", err)
 	}
 
+	// 7b. UpdatePRStatusMessageID
+	if err := store.UpdatePRStatusMessageID(ctx, "aerial", 101, "  msg-widget-777  "); err != nil {
+		t.Fatalf("UpdatePRStatusMessageID failed: %v", err)
+	}
+	withMsgID, err := store.GetPRByNumber(ctx, "aerial", 101)
+	if err != nil || withMsgID.StatusMessageID != "msg-widget-777" {
+		t.Fatalf("Expected status_message_id 'msg-widget-777', got %+v (err: %v)", withMsgID, err)
+	}
+	err = store.UpdatePRStatusMessageID(ctx, "aerial", 9999, "msg-widget-999")
+	if !errors.Is(err, ErrPRNotFound) {
+		t.Errorf("Expected ErrPRNotFound on UpdatePRStatusMessageID for non-existent PR, got %v", err)
+	}
+	if err := store.UpdatePRStatusMessageID(ctx, "", 101, "msg-widget-777"); err == nil {
+		t.Errorf("Expected validation error on empty repo in UpdatePRStatusMessageID")
+	}
+
 	// 8. AtomicTransitionPRStatus (CAS gate)
 	// Transition from 'deploying' to 'deployed' when status != 'deployed' -> succeeds
 	trans1, err := store.AtomicTransitionPRStatus(ctx, "aerial", 101, "deployed", "deployed")
 	if err != nil {
 		t.Fatalf("AtomicTransitionPRStatus failed: %v", err)
 	}
-	if trans1 == nil || trans1.Status != "deployed" {
-		t.Fatalf("Expected transition to deployed, got %+v", trans1)
+	if trans1 == nil || trans1.Status != "deployed" || trans1.StatusMessageID != "msg-widget-777" {
+		t.Fatalf("Expected transition to deployed preserving status_message_id, got %+v", trans1)
 	}
 
 	// Attempt duplicate transition when status is already 'deployed' -> returns nil (no-op)
@@ -222,6 +238,13 @@ func TestPRRegistry_FakeStore_Failures(t *testing.T) {
 		t.Errorf("Expected %v, got %v", simErr, err)
 	}
 
+	// UpdatePRStatusMessageID fail
+	store.FailNext("UpdatePRStatusMessageID", simErr)
+	err = store.UpdatePRStatusMessageID(ctx, "a", 1, "msg-1")
+	if !errors.Is(err, simErr) {
+		t.Errorf("Expected %v, got %v", simErr, err)
+	}
+
 	// AtomicTransitionPRStatus fail
 	store.FailNext("AtomicTransitionPRStatus", simErr)
 	_, err = store.AtomicTransitionPRStatus(ctx, "a", 1, "s1", "s2")
@@ -262,6 +285,9 @@ func TestPRRegistry_SQLStore_NilAndValidationBranches(t *testing.T) {
 		if err := s.UpdatePRStatus(ctx, "aerial", 1, "open"); err == nil {
 			t.Errorf("[%d] expected error on UpdatePRStatus with nil store/db", i)
 		}
+		if err := s.UpdatePRStatusMessageID(ctx, "aerial", 1, "msg-1"); err == nil {
+			t.Errorf("[%d] expected error on UpdatePRStatusMessageID with nil store/db", i)
+		}
 		if _, err := s.AtomicTransitionPRStatus(ctx, "aerial", 1, "s1", "s2"); err == nil {
 			t.Errorf("[%d] expected error on AtomicTransitionPRStatus with nil store/db", i)
 		}
@@ -291,6 +317,9 @@ func TestPRRegistry_SQLStore_NilAndValidationBranches(t *testing.T) {
 	}
 	if err := sqlStore.UpdatePRStatus(ctx, "", 1, "open"); err == nil {
 		t.Errorf("expected error on empty repo UpdatePRStatus")
+	}
+	if err := sqlStore.UpdatePRStatusMessageID(ctx, "", 1, "msg-1"); err == nil {
+		t.Errorf("expected error on empty repo UpdatePRStatusMessageID")
 	}
 	if _, err := sqlStore.AtomicTransitionPRStatus(ctx, "", 1, "s1", "s2"); err == nil {
 		t.Errorf("expected error on empty repo AtomicTransitionPRStatus")
@@ -349,6 +378,9 @@ func TestPRRegistry_SQLStore_ClosedDBBranches(t *testing.T) {
 	}
 	if err := closedStore.UpdatePRStatus(ctx, "aerial", 1, "open"); err == nil {
 		t.Errorf("expected error on closed db UpdatePRStatus")
+	}
+	if err := closedStore.UpdatePRStatusMessageID(ctx, "aerial", 1, "msg-1"); err == nil {
+		t.Errorf("expected error on closed db UpdatePRStatusMessageID")
 	}
 	if _, err := closedStore.AtomicTransitionPRStatus(ctx, "aerial", 1, "s1", "s2"); err == nil {
 		t.Errorf("expected error on closed db AtomicTransitionPRStatus")

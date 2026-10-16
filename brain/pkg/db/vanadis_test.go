@@ -204,6 +204,21 @@ func runVanadisTests(t *testing.T, store Store) {
 	if err := store.UpdateVanadisBuildStatus(ctx, "build-101", ""); err == nil {
 		t.Errorf("expected error for empty status in UpdateVanadisBuildStatus")
 	}
+
+	// 8. UpdateVanadisBuildStatusMessageID
+	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "build-101", "  msg-build-999  "); err != nil {
+		t.Fatalf("UpdateVanadisBuildStatusMessageID failed: %v", err)
+	}
+	gotBuildWithMsg, _, err := store.GetVanadisBuild(ctx, "build-101")
+	if err != nil || gotBuildWithMsg.StatusMessageID != "msg-build-999" {
+		t.Fatalf("expected status_message_id 'msg-build-999', got %+v (err: %v)", gotBuildWithMsg, err)
+	}
+	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "nonexistent-build", "msg-build-999"); !errors.Is(err, ErrVanadisBuildNotFound) {
+		t.Errorf("expected ErrVanadisBuildNotFound on UpdateVanadisBuildStatusMessageID, got %v", err)
+	}
+	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "", "msg-build-999"); err == nil {
+		t.Errorf("expected error for empty buildID in UpdateVanadisBuildStatusMessageID")
+	}
 }
 
 func TestVanadis_SQLStore(t *testing.T) {
@@ -269,6 +284,11 @@ func TestVanadis_FakeStore_FailuresAndClosed(t *testing.T) {
 		t.Errorf("expected %v, got %v", simErr, err)
 	}
 
+	store.FailNext("UpdateVanadisBuildStatusMessageID", simErr)
+	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "b1", "msg-1"); !errors.Is(err, simErr) {
+		t.Errorf("expected %v, got %v", simErr, err)
+	}
+
 	_ = store.Close()
 	if err := store.CreateVanadisBuild(ctx, VanadisBuild{}, nil); !errors.Is(err, sql.ErrConnDone) {
 		t.Errorf("expected ErrConnDone, got %v", err)
@@ -286,6 +306,9 @@ func TestVanadis_FakeStore_FailuresAndClosed(t *testing.T) {
 		t.Errorf("expected ErrConnDone, got %v", err)
 	}
 	if err := store.UpdateVanadisBuildStatus(ctx, "b1", "s"); !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("expected ErrConnDone, got %v", err)
+	}
+	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "b1", "msg-1"); !errors.Is(err, sql.ErrConnDone) {
 		t.Errorf("expected ErrConnDone, got %v", err)
 	}
 }
@@ -315,6 +338,9 @@ func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
 		if err := s.UpdateVanadisBuildStatus(ctx, "b1", "s"); err == nil {
 			t.Errorf("[%d] expected error on nil UpdateVanadisBuildStatus", i)
 		}
+		if err := s.UpdateVanadisBuildStatusMessageID(ctx, "b1", "msg-1"); err == nil {
+			t.Errorf("[%d] expected error on nil UpdateVanadisBuildStatusMessageID", i)
+		}
 	}
 
 	tmpPath := t.TempDir() + "/closed_vanadis.db"
@@ -343,6 +369,9 @@ func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
 	}
 	if err := closedStore.UpdateVanadisBuildStatus(ctx, "b1", "s"); err == nil {
 		t.Errorf("expected error on closed UpdateVanadisBuildStatus")
+	}
+	if err := closedStore.UpdateVanadisBuildStatusMessageID(ctx, "b1", "msg-1"); err == nil {
+		t.Errorf("expected error on closed UpdateVanadisBuildStatusMessageID")
 	}
 }
 
@@ -382,6 +411,7 @@ func TestVanadis_SQLStore_PostgresBranches(t *testing.T) {
 		{
 			ID:           "c-pg-1",
 			ChunkIndex:   0,
+			Repo:         "aerial-config",
 			Title:        "t1",
 			Instructions: "i1",
 			TargetFiles:  nil,
