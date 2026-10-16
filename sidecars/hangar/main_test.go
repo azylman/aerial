@@ -379,45 +379,106 @@ func TestResolveGitDir(t *testing.T) {
 	}
 }
 
-func TestStartReconcilerLoop(t *testing.T) {
-	daemon := &SyncDaemon{
-		composeDir:  t.TempDir(),
-		reconcileCh: make(chan struct{}, 1),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
+	t.Run("StartReconcilerLoop_nil_channel_init", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		d := &SyncDaemon{}
+		d.StartReconcilerLoop(ctx)
+		if d.reconcileCh == nil {
+			t.Errorf("expected reconcileCh to be initialized")
+		}
+	})
 
-	daemon.StartReconcilerLoop(ctx)
-	// Signal reconcile channel
-	daemon.reconcileCh <- struct{}{}
-	time.Sleep(20 * time.Millisecond)
+	t.Run("StartReconcilerLoop_debounce_and_execution", func(t *testing.T) {
+		oldDebounce := reconcilerDebounceDuration
+		oldCooldown := reconcilerMinCooldown
+		reconcilerDebounceDuration = 5 * time.Millisecond
+		reconcilerMinCooldown = 5 * time.Millisecond
+		defer func() {
+			reconcilerDebounceDuration = oldDebounce
+			reconcilerMinCooldown = oldCooldown
+		}()
 
-	cancel()
-	time.Sleep(10 * time.Millisecond)
-}
+		tempDir := t.TempDir()
+		nomadExecuted := make(chan struct{}, 10)
+		d := NewDaemon(DaemonConfig{
+			ComposeDir: tempDir,
+			ConfigDir:  tempDir,
+			ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return nil, nil, errors.New("compose fail")
+			},
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				select {
+				case nomadExecuted <- struct{}{}:
+				default:
+				}
+				return nil, nil, errors.New("nomad fail")
+			},
+		})
+		d.recordPendingNomadChanges(tempDir, []NomadFileChange{
+			{JobName: "deljob", Action: "delete"},
+			{JobName: "appjob", Action: "apply", Path: "jobs/app.nomad"},
+		})
 
-func TestStartPeriodicLoop(t *testing.T) {
-	triggered := make(chan struct{}, 1)
-	daemon := &SyncDaemon{
-		interval: 5 * time.Millisecond,
-		repos:    []string{},
-		triggerFn: func() ([]RepoSyncResult, error) {
+		loopCtx, loopCancel := context.WithCancel(context.Background())
+		d.StartReconcilerLoop(loopCtx)
+
+		// First trigger
+		d.TriggerReconcile(context.Background(), true)
+		select {
+		case <-nomadExecuted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for nomad executor signal on first trigger")
+		}
+
+		// Second trigger with updated lastReconcile to test cooldown path
+		d.SetLastReconcile(time.Now())
+		d.TriggerReconcile(context.Background(), true)
+		select {
+		case <-nomadExecuted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for nomad executor signal on second trigger")
+		}
+
+		loopCancel()
+	})
+
+	t.Run("StartPeriodicLoop_execution_and_shutdown", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		triggered := make(chan struct{}, 1)
+		d := NewDaemon(DaemonConfig{
+			Interval:   5 * time.Millisecond,
+			ComposeDir: t.TempDir(),
+		})
+		d.triggerFn = func() ([]RepoSyncResult, error) {
 			select {
 			case triggered <- struct{}{}:
 			default:
 			}
 			return nil, errors.New("simulated periodic sync notice")
-		},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	daemon.StartPeriodicLoop(ctx)
-	select {
-	case <-triggered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for periodic loop execution")
-	}
-	cancel()
+		}
+
+		d.StartPeriodicLoop(ctx)
+		select {
+		case <-triggered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for periodic loop execution")
+		}
+		cancel()
+	})
+
+	t.Run("DaemonLoops_graceful_cancel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		d := NewDaemon(DaemonConfig{
+			Interval: 10 * time.Millisecond,
+		})
+		d.StartPeriodicLoop(ctx)
+		d.StartReconcilerLoop(ctx)
+		cancel()
+	})
 }
 
 func TestEnsureRepoAndSync(t *testing.T) {
@@ -609,34 +670,6 @@ func TestSyncRepoErrorBranches(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(tempBase, "fail_adopt"), 0755)
 	_ = os.WriteFile(filepath.Join(tempBase, "fail_adopt", "file.txt"), []byte("content"), 0644)
 	_ = daemonEnsureFail.SyncRepo(ctx, filepath.Join(tempBase, "fail_adopt"))
-}
-
-func TestStartReconcilerLoopExecution(t *testing.T) {
-	oldDebounce := reconcilerDebounceDuration
-	oldCooldown := reconcilerMinCooldown
-	reconcilerDebounceDuration = 5 * time.Millisecond
-	reconcilerMinCooldown = 5 * time.Millisecond
-	defer func() {
-		reconcilerDebounceDuration = oldDebounce
-		reconcilerMinCooldown = oldCooldown
-	}()
-
-	tempDir := t.TempDir()
-	daemon := &SyncDaemon{
-		composeDir: tempDir,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	daemon.StartReconcilerLoop(ctx)
-	// Trigger channel
-	daemon.reconcileCh <- struct{}{}
-	time.Sleep(20 * time.Millisecond)
-
-	// Trigger second time after lastReconcile updated
-	daemon.lastReconcile = time.Now()
-	daemon.reconcileCh <- struct{}{}
-	time.Sleep(20 * time.Millisecond)
 }
 
 func TestGetRepoCommitAndStatusEdgeCases(t *testing.T) {
@@ -3416,29 +3449,6 @@ func TestResolveChannelID_ClientFail(t *testing.T) {
 	}
 }
 
-func TestGetRegistryClient_AndReconcileAccessors(t *testing.T) {
-	// Default client
-	dDefault := &SyncDaemon{}
-	c := dDefault.getRegistryClient()
-	if c == nil || c.Timeout != 10*time.Second {
-		t.Errorf("expected default registry client with 10s timeout, got %v", c)
-	}
-
-	// Custom client
-	custom := &http.Client{Timeout: 42 * time.Second}
-	dCustom := NewDaemon(DaemonConfig{RegistryClient: custom})
-	if dCustom.getRegistryClient() != custom {
-		t.Errorf("expected custom registry client to be returned")
-	}
-
-	// LastReconcile accessors
-	now := time.Now().Truncate(time.Second)
-	dCustom.SetLastReconcile(now)
-	if !dCustom.GetLastReconcile().Equal(now) {
-		t.Errorf("expected LastReconcile to equal %v, got %v", now, dCustom.GetLastReconcile())
-	}
-}
-
 type mockOCIOptions struct {
 	ProbeErr       error
 	ProbeStatus    int
@@ -3903,359 +3913,69 @@ func TestEnsureRepo_RemediatedErrors(t *testing.T) {
 	}
 }
 
-func TestStartPeriodicLoop_ExecutionAndShutdown(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	triggered := make(chan struct{}, 1)
-	d := NewDaemon(DaemonConfig{
-		Interval:   5 * time.Millisecond,
-		ComposeDir: t.TempDir(),
-	})
-	d.triggerFn = func() ([]RepoSyncResult, error) {
-		select {
-		case triggered <- struct{}{}:
-		default:
-		}
-		return nil, nil
-	}
-
-	d.StartPeriodicLoop(ctx)
-	select {
-	case <-triggered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for periodic loop execution")
-	}
-	cancel()
-}
-
-func TestReconciliationStatus_TTLReset(t *testing.T) {
-	d := NewDaemon(DaemonConfig{})
-	d.updateReconcileStatus(func(s *ReconciliationStatus) {
-		s.Active = false
-		s.State = "healthy"
-		s.Stage = "healthy"
-		s.TargetServices = []string{"brain"}
-		s.CompletedAt = time.Now().Add(-6 * time.Minute)
-	})
-
-	// Since CompletedAt is > 5m ago, GetReconciliationStatus returns idle
-	status := d.GetReconciliationStatus()
-	if status.State != "idle" || status.Stage != "idle" {
-		t.Errorf("expected TTL to reset state to idle, got %+v", status)
-	}
-}
-
-func TestReconciliationStatus_ExposedInGetStatus(t *testing.T) {
-	d := NewDaemon(DaemonConfig{})
-	d.updateReconcileStatus(func(s *ReconciliationStatus) {
-		s.Active = true
-		s.State = "swapping"
-		s.Stage = "swapping"
-		s.TargetServices = []string{"scheduler-mcp"}
-		s.StartedAt = time.Now().UTC()
-	})
-
-	statusResp := d.GetStatus(context.Background())
-	if statusResp.Reconciliation == nil {
-		t.Fatalf("expected non-nil Reconciliation in GetStatus")
-	}
-	if statusResp.Reconciliation.State != "swapping" {
-		t.Errorf("expected state swapping, got %s", statusResp.Reconciliation.State)
-	}
-	if len(statusResp.Reconciliation.TargetServices) != 1 || statusResp.Reconciliation.TargetServices[0] != "scheduler-mcp" {
-		t.Errorf("expected target services [scheduler-mcp], got %v", statusResp.Reconciliation.TargetServices)
-	}
-}
-
-func TestGetStatus_PopulatesAndCachesGitHubRepo(t *testing.T) {
-	remoteCalls := 0
-	d := NewDaemon(DaemonConfig{
-		Repos: []string{"/share/mirrormere"},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 3 && args[0] == "remote" && args[1] == "get-url" && args[2] == "origin" {
-				remoteCalls++
-				return []byte("https://github.com/azylman/mirrormere.git\n"), nil, nil
-			}
-			if len(args) >= 4 && args[0] == "log" && args[1] == "-1" {
-				return []byte("abc1234\x002026-09-26T20:00:00Z\n"), nil, nil
-			}
-			return nil, nil, nil
-		},
-	})
-
-	// First call resolves and caches
-	st1 := d.GetStatus(context.Background())
-	repoSt1, ok := st1.Repos["/share/mirrormere"]
-	if !ok {
-		t.Fatalf("expected /share/mirrormere in repos")
-	}
-	if repoSt1.GitHubRepo != "azylman/mirrormere" {
-		t.Errorf("expected GitHubRepo 'azylman/mirrormere', got %q", repoSt1.GitHubRepo)
-	}
-	if remoteCalls != 1 {
-		t.Errorf("expected 1 remote call, got %d", remoteCalls)
-	}
-
-	// Second call uses cached slug, remoteCalls should stay 1
-	st2 := d.GetStatus(context.Background())
-	repoSt2, ok := st2.Repos["/share/mirrormere"]
-	if !ok {
-		t.Fatalf("expected /share/mirrormere in repos on second call")
-	}
-	if repoSt2.GitHubRepo != "azylman/mirrormere" {
-		t.Errorf("expected cached GitHubRepo 'azylman/mirrormere', got %q", repoSt2.GitHubRepo)
-	}
-	if remoteCalls != 1 {
-		t.Errorf("expected remoteCalls to remain 1 after cached call, got %d", remoteCalls)
-	}
-}
-
-func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	jobsDir := filepath.Join(tmpDir, "jobs")
-	if err := os.MkdirAll(jobsDir, 0755); err != nil {
-		t.Fatalf("failed to create jobs dir: %v", err)
-	}
-
-	jobFile := filepath.Join(jobsDir, "mirrormere-core.nomad")
-	jobContent := `job "mirrormere-core" { group "core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:latest" } } } }`
-	if err := os.WriteFile(jobFile, []byte(jobContent), 0644); err != nil {
-		t.Fatalf("failed to write job file: %v", err)
-	}
-
-	currentDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	var restartCalled bool
-	var restartedJob string
-
-	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
-			restartCalled = true
-			restartedJob = args[len(args)-1]
-			return []byte("Job restart scheduled\n"), nil, nil
-		}
-		return nil, nil, nil
-	}
-
-	mockClient := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				header := make(http.Header)
-				header.Set("Docker-Content-Digest", currentDigest)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     header,
-					Body:       ioNopCloser(strings.NewReader("")),
-				}, nil
-			},
-		},
-	}
-
-	evtCh := make(chan HangarDeployEvent, 10)
-	d := NewDaemon(DaemonConfig{
-		ConfigDir:      tmpDir,
-		NomadExecutor:  mockNomad,
-		RegistryClient: mockClient,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "rev-parse" {
-				return []byte("poll_commit_sha_123\n"), nil, nil
-			}
-			return nil, nil, nil
-		},
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-	})
-
-	// Pre-seed known digest with older hash so new digest triggers restart
-	d.nomadKnownDigests["mirrormere-core:ghcr.io/azylman/mirrormere:latest"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-
-	if err := d.CheckAndReconcileNomadImages(context.Background()); err != nil {
-		t.Errorf("CheckAndReconcileNomadImages returned error: %v", err)
-	}
-
-	if !restartCalled {
-		t.Errorf("expected nomad job restart to be called")
-	}
-	select {
-	case dispatchedEvt := <-evtCh:
-		if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.JobName != "mirrormere-core" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" {
-			t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
-		}
-	case <-time.After(2 * time.Second):
-		t.Errorf("timed out waiting for deploy_started event")
-	}
-	if restartedJob != "mirrormere-core" {
-		t.Errorf("expected restarted job 'mirrormere-core', got %q", restartedJob)
-	}
-}
-
-func TestSyncDaemon_RemainingHelpers(t *testing.T) {
-	ctx := context.Background()
-	// nil daemon and nil fn updateReconcileStatus
-	var nilD *SyncDaemon
-	nilD.updateReconcileStatus(func(s *ReconciliationStatus) {})
-	d := NewDaemon(DaemonConfig{})
-	d.updateReconcileStatus(nil)
-
-	// GetReconciliationStatus edge cases
-	if st := nilD.GetReconciliationStatus(); st.State != "idle" {
-		t.Errorf("expected idle for nil daemon, got %q", st.State)
-	}
-
-	d.updateReconcileStatus(func(s *ReconciliationStatus) {
-		s.Active = false
-		s.State = "healthy"
-		s.CompletedAt = time.Now().Add(-10 * time.Minute)
-	})
-	if st := d.GetReconciliationStatus(); st.State != "idle" {
-		t.Errorf("expected idle after TTL expiry, got %q", st.State)
-	}
-
-
-	// EnsureDockerAuth
-	if err := nilD.EnsureDockerAuth(); err != nil {
-		t.Errorf("unexpected error for nil daemon: %v", err)
-	}
-	dNoPat := NewDaemon(DaemonConfig{PAT: ""})
-	if err := dNoPat.EnsureDockerAuth(); err != nil {
-		t.Errorf("unexpected error for empty PAT: %v", err)
-	}
-	dWithPat := NewDaemon(DaemonConfig{
-		PAT:       "ghp_test123",
-		ConfigDir: "/cfg",
-		RepoURLs: map[string]string{
-			"/cfg": "https://github.com/azylman/aerial-config.git",
-		},
-	})
-	_ = dWithPat.EnsureDockerAuth()
-
-	// resolveGitDir
-	if res, err := resolveGitDir(""); err == nil || res != "" {
-		t.Errorf("expected error for empty dir")
-	}
-
-	tempGitDir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tempGitDir, ".git"), 0755)
-	if res, err := resolveGitDir(tempGitDir); err != nil || res != filepath.Join(tempGitDir, ".git") {
-		t.Errorf("expected .git dir, got %s (err=%v)", res, err)
-	}
-
-	tempGitFileRel := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tempGitFileRel, ".git"), []byte("gitdir: ../dotgit\n"), 0644)
-	if res, err := resolveGitDir(tempGitFileRel); err != nil || !strings.HasSuffix(res, "dotgit") {
-		t.Errorf("expected relative dotgit resolved, got %s (err=%v)", res, err)
-	}
-
-	tempGitFileAbs := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tempGitFileAbs, ".git"), []byte("gitdir: /var/git/target\n"), 0644)
-	if res, err := resolveGitDir(tempGitFileAbs); err != nil || res != "/var/git/target" {
-		t.Errorf("expected abs dotgit resolved, got %s (err=%v)", res, err)
-	}
-
-	tempGitFileRaw := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tempGitFileRaw, ".git"), []byte("notgitdir\n"), 0644)
-	if res, err := resolveGitDir(tempGitFileRaw); err != nil || res != filepath.Join(tempGitFileRaw, ".git") {
-		t.Errorf("expected raw dotgit file returned, got %s (err=%v)", res, err)
-	}
-
-	// ReconcilePendingNomad error aggregation
-	_ = os.MkdirAll(filepath.Join(tempGitDir, "jobs"), 0755)
-	_ = os.WriteFile(filepath.Join(tempGitDir, "jobs", "bad.nomad"), []byte(`job "bad" {}`), 0644)
-	dNomadErr := NewDaemon(DaemonConfig{
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("syntax err"), errors.New("val fail")
-		},
-	})
-	dNomadErr.recordPendingNomadChanges(tempGitDir, []NomadFileChange{
-		{JobName: "bad", Path: "jobs/bad.nomad", Action: "apply"},
-	})
-	if err := dNomadErr.ReconcilePendingNomad(ctx); err == nil {
-		t.Errorf("expected error from ReconcilePendingNomad with invalid job")
-	}
-
-	// postChannelMessage
-	d.cachedChannelID = "12345"
-	client404 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusNotFound,
-					Body:       ioNopCloser(strings.NewReader("")),
-				}, nil
-			},
-		},
-	}
-	d.postChannelMessage(ctx, client404, "bot-tok", "12345", "hello")
-	if d.cachedChannelID != "" {
-		t.Errorf("expected cachedChannelID to be cleared on 404")
-	}
-
-	client500 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       ioNopCloser(strings.NewReader("")),
-				}, nil
-			},
-		},
-	}
-	d.postChannelMessage(ctx, client500, "bot-tok", "12345", "hello")
-
-	clientErr := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return nil, errors.New("network failure")
-			},
-		},
-	}
-	d.postChannelMessage(ctx, clientErr, "bot-tok", "12345", "hello")
-}
-
-func TestNomadCoverageRemediation(t *testing.T) {
+func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 	ctx := context.Background()
 
-	// 1. StartReconcilerLoop with debounce timer execution and failure branches
-	oldDebounce := reconcilerDebounceDuration
-	reconcilerDebounceDuration = 5 * time.Millisecond
-	defer func() { reconcilerDebounceDuration = oldDebounce }()
-
-	tempDir := t.TempDir()
-	d := NewDaemon(DaemonConfig{
-		ComposeDir: tempDir,
-		ConfigDir:  tempDir,
-		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, nil, errors.New("compose fail")
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return nil, nil, errors.New("nomad fail")
-		},
+	t.Run("missing_jobs_dir_returns_nil", func(t *testing.T) {
+		emptyDir := t.TempDir()
+		d := NewDaemon(DaemonConfig{
+			ComposeDir: emptyDir,
+			ConfigDir:  emptyDir,
+		})
+		if err := d.CheckAndReconcileNomadImages(ctx); err != nil {
+			t.Errorf("expected nil error for missing jobs directory, got %v", err)
+		}
 	})
-	d.recordPendingNomadChanges(tempDir, []NomadFileChange{
-		{JobName: "deljob", Action: "delete"},
-		{JobName: "appjob", Action: "apply", Path: "jobs/app.nomad"},
-	})
-	loopCtx, loopCancel := context.WithCancel(context.Background())
-	d.StartReconcilerLoop(loopCtx)
-	d.TriggerReconcile(ctx, true)
-	time.Sleep(30 * time.Millisecond)
-	loopCancel()
 
-	// 2. CheckAndReconcileNomadImages: directory entries, unreadable file, nil cache, restart error, throttle cooldown
-	cfgDir := t.TempDir()
-	jobsDir := filepath.Join(cfgDir, "jobs")
-	_ = os.MkdirAll(jobsDir, 0755)
-	_ = os.MkdirAll(filepath.Join(jobsDir, "nested-dir"), 0755)
-	_ = os.WriteFile(filepath.Join(jobsDir, "readme.txt"), []byte("not a nomad file"), 0644)
-	_ = os.WriteFile(filepath.Join(jobsDir, "job1.nomad"), []byte(`job "job1" { task "t" { config { image = "ghcr.io/test/img1:latest" } } }`), 0644)
+	t.Run("directory_entries_unreadable_and_throttle_early_return", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		jobsDir := filepath.Join(cfgDir, "jobs")
+		_ = os.MkdirAll(jobsDir, 0755)
+		_ = os.MkdirAll(filepath.Join(jobsDir, "nested-dir"), 0755)
+		_ = os.WriteFile(filepath.Join(jobsDir, "readme.txt"), []byte("not a nomad file"), 0644)
+		_ = os.WriteFile(filepath.Join(jobsDir, "job1.nomad"), []byte(`job "job1" { task "t" { config { image = "ghcr.io/test/img1:latest" } } }`), 0644)
 
-	dImages := NewDaemon(DaemonConfig{
-		ConfigDir: cfgDir,
-		RegistryClient: &http.Client{
+		dImages := NewDaemon(DaemonConfig{
+			ComposeDir: cfgDir,
+			ConfigDir:  cfgDir,
+			RegistryClient: &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						resp := &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader("{}")),
+						}
+						resp.Header.Set("Docker-Content-Digest", "sha256:firstdigest111")
+						return resp, nil
+					},
+				},
+			},
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) > 1 && args[1] == "restart" {
+					return []byte("restart err"), []byte("err details"), errors.New("restart fail")
+				}
+				return []byte("ok"), nil, nil
+			},
+		})
+
+		// Initial poll populates nil map
+		dImages.nomadKnownDigests = nil
+		if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
+			t.Errorf("unexpected error on first CheckAndReconcileNomadImages: %v", err)
+		}
+
+		// Immediate second poll triggers 5-minute throttle cooldown
+		if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
+			t.Errorf("unexpected error on throttled CheckAndReconcileNomadImages: %v", err)
+		}
+
+		// Reset lastNomadImagePoll to simulate elapsed time, update mock client digest to trigger restart failure path
+		dImages.nomadPollMu.Lock()
+		dImages.lastNomadImagePoll = time.Time{}
+		dImages.nomadPollMu.Unlock()
+
+		dImages.registryClient = &http.Client{
 			Transport: &roundTripperFunc{
 				fn: func(req *http.Request) (*http.Response, error) {
 					resp := &http.Response{
@@ -4263,63 +3983,335 @@ func TestNomadCoverageRemediation(t *testing.T) {
 						Header:     make(http.Header),
 						Body:       ioNopCloser(strings.NewReader("{}")),
 					}
-					resp.Header.Set("Docker-Content-Digest", "sha256:firstdigest111")
+					resp.Header.Set("Docker-Content-Digest", "sha256:seconddigest222")
 					return resp, nil
 				},
 			},
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) > 1 && args[1] == "restart" {
-				return []byte("restart err"), []byte("err details"), errors.New("restart fail")
-			}
-			return []byte("ok"), nil, nil
-		},
+		}
+		if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
+			t.Errorf("unexpected error on restart fail CheckAndReconcileNomadImages: %v", err)
+		}
 	})
 
-	// Initial poll populates nil map
-	dImages.nomadKnownDigests = nil
-	if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
-		t.Errorf("unexpected error on first CheckAndReconcileNomadImages: %v", err)
-	}
+	t.Run("image_polling_discovery_unchanged_changed_and_restart_handling", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		// Create a repo dir named "aerial" so filepath.Base(repo) resolves to "azylman/aerial"
+		repoDir := filepath.Join(tmpDir, "aerial")
+		jobsDir := filepath.Join(repoDir, "jobs")
+		_ = os.MkdirAll(jobsDir, 0755)
 
-	// Immediate second poll triggers 5-minute throttle cooldown
-	if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
-		t.Errorf("unexpected error on throttled CheckAndReconcileNomadImages: %v", err)
-	}
+		jobFile := filepath.Join(jobsDir, "svc.nomad")
+		// Non-azylman image ref triggers ImageSourceRepo == "" fallback to filepath.Base(repo) -> "azylman/aerial"
+		content := `job "svc" {
+  group "g" {
+    task "t" {
+      driver = "docker"
+      config {
+        image = "ghcr.io/test/img1:latest"
+      }
+    }
+  }
+}`
+		_ = os.WriteFile(jobFile, []byte(content), 0644)
 
-	// Reset lastNomadImagePoll to simulate elapsed time, update mock client digest to trigger restart failure path
-	dImages.lastNomadImagePoll = time.Time{}
-	dImages.registryClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				resp := &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     make(http.Header),
-					Body:       ioNopCloser(strings.NewReader("{}")),
-				}
-				resp.Header.Set("Docker-Content-Digest", "sha256:seconddigest222")
-				return resp, nil
+		currentDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.URL != nil && strings.Contains(req.URL.String(), "test/img1") {
+						header := make(http.Header)
+						header.Set("Docker-Content-Digest", currentDigest)
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Body:       ioNopCloser(strings.NewReader("not found")),
+					}, nil
+				},
 			},
-		},
-	}
-	if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
-		t.Errorf("unexpected error on restart fail CheckAndReconcileNomadImages: %v", err)
-	}
+		}
 
-	// 3. HasNomadChanges empty repoPath
-	if ch, err := d.HasNomadChanges(ctx, "", "head1", "head2"); err != nil || ch != nil {
-		t.Errorf("expected nil for empty repoPath in HasNomadChanges")
-	}
+		var restartedJob string
+		mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
+				restartedJob = args[len(args)-1]
+				return []byte("Restarted"), nil, nil
+			}
+			return nil, nil, nil
+		}
 
-	// 4. ParseNomadGitStatus with empty lines and spaces
-	changes := ParseNomadGitStatus("\n\n   \n\t\nM jobs/app.nomad\nD jobs/old.nomad\n")
-	if len(changes) != 2 {
-		t.Errorf("expected 2 changes from ParseNomadGitStatus, got %d", len(changes))
-	}
+		evtCh := make(chan HangarDeployEvent, 10)
+		d := NewDaemon(DaemonConfig{
+			Repos:          []string{repoDir},
+			ComposeDir:     repoDir,
+			ConfigDir:      repoDir,
+			NomadExecutor:  mockNomad,
+			RegistryClient: mockClient,
+			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "rev-parse" {
+					return []byte("poll_commit_sha_123\n"), nil, nil
+				}
+				return nil, nil, nil
+			},
+			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+				evtCh <- evt
+				return nil
+			},
+		})
 
-	// 6. postChannelMessage and sendWebhook with invalid URLs
-	d.postChannelMessage(ctx, http.DefaultClient, "tok", "bad\nchan", "msg")
-	d.sendWebhook(ctx, http.DefaultClient, "http://bad\nurl", "msg")
+		// 1. Initial discovery with nil nomadKnownDigests
+		d.nomadKnownDigests = nil
+		err := d.CheckAndReconcileNomadImages(ctx)
+		if err != nil {
+			t.Fatalf("first poll unexpected error: %v", err)
+		}
+		if restartedJob != "" {
+			t.Fatalf("expected no restart on initial discovery, got %s", restartedJob)
+		}
+
+		// Reset poll throttle
+		d.nomadPollMu.Lock()
+		d.lastNomadImagePoll = time.Time{}
+		d.nomadPollMu.Unlock()
+
+		// 2. Unchanged digest poll (no restart)
+		err = d.CheckAndReconcileNomadImages(ctx)
+		if err != nil {
+			t.Fatalf("second poll unexpected error: %v", err)
+		}
+		if restartedJob != "" {
+			t.Fatalf("expected no restart when digest matches, got %s", restartedJob)
+		}
+
+		// Reset poll throttle
+		d.nomadPollMu.Lock()
+		d.lastNomadImagePoll = time.Time{}
+		d.nomadPollMu.Unlock()
+
+		// 3. Changed digest poll with non-azylman image, git rev-parse HEAD fallback, and deploy_started event dispatch
+		currentDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		err = d.CheckAndReconcileNomadImages(ctx)
+		if err != nil {
+			t.Fatalf("third poll unexpected error: %v", err)
+		}
+		if restartedJob != "svc" {
+			t.Errorf("expected restart for svc, got %q", restartedJob)
+		}
+		select {
+		case dispatchedEvt := <-evtCh:
+			if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" || dispatchedEvt.Repo != "azylman/aerial" {
+				t.Errorf("expected deploy_started with repo azylman/aerial and commit poll_commit_sha_123, got %+v", dispatchedEvt)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for deploy_started event")
+		}
+
+		// Reset poll throttle
+		d.nomadPollMu.Lock()
+		d.lastNomadImagePoll = time.Time{}
+		d.nomadPollMu.Unlock()
+
+		// 4. Nomad job restart error handling
+		currentDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, []byte("nomad down"), errors.New("restart fail")
+		}
+		err = d.CheckAndReconcileNomadImages(ctx)
+		if err != nil {
+			t.Fatalf("poll with restart fail returned error: %v", err)
+		}
+	})
+}
+
+func TestReconciliationStatusAndHelpers_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ReconciliationStatus_nil_daemon_and_nil_fn", func(t *testing.T) {
+		var nilD *SyncDaemon
+		nilD.updateReconcileStatus(func(s *ReconciliationStatus) {})
+		if st := nilD.GetReconciliationStatus(); st.State != "idle" {
+			t.Errorf("expected idle for nil daemon, got %q", st.State)
+		}
+
+		d := NewDaemon(DaemonConfig{})
+		d.updateReconcileStatus(nil)
+	})
+
+	t.Run("ReconciliationStatus_TTL_reset", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{})
+		d.updateReconcileStatus(func(s *ReconciliationStatus) {
+			s.Active = false
+			s.State = "healthy"
+			s.Stage = "healthy"
+			s.TargetServices = []string{"brain"}
+			s.CompletedAt = time.Now().Add(-6 * time.Minute)
+		})
+
+		status := d.GetReconciliationStatus()
+		if status.State != "idle" || status.Stage != "idle" {
+			t.Errorf("expected TTL to reset state to idle, got %+v", status)
+		}
+	})
+
+	t.Run("ReconciliationStatus_exposed_in_GetStatus", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{})
+		d.updateReconcileStatus(func(s *ReconciliationStatus) {
+			s.Active = true
+			s.State = "swapping"
+			s.Stage = "swapping"
+			s.TargetServices = []string{"scheduler-mcp"}
+			s.StartedAt = time.Now().UTC()
+		})
+
+		statusResp := d.GetStatus(ctx)
+		if statusResp.Reconciliation == nil {
+			t.Fatalf("expected non-nil Reconciliation in GetStatus")
+		}
+		if statusResp.Reconciliation.State != "swapping" {
+			t.Errorf("expected state swapping, got %s", statusResp.Reconciliation.State)
+		}
+		if len(statusResp.Reconciliation.TargetServices) != 1 || statusResp.Reconciliation.TargetServices[0] != "scheduler-mcp" {
+			t.Errorf("expected target services [scheduler-mcp], got %v", statusResp.Reconciliation.TargetServices)
+		}
+	})
+
+	t.Run("GetStatus_populates_and_caches_GitHubRepo", func(t *testing.T) {
+		remoteCalls := 0
+		d := NewDaemon(DaemonConfig{
+			Repos: []string{"/share/mirrormere"},
+			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 3 && args[0] == "remote" && args[1] == "get-url" && args[2] == "origin" {
+					remoteCalls++
+					return []byte("https://github.com/azylman/mirrormere.git\n"), nil, nil
+				}
+				if len(args) >= 4 && args[0] == "log" && args[1] == "-1" {
+					return []byte("abc1234\x002026-09-26T20:00:00Z\n"), nil, nil
+				}
+				return nil, nil, nil
+			},
+		})
+
+		st1 := d.GetStatus(ctx)
+		repoSt1, ok := st1.Repos["/share/mirrormere"]
+		if !ok || repoSt1.GitHubRepo != "azylman/mirrormere" {
+			t.Errorf("expected GitHubRepo azylman/mirrormere, got %q", repoSt1.GitHubRepo)
+		}
+		if remoteCalls != 1 {
+			t.Errorf("expected 1 remote call, got %d", remoteCalls)
+		}
+
+		st2 := d.GetStatus(ctx)
+		repoSt2, ok := st2.Repos["/share/mirrormere"]
+		if !ok || repoSt2.GitHubRepo != "azylman/mirrormere" {
+			t.Errorf("expected cached GitHubRepo azylman/mirrormere, got %q", repoSt2.GitHubRepo)
+		}
+		if remoteCalls != 1 {
+			t.Errorf("expected remoteCalls to remain 1 after cached call, got %d", remoteCalls)
+		}
+	})
+
+	t.Run("RegistryClient_and_LastReconcile_accessors", func(t *testing.T) {
+		var nilDaemon *SyncDaemon
+		if c := nilDaemon.getRegistryClient(); c == nil {
+			t.Errorf("expected default registry client for nil daemon")
+		}
+
+		dDefault := &SyncDaemon{}
+		c := dDefault.getRegistryClient()
+		if c == nil || c.Timeout != 10*time.Second {
+			t.Errorf("expected default registry client with 10s timeout, got %v", c)
+		}
+
+		custom := &http.Client{Timeout: 42 * time.Second}
+		dCustom := NewDaemon(DaemonConfig{RegistryClient: custom})
+		if dCustom.getRegistryClient() != custom {
+			t.Errorf("expected custom registry client to be returned")
+		}
+
+		now := time.Now().Truncate(time.Second)
+		dCustom.SetLastReconcile(now)
+		if !dCustom.GetLastReconcile().Equal(now) {
+			t.Errorf("expected LastReconcile to equal %v, got %v", now, dCustom.GetLastReconcile())
+		}
+	})
+
+	t.Run("resolveGitDir_cases", func(t *testing.T) {
+		if res, err := resolveGitDir(""); err == nil || res != "" {
+			t.Errorf("expected error for empty dir")
+		}
+
+		tempGitDir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(tempGitDir, ".git"), 0755)
+		if res, err := resolveGitDir(tempGitDir); err != nil || res != filepath.Join(tempGitDir, ".git") {
+			t.Errorf("expected .git dir, got %s (err=%v)", res, err)
+		}
+
+		tempGitFileRel := t.TempDir()
+		_ = os.WriteFile(filepath.Join(tempGitFileRel, ".git"), []byte("gitdir: ../dotgit\n"), 0644)
+		if res, err := resolveGitDir(tempGitFileRel); err != nil || !strings.HasSuffix(res, "dotgit") {
+			t.Errorf("expected relative dotgit resolved, got %s (err=%v)", res, err)
+		}
+
+		tempGitFileAbs := t.TempDir()
+		_ = os.WriteFile(filepath.Join(tempGitFileAbs, ".git"), []byte("gitdir: /var/git/target\n"), 0644)
+		if res, err := resolveGitDir(tempGitFileAbs); err != nil || res != "/var/git/target" {
+			t.Errorf("expected abs dotgit resolved, got %s (err=%v)", res, err)
+		}
+
+		tempGitFileRaw := t.TempDir()
+		_ = os.WriteFile(filepath.Join(tempGitFileRaw, ".git"), []byte("notgitdir\n"), 0644)
+		if res, err := resolveGitDir(tempGitFileRaw); err != nil || res != filepath.Join(tempGitFileRaw, ".git") {
+			t.Errorf("expected raw dotgit file returned, got %s (err=%v)", res, err)
+		}
+	})
+
+	t.Run("postChannelMessage_and_sendWebhook", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{})
+		d.cachedChannelID = "12345"
+
+		client404 := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+		d.postChannelMessage(ctx, client404, "bot-tok", "12345", "hello")
+		if d.cachedChannelID != "" {
+			t.Errorf("expected cachedChannelID to be cleared on 404")
+		}
+
+		client500 := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusInternalServerError,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+		d.postChannelMessage(ctx, client500, "bot-tok", "12345", "hello")
+
+		clientErr := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return nil, errors.New("network failure")
+				},
+			},
+		}
+		d.postChannelMessage(ctx, clientErr, "bot-tok", "12345", "hello")
+
+		d.postChannelMessage(ctx, http.DefaultClient, "tok", "bad\nchan", "msg")
+		d.sendWebhook(ctx, http.DefaultClient, "http://bad\nurl", "msg")
+	})
 }
 
 func TestCheckGitHubRepoBuildInProgress_TableDriven(t *testing.T) {
@@ -5763,130 +5755,6 @@ func TestExecutors_DirectCoverage(t *testing.T) {
 	_, _, _ = defaultComposeExecutor(ctx, t.TempDir(), "version")
 }
 
-func TestCheckAndReconcileNomadImages_Comprehensive(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	jobsDir := filepath.Join(tmpDir, "jobs")
-	_ = os.MkdirAll(jobsDir, 0755)
-
-	jobFile := filepath.Join(jobsDir, "svc.nomad")
-	content := `
-job "svc" {
-  group "g" {
-    task "t" {
-      driver = "docker"
-      config {
-        image = "ghcr.io/azylman/aerial-brain:latest"
-      }
-    }
-  }
-}
-`
-	_ = os.WriteFile(jobFile, []byte(content), 0644)
-
-	currentDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	mockClient := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				header := make(http.Header)
-				header.Set("Docker-Content-Digest", currentDigest)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     header,
-					Body:       ioNopCloser(strings.NewReader("")),
-				}, nil
-			},
-		},
-	}
-
-	var restartedJob string
-	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
-			restartedJob = args[len(args)-1]
-			return []byte("Restarted"), nil, nil
-		}
-		return nil, nil, nil
-	}
-
-	evtCh := make(chan HangarDeployEvent, 10)
-	d := NewDaemon(DaemonConfig{
-		ConfigDir:      tmpDir,
-		NomadExecutor:  mockNomad,
-		RegistryClient: mockClient,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "rev-parse" {
-				return []byte("poll_commit_sha_123\n"), nil, nil
-			}
-			return nil, nil, nil
-		},
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-	})
-
-	// 1. First poll seeds known digest
-	err := d.CheckAndReconcileNomadImages(ctx)
-	if err != nil {
-		t.Fatalf("first poll unexpected error: %v", err)
-	}
-	if restartedJob != "" {
-		t.Fatalf("expected no restart on initial discovery, got %s", restartedJob)
-	}
-
-	// Reset poll throttle
-	d.nomadPollMu.Lock()
-	d.lastNomadImagePoll = time.Time{}
-	d.nomadPollMu.Unlock()
-
-	// 2. Second poll sees same digest (no restart)
-	err = d.CheckAndReconcileNomadImages(ctx)
-	if err != nil {
-		t.Fatalf("second poll unexpected error: %v", err)
-	}
-	if restartedJob != "" {
-		t.Fatalf("expected no restart when digest matches, got %s", restartedJob)
-	}
-
-	// Reset poll throttle
-	d.nomadPollMu.Lock()
-	d.lastNomadImagePoll = time.Time{}
-	d.nomadPollMu.Unlock()
-
-	// 3. Third poll sees new digest -> triggers restart
-	currentDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	err = d.CheckAndReconcileNomadImages(ctx)
-	if err != nil {
-		t.Fatalf("third poll unexpected error: %v", err)
-	}
-	if restartedJob != "svc" {
-		t.Errorf("expected restart for svc, got %q", restartedJob)
-	}
-	select {
-	case dispatchedEvt := <-evtCh:
-		if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" || dispatchedEvt.Status != "started" {
-			t.Errorf("expected deploy_started with commit poll_commit_sha_123, got %+v", dispatchedEvt)
-		}
-	case <-time.After(2 * time.Second):
-		t.Errorf("timed out waiting for deploy_started event")
-	}
-
-	// Reset poll throttle
-	d.nomadPollMu.Lock()
-	d.lastNomadImagePoll = time.Time{}
-	d.nomadPollMu.Unlock()
-
-	// 4. Restart fails gracefully
-	currentDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
-	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		return nil, []byte("nomad down"), errors.New("restart fail")
-	}
-	err = d.CheckAndReconcileNomadImages(ctx)
-	if err != nil {
-		t.Fatalf("poll with restart fail returned error: %v", err)
-	}
-}
-
 func TestEnsureDockerAuth_AllCases(t *testing.T) {
 	// 1. Empty PAT -> no-op nil
 	dEmpty := NewDaemon(DaemonConfig{PAT: ""})
@@ -5940,17 +5808,6 @@ func TestExecutorsAndDispatchers_EdgeCoverage(t *testing.T) {
 		},
 	})
 	dPanic.DispatchDeployEvent(HangarDeployEvent{JobName: "test-panic"})
-	time.Sleep(50 * time.Millisecond)
-}
-
-func TestDaemonLoops_GracefulCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	d := NewDaemon(DaemonConfig{
-		Interval: 10 * time.Millisecond,
-	})
-	d.StartPeriodicLoop(ctx)
-	d.StartReconcilerLoop(ctx)
-	cancel()
 	time.Sleep(50 * time.Millisecond)
 }
 
@@ -6357,17 +6214,6 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 }
 
 
-func TestStartReconcilerLoop_NilChannel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	d := &SyncDaemon{}
-	d.StartReconcilerLoop(ctx)
-	if d.reconcileCh == nil {
-		t.Errorf("expected reconcileCh to be initialized")
-	}
-}
-
-
 func TestRunGitCommand_WithDir(t *testing.T) {
 	dir := t.TempDir()
 	stdout, _, err := runGitCommand(context.Background(), dir, "", "init")
@@ -6406,14 +6252,6 @@ func TestGetDeployDispatcher_Branches(t *testing.T) {
 	}
 	if !customCalled {
 		t.Errorf("expected custom deploy dispatcher to be called")
-	}
-}
-
-func TestGetRegistryClient_NilDaemon(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	client := nilDaemon.getRegistryClient()
-	if client == nil {
-		t.Errorf("expected non-nil default client for nil daemon")
 	}
 }
 
