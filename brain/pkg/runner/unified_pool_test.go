@@ -3296,3 +3296,125 @@ func TestUnifiedProcessPool_AcquireLease_DefersRotationToTurnEndEvenIfExceeded(t
 		t.Errorf("expected rotatedOld %q, got %q", existingSessID, rotatedOld)
 	}
 }
+
+func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var spawnedEnvs [][]string
+	var spawnedSessions []string
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			mu.Lock()
+			envCopy := append([]string(nil), cfg.Env...)
+			spawnedEnvs = append(spawnedEnvs, envCopy)
+			spawnedSessions = append(spawnedSessions, cfg.SessionID)
+			pid := 510 + len(spawnedEnvs)
+			mu.Unlock()
+
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = uuid.New().String()
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						return
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
+					}
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: pid}, nil
+		},
+	}
+
+	pinnedSessID := uuid.New().String()
+	pool := NewUnifiedProcessPool(PoolConfig{
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			return SessionRecord{
+				ActiveSessionID: pinnedSessID,
+				TurnCount:       1,
+			}, nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// 1. Pre-warm / non-chunk turn spawns with no AERIAL_VANADIS_CHUNK_ID
+	lease0, err := pool.AcquireLease(ctx, "thread-vanadis")
+	if err != nil {
+		t.Fatalf("AcquireLease 0 error: %v", err)
+	}
+	if _, err := lease0.Execute(ctx, &TurnContext{TurnID: "t0", Prompt: "warmup", Ctx: ctx}); err != nil {
+		t.Fatalf("Execute 0 error: %v", err)
+	}
+	_ = lease0.Release()
+
+	// 2. Chunk 1 turn refreshes daemon with AERIAL_VANADIS_CHUNK_ID=chunk-1 while preserving SessionID
+	ctxChunk1 := WithVanadisChunkID(ctx, "chunk-1")
+	lease1, err := pool.AcquireLease(ctxChunk1, "thread-vanadis")
+	if err != nil {
+		t.Fatalf("AcquireLease 1 error: %v", err)
+	}
+	if lease1.SessionID() != pinnedSessID {
+		t.Fatalf("expected pinned session %q to be preserved across chunk refresh, got %q", pinnedSessID, lease1.SessionID())
+	}
+	if _, err := lease1.Execute(ctxChunk1, &TurnContext{TurnID: "t1", Prompt: "chunk 1 work", VanadisChunkID: "chunk-1", Ctx: ctxChunk1}); err != nil {
+		t.Fatalf("Execute 1 error: %v", err)
+	}
+	_ = lease1.Release()
+
+	// 3. Subsequent non-chunk turn refreshes daemon back to clean env (no AERIAL_VANADIS_CHUNK_ID)
+	lease2, err := pool.AcquireLease(ctx, "thread-vanadis")
+	if err != nil {
+		t.Fatalf("AcquireLease 2 error: %v", err)
+	}
+	if _, err := lease2.Execute(ctx, &TurnContext{TurnID: "t2", Prompt: "post-chunk chat", Ctx: ctx}); err != nil {
+		t.Fatalf("Execute 2 error: %v", err)
+	}
+	_ = lease2.Release()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(spawnedEnvs) != 3 {
+		t.Fatalf("expected 3 daemon spawns (initial, chunk-1, post-chunk), got %d", len(spawnedEnvs))
+	}
+	for _, kv := range spawnedEnvs[0] {
+		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
+			t.Errorf("spawn 0 should not have AERIAL_VANADIS_CHUNK_ID, got %q", kv)
+		}
+	}
+	foundChunk1 := false
+	for _, kv := range spawnedEnvs[1] {
+		if kv == "AERIAL_VANADIS_CHUNK_ID=chunk-1" {
+			foundChunk1 = true
+		}
+	}
+	if !foundChunk1 {
+		t.Errorf("spawn 1 missing AERIAL_VANADIS_CHUNK_ID=chunk-1 in env: %v", spawnedEnvs[1])
+	}
+	for _, kv := range spawnedEnvs[2] {
+		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
+			t.Errorf("spawn 2 should scrub AERIAL_VANADIS_CHUNK_ID after chunk completes, got %q", kv)
+		}
+	}
+	for i, s := range spawnedSessions {
+		if s != pinnedSessID {
+			t.Errorf("spawn %d expected SessionID %q, got %q", i, pinnedSessID, s)
+		}
+	}
+}
+

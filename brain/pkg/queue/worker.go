@@ -472,6 +472,15 @@ func extractBurstSilent(burst []db.Message) bool {
 	return false
 }
 
+func extractBurstVanadisChunkID(burst []db.Message) string {
+	for i := len(burst) - 1; i >= 0; i-- {
+		if cid := strings.TrimSpace(burst[i].Metadata.VanadisChunkID); cid != "" {
+			return cid
+		}
+	}
+	return ""
+}
+
 func isLowEffortBurst(burst []db.Message) bool {
 	for _, m := range burst {
 		if strings.EqualFold(strings.TrimSpace(m.Effort), "low") ||
@@ -631,6 +640,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 
 	// 2. Acquire exclusive session lease before prompt construction
 	leaseCtx, leaseCancel := context.WithTimeout(te.pool.ctx, 30*time.Second)
+	leaseCtx = runner.WithVanadisChunkID(leaseCtx, extractBurstVanadisChunkID(te.burst))
 	lease, leaseErr := leasedPool.AcquireLease(leaseCtx, te.threadID)
 	leaseCancel()
 	if leaseErr != nil {
@@ -1706,6 +1716,7 @@ func (te *turnExecution) executeWithRetries() {
 				ScopeInstructions:   scopeInst,
 				ChannelInstructions: scopeInst,
 				CoordinationContext: te.injectedHookContext,
+				VanadisChunkID:      extractBurstVanadisChunkID(te.burst),
 				Sink:                sink,
 				CreatedAt:           time.Now(),
 				Ctx:                 runCtx,

@@ -46,12 +46,13 @@ import (
 )
 
 type PromptRequest struct {
-	Prompt    string `json:"prompt"`
-	ChannelID string `json:"channel_id"`
-	MessageID string `json:"message_id,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Effort    string `json:"effort,omitempty"`
-	Silent    bool   `json:"silent,omitempty"`
+	Prompt         string `json:"prompt"`
+	ChannelID      string `json:"channel_id"`
+	MessageID      string `json:"message_id,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Effort         string `json:"effort,omitempty"`
+	Silent         bool   `json:"silent,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -124,8 +125,9 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Status:     db.StatusPending,
 			Effort:     effort,
 			Metadata: db.MessageMetadata{
-				Model:  model,
-				Silent: req.Silent,
+				Model:          model,
+				Silent:         req.Silent,
+				VanadisChunkID: strings.TrimSpace(req.VanadisChunkID),
 			},
 			CreatedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),

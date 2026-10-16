@@ -245,13 +245,31 @@ NOMAD_DELETED_JOB_CHECK=$(bash -c '
 ')
 assert_eq "kiosk-go2rtc" "$NOMAD_DELETED_JOB_CHECK" "Deleted Nomad jobs are filtered out from metadata"
 
-# Case 9: --vanadis-chunk global flag parsing
+# Case 9: --vanadis-chunk global flag parsing and AERIAL_VANADIS_CHUNK_ID env injection
 VANADIS_FLAG_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --vanadis-chunk=chunk-xyz-123 --source-only 2>/dev/null || true
     echo \"\${VANADIS_CHUNK_ID}\"
 ")
 assert_eq "chunk-xyz-123" "$VANADIS_FLAG_CHECK" "--vanadis-chunk=<id> sets VANADIS_CHUNK_ID"
+
+VANADIS_ENV_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    echo \"\${VANADIS_CHUNK_ID}\"
+")
+assert_eq "chunk-from-env-456" "$VANADIS_ENV_CHECK" "AERIAL_VANADIS_CHUNK_ID populates VANADIS_CHUNK_ID automatically"
+
+VANADIS_OVERRIDE_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
+    source \"${AERIAL_PR}\" --vanadis-chunk=chunk-cli-override-789 --source-only 2>/dev/null || true
+    local_init=\$(grep 'local vanadis_chunk_id=' \"${AERIAL_PR}\")
+    _check_local() { eval \"\$local_init\"; echo \"\$vanadis_chunk_id\"; }
+    echo \"\${VANADIS_CHUNK_ID}:\$(_check_local)\"
+")
+assert_eq "chunk-cli-override-789:chunk-cli-override-789" "$VANADIS_OVERRIDE_CHECK" "--vanadis-chunk CLI flag overrides AERIAL_VANADIS_CHUNK_ID in both global and submit_scratch scope"
 
 # Case 10: register_pr_in_brain retry with backoff and hard failure on exhaustion
 REGISTER_PR_CHECK=$(bash -c "

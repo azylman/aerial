@@ -38,6 +38,7 @@ type MessageMetadata struct {
 	Attachments       []string `json:"attachments,omitempty"`
 	Model             string   `json:"model,omitempty"`
 	Silent            bool     `json:"silent,omitempty"`
+	VanadisChunkID    string   `json:"vanadis_chunk_id,omitempty"`
 }
 
 // IsEmpty returns true if all metadata fields are zero/empty.
@@ -58,7 +59,8 @@ func (m MessageMetadata) IsEmpty() bool {
 		m.ReplyingToContent == "" &&
 		len(m.Attachments) == 0 &&
 		m.Model == "" &&
-		!m.Silent
+		!m.Silent &&
+		m.VanadisChunkID == ""
 }
 
 // Value implements driver.Valuer for PostgreSQL JSONB and SQLite TEXT.

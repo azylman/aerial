@@ -45,6 +45,7 @@ type TurnContext struct {
 	ChannelInstructions string // Deprecated: Use ScopeInstructions
 	CoordinationContext string
 	ThreadSummary       string
+	VanadisChunkID      string
 	Sink                TurnSink
 	CreatedAt           time.Time
 	Ctx                 context.Context
@@ -209,6 +210,16 @@ func (d *StreamingDaemon) SessionID() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.sessionID
+}
+
+// VanadisChunkID returns the Vanadis chunk ID configured in the daemon's environment.
+func (d *StreamingDaemon) VanadisChunkID() string {
+	if d == nil {
+		return ""
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return strings.TrimSpace(d.cfg.VanadisChunkID)
 }
 
 // SetTranscriptRescuer dynamically updates the transcript rescuer callback on the daemon.

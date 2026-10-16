@@ -25,6 +25,7 @@ func TestFormatSingleDiscordPrompt_StructureAndEscaping(t *testing.T) {
 			AuthorGlobalName:  "Alice In Wonderland\r",
 			AuthorBot:         false,
 			IsAdmin:           true,
+			VanadisChunkID:    "chunk-test-77",
 			Mentions:          []string{"aerial", "moderator"},
 			MentionUserIDs:    []string{"bot-aerial-id"},
 			MentionRoleIDs:    []string{"role-admin"},
@@ -70,6 +71,9 @@ func TestFormatSingleDiscordPrompt_StructureAndEscaping(t *testing.T) {
 	}
 	if !strings.Contains(formatted, "- is_admin: true\n") {
 		t.Errorf("missing - is_admin: true")
+	}
+	if !strings.Contains(formatted, "- vanadis_chunk_id: chunk-test-77\n") {
+		t.Errorf("missing - vanadis_chunk_id: chunk-test-77: %s", formatted)
 	}
 	if !strings.Contains(formatted, "- replying_to:\n    author: \"@bob\"\n") {
 		t.Errorf("missing - replying_to author: %s", formatted)
@@ -369,3 +373,17 @@ func TestFormatSingleDiscordPrompt_ChannelAndThreadNames(t *testing.T) {
 	}
 }
 
+
+func TestExtractBurstVanadisChunkID(t *testing.T) {
+	if got := extractBurstVanadisChunkID(nil); got != "" {
+		t.Fatalf("expected empty for nil burst, got %q", got)
+	}
+	burst := []db.Message{
+		{ID: "1", Metadata: db.MessageMetadata{VanadisChunkID: "chunk-old"}},
+		{ID: "2", Metadata: db.MessageMetadata{VanadisChunkID: "  chunk-latest  "}},
+		{ID: "3", Metadata: db.MessageMetadata{}},
+	}
+	if got := extractBurstVanadisChunkID(burst); got != "chunk-latest" {
+		t.Fatalf("expected chunk-latest, got %q", got)
+	}
+}
