@@ -45,12 +45,12 @@ import (
 )
 
 type PromptRequest struct {
-	Prompt         string `json:"prompt"`
-	ChannelID      string `json:"channel_id"`
-	MessageID      string `json:"message_id,omitempty"`
-	Model          string `json:"model,omitempty"`
-	Effort         string `json:"effort,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	Prompt    string `json:"prompt"`
+	ChannelID string `json:"channel_id"`
+	MessageID string `json:"message_id,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	Silent    bool   `json:"silent,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -107,9 +107,8 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		model := strings.TrimSpace(req.Model)
-		vanadisChunkID := strings.TrimSpace(req.VanadisChunkID)
 		effort := strings.TrimSpace(req.Effort)
-		if effort == "" && (vanadisChunkID != "" || strings.Contains(strings.ToLower(model), "flash")) {
+		if effort == "" && strings.Contains(strings.ToLower(model), "flash") {
 			effort = "low"
 		}
 
@@ -124,8 +123,8 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Status:     db.StatusPending,
 			Effort:     effort,
 			Metadata: db.MessageMetadata{
-				Model:          model,
-				VanadisChunkID: vanadisChunkID,
+				Model:  model,
+				Silent: req.Silent,
 			},
 			CreatedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),

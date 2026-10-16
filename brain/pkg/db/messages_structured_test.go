@@ -32,7 +32,7 @@ func TestMessageMetadata_IsEmpty(t *testing.T) {
 		{"replying_to_content", MessageMetadata{ReplyingToContent: "hello"}},
 		{"attachments", MessageMetadata{Attachments: []string{"http://example.com/img.png"}}},
 		{"model", MessageMetadata{Model: "gemini-4-flash"}},
-		{"vanadis_chunk_id", MessageMetadata{VanadisChunkID: "chunk-101-0"}},
+		{"silent", MessageMetadata{Silent: true}},
 	}
 
 	for _, tc := range tests {
@@ -60,7 +60,7 @@ func TestMessageMetadata_ValueAndScan(t *testing.T) {
 		ReplyingToContent: "previous message",
 		Attachments:       []string{"https://cdn.discordapp.com/attachments/1.png"},
 		Model:             "gemini-4-flash",
-		VanadisChunkID:    "chunk-101-0",
+		Silent:            true,
 	}
 
 	val, err := md.Value()
@@ -78,7 +78,7 @@ func TestMessageMetadata_ValueAndScan(t *testing.T) {
 	if err := scanned.Scan(strVal); err != nil {
 		t.Fatalf("Scan(string) failed: %v", err)
 	}
-	if scanned.ChannelID != md.ChannelID || scanned.AuthorUsername != md.AuthorUsername || !scanned.IsAdmin || scanned.Model != "gemini-4-flash" || scanned.VanadisChunkID != "chunk-101-0" {
+	if scanned.ChannelID != md.ChannelID || scanned.AuthorUsername != md.AuthorUsername || !scanned.IsAdmin || scanned.Model != "gemini-4-flash" || !scanned.Silent {
 		t.Errorf("scanned metadata mismatch: %+v", scanned)
 	}
 

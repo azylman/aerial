@@ -545,10 +545,10 @@ func (w *ExecuteChunkWorker) Work(ctx context.Context, job *river.Job[ExecuteChu
 
 // BrainPromptRequest represents the JSON payload dispatched to Brain's POST /prompt endpoint.
 type BrainPromptRequest struct {
-	ChannelID      string `json:"channel_id"`
-	Prompt         string `json:"prompt"`
-	Effort         string `json:"effort,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id"`
+	ChannelID string `json:"channel_id"`
+	Prompt    string `json:"prompt"`
+	Effort    string `json:"effort,omitempty"`
+	Silent    bool   `json:"silent,omitempty"`
 }
 
 // VanadisServer manages HTTP endpoints and River worker coordination for Vanadis builds.
@@ -633,10 +633,10 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	}
 
 	reqPayload := BrainPromptRequest{
-		ChannelID:      build.ThreadID,
-		Prompt:         prompt,
-		Effort:         "low",
-		VanadisChunkID: chunk.ID,
+		ChannelID: build.ThreadID,
+		Prompt:    prompt,
+		Effort:    "low",
+		Silent:    true,
 	}
 
 	if err := s.dispatchBrainPrompt(ctx, reqPayload); err != nil {

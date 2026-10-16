@@ -123,26 +123,26 @@ func TestHandlePromptValidation(t *testing.T) {
 		t.Errorf("Unexpected message fields in DB: %+v", msg)
 	}
 
-	// Test prompt payload with model and vanadis_chunk_id sets low effort and metadata
-	vanadisPayload, _ := json.Marshal(map[string]string{
-		"prompt":           "Execute chunk 1",
-		"channel_id":       "1542423172400291873",
-		"message_id":       "msg-vanadis-1",
-		"model":            "gemini-4-flash",
-		"vanadis_chunk_id": "chunk-1",
+	// Test prompt payload with model and silent sets metadata and low effort
+	silentPayload, _ := json.Marshal(map[string]any{
+		"prompt":     "Execute chunk 1",
+		"channel_id": "1542423172400291873",
+		"message_id": "msg-silent-1",
+		"model":      "gemini-4-flash",
+		"silent":     true,
 	})
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(vanadisPayload))
+	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(silentPayload))
 	w = httptest.NewRecorder()
 	handler(w, req)
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("Expected status 202 StatusAccepted for vanadis prompt, got %d", w.Code)
+		t.Fatalf("Expected status 202 StatusAccepted for silent prompt, got %d", w.Code)
 	}
-	vMsg, err := store.GetMessage(context.Background(), "msg-vanadis-1")
-	if err != nil || vMsg == nil {
-		t.Fatalf("Failed to retrieve vanadis message: %v", err)
+	sMsg, err := store.GetMessage(context.Background(), "msg-silent-1")
+	if err != nil || sMsg == nil {
+		t.Fatalf("Failed to retrieve silent message: %v", err)
 	}
-	if vMsg.Effort != "low" || vMsg.Metadata.Model != "gemini-4-flash" || vMsg.Metadata.VanadisChunkID != "chunk-1" {
-		t.Errorf("Expected Effort='low', Metadata.Model='gemini-4-flash', Metadata.VanadisChunkID='chunk-1', got Effort=%q Metadata=%+v", vMsg.Effort, vMsg.Metadata)
+	if sMsg.Effort != "low" || sMsg.Metadata.Model != "gemini-4-flash" || !sMsg.Metadata.Silent {
+		t.Errorf("Expected Effort='low', Metadata.Model='gemini-4-flash', Metadata.Silent=true, got Effort=%q Metadata=%+v", sMsg.Effort, sMsg.Metadata)
 	}
 }
 
