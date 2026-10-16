@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -451,13 +452,15 @@ type DeployingPR struct {
 
 // VanadisChunkSummary holds condensed status metadata for a single chunk in a Vanadis build.
 type VanadisChunkSummary struct {
-	ID         string `json:"id"`
-	ChunkIndex int    `json:"chunk_index"`
-	Repo       string `json:"repo,omitempty"`
-	Title      string `json:"title"`
-	Status     string `json:"status"`
-	PRNumber   int    `json:"pr_number,omitempty"`
-	DiffStat   string `json:"diff_stat,omitempty"`
+	ID         string    `json:"id"`
+	ChunkIndex int       `json:"chunk_index"`
+	Repo       string    `json:"repo,omitempty"`
+	Title      string    `json:"title"`
+	Status     string    `json:"status"`
+	PRNumber   int       `json:"pr_number,omitempty"`
+	DiffStat   string    `json:"diff_stat,omitempty"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
 }
 
 // VanadisAdvancementResult describes the outcome of advancing a Vanadis build chunk upon PR merge.
@@ -505,13 +508,15 @@ type PRRegistryUpdater interface {
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 type StatusWidgetChunk struct {
-	Index         int      `json:"index"`
-	Repo          string   `json:"repo"`
-	Title         string   `json:"title"`
-	Status        string   `json:"status"`
-	PRNumber      int      `json:"pr_number,omitempty"`
-	DiffStat      string   `json:"diff_stat,omitempty"`
-	DeployingJobs []string `json:"deploying_jobs,omitempty"`
+	Index         int       `json:"index"`
+	Repo          string    `json:"repo"`
+	Title         string    `json:"title"`
+	Status        string    `json:"status"`
+	PRNumber      int       `json:"pr_number,omitempty"`
+	DiffStat      string    `json:"diff_stat,omitempty"`
+	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
+	StartedAt     time.Time `json:"started_at,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 }
 
 // StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
@@ -973,7 +978,7 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 		return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
 	}
 
-	allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), diff_stat FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
+	allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), diff_stat, started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
 	rows, err := tx.Query(qCtx, allChunksQuery, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("query vanadis build chunks: %w", err)
@@ -981,9 +986,13 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 	var allChunks []VanadisChunkSummary
 	for rows.Next() {
 		var cs VanadisChunkSummary
-		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &cs.DiffStat); scanErr != nil {
+		var startedAt sql.NullTime
+		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &cs.DiffStat, &startedAt, &cs.UpdatedAt); scanErr != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan vanadis build chunk: %w", scanErr)
+		}
+		if startedAt.Valid {
+			cs.StartedAt = startedAt.Time
 		}
 		if cs.ID == chunkID {
 			cs.Status = "merged"
@@ -1734,7 +1743,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	)
 	if err == nil && buildID != "" {
 		// Parent Vanadis build found
-		allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), diff_stat FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC`
+		allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), diff_stat, started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC`
 		rows, qErr := pgReg.pool.Query(qCtx, allChunksQuery, buildID)
 		if qErr != nil {
 			return fmt.Errorf("sync widget query chunks: %w", qErr)
@@ -1743,9 +1752,14 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 		for rows.Next() {
 			var csID, csRepo, csTitle, csStatus, csDiff string
 			var csIdx, csPR int
-			if scanErr := rows.Scan(&csID, &csIdx, &csRepo, &csTitle, &csStatus, &csPR, &csDiff); scanErr != nil {
+			var csStartedAtNull sql.NullTime
+			var csStartedAt, csUpdatedAt time.Time
+			if scanErr := rows.Scan(&csID, &csIdx, &csRepo, &csTitle, &csStatus, &csPR, &csDiff, &csStartedAtNull, &csUpdatedAt); scanErr != nil {
 				rows.Close()
 				return fmt.Errorf("sync widget scan chunk: %w", scanErr)
+			}
+			if csStartedAtNull.Valid {
+				csStartedAt = csStartedAtNull.Time
 			}
 			chunkRepo := csRepo
 			if chunkRepo == "" {
@@ -1755,6 +1769,12 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 			var cJobs []string
 			if csPR == prNumber {
 				if statusOverride != "" {
+					if csStatus != statusOverride {
+						csUpdatedAt = time.Now().UTC()
+						if csStartedAt.IsZero() {
+							csStartedAt = csUpdatedAt
+						}
+					}
 					chunkStatus = statusOverride
 				}
 				if len(deployingJobs) > 0 {
@@ -1769,6 +1789,8 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 				PRNumber:      csPR,
 				DiffStat:      csDiff,
 				DeployingJobs: cJobs,
+				StartedAt:     csStartedAt,
+				UpdatedAt:     csUpdatedAt,
 			})
 		}
 		rows.Close()
@@ -1808,9 +1830,10 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	}
 
 	// 2. Standalone PR in pr_registry
-	prQuery := `SELECT target_id, title, status, status_message_id, COALESCE(metadata->>'diff_stat', '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
+	prQuery := `SELECT target_id, title, status, status_message_id, COALESCE(metadata->>'diff_stat', ''), created_at, updated_at FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
 	var targetID, title, prStatus, prMsgID, diffStat string
-	err = pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &diffStat)
+	var prCreatedAt, prUpdatedAt time.Time
+	err = pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &diffStat, &prCreatedAt, &prUpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) || targetID == "" {
 		return nil
 	}
@@ -1820,6 +1843,9 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 
 	finalStatus := prStatus
 	if statusOverride != "" {
+		if prStatus != statusOverride {
+			prUpdatedAt = time.Now().UTC()
+		}
 		finalStatus = statusOverride
 	}
 	widgetTitle := title
@@ -1843,6 +1869,8 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 				PRNumber:      prNumber,
 				DiffStat:      diffStat,
 				DeployingJobs: deployingJobs,
+				StartedAt:     prCreatedAt,
+				UpdatedAt:     prUpdatedAt,
 			},
 		},
 	}
