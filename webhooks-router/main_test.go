@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3642,6 +3643,16 @@ func (r *mockVanadisPgxRows) Scan(dest ...any) error {
 	*(dest[4].(*string)) = it.Status
 	*(dest[5].(*int)) = it.PRNumber
 	*(dest[6].(*string)) = it.DiffStat
+	if len(dest) > 7 {
+		if !it.StartedAt.IsZero() {
+			*(dest[7].(*sql.NullTime)) = sql.NullTime{Time: it.StartedAt, Valid: true}
+		} else {
+			*(dest[7].(*sql.NullTime)) = sql.NullTime{}
+		}
+	}
+	if len(dest) > 8 {
+		*(dest[8].(*time.Time)) = it.UpdatedAt
+	}
 	return nil
 }
 
@@ -3911,8 +3922,10 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	}
 
 	// Build completion (all chunks merged): update build error, commit error, and success
+	chunkStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+	chunkEnd := chunkStart.Add(2 * time.Minute)
 	allMergedChunks := []VanadisChunkSummary{
-		{ID: "chunk-0", ChunkIndex: 0, Title: "Title 0", Status: "merged", PRNumber: 9},
+		{ID: "chunk-0", ChunkIndex: 0, Title: "Title 0", Status: "merged", PRNumber: 9, StartedAt: chunkStart, UpdatedAt: chunkEnd},
 		{ID: "chunk-1", ChunkIndex: 1, Title: "Title 1", Status: "pr_open", PRNumber: 10},
 	}
 	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
@@ -3957,8 +3970,8 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		}, nil
 	}
 	resDone, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
-	if err != nil || !resDone.Advanced || !resDone.BuildCompleted || resDone.BuildStatus != "completed" || resDone.NextChunkIndex != -1 || resDone.Title != "Test Build Title" {
-		t.Fatalf("expected build completed, got %+v, err=%v", resDone, err)
+	if err != nil || !resDone.Advanced || !resDone.BuildCompleted || resDone.BuildStatus != "completed" || resDone.NextChunkIndex != -1 || resDone.Title != "Test Build Title" || len(resDone.Chunks) != 2 || !resDone.Chunks[0].StartedAt.Equal(chunkStart) || !resDone.Chunks[0].UpdatedAt.Equal(chunkEnd) {
+		t.Fatalf("expected build completed with chunk timestamps, got %+v, err=%v", resDone, err)
 	}
 }
 
@@ -3977,6 +3990,8 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 	}
 
 	// 2. Standalone PR with mock pool
+	prStart := time.Date(2026, 10, 16, 17, 30, 0, 0, time.UTC)
+	prUpdate := prStart.Add(4 * time.Minute)
 	pool := &mockVanadisPgxPool{
 		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
 			if strings.Contains(sql, "FROM vanadis_chunks") {
@@ -3989,6 +4004,12 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					*dest[2].(*string) = "open"
 					*dest[3].(*string) = "old-msg-id"
 					*dest[4].(*string) = "+10 -2"
+					if len(dest) > 5 {
+						*dest[5].(*time.Time) = prStart
+					}
+					if len(dest) > 6 {
+						*dest[6].(*time.Time) = prUpdate
+					}
 					return nil
 				}}
 			}
@@ -4011,11 +4032,13 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		t.Fatalf("expected widget call dispatched")
 	}
 	lastCall := calls[len(calls)-1]
-	if lastCall.ID != "pr-azylman/aerial-101" || lastCall.Status != "merged" || lastCall.ChannelID != "1555405874565091380" {
+	if lastCall.ID != "pr-azylman/aerial-101" || lastCall.Status != "merged" || lastCall.ChannelID != "1555405874565091380" || len(lastCall.Chunks) != 1 || !lastCall.Chunks[0].StartedAt.Equal(prStart) || !lastCall.Chunks[0].UpdatedAt.After(prUpdate) {
 		t.Errorf("unexpected widget request: %+v", lastCall)
 	}
 
-	// 3. Vanadis chunk match with mock pool
+	// 3. Vanadis chunk match with mock pool (testing both pre-existing StartedAt and zero StartedAt fallback on status override)
+	chunk0Start := time.Date(2026, 10, 16, 17, 0, 0, 0, time.UTC)
+	chunk0Update := chunk0Start.Add(5 * time.Minute)
 	vanadisPool := &mockVanadisPgxPool{
 		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
 			if strings.Contains(sql, "FROM vanadis_chunks") {
@@ -4036,7 +4059,8 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		},
 		queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 			chunks := []VanadisChunkSummary{
-				{ID: "chunk-1", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 1", Status: "running", PRNumber: 102, DiffStat: "+5 -1"},
+				{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, DiffStat: "+2 -1", StartedAt: chunk0Start, UpdatedAt: chunk0Update},
+				{ID: "chunk-1", ChunkIndex: 1, Repo: "aerial", Title: "Chunk 1", Status: "running", PRNumber: 102, DiffStat: "+5 -1"},
 			}
 			return &mockVanadisPgxRows{items: chunks}, nil
 		},
@@ -4052,7 +4076,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 	}
 	calls = mockDisp.WidgetCalls()
 	lastCall = calls[len(calls)-1]
-	if lastCall.ID != "build-abc" || lastCall.Title != "Vanadis Build Title" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 1 || lastCall.Chunks[0].Status != "deployed" {
+	if lastCall.ID != "build-abc" || lastCall.Title != "Vanadis Build Title" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 2 || lastCall.Chunks[1].Status != "deployed" || !lastCall.Chunks[0].StartedAt.Equal(chunk0Start) || lastCall.Chunks[1].StartedAt.IsZero() || lastCall.Chunks[1].UpdatedAt.IsZero() {
 		t.Errorf("unexpected vanadis widget request: %+v", lastCall)
 	}
 }

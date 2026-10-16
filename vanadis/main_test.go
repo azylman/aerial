@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -72,8 +73,13 @@ func (r *mockRows) Scan(dest ...any) error {
 	*(dest[10].(*string)) = c.Status
 	*(dest[11].(*int)) = c.PRNumber
 	*(dest[12].(*string)) = c.DiffStat
-	*(dest[13].(*time.Time)) = c.CreatedAt
-	*(dest[14].(*time.Time)) = c.UpdatedAt
+	if !c.StartedAt.IsZero() {
+		*(dest[13].(*sql.NullTime)) = sql.NullTime{Time: c.StartedAt, Valid: true}
+	} else {
+		*(dest[13].(*sql.NullTime)) = sql.NullTime{}
+	}
+	*(dest[14].(*time.Time)) = c.CreatedAt
+	*(dest[15].(*time.Time)) = c.UpdatedAt
 	return nil
 }
 
@@ -190,6 +196,10 @@ func (m *memoryVanadisStore) UpdateChunkStatus(_ context.Context, chunkID, statu
 		for i := range list {
 			if list[i].ID == chunkID {
 				list[i].Status = status
+				if (status == "running" || status == "coding") && list[i].StartedAt.IsZero() {
+					list[i].StartedAt = time.Now().UTC()
+				}
+				list[i].UpdatedAt = time.Now().UTC()
 				m.chunks[bID] = list
 				return nil
 			}
@@ -425,8 +435,14 @@ func TestPostgresVanadisStore(t *testing.T) {
 		}
 	}
 
-	// CreateBuild success
-	if err := store.CreateBuild(ctx, validBuild, validChunks); err != nil {
+	// CreateBuild success (including StartedAt variants: pending/zero, explicit StartedAt, and running status)
+	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+	createChunks := []VanadisChunk{
+		validChunks[0],
+		{ID: "c-2", ChunkIndex: 1, Title: "T2", Instructions: "I2", StartedAt: explicitStart},
+		{ID: "c-3", ChunkIndex: 2, Title: "T3", Instructions: "I3", Status: "running"},
+	}
+	if err := store.CreateBuild(ctx, validBuild, createChunks); err != nil {
 		t.Fatalf("CreateBuild failed: %v", err)
 	}
 
@@ -562,18 +578,27 @@ func TestPostgresVanadisStore(t *testing.T) {
 			return &mockRow{scanFn: populateBuildRow}
 		},
 		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			return &mockRows{items: []VanadisChunk{{
-				ID:           "c-1",
-				BuildID:      "b-1",
-				Title:        "T1",
-				Instructions: "I1",
-				TargetFiles:  nil,
-				Effort:       "",
-			}}}, nil
+			return &mockRows{items: []VanadisChunk{
+				{
+					ID:           "c-1",
+					BuildID:      "b-1",
+					Title:        "T1",
+					Instructions: "I1",
+					TargetFiles:  nil,
+					Effort:       "",
+					StartedAt:    explicitStart,
+				},
+				{
+					ID:           "c-2",
+					BuildID:      "b-1",
+					Title:        "T2",
+					Instructions: "I2",
+				},
+			}}, nil
 		},
 	})
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
-	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || gotB.SharedContext != "Shared Context" || len(gotC) != 1 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "low" {
+	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || gotB.SharedContext != "Shared Context" || len(gotC) != 2 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "low" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
 	}
 
@@ -1175,12 +1200,14 @@ func TestSyncBuildWidget(t *testing.T) {
 		Status:    "running",
 		Tier:      2,
 	}
+	startedAt := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+	updatedAt := startedAt.Add(3 * time.Minute)
 	chunks := []VanadisChunk{
-		{ChunkIndex: 0, Title: "Chunk 0", Status: "running", Repo: "aerial"},
+		{ChunkIndex: 0, Title: "Chunk 0", Status: "running", Repo: "aerial", StartedAt: startedAt, UpdatedAt: updatedAt},
 	}
 
 	srv.syncBuildWidget(ctx, build, chunks, "test banner")
-	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" {
+	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" || len(postedReq.Chunks) != 1 || !postedReq.Chunks[0].StartedAt.Equal(startedAt) || !postedReq.Chunks[0].UpdatedAt.Equal(updatedAt) {
 		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
 	}
 	if store.builds["b1"].StatusMessageID != "msg-new-widget-42" {
@@ -1195,9 +1222,9 @@ func TestSyncBuildWidget(t *testing.T) {
 	defer tsBadJSON.Close()
 
 	srvBadJSON := &VanadisServer{
-		cfg: Config{BrainURL: tsBadJSON.URL},
+		cfg:        Config{BrainURL: tsBadJSON.URL},
 		httpClient: tsBadJSON.Client(),
-		store: store,
+		store:      store,
 	}
 	srvBadJSON.syncBuildWidget(ctx, build, chunks, "")
 
