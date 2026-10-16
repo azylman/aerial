@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
+	"github.com/azylman/aerial/brain/pkg/discord"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -76,6 +77,7 @@ type WorkerPoolConfig struct {
 	NotifierFunc                func(agyBin, apiKey, contextDescription string) string
 	DeliveryFunc                func(s *discordgo.Session, channelID, text string) error
 	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
+	WidgetDeliveryFunc          func(req discord.StatusWidgetRequest) (string, error)
 	TypingFunc                  func(s *discordgo.Session, channelID string) (stop func())
 	OnMessageCompleted          func(msg db.Message, finalStatus string)
 	ResolveChannelPolicy        func(channelID, channelName string) config.ChannelPolicy
@@ -545,6 +547,12 @@ func (p *WorkerPool) SetDiscordSession(s *discordgo.Session) {
 	p.cfg.DiscordSession = s
 }
 
+func (p *WorkerPool) SetWidgetDeliveryFunc(fn func(req discord.StatusWidgetRequest) (string, error)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.WidgetDeliveryFunc = fn
+}
+
 func (p *WorkerPool) Classifier() *classifier.Classifier {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -576,6 +584,21 @@ func (p *WorkerPool) DeliverDirect(channelID, text string) error {
 		return p.cfg.DeliveryFunc(sess, channelID, text)
 	}
 	return delivery.SendMessage(sess, channelID, text)
+}
+
+// DeliverStatusWidget delivers or updates a status tracker widget directly to Discord.
+func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (string, error) {
+	if p == nil {
+		return "", errors.New("worker pool is nil")
+	}
+	if p.cfg.WidgetDeliveryFunc != nil {
+		return p.cfg.WidgetDeliveryFunc(req)
+	}
+	sess := p.DiscordSession()
+	if sess == nil {
+		return "", errors.New("discord session is not connected")
+	}
+	return discord.DeliverStatusWidget(sess, req, time.Now())
 }
 
 // WebhookDispatcher returns the assigned webhook dispatcher.

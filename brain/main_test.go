@@ -22,6 +22,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/discord"
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
@@ -359,6 +360,224 @@ func TestHandleDirectMessage(t *testing.T) {
 
 		if wInternal.Code != http.StatusNotFound {
 			t.Errorf("expected 404 for dropped /internal/message, got %d", wInternal.Code)
+		}
+	})
+}
+
+func TestHandleStatusWidget(t *testing.T) {
+	t.Run("method not allowed", func(t *testing.T) {
+		handler := handleStatusWidget(&queue.WorkerPool{})
+		req := httptest.NewRequest(http.MethodGet, "/discord/widget", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405 MethodNotAllowed, got %d", w.Code)
+		}
+	})
+
+	t.Run("nil pool returns 500", func(t *testing.T) {
+		handler := handleStatusWidget(nil)
+		payload := `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(payload))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500 InternalServerError, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Worker pool not available") {
+			t.Fatalf("expected 'Worker pool not available' in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("invalid JSON returns 400", func(t *testing.T) {
+		pool := &queue.WorkerPool{}
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader("{invalid-json"))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Invalid JSON payload") {
+			t.Fatalf("expected 'Invalid JSON payload' in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("missing channel_id returns 400", func(t *testing.T) {
+		pool := &queue.WorkerPool{}
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"chunks":[{"title":"task"}]}`))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Invalid payload: 'channel_id' field is required and cannot be empty") {
+			t.Fatalf("expected channel_id required error, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("non-snowflake channel_id returns 400", func(t *testing.T) {
+		pool := &queue.WorkerPool{}
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"invalid-snow","chunks":[{"title":"task"}]}`))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake") {
+			t.Fatalf("expected snowflake error, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("empty chunks returns 400", func(t *testing.T) {
+		pool := &queue.WorkerPool{}
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[]}`))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Invalid payload: 'chunks' field is required and cannot be empty") {
+			t.Fatalf("expected chunks required error, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("discord session not connected returns 503", func(t *testing.T) {
+		pool := &queue.WorkerPool{}
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503 ServiceUnavailable, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Discord session not connected") {
+			t.Fatalf("expected 'Discord session not connected' in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("discord client error returns status code for RESTError", func(t *testing.T) {
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+				return "", &discordgo.RESTError{
+					Response: &http.Response{StatusCode: 403},
+				}
+			},
+		})
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Discord client error") {
+			t.Fatalf("expected 'Discord client error' in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("discord client error returns 400 for cannot send", func(t *testing.T) {
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+				return "", errors.New("cannot send messages to this thread")
+			},
+		})
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Discord client error") {
+			t.Fatalf("expected 'Discord client error' in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("generic delivery failure returns 500", func(t *testing.T) {
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+				return "", errors.New("database connection reset")
+			},
+		})
+		handler := handleStatusWidget(pool)
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500 InternalServerError, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Failed to deliver widget") {
+			t.Fatalf("expected 'Failed to deliver widget' in body, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("success returns 200 with message_id and delivers widget", func(t *testing.T) {
+		var capturedReq discord.StatusWidgetRequest
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+				capturedReq = req
+				return "created-widget-msg-789", nil
+			},
+		})
+		handler := handleStatusWidget(pool)
+
+		payload := `{
+			"channel_id": "1542423172400291873",
+			"id": "build-123",
+			"title": "Build Title",
+			"status": "running",
+			"chunks": [
+				{"index": 1, "repo": "aerial", "title": "Chunk 1", "status": "completed"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(payload))
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d (body: %s)", w.Code, w.Body.String())
+		}
+
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response JSON: %v", err)
+		}
+		if resp["status"] != "ok" || resp["message_id"] != "created-widget-msg-789" {
+			t.Fatalf("unexpected response body: %+v", resp)
+		}
+		if capturedReq.ChannelID != "1542423172400291873" || capturedReq.ID != "build-123" {
+			t.Fatalf("unexpected captured request: %+v", capturedReq)
+		}
+	})
+
+	t.Run("mux route mounting for /discord/widget", func(t *testing.T) {
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+				return "widget-99", nil
+			},
+		})
+		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 for /discord/widget, got %d (body: %s)", w.Code, w.Body.String())
 		}
 	})
 }
