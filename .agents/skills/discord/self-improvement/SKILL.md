@@ -245,16 +245,24 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - **Defense-in-Depth Validation**: When designing or validating input handling, validate across all layers (API entry point, domain business logic, environment guards) so invalid states become structurally impossible to reach.
    - **Test Double & Production Purity**: Never assert on a mock's internal calls; assert real component outcomes. Mock only external boundaries (slow I/O, network), never domain business logic. Production structs carry production methods only—keep test-only reset or lifecycle hooks in test utilities.
    - **Scope Discipline & File Health**: Speculative abstractions and unrequested "nice-to-haves" are flagged as architectural defects ("Extra") on equal footing with missed requirements ("Missing"). Block changes that significantly bloat already large files; decompose cohesive units behind narrow interface boundaries.
-3. **Functional Core, Imperative Shell (Decoupling Logic from Concurrency & I/O)**:
+   - **Banning Closure Tables in Tests**: Unit tests must avoid anonymous closure tables (`run: func(t *testing.T)`) unless explicitly testing concurrency barriers or mutex locks. Prefer clean data-only table structs with shared test assertion bodies to keep tests concise, readable, and debuggable.
+3. **Vanadis Multi-Chunk Build Authoring Runbook (`scripts/aerial-build.sh enqueue <plan.json>`)**:
+   - For multi-step autonomous builds spanning multiple PRs or services, author a declarative build plan JSON and enqueue via `scripts/aerial-build.sh enqueue <plan.json>`.
+   - **`shared_context`**: Populate with architectural topology, service invariants, database connections, and shared technical decisions that every chunk worker must know.
+   - **`target_files`**: Specify exact files each chunk modifies or creates so workers focus immediately on their workspace perimeter.
+   - **`target_symbols`**: Specify the key functions, structs, interfaces, or tables touched in this chunk to prevent broad exploratory grepping.
+   - **`effort`**: Chunk effort level dispatched to Brain (`"low"`, `"medium"`, or `"high"`). Defaults to `"low"` for straightforward single-file changes or localized refactors; use `"medium"` or `"high"` for complex concurrency orchestration, cross-cutting multi-service integrations, or high-dimensional logic.
+   - **`acceptance_criteria`**: List concrete, verifiable invariants and testing expectations (`- Coverage >= 95.0%`, `- Table-driven hermetic unit tests pass`, `- Staged preflight checks clean`).
+4. **Functional Core, Imperative Shell (Decoupling Logic from Concurrency & I/O)**:
    - When designing new features or bugfixes, business logic, prompt formatting, state transitions, session key calculation, and decision rules MUST be factored into pure, deterministic functions (e.g. `AssembleTurnPrompt`, `PlanBurstExecution`, `DetermineSessionAction`, `CalculateBackoffDelay`) that accept values and return values.
    - **Table-Driven Unit Tests as Primary Vehicle**: Unit tests for business logic permutations and edge cases MUST target these pure functions directly using fast, table-driven tests (< 1ms) with zero chance of channel deadlocks, race conditions, or timing flakiness.
    - **Reserve Mock Runner / Subprocess Orchestration for Plumbing Only**: Tests that instantiate mock subprocesses (`createMockAgyScript`), mock runners (`RunnerFunc`), goroutine worker pools, channel select loops, and context timeouts MUST be strictly limited to verifying concurrency plumbing (e.g., watchdog timeouts, process group kills, startup catch-up sweeps). Never test business logic variants via end-to-end mock runner pipelines.
    - **Zero Arbitrary Sleeps Invariant (`time.Sleep` Elimination)**: Arbitrary sleeps (`time.Sleep`) are strictly prohibited in tests and production plumbing. Asynchronous coordination must use event-driven signaling, condition variables, channel selects, or injected delay overrides (`RetryDelayOverride`) to guarantee fast, deterministic execution without timing flakes.
    - **Hermetic In-Memory Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory database handles or `t.TempDir()` isolated files strictly for fast, hermetic unit testing. Unit tests MUST NEVER write to shared host database paths, `/data`, or `/share`.
    - **Interface Abstraction at External Boundaries**: Abstract external system boundaries (git commands, Docker sockets, Discord REST, database drivers) behind interfaces (e.g. `GitExecutor`) so packages can be tested hermetically with in-memory mocks without disk or subprocess overhead.
-4. **Orchestration & Workflow Standards**:
+5. **Orchestration & Workflow Standards**:
    - Strictly adhere to the Tiered Engineering Workflow and Orchestration Invariants detailed above.
-5. **Declarative Database Schema Migrations Runbook (Atlas)**:
+6. **Declarative Database Schema Migrations Runbook (Atlas)**:
    - **Step 1: Declarative Schema Definition (`schema.sql`)**:
      - Modify the repository's canonical schema file (`brain/pkg/db/schema.sql` for `aerial`, `db/schema.sql` for `aerial-sidecars`).
      - Never hand-write migration files or imperative DDL (`ALTER TABLE`, `DROP TABLE`) in Go/Python/TypeScript application code. All DDL is mechanically blocked by `scripts/verify.sh`.

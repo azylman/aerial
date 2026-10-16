@@ -66,11 +66,14 @@ func (r *mockRows) Scan(dest ...any) error {
 	*(dest[4].(*string)) = c.Title
 	*(dest[5].(*string)) = c.Instructions
 	*(dest[6].(*[]string)) = c.TargetFiles
-	*(dest[7].(*string)) = c.Status
-	*(dest[8].(*int)) = c.PRNumber
-	*(dest[9].(*string)) = c.DiffStat
-	*(dest[10].(*time.Time)) = c.CreatedAt
-	*(dest[11].(*time.Time)) = c.UpdatedAt
+	*(dest[7].(*[]string)) = c.TargetSymbols
+	*(dest[8].(*string)) = c.Effort
+	*(dest[9].(*[]string)) = c.AcceptanceCriteria
+	*(dest[10].(*string)) = c.Status
+	*(dest[11].(*int)) = c.PRNumber
+	*(dest[12].(*string)) = c.DiffStat
+	*(dest[13].(*time.Time)) = c.CreatedAt
+	*(dest[14].(*time.Time)) = c.UpdatedAt
 	return nil
 }
 
@@ -378,13 +381,24 @@ func TestPostgresVanadisStore(t *testing.T) {
 	}
 
 	validBuild := VanadisBuild{
-		ID:        "b-1",
-		Repo:      "aerial",
-		ThreadID:  "12345",
-		Objective: "Ship Vanadis",
+		ID:            "b-1",
+		Repo:          "aerial",
+		ThreadID:      "12345",
+		Objective:     "Ship Vanadis",
+		SharedContext: "Shared ctx test",
 	}
 	validChunks := []VanadisChunk{
-		{ID: "c-1", ChunkIndex: 0, Title: "T1", Instructions: "I1", PRNumber: 42},
+		{
+			ID:                 "c-1",
+			ChunkIndex:         0,
+			Title:              "T1",
+			Instructions:       "I1",
+			TargetFiles:        []string{"main.go"},
+			TargetSymbols:      []string{"Foo"},
+			Effort:             "medium",
+			AcceptanceCriteria: []string{"Must pass"},
+			PRNumber:           42,
+		},
 	}
 
 	store := NewPostgresVanadisStore(&mockDB{})
@@ -403,6 +417,7 @@ func TestPostgresVanadisStore(t *testing.T) {
 		{"mismatched chunk build_id", validBuild, []VanadisChunk{{ID: "c", BuildID: "other", Title: "t", Instructions: "i"}}},
 		{"empty chunk title", validBuild, []VanadisChunk{{ID: "c", Instructions: "i"}}},
 		{"empty chunk instructions", validBuild, []VanadisChunk{{ID: "c", Title: "t"}}},
+		{"invalid chunk effort", validBuild, []VanadisChunk{{ID: "c", Title: "t", Instructions: "i", Effort: "ultra"}}},
 	}
 	for _, tc := range invalidCases {
 		if err := store.CreateBuild(ctx, tc.build, tc.chunks); err == nil {
@@ -491,16 +506,17 @@ func TestPostgresVanadisStore(t *testing.T) {
 		t.Fatal("expected queryRow error")
 	}
 
-	 populateBuildRow := func(dest ...any) error {
+	populateBuildRow := func(dest ...any) error {
 		*(dest[0].(*string)) = "b-1"
 		*(dest[1].(*string)) = "azylman/aerial"
 		*(dest[2].(*string)) = "thread-1"
 		*(dest[3].(*int)) = 2
 		*(dest[4].(*string)) = "Objective"
-		*(dest[5].(*string)) = "running"
-		*(dest[6].(*string)) = "msg-1"
-		*(dest[7].(*time.Time)) = time.Now()
+		*(dest[5].(*string)) = "Shared Context"
+		*(dest[6].(*string)) = "running"
+		*(dest[7].(*string)) = "msg-1"
 		*(dest[8].(*time.Time)) = time.Now()
+		*(dest[9].(*time.Time)) = time.Now()
 		return nil
 	}
 
@@ -545,11 +561,18 @@ func TestPostgresVanadisStore(t *testing.T) {
 			return &mockRow{scanFn: populateBuildRow}
 		},
 		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			return &mockRows{items: []VanadisChunk{{ID: "c-1", BuildID: "b-1", Title: "T1", Instructions: "I1", TargetFiles: nil}}}, nil
+			return &mockRows{items: []VanadisChunk{{
+				ID:           "c-1",
+				BuildID:      "b-1",
+				Title:        "T1",
+				Instructions: "I1",
+				TargetFiles:  nil,
+				Effort:       "",
+			}}}, nil
 		},
 	})
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
-	if err != nil || gotB.ID != "b-1" || len(gotC) != 1 || gotC[0].TargetFiles == nil {
+	if err != nil || gotB.ID != "b-1" || gotB.SharedContext != "Shared Context" || len(gotC) != 1 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "low" {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
 	}
 
@@ -616,11 +639,12 @@ func TestPostgresVanadisStore(t *testing.T) {
 func TestFormatChunkPrompt(t *testing.T) {
 	t.Parallel()
 	build := VanadisBuild{
-		ID:        "build-999",
-		Repo:      "azylman/aerial",
-		ThreadID:  "1555000111",
-		Tier:      2,
-		Objective: "Build Vanadis Queue",
+		ID:            "build-999",
+		Repo:          "azylman/aerial",
+		ThreadID:      "1555000111",
+		Tier:          2,
+		Objective:     "Build Vanadis Queue",
+		SharedContext: "Architecture: River queue backed by PostgreSQL.",
 	}
 	chunks := []VanadisChunk{
 		{
@@ -634,12 +658,15 @@ func TestFormatChunkPrompt(t *testing.T) {
 			DiffStat:     "1 file changed, 25 insertions(+)",
 		},
 		{
-			ID:           "build-999-chunk-2",
-			ChunkIndex:   1,
-			Title:        "Task 2: Service",
-			Instructions: "Create vanadis service",
-			TargetFiles:  []string{"vanadis/main.go", "vanadis/main_test.go"},
-			Status:       "running",
+			ID:                 "build-999-chunk-2",
+			ChunkIndex:         1,
+			Title:              "Task 2: Service",
+			Instructions:       "Create vanadis service",
+			TargetFiles:        []string{"vanadis/main.go", "vanadis/main_test.go"},
+			TargetSymbols:      []string{"VanadisServer", "FormatChunkPrompt"},
+			Effort:             "high",
+			AcceptanceCriteria: []string{"Coverage >= 95.0%", "  ", "Table driven tests pass"},
+			Status:             "running",
 		},
 		{
 			ID:           "build-999-chunk-3",
@@ -668,6 +695,9 @@ func TestFormatChunkPrompt(t *testing.T) {
 	if !strings.Contains(p0, "(none — this is the first chunk)") || !strings.Contains(p0, "DO NOT implement these remaining chunks in this turn") {
 		t.Fatalf("unexpected prompt for chunk 0:\n%s", p0)
 	}
+	if !strings.Contains(p0, "=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.") {
+		t.Fatalf("expected Shared Build Context in prompt 0:\n%s", p0)
+	}
 
 	p1, err := FormatChunkPrompt(build, chunks, 1)
 	if err != nil {
@@ -676,17 +706,32 @@ func TestFormatChunkPrompt(t *testing.T) {
 	for _, want := range []string{
 		"[VANADIS BUILD CHUNK EXECUTION]",
 		"Build ID: build-999",
+		"=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.",
 		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)",
 		"DiffStat: 1 file changed, 25 insertions(+)",
 		"=== Active Chunk (Chunk 2 of 3) ===",
 		"Repository: azylman/aerial",
 		"Target Files: vanadis/main.go, vanadis/main_test.go",
+		"Target Symbols: VanadisServer, FormatChunkPrompt",
+		"=== Acceptance Criteria ===\n- Coverage >= 95.0%\n- Table driven tests pass\n",
 		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)",
+		"Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches.",
 		"--vanadis-chunk build-999-chunk-2",
 	} {
 		if !strings.Contains(p1, want) {
 			t.Fatalf("prompt for chunk 1 missing %q:\n%s", want, p1)
 		}
+	}
+
+	// Verify build with empty shared context does not render header
+	emptySharedBuild := build
+	emptySharedBuild.SharedContext = "   "
+	pEmpty, err := FormatChunkPrompt(emptySharedBuild, chunks, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(pEmpty, "=== Shared Build Context ===") {
+		t.Fatalf("unexpected Shared Build Context header when empty:\n%s", pEmpty)
 	}
 
 	p2, err := FormatChunkPrompt(build, chunks, 2)
@@ -758,7 +803,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 		Status:    "running",
 	}, []VanadisChunk{
 		{ID: "c-0", BuildID: "b-run", ChunkIndex: 0, Title: "C0", Instructions: "I0", Status: "merged", PRNumber: 10},
-		{ID: "c-1", BuildID: "b-run", ChunkIndex: 1, Title: "C1", Instructions: "I1", Status: "pending"},
+		{ID: "c-1", BuildID: "b-run", ChunkIndex: 1, Title: "C1", Instructions: "I1", Effort: "high", Status: "pending"},
 	})
 
 	// Chunk index not found
@@ -778,7 +823,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	}
 	memStore.updateChunkErr = nil
 
-	// Successful execution via Worker
+	// Successful execution via Worker with Effort propagation
 	worker := &ExecuteChunkWorker{server: srv}
 	job := &river.Job[ExecuteChunkArgs]{
 		JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3},
@@ -787,7 +832,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if err := worker.Work(ctx, job); err != nil {
 		t.Fatalf("unexpected worker error: %v", err)
 	}
-	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "low" || gotPrompts[0].ChannelID != "thread-777" {
+	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "high" || gotPrompts[0].ChannelID != "thread-777" {
 		t.Fatalf("unexpected dispatched prompts: %+v", gotPrompts)
 	}
 
@@ -896,6 +941,7 @@ func TestHTTPEndpoints(t *testing.T) {
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[]}`,
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"","instructions":"i"}]}`,
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":""}]}`,
+		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":"i","effort":"unsupported"}]}`,
 	}
 	for _, p := range badPayloads {
 		if rec := doReq(http.MethodPost, "/builds", strings.NewReader(p)); rec.Code != http.StatusBadRequest {
@@ -907,9 +953,10 @@ func TestHTTPEndpoints(t *testing.T) {
 		"repo": "aerial",
 		"thread_id": "1555999",
 		"objective": "Implement feature X",
+		"shared_context": "Targeting Nomad cluster",
 		"chunks": [
-			{"title": "Part 1", "instructions": "Do part 1"},
-			{"id": "custom-chunk-2", "title": "Part 2", "instructions": "Do part 2", "target_files": ["a.go"]}
+			{"title": "Part 1", "instructions": "Do part 1", "effort": "low"},
+			{"id": "custom-chunk-2", "title": "Part 2", "instructions": "Do part 2", "target_files": ["a.go"], "target_symbols": ["A"], "effort": "medium", "acceptance_criteria": ["All green"]}
 		]
 	}`
 
@@ -942,6 +989,10 @@ func TestHTTPEndpoints(t *testing.T) {
 	buildID, _ := createResp["build_id"].(string)
 	if buildID == "" || createResp["status"] != "accepted" || len(inserter.inserted) != 1 {
 		t.Fatalf("unexpected create response: %+v", createResp)
+	}
+	storedBuild, storedChunks, _ := memStore.GetBuild(context.Background(), buildID)
+	if storedBuild.SharedContext != "Targeting Nomad cluster" || len(storedChunks) != 2 || storedChunks[1].Effort != "medium" || len(storedChunks[1].TargetSymbols) != 1 || len(storedChunks[1].AcceptanceCriteria) != 1 {
+		t.Fatalf("stored build mismatch: build=%+v chunks=%+v", storedBuild, storedChunks)
 	}
 
 	// GET /builds/{id} and POST /builds/{id}/cancel

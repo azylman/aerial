@@ -143,6 +143,20 @@ type RiverInserter interface {
 	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
 }
 
+// normalizeChunkEffort trims and lowercases effort, defaulting "" to "low" and validating "low", "medium", "high".
+func normalizeChunkEffort(effort string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(effort))
+	if trimmed == "" {
+		return "low", nil
+	}
+	switch trimmed {
+	case "low", "medium", "high":
+		return trimmed, nil
+	default:
+		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
+	}
+}
+
 // VanadisBuild represents a multi-chunk autonomous engineering build run.
 type VanadisBuild struct {
 	ID              string    `json:"id"`
@@ -150,6 +164,7 @@ type VanadisBuild struct {
 	ThreadID        string    `json:"thread_id"`
 	Tier            int       `json:"tier"`
 	Objective       string    `json:"objective"`
+	SharedContext   string    `json:"shared_context,omitempty"`
 	Status          string    `json:"status"`
 	StatusMessageID string    `json:"status_message_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -158,18 +173,21 @@ type VanadisBuild struct {
 
 // VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
 type VanadisChunk struct {
-	ID           string    `json:"id"`
-	BuildID      string    `json:"build_id"`
-	ChunkIndex   int       `json:"chunk_index"`
-	Repo         string    `json:"repo,omitempty"`
-	Title        string    `json:"title"`
-	Instructions string    `json:"instructions"`
-	TargetFiles  []string  `json:"target_files"`
-	Status       string    `json:"status"`
-	PRNumber     int       `json:"pr_number,omitempty"`
-	DiffStat     string    `json:"diff_stat,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                 string    `json:"id"`
+	BuildID            string    `json:"build_id"`
+	ChunkIndex         int       `json:"chunk_index"`
+	Repo               string    `json:"repo,omitempty"`
+	Title              string    `json:"title"`
+	Instructions       string    `json:"instructions"`
+	TargetFiles        []string  `json:"target_files"`
+	TargetSymbols      []string  `json:"target_symbols"`
+	Effort             string    `json:"effort"`
+	AcceptanceCriteria []string  `json:"acceptance_criteria"`
+	Status             string    `json:"status"`
+	PRNumber           int       `json:"pr_number,omitempty"`
+	DiffStat           string    `json:"diff_stat,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // VanadisStore defines the persistence contract for Vanadis builds and chunks.
@@ -254,6 +272,9 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 		if strings.TrimSpace(c.Instructions) == "" {
 			return fmt.Errorf("chunk[%d] instructions cannot be empty", i)
 		}
+		if _, err := normalizeChunkEffort(c.Effort); err != nil {
+			return fmt.Errorf("chunk[%d] %w", i, err)
+		}
 	}
 
 	tx, err := s.db.Begin(ctx)
@@ -267,17 +288,18 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 	}()
 
 	statusMessageID := strings.TrimSpace(build.StatusMessageID)
+	sharedContext := strings.TrimSpace(build.SharedContext)
 	buildQuery := `
-		INSERT INTO vanadis_builds (id, repo, thread_id, tier, objective, status, status_message_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO vanadis_builds (id, repo, thread_id, tier, objective, shared_context, status, status_message_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 	`
-	if _, err := tx.Exec(ctx, buildQuery, buildID, repo, threadID, tier, objective, status, statusMessageID); err != nil {
+	if _, err := tx.Exec(ctx, buildQuery, buildID, repo, threadID, tier, objective, sharedContext, status, statusMessageID); err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
 	}
 
 	chunkQuery := `
-		INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, status, pr_number, diff_stat, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, diff_stat, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 	`
 	for _, c := range chunks {
 		chunkID := strings.TrimSpace(c.ID)
@@ -291,6 +313,10 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 		if cStatus == "" {
 			cStatus = "pending"
 		}
+		cEffort, err := normalizeChunkEffort(c.Effort)
+		if err != nil {
+			return fmt.Errorf("chunk %s: %w", chunkID, err)
+		}
 		var prNum any
 		if c.PRNumber > 0 {
 			prNum = c.PRNumber
@@ -299,8 +325,16 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 		if files == nil {
 			files = []string{}
 		}
+		symbols := c.TargetSymbols
+		if symbols == nil {
+			symbols = []string{}
+		}
+		criteria := c.AcceptanceCriteria
+		if criteria == nil {
+			criteria = []string{}
+		}
 		if _, err := tx.Exec(ctx, chunkQuery,
-			chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, files, cStatus, prNum, c.DiffStat,
+			chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, files, symbols, cEffort, criteria, cStatus, prNum, c.DiffStat,
 		); err != nil {
 			return fmt.Errorf("failed to insert vanadis chunk %s: %w", chunkID, err)
 		}
@@ -324,13 +358,13 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	}
 
 	buildQuery := `
-		SELECT id, repo, thread_id, tier, objective, status, status_message_id, created_at, updated_at
+		SELECT id, repo, thread_id, tier, objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
 		FROM vanadis_builds
 		WHERE id = $1;
 	`
 	var b VanadisBuild
 	err := s.db.QueryRow(ctx, buildQuery, buildID).Scan(
-		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Objective, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
+		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrBuildNotFound
@@ -340,7 +374,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	}
 
 	chunksQuery := `
-		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'low'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE build_id = $1
 		ORDER BY chunk_index ASC;
@@ -355,12 +389,21 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	for rows.Next() {
 		var c VanadisChunk
 		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
+			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &c.DiffStat, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
 		}
 		if c.TargetFiles == nil {
 			c.TargetFiles = []string{}
+		}
+		if c.TargetSymbols == nil {
+			c.TargetSymbols = []string{}
+		}
+		if c.AcceptanceCriteria == nil {
+			c.AcceptanceCriteria = []string{}
+		}
+		if strings.TrimSpace(c.Effort) == "" {
+			c.Effort = "low"
 		}
 		chunks = append(chunks, c)
 	}
@@ -477,6 +520,10 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	fmt.Fprintf(&sb, "Tier: %d\n", build.Tier)
 	fmt.Fprintf(&sb, "Overall Objective: %s\n\n", build.Objective)
 
+	if sharedCtx := strings.TrimSpace(build.SharedContext); sharedCtx != "" {
+		fmt.Fprintf(&sb, "=== Shared Build Context ===\n%s\n\n", sharedCtx)
+	}
+
 	sb.WriteString("=== Completed Chunks Ledger ===\n")
 	if activeIdx == 0 {
 		sb.WriteString("(none — this is the first chunk)\n\n")
@@ -501,7 +548,27 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	fmt.Fprintf(&sb, "Title: %s\n", active.Title)
 	fmt.Fprintf(&sb, "Repository: %s\n", activeRepo)
 	fmt.Fprintf(&sb, "Target Files: %s\n", targetFilesStr)
+	if len(active.TargetSymbols) > 0 {
+		fmt.Fprintf(&sb, "Target Symbols: %s\n", strings.Join(active.TargetSymbols, ", "))
+	}
 	fmt.Fprintf(&sb, "Instructions:\n%s\n\n", active.Instructions)
+
+	if len(active.AcceptanceCriteria) > 0 {
+		var criteriaLines []string
+		for _, crit := range active.AcceptanceCriteria {
+			if trimmed := strings.TrimSpace(crit); trimmed != "" {
+				criteriaLines = append(criteriaLines, fmt.Sprintf("- %s", trimmed))
+			}
+		}
+		if len(criteriaLines) > 0 {
+			sb.WriteString("=== Acceptance Criteria ===\n")
+			for _, line := range criteriaLines {
+				sb.WriteString(line)
+				sb.WriteByte('\n')
+			}
+			sb.WriteByte('\n')
+		}
+	}
 
 	sb.WriteString("=== Remaining Chunks ===\n")
 	if activeIdx+1 >= total {
@@ -519,8 +586,9 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	sb.WriteString("=== Mandatory Execution Contract ===\n")
 	fmt.Fprintf(&sb, "1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n", activeRepo)
 	sb.WriteString("2. Implement ONLY this chunk following TDD, run package tests and `./scripts/verify.sh --staged`, and write `PR_DESCRIPTION.md`.\n")
-	fmt.Fprintf(&sb, "3. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n", active.ID)
-	sb.WriteString("4. Terminate turn immediately after submission.\n")
+	sb.WriteString("3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches.\n")
+	fmt.Fprintf(&sb, "4. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n", active.ID)
+	sb.WriteString("5. Terminate turn immediately after submission.\n")
 
 	return sb.String(), nil
 }
@@ -734,7 +802,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	reqPayload := BrainPromptRequest{
 		ChannelID: build.ThreadID,
 		Prompt:    prompt,
-		Effort:    "low",
+		Effort:    firstNonEmpty(strings.TrimSpace(chunk.Effort), "low"),
 		Silent:    true,
 	}
 
@@ -802,21 +870,25 @@ func isNumericSnowflake(s string) bool {
 
 // CreateChunkInput defines a single chunk in a CreateBuildRequest.
 type CreateChunkInput struct {
-	ID           string   `json:"id"`
-	Repo         string   `json:"repo,omitempty"`
-	Title        string   `json:"title"`
-	Instructions string   `json:"instructions"`
-	TargetFiles  []string `json:"target_files"`
+	ID                 string   `json:"id"`
+	Repo               string   `json:"repo,omitempty"`
+	Title              string   `json:"title"`
+	Instructions       string   `json:"instructions"`
+	TargetFiles        []string `json:"target_files"`
+	TargetSymbols      []string `json:"target_symbols"`
+	Effort             string   `json:"effort,omitempty"`
+	AcceptanceCriteria []string `json:"acceptance_criteria"`
 }
 
 // CreateBuildRequest defines the JSON request body for POST /builds.
 type CreateBuildRequest struct {
-	ID        string             `json:"id"`
-	Repo      string             `json:"repo"`
-	ThreadID  string             `json:"thread_id"`
-	Tier      int                `json:"tier"`
-	Objective string             `json:"objective"`
-	Chunks    []CreateChunkInput `json:"chunks"`
+	ID            string             `json:"id"`
+	Repo          string             `json:"repo"`
+	ThreadID      string             `json:"thread_id"`
+	Tier          int                `json:"tier"`
+	Objective     string             `json:"objective"`
+	SharedContext string             `json:"shared_context,omitempty"`
+	Chunks        []CreateChunkInput `json:"chunks"`
 }
 
 func generateBuildID() string {
@@ -928,14 +1000,15 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 
 	now := time.Now().UTC()
 	build := VanadisBuild{
-		ID:        buildID,
-		Repo:      repo,
-		ThreadID:  threadID,
-		Tier:      tier,
-		Objective: objective,
-		Status:    "running",
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:            buildID,
+		Repo:          repo,
+		ThreadID:      threadID,
+		Tier:          tier,
+		Objective:     objective,
+		SharedContext: strings.TrimSpace(req.SharedContext),
+		Status:        "running",
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	chunks := make([]VanadisChunk, len(req.Chunks))
@@ -950,6 +1023,11 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("chunk[%d] instructions are required", i)})
 			return
 		}
+		normalizedEffort, err := normalizeChunkEffort(c.Effort)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("chunk[%d] invalid effort: %v", i, err)})
+			return
+		}
 		chunkID := strings.TrimSpace(c.ID)
 		if chunkID == "" {
 			chunkID = fmt.Sprintf("%s-chunk-%d", buildID, i+1)
@@ -962,17 +1040,28 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		if files == nil {
 			files = []string{}
 		}
+		symbols := c.TargetSymbols
+		if symbols == nil {
+			symbols = []string{}
+		}
+		criteria := c.AcceptanceCriteria
+		if criteria == nil {
+			criteria = []string{}
+		}
 		chunks[i] = VanadisChunk{
-			ID:           chunkID,
-			BuildID:      buildID,
-			ChunkIndex:   i,
-			Repo:         chunkRepo,
-			Title:        title,
-			Instructions: instructions,
-			TargetFiles:  files,
-			Status:       "pending",
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			ID:                 chunkID,
+			BuildID:            buildID,
+			ChunkIndex:         i,
+			Repo:               chunkRepo,
+			Title:              title,
+			Instructions:       instructions,
+			TargetFiles:        files,
+			TargetSymbols:      symbols,
+			Effort:             normalizedEffort,
+			AcceptanceCriteria: criteria,
+			Status:             "pending",
+			CreatedAt:          now,
+			UpdatedAt:          now,
 		}
 	}
 
