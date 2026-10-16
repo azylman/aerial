@@ -608,11 +608,7 @@ func (d *SyncDaemon) HasNomadChanges(ctx context.Context, repoPath, prevHead, cu
 	return ParseNomadGitStatus(out), nil
 }
 
-func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadFileChange, meta ...string) {
-	d.pendingNomadMu.Lock()
-	defer d.pendingNomadMu.Unlock()
-	var repo, commit, targetID string
-	var prNumber int
+func parseNomadMeta(meta []string) (repo, commit, targetID string, prNumber int) {
 	if len(meta) >= 1 {
 		repo = meta[0]
 	}
@@ -627,6 +623,12 @@ func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadF
 			prNumber = parsed
 		}
 	}
+	return repo, commit, targetID, prNumber
+}
+func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadFileChange, meta ...string) {
+	d.pendingNomadMu.Lock()
+	defer d.pendingNomadMu.Unlock()
+	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 	d.pendingNomadChanges = append(d.pendingNomadChanges, NomadChangeEvent{
 		RepoPath:  repoPath,
 		Changes:   changes,
@@ -1287,27 +1289,45 @@ func (d *SyncDaemon) IsJobDefinedInOtherRepo(jobName string, skipRepo string) (s
 }
 
 // ReconcileNomadChanges validates and applies or stops Nomad job specifications.
+func (d *SyncDaemon) stopDeletedNomadJob(ctx context.Context, logPrefix, repoPath, jobName string) {
+	if survivingPath, found := d.IsJobDefinedInOtherRepo(jobName, repoPath); found {
+		log.Printf("%s Notice: skipping stop for deleted job %s (deleted from %s): job is still defined in %s", logPrefix, jobName, repoPath, survivingPath)
+		return
+	}
+	out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", jobName)
+	if err != nil {
+		log.Printf("%s Warning: failed to stop deleted job %s: %s (%v)", logPrefix, jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
+	} else {
+		log.Printf("%s Successfully stopped deleted job %s", logPrefix, jobName)
+	}
+}
+
+func (d *SyncDaemon) runNomadJobWithEvents(ctx context.Context, baseEvt HangarDeployEvent, runArgs ...string) (out []byte, sanitizedCombined string, err error) {
+	baseEvt.Event = "deploy_started"
+	baseEvt.Status = "started"
+	baseEvt.Timestamp = time.Now().UTC()
+	d.DispatchDeployEvent(baseEvt)
+
+	var errBytes []byte
+	out, errBytes, err = d.getNomadExecutor()(ctx, runArgs...)
+	if err != nil {
+		sanitizedCombined = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
+		failEvt := baseEvt
+		failEvt.Event = "deploy_failed"
+		failEvt.Status = "failed"
+		failEvt.Details = sanitizedCombined
+		failEvt.Timestamp = time.Now().UTC()
+		d.DispatchDeployEvent(failEvt)
+	}
+	return out, sanitizedCombined, err
+}
+
 func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) error {
 	if len(changes) == 0 {
 		return nil
 	}
 
-	var repo, commit, targetID string
-	var prNumber int
-	if len(meta) >= 1 {
-		repo = meta[0]
-	}
-	if len(meta) >= 2 {
-		commit = meta[1]
-	}
-	if len(meta) >= 3 {
-		targetID = meta[2]
-	}
-	if len(meta) >= 4 {
-		if parsed, err := strconv.Atoi(meta[3]); err == nil {
-			prNumber = parsed
-		}
-	}
+	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 	if repo == "" && repoPath != "" {
 		repo = NormalizeGitHubSlug(repoPath)
 	}
@@ -1328,17 +1348,7 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	// Phase 1: Teardowns (stop deleted jobs)
 	for _, change := range changes {
 		if change.Action == "delete" {
-			if survivingPath, found := d.IsJobDefinedInOtherRepo(change.JobName, repoPath); found {
-				log.Printf("[Hangar:Nomad] Notice: skipping teardown for deleted job %s (deleted from %s): job is still defined in %s", change.JobName, repoPath, survivingPath)
-				continue
-			}
-			log.Printf("[Hangar:Nomad] Stopping deleted job %s...", change.JobName)
-			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "stop", "-purge", change.JobName)
-			if err != nil {
-				log.Printf("[Hangar:Nomad] Warning: failed to stop deleted job %s: %s (%v)", change.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
-			} else {
-				log.Printf("[Hangar:Nomad] Successfully stopped deleted job %s", change.JobName)
-			}
+			d.stopDeletedNomadJob(recCtx, "[Hangar:Nomad]", repoPath, change.JobName)
 		}
 	}
 
@@ -1363,28 +1373,17 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 			}
 
 			baseEvt := HangarDeployEvent{
-				Event:     "deploy_started",
 				JobName:   change.JobName,
 				Repo:      repo,
 				CommitSHA: commit,
 				PRNumber:  prNumber,
 				TargetID:  targetID,
-				Status:    "started",
-				Timestamp: time.Now().UTC(),
 			}
-			d.DispatchDeployEvent(baseEvt)
 
 			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", change.JobName, change.Path)
-			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "run", "-detach", fullPath)
+			out, sanitizedCombined, err := d.runNomadJobWithEvents(recCtx, baseEvt, "job", "run", "-detach", fullPath)
 			if err != nil {
-				combined := string(append(out, errBytes...))
-				failEvt := baseEvt
-				failEvt.Event = "deploy_failed"
-				failEvt.Status = "failed"
-				failEvt.Details = SanitizeLog(strings.TrimSpace(combined))
-				failEvt.Timestamp = time.Now().UTC()
-				d.DispatchDeployEvent(failEvt)
-				return fmt.Errorf("nomad job run failed for %s: %s (%w)", change.Path, SanitizeLog(strings.TrimSpace(combined)), err)
+				return fmt.Errorf("nomad job run failed for %s: %s (%w)", change.Path, sanitizedCombined, err)
 			}
 			log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", change.JobName, SanitizeLog(strings.TrimSpace(string(out))))
 		}
@@ -1405,17 +1404,7 @@ func (d *SyncDaemon) ExecuteNomadTeardowns(ctx context.Context, pending []NomadC
 	for _, evt := range pending {
 		for _, change := range evt.Changes {
 			if change.Action == "delete" {
-				if survivingPath, found := d.IsJobDefinedInOtherRepo(change.JobName, evt.RepoPath); found {
-					log.Printf("[Hangar:Nomad] Pre-flight teardown: skipping stop for deleted job %s (deleted from %s): job is still defined in %s", change.JobName, evt.RepoPath, survivingPath)
-					continue
-				}
-				log.Printf("[Hangar:Nomad] Pre-flight teardown for deleted job %s...", change.JobName)
-				out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", change.JobName)
-				if err != nil {
-					log.Printf("[Hangar:Nomad] Warning: pre-flight stop of %s: %s (%v)", change.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
-				} else {
-					log.Printf("[Hangar:Nomad] Successfully stopped %s", change.JobName)
-				}
+				d.stopDeletedNomadJob(ctx, "[Hangar:Nomad]", evt.RepoPath, change.JobName)
 			}
 		}
 	}
@@ -2598,36 +2587,14 @@ func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec s
 }
 
 func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) ([]string, error) {
-	var repo, commit, targetID string
-	var prNumber int
-	if len(meta) >= 1 {
-		repo = meta[0]
-	}
-	if len(meta) >= 2 {
-		commit = meta[1]
-	}
-	if len(meta) >= 3 {
-		targetID = meta[2]
-	}
-	if len(meta) >= 4 {
-		if parsed, err := strconv.Atoi(meta[3]); err == nil {
-			prNumber = parsed
-		}
-	}
+	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 
 	SortNomadChangesHangarLast(changes)
 
 	var applied []string
 	for _, ch := range changes {
 		if ch.Action == "delete" {
-			if survivingPath, found := d.IsJobDefinedInOtherRepo(ch.JobName, repoPath); found {
-				log.Printf("[Hangar:Nomad] Notice: skipping teardown for deleted job %s (deleted from %s): job is still defined in %s", ch.JobName, repoPath, survivingPath)
-				continue
-			}
-			out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", ch.JobName)
-			if err != nil {
-				log.Printf("[Hangar:Nomad] Warning: failed to stop deleted job %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
-			}
+			d.stopDeletedNomadJob(ctx, "[Hangar:Nomad]", repoPath, ch.JobName)
 			continue
 		}
 		fullPath := filepath.Join(repoPath, ch.Path)
@@ -2644,25 +2611,14 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 		}
 
 		baseEvt := HangarDeployEvent{
-			Event:     "deploy_started",
 			JobName:   ch.JobName,
 			Repo:      repo,
 			CommitSHA: commit,
 			PRNumber:  prNumber,
 			TargetID:  targetID,
-			Status:    "started",
-			Timestamp: time.Now().UTC(),
 		}
-		d.DispatchDeployEvent(baseEvt)
 
-		out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach", fullPath)
-		if errRun != nil {
-			failEvt := baseEvt
-			failEvt.Event = "deploy_failed"
-			failEvt.Status = "failed"
-			failEvt.Details = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
-			failEvt.Timestamp = time.Now().UTC()
-			d.DispatchDeployEvent(failEvt)
+		if _, _, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath); errRun != nil {
 			return applied, errRun
 		}
 
@@ -2837,18 +2793,9 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 			var appliedJobs []string
 			var deferredJobs []string
 
-			for _, ch := range nomadChanges {
+				for _, ch := range nomadChanges {
 				if ch.Action == "delete" {
-					if survivingPath, found := d.IsJobDefinedInOtherRepo(ch.JobName, repoPath); found {
-						log.Printf("[Hangar:GitPush] Notice: skipping stop for deleted job %s (deleted from %s): job is still defined in %s", ch.JobName, repoPath, survivingPath)
-						continue
-					}
-					out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", ch.JobName)
-					if err != nil {
-						log.Printf("[Hangar:GitPush] Warning stopping deleted job %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
-					} else {
-						log.Printf("[Hangar:GitPush] Successfully stopped deleted job %s", ch.JobName)
-					}
+					d.stopDeletedNomadJob(ctx, "[Hangar:GitPush]", repoPath, ch.JobName)
 					continue
 				}
 
@@ -2869,26 +2816,15 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 				} else {
 					if errVal := d.ValidateNomadJob(ctx, fullPath); errVal == nil {
 						baseEvt := HangarDeployEvent{
-							Event:     "deploy_started",
 							JobName:   ch.JobName,
 							Repo:      req.Repo,
 							CommitSHA: req.Commit,
 							PRNumber:  req.PRNumber,
 							TargetID:  req.TargetID,
-							Status:    "started",
-							Timestamp: time.Now().UTC(),
 						}
-						d.DispatchDeployEvent(baseEvt)
 
-						out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach", fullPath)
-						if errRun != nil {
-							log.Printf("[Hangar:GitPush] nomad job run failed for %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), errRun)
-							failEvt := baseEvt
-							failEvt.Event = "deploy_failed"
-							failEvt.Status = "failed"
-							failEvt.Details = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
-							failEvt.Timestamp = time.Now().UTC()
-							d.DispatchDeployEvent(failEvt)
+						if _, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath); errRun != nil {
+							log.Printf("[Hangar:GitPush] nomad job run failed for %s: %s (%v)", ch.JobName, sanitizedCombined, errRun)
 						} else {
 							appliedJobs = append(appliedJobs, ch.JobName)
 						}
@@ -2897,7 +2833,6 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 					}
 				}
 			}
-
 			resp.AppliedJobs = appliedJobs
 			if len(deferredJobs) > 0 {
 				resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(appliedJobs), len(deferredJobs))
@@ -2918,16 +2853,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 	return resp, http.StatusOK
 }
 
-// ExecuteImageReadyEvent processes an incoming image ready event by deploying matching Nomad jobs.
-func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyEventRequest) (ImageReadyEventResponse, int) {
-	imgRef := strings.TrimSpace(req.Image)
-	if imgRef == "" {
-		return ImageReadyEventResponse{
-			Status:  "error",
-			Message: "missing required field: image",
-		}, http.StatusBadRequest
-	}
-
+func (d *SyncDaemon) findAllNomadJobsByImage(imgRef string) []MatchedNomadJob {
 	var matches []MatchedNomadJob
 	seenJobs := make(map[string]struct{})
 	for _, repo := range d.candidateJobRepos() {
@@ -2941,6 +2867,20 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 			}
 		}
 	}
+	return matches
+}
+
+// ExecuteImageReadyEvent processes an incoming image ready event by deploying matching Nomad jobs.
+func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyEventRequest) (ImageReadyEventResponse, int) {
+	imgRef := strings.TrimSpace(req.Image)
+	if imgRef == "" {
+		return ImageReadyEventResponse{
+			Status:  "error",
+			Message: "missing required field: image",
+		}, http.StatusBadRequest
+	}
+
+	matches := d.findAllNomadJobsByImage(imgRef)
 
 	if len(matches) == 0 {
 		log.Printf("[Hangar:ImageReady] No Nomad jobs found referencing image %s", imgRef)
@@ -2984,7 +2924,6 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		}
 
 		baseEvt := HangarDeployEvent{
-			Event:     "deploy_started",
 			JobName:   job.JobName,
 			Repo:      req.Repo,
 			CommitSHA: req.CommitSHA,
@@ -2992,10 +2931,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 			TargetID:  req.TargetID,
 			Image:     req.Image,
 			Digest:    digest,
-			Status:    "started",
-			Timestamp: time.Now().UTC(),
 		}
-		d.DispatchDeployEvent(baseEvt)
 
 		runArgs := []string{"job", "run", "-detach"}
 		varInjected := false
@@ -3018,15 +2954,8 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		runArgs = append(runArgs, job.JobPath)
 
 		log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s (args: %v)...", job.JobName, job.JobPath, runArgs)
-		outRun, errRunBytes, errRun := d.getNomadExecutor()(ctx, runArgs...)
-		if errRun != nil {
-			log.Printf("[Hangar:ImageReady] Error: job run failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...)))), errRun)
-			failEvt := baseEvt
-			failEvt.Event = "deploy_failed"
-			failEvt.Status = "failed"
-			failEvt.Details = SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...))))
-			failEvt.Timestamp = time.Now().UTC()
-			d.DispatchDeployEvent(failEvt)
+		if _, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, runArgs...); errRun != nil {
+			log.Printf("[Hangar:ImageReady] Error: job run failed for %s: %s (%v)", job.JobName, sanitizedCombined, errRun)
 			runErrors = append(runErrors, fmt.Sprintf("%s: %v", job.JobName, errRun))
 			continue
 		}
@@ -3086,19 +3015,7 @@ func (d *SyncDaemon) EnqueueImageReadyEvent(req ImageReadyEventRequest) (ImageRe
 		}, http.StatusBadRequest
 	}
 
-	var matches []MatchedNomadJob
-	seenJobs := make(map[string]struct{})
-	for _, repo := range d.candidateJobRepos() {
-		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
-			dir := filepath.Join(repo, sub)
-			for _, m := range FindNomadJobsByImage(dir, imgRef) {
-				if _, ok := seenJobs[m.JobName]; !ok {
-					seenJobs[m.JobName] = struct{}{}
-					matches = append(matches, m)
-				}
-			}
-		}
-	}
+	matches := d.findAllNomadJobsByImage(imgRef)
 
 	if len(matches) == 0 {
 		log.Printf("[Hangar:ImageReady] No Nomad jobs found referencing image %s", imgRef)
@@ -3202,13 +3119,9 @@ func (d *SyncDaemon) isHangarRequest(req ImageReadyEventRequest) bool {
 	if IsHangarImage(req.Image) {
 		return true
 	}
-	for _, repo := range d.candidateJobRepos() {
-		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
-			for _, m := range FindNomadJobsByImage(filepath.Join(repo, sub), req.Image) {
-				if IsHangarJob(m.JobName) {
-					return true
-				}
-			}
+	for _, m := range d.findAllNomadJobsByImage(req.Image) {
+		if IsHangarJob(m.JobName) {
+			return true
 		}
 	}
 	return false
@@ -3253,6 +3166,13 @@ var (
 	writeMetaDirFn     = coverage.WriteMetaDir
 )
 
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method != method {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return false
+	}
+	return true
+}
 // SetupMux configures HTTP handlers for metrics, health, status, and sync.
 func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux := http.NewServeMux()
@@ -3278,8 +3198,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	})
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
 
@@ -3291,8 +3210,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	})
 
 	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
 
@@ -3311,8 +3229,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	})
 
 	mux.HandleFunc("/reconcile", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
 
@@ -3354,8 +3271,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	})
 
 	mux.HandleFunc("/events/git_push", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
 		if r.Body != nil {
@@ -3380,8 +3296,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	})
 
 	mux.HandleFunc("/events/image_ready", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
 		if r.Body != nil {
