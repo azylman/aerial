@@ -1054,12 +1054,6 @@ func TestSinkMethods_CoverageAudit(t *testing.T) {
 	_, _ = getPreviousSessionID(nil, "")
 }
 
-// scriptedDaemonTurnDef defines the behavior of a scripted daemon conversation turn.
-type scriptedDaemonTurnDef struct {
-	conversationID string
-	responses      []string // Raw NDJSON lines emitted in order for each input turn
-}
-
 // newScriptedDaemonSpawner returns a MockDaemonSpawner that responds with pre-scripted events.
 func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *runner.MockDaemonSpawner {
 	return &runner.MockDaemonSpawner{

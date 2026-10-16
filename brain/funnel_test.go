@@ -1359,15 +1359,16 @@ channels:
 	dispatchSessionEvent(s, &discordgo.Disconnect{})
 	dispatchSessionEvent(s, &discordgo.Resumed{})
 
-	// 5b. GuildMemberUpdate
+	// 5b. GuildMemberUpdate (isolated guild ID so async GuildCreate syncBotMemberRoles on g-create-2 cannot race)
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "g-member-update-3"})
 	dispatchSessionEvent(s, &discordgo.GuildMemberUpdate{
 		Member: &discordgo.Member{
-			GuildID: "g-create-2",
+			GuildID: "g-member-update-3",
 			User:    &discordgo.User{ID: "bot-aerial-id"},
 			Roles:   []string{"mock-role-robot-123"},
 		},
 	})
-	mUpdated, err := s.State.Member("g-create-2", "bot-aerial-id")
+	mUpdated, err := s.State.Member("g-member-update-3", "bot-aerial-id")
 	if err != nil || len(mUpdated.Roles) != 1 || mUpdated.Roles[0] != "mock-role-robot-123" {
 		t.Errorf("Expected bot member roles updated on GuildMemberUpdate, got %v (err: %v)", mUpdated, err)
 	}
