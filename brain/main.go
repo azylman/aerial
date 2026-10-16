@@ -1080,6 +1080,15 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
 			return
 		}
+		chunkID := strings.TrimSpace(req.VanadisChunkID)
+		if chunkID != "" && (len(req.TargetID) < 17 || len(req.TargetID) > 20 || !queue.IsNumericSnowflake(req.TargetID)) {
+			if chunk, err := store.GetVanadisChunk(r.Context(), chunkID); err == nil && chunk != nil {
+				if build, _, bErr := store.GetVanadisBuild(r.Context(), chunk.BuildID); bErr == nil && build != nil && strings.TrimSpace(build.ThreadID) != "" {
+					req.TargetID = strings.TrimSpace(build.ThreadID)
+				}
+			}
+		}
+
 		if req.TargetID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
 			return
@@ -1113,7 +1122,6 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 			return
 		}
 
-		chunkID := strings.TrimSpace(req.VanadisChunkID)
 		if chunkID != "" {
 			if err := store.AttachVanadisChunkPR(r.Context(), chunkID, req.PRNumber, strings.TrimSpace(req.DiffStat)); err != nil {
 				log.Printf("[HTTP] Failed to attach PR #%d to Vanadis chunk %s: %v", req.PRNumber, chunkID, err)

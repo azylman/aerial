@@ -186,13 +186,26 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     [ \"\$res3\" = \"target_channel\" ] && echo \"target3:ok\" || echo \"target3:fail\"
 
     # Subtest 4: fallback to system dev channel
-    res4=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID; resolve_target_id)
+    res4=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID ANTIGRAVITY_APP_DATA_DIR ANTIGRAVITY_CONVERSATION_ID; resolve_target_id)
     [ \"\$res4\" = \"1542423172400291873\" ] && echo \"target4:ok\" || echo \"target4:fail\"
+
+    # Subtest 5: InterchangeablePool worker key (discord:worker-0) is skipped in favor of DISCORD_THREAD_ID
+    res5=\$(AERIAL_TARGET_ID=\"discord:worker-0\" DISCORD_THREAD_ID=\"1559768078131269684\" resolve_target_id)
+    [ \"\$res5\" = \"1559768078131269684\" ] && echo \"target5:ok\" || echo \"target5:fail\"
+
+    # Subtest 6: InterchangeablePool worker key resolves thread_id from active transcript.jsonl when env thread/channel unset
+    FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app\"
+    mkdir -p \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs\"
+    echo '{\"content\":\"- channel_id: 1542423172400291873\\n- thread_id: 1559768078131269684\"}' > \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs/transcript.jsonl\"
+    res6=\$(unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID; AERIAL_TARGET_ID=\"discord:worker-0\" ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-123\" resolve_target_id)
+    [ \"\$res6\" = \"1559768078131269684\" ] && echo \"target6:ok\" || echo \"target6:fail:\$res6\"
 ")
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target2:ok' && echo true || echo false)" "Target precedence: DISCORD_THREAD_ID takes second priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target3:ok' && echo true || echo false)" "Target precedence: DISCORD_CHANNEL_ID takes third priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && echo true || echo false)" "Target precedence: fallback to 1542423172400291873"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: skips discord:worker-0 for DISCORD_THREAD_ID"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: resolves thread_id from transcript.jsonl when worker key set"
 
 # Case 7: Candidate Nomad job name extraction from changed files
 NOMAD_JOB_EXTRACTION_CHECK=$(bash -c '

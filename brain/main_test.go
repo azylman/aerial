@@ -4633,12 +4633,17 @@ func TestHandlePRRegister(t *testing.T) {
 			t.Fatalf("CreateVanadisBuild failed: %v", err)
 		}
 
-		payload := `{"repo":"aerial","pr_number":510,"branch":"feat/vanadis-chunk","head_sha":"head510","target_id":"1555405874565091380","title":"feat: vanadis chunk","vanadis_chunk_id":"chunk-reg-1","diff_stat":" 2 files changed, 45 insertions(+)"}`
+		payload := `{"repo":"aerial","pr_number":510,"branch":"feat/vanadis-chunk","head_sha":"head510","target_id":"discord:worker-0","title":"feat: vanadis chunk","vanadis_chunk_id":"chunk-reg-1","diff_stat":" 2 files changed, 45 insertions(+)"}`
 		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
 		rec := httptest.NewRecorder()
 		handler(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("Expected 200 OK with vanadis_chunk_id, got %d (%s)", rec.Code, rec.Body.String())
+			t.Fatalf("Expected 200 OK with vanadis_chunk_id and worker target_id, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		prInStore, err := store.GetPRByNumber(context.Background(), "aerial", 510)
+		if err != nil || prInStore == nil || prInStore.TargetID != "1555405874565091380" {
+			t.Errorf("Expected PR target_id resolved from build.ThreadID (1555405874565091380), got %+v (err: %v)", prInStore, err)
 		}
 
 		chunk, err := store.GetVanadisChunk(context.Background(), "chunk-reg-1")
