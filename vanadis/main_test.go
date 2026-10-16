@@ -511,12 +511,13 @@ func TestPostgresVanadisStore(t *testing.T) {
 		*(dest[1].(*string)) = "azylman/aerial"
 		*(dest[2].(*string)) = "thread-1"
 		*(dest[3].(*int)) = 2
-		*(dest[4].(*string)) = "Objective"
-		*(dest[5].(*string)) = "Shared Context"
-		*(dest[6].(*string)) = "running"
-		*(dest[7].(*string)) = "msg-1"
-		*(dest[8].(*time.Time)) = time.Now()
+		*(dest[4].(*string)) = "Build Title"
+		*(dest[5].(*string)) = "Objective"
+		*(dest[6].(*string)) = "Shared Context"
+		*(dest[7].(*string)) = "running"
+		*(dest[8].(*string)) = "msg-1"
 		*(dest[9].(*time.Time)) = time.Now()
+		*(dest[10].(*time.Time)) = time.Now()
 		return nil
 	}
 
@@ -572,7 +573,7 @@ func TestPostgresVanadisStore(t *testing.T) {
 		},
 	})
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
-	if err != nil || gotB.ID != "b-1" || gotB.SharedContext != "Shared Context" || len(gotC) != 1 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "low" {
+	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || gotB.SharedContext != "Shared Context" || len(gotC) != 1 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "low" {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
 	}
 
@@ -643,6 +644,7 @@ func TestFormatChunkPrompt(t *testing.T) {
 		Repo:          "azylman/aerial",
 		ThreadID:      "1555000111",
 		Tier:          2,
+		Title:         "Build Vanadis Queue Execution Pipeline",
 		Objective:     "Build Vanadis Queue",
 		SharedContext: "Architecture: River queue backed by PostgreSQL.",
 	}
@@ -706,6 +708,7 @@ func TestFormatChunkPrompt(t *testing.T) {
 	for _, want := range []string{
 		"[VANADIS BUILD CHUNK EXECUTION]",
 		"Build ID: build-999",
+		"Build Title: Build Vanadis Queue Execution Pipeline",
 		"=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.",
 		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)",
 		"DiffStat: 1 file changed, 25 insertions(+)",
@@ -952,6 +955,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	validPayload := `{
 		"repo": "aerial",
 		"thread_id": "1555999",
+		"title": "Implement Feature X Build Title",
 		"objective": "Implement feature X",
 		"shared_context": "Targeting Nomad cluster",
 		"chunks": [
@@ -991,7 +995,7 @@ func TestHTTPEndpoints(t *testing.T) {
 		t.Fatalf("unexpected create response: %+v", createResp)
 	}
 	storedBuild, storedChunks, _ := memStore.GetBuild(context.Background(), buildID)
-	if storedBuild.SharedContext != "Targeting Nomad cluster" || len(storedChunks) != 2 || storedChunks[1].Effort != "medium" || len(storedChunks[1].TargetSymbols) != 1 || len(storedChunks[1].AcceptanceCriteria) != 1 {
+	if storedBuild.Title != "Implement Feature X Build Title" || storedBuild.SharedContext != "Targeting Nomad cluster" || len(storedChunks) != 2 || storedChunks[1].Effort != "medium" || len(storedChunks[1].TargetSymbols) != 1 || len(storedChunks[1].AcceptanceCriteria) != 1 {
 		t.Fatalf("stored build mismatch: build=%+v chunks=%+v", storedBuild, storedChunks)
 	}
 
@@ -1151,31 +1155,32 @@ func TestSyncBuildWidget(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&postedReq)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status": "delivered",
+			"status":     "delivered",
 			"message_id": "msg-new-widget-42",
 		})
 	}))
 	defer ts.Close()
 
 	srv := &VanadisServer{
-		cfg: Config{BrainURL: ts.URL},
+		cfg:        Config{BrainURL: ts.URL},
 		httpClient: ts.Client(),
-		store: store,
+		store:      store,
 	}
 
 	build := VanadisBuild{
-		ID: "b1",
-		ThreadID: "1555405874565091380",
+		ID:        "b1",
+		ThreadID:  "1555405874565091380",
+		Title:     "Test Build Title",
 		Objective: "Test Obj",
-		Status: "running",
-		Tier: 2,
+		Status:    "running",
+		Tier:      2,
 	}
 	chunks := []VanadisChunk{
 		{ChunkIndex: 0, Title: "Chunk 0", Status: "running", Repo: "aerial"},
 	}
 
 	srv.syncBuildWidget(ctx, build, chunks, "test banner")
-	if postedReq.ID != "b1" || postedReq.Banner != "test banner" {
+	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" {
 		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
 	}
 	if store.builds["b1"].StatusMessageID != "msg-new-widget-42" {

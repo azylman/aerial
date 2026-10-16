@@ -3787,9 +3787,10 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 				*(dest[5].(*string)) = "azylman/aerial"
 				*(dest[6].(*string)) = "123456789012345678"
 				*(dest[7].(*int)) = 2
-				*(dest[8].(*string)) = "Test Objective"
-				*(dest[9].(*string)) = bStatus
-				*(dest[10].(*string)) = "msg-12345"
+				*(dest[8].(*string)) = "Test Build Title"
+				*(dest[9].(*string)) = "Test Objective"
+				*(dest[10].(*string)) = bStatus
+				*(dest[11].(*string)) = "msg-12345"
 				return nil
 			}}
 		}
@@ -3905,7 +3906,7 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		}, nil
 	}
 	resMid, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
-	if err != nil || !resMid.Advanced || resMid.BuildCompleted || resMid.NextChunkIndex != 1 {
+	if err != nil || !resMid.Advanced || resMid.BuildCompleted || resMid.NextChunkIndex != 1 || resMid.Title != "Test Build Title" {
 		t.Fatalf("expected mid-run advance to chunk 1, got %+v, err=%v", resMid, err)
 	}
 
@@ -3956,7 +3957,7 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		}, nil
 	}
 	resDone, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
-	if err != nil || !resDone.Advanced || !resDone.BuildCompleted || resDone.BuildStatus != "completed" || resDone.NextChunkIndex != -1 {
+	if err != nil || !resDone.Advanced || !resDone.BuildCompleted || resDone.BuildStatus != "completed" || resDone.NextChunkIndex != -1 || resDone.Title != "Test Build Title" {
 		t.Fatalf("expected build completed, got %+v, err=%v", resDone, err)
 	}
 }
@@ -4024,9 +4025,10 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					*dest[2].(*string) = "aerial"
 					*dest[3].(*string) = "1555405874565091380"
 					*dest[4].(*int) = 2
-					*dest[5].(*string) = "Vanadis Objective"
-					*dest[6].(*string) = "running"
-					*dest[7].(*string) = "old-build-msg"
+					*dest[5].(*string) = "Vanadis Build Title"
+					*dest[6].(*string) = "Vanadis Objective"
+					*dest[7].(*string) = "running"
+					*dest[8].(*string) = "old-build-msg"
 					return nil
 				}}
 			}
@@ -4050,7 +4052,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 	}
 	calls = mockDisp.WidgetCalls()
 	lastCall = calls[len(calls)-1]
-	if lastCall.ID != "build-abc" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 1 || lastCall.Chunks[0].Status != "deployed" {
+	if lastCall.ID != "build-abc" || lastCall.Title != "Vanadis Build Title" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 1 || lastCall.Chunks[0].Status != "deployed" {
 		t.Errorf("unexpected vanadis widget request: %+v", lastCall)
 	}
 }
