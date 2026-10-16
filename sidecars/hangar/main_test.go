@@ -96,287 +96,484 @@ func TestBuildGitEnv(t *testing.T) {
 	}
 }
 
-func TestGetStatus(t *testing.T) {
-	fakeRepo := "/mock/repo/aerial"
-	daemon := &SyncDaemon{
-		repos: []string{fakeRepo},
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte("abc1234567890abcdef1234567890abcdef12\x002026-09-12T12:00:00Z"), nil, nil
+func TestGetComposeArgs_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		subArgs []string
+		setup   func(t *testing.T) (composeDir string, configDir string, check func(t *testing.T, args []string, composeDir, configDir string))
+	}{
+		{
+			name:    "base_only",
+			subArgs: []string{"config", "--quiet"},
+			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
+				composeDir := t.TempDir()
+				configDir := t.TempDir()
+				baseFile := filepath.Join(composeDir, "docker-compose.yml")
+				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				expectedPrefix := []string{
+					"--project-name", "aerial",
+					"--project-directory", composeDir,
+					"-f", baseFile,
+					"config", "--quiet",
+				}
+				return composeDir, configDir, func(t *testing.T, args []string, _, _ string) {
+					if len(args) != len(expectedPrefix) {
+						t.Fatalf("expected %d args, got %d: %v", len(expectedPrefix), len(args), args)
+					}
+					for i := range expectedPrefix {
+						if args[i] != expectedPrefix[i] {
+							t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedPrefix[i])
+						}
+					}
+				}
+			},
+		},
+		{
+			name:    "with_config_override",
+			subArgs: []string{"up", "-d", "--no-recreate", "gitsync"},
+			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
+				composeDir := t.TempDir()
+				configDir := t.TempDir()
+				baseFile := filepath.Join(composeDir, "docker-compose.yml")
+				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				overrideFile := filepath.Join(configDir, "docker-compose.override.yml")
+				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				expectedArgs := []string{
+					"--project-name", "aerial",
+					"--project-directory", composeDir,
+					"-f", baseFile,
+					"-f", filepath.Clean(overrideFile),
+					"up", "-d", "--no-recreate", "gitsync",
+				}
+				return composeDir, configDir, func(t *testing.T, args []string, _, _ string) {
+					if len(args) != len(expectedArgs) {
+						t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(args), args)
+					}
+					for i := range expectedArgs {
+						if args[i] != expectedArgs[i] {
+							t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedArgs[i])
+						}
+					}
+				}
+			},
+		},
+		{
+			name:    "deduplication",
+			subArgs: []string{"config"},
+			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
+				composeDir := t.TempDir()
+				baseFile := filepath.Join(composeDir, "docker-compose.yml")
+				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				overrideFile := filepath.Join(composeDir, "docker-compose.override.yml")
+				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return composeDir, composeDir, func(t *testing.T, args []string, _, _ string) {
+					fCount := 0
+					for _, a := range args {
+						if a == "-f" {
+							fCount++
+						}
+					}
+					if fCount != 2 {
+						t.Fatalf("expected exactly 2 -f flags (base + deduplicated override), got %d: %v", fCount, args)
+					}
+				}
+			},
+		},
+		{
+			name:    "with_env_file",
+			subArgs: []string{"config"},
+			setup: func(t *testing.T) (string, string, func(*testing.T, []string, string, string)) {
+				composeDir := t.TempDir()
+				configDir := t.TempDir()
+				baseFile := filepath.Join(composeDir, "docker-compose.yml")
+				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				envFile := filepath.Join(composeDir, ".env")
+				if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return composeDir, configDir, func(t *testing.T, args []string, _, _ string) {
+					hasEnvFile := false
+					for i, a := range args {
+						if a == "--env-file" && i+1 < len(args) && args[i+1] == envFile {
+							hasEnvFile = true
+							break
+						}
+					}
+					if !hasEnvFile {
+						t.Fatalf("expected --env-file %s in args, got: %v", envFile, args)
+					}
+				}
+			},
 		},
 	}
 
-	ctx := context.Background()
-	status := daemon.GetStatus(ctx)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			composeDir, configDir, check := tc.setup(t)
+			daemon := &SyncDaemon{
+				composeDir: composeDir,
+				configDir:  configDir,
+			}
+			args := daemon.getComposeArgs(composeDir, tc.subArgs...)
+			check(t, args, composeDir, configDir)
+		})
+	}
+}
 
-	if status.Status != "synced" {
-		t.Errorf("expected status 'synced', got %q", status.Status)
-	}
-	if status.MaxLagSeconds != 0 {
-		t.Errorf("expected max_lag_seconds 0, got %d", status.MaxLagSeconds)
-	}
-	repoSt, ok := status.Repos[fakeRepo]
-	if !ok {
-		t.Fatalf("expected repo %s in status response", fakeRepo)
-	}
-	if repoSt.DiskCommit != "abc1234567890abcdef1234567890abcdef12" {
-		t.Errorf("expected disk commit 'abc1234567890abcdef1234567890abcdef12', got %q", repoSt.DiskCommit)
-	}
-	if repoSt.SyncStatus != "synced" {
-		t.Errorf("expected repo sync_status 'synced', got %q", repoSt.SyncStatus)
-	}
+func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
+	t.Run("getRepoCommit", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			pat         string
+			gitExecutor func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error)
+			wantSha     string
+			wantErr     bool
+			checkTime   func(t *testing.T, tm *time.Time)
+		}{
+			{
+				name: "git_error",
+				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return nil, nil, errors.New("git error")
+				},
+				wantErr: true,
+				checkTime: func(t *testing.T, tm *time.Time) {
+					if tm != nil {
+						t.Errorf("expected nil time on error, got %v", tm)
+					}
+				},
+			},
+			{
+				name: "output_without_null_delimiter",
+				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("abc1234"), nil, nil
+				},
+				wantSha: "abc1234",
+				wantErr: false,
+				checkTime: func(t *testing.T, tm *time.Time) {
+					if tm != nil {
+						t.Errorf("expected nil time without delimiter, got %v", tm)
+					}
+				},
+			},
+			{
+				name: "output_with_invalid_rfc3339_date",
+				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("abc1234\x00invalid-date"), nil, nil
+				},
+				wantSha: "abc1234",
+				wantErr: false,
+				checkTime: func(t *testing.T, tm *time.Time) {
+					if tm != nil {
+						t.Errorf("expected nil time on invalid date, got %v", tm)
+					}
+				},
+			},
+			{
+				name: "output_with_valid_rfc3339_date_and_pat",
+				pat:  "my_pat",
+				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
+				},
+				wantSha: "1122334455667788990011223344556677889900",
+				wantErr: false,
+				checkTime: func(t *testing.T, tm *time.Time) {
+					if tm == nil || tm.Year() != 2026 {
+						t.Errorf("expected valid time with year 2026, got %v", tm)
+					}
+				},
+			},
+		}
 
-	// Test HTTP Endpoint
-	mux := http.NewServeMux()
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(daemon.GetStatus(r.Context()))
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				d := &SyncDaemon{
+					pat:         tc.pat,
+					gitExecutor: tc.gitExecutor,
+				}
+				sha, tm, err := d.getRepoCommit(context.Background(), "/repo", "HEAD")
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("getRepoCommit() error = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if sha != tc.wantSha {
+					t.Errorf("getRepoCommit() sha = %q, want %q", sha, tc.wantSha)
+				}
+				if tc.checkTime != nil {
+					tc.checkTime(t, tm)
+				}
+			})
+		}
 	})
 
-	server := httptest.NewServer(mux)
-	defer server.Close()
+	t.Run("GetStatus", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			check func(t *testing.T)
+		}{
+			{
+				name: "synced_and_http_endpoint",
+				check: func(t *testing.T) {
+					fakeRepo := "/mock/repo/aerial"
+					daemon := &SyncDaemon{
+						repos: []string{fakeRepo},
+						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							return []byte("abc1234567890abcdef1234567890abcdef12\x002026-09-12T12:00:00Z"), nil, nil
+						},
+					}
 
-	resp, err := http.Get(server.URL + "/status")
-	if err != nil {
-		t.Fatalf("GET /status failed: %v", err)
-	}
-	defer resp.Body.Close()
+					ctx := context.Background()
+					status := daemon.GetStatus(ctx)
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected status 200, got %d", resp.StatusCode)
-	}
+					if status.Status != "synced" {
+						t.Errorf("expected status 'synced', got %q", status.Status)
+					}
+					if status.MaxLagSeconds != 0 {
+						t.Errorf("expected max_lag_seconds 0, got %d", status.MaxLagSeconds)
+					}
+					repoSt, ok := status.Repos[fakeRepo]
+					if !ok {
+						t.Fatalf("expected repo %s in status response", fakeRepo)
+					}
+					if repoSt.DiskCommit != "abc1234567890abcdef1234567890abcdef12" {
+						t.Errorf("expected disk commit 'abc1234567890abcdef1234567890abcdef12', got %q", repoSt.DiskCommit)
+					}
+					if repoSt.SyncStatus != "synced" {
+						t.Errorf("expected repo sync_status 'synced', got %q", repoSt.SyncStatus)
+					}
 
-	var jsonResp GitSyncStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
-		t.Fatalf("failed to decode JSON: %v", err)
-	}
+					mux := http.NewServeMux()
+					mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(daemon.GetStatus(r.Context()))
+					})
 
-	if jsonResp.Status != "synced" {
-		t.Errorf("expected json status 'synced', got %q", jsonResp.Status)
-	}
-}
+					server := httptest.NewServer(mux)
+					defer server.Close()
 
-func TestGetComposeArgs_BaseOnly(t *testing.T) {
-	composeDir := t.TempDir()
-	configDir := t.TempDir()
+					resp, err := http.Get(server.URL + "/status")
+					if err != nil {
+						t.Fatalf("GET /status failed: %v", err)
+					}
+					defer resp.Body.Close()
 
-	baseFile := filepath.Join(composeDir, "docker-compose.yml")
-	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-		t.Fatal(err)
-	}
+					if resp.StatusCode != http.StatusOK {
+						t.Errorf("expected status 200, got %d", resp.StatusCode)
+					}
 
-	daemon := &SyncDaemon{
-		composeDir: composeDir,
-		configDir:  configDir,
-	}
+					var jsonResp GitSyncStatusResponse
+					if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
+						t.Fatalf("failed to decode JSON: %v", err)
+					}
 
-	args := daemon.getComposeArgs(composeDir, "config", "--quiet")
+					if jsonResp.Status != "synced" {
+						t.Errorf("expected json status 'synced', got %q", jsonResp.Status)
+					}
+				},
+			},
+			{
+				name: "error_status_when_one_repo_fails_with_lastSyncTimes",
+				check: func(t *testing.T) {
+					pastTime := time.Now().Add(-1 * time.Hour)
+					daemon := &SyncDaemon{
+						repos: []string{
+							"/repo/ok",
+							"/repo/failing",
+						},
+						lastSyncTimes: map[string]time.Time{
+							"/repo/ok": pastTime,
+						},
+						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if dir == "/repo/failing" {
+								return nil, []byte("error"), errors.New("failed")
+							}
+							return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
+						},
+					}
 
-	expectedPrefix := []string{
-		"--project-name", "aerial",
-		"--project-directory", composeDir,
-		"-f", baseFile,
-		"config", "--quiet",
-	}
+					status := daemon.GetStatus(context.Background())
+					if status.Status != "error" {
+						t.Errorf("expected overall status 'error' when one repo fails, got %q", status.Status)
+					}
+				},
+			},
+			{
+				name: "lagging_status_when_remote_sha_differs_and_timestamp_older",
+				check: func(t *testing.T) {
+					fakeRepo := "/mock/local"
+					remoteSha := "2222222222222222222222222222222222222222"
+					localSha := "1111111111111111111111111111111111111111"
 
-	if len(args) != len(expectedPrefix) {
-		t.Fatalf("expected %d args, got %d: %v", len(expectedPrefix), len(args), args)
-	}
-	for i := range expectedPrefix {
-		if args[i] != expectedPrefix[i] {
-			t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedPrefix[i])
+					d := NewDaemon(DaemonConfig{
+						Repos: []string{fakeRepo},
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							ref := args[len(args)-1]
+							if ref == "@{u}" || strings.Contains(ref, "origin/") {
+								return []byte(remoteSha + "\x002035-01-01T12:00:00Z"), nil, nil
+							}
+							return []byte(localSha + "\x002026-09-12T12:00:00Z"), nil, nil
+						},
+					})
+
+					stLagging := d.GetStatus(context.Background())
+					if stLagging.Status != "lagging" {
+						t.Errorf("expected lagging status, got %s", stLagging.Status)
+					}
+				},
+			},
+			{
+				name: "origin_main_error_fallback_to_fetch_head",
+				check: func(t *testing.T) {
+					fakeRepo := "/mock/repo"
+					now := time.Now()
+					past := now.Add(-10 * time.Minute)
+
+					d := NewDaemon(DaemonConfig{
+						Repos: []string{fakeRepo},
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							ref := args[len(args)-1]
+							if ref == "origin/main" {
+								return nil, nil, errors.New("no origin/main")
+							}
+							if ref == "FETCH_HEAD" {
+								return []byte("2222222222222222222222222222222222222222\x00" + past.Format(time.RFC3339)), nil, nil
+							}
+							return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
+						},
+					})
+					st := d.GetStatus(context.Background())
+					if st.Repos[fakeRepo].RemoteCommit != "2222222222222222222222222222222222222222" {
+						t.Errorf("expected FETCH_HEAD fallback, got %s", st.Repos[fakeRepo].RemoteCommit)
+					}
+				},
+			},
+			{
+				name: "origin_main_and_fetch_head_failing_fallback_to_disk_sha",
+				check: func(t *testing.T) {
+					fakeRepo := "/mock/repo"
+					now := time.Now()
+
+					dFallbackDisk := NewDaemon(DaemonConfig{
+						Repos: []string{fakeRepo},
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							ref := args[len(args)-1]
+							if ref == "origin/main" || ref == "FETCH_HEAD" {
+								return nil, nil, errors.New("remote ref not found")
+							}
+							return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
+						},
+					})
+					st2 := dFallbackDisk.GetStatus(context.Background())
+					if st2.Repos[fakeRepo].RemoteCommit != "1111111111111111111111111111111111111111" {
+						t.Errorf("expected diskSha fallback, got %s", st2.Repos[fakeRepo].RemoteCommit)
+					}
+				},
+			},
+			{
+				name: "clean_status_synced",
+				check: func(t *testing.T) {
+					cleanDaemon := &SyncDaemon{
+						repos: []string{"/repo/ok"},
+						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
+						},
+					}
+					cleanStatus := cleanDaemon.GetStatus(context.Background())
+					if cleanStatus.Status != "synced" {
+						t.Errorf("expected clean status 'synced', got %q", cleanStatus.Status)
+					}
+					if len(cleanStatus.Repos) != 1 {
+						t.Errorf("expected 1 repo status, got %d", len(cleanStatus.Repos))
+					}
+				},
+			},
 		}
-	}
-}
 
-func TestGetComposeArgs_WithConfigOverride(t *testing.T) {
-	composeDir := t.TempDir()
-	configDir := t.TempDir()
-
-	baseFile := filepath.Join(composeDir, "docker-compose.yml")
-	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	overrideFile := filepath.Join(configDir, "docker-compose.override.yml")
-	if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	daemon := &SyncDaemon{
-		composeDir: composeDir,
-		configDir:  configDir,
-	}
-
-	args := daemon.getComposeArgs(composeDir, "up", "-d", "--no-recreate", "gitsync")
-
-	expectedArgs := []string{
-		"--project-name", "aerial",
-		"--project-directory", composeDir,
-		"-f", baseFile,
-		"-f", filepath.Clean(overrideFile),
-		"up", "-d", "--no-recreate", "gitsync",
-	}
-
-	if len(args) != len(expectedArgs) {
-		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(args), args)
-	}
-	for i := range expectedArgs {
-		if args[i] != expectedArgs[i] {
-			t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedArgs[i])
+		for _, tc := range tests {
+			t.Run(tc.name, tc.check)
 		}
-	}
-}
+	})
 
-// Verify ReconcileNomadJobs alias
-func TestGetComposeArgs_Deduplication(t *testing.T) {
-	composeDir := t.TempDir()
+	t.Run("resolveGitDir", func(t *testing.T) {
+		tempDir := t.TempDir()
 
-	baseFile := filepath.Join(composeDir, "docker-compose.yml")
-	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-		t.Fatal(err)
-	}
+		// Setup dirs
+		standardRepo := filepath.Join(tempDir, "standard")
+		_ = os.MkdirAll(filepath.Join(standardRepo, ".git"), 0755)
 
-	overrideFile := filepath.Join(composeDir, "docker-compose.override.yml")
-	if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
-		t.Fatal(err)
-	}
+		worktreeRepo := filepath.Join(tempDir, "worktree")
+		_ = os.MkdirAll(worktreeRepo, 0755)
+		targetGitDir := filepath.Join(tempDir, "target-git-dir")
+		_ = os.MkdirAll(targetGitDir, 0755)
+		_ = os.WriteFile(filepath.Join(worktreeRepo, ".git"), []byte("gitdir: "+targetGitDir+"\n"), 0644)
 
-	// Set configDir to the same directory as composeDir
-	daemon := &SyncDaemon{
-		composeDir: composeDir,
-		configDir:  composeDir,
-	}
+		relWorktreeRepo := filepath.Join(tempDir, "relworktree")
+		_ = os.MkdirAll(relWorktreeRepo, 0755)
+		_ = os.WriteFile(filepath.Join(relWorktreeRepo, ".git"), []byte("gitdir: ../target-git-dir\n"), 0644)
 
-	args := daemon.getComposeArgs(composeDir, "config")
+		plainFileRepo := filepath.Join(tempDir, "plainfile")
+		_ = os.MkdirAll(plainFileRepo, 0755)
+		_ = os.WriteFile(filepath.Join(plainFileRepo, ".git"), []byte("not_a_gitdir"), 0644)
 
-	fCount := 0
-	for _, a := range args {
-		if a == "-f" {
-			fCount++
+		tests := []struct {
+			name        string
+			repoPath    string
+			wantGitDir  string
+			wantErr     bool
+		}{
+			{
+				name:       "nonexistent_directory",
+				repoPath:   filepath.Join(tempDir, "nonexistent"),
+				wantErr:    true,
+			},
+			{
+				name:       "standard_git_directory",
+				repoPath:   standardRepo,
+				wantGitDir: filepath.Join(standardRepo, ".git"),
+				wantErr:    false,
+			},
+			{
+				name:       "worktree_absolute_gitdir",
+				repoPath:   worktreeRepo,
+				wantGitDir: targetGitDir,
+				wantErr:    false,
+			},
+			{
+				name:       "worktree_relative_gitdir",
+				repoPath:   relWorktreeRepo,
+				wantGitDir: targetGitDir,
+				wantErr:    false,
+			},
+			{
+				name:       "worktree_without_gitdir_prefix",
+				repoPath:   plainFileRepo,
+				wantGitDir: filepath.Join(plainFileRepo, ".git"),
+				wantErr:    false,
+			},
 		}
-	}
 
-	if fCount != 2 {
-		t.Fatalf("expected exactly 2 -f flags (base + deduplicated override), got %d: %v", fCount, args)
-	}
-}
-
-func TestGetComposeArgs_WithEnvFile(t *testing.T) {
-	composeDir := t.TempDir()
-	configDir := t.TempDir()
-
-	baseFile := filepath.Join(composeDir, "docker-compose.yml")
-	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	envFile := filepath.Join(composeDir, ".env")
-	if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	daemon := &SyncDaemon{
-		composeDir: composeDir,
-		configDir:  configDir,
-	}
-
-	args := daemon.getComposeArgs(composeDir, "config")
-
-	hasEnvFile := false
-	for i, a := range args {
-		if a == "--env-file" && i+1 < len(args) && args[i+1] == envFile {
-			hasEnvFile = true
-			break
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				gitDir, err := resolveGitDir(tc.repoPath)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("resolveGitDir() error = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if !tc.wantErr && gitDir != tc.wantGitDir {
+					t.Errorf("resolveGitDir() = %q, want %q", gitDir, tc.wantGitDir)
+				}
+			})
 		}
-	}
-	if !hasEnvFile {
-		t.Fatalf("expected --env-file %s in args, got: %v", envFile, args)
-	}
-}
-
-func TestGetRepoCommitAndStatus(t *testing.T) {
-	fakeRepo := "/mock/repo"
-	daemon := &SyncDaemon{
-		interval:      time.Minute,
-		repos:         []string{fakeRepo},
-		lastSyncTimes: make(map[string]time.Time),
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte("fedcba9876543210fedcba9876543210fedcba98\x002026-09-12T12:00:00Z"), nil, nil
-		},
-	}
-
-	ctx := context.Background()
-	sha, ts, err := daemon.getRepoCommit(ctx, fakeRepo, "HEAD")
-	if err != nil {
-		t.Fatalf("getRepoCommit failed: %v", err)
-	}
-	if sha != "fedcba9876543210fedcba9876543210fedcba98" || ts == nil {
-		t.Fatalf("expected non-empty sha and timestamp, got sha=%q, ts=%v", sha, ts)
-	}
-
-	status := daemon.GetStatus(ctx)
-	if status.Status == "" {
-		t.Errorf("expected valid status string")
-	}
-	if len(status.Repos) != 1 {
-		t.Errorf("expected 1 repo status, got %d", len(status.Repos))
-	}
-}
-
-func TestResolveGitDir(t *testing.T) {
-	tempDir := t.TempDir()
-
-	// 1. Directory does not exist
-	_, err := resolveGitDir(filepath.Join(tempDir, "nonexistent"))
-	if err == nil {
-		t.Errorf("expected error for nonexistent directory, got nil")
-	}
-
-	// 2. Standard .git directory
-	standardRepo := filepath.Join(tempDir, "standard")
-	_ = os.MkdirAll(filepath.Join(standardRepo, ".git"), 0755)
-	gitDir, err := resolveGitDir(standardRepo)
-	if err != nil {
-		t.Fatalf("resolveGitDir failed on standard repo: %v", err)
-	}
-	if gitDir != filepath.Join(standardRepo, ".git") {
-		t.Errorf("expected %s, got %s", filepath.Join(standardRepo, ".git"), gitDir)
-	}
-
-	// 3. Worktree .git file with absolute target
-	worktreeRepo := filepath.Join(tempDir, "worktree")
-	_ = os.MkdirAll(worktreeRepo, 0755)
-	targetGitDir := filepath.Join(tempDir, "target-git-dir")
-	_ = os.MkdirAll(targetGitDir, 0755)
-	_ = os.WriteFile(filepath.Join(worktreeRepo, ".git"), []byte("gitdir: "+targetGitDir+"\n"), 0644)
-	gitDir, err = resolveGitDir(worktreeRepo)
-	if err != nil {
-		t.Fatalf("resolveGitDir failed on worktree repo: %v", err)
-	}
-	if gitDir != targetGitDir {
-		t.Errorf("expected %s, got %s", targetGitDir, gitDir)
-	}
-
-	// 4. Worktree .git file with relative target
-	relWorktreeRepo := filepath.Join(tempDir, "relworktree")
-	_ = os.MkdirAll(relWorktreeRepo, 0755)
-	_ = os.WriteFile(filepath.Join(relWorktreeRepo, ".git"), []byte("gitdir: ../target-git-dir\n"), 0644)
-	gitDir, err = resolveGitDir(relWorktreeRepo)
-	if err != nil {
-		t.Fatalf("resolveGitDir failed on relative worktree repo: %v", err)
-	}
-	if gitDir != targetGitDir {
-		t.Errorf("expected %s, got %s", targetGitDir, gitDir)
-	}
-
-	// 5. Worktree .git file without gitdir prefix
-	plainFileRepo := filepath.Join(tempDir, "plainfile")
-	_ = os.MkdirAll(plainFileRepo, 0755)
-	_ = os.WriteFile(filepath.Join(plainFileRepo, ".git"), []byte("not_a_gitdir"), 0644)
-	gitDir, err = resolveGitDir(plainFileRepo)
-	if err != nil || gitDir != filepath.Join(plainFileRepo, ".git") {
-		t.Errorf("expected %s, got %s (err=%v)", filepath.Join(plainFileRepo, ".git"), gitDir, err)
-	}
+	})
 }
 
 func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
@@ -481,257 +678,553 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 	})
 }
 
-func TestEnsureRepoAndSync(t *testing.T) {
-	tempBase := t.TempDir()
-	bareRemote := "https://example.com/repo.git"
-	localClone := filepath.Join(tempBase, "local")
+func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
+	t.Run("EnsureRepo", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			check func(t *testing.T)
+		}{
+			{
+				name: "empty_path_or_url_noop",
+				check: func(t *testing.T) {
+					daemon := &SyncDaemon{}
+					if err := daemon.EnsureRepo(context.Background(), "", ""); err != nil {
+						t.Errorf("EnsureRepo with empty strings failed: %v", err)
+					}
+				},
+			},
+			{
+				name: "regular_file_not_a_directory_error",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+					filePath := filepath.Join(tempDir, "file-not-dir")
+					_ = os.WriteFile(filePath, []byte("regular file"), 0644)
+					d := NewDaemon(DaemonConfig{})
+					err := d.EnsureRepo(context.Background(), filePath, "https://github.com/example/repo.git")
+					if err == nil {
+						t.Errorf("expected error when repoPath is a regular file")
+					}
+				},
+			},
+			{
+				name: "empty_directory_clone_success_and_second_call_noop",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					bareRemote := "https://example.com/repo.git"
+					localClone := filepath.Join(tempBase, "local")
+					cloneCalled := false
 
-	simulatedCurrentHead := "1111111111111111111111111111111111111111"
-	simulatedFetchHead := "1111111111111111111111111111111111111111"
-	cloneCalled := false
+					daemon := &SyncDaemon{
+						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 && args[0] == "clone" {
+								cloneCalled = true
+								targetPath := args[len(args)-1]
+								_ = os.MkdirAll(filepath.Join(targetPath, ".git"), 0755)
+							}
+							return nil, nil, nil
+						},
+					}
 
-	gitMock := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		if len(args) == 0 {
-			return nil, nil, nil
+					ctx := context.Background()
+					if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
+						t.Fatalf("EnsureRepo failed: %v", err)
+					}
+					if !cloneCalled {
+						t.Errorf("expected clone to be called on empty directory")
+					}
+
+					// Second call should be a no-op since .git now exists
+					if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
+						t.Fatalf("EnsureRepo second call failed: %v", err)
+					}
+				},
+			},
+			{
+				name: "clone_error",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+					d := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							return nil, []byte("fatal: repository not found"), errors.New("clone failed")
+						},
+					})
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					err := d.EnsureRepo(ctx, filepath.Join(tempDir, "empty"), "file:///nonexistent-repo-url-xyz")
+					if err == nil {
+						t.Errorf("expected error from clone, got nil")
+					}
+				},
+			},
+			{
+				name: "non_empty_directory_adoption_success",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					adoptDir := filepath.Join(tempBase, "adopt")
+					_ = os.MkdirAll(adoptDir, 0755)
+					_ = os.WriteFile(filepath.Join(adoptDir, "existing.txt"), []byte("pre-existing content"), 0644)
+
+					var calls []string
+					d := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 {
+								calls = append(calls, args[0])
+							}
+							return nil, nil, nil
+						},
+					})
+					if err := d.EnsureRepo(context.Background(), adoptDir, "https://github.com/example/repo.git"); err != nil {
+						t.Fatalf("EnsureRepo adoption failed: %v", err)
+					}
+					if len(calls) < 4 {
+						t.Errorf("expected at least 4 git calls during adoption, got %d (%v)", len(calls), calls)
+					}
+				},
+			},
+			{
+				name: "adoption_git_init_failure",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+					adoptDir := filepath.Join(tempDir, "adopt")
+					_ = os.MkdirAll(adoptDir, 0755)
+					_ = os.WriteFile(filepath.Join(adoptDir, "file.txt"), []byte("data"), 0644)
+
+					dInitFail := &SyncDaemon{
+						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 && args[0] == "init" {
+								return nil, []byte("fatal: init error"), errors.New("init error")
+							}
+							return nil, nil, nil
+						},
+					}
+					if err := dInitFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
+						t.Errorf("expected error on init failure")
+					}
+				},
+			},
+			{
+				name: "adoption_git_remote_add_nonfatal_warning_when_fetch_succeeds_and_fails",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+
+					// Case A: remote add warning, fetch succeeds -> EnsureRepo succeeds
+					dRemoteSuccess := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 {
+								if args[0] == "init" {
+									return nil, nil, nil
+								}
+								if args[0] == "remote" {
+									return nil, []byte("fatal: remote origin already exists"), errors.New("already exists")
+								}
+								if args[0] == "fetch" {
+									return nil, nil, nil
+								}
+								if args[0] == "reset" {
+									return nil, nil, nil
+								}
+							}
+							return nil, nil, nil
+						},
+					})
+					nonEmptyDir1 := filepath.Join(tempDir, "nonempty1")
+					_ = os.MkdirAll(nonEmptyDir1, 0755)
+					_ = os.WriteFile(filepath.Join(nonEmptyDir1, "file.txt"), []byte("data"), 0644)
+					if err := dRemoteSuccess.EnsureRepo(context.Background(), nonEmptyDir1, "https://github.com/org/repo.git"); err != nil {
+						t.Fatalf("expected already exists remote error to be non-fatal when fetch succeeds, got %v", err)
+					}
+
+					// Case B: remote add warning, fetch fails -> EnsureRepo fails
+					dRemoteFail := &SyncDaemon{
+						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 && args[0] == "remote" {
+								return nil, []byte("remote origin exists"), errors.New("remote exists")
+							}
+							if len(args) > 0 && args[0] == "fetch" {
+								return nil, []byte("fatal: fetch error"), errors.New("fetch error")
+							}
+							return nil, nil, nil
+						},
+					}
+					nonEmptyDir2 := filepath.Join(tempDir, "nonempty2")
+					_ = os.MkdirAll(nonEmptyDir2, 0755)
+					_ = os.WriteFile(filepath.Join(nonEmptyDir2, "file.txt"), []byte("data"), 0644)
+					if err := dRemoteFail.EnsureRepo(context.Background(), nonEmptyDir2, "https://example.com/repo.git"); err == nil {
+						t.Errorf("expected error on fetch failure after remote add warning")
+					}
+				},
+			},
+			{
+				name: "adoption_git_reset_soft_failure",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+					nonEmptyDir := filepath.Join(tempDir, "nonempty")
+					_ = os.MkdirAll(nonEmptyDir, 0755)
+					_ = os.WriteFile(filepath.Join(nonEmptyDir, "file.txt"), []byte("data"), 0644)
+
+					dResetFail := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 {
+								if args[0] == "reset" && len(args) > 1 && args[1] == "--soft" {
+									return nil, []byte("soft reset failed"), errors.New("soft reset error")
+								}
+								if args[0] == "reset" {
+									return nil, []byte("fatal: reset error"), errors.New("reset error")
+								}
+							}
+							return nil, nil, nil
+						},
+					})
+					if err := dResetFail.EnsureRepo(context.Background(), nonEmptyDir, "https://github.com/org/repo.git"); err == nil {
+						t.Fatalf("expected git reset --soft error, got nil")
+					}
+				},
+			},
 		}
-		switch args[0] {
-		case "clone":
-			cloneCalled = true
-			targetPath := args[len(args)-1]
-			_ = os.MkdirAll(filepath.Join(targetPath, ".git"), 0755)
-			return nil, nil, nil
-		case "config":
-			return nil, nil, nil
-		case "rev-parse":
-			if len(args) > 1 && args[1] == "FETCH_HEAD" {
-				return []byte(simulatedFetchHead + "\n"), nil, nil
-			}
-			return []byte(simulatedCurrentHead + "\n"), nil, nil
-		case "fetch":
-			return nil, nil, nil
-		case "merge":
-			simulatedCurrentHead = simulatedFetchHead
-			return []byte("Updating " + simulatedCurrentHead + "\n"), nil, nil
-		case "diff":
-			return []byte("docker-compose.yml\n"), nil, nil
+
+		for _, tc := range tests {
+			t.Run(tc.name, tc.check)
 		}
-		return nil, nil, nil
-	}
-
-	daemon := &SyncDaemon{
-		repos:       []string{localClone},
-		repoUrls:    map[string]string{localClone: bareRemote},
-		reconcileCh: make(chan struct{}, 1),
-		gitExecutor: gitMock,
-	}
-	ctx := context.Background()
-
-	// 1. EnsureRepo test on empty directory (clones from bareRemote)
-	if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
-		t.Fatalf("EnsureRepo failed: %v", err)
-	}
-	if !cloneCalled {
-		t.Errorf("expected clone to be called on empty directory")
-	}
-
-	// 2. Calling EnsureRepo again should be a no-op since .git now exists
-	if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
-		t.Fatalf("EnsureRepo second call failed: %v", err)
-	}
-
-	// 3. Calling EnsureRepo with empty strings returns nil immediately
-	if err := daemon.EnsureRepo(ctx, "", ""); err != nil {
-		t.Errorf("EnsureRepo with empty strings failed: %v", err)
-	}
-
-	// 4. SyncRepo test when up to date
-	res := daemon.SyncRepo(ctx, localClone)
-	if res.Error != "" {
-		t.Fatalf("SyncRepo failed: %s", res.Error)
-	}
-	if res.Changed {
-		t.Errorf("expected changed=false when up to date")
-	}
-	if res.PreviousHead != res.CurrentHead {
-		t.Errorf("expected PreviousHead == CurrentHead, got %s != %s", res.PreviousHead, res.CurrentHead)
-	}
-
-	// 5. SyncRepo test when remote changes exist
-	simulatedFetchHead = "2222222222222222222222222222222222222222"
-	res2 := daemon.SyncRepo(ctx, localClone)
-	if res2.Error != "" {
-		t.Fatalf("SyncRepo failed on update: %s", res2.Error)
-	}
-	if !res2.Changed {
-		t.Errorf("expected changed=true after remote update")
-	}
-	if res2.PreviousHead == res2.CurrentHead {
-		t.Errorf("expected PreviousHead != CurrentHead, got %s == %s", res2.PreviousHead, res2.CurrentHead)
-	}
-	if res2.PreviousHead != "1111111111111111111111111111111111111111" || res2.CurrentHead != "2222222222222222222222222222222222222222" {
-		t.Errorf("unexpected heads: prev=%s curr=%s", res2.PreviousHead, res2.CurrentHead)
-	}
-
-	// 6. Test index.lock guard
-	lockFile := filepath.Join(localClone, ".git", "index.lock")
-	_ = os.WriteFile(lockFile, []byte(""), 0644)
-	resLock := daemon.SyncRepo(ctx, localClone)
-	if resLock.Error != "index.lock active" {
-		t.Errorf("expected 'index.lock active', got %q", resLock.Error)
-	}
-	_ = os.Remove(lockFile)
-
-	// 7. Test SyncRepo empty repo path & invalid repo
-	emptyRes := daemon.SyncRepo(ctx, "")
-	if emptyRes.Repo != "" {
-		t.Errorf("expected empty repo result")
-	}
-
-	invalidRes := daemon.SyncRepo(ctx, filepath.Join(tempBase, "nonexistent"))
-	if invalidRes.Error == "" {
-		t.Errorf("expected error on nonexistent repo")
-	}
-}
-
-func TestEnsureRepo_Adoption(t *testing.T) {
-	tempBase := t.TempDir()
-	adoptDir := filepath.Join(tempBase, "adopt")
-	_ = os.MkdirAll(adoptDir, 0755)
-	_ = os.WriteFile(filepath.Join(adoptDir, "existing.txt"), []byte("pre-existing content"), 0644)
-
-	var calls []string
-	d := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 {
-				calls = append(calls, args[0])
-			}
-			return nil, nil, nil
-		},
 	})
-	if err := d.EnsureRepo(context.Background(), adoptDir, "https://github.com/example/repo.git"); err != nil {
-		t.Fatalf("EnsureRepo adoption failed: %v", err)
-	}
-	if len(calls) < 4 {
-		t.Errorf("expected at least 4 git calls during adoption, got %d (%v)", len(calls), calls)
-	}
-}
 
-func TestSyncRepoErrorBranches(t *testing.T) {
-	tempBase := t.TempDir()
-	ctx := context.Background()
+	t.Run("SyncRepo", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			check func(t *testing.T)
+		}{
+			{
+				name: "empty_repo_path",
+				check: func(t *testing.T) {
+					daemon := &SyncDaemon{}
+					emptyRes := daemon.SyncRepo(context.Background(), "")
+					if emptyRes.Repo != "" {
+						t.Errorf("expected empty repo result")
+					}
+				},
+			},
+			{
+				name: "nonexistent_repo_path",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					daemon := &SyncDaemon{}
+					invalidRes := daemon.SyncRepo(context.Background(), filepath.Join(tempBase, "nonexistent"))
+					if invalidRes.Error == "" {
+						t.Errorf("expected error on nonexistent repo")
+					}
+				},
+			},
+			{
+				name: "index_lock_active_guard",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					localClone := filepath.Join(tempBase, "local")
+					_ = os.MkdirAll(filepath.Join(localClone, ".git"), 0755)
+					lockFile := filepath.Join(localClone, ".git", "index.lock")
+					_ = os.WriteFile(lockFile, []byte(""), 0644)
 
-	// 1. Repo with empty .git dir (no commits -> rev-parse HEAD fails before pull)
-	emptyGitRepo := filepath.Join(tempBase, "emptygit")
-	_ = os.MkdirAll(filepath.Join(emptyGitRepo, ".git"), 0755)
-	daemonEmpty := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: ambiguous argument 'HEAD'"), errors.New("exit status 128")
-		},
+					daemon := &SyncDaemon{}
+					resLock := daemon.SyncRepo(context.Background(), localClone)
+					if resLock.Error != "index.lock active" {
+						t.Errorf("expected 'index.lock active', got %q", resLock.Error)
+					}
+				},
+			},
+			{
+				name: "up_to_date_and_fast_forward_update_with_diff",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					localClone := filepath.Join(tempBase, "local")
+					_ = os.MkdirAll(filepath.Join(localClone, ".git"), 0755)
+
+					simCurrentHead := "1111111111111111111111111111111111111111"
+					simFetchHead := "1111111111111111111111111111111111111111"
+
+					daemon := &SyncDaemon{
+						repos:       []string{localClone},
+						repoUrls:    map[string]string{localClone: "https://example.com/repo.git"},
+						reconcileCh: make(chan struct{}, 1),
+						gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) == 0 {
+								return nil, nil, nil
+							}
+							switch args[0] {
+							case "config":
+								return nil, nil, nil
+							case "rev-parse":
+								if len(args) > 1 && args[1] == "FETCH_HEAD" {
+									return []byte(simFetchHead + "\n"), nil, nil
+								}
+								return []byte(simCurrentHead + "\n"), nil, nil
+							case "fetch":
+								return nil, nil, nil
+							case "merge":
+								simCurrentHead = simFetchHead
+								return []byte("Updating " + simCurrentHead + "\n"), nil, nil
+							case "diff":
+								return []byte("docker-compose.yml\n"), nil, nil
+							}
+							return nil, nil, nil
+						},
+					}
+
+					ctx := context.Background()
+					// 1. Up to date
+					res := daemon.SyncRepo(ctx, localClone)
+					if res.Error != "" {
+						t.Fatalf("SyncRepo failed: %s", res.Error)
+					}
+					if res.Changed {
+						t.Errorf("expected changed=false when up to date")
+					}
+					if res.PreviousHead != res.CurrentHead {
+						t.Errorf("expected PreviousHead == CurrentHead, got %s != %s", res.PreviousHead, res.CurrentHead)
+					}
+
+					// 2. Remote update exists
+					simFetchHead = "2222222222222222222222222222222222222222"
+					res2 := daemon.SyncRepo(ctx, localClone)
+					if res2.Error != "" {
+						t.Fatalf("SyncRepo failed on update: %s", res2.Error)
+					}
+					if !res2.Changed {
+						t.Errorf("expected changed=true after remote update")
+					}
+					if res2.PreviousHead == res2.CurrentHead {
+						t.Errorf("expected PreviousHead != CurrentHead, got %s == %s", res2.PreviousHead, res2.CurrentHead)
+					}
+					if res2.PreviousHead != "1111111111111111111111111111111111111111" || res2.CurrentHead != "2222222222222222222222222222222222222222" {
+						t.Errorf("unexpected heads: prev=%s curr=%s", res2.PreviousHead, res2.CurrentHead)
+					}
+				},
+			},
+			{
+				name: "empty_git_rev_parse_head_error",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					emptyGitRepo := filepath.Join(tempBase, "emptygit")
+					_ = os.MkdirAll(filepath.Join(emptyGitRepo, ".git"), 0755)
+					daemonEmpty := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							return nil, []byte("fatal: ambiguous argument 'HEAD'"), errors.New("exit status 128")
+						},
+					})
+					resEmpty := daemonEmpty.SyncRepo(context.Background(), emptyGitRepo)
+					if resEmpty.Error == "" {
+						t.Errorf("expected error on empty git repo without commits")
+					}
+				},
+			},
+			{
+				name: "fetch_error",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					brokenOriginRepo := filepath.Join(tempBase, "brokenorigin")
+					_ = os.MkdirAll(filepath.Join(brokenOriginRepo, ".git"), 0755)
+					daemonBroken := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 {
+								switch args[0] {
+								case "config":
+									return nil, nil, nil
+								case "rev-parse":
+									return []byte("1111111111111111111111111111111111111111"), nil, nil
+								case "fetch":
+									return nil, []byte("fatal: unable to access"), errors.New("fetch failed")
+								case "pull":
+									return nil, []byte("fatal: unable to access"), errors.New("pull failed")
+								}
+							}
+							return nil, nil, nil
+						},
+					})
+
+					resBroken := daemonBroken.SyncRepo(context.Background(), brokenOriginRepo)
+					if !strings.Contains(resBroken.Error, "fetch failed") {
+						t.Errorf("expected fetch failed error on broken remote, got: %s", resBroken.Error)
+					}
+				},
+			},
+			{
+				name: "ensure_repo_failure_warning_uninitialized",
+				check: func(t *testing.T) {
+					tempBase := t.TempDir()
+					failDir := filepath.Join(tempBase, "fail_adopt")
+					daemonEnsureFail := NewDaemon(DaemonConfig{
+						Repos:    []string{failDir},
+						RepoURLs: map[string]string{failDir: "http://invalid-non-routable-domain-1234567.com/repo.git"},
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							return nil, []byte("fatal: clone failed"), errors.New("clone failed")
+						},
+					})
+					_ = os.MkdirAll(failDir, 0755)
+					_ = os.WriteFile(filepath.Join(failDir, "file.txt"), []byte("content"), 0644)
+					_ = daemonEnsureFail.SyncRepo(context.Background(), failDir)
+				},
+			},
+			{
+				name: "merge_conflict_reset_recovery",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+					localDir := filepath.Join(tempDir, "local")
+					_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+
+					head1 := "1111111111111111111111111111111111111111"
+					head2 := "2222222222222222222222222222222222222222"
+					currentHead := head1
+
+					gitMock := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						if len(args) == 0 {
+							return nil, nil, nil
+						}
+						switch args[0] {
+						case "config":
+							return nil, nil, nil
+						case "rev-parse":
+							if len(args) > 1 && args[1] == "FETCH_HEAD" {
+								return []byte(head2), nil, nil
+							}
+							return []byte(currentHead), nil, nil
+						case "fetch":
+							return nil, nil, nil
+						case "merge":
+							return nil, []byte("fatal: Not possible to fast-forward, aborting."), errors.New("exit status 128")
+						case "reset":
+							currentHead = head2
+							return []byte("HEAD is now at " + head2), nil, nil
+						case "clean":
+							return nil, nil, nil
+						}
+						return nil, nil, nil
+					}
+
+					d := NewDaemon(DaemonConfig{
+						GitExecutor: gitMock,
+					})
+					res := d.SyncRepo(context.Background(), localDir)
+					if res.Error != "" {
+						t.Fatalf("SyncRepo failed unexpectedly during reset recovery: %s", res.Error)
+					}
+					if !res.Changed {
+						t.Errorf("expected Changed to be true after reset recovery")
+					}
+					if currentHead != head2 {
+						t.Errorf("expected HEAD to be reset to %s, got %s", head2, currentHead)
+					}
+				},
+			},
+			{
+				name: "recovery_reset_hard_failure",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+					localDir := filepath.Join(tempDir, "local")
+					_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+
+					dResetFail := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 {
+								switch args[0] {
+								case "config":
+									return nil, nil, nil
+								case "rev-parse":
+									return []byte("1111111111111111111111111111111111111111"), nil, nil
+								case "fetch":
+									return nil, nil, nil
+								case "merge":
+									return nil, []byte("fatal: conflict"), errors.New("merge conflict")
+								case "reset":
+									return nil, []byte("fatal: reset failed"), errors.New("reset failed")
+								}
+							}
+							return nil, nil, nil
+						},
+					})
+					res := dResetFail.SyncRepo(context.Background(), localDir)
+					if !strings.Contains(res.Error, "reset failed") {
+						t.Errorf("expected reset failed error, got %s", res.Error)
+					}
+				},
+			},
+			{
+				name: "post_merge_rev_parse_failure",
+				check: func(t *testing.T) {
+					tempDir := t.TempDir()
+					localDir := filepath.Join(tempDir, "local")
+					_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+
+					revParseCount := 0
+					dRevParseFail := NewDaemon(DaemonConfig{
+						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+							if len(args) > 0 {
+								switch args[0] {
+								case "config":
+									return nil, nil, nil
+								case "rev-parse":
+									revParseCount++
+									if revParseCount > 1 {
+										return nil, []byte("fatal: rev-parse failed"), errors.New("rev-parse error")
+									}
+									return []byte("1111111111111111111111111111111111111111"), nil, nil
+								case "fetch":
+									return nil, nil, nil
+								case "merge":
+									return []byte("Already up to date."), nil, nil
+								}
+							}
+							return nil, nil, nil
+						},
+					})
+					res2 := dRevParseFail.SyncRepo(context.Background(), localDir)
+					if res2.Error == "" {
+						t.Errorf("expected error when post-merge rev-parse fails")
+					}
+				},
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, tc.check)
+		}
 	})
-	resEmpty := daemonEmpty.SyncRepo(ctx, emptyGitRepo)
-	if resEmpty.Error == "" {
-		t.Errorf("expected error on empty git repo without commits")
-	}
 
-	// 2. Repo where pull fails and fetch also fails
-	brokenOriginRepo := filepath.Join(tempBase, "brokenorigin")
-	_ = os.MkdirAll(filepath.Join(brokenOriginRepo, ".git"), 0755)
-	daemonBroken := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 {
+	t.Run("TriggerSync", func(t *testing.T) {
+		tempDir := t.TempDir()
+		localDir := filepath.Join(tempDir, "local")
+		_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+
+		head1 := "1111111111111111111111111111111111111111"
+		head2 := "2222222222222222222222222222222222222222"
+		currentHead := head1
+
+		d := NewDaemon(DaemonConfig{
+			Repos: []string{localDir},
+			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) == 0 {
+					return nil, nil, nil
+				}
 				switch args[0] {
 				case "config":
 					return nil, nil, nil
 				case "rev-parse":
-					return []byte("1111111111111111111111111111111111111111"), nil, nil
+					return []byte(currentHead), nil, nil
 				case "fetch":
-					return nil, []byte("fatal: unable to access"), errors.New("fetch failed")
-				case "pull":
-					return nil, []byte("fatal: unable to access"), errors.New("pull failed")
+					return nil, nil, nil
+				case "merge":
+					currentHead = head2
+					return []byte("Updating " + head2), nil, nil
+				case "diff":
+					return nil, nil, nil
 				}
-			}
-			return nil, nil, nil
-		},
+				return nil, nil, nil
+			},
+		})
+		results, err := d.TriggerSync()
+		if err != nil {
+			t.Fatalf("TriggerSync failed: %v", err)
+		}
+		if len(results) != 1 || !results[0].Changed {
+			t.Errorf("expected 1 result with Changed=true, got %+v", results)
+		}
 	})
-
-	resBroken := daemonBroken.SyncRepo(ctx, brokenOriginRepo)
-	if !strings.Contains(resBroken.Error, "fetch failed") {
-		t.Errorf("expected fetch failed error on broken remote, got: %s", resBroken.Error)
-	}
-
-	// 3. EnsureRepo failure branch in SyncRepo
-	daemonEnsureFail := NewDaemon(DaemonConfig{
-		Repos:    []string{filepath.Join(tempBase, "fail_adopt")},
-		RepoURLs: map[string]string{filepath.Join(tempBase, "fail_adopt"): "http://invalid-non-routable-domain-1234567.com/repo.git"},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: clone failed"), errors.New("clone failed")
-		},
-	})
-	_ = os.MkdirAll(filepath.Join(tempBase, "fail_adopt"), 0755)
-	_ = os.WriteFile(filepath.Join(tempBase, "fail_adopt", "file.txt"), []byte("content"), 0644)
-	_ = daemonEnsureFail.SyncRepo(ctx, filepath.Join(tempBase, "fail_adopt"))
-}
-
-func TestGetRepoCommitAndStatusEdgeCases(t *testing.T) {
-	ctx := context.Background()
-
-	// 1. Error from getRepoCommit
-	dErr := &SyncDaemon{
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: not a git repository"), errors.New("exit status 128")
-		},
-	}
-	_, _, err := dErr.getRepoCommit(ctx, "/nonexistent", "HEAD")
-	if err == nil {
-		t.Errorf("expected error from getRepoCommit on nonexistent repo")
-	}
-
-	// 2. Valid commit with PAT
-	dPat := &SyncDaemon{
-		pat: "my_pat",
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
-		},
-	}
-	sha, ts, err := dPat.getRepoCommit(ctx, "/repo", "HEAD")
-	if err != nil || sha == "" || ts == nil {
-		t.Errorf("expected valid sha and ts with PAT, got sha=%s, err=%v", sha, err)
-	}
-
-	// 3. GetStatus with lagging and error repos
-	pastTime := time.Now().Add(-1 * time.Hour)
-	daemon := &SyncDaemon{
-		repos: []string{
-			"/repo/ok",
-			"/repo/failing",
-		},
-		lastSyncTimes: map[string]time.Time{
-			"/repo/ok": pastTime,
-		},
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if dir == "/repo/failing" {
-				return nil, []byte("error"), errors.New("failed")
-			}
-			return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
-		},
-	}
-
-	status := daemon.GetStatus(ctx)
-	if status.Status != "error" {
-		t.Errorf("expected overall status 'error' when one repo fails, got %q", status.Status)
-	}
-
-	// 4. Clean status with synced repo
-	cleanDaemon := &SyncDaemon{
-		repos: []string{"/repo/ok"},
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte("1122334455667788990011223344556677889900\x002026-09-12T12:00:00Z"), nil, nil
-		},
-	}
-	cleanStatus := cleanDaemon.GetStatus(ctx)
-	if cleanStatus.Status != "synced" {
-		t.Errorf("expected clean status 'synced', got %q", cleanStatus.Status)
-	}
 }
 
 func TestNewConfigFromLookup_Custom(t *testing.T) {
@@ -2344,76 +2837,6 @@ func TestPostChannelMessage_Extended(t *testing.T) {
 	d.postChannelMessage(context.Background(), clientErr, "token", "123", "hello")
 }
 
-func TestSyncRepo_ResetRecovery(t *testing.T) {
-	tempDir := t.TempDir()
-	localDir := filepath.Join(tempDir, "local")
-	_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
-	head1 := "1111111111111111111111111111111111111111"
-	head2 := "2222222222222222222222222222222222222222"
-	currentHead := head1
-
-	gitMock := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		if len(args) == 0 {
-			return nil, nil, nil
-		}
-		switch args[0] {
-		case "config":
-			return nil, nil, nil
-		case "rev-parse":
-			if len(args) > 1 && args[1] == "FETCH_HEAD" {
-				return []byte(head2), nil, nil
-			}
-			return []byte(currentHead), nil, nil
-		case "fetch":
-			return nil, nil, nil
-		case "merge":
-			return nil, []byte("fatal: Not possible to fast-forward, aborting."), errors.New("exit status 128")
-		case "reset":
-			currentHead = head2
-			return []byte("HEAD is now at " + head2), nil, nil
-		case "clean":
-			return nil, nil, nil
-		}
-		return nil, nil, nil
-	}
-
-	d := NewDaemon(DaemonConfig{
-		GitExecutor: gitMock,
-	})
-	res := d.SyncRepo(context.Background(), localDir)
-	if res.Error != "" {
-		t.Fatalf("SyncRepo failed unexpectedly during reset recovery: %s", res.Error)
-	}
-	if !res.Changed {
-		t.Errorf("expected Changed to be true after reset recovery")
-	}
-	if currentHead != head2 {
-		t.Errorf("expected HEAD to be reset to %s, got %s", head2, currentHead)
-	}
-}
-
-func TestGetStatus_Lagging(t *testing.T) {
-	fakeRepo := "/mock/local"
-	remoteSha := "2222222222222222222222222222222222222222"
-	localSha := "1111111111111111111111111111111111111111"
-
-	d := NewDaemon(DaemonConfig{
-		Repos: []string{fakeRepo},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			ref := args[len(args)-1]
-			if ref == "@{u}" || strings.Contains(ref, "origin/") {
-				return []byte(remoteSha + "\x002035-01-01T12:00:00Z"), nil, nil
-			}
-			return []byte(localSha + "\x002026-09-12T12:00:00Z"), nil, nil
-		},
-	})
-
-	stLagging := d.GetStatus(context.Background())
-	if stLagging.Status != "lagging" {
-		t.Errorf("expected lagging status, got %s", stLagging.Status)
-	}
-}
 
 func TestSetupMux_Extended(t *testing.T) {
 	d := NewDaemon(DaemonConfig{})
@@ -2571,20 +2994,6 @@ func TestTriggerReconcile_TableDriven(t *testing.T) {
 	}
 }
 
-func TestEnsureRepo_CloneError(t *testing.T) {
-	tempDir := t.TempDir()
-	d := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("fatal: repository not found"), errors.New("clone failed")
-		},
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err := d.EnsureRepo(ctx, filepath.Join(tempDir, "empty"), "file:///nonexistent-repo-url-xyz")
-	if err == nil {
-		t.Errorf("expected error from clone, got nil")
-	}
-}
 
 func TestRunDaemon_ServerFatalError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2643,45 +3052,6 @@ func TestNilMapInitializers(t *testing.T) {
 	}
 }
 
-func TestTriggerSync_AnyChanged(t *testing.T) {
-	tempDir := t.TempDir()
-	localDir := filepath.Join(tempDir, "local")
-	_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
-	head1 := "1111111111111111111111111111111111111111"
-	head2 := "2222222222222222222222222222222222222222"
-	currentHead := head1
-
-	d := NewDaemon(DaemonConfig{
-		Repos: []string{localDir},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) == 0 {
-				return nil, nil, nil
-			}
-			switch args[0] {
-			case "config":
-				return nil, nil, nil
-			case "rev-parse":
-				return []byte(currentHead), nil, nil
-			case "fetch":
-				return nil, nil, nil
-			case "merge":
-				currentHead = head2
-				return []byte("Updating " + head2), nil, nil
-			case "diff":
-				return nil, nil, nil
-			}
-			return nil, nil, nil
-		},
-	})
-	results, err := d.TriggerSync()
-	if err != nil {
-		t.Fatalf("TriggerSync failed: %v", err)
-	}
-	if len(results) != 1 || !results[0].Changed {
-		t.Errorf("expected 1 result with Changed=true, got %+v", results)
-	}
-}
 
 func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 	tempDir := t.TempDir()
@@ -2755,16 +3125,6 @@ func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 	}
 }
 
-func TestEnsureRepo_NotDirectoryError(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "file-not-dir")
-	_ = os.WriteFile(filePath, []byte("regular file"), 0644)
-	d := NewDaemon(DaemonConfig{})
-	err := d.EnsureRepo(context.Background(), filePath, "https://github.com/example/repo.git")
-	if err == nil {
-		t.Errorf("expected error when repoPath is a regular file")
-	}
-}
 
 func TestSendDiscordAlert_ResolveFailure(t *testing.T) {
 	client500 := &http.Client{
@@ -2870,45 +3230,6 @@ func TestScrubComposeEnv_Extended(t *testing.T) {
 }
 
 
-func TestGetRepoCommit_DetailedCoverage(t *testing.T) {
-	d := &SyncDaemon{}
-
-	// 1. Error from git executor
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return nil, nil, errors.New("git error")
-	}
-	sha, tm, err := d.getRepoCommit(context.Background(), "/repo", "HEAD")
-	if err == nil || sha != "" || tm != nil {
-		t.Errorf("expected error, got %v, %v, %v", sha, tm, err)
-	}
-
-	// 2. Output without null delimiter
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return []byte("abc1234"), nil, nil
-	}
-	sha, tm, err = d.getRepoCommit(context.Background(), "/repo", "HEAD")
-	if err != nil || sha != "abc1234" || tm != nil {
-		t.Errorf("expected sha only, got %v, %v, %v", sha, tm, err)
-	}
-
-	// 3. Output with invalid date
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return []byte("abc1234\x00invalid-date"), nil, nil
-	}
-	sha, tm, err = d.getRepoCommit(context.Background(), "/repo", "HEAD")
-	if err != nil || sha != "abc1234" || tm != nil {
-		t.Errorf("expected sha with nil time on bad date, got %v, %v, %v", sha, tm, err)
-	}
-
-	// 4. Output with valid RFC3339 date
-	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-		return []byte("abc1234\x002026-09-12T12:00:00Z"), nil, nil
-	}
-	sha, tm, err = d.getRepoCommit(context.Background(), "/repo", "HEAD")
-	if err != nil || sha != "abc1234" || tm == nil || tm.Year() != 2026 {
-		t.Errorf("expected valid sha and time, got %v, %v, %v", sha, tm, err)
-	}
-}
 
 func TestResolveChannelID_DetailedCoverage(t *testing.T) {
 	d := &SyncDaemon{}
@@ -3014,105 +3335,6 @@ func TestGetComposeExecutor_Branches(t *testing.T) {
 	}
 }
 
-func TestSyncRepo_ResetFailureAndPostMergeRevParseError(t *testing.T) {
-	tempDir := t.TempDir()
-	localDir := filepath.Join(tempDir, "local")
-	_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
-	// 1. Reset failure in recovery branch
-	dResetFail := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 {
-				switch args[0] {
-				case "config":
-					return nil, nil, nil
-				case "rev-parse":
-					return []byte("1111111111111111111111111111111111111111"), nil, nil
-				case "fetch":
-					return nil, nil, nil
-				case "merge":
-					return nil, []byte("fatal: conflict"), errors.New("merge conflict")
-				case "reset":
-					return nil, []byte("fatal: reset failed"), errors.New("reset failed")
-				}
-			}
-			return nil, nil, nil
-		},
-	})
-	res := dResetFail.SyncRepo(context.Background(), localDir)
-	if !strings.Contains(res.Error, "reset failed") {
-		t.Errorf("expected reset failed error, got %s", res.Error)
-	}
-
-	// 2. Post-merge rev-parse failure
-	revParseCount := 0
-	dRevParseFail := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 {
-				switch args[0] {
-				case "config":
-					return nil, nil, nil
-				case "rev-parse":
-					revParseCount++
-					if revParseCount > 1 {
-						return nil, []byte("fatal: rev-parse failed"), errors.New("rev-parse error")
-					}
-					return []byte("1111111111111111111111111111111111111111"), nil, nil
-				case "fetch":
-					return nil, nil, nil
-				case "merge":
-					return []byte("Already up to date."), nil, nil
-				}
-			}
-			return nil, nil, nil
-		},
-	})
-	res2 := dRevParseFail.SyncRepo(context.Background(), localDir)
-	if res2.Error == "" {
-		t.Errorf("expected error when post-merge rev-parse fails")
-	}
-}
-
-func TestGetStatus_RemoteFallbackAndNegativeLag(t *testing.T) {
-	fakeRepo := "/mock/repo"
-	now := time.Now()
-	past := now.Add(-10 * time.Minute)
-
-	// Case 1: origin/main fails, fallback to FETCH_HEAD
-	d := NewDaemon(DaemonConfig{
-		Repos: []string{fakeRepo},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			ref := args[len(args)-1]
-			if ref == "origin/main" {
-				return nil, nil, errors.New("no origin/main")
-			}
-			if ref == "FETCH_HEAD" {
-				return []byte("2222222222222222222222222222222222222222\x00" + past.Format(time.RFC3339)), nil, nil
-			}
-			return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
-		},
-	})
-	st := d.GetStatus(context.Background())
-	if st.Repos[fakeRepo].RemoteCommit != "2222222222222222222222222222222222222222" {
-		t.Errorf("expected FETCH_HEAD fallback, got %s", st.Repos[fakeRepo].RemoteCommit)
-	}
-
-	// Case 2: both origin/main and FETCH_HEAD fail, fallback to diskSha
-	dFallbackDisk := NewDaemon(DaemonConfig{
-		Repos: []string{fakeRepo},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			ref := args[len(args)-1]
-			if ref == "origin/main" || ref == "FETCH_HEAD" {
-				return nil, nil, errors.New("remote ref not found")
-			}
-			return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
-		},
-	})
-	st2 := dFallbackDisk.GetStatus(context.Background())
-	if st2.Repos[fakeRepo].RemoteCommit != "1111111111111111111111111111111111111111" {
-		t.Errorf("expected diskSha fallback, got %s", st2.Repos[fakeRepo].RemoteCommit)
-	}
-}
 
 func TestRunGitCommand_CancelCoverage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3358,58 +3580,6 @@ func TestHangar_Helpers(t *testing.T) {
 	}
 }
 
-func TestEnsureRepo_AdoptionErrors(t *testing.T) {
-	tempDir := t.TempDir()
-	adoptDir := filepath.Join(tempDir, "adopt")
-	if err := os.MkdirAll(adoptDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(adoptDir, "file.txt"), []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// 1. Init failure
-	dInitFail := &SyncDaemon{
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "init" {
-				return nil, []byte("fatal: init error"), errors.New("init error")
-			}
-			return nil, nil, nil
-		},
-	}
-	if err := dInitFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
-		t.Errorf("expected error on init failure")
-	}
-
-	// 2. Remote add failure (should NOT fail, should continue to fetch)
-	dRemoteFail := &SyncDaemon{
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "remote" {
-				return nil, []byte("remote origin exists"), errors.New("remote exists")
-			}
-			if len(args) > 0 && args[0] == "fetch" {
-				return nil, []byte("fatal: fetch error"), errors.New("fetch error")
-			}
-			return nil, nil, nil
-		},
-	}
-	if err := dRemoteFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
-		t.Errorf("expected error on fetch failure")
-	}
-
-	// 3. Reset soft failure
-	dResetFail := &SyncDaemon{
-		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "reset" {
-				return nil, []byte("fatal: reset error"), errors.New("reset error")
-			}
-			return nil, nil, nil
-		},
-	}
-	if err := dResetFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
-		t.Errorf("expected error on reset soft failure")
-	}
-}
 
 func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
 	d := &SyncDaemon{}
@@ -3847,71 +4017,6 @@ func TestGetRemoteImageDigest_TableDriven(t *testing.T) {
 	}
 }
 
-func TestEnsureRepo_RemediatedErrors(t *testing.T) {
-	tempDir := t.TempDir()
-
-	// 1. git init error
-	dInitFail := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "init" {
-				return nil, []byte("init permission denied"), errors.New("init failed")
-			}
-			return nil, nil, nil
-		},
-	})
-	nonEmptyDir := filepath.Join(tempDir, "nonempty1")
-	_ = os.MkdirAll(nonEmptyDir, 0755)
-	_ = os.WriteFile(filepath.Join(nonEmptyDir, "file.txt"), []byte("data"), 0644)
-
-	if err := dInitFail.EnsureRepo(context.Background(), nonEmptyDir, "https://github.com/org/repo.git"); err == nil {
-		t.Fatalf("expected git init error, got nil")
-	}
-
-	// 2. git remote add origin warning branch
-	dRemoteFail := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 {
-				if args[0] == "init" {
-					return nil, nil, nil
-				}
-				if args[0] == "remote" {
-					return nil, []byte("fatal: remote origin already exists"), errors.New("already exists")
-				}
-				if args[0] == "fetch" {
-					return nil, nil, nil
-				}
-				if args[0] == "reset" {
-					return nil, nil, nil
-				}
-			}
-			return nil, nil, nil
-		},
-	})
-	nonEmptyDir2 := filepath.Join(tempDir, "nonempty2")
-	_ = os.MkdirAll(nonEmptyDir2, 0755)
-	_ = os.WriteFile(filepath.Join(nonEmptyDir2, "file.txt"), []byte("data"), 0644)
-	if err := dRemoteFail.EnsureRepo(context.Background(), nonEmptyDir2, "https://github.com/org/repo.git"); err != nil {
-		t.Fatalf("expected already exists remote error to be non-fatal, got %v", err)
-	}
-
-	// 3. git reset --soft error
-	dResetFail := NewDaemon(DaemonConfig{
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 {
-				if args[0] == "reset" && args[1] == "--soft" {
-					return nil, []byte("soft reset failed"), errors.New("soft reset error")
-				}
-			}
-			return nil, nil, nil
-		},
-	})
-	nonEmptyDir3 := filepath.Join(tempDir, "nonempty3")
-	_ = os.MkdirAll(nonEmptyDir3, 0755)
-	_ = os.WriteFile(filepath.Join(nonEmptyDir3, "file.txt"), []byte("data"), 0644)
-	if err := dResetFail.EnsureRepo(context.Background(), nonEmptyDir3, "https://github.com/org/repo.git"); err == nil {
-		t.Fatalf("expected git reset --soft error, got nil")
-	}
-}
 
 func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 	ctx := context.Background()
