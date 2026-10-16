@@ -139,3 +139,18 @@ func waitForCompletion(t testing.TB, doneCh <-chan struct{}, timeout time.Durati
 		t.Fatalf("timed out waiting for completion: %s", msg)
 	}
 }
+
+func waitPoolWorkersDone(t *testing.T, pool *WorkerPool, timeout time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		pool.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for worker pool goroutines to exit")
+	}
+}
+
