@@ -953,9 +953,8 @@ service_configs:
 func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 	t.Run("NewDaemon interval configuration", func(t *testing.T) {
 		for _, tc := range []struct {
-			name     string
-			interval time.Duration
-			want     time.Duration
+			name           string
+			interval, want time.Duration
 		}{
 			{"custom interval", 50 * time.Millisecond, 50 * time.Millisecond},
 			{"default fallback", 0, 60 * time.Second},
@@ -976,13 +975,9 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(jobsDir, "test.nomad"), []byte(`job "test" { task "t" { config { image = "ghcr.io/azylman/aerial:latest" } } }`), 0644)
 
 		tests := []struct {
-			name        string
-			method      string
-			path        string
-			body        string
-			contentType string
-			setup       func(d *SyncDaemon)
-			wantCode    int
+			name, method, path, body, contentType, reconcileMode string
+			syncErr                                              bool
+			wantCode                                             int
 		}{
 			{name: "GET /health 200", method: http.MethodGet, path: "/health", wantCode: http.StatusOK},
 			{name: "GET /metrics 200", method: http.MethodGet, path: "/metrics", wantCode: http.StatusOK},
@@ -990,20 +985,12 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 			{name: "POST /status 405", method: http.MethodPost, path: "/status", wantCode: http.StatusMethodNotAllowed},
 			{name: "GET /sync 405", method: http.MethodGet, path: "/sync", wantCode: http.StatusMethodNotAllowed},
 			{name: "POST /sync 200", method: http.MethodPost, path: "/sync", wantCode: http.StatusOK},
-			{name: "POST /sync 500", method: http.MethodPost, path: "/sync", setup: func(d *SyncDaemon) {
-				d.triggerFn = func() ([]RepoSyncResult, error) { return nil, errors.New("fail") }
-			}, wantCode: http.StatusInternalServerError},
+			{name: "POST /sync 500", method: http.MethodPost, path: "/sync", syncErr: true, wantCode: http.StatusInternalServerError},
 			{name: "GET /reconcile 405", method: http.MethodGet, path: "/reconcile", wantCode: http.StatusMethodNotAllowed},
 			{name: "POST /reconcile 202 async", method: http.MethodPost, path: "/reconcile", wantCode: http.StatusAccepted},
-			{name: "POST /reconcile?sync=true 200", method: http.MethodPost, path: "/reconcile?sync=true", setup: func(d *SyncDaemon) {
-				d.reconcileFn = func(ctx context.Context) error { return nil }
-			}, wantCode: http.StatusOK},
-			{name: "POST /reconcile?sync=true 500", method: http.MethodPost, path: "/reconcile?sync=true", setup: func(d *SyncDaemon) {
-				d.reconcileFn = func(ctx context.Context) error { return errors.New("fail") }
-			}, wantCode: http.StatusInternalServerError},
-			{name: "POST /reconcile JSON sync=true 200", method: http.MethodPost, path: "/reconcile", body: `{"sync":true}`, contentType: "application/json", setup: func(d *SyncDaemon) {
-				d.reconcileFn = func(ctx context.Context) error { return nil }
-			}, wantCode: http.StatusOK},
+			{name: "POST /reconcile?sync=true 200", method: http.MethodPost, path: "/reconcile?sync=true", reconcileMode: "ok", wantCode: http.StatusOK},
+			{name: "POST /reconcile?sync=true 500", method: http.MethodPost, path: "/reconcile?sync=true", reconcileMode: "err", wantCode: http.StatusInternalServerError},
+			{name: "POST /reconcile JSON sync=true 200", method: http.MethodPost, path: "/reconcile", body: `{"sync":true}`, contentType: "application/json", reconcileMode: "ok", wantCode: http.StatusOK},
 			{name: "POST /reconcile JSON sync=false 202", method: http.MethodPost, path: "/reconcile", body: `{"sync":false}`, contentType: "application/json", wantCode: http.StatusAccepted},
 			{name: "POST /events/git_push 200", method: http.MethodPost, path: "/events/git_push", body: `{"repo":"` + tmpDir + `","ref":"refs/heads/main"}`, contentType: "application/json", wantCode: http.StatusOK},
 			{name: "GET /events/git_push 405", method: http.MethodGet, path: "/events/git_push", wantCode: http.StatusMethodNotAllowed},
@@ -1025,21 +1012,25 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 						return []byte("OK"), nil, nil
 					},
 				})
-				if tc.setup != nil {
-					tc.setup(d)
+				if tc.syncErr {
+					d.triggerFn = func() ([]RepoSyncResult, error) { return nil, errors.New("fail") }
 				}
-				handler := SetupMux(d)
-				var req *http.Request
+				switch tc.reconcileMode {
+				case "ok":
+					d.reconcileFn = func(ctx context.Context) error { return nil }
+				case "err":
+					d.reconcileFn = func(ctx context.Context) error { return errors.New("fail") }
+				}
+				var body io.Reader
 				if tc.body != "" {
-					req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
-				} else {
-					req = httptest.NewRequest(tc.method, tc.path, nil)
+					body = strings.NewReader(tc.body)
 				}
+				req := httptest.NewRequest(tc.method, tc.path, body)
 				if tc.contentType != "" {
 					req.Header.Set("Content-Type", tc.contentType)
 				}
 				rec := httptest.NewRecorder()
-				handler.ServeHTTP(rec, req)
+				SetupMux(d).ServeHTTP(rec, req)
 				if rec.Code != tc.wantCode {
 					t.Errorf("%s %s returned %d; want %d", tc.method, tc.path, rec.Code, tc.wantCode)
 				}
@@ -1049,75 +1040,47 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 
 	t.Run("RunDaemon lifecycle", func(t *testing.T) {
 		for _, tc := range []struct {
-			name    string
-			run     func(t *testing.T) error
-			wantErr bool
+			name, port, pat   string
+			withRepo, wantErr bool
 		}{
-			{
-				name: "invalid port string fatal error",
-				run: func(t *testing.T) error {
-					return RunDaemon(context.Background(), DaemonConfig{Port: "invalid-port-string"})
-				},
-				wantErr: true,
-			},
-			{
-				name: "invalid negative port fatal error",
-				run: func(t *testing.T) error {
-					return RunDaemon(context.Background(), DaemonConfig{Port: "-1"})
-				},
-				wantErr: true,
-			},
-			{
-				name: "normal lifecycle with PAT and deterministic sync signaling",
-				run: func(t *testing.T) error {
+			{name: "invalid port string fatal error", port: "invalid-port-string", wantErr: true},
+			{name: "invalid negative port fatal error", port: "-1", wantErr: true},
+			{name: "normal lifecycle with PAT and deterministic sync signaling", port: "0", pat: "ghp_dummy_token_1234567890", withRepo: true, wantErr: false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				cfg := DaemonConfig{Port: tc.port, PAT: tc.pat}
+				if tc.withRepo {
 					t.Setenv("DOCKER_CONFIG", t.TempDir())
 					repoDir := filepath.Join(t.TempDir(), "repo")
 					_ = os.MkdirAll(filepath.Join(repoDir, ".git"), 0755)
-
-					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
 					started := make(chan struct{}, 1)
-
-					cfg := DaemonConfig{
-						Port:       "0",
-						PAT:        "ghp_dummy_token_1234567890",
-						Interval:   time.Hour,
-						Repos:      []string{repoDir},
-						ComposeDir: t.TempDir(),
-						ConfigDir:  t.TempDir(),
-						GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							select {
-							case started <- struct{}{}:
-							default:
-							}
-							return []byte("abc1234"), nil, nil
-						},
-						ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-							return []byte("ok"), nil, nil
-						},
+					cfg.Interval = time.Hour
+					cfg.Repos = []string{repoDir}
+					cfg.ComposeDir = t.TempDir()
+					cfg.ConfigDir = t.TempDir()
+					cfg.GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						select {
+						case started <- struct{}{}:
+						default:
+						}
+						return []byte("abc1234"), nil, nil
 					}
-
+					cfg.ComposeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+						return []byte("ok"), nil, nil
+					}
 					go func() {
 						select {
 						case <-started:
-							cancel()
 						case <-time.After(2 * time.Second):
-							cancel()
 						}
+						cancel()
 					}()
-
-					return RunDaemon(ctx, cfg)
-				},
-				wantErr: false,
-			},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				err := tc.run(t)
-				if tc.wantErr && err == nil {
-					t.Errorf("expected error, got nil")
 				}
-				if !tc.wantErr && err != nil {
-					t.Errorf("unexpected error: %v", err)
+				err := RunDaemon(ctx, cfg)
+				if (err != nil) != tc.wantErr {
+					t.Errorf("RunDaemon() error = %v, wantErr = %v", err, tc.wantErr)
 				}
 			})
 		}
@@ -1130,16 +1093,11 @@ func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", composePath, err)
 	}
-
-	lines := strings.Split(string(data), "\n")
-	inDependsOn := false
-	currentService := ""
-
-	for lineNum, line := range lines {
+	inDependsOn, currentService := false, ""
+	for lineNum, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(trimmed, ":") {
-			currentService = strings.TrimSuffix(trimmed, ":")
-			inDependsOn = false
+			currentService, inDependsOn = strings.TrimSuffix(trimmed, ":"), false
 		}
 		if strings.HasPrefix(line, "    depends_on:") {
 			inDependsOn = true
@@ -1147,8 +1105,7 @@ func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 		}
 		if inDependsOn {
 			if len(line) > 0 && line[0] != ' ' {
-				inDependsOn = false
-				currentService = ""
+				inDependsOn, currentService = false, ""
 			} else if strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "      ") && !strings.HasPrefix(line, "    depends_on:") && strings.HasSuffix(trimmed, ":") {
 				inDependsOn = false
 			} else if strings.Contains(line, "gitsync:") || trimmed == "- gitsync" {
@@ -1163,7 +1120,6 @@ type urlRewritingTransport struct {
 }
 
 func (t *urlRewritingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Rewrite https://discord.com to targetBase
 	if strings.HasPrefix(req.URL.String(), "https://discord.com") {
 		rewritten := strings.Replace(req.URL.String(), "https://discord.com", t.targetBase, 1)
 		newReq, err := http.NewRequestWithContext(req.Context(), req.Method, rewritten, req.Body)
@@ -1184,55 +1140,28 @@ func TestDiscordAlertsAndWebhooks_TableDriven(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			defer mu.Unlock()
-
-			if strings.Contains(r.URL.Path, "webhook") {
+			switch {
+			case strings.Contains(r.URL.Path, "webhook") || strings.Contains(r.URL.Path, "/channels/chan_456/messages") || strings.Contains(r.URL.Path, "/channels/snowflake_789/messages"):
 				var payload map[string]interface{}
 				_ = json.NewDecoder(r.Body).Decode(&payload)
 				receivedPayloads = append(receivedPayloads, payload)
 				w.WriteHeader(http.StatusOK)
-				return
+			case strings.HasSuffix(r.URL.Path, "/guilds"):
+				_ = json.NewEncoder(w).Encode([]map[string]string{{"id": "guild_123"}})
+			case strings.HasSuffix(r.URL.Path, "/channels") && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode([]map[string]interface{}{{"id": "chan_456", "name": "aerial-dev", "type": 0}})
+			default:
+				w.WriteHeader(http.StatusNotFound)
 			}
-
-			if strings.HasSuffix(r.URL.Path, "/guilds") {
-				_ = json.NewEncoder(w).Encode([]map[string]string{
-					{"id": "guild_123"},
-				})
-				return
-			}
-
-			if strings.HasSuffix(r.URL.Path, "/channels") && r.Method == http.MethodGet {
-				_ = json.NewEncoder(w).Encode([]map[string]interface{}{
-					{"id": "chan_456", "name": "aerial-dev", "type": 0},
-				})
-				return
-			}
-
-			if strings.Contains(r.URL.Path, "/channels/chan_456/messages") || strings.Contains(r.URL.Path, "/channels/snowflake_789/messages") {
-				var payload map[string]interface{}
-				_ = json.NewDecoder(r.Body).Decode(&payload)
-				receivedPayloads = append(receivedPayloads, payload)
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-
-			w.WriteHeader(http.StatusNotFound)
 		}))
 		defer srv.Close()
 
-		customClient := &http.Client{
-			Transport: &urlRewritingTransport{targetBase: srv.URL},
-			Timeout:   5 * time.Second,
-		}
-
-		daemon := NewDaemon(DaemonConfig{
-			DiscordWebhookURL: srv.URL + "/webhook",
-		})
+		customClient := &http.Client{Transport: &urlRewritingTransport{targetBase: srv.URL}, Timeout: 5 * time.Second}
+		daemon := NewDaemon(DaemonConfig{DiscordWebhookURL: srv.URL + "/webhook"})
 		daemon.alertHTTPClient = customClient
 
-		// 1. Send alert via webhook with large error (>1200 chars) and sensitive secrets
 		longError := "sensitive token ghp_1234567890abcdef1234567890abcdef12 and secret\n" + strings.Repeat("error detail line with some context\n", 40)
 		ctx := context.Background()
-
 		daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
 
 		mu.Lock()
@@ -1242,20 +1171,15 @@ func TestDiscordAlertsAndWebhooks_TableDriven(t *testing.T) {
 		content := receivedPayloads[0]["content"].(string)
 		mu.Unlock()
 
-		if !strings.Contains(content, "🚨 **GitSync GitOps Alert: Test Rollback**") {
-			t.Errorf("expected alert header in payload, got: %s", content)
-		}
-		if !strings.Contains(content, "[... truncated for length]") {
-			t.Errorf("expected error truncation marker in payload")
+		for _, wantSub := range []string{"🚨 **GitSync GitOps Alert: Test Rollback**", "[... truncated for length]", "[REDACTED_TOKEN]"} {
+			if !strings.Contains(content, wantSub) {
+				t.Errorf("expected %q in payload, got: %s", wantSub, content)
+			}
 		}
 		if strings.Contains(content, "ghp_1234567890abcdef1234567890abcdef12") {
 			t.Errorf("expected token to be scrubbed, but found in payload")
 		}
-		if !strings.Contains(content, "[REDACTED_TOKEN]") {
-			t.Errorf("expected [REDACTED_TOKEN] in payload")
-		}
 
-		// 2. Deduplication: Send identical alert within 15 minutes
 		daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
 		mu.Lock()
 		if len(receivedPayloads) != 1 {
@@ -1263,13 +1187,8 @@ func TestDiscordAlertsAndWebhooks_TableDriven(t *testing.T) {
 		}
 		mu.Unlock()
 
-		// 3. Test Bot token and channel name resolution
-		daemonBot := NewDaemon(DaemonConfig{
-			DiscordToken:   "my-bot-token",
-			DiscordChannel: "aerial-dev",
-		})
+		daemonBot := NewDaemon(DaemonConfig{DiscordToken: "my-bot-token", DiscordChannel: "aerial-dev"})
 		daemonBot.alertHTTPClient = customClient
-
 		daemonBot.SendDiscordAlert(ctx, "Bot API Alert", "/share/aerial", "badsha789", "goodsha000", "pre-flight validation", "syntax error")
 		mu.Lock()
 		if len(receivedPayloads) != 2 {
@@ -1277,16 +1196,11 @@ func TestDiscordAlertsAndWebhooks_TableDriven(t *testing.T) {
 		}
 		botContent := receivedPayloads[1]["content"].(string)
 		mu.Unlock()
-
 		if !strings.Contains(botContent, "badsha789") {
 			t.Errorf("expected faulty commit in bot alert, got: %s", botContent)
 		}
 
-		// 4. Test direct snowflake channel ID
-		daemonSnowflake := NewDaemon(DaemonConfig{
-			DiscordToken:   "my-bot-token",
-			DiscordChannel: "123456789012345678",
-		})
+		daemonSnowflake := NewDaemon(DaemonConfig{DiscordToken: "my-bot-token", DiscordChannel: "123456789012345678"})
 		daemonSnowflake.alertHTTPClient = customClient
 		if !isSnowflake(daemonSnowflake.discordChannel) {
 			t.Errorf("expected 123456789012345678 to be recognized as snowflake")
@@ -1294,264 +1208,125 @@ func TestDiscordAlertsAndWebhooks_TableDriven(t *testing.T) {
 	})
 
 	t.Run("SendDiscordAlert_EdgeCases", func(t *testing.T) {
-		tests := []struct {
-			name string
-			exec func(t *testing.T)
+		for _, tt := range []struct {
+			name, token, channel, repo, sha, prev string
+			rawDaemon                             bool
+			status                                int
 		}{
-			{
-				name: "uninitialized daemon initializes lastAlertTimes",
-				exec: func(t *testing.T) {
-					d := &SyncDaemon{}
-					d.SendDiscordAlert(context.Background(), "title", "", "", "", "stage", "msg")
-					if d.lastAlertTimes == nil {
-						t.Errorf("expected lastAlertTimes to be initialized")
-					}
-				},
-			},
-			{
-				name: "channel resolve failure gracefully handles HTTP 500",
-				exec: func(t *testing.T) {
-					client500 := &http.Client{
-						Transport: &roundTripperFunc{
-							fn: func(req *http.Request) (*http.Response, error) {
-								return &http.Response{
-									StatusCode: http.StatusInternalServerError,
-									Body:       ioNopCloser(strings.NewReader("server error")),
-									Header:     make(http.Header),
-								}, nil
-							},
-						},
-					}
-					d := NewDaemon(DaemonConfig{
-						DiscordToken:   "mock_token",
-						DiscordChannel: "unresolvable-chan",
-					})
-					d.alertHTTPClient = client500
-					d.SendDiscordAlert(context.Background(), "title", "/repo", "sha", "prev", "stage", "err msg")
-				},
-			},
-		}
-
-		for _, tt := range tests {
+			{name: "uninitialized daemon initializes lastAlertTimes", rawDaemon: true},
+			{name: "channel resolve failure gracefully handles HTTP 500", token: "mock_token", channel: "unresolvable-chan", repo: "/repo", sha: "sha", prev: "prev", status: http.StatusInternalServerError},
+		} {
 			t.Run(tt.name, func(t *testing.T) {
-				tt.exec(t)
+				var d *SyncDaemon
+				if tt.rawDaemon {
+					d = &SyncDaemon{}
+				} else {
+					d = NewDaemon(DaemonConfig{DiscordToken: tt.token, DiscordChannel: tt.channel})
+					d.alertHTTPClient = &http.Client{
+						Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+							return &http.Response{StatusCode: tt.status, Body: ioNopCloser(strings.NewReader("server error")), Header: make(http.Header)}, nil
+						}},
+					}
+				}
+				d.SendDiscordAlert(context.Background(), "title", tt.repo, tt.sha, tt.prev, "stage", "err msg")
+				if d.lastAlertTimes == nil {
+					t.Errorf("expected lastAlertTimes to be initialized")
+				}
 			})
 		}
 	})
 
 	t.Run("ResolveAlertChannel", func(t *testing.T) {
-		tests := []struct {
-			name         string
-			setup        func(t *testing.T) *SyncDaemon
-			expectedChan string
+		for _, tt := range []struct {
+			name, discordChan, configYAML, want string
 		}{
-			{
-				name: "explicit DiscordChannel overrides config.yaml",
-				setup: func(t *testing.T) *SyncDaemon {
-					tempDir := t.TempDir()
-					configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
-					_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
-					return NewDaemon(DaemonConfig{
-						DiscordChannel: "override-channel",
-						ConfigDir:      tempDir,
-					})
-				},
-				expectedChan: "override-channel",
-			},
-			{
-				name: "dynamic read from config.yaml in ConfigDir",
-				setup: func(t *testing.T) *SyncDaemon {
-					tempDir := t.TempDir()
-					configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
-					_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
-					return NewDaemon(DaemonConfig{
-						ConfigDir: tempDir,
-					})
-				},
-				expectedChan: "ops-alerts",
-			},
-			{
-				name: "invalid YAML falls back to aerial-dev",
-				setup: func(t *testing.T) *SyncDaemon {
-					tempDirBad := t.TempDir()
-					_ = os.WriteFile(filepath.Join(tempDirBad, "config.yaml"), []byte("invalid: [yaml\n"), 0644)
-					return NewDaemon(DaemonConfig{
-						ConfigDir: tempDirBad,
-					})
-				},
-				expectedChan: "aerial-dev",
-			},
-			{
-				name: "missing config.yaml falls back to aerial-dev",
-				setup: func(t *testing.T) *SyncDaemon {
-					tempDirEmpty := t.TempDir()
-					return NewDaemon(DaemonConfig{
-						ConfigDir: tempDirEmpty,
-					})
-				},
-				expectedChan: "aerial-dev",
-			},
-		}
-
-		for _, tt := range tests {
+			{name: "explicit DiscordChannel overrides config.yaml", discordChan: "override-channel", configYAML: "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n", want: "override-channel"},
+			{name: "dynamic read from config.yaml in ConfigDir", configYAML: "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n", want: "ops-alerts"},
+			{name: "invalid YAML falls back to aerial-dev", configYAML: "invalid: [yaml\n", want: "aerial-dev"},
+			{name: "missing config.yaml falls back to aerial-dev", want: "aerial-dev"},
+		} {
 			t.Run(tt.name, func(t *testing.T) {
-				d := tt.setup(t)
-				if ch := d.ResolveAlertChannel(); ch != tt.expectedChan {
-					t.Errorf("ResolveAlertChannel() = %q, want %q", ch, tt.expectedChan)
+				tempDir := t.TempDir()
+				if tt.configYAML != "" {
+					_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(tt.configYAML), 0644)
+				}
+				d := NewDaemon(DaemonConfig{DiscordChannel: tt.discordChan, ConfigDir: tempDir})
+				if ch := d.ResolveAlertChannel(); ch != tt.want {
+					t.Errorf("ResolveAlertChannel() = %q, want %q", ch, tt.want)
 				}
 			})
 		}
 	})
 
 	t.Run("sendWebhook", func(t *testing.T) {
-		tests := []struct {
-			name   string
-			client func(t *testing.T) (*http.Client, string)
+		for _, tt := range []struct {
+			name, netErr, rawURL string
+			status               int
+			timeout              time.Duration
 		}{
-			{
-				name: "HTTP 200 OK",
-				client: func(t *testing.T) (*http.Client, string) {
-					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						w.WriteHeader(http.StatusOK)
-					}))
-					t.Cleanup(srv.Close)
-					return srv.Client(), srv.URL
-				},
-			},
-			{
-				name: "HTTP 500 error",
-				client: func(t *testing.T) (*http.Client, string) {
-					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						w.WriteHeader(http.StatusInternalServerError)
-					}))
-					t.Cleanup(srv.Close)
-					return srv.Client(), srv.URL
-				},
-			},
-			{
-				name: "hermetic roundTripperFunc network error",
-				client: func(t *testing.T) (*http.Client, string) {
-					return &http.Client{
-						Transport: &roundTripperFunc{
-							fn: func(req *http.Request) (*http.Response, error) {
-								return nil, errors.New("connection refused mock")
-							},
-						},
-					}, "http://127.0.0.1:65530/webhook"
-				},
-			},
-			{
-				name: "invalid URL format",
-				client: func(t *testing.T) (*http.Client, string) {
-					return http.DefaultClient, "://invalid-url"
-				},
-			},
-			{
-				name: "timeout client error",
-				client: func(t *testing.T) (*http.Client, string) {
-					return &http.Client{Timeout: 5 * time.Millisecond}, "http://127.0.0.1:1/invalid"
-				},
-			},
-		}
-
-		for _, tt := range tests {
+			{name: "HTTP 200 OK", status: http.StatusOK},
+			{name: "HTTP 500 error", status: http.StatusInternalServerError},
+			{name: "hermetic roundTripperFunc network error", netErr: "connection refused mock", rawURL: "http://127.0.0.1:65530/webhook"},
+			{name: "invalid URL format", rawURL: "://invalid-url"},
+			{name: "timeout client error", rawURL: "http://127.0.0.1:1/invalid", timeout: 5 * time.Millisecond},
+		} {
 			t.Run(tt.name, func(t *testing.T) {
 				d := NewDaemon(DaemonConfig{})
-				client, url := tt.client(t)
-				d.sendWebhook(context.Background(), client, url, "webhook test payload")
+				client, targetURL := http.DefaultClient, tt.rawURL
+				if tt.status != 0 {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.WriteHeader(tt.status)
+					}))
+					defer srv.Close()
+					client, targetURL = srv.Client(), srv.URL
+				} else if tt.netErr != "" {
+					client = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+						return nil, errors.New(tt.netErr)
+					}}}
+				} else if tt.timeout > 0 {
+					client = &http.Client{Timeout: tt.timeout}
+				}
+				d.sendWebhook(context.Background(), client, targetURL, "webhook test payload")
 			})
 		}
 	})
 
 	t.Run("postChannelMessage", func(t *testing.T) {
-		tests := []struct {
-			name        string
-			client      *http.Client
-			setupDaemon func(d *SyncDaemon)
-			checkDaemon func(t *testing.T, d *SyncDaemon)
+		for _, tt := range []struct {
+			name, body, netErr, seedCache string
+			status                        int
+			timeout                       time.Duration
+			checkInvalidated              bool
 		}{
-			{
-				name: "HTTP 200 OK",
-				client: &http.Client{
-					Transport: &roundTripperFunc{
-						fn: func(req *http.Request) (*http.Response, error) {
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Body:       ioNopCloser(strings.NewReader(`{"id":"msg-1"}`)),
-								Header:     make(http.Header),
-							}, nil
-						},
-					},
-				},
-			},
-			{
-				name: "HTTP 404 invalidates cachedChannelID",
-				client: &http.Client{
-					Transport: &roundTripperFunc{
-						fn: func(req *http.Request) (*http.Response, error) {
-							return &http.Response{
-								StatusCode: http.StatusNotFound,
-								Body:       ioNopCloser(strings.NewReader(`{"message":"Unknown Channel"}`)),
-								Header:     make(http.Header),
-							}, nil
-						},
-					},
-				},
-				setupDaemon: func(d *SyncDaemon) {
-					d.cachedChannelID = "123"
-				},
-				checkDaemon: func(t *testing.T, d *SyncDaemon) {
-					if d.cachedChannelID != "" {
-						t.Errorf("expected cached channel to be invalidated on 404")
-					}
-				},
-			},
-			{
-				name: "HTTP 500 server error",
-				client: &http.Client{
-					Transport: &roundTripperFunc{
-						fn: func(req *http.Request) (*http.Response, error) {
-							return &http.Response{
-								StatusCode: http.StatusInternalServerError,
-								Body:       ioNopCloser(strings.NewReader(`{"message":"Server error"}`)),
-								Header:     make(http.Header),
-							}, nil
-						},
-					},
-				},
-			},
-			{
-				name: "hermetic roundTripperFunc network error",
-				client: &http.Client{
-					Transport: &roundTripperFunc{
-						fn: func(req *http.Request) (*http.Response, error) {
-							return nil, errors.New("network drop")
-						},
-					},
-				},
-			},
-			{
-				name:   "timeout client error",
-				client: &http.Client{Timeout: 5 * time.Millisecond},
-			},
-		}
-
-		for _, tt := range tests {
+			{name: "HTTP 200 OK", status: http.StatusOK, body: `{"id":"msg-1"}`},
+			{name: "HTTP 404 invalidates cachedChannelID", status: http.StatusNotFound, body: `{"message":"Unknown Channel"}`, seedCache: "123", checkInvalidated: true},
+			{name: "HTTP 500 server error", status: http.StatusInternalServerError, body: `{"message":"Server error"}`},
+			{name: "hermetic roundTripperFunc network error", netErr: "network drop"},
+			{name: "timeout client error", timeout: 5 * time.Millisecond},
+		} {
 			t.Run(tt.name, func(t *testing.T) {
 				d := NewDaemon(DaemonConfig{})
-				if tt.setupDaemon != nil {
-					tt.setupDaemon(d)
+				d.cachedChannelID = tt.seedCache
+				var client *http.Client
+				if tt.timeout > 0 {
+					client = &http.Client{Timeout: tt.timeout}
+				} else {
+					client = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+						if tt.netErr != "" {
+							return nil, errors.New(tt.netErr)
+						}
+						return &http.Response{StatusCode: tt.status, Body: ioNopCloser(strings.NewReader(tt.body)), Header: make(http.Header)}, nil
+					}}}
 				}
-				d.postChannelMessage(context.Background(), tt.client, "token", "123", "hello")
-				if tt.checkDaemon != nil {
-					tt.checkDaemon(t, d)
+				d.postChannelMessage(context.Background(), client, "token", "123", "hello")
+				if tt.checkInvalidated && d.cachedChannelID != "" {
+					t.Errorf("expected cached channel to be invalidated on 404")
 				}
 			})
 		}
 	})
 }
 
-// nomadConfigSyncTestEnv encapsulates a test harness for Nomad configuration synchronization.
 type nomadConfigSyncTestEnv struct {
 	configDir string
 	daemon    *SyncDaemon
@@ -1611,121 +1386,88 @@ func (e *nomadConfigSyncTestEnv) waitForEvents(t *testing.T, count int) []Hangar
 	return events
 }
 
+type nomadSyncValidationCase struct {
+	name, dirAsFile, wantErrSub string
+	files                       map[string]string
+	disableNomad, nomadErr      bool
+}
+
+func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase, syncFn func(d *SyncDaemon, dir string) error) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newNomadConfigSyncTestEnv(t)
+			if tc.dirAsFile != "" {
+				if err := os.MkdirAll(filepath.Join(env.configDir, tc.dirAsFile), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for rel, content := range tc.files {
+				full := filepath.Join(env.configDir, rel)
+				_ = os.MkdirAll(filepath.Dir(full), 0755)
+				_ = os.WriteFile(full, []byte(content), 0644)
+			}
+			if tc.disableNomad {
+				env.daemon.nomadAddr = ""
+			}
+			if tc.nomadErr {
+				env.daemon.nomadExecutor = func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
+				}
+			}
+			err := syncFn(env.daemon, env.configDir)
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
+				}
+			} else if err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestSyncBrainConfigToNomad_TableDriven(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	validBrainYAML := "model: gemini-2.5-flash\nchannels:\n  default:\n    mode: threads\n"
 
 	t.Run("validation_and_disabled_paths", func(t *testing.T) {
 		t.Parallel()
-		tests := []struct {
-			name        string
-			setup       func(t *testing.T, dir string)
-			daemonSetup func(d *SyncDaemon)
-			wantErrSub  string
-		}{
-			{
-				name:  "missing_config_yaml_safe_noop",
-				setup: func(t *testing.T, dir string) {},
-			},
-			{
-				name: "directory_as_config_yaml_error",
-				setup: func(t *testing.T, dir string) {
-					if err := os.Mkdir(filepath.Join(dir, "config.yaml"), 0755); err != nil {
-						t.Fatal(err)
-					}
-				},
-				wantErrSub: "is a directory",
-			},
-			{
-				name: "invalid_yaml_syntax_error",
-				setup: func(t *testing.T, dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("invalid: yaml: [unclosed"), 0644)
-				},
-				wantErrSub: "invalid YAML syntax",
-			},
-			{
-				name: "semantic_validation_missing_channels_default",
-				setup: func(t *testing.T, dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("channels:\n  other:\n    mode: threads\n"), 0644)
-				},
-				wantErrSub: "channels.default is required",
-			},
-			{
-				name: "disabled_nomad_addr_safe_noop",
-				setup: func(t *testing.T, dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("model: gemini-2.5-flash\nchannels:\n  default:\n    mode: threads\n"), 0644)
-				},
-				daemonSetup: func(d *SyncDaemon) {
-					d.nomadAddr = ""
-				},
-			},
-			{
-				name: "nomad_cli_failure_returns_error",
-				setup: func(t *testing.T, dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("model: gemini-2.5-flash\nchannels:\n  default:\n    mode: threads\n"), 0644)
-				},
-				daemonSetup: func(d *SyncDaemon) {
-					d.nomadExecutor = func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
-						return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
-					}
-				},
-				wantErrSub: "failed updating Nomad variable",
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				env := newNomadConfigSyncTestEnv(t)
-				tc.setup(t, env.configDir)
-				if tc.daemonSetup != nil {
-					tc.daemonSetup(env.daemon)
-				}
-				err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir)
-				if tc.wantErrSub != "" {
-					if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-						t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
-					}
-				} else if err != nil {
-					t.Fatalf("expected nil error, got %v", err)
-				}
-			})
-		}
+		runNomadValidationCases(t, []nomadSyncValidationCase{
+			{name: "missing_config_yaml_safe_noop"},
+			{name: "directory_as_config_yaml_error", dirAsFile: "config.yaml", wantErrSub: "is a directory"},
+			{name: "invalid_yaml_syntax_error", files: map[string]string{"config.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "semantic_validation_missing_channels_default", files: map[string]string{"config.yaml": "channels:\n  other:\n    mode: threads\n"}, wantErrSub: "channels.default is required"},
+			{name: "disabled_nomad_addr_safe_noop", files: map[string]string{"config.yaml": validBrainYAML}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error", files: map[string]string{"config.yaml": validBrainYAML}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
+		}, func(d *SyncDaemon, dir string) error {
+			return d.SyncBrainConfigToNomad(ctx, dir)
+		})
 	})
 
 	t.Run("hash_caching_and_invalidation", func(t *testing.T) {
 		t.Parallel()
 		env := newNomadConfigSyncTestEnv(t)
 		cfgPath := filepath.Join(env.configDir, "config.yaml")
-		_ = os.WriteFile(cfgPath, []byte("model: gemini-2.5-flash\nchannels:\n  default:\n    mode: threads\n"), 0644)
+		_ = os.WriteFile(cfgPath, []byte(validBrainYAML), 0644)
 
-		// 1. Initial push -> updates Nomad var
 		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil {
 			t.Fatalf("expected success on initial push: %v", err)
 		}
 		calls := env.nomadCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected 1 nomad call, got %d", len(calls))
-		}
-		if len(calls[0]) < 5 || calls[0][0] != "var" || calls[0][1] != "put" || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/brain" {
-			t.Errorf("unexpected nomad CLI args: %v", calls[0])
+		if len(calls) != 1 || len(calls[0]) < 5 || calls[0][0] != "var" || calls[0][1] != "put" || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/brain" {
+			t.Fatalf("unexpected initial nomad calls: %v", calls)
 		}
 
-		// 2. Unchanged config -> cache hit skips CLI call
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success on cached call: %v", err)
-		}
-		if len(env.nomadCalls()) != 1 {
-			t.Errorf("expected nomadCalls to remain 1 after unchanged push, got %d", len(env.nomadCalls()))
+		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
+			t.Fatalf("expected cached call to remain at 1 call, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 
-		// 3. Modified config -> cache invalidated, pushes update
 		_ = os.WriteFile(cfgPath, []byte("channels:\n  default:\n    mode: classify\n"), 0644)
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success on modified config: %v", err)
-		}
-		if len(env.nomadCalls()) != 2 {
-			t.Errorf("expected nomadCalls to become 2 after modification, got %d", len(env.nomadCalls()))
+		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 2 {
+			t.Fatalf("expected modified config to push 2nd call, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 	})
 
@@ -1735,21 +1477,9 @@ func TestSyncBrainConfigToNomad_TableDriven(t *testing.T) {
 		cfgPath := filepath.Join(env.configDir, "config.yaml")
 		_ = os.WriteFile(cfgPath, []byte("channels:\n  default:\n    mode: mention\n"), 0644)
 
-		scUntouched := ConfigSyncContext{
-			Repo:         "azylman/aerial-config",
-			CommitSHA:    "sha_untouched",
-			PRNumber:     101,
-			TargetID:     "1555405874565091380",
-			DiffGated:    true,
-			ChangedFiles: []string{"services/voice/voice.yaml"},
-		}
-
-		// 1. Untouched file: no CLI push, but primes cache
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scUntouched); err != nil {
-			t.Fatalf("SyncBrainConfigToNomad error: %v", err)
-		}
-		if len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected 0 nomad calls for untouched diff, got %d", len(env.nomadCalls()))
+		scUntouched := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}}
+		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scUntouched); err != nil || len(env.nomadCalls()) != 0 {
+			t.Fatalf("expected 0 nomad calls for untouched diff, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 		env.daemon.lastPushedConfigMu.Lock()
 		cached := env.daemon.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"]
@@ -1758,53 +1488,22 @@ func TestSyncBrainConfigToNomad_TableDriven(t *testing.T) {
 			t.Fatalf("expected cache to be primed for brain config")
 		}
 
-		// 2. Touched in diff, but identical content (double-filter): no push
-		scSameContent := ConfigSyncContext{
-			Repo:         "azylman/aerial-config",
-			CommitSHA:    "sha_same",
-			PRNumber:     101,
-			TargetID:     "1555405874565091380",
-			DiffGated:    true,
-			ChangedFiles: []string{"config.yaml"},
-		}
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scSameContent); err != nil {
-			t.Fatalf("SyncBrainConfigToNomad error: %v", err)
-		}
-		if len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected 0 nomad calls for identical content, got %d", len(env.nomadCalls()))
+		scSameContent := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}}
+		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scSameContent); err != nil || len(env.nomadCalls()) != 0 {
+			t.Fatalf("expected 0 nomad calls for identical content, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 
-		// 3. Touched in diff with modified content: pushes var with COMMIT_SHA and emits deploy_started
 		_ = os.WriteFile(cfgPath, []byte("channels:\n  default:\n    mode: always\n"), 0644)
-		scModified := ConfigSyncContext{
-			Repo:         "azylman/aerial-config",
-			CommitSHA:    "sha_modified",
-			PRNumber:     101,
-			TargetID:     "1555405874565091380",
-			DiffGated:    true,
-			ChangedFiles: []string{"config.yaml"},
-		}
+		scModified := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}}
 		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scModified); err != nil {
 			t.Fatalf("SyncBrainConfigToNomad error: %v", err)
 		}
 		calls := env.nomadCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected 1 nomad call for modified config, got %d", len(calls))
+		if len(calls) != 1 || ! strings.Contains(strings.Join(calls[0], " "), "COMMIT_SHA=sha_modified") {
+			t.Fatalf("expected 1 nomad call with COMMIT_SHA=sha_modified, got %v", calls)
 		}
-		hasCommit := false
-		for _, arg := range calls[0] {
-			if arg == "COMMIT_SHA=sha_modified" {
-				hasCommit = true
-				break
-			}
-		}
-		if !hasCommit {
-			t.Errorf("expected COMMIT_SHA in nomad CLI args: %v", calls[0])
-		}
-
 		evts := env.waitForEvents(t, 1)
-		if evts[0].Event != "deploy_started" || evts[0].JobName != "brain" || evts[0].Repo != scModified.Repo ||
-			evts[0].CommitSHA != scModified.CommitSHA || evts[0].PRNumber != scModified.PRNumber || evts[0].TargetID != scModified.TargetID {
+		if evts[0].Event != "deploy_started" || evts[0].JobName != "brain" || evts[0].Repo != scModified.Repo || evts[0].CommitSHA != scModified.CommitSHA || evts[0].PRNumber != scModified.PRNumber || evts[0].TargetID != scModified.TargetID {
 			t.Errorf("unexpected deploy_started event payload: %+v", evts[0])
 		}
 	})
@@ -1821,153 +1520,56 @@ func TestSyncHomepageConfigToNomad_TableDriven(t *testing.T) {
 			t.Fatalf("expected nil for empty configDir, got %v", err)
 		}
 		calls := env.nomadCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected 1 call, got %d", len(calls))
+		if len(calls) != 1 || len(calls[0]) < 5 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
+			t.Fatalf("expected nomad/jobs/homepage target, got %v", calls)
 		}
-		if len(calls[0]) < 5 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
-			t.Errorf("expected nomad/jobs/homepage target, got %v", calls[0])
-		}
-		foundHash := false
-		foundYAML := false
-		for _, arg := range calls[0] {
-			if strings.HasPrefix(arg, "CONFIG_HASH=") {
-				foundHash = true
-			}
-			if strings.HasPrefix(arg, "HOMEPAGE_YAML=@") {
-				foundYAML = true
-			}
-		}
-		if !foundHash || foundYAML {
+		joined := strings.Join(calls[0], " ")
+		if !strings.Contains(joined, "CONFIG_HASH=") || strings.Contains(joined, "HOMEPAGE_YAML=@") {
 			t.Errorf("expected CONFIG_HASH and NO HOMEPAGE_YAML on empty dir, got %v", calls[0])
 		}
 	})
 
 	t.Run("validation_and_disabled_paths", func(t *testing.T) {
 		t.Parallel()
-		tests := []struct {
-			name        string
-			setup       func(t *testing.T, dir string)
-			daemonSetup func(d *SyncDaemon)
-			wantErrSub  string
-		}{
-			{
-				name: "directory_as_homepage_yaml_error",
-				setup: func(t *testing.T, dir string) {
-					if err := os.MkdirAll(filepath.Join(dir, "services", "homepage", "homepage.yaml"), 0755); err != nil {
-						t.Fatal(err)
-					}
-				},
-				wantErrSub: "is a directory",
-			},
-			{
-				name: "invalid_yaml_syntax_in_homepage_yaml",
-				setup: func(t *testing.T, dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "homepage"), 0755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "homepage", "homepage.yaml"), []byte("invalid: yaml: [unclosed"), 0644)
-				},
-				wantErrSub: "invalid YAML syntax",
-			},
-			{
-				name: "disabled_nomad_addr_safe_noop",
-				setup: func(t *testing.T, dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "homepage"), 0755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\n"), 0644)
-				},
-				daemonSetup: func(d *SyncDaemon) {
-					d.nomadAddr = ""
-				},
-			},
-			{
-				name: "nomad_cli_failure_returns_error",
-				setup: func(t *testing.T, dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "homepage"), 0755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\n"), 0644)
-				},
-				daemonSetup: func(d *SyncDaemon) {
-					d.nomadExecutor = func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
-						return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
-					}
-				},
-				wantErrSub: "failed updating Nomad variable",
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				env := newNomadConfigSyncTestEnv(t)
-				tc.setup(t, env.configDir)
-				if tc.daemonSetup != nil {
-					tc.daemonSetup(env.daemon)
-				}
-				err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir)
-				if tc.wantErrSub != "" {
-					if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-						t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
-					}
-				} else if err != nil {
-					t.Fatalf("expected nil error, got %v", err)
-				}
-			})
-		}
+		runNomadValidationCases(t, []nomadSyncValidationCase{
+			{name: "directory_as_homepage_yaml_error", dirAsFile: "services/homepage/homepage.yaml", wantErrSub: "is a directory"},
+			{name: "invalid_yaml_syntax_in_homepage_yaml", files: map[string]string{"services/homepage/homepage.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "disabled_nomad_addr_safe_noop", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
+		}, func(d *SyncDaemon, dir string) error {
+			return d.SyncHomepageConfigToNomad(ctx, dir)
+		})
 	})
 
 	t.Run("hash_caching_and_dir_filtering", func(t *testing.T) {
 		t.Parallel()
 		env := newNomadConfigSyncTestEnv(t)
-
 		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "homepage"), 0755)
 		_ = os.WriteFile(filepath.Join(env.configDir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\nallowed_hosts: \"*\"\n"), 0644)
 		_ = os.MkdirAll(filepath.Join(env.configDir, "homepage", "subdir"), 0755)
-		_ = os.WriteFile(filepath.Join(env.configDir, "homepage", "services.yaml"), []byte("- My Group: []\n"), 0644)
-		_ = os.WriteFile(filepath.Join(env.configDir, "homepage", "widgets.yaml"), []byte("- search: {}\n"), 0644)
-		_ = os.WriteFile(filepath.Join(env.configDir, "homepage", ".hidden"), []byte("ignore me"), 0644)
-		_ = os.WriteFile(filepath.Join(env.configDir, "homepage", "temp.tmp"), []byte("ignore me too"), 0644)
+		for name, content := range map[string]string{"services.yaml": "- My Group: []\n", "widgets.yaml": "- search: {}\n", ".hidden": "ignore me", "temp.tmp": "ignore me too"} {
+			_ = os.WriteFile(filepath.Join(env.configDir, "homepage", name), []byte(content), 0644)
+		}
 
-		// 1. Initial push -> verified hash & args
 		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil {
 			t.Fatalf("expected success pushing to nomad: %v", err)
 		}
 		calls := env.nomadCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected 1 call, got %d", len(calls))
+		if len(calls) != 1 || len(calls[0]) < 6 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
+			t.Fatalf("unexpected nomad CLI args: %v", calls)
 		}
-		if len(calls[0]) < 6 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
-			t.Fatalf("unexpected nomad CLI args: %v", calls[0])
-		}
-		foundHash := false
-		foundYAML := false
-		for _, arg := range calls[0] {
-			if strings.HasPrefix(arg, "CONFIG_HASH=") {
-				foundHash = true
-				hashVal := strings.TrimPrefix(arg, "CONFIG_HASH=")
-				if len(hashVal) != 64 {
-					t.Errorf("expected 64-char sha256 hex hash, got %s", hashVal)
-				}
-			}
-			if strings.HasPrefix(arg, "HOMEPAGE_YAML=@") {
-				foundYAML = true
-			}
-		}
-		if !foundHash || !foundYAML {
+		joined := strings.Join(calls[0], " ")
+		if !strings.Contains(joined, "CONFIG_HASH=") || !strings.Contains(joined, "HOMEPAGE_YAML=@") {
 			t.Errorf("missing CONFIG_HASH or HOMEPAGE_YAML in args: %v", calls[0])
 		}
 
-		// 2. Unchanged call -> cache hit
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success on cached call: %v", err)
-		}
-		if len(env.nomadCalls()) != 1 {
-			t.Errorf("expected calls to remain 1, got %d", len(env.nomadCalls()))
+		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
+			t.Fatalf("expected cached call to remain 1, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 
-		// 3. Modified homepage config -> pushes update
 		_ = os.WriteFile(filepath.Join(env.configDir, "services", "homepage", "homepage.yaml"), []byte("title: Updated Aerial Dashboard\n"), 0644)
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success after homepage update: %v", err)
-		}
-		if len(env.nomadCalls()) != 2 {
-			t.Errorf("expected calls to become 2, got %d", len(env.nomadCalls()))
+		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 2 {
+			t.Fatalf("expected calls to become 2 after update, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 	})
 
@@ -1980,21 +1582,9 @@ func TestSyncHomepageConfigToNomad_TableDriven(t *testing.T) {
 		subYaml := filepath.Join(env.configDir, "homepage", "services.yaml")
 		_ = os.WriteFile(subYaml, []byte("services:\n  - name: test\n"), 0644)
 
-		scUntouched := ConfigSyncContext{
-			Repo:         "azylman/aerial-config",
-			CommitSHA:    "sha_untouched",
-			PRNumber:     101,
-			TargetID:     "1555405874565091380",
-			DiffGated:    true,
-			ChangedFiles: []string{"services/voice/voice.yaml"},
-		}
-
-		// 1. Untouched in diff: primes cache, skips push
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir, scUntouched); err != nil {
-			t.Fatalf("SyncHomepageConfigToNomad error: %v", err)
-		}
-		if len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected 0 nomad calls for untouched diff, got %d", len(env.nomadCalls()))
+		scUntouched := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}}
+		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir, scUntouched); err != nil || len(env.nomadCalls()) != 0 {
+			t.Fatalf("expected 0 nomad calls for untouched diff, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 		env.daemon.lastPushedConfigMu.Lock()
 		cached := env.daemon.lastPushedConfig["nomad/jobs/homepage"]
@@ -2003,37 +1593,17 @@ func TestSyncHomepageConfigToNomad_TableDriven(t *testing.T) {
 			t.Fatalf("expected cache to be primed for homepage config")
 		}
 
-		// 2. Subfile in homepage/ directory touched: pushes var and emits deploy_started
 		_ = os.WriteFile(subYaml, []byte("services:\n  - name: test2\n"), 0644)
-		scSubTouched := ConfigSyncContext{
-			Repo:         "azylman/aerial-config",
-			CommitSHA:    "sha_sub",
-			PRNumber:     101,
-			TargetID:     "1555405874565091380",
-			DiffGated:    true,
-			ChangedFiles: []string{"homepage/services.yaml"},
-		}
+		scSubTouched := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_sub", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"homepage/services.yaml"}}
 		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir, scSubTouched); err != nil {
 			t.Fatalf("SyncHomepageConfigToNomad error: %v", err)
 		}
 		calls := env.nomadCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected 1 nomad call for modified homepage subfile, got %d", len(calls))
+		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "COMMIT_SHA=sha_sub") {
+			t.Fatalf("expected 1 nomad call with COMMIT_SHA=sha_sub, got %v", calls)
 		}
-		hasCommit := false
-		for _, arg := range calls[0] {
-			if arg == "COMMIT_SHA=sha_sub" {
-				hasCommit = true
-				break
-			}
-		}
-		if !hasCommit {
-			t.Errorf("expected COMMIT_SHA in args: %v", calls[0])
-		}
-
 		evts := env.waitForEvents(t, 1)
-		if evts[0].Event != "deploy_started" || evts[0].JobName != "homepage" || evts[0].Repo != scSubTouched.Repo ||
-			evts[0].CommitSHA != scSubTouched.CommitSHA || evts[0].PRNumber != scSubTouched.PRNumber || evts[0].TargetID != scSubTouched.TargetID {
+		if evts[0].Event != "deploy_started" || evts[0].JobName != "homepage" || evts[0].Repo != scSubTouched.Repo || evts[0].CommitSHA != scSubTouched.CommitSHA || evts[0].PRNumber != scSubTouched.PRNumber || evts[0].TargetID != scSubTouched.TargetID {
 			t.Errorf("unexpected deploy_started event payload: %+v", evts[0])
 		}
 	})
@@ -2045,170 +1615,76 @@ func TestSyncServiceConfigsToNomad_TableDriven(t *testing.T) {
 
 	t.Run("validation_and_disabled_paths", func(t *testing.T) {
 		t.Parallel()
-		tests := []struct {
-			name        string
-			setup       func(t *testing.T, dir string)
-			daemonSetup func(d *SyncDaemon)
-			wantErrSub  string
-		}{
-			{
-				name:  "empty_dir_graceful_skip",
-				setup: func(t *testing.T, dir string) {},
-			},
-			{
-				name: "directory_instead_of_file_error",
-				setup: func(t *testing.T, dir string) {
-					if err := os.MkdirAll(filepath.Join(dir, "services", "mcp", "scheduler-mcp.yaml"), 0755); err != nil {
-						t.Fatal(err)
-					}
-				},
-				wantErrSub: "failed to read service config",
-			},
-			{
-				name: "invalid_yaml_syntax_in_service_config",
-				setup: func(t *testing.T, dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "mcp"), 0755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "mcp", "scheduler-mcp.yaml"), []byte("invalid: yaml: [unclosed"), 0644)
-				},
-				wantErrSub: "invalid YAML syntax",
-			},
-			{
-				name: "disabled_nomad_addr_safe_noop",
-				setup: func(t *testing.T, dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "mcp"), 0755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: \"4005\"\n"), 0644)
-				},
-				daemonSetup: func(d *SyncDaemon) {
-					d.nomadAddr = ""
-				},
-			},
-			{
-				name: "nomad_cli_failure_returns_error",
-				setup: func(t *testing.T, dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "mcp"), 0755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: \"4005\"\n"), 0644)
-				},
-				daemonSetup: func(d *SyncDaemon) {
-					d.nomadExecutor = func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
-						return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
-					}
-				},
-				wantErrSub: "failed updating Nomad variable",
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				env := newNomadConfigSyncTestEnv(t)
-				tc.setup(t, env.configDir)
-				if tc.daemonSetup != nil {
-					tc.daemonSetup(env.daemon)
-				}
-				err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir)
-				if tc.wantErrSub != "" {
-					if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-						t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
-					}
-				} else if err != nil {
-					t.Fatalf("expected nil error, got %v", err)
-				}
-			})
-		}
+		runNomadValidationCases(t, []nomadSyncValidationCase{
+			{name: "empty_dir_graceful_skip"},
+			{name: "directory_instead_of_file_error", dirAsFile: "services/mcp/scheduler-mcp.yaml", wantErrSub: "failed to read service config"},
+			{name: "invalid_yaml_syntax_in_service_config", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "disabled_nomad_addr_safe_noop", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
+		}, func(d *SyncDaemon, dir string) error {
+			return d.SyncServiceConfigsToNomad(ctx, dir)
+		})
 	})
 
 	t.Run("non_yaml_config_skips_yaml_validation", func(t *testing.T) {
 		t.Parallel()
 		env := newNomadConfigSyncTestEnv(t)
-		env.daemon.serviceConfigs = []ServiceConfigMapping{
-			{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/mesh-proxy", VarKey: "DEFAULT_CONF"},
-		}
+		env.daemon.serviceConfigs = []ServiceConfigMapping{{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/mesh-proxy", VarKey: "DEFAULT_CONF"}}
 		_ = os.MkdirAll(filepath.Join(env.configDir, "proxy"), 0755)
 		_ = os.WriteFile(filepath.Join(env.configDir, "proxy", "default.conf"), []byte("server { listen 80; proxy_pass http://backend; }"), 0644)
-
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected non-YAML config to sync successfully, got %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected 1 nomad var put call, got %d", len(calls))
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
+			t.Fatalf("expected non-YAML config to sync with 1 call, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 	})
 
 	t.Run("hash_caching_and_sequence_yaml_sync", func(t *testing.T) {
 		t.Parallel()
 		env := newNomadConfigSyncTestEnv(t)
-
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "mcp"), 0755)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "webhooks-router"), 0755)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "victoriametrics"), 0755)
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: \"4005\"\n"), 0644)
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "mcp", "docker-mcp.yaml"), []byte("port: \"4002\"\n"), 0644)
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "webhooks-router", "webhooks-router.yaml"), []byte("port: \"4020\"\n"), 0644)
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "victoriametrics", "scrape.yml"), []byte("- job_name: \"anomaly-detector\"\n"), 0644)
-
-		// 1. Initial push -> 4 calls
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success, got %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 4 {
-			t.Fatalf("expected 4 nomad var put calls, got %d: %v", len(calls), calls)
+		for rel, content := range map[string]string{
+			"services/mcp/scheduler-mcp.yaml":            "port: \"4005\"\n",
+			"services/mcp/docker-mcp.yaml":               "port: \"4002\"\n",
+			"services/webhooks-router/webhooks-router.yaml": "port: \"4020\"\n",
+			"services/victoriametrics/scrape.yml":        "- job_name: \"anomaly-detector\"\n",
+		} {
+			full := filepath.Join(env.configDir, rel)
+			_ = os.MkdirAll(filepath.Dir(full), 0755)
+			_ = os.WriteFile(full, []byte(content), 0644)
 		}
 
-		// 2. Unchanged push -> cache hit, 0 additional calls
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success on cached call: %v", err)
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 4 {
+			t.Fatalf("expected 4 nomad var put calls, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
-		if len(env.nomadCalls()) != 4 {
-			t.Fatalf("expected calls to remain 4, got %d", len(env.nomadCalls()))
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 4 {
+			t.Fatalf("expected cached calls to remain 4, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
-
-		// 3. Modify 1 service config -> exactly 1 gets pushed
 		_ = os.WriteFile(filepath.Join(env.configDir, "services", "mcp", "docker-mcp.yaml"), []byte("docker_host: unix:///var/run/docker.sock\n# modified\n"), 0644)
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success on modified service call: %v", err)
-		}
-		if len(env.nomadCalls()) != 5 {
-			t.Fatalf("expected calls to increase to 5, got %d", len(env.nomadCalls()))
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 5 {
+			t.Fatalf("expected calls to increase to 5, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 	})
 
 	t.Run("service_config_mappings_precedence_and_invariants", func(t *testing.T) {
 		t.Parallel()
-		// Invariant: DefaultManagedServiceConfigs stays generic
 		for _, m := range DefaultManagedServiceConfigs {
 			if strings.Contains(m.NomadVar, "orin-voice") || strings.Contains(m.NomadVar, "mirrormere") {
-				t.Errorf("expected DefaultManagedServiceConfigs to remain generic, found deployment-specific mapping: %v", m)
+				t.Errorf("expected DefaultManagedServiceConfigs to remain generic, found: %v", m)
 			}
 		}
 
-		// Precedence Tier 1: services/hangar/hangar.yaml override in configDir
 		customDir := t.TempDir()
 		_ = os.MkdirAll(filepath.Join(customDir, "services", "hangar"), 0755)
-		hangarYAML := "service_configs:\n  - rel_path: \"services/custom/custom.yaml\"\n    nomad_var: \"nomad/jobs/custom-job\"\n    var_key: \"CONFIG_YAML\"\n"
-		_ = os.WriteFile(filepath.Join(customDir, "services", "hangar", "hangar.yaml"), []byte(hangarYAML), 0644)
+		_ = os.WriteFile(filepath.Join(customDir, "services", "hangar", "hangar.yaml"), []byte("service_configs:\n  - rel_path: \"services/custom/custom.yaml\"\n    nomad_var: \"nomad/jobs/custom-job\"\n    var_key: \"CONFIG_YAML\"\n"), 0644)
 		d := NewDaemon(DaemonConfig{ConfigDir: customDir})
-		customMappings := d.GetServiceConfigMappings(customDir)
-		if len(customMappings) != 1 || customMappings[0].RelPath != "services/custom/custom.yaml" || customMappings[0].NomadVar != "nomad/jobs/custom-job" {
+		if customMappings := d.GetServiceConfigMappings(customDir); len(customMappings) != 1 || customMappings[0].RelPath != "services/custom/custom.yaml" || customMappings[0].NomadVar != "nomad/jobs/custom-job" {
 			t.Fatalf("expected custom mappings from hangar.yaml, got %v", customMappings)
 		}
 
-		// Precedence Tier 2: daemon-configured serviceConfigs fallback
-		dCustom := &SyncDaemon{
-			serviceConfigs: []ServiceConfigMapping{
-				{RelPath: "services/test/test.yaml", NomadVar: "nomad/jobs/test-job", VarKey: "CONFIG_YAML"},
-			},
-		}
-		daemonMappings := dCustom.GetServiceConfigMappings(t.TempDir())
-		if len(daemonMappings) != 1 || daemonMappings[0].RelPath != "services/test/test.yaml" {
+		dCustom := &SyncDaemon{serviceConfigs: []ServiceConfigMapping{{RelPath: "services/test/test.yaml", NomadVar: "nomad/jobs/test-job", VarKey: "CONFIG_YAML"}}}
+		if daemonMappings := dCustom.GetServiceConfigMappings(t.TempDir()); len(daemonMappings) != 1 || daemonMappings[0].RelPath != "services/test/test.yaml" {
 			t.Fatalf("expected daemon-configured mappings, got %v", daemonMappings)
 		}
 
-		// Precedence Tier 3: DefaultManagedServiceConfigs fallback when empty
-		dDefault := &SyncDaemon{}
-		defaultMappings := dDefault.GetServiceConfigMappings(t.TempDir())
-		if len(defaultMappings) != len(DefaultManagedServiceConfigs) {
+		if defaultMappings := (&SyncDaemon{}).GetServiceConfigMappings(t.TempDir()); len(defaultMappings) != len(DefaultManagedServiceConfigs) {
 			t.Fatalf("expected DefaultManagedServiceConfigs fallback, got %d mappings", len(defaultMappings))
 		}
 	})
@@ -2216,83 +1692,38 @@ func TestSyncServiceConfigsToNomad_TableDriven(t *testing.T) {
 	t.Run("diff_gating_and_deploy_event_lifecycle", func(t *testing.T) {
 		t.Parallel()
 		env := newNomadConfigSyncTestEnv(t)
-
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "voice"), 0755)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "mcp"), 0755)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "hangar"), 0755)
-
-		voiceYaml := filepath.Join(env.configDir, "services", "voice", "voice.yaml")
-		_ = os.WriteFile(voiceYaml, []byte("model: small.en\n"), 0644)
-		schedYaml := filepath.Join(env.configDir, "services", "mcp", "scheduler-mcp.yaml")
-		_ = os.WriteFile(schedYaml, []byte("enabled: true\n"), 0644)
-
-		hangarYaml := filepath.Join(env.configDir, "services", "hangar", "hangar.yaml")
-		hangarContent := `service_configs:
-  - rel_path: "services/voice/voice.yaml"
-    nomad_var: "nomad/jobs/orin-voice"
-    var_key: "CONFIG_YAML"
-  - rel_path: "services/mcp/scheduler-mcp.yaml"
-    nomad_var: "nomad/jobs/scheduler-mcp"
-    var_key: "CONFIG_YAML"
-`
-		_ = os.WriteFile(hangarYaml, []byte(hangarContent), 0644)
-
-		// 1. Untouched service configs in diff (e.g. only hangar.yaml changed): primes cache, 0 calls, 0 events
-		scHangarOnly := ConfigSyncContext{
-			Repo:         "azylman/aerial-config",
-			CommitSHA:    "sha_pr264",
-			PRNumber:     101,
-			TargetID:     "1555405874565091380",
-			DiffGated:    true,
-			ChangedFiles: []string{"services/hangar/hangar.yaml"},
+		for rel, content := range map[string]string{
+			"services/voice/voice.yaml":       "model: small.en\n",
+			"services/mcp/scheduler-mcp.yaml": "enabled: true\n",
+			"services/hangar/hangar.yaml":     "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/mcp/scheduler-mcp.yaml\"\n    nomad_var: \"nomad/jobs/scheduler-mcp\"\n    var_key: \"CONFIG_YAML\"\n",
+		} {
+			full := filepath.Join(env.configDir, rel)
+			_ = os.MkdirAll(filepath.Dir(full), 0755)
+			_ = os.WriteFile(full, []byte(content), 0644)
 		}
 
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, scHangarOnly); err != nil {
-			t.Fatalf("SyncServiceConfigsToNomad unexpected error: %v", err)
-		}
-		if len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected ZERO nomad calls for PR #264 hangar-only diff, got %d", len(env.nomadCalls()))
+		scHangarOnly := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_pr264", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/hangar/hangar.yaml"}}
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, scHangarOnly); err != nil || len(env.nomadCalls()) != 0 {
+			t.Fatalf("expected ZERO nomad calls for hangar-only diff, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 		env.daemon.lastPushedConfigMu.Lock()
-		cachedVoice := env.daemon.lastPushedConfig["nomad/jobs/orin-voice:CONFIG_YAML"]
-		cachedSched := env.daemon.lastPushedConfig["nomad/jobs/scheduler-mcp:CONFIG_YAML"]
+		cachedVoice, cachedSched := env.daemon.lastPushedConfig["nomad/jobs/orin-voice:CONFIG_YAML"], env.daemon.lastPushedConfig["nomad/jobs/scheduler-mcp:CONFIG_YAML"]
 		env.daemon.lastPushedConfigMu.Unlock()
 		if cachedVoice == "" || cachedSched == "" {
 			t.Fatalf("expected cache to be primed for untouched service configs")
 		}
 
-		// 2. Touched in diff with modified content: pushes ONLY orin-voice with COMMIT_SHA and emits deploy_started
-		_ = os.WriteFile(voiceYaml, []byte("model: distil-small.en\n"), 0644)
-		scVoiceOnly := ConfigSyncContext{
-			Repo:         "azylman/aerial-config",
-			CommitSHA:    "sha_voice_update",
-			PRNumber:     101,
-			TargetID:     "1555405874565091380",
-			DiffGated:    true,
-			ChangedFiles: []string{"services/voice/voice.yaml"},
-		}
-
+		_ = os.WriteFile(filepath.Join(env.configDir, "services", "voice", "voice.yaml"), []byte("model: distil-small.en\n"), 0644)
+		scVoiceOnly := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_voice_update", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}}
 		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, scVoiceOnly); err != nil {
 			t.Fatalf("SyncServiceConfigsToNomad error: %v", err)
 		}
 		calls := env.nomadCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected exactly 1 nomad call (only orin-voice), got %d", len(calls))
+		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "COMMIT_SHA=sha_voice_update") {
+			t.Fatalf("expected 1 nomad call with COMMIT_SHA=sha_voice_update, got %v", calls)
 		}
-		hasCommit := false
-		for _, arg := range calls[0] {
-			if arg == "COMMIT_SHA=sha_voice_update" {
-				hasCommit = true
-				break
-			}
-		}
-		if !hasCommit {
-			t.Errorf("expected COMMIT_SHA in args: %v", calls[0])
-		}
-
 		evts := env.waitForEvents(t, 1)
-		if evts[0].Event != "deploy_started" || evts[0].JobName != "orin-voice" || evts[0].Repo != scVoiceOnly.Repo ||
-			evts[0].CommitSHA != scVoiceOnly.CommitSHA || evts[0].PRNumber != scVoiceOnly.PRNumber || evts[0].TargetID != scVoiceOnly.TargetID {
+		if evts[0].Event != "deploy_started" || evts[0].JobName != "orin-voice" || evts[0].Repo != scVoiceOnly.Repo || evts[0].CommitSHA != scVoiceOnly.CommitSHA || evts[0].PRNumber != scVoiceOnly.PRNumber || evts[0].TargetID != scVoiceOnly.TargetID {
 			t.Errorf("unexpected deploy_started event payload: %+v", evts[0])
 		}
 	})
@@ -2300,27 +1731,17 @@ func TestSyncServiceConfigsToNomad_TableDriven(t *testing.T) {
 
 func TestRepoLock_ThreadSafety(t *testing.T) {
 	daemon := NewDaemon(DaemonConfig{})
-
-	pathA := filepath.Clean("/share/aerial")
-	pathB := filepath.Clean("/share/aerial-config")
-
-	lockA1 := daemon.getRepoLock(pathA)
-	lockA2 := daemon.getRepoLock(pathA)
-	lockB := daemon.getRepoLock(pathB)
-
+	pathA, pathB := filepath.Clean("/share/aerial"), filepath.Clean("/share/aerial-config")
+	lockA1, lockA2, lockB := daemon.getRepoLock(pathA), daemon.getRepoLock(pathA), daemon.getRepoLock(pathB)
 	if lockA1 != lockA2 {
 		t.Errorf("expected identical mutex pointer for same repo path, got %p vs %p", lockA1, lockA2)
 	}
 	if lockA1 == lockB {
 		t.Errorf("expected distinct mutex pointers for different repo paths")
 	}
-
-	// Concurrent lock test
 	var wg sync.WaitGroup
-	iterations := 50
 	counter := 0
-
-	for i := 0; i < iterations; i++ {
+	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -2331,171 +1752,56 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-
-	if counter != iterations {
-		t.Errorf("expected counter %d, got %d", iterations, counter)
+	if counter != 50 {
+		t.Errorf("expected counter 50, got %d", counter)
 	}
 }
 
 func TestResolveChannelID_TableDriven(t *testing.T) {
-	tests := []struct {
-		name         string
-		channelInput string
-		setupDaemon  func(d *SyncDaemon)
-		client       *http.Client
-		expectedID   string
-		expectErr    bool
-		errContains  string
+	for _, tt := range []struct {
+		name, channelInput, cachedID, guildsBody, channelsBody, netErr, expectedID, errContains string
+		guildsStatus                                                                            int
+		timeout                                                                                 time.Duration
+		expectErr                                                                               bool
 	}{
-		{
-			name:         "snowflake direct return",
-			channelInput: "123456789012345678",
-			client:       http.DefaultClient,
-			expectedID:   "123456789012345678",
-		},
-		{
-			name:         "cachedChannelID direct return",
-			channelInput: "general",
-			setupDaemon: func(d *SyncDaemon) {
-				d.cachedChannelID = "999888777666"
-			},
-			client:     http.DefaultClient,
-			expectedID: "999888777666",
-		},
-		{
-			name:         "discord API HTTP 500 error from guilds",
-			channelInput: "general",
-			client: &http.Client{
-				Transport: &roundTripperFunc{
-					fn: func(req *http.Request) (*http.Response, error) {
-						return &http.Response{
-							StatusCode: http.StatusInternalServerError,
-							Body:       ioNopCloser(strings.NewReader("server error")),
-							Header:     make(http.Header),
-						}, nil
-					},
-				},
-			},
-			expectErr: true,
-		},
-		{
-			name:         "malformed JSON from guilds",
-			channelInput: "general",
-			client: &http.Client{
-				Transport: &roundTripperFunc{
-					fn: func(req *http.Request) (*http.Response, error) {
-						return &http.Response{
-							StatusCode: http.StatusOK,
-							Body:       ioNopCloser(strings.NewReader("not json")),
-							Header:     make(http.Header),
-						}, nil
-					},
-				},
-			},
-			expectErr: true,
-		},
-		{
-			name:         "successful guild and channel resolution with hash prefix",
-			channelInput: "#aerial-alerts",
-			client: &http.Client{
-				Transport: &roundTripperFunc{
-					fn: func(req *http.Request) (*http.Response, error) {
-						if strings.Contains(req.URL.Path, "/guilds") && !strings.Contains(req.URL.Path, "/channels") {
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Body:       ioNopCloser(strings.NewReader(`[{"id":"guild-1"}]`)),
-								Header:     make(http.Header),
-							}, nil
-						}
-						if strings.Contains(req.URL.Path, "/channels") {
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Body:       ioNopCloser(strings.NewReader(`[{"id":"chan-42","name":"aerial-alerts","type":0}]`)),
-								Header:     make(http.Header),
-							}, nil
-						}
-						return &http.Response{
-							StatusCode: http.StatusNotFound,
-							Body:       ioNopCloser(strings.NewReader(`{}`)),
-							Header:     make(http.Header),
-						}, nil
-					},
-				},
-			},
-			expectedID: "chan-42",
-		},
-		{
-			name:         "channel not found across connected guilds",
-			channelInput: "nonexistent-channel",
-			client: &http.Client{
-				Transport: &roundTripperFunc{
-					fn: func(req *http.Request) (*http.Response, error) {
-						if strings.Contains(req.URL.Path, "/guilds") && !strings.Contains(req.URL.Path, "/channels") {
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Body:       ioNopCloser(strings.NewReader(`[{"id":"guild-1"}]`)),
-								Header:     make(http.Header),
-							}, nil
-						}
-						if strings.Contains(req.URL.Path, "/channels") {
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Body:       ioNopCloser(strings.NewReader(`[{"id":"chan-42","name":"aerial-alerts","type":0}]`)),
-								Header:     make(http.Header),
-							}, nil
-						}
-						return &http.Response{
-							StatusCode: http.StatusNotFound,
-							Body:       ioNopCloser(strings.NewReader(`{}`)),
-							Header:     make(http.Header),
-						}, nil
-					},
-				},
-			},
-			expectErr:   true,
-			errContains: "not found",
-		},
-		{
-			name:         "hermetic roundTripperFunc client network error",
-			channelInput: "test-channel",
-			client: &http.Client{
-				Transport: &roundTripperFunc{
-					fn: func(req *http.Request) (*http.Response, error) {
-						return nil, errors.New("client timeout / failure")
-					},
-				},
-			},
-			expectErr: true,
-		},
-		{
-			name:         "client timeout error",
-			channelInput: "test-channel",
-			client:       &http.Client{Timeout: 5 * time.Millisecond},
-			expectErr:    true,
-		},
-	}
-
-	for _, tt := range tests {
+		{name: "snowflake direct return", channelInput: "123456789012345678", expectedID: "123456789012345678"},
+		{name: "cachedChannelID direct return", channelInput: "general", cachedID: "999888777666", expectedID: "999888777666"},
+		{name: "discord API HTTP 500 error from guilds", channelInput: "general", guildsStatus: http.StatusInternalServerError, guildsBody: "server error", expectErr: true},
+		{name: "malformed JSON from guilds", channelInput: "general", guildsStatus: http.StatusOK, guildsBody: "not json", expectErr: true},
+		{name: "successful guild and channel resolution with hash prefix", channelInput: "#aerial-alerts", guildsStatus: http.StatusOK, guildsBody: `[{"id":"guild-1"}]`, channelsBody: `[{"id":"chan-42","name":"aerial-alerts","type":0}]`, expectedID: "chan-42"},
+		{name: "channel not found across connected guilds", channelInput: "nonexistent-channel", guildsStatus: http.StatusOK, guildsBody: `[{"id":"guild-1"}]`, channelsBody: `[{"id":"chan-42","name":"aerial-alerts","type":0}]`, expectErr: true, errContains: "not found"},
+		{name: "hermetic roundTripperFunc client network error", channelInput: "test-channel", netErr: "client timeout / failure", expectErr: true},
+		{name: "client timeout error", channelInput: "test-channel", timeout: 5 * time.Millisecond, expectErr: true},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d := NewDaemon(DaemonConfig{})
-			if tt.setupDaemon != nil {
-				tt.setupDaemon(d)
+			d.cachedChannelID = tt.cachedID
+			client := http.DefaultClient
+			if tt.timeout > 0 {
+				client = &http.Client{Timeout: tt.timeout}
+			} else if tt.netErr != "" || tt.guildsStatus != 0 {
+				client = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+					if tt.netErr != "" {
+						return nil, errors.New(tt.netErr)
+					}
+					if strings.Contains(req.URL.Path, "/guilds") && !strings.Contains(req.URL.Path, "/channels") {
+						return &http.Response{StatusCode: tt.guildsStatus, Body: ioNopCloser(strings.NewReader(tt.guildsBody)), Header: make(http.Header)}, nil
+					}
+					if strings.Contains(req.URL.Path, "/channels") && tt.channelsBody != "" {
+						return &http.Response{StatusCode: http.StatusOK, Body: ioNopCloser(strings.NewReader(tt.channelsBody)), Header: make(http.Header)}, nil
+					}
+					return &http.Response{StatusCode: http.StatusNotFound, Body: ioNopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+				}}}
 			}
-			chID, err := d.resolveChannelID(context.Background(), tt.client, "token", tt.channelInput)
+			chID, err := d.resolveChannelID(context.Background(), client, "token", tt.channelInput)
 			if tt.expectErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("expected error containing %q, got: %v", tt.errContains, err)
+				if err == nil || (tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains)) {
+					t.Fatalf("expected error containing %q, got: %v", tt.errContains, err)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if chID != tt.expectedID {
-				t.Errorf("resolveChannelID() = %q, want %q", chID, tt.expectedID)
+			if err != nil || chID != tt.expectedID {
+				t.Fatalf("resolveChannelID() = (%q, %v), want (%q, nil)", chID, err, tt.expectedID)
 			}
 		})
 	}
@@ -2503,23 +1809,13 @@ func TestResolveChannelID_TableDriven(t *testing.T) {
 
 func TestTriggerReconcile_TableDriven(t *testing.T) {
 	ctx := context.Background()
-
-	// 1. Sync execution calls reconcileFn
 	calledSync := false
-	d := &SyncDaemon{
-		reconcileFn: func(ctx context.Context) error {
-			calledSync = true
-			return nil
-		},
-	}
+	d := &SyncDaemon{reconcileFn: func(ctx context.Context) error { calledSync = true; return nil }}
 	if err := d.TriggerReconcile(ctx, false); err != nil || !calledSync {
 		t.Fatalf("expected TriggerReconcile(false) to execute reconcileFn, err=%v", err)
 	}
 
-	// 2. Async execution queues into reconcileCh
-	dAsync := &SyncDaemon{
-		reconcileCh: make(chan struct{}, 1),
-	}
+	dAsync := &SyncDaemon{reconcileCh: make(chan struct{}, 1)}
 	if err := dAsync.TriggerReconcile(ctx, true); err != nil {
 		t.Fatalf("expected TriggerReconcile(true) to succeed, err=%v", err)
 	}
@@ -2529,19 +1825,14 @@ func TestTriggerReconcile_TableDriven(t *testing.T) {
 		t.Errorf("expected message in reconcileCh")
 	}
 
-	// 3. Async execution when channel is already full (default branch)
 	dAsync.reconcileCh <- struct{}{}
 	if err := dAsync.TriggerReconcile(ctx, true); err != nil {
 		t.Fatalf("expected TriggerReconcile(true) with full channel to succeed, err=%v", err)
 	}
 
-	// 4. Async execution when reconcileCh is nil (lazy initialization branch)
 	dNil := &SyncDaemon{}
-	if err := dNil.TriggerReconcile(ctx, true); err != nil {
-		t.Fatalf("expected TriggerReconcile(true) with nil channel to succeed, err=%v", err)
-	}
-	if dNil.reconcileCh == nil {
-		t.Errorf("expected reconcileCh to be initialized")
+	if err := dNil.TriggerReconcile(ctx, true); err != nil || dNil.reconcileCh == nil {
+		t.Fatalf("expected TriggerReconcile(true) with nil channel to initialize reconcileCh, err=%v", err)
 	}
 }
 
@@ -2549,7 +1840,6 @@ func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 	tempDir := t.TempDir()
 	localDir := filepath.Join(tempDir, "local")
 	_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
 	configDir := filepath.Join(tempDir, "config")
 	_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755)
 	_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0644)
@@ -2570,48 +1860,34 @@ func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 			return []byte("var updated"), nil, nil
 		},
 		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) == 0 {
-				return nil, nil, nil
-			}
-			switch args[0] {
-			case "rev-parse":
+			if len(args) > 0 && args[0] == "rev-parse" {
 				return []byte(head), nil, nil
-			case "merge":
-				return []byte("Already up to date."), nil, nil
-			default:
-				return nil, nil, nil
 			}
+			if len(args) > 0 && args[0] == "merge" {
+				return []byte("Already up to date."), nil, nil
+			}
+			return nil, nil, nil
 		},
 	})
 
 	results, err := d.TriggerSync()
-	if err != nil {
-		t.Fatalf("TriggerSync failed: %v", err)
+	if err != nil || len(results) != 1 || results[0].Changed {
+		t.Fatalf("expected 1 unchanged result, err=%v, results=%+v", err, results)
 	}
-	if len(results) != 1 || results[0].Changed {
-		t.Fatalf("expected 1 result with Changed=false, got %+v", results)
-	}
-
 	nomadMu.Lock()
 	callsCount := len(nomadCalls)
 	nomadMu.Unlock()
-
 	if callsCount == 0 {
 		t.Fatalf("expected nomad var put calls even when git repo has no changes, got 0")
 	}
 
 	results2, err := d.TriggerSync()
-	if err != nil {
-		t.Fatalf("second TriggerSync failed: %v", err)
+	if err != nil || len(results2) != 1 || results2[0].Changed {
+		t.Fatalf("expected 1 unchanged result on second sync, err=%v, results=%+v", err, results2)
 	}
-	if len(results2) != 1 || results2[0].Changed {
-		t.Fatalf("expected 1 result with Changed=false, got %+v", results2)
-	}
-
 	nomadMu.Lock()
 	secondCount := len(nomadCalls)
 	nomadMu.Unlock()
-
 	if secondCount != callsCount {
 		t.Fatalf("expected call count to remain %d due to caching, got %d", callsCount, secondCount)
 	}
@@ -2636,7 +1912,6 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 		if err := os.MkdirAll(binDir, 0755); err != nil {
 			t.Fatalf("failed to create bin dir: %v", err)
 		}
-
 		if runtime.GOOS == "windows" {
 			script := "@echo off\r\nset \"arg=%*\"\r\necho %arg% | findstr /i \"waitloop\" >nul && goto do_wait\r\necho %arg% | findstr /i \"compose\" >nul && (echo Docker Compose mock v2.0 & exit /b 0)\r\necho %arg% | findstr /i \"version\" >nul && (echo Docker mock v24.0 & exit /b 0)\r\necho unknown cmd >&2\r\nexit /b 1\r\n:do_wait\r\ngoto do_wait\r\n"
 			_ = os.WriteFile(filepath.Join(binDir, "docker.cmd"), []byte(script), 0755)
@@ -2644,41 +1919,34 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			script := "#!/bin/sh\ncase \"$*\" in\n  *\"waitloop\"*) trap 'exit 0' TERM INT; while :; do :; done;;\n  *\"compose\"*) echo \"Docker Compose mock v2.0\"; exit 0;;\n  *\"version\"*) echo \"Docker mock v24.0\"; exit 0;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
 			_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0755)
 		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-		origPath := os.Getenv("PATH")
-		t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
-
-		tests := []struct {
-			name    string
-			execFn  func() ([]byte, []byte, error)
-			wantOut string
-			wantErr bool
+		for _, tc := range []struct {
+			name, arg, wantOut             string
+			isCompose, cancelCtx, wantErr bool
 		}{
-			{name: "compose executor success", execFn: func() ([]byte, []byte, error) {
-				return defaultComposeExecutor(context.Background(), tempDir, "version")
-			}, wantOut: "Docker Compose mock"},
-			{name: "compose executor cancel", execFn: func() ([]byte, []byte, error) {
-				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-				defer cancel()
-				return defaultComposeExecutor(ctx, tempDir, "waitloop")
-			}, wantErr: true},
-			{name: "docker executor success", execFn: func() ([]byte, []byte, error) { return defaultDockerExecutor(context.Background(), "version") }, wantOut: "Docker mock v24.0"},
-			{name: "docker executor cancel", execFn: func() ([]byte, []byte, error) {
-				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-				defer cancel()
-				return defaultDockerExecutor(ctx, "waitloop")
-			}, wantErr: true},
-			{name: "docker executor unknown cmd error", execFn: func() ([]byte, []byte, error) { return defaultDockerExecutor(context.Background(), "unknown") }, wantErr: true},
-		}
-
-		for _, tc := range tests {
+			{name: "compose executor success", isCompose: true, arg: "version", wantOut: "Docker Compose mock"},
+			{name: "compose executor cancel", isCompose: true, arg: "waitloop", cancelCtx: true, wantErr: true},
+			{name: "docker executor success", arg: "version", wantOut: "Docker mock v24.0"},
+			{name: "docker executor cancel", arg: "waitloop", cancelCtx: true, wantErr: true},
+			{name: "docker executor unknown cmd error", arg: "unknown", wantErr: true},
+		} {
 			t.Run(tc.name, func(t *testing.T) {
-				stdout, stderr, err := tc.execFn()
-				if tc.wantErr && err == nil {
-					t.Errorf("expected error, got nil")
+				ctx := context.Background()
+				if tc.cancelCtx {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+					defer cancel()
 				}
-				if !tc.wantErr && err != nil {
-					t.Errorf("unexpected error: %v", err)
+				var stdout, stderr []byte
+				var err error
+				if tc.isCompose {
+					stdout, stderr, err = defaultComposeExecutor(ctx, tempDir, tc.arg)
+				} else {
+					stdout, stderr, err = defaultDockerExecutor(ctx, tc.arg)
+				}
+				if (err != nil) != tc.wantErr {
+					t.Errorf("error = %v, wantErr = %v", err, tc.wantErr)
 				}
 				if tc.wantOut != "" && !strings.Contains(string(stdout), tc.wantOut) && !strings.Contains(string(stderr), tc.wantOut) {
 					t.Errorf("expected output to contain %q, stdout: %s, stderr: %s", tc.wantOut, stdout, stderr)
@@ -2688,7 +1956,6 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 	})
 
 	t.Run("daemon executor resolution branches", func(t *testing.T) {
-		// 1. getGitExecutor
 		var nilDaemon *SyncDaemon
 		if nilDaemon.getGitExecutor() == nil || (&SyncDaemon{}).getGitExecutor() == nil {
 			t.Errorf("expected non-nil default git executor")
@@ -2706,7 +1973,6 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			_, _, _ = defaultExec(context.Background(), t.TempDir(), "version")
 		}
 
-		// 2. getDockerExecutor
 		if nilDaemon.getDockerExecutor() == nil || (&SyncDaemon{}).getDockerExecutor() == nil {
 			t.Errorf("expected non-nil default docker executor")
 		}
@@ -2720,7 +1986,6 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			t.Errorf("expected custom docker executor to be called")
 		}
 
-		// 3. getComposeExecutor
 		if nilDaemon.getComposeExecutor() == nil || (&SyncDaemon{}).getComposeExecutor() == nil {
 			t.Errorf("expected non-nil default compose executor")
 		}
@@ -2734,7 +1999,6 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			t.Errorf("expected custom compose executor to be called")
 		}
 
-		// 4. getDeployDispatcher
 		if fnNil := nilDaemon.getDeployDispatcher(); fnNil == nil || fnNil(context.Background(), HangarDeployEvent{}) == nil {
 			t.Errorf("expected error from deploy dispatcher on nil daemon")
 		}
@@ -2750,19 +2014,27 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 
 	t.Run("runGitCommand variations", func(t *testing.T) {
 		for _, tc := range []struct {
-			name   string
-			action func(t *testing.T)
+			name, pat, arg        string
+			useTempDir, cancelCtx bool
 		}{
-			{name: "normal version", action: func(t *testing.T) { _, _, _ = runGitCommand(context.Background(), "", "", "version") }},
-			{name: "with dir init", action: func(t *testing.T) { _, _, _ = runGitCommand(context.Background(), t.TempDir(), "", "init") }},
-			{name: "with pat version", action: func(t *testing.T) { _, _, _ = runGitCommand(context.Background(), "", "mock-pat", "version") }},
-			{name: "canceled context", action: func(t *testing.T) {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				_, _, _ = runGitCommand(ctx, "", "", "status")
-			}},
+			{name: "normal version", arg: "version"},
+			{name: "with dir init", useTempDir: true, arg: "init"},
+			{name: "with pat version", pat: "mock-pat", arg: "version"},
+			{name: "canceled context", cancelCtx: true, arg: "status"},
 		} {
-			t.Run(tc.name, tc.action)
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				if tc.cancelCtx {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithCancel(ctx)
+					cancel()
+				}
+				dir := ""
+				if tc.useTempDir {
+					dir = t.TempDir()
+				}
+				_, _, _ = runGitCommand(ctx, dir, tc.pat, tc.arg)
+			})
 		}
 	})
 
@@ -2776,29 +2048,27 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 	})
 
 	t.Run("defaultDeployDispatcher HTTP handling", func(t *testing.T) {
-		tests := []struct {
-			name    string
-			d       *SyncDaemon
-			wantErr bool
+		for _, tc := range []struct {
+			name               string
+			invalidURL, wantErr bool
+			status             int
 		}{
-			{name: "invalid router URL", d: &SyncDaemon{webhooksRouterURL: "://invalid-router-url"}, wantErr: true},
-			{name: "HTTP 500 server error response", d: func() *SyncDaemon {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusInternalServerError)
-				}))
-				t.Cleanup(srv.Close)
-				return &SyncDaemon{webhooksRouterURL: srv.URL}
-			}(), wantErr: true},
-		}
-
-		for _, tc := range tests {
+			{name: "invalid router URL", invalidURL: true, wantErr: true},
+			{name: "HTTP 500 server error response", status: http.StatusInternalServerError, wantErr: true},
+		} {
 			t.Run(tc.name, func(t *testing.T) {
-				err := tc.d.defaultDeployDispatcher(context.Background(), HangarDeployEvent{JobName: "test"})
-				if tc.wantErr && err == nil {
-					t.Errorf("expected error, got nil")
+				routerURL := "://invalid-router-url"
+				if !tc.invalidURL {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.WriteHeader(tc.status)
+					}))
+					defer srv.Close()
+					routerURL = srv.URL
 				}
-				if !tc.wantErr && err != nil {
-					t.Errorf("unexpected error: %v", err)
+				d := &SyncDaemon{webhooksRouterURL: routerURL}
+				err := d.defaultDeployDispatcher(context.Background(), HangarDeployEvent{JobName: "test"})
+				if (err != nil) != tc.wantErr {
+					t.Errorf("defaultDeployDispatcher() error = %v, wantErr = %v", err, tc.wantErr)
 				}
 			})
 		}
@@ -2830,100 +2100,74 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 
 func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 	dummyPAT := "ghp_mock_token_12345"
-
-	tests := []struct {
-		name string
-		run  func(t *testing.T)
+	for _, tc := range []struct {
+		name, mode, pat, repoURL, wantErrSub, wantAuthUser string
+		mkdirErr, readErr, writeErr                        error
 	}{
-		{
-			name: "nil daemon and empty PAT daemon return nil",
-			run: func(t *testing.T) {
+		{name: "nil daemon and empty PAT daemon return nil", mode: "daemon_empty"},
+		{name: "empty PAT in EnsureDockerAuthPath is no-op", mode: "mock_callbacks", pat: "", repoURL: "https://github.com/azylman/aerial-config.git"},
+		{name: "mkdir failure returns error", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", mkdirErr: errors.New("disk permission denied"), wantErrSub: "disk permission denied"},
+		{name: "read error other than not-exist returns error", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", readErr: errors.New("read fault"), wantErrSub: "read fault"},
+		{name: "write failure returns error", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", readErr: os.ErrNotExist, writeErr: errors.New("write fault"), wantErrSub: "write fault"},
+		{name: "successful write creates valid docker config file with 0600 mode", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/custom-org/aerial-config.git", readErr: os.ErrNotExist, wantAuthUser: "custom-org"},
+		{name: "filesystem integration with real callbacks writing .docker/config.json", mode: "real_fs", pat: dummyPAT},
+		{name: "filesystem integration test via daemon EnsureDockerAuth", mode: "daemon_fs", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", wantAuthUser: "azylman"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			switch tc.mode {
+			case "daemon_empty":
 				var nilDaemon *SyncDaemon
-				if err := nilDaemon.EnsureDockerAuth(); err != nil {
-					t.Errorf("expected nil error for nil daemon, got %v", err)
+				for _, err := range []error{nilDaemon.EnsureDockerAuth(), (&SyncDaemon{pat: ""}).EnsureDockerAuth(), NewDaemon(DaemonConfig{PAT: ""}).EnsureDockerAuth()} {
+					if err != nil {
+						t.Errorf("expected nil error for empty/nil daemon, got %v", err)
+					}
 				}
-				if err := (&SyncDaemon{pat: ""}).EnsureDockerAuth(); err != nil {
-					t.Errorf("expected nil error for empty PAT daemon, got %v", err)
-				}
-				if err := NewDaemon(DaemonConfig{PAT: ""}).EnsureDockerAuth(); err != nil {
-					t.Errorf("expected nil error for empty PAT via NewDaemon, got %v", err)
-				}
-			},
-		},
-		{
-			name: "empty PAT in EnsureDockerAuthPath is no-op",
-			run: func(t *testing.T) {
-				if err := EnsureDockerAuthPath("", "https://github.com/azylman/aerial-config.git", nil, nil, nil, nil); err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-			},
-		},
-		{
-			name: "mkdir failure returns error",
-			run: func(t *testing.T) {
-				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/azylman/aerial-config.git", func(string) string { return "/mock/docker" }, nil, nil, func(string, os.FileMode) error { return errors.New("disk permission denied") })
-				if err == nil || !strings.Contains(err.Error(), "disk permission denied") {
-					t.Fatalf("expected wrapped mkdir error, got %v", err)
-				}
-			},
-		},
-		{
-			name: "read error other than not-exist returns error",
-			run: func(t *testing.T) {
-				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/azylman/aerial-config.git", func(string) string { return "/mock/docker" }, func(string) ([]byte, error) { return nil, errors.New("read fault") }, nil, func(string, os.FileMode) error { return nil })
-				if err == nil || !strings.Contains(err.Error(), "read fault") {
-					t.Fatalf("expected wrapped read error, got %v", err)
-				}
-			},
-		},
-		{
-			name: "write failure returns error",
-			run: func(t *testing.T) {
-				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/azylman/aerial-config.git", func(string) string { return "/mock/docker" }, func(string) ([]byte, error) { return nil, os.ErrNotExist }, func(string, []byte, os.FileMode) error { return errors.New("write fault") }, func(string, os.FileMode) error { return nil })
-				if err == nil || !strings.Contains(err.Error(), "write fault") {
-					t.Fatalf("expected wrapped write error, got %v", err)
-				}
-			},
-		},
-		{
-			name: "successful write creates valid docker config file with 0600 mode",
-			run: func(t *testing.T) {
+			case "mock_callbacks":
 				var writtenPath string
 				var writtenData []byte
 				var writtenMode os.FileMode
-
-				err := EnsureDockerAuthPath(dummyPAT, "https://github.com/custom-org/aerial-config.git", func(k string) string {
-					if k == "DOCKER_CONFIG" {
-						return "/mock/docker"
+				err := EnsureDockerAuthPath(
+					tc.pat,
+					tc.repoURL,
+					func(k string) string {
+						if k == "DOCKER_CONFIG" {
+							return "/mock/docker"
+						}
+						return ""
+					},
+					func(string) ([]byte, error) { return nil, tc.readErr },
+					func(path string, data []byte, mode os.FileMode) error {
+						writtenPath, writtenData, writtenMode = path, data, mode
+						return tc.writeErr
+					},
+					func(string, os.FileMode) error { return tc.mkdirErr },
+				)
+				if tc.wantErrSub != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+						t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
 					}
-					return ""
-				}, func(string) ([]byte, error) { return nil, os.ErrNotExist }, func(path string, data []byte, mode os.FileMode) error {
-					writtenPath, writtenData, writtenMode = path, data, mode
-					return nil
-				}, func(string, os.FileMode) error { return nil })
+					return
+				}
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
-				if filepath.ToSlash(writtenPath) != "/mock/docker/config.json" || writtenMode != 0600 {
-					t.Errorf("expected /mock/docker/config.json and 0600, got %s and %v", writtenPath, writtenMode)
+				if tc.wantAuthUser != "" {
+					if filepath.ToSlash(writtenPath) != "/mock/docker/config.json" || writtenMode != 0600 {
+						t.Errorf("expected /mock/docker/config.json and 0600, got %s and %v", writtenPath, writtenMode)
+					}
+					var parsed struct {
+						Auths map[string]struct {
+							Auth string `json:"auth"`
+						} `json:"auths"`
+					}
+					if err := json.Unmarshal(writtenData, &parsed); err != nil {
+						t.Fatalf("failed to unmarshal written config: %v", err)
+					}
+					if entry, ok := parsed.Auths["ghcr.io"]; !ok || entry.Auth != base64.StdEncoding.EncodeToString([]byte(tc.wantAuthUser+":"+tc.pat)) {
+						t.Errorf("unexpected ghcr auth entry: %+v", entry)
+					}
 				}
-
-				var parsed struct {
-					Auths map[string]struct {
-						Auth string `json:"auth"`
-					} `json:"auths"`
-				}
-				if err := json.Unmarshal(writtenData, &parsed); err != nil {
-					t.Fatalf("failed to unmarshal written config: %v", err)
-				}
-				if entry, ok := parsed.Auths["ghcr.io"]; !ok || entry.Auth != base64.StdEncoding.EncodeToString([]byte("custom-org:"+dummyPAT)) {
-					t.Errorf("unexpected ghcr auth entry: %+v", entry)
-				}
-			},
-		},
-		{
-			name: "filesystem integration with real callbacks writing .docker/config.json",
-			run: func(t *testing.T) {
+			case "real_fs":
 				tmpDir := t.TempDir()
 				lookup := func(k string) string {
 					if k == "DOCKER_CONFIG" {
@@ -2931,55 +2175,31 @@ func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 					}
 					return ""
 				}
-				if err := EnsureDockerAuthPath("ghp_mock_token_12345", "", lookup, nil, nil, nil); err != nil {
+				if err := EnsureDockerAuthPath(tc.pat, "", lookup, nil, nil, nil); err != nil {
 					t.Fatalf("expected success writing docker config, got %v", err)
 				}
-				content, err := os.ReadFile(filepath.Join(tmpDir, ".docker", "config.json"))
-				if err != nil || !strings.Contains(string(content), "ghcr.io") {
+				if content, err := os.ReadFile(filepath.Join(tmpDir, ".docker", "config.json")); err != nil || !strings.Contains(string(content), "ghcr.io") {
 					t.Errorf("expected docker config with ghcr.io, got %s, err: %v", string(content), err)
 				}
-			},
-		},
-		{
-			name: "filesystem integration test via daemon EnsureDockerAuth",
-			run: func(t *testing.T) {
+			case "daemon_fs":
 				tempDir := t.TempDir()
 				t.Setenv("DOCKER_CONFIG", tempDir)
-
-				d := &SyncDaemon{
-					pat:       dummyPAT,
-					configDir: "/share/aerial-config",
-					repoUrls: map[string]string{
-						"/share/aerial-config": "https://github.com/azylman/aerial-config.git",
-					},
-				}
-
+				d := &SyncDaemon{pat: tc.pat, configDir: "/share/aerial-config", repoUrls: map[string]string{"/share/aerial-config": tc.repoURL}}
 				if err := d.EnsureDockerAuth(); err != nil {
 					t.Fatalf("daemon.EnsureDockerAuth failed: %v", err)
 				}
-
-				data, err := os.ReadFile(filepath.Join(tempDir, "config.json"))
-				if err != nil || !strings.Contains(string(data), base64.StdEncoding.EncodeToString([]byte("azylman:"+dummyPAT))) {
+				if data, err := os.ReadFile(filepath.Join(tempDir, "config.json")); err != nil || !strings.Contains(string(data), base64.StdEncoding.EncodeToString([]byte(tc.wantAuthUser+":"+tc.pat))) {
 					t.Errorf("expected valid auth in written config, got %s, err: %v", string(data), err)
 				}
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, tc.run)
+			}
+		})
 	}
 }
 
 type mockErrReadCloser struct{}
 
-func (e *mockErrReadCloser) Read(p []byte) (int, error) {
-	return 0, io.EOF
-}
-
-func (e *mockErrReadCloser) Close() error {
-	return errors.New("simulated close error")
-}
+func (e *mockErrReadCloser) Read(p []byte) (int, error) { return 0, io.EOF }
+func (e *mockErrReadCloser) Close() error               { return errors.New("simulated close error") }
 
 type mockErrResponseWriter struct {
 	header http.Header
@@ -2992,12 +2212,8 @@ func (m *mockErrResponseWriter) Header() http.Header {
 	}
 	return m.header
 }
-
-func (m *mockErrResponseWriter) Write(p []byte) (int, error) {
-	return 0, m.err
-}
-
-func (m *mockErrResponseWriter) WriteHeader(statusCode int) {}
+func (m *mockErrResponseWriter) Write(p []byte) (int, error) { return 0, m.err }
+func (m *mockErrResponseWriter) WriteHeader(statusCode int)  {}
 
 func TestHangarHelpers_TableDriven(t *testing.T) {
 	t.Run("closeWarn", func(t *testing.T) {
@@ -3016,7 +2232,6 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 	t.Run("isClientDisconnect", func(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(context.Background())
 		cancel()
-
 		for _, tc := range []struct {
 			name string
 			req  *http.Request
@@ -3050,10 +2265,8 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				writeResponse(tc.w, req, tc.body)
-				if rec, ok := tc.w.(*httptest.ResponseRecorder); ok && tc.want != "" {
-					if rec.Body.String() != tc.want {
-						t.Errorf("expected body %q, got %q", tc.want, rec.Body.String())
-					}
+				if rec, ok := tc.w.(*httptest.ResponseRecorder); ok && tc.want != "" && rec.Body.String() != tc.want {
+					t.Errorf("expected body %q, got %q", tc.want, rec.Body.String())
 				}
 			})
 		}
@@ -3081,8 +2294,7 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 
 	t.Run("pure edge helpers from coverage boosters", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		dummyGit := filepath.Join(tmpDir, "git.exe")
-		_ = os.WriteFile(dummyGit, []byte("echo"), 0755)
+		_ = os.WriteFile(filepath.Join(tmpDir, "git.exe"), []byte("echo"), 0755)
 		_ = resolveGitBinInternal(func(k string) string {
 			if k == "ProgramFiles" {
 				return tmpDir
@@ -3091,12 +2303,8 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 		}, nil, func(string) (string, error) { return "", errors.New("not found") }, "windows")
 
 		for _, tc := range []struct {
-			name        string
-			raw         string
-			wantReg     string
-			wantRepo    string
-			wantTag     string
-			expectError bool
+			name, raw, wantReg, wantRepo, wantTag string
+			expectError                           bool
 		}{
 			{name: "docker.io library image", raw: "docker.io/myimage:v1", wantReg: "registry-1.docker.io", wantRepo: "library/myimage", wantTag: "v1"},
 			{name: "index.docker.io owner image", raw: "index.docker.io/owner/image:latest", wantReg: "registry-1.docker.io", wantRepo: "owner/image", wantTag: "latest"},
@@ -3119,11 +2327,9 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 		if _, svc, _, pErr := ParseWwwAuthenticate("Bearer realm=\"https://example.com\",service=\"test\",trailingnoparam"); pErr != nil || svc != "test" {
 			t.Errorf("unexpected ParseWwwAuthenticate error: %v, svc=%s", pErr, svc)
 		}
-
 		if !ContainsDigest([]string{"repo/img@sha256:1234567890abcdef"}, "sha256:1234567890abcdef") {
 			t.Errorf("expected ContainsDigest to match")
 		}
-
 		if resolved := ResolveRepoPath("aerial", []string{"/mnt/data/supervisor/share/aerial"}); resolved != "/mnt/data/supervisor/share/aerial" {
 			t.Errorf("expected /mnt/data/supervisor/share/aerial, got %s", resolved)
 		}
@@ -3159,7 +2365,7 @@ func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
 	go func() {
 		_, _, _ = d.sfg.Do("sync", func() (interface{}, error) {
 			close(started)
-			time.Sleep(20 * time.Millisecond)
+			<-time.After(20 * time.Millisecond)
 			return "invalid-type", nil
 		})
 	}()
@@ -5524,7 +4730,7 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		}
 
 		// Wait briefly for debounce timer to fire first panic
-		time.Sleep(25 * time.Millisecond)
+		<-time.After(25 * time.Millisecond)
 
 		// Second event tests that loop survived panic and executes successfully
 		_, code2 := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
