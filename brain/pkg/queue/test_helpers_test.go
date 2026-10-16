@@ -3,6 +3,9 @@ package queue
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
 
 	"github.com/azylman/aerial/brain/pkg/db"
 )
@@ -116,3 +119,23 @@ func rotateSessionID(store db.Store, sessionKey, newSessionID string) error {
 }
 
 
+
+// noopDelivery returns a discordgo delivery function that always succeeds.
+func noopDelivery(s *discordgo.Session, channelID, text string) error {
+	return nil
+}
+
+// noopTyping returns a discordgo typing indicator function that does nothing.
+func noopTyping(s *discordgo.Session, channelID string) func() {
+	return func() {}
+}
+
+// waitForCompletion waits for doneCh with a timeout, failing the test if expired.
+func waitForCompletion(t testing.TB, doneCh <-chan struct{}, timeout time.Duration, msg string) {
+	t.Helper()
+	select {
+	case <-doneCh:
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for completion: %s", msg)
+	}
+}
