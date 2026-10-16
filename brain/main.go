@@ -30,6 +30,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
+	"github.com/azylman/aerial/brain/pkg/discord"
 	"github.com/azylman/aerial/brain/pkg/mcp"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
@@ -239,6 +240,74 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "sent", "channel_id": targetID})
+	}
+}
+
+func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if pool == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Worker pool not available"})
+			return
+		}
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if closeErr := r.Body.Close(); closeErr != nil {
+			log.Printf("[HTTP] Warning closing status widget request body: %v", closeErr)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+			return
+		}
+
+		var req discord.StatusWidgetRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+			return
+		}
+
+		targetID := strings.TrimSpace(req.ChannelID)
+		if targetID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' field is required and cannot be empty"})
+			return
+		}
+		if !queue.IsNumericSnowflake(targetID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"})
+			return
+		}
+
+		if len(req.Chunks) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'chunks' field is required and cannot be empty"})
+			return
+		}
+
+		msgID, err := pool.DeliverStatusWidget(req)
+		if err != nil {
+			if strings.Contains(err.Error(), "discord session is not connected") || strings.Contains(err.Error(), "discord session is nil") {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Discord session not connected"})
+				return
+			}
+			var restErr *discordgo.RESTError
+			if errors.As(err, &restErr) {
+				if restErr.Response != nil && restErr.Response.StatusCode >= 400 && restErr.Response.StatusCode < 500 {
+					writeJSON(w, restErr.Response.StatusCode, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+					return
+				}
+			}
+			if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "cannot send") {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to deliver widget: %v", err)})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "message_id": msgID})
 	}
 }
 
@@ -1136,6 +1205,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
+	mux.HandleFunc("/discord/widget", handleStatusWidget(pool))
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(store, searchPaths...))
@@ -1867,6 +1937,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	dgSession := connectDiscordFunnel(ctx, store, pool, cur.DiscordToken)
 	if pool != nil && dgSession != nil {
 		pool.SetDiscordSession(dgSession)
+		pool.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
+			return discord.DeliverStatusWidget(dgSession, req, time.Now())
+		})
 	}
 
 	// Resume interrupted turns after Discord gateway session is registered

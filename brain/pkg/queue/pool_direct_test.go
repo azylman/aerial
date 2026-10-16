@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/azylman/aerial/brain/pkg/discord"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -86,3 +87,42 @@ func TestWorkerPool_DeliverDirect(t *testing.T) {
 		}
 	})
 }
+
+func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
+	t.Run("nil pool returns error", func(t *testing.T) {
+		var p *WorkerPool
+		_, err := p.DeliverStatusWidget(discord.StatusWidgetRequest{})
+		if err == nil || err.Error() != "worker pool is nil" {
+			t.Fatalf("expected 'worker pool is nil', got %v", err)
+		}
+	})
+
+	t.Run("injected WidgetDeliveryFunc is invoked", func(t *testing.T) {
+		invoked := false
+		p := &WorkerPool{
+			cfg: WorkerPoolConfig{
+				WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+					invoked = true
+					return "widget-msg-123", nil
+				},
+			},
+		}
+
+		msgID, err := p.DeliverStatusWidget(discord.StatusWidgetRequest{ChannelID: "chan-1"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !invoked || msgID != "widget-msg-123" {
+			t.Fatalf("expected invoked and msgID 'widget-msg-123', got %v, %s", invoked, msgID)
+		}
+	})
+
+	t.Run("nil session with nil WidgetDeliveryFunc returns discord session is not connected", func(t *testing.T) {
+		p := &WorkerPool{}
+		_, err := p.DeliverStatusWidget(discord.StatusWidgetRequest{ChannelID: "chan-1"})
+		if err == nil || err.Error() != "discord session is not connected" {
+			t.Fatalf("expected 'discord session is not connected', got %v", err)
+		}
+	})
+}
+
