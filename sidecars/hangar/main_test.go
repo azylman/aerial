@@ -20,80 +20,196 @@ import (
 	"time"
 )
 
-func TestSanitizeLog(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "clean string",
-			input:    "repository synced cleanly",
-			expected: "repository synced cleanly",
-		},
-		{
-			name:     "github pat",
-			input:    "failed with token github_pat_11AAAA_secret_token_123",
-			expected: "failed with token [REDACTED_TOKEN]",
-		},
-		{
-			name:     "classic ghp token",
-			input:    "cloning with ghp_1234567890abcdef1234567890abcdef12",
-			expected: "cloning with [REDACTED_TOKEN]",
-		},
-		{
-			name:     "basic auth header",
-			input:    "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0",
-			expected: "AUTHORIZATION: [REDACTED_TOKEN]",
-		},
-		{
-			name:     "postgres connection string",
-			input:    "connecting to postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
-			expected: "connecting to [REDACTED_TOKEN]?sslmode=disable",
-		},
-		{
-			name:     "anthropic api key",
-			input:    "using sk-ant-api03-1234567890abcdef-secret",
-			expected: "using [REDACTED_TOKEN]",
-		},
-		{
-			name:     "google api key",
-			input:    "key AIzaSyD1234567890abcdefghijklmnopqrstuv",
-			expected: "key [REDACTED_TOKEN]",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := SanitizeLog(tt.input)
-			if got != tt.expected {
-				t.Errorf("SanitizeLog() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestBuildGitEnv(t *testing.T) {
-	env := BuildGitEnv("my_test_pat", os.Environ())
-	foundAuth := false
-	for _, e := range env {
-		if strings.HasPrefix(e, "GIT_CONFIG_VALUE_0=") {
-			foundAuth = true
-			if !strings.Contains(e, "AUTHORIZATION: basic ") {
-				t.Errorf("expected basic auth header, got %s", e)
-			}
+func TestSanitizeAndEnv_TableDriven(t *testing.T) {
+	t.Run("SanitizeLog", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			input    string
+			expected string
+		}{
+			{
+				name:     "clean string",
+				input:    "repository synced cleanly",
+				expected: "repository synced cleanly",
+			},
+			{
+				name:     "github pat",
+				input:    "failed with token github_pat_11AAAA_secret_token_123",
+				expected: "failed with token [REDACTED_TOKEN]",
+			},
+			{
+				name:     "classic ghp token",
+				input:    "cloning with ghp_1234567890abcdef1234567890abcdef12",
+				expected: "cloning with [REDACTED_TOKEN]",
+			},
+			{
+				name:     "basic auth header",
+				input:    "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0",
+				expected: "AUTHORIZATION: [REDACTED_TOKEN]",
+			},
+			{
+				name:     "postgres connection string",
+				input:    "connecting to postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
+				expected: "connecting to [REDACTED_TOKEN]?sslmode=disable",
+			},
+			{
+				name:     "anthropic api key",
+				input:    "using sk-ant-api03-1234567890abcdef-secret",
+				expected: "using [REDACTED_TOKEN]",
+			},
+			{
+				name:     "google api key",
+				input:    "key AIzaSyD1234567890abcdefghijklmnopqrstuv",
+				expected: "key [REDACTED_TOKEN]",
+			},
 		}
-	}
-	if !foundAuth {
-		t.Errorf("BuildGitEnv() did not produce GIT_CONFIG_VALUE_0 auth header")
-	}
 
-	emptyEnv := BuildGitEnv("", os.Environ())
-	for _, e := range emptyEnv {
-		if strings.HasPrefix(e, "GIT_CONFIG_COUNT=") || strings.HasPrefix(e, "GIT_CONFIG_KEY_") || strings.HasPrefix(e, "GIT_CONFIG_VALUE_") {
-			t.Errorf("unexpected auth GIT_CONFIG in empty PAT env: %s", e)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				got := SanitizeLog(tt.input)
+				if got != tt.expected {
+					t.Errorf("SanitizeLog() = %q, want %q", got, tt.expected)
+				}
+			})
 		}
-	}
+	})
+
+	t.Run("SanitizeAll", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			daemon     *SyncDaemon
+			raw        string
+			shouldHide []string
+			shouldKeep []string
+		}{
+			{
+				name: "redacts secrets len >= 4 and preserves short strings",
+				daemon: &SyncDaemon{
+					pat:               "ghp_myPersonalAccessToken12345",
+					discordToken:      "my_discord_secret_token",
+					discordWebhookURL: "https://discord.com/api/webhooks/999/super_secret_webhook",
+					extraSecrets: []string{
+						"pg_super_secret_password",
+						"ha_long_lived_access_token_12345",
+						"AIzaSyTestApiKeyForGemini1234567890",
+						"abc", // length < 4, should NOT be added or sanitized as literal secret
+					},
+				},
+				raw: "Connect to postgres://user:pg_super_secret_password@db:5432 with ghp_myPersonalAccessToken12345 and token my_discord_secret_token or webhook https://discord.com/api/webhooks/999/super_secret_webhook. Also ha_long_lived_access_token_12345 and key AIzaSyTestApiKeyForGemini1234567890 and normal word abc.",
+				shouldHide: []string{
+					"pg_super_secret_password",
+					"ghp_myPersonalAccessToken12345",
+					"my_discord_secret_token",
+					"super_secret_webhook",
+					"ha_long_lived_access_token_12345",
+					"AIzaSyTestApiKeyForGemini1234567890",
+				},
+				shouldKeep: []string{
+					"abc",
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				sanitized := tt.daemon.SanitizeAll(tt.raw)
+				for _, secret := range tt.shouldHide {
+					if strings.Contains(sanitized, secret) {
+						t.Errorf("expected %q to be redacted, got: %s", secret, sanitized)
+					}
+				}
+				for _, keep := range tt.shouldKeep {
+					if !strings.Contains(sanitized, keep) {
+						t.Errorf("expected %q to be preserved, got: %s", keep, sanitized)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("BuildGitEnv", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			pat         string
+			baseEnv     []string
+			verifyFound func(t *testing.T, env []string)
+		}{
+			{
+				name:    "non-empty PAT produces basic auth GIT_CONFIG",
+				pat:     "my_test_pat",
+				baseEnv: os.Environ(),
+				verifyFound: func(t *testing.T, env []string) {
+					foundAuth := false
+					for _, e := range env {
+						if strings.HasPrefix(e, "GIT_CONFIG_VALUE_0=") {
+							foundAuth = true
+							if !strings.Contains(e, "AUTHORIZATION: basic ") {
+								t.Errorf("expected basic auth header, got %s", e)
+							}
+						}
+					}
+					if !foundAuth {
+						t.Errorf("BuildGitEnv() did not produce GIT_CONFIG_VALUE_0 auth header")
+					}
+				},
+			},
+			{
+				name:    "empty PAT omits GIT_CONFIG auth variables",
+				pat:     "",
+				baseEnv: os.Environ(),
+				verifyFound: func(t *testing.T, env []string) {
+					for _, e := range env {
+						if strings.HasPrefix(e, "GIT_CONFIG_COUNT=") || strings.HasPrefix(e, "GIT_CONFIG_KEY_") || strings.HasPrefix(e, "GIT_CONFIG_VALUE_") {
+							t.Errorf("unexpected auth GIT_CONFIG in empty PAT env: %s", e)
+						}
+					}
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				env := BuildGitEnv(tt.pat, tt.baseEnv)
+				tt.verifyFound(t, env)
+			})
+		}
+	})
+
+	t.Run("scrubComposeEnv", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			input    []string
+			expected []string
+		}{
+			{
+				name: "filters internal directories and invalid keys while preserving compose project",
+				input: []string{
+					"INVALID_NO_EQUALS",
+					"AERIAL_CONFIG_DIR=/dir/config",
+					"AERIAL_PROJECT_DIR=/dir/project",
+					"GOOD_VAR=123",
+					"COMPOSE_PROJECT_NAME=aerial",
+				},
+				expected: []string{
+					"COMPOSE_PROJECT_NAME=aerial",
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				out := scrubComposeEnv(tt.input)
+				if len(out) != len(tt.expected) {
+					t.Fatalf("expected len %d, got %d (%v)", len(tt.expected), len(out), out)
+				}
+				for i := range out {
+					if out[i] != tt.expected[i] {
+						t.Errorf("output[%d] = %q, want %q", i, out[i], tt.expected[i])
+					}
+				}
+			})
+		}
+	})
 }
 
 func TestGetComposeArgs_TableDriven(t *testing.T) {
@@ -1227,96 +1343,113 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 	})
 }
 
-func TestNewConfigFromLookup_Custom(t *testing.T) {
-	envMap := map[string]string{
-		"PORT":                   "9090",
-		"SYNC_REPOS":             "/path/a, /path/b",
-		"SYNC_INTERVAL":          "30s",
-		"GITHUB_PAT":             "my_secret_pat",
-		"AERIAL_CONFIG_REPO_URL": "https://github.com/custom/config.git",
-		"AERIAL_PROJECT_DIR":     "/custom/aerial",
-		"AERIAL_CONFIG_DIR":      "/custom/config",
-		"DISCORD_BOT_TOKEN":      "bot_token",
-		"DISCORD_CHANNEL":        "custom-channel",
-		"DISCORD_WEBHOOK_URL":    "https://discord.com/api/webhooks/123/abc",
-		"BRAIN_INTERNAL_URL":     "http://brain:9999/reload",
-		"POSTGRES_PASSWORD":      "pg_pass",
-		"HA_TOKEN":               "ha_tok",
-		"GEMINI_API_KEY":         "gem_key",
-	}
-	lookup := func(k string) string {
-		return envMap[k]
-	}
-
-	cfg := NewConfigFromLookup(lookup)
-	if cfg.Port != "9090" {
-		t.Errorf("expected port 9090, got %q", cfg.Port)
-	}
-	if len(cfg.Repos) != 2 || cfg.Repos[0] != "/path/a" || cfg.Repos[1] != "/path/b" {
-		t.Errorf("unexpected repos: %v", cfg.Repos)
-	}
-	if cfg.Interval != 30*time.Second {
-		t.Errorf("expected interval 30s, got %v", cfg.Interval)
-	}
-	if cfg.PAT != "my_secret_pat" {
-		t.Errorf("expected pat 'my_secret_pat', got %q", cfg.PAT)
-	}
-	if cfg.ComposeDir != "/custom/aerial" {
-		t.Errorf("expected composeDir '/custom/aerial', got %q", cfg.ComposeDir)
-	}
-	if cfg.ConfigDir != "/custom/config" {
-		t.Errorf("expected configDir '/custom/config', got %q", cfg.ConfigDir)
-	}
-	if cfg.DiscordToken != "bot_token" {
-		t.Errorf("expected discordToken 'bot_token', got %q", cfg.DiscordToken)
-	}
-	if cfg.DiscordChannel != "custom-channel" {
-		t.Errorf("expected discordChannel 'custom-channel', got %q", cfg.DiscordChannel)
-	}
-	if cfg.DiscordWebhookURL != "https://discord.com/api/webhooks/123/abc" {
-		t.Errorf("expected discordWebhookURL 'https://discord.com/api/webhooks/123/abc', got %q", cfg.DiscordWebhookURL)
-	}
-	if cfg.BrainInternalURL != "http://brain:9999/reload" {
-		t.Errorf("expected brainInternalURL 'http://brain:9999/reload', got %q", cfg.BrainInternalURL)
-	}
-	if len(cfg.ExtraSecrets) != 4 {
-		t.Errorf("expected 4 extraSecrets, got %d (%v)", len(cfg.ExtraSecrets), cfg.ExtraSecrets)
-	}
-}
-
-func TestNewConfigFromLookup_Defaults(t *testing.T) {
-	// Empty lookup returns defaults
-	cfg := NewConfigFromLookup(func(string) string { return "" })
-	if cfg.Port != "8087" {
-		t.Errorf("expected default port 8087, got %q", cfg.Port)
-	}
-	if cfg.Interval != 60*time.Second {
-		t.Errorf("expected default interval 60s, got %v", cfg.Interval)
-	}
-	if cfg.ComposeDir != "/share/aerial" {
-		t.Errorf("expected default composeDir /share/aerial, got %q", cfg.ComposeDir)
-	}
-	if cfg.ConfigDir != "/share/aerial-config" {
-		t.Errorf("expected default configDir /share/aerial-config, got %q", cfg.ConfigDir)
-	}
-	if cfg.BrainInternalURL != "http://brain:8088/internal/reload" {
-		t.Errorf("expected default brainInternalURL 'http://brain:8088/internal/reload', got %q", cfg.BrainInternalURL)
-	}
-	if len(cfg.ExtraSecrets) != 0 {
-		t.Errorf("expected 0 extraSecrets with empty lookup, got %v", cfg.ExtraSecrets)
-	}
-
-	// Nil lookup safely behaves the same as empty lookup
-	cfgNil := NewConfigFromLookup(nil)
-	if cfgNil.Port != "8087" {
-		t.Errorf("expected default port 8087 with nil lookup, got %q", cfgNil.Port)
-	}
-}
-
-func TestNewConfigFromLookup_YAML(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "hangar.yaml")
-	yamlData := `
+func TestNewConfigFromLookup_TableDriven(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (lookup func(string) string, verify func(t *testing.T, cfg DaemonConfig))
+	}{
+		{
+			name: "custom environment lookup with extra secrets",
+			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
+				envMap := map[string]string{
+					"PORT":                   "9090",
+					"SYNC_REPOS":             "/path/a, /path/b",
+					"SYNC_INTERVAL":          "30s",
+					"GITHUB_PAT":             "my_secret_pat",
+					"AERIAL_CONFIG_REPO_URL": "https://github.com/custom/config.git",
+					"AERIAL_PROJECT_DIR":     "/custom/aerial",
+					"AERIAL_CONFIG_DIR":      "/custom/config",
+					"DISCORD_BOT_TOKEN":      "bot_token",
+					"DISCORD_CHANNEL":        "custom-channel",
+					"DISCORD_WEBHOOK_URL":    "https://discord.com/api/webhooks/123/abc",
+					"BRAIN_INTERNAL_URL":     "http://brain:9999/reload",
+					"POSTGRES_PASSWORD":      "pg_pass",
+					"HA_TOKEN":               "ha_tok",
+					"GEMINI_API_KEY":         "gem_key",
+				}
+				lookup := func(k string) string { return envMap[k] }
+				verify := func(t *testing.T, cfg DaemonConfig) {
+					if cfg.Port != "9090" {
+						t.Errorf("expected port 9090, got %q", cfg.Port)
+					}
+					if len(cfg.Repos) != 2 || cfg.Repos[0] != "/path/a" || cfg.Repos[1] != "/path/b" {
+						t.Errorf("unexpected repos: %v", cfg.Repos)
+					}
+					if cfg.Interval != 30*time.Second {
+						t.Errorf("expected interval 30s, got %v", cfg.Interval)
+					}
+					if cfg.PAT != "my_secret_pat" {
+						t.Errorf("expected pat my_secret_pat, got %q", cfg.PAT)
+					}
+					if cfg.ComposeDir != "/custom/aerial" {
+						t.Errorf("expected composeDir /custom/aerial, got %q", cfg.ComposeDir)
+					}
+					if cfg.ConfigDir != "/custom/config" {
+						t.Errorf("expected configDir /custom/config, got %q", cfg.ConfigDir)
+					}
+					if cfg.DiscordToken != "bot_token" {
+						t.Errorf("expected discordToken bot_token, got %q", cfg.DiscordToken)
+					}
+					if cfg.DiscordChannel != "custom-channel" {
+						t.Errorf("expected discordChannel custom-channel, got %q", cfg.DiscordChannel)
+					}
+					if cfg.DiscordWebhookURL != "https://discord.com/api/webhooks/123/abc" {
+						t.Errorf("expected discordWebhookURL https://discord.com/api/webhooks/123/abc, got %q", cfg.DiscordWebhookURL)
+					}
+					if cfg.BrainInternalURL != "http://brain:9999/reload" {
+						t.Errorf("expected brainInternalURL http://brain:9999/reload, got %q", cfg.BrainInternalURL)
+					}
+					if len(cfg.ExtraSecrets) != 4 {
+						t.Errorf("expected 4 extraSecrets, got %d (%v)", len(cfg.ExtraSecrets), cfg.ExtraSecrets)
+					}
+				}
+				return lookup, verify
+			},
+		},
+		{
+			name: "empty lookup defaults",
+			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
+				lookup := func(string) string { return "" }
+				verify := func(t *testing.T, cfg DaemonConfig) {
+					if cfg.Port != "8087" {
+						t.Errorf("expected default port 8087, got %q", cfg.Port)
+					}
+					if cfg.Interval != 60*time.Second {
+						t.Errorf("expected default interval 60s, got %v", cfg.Interval)
+					}
+					if cfg.ComposeDir != "/share/aerial" {
+						t.Errorf("expected default composeDir /share/aerial, got %q", cfg.ComposeDir)
+					}
+					if cfg.ConfigDir != "/share/aerial-config" {
+						t.Errorf("expected default configDir /share/aerial-config, got %q", cfg.ConfigDir)
+					}
+					if cfg.BrainInternalURL != "http://brain:8088/internal/reload" {
+						t.Errorf("expected default brainInternalURL http://brain:8088/internal/reload, got %q", cfg.BrainInternalURL)
+					}
+					if len(cfg.ExtraSecrets) != 0 {
+						t.Errorf("expected 0 extraSecrets with empty lookup, got %v", cfg.ExtraSecrets)
+					}
+				}
+				return lookup, verify
+			},
+		},
+		{
+			name: "nil lookup defaults",
+			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
+				return nil, func(t *testing.T, _ DaemonConfig) {
+					cfg := NewConfigFromLookup(nil)
+					if cfg.Port != "8087" {
+						t.Errorf("expected default port 8087 with nil lookup, got %q", cfg.Port)
+					}
+				}
+			},
+		},
+		{
+			name: "CONFIG_PATH YAML loading and service configs",
+			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
+				tmpDir := t.TempDir()
+				cfgPath := filepath.Join(tmpDir, "hangar.yaml")
+				yamlData := `
 port: "8087"
 sync_interval: "45s"
 sync_repos:
@@ -1329,78 +1462,115 @@ service_configs:
     nomad_var: "nomad/jobs/orin-voice"
     var_key: "CONFIG_YAML"
 `
-	if err := os.WriteFile(cfgPath, []byte(yamlData), 0644); err != nil {
-		t.Fatalf("failed to write test yaml: %v", err)
+				if err := os.WriteFile(cfgPath, []byte(yamlData), 0644); err != nil {
+					t.Fatalf("failed to write test yaml: %v", err)
+				}
+				lookup := func(k string) string {
+					if k == "CONFIG_PATH" {
+						return cfgPath
+					}
+					return ""
+				}
+				verify := func(t *testing.T, cfg DaemonConfig) {
+					if cfg.Port != "8087" {
+						t.Errorf("expected port 8087, got %q", cfg.Port)
+					}
+					if cfg.Interval != 45*time.Second {
+						t.Errorf("expected interval 45s, got %v", cfg.Interval)
+					}
+					if len(cfg.Repos) != 2 || cfg.Repos[0] != "/repo/a" || cfg.Repos[1] != "/repo/b" {
+						t.Errorf("unexpected repos from yaml: %v", cfg.Repos)
+					}
+					if cfg.NomadAddr != "http://nomad.cluster:4646" {
+						t.Errorf("expected nomadAddr http://nomad.cluster:4646, got %q", cfg.NomadAddr)
+					}
+					if cfg.BrainInternalURL != "http://brain.cluster:8088/internal/reload" {
+						t.Errorf("expected brainInternalURL http://brain.cluster:8088/internal/reload, got %q", cfg.BrainInternalURL)
+					}
+					if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != "services/voice/voice.yaml" {
+						t.Errorf("expected 1 serviceConfig from yaml, got %v", cfg.ServiceConfigs)
+					}
+				}
+				return lookup, verify
+			},
+		},
+		{
+			name: "env overrides take precedence over CONFIG_PATH YAML",
+			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
+				tmpDir := t.TempDir()
+				cfgPath := filepath.Join(tmpDir, "hangar.yaml")
+				yamlData := `
+port: "8087"
+sync_interval: "45s"
+sync_repos:
+  - "/repo/a"
+  - "/repo/b"
+nomad_addr: "http://nomad.cluster:4646"
+brain_internal_url: "http://brain.cluster:8088/internal/reload"
+`
+				if err := os.WriteFile(cfgPath, []byte(yamlData), 0644); err != nil {
+					t.Fatalf("failed to write test yaml: %v", err)
+				}
+				lookup := func(k string) string {
+					switch k {
+					case "CONFIG_PATH":
+						return cfgPath
+					case "PORT":
+						return "9999"
+					case "SYNC_INTERVAL":
+						return "10s"
+					case "SYNC_REPOS":
+						return "/override/repo"
+					case "NOMAD_ADDR":
+						return "http://override.nomad:4646"
+					case "BRAIN_INTERNAL_URL":
+						return "http://override.brain:8088/reload"
+					default:
+						return ""
+					}
+				}
+				verify := func(t *testing.T, cfg DaemonConfig) {
+					if cfg.Port != "9999" {
+						t.Errorf("expected port override 9999, got %q", cfg.Port)
+					}
+					if cfg.Interval != 10*time.Second {
+						t.Errorf("expected interval override 10s, got %v", cfg.Interval)
+					}
+					if len(cfg.Repos) != 1 || cfg.Repos[0] != "/override/repo" {
+						t.Errorf("expected repos override, got %v", cfg.Repos)
+					}
+					if cfg.NomadAddr != "http://override.nomad:4646" {
+						t.Errorf("expected nomadAddr override, got %q", cfg.NomadAddr)
+					}
+					if cfg.BrainInternalURL != "http://override.brain:8088/reload" {
+						t.Errorf("expected brainInternalURL override, got %q", cfg.BrainInternalURL)
+					}
+				}
+				return lookup, verify
+			},
+		},
+		{
+			name: "NewConfigFromEnv smoke check",
+			setup: func(t *testing.T) (func(string) string, func(*testing.T, DaemonConfig)) {
+				return nil, func(t *testing.T, _ DaemonConfig) {
+					cfg := NewConfigFromEnv()
+					if cfg.Port == "" {
+						t.Errorf("expected non-empty port from NewConfigFromEnv, got %q", cfg.Port)
+					}
+				}
+			},
+		},
 	}
 
-	// 1. Load from YAML via CONFIG_PATH
-	cfg := NewConfigFromLookup(func(k string) string {
-		if k == "CONFIG_PATH" {
-			return cfgPath
-		}
-		return ""
-	})
-
-	if cfg.Port != "8087" {
-		t.Errorf("expected port 8087, got %q", cfg.Port)
-	}
-	if cfg.Interval != 45*time.Second {
-		t.Errorf("expected interval 45s, got %v", cfg.Interval)
-	}
-	if len(cfg.Repos) != 2 || cfg.Repos[0] != "/repo/a" || cfg.Repos[1] != "/repo/b" {
-		t.Errorf("unexpected repos from yaml: %v", cfg.Repos)
-	}
-	if cfg.NomadAddr != "http://nomad.cluster:4646" {
-		t.Errorf("expected nomadAddr 'http://nomad.cluster:4646', got %q", cfg.NomadAddr)
-	}
-	if cfg.BrainInternalURL != "http://brain.cluster:8088/internal/reload" {
-		t.Errorf("expected brainInternalURL 'http://brain.cluster:8088/internal/reload', got %q", cfg.BrainInternalURL)
-	}
-	if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != "services/voice/voice.yaml" {
-		t.Errorf("expected 1 serviceConfig from yaml, got %v", cfg.ServiceConfigs)
-	}
-
-	// 2. Env overrides take precedence over YAML
-	cfgOver := NewConfigFromLookup(func(k string) string {
-		switch k {
-		case "CONFIG_PATH":
-			return cfgPath
-		case "PORT":
-			return "9999"
-		case "SYNC_INTERVAL":
-			return "10s"
-		case "SYNC_REPOS":
-			return "/override/repo"
-		case "NOMAD_ADDR":
-			return "http://override.nomad:4646"
-		case "BRAIN_INTERNAL_URL":
-			return "http://override.brain:8088/reload"
-		default:
-			return ""
-		}
-	})
-
-	if cfgOver.Port != "9999" {
-		t.Errorf("expected port override 9999, got %q", cfgOver.Port)
-	}
-	if cfgOver.Interval != 10*time.Second {
-		t.Errorf("expected interval override 10s, got %v", cfgOver.Interval)
-	}
-	if len(cfgOver.Repos) != 1 || cfgOver.Repos[0] != "/override/repo" {
-		t.Errorf("expected repos override, got %v", cfgOver.Repos)
-	}
-	if cfgOver.NomadAddr != "http://override.nomad:4646" {
-		t.Errorf("expected nomadAddr override, got %q", cfgOver.NomadAddr)
-	}
-	if cfgOver.BrainInternalURL != "http://override.brain:8088/reload" {
-		t.Errorf("expected brainInternalURL override, got %q", cfgOver.BrainInternalURL)
-	}
-}
-
-func TestNewConfigFromEnv_Smoke(t *testing.T) {
-	cfg := NewConfigFromEnv()
-	if cfg.Port == "" {
-		t.Errorf("expected non-empty port from NewConfigFromEnv, got %q", cfg.Port)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lookup, verify := tt.setup(t)
+			var cfg DaemonConfig
+			if lookup != nil {
+				cfg = NewConfigFromLookup(lookup)
+			}
+			verify(t, cfg)
+		})
 	}
 }
 
@@ -1595,204 +1765,379 @@ func (t *urlRewritingTransport) RoundTrip(req *http.Request) (*http.Response, er
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-func TestDiscordAlert_FormattingAndTruncation(t *testing.T) {
-	var receivedPayloads []map[string]interface{}
-	var mu sync.Mutex
+func TestDiscordAlertsAndWebhooks_TableDriven(t *testing.T) {
+	t.Run("SendDiscordAlert_FormattingTruncationDeduplicationAndBot", func(t *testing.T) {
+		var receivedPayloads []map[string]interface{}
+		var mu sync.Mutex
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			if strings.Contains(r.URL.Path, "webhook") {
+				var payload map[string]interface{}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				receivedPayloads = append(receivedPayloads, payload)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			if strings.HasSuffix(r.URL.Path, "/guilds") {
+				_ = json.NewEncoder(w).Encode([]map[string]string{
+					{"id": "guild_123"},
+				})
+				return
+			}
+
+			if strings.HasSuffix(r.URL.Path, "/channels") && r.Method == http.MethodGet {
+				_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+					{"id": "chan_456", "name": "aerial-dev", "type": 0},
+				})
+				return
+			}
+
+			if strings.Contains(r.URL.Path, "/channels/chan_456/messages") || strings.Contains(r.URL.Path, "/channels/snowflake_789/messages") {
+				var payload map[string]interface{}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				receivedPayloads = append(receivedPayloads, payload)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		customClient := &http.Client{
+			Transport: &urlRewritingTransport{targetBase: srv.URL},
+			Timeout:   5 * time.Second,
+		}
+
+		daemon := NewDaemon(DaemonConfig{
+			DiscordWebhookURL: srv.URL + "/webhook",
+		})
+		daemon.alertHTTPClient = customClient
+
+		// 1. Send alert via webhook with large error (>1200 chars) and sensitive secrets
+		longError := "sensitive token ghp_1234567890abcdef1234567890abcdef12 and secret\n" + strings.Repeat("error detail line with some context\n", 40)
+		ctx := context.Background()
+
+		daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
+
 		mu.Lock()
-		defer mu.Unlock()
+		if len(receivedPayloads) != 1 {
+			t.Fatalf("expected 1 webhook payload, got %d", len(receivedPayloads))
+		}
+		content := receivedPayloads[0]["content"].(string)
+		mu.Unlock()
 
-		if strings.Contains(r.URL.Path, "webhook") {
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-			receivedPayloads = append(receivedPayloads, payload)
-			w.WriteHeader(http.StatusOK)
-			return
+		if !strings.Contains(content, "🚨 **GitSync GitOps Alert: Test Rollback**") {
+			t.Errorf("expected alert header in payload, got: %s", content)
+		}
+		if !strings.Contains(content, "[... truncated for length]") {
+			t.Errorf("expected error truncation marker in payload")
+		}
+		if strings.Contains(content, "ghp_1234567890abcdef1234567890abcdef12") {
+			t.Errorf("expected token to be scrubbed, but found in payload")
+		}
+		if !strings.Contains(content, "[REDACTED_TOKEN]") {
+			t.Errorf("expected [REDACTED_TOKEN] in payload")
 		}
 
-		if strings.HasSuffix(r.URL.Path, "/guilds") {
-			_ = json.NewEncoder(w).Encode([]map[string]string{
-				{"id": "guild_123"},
+		// 2. Deduplication: Send identical alert within 15 minutes
+		daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
+		mu.Lock()
+		if len(receivedPayloads) != 1 {
+			t.Errorf("expected alert to be deduplicated (count=1), got count=%d", len(receivedPayloads))
+		}
+		mu.Unlock()
+
+		// 3. Test Bot token and channel name resolution
+		daemonBot := NewDaemon(DaemonConfig{
+			DiscordToken:   "my-bot-token",
+			DiscordChannel: "aerial-dev",
+		})
+		daemonBot.alertHTTPClient = customClient
+
+		daemonBot.SendDiscordAlert(ctx, "Bot API Alert", "/share/aerial", "badsha789", "goodsha000", "pre-flight validation", "syntax error")
+		mu.Lock()
+		if len(receivedPayloads) != 2 {
+			t.Fatalf("expected 2 total payloads after bot alert, got %d", len(receivedPayloads))
+		}
+		botContent := receivedPayloads[1]["content"].(string)
+		mu.Unlock()
+
+		if !strings.Contains(botContent, "badsha789") {
+			t.Errorf("expected faulty commit in bot alert, got: %s", botContent)
+		}
+
+		// 4. Test direct snowflake channel ID
+		daemonSnowflake := NewDaemon(DaemonConfig{
+			DiscordToken:   "my-bot-token",
+			DiscordChannel: "123456789012345678",
+		})
+		daemonSnowflake.alertHTTPClient = customClient
+		if !isSnowflake(daemonSnowflake.discordChannel) {
+			t.Errorf("expected 123456789012345678 to be recognized as snowflake")
+		}
+	})
+
+	t.Run("SendDiscordAlert_EdgeCases", func(t *testing.T) {
+		tests := []struct {
+			name string
+			exec func(t *testing.T)
+		}{
+			{
+				name: "uninitialized daemon initializes lastAlertTimes",
+				exec: func(t *testing.T) {
+					d := &SyncDaemon{}
+					d.SendDiscordAlert(context.Background(), "title", "", "", "", "stage", "msg")
+					if d.lastAlertTimes == nil {
+						t.Errorf("expected lastAlertTimes to be initialized")
+					}
+				},
+			},
+			{
+				name: "channel resolve failure gracefully handles HTTP 500",
+				exec: func(t *testing.T) {
+					client500 := &http.Client{
+						Transport: &roundTripperFunc{
+							fn: func(req *http.Request) (*http.Response, error) {
+								return &http.Response{
+									StatusCode: http.StatusInternalServerError,
+									Body:       ioNopCloser(strings.NewReader("server error")),
+									Header:     make(http.Header),
+								}, nil
+							},
+						},
+					}
+					d := NewDaemon(DaemonConfig{
+						DiscordToken:   "mock_token",
+						DiscordChannel: "unresolvable-chan",
+					})
+					d.alertHTTPClient = client500
+					d.SendDiscordAlert(context.Background(), "title", "/repo", "sha", "prev", "stage", "err msg")
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				tt.exec(t)
 			})
-			return
+		}
+	})
+
+	t.Run("ResolveAlertChannel", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			setup        func(t *testing.T) *SyncDaemon
+			expectedChan string
+		}{
+			{
+				name: "explicit DiscordChannel overrides config.yaml",
+				setup: func(t *testing.T) *SyncDaemon {
+					tempDir := t.TempDir()
+					configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
+					_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
+					return NewDaemon(DaemonConfig{
+						DiscordChannel: "override-channel",
+						ConfigDir:      tempDir,
+					})
+				},
+				expectedChan: "override-channel",
+			},
+			{
+				name: "dynamic read from config.yaml in ConfigDir",
+				setup: func(t *testing.T) *SyncDaemon {
+					tempDir := t.TempDir()
+					configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
+					_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
+					return NewDaemon(DaemonConfig{
+						ConfigDir: tempDir,
+					})
+				},
+				expectedChan: "ops-alerts",
+			},
+			{
+				name: "invalid YAML falls back to aerial-dev",
+				setup: func(t *testing.T) *SyncDaemon {
+					tempDirBad := t.TempDir()
+					_ = os.WriteFile(filepath.Join(tempDirBad, "config.yaml"), []byte("invalid: [yaml\n"), 0644)
+					return NewDaemon(DaemonConfig{
+						ConfigDir: tempDirBad,
+					})
+				},
+				expectedChan: "aerial-dev",
+			},
+			{
+				name: "missing config.yaml falls back to aerial-dev",
+				setup: func(t *testing.T) *SyncDaemon {
+					tempDirEmpty := t.TempDir()
+					return NewDaemon(DaemonConfig{
+						ConfigDir: tempDirEmpty,
+					})
+				},
+				expectedChan: "aerial-dev",
+			},
 		}
 
-		if strings.HasSuffix(r.URL.Path, "/channels") && r.Method == http.MethodGet {
-			_ = json.NewEncoder(w).Encode([]map[string]interface{}{
-				{"id": "chan_456", "name": "aerial-dev", "type": 0},
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				d := tt.setup(t)
+				if ch := d.ResolveAlertChannel(); ch != tt.expectedChan {
+					t.Errorf("ResolveAlertChannel() = %q, want %q", ch, tt.expectedChan)
+				}
 			})
-			return
+		}
+	})
+
+	t.Run("sendWebhook", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			client func(t *testing.T) (*http.Client, string)
+		}{
+			{
+				name: "HTTP 200 OK",
+				client: func(t *testing.T) (*http.Client, string) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.WriteHeader(http.StatusOK)
+					}))
+					t.Cleanup(srv.Close)
+					return srv.Client(), srv.URL
+				},
+			},
+			{
+				name: "HTTP 500 error",
+				client: func(t *testing.T) (*http.Client, string) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.WriteHeader(http.StatusInternalServerError)
+					}))
+					t.Cleanup(srv.Close)
+					return srv.Client(), srv.URL
+				},
+			},
+			{
+				name: "hermetic roundTripperFunc network error",
+				client: func(t *testing.T) (*http.Client, string) {
+					return &http.Client{
+						Transport: &roundTripperFunc{
+							fn: func(req *http.Request) (*http.Response, error) {
+								return nil, errors.New("connection refused mock")
+							},
+						},
+					}, "http://127.0.0.1:65530/webhook"
+				},
+			},
+			{
+				name: "invalid URL format",
+				client: func(t *testing.T) (*http.Client, string) {
+					return http.DefaultClient, "://invalid-url"
+				},
+			},
+			{
+				name: "timeout client error",
+				client: func(t *testing.T) (*http.Client, string) {
+					return &http.Client{Timeout: 5 * time.Millisecond}, "http://127.0.0.1:1/invalid"
+				},
+			},
 		}
 
-		if strings.Contains(r.URL.Path, "/channels/chan_456/messages") || strings.Contains(r.URL.Path, "/channels/snowflake_789/messages") {
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-			receivedPayloads = append(receivedPayloads, payload)
-			w.WriteHeader(http.StatusOK)
-			return
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				d := NewDaemon(DaemonConfig{})
+				client, url := tt.client(t)
+				d.sendWebhook(context.Background(), client, url, "webhook test payload")
+			})
+		}
+	})
+
+	t.Run("postChannelMessage", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			client      *http.Client
+			setupDaemon func(d *SyncDaemon)
+			checkDaemon func(t *testing.T, d *SyncDaemon)
+		}{
+			{
+				name: "HTTP 200 OK",
+				client: &http.Client{
+					Transport: &roundTripperFunc{
+						fn: func(req *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Body:       ioNopCloser(strings.NewReader(`{"id":"msg-1"}`)),
+								Header:     make(http.Header),
+							}, nil
+						},
+					},
+				},
+			},
+			{
+				name: "HTTP 404 invalidates cachedChannelID",
+				client: &http.Client{
+					Transport: &roundTripperFunc{
+						fn: func(req *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusNotFound,
+								Body:       ioNopCloser(strings.NewReader(`{"message":"Unknown Channel"}`)),
+								Header:     make(http.Header),
+							}, nil
+						},
+					},
+				},
+				setupDaemon: func(d *SyncDaemon) {
+					d.cachedChannelID = "123"
+				},
+				checkDaemon: func(t *testing.T, d *SyncDaemon) {
+					if d.cachedChannelID != "" {
+						t.Errorf("expected cached channel to be invalidated on 404")
+					}
+				},
+			},
+			{
+				name: "HTTP 500 server error",
+				client: &http.Client{
+					Transport: &roundTripperFunc{
+						fn: func(req *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusInternalServerError,
+								Body:       ioNopCloser(strings.NewReader(`{"message":"Server error"}`)),
+								Header:     make(http.Header),
+							}, nil
+						},
+					},
+				},
+			},
+			{
+				name: "hermetic roundTripperFunc network error",
+				client: &http.Client{
+					Transport: &roundTripperFunc{
+						fn: func(req *http.Request) (*http.Response, error) {
+							return nil, errors.New("network drop")
+						},
+					},
+				},
+			},
+			{
+				name:   "timeout client error",
+				client: &http.Client{Timeout: 5 * time.Millisecond},
+			},
 		}
 
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	customClient := &http.Client{
-		Transport: &urlRewritingTransport{targetBase: srv.URL},
-		Timeout:   5 * time.Second,
-	}
-
-	daemon := NewDaemon(DaemonConfig{
-		DiscordWebhookURL: srv.URL + "/webhook",
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				d := NewDaemon(DaemonConfig{})
+				if tt.setupDaemon != nil {
+					tt.setupDaemon(d)
+				}
+				d.postChannelMessage(context.Background(), tt.client, "token", "123", "hello")
+				if tt.checkDaemon != nil {
+					tt.checkDaemon(t, d)
+				}
+			})
+		}
 	})
-	daemon.alertHTTPClient = customClient
-
-	// 1. Send alert via webhook with large error (>1200 chars) and sensitive secrets
-	longError := "sensitive token ghp_1234567890abcdef1234567890abcdef12 and secret\n" + strings.Repeat("error detail line with some context\n", 40)
-	ctx := context.Background()
-
-	daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
-
-	mu.Lock()
-	if len(receivedPayloads) != 1 {
-		t.Fatalf("expected 1 webhook payload, got %d", len(receivedPayloads))
-	}
-	content := receivedPayloads[0]["content"].(string)
-	mu.Unlock()
-
-	if !strings.Contains(content, "🚨 **GitSync GitOps Alert: Test Rollback**") {
-		t.Errorf("expected alert header in payload, got: %s", content)
-	}
-	if !strings.Contains(content, "[... truncated for length]") {
-		t.Errorf("expected error truncation marker in payload")
-	}
-	if strings.Contains(content, "ghp_1234567890abcdef1234567890abcdef12") {
-		t.Errorf("expected token to be scrubbed, but found in payload")
-	}
-	if !strings.Contains(content, "[REDACTED_TOKEN]") {
-		t.Errorf("expected [REDACTED_TOKEN] in payload")
-	}
-
-	// 2. Deduplication: Send identical alert within 15 minutes
-	daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
-	mu.Lock()
-	if len(receivedPayloads) != 1 {
-		t.Errorf("expected alert to be deduplicated (count=1), got count=%d", len(receivedPayloads))
-	}
-	mu.Unlock()
-
-	// 3. Test Bot token and channel name resolution
-	daemonBot := NewDaemon(DaemonConfig{
-		DiscordToken:   "my-bot-token",
-		DiscordChannel: "aerial-dev",
-	})
-	daemonBot.alertHTTPClient = customClient
-
-	daemonBot.SendDiscordAlert(ctx, "Bot API Alert", "/share/aerial", "badsha789", "goodsha000", "pre-flight validation", "syntax error")
-	mu.Lock()
-	if len(receivedPayloads) != 2 {
-		t.Fatalf("expected 2 total payloads after bot alert, got %d", len(receivedPayloads))
-	}
-	botContent := receivedPayloads[1]["content"].(string)
-	mu.Unlock()
-
-	if !strings.Contains(botContent, "badsha789") {
-		t.Errorf("expected faulty commit in bot alert, got: %s", botContent)
-	}
-
-	// 4. Test direct snowflake channel ID
-	daemonSnowflake := NewDaemon(DaemonConfig{
-		DiscordToken:   "my-bot-token",
-		DiscordChannel: "123456789012345678",
-	})
-	daemonSnowflake.alertHTTPClient = customClient
-	if !isSnowflake(daemonSnowflake.discordChannel) {
-		t.Errorf("expected 123456789012345678 to be recognized as snowflake")
-	}
-}
-
-func TestResolveAlertChannel_DynamicFromConfig(t *testing.T) {
-	tempDir := t.TempDir()
-
-	// 1. Explicit daemon config field overrides everything, including config.yaml
-	configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
-	_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
-
-	d1 := NewDaemon(DaemonConfig{
-		DiscordChannel: "override-channel",
-		ConfigDir:      tempDir,
-	})
-	if ch := d1.ResolveAlertChannel(); ch != "override-channel" {
-		t.Errorf("expected 'override-channel', got %q", ch)
-	}
-
-	// 2. Dynamic read from config.yaml in ConfigDir when DiscordChannel is empty
-	d2 := NewDaemon(DaemonConfig{
-		ConfigDir: tempDir,
-	})
-	if ch := d2.ResolveAlertChannel(); ch != "ops-alerts" {
-		t.Errorf("expected 'ops-alerts' from config.yaml, got %q", ch)
-	}
-
-	// 3. Invalid YAML falls back to "aerial-dev"
-	tempDirBad := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tempDirBad, "config.yaml"), []byte("invalid: [yaml\n"), 0644)
-	d3 := NewDaemon(DaemonConfig{
-		ConfigDir: tempDirBad,
-	})
-	if ch := d3.ResolveAlertChannel(); ch != "aerial-dev" {
-		t.Errorf("expected fallback 'aerial-dev' on invalid yaml, got %q", ch)
-	}
-
-	// 4. Missing config.yaml falls back to "aerial-dev"
-	tempDirEmpty := t.TempDir()
-	d4 := NewDaemon(DaemonConfig{
-		ConfigDir: tempDirEmpty,
-	})
-	if ch := d4.ResolveAlertChannel(); ch != "aerial-dev" {
-		t.Errorf("expected fallback 'aerial-dev' on missing config.yaml, got %q", ch)
-	}
-}
-
-func TestSanitizeAll(t *testing.T) {
-	d := &SyncDaemon{
-		pat:               "ghp_myPersonalAccessToken12345",
-		discordToken:      "my_discord_secret_token",
-		discordWebhookURL: "https://discord.com/api/webhooks/999/super_secret_webhook",
-		extraSecrets: []string{
-			"pg_super_secret_password",
-			"ha_long_lived_access_token_12345",
-			"AIzaSyTestApiKeyForGemini1234567890",
-			"abc", // length < 4, should NOT be added or sanitized as literal secret
-		},
-	}
-
-	raw := "Connect to postgres://user:pg_super_secret_password@db:5432 with ghp_myPersonalAccessToken12345 and token my_discord_secret_token or webhook https://discord.com/api/webhooks/999/super_secret_webhook. Also ha_long_lived_access_token_12345 and key AIzaSyTestApiKeyForGemini1234567890 and normal word abc."
-
-	sanitized := d.SanitizeAll(raw)
-
-	if strings.Contains(sanitized, "pg_super_secret_password") {
-		t.Errorf("expected postgres password to be redacted, got: %s", sanitized)
-	}
-	if strings.Contains(sanitized, "ghp_myPersonalAccessToken12345") {
-		t.Errorf("expected PAT to be redacted, got: %s", sanitized)
-	}
-	if strings.Contains(sanitized, "my_discord_secret_token") {
-		t.Errorf("expected discord token to be redacted, got: %s", sanitized)
-	}
-	if strings.Contains(sanitized, "super_secret_webhook") {
-		t.Errorf("expected webhook URL to be redacted, got: %s", sanitized)
-	}
-	if strings.Contains(sanitized, "ha_long_lived_access_token_12345") {
-		t.Errorf("expected HA token to be redacted, got: %s", sanitized)
-	}
-	if strings.Contains(sanitized, "AIzaSyTestApiKeyForGemini1234567890") {
-		t.Errorf("expected Gemini API key to be redacted, got: %s", sanitized)
-	}
-	// "abc" must NOT be redacted because len < 4
-	if !strings.Contains(sanitized, "abc") {
-		t.Errorf("expected short string 'abc' to be preserved, got: %s", sanitized)
-	}
 }
 
 // nomadConfigSyncTestEnv encapsulates a test harness for Nomad configuration synchronization.
@@ -2657,186 +3002,169 @@ func TestGetComposeExecutor(t *testing.T) {
 	}
 }
 
-func TestSendWebhook_Extended(t *testing.T) {
-	d := NewDaemon(DaemonConfig{})
-
-	// Success case
-	srvSuccess := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srvSuccess.Close()
-
-	d.sendWebhook(context.Background(), srvSuccess.Client(), srvSuccess.URL, "alert test success")
-
-	// Failure case (HTTP 500)
-	srvFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srvFail.Close()
-
-	d.sendWebhook(context.Background(), srvFail.Client(), srvFail.URL, "alert test 500")
-
-	// Network error
-	closedClient := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return nil, errors.New("connection refused mock")
+func TestResolveChannelID_TableDriven(t *testing.T) {
+	tests := []struct {
+		name         string
+		channelInput string
+		setupDaemon  func(d *SyncDaemon)
+		client       *http.Client
+		expectedID   string
+		expectErr    bool
+		errContains  string
+	}{
+		{
+			name:         "snowflake direct return",
+			channelInput: "123456789012345678",
+			client:       http.DefaultClient,
+			expectedID:   "123456789012345678",
+		},
+		{
+			name:         "cachedChannelID direct return",
+			channelInput: "general",
+			setupDaemon: func(d *SyncDaemon) {
+				d.cachedChannelID = "999888777666"
 			},
+			client:     http.DefaultClient,
+			expectedID: "999888777666",
+		},
+		{
+			name:         "discord API HTTP 500 error from guilds",
+			channelInput: "general",
+			client: &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Body:       ioNopCloser(strings.NewReader("server error")),
+							Header:     make(http.Header),
+						}, nil
+					},
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name:         "malformed JSON from guilds",
+			channelInput: "general",
+			client: &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       ioNopCloser(strings.NewReader("not json")),
+							Header:     make(http.Header),
+						}, nil
+					},
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name:         "successful guild and channel resolution with hash prefix",
+			channelInput: "#aerial-alerts",
+			client: &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						if strings.Contains(req.URL.Path, "/guilds") && !strings.Contains(req.URL.Path, "/channels") {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Body:       ioNopCloser(strings.NewReader(`[{"id":"guild-1"}]`)),
+								Header:     make(http.Header),
+							}, nil
+						}
+						if strings.Contains(req.URL.Path, "/channels") {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Body:       ioNopCloser(strings.NewReader(`[{"id":"chan-42","name":"aerial-alerts","type":0}]`)),
+								Header:     make(http.Header),
+							}, nil
+						}
+						return &http.Response{
+							StatusCode: http.StatusNotFound,
+							Body:       ioNopCloser(strings.NewReader(`{}`)),
+							Header:     make(http.Header),
+						}, nil
+					},
+				},
+			},
+			expectedID: "chan-42",
+		},
+		{
+			name:         "channel not found across connected guilds",
+			channelInput: "nonexistent-channel",
+			client: &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						if strings.Contains(req.URL.Path, "/guilds") && !strings.Contains(req.URL.Path, "/channels") {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Body:       ioNopCloser(strings.NewReader(`[{"id":"guild-1"}]`)),
+								Header:     make(http.Header),
+							}, nil
+						}
+						if strings.Contains(req.URL.Path, "/channels") {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Body:       ioNopCloser(strings.NewReader(`[{"id":"chan-42","name":"aerial-alerts","type":0}]`)),
+								Header:     make(http.Header),
+							}, nil
+						}
+						return &http.Response{
+							StatusCode: http.StatusNotFound,
+							Body:       ioNopCloser(strings.NewReader(`{}`)),
+							Header:     make(http.Header),
+						}, nil
+					},
+				},
+			},
+			expectErr:   true,
+			errContains: "not found",
+		},
+		{
+			name:         "hermetic roundTripperFunc client network error",
+			channelInput: "test-channel",
+			client: &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						return nil, errors.New("client timeout / failure")
+					},
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name:         "client timeout error",
+			channelInput: "test-channel",
+			client:       &http.Client{Timeout: 5 * time.Millisecond},
+			expectErr:    true,
 		},
 	}
-	d.sendWebhook(context.Background(), closedClient, "http://127.0.0.1:65530/webhook", "alert test error")
-}
 
-func TestResolveChannelID_Extended(t *testing.T) {
-	d := NewDaemon(DaemonConfig{})
-
-	// 1. Snowflake direct return
-	chID, err := d.resolveChannelID(context.Background(), http.DefaultClient, "token", "123456789012345678")
-	if err != nil || chID != "123456789012345678" {
-		t.Errorf("expected snowflake return, got %s, %v", chID, err)
-	}
-
-	// 2. Cached return
-	d.cachedChannelID = "999888777666"
-	chID, err = d.resolveChannelID(context.Background(), http.DefaultClient, "token", "general")
-	if err != nil || chID != "999888777666" {
-		t.Errorf("expected cached return, got %s, %v", chID, err)
-	}
-	d.cachedChannelID = ""
-
-	// 3. Discord API error (HTTP 500 from guilds)
-	client500 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       ioNopCloser(strings.NewReader("server error")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	_, err = d.resolveChannelID(context.Background(), client500, "token", "general")
-	if err == nil {
-		t.Errorf("expected error on HTTP 500 guilds")
-	}
-
-	// 4. Malformed JSON from guilds
-	clientBadJSON := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       ioNopCloser(strings.NewReader("not json")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	_, err = d.resolveChannelID(context.Background(), clientBadJSON, "token", "general")
-	if err == nil {
-		t.Errorf("expected error on bad JSON guilds")
-	}
-
-	// 5. Successful guild & channel resolution
-	clientSuccess := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				if strings.Contains(req.URL.Path, "/guilds") && !strings.Contains(req.URL.Path, "/channels") {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       ioNopCloser(strings.NewReader(`[{"id":"guild-1"}]`)),
-						Header:     make(http.Header),
-					}, nil
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := NewDaemon(DaemonConfig{})
+			if tt.setupDaemon != nil {
+				tt.setupDaemon(d)
+			}
+			chID, err := d.resolveChannelID(context.Background(), tt.client, "token", tt.channelInput)
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
 				}
-				if strings.Contains(req.URL.Path, "/channels") {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       ioNopCloser(strings.NewReader(`[{"id":"chan-42","name":"aerial-alerts","type":0}]`)),
-						Header:     make(http.Header),
-					}, nil
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("expected error containing %q, got: %v", tt.errContains, err)
 				}
-				return &http.Response{
-					StatusCode: http.StatusNotFound,
-					Body:       ioNopCloser(strings.NewReader(`{}`)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	chID, err = d.resolveChannelID(context.Background(), clientSuccess, "token", "#aerial-alerts")
-	if err != nil || chID != "chan-42" {
-		t.Errorf("expected chan-42, got %s, err: %v", chID, err)
-	}
-
-	// 6. Channel not found in connected guilds
-	d.cachedChannelID = ""
-	_, err = d.resolveChannelID(context.Background(), clientSuccess, "token", "nonexistent-channel")
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected not found error, got %v", err)
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if chID != tt.expectedID {
+				t.Errorf("resolveChannelID() = %q, want %q", chID, tt.expectedID)
+			}
+		})
 	}
 }
-
-func TestPostChannelMessage_Extended(t *testing.T) {
-	d := NewDaemon(DaemonConfig{})
-
-	// 1. Success 200
-	client200 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       ioNopCloser(strings.NewReader(`{"id":"msg-1"}`)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	d.postChannelMessage(context.Background(), client200, "token", "123", "hello")
-
-	// 2. 404 Invalidate Cache
-	d.cachedChannelID = "123"
-	client404 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusNotFound,
-					Body:       ioNopCloser(strings.NewReader(`{"message":"Unknown Channel"}`)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	d.postChannelMessage(context.Background(), client404, "token", "123", "hello")
-	if d.cachedChannelID != "" {
-		t.Errorf("expected cached channel to be invalidated on 404")
-	}
-
-	// 3. 500 error
-	client500 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       ioNopCloser(strings.NewReader(`{"message":"Server error"}`)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	d.postChannelMessage(context.Background(), client500, "token", "123", "hello")
-
-	// 4. Network error
-	clientErr := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return nil, errors.New("network drop")
-			},
-		},
-	}
-	d.postChannelMessage(context.Background(), clientErr, "token", "123", "hello")
-}
-
 
 func TestSetupMux_Extended(t *testing.T) {
 	d := NewDaemon(DaemonConfig{})
@@ -3044,15 +3372,6 @@ func TestRunDaemon_NormalLifecycle(t *testing.T) {
 	}
 }
 
-func TestNilMapInitializers(t *testing.T) {
-	d := &SyncDaemon{}
-	d.SendDiscordAlert(context.Background(), "title", "", "", "", "stage", "msg")
-	if d.lastAlertTimes == nil {
-		t.Errorf("expected lastAlertTimes to be initialized")
-	}
-}
-
-
 func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 	tempDir := t.TempDir()
 	localDir := filepath.Join(tempDir, "local")
@@ -3126,31 +3445,6 @@ func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
 }
 
 
-func TestSendDiscordAlert_ResolveFailure(t *testing.T) {
-	client500 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       ioNopCloser(strings.NewReader("server error")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	d := NewDaemon(DaemonConfig{
-		DiscordToken:   "mock_token",
-		DiscordChannel: "unresolvable-chan",
-	})
-	d.alertHTTPClient = client500
-	d.SendDiscordAlert(context.Background(), "title", "/repo", "sha", "prev", "stage", "err msg")
-}
-
-func TestSendWebhook_InvalidURL(t *testing.T) {
-	d := NewDaemon(DaemonConfig{})
-	d.sendWebhook(context.Background(), http.DefaultClient, "://invalid-url", "content")
-}
-
 type roundTripperFunc struct {
 	fn func(req *http.Request) (*http.Response, error)
 }
@@ -3212,57 +3506,6 @@ func TestDefaultDockerExecutor_Coverage(t *testing.T) {
 	_, stderr, err := defaultDockerExecutor(context.Background(), "unknown")
 	if err == nil || !strings.Contains(string(stderr), "unknown cmd") {
 		t.Errorf("expected error from unknown command, got err=%v, stderr=%s", err, string(stderr))
-	}
-}
-
-func TestScrubComposeEnv_Extended(t *testing.T) {
-	input := []string{
-		"INVALID_NO_EQUALS",
-		"AERIAL_CONFIG_DIR=/dir/config",
-		"AERIAL_PROJECT_DIR=/dir/project",
-		"GOOD_VAR=123",
-		"COMPOSE_PROJECT_NAME=aerial",
-	}
-	out := scrubComposeEnv(input)
-	if len(out) != 1 || out[0] != "COMPOSE_PROJECT_NAME=aerial" {
-		t.Errorf("unexpected scrubbed output: %v", out)
-	}
-}
-
-
-
-func TestResolveChannelID_DetailedCoverage(t *testing.T) {
-	d := &SyncDaemon{}
-
-	client500 := &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       ioNopCloser(strings.NewReader("server error")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-
-	// 1. Guilds HTTP 500 error
-	_, err := d.resolveChannelID(context.Background(), client500, "token", "alerts")
-	if err == nil {
-		t.Errorf("expected error on HTTP 500")
-	}
-
-	// 2. Snowflake fast return
-	ch, err := d.resolveChannelID(context.Background(), client500, "token", "123456789012345678")
-	if err != nil || ch != "123456789012345678" {
-		t.Errorf("expected snowflake fast return, got %v, %v", ch, err)
-	}
-
-	// 3. Channel not found / cached return
-	d.cachedChannelID = "cached-999"
-	ch, err = d.resolveChannelID(context.Background(), client500, "token", "alerts")
-	if err != nil || ch != "cached-999" {
-		t.Errorf("expected cached channel ID, got %v, %v", ch, err)
 	}
 }
 
@@ -3595,27 +3838,6 @@ func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
 	_, err := d.TriggerSync()
 	if err == nil || !strings.Contains(err.Error(), "unexpected return type") {
 		t.Errorf("expected unexpected return type error, got %v", err)
-	}
-}
-
-func TestSendWebhook_Errors(t *testing.T) {
-	d := &SyncDaemon{}
-	client := &http.Client{Timeout: 5 * time.Millisecond}
-	d.sendWebhook(context.Background(), client, "http://127.0.0.1:1/invalid", "msg")
-}
-
-func TestPostChannelMessage_Errors(t *testing.T) {
-	d := &SyncDaemon{}
-	client := &http.Client{Timeout: 5 * time.Millisecond}
-	d.postChannelMessage(context.Background(), client, "token", "chan-id", "msg")
-}
-
-func TestResolveChannelID_ClientFail(t *testing.T) {
-	d := &SyncDaemon{}
-	client := &http.Client{Timeout: 5 * time.Millisecond}
-	_, err := d.resolveChannelID(context.Background(), client, "token", "test-channel")
-	if err == nil {
-		t.Errorf("expected error from resolveChannelID on timeout/failure")
 	}
 }
 
