@@ -482,7 +482,7 @@ func isLowEffortBurst(burst []db.Message) bool {
 	return false
 }
 
-func (p *WorkerPool) processBurst(burst []db.Message) {
+func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	if len(burst) == 0 {
 		return
 	}
@@ -494,13 +494,19 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	defer metrics.ActiveWorkers.Dec()
 
 	threadID := burst[0].ThreadID
-	log.Printf("[WorkerPool] Processing burst of %d message(s) for thread %s", len(burst), threadID)
+	scopeKey := threadID
+	if len(scopeKeyOpt) > 0 && scopeKeyOpt[0] != "" {
+		scopeKey = scopeKeyOpt[0]
+	} else if p != nil {
+		scopeKey = p.resolveScopeKey(burst[0])
+	}
+	log.Printf("[WorkerPool] Processing burst of %d message(s) for thread %s (scope: %s)", len(burst), threadID, scopeKey)
 
-	lockVal, _ := p.scopeLocks.LoadOrStore(threadID, &sync.Mutex{})
+	lockVal, _ := p.scopeLocks.LoadOrStore(scopeKey, &sync.Mutex{})
 	scopeLock, ok := lockVal.(*sync.Mutex)
 	if !ok {
 		scopeLock = &sync.Mutex{}
-		p.scopeLocks.Store(threadID, scopeLock)
+		p.scopeLocks.Store(scopeKey, scopeLock)
 	}
 	scopeLock.Lock()
 	defer scopeLock.Unlock()

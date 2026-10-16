@@ -2865,6 +2865,127 @@ func TestWorker_DualPoolRouting_LowEffortAndFallback(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing.T) {
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	lowStartedCh := make(chan struct{}, 1)
+	lowBlockCh := make(chan struct{})
+	normDoneCh := make(chan struct{})
+	lowDoneCh := make(chan struct{})
+
+	primarySpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"c1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"primary reply\",\"usage\":{\"total_tokens\":10}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+
+	lowSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"d1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					select {
+					case lowStartedCh <- struct{}{}:
+					default:
+					}
+					<-lowBlockCh
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"low reply\",\"usage\":{\"total_tokens\":5}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12346), nil
+		},
+	}
+
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
+
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+		d.LowEffortModel = "gemini-3.8-flash-low"
+	})
+
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if msg.ID == "msg-norm-concurrent" && status == db.StatusCompleted {
+				close(normDoneCh)
+			}
+			if msg.ID == "msg-low-concurrent" && status == db.StatusCompleted {
+				close(lowDoneCh)
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "th-shared-concurrent"
+
+	lowMsg := db.Message{
+		ID:        "msg-low-concurrent",
+		ThreadID:  threadID,
+		Content:   "long low-effort task",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), lowMsg)
+	pool.Enqueue(lowMsg)
+
+	select {
+	case <-lowStartedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for low-effort turn to start")
+	}
+
+	normMsg := db.Message{
+		ID:        "msg-norm-concurrent",
+		ThreadID:  threadID,
+		Content:   "user asks what is happening",
+		Effort:    "medium",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), normMsg)
+	pool.Enqueue(normMsg)
+
+	select {
+	case <-normDoneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("primary message was blocked by low-effort task on same thread")
+	}
+
+	close(lowBlockCh)
+	select {
+	case <-lowDoneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for low-effort task to complete")
+	}
+}
+
 func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testing.T) {
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
@@ -3195,7 +3316,7 @@ func TestWorker_ThreadWorker_ActiveTasksInLowEffortPoolPreventReap(t *testing.T)
 	// Verify worker remains active because background task in lowEffortProcessPool is still running
 	time.Sleep(60 * time.Millisecond)
 	pool.mu.Lock()
-	_, workerStillActive := pool.threadChs[threadID]
+	_, workerStillActive := pool.threadChs["low_effort:"+threadID]
 	pool.mu.Unlock()
 
 	if !workerStillActive {

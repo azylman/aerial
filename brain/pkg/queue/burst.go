@@ -18,6 +18,23 @@ func (p *WorkerPool) Enqueue(msg db.Message) {
 	p.EnqueueBurst(msg)
 }
 
+func isLowEffortMessage(m db.Message) bool {
+	return strings.EqualFold(strings.TrimSpace(m.Effort), "low") ||
+		strings.Contains(strings.ToLower(strings.TrimSpace(m.Metadata.Model)), "flash")
+}
+
+func (p *WorkerPool) resolveScopeKey(m db.Message) string {
+	if isLowEffortMessage(m) && p != nil && p.lowEffortProcessPool != nil {
+		return "low_effort:" + m.ThreadID
+	}
+	return m.ThreadID
+}
+
+// ScopeKey returns the queue and lock partition key for a message.
+func (p *WorkerPool) ScopeKey(m db.Message) string {
+	return p.resolveScopeKey(m)
+}
+
 // EnqueueBurst atomically enqueues multiple messages for a thread into the queue.
 func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 	if len(msgs) == 0 {
@@ -31,18 +48,19 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 	}
 
 	type newWorker struct {
-		threadID string
+		scopeKey string
 		state    *threadWorkerState
 	}
 	var newWorkers []newWorker
 
 	for _, msg := range msgs {
-		state, exists := p.threadChs[msg.ThreadID]
+		scopeKey := p.resolveScopeKey(msg)
+		state, exists := p.threadChs[scopeKey]
 		if !exists {
 			state = &threadWorkerState{ch: make(chan db.Message, 100)}
-			p.threadChs[msg.ThreadID] = state
+			p.threadChs[scopeKey] = state
 			p.wg.Add(1)
-			newWorkers = append(newWorkers, newWorker{threadID: msg.ThreadID, state: state})
+			newWorkers = append(newWorkers, newWorker{scopeKey: scopeKey, state: state})
 		}
 
 		select {
@@ -68,12 +86,13 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 	p.mu.Unlock()
 
 	for _, nw := range newWorkers {
-		go p.runThreadWorker(nw.threadID, nw.state)
+		go p.runThreadWorker(nw.scopeKey, nw.state)
 	}
 }
 
-func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) {
+func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) {
 	defer p.wg.Done()
+	threadID := strings.TrimPrefix(scopeKey, "low_effort:")
 
 	idleTimeout := p.cfg.IdleTimeout
 	if idleTimeout <= 0 {
@@ -120,7 +139,7 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 			}
 			p.mu.Unlock()
 
-			p.processBurst(burst)
+			p.processBurst(burst, scopeKey)
 
 			p.mu.Lock()
 			state.inFlight = false
@@ -161,8 +180,8 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 					idleTimer.Reset(idleTimeout)
 					continue
 				}
-				delete(p.threadChs, threadID)
-				p.scopeLocks.Delete(threadID)
+				delete(p.threadChs, scopeKey)
+				p.scopeLocks.Delete(scopeKey)
 				p.mu.Unlock()
 				return
 			}

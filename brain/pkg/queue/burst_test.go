@@ -703,7 +703,7 @@ func TestBurst_ActiveTasksInLowEffortPoolPreventReap(t *testing.T) {
 	// Verify worker remains active because background task in lowEffortProcessPool is still running
 	time.Sleep(60 * time.Millisecond)
 	pool.mu.Lock()
-	_, workerStillActive := pool.threadChs[threadID]
+	_, workerStillActive := pool.threadChs["low_effort:"+threadID]
 	pool.mu.Unlock()
 
 	if !workerStillActive {
