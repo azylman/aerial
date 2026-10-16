@@ -252,7 +252,6 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - **`shared_context`**: Populate with architectural topology, service invariants, database connections, and shared technical decisions that every chunk worker must know.
    - **`target_files`**: Specify exact files each chunk modifies or creates so workers focus immediately on their workspace perimeter.
    - **`target_symbols`**: Specify the key functions, structs, interfaces, or tables touched in this chunk to prevent broad exploratory grepping.
-   - **`effort`**: Chunk effort level dispatched to Brain (`"low"`, `"medium"`, or `"high"`). Defaults to `"low"` for straightforward single-file changes or localized refactors; use `"medium"` or `"high"` for complex concurrency orchestration, cross-cutting multi-service integrations, or high-dimensional logic.
    - **`acceptance_criteria`**: List concrete, verifiable invariants and testing expectations (`- Coverage >= 95.0%`, `- Table-driven hermetic unit tests pass`, `- Staged preflight checks clean`).
 4. **Functional Core, Imperative Shell (Decoupling Logic from Concurrency & I/O)**:
    - When designing new features or bugfixes, business logic, prompt formatting, state transitions, session key calculation, and decision rules MUST be factored into pure, deterministic functions (e.g. `AssembleTurnPrompt`, `PlanBurstExecution`, `DetermineSessionAction`, `CalculateBackoffDelay`) that accept values and return values.
