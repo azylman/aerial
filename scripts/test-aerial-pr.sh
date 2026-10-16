@@ -253,6 +253,36 @@ VANADIS_FLAG_CHECK=$(bash -c "
 ")
 assert_eq "chunk-xyz-123" "$VANADIS_FLAG_CHECK" "--vanadis-chunk=<id> sets VANADIS_CHUNK_ID"
 
+# Case 10: register_pr_in_brain retry with backoff and hard failure on exhaustion
+REGISTER_PR_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    ATTEMPT_FILE=\"${TMP_TEST_DIR}/reg_attempts\"
+
+    curl() { echo '{\"status\":\"registered\"}'; }
+    export -f curl
+    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://brain.aerial/internal/pr/register' '{}' 101 '1560698400780062884' 2>/dev/null && echo 'reg1:ok'
+
+    echo 0 > \"\$ATTEMPT_FILE\"
+    curl() {
+        local c=\$(( \$(cat \"\$ATTEMPT_FILE\") + 1 )); echo \"\$c\" > \"\$ATTEMPT_FILE\"
+        [ \"\$c\" -lt 2 ] && echo '{\"error\":\"transient\"}' || echo '{\"status\":\"registered\"}'
+    }
+    export -f curl
+    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://brain.aerial/internal/pr/register' '{}' 102 '1560698400780062884' 2>/dev/null && echo \"reg2:ok:\$(cat \"\$ATTEMPT_FILE\")\"
+
+    echo 0 > \"\$ATTEMPT_FILE\"
+    curl() {
+        local c=\$(( \$(cat \"\$ATTEMPT_FILE\") + 1 )); echo \"\$c\" > \"\$ATTEMPT_FILE\"
+        echo '{\"error\":\"Failed to attach PR to Vanadis chunk\"}'
+    }
+    export -f curl
+    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://brain.aerial/internal/pr/register' '{}' 103 '1560698400780062884' 2>/dev/null || echo \"reg3:failed_as_expected:\$(cat \"\$ATTEMPT_FILE\")\"
+")
+assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg1:ok' && echo true || echo false)" "register_pr_in_brain succeeds on first attempt"
+assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg2:ok:2' && echo true || echo false)" "register_pr_in_brain retries transient error and succeeds on attempt 2"
+assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg3:failed_as_expected:3' && echo true || echo false)" "register_pr_in_brain fails non-zero after exhausting all 3 attempts"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

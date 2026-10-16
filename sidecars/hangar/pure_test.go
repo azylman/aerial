@@ -1333,6 +1333,27 @@ R100	jobs/old.nomad	jobs/new.nomad
 	if len(nonNomadStatus) != 0 {
 		t.Errorf("expected 0 changes for non-nomad files")
 	}
+
+	migrationStatus := ParseNomadGitStatus("A\tbrain/pkg/db/migrations/20261016182900_add_vanadis_chunk_started_at.sql\nM\tbrain/pkg/db/migrations/atlas.sum\nM\tbrain/pkg/db/schema.sql\n")
+	if len(migrationStatus) != 1 || migrationStatus[0].JobName != "db-migrate" || migrationStatus[0].Path != "nomad/jobs/db-migrate.nomad" || migrationStatus[0].Action != "apply" {
+		t.Errorf("expected db-migrate change when migration files modified, got %+v", migrationStatus)
+	}
+	if len(ParseNomadGitStatus("D\tbrain/pkg/db/migrations/old.sql\n")) != 0 {
+		t.Errorf("expected 0 changes when migration file is deleted only")
+	}
+	if !IsMigrationFile("brain/pkg/db/migrations/20261016_init.sql") || !IsMigrationFile("/brain/pkg/db/migrations/atlas.sum") || IsMigrationFile("brain/pkg/db/schema.sql") || IsMigrationFile("") || IsMigrationFile("brain/pkg/db/migrations") {
+		t.Errorf("unexpected IsMigrationFile classification")
+	}
+	if !HasMigrationChanges([]string{"README.md", "brain/pkg/db/migrations/20261016_init.sql"}) || HasMigrationChanges([]string{"brain/pkg/db/schema.sql"}) {
+		t.Errorf("unexpected HasMigrationChanges result")
+	}
+	if ren := ParseNomadGitStatus("R100\tbrain/pkg/db/old.sql\tbrain/pkg/db/migrations/20261016_new.sql\n"); len(ren) != 1 || ren[0].JobName != "db-migrate" {
+		t.Errorf("expected db-migrate when file renamed into migrations dir, got %+v", ren)
+	}
+	ensured := EnsureDBMigrateNomadChange([]NomadFileChange{{Path: "nomad/jobs/vanadis.nomad", Action: "apply", JobName: "vanadis"}, {Path: "nomad/jobs/db-migrate.nomad", Action: "apply", JobName: "db-migrate"}})
+	if len(ensured) != 2 || ensured[0].JobName != "db-migrate" || ensured[1].JobName != "vanadis" || len(EnsureDBMigrateNomadChange(ensured)) != 2 {
+		t.Errorf("expected db-migrate moved to index 0 and idempotent, got %+v", ensured)
+	}
 }
 
 func TestPureSlugAndDigestHelpers(t *testing.T) {

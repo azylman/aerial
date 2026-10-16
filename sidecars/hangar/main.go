@@ -2726,6 +2726,10 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}
 
 		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
+		if errDiff == nil && HasMigrationChanges(changedFiles) {
+			nomadChanges = EnsureDBMigrateNomadChange(nomadChanges)
+			errNomad = nil
+		}
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
 			var immediateChanges []NomadFileChange
