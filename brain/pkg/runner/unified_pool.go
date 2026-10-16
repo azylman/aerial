@@ -162,7 +162,7 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 		}
 
 		initCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-		if _, err := p.GetOrCreate(initCtx, target, ""); err != nil {
+		if err := p.prewarmTarget(initCtx, target); err != nil {
 			log.Printf("[UnifiedProcessPool] Warning: pre-warming target %q failed: %v", target, err)
 		} else {
 			log.Printf("[UnifiedProcessPool] Pre-warmed target %q successfully", target)
@@ -170,6 +170,52 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 		cancel()
 	}
 	return nil
+}
+
+func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string) error {
+	trimmed := strings.TrimSpace(targetKey)
+	if trimmed == "" {
+		return nil
+	}
+	if d, ok := p.Get(trimmed); ok && !d.IsDirty() {
+		return nil
+	}
+	tl, acquired := p.tryAcquireTargetLock(trimmed)
+	if !acquired {
+		// Target is actively leased by an in-flight turn; skip pre-warming so we never clobber it.
+		return nil
+	}
+	defer p.releaseTargetLock(trimmed, tl, true)
+
+	if d, ok := p.Get(trimmed); ok && !d.IsDirty() {
+		return nil
+	}
+	_, err := p.GetOrCreate(ctx, trimmed, "")
+	return err
+}
+
+func (p *UnifiedProcessPool) closeEvictedDaemon(oldD *StreamingDaemon, targetKey string) {
+	if oldD == nil {
+		return
+	}
+	oldD.MarkDirty()
+	if oldD.InflightCount() > 0 {
+		oldD.SetOnTurnFinished(func(d *StreamingDaemon) {
+			if closeErr := d.Close(); closeErr != nil {
+				log.Printf("[UnifiedProcessPool] Warning: error closing drained daemon %q: %v", targetKey, closeErr)
+			}
+		})
+		if oldD.InflightCount() > 0 {
+			return
+		}
+	}
+	p.bgWg.Add(1)
+	go func(d *StreamingDaemon, tKey string) {
+		defer p.bgWg.Done()
+		if closeErr := d.Close(); closeErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning: error closing old daemon %q: %v", tKey, closeErr)
+		}
+	}(oldD, targetKey)
 }
 
 type vanadisChunkIDCtxKey struct{}
@@ -238,13 +284,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 				trimmedSess = d.SessionID()
 			}
 			delete(p.daemons, targetKey)
-			p.bgWg.Add(1)
-			go func(oldD *StreamingDaemon, tKey string) {
-				defer p.bgWg.Done()
-				if closeErr := oldD.Close(); closeErr != nil {
-					log.Printf("[UnifiedProcessPool] Warning: error closing old daemon %q: %v", tKey, closeErr)
-				}
-			}(d, targetKey)
+			p.closeEvictedDaemon(d, targetKey)
 			if should && trimmedSess == "" {
 				metrics.RecordSessionRotation("pre_flight", "pool", rotReason)
 			}
@@ -313,13 +353,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			return nil, fmt.Errorf("process pool is closed")
 		}
 		if prev, exists := p.daemons[targetKey]; exists && prev != nil && prev != daemon {
-			p.bgWg.Add(1)
-			go func(oldD *StreamingDaemon, tKey string) {
-				defer p.bgWg.Done()
-				if err := oldD.Close(); err != nil {
-					log.Printf("[UnifiedProcessPool] Error closing superseded daemon for %s: %v", tKey, err)
-				}
-			}(prev, targetKey)
+			p.closeEvictedDaemon(prev, targetKey)
 		}
 		p.daemons[targetKey] = daemon
 		p.mu.Unlock()
@@ -515,7 +549,7 @@ func (p *UnifiedProcessPool) MarkDirty() {
 		if d == nil {
 			continue
 		}
-		if d.InflightCount() == 0 {
+		if d.InflightCount() == 0 && !p.isTargetLocked(target) {
 			delete(p.daemons, target)
 			toClose = append(toClose, evictedEntry{targetKey: target, daemon: d})
 			d.MarkDirty()
@@ -536,7 +570,7 @@ func (p *UnifiedProcessPool) MarkDirty() {
 			continue
 		}
 		d, exists := p.daemons[target]
-		if (!exists || d == nil || d.State() == StateClosed) && !p.prewarming[target] {
+		if (!exists || d == nil || d.State() == StateClosed) && !p.prewarming[target] && !p.isTargetLocked(target) {
 			p.prewarming[target] = true
 			toPrewarm = append(toPrewarm, target)
 		}
@@ -569,7 +603,7 @@ func (p *UnifiedProcessPool) MarkDirty() {
 			}()
 			initCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 			defer cancel()
-			if _, err := p.GetOrCreate(initCtx, tKey, ""); err != nil {
+			if err := p.prewarmTarget(initCtx, tKey); err != nil {
 				if !errors.Is(err, context.Canceled) {
 					log.Printf("[UnifiedProcessPool] Warning: re-warming prewarmed target %q failed: %v", tKey, err)
 				}
@@ -784,6 +818,38 @@ func (p *UnifiedProcessPool) EphemeralLLMFunc(targetKey string) LLMFunc {
 type targetLock struct {
 	sem  chan struct{}
 	refs int32
+}
+
+func (p *UnifiedProcessPool) isTargetLocked(targetKey string) bool {
+	p.targetMu.Lock()
+	defer p.targetMu.Unlock()
+	tl, ok := p.targetLocks[targetKey]
+	return ok && tl != nil && len(tl.sem) > 0
+}
+
+func (p *UnifiedProcessPool) tryAcquireTargetLock(targetKey string) (*targetLock, bool) {
+	p.targetMu.Lock()
+	defer p.targetMu.Unlock()
+	if p.targetLocks == nil {
+		p.targetLocks = make(map[string]*targetLock)
+	}
+	tl, ok := p.targetLocks[targetKey]
+	if !ok {
+		tl = &targetLock{
+			sem: make(chan struct{}, 1),
+		}
+		p.targetLocks[targetKey] = tl
+	}
+	select {
+	case tl.sem <- struct{}{}:
+		tl.refs++
+		return tl, true
+	default:
+		if tl.refs <= 0 {
+			delete(p.targetLocks, targetKey)
+		}
+		return nil, false
+	}
 }
 
 func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
@@ -1045,12 +1111,15 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	if reqChunkID == "" {
 		reqChunkID = VanadisChunkIDFromContext(ctx)
 	}
-	if l.pool != nil && (l.daemon == nil || l.daemon.VanadisChunkID() != reqChunkID) {
+	if l.pool != nil && (l.daemon == nil || l.daemon.State() == StateClosed || l.daemon.IsDirty() || l.daemon.VanadisChunkID() != reqChunkID) {
 		refreshed, err := l.pool.GetOrCreate(WithVanadisChunkID(ctx, reqChunkID), l.targetKey, l.sessionID, l.turnCount)
 		if err != nil {
 			return nil, err
 		}
 		l.daemon = refreshed
+		if refreshed.SessionID() != "" {
+			l.sessionID = refreshed.SessionID()
+		}
 	}
 
 	if err := l.daemon.Send(compiledPrompt, turn); err != nil {

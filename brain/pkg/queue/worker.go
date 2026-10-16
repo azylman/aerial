@@ -2428,7 +2428,8 @@ func (te *turnExecution) executeWithRetries() {
 				te.lease = nil
 			}
 			if leasedPool, ok := activePool.(runner.LeasedAgentPool); ok {
-				newLease, lErr := leasedPool.AcquireLease(te.pool.ctx, te.threadID)
+				corruptLeaseCtx := runner.WithVanadisChunkID(te.pool.ctx, extractBurstVanadisChunkID(te.burst))
+				newLease, lErr := leasedPool.AcquireLease(corruptLeaseCtx, te.threadID)
 				if lErr == nil {
 					te.lease = newLease
 					te.isEphemeral = newLease.IsEphemeral() || (isLowEffort && te.pool.lowEffortProcessPool != nil)

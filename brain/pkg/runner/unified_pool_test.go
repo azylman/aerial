@@ -3490,3 +3490,95 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 	}
 }
 
+func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
+	var seq atomic.Int32
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			id := int(seq.Add(1))
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = fmt.Sprintf("00000000-0000-0000-0000-%012d", id)
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				buf := make([]byte, 4096)
+				for {
+					n, err := inR.Read(buf)
+					if err != nil {
+						return
+					}
+					if strings.Contains(string(buf[:n]), `"event":"user"`) {
+						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
+					}
+				}
+			}()
+			return inW, outR, errR, &MockProcessHandle{pid: 900 + id}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		GeminiHomeDir:    t.TempDir(),
+		PrewarmedTargets: []string{"discord:worker-0", "discord:worker-1"},
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	chunkCtx := WithVanadisChunkID(ctx, "chunk-recovery-1")
+	lease, err := pool.AcquireLease(chunkCtx, "discord:worker-0")
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	dBefore, ok := pool.Get("discord:worker-0")
+	if !ok || dBefore == nil || dBefore.VanadisChunkID() != "chunk-recovery-1" {
+		t.Fatalf("expected active chunk-recovery-1 daemon on discord:worker-0")
+	}
+	if err := pool.prewarmTarget(ctx, "   "); err != nil {
+		t.Fatalf("expected nil for empty targetKey, got %v", err)
+	}
+	if err := pool.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+	pool.WaitBackground()
+	if dAfterInit, ok := pool.Get("discord:worker-0"); !ok || dAfterInit != dBefore || dBefore.State() == StateClosed || !pool.HasDaemon("discord:worker-1") {
+		t.Fatalf("expected worker-0 untouched and worker-1 pre-warmed after Initialize")
+	}
+
+	pool.MarkDirty()
+	pool.WaitBackground()
+	if err := pool.prewarmTarget(ctx, "discord:worker-0"); err != nil || dBefore.State() == StateClosed {
+		t.Fatalf("MarkDirty or prewarmTarget while locked failed or closed daemon: %v", err)
+	}
+
+	_ = dBefore.Close()
+	res, err := lease.Execute(chunkCtx, &TurnContext{TurnID: "retry-2", Prompt: "retry", VanadisChunkID: "chunk-recovery-1", Ctx: chunkCtx})
+	if err != nil || res == nil || res.Response != "ok" {
+		t.Fatalf("expected lease.Execute to refresh closed daemon on retry: res=%+v err=%v", res, err)
+	}
+	_ = lease.Release()
+
+	dWorker1, _ := pool.Get("discord:worker-1")
+	dWorker1.inflightMu.Lock()
+	dWorker1.inflight = append(dWorker1.inflight, &TurnContext{TurnID: "inflight-1"})
+	dWorker1.inflightMu.Unlock()
+	pool.closeEvictedDaemon(dWorker1, "discord:worker-1")
+	if dWorker1.State() == StateClosed {
+		t.Fatalf("expected closeEvictedDaemon not to close daemon while InflightCount > 0")
+	}
+	dWorker1.inflightMu.Lock()
+	dWorker1.inflight = nil
+	cb := dWorker1.onTurnFinished
+	dWorker1.inflightMu.Unlock()
+	if cb == nil {
+		t.Fatalf("expected onTurnFinished callback on in-flight evicted daemon")
+	}
+	cb(dWorker1)
+	if dWorker1.State() != StateClosed {
+		t.Fatalf("expected evicted daemon to close once onTurnFinished fires")
+	}
+	pool.closeEvictedDaemon(nil, "discord:worker-1")
+}
+
+
