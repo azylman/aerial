@@ -522,6 +522,43 @@ func resolveGitDir(repoPath string) (string, error) {
 	return gitPath, nil
 }
 
+// runGitDiffWithFallback executes git diff or diff-tree when prevHead is all zeros or primary diff fails.
+func (d *SyncDaemon) runGitDiffWithFallback(ctx context.Context, repoPath, diffFlag, prevHead, currHead, fallbackRef string, pathArgs ...string) (string, error) {
+	if isAllZeros(prevHead) {
+		treeArgs := []string{"diff-tree", "--no-commit-id", diffFlag, "-r", fallbackRef}
+		if len(pathArgs) > 0 {
+			treeArgs = append(append(treeArgs, "--"), pathArgs...)
+		}
+		out, _, err := d.getGitExecutor()(ctx, repoPath, treeArgs...)
+		if err != nil {
+			return "", err
+		}
+		return string(out), nil
+	}
+
+	diffArgs := []string{"diff", diffFlag, prevHead, currHead}
+	if len(pathArgs) > 0 {
+		diffArgs = append(append(diffArgs, "--"), pathArgs...)
+	}
+	out, _, err := d.getGitExecutor()(ctx, repoPath, diffArgs...)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		treeArgs := []string{"diff-tree", "--no-commit-id", diffFlag, "-r", fallbackRef}
+		if len(pathArgs) > 0 {
+			treeArgs = append(append(treeArgs, "--"), pathArgs...)
+		}
+		outFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, treeArgs...)
+		if errFallback != nil {
+			return "", errFallback
+		}
+		return string(outFallback), nil
+	}
+
+	return string(out), nil
+}
+
 // HasNomadConfigChanges checks whether Nomad daemon configuration files changed between commits.
 func (d *SyncDaemon) HasNomadConfigChanges(ctx context.Context, repoPath, prevHead, currHead string) (bool, error) {
 	if ctx.Err() != nil {
@@ -534,26 +571,16 @@ func (d *SyncDaemon) HasNomadConfigChanges(ctx context.Context, repoPath, prevHe
 		return false, nil
 	}
 
-	args := []string{"diff", "--name-only", prevHead, currHead, "--", "nomad"}
-	stdout, _, err := d.getGitExecutor()(ctx, repoPath, args...)
+	out, err := d.runGitDiffWithFallback(ctx, repoPath, "--name-only", prevHead, currHead, "HEAD", "nomad")
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		fallbackArgs := []string{"diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--", "nomad"}
-		stdoutFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, fallbackArgs...)
-		if errFallback != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
-			}
-			log.Printf("[Hangar] Warning: Failed to inspect nomad diff in %s (%v); failing safe to false", repoPath, errFallback)
-			return false, nil
-		}
-		lines := strings.Split(strings.TrimSpace(string(stdoutFallback)), "\n")
-		return len(FilterNomadConfigFiles(lines)) > 0, nil
+		log.Printf("[Hangar] Warning: Failed to inspect nomad diff in %s (%v); failing safe to false", repoPath, err)
+		return false, nil
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
 	return len(FilterNomadConfigFiles(lines)) > 0, nil
 }
 
@@ -569,25 +596,16 @@ func (d *SyncDaemon) HasNomadChanges(ctx context.Context, repoPath, prevHead, cu
 		return nil, nil
 	}
 
-	args := []string{"diff", "--name-status", prevHead, currHead, "--"}
-	stdout, _, err := d.getGitExecutor()(ctx, repoPath, args...)
+	out, err := d.runGitDiffWithFallback(ctx, repoPath, "--name-status", prevHead, currHead, "HEAD")
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		fallbackArgs := []string{"diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD", "--"}
-		stdoutFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, fallbackArgs...)
-		if errFallback != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			log.Printf("[Hangar:Nomad] Warning: Failed to inspect diff in %s (%v)", repoPath, errFallback)
-			return nil, nil
-		}
-		return ParseNomadGitStatus(string(stdoutFallback)), nil
+		log.Printf("[Hangar:Nomad] Warning: Failed to inspect diff in %s (%v)", repoPath, err)
+		return nil, nil
 	}
 
-	return ParseNomadGitStatus(string(stdout)), nil
+	return ParseNomadGitStatus(out), nil
 }
 
 func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadFileChange, meta ...string) {
@@ -1187,34 +1205,30 @@ var (
 	reconcilerMinCooldown      = 15 * time.Second
 )
 
-// ValidateNomadJob validates a Nomad job specification using nomad job validate.
-func (d *SyncDaemon) ValidateNomadJob(ctx context.Context, jobPath string) error {
-	valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	stdout, stderr, err := d.getNomadExecutor()(valCtx, "job", "validate", jobPath)
-	if err != nil {
-		combined := string(append(stdout, stderr...))
-		return fmt.Errorf("nomad job validate failed for %s: %s (%w)", jobPath, SanitizeLog(strings.TrimSpace(combined)), err)
-	}
-	return nil
-}
-
-// ValidateNomadConfig validates a Nomad daemon configuration path using nomad config validate.
-func (d *SyncDaemon) ValidateNomadConfig(ctx context.Context, configPath string) error {
+func (d *SyncDaemon) runNomadValidate(ctx context.Context, subCmd, targetPath string, requireNonNilExec bool) error {
 	valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	nomadExec := d.getNomadExecutor()
-	if nomadExec == nil {
+	if requireNonNilExec && nomadExec == nil {
 		return errors.New("nomad executor unavailable, failing safe")
 	}
-	stdout, stderr, err := nomadExec(valCtx, "config", "validate", configPath)
+	stdout, stderr, err := nomadExec(valCtx, subCmd, "validate", targetPath)
 	if err != nil {
 		combined := string(append(stdout, stderr...))
-		return fmt.Errorf("nomad config validate failed for %s: %s (%w)", configPath, SanitizeLog(strings.TrimSpace(combined)), err)
+		return fmt.Errorf("nomad %s validate failed for %s: %s (%w)", subCmd, targetPath, SanitizeLog(strings.TrimSpace(combined)), err)
 	}
 	return nil
+}
+
+// ValidateNomadJob validates a Nomad job specification using nomad job validate.
+func (d *SyncDaemon) ValidateNomadJob(ctx context.Context, jobPath string) error {
+	return d.runNomadValidate(ctx, "job", jobPath, false)
+}
+
+// ValidateNomadConfig validates a Nomad daemon configuration path using nomad config validate.
+func (d *SyncDaemon) ValidateNomadConfig(ctx context.Context, configPath string) error {
+	return d.runNomadValidate(ctx, "config", configPath, true)
 }
 
 // reconcileNomadServer safely restarts the nomad-server container after validating daemon configuration.
@@ -1848,15 +1862,7 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 		}
 
 		if !hasError && d.configDir != "" {
-			if err := d.SyncBrainConfigToNomad(syncCtx, d.configDir); err != nil {
-				log.Printf("[Hangar:Periodic] Notice: SyncBrainConfigToNomad: %v", err)
-			}
-			if err := d.SyncHomepageConfigToNomad(syncCtx, d.configDir); err != nil {
-				log.Printf("[Hangar:Periodic] Notice: SyncHomepageConfigToNomad: %v", err)
-			}
-			if err := d.SyncServiceConfigsToNomad(syncCtx, d.configDir); err != nil {
-				log.Printf("[Hangar:Periodic] Notice: SyncServiceConfigsToNomad: %v", err)
-			}
+			d.syncAllConfigsToNomad(syncCtx, "[Hangar:Periodic]", d.configDir)
 		}
 		metrics.RecordSyncRequest("periodic", status)
 
@@ -1871,6 +1877,78 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 		return nil, fmt.Errorf("unexpected return type from singleflight: %T", val)
 	}
 	return res, nil
+}
+
+func (d *SyncDaemon) pushNomadConfigVar(ctx context.Context, cacheKey, nomadVar, jobName, configHash string, isChangedInGit bool, varArgs []string, syncCtx []ConfigSyncContext) (bool, error) {
+	nomadExec := d.getNomadExecutor()
+	if nomadExec == nil || d.nomadAddr == "" {
+		return false, nil
+	}
+
+	d.lastPushedConfigMu.Lock()
+	cachedHash := ""
+	if d.lastPushedConfig != nil {
+		cachedHash = d.lastPushedConfig[cacheKey]
+	}
+	if !isChangedInGit {
+		if d.lastPushedConfig == nil {
+			d.lastPushedConfig = make(map[string]string)
+		}
+		d.lastPushedConfig[cacheKey] = configHash
+		d.lastPushedConfigMu.Unlock()
+		return false, nil
+	}
+	if cachedHash == configHash {
+		d.lastPushedConfigMu.Unlock()
+		return false, nil
+	}
+	d.lastPushedConfigMu.Unlock()
+
+	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	args := append([]string{"var", "put", "-force", nomadVar}, varArgs...)
+	if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
+		args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
+		baseEvt := HangarDeployEvent{
+			Event:     "deploy_started",
+			JobName:   jobName,
+			Repo:      syncCtx[0].Repo,
+			CommitSHA: syncCtx[0].CommitSHA,
+			PRNumber:  syncCtx[0].PRNumber,
+			TargetID:  syncCtx[0].TargetID,
+			Status:    "started",
+			Timestamp: time.Now().UTC(),
+		}
+		go d.DispatchDeployEvent(baseEvt)
+	}
+
+	stdout, stderr, err := nomadExec(valCtx, args...)
+	if err != nil {
+		combined := string(append(stdout, stderr...))
+		return false, fmt.Errorf("failed updating Nomad variable %s: %s (%w)", nomadVar, SanitizeLog(strings.TrimSpace(combined)), err)
+	}
+
+	d.lastPushedConfigMu.Lock()
+	if d.lastPushedConfig == nil {
+		d.lastPushedConfig = make(map[string]string)
+	}
+	d.lastPushedConfig[cacheKey] = configHash
+	d.lastPushedConfigMu.Unlock()
+
+	return true, nil
+}
+
+func (d *SyncDaemon) syncAllConfigsToNomad(ctx context.Context, logPrefix, configDir string, syncCtx ...ConfigSyncContext) {
+	if err := d.SyncBrainConfigToNomad(ctx, configDir, syncCtx...); err != nil {
+		log.Printf("%s Notice: SyncBrainConfigToNomad: %v", logPrefix, err)
+	}
+	if err := d.SyncHomepageConfigToNomad(ctx, configDir, syncCtx...); err != nil {
+		log.Printf("%s Notice: SyncHomepageConfigToNomad: %v", logPrefix, err)
+	}
+	if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
+		log.Printf("%s Notice: SyncServiceConfigsToNomad: %v", logPrefix, err)
+	}
 }
 
 // SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML).
@@ -1906,66 +1984,16 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 	h := sha256.Sum256(raw)
 	configHash := hex.EncodeToString(h[:])
 
-	nomadExec := d.getNomadExecutor()
-	if nomadExec == nil || d.nomadAddr == "" {
-		return nil
-	}
-
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 	isChangedInGit := !diffGated || fileInChangedList("config.yaml", syncCtx[0].ChangedFiles)
 
-	d.lastPushedConfigMu.Lock()
-	cachedHash := ""
-	if d.lastPushedConfig != nil {
-		cachedHash = d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"]
-	}
-	if !isChangedInGit {
-		if d.lastPushedConfig == nil {
-			d.lastPushedConfig = make(map[string]string)
-		}
-		d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"] = configHash
-		d.lastPushedConfigMu.Unlock()
-		return nil
-	}
-	if cachedHash == configHash {
-		d.lastPushedConfigMu.Unlock()
-		return nil
-	}
-	d.lastPushedConfigMu.Unlock()
-
-	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	args := []string{"var", "put", "-force", "nomad/jobs/brain", "CONFIG_YAML=@" + configPath}
-	if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
-		args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
-		baseEvt := HangarDeployEvent{
-			Event:     "deploy_started",
-			JobName:   "brain",
-			Repo:      syncCtx[0].Repo,
-			CommitSHA: syncCtx[0].CommitSHA,
-			PRNumber:  syncCtx[0].PRNumber,
-			TargetID:  syncCtx[0].TargetID,
-			Status:    "started",
-			Timestamp: time.Now().UTC(),
-		}
-		go d.DispatchDeployEvent(baseEvt)
-	}
-
-	stdout, stderr, err := nomadExec(valCtx, args...)
+	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/brain:CONFIG_YAML", "nomad/jobs/brain", "brain", configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
 	if err != nil {
-		combined := string(append(stdout, stderr...))
-		return fmt.Errorf("failed updating Nomad variable nomad/jobs/brain: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
+		return err
 	}
-
-	d.lastPushedConfigMu.Lock()
-	if d.lastPushedConfig == nil {
-		d.lastPushedConfig = make(map[string]string)
+	if pushed {
+		log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/brain")
 	}
-	d.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"] = configHash
-	d.lastPushedConfigMu.Unlock()
-
-	log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/brain")
 	return nil
 }
 
@@ -2018,69 +2046,21 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 
 	configHash := hex.EncodeToString(h.Sum(nil))
 
-	nomadExec := d.getNomadExecutor()
-	if nomadExec == nil || d.nomadAddr == "" {
-		return nil
-	}
-
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 	isChangedInGit := !diffGated || homepageInChangedList(syncCtx[0].ChangedFiles)
 
-	d.lastPushedConfigMu.Lock()
-	cachedHash := ""
-	if d.lastPushedConfig != nil {
-		cachedHash = d.lastPushedConfig["nomad/jobs/homepage"]
-	}
-	if !isChangedInGit {
-		if d.lastPushedConfig == nil {
-			d.lastPushedConfig = make(map[string]string)
-		}
-		d.lastPushedConfig["nomad/jobs/homepage"] = configHash
-		d.lastPushedConfigMu.Unlock()
-		return nil
-	}
-	if cachedHash == configHash {
-		d.lastPushedConfigMu.Unlock()
-		return nil
-	}
-	d.lastPushedConfigMu.Unlock()
-
-	valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	args := []string{"var", "put", "-force", "nomad/jobs/homepage", "CONFIG_HASH=" + configHash}
+	varArgs := []string{"CONFIG_HASH=" + configHash}
 	if len(raw) > 0 {
-		args = append(args, "HOMEPAGE_YAML=@"+homepageConfigPath)
-	}
-	if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
-		args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
-		baseEvt := HangarDeployEvent{
-			Event:     "deploy_started",
-			JobName:   "homepage",
-			Repo:      syncCtx[0].Repo,
-			CommitSHA: syncCtx[0].CommitSHA,
-			PRNumber:  syncCtx[0].PRNumber,
-			TargetID:  syncCtx[0].TargetID,
-			Status:    "started",
-			Timestamp: time.Now().UTC(),
-		}
-		go d.DispatchDeployEvent(baseEvt)
+		varArgs = append(varArgs, "HOMEPAGE_YAML=@"+homepageConfigPath)
 	}
 
-	stdout, stderr, err := nomadExec(valCtx, args...)
+	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/homepage", "nomad/jobs/homepage", "homepage", configHash, isChangedInGit, varArgs, syncCtx)
 	if err != nil {
-		combined := string(append(stdout, stderr...))
-		return fmt.Errorf("failed updating Nomad variable nomad/jobs/homepage: %s (%w)", SanitizeLog(strings.TrimSpace(combined)), err)
+		return err
 	}
-
-	d.lastPushedConfigMu.Lock()
-	if d.lastPushedConfig == nil {
-		d.lastPushedConfig = make(map[string]string)
+	if pushed {
+		log.Printf("[Hangar:Nomad] Successfully pushed homepage config to nomad/jobs/homepage (hash=%s)", configHash[:12])
 	}
-	d.lastPushedConfig["nomad/jobs/homepage"] = configHash
-	d.lastPushedConfigMu.Unlock()
-
-	log.Printf("[Hangar:Nomad] Successfully pushed homepage config to nomad/jobs/homepage (hash=%s)", configHash[:12])
 	return nil
 }
 
@@ -2148,11 +2128,6 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 			}
 		}
 
-		nomadExec := d.getNomadExecutor()
-		if nomadExec == nil || d.nomadAddr == "" {
-			continue
-		}
-
 		h := sha256.Sum256(raw)
 		configHash := hex.EncodeToString(h[:])
 		cacheKey := mapping.NomadVar + ":" + mapping.VarKey
@@ -2160,56 +2135,16 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 		isChangedInGit := !diffGated || fileInChangedList(mapping.RelPath, syncCtx[0].ChangedFiles)
 
-		d.lastPushedConfigMu.Lock()
-		cachedHash := ""
-		if d.lastPushedConfig != nil {
-			cachedHash = d.lastPushedConfig[cacheKey]
-		}
-		if !isChangedInGit {
-			if d.lastPushedConfig == nil {
-				d.lastPushedConfig = make(map[string]string)
-			}
-			d.lastPushedConfig[cacheKey] = configHash
-			d.lastPushedConfigMu.Unlock()
-			continue
-		}
-		if cachedHash == configHash {
-			d.lastPushedConfigMu.Unlock()
-			continue
-		}
-		d.lastPushedConfigMu.Unlock()
+		jobName := strings.TrimPrefix(mapping.NomadVar, "nomad/jobs/")
+		varArgs := []string{mapping.VarKey + "=@" + filePath}
 
-		valCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		args := []string{"var", "put", "-force", mapping.NomadVar, mapping.VarKey + "=@" + filePath}
-		if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
-			args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
-			baseEvt := HangarDeployEvent{
-				Event:     "deploy_started",
-				JobName:   strings.TrimPrefix(mapping.NomadVar, "nomad/jobs/"),
-				Repo:      syncCtx[0].Repo,
-				CommitSHA: syncCtx[0].CommitSHA,
-				PRNumber:  syncCtx[0].PRNumber,
-				TargetID:  syncCtx[0].TargetID,
-				Status:    "started",
-				Timestamp: time.Now().UTC(),
-			}
-			go d.DispatchDeployEvent(baseEvt)
-		}
-		stdout, stderr, err := nomadExec(valCtx, args...)
-		cancel()
+		pushed, err := d.pushNomadConfigVar(ctx, cacheKey, mapping.NomadVar, jobName, configHash, isChangedInGit, varArgs, syncCtx)
 		if err != nil {
-			combined := string(append(stdout, stderr...))
-			return fmt.Errorf("failed updating Nomad variable %s: %s (%w)", mapping.NomadVar, SanitizeLog(strings.TrimSpace(combined)), err)
+			return err
 		}
-
-		d.lastPushedConfigMu.Lock()
-		if d.lastPushedConfig == nil {
-			d.lastPushedConfig = make(map[string]string)
+		if pushed {
+			log.Printf("[Hangar:Nomad] Successfully pushed %s to %s", mapping.VarKey, mapping.NomadVar)
 		}
-		d.lastPushedConfig[cacheKey] = configHash
-		d.lastPushedConfigMu.Unlock()
-
-		log.Printf("[Hangar:Nomad] Successfully pushed %s to %s", mapping.VarKey, mapping.NomadVar)
 	}
 
 	return nil
@@ -2626,22 +2561,11 @@ func (d *SyncDaemon) getChangedFiles(ctx context.Context, repoPath, prevHead, cu
 	if prevHead == "" || currHead == "" || prevHead == currHead {
 		return nil, nil
 	}
-	if isAllZeros(prevHead) {
-		outFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, "diff-tree", "--no-commit-id", "--name-only", "-r", currHead)
-		if errFallback != nil {
-			return nil, errFallback
-		}
-		return splitLines(string(outFallback)), nil
-	}
-	out, _, err := d.getGitExecutor()(ctx, repoPath, "diff", "--name-only", prevHead, currHead)
+	out, err := d.runGitDiffWithFallback(ctx, repoPath, "--name-only", prevHead, currHead, currHead)
 	if err != nil {
-		outFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, "diff-tree", "--no-commit-id", "--name-only", "-r", currHead)
-		if errFallback != nil {
-			return nil, errFallback
-		}
-		return splitLines(string(outFallback)), nil
+		return nil, err
 	}
-	return splitLines(string(out)), nil
+	return splitLines(out), nil
 }
 
 func splitLines(s string) []string {
@@ -2985,15 +2909,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}
 
 		sc.CommitSHA = commitSHA
-		if err := d.SyncBrainConfigToNomad(ctx, repoPath, sc); err != nil {
-			log.Printf("[Hangar:GitPush] Notice: SyncBrainConfigToNomad: %v", err)
-		}
-		if err := d.SyncHomepageConfigToNomad(ctx, repoPath, sc); err != nil {
-			log.Printf("[Hangar:GitPush] Notice: SyncHomepageConfigToNomad: %v", err)
-		}
-		if err := d.SyncServiceConfigsToNomad(ctx, repoPath, sc); err != nil {
-			log.Printf("[Hangar:GitPush] Notice: SyncServiceConfigsToNomad: %v", err)
-		}
+		d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", repoPath, sc)
 
 		return resp, http.StatusOK
 	}
