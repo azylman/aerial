@@ -502,6 +502,29 @@ type PRRegistryUpdater interface {
 }
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
+// StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
+type StatusWidgetChunk struct {
+	Index         int      `json:"index"`
+	Repo          string   `json:"repo"`
+	Title         string   `json:"title"`
+	Status        string   `json:"status"`
+	PRNumber      int      `json:"pr_number,omitempty"`
+	DiffStat      string   `json:"diff_stat,omitempty"`
+	DeployingJobs []string `json:"deploying_jobs,omitempty"`
+}
+
+// StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
+type StatusWidgetRequest struct {
+	ChannelID string              `json:"channel_id"`
+	MessageID string              `json:"message_id,omitempty"`
+	ID        string              `json:"id"`
+	Tier      int                 `json:"tier,omitempty"`
+	Title     string              `json:"title"`
+	Status    string              `json:"status"`
+	Banner    string              `json:"banner,omitempty"`
+	Chunks    []StatusWidgetChunk `json:"chunks"`
+}
+
 type ChannelMessageContext struct {
 	AuthorName   string
 	Content      string
@@ -1148,6 +1171,7 @@ type OutboundDispatcher interface {
 	DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
+	DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error)
 }
 
 type DefaultOutboundDispatcher struct {
@@ -1298,6 +1322,45 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
 
 func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
 	return d.postBrainWithRetry(ctx, "/discord/message", "direct message", "brain internal message", req.ChannelID, 3, 500*time.Millisecond, false, req)
+}
+
+func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
+	if !IsValidDiscordSnowflake(payload.ChannelID) {
+		return "", fmt.Errorf("invalid discord snowflake channel id: %q", payload.ChannelID)
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal widget request: %w", err)
+	}
+	endpoint := d.brainURL + "/discord/widget"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("create widget request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := d.httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("dispatch widget request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read widget response body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("brain widget returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var res struct {
+		Status    string `json:"status"`
+		MessageID string `json:"message_id"`
+	}
+	if err := json.Unmarshal(respBody, &res); err != nil {
+		return "", fmt.Errorf("decode widget response: %w", err)
+	}
+	return res.MessageID, nil
 }
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
@@ -1613,13 +1676,182 @@ func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (s *RouterServer) dispatchDirectMessage(ctx context.Context, targetID, label, content string) error {
-	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+
+func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber int, statusOverride string, banner string, deployingJobs []string) error {
+	if s == nil || s.dispatcher == nil || repo == "" || prNumber <= 0 {
 		return nil
 	}
-	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: content}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error dispatching %s direct message: %v", label, err)
-		return fmt.Errorf("dispatch %s direct message: %w", label, err)
+	repo = normalizeRepo(repo)
+	qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	pgReg, ok := s.registry.(*PostgresPRRegistry)
+	if !ok || pgReg == nil || pgReg.pool == nil {
+		targetID, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNumber)
+		if err != nil {
+			log.Printf("[webhooks-router] [widget] resolve pr error: %v", err)
+		}
+		if targetID == "" {
+			return nil
+		}
+		widgetReq := StatusWidgetRequest{
+			ChannelID: targetID,
+			ID:        fmt.Sprintf("pr-%s-%d", repo, prNumber),
+			Title:     branch,
+			Status:    statusOverride,
+			Banner:    banner,
+			Chunks: []StatusWidgetChunk{
+				{
+					Index:         0,
+					Repo:          repo,
+					Title:         branch,
+					Status:        statusOverride,
+					PRNumber:      prNumber,
+					DeployingJobs: deployingJobs,
+				},
+			},
+		}
+		_, err = s.dispatcher.DispatchWidget(ctx, widgetReq)
+		return err
+	}
+
+	// 1. Check if (repo, prNumber) belongs to a vanadis_chunks row
+	selectChunkQuery := `
+		SELECT c.id, c.build_id, b.repo, b.thread_id, b.tier, b.objective, b.status, b.status_message_id
+		FROM vanadis_chunks c
+		JOIN vanadis_builds b ON c.build_id = b.id
+		WHERE c.repo = $1 AND c.pr_number = $2
+		ORDER BY c.updated_at DESC LIMIT 1`
+
+	var cID, buildID, bRepo, threadID, objective, bStatus, bStatusMsgID string
+	var tier int
+	err := pgReg.pool.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
+		&cID, &buildID, &bRepo, &threadID, &tier, &objective, &bStatus, &bStatusMsgID,
+	)
+	if err == nil && buildID != "" {
+		// Parent Vanadis build found
+		allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), diff_stat FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC`
+		rows, qErr := pgReg.pool.Query(qCtx, allChunksQuery, buildID)
+		if qErr != nil {
+			return fmt.Errorf("sync widget query chunks: %w", qErr)
+		}
+		var wChunks []StatusWidgetChunk
+		for rows.Next() {
+			var csID, csRepo, csTitle, csStatus, csDiff string
+			var csIdx, csPR int
+			if scanErr := rows.Scan(&csID, &csIdx, &csRepo, &csTitle, &csStatus, &csPR, &csDiff); scanErr != nil {
+				rows.Close()
+				return fmt.Errorf("sync widget scan chunk: %w", scanErr)
+			}
+			chunkRepo := csRepo
+			if chunkRepo == "" {
+				chunkRepo = bRepo
+			}
+			chunkStatus := csStatus
+			var cJobs []string
+			if csPR == prNumber {
+				if statusOverride != "" {
+					chunkStatus = statusOverride
+				}
+				if len(deployingJobs) > 0 {
+					cJobs = deployingJobs
+				}
+			}
+			wChunks = append(wChunks, StatusWidgetChunk{
+				Index:         csIdx,
+				Repo:          chunkRepo,
+				Title:         csTitle,
+				Status:        chunkStatus,
+				PRNumber:      csPR,
+				DiffStat:      csDiff,
+				DeployingJobs: cJobs,
+			})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("sync widget iterate chunks: %w", err)
+		}
+
+		widgetStatus := bStatus
+		if statusOverride == "completed" {
+			widgetStatus = "completed"
+		} else if statusOverride == "failed" {
+			widgetStatus = "failed"
+		}
+
+		widgetReq := StatusWidgetRequest{
+			ChannelID: threadID,
+			MessageID: bStatusMsgID,
+			ID:        buildID,
+			Tier:      tier,
+			Title:     objective,
+			Status:    widgetStatus,
+			Banner:    banner,
+			Chunks:    wChunks,
+		}
+
+		newMsgID, dispErr := s.dispatcher.DispatchWidget(qCtx, widgetReq)
+		if dispErr != nil {
+			return fmt.Errorf("dispatch vanadis widget: %w", dispErr)
+		}
+		if newMsgID != "" && newMsgID != bStatusMsgID {
+			updateMsgQuery := `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+			if _, execErr := pgReg.pool.Exec(qCtx, updateMsgQuery, newMsgID, buildID); execErr != nil {
+				log.Printf("[webhooks-router] [widget] warning updating vanadis status_message_id: %v", execErr)
+			}
+		}
+		return nil
+	}
+
+	// 2. Standalone PR in pr_registry
+	prQuery := `SELECT target_id, title, status, status_message_id, COALESCE(metadata->>'diff_stat', '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
+	var targetID, title, prStatus, prMsgID, diffStat string
+	err = pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &diffStat)
+	if errors.Is(err, pgx.ErrNoRows) || targetID == "" {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sync pr widget query pr: %w", err)
+	}
+
+	finalStatus := prStatus
+	if statusOverride != "" {
+		finalStatus = statusOverride
+	}
+	widgetTitle := title
+	if widgetTitle == "" {
+		widgetTitle = fmt.Sprintf("PR #%d", prNumber)
+	}
+
+	widgetReq := StatusWidgetRequest{
+		ChannelID: targetID,
+		MessageID: prMsgID,
+		ID:        fmt.Sprintf("pr-%s-%d", repo, prNumber),
+		Title:     widgetTitle,
+		Status:    finalStatus,
+		Banner:    banner,
+		Chunks: []StatusWidgetChunk{
+			{
+				Index:         0,
+				Repo:          repo,
+				Title:         widgetTitle,
+				Status:        finalStatus,
+				PRNumber:      prNumber,
+				DiffStat:      diffStat,
+				DeployingJobs: deployingJobs,
+			},
+		},
+	}
+
+	newMsgID, dispErr := s.dispatcher.DispatchWidget(qCtx, widgetReq)
+	if dispErr != nil {
+		return fmt.Errorf("dispatch pr widget: %w", dispErr)
+	}
+	if newMsgID != "" && newMsgID != prMsgID {
+		updatePRMsgQuery := `UPDATE pr_registry SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE repo = $2 AND pr_number = $3`
+		if _, execErr := pgReg.pool.Exec(qCtx, updatePRMsgQuery, newMsgID, repo, prNumber); execErr != nil {
+			log.Printf("[webhooks-router] [widget] warning updating pr status_message_id: %v", execErr)
+		}
 	}
 	return nil
 }
@@ -1685,7 +1917,6 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	if res == nil || !res.Matched || !res.Advanced {
 		return nil
 	}
-	total := len(res.Chunks)
 	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if s.riverClient != nil {
 			if err := s.insertRiverJob(ctx, VanadisExecuteChunkArgs{
@@ -1695,18 +1926,17 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 				return fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
 			}
 		}
-		dmMsg := fmt.Sprintf("⚡ **(Build: %s, Chunk %d/%d)** Merged PR #%d (%s) — advancing to Chunk %d/%d",
-			res.BuildID, res.MergedChunkIndex+1, total, prNumber, res.MergedChunkTitle, res.NextChunkIndex+1, total)
-		if err := s.dispatchDirectMessage(ctx, res.ThreadID, "vanadis_chunk_advanced", dmMsg); err != nil {
-			log.Printf("[webhooks-router] [vanadis] warning dispatching chunk advancement message for build %s: %v", res.BuildID, err)
+		if err := s.SyncPRWidget(ctx, repo, prNumber, "merged", "", nil); err != nil {
+			log.Printf("[webhooks-router] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
 		}
 		return nil
 	}
 	if res.BuildCompleted {
-		dmMsg := fmt.Sprintf("🏁 **(Build: %s, repo: %s)** All %d Vanadis build chunks merged!",
-			res.BuildID, cleanRepoName(res.Repo), total)
+		if err := s.SyncPRWidget(ctx, repo, prNumber, "completed", "", nil); err != nil {
+			log.Printf("[webhooks-router] [vanadis] warning syncing build completed widget for build %s: %v", res.BuildID, err)
+		}
 		prompt := formatVanadisBuildCompletedPrompt(res)
-		return s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", dmMsg, prompt)
+		return s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt)
 	}
 	return nil
 }
@@ -1746,7 +1976,13 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	prefix := formatDirectMessagePrefix(evt.PRNumber, evt.Repo)
 	switch evt.Event {
 	case "deploy_started":
-		return &evt, s.dispatchDirectMessage(ctx, evt.TargetID, "deploy_started", fmt.Sprintf("🚀 %sStarting deploy for %s", prefix, evt.JobName))
+		if evt.PRNumber > 0 {
+			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "deploying", "", []string{evt.JobName}); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing deploy_started widget: %v", err)
+				return &evt, err
+			}
+		}
+		return &evt, nil
 	case "deploy_success":
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
@@ -1763,16 +1999,25 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
 		}
 		dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
+		banner := fmt.Sprintf("Deployment failed for %s", evt.JobName)
+		if evt.Event == "deploy_rollback" {
+			banner = fmt.Sprintf("Deployment failed and rolled back for %s", evt.JobName)
+		}
+		if evt.PRNumber > 0 {
+			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "failed", banner, nil); err == nil {
+				dmMsg = ""
+			}
+		}
 		prompt := formatErrorDetailsBlock(
 			fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 			evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
 		)
 		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt)
 	case "sync_success":
-		if err := s.dispatchDirectMessage(ctx, evt.TargetID, "sync_success", fmt.Sprintf("🔄 %sGit file sync completed", prefix)); err != nil {
-			return &evt, err
-		}
 		if evt.PRNumber > 0 {
+			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "merged", "", nil); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing sync_success widget: %v", err)
+			}
 			if err := s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber); err != nil {
 				return &evt, err
 			}
@@ -1784,6 +2029,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			header = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
 		}
 		dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
+		if evt.PRNumber > 0 {
+			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "failed", "Git file sync failed", nil); err == nil {
+				dmMsg = ""
+			}
+		}
 		prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
 		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt)
 	}
@@ -1863,7 +2113,10 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 			log.Printf("[webhooks-router] [vanadis] warning checking deploy wake suppression for %s#%d: %v", repo, prNum, err)
 		} else if suppressed {
 			log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
-			return s.dispatchDirectMessage(ctx, targetID, "deploy_success", fmt.Sprintf("✅ %sContinuous Delivery deployment completed for job %s", formatDirectMessagePrefix(prNum, repo), jobName))
+			if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing suppressed deploy_success widget: %v", err)
+			}
+			return nil
 		}
 	}
 
@@ -1895,6 +2148,16 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 
 func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, checkName, repo, headSHA string, prNum int, details, checkURL string) error {
 	dmMsg := fmt.Sprintf("❌ %sCI check %q failed. Following up...", formatDirectMessagePrefix(prNum, repo), checkName)
+	if prNum > 0 {
+		banner := fmt.Sprintf("CI check %q failed", checkName)
+		if s.registry != nil {
+			if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
+				if err := s.SyncPRWidget(ctx, repo, prNum, "failed", banner, nil); err == nil {
+					dmMsg = ""
+				}
+			}
+		}
+	}
 	var urlLine string
 	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
 		urlLine = "Check URL: " + cleanURL
@@ -1909,6 +2172,15 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
 	dmMsg := fmt.Sprintf("⛔ %sMerge conflict detected. Following up...", formatDirectMessagePrefix(prNum, repo))
+	if prNum > 0 {
+		if s.registry != nil {
+			if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
+				if err := s.SyncPRWidget(ctx, repo, prNum, "conflict", "Merge conflict detected", nil); err == nil {
+					dmMsg = ""
+				}
+			}
+		}
+	}
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
 	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt)
 }
@@ -2432,8 +2704,8 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 						return nil, err
 					}
 					res.TargetID = firstNonEmpty(res.TargetID, targetID)
-					if err := s.dispatchDirectMessage(ctx, res.TargetID, "pr_merged", fmt.Sprintf("🔀 %sMerged into main", formatDirectMessagePrefix(res.PRNumber, res.Repo))); err != nil {
-						return nil, err
+					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "merged", "", nil); err != nil {
+						log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
 					if !isHangarSyncedRepo(res.Repo) {
 						if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
@@ -2448,6 +2720,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					res.TargetID = firstNonEmpty(res.TargetID, targetID)
 					if _, err := s.registry.FailVanadisChunkByPR(ctx, res.Repo, res.PRNumber); err != nil {
 						log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
+					}
+					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "closed", "", nil); err != nil {
+						log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
 				}
 			case "synchronize":

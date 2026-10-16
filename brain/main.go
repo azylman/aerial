@@ -1034,7 +1034,7 @@ type PRRegisterRequest struct {
 	DiffStat       string `json:"diff_stat,omitempty"`
 }
 
-func handlePRRegister(store db.Store) http.HandlerFunc {
+func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
@@ -1113,11 +1113,100 @@ func handlePRRegister(store db.Store) http.HandlerFunc {
 			return
 		}
 
-		if chunkID := strings.TrimSpace(req.VanadisChunkID); chunkID != "" {
+		chunkID := strings.TrimSpace(req.VanadisChunkID)
+		if chunkID != "" {
 			if err := store.AttachVanadisChunkPR(r.Context(), chunkID, req.PRNumber, strings.TrimSpace(req.DiffStat)); err != nil {
 				log.Printf("[HTTP] Failed to attach PR #%d to Vanadis chunk %s: %v", req.PRNumber, chunkID, err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to attach PR to Vanadis chunk"})
 				return
+			}
+		}
+
+		var activePool *queue.WorkerPool
+		if len(pool) > 0 && pool[0] != nil {
+			activePool = pool[0]
+		}
+
+		if activePool != nil {
+			if chunkID != "" {
+				chunk, err := store.GetVanadisChunk(r.Context(), chunkID)
+				if err != nil {
+					log.Printf("[HTTP] [pr_register] warning loading chunk %s for widget: %v", chunkID, err)
+				} else if chunk != nil {
+					build, chunks, err := store.GetVanadisBuild(r.Context(), chunk.BuildID)
+					if err != nil {
+						log.Printf("[HTTP] [pr_register] warning loading build %s for widget: %v", chunk.BuildID, err)
+					} else if build != nil {
+						widgetChunks := make([]discord.StatusWidgetChunk, len(chunks))
+						for i, c := range chunks {
+							cRepo := c.Repo
+							if cRepo == "" {
+								cRepo = build.Repo
+							}
+							widgetChunks[i] = discord.StatusWidgetChunk{
+								Index:    c.ChunkIndex,
+								Repo:     cRepo,
+								Title:    c.Title,
+								Status:   c.Status,
+								PRNumber: c.PRNumber,
+								DiffStat: c.DiffStat,
+							}
+						}
+						widgetReq := discord.StatusWidgetRequest{
+							ID:        build.ID,
+							ChannelID: build.ThreadID,
+							MessageID: build.StatusMessageID,
+							Tier:      build.Tier,
+							Title:     build.Objective,
+							Status:    build.Status,
+							Chunks:    widgetChunks,
+						}
+						if msgID, err := activePool.DeliverStatusWidget(widgetReq); err != nil {
+							log.Printf("[HTTP] [pr_register] warning delivering vanadis build widget for build %s: %v", build.ID, err)
+						} else if msgID != "" && msgID != build.StatusMessageID {
+							if err := store.UpdateVanadisBuildStatusMessageID(r.Context(), build.ID, msgID); err != nil {
+								log.Printf("[HTTP] [pr_register] warning persisting status_message_id for build %s: %v", build.ID, err)
+							}
+						}
+					}
+				}
+			} else if req.TargetID != "" {
+				prTitle := req.Title
+				if prTitle == "" {
+					prTitle = fmt.Sprintf("PR #%d", req.PRNumber)
+				}
+				existingPR, err := store.GetPRByNumber(r.Context(), req.Repo, req.PRNumber)
+				if err != nil {
+					log.Printf("[HTTP] [pr_register] info loading PR %s#%d for widget: %v", req.Repo, req.PRNumber, err)
+				}
+				msgID := ""
+				if existingPR != nil {
+					msgID = existingPR.StatusMessageID
+				}
+				widgetReq := discord.StatusWidgetRequest{
+					ID:        fmt.Sprintf("pr-%s-%d", req.Repo, req.PRNumber),
+					ChannelID: req.TargetID,
+					MessageID: msgID,
+					Title:     prTitle,
+					Status:    "open",
+					Chunks: []discord.StatusWidgetChunk{
+						{
+							Index:    0,
+							Repo:     req.Repo,
+							Title:    prTitle,
+							Status:   "open",
+							PRNumber: req.PRNumber,
+							DiffStat: req.DiffStat,
+						},
+					},
+				}
+				if newMsgID, err := activePool.DeliverStatusWidget(widgetReq); err != nil {
+					log.Printf("[HTTP] [pr_register] warning delivering standalone PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
+				} else if newMsgID != "" && newMsgID != msgID {
+					if err := store.UpdatePRStatusMessageID(r.Context(), req.Repo, req.PRNumber, newMsgID); err != nil {
+						log.Printf("[HTTP] [pr_register] warning persisting status_message_id for PR %s#%d: %v", req.Repo, req.PRNumber, err)
+					}
+				}
 			}
 		}
 
@@ -1217,7 +1306,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/facts", handleFacts(store))
 	mux.HandleFunc("/schedules", handleSchedules(store))
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
-	mux.HandleFunc("/internal/pr/register", handlePRRegister(store))
+	mux.HandleFunc("/internal/pr/register", handlePRRegister(store, pool))
 	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
 		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
 			if err := writeMetaDirFn(dir); err != nil {

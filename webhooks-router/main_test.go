@@ -345,6 +345,10 @@ type mockOutboundDispatcher struct {
 	imageReadyErr      error
 	promptErr          error
 	directMessageErr   error
+	widgetErr          error
+	widgetReturnMsgID  string
+	widgetCalls        []StatusWidgetRequest
+	widgetCh           chan StatusWidgetRequest
 	matchedJobs        map[string][]string
 }
 
@@ -430,6 +434,28 @@ func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]DirectMessageRequest(nil), m.directMessageCalls...)
+}
+
+func (m *mockOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
+	m.mu.Lock()
+	m.widgetCalls = append(m.widgetCalls, payload)
+	ch := m.widgetCh
+	msgID := m.widgetReturnMsgID
+	err := m.widgetErr
+	m.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- payload:
+		default:
+		}
+	}
+	return msgID, err
+}
+
+func (m *mockOutboundDispatcher) WidgetCalls() []StatusWidgetRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]StatusWidgetRequest(nil), m.widgetCalls...)
 }
 
 func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp OutboundDispatcher, riverInserter ...RiverInserter) *RouterServer {
@@ -1634,14 +1660,10 @@ func TestProcessGitHubEvent_RegistryAndDispatch(t *testing.T) {
 			t.Fatalf("expected still 1 prompt dispatch for duplicate, got %d", len(mockDisp.PromptCalls()))
 		}
 
-		// 4. pull_request closed+merged dispatches direct message
+		// 4. pull_request closed+merged updates widget via SyncPRWidget (suppresses direct message)
 		prMergedPayload := `{"action":"closed","number":542,"pull_request":{"number":542,"merged":true,"head":{"ref":"feat/batch1","sha":"head542"},"merge_commit_sha":"merge542"},"repository":{"full_name":"azylman/aerial"}}`
 		if res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merge", []byte(prMergedPayload)); err != nil || res.PRNumber != 542 || res.Action != "closed" {
 			t.Fatalf("PR merged event failed: err=%v, res=%+v", err, res)
-		}
-		dmCalls := mockDisp.DirectMessageCalls()
-		if len(dmCalls) == 0 || dmCalls[len(dmCalls)-1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[len(dmCalls)-1].Content, "🔀 **(PR: #542, repo: aerial)** Merged into main") {
-			t.Errorf("unexpected pr_merged direct message: %+v", dmCalls)
 		}
 
 		// 5. pull_request auto_merge_disabled dispatches conflict DM + prompt
@@ -1649,7 +1671,7 @@ func TestProcessGitHubEvent_RegistryAndDispatch(t *testing.T) {
 		if res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-amd", []byte(amdPayload)); err != nil || res.Action != "auto_merge_disabled" || res.PRNumber != 543 {
 			t.Fatalf("auto_merge_disabled failed: err=%v, res=%+v", err, res)
 		}
-		dmCalls = mockDisp.DirectMessageCalls()
+		dmCalls := mockDisp.DirectMessageCalls()
 		pCalls = mockDisp.PromptCalls()
 		if !strings.Contains(dmCalls[len(dmCalls)-1].Content, "⛔ **(PR: #543, repo: aerial)** Merge conflict detected. Following up...") ||
 			!strings.Contains(pCalls[len(pCalls)-1].Prompt, "Merge conflict detected on PR #543") {
@@ -1987,9 +2009,8 @@ func TestProcessHangarEvent(t *testing.T) {
 					TargetID:  "1555405874565091380",
 					Status:    "started",
 				},
-				wantDMs:     1,
+				wantDMs:     0,
 				wantPrompts: 0,
-				wantDMSub:   "🚀 **(PR: #527, repo: aerial)** Starting deploy for brain",
 			},
 			{
 				name: "deploy_success valid snowflake with channel context",
@@ -2002,7 +2023,7 @@ func TestProcessHangarEvent(t *testing.T) {
 					TargetID:  "1555405874565091380",
 					Status:    "success",
 				},
-				wantDMs:     1,
+				wantDMs:     0,
 				wantPrompts: 1,
 				wantPrSub: []string{
 					"Continuous Delivery deployment completed for job brain",
@@ -2023,9 +2044,8 @@ func TestProcessHangarEvent(t *testing.T) {
 					Status:    "rollback",
 					Details:   strings.Repeat("error detail line\n", 50),
 				},
-				wantDMs:     2,
+				wantDMs:     0,
 				wantPrompts: 2,
-				wantDMSub:   "💥 **(PR: #529, repo: aerial)** Deployment failed and rolled back for webhooks-router. Following up...",
 				wantPrSub: []string{
 					"Deployment failed and rolled back",
 					"Please investigate and fix",
@@ -2044,9 +2064,8 @@ func TestProcessHangarEvent(t *testing.T) {
 					Status:    "failed",
 					Details:   "exit status 1",
 				},
-				wantDMs:     3,
+				wantDMs:     0,
 				wantPrompts: 3,
-				wantDMSub:   "💥 **(PR: #530, repo: aerial)** Deployment failed for hangar. Following up...",
 				wantPrSub: []string{
 					"Deployment failed for job hangar",
 					"Please investigate and fix",
@@ -2060,9 +2079,8 @@ func TestProcessHangarEvent(t *testing.T) {
 					CommitSHA: "sha999",
 					TargetID:  "1555405874565091380",
 				},
-				wantDMs:     4,
+				wantDMs:     0,
 				wantPrompts: 3,
-				wantDMSub:   "🔄 **(repo: aerial-config)** Git file sync completed",
 			},
 			{
 				name: "sync_failed with details",
@@ -2073,7 +2091,7 @@ func TestProcessHangarEvent(t *testing.T) {
 					TargetID:  "1555405874565091380",
 					Details:   "merge conflict in rules/persona",
 				},
-				wantDMs:     5,
+				wantDMs:     1,
 				wantPrompts: 4,
 				wantDMSub:   "⚠️ **(repo: aerial-config)** Git file sync failed. Following up...",
 				wantPrSub: []string{
@@ -2089,7 +2107,7 @@ func TestProcessHangarEvent(t *testing.T) {
 					JobName:  "hangar",
 					TargetID: "not-a-snowflake",
 				},
-				wantDMs:     5,
+				wantDMs:     1,
 				wantPrompts: 4,
 			},
 			{
@@ -2099,7 +2117,7 @@ func TestProcessHangarEvent(t *testing.T) {
 					JobName:  "hangar",
 					TargetID: "not-a-snowflake",
 				},
-				wantDMs:     5,
+				wantDMs:     1,
 				wantPrompts: 4,
 			},
 			{
@@ -2113,9 +2131,8 @@ func TestProcessHangarEvent(t *testing.T) {
 					Repo:      "azylman/aerial-config",
 					CommitSHA: "dccc646186d7bf7d17efa6cac6f730d17f66125b",
 				},
-				wantDMs:     6,
+				wantDMs:     1,
 				wantPrompts: 4,
-				wantDMSub:   "🔄 **(PR: #241, repo: aerial-config)** Git file sync completed",
 			},
 			{
 				name: "deploy_success on aerial-config",
@@ -2128,7 +2145,7 @@ func TestProcessHangarEvent(t *testing.T) {
 					TargetID:  "1555405874565091380",
 					Status:    "success",
 				},
-				wantDMs:     6,
+				wantDMs:     1,
 				wantPrompts: 5,
 				wantPrSub: []string{
 					"Continuous Delivery deployment completed for job homepage on azylman/aerial-config",
@@ -2145,9 +2162,8 @@ func TestProcessHangarEvent(t *testing.T) {
 					Status:    "failed",
 					Details:   "merge conflict in rules/foo.md",
 				},
-				wantDMs:     7,
+				wantDMs:     1,
 				wantPrompts: 6,
-				wantDMSub:   "⚠️ **(PR: #542, repo: aerial)** Git file sync failed. Following up...",
 				wantPrSub: []string{
 					"Git sync failed for repo azylman/aerial",
 					"merge conflict in rules/foo.md",
@@ -2178,8 +2194,8 @@ func TestProcessHangarEvent(t *testing.T) {
 			}
 		}
 
-		// Error propagation when DispatchDirectMessage fails on deploy_started
-		mockDisp.directMessageErr = errors.New("brain offline")
+		// Error propagation when DispatchWidget fails on deploy_started
+		mockDisp.widgetErr = errors.New("brain offline")
 		_, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
 			Event:     "deploy_started",
 			Repo:      "azylman/aerial",
@@ -3403,10 +3419,7 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 		if len(inserter.insertedVanadisJobs) != 1 || inserter.insertedVanadisJobs[0].BuildID != "build-mid" || inserter.insertedVanadisJobs[0].ChunkIndex != 1 {
 			t.Fatalf("expected VanadisExecuteChunkArgs{build-mid, 1}, got %+v", inserter.insertedVanadisJobs)
 		}
-		dms := disp.DirectMessageCalls()
-		if len(dms) != 1 || !strings.Contains(dms[0].Content, "Chunk 1/2") || !strings.Contains(dms[0].Content, "Chunk 2/2") {
-			t.Fatalf("unexpected advancement DM: %+v", dms)
-		}
+		// Mid-run advancement updates widget in-place (no chat DM)
 
 		// 5. River insert error during mid-run advancement
 		inserter.err = errors.New("river insert failed")
@@ -3438,8 +3451,9 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 		if err := srv.advanceVanadisChunk(ctx, "aerial", 42); err != nil {
 			t.Fatalf("unexpected error on build completion: %v", err)
 		}
-		if len(disp.DirectMessageCalls()) != 1 || !strings.Contains(disp.DirectMessageCalls()[0].Content, "All 2 Vanadis build chunks merged!") {
-			t.Fatalf("expected completion DM, got %+v", disp.DirectMessageCalls())
+		// Final build completion updates widget in-place with dmMsg: "" so only completion prompt runs
+		if len(disp.DirectMessageCalls()) != 0 {
+			t.Fatalf("expected 0 direct messages on build completion, got %+v", disp.DirectMessageCalls())
 		}
 		if len(disp.PromptCalls()) != 1 || !strings.Contains(disp.PromptCalls()[0].Prompt, "Vanadis build build-done completed") {
 			t.Fatalf("expected completion prompt, got %+v", disp.PromptCalls())
@@ -3570,8 +3584,9 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 		if len(disp.PromptCalls()) != 0 {
 			t.Fatalf("expected 0 /prompt calls when suppressed, got %d", len(disp.PromptCalls()))
 		}
-		if len(disp.DirectMessageCalls()) != 1 || !strings.Contains(disp.DirectMessageCalls()[0].Content, "Continuous Delivery deployment completed for job vanadis") {
-			t.Fatalf("expected deploy_success direct message, got %+v", disp.DirectMessageCalls())
+		// Mid-run deploy_success updates widget in-place (no chat DM)
+		if len(disp.DirectMessageCalls()) != 0 {
+			t.Fatalf("expected 0 direct messages on suppressed deploy, got %+v", disp.DirectMessageCalls())
 		}
 
 		// 2. Suppression check error logs warning and falls back to normal /prompt dispatch
@@ -3946,3 +3961,152 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	}
 }
 
+
+func TestSyncPRWidget_Unit(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil receiver / dispatcher / invalid params
+	var nilSrv *RouterServer
+	if err := nilSrv.SyncPRWidget(ctx, "aerial", 1, "", "", nil); err != nil {
+		t.Errorf("expected nil on nil server")
+	}
+
+	mockDisp := &mockOutboundDispatcher{
+		widgetReturnMsgID: "msg-widget-101",
+	}
+
+	// 2. Standalone PR with mock pool
+	pool := &mockVanadisPgxPool{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "FROM vanadis_chunks") {
+				return &mockVanadisPgxRow{scanFn: func(dest ...any) error { return pgx.ErrNoRows }}
+			}
+			if strings.Contains(sql, "FROM pr_registry") {
+				return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+					*dest[0].(*string) = "1555405874565091380"
+					*dest[1].(*string) = "feat: awesome feature"
+					*dest[2].(*string) = "open"
+					*dest[3].(*string) = "old-msg-id"
+					*dest[4].(*string) = "+10 -2"
+					return nil
+				}}
+			}
+			return &mockVanadisPgxRow{}
+		},
+		execFn: func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+			return pgconn.CommandTag{}, nil
+		},
+	}
+
+	reg := NewPostgresPRRegistry(pool)
+	srv := newTestRouter(Config{}, nil, reg, mockDisp)
+
+	err := srv.SyncPRWidget(ctx, "aerial", 101, "merged", "", nil)
+	if err != nil {
+		t.Fatalf("SyncPRWidget standalone PR failed: %v", err)
+	}
+	calls := mockDisp.WidgetCalls()
+	if len(calls) == 0 {
+		t.Fatalf("expected widget call dispatched")
+	}
+	lastCall := calls[len(calls)-1]
+	if lastCall.ID != "pr-azylman/aerial-101" || lastCall.Status != "merged" || lastCall.ChannelID != "1555405874565091380" {
+		t.Errorf("unexpected widget request: %+v", lastCall)
+	}
+
+	// 3. Vanadis chunk match with mock pool
+	vanadisPool := &mockVanadisPgxPool{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "FROM vanadis_chunks") {
+				return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+					*dest[0].(*string) = "chunk-1"
+					*dest[1].(*string) = "build-abc"
+					*dest[2].(*string) = "aerial"
+					*dest[3].(*string) = "1555405874565091380"
+					*dest[4].(*int) = 2
+					*dest[5].(*string) = "Vanadis Objective"
+					*dest[6].(*string) = "running"
+					*dest[7].(*string) = "old-build-msg"
+					return nil
+				}}
+			}
+			return &mockVanadisPgxRow{}
+		},
+		queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+			chunks := []VanadisChunkSummary{
+				{ID: "chunk-1", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 1", Status: "running", PRNumber: 102, DiffStat: "+5 -1"},
+			}
+			return &mockVanadisPgxRows{items: chunks}, nil
+		},
+		execFn: func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+			return pgconn.CommandTag{}, nil
+		},
+	}
+
+	srvVanadis := newTestRouter(Config{}, nil, NewPostgresPRRegistry(vanadisPool), mockDisp)
+	err = srvVanadis.SyncPRWidget(ctx, "aerial", 102, "deployed", "Deploying now", []string{"job-a"})
+	if err != nil {
+		t.Fatalf("SyncPRWidget vanadis failed: %v", err)
+	}
+	calls = mockDisp.WidgetCalls()
+	lastCall = calls[len(calls)-1]
+	if lastCall.ID != "build-abc" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 1 || lastCall.Chunks[0].Status != "deployed" {
+		t.Errorf("unexpected vanadis widget request: %+v", lastCall)
+	}
+}
+
+func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Invalid snowflake
+	disp := NewDefaultOutboundDispatcher("", "", nil)
+	if _, err := disp.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "bad"}); err == nil {
+		t.Errorf("expected error for invalid snowflake")
+	}
+
+	// 2. Server 200 OK
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/discord/widget" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+			"message_id": "msg-widget-dispatch-ok",
+		})
+	}))
+	defer ts.Close()
+
+	dispOK := NewDefaultOutboundDispatcher("", ts.URL, ts.Client())
+	msgID, err := dispOK.DispatchWidget(ctx, StatusWidgetRequest{
+		ChannelID: "1555405874565091380",
+		ID: "widget-1",
+	})
+	if err != nil || msgID != "msg-widget-dispatch-ok" {
+		t.Fatalf("DispatchWidget failed: msgID=%q, err=%v", msgID, err)
+	}
+
+	// 3. Server 400 Bad Request
+	ts400 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad payload"}`))
+	}))
+	defer ts400.Close()
+
+	disp400 := NewDefaultOutboundDispatcher("", ts400.URL, ts400.Client())
+	if _, err := disp400.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "1555405874565091380"}); err == nil {
+		t.Errorf("expected error on 400 status")
+	}
+
+	// 4. Server bad JSON response
+	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{not json`))
+	}))
+	defer tsBadJSON.Close()
+
+	dispBadJSON := NewDefaultOutboundDispatcher("", tsBadJSON.URL, tsBadJSON.Client())
+	if _, err := dispBadJSON.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "1555405874565091380"}); err == nil {
+		t.Errorf("expected error on bad JSON response")
+	}
+}
