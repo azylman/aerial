@@ -10,39 +10,43 @@ import (
 	"testing"
 )
 
-func TestConfigureSysProcAttr_Setpgid(t *testing.T) {
-	cmd := exec.Command("true")
-	configureSysProcAttr(cmd)
-
-	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+func TestRunnerPosix_ProcessGroupAndSignalHelpers(t *testing.T) {
+	// SysProcAttr Setpgid
+	cmdPgid := exec.Command("true")
+	configureSysProcAttr(cmdPgid)
+	if cmdPgid.SysProcAttr == nil || !cmdPgid.SysProcAttr.Setpgid {
 		t.Errorf("expected SysProcAttr.Setpgid=true")
 	}
-}
 
-func TestRunnerPosix_SignalAndTerminateHelpers(t *testing.T) {
+	// Nil / dead command terminateProcessGroup
 	terminateProcessGroup(nil)
-	cmd := exec.Command("true")
-	terminateProcessGroup(cmd)
+	cmdTrue := exec.Command("true")
+	terminateProcessGroup(cmdTrue)
 
+	// isProcessTerminatedBySignal nil check
 	if isProcessTerminatedBySignal(nil) {
 		t.Errorf("expected false for nil ExitError")
 	}
 
-	cmdAlive := exec.Command("sleep", "10")
-	configureSysProcAttr(cmdAlive)
-	if err := cmdAlive.Start(); err == nil {
-		terminateProcessGroup(cmdAlive)
-		err := cmdAlive.Wait()
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if !isProcessTerminatedBySignal(exitErr) {
-				t.Errorf("expected true from isProcessTerminatedBySignal for SIGTERM exit")
+	// Terminate process group with live process (sh -c "read _" with stdin pipe)
+	cmdAliveTerm := exec.Command("sh", "-c", "read _")
+	stdinTerm, err := cmdAliveTerm.StdinPipe()
+	if err == nil {
+		configureSysProcAttr(cmdAliveTerm)
+		if err := cmdAliveTerm.Start(); err == nil {
+			terminateProcessGroup(cmdAliveTerm)
+			_ = stdinTerm.Close()
+			err := cmdAliveTerm.Wait()
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				if !isProcessTerminatedBySignal(exitErr) {
+					t.Errorf("expected true from isProcessTerminatedBySignal for SIGTERM exit")
+				}
 			}
 		}
 	}
-}
 
-func TestRunnerPosix_KillHelpers(t *testing.T) {
+	// Ignorable kill errors
 	if isIgnorableKillError(nil) {
 		t.Errorf("expected false for nil")
 	}
@@ -56,31 +60,36 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 		t.Errorf("expected false for other error")
 	}
 
-	// Test killProcessGroup with nil and dead command
+	// killProcessGroup with nil and dead command
 	killProcessGroup(nil)
-	cmd := exec.Command("true")
-	killProcessGroup(cmd)
-	if err := cmd.Start(); err == nil {
-		_ = cmd.Wait()
-		killProcessGroup(cmd)
+	cmdKillDead := exec.Command("true")
+	killProcessGroup(cmdKillDead)
+	if err := cmdKillDead.Start(); err == nil {
+		_ = cmdKillDead.Wait()
+		killProcessGroup(cmdKillDead)
 	}
 
-	cmdAlive := exec.Command("sleep", "10")
-	configureSysProcAttr(cmdAlive)
-	if err := cmdAlive.Start(); err == nil {
-		killProcessGroup(cmdAlive)
-		err := cmdAlive.Wait()
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if !isProcessTerminatedBySignal(exitErr) {
-				t.Errorf("expected true from isProcessTerminatedBySignal for SIGKILL exit")
+	// Kill process group with live process (sh -c "read _" with stdin pipe)
+	cmdAliveKill := exec.Command("sh", "-c", "read _")
+	stdinKill, err := cmdAliveKill.StdinPipe()
+	if err == nil {
+		configureSysProcAttr(cmdAliveKill)
+		if err := cmdAliveKill.Start(); err == nil {
+			killProcessGroup(cmdAliveKill)
+			_ = stdinKill.Close()
+			err := cmdAliveKill.Wait()
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				if !isProcessTerminatedBySignal(exitErr) {
+					t.Errorf("expected true from isProcessTerminatedBySignal for SIGKILL exit")
+				}
 			}
 		}
 	}
 
-	// Test non-signaled exit (e.g. exit code 1) returns false from isProcessTerminatedBySignal
-	cmdExit := exec.Command("sh", "-c", "exit 1")
-	if err := cmdExit.Run(); err != nil {
+	// Non-signaled exit (exit code 1)
+	exitCmd := exec.Command("sh", "-c", "exit 1")
+	if err := exitCmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if isProcessTerminatedBySignal(exitErr) {
@@ -89,7 +98,7 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 		}
 	}
 
-	// Edge case process group calls with negative/zero pid or nil process
+	// Negative/zero PID or nil process edge cases
 	terminateProcessGroup(&exec.Cmd{Process: &os.Process{Pid: -1}})
 	terminateProcessGroup(&exec.Cmd{Process: &os.Process{Pid: 0}})
 	terminateProcessGroup(&exec.Cmd{})
@@ -97,7 +106,7 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 	killProcessGroup(&exec.Cmd{Process: &os.Process{Pid: 0}})
 	killProcessGroup(&exec.Cmd{})
 
-	// Test killProcessGroupWith and terminateProcessGroupWith with injected mocks
+	// Dependency-injected mocks for killProcessGroupWith and terminateProcessGroupWith
 	var mockSigKillCalled, mockProcKillCalled bool
 	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 98765}}
 	killProcessGroupWith(mockCmd, func(pid int, sig syscall.Signal) error {
@@ -126,6 +135,3 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 		t.Errorf("expected signal term mock to be called")
 	}
 }
-
-
-
