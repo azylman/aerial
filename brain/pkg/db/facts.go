@@ -133,46 +133,62 @@ func (ft *FactTime) Scan(src any) error {
 		ft.Time = v
 		ft.Valid = true
 		return nil
+	case *time.Time:
+		if v != nil {
+			ft.Time = *v
+			ft.Valid = true
+			return nil
+		}
+		ft.Time = time.Time{}
+		ft.Valid = false
+		return nil
 	case string:
-		for _, layout := range []string{
-			"2006-01-02 15:04:05.999999999 -0700 MST",
-			"2006-01-02 15:04:05.999999999 -0700 -0700",
-			"2006-01-02 15:04:05 -0700 MST",
-			time.RFC3339Nano,
-			time.RFC3339,
-			time.DateTime,
-			"2006-01-02 15:04:05.999999999-07:00",
-			"2006-01-02 15:04:05-07:00",
-			"2006-01-02 15:04:05.999999999",
-			"2006-01-02 15:04:05",
-			"2006-01-02T15:04:05Z",
-			"2006-01-02T15:04:05",
-		} {
-			if t, err := time.Parse(layout, v); err == nil {
-				ft.Time = t
-				ft.Valid = true
-				return nil
-			}
+		if strings.TrimSpace(v) == "" {
+			ft.Time = time.Time{}
+			ft.Valid = false
+			return nil
 		}
-		// Also try trimming any trailing monotonic clock info (e.g. " m=+0.001234567")
-		if idx := strings.Index(v, " m="); idx != -1 {
-			trimmed := v[:idx]
-			for _, layout := range []string{
-				"2006-01-02 15:04:05.999999999 -0700 MST",
-				"2006-01-02 15:04:05 -0700 MST",
-			} {
-				if t, err := time.Parse(layout, trimmed); err == nil {
-					ft.Time = t
-					ft.Valid = true
-					return nil
-				}
-			}
+		t, ok := ParseDBTime(v)
+		if !ok {
+			return fmt.Errorf("failed to parse FactTime from %q", v)
 		}
-		return fmt.Errorf("cannot parse %q into FactTime", v)
+		ft.Time = t
+		ft.Valid = true
+		return nil
 	case []byte:
-		return ft.Scan(string(v))
+		str := string(v)
+		if strings.TrimSpace(str) == "" {
+			ft.Time = time.Time{}
+			ft.Valid = false
+			return nil
+		}
+		t, ok := ParseDBTime(str)
+		if !ok {
+			return fmt.Errorf("failed to parse FactTime from %q", str)
+		}
+		ft.Time = t
+		ft.Valid = true
+		return nil
 	}
-	return fmt.Errorf("unsupported type %T for FactTime", src)
+	return fmt.Errorf("unsupported Scan, storing driver.Value type %T into type *db.FactTime", src)
+}
+
+func scanFact(scanner interface{ Scan(dest ...any) error }) (Fact, error) {
+	var f Fact
+	var createdAt, lastReinforced, lastDecayed FactTime
+	if err := scanner.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		return Fact{}, err
+	}
+	f.CreatedAt = createdAt.Time
+	f.LastReinforcedAt = lastReinforced.Time
+	if f.LastReinforcedAt.IsZero() {
+		f.LastReinforcedAt = f.CreatedAt
+	}
+	f.LastDecayedAt = lastDecayed.Time
+	if f.LastDecayedAt.IsZero() {
+		f.LastDecayedAt = f.CreatedAt
+	}
+	return f, nil
 }
 
 func cosineSimilarity(a, b []float32) float64 {
@@ -226,14 +242,10 @@ func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, li
 
 	var results []Fact
 	for rows.Next() {
-		var f Fact
-		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		f, err := scanFact(rows)
+		if err != nil {
 			return nil, err
 		}
-		f.CreatedAt = createdAt.Time
-		f.LastReinforcedAt = lastReinforced.Time
-		f.LastDecayedAt = lastDecayed.Time
 		results = append(results, f)
 	}
 	return results, rows.Err()
@@ -427,14 +439,10 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 
 	var facts []Fact
 	for rows.Next() {
-		var f Fact
-		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		f, err := scanFact(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan fact error: %w", err)
 		}
-		f.CreatedAt = createdAt.Time
-		f.LastReinforcedAt = lastReinforced.Time
-		f.LastDecayedAt = lastDecayed.Time
 		facts = append(facts, f)
 	}
 
@@ -616,14 +624,10 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 
 	facts := make([]Fact, 0)
 	for rows.Next() {
-		var f Fact
-		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		f, err := scanFact(rows)
+		if err != nil {
 			return nil, fmt.Errorf("failed to scan fact: %w", err)
 		}
-		f.CreatedAt = createdAt.Time
-		f.LastReinforcedAt = lastReinforced.Time
-		f.LastDecayedAt = lastDecayed.Time
 		facts = append(facts, f)
 	}
 

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
-	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 func TestNew_ConfigPointerInjection(t *testing.T) {
@@ -1302,11 +1301,10 @@ func TestTasksAndTriggers(t *testing.T) {
 	t.Logf("Active tasks found: %d", len(tasks))
 }
 
-func TestSessionTurnMapping(t *testing.T) {
+func TestSessionConversationMapping(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	// Conversation Mapping
 	err := SaveConversationMapping(database, "ext-1", "int-1")
 	if err != nil {
 		t.Fatalf("SaveConversationMapping failed: %v", err)
@@ -1321,31 +1319,6 @@ func TestSessionTurnMapping(t *testing.T) {
 	if err != nil || extID != "ext-1" {
 		t.Errorf("expected ext-1, got %s (err: %v)", extID, err)
 	}
-
-	// Turn State
-	err = RegisterTurn(database, "ext-1", "m-turn-1", "Turn prompt")
-	if err != nil {
-		t.Fatalf("RegisterTurn failed: %v", err)
-	}
-
-	err = SetTurnProcessing(database, "ext-1", true, "m-turn-1")
-	if err != nil {
-		t.Fatalf("SetTurnProcessing failed: %v", err)
-	}
-
-	turn, err := GetTurnState(database, "ext-1")
-	if err != nil || turn == nil {
-		t.Fatalf("GetTurnState failed: %v", err)
-	}
-	if !turn.IsProcessing {
-		t.Errorf("expected isProcessing true, got %v", turn.IsProcessing)
-	}
-
-	interrupted, err := GetInterruptedTurns(database)
-	if err != nil {
-		t.Fatalf("GetInterruptedTurns failed: %v", err)
-	}
-	t.Logf("Interrupted turns: %d", len(interrupted))
 }
 
 func TestFactEmbeddingAndThreadLookup(t *testing.T) {
@@ -1572,10 +1545,6 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	_ = RotateSessionID(nil, "th1", "s2")
 	_, _ = GetSessionTurnCount(nil, "th1")
 	_, _ = GetExternalConversationID(nil, "s1")
-	_ = RegisterTurn(nil, "th1", "m1", "prompt")
-	_ = SetTurnProcessing(nil, "th1", true, "m1")
-	_, _ = GetTurnState(nil, "th1")
-	_, _ = GetInterruptedTurns(nil)
 
 	// Facts
 	_, _ = InsertFact(nil, "cat", "fact", 1.0, nil)
@@ -1643,10 +1612,6 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	_ = RotateSessionID(closedDB, "th1", "s2")
 	_, _ = GetSessionTurnCount(closedDB, "th1")
 	_, _ = GetExternalConversationID(closedDB, "s1")
-	_ = RegisterTurn(closedDB, "th1", "m1", "prompt")
-	_ = SetTurnProcessing(closedDB, "th1", true, "m1")
-	_, _ = GetTurnState(closedDB, "th1")
-	_, _ = GetInterruptedTurns(closedDB)
 
 	// Facts
 	_, _ = InsertFact(closedDB, "cat", "fact", 1.0, vec)
@@ -2140,21 +2105,6 @@ func TestDB_SessionsAndSchedules_MoreBranches(t *testing.T) {
 		t.Errorf("expected empty extID, got %s, err: %v", extID, err)
 	}
 
-	// 2. SetTurnProcessing with and without message ID
-	if err := SetTurnProcessing(database, "th-1", true, ""); err != nil {
-		t.Errorf("unexpected error with empty message ID: %v", err)
-	}
-
-	_ = InsertMessage(database, Message{
-		ID:       "msg-turn-1",
-		ThreadID: "th-1",
-		Content:  "turn prompt",
-		Status:   StatusPending,
-	})
-	if err := SetTurnProcessing(database, "th-1", false, "msg-turn-1"); err != nil {
-		t.Errorf("unexpected error updating turn message: %v", err)
-	}
-
 	// 3. InsertMessageAndConsumeOneShot edge cases
 	if err := InsertMessageAndConsumeOneShot(nil, "s-1", Message{ID: "m-1"}); err == nil {
 		t.Error("expected error for nil database")
@@ -2539,47 +2489,6 @@ func TestDB_CloseWarnAndRollbackWarn(t *testing.T) {
 	rollbackWarn(tx2, "committed-tx")
 }
 
-func TestDB_ActiveTaskPersistence(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	_ = SaveSessionID(database, "thread-active-db", "sess-active-db")
-
-	tasks := []session.TaskMetadata{
-		{TaskID: "task-db-42", ToolName: "run_command", CommandLine: "sleep 20", StartedAt: time.Now()},
-	}
-
-	if err := SaveActiveTasks(database, "thread-active-db", tasks); err != nil {
-		t.Fatalf("SaveActiveTasks failed: %v", err)
-	}
-
-	loaded, err := GetSessionActiveTasks(database, "thread-active-db")
-	if err != nil {
-		t.Fatalf("GetSessionActiveTasks failed: %v", err)
-	}
-	if len(loaded) != 1 || loaded[0].TaskID != "task-db-42" {
-		t.Errorf("expected loaded task-db-42 from database, got %v", loaded)
-	}
-
-	// Nil / empty thread handling
-	if err := SaveActiveTasks(nil, "thread-active-db", tasks); err != nil {
-		t.Errorf("expected nil error on nil db")
-	}
-	if err := SaveActiveTasks(database, "", tasks); err != nil {
-		t.Errorf("expected nil error on empty threadID")
-	}
-	if l, err := GetSessionActiveTasks(nil, "thread-active-db"); l != nil || err != nil {
-		t.Errorf("expected nil, nil on nil db")
-	}
-	if l, err := GetSessionActiveTasks(database, ""); l != nil || err != nil {
-		t.Errorf("expected nil, nil on empty threadID")
-	}
-
-	// Non-existent thread
-	if l, err := GetSessionActiveTasks(database, "non-existent-thread"); l != nil || err != nil {
-		t.Errorf("expected nil, nil on non-existent thread, got %v, %v", l, err)
-	}
-}
 
 
 

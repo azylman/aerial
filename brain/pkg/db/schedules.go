@@ -93,6 +93,36 @@ func CreateOneShotSchedule(database DBTX, s OneShotSchedule) error {
 	return err
 }
 
+func scanOneShotRows(rows *sql.Rows) ([]OneShotSchedule, error) {
+	var results []OneShotSchedule
+	for rows.Next() {
+		var s OneShotSchedule
+		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
+			return nil, err
+		}
+		results = append(results, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func scanCronRows(rows *sql.Rows) ([]CronSchedule, error) {
+	var results []CronSchedule
+	for rows.Next() {
+		var c CronSchedule
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
+			return nil, err
+		}
+		results = append(results, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	if database == nil {
 		return nil, nil
@@ -107,15 +137,7 @@ func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	}
 	defer rows.Close()
 
-	var results []OneShotSchedule
-	for rows.Next() {
-		var s OneShotSchedule
-		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
-			return nil, err
-		}
-		results = append(results, s)
-	}
-	return results, nil
+	return scanOneShotRows(rows)
 }
 
 func DeleteOneShotSchedule(database DBTX, id string) error {
@@ -133,20 +155,6 @@ func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Messag
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
-	if msg.ID == "" {
-		return fmt.Errorf("message id cannot be empty")
-	}
-	if msg.Status == "" {
-		msg.Status = StatusPending
-	}
-	now := time.Now().UTC()
-	if msg.CreatedAt.IsZero() {
-		msg.CreatedAt = now
-	}
-	if msg.UpdatedAt.IsZero() {
-		msg.UpdatedAt = now
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -165,12 +173,7 @@ func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Messag
 		exec = tx
 	}
 
-	insertQuery := `
-	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, effort, error_message, response_text, schedule_run_id, created_at, updated_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-	ON CONFLICT (id) DO NOTHING;
-	`
-	if _, err := exec.ExecContext(ctx, insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount, msg.Effort, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
+	if err := InsertMessage(exec, msg); err != nil {
 		return err
 	}
 
@@ -212,15 +215,7 @@ func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, 
 	}
 	defer rows.Close()
 
-	var results []OneShotSchedule
-	for rows.Next() {
-		var s OneShotSchedule
-		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
-			return nil, err
-		}
-		results = append(results, s)
-	}
-	return results, nil
+	return scanOneShotRows(rows)
 }
 
 func CreateCronSchedule(database DBTX, c CronSchedule) error {
@@ -256,15 +251,7 @@ func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
 	}
 	defer rows.Close()
 
-	var results []CronSchedule
-	for rows.Next() {
-		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
-			return nil, err
-		}
-		results = append(results, c)
-	}
-	return results, nil
+	return scanCronRows(rows)
 }
 
 func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error) {
@@ -289,15 +276,7 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	}
 	defer rows.Close()
 
-	var results []CronSchedule
-	for rows.Next() {
-		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
-			return nil, err
-		}
-		results = append(results, c)
-	}
-	return results, nil
+	return scanCronRows(rows)
 }
 
 func UpdateCronScheduleEffort(database DBTX, id, effort string) error {
