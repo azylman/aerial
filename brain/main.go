@@ -2072,6 +2072,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		LowEffortProcessPool:    discordLowEffortPool,
 		MediumEffortProcessPool: discordMediumEffortPool,
 		VoiceProcessPool:        voicePool,
+		LLMFunc:                 ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
 		AmbientResolver:         ambientResolver,
 	})
 	pool.Start()

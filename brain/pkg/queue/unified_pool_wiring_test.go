@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"testing"
 
 	"github.com/azylman/aerial/brain/pkg/config"
@@ -225,6 +226,10 @@ func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
 					LowEffortProcessPool: lPool,
 					VoiceProcessPool:     vPool,
 				})
+				_, _ = pool.cfg.LLMFunc(context.Background(), "", "summarize")
+				if got := lSpawner.LastSpawnCfg().Model; got != "gemini-3.8-flash-low" {
+					t.Fatalf("expected auto-populated LLMFunc to use LowEffortProcessPool model gemini-3.8-flash-low, got %q (primary=%q)", got, pSpawner.LastSpawnCfg().Model)
+				}
 				pool.MarkDirty()
 				pool.Stop()
 				return
