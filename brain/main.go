@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -176,6 +177,41 @@ type DirectMessageRequest struct {
 	Text      string `json:"text,omitempty"`
 }
 
+func readPostJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if closeErr := r.Body.Close(); closeErr != nil {
+		log.Printf("[HTTP] Warning closing request body: %v", closeErr)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+		return false
+	}
+	if err := json.Unmarshal(body, dst); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+		return false
+	}
+	return true
+}
+
+func writeDiscordDeliveryError(w http.ResponseWriter, err error, failPrefix string) {
+	if strings.Contains(err.Error(), "discord session is not connected") || strings.Contains(err.Error(), "discord session is nil") {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Discord session not connected"})
+		return
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) {
+		if restErr.Response != nil && restErr.Response.StatusCode >= 400 && restErr.Response.StatusCode < 500 {
+			writeJSON(w, restErr.Response.StatusCode, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+			return
+		}
+	}
+	if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "cannot send") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%s: %v", failPrefix, err)})
+}
+
 func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -189,18 +225,8 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if closeErr := r.Body.Close(); closeErr != nil {
-			log.Printf("[HTTP] Warning closing direct message request body: %v", closeErr)
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
-			return
-		}
-
 		var req DirectMessageRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+		if !readPostJSON(w, r, &req) {
 			return
 		}
 
@@ -227,22 +253,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		if err := pool.DeliverDirect(targetID, content); err != nil {
-			if strings.Contains(err.Error(), "discord session is not connected") || strings.Contains(err.Error(), "discord session is nil") {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Discord session not connected"})
-				return
-			}
-			var restErr *discordgo.RESTError
-			if errors.As(err, &restErr) {
-				if restErr.Response != nil && restErr.Response.StatusCode >= 400 && restErr.Response.StatusCode < 500 {
-					writeJSON(w, restErr.Response.StatusCode, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
-					return
-				}
-			}
-			if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "cannot send") {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to deliver message: %v", err)})
+			writeDiscordDeliveryError(w, err, "Failed to deliver message")
 			return
 		}
 
@@ -263,18 +274,8 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if closeErr := r.Body.Close(); closeErr != nil {
-			log.Printf("[HTTP] Warning closing status widget request body: %v", closeErr)
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
-			return
-		}
-
 		var req discord.StatusWidgetRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+		if !readPostJSON(w, r, &req) {
 			return
 		}
 
@@ -295,22 +296,7 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 
 		msgID, err := pool.DeliverStatusWidget(req)
 		if err != nil {
-			if strings.Contains(err.Error(), "discord session is not connected") || strings.Contains(err.Error(), "discord session is nil") {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Discord session not connected"})
-				return
-			}
-			var restErr *discordgo.RESTError
-			if errors.As(err, &restErr) {
-				if restErr.Response != nil && restErr.Response.StatusCode >= 400 && restErr.Response.StatusCode < 500 {
-					writeJSON(w, restErr.Response.StatusCode, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
-					return
-				}
-			}
-			if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "cannot send") {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to deliver widget: %v", err)})
+			writeDiscordDeliveryError(w, err, "Failed to deliver widget")
 			return
 		}
 
@@ -688,6 +674,28 @@ func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 	}
 }
 
+func parseLimitOffset(q url.Values, defaultLimit, maxLimit int) (limit, offset int) {
+	limit = defaultLimit
+	if lStr := q.Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			if maxLimit <= 0 || l <= maxLimit {
+				limit = l
+			}
+		}
+	}
+	if oStr := q.Get("offset"); oStr != "" {
+		if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+	return limit, offset
+}
+
+func setNoCacheJSONHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+}
+
 func handleFacts(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -701,19 +709,7 @@ func handleFacts(store db.Store) http.HandlerFunc {
 		}
 
 		q := r.URL.Query()
-		limit := 0
-		if lStr := q.Get("limit"); lStr != "" {
-			if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
-				limit = l
-			}
-		}
-
-		offset := 0
-		if oStr := q.Get("offset"); oStr != "" {
-			if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
-				offset = o
-			}
-		}
+		limit, offset := parseLimitOffset(q, 0, 0)
 
 		category := strings.TrimSpace(q.Get("category"))
 		search := strings.TrimSpace(q.Get("q"))
@@ -735,15 +731,9 @@ func handleFacts(store db.Store) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		setNoCacheJSONHeaders(w)
 		writeJSON(w, http.StatusOK, result)
 	}
-}
-
-// SanitizeString scrubs sensitive tokens, PATs, passwords, and credentials from text.
-func SanitizeString(input string) string {
-	return sanitizer.SanitizeString(input)
 }
 
 // Telemetry & Schedules Data Structures
@@ -821,8 +811,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 				Crons:      cache.crons,
 				OneShots:   cache.oneShots,
 			}
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			setNoCacheJSONHeaders(w)
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -854,10 +843,10 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 				ID:              c.ID,
 				TargetID:        c.TargetID,
 				ChannelID:       c.TargetID,
-				TitlePrefix:     SanitizeString(c.TitlePrefix),
+				TitlePrefix:     sanitizer.SanitizeString(c.TitlePrefix),
 				CronExpr:        c.CronExpr,
 				CronDescription: FormatCronDescription(c.CronExpr),
-				Prompt:          SanitizeString(c.Prompt),
+				Prompt:          sanitizer.SanitizeString(c.Prompt),
 				Timezone:        c.Timezone,
 				NextRunAt:       c.NextRunAt,
 				Enabled:         c.Enabled,
@@ -870,7 +859,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 			oneShots = append(oneShots, OneShotScheduleJSON{
 				ID:        s.ID,
 				ThreadID:  s.ThreadID,
-				Prompt:    SanitizeString(s.Prompt),
+				Prompt:    sanitizer.SanitizeString(s.Prompt),
 				RunAt:     s.RunAt,
 				CreatedAt: s.CreatedAt,
 			})
@@ -889,8 +878,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 			OneShots:   oneShots,
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		setNoCacheJSONHeaders(w)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -908,19 +896,7 @@ func handleScheduleRuns(store db.Store) http.HandlerFunc {
 		}
 
 		q := r.URL.Query()
-		limit := 50
-		if lStr := q.Get("limit"); lStr != "" {
-			if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 100 {
-				limit = l
-			}
-		}
-
-		offset := 0
-		if oStr := q.Get("offset"); oStr != "" {
-			if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
-				offset = o
-			}
-		}
+		limit, offset := parseLimitOffset(q, 50, 100)
 
 		scheduleID := strings.TrimSpace(q.Get("schedule_id"))
 		status := strings.TrimSpace(q.Get("status"))
@@ -934,9 +910,9 @@ func handleScheduleRuns(store db.Store) http.HandlerFunc {
 
 		runs := make([]db.ScheduleRun, 0, len(rawRuns))
 		for _, run := range rawRuns {
-			run.Prompt = SanitizeString(run.Prompt)
-			run.Error = SanitizeString(run.Error)
-			run.Title = SanitizeString(run.Title)
+			run.Prompt = sanitizer.SanitizeString(run.Prompt)
+			run.Error = sanitizer.SanitizeString(run.Error)
+			run.Title = sanitizer.SanitizeString(run.Title)
 			runs = append(runs, run)
 		}
 
@@ -948,8 +924,7 @@ func handleScheduleRuns(store db.Store) http.HandlerFunc {
 			Runs:   runs,
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		setNoCacheJSONHeaders(w)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -986,8 +961,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 		defer cache.mu.Unlock()
 
 		if now.Before(cache.expiresAt) && cache.tasks != nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			setNoCacheJSONHeaders(w)
 			writeJSON(w, http.StatusOK, TasksResponse{
 				Status: "ok",
 				Total:  len(cache.tasks),
@@ -1005,22 +979,21 @@ func handleTasks(store db.Store) http.HandlerFunc {
 
 		tasks := make([]db.ActiveTask, 0, len(rawTasks))
 		for _, task := range rawTasks {
-			sanitizedPrompt := SanitizeString(task.Prompt)
+			sanitizedPrompt := sanitizer.SanitizeString(task.Prompt)
 			runes := []rune(sanitizedPrompt)
 			if len(runes) > 500 {
 				sanitizedPrompt = string(runes[:500]) + "..."
 			}
 			task.Prompt = sanitizedPrompt
-			task.Summary = SanitizeString(task.Summary)
-			task.AuthorName = SanitizeString(sanitizer.SanitizeAuthor(task.AuthorName))
+			task.Summary = sanitizer.SanitizeString(task.Summary)
+			task.AuthorName = sanitizer.SanitizeString(sanitizer.SanitizeAuthor(task.AuthorName))
 			tasks = append(tasks, task)
 		}
 
 		cache.tasks = tasks
 		cache.expiresAt = now.Add(1 * time.Second)
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		setNoCacheJSONHeaders(w)
 		writeJSON(w, http.StatusOK, TasksResponse{
 			Status: "ok",
 			Total:  len(tasks),
@@ -1299,10 +1272,6 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SetupBrainMux(store db.Store, pool *queue.WorkerPool, searchPaths ...string) *http.ServeMux {
-	return SetupBrainMuxWithEmbedder(store, pool, nil, searchPaths...)
-}
-
 var (
 	writeCountersDirFn = coverage.WriteCountersDir
 	writeMetaDirFn     = coverage.WriteMetaDir
@@ -1515,45 +1484,15 @@ func WithOnReload(fn func(source string)) BrainAppOption {
 	}
 }
 
-// extractVoiceMCPServers extracts voice-relevant MCP servers (scheduler, common, voice) from config.
 func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
-	serverMap := make(map[string]runner.MCPServerConfig)
-	serverMap["scheduler"] = runner.MCPServerConfig{
-		Name:      "scheduler",
-		ServerURL: "http://scheduler-mcp:8080/mcp",
-	}
-	if cur != nil {
-		type srvJSON struct {
-			ServerURL string            `json:"serverUrl"`
-			Headers   map[string]string `json:"headers,omitempty"`
-		}
-		parseMap := func(m map[string]json.RawMessage) {
-			for name, raw := range m {
-				var sj srvJSON
-				if err := json.Unmarshal(raw, &sj); err == nil && strings.TrimSpace(sj.ServerURL) != "" {
-					serverMap[name] = runner.MCPServerConfig{
-						Name:      name,
-						ServerURL: strings.TrimSpace(sj.ServerURL),
-						Headers:   sj.Headers,
-					}
-				}
-			}
-		}
-		parseMap(cur.McpServers.Common)
-		parseMap(cur.McpServers.Voice)
-	}
-	result := make([]runner.MCPServerConfig, 0, len(serverMap))
-	for _, s := range serverMap {
-		result = append(result, s)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Name < result[j].Name
-	})
-	return result
+	return extractMCPServers(cur, false)
 }
 
-// extractAllMCPServers extracts MCP servers across common, discord, and voice targets from config.
 func extractAllMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
+	return extractMCPServers(cur, true)
+}
+
+func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
 	serverMap := make(map[string]runner.MCPServerConfig)
 	serverMap["scheduler"] = runner.MCPServerConfig{
 		Name:      "scheduler",
@@ -1577,7 +1516,9 @@ func extractAllMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
 			}
 		}
 		parseMap(cur.McpServers.Common)
-		parseMap(cur.McpServers.Discord)
+		if includeDiscord {
+			parseMap(cur.McpServers.Discord)
+		}
 		parseMap(cur.McpServers.Voice)
 	}
 	result := make([]runner.MCPServerConfig, 0, len(serverMap))
@@ -1797,13 +1738,26 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 	return runner.NewDynamicVoicePool(buildPool)
 }
 
-// createVoicePool is an alias for createVoiceProcessPool.
-func createVoicePool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.AgentPool {
-	return createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner)
-}
-
 // PrewarmProcessPoolsSequentially pre-warms process pool targets in series in the background,
 // ensuring only one daemon is in the CPU-intensive startup phase at a time across all pools.
+func newWorkerInterchangeablePool(pCfg runner.PoolConfig, spawner runner.DaemonSpawner, keyPrefix ...string) *runner.InterchangeablePool {
+	prefix := ""
+	if len(keyPrefix) > 0 {
+		prefix = keyPrefix[0]
+	} else if len(pCfg.PrewarmedTargets) > 0 {
+		prefix = strings.TrimSuffix(pCfg.PrewarmedTargets[0], "-0")
+	}
+	workerCount := len(pCfg.PrewarmedTargets)
+	if workerCount == 0 {
+		workerCount = 2
+	}
+	underlying := runner.NewUnifiedProcessPool(pCfg, spawner)
+	return runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
+		WorkerCount: workerCount,
+		KeyPrefix:   prefix,
+	})
+}
+
 func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentPool) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1938,7 +1892,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	ephemeralUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+	ephemeralPool := newWorkerInterchangeablePool(runner.PoolConfig{
 		GeminiHomeDir:     ephemeralHome,
 		Model:             lowEffortModel,
 		AgyBin:            cur.AgyBin,
@@ -1948,19 +1902,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		PrewarmedTargets:  []string{"ephemeral:worker-0", "ephemeral:worker-1"},
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		SessionManager:    sessionMgr,
-	}, appOpts.processSpawner)
-
-	ephemeralPool := runner.NewInterchangeablePool(ephemeralUnderlying, runner.InterchangeablePoolConfig{
-		WorkerCount: 2,
-		KeyPrefix:   "ephemeral:worker",
-	})
+	}, appOpts.processSpawner, "ephemeral:worker")
 	defer func() {
 		if err := ephemeralPool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close ephemeral process pool: %v", err)
 		}
 	}()
 
-	discordLowEffortUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+	discordLowEffortPool := newWorkerInterchangeablePool(runner.PoolConfig{
 		GeminiHomeDir:     discordHome,
 		Model:             lowEffortModel,
 		AgyBin:            cur.AgyBin,
@@ -1970,19 +1919,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		PrewarmedTargets:  []string{"discord:worker-0", "discord:worker-1"},
 		SessionManager:    sessionMgr,
-	}, appOpts.processSpawner)
-
-	discordLowEffortPool := runner.NewInterchangeablePool(discordLowEffortUnderlying, runner.InterchangeablePoolConfig{
-		WorkerCount: 2,
-		KeyPrefix:   "discord:worker",
-	})
+	}, appOpts.processSpawner, "discord:worker")
 	defer func() {
 		if err := discordLowEffortPool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close discord low effort process pool: %v", err)
 		}
 	}()
 
-	discordMediumEffortUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+	discordMediumEffortPool := newWorkerInterchangeablePool(runner.PoolConfig{
 		GeminiHomeDir:     discordHome,
 		Model:             mediumEffortModel,
 		AgyBin:            cur.AgyBin,
@@ -1992,12 +1936,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 		PrewarmedTargets:  []string{"discord:medium-worker-0", "discord:medium-worker-1"},
 		SessionManager:    sessionMgr,
-	}, appOpts.processSpawner)
-
-	discordMediumEffortPool := runner.NewInterchangeablePool(discordMediumEffortUnderlying, runner.InterchangeablePoolConfig{
-		WorkerCount: 2,
-		KeyPrefix:   "discord:medium-worker",
-	})
+	}, appOpts.processSpawner, "discord:medium-worker")
 	defer func() {
 		if err := discordMediumEffortPool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close discord medium effort process pool: %v", err)
@@ -2196,11 +2135,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 // DefaultGeminiHomeDir returns the production default base directory for .gemini files.
 func DefaultGeminiHomeDir() string {
-	return defaultGeminiHomeDir(os.Getenv("HOME"), testing.Testing())
-}
-
-func defaultGeminiHomeDir(home string, isTesting bool) string {
-	return defaultGeminiHomeDirWithLookup(home, isTesting, os.UserHomeDir)
+	return defaultGeminiHomeDirWithLookup(os.Getenv("HOME"), testing.Testing(), os.UserHomeDir)
 }
 
 func defaultGeminiHomeDirWithLookup(home string, isTesting bool, userHomeDirFn func() (string, error)) string {
