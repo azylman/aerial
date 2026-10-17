@@ -19,21 +19,19 @@ func recordTranscriptQuery(op string, start time.Time, errp *error) {
 	metrics.RecordDBQuery(op, status, time.Since(start))
 }
 
-// GetSessionSyncStatesWithContext retrieves sync states with context and database driver detection.
-func GetSessionSyncStatesWithContext(ctx context.Context, database DBTX, isPg bool) (results map[string]SessionSyncState, err error) {
+// TranscriptStore implementation on *SQLStore
+
+func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (results map[string]SessionSyncState, err error) {
 	defer recordTranscriptQuery("get_session_sync_states", time.Now(), &err)
 
-	if database == nil {
-		return nil, fmt.Errorf("database is nil")
+	if err = s.checkDB(); err != nil {
+		return nil, err
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	query := `SELECT session_id, last_mtime, last_indexed_step, is_settled FROM session_summaries`
-	rows, err := database.QueryContext(queryCtx, query)
+	rows, err := s.db.QueryContext(queryCtx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query session sync states: %w", err)
 	}
@@ -67,20 +65,16 @@ func GetSessionSyncStatesWithContext(ctx context.Context, database DBTX, isPg bo
 	return results, nil
 }
 
-// UpsertSessionSummaryWithContext inserts or updates a session summary record with context.
-func UpsertSessionSummaryWithContext(ctx context.Context, database DBTX, isPg bool, summary SessionSummary) (err error) {
+func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) (err error) {
 	defer recordTranscriptQuery("upsert_session_summary", time.Now(), &err)
 
-	if database == nil {
-		return fmt.Errorf("database is nil")
+	if err = s.checkDB(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(summary.SessionID) == "" {
 		return fmt.Errorf("session ID cannot be empty")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	now := time.Now().UTC()
@@ -126,7 +120,7 @@ func UpsertSessionSummaryWithContext(ctx context.Context, database DBTX, isPg bo
 		END,
 		updated_at = EXCLUDED.updated_at;
 	`
-	_, err = database.ExecContext(queryCtx, query,
+	_, err = s.db.ExecContext(queryCtx, query,
 		summary.SessionID,
 		summary.ThreadID,
 		summary.Summary,
@@ -144,31 +138,27 @@ func UpsertSessionSummaryWithContext(ctx context.Context, database DBTX, isPg bo
 	return nil
 }
 
-// BatchInsertTranscriptStepsWithContext inserts steps with chunking and context.
-func BatchInsertTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg bool, steps []TranscriptStep) (err error) {
+func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) (err error) {
 	defer recordTranscriptQuery("batch_insert_transcript_steps", time.Now(), &err)
 
-	if database == nil {
-		return fmt.Errorf("database is nil")
+	if err = s.checkDB(); err != nil {
+		return err
 	}
 	if len(steps) == 0 {
 		return nil
 	}
 
 	validSteps := make([]TranscriptStep, 0, len(steps))
-	for _, s := range steps {
-		if strings.TrimSpace(s.SessionID) != "" {
-			validSteps = append(validSteps, s)
+	for _, st := range steps {
+		if strings.TrimSpace(st.SessionID) != "" {
+			validSteps = append(validSteps, st)
 		}
 	}
 	if len(validSteps) == 0 {
 		return nil
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	const batchSize = 100
@@ -183,14 +173,14 @@ func BatchInsertTranscriptStepsWithContext(ctx context.Context, database DBTX, i
 		valArgs := make([]any, 0, len(chunk)*6)
 		now := time.Now().UTC()
 
-		for j, s := range chunk {
-			createdAt := s.CreatedAt
+		for j, st := range chunk {
+			createdAt := st.CreatedAt
 			if createdAt.IsZero() {
 				createdAt = now
 			}
 			p := j * 6
 			valStrings = append(valStrings, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)", p+1, p+2, p+3, p+4, p+5, p+6))
-			valArgs = append(valArgs, s.SessionID, s.StepIndex, s.StepType, s.ToolName, s.Content, createdAt)
+			valArgs = append(valArgs, st.SessionID, st.StepIndex, st.StepType, st.ToolName, st.Content, createdAt)
 		}
 
 		query := fmt.Sprintf(`
@@ -199,19 +189,18 @@ func BatchInsertTranscriptStepsWithContext(ctx context.Context, database DBTX, i
 		ON CONFLICT (session_id, step_index) DO NOTHING;
 		`, strings.Join(valStrings, ", "))
 
-		if _, err := database.ExecContext(queryCtx, query, valArgs...); err != nil {
+		if _, err := s.db.ExecContext(queryCtx, query, valArgs...); err != nil {
 			return fmt.Errorf("batch insert transcript steps chunk failed: %w", err)
 		}
 	}
 	return nil
 }
 
-// SearchSessionSummariesWithContext searches macro session summaries with context.
-func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, queryText string, limit int, minScore float64) (results []SessionSummary, err error) {
+func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) (results []SessionSummary, err error) {
 	defer recordTranscriptQuery("search_session_summaries", time.Now(), &err)
 
-	if database == nil {
-		return nil, nil
+	if err = s.checkDB(); err != nil {
+		return nil, err
 	}
 
 	hasEmbedding := len(embedding) == ExpectedEmbeddingDim
@@ -228,10 +217,7 @@ func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg 
 		minScore = 0.0
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	candidateLimit := limit * 3
@@ -258,42 +244,66 @@ func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg 
 			WHERE fts_tokens @@ websearch_to_tsquery('simple', $3)
 			LIMIT $2
 		)
-		SELECT s.session_id, s.thread_id, s.summary, s.last_indexed_step, s.last_mtime,
-		       s.summary_step_watermark, s.is_settled, s.created_at, s.updated_at,
-		       ((COALESCE(0.50 / (60.0 + v.rank), 0.0) + COALESCE(0.50 / (60.0 + t.rank), 0.0)) * 60.0) AS score
+		SELECT 
+			s.session_id, 
+			s.thread_id, 
+			s.summary, 
+			s.last_indexed_step, 
+			s.last_mtime, 
+			s.summary_step_watermark, 
+			s.is_settled, 
+			s.created_at, 
+			s.updated_at,
+			((COALESCE(0.5 / (60.0 + v.rank), 0.0) + COALESCE(0.5 / (60.0 + t.rank), 0.0)) * 60.0) AS score
 		FROM vector_hits v
 		FULL OUTER JOIN text_hits t ON v.session_id = t.session_id
 		JOIN session_summaries s ON s.session_id = COALESCE(v.session_id, t.session_id)
-		WHERE ((COALESCE(0.50 / (60.0 + v.rank), 0.0) + COALESCE(0.50 / (60.0 + t.rank), 0.0)) * 60.0) >= $4
+		WHERE ((COALESCE(0.5 / (60.0 + v.rank), 0.0) + COALESCE(0.5 / (60.0 + t.rank), 0.0)) * 60.0) >= $4
 		ORDER BY score DESC
 		LIMIT $5;
 		`
 		vec := pgvector.NewVector(embedding)
-		rows, err = database.QueryContext(queryCtx, query, vec, candidateLimit, queryText, minScore, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, vec, candidateLimit, queryText, minScore, limit)
 	} else if hasEmbedding {
-		// Dense vector only query
+		// Dense-only search
 		query = `
 		WITH candidates AS (
-			SELECT session_id, thread_id, summary, last_indexed_step, last_mtime,
-			       summary_step_watermark, is_settled, created_at, updated_at,
-			       (1.0 - (embedding <=> $1)) AS similarity
+			SELECT 
+				session_id, 
+				thread_id, 
+				summary, 
+				last_indexed_step, 
+				last_mtime, 
+				summary_step_watermark, 
+				is_settled, 
+				created_at, 
+				updated_at,
+				(1.0 - (embedding <=> $1)) AS similarity
 			FROM session_summaries
 			WHERE embedding IS NOT NULL
 			ORDER BY embedding <=> $1
 			LIMIT $2
 		)
-		SELECT session_id, thread_id, summary, last_indexed_step, last_mtime,
-		       summary_step_watermark, is_settled, created_at, updated_at,
-		       similarity AS score
+		SELECT 
+			session_id, 
+			thread_id, 
+			summary, 
+			last_indexed_step, 
+			last_mtime, 
+			summary_step_watermark, 
+			is_settled, 
+			created_at, 
+			updated_at,
+			similarity AS score
 		FROM candidates
 		WHERE similarity >= $3
 		ORDER BY similarity DESC
 		LIMIT $4;
 		`
 		vec := pgvector.NewVector(embedding)
-		rows, err = database.QueryContext(queryCtx, query, vec, candidateLimit, minScore, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, vec, candidateLimit, minScore, limit)
 	} else {
-		// Sparse FTS only query
+		// Sparse-only full-text search
 		query = `
 		WITH text_hits AS (
 			SELECT session_id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank
@@ -301,16 +311,24 @@ func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg 
 			WHERE fts_tokens @@ websearch_to_tsquery('simple', $1)
 			LIMIT $2
 		)
-		SELECT s.session_id, s.thread_id, s.summary, s.last_indexed_step, s.last_mtime,
-		       s.summary_step_watermark, s.is_settled, s.created_at, s.updated_at,
-		       ((1.0 / (60.0 + t.rank)) * 60.0) AS score
+		SELECT 
+			s.session_id, 
+			s.thread_id, 
+			s.summary, 
+			s.last_indexed_step, 
+			s.last_mtime, 
+			s.summary_step_watermark, 
+			s.is_settled, 
+			s.created_at, 
+			s.updated_at,
+			(1.0 / (60.0 + t.rank) * 60.0) AS score
 		FROM text_hits t
 		JOIN session_summaries s ON s.session_id = t.session_id
-		WHERE ((1.0 / (60.0 + t.rank)) * 60.0) >= $3
+		WHERE (1.0 / (60.0 + t.rank) * 60.0) >= $3
 		ORDER BY score DESC
 		LIMIT $4;
 		`
-		rows, err = database.QueryContext(queryCtx, query, queryText, candidateLimit, minScore, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, queryText, candidateLimit, minScore, limit)
 	}
 
 	if err != nil {
@@ -320,24 +338,29 @@ func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg 
 
 	var summaries []SessionSummary
 	for rows.Next() {
-		var s SessionSummary
-		var rawMtime, rawCreatedAt, rawUpdatedAt any
+		var sm SessionSummary
+		var (
+			rawMtime     any
+			rawCreatedAt any
+			rawUpdatedAt any
+		)
 		if err := rows.Scan(
-			&s.SessionID, &s.ThreadID, &s.Summary, &s.LastIndexedStep, &rawMtime,
-			&s.SummaryStepWatermark, &s.IsSettled, &rawCreatedAt, &rawUpdatedAt, &s.Score,
+			&sm.SessionID, &sm.ThreadID, &sm.Summary, &sm.LastIndexedStep,
+			&rawMtime, &sm.SummaryStepWatermark, &sm.IsSettled,
+			&rawCreatedAt, &rawUpdatedAt, &sm.Score,
 		); err != nil {
 			return nil, fmt.Errorf("scan session summary result: %w", err)
 		}
 		if t, ok := ParseDBTime(rawMtime); ok {
-			s.LastMtime = t
+			sm.LastMtime = t
 		}
 		if t, ok := ParseDBTime(rawCreatedAt); ok {
-			s.CreatedAt = t
+			sm.CreatedAt = t
 		}
 		if t, ok := ParseDBTime(rawUpdatedAt); ok {
-			s.UpdatedAt = t
+			sm.UpdatedAt = t
 		}
-		summaries = append(summaries, s)
+		summaries = append(summaries, sm)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate search session summaries results: %w", err)
@@ -345,12 +368,11 @@ func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg 
 	return summaries, nil
 }
 
-// SearchTranscriptStepsWithContext searches micro execution steps with context.
-func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg bool, queryText, sessionFilter, toolFilter string, limit int) (results []TranscriptStep, err error) {
+func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("search_transcript_steps", time.Now(), &err)
 
-	if database == nil {
-		return nil, nil
+	if err = s.checkDB(); err != nil {
+		return nil, err
 	}
 
 	queryText = strings.TrimSpace(queryText)
@@ -364,10 +386,7 @@ func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg b
 		limit = 20
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	var rows *sql.Rows
@@ -382,7 +401,7 @@ func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg b
 		ORDER BY rank_score DESC, created_at DESC
 		LIMIT $4;
 		`
-		rows, err = database.QueryContext(queryCtx, query, queryText, sessionFilter, toolFilter, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, queryText, sessionFilter, toolFilter, limit)
 	} else {
 		query := `
 		SELECT session_id, step_index, step_type, tool_name, content, created_at,
@@ -393,7 +412,7 @@ func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg b
 		ORDER BY created_at DESC
 		LIMIT $3;
 		`
-		rows, err = database.QueryContext(queryCtx, query, sessionFilter, toolFilter, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, sessionFilter, toolFilter, limit)
 	}
 
 	if err != nil {
@@ -420,41 +439,4 @@ func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg b
 		return nil, fmt.Errorf("iterate search transcript steps results: %w", err)
 	}
 	return steps, nil
-}
-
-// TranscriptStore implementation on *SQLStore
-
-func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	return GetSessionSyncStatesWithContext(ctx, s.db, s.isPostgres)
-}
-
-func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	return UpsertSessionSummaryWithContext(ctx, s.db, s.isPostgres, summary)
-}
-
-func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	return BatchInsertTranscriptStepsWithContext(ctx, s.db, s.isPostgres, steps)
-}
-
-func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	return SearchSessionSummariesWithContext(ctx, s.db, s.isPostgres, embedding, queryText, limit, minScore)
-}
-
-func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	return SearchTranscriptStepsWithContext(ctx, s.db, s.isPostgres, queryText, sessionFilter, toolFilter, limit)
 }

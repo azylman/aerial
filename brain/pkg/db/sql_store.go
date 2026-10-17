@@ -47,6 +47,13 @@ func isDBTXNil(d DBTX) bool {
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
+func withTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, d)
+}
+
 // NewSQLStore creates a new Store instance wrapping the provided *sql.DB connection.
 func NewSQLStore(database *sql.DB) Store {
 	if database == nil {
@@ -105,69 +112,6 @@ func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) err
 		return err
 	}
 	return tx.Commit()
-}
-
-// FactStore implementation
-func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
-	return queryDB(s, func(db DBTX) (int64, error) {
-		return InsertFactWithContext(ctx, db, s.isPostgres, category, factText, importance, embedding)
-	})
-}
-
-func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
-	return queryDB(s, func(db DBTX) ([]Fact, error) {
-		return SearchSimilarFactsWithContext(ctx, db, s.isPostgres, embedding, queryText, limit, minScore)
-	})
-}
-
-func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
-	return queryDB(s, func(db DBTX) (*FactsResult, error) {
-		return GetFactsPaginatedWithContext(ctx, db, s.isPostgres, filter)
-	})
-}
-
-func (s *SQLStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
-	return queryDB(s, func(db DBTX) ([]FactWithEmbedding, error) {
-		return GetFactsByThreadWithEmbeddings(db, threadID)
-	})
-}
-
-func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
-	return queryDB(s, func(db DBTX) ([]string, error) {
-		return GetActiveConversationsForExtraction(db, activeHours)
-	})
-}
-
-func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
-	return execDB(s, func(db DBTX) error {
-		return UpdateConversationFactWatermark(db, threadID, maxRowID)
-	})
-}
-
-func (s *SQLStore) UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error {
-	return execDB(s, func(db DBTX) error {
-		return UpdateConversationFactExtractedAt(db, threadID)
-	})
-}
-
-func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, 0, err
-	}
-	return FindDuplicateFactWithContext(ctx, s.db, s.isPostgres, embedding, minSim)
-}
-
-func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error {
-	return execDB(s, func(db DBTX) error {
-		return ReinforceFactWithContext(ctx, db, s.isPostgres, id, newText, newEmbedding, boost)
-	})
-}
-
-func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
-	if err := s.checkDB(); err != nil {
-		return 0, 0, err
-	}
-	return DecayAndPruneFactsWithContext(ctx, s.db, s.isPostgres, decayStep, pruneFloor, pruneAgeDays)
 }
 
 // ScheduleStore implementation
