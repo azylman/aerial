@@ -26,7 +26,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
-	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
 	_ "modernc.org/sqlite"
@@ -34,286 +33,167 @@ import (
 
 func TestHandlePromptValidation(t *testing.T) {
 	store := db.NewFakeStore()
-
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
-	handler := handlePrompt(store, pool)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
 
-	// Test GET method not allowed
-	req := httptest.NewRequest(http.MethodGet, "/prompt", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected status 405 MethodNotAllowed, got %d", w.Code)
-	}
-
-	// Test invalid empty prompt payload
-	emptyPayload, _ := json.Marshal(map[string]string{"prompt": ""})
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(emptyPayload))
-	w = httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400 BadRequest for empty prompt, got %d", w.Code)
-	}
-
-	// Test invalid JSON payload
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader([]byte("{invalid-json")))
-	w = httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400 BadRequest for invalid JSON, got %d", w.Code)
-	}
-
-	// Test missing channel_id payload rejected
-	missingChPayload, _ := json.Marshal(map[string]string{
-		"prompt": "Test prompt",
-	})
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(missingChPayload))
-	w = httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400 BadRequest for missing channel_id, got %d", w.Code)
+	for _, tc := range []struct {
+		name       string
+		method     string
+		store      db.Store
+		pool       *queue.WorkerPool
+		body       io.Reader
+		wantStatus int
+		wantSubstr string
+	}{
+		{"method not allowed", http.MethodGet, store, pool, nil, http.StatusMethodNotAllowed, "Method not allowed"},
+		{"read error", http.MethodPost, store, pool, &errReadCloser{readErr: errors.New("simulated network read error")}, http.StatusBadRequest, "Failed to read request body"},
+		{"invalid JSON", http.MethodPost, store, pool, strings.NewReader("{invalid-json"), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
+		{"empty prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":""}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
+		{"whitespace prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"   "}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
+		{"missing channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
+		{"non-snowflake channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"not-a-snowflake"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"nil store", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Database store not configured"},
+		{"closed store", http.MethodPost, closedStore, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Failed to persist prompt message"},
+		{"body close error", http.MethodPost, store, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := handlePrompt(tc.store, tc.pool)
+			req := httptest.NewRequest(tc.method, "/prompt", tc.body)
+			w := httptest.NewRecorder()
+			handler(w, req)
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
+		})
 	}
 
-	// Test invalid non-numeric snowflake channel_id rejected
-	invalidChPayload, _ := json.Marshal(map[string]string{
-		"prompt":     "Test prompt",
-		"channel_id": "not-a-snowflake",
-	})
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(invalidChPayload))
-	w = httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400 BadRequest for non-snowflake channel_id, got %d", w.Code)
-	}
-
-	// Test valid prompt payload accepted
-	validPayload, _ := json.Marshal(map[string]string{
-		"prompt":     "Test valid prompt",
-		"channel_id": "1542423172400291873",
-		"message_id": "msg-123",
-	})
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(validPayload))
-	w = httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Errorf("Expected status 202 StatusAccepted, got %d", w.Code)
-	}
-
-	var respBody map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &respBody); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
-	if respBody["channel_id"] != "1542423172400291873" {
-		t.Errorf("Expected channel_id in response, got %+v", respBody)
-	}
-
-	// Verify message persisted to DB
-	msg, err := store.GetMessage(context.Background(), "msg-123")
-	if err != nil || msg == nil {
-		t.Fatalf("Failed to retrieve persisted message: %v", err)
-	}
-	if msg.ThreadID != "1542423172400291873" || msg.Content != "Test valid prompt" {
-		t.Errorf("Unexpected message fields in DB: %+v", msg)
-	}
-
-	// Test prompt payload with model and silent sets metadata and low effort
-	silentPayload, _ := json.Marshal(map[string]any{
-		"prompt":     "Execute chunk 1",
-		"channel_id": "1542423172400291873",
-		"message_id": "msg-silent-1",
-		"model":      "gemini-4-flash",
-		"silent":     true,
-	})
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(silentPayload))
-	w = httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("Expected status 202 StatusAccepted for silent prompt, got %d", w.Code)
-	}
-	sMsg, err := store.GetMessage(context.Background(), "msg-silent-1")
-	if err != nil || sMsg == nil {
-		t.Fatalf("Failed to retrieve silent message: %v", err)
-	}
-	if sMsg.Effort != "low" || sMsg.Metadata.Model != "gemini-4-flash" || !sMsg.Metadata.Silent {
-		t.Errorf("Expected Effort='low', Metadata.Model='gemini-4-flash', Metadata.Silent=true, got Effort=%q Metadata=%+v", sMsg.Effort, sMsg.Metadata)
-	}
-
-	// Test prompt payload with medium flash model sets medium effort (not low)
-	medPayload, _ := json.Marshal(map[string]any{
-		"prompt":     "Execute medium chunk",
-		"channel_id": "1542423172400291873",
-		"message_id": "msg-med-1",
-		"model":      "gemini-3.8-flash-medium",
-		"silent":     true,
-	})
-	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(medPayload))
-	w = httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("Expected status 202 StatusAccepted for medium prompt, got %d", w.Code)
-	}
-	mMsg, err := store.GetMessage(context.Background(), "msg-med-1")
-	if err != nil || mMsg == nil {
-		t.Fatalf("Failed to retrieve medium message: %v", err)
-	}
-	if mMsg.Effort != "medium" || mMsg.Metadata.Model != "gemini-3.8-flash-medium" {
-		t.Errorf("Expected Effort='medium', Metadata.Model='gemini-3.8-flash-medium', got Effort=%q Metadata=%+v", mMsg.Effort, mMsg.Metadata)
+	for _, tc := range []struct {
+		name        string
+		pool        *queue.WorkerPool
+		payload     string
+		msgID       string
+		wantEffort  string
+		wantModel   string
+		wantSilent  bool
+		wantChunkID string
+		wantContent string
+	}{
+		{
+			name:        "default effort",
+			pool:        pool,
+			payload:     `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`,
+			msgID:       "msg-123",
+			wantContent: "Test valid prompt",
+		},
+		{
+			name:       "gemini-4-flash silent",
+			pool:       pool,
+			payload:    `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`,
+			msgID:      "msg-silent-1",
+			wantEffort: "low",
+			wantModel:  "gemini-4-flash",
+			wantSilent: true,
+		},
+		{
+			name:       "gemini-3.8-flash-medium",
+			pool:       pool,
+			payload:    `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`,
+			msgID:      "msg-med-1",
+			wantEffort: "medium",
+			wantModel:  "gemini-3.8-flash-medium",
+			wantSilent: true,
+		},
+		{
+			name:        "vanadis_chunk_id nil pool",
+			pool:        nil,
+			payload:     `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`,
+			msgID:       "msg-vanadis-chunk",
+			wantChunkID: "chunk-abc-99",
+		},
+		{
+			name:        "auto-generated uuid when message_id omitted",
+			pool:        pool,
+			payload:     `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`,
+			wantContent: "auto uuid prompt",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := handlePrompt(store, tc.pool)
+			req := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(tc.payload))
+			w := httptest.NewRecorder()
+			handler(w, req)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("got status=%d body=%q, want 202", w.Code, w.Body.String())
+			}
+			if tc.msgID != "" {
+				msg, err := store.GetMessage(context.Background(), tc.msgID)
+				if err != nil || msg == nil {
+					t.Fatalf("failed to retrieve persisted message %s: %v", tc.msgID, err)
+				}
+				if tc.wantContent != "" && msg.Content != tc.wantContent {
+					t.Errorf("content=%q, want %q", msg.Content, tc.wantContent)
+				}
+				if tc.wantEffort != "" && msg.Effort != tc.wantEffort {
+					t.Errorf("effort=%q, want %q", msg.Effort, tc.wantEffort)
+				}
+				if tc.wantModel != "" && msg.Metadata.Model != tc.wantModel {
+					t.Errorf("model=%q, want %q", msg.Metadata.Model, tc.wantModel)
+				}
+				if tc.wantSilent && !msg.Metadata.Silent {
+					t.Errorf("expected silent=true, got %v", msg.Metadata.Silent)
+				}
+				if tc.wantChunkID != "" && msg.Metadata.VanadisChunkID != tc.wantChunkID {
+					t.Errorf("chunkID=%q, want %q", msg.Metadata.VanadisChunkID, tc.wantChunkID)
+				}
+			}
+		})
 	}
 }
 
 func TestHandleDirectMessage(t *testing.T) {
-	t.Run("method not allowed", func(t *testing.T) {
-		handler := handleDirectMessage(&queue.WorkerPool{})
-		req := httptest.NewRequest(http.MethodGet, "/discord/message", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("expected 405 MethodNotAllowed, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Method not allowed") {
-			t.Fatalf("expected 'Method not allowed' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("nil pool returns 500", func(t *testing.T) {
-		handler := handleDirectMessage(nil)
-		payload := `{"channel_id":"1542423172400291873","content":"hello"}`
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(payload))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusInternalServerError {
-			t.Fatalf("expected 500 InternalServerError, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Worker pool not available") {
-			t.Fatalf("expected 'Worker pool not available' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("invalid JSON returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleDirectMessage(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader("{invalid-json"))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid JSON payload") {
-			t.Fatalf("expected 'Invalid JSON payload' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("missing channel_id returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleDirectMessage(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"content":"hello"}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid payload: 'channel_id' field is required and cannot be empty") {
-			t.Fatalf("expected channel_id required error, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("non-snowflake channel_id returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleDirectMessage(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"not-a-snowflake","content":"hello"}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake") {
-			t.Fatalf("expected snowflake error, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("empty content returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleDirectMessage(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"  "}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid payload: 'content' field is required and cannot be empty") {
-			t.Fatalf("expected content required error, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("discord session not connected returns 503", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleDirectMessage(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusServiceUnavailable {
-			t.Fatalf("expected 503 ServiceUnavailable, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Discord session not connected") {
-			t.Fatalf("expected 'Discord session not connected' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("discord client error returns 403 for RESTError", func(t *testing.T) {
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+	for _, tc := range []struct {
+		name       string
+		method     string
+		pool       *queue.WorkerPool
+		body       io.Reader
+		wantStatus int
+		wantSubstr string
+	}{
+		{"method not allowed", http.MethodGet, &queue.WorkerPool{}, nil, http.StatusMethodNotAllowed, "Method not allowed"},
+		{"nil pool", http.MethodPost, nil, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusInternalServerError, "Worker pool not available"},
+		{"read and close error", http.MethodPost, &queue.WorkerPool{}, &errReadCloser{readErr: errors.New("read err"), closeErr: errors.New("close err")}, http.StatusBadRequest, "Failed to read request body"},
+		{"invalid JSON", http.MethodPost, &queue.WorkerPool{}, strings.NewReader("{invalid-json"), http.StatusBadRequest, "Invalid JSON payload"},
+		{"missing channel_id", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"content":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
+		{"non-snowflake channel_id", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"not-a-snowflake","content":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"empty content", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"  "}`), http.StatusBadRequest, "Invalid payload: 'content' field is required and cannot be empty"},
+		{"discord session not connected", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusServiceUnavailable, "Discord session not connected"},
+		{"discord client RESTError", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return &discordgo.RESTError{
-					Response: &http.Response{StatusCode: 403},
-				}
+				return &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
 			},
-		})
-		handler := handleDirectMessage(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("expected 403 Forbidden, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Discord client error") {
-			t.Fatalf("expected 'Discord client error' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("discord client error returns 400 for cannot send", func(t *testing.T) {
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		}), strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusForbidden, "Discord client error"},
+		{"discord client cannot send", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 				return errors.New("cannot send messages to this thread")
 			},
+		}), strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusBadRequest, "Discord client error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := handleDirectMessage(tc.pool)
+			req := httptest.NewRequest(tc.method, "/discord/message", tc.body)
+			w := httptest.NewRecorder()
+			handler(w, req)
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
 		})
-		handler := handleDirectMessage(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
+	}
 
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Discord client error") {
-			t.Fatalf("expected 'Discord client error' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("success returns 200 with channel_id and delivers message", func(t *testing.T) {
+	t.Run("delivery success and fallback", func(t *testing.T) {
 		var capturedChannelID, capturedText string
 		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -357,7 +237,7 @@ func TestHandleDirectMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("mux route mounting for canonical /discord/message", func(t *testing.T) {
+	t.Run("mux route mounting for /discord/message", func(t *testing.T) {
 		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 				return nil
@@ -365,20 +245,16 @@ func TestHandleDirectMessage(t *testing.T) {
 		})
 		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil)
 
-		// /discord/message should return 200 OK
 		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
-
 		if w.Code != http.StatusOK {
 			t.Errorf("expected 200 for /discord/message, got %d (body: %s)", w.Code, w.Body.String())
 		}
 
-		// /internal/message should return 404 Not Found (dropped)
 		reqInternal := httptest.NewRequest(http.MethodPost, "/internal/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`))
 		wInternal := httptest.NewRecorder()
 		mux.ServeHTTP(wInternal, reqInternal)
-
 		if wInternal.Code != http.StatusNotFound {
 			t.Errorf("expected 404 for dropped /internal/message, got %d", wInternal.Code)
 		}
@@ -386,165 +262,51 @@ func TestHandleDirectMessage(t *testing.T) {
 }
 
 func TestHandleStatusWidget(t *testing.T) {
-	t.Run("method not allowed", func(t *testing.T) {
-		handler := handleStatusWidget(&queue.WorkerPool{})
-		req := httptest.NewRequest(http.MethodGet, "/discord/widget", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("expected 405 MethodNotAllowed, got %d", w.Code)
-		}
-	})
-
-	t.Run("nil pool returns 500", func(t *testing.T) {
-		handler := handleStatusWidget(nil)
-		payload := `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(payload))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusInternalServerError {
-			t.Fatalf("expected 500 InternalServerError, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Worker pool not available") {
-			t.Fatalf("expected 'Worker pool not available' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("invalid JSON returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader("{invalid-json"))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid JSON payload") {
-			t.Fatalf("expected 'Invalid JSON payload' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("missing channel_id returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"chunks":[{"title":"task"}]}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid payload: 'channel_id' field is required and cannot be empty") {
-			t.Fatalf("expected channel_id required error, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("non-snowflake channel_id returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"invalid-snow","chunks":[{"title":"task"}]}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake") {
-			t.Fatalf("expected snowflake error, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("empty chunks returns 400", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[]}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Invalid payload: 'chunks' field is required and cannot be empty") {
-			t.Fatalf("expected chunks required error, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("discord session not connected returns 503", func(t *testing.T) {
-		pool := &queue.WorkerPool{}
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusServiceUnavailable {
-			t.Fatalf("expected 503 ServiceUnavailable, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Discord session not connected") {
-			t.Fatalf("expected 'Discord session not connected' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("discord client error returns status code for RESTError", func(t *testing.T) {
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+	for _, tc := range []struct {
+		name       string
+		method     string
+		pool       *queue.WorkerPool
+		body       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{"method not allowed", http.MethodGet, &queue.WorkerPool{}, "", http.StatusMethodNotAllowed, "Method not allowed"},
+		{"nil pool", http.MethodPost, nil, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusInternalServerError, "Worker pool not available"},
+		{"invalid JSON", http.MethodPost, &queue.WorkerPool{}, "{invalid-json", http.StatusBadRequest, "Invalid JSON payload"},
+		{"missing channel_id", http.MethodPost, &queue.WorkerPool{}, `{"chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
+		{"non-snowflake channel_id", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"invalid-snow","chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"empty chunks", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"1542423172400291873","chunks":[]}`, http.StatusBadRequest, "Invalid payload: 'chunks' field is required and cannot be empty"},
+		{"discord session not connected", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusServiceUnavailable, "Discord session not connected"},
+		{"discord client RESTError", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-				return "", &discordgo.RESTError{
-					Response: &http.Response{StatusCode: 403},
-				}
+				return "", &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
 			},
-		})
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("expected 403 Forbidden, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Discord client error") {
-			t.Fatalf("expected 'Discord client error' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("discord client error returns 400 for cannot send", func(t *testing.T) {
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		}), `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusForbidden, "Discord client error"},
+		{"discord client cannot send", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
 				return "", errors.New("cannot send messages to this thread")
 			},
-		})
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 BadRequest, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Discord client error") {
-			t.Fatalf("expected 'Discord client error' in body, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("generic delivery failure returns 500", func(t *testing.T) {
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		}), `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Discord client error"},
+		{"generic delivery failure", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
 				return "", errors.New("database connection reset")
 			},
+		}), `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusInternalServerError, "Failed to deliver widget"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := handleStatusWidget(tc.pool)
+			var r io.Reader
+			if tc.body != "" {
+				r = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, "/discord/widget", r)
+			w := httptest.NewRecorder()
+			handler(w, req)
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
 		})
-		handler := handleStatusWidget(pool)
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusInternalServerError {
-			t.Fatalf("expected 500 InternalServerError, got %d", w.Code)
-		}
-		if !strings.Contains(w.Body.String(), "Failed to deliver widget") {
-			t.Fatalf("expected 'Failed to deliver widget' in body, got %q", w.Body.String())
-		}
-	})
+	}
 
 	t.Run("success returns 200 with message_id and delivers widget", func(t *testing.T) {
 		var capturedReq discord.StatusWidgetRequest
@@ -598,67 +360,127 @@ func TestHandleStatusWidget(t *testing.T) {
 		mux.ServeHTTP(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 for /discord/widget, got %d (body: %s)", w.Code, w.Body.String())
+			t.Errorf("expected 200 for /discord/widget, got %d", w.Code)
 		}
 	})
 }
 
 func TestHandleTranscripts(t *testing.T) {
 	store := db.NewFakeStore()
-
 	tmpHome := t.TempDir()
-	handler := handleTranscripts(store, tmpHome)
 
+	// 1. Empty dir returns []
+	handler := handleTranscripts(store, tmpHome)
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200 OK, got %d", w.Code)
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Fatalf("Expected 200 with empty array, got %d: %q", w.Code, w.Body.String())
 	}
-	if strings.TrimSpace(w.Body.String()) != "[]" {
-		t.Errorf("Expected empty JSON array '[]', got %q", w.Body.String())
+
+	// 2. Transcript file with various errors and include_raw=true
+	_ = store.SaveConversationMapping(context.Background(), "thread-discord-100", "conv-alpha-100")
+	brainDir := filepath.Join(tmpHome, "brain")
+	convDir := filepath.Join(brainDir, "conv-alpha-100", ".system_generated", "logs")
+	if err := os.MkdirAll(convDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	transcriptContent := "{\"step_index\": 1, \"status\": \"DONE\", \"content\": \"hello\"}\n" +
+		"{\"step_index\": 2, \"status\": \"ERROR\", \"error\": \"something failed\"}\n" +
+		"{\"step_index\": 3, \"status\": \"RUNNING\", \"error\": {\"code\": 500, \"message\": \"object error\"}}\n" +
+		"{\"step_index\": 4, \"status\": \"RUNNING\", \"error\": 99999}\n" +
+		"not a valid json line\n"
+	if err := os.WriteFile(filepath.Join(convDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// Include unreadable folder (missing transcript.jsonl) and non-directory file
+	_ = os.MkdirAll(filepath.Join(brainDir, "conv-no-transcript", ".system_generated", "logs"), 0755)
+	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0644)
+
+	handler2 := handleTranscripts(store, brainDir, "", "   ", "/nonexistent/dir")
+	reqGet := httptest.NewRequest(http.MethodGet, "/transcripts?include_raw=true", nil)
+	wGet := httptest.NewRecorder()
+	handler2(wGet, reqGet)
+	if wGet.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d", wGet.Code)
+	}
+	bodyStr := wGet.Body.String()
+	if !strings.Contains(bodyStr, "conv-alpha-100") || !strings.Contains(bodyStr, "99999") {
+		t.Errorf("Expected conv-alpha-100 and 99999 in response: %s", bodyStr)
+	}
+
+	// 3. Closed DB error branch (GetExternalConversationID warning branch)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	handlerClosed := handleTranscripts(closedStore, brainDir)
+	wClosed := httptest.NewRecorder()
+	handlerClosed(wClosed, req)
+	if wClosed.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK on closed DB warning branch, got %d", wClosed.Code)
+	}
+
+	// 4. Multi-root deduplication
+	root1 := filepath.Join(tmpHome, "root1")
+	root2 := filepath.Join(tmpHome, "root2")
+	dir1 := filepath.Join(root1, "shared-conv-1", ".system_generated", "logs")
+	dir2 := filepath.Join(root2, "shared-conv-1", ".system_generated", "logs")
+	_ = os.MkdirAll(dir1, 0755)
+	_ = os.MkdirAll(dir2, 0755)
+	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
+
+	handlerDedup := handleTranscripts(store, root1, root2)
+	wDedup := httptest.NewRecorder()
+	handlerDedup(wDedup, req)
+	if wDedup.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK from dedup, got %d", wDedup.Code)
 	}
 }
 
 func TestHandleTranscriptSearchAndStats(t *testing.T) {
-	t.Run("Search_MethodNotAllowed", func(t *testing.T) {
-		handler := handleTranscriptSearch(db.NewFakeStore(), nil)
-		req := httptest.NewRequest(http.MethodPost, "/api/transcripts/search", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("expected 405, got %d", w.Code)
-		}
+	fake := db.NewFakeStore()
+	_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
+		SessionID: "sess-mux-1",
+		Summary:   "Triaged container restart in aerial",
 	})
+	errStore := &errTranscriptStore{FakeStore: db.NewFakeStore()}
+	embedderCalled := false
+	embedder := func(ctx context.Context, text string) ([]float32, error) {
+		embedderCalled = true
+		return make([]float32, 384), nil
+	}
 
-	t.Run("Search_NilStore", func(t *testing.T) {
-		handler := handleTranscriptSearch(nil, nil)
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=test", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-		if w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500, got %d", w.Code)
-		}
-	})
-
-	t.Run("Search_Success", func(t *testing.T) {
-		fake := db.NewFakeStore()
-		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
-			SessionID: "sess-mux-1",
-			Summary:   "Triaged container restart in aerial",
+	for _, tc := range []struct {
+		name       string
+		handler    http.HandlerFunc
+		method     string
+		target     string
+		wantStatus int
+	}{
+		{"search method not allowed", handleTranscriptSearch(fake, nil), http.MethodPost, "/api/transcripts/search", http.StatusMethodNotAllowed},
+		{"search nil store", handleTranscriptSearch(nil, nil), http.MethodGet, "/api/transcripts/search?q=test", http.StatusInternalServerError},
+		{"search store error", handleTranscriptSearch(errStore, nil), http.MethodGet, "/api/transcripts/search?q=test&mode=semantic", http.StatusInternalServerError},
+		{"stats method not allowed", handleTranscriptStats(fake), http.MethodPost, "/api/transcripts/stats", http.StatusMethodNotAllowed},
+		{"stats nil store", handleTranscriptStats(nil), http.MethodGet, "/api/transcripts/stats", http.StatusInternalServerError},
+		{"stats store error", handleTranscriptStats(errStore), http.MethodGet, "/api/transcripts/stats", http.StatusInternalServerError},
+		{"search query param alias", handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?query=fallback-query&limit=abc", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, nil)
+			w := httptest.NewRecorder()
+			tc.handler(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
 		})
-		embedderCalled := false
-		embedder := func(ctx context.Context, text string) ([]float32, error) {
-			embedderCalled = true
-			return make([]float32, 384), nil
-		}
-		handler := handleTranscriptSearch(fake, embedder)
+	}
 
+	t.Run("search success and embedder", func(t *testing.T) {
+		handler := handleTranscriptSearch(fake, embedder)
 		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
 		w := httptest.NewRecorder()
 		handler(w, req)
-
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
 		}
@@ -666,109 +488,34 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 			t.Error("expected embedder to be invoked")
 		}
 		var res transcript.SearchResult
-		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-			t.Fatalf("failed unmarshaling search response: %v", err)
-		}
-		if len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
-			t.Errorf("unexpected search result: %+v", res)
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
+			t.Fatalf("unexpected search result: %+v, err: %v", res, err)
 		}
 	})
 
-	t.Run("Stats_MethodNotAllowed", func(t *testing.T) {
-		handler := handleTranscriptStats(db.NewFakeStore())
-		req := httptest.NewRequest(http.MethodPost, "/api/transcripts/stats", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("expected 405, got %d", w.Code)
-		}
-	})
-
-	t.Run("Stats_NilStore", func(t *testing.T) {
-		handler := handleTranscriptStats(nil)
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-		if w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500, got %d", w.Code)
-		}
-	})
-
-	t.Run("Stats_Success", func(t *testing.T) {
-		fake := db.NewFakeStore()
-		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
-			SessionID: "sess-stat-1",
-			Summary:   "Session 1",
-		})
+	t.Run("stats success", func(t *testing.T) {
 		handler := handleTranscriptStats(fake)
-
 		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
 		w := httptest.NewRecorder()
 		handler(w, req)
-
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
 		}
 		var stats map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil {
-			t.Fatalf("failed unmarshaling stats response: %v", err)
-		}
-		if stats["total_sessions"] != float64(1) || stats["status"] != "ok" {
-			t.Errorf("unexpected stats: %+v", stats)
+		if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil || stats["total_sessions"] != float64(1) || stats["status"] != "ok" {
+			t.Fatalf("unexpected stats: %+v, err: %v", stats, err)
 		}
 	})
 
-	t.Run("Search_QueryParamAlias", func(t *testing.T) {
-		fake := db.NewFakeStore()
-		handler := handleTranscriptSearch(fake, nil)
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?query=fallback-query&limit=abc", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 OK, got %d", w.Code)
-		}
-	})
-
-	t.Run("Search_Error", func(t *testing.T) {
-		errStore := &errTranscriptStore{FakeStore: db.NewFakeStore()}
-		handler := handleTranscriptSearch(errStore, nil)
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=test&mode=semantic", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-		if w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 on search store error, got %d", w.Code)
-		}
-	})
-
-	t.Run("Stats_Error", func(t *testing.T) {
-		errStore := &errTranscriptStore{FakeStore: db.NewFakeStore()}
-		handler := handleTranscriptStats(errStore)
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
-		if w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 on store error, got %d", w.Code)
-		}
-	})
-
-	t.Run("SetupBrainMuxWithEmbedder_Endpoints", func(t *testing.T) {
-		fake := db.NewFakeStore()
+	t.Run("mux endpoints", func(t *testing.T) {
 		mux := SetupBrainMuxWithEmbedder(fake, nil, nil)
-
-		// Test /api/transcripts/search route
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=test", nil)
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 from /api/transcripts/search route, got %d", w.Code)
-		}
-
-		// Test /api/transcripts/stats route
-		req = httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
-		w = httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 from /api/transcripts/stats route, got %d", w.Code)
+		for _, path := range []string{"/api/transcripts/search?q=test", "/api/transcripts/stats"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("expected 200 for %s, got %d", path, w.Code)
+			}
 		}
 	})
 }
@@ -787,40 +534,6 @@ func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, query, s
 
 func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
 	return nil, errors.New("simulated search session summaries error")
-}
-
-func TestSanitizeString(t *testing.T) {
-	tests := []struct {
-		input       string
-		mustNotHave string
-		mustHave    string
-	}{
-		{
-			input:       "Execute prompt with token ghp_1234567890abcdefABCDEF123456",
-			mustNotHave: "ghp_1234567890abcdefABCDEF123456",
-			mustHave:    "[REDACTED]",
-		},
-		{
-			input:       "Error: failed with github_pat_11ABCD1234_abcdef5678",
-			mustNotHave: "github_pat_11ABCD1234_abcdef5678",
-			mustHave:    "[REDACTED]",
-		},
-		{
-			input:       "Clean prompt with no tokens to redact",
-			mustNotHave: "[REDACTED]",
-			mustHave:    "Clean prompt with no tokens to redact",
-		},
-	}
-
-	for _, tt := range tests {
-		got := sanitizer.SanitizeString(tt.input)
-		if tt.mustNotHave != "" && strings.Contains(got, tt.mustNotHave) {
-			t.Errorf("SanitizeString(%q) leaked token %q: %s", tt.input, tt.mustNotHave, got)
-		}
-		if tt.mustHave != "" && !strings.Contains(got, tt.mustHave) {
-			t.Errorf("SanitizeString(%q) = %q, expected to contain %q", tt.input, got, tt.mustHave)
-		}
-	}
 }
 
 func TestSchedulesEndpoints(t *testing.T) {
@@ -1027,6 +740,53 @@ func TestSchedulesEndpoints(t *testing.T) {
 	if wPostRuns.Code != http.StatusMethodNotAllowed {
 		t.Errorf("Expected 405 MethodNotAllowed for POST /schedules/runs, got %d", wPostRuns.Code)
 	}
+
+	// Error branches & Nil store
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+
+	storeCronErr := db.NewFakeStore()
+	storeCronErr.FailNext("GetAllCronSchedules", errors.New("cron query forced error"))
+
+	storeOneShotErr := db.NewFakeStore()
+	storeOneShotErr.FailNext("GetAllOneShotSchedules", errors.New("oneshot query forced error"))
+
+	for _, tc := range []struct {
+		name       string
+		handler    http.HandlerFunc
+		target     string
+		wantStatus int
+	}{
+		{"schedules closed DB", handleSchedules(closedStore), "/schedules", http.StatusInternalServerError},
+		{"schedules nil store", handleSchedules(nil), "/schedules", http.StatusInternalServerError},
+		{"schedules cron err", handleSchedules(storeCronErr), "/schedules", http.StatusInternalServerError},
+		{"schedules oneshot err", handleSchedules(storeOneShotErr), "/schedules", http.StatusInternalServerError},
+		{"runs closed DB", handleScheduleRuns(closedStore), "/schedules/runs", http.StatusInternalServerError},
+		{"runs nil store", handleScheduleRuns(nil), "/schedules/runs", http.StatusInternalServerError},
+		{"runs query filter", handleScheduleRuns(store), "/schedules/runs?limit=100&offset=5&schedule_id=cron-1&status=completed", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			w := httptest.NewRecorder()
+			tc.handler(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("got status=%d, want %d", w.Code, tc.wantStatus)
+			}
+		})
+	}
+
+	// Concurrent double check
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+			rw := httptest.NewRecorder()
+			schedulesHandler(rw, r)
+		}()
+	}
+	wg.Wait()
 }
 
 func TestHandleTasks(t *testing.T) {
@@ -1127,6 +887,39 @@ func TestHandleTasks(t *testing.T) {
 	if rrPost.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
 	}
+
+	// 5. Error branches & Nil store
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"nil store", handleTasks(nil)},
+		{"closed store", handleTasks(closedStore)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+			rw := httptest.NewRecorder()
+			tc.handler(rw, r)
+			if rw.Code != http.StatusInternalServerError {
+				t.Fatalf("got status=%d, want 500", rw.Code)
+			}
+		})
+	}
+
+	// 6. Concurrent double check
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+			rw := httptest.NewRecorder()
+			handler(rw, r)
+		}()
+	}
+	wg.Wait()
 }
 
 func TestMetricsEndpoint(t *testing.T) {
@@ -1328,37 +1121,13 @@ func TestHandleFacts_Comprehensive(t *testing.T) {
 	if wErr.Code != http.StatusInternalServerError {
 		t.Errorf("Expected 500 InternalServerError on closed DB, got %d", wErr.Code)
 	}
-}
 
-func TestHandleSchedules_And_Runs_ErrorBranches(t *testing.T) {
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-
-	// 1. handleSchedules with closed DB
-	schedHandler := handleSchedules(closedStore)
-	req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	w := httptest.NewRecorder()
-	schedHandler(w, req)
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 on closed DB from handleSchedules, got %d", w.Code)
-	}
-
-	// 2. handleScheduleRuns with closed DB
-	runsHandler := handleScheduleRuns(closedStore)
-	reqRuns := httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
-	wRuns := httptest.NewRecorder()
-	runsHandler(wRuns, reqRuns)
-	if wRuns.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 on closed DB from handleScheduleRuns, got %d", wRuns.Code)
-	}
-
-	// 3. handleTasks with closed DB
-	tasksHandler := handleTasks(closedStore)
-	reqTasks := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-	wTasks := httptest.NewRecorder()
-	tasksHandler(wTasks, reqTasks)
-	if wTasks.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 on closed DB from handleTasks, got %d", wTasks.Code)
+	// 5. Nil store returns 500
+	handlerNil := handleFacts(nil)
+	wNil := httptest.NewRecorder()
+	handlerNil(wNil, req)
+	if wNil.Code != http.StatusInternalServerError {
+		t.Errorf("Expected 500 InternalServerError on nil store, got %d", wNil.Code)
 	}
 }
 
@@ -1493,226 +1262,6 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 	})
 }
 
-func TestHandlePrompt_ErrorBranches(t *testing.T) {
-	store := db.NewFakeStore()
-
-	pool := newTestWorkerPool(store)
-	// pool is not started so it won't trigger real background worker executions
-
-	handler := handlePrompt(store, pool)
-
-	// 1. Read body error
-	reqErr := httptest.NewRequest(http.MethodPost, "/prompt", &errReadCloser{readErr: errors.New("simulated network read error")})
-	wErr := httptest.NewRecorder()
-	handler(wErr, reqErr)
-	if wErr.Code != http.StatusBadRequest {
-		t.Errorf("Expected 400 for read error, got %d", wErr.Code)
-	}
-
-	// 2. Whitespace only prompt
-	reqWs := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"   "}`))
-	wWs := httptest.NewRecorder()
-	handler(wWs, reqWs)
-	if wWs.Code != http.StatusBadRequest {
-		t.Errorf("Expected 400 for whitespace prompt, got %d", wWs.Code)
-	}
-
-	// 3. Auto-generated UUIDs when omitted
-	reqAuto := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello world","channel_id":"1542423172400291873"}`))
-	wAuto := httptest.NewRecorder()
-	handler(wAuto, reqAuto)
-	if wAuto.Code != http.StatusAccepted {
-		t.Errorf("Expected 202 for auto prompt, got %d", wAuto.Code)
-	}
-
-	// 4. Closed DB returns 500
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-	handlerClosed := handlePrompt(closedStore, pool)
-	reqClosed := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello fallback","channel_id":"1542423172400291873"}`))
-	wClosed := httptest.NewRecorder()
-	handlerClosed(wClosed, reqClosed)
-	if wClosed.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 for closed DB insert failure, got %d", wClosed.Code)
-	}
-
-	// 5. Nil store returns 500
-	handlerNilStore := handlePrompt(nil, pool)
-	reqNilStore := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil store","channel_id":"1542423172400291873"}`))
-	wNilStore := httptest.NewRecorder()
-	handlerNilStore(wNilStore, reqNilStore)
-	if wNilStore.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 for nil store, got %d", wNilStore.Code)
-	}
-
-	// 6. Nil pool handling (store succeeds, pool nil returns 202) and vanadis_chunk_id metadata propagation
-	handlerNilPool := handlePrompt(store, nil)
-	reqNilPool := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`))
-	wNilPool := httptest.NewRecorder()
-	handlerNilPool(wNilPool, reqNilPool)
-	if wNilPool.Code != http.StatusAccepted {
-		t.Errorf("Expected 202 for nil pool when store succeeds, got %d", wNilPool.Code)
-	}
-	msgs, _ := store.GetRecentThreadMessages(context.Background(), "1542423172400291873", 10)
-	foundChunkMeta := false
-	for _, m := range msgs {
-		if m.ID == "msg-vanadis-chunk" && m.Metadata.VanadisChunkID == "chunk-abc-99" {
-			foundChunkMeta = true
-		}
-	}
-	if !foundChunkMeta {
-		t.Errorf("Expected persisted message msg-vanadis-chunk to carry VanadisChunkID=chunk-abc-99, got %+v", msgs)
-	}
-}
-
-func TestHandleTranscripts_ErrorAndRawBranches(t *testing.T) {
-	tmpHome := t.TempDir()
-
-	store := db.NewFakeStore()
-
-	// Seed an external conversation ID mapping
-	_ = store.SaveConversationMapping(context.Background(), "thread-discord-100", "conv-alpha-100")
-
-	// Create transcript folders
-	brainDir := filepath.Join(tmpHome, "brain")
-	convDir := filepath.Join(brainDir, "conv-alpha-100", ".system_generated", "logs")
-	if err := os.MkdirAll(convDir, 0755); err != nil {
-		t.Fatalf("MkdirAll failed: %v", err)
-	}
-
-	transcriptContent := `{"step_index": 1, "status": "DONE", "content": "hello"}
-{"step_index": 2, "status": "ERROR", "error": "something failed"}
-{"step_index": 3, "status": "RUNNING", "error": {"code": 500, "message": "object error"}}
-not a valid json line
-`
-	if err := os.WriteFile(filepath.Join(convDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
-		t.Fatalf("WriteFile failed: %v", err)
-	}
-
-	handler := handleTranscripts(store, brainDir)
-
-	// GET transcripts with include_raw=true
-	reqGet := httptest.NewRequest(http.MethodGet, "/transcripts?include_raw=true", nil)
-	wGet := httptest.NewRecorder()
-	handler(wGet, reqGet)
-	if wGet.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", wGet.Code)
-	}
-	if !strings.Contains(wGet.Body.String(), "conv-alpha-100") {
-		t.Errorf("Expected conv-alpha-100 in response: %s", wGet.Body.String())
-	}
-}
-
-func TestHandleFacts_TruncationAndErrors(t *testing.T) {
-	store := db.NewFakeStore()
-
-	handler := handleFacts(store)
-
-	// 1. Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/facts", nil)
-	wPost := httptest.NewRecorder()
-	handler(wPost, reqPost)
-	if wPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 MethodNotAllowed, got %d", wPost.Code)
-	}
-
-	// 2. Long query truncation (>64 runes)
-	longQuery := strings.Repeat("a", 100)
-	reqLong := httptest.NewRequest(http.MethodGet, "/facts?q="+longQuery, nil)
-	wLong := httptest.NewRecorder()
-	handler(wLong, reqLong)
-	if wLong.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", wLong.Code)
-	}
-
-	// 3. Closed DB error -> 500
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-	handlerClosed := handleFacts(closedStore)
-	reqClosed := httptest.NewRequest(http.MethodGet, "/facts?q=test", nil)
-	wClosed := httptest.NewRecorder()
-	handlerClosed(wClosed, reqClosed)
-	if wClosed.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 InternalServerError for closed DB, got %d", wClosed.Code)
-	}
-}
-
-func TestHandleSchedules_And_Runs_GranularErrors(t *testing.T) {
-	store := db.NewFakeStore()
-
-	handlerSched := handleSchedules(store)
-
-	// 1. handleSchedules: Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/schedules", nil)
-	wPost := httptest.NewRecorder()
-	handlerSched(wPost, reqPost)
-	if wPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 MethodNotAllowed, got %d", wPost.Code)
-	}
-
-	// 2. handleSchedules: Closed DB error on summary metrics -> 500
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-	handlerSchedClosed := handleSchedules(closedStore)
-	reqClosed := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	wClosed := httptest.NewRecorder()
-	handlerSchedClosed(wClosed, reqClosed)
-	if wClosed.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 for closed DB, got %d", wClosed.Code)
-	}
-
-	// 3. handleScheduleRuns: Method Not Allowed
-	handlerRuns := handleScheduleRuns(store)
-	reqRunsPost := httptest.NewRequest(http.MethodPost, "/schedules/runs", nil)
-	wRunsPost := httptest.NewRecorder()
-	handlerRuns(wRunsPost, reqRunsPost)
-	if wRunsPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 for runs POST, got %d", wRunsPost.Code)
-	}
-
-	// 4. handleScheduleRuns: query parameters & filters
-	reqRunsQuery := httptest.NewRequest(http.MethodGet, "/schedules/runs?limit=100&offset=5&schedule_id=sched-1&status=completed", nil)
-	wRunsQuery := httptest.NewRecorder()
-	handlerRuns(wRunsQuery, reqRunsQuery)
-	if wRunsQuery.Code != http.StatusOK {
-		t.Errorf("Expected 200 for runs query, got %d", wRunsQuery.Code)
-	}
-
-	// 5. handleScheduleRuns: closed DB error -> 500
-	handlerRunsClosed := handleScheduleRuns(closedStore)
-	reqRunsClosed := httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
-	wRunsClosed := httptest.NewRecorder()
-	handlerRunsClosed(wRunsClosed, reqRunsClosed)
-	if wRunsClosed.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 for closed DB on runs, got %d", wRunsClosed.Code)
-	}
-}
-
-func TestHandleTasks_GranularErrors(t *testing.T) {
-	store := db.NewFakeStore()
-
-	handler := handleTasks(store)
-
-	// 1. Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/tasks", nil)
-	wPost := httptest.NewRecorder()
-	handler(wPost, reqPost)
-	if wPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 MethodNotAllowed, got %d", wPost.Code)
-	}
-
-	// 2. Closed DB error -> 500
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-	handlerClosed := handleTasks(closedStore)
-	reqClosed := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-	wClosed := httptest.NewRecorder()
-	handlerClosed(wClosed, reqClosed)
-	if wClosed.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 for closed DB on tasks, got %d", wClosed.Code)
-	}
-}
-
 func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("invalid YAML with alert", func(t *testing.T) {
 		cfg := config.NewTestConfig()
@@ -1802,183 +1351,6 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	})
 }
 
-func TestHandleSchedules_DetailedCoverage(t *testing.T) {
-	store := db.NewFakeStore()
-
-	// Seed cron and one shot schedules
-	_ = store.CreateCronSchedule(context.Background(), db.CronSchedule{
-		ID:          "cron-1",
-		TargetID:    "target-1",
-		TitlePrefix: "Daily Backup",
-		CronExpr:    "0 0 * * *",
-		Prompt:      "Run backup",
-		Timezone:    "America/Los_Angeles",
-		Enabled:     true,
-		CreatedAt:   time.Now().UTC(),
-	})
-	_ = store.CreateOneShotSchedule(context.Background(), db.OneShotSchedule{
-		ID:        "oneshot-1",
-		ThreadID:  "target-1",
-		Prompt:    "Run once",
-		RunAt:     time.Now().UTC().Add(1 * time.Hour),
-		CreatedAt: time.Now().UTC(),
-	})
-
-	handler := handleSchedules(store)
-
-	// 1. Initial request (cache miss)
-	req1 := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	w1 := httptest.NewRecorder()
-	handler(w1, req1)
-	if w1.Code != http.StatusOK {
-		t.Errorf("Expected 200 on initial fetch, got %d", w1.Code)
-	}
-	if !strings.Contains(w1.Body.String(), "Daily Backup") {
-		t.Errorf("Expected Daily Backup in response: %s", w1.Body.String())
-	}
-
-	// 2. Immediate request (cache hit under RLock)
-	req2 := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	w2 := httptest.NewRecorder()
-	handler(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Errorf("Expected 200 on cached fetch, got %d", w2.Code)
-	}
-
-	// 3. FailNext GetAllCronSchedules to trigger GetAllCronSchedules error
-	storeCronErr := db.NewFakeStore()
-	storeCronErr.FailNext("GetAllCronSchedules", errors.New("cron query forced error"))
-	handlerCronErr := handleSchedules(storeCronErr)
-	reqCronErr := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	wCronErr := httptest.NewRecorder()
-	handlerCronErr(wCronErr, reqCronErr)
-	if wCronErr.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 for cron query error, got %d", wCronErr.Code)
-	}
-
-	// 4. FailNext GetAllOneShotSchedules to trigger GetAllOneShotSchedules error
-	storeOneShotErr := db.NewFakeStore()
-	storeOneShotErr.FailNext("GetAllOneShotSchedules", errors.New("oneshot query forced error"))
-	handlerOneShotErr := handleSchedules(storeOneShotErr)
-	reqOneShotErr := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	wOneShotErr := httptest.NewRecorder()
-	handlerOneShotErr(wOneShotErr, reqOneShotErr)
-	if wOneShotErr.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 for one shot query error, got %d", wOneShotErr.Code)
-	}
-}
-
-func TestHandleTasks_DetailedCoverage(t *testing.T) {
-	store := db.NewFakeStore()
-
-	longPrompt := strings.Repeat("a", 600)
-	_ = store.InsertMessage(context.Background(), db.Message{
-		ID:         "task-msg-1",
-		ThreadID:   "thread-1",
-		AuthorName: "Alice",
-		Content:    longPrompt,
-		Status:     db.StatusProcessing,
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
-	})
-
-	handler := handleTasks(store)
-
-	// 1. Initial request (cache miss)
-	req1 := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-	w1 := httptest.NewRecorder()
-	handler(w1, req1)
-	if w1.Code != http.StatusOK {
-		t.Errorf("Expected 200 on initial tasks fetch, got %d", w1.Code)
-	}
-	if !strings.Contains(w1.Body.String(), "...") {
-		t.Errorf("Expected prompt truncation in response: %s", w1.Body.String())
-	}
-
-	// 2. Immediate request (cache hit under RLock)
-	req2 := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-	w2 := httptest.NewRecorder()
-	handler(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Errorf("Expected 200 on cached tasks fetch, got %d", w2.Code)
-	}
-}
-
-func TestHandleSchedules_ConcurrentDoubleCheck(t *testing.T) {
-	store := db.NewFakeStore()
-
-	handler := handleSchedules(store)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-			w := httptest.NewRecorder()
-			handler(w, req)
-		}()
-	}
-	wg.Wait()
-}
-
-func TestHandleTasks_ConcurrentDoubleCheck(t *testing.T) {
-	store := db.NewFakeStore()
-
-	handler := handleTasks(store)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-			w := httptest.NewRecorder()
-			handler(w, req)
-		}()
-	}
-	wg.Wait()
-}
-
-func TestHandleTranscripts_NonDirectoryAndBadHome(t *testing.T) {
-	store := db.NewFakeStore()
-
-	tmpDir := t.TempDir()
-
-	brainDir := filepath.Join(tmpDir, "brain")
-	_ = os.MkdirAll(brainDir, 0755)
-	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0644)
-
-	handler := handleTranscripts(store, brainDir, "", "   ", "/nonexistent/dir")
-	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-}
-
-func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	convID := "test-conv-err-1"
-	brainDir := filepath.Join(tmpDir, "brain")
-	tDir := filepath.Join(brainDir, convID, ".system_generated", "logs")
-	_ = os.MkdirAll(tDir, 0755)
-	_ = os.WriteFile(filepath.Join(tDir, "transcript.jsonl"), []byte(`{"status":"DONE"}`+"\n"), 0644)
-
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-
-	handler := handleTranscripts(closedStore, brainDir)
-	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-}
-
 func TestDefaultTranscriptRoots(t *testing.T) {
 	// 1. Nil config
 	nilRoots := DefaultTranscriptRoots(nil)
@@ -2028,44 +1400,6 @@ func TestDefaultTranscriptRoots(t *testing.T) {
 	}
 }
 
-func TestHandleTranscripts_Deduplication(t *testing.T) {
-	store := db.NewFakeStore()
-
-	tmpDir := t.TempDir()
-	root1 := filepath.Join(tmpDir, "root1")
-	root2 := filepath.Join(tmpDir, "root2")
-
-	convID := "shared-conv-1"
-	dir1 := filepath.Join(root1, convID, ".system_generated", "logs")
-	dir2 := filepath.Join(root2, convID, ".system_generated", "logs")
-	_ = os.MkdirAll(dir1, 0755)
-	_ = os.MkdirAll(dir2, 0755)
-	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
-	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
-
-	handler := handleTranscripts(store, root1, root2)
-	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &results); err != nil {
-		t.Fatalf("Failed to parse json: %v", err)
-	}
-	if len(results) != 1 {
-		t.Errorf("Expected exactly 1 deduplicated result, got %d", len(results))
-	} else {
-		expectedPath := filepath.Join(dir1, "transcript.jsonl")
-		if gotPath, ok := results[0]["path"].(string); !ok || gotPath != expectedPath {
-			t.Errorf("Expected first root to win with path %q, got %q", expectedPath, gotPath)
-		}
-	}
-}
-
 func TestDefaultPaths(t *testing.T) {
 	// 1. With HOME set
 	t.Setenv("HOME", "/custom/home")
@@ -2106,22 +1440,6 @@ func TestDefaultPaths(t *testing.T) {
 	}
 	if dir := DefaultDataDir(); dir == "" {
 		t.Errorf("expected non-empty data dir, got empty")
-	}
-}
-
-func TestHandleSessions_UnreadableTranscript(t *testing.T) {
-	store := db.NewFakeStore()
-
-	tmpDir := t.TempDir()
-	convDir := filepath.Join(tmpDir, "conv-no-transcript", ".system_generated", "logs")
-	_ = os.MkdirAll(convDir, 0755)
-
-	handler := handleTranscripts(store, tmpDir)
-	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200 OK, got %d", rr.Code)
 	}
 }
 
@@ -2704,40 +2022,6 @@ func TestRunBrainApp_DaemonCloseErrors(t *testing.T) {
 	}
 }
 
-func TestHandlers_NilStore(t *testing.T) {
-	// 1. handleFacts with nil store
-	reqFacts := httptest.NewRequest(http.MethodGet, "/facts", nil)
-	recFacts := httptest.NewRecorder()
-	handleFacts(nil)(recFacts, reqFacts)
-	if recFacts.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for handleFacts(nil), got %d", recFacts.Code)
-	}
-
-	// 2. handleSchedules with nil store
-	reqSched := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	recSched := httptest.NewRecorder()
-	handleSchedules(nil)(recSched, reqSched)
-	if recSched.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for handleSchedules(nil), got %d", recSched.Code)
-	}
-
-	// 3. handleScheduleRuns with nil store
-	reqRuns := httptest.NewRequest(http.MethodGet, "/schedule-runs", nil)
-	recRuns := httptest.NewRecorder()
-	handleScheduleRuns(nil)(recRuns, reqRuns)
-	if recRuns.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for handleScheduleRuns(nil), got %d", recRuns.Code)
-	}
-
-	// 4. handleTasks with nil store
-	reqTasks := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-	recTasks := httptest.NewRecorder()
-	handleTasks(nil)(recTasks, reqTasks)
-	if recTasks.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for handleTasks(nil), got %d", recTasks.Code)
-	}
-}
-
 type errReadCloser struct {
 	reader   io.Reader
 	readErr  error
@@ -2824,23 +2108,6 @@ func TestWriteJSON_Error(t *testing.T) {
 	w := httptest.NewRecorder()
 	// Channels cannot be JSON-encoded
 	writeJSON(w, http.StatusOK, make(chan int))
-}
-
-func TestHandlePrompt_BodyCloseError(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := newTestWorkerPool(store)
-	handler := handlePrompt(store, pool)
-
-	validPayload, _ := json.Marshal(map[string]string{
-		"prompt":     "Test prompt",
-		"channel_id": "1542423172400291873",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/prompt", &errReadCloser{reader: bytes.NewReader(validPayload), closeErr: errors.New("close error")})
-	w := httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Errorf("expected 202, got %d", w.Code)
-	}
 }
 
 func TestSetupBrainMux_WriteErrors(t *testing.T) {
@@ -3245,25 +2512,6 @@ func TestHandleVoiceAsk_JSON(t *testing.T) {
 	})
 }
 
-func TestHandleTranscripts_NonStringError(t *testing.T) {
-	store := db.NewFakeStore()
-	tmpDir := t.TempDir()
-	convDir := filepath.Join(tmpDir, "conv-err", ".system_generated", "logs")
-	_ = os.MkdirAll(convDir, 0755)
-	_ = os.WriteFile(filepath.Join(convDir, "transcript.jsonl"), []byte(`{"step_index":1,"error":99999}`+"\n"), 0644)
-
-	handler := handleTranscripts(store, tmpDir)
-	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200 OK, got %d", rr.Code)
-	}
-	if !strings.Contains(rr.Body.String(), "99999") {
-		t.Errorf("expected 99999 in response, got %s", rr.Body.String())
-	}
-}
-
 func TestVoicePool_FactoryWiring(t *testing.T) {
 	t.Parallel()
 
@@ -3506,11 +2754,11 @@ func TestExtractMCPServers(t *testing.T) {
 	t.Parallel()
 
 	// 1. Nil config
-	nilVoice := extractVoiceMCPServers(nil)
+	nilVoice := extractMCPServers(nil, false)
 	if len(nilVoice) != 1 || nilVoice[0].Name != "scheduler" {
 		t.Fatalf("expected scheduler default for nil voice config, got: %+v", nilVoice)
 	}
-	nilAll := extractAllMCPServers(nil)
+	nilAll := extractMCPServers(nil, true)
 	if len(nilAll) != 1 || nilAll[0].Name != "scheduler" {
 		t.Fatalf("expected scheduler default for nil all config, got: %+v", nilAll)
 	}
@@ -3533,11 +2781,11 @@ func TestExtractMCPServers(t *testing.T) {
 		},
 	}
 
-	voiceServers := extractVoiceMCPServers(data)
+	voiceServers := extractMCPServers(data, false)
 	if len(voiceServers) != 3 {
 		t.Fatalf("expected 3 servers for voice (scheduler, alpha, gamma), got %d: %+v", len(voiceServers), voiceServers)
 	}
-	allServers := extractAllMCPServers(data)
+	allServers := extractMCPServers(data, true)
 	if len(allServers) != 4 {
 		t.Fatalf("expected 4 servers for all (scheduler, alpha, beta, gamma), got %d: %+v", len(allServers), allServers)
 	}

@@ -612,15 +612,21 @@ func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 	}
 }
 
+func requireGetWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) bool {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+		return false
+	}
+	if storeNil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+		return false
+	}
+	return true
+}
+
 func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if store == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+		if !requireGetWithStore(w, r, store == nil) {
 			return
 		}
 
@@ -651,13 +657,7 @@ func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.Embedd
 
 func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if store == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+		if !requireGetWithStore(w, r, store == nil) {
 			return
 		}
 
@@ -698,13 +698,7 @@ func setNoCacheJSONHeaders(w http.ResponseWriter) {
 
 func handleFacts(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if store == nil {
-			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
+		if !requireGetWithStore(w, r, store == nil) {
 			return
 		}
 
@@ -788,13 +782,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 	cache := &schedulesCache{}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if store == nil {
-			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
+		if !requireGetWithStore(w, r, store == nil) {
 			return
 		}
 
@@ -885,13 +873,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 
 func handleScheduleRuns(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if store == nil {
-			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
+		if !requireGetWithStore(w, r, store == nil) {
 			return
 		}
 
@@ -945,13 +927,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 	cache := &tasksCache{}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if store == nil {
-			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
+		if !requireGetWithStore(w, r, store == nil) {
 			return
 		}
 
@@ -1025,15 +1001,8 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 			return
 		}
 
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
-			return
-		}
-
 		var req PRRegisterRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+		if !readPostJSON(w, r, &req) {
 			return
 		}
 
@@ -1073,15 +1042,9 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 			return
 		}
 
-		if len(req.TargetID) < 17 || len(req.TargetID) > 20 {
+		if len(req.TargetID) < 17 || len(req.TargetID) > 20 || !queue.IsNumericSnowflake(req.TargetID) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return
-		}
-		for _, c := range req.TargetID {
-			if c < '0' || c > '9' {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must contain only numeric digits"})
-				return
-			}
 		}
 
 		rec := db.PRRecord{
@@ -1397,6 +1360,11 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 	return func(source string) {
 		reloadMu.Lock()
 		defer reloadMu.Unlock()
+		defer func() {
+			if options.onReload != nil {
+				options.onReload(source)
+			}
+		}()
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
 		if cfg != nil {
 			if err := options.reloadSupplier(cfg); err != nil {
@@ -1407,9 +1375,6 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 					if alertErr := delivery.SendSystemAlert(options.dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg); alertErr != nil {
 						log.Printf("[%s] Warning: Failed to send system alert for config reload failure: %v", source, alertErr)
 					}
-				}
-				if options.onReload != nil {
-					options.onReload(source)
 				}
 				return
 			}
@@ -1438,9 +1403,6 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 
 			if options.workerPool != nil {
 				options.workerPool.MarkDirty()
-			}
-			if options.onReload != nil {
-				options.onReload(source)
 			}
 		}
 	}
@@ -1482,14 +1444,6 @@ func WithOnReload(fn func(source string)) BrainAppOption {
 	return func(o *brainAppOptions) {
 		o.onReload = fn
 	}
-}
-
-func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
-	return extractMCPServers(cur, false)
-}
-
-func extractAllMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
-	return extractMCPServers(cur, true)
 }
 
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
@@ -1617,7 +1571,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 
 		var ambRetriever runner.AmbientContextRetriever
 		if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
-			voiceServers := extractVoiceMCPServers(cur)
+			voiceServers := extractMCPServers(cur, false)
 			disp := mcp.NewDispatcher(voiceServers, nil)
 			p, pErr := ambient.NewProvider(*ambCfg, disp)
 			if pErr != nil {
@@ -1650,7 +1604,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 				}
 				effectiveModel = geminiModel
 				effectiveAPIKey = apiKey
-				mcpServers = extractVoiceMCPServers(cur)
+				mcpServers = extractMCPServers(cur, false)
 				voicePool = runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
 					APIKey:                  apiKey,
 					Model:                   geminiModel,
@@ -1740,21 +1694,11 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 
 // PrewarmProcessPoolsSequentially pre-warms process pool targets in series in the background,
 // ensuring only one daemon is in the CPU-intensive startup phase at a time across all pools.
-func newWorkerInterchangeablePool(pCfg runner.PoolConfig, spawner runner.DaemonSpawner, keyPrefix ...string) *runner.InterchangeablePool {
-	prefix := ""
-	if len(keyPrefix) > 0 {
-		prefix = keyPrefix[0]
-	} else if len(pCfg.PrewarmedTargets) > 0 {
-		prefix = strings.TrimSuffix(pCfg.PrewarmedTargets[0], "-0")
-	}
-	workerCount := len(pCfg.PrewarmedTargets)
-	if workerCount == 0 {
-		workerCount = 2
-	}
+func newWorkerInterchangeablePool(pCfg runner.PoolConfig, spawner runner.DaemonSpawner, keyPrefix string) *runner.InterchangeablePool {
 	underlying := runner.NewUnifiedProcessPool(pCfg, spawner)
 	return runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
-		WorkerCount: workerCount,
-		KeyPrefix:   prefix,
+		WorkerCount: len(pCfg.PrewarmedTargets),
+		KeyPrefix:   keyPrefix,
 	})
 }
 
@@ -1850,12 +1794,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	runtimeBase := cur.DataDir
-	if runtimeBase == "" {
-		runtimeBase = cfg.DataDir()
-	}
-	if runtimeBase == "" {
-		runtimeBase = cfg.GeminiHomeDir()
-	}
 
 	discordHome := filepath.Join(runtimeBase, "runtimes", "discord")
 	voiceHome := filepath.Join(runtimeBase, "runtimes", "voice")
@@ -1977,7 +1915,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			if cfg != nil {
 				curData = cfg.Current()
 			}
-			servers := extractAllMCPServers(curData)
+			servers := extractMCPServers(curData, true)
 			disp := mcp.NewDispatcher(servers, nil)
 			var pErr error
 			prov, pErr = ambient.NewProvider(*ambCfg, disp)
@@ -2082,8 +2020,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 	var embedder transcript.EmbedderFunc
-	if cfg != nil {
-		memClient := memory.New(cfg, sessionMgr.Roots()...)
+	if memClient != nil {
 		embedder = func(eCtx context.Context, text string) ([]float32, error) {
 			return memClient.GenerateEmbedding(eCtx, text, false, 1)
 		}
