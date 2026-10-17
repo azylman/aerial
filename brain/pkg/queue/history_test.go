@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -109,14 +110,14 @@ func TestFormatChannelHistory(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                 string
-		msgs                 []HistoryMessage
-		tzOpt                []string
-		wantExact            string
-		wantPrefix           string
-		wantSuffix           string
-		wantContains         []string
-		wantExcludes         []string
+		name                  string
+		msgs                  []HistoryMessage
+		tzOpt                 []string
+		wantExact             string
+		wantPrefix            string
+		wantSuffix            string
+		wantContains          []string
+		wantExcludes          []string
 		wantOrderedSubstrings []string
 	}{
 		{
@@ -426,6 +427,29 @@ func TestSummarizeThreadHistory(t *testing.T) {
 	}
 }
 
+func waitForSingleflightFollowers(t *testing.T, callerSubstr string, followers int) {
+	t.Helper()
+	buf := make([]byte, 256*1024)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		stacks := strings.Split(string(buf[:n]), "\n\n")
+		waiting := 0
+		for _, st := range stacks {
+			if strings.Contains(st, callerSubstr) &&
+				strings.Contains(st, "singleflight.(*Group).Do") &&
+				strings.Contains(st, "sync.(*WaitGroup).Wait") {
+				waiting++
+			}
+		}
+		if waiting >= followers {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("timed out waiting for %d singleflight followers in %s", followers, callerSubstr)
+}
+
 func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	t.Parallel()
 	msgs := []HistoryMessage{
@@ -436,8 +460,6 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	release := make(chan struct{})
-	var enterCount atomic.Int32
-	allEntered := make(chan struct{})
 
 	mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
 		calls.Add(1)
@@ -452,9 +474,6 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	done := make(chan string, 3)
 	for i := 0; i < 3; i++ {
 		go func() {
-			if enterCount.Add(1) == 3 {
-				close(allEntered)
-			}
 			summary, _ := SummarizeThreadHistoryWithGroup(context.Background(), sfg, mockLLM, "test-model", "thread-sf", msgs)
 			done <- summary
 		}()
@@ -466,11 +485,7 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 		t.Fatal("timed out waiting for mockLLM invocation")
 	}
 
-	select {
-	case <-allEntered:
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for goroutines to enter")
-	}
+	waitForSingleflightFollowers(t, "SummarizeThreadHistoryWithGroup", 2)
 	close(release)
 
 	for i := 0; i < 3; i++ {

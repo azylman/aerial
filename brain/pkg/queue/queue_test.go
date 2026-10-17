@@ -1303,13 +1303,11 @@ func TestResolveEffectiveChannel(t *testing.T) {
 					}),
 				}
 				id := tc.inputIDs[0]
-				var readyWg, doneWg sync.WaitGroup
+				var doneWg sync.WaitGroup
 				for i := 0; i < tc.concurrent; i++ {
-					readyWg.Add(1)
 					doneWg.Add(1)
 					go func() {
 						defer doneWg.Done()
-						readyWg.Done()
 						effID, effName, isThread := ResolveEffectiveChannel(s, id)
 						if effID != tc.wantEffIDs[0] || effName != tc.wantEffName || isThread != tc.wantIsThread {
 							t.Errorf("ResolveEffectiveChannel(%q) = (%q, %q, %v), want (%q, %q, %v)",
@@ -1317,11 +1315,8 @@ func TestResolveEffectiveChannel(t *testing.T) {
 						}
 					}()
 				}
-				readyWg.Wait()
 				<-reqEntered
-				for i := 0; i < 1000; i++ {
-					runtime.Gosched()
-				}
+				waitForSingleflightFollowers(t, "ResolveEffectiveChannel", tc.concurrent-1)
 				close(releaseReq)
 				doneWg.Wait()
 				if count := atomic.LoadInt32(&reqCount); count != 1 {
@@ -2288,6 +2283,16 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			sfKey := fmt.Sprintf("bot_member:%s:%s", tc.guildID, tc.botID)
+			restCooldownMu.Lock()
+			delete(restCooldown, sfKey)
+			restCooldownMu.Unlock()
+			t.Cleanup(func() {
+				restCooldownMu.Lock()
+				delete(restCooldown, sfKey)
+				restCooldownMu.Unlock()
+			})
+
 			if tc.checkNilSession {
 				if roles := ResolveBotRoleIDs(nil, tc.guildID, tc.botID); roles != nil {
 					t.Errorf("Expected nil for nil session, got %v", roles)
@@ -2332,13 +2337,10 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 
 			if tc.concurrentCallers > 0 {
 				var wg sync.WaitGroup
-				readyWg := sync.WaitGroup{}
 				wg.Add(tc.concurrentCallers)
-				readyWg.Add(tc.concurrentCallers)
 				for i := 0; i < tc.concurrentCallers; i++ {
 					go func() {
 						defer wg.Done()
-						readyWg.Done()
 						roles := ResolveBotRoleIDs(s, tc.guildID, tc.botID)
 						got := append([]string(nil), roles...)
 						sort.Strings(got)
@@ -2347,11 +2349,8 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 						}
 					}()
 				}
-				readyWg.Wait()
 				<-enteredCh
-				for i := 0; i < 64; i++ {
-					runtime.Gosched()
-				}
+				waitForSingleflightFollowers(t, "ResolveBotRoleIDs", tc.concurrentCallers-1)
 				close(releaseCh)
 				wg.Wait()
 			} else {
