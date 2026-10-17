@@ -174,10 +174,14 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	targets := append([]string(nil), mock1.prewarmedTargets...)
 	mock1.mu.Unlock()
 
-	if dyn.Model() != "gemini-2.5-flash" || dyn.Fingerprint() != "fp-1" || dyn.Initialize(ctx) != nil ||
-		atomic.LoadInt32(&mock1.initCalled) != 1 || len(targets) != 2 || targets[0] != "kiosk-kitchen" || targets[1] != "kiosk-living-room" ||
-		err != nil || sess.SessionID() != "sess-k1" || nShould || rotErr != nil || rot != nil || leaseErr == nil {
-		t.Fatalf("unexpected nominal / non-rotator passthrough behavior")
+	if dyn.Model() != "gemini-2.5-flash" || dyn.Fingerprint() != "fp-1" || dyn.Initialize(ctx) != nil || atomic.LoadInt32(&mock1.initCalled) != 1 {
+		t.Fatalf("unexpected model/fingerprint/init passthrough: model=%q, fp=%q, initCalled=%d", dyn.Model(), dyn.Fingerprint(), mock1.initCalled)
+	}
+	if len(targets) != 2 || targets[0] != "kiosk-kitchen" || targets[1] != "kiosk-living-room" {
+		t.Fatalf("unexpected prewarmed targets: %v", targets)
+	}
+	if err != nil || sess.SessionID() != "sess-k1" || nShould || rotErr != nil || rot != nil || leaseErr == nil {
+		t.Fatalf("unexpected non-rotator/non-leased passthrough: err=%v, sess=%q, should=%v, rotErr=%v, leaseErr=%v", err, sess.SessionID(), nShould, rotErr, leaseErr)
 	}
 
 	// 4. Closed dynamic pool safety
@@ -196,7 +200,10 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	fakeSess, fakeL := &mockVoiceSession{sessID: "rot-s", targetKey: "k"}, &fakeSessionLease{sessID: "lease-123"}
 	dynRot := NewDynamicVoicePoolWithInitial(&mockRotatorVoicePool{mockVoicePool: newMockVoicePool("m2"), shouldRotate: true, rotReason: "test reason", rotatedSess: fakeSess}, "fp-2", nil)
 	dynLeased := NewDynamicVoicePoolWithInitial(&mockLeasedVoicePool{mockVoicePool: newMockVoicePool("m3"), lease: fakeL}, "fp-3", nil)
-	defer func() { _ = dynRot.Close(); _ = dynLeased.Close() }()
+	defer func() {
+		_ = dynRot.Close()
+		_ = dynLeased.Close()
+	}()
 
 	should, reason := dynRot.ShouldRotateSession(fakeSess)
 	rotSess, rotErr2 := dynRot.RotateSession(ctx, "k")
@@ -228,10 +235,11 @@ func TestDynamicVoicePool_MarkDirtyAndReloadEdgeCases(t *testing.T) {
 	sf.set(nil, "", errors.New("cannot create pool"))
 	dyn.MarkDirty()
 
-	if atomic.LoadInt32(&mock1.markDirtyCalled) != 1 || atomic.LoadInt32(&mock2.initCalled) != 1 ||
-		atomic.LoadInt32(&mock1.closeCalled) != 1 || dyn.CurrentPool() != mockGood || dyn.Fingerprint() != "fp-good" ||
-		atomic.LoadInt32(&mockFailing.closeCalled) != 1 {
-		t.Fatalf("unexpected state after swaps / LKGP retention")
+	if atomic.LoadInt32(&mock1.markDirtyCalled) != 1 || atomic.LoadInt32(&mock2.initCalled) != 1 || atomic.LoadInt32(&mock1.closeCalled) != 1 {
+		t.Fatalf("unexpected swap lifecycle counts: dirty1=%d, init2=%d, close1=%d", mock1.markDirtyCalled, mock2.initCalled, mock1.closeCalled)
+	}
+	if dyn.CurrentPool() != mockGood || dyn.Fingerprint() != "fp-good" || atomic.LoadInt32(&mockFailing.closeCalled) != 1 {
+		t.Fatalf("expected LKGP retained on failure: pool=%v, fp=%q, failClosed=%d", dyn.CurrentPool(), dyn.Fingerprint(), mockFailing.closeCalled)
 	}
 
 	// 4. Edge Cases: Factory error on NewDynamicVoicePool & nil/plain pools
@@ -255,10 +263,12 @@ func TestDynamicVoicePool_MarkDirtyAndReloadEdgeCases(t *testing.T) {
 	dynCloseRace = NewDynamicVoicePoolWithInitial(mockNoFac, "fp-old", func() (AgentPool, string, error) { return mockInitBlock, "fp-new", nil })
 	dynCloseRace.MarkDirty()
 
-	if dynErr.CurrentPool() != nil || dynErr.Model() != "" || geErr == nil || dynErr.Initialize(ctx) == nil ||
-		NewDynamicVoicePoolWithInitial(&plainPoolWithoutModel{}, "fp", nil).Model() != "" ||
+	if dynErr.CurrentPool() != nil || dynErr.Model() != "" || geErr == nil || dynErr.Initialize(ctx) == nil {
+		t.Errorf("expected nil pool and errors when initial factory fails, got geErr=%v", geErr)
+	}
+	if NewDynamicVoicePoolWithInitial(&plainPoolWithoutModel{}, "fp", nil).Model() != "" ||
 		atomic.LoadInt32(&mockNoFac.markDirtyCalled) != 1 || dNil.Fingerprint() != "fp-old" || dErr.Fingerprint() != "fp-old" {
-		t.Errorf("unexpected edge case reload behavior")
+		t.Errorf("unexpected edge case reload behavior: dirty=%d, fpNil=%q, fpErr=%q", mockNoFac.markDirtyCalled, dNil.Fingerprint(), dErr.Fingerprint())
 	}
 }
 
