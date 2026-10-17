@@ -354,6 +354,224 @@ func TestBuildScheduleRunsUpstreamURL_TableDriven(t *testing.T) {
 	}
 }
 
+func TestBuildVanadisBuildsUpstreamURL_TableDriven(t *testing.T) {
+	tests := []struct {
+		name      string
+		baseURL   string
+		query     url.Values
+		wantLimit int
+		wantErr   bool
+		wantQuery map[string]string
+	}{
+		{
+			name:    "empty base URL returns error",
+			baseURL: "",
+			wantErr: true,
+		},
+		{
+			name:    "control characters in URL return error",
+			baseURL: "http://vanadis:\x7f8080",
+			wantErr: true,
+		},
+		{
+			name:      "defaults applied when query is empty",
+			baseURL:   "http://vanadis:8080/",
+			query:     url.Values{},
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+		{
+			name:      "nil query receives defaults",
+			baseURL:   "http://vanadis:8080",
+			query:     nil,
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+		{
+			name:    "valid limit and filters within boundaries",
+			baseURL: "http://vanadis:8080",
+			query: url.Values{
+				"limit":       []string{"25"},
+				"status":      []string{"  running  "},
+				"queue_state": []string{"  queued  "},
+			},
+			wantLimit: 25,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit":       "25",
+				"status":      "running",
+				"queue_state": "queued",
+			},
+		},
+		{
+			name:    "limit > 100 falls back to default 50",
+			baseURL: "http://vanadis:8080",
+			query: url.Values{
+				"limit": []string{"150"},
+			},
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+		{
+			name:    "limit <= 0 falls back to default 50",
+			baseURL: "http://vanadis:8080",
+			query: url.Values{
+				"limit": []string{"-5"},
+			},
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+		{
+			name:    "invalid non-integer limit falls back to default 50",
+			baseURL: "http://vanadis:8080",
+			query: url.Values{
+				"limit": []string{"abc"},
+			},
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, gotLimit, err := BuildVanadisBuildsUpstreamURL(tt.baseURL, tt.query)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BuildVanadisBuildsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if gotLimit != tt.wantLimit {
+				t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
+			}
+
+			parsed, err := url.Parse(gotURL)
+			if err != nil {
+				t.Fatalf("failed to parse returned URL: %v", err)
+			}
+			if strings.Contains(parsed.Path, "//") {
+				t.Errorf("path contains double slashes: %q", parsed.Path)
+			}
+
+			q := parsed.Query()
+			for k, v := range tt.wantQuery {
+				if got := q.Get(k); got != v {
+					t.Errorf("query param %q = %q, want %q", k, got, v)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildVanadisBuildDetailUpstreamURL_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		baseURL     string
+		requestPath string
+		wantURL     string
+		wantBuildID string
+		wantErr     bool
+	}{
+		{
+			name:        "empty base URL returns error",
+			baseURL:     "",
+			requestPath: "/api/builds/build-123",
+			wantErr:     true,
+		},
+		{
+			name:        "control characters in URL return error",
+			baseURL:     "http://vanadis:\x7f8080",
+			requestPath: "/api/builds/build-123",
+			wantErr:     true,
+		},
+		{
+			name:        "valid /api/builds/ path",
+			baseURL:     "http://vanadis:8080/",
+			requestPath: "/api/builds/build-123-abc",
+			wantURL:     "http://vanadis:8080/builds/build-123-abc",
+			wantBuildID: "build-123-abc",
+			wantErr:     false,
+		},
+		{
+			name:        "valid /dashboard/api/builds/ path",
+			baseURL:     "http://vanadis:8080",
+			requestPath: "/dashboard/api/builds/build-456-def",
+			wantURL:     "http://vanadis:8080/builds/build-456-def",
+			wantBuildID: "build-456-def",
+			wantErr:     false,
+		},
+		{
+			name:        "invalid path prefix",
+			baseURL:     "http://vanadis:8080",
+			requestPath: "/api/other/build-123",
+			wantErr:     true,
+		},
+		{
+			name:        "empty build ID in /api/builds/",
+			baseURL:     "http://vanadis:8080",
+			requestPath: "/api/builds/",
+			wantErr:     true,
+		},
+		{
+			name:        "empty build ID in /dashboard/api/builds/",
+			baseURL:     "http://vanadis:8080",
+			requestPath: "/dashboard/api/builds/",
+			wantErr:     true,
+		},
+		{
+			name:        "whitespace build ID in /api/builds/",
+			baseURL:     "http://vanadis:8080",
+			requestPath: "/api/builds/   ",
+			wantErr:     true,
+		},
+		{
+			name:        "path traversal with .. rejected",
+			baseURL:     "http://vanadis:8080",
+			requestPath: "/api/builds/../escape",
+			wantErr:     true,
+		},
+		{
+			name:        "path traversal with slash rejected",
+			baseURL:     "http://vanadis:8080",
+			requestPath: "/api/builds/build-1/extra",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, gotID, err := BuildVanadisBuildDetailUpstreamURL(tt.baseURL, tt.requestPath)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BuildVanadisBuildDetailUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if gotID != tt.wantBuildID {
+				t.Errorf("gotBuildID = %q, want %q", gotID, tt.wantBuildID)
+			}
+			if gotURL != tt.wantURL {
+				t.Errorf("gotURL = %q, want %q", gotURL, tt.wantURL)
+			}
+		})
+	}
+}
+
 func TestCalculateClusterStatus_TableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2204,6 +2422,12 @@ func TestPure_TargetedCoverageBoost(t *testing.T) {
 	}
 	if _, _, _, err := BuildScheduleRunsUpstreamURL(invalidURL, nil); err == nil {
 		t.Errorf("expected url.Parse error for invalid schedule runs URL")
+	}
+	if _, _, err := BuildVanadisBuildsUpstreamURL(invalidURL, nil); err == nil {
+		t.Errorf("expected url.Parse error for invalid vanadis builds URL")
+	}
+	if _, _, err := BuildVanadisBuildDetailUpstreamURL(invalidURL, "/api/builds/b1"); err == nil {
+		t.Errorf("expected url.Parse error for invalid vanadis build detail URL")
 	}
 
 	// 3. Cardinality clamping to max 5 deployments

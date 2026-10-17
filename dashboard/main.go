@@ -318,6 +318,68 @@ type ScheduleRunsAPIResponse struct {
 	Error  string        `json:"error,omitempty"`
 }
 
+// VanadisChunkDTO represents an individual task chunk within a build.
+type VanadisChunkDTO struct {
+	ID                 string    `json:"id"`
+	BuildID            string    `json:"build_id"`
+	ChunkIndex         int       `json:"chunk_index"`
+	Repo               string    `json:"repo,omitempty"`
+	Title              string    `json:"title"`
+	Instructions       string    `json:"instructions"`
+	TargetFiles        []string  `json:"target_files"`
+	TargetSymbols      []string  `json:"target_symbols"`
+	Effort             string    `json:"effort"`
+	AcceptanceCriteria []string  `json:"acceptance_criteria"`
+	Status             string    `json:"status"`
+	PRNumber           int       `json:"pr_number,omitempty"`
+	DiffStat           string    `json:"diff_stat,omitempty"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// VanadisBuildDTO represents a build run or entry with optional chunk summary stats.
+type VanadisBuildDTO struct {
+	ID              string            `json:"id"`
+	Repo            string            `json:"repo"`
+	ThreadID        string            `json:"thread_id"`
+	Tier            int               `json:"tier"`
+	Title           string            `json:"title"`
+	Objective       string            `json:"objective"`
+	SharedContext   string            `json:"shared_context,omitempty"`
+	Status          string            `json:"status"`
+	StatusMessageID string            `json:"status_message_id,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
+	QueueState      string            `json:"queue_state,omitempty"`
+	TotalChunks     int               `json:"total_chunks,omitempty"`
+	CompletedChunks int               `json:"completed_chunks,omitempty"`
+	RunningChunks   int               `json:"running_chunks,omitempty"`
+	PendingChunks   int               `json:"pending_chunks,omitempty"`
+	FailedChunks    int               `json:"failed_chunks,omitempty"`
+	Chunks          []VanadisChunkDTO `json:"chunks,omitempty"`
+}
+
+// BuildsAPIResponse represents the response for build queue listings.
+type BuildsAPIResponse struct {
+	Status         string            `json:"status"`
+	Total          int               `json:"total"`
+	RunningCount   int               `json:"running_count"`
+	QueuedCount    int               `json:"queued_count"`
+	CompletedCount int               `json:"completed_count"`
+	Builds         []VanadisBuildDTO `json:"builds"`
+	Error          string            `json:"error,omitempty"`
+}
+
+// BuildDetailAPIResponse represents the response for inspecting a single build.
+type BuildDetailAPIResponse struct {
+	Status string            `json:"status"`
+	Build  *VanadisBuildDTO  `json:"build,omitempty"`
+	Chunks []VanadisChunkDTO `json:"chunks"`
+	Entry  *VanadisBuildDTO  `json:"entry,omitempty"`
+	Error  string            `json:"error,omitempty"`
+}
+
 // Singleton tuned HTTP client for upstream brain communication
 var brainHTTPClient = &http.Client{
 	Timeout: 5 * time.Second,
@@ -1106,9 +1168,37 @@ type rawUserConfig struct {
 		QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
 		GitHubRepos      []string          `yaml:"github_repos"`
 		Repos            []string          `yaml:"repos"`
+		VanadisURL       string            `yaml:"vanadis_url"`
 	} `yaml:"dashboard"`
 	QuickLinks  []QuickLaunchLink `yaml:"quick_links"`
 	GitHubRepos []string          `yaml:"github_repos"`
+	VanadisURL  string            `yaml:"vanadis_url"`
+}
+
+// loadDashboardVanadisURL parses the optional Vanadis upstream URL from config.yaml.
+func loadDashboardVanadisURL(configPath string) string {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return ""
+	}
+	configPath = filepath.Clean(configPath)
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+
+	var cfg rawUserConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Printf("[Dashboard] Warning: failed to parse %s for vanadis url: %v", configPath, err)
+		return ""
+	}
+
+	vURL := strings.TrimSpace(cfg.Dashboard.VanadisURL)
+	if vURL == "" {
+		vURL = strings.TrimSpace(cfg.VanadisURL)
+	}
+	return vURL
 }
 
 // loadDashboardRepos parses the list of GitHub repositories configured for status dashboard monitoring.
@@ -1578,6 +1668,186 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 	}
 }
 
+func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		targetURL, _, err := BuildVanadisBuildsUpstreamURL(vanadisBaseURL, r.URL.Query())
+		if err != nil {
+			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Accept", "application/json")
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		resp, err := brainHTTPClient.Do(req)
+		if err != nil {
+			log.Printf("[Dashboard] Upstream vanadis request failed (%s): %v", targetURL, err)
+			writeJSON(w, r, http.StatusServiceUnavailable, BuildsAPIResponse{
+				Status:         "degraded",
+				Error:          "Vanadis service unreachable. Retrying...",
+				Total:          0,
+				RunningCount:   0,
+				QueuedCount:    0,
+				CompletedCount: 0,
+				Builds:         []VanadisBuildDTO{},
+			})
+			return
+		}
+		defer resp.Body.Close()
+		defer drainAndClose(resp.Body, "vanadis builds response body")
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[Dashboard] Upstream vanadis returned status %d", resp.StatusCode)
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			errMsg := "Upstream vanadis error occurred"
+			if decodeErr := json.NewDecoder(resp.Body).Decode(&errResp); decodeErr == nil && errResp.Error != "" {
+				errMsg = errResp.Error
+			}
+			writeJSON(w, r, resp.StatusCode, BuildsAPIResponse{
+				Status:         "error",
+				Error:          errMsg,
+				Total:          0,
+				RunningCount:   0,
+				QueuedCount:    0,
+				CompletedCount: 0,
+				Builds:         []VanadisBuildDTO{},
+			})
+			return
+		}
+
+		var data BuildsAPIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			writeJSON(w, r, http.StatusBadGateway, BuildsAPIResponse{
+				Status:         "error",
+				Error:          "Failed to decode upstream vanadis response",
+				Total:          0,
+				RunningCount:   0,
+				QueuedCount:    0,
+				CompletedCount: 0,
+				Builds:         []VanadisBuildDTO{},
+			})
+			return
+		}
+
+		if data.Builds == nil {
+			data.Builds = []VanadisBuildDTO{}
+		}
+		if data.Status == "" {
+			data.Status = "ok"
+		}
+
+		writeJSON(w, r, http.StatusOK, data)
+	}
+}
+
+func buildDetailHandler(vanadisBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		targetURL, _, err := BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL, r.URL.Path)
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid upstream URL configuration") {
+				http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			writeJSON(w, r, http.StatusBadRequest, BuildDetailAPIResponse{
+				Status: "error",
+				Error:  err.Error(),
+				Chunks: []VanadisChunkDTO{},
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Accept", "application/json")
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		resp, err := brainHTTPClient.Do(req)
+		if err != nil {
+			log.Printf("[Dashboard] Upstream vanadis request failed (%s): %v", targetURL, err)
+			writeJSON(w, r, http.StatusServiceUnavailable, BuildDetailAPIResponse{
+				Status: "degraded",
+				Error:  "Vanadis service unreachable. Retrying...",
+				Chunks: []VanadisChunkDTO{},
+			})
+			return
+		}
+		defer resp.Body.Close()
+		defer drainAndClose(resp.Body, "vanadis build detail response body")
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[Dashboard] Upstream vanadis returned status %d", resp.StatusCode)
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			errMsg := "Upstream vanadis error occurred"
+			if decodeErr := json.NewDecoder(resp.Body).Decode(&errResp); decodeErr == nil && errResp.Error != "" {
+				errMsg = errResp.Error
+			}
+			writeJSON(w, r, resp.StatusCode, BuildDetailAPIResponse{
+				Status: "error",
+				Error:  errMsg,
+				Chunks: []VanadisChunkDTO{},
+			})
+			return
+		}
+
+		var data BuildDetailAPIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			writeJSON(w, r, http.StatusBadGateway, BuildDetailAPIResponse{
+				Status: "error",
+				Error:  "Failed to decode upstream vanadis response",
+				Chunks: []VanadisChunkDTO{},
+			})
+			return
+		}
+
+		if data.Chunks == nil {
+			data.Chunks = []VanadisChunkDTO{}
+		}
+		if data.Entry != nil && data.Entry.Chunks == nil {
+			data.Entry.Chunks = []VanadisChunkDTO{}
+		}
+		if data.Status == "" {
+			data.Status = "ok"
+		}
+
+		writeJSON(w, r, http.StatusOK, data)
+	}
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -1738,6 +2008,7 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type DashboardConfig struct {
 	Port       string
 	BrainURL   string
+	VanadisURL string
 	GHRepo     string
 	GHRepos    []string
 	GHToken    string
@@ -1753,6 +2024,7 @@ type DashboardConfig struct {
 type DashboardYAMLConfig struct {
 	Port       string   `yaml:"port"`
 	BrainURL   string   `yaml:"brain_url"`
+	VanadisURL string   `yaml:"vanadis_url"`
 	HangarURL  string   `yaml:"hangar_url"`
 	GitSyncURL string   `yaml:"gitsync_url"`
 	GHRepo     string   `yaml:"github_repo"`
@@ -1858,6 +2130,14 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		configPath = "/share/aerial-config/config.yaml"
 	}
 
+	vanadisURL := loadDashboardVanadisURL(configPath)
+	if vanadisURL == "" && ycfg.VanadisURL != "" {
+		vanadisURL = strings.TrimSpace(ycfg.VanadisURL)
+	}
+	if vanadisURL == "" {
+		vanadisURL = "http://vanadis.aerial"
+	}
+
 	gitCommit := normalizeGitCommit(lookup("GIT_COMMIT"))
 	if gitCommit == "" {
 		gitCommit = "latest"
@@ -1874,6 +2154,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 	return DashboardConfig{
 		Port:       port,
 		BrainURL:   brainURL,
+		VanadisURL: vanadisURL,
 		GHRepo:     ghRepo,
 		GHRepos:    ghRepos,
 		GHToken:    ghToken,
@@ -1912,6 +2193,10 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(cfg.BrainURL))
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
 	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
+	mux.HandleFunc("/api/builds", buildsHandler(cfg.VanadisURL))
+	mux.HandleFunc("/dashboard/api/builds", buildsHandler(cfg.VanadisURL))
+	mux.HandleFunc("/api/builds/", buildDetailHandler(cfg.VanadisURL))
+	mux.HandleFunc("/dashboard/api/builds/", buildDetailHandler(cfg.VanadisURL))
 	coverageFlush := func(w http.ResponseWriter, r *http.Request) {
 		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
 			if err := writeMetaDirFn(dir); err != nil {
