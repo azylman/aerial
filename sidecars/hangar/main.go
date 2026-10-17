@@ -914,7 +914,23 @@ func (d *SyncDaemon) TriggerReconcile(ctx context.Context, async bool) error {
 var (
 	reconcilerDebounceDuration = 5 * time.Second
 	reconcilerMinCooldown      = 15 * time.Second
+	reconcilerServerReadyDelay = 3 * time.Second
 )
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 
 func (d *SyncDaemon) runNomadValidate(ctx context.Context, subCmd, targetPath string, requireNonNilExec bool) error {
 	valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1248,7 +1264,9 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 				}
 				debounceTimer = time.AfterFunc(reconcilerDebounceDuration, func() {
 					if elapsed := time.Since(d.GetLastReconcile()); elapsed < reconcilerMinCooldown {
-						time.Sleep(reconcilerMinCooldown - elapsed)
+						if !sleepWithContext(ctx, reconcilerMinCooldown-elapsed) {
+							return
+						}
 					}
 
 					// Phase 1: Teardowns for any deleted Nomad jobs (releases ports)
@@ -1263,7 +1281,9 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 							log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
 						} else {
 							// Wait briefly for Nomad API readiness after server container restart
-							time.Sleep(3 * time.Second)
+							if !sleepWithContext(ctx, reconcilerServerReadyDelay) {
+								return
+							}
 						}
 					}
 

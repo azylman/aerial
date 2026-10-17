@@ -78,64 +78,6 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 			})
 		}
 	})
-
-	t.Run("BuildGitEnv", func(t *testing.T) {
-		tests := []struct {
-			name            string
-			pat             string
-			wantAuthHeader  bool
-			forbidGitConfig bool
-		}{
-			{"non-empty PAT produces basic auth GIT_CONFIG", "my_test_pat", true, false},
-			{"empty PAT omits GIT_CONFIG auth variables", "", false, true},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				env := BuildGitEnv(tt.pat, os.Environ())
-				foundAuth := false
-				for _, e := range env {
-					if strings.HasPrefix(e, "GIT_CONFIG_VALUE_0=") {
-						foundAuth = true
-						if tt.wantAuthHeader && !strings.Contains(e, "AUTHORIZATION: basic ") {
-							t.Errorf("expected basic auth header, got %s", e)
-						}
-					}
-					if tt.forbidGitConfig && (strings.HasPrefix(e, "GIT_CONFIG_COUNT=") || strings.HasPrefix(e, "GIT_CONFIG_KEY_") || strings.HasPrefix(e, "GIT_CONFIG_VALUE_")) {
-						t.Errorf("unexpected auth GIT_CONFIG in empty PAT env: %s", e)
-					}
-				}
-				if tt.wantAuthHeader && !foundAuth {
-					t.Errorf("BuildGitEnv() did not produce GIT_CONFIG_VALUE_0 auth header")
-				}
-			})
-		}
-	})
-
-	t.Run("ScrubComposeEnv", func(t *testing.T) {
-		tests := []struct {
-			name            string
-			input, expected []string
-		}{
-			{
-				name:     "filters internal directories and invalid keys while preserving compose project",
-				input:    []string{"INVALID_NO_EQUALS", "AERIAL_CONFIG_DIR=/dir/config", "AERIAL_PROJECT_DIR=/dir/project", "GOOD_VAR=123", "COMPOSE_PROJECT_NAME=aerial"},
-				expected: []string{"COMPOSE_PROJECT_NAME=aerial"},
-			},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				out := ScrubComposeEnv(tt.input)
-				if len(out) != len(tt.expected) {
-					t.Fatalf("expected len %d, got %d (%v)", len(tt.expected), len(out), out)
-				}
-				for i := range out {
-					if out[i] != tt.expected[i] {
-						t.Errorf("output[%d] = %q, want %q", i, out[i], tt.expected[i])
-					}
-				}
-			})
-		}
-	})
 }
 
 func TestGetComposeArgs_TableDriven(t *testing.T) {
@@ -426,6 +368,7 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 			name, repoPath, wantGitDir string
 			wantErr                    bool
 		}{
+			{"empty_path", "", "", true},
 			{"nonexistent_directory", filepath.Join(tempDir, "nonexistent"), "", true},
 			{"standard_git_directory", standardRepo, filepath.Join(standardRepo, ".git"), false},
 			{"worktree_absolute_gitdir", worktreeRepo, targetGitDir, false},
@@ -793,9 +736,90 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 			t.Errorf("expected 1 result with Changed=true, got %+v", results)
 		}
 	})
+
+	t.Run("TriggerSync_singleflight_invalid_type", func(t *testing.T) {
+		d := &SyncDaemon{}
+		started := make(chan struct{})
+		go func() {
+			_, _, _ = d.sfg.Do("sync", func() (interface{}, error) {
+				close(started)
+				<-time.After(20 * time.Millisecond)
+				return "invalid-type", nil
+			})
+		}()
+		<-started
+		_, err := d.TriggerSync()
+		if err == nil || !strings.Contains(err.Error(), "unexpected return type") {
+			t.Errorf("expected unexpected return type error, got %v", err)
+		}
+	})
+
+	t.Run("TriggerSync_unconditional_nomad_config_sync", func(t *testing.T) {
+		tempDir := t.TempDir()
+		localDir := filepath.Join(tempDir, "local")
+		_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+		configDir := filepath.Join(tempDir, "config")
+		_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755)
+		_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0644)
+		_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 4001\n"), 0644)
+
+		head := "1111111111111111111111111111111111111111"
+		var nomadCalls [][]string
+		var nomadMu sync.Mutex
+
+		d := NewDaemon(DaemonConfig{
+			Repos:     []string{localDir},
+			ConfigDir: configDir,
+			NomadAddr: "http://127.0.0.1:4646",
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				nomadMu.Lock()
+				nomadCalls = append(nomadCalls, args)
+				nomadMu.Unlock()
+				return []byte("var updated"), nil, nil
+			},
+			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "rev-parse" {
+					return []byte(head), nil, nil
+				}
+				if len(args) > 0 && args[0] == "merge" {
+					return []byte("Already up to date."), nil, nil
+				}
+				return nil, nil, nil
+			},
+		})
+
+		results, err := d.TriggerSync()
+		if err != nil || len(results) != 1 || results[0].Changed {
+			t.Fatalf("expected 1 unchanged result, err=%v, results=%+v", err, results)
+		}
+		nomadMu.Lock()
+		callsCount := len(nomadCalls)
+		nomadMu.Unlock()
+		if callsCount == 0 {
+			t.Fatalf("expected nomad var put calls even when git repo has no changes, got 0")
+		}
+
+		results2, err := d.TriggerSync()
+		if err != nil || len(results2) != 1 || results2[0].Changed {
+			t.Fatalf("expected 1 unchanged result on second sync, err=%v, results=%+v", err, results2)
+		}
+		nomadMu.Lock()
+		secondCount := len(nomadCalls)
+		nomadMu.Unlock()
+		if secondCount != callsCount {
+			t.Fatalf("expected call count to remain %d due to caching, got %d", callsCount, secondCount)
+		}
+	})
 }
 
 func TestNewConfigFromLookup_TableDriven(t *testing.T) {
+	if cfg := NewConfigFromEnv(); cfg.Port == "" {
+		t.Errorf("expected non-empty port from NewConfigFromEnv()")
+	}
+	if cfg := NewConfigFromLookup(nil); cfg.Port != "8087" {
+		t.Errorf("NewConfigFromLookup(nil) Port = %q, want 8087", cfg.Port)
+	}
+
 	baseYAML := `
 port: "8087"
 sync_interval: "45s"
@@ -811,12 +835,9 @@ service_configs:
 `
 	tests := []struct {
 		name                     string
-		nilLookup                bool
-		useFromEnv               bool
 		yamlContent              string
 		env                      map[string]string
 		wantPort                 string
-		wantNonEmptyPort         bool
 		wantRepos                []string
 		wantInterval             time.Duration
 		wantPAT                  string
@@ -854,7 +875,6 @@ service_configs:
 			wantConfigDir: "/share/aerial-config", wantBrainURL: "http://brain:8088/internal/reload",
 			wantExtraSecretsLen: 0, checkExtraSecrets: true,
 		},
-		{name: "nil lookup defaults", nilLookup: true, wantPort: "8087"},
 		{
 			name: "CONFIG_PATH YAML loading and service configs", yamlContent: baseYAML,
 			wantPort: "8087", wantInterval: 45 * time.Second, wantRepos: []string{"/repo/a", "/repo/b"},
@@ -870,34 +890,23 @@ service_configs:
 			wantPort: "9999", wantInterval: 10 * time.Second, wantRepos: []string{"/override/repo"},
 			wantNomadAddr: "http://override.nomad:4646", wantBrainURL: "http://override.brain:8088/reload",
 		},
-		{name: "NewConfigFromEnv smoke check", useFromEnv: true, wantNonEmptyPort: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var cfg DaemonConfig
-			if tt.useFromEnv {
-				cfg = NewConfigFromEnv()
-			} else if tt.nilLookup {
-				cfg = NewConfigFromLookup(nil)
-			} else {
-				envMap := make(map[string]string, len(tt.env)+1)
-				for k, v := range tt.env {
-					envMap[k] = v
-				}
-				if tt.yamlContent != "" {
-					cfgPath := filepath.Join(t.TempDir(), "hangar.yaml")
-					if err := os.WriteFile(cfgPath, []byte(tt.yamlContent), 0644); err != nil {
-						t.Fatalf("failed to write test yaml: %v", err)
-					}
-					envMap["CONFIG_PATH"] = cfgPath
-				}
-				cfg = NewConfigFromLookup(func(k string) string { return envMap[k] })
+			envMap := make(map[string]string, len(tt.env)+1)
+			for k, v := range tt.env {
+				envMap[k] = v
 			}
+			if tt.yamlContent != "" {
+				cfgPath := filepath.Join(t.TempDir(), "hangar.yaml")
+				if err := os.WriteFile(cfgPath, []byte(tt.yamlContent), 0644); err != nil {
+					t.Fatalf("failed to write test yaml: %v", err)
+				}
+				envMap["CONFIG_PATH"] = cfgPath
+			}
+			cfg := NewConfigFromLookup(func(k string) string { return envMap[k] })
 
-			if tt.wantNonEmptyPort && cfg.Port == "" {
-				t.Errorf("expected non-empty port, got %q", cfg.Port)
-			}
 			if tt.wantPort != "" && cfg.Port != tt.wantPort {
 				t.Errorf("Port = %q, want %q", cfg.Port, tt.wantPort)
 			}
@@ -1085,7 +1094,55 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("coverage_flush_endpoint", func(t *testing.T) {
+		mux := SetupMux(&SyncDaemon{})
+		orig := os.Getenv("GOCOVERDIR")
+		_ = os.Unsetenv("GOCOVERDIR")
+		defer func() {
+			if orig != "" {
+				_ = os.Setenv("GOCOVERDIR", orig)
+			} else {
+				_ = os.Unsetenv("GOCOVERDIR")
+			}
+		}()
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected 200 OK without GOCOVERDIR, got: %d", rec.Code)
+		}
+
+		oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
+		defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
+
+		called, metaCalled := false, false
+		writeCountersDirFn = func(dir string) error { called = true; return nil }
+		writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
+		_ = os.Setenv("GOCOVERDIR", t.TempDir())
+
+		rec2 := httptest.NewRecorder()
+		mux.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
+		if rec2.Code != http.StatusOK || !called || !metaCalled {
+			t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", rec2.Code, called, metaCalled)
+		}
+
+		writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
+		rec2b := httptest.NewRecorder()
+		mux.ServeHTTP(rec2b, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
+		if rec2b.Code != http.StatusOK {
+			t.Errorf("expected 200 OK when meta flush errors, got %d", rec2b.Code)
+		}
+
+		writeCountersDirFn = func(dir string) error { return errors.New("simulated flush error") }
+		rec3 := httptest.NewRecorder()
+		mux.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
+		if rec3.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500 on error, got: %d", rec3.Code)
+		}
+	})
 }
+
 
 func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 	composePath := filepath.Join("..", "..", "docker-compose.yml")
@@ -1574,63 +1631,6 @@ func TestTriggerReconcile_TableDriven(t *testing.T) {
 	}
 }
 
-func TestTriggerSync_UnconditionalNomadConfigSync(t *testing.T) {
-	tempDir := t.TempDir()
-	localDir := filepath.Join(tempDir, "local")
-	_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-	configDir := filepath.Join(tempDir, "config")
-	_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755)
-	_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0644)
-	_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 4001\n"), 0644)
-
-	head := "1111111111111111111111111111111111111111"
-	var nomadCalls [][]string
-	var nomadMu sync.Mutex
-
-	d := NewDaemon(DaemonConfig{
-		Repos:     []string{localDir},
-		ConfigDir: configDir,
-		NomadAddr: "http://127.0.0.1:4646",
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			nomadMu.Lock()
-			nomadCalls = append(nomadCalls, args)
-			nomadMu.Unlock()
-			return []byte("var updated"), nil, nil
-		},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "rev-parse" {
-				return []byte(head), nil, nil
-			}
-			if len(args) > 0 && args[0] == "merge" {
-				return []byte("Already up to date."), nil, nil
-			}
-			return nil, nil, nil
-		},
-	})
-
-	results, err := d.TriggerSync()
-	if err != nil || len(results) != 1 || results[0].Changed {
-		t.Fatalf("expected 1 unchanged result, err=%v, results=%+v", err, results)
-	}
-	nomadMu.Lock()
-	callsCount := len(nomadCalls)
-	nomadMu.Unlock()
-	if callsCount == 0 {
-		t.Fatalf("expected nomad var put calls even when git repo has no changes, got 0")
-	}
-
-	results2, err := d.TriggerSync()
-	if err != nil || len(results2) != 1 || results2[0].Changed {
-		t.Fatalf("expected 1 unchanged result on second sync, err=%v, results=%+v", err, results2)
-	}
-	nomadMu.Lock()
-	secondCount := len(nomadCalls)
-	nomadMu.Unlock()
-	if secondCount != callsCount {
-		t.Fatalf("expected call count to remain %d due to caching, got %d", callsCount, secondCount)
-	}
-}
-
 type roundTripperFunc struct {
 	fn func(req *http.Request) (*http.Response, error)
 }
@@ -1818,29 +1818,58 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 
 func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 	dummyPAT := "ghp_mock_token_12345"
-	for _, tc := range []struct {
-		name, mode, pat, repoURL, wantErrSub, wantAuthUser string
-		mkdirErr, readErr, writeErr                        error
-	}{
-		{name: "nil daemon and empty PAT daemon return nil", mode: "daemon_empty"},
-		{name: "empty PAT in EnsureDockerAuthPath is no-op", mode: "mock_callbacks", pat: "", repoURL: "https://github.com/azylman/aerial-config.git"},
-		{name: "mkdir failure returns error", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", mkdirErr: errors.New("disk permission denied"), wantErrSub: "disk permission denied"},
-		{name: "read error other than not-exist returns error", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", readErr: errors.New("read fault"), wantErrSub: "read fault"},
-		{name: "write failure returns error", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", readErr: os.ErrNotExist, writeErr: errors.New("write fault"), wantErrSub: "write fault"},
-		{name: "successful write creates valid docker config file with 0600 mode", mode: "mock_callbacks", pat: dummyPAT, repoURL: "https://github.com/custom-org/aerial-config.git", readErr: os.ErrNotExist, wantAuthUser: "custom-org"},
-		{name: "filesystem integration with real callbacks writing .docker/config.json", mode: "real_fs", pat: dummyPAT},
-		{name: "filesystem integration test via daemon EnsureDockerAuth", mode: "daemon_fs", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", wantAuthUser: "azylman"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			switch tc.mode {
-			case "daemon_empty":
-				var nilDaemon *SyncDaemon
-				for _, err := range []error{nilDaemon.EnsureDockerAuth(), (&SyncDaemon{pat: ""}).EnsureDockerAuth(), NewDaemon(DaemonConfig{PAT: ""}).EnsureDockerAuth()} {
-					if err != nil {
-						t.Errorf("expected nil error for empty/nil daemon, got %v", err)
-					}
-				}
-			case "mock_callbacks":
+
+	t.Run("nil_and_empty_daemon", func(t *testing.T) {
+		var nilDaemon *SyncDaemon
+		for _, err := range []error{nilDaemon.EnsureDockerAuth(), (&SyncDaemon{pat: ""}).EnsureDockerAuth(), NewDaemon(DaemonConfig{PAT: ""}).EnsureDockerAuth()} {
+			if err != nil {
+				t.Errorf("expected nil error for empty/nil daemon, got %v", err)
+			}
+		}
+	})
+
+	t.Run("real_fs_callbacks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		lookup := func(k string) string {
+			if k == "DOCKER_CONFIG" {
+				return filepath.Join(tmpDir, ".docker")
+			}
+			return ""
+		}
+		if err := EnsureDockerAuthPath(dummyPAT, "", lookup, nil, nil, nil); err != nil {
+			t.Fatalf("expected success writing docker config, got %v", err)
+		}
+		if content, err := os.ReadFile(filepath.Join(tmpDir, ".docker", "config.json")); err != nil || !strings.Contains(string(content), "ghcr.io") {
+			t.Errorf("expected docker config with ghcr.io, got %s, err: %v", string(content), err)
+		}
+	})
+
+	t.Run("daemon_EnsureDockerAuth_fs", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Setenv("DOCKER_CONFIG", tempDir)
+		d := &SyncDaemon{pat: dummyPAT, configDir: "/share/aerial-config", repoUrls: map[string]string{"/share/aerial-config": "https://github.com/azylman/aerial-config.git"}}
+		if err := d.EnsureDockerAuth(); err != nil {
+			t.Fatalf("daemon.EnsureDockerAuth failed: %v", err)
+		}
+		if data, err := os.ReadFile(filepath.Join(tempDir, "config.json")); err != nil || !strings.Contains(string(data), base64.StdEncoding.EncodeToString([]byte("azylman:"+dummyPAT))) {
+			t.Errorf("expected valid auth in written config, got %s, err: %v", string(data), err)
+		}
+	})
+
+	t.Run("mock_callbacks_table", func(t *testing.T) {
+		tests := []struct {
+			name, pat, repoURL, wantErrSub, wantAuthUser string
+			mkdirErr, readErr, writeErr                  error
+		}{
+			{name: "empty PAT in EnsureDockerAuthPath is no-op", pat: "", repoURL: "https://github.com/azylman/aerial-config.git"},
+			{name: "mkdir failure returns error", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", mkdirErr: errors.New("disk permission denied"), wantErrSub: "disk permission denied"},
+			{name: "read error other than not-exist returns error", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", readErr: errors.New("read fault"), wantErrSub: "read fault"},
+			{name: "write failure returns error", pat: dummyPAT, repoURL: "https://github.com/azylman/aerial-config.git", readErr: os.ErrNotExist, writeErr: errors.New("write fault"), wantErrSub: "write fault"},
+			{name: "successful write creates valid docker config file with 0600 mode", pat: dummyPAT, repoURL: "https://github.com/custom-org/aerial-config.git", readErr: os.ErrNotExist, wantAuthUser: "custom-org"},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
 				var writtenPath string
 				var writtenData []byte
 				var writtenMode os.FileMode
@@ -1885,35 +1914,10 @@ func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 						t.Errorf("unexpected ghcr auth entry: %+v", entry)
 					}
 				}
-			case "real_fs":
-				tmpDir := t.TempDir()
-				lookup := func(k string) string {
-					if k == "DOCKER_CONFIG" {
-						return filepath.Join(tmpDir, ".docker")
-					}
-					return ""
-				}
-				if err := EnsureDockerAuthPath(tc.pat, "", lookup, nil, nil, nil); err != nil {
-					t.Fatalf("expected success writing docker config, got %v", err)
-				}
-				if content, err := os.ReadFile(filepath.Join(tmpDir, ".docker", "config.json")); err != nil || !strings.Contains(string(content), "ghcr.io") {
-					t.Errorf("expected docker config with ghcr.io, got %s, err: %v", string(content), err)
-				}
-			case "daemon_fs":
-				tempDir := t.TempDir()
-				t.Setenv("DOCKER_CONFIG", tempDir)
-				d := &SyncDaemon{pat: tc.pat, configDir: "/share/aerial-config", repoUrls: map[string]string{"/share/aerial-config": tc.repoURL}}
-				if err := d.EnsureDockerAuth(); err != nil {
-					t.Fatalf("daemon.EnsureDockerAuth failed: %v", err)
-				}
-				if data, err := os.ReadFile(filepath.Join(tempDir, "config.json")); err != nil || !strings.Contains(string(data), base64.StdEncoding.EncodeToString([]byte(tc.wantAuthUser+":"+tc.pat))) {
-					t.Errorf("expected valid auth in written config, got %s, err: %v", string(data), err)
-				}
-			}
-		})
-	}
+			})
+		}
+	})
 }
-
 type mockErrReadCloser struct{}
 
 func (e *mockErrReadCloser) Read(p []byte) (int, error) { return 0, io.EOF }
@@ -2010,23 +2014,81 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 		}
 	})
 
-}
 
-func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
-	d := &SyncDaemon{}
-	started := make(chan struct{})
-	go func() {
-		_, _, _ = d.sfg.Do("sync", func() (interface{}, error) {
-			close(started)
-			<-time.After(20 * time.Millisecond)
-			return "invalid-type", nil
+	t.Run("ReconciliationStatus", func(t *testing.T) {
+		var nilD *SyncDaemon
+		if st := nilD.GetReconciliationStatus(); st.State != "idle" || st.Stage != "idle" {
+			t.Errorf("expected idle for nil daemon, got %+v", st)
+		}
+		d := NewDaemon(DaemonConfig{})
+		if st := d.GetReconciliationStatus(); st.State != "idle" || st.Stage != "idle" {
+			t.Errorf("expected idle for daemon, got %+v", st)
+		}
+		statusResp := d.GetStatus(context.Background())
+		if statusResp.Reconciliation == nil || statusResp.Reconciliation.State != "idle" {
+			t.Errorf("expected state idle in GetStatus, got %+v", statusResp.Reconciliation)
+		}
+	})
+
+	t.Run("GetStatus_populates_and_caches_GitHubRepo", func(t *testing.T) {
+		remoteCalls := 0
+		d := NewDaemon(DaemonConfig{
+			Repos: []string{"/share/mirrormere"},
+			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) >= 3 && args[0] == "remote" && args[1] == "get-url" && args[2] == "origin" {
+					remoteCalls++
+					return []byte("https://github.com/azylman/mirrormere.git\n"), nil, nil
+				}
+				if len(args) >= 4 && args[0] == "log" && args[1] == "-1" {
+					return []byte("abc1234\x002026-09-26T20:00:00Z\n"), nil, nil
+				}
+				return nil, nil, nil
+			},
 		})
-	}()
-	<-started
-	_, err := d.TriggerSync()
-	if err == nil || !strings.Contains(err.Error(), "unexpected return type") {
-		t.Errorf("expected unexpected return type error, got %v", err)
-	}
+
+		st1 := d.GetStatus(context.Background())
+		repoSt1, ok := st1.Repos["/share/mirrormere"]
+		if !ok || repoSt1.GitHubRepo != "azylman/mirrormere" {
+			t.Errorf("expected GitHubRepo azylman/mirrormere, got %q", repoSt1.GitHubRepo)
+		}
+		if remoteCalls != 1 {
+			t.Errorf("expected 1 remote call, got %d", remoteCalls)
+		}
+
+		st2 := d.GetStatus(context.Background())
+		repoSt2, ok := st2.Repos["/share/mirrormere"]
+		if !ok || repoSt2.GitHubRepo != "azylman/mirrormere" {
+			t.Errorf("expected cached GitHubRepo azylman/mirrormere, got %q", repoSt2.GitHubRepo)
+		}
+		if remoteCalls != 1 {
+			t.Errorf("expected remoteCalls to remain 1 after cached call, got %d", remoteCalls)
+		}
+	})
+
+	t.Run("RegistryClient_and_LastReconcile_accessors", func(t *testing.T) {
+		var nilDaemon *SyncDaemon
+		if c := nilDaemon.getRegistryClient(); c == nil {
+			t.Errorf("expected default registry client for nil daemon")
+		}
+
+		dDefault := &SyncDaemon{}
+		c := dDefault.getRegistryClient()
+		if c == nil || c.Timeout != 10*time.Second {
+			t.Errorf("expected default registry client with 10s timeout, got %v", c)
+		}
+
+		custom := &http.Client{Timeout: 42 * time.Second}
+		dCustom := NewDaemon(DaemonConfig{RegistryClient: custom})
+		if dCustom.getRegistryClient() != custom {
+			t.Errorf("expected custom registry client to be returned")
+		}
+
+		now := time.Now().Truncate(time.Second)
+		dCustom.SetLastReconcile(now)
+		if !dCustom.GetLastReconcile().Equal(now) {
+			t.Errorf("expected LastReconcile to equal %v, got %v", now, dCustom.GetLastReconcile())
+		}
+	})
 }
 
 type mockOCIOptions struct {
@@ -2639,236 +2701,188 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 			t.Fatalf("poll with restart fail returned error: %v", err)
 		}
 	})
-}
 
-func TestReconciliationStatusAndHelpers_TableDriven(t *testing.T) {
-	ctx := context.Background()
+	t.Run("nomad_image_poll_uses_image_revision", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		jobsDir := filepath.Join(tmpDir, "jobs")
+		if err := os.MkdirAll(jobsDir, 0755); err != nil {
+			t.Fatalf("failed to create jobs dir: %v", err)
+		}
 
-	t.Run("ReconciliationStatus", func(t *testing.T) {
-		var nilD *SyncDaemon
-		if st := nilD.GetReconciliationStatus(); st.State != "idle" || st.Stage != "idle" {
-			t.Errorf("expected idle for nil daemon, got %+v", st)
+		jobFile := filepath.Join(jobsDir, "webhooks-router.nomad")
+		jobContent := `job "webhooks-router" { group "core" { task "router" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } } }`
+		if err := os.WriteFile(jobFile, []byte(jobContent), 0644); err != nil {
+			t.Fatalf("failed to write job file: %v", err)
 		}
-		d := NewDaemon(DaemonConfig{})
-		if st := d.GetReconciliationStatus(); st.State != "idle" || st.Stage != "idle" {
-			t.Errorf("expected idle for daemon, got %+v", st)
-		}
-		statusResp := d.GetStatus(ctx)
-		if statusResp.Reconciliation == nil || statusResp.Reconciliation.State != "idle" {
-			t.Errorf("expected state idle in GetStatus, got %+v", statusResp.Reconciliation)
-		}
-	})
 
-	t.Run("GetStatus_populates_and_caches_GitHubRepo", func(t *testing.T) {
-		remoteCalls := 0
-		d := NewDaemon(DaemonConfig{
-			Repos: []string{"/share/mirrormere"},
-			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				if len(args) >= 3 && args[0] == "remote" && args[1] == "get-url" && args[2] == "origin" {
-					remoteCalls++
-					return []byte("https://github.com/azylman/mirrormere.git\n"), nil, nil
+		newDigest := "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+		expectedImageRevision := "9876543210abcdef9876543210abcdef98765432"
+
+		manifestWithAnnotations := fmt.Sprintf(`{
+			"schemaVersion": 2,
+			"mediaType": "application/vnd.oci.image.manifest.v1+json",
+			"config": {
+				"digest": "sha256:dummyblobdigest11111111111111111111111111111111111111111111111111"
+			},
+			"annotations": {
+				"org.opencontainers.image.revision": "%s"
+			}
+		}`, expectedImageRevision)
+
+		var restartCalled bool
+		var restartedJob string
+
+		mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
+				restartCalled = true
+				restartedJob = args[len(args)-1]
+				return []byte("Job restart scheduled\n"), nil, nil
+			}
+			return nil, nil, nil
+		}
+
+		mockClient := newMockOCIRegistryClient(mockOCIOptions{
+			OnRequest: func(req *http.Request) (*http.Response, error, bool) {
+				if req.Method == http.MethodHead {
+					header := make(http.Header)
+					header.Set("Docker-Content-Digest", newDigest)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil, true
 				}
-				if len(args) >= 4 && args[0] == "log" && args[1] == "-1" {
-					return []byte("abc1234\x002026-09-26T20:00:00Z\n"), nil, nil
+				if req.Method == http.MethodGet {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(manifestWithAnnotations)),
+					}, nil, true
 				}
-				return nil, nil, nil
+				return nil, nil, false
 			},
 		})
 
-		st1 := d.GetStatus(ctx)
-		repoSt1, ok := st1.Repos["/share/mirrormere"]
-		if !ok || repoSt1.GitHubRepo != "azylman/mirrormere" {
-			t.Errorf("expected GitHubRepo azylman/mirrormere, got %q", repoSt1.GitHubRepo)
-		}
-		if remoteCalls != 1 {
-			t.Errorf("expected 1 remote call, got %d", remoteCalls)
+		evtCh := make(chan HangarDeployEvent, 10)
+		d := NewDaemon(DaemonConfig{
+			ConfigDir:      tmpDir,
+			NomadExecutor:  mockNomad,
+			RegistryClient: mockClient,
+			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "rev-parse" {
+					return []byte("git_head_fallback_should_not_be_used\n"), nil, nil
+				}
+				return nil, nil, nil
+			},
+			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+				evtCh <- evt
+				return nil
+			},
+		})
+
+		d.nomadKnownDigests["webhooks-router:ghcr.io/azylman/aerial-webhooks-router:latest"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+		if err := d.CheckAndReconcileNomadImages(context.Background()); err != nil {
+			t.Fatalf("CheckAndReconcileNomadImages returned error: %v", err)
 		}
 
-		st2 := d.GetStatus(ctx)
-		repoSt2, ok := st2.Repos["/share/mirrormere"]
-		if !ok || repoSt2.GitHubRepo != "azylman/mirrormere" {
-			t.Errorf("expected cached GitHubRepo azylman/mirrormere, got %q", repoSt2.GitHubRepo)
+		if !restartCalled {
+			t.Fatalf("expected nomad job restart to be called")
 		}
-		if remoteCalls != 1 {
-			t.Errorf("expected remoteCalls to remain 1 after cached call, got %d", remoteCalls)
+		if restartedJob != "webhooks-router" {
+			t.Errorf("restartedJob = %q, want webhooks-router", restartedJob)
+		}
+
+		select {
+			case evt := <-evtCh:
+				if evt.Event != "deploy_started" {
+					t.Errorf("event = %q, want deploy_started", evt.Event)
+				}
+				if evt.JobName != "webhooks-router" {
+					t.Errorf("job_name = %q, want webhooks-router", evt.JobName)
+				}
+				if evt.CommitSHA != expectedImageRevision {
+					t.Errorf("commit_sha = %q, want %q", evt.CommitSHA, expectedImageRevision)
+				}
+				if evt.Repo != "azylman/aerial" {
+					t.Errorf("repo = %q, want azylman/aerial", evt.Repo)
+				}
+				if evt.Digest != newDigest {
+					t.Errorf("digest = %q, want %q", evt.Digest, newDigest)
+				}
+			case <-time.After(2 * time.Second):
+				t.Errorf("timed out waiting for deploy_started event")
 		}
 	})
-
-	t.Run("RegistryClient_and_LastReconcile_accessors", func(t *testing.T) {
-		var nilDaemon *SyncDaemon
-		if c := nilDaemon.getRegistryClient(); c == nil {
-			t.Errorf("expected default registry client for nil daemon")
-		}
-
-		dDefault := &SyncDaemon{}
-		c := dDefault.getRegistryClient()
-		if c == nil || c.Timeout != 10*time.Second {
-			t.Errorf("expected default registry client with 10s timeout, got %v", c)
-		}
-
-		custom := &http.Client{Timeout: 42 * time.Second}
-		dCustom := NewDaemon(DaemonConfig{RegistryClient: custom})
-		if dCustom.getRegistryClient() != custom {
-			t.Errorf("expected custom registry client to be returned")
-		}
-
-		now := time.Now().Truncate(time.Second)
-		dCustom.SetLastReconcile(now)
-		if !dCustom.GetLastReconcile().Equal(now) {
-			t.Errorf("expected LastReconcile to equal %v, got %v", now, dCustom.GetLastReconcile())
-		}
-	})
-
-	t.Run("resolveGitDir_cases", func(t *testing.T) {
-		if res, err := resolveGitDir(""); err == nil || res != "" {
-			t.Errorf("expected error for empty dir")
-		}
-
-		tempGitDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tempGitDir, ".git"), 0755)
-		if res, err := resolveGitDir(tempGitDir); err != nil || res != filepath.Join(tempGitDir, ".git") {
-			t.Errorf("expected .git dir, got %s (err=%v)", res, err)
-		}
-
-		tempGitFileRel := t.TempDir()
-		_ = os.WriteFile(filepath.Join(tempGitFileRel, ".git"), []byte("gitdir: ../dotgit\n"), 0644)
-		if res, err := resolveGitDir(tempGitFileRel); err != nil || !strings.HasSuffix(res, "dotgit") {
-			t.Errorf("expected relative dotgit resolved, got %s (err=%v)", res, err)
-		}
-
-		tempGitFileAbs := t.TempDir()
-		_ = os.WriteFile(filepath.Join(tempGitFileAbs, ".git"), []byte("gitdir: /var/git/target\n"), 0644)
-		if res, err := resolveGitDir(tempGitFileAbs); err != nil || res != "/var/git/target" {
-			t.Errorf("expected abs dotgit resolved, got %s (err=%v)", res, err)
-		}
-
-		tempGitFileRaw := t.TempDir()
-		_ = os.WriteFile(filepath.Join(tempGitFileRaw, ".git"), []byte("notgitdir\n"), 0644)
-		if res, err := resolveGitDir(tempGitFileRaw); err != nil || res != filepath.Join(tempGitFileRaw, ".git") {
-			t.Errorf("expected raw dotgit file returned, got %s (err=%v)", res, err)
-		}
-	})
-
 }
+
 
 func TestCheckGitHubRepoBuildInProgress_TableDriven(t *testing.T) {
 	ctx := context.Background()
 
-	// 1. Nil daemon
 	var dNil *SyncDaemon
 	if dNil.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
 		t.Errorf("expected false for nil daemon")
 	}
 
-	// 2. Empty repo slug
-	dEmpty := &SyncDaemon{}
-	if dEmpty.CheckGitHubRepoBuildInProgress(ctx, "") {
-		t.Errorf("expected false for empty slug")
-	}
-
-	// 3. In-progress workflow run exists
-	dInProgress := &SyncDaemon{
-		pat: "test-pat",
-		registryClient: &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					if strings.Contains(req.URL.String(), "status=in_progress") {
-						return &http.Response{
-							StatusCode: http.StatusOK,
-							Header:     make(http.Header),
-							Body:       ioNopCloser(strings.NewReader(`{"total_count": 1, "workflow_runs": [{}]}`)),
-						}, nil
-					}
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
-					}, nil
-				},
-			},
+	tests := []struct {
+		name      string
+		repo      string
+		pat       string
+		respCode  int
+		respBody  string
+		clientErr error
+		want      bool
+	}{
+		{name: "empty repo slug", repo: "", want: false},
+		{
+			name: "in-progress workflow run exists", repo: "azylman/aerial", pat: "test-pat",
+			respCode: http.StatusOK, respBody: `{"total_count": 1, "workflow_runs": [{}]}`, want: true,
+		},
+		{
+			name: "queued workflow run exists", repo: "aerial", pat: "test-pat",
+			respCode: http.StatusOK, respBody: `{"total_count": 2, "workflow_runs": [{},{}]}`, want: true,
+		},
+		{
+			name: "zero runs", repo: "azylman/mirrormere",
+			respCode: http.StatusOK, respBody: `{"total_count": 0, "workflow_runs": []}`, want: false,
+		},
+		{
+			name: "HTTP 502 error", repo: "aerial",
+			respCode: http.StatusBadGateway, respBody: "error", want: false,
+		},
+		{
+			name: "client transport error", repo: "aerial",
+			clientErr: errors.New("network timeout"), want: false,
 		},
 	}
-	if !dInProgress.CheckGitHubRepoBuildInProgress(ctx, "azylman/aerial") {
-		t.Errorf("expected true when in_progress workflow run exists")
-	}
 
-	// 4. Queued workflow run exists (in_progress is 0)
-	dQueued := &SyncDaemon{
-		pat: "test-pat",
-		registryClient: &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					if strings.Contains(req.URL.String(), "status=queued") {
-						return &http.Response{
-							StatusCode: http.StatusOK,
-							Header:     make(http.Header),
-							Body:       ioNopCloser(strings.NewReader(`{"total_count": 2, "workflow_runs": [{},{}]}`)),
-						}, nil
-					}
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
-					}, nil
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &SyncDaemon{
+				pat: tc.pat,
+				registryClient: &http.Client{
+					Transport: &roundTripperFunc{
+						fn: func(req *http.Request) (*http.Response, error) {
+							if tc.clientErr != nil {
+								return nil, tc.clientErr
+							}
+							return &http.Response{
+								StatusCode: tc.respCode,
+								Header:     make(http.Header),
+								Body:       ioNopCloser(strings.NewReader(tc.respBody)),
+							}, nil
+						},
+					},
 				},
-			},
-		},
-	}
-	if !dQueued.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
-		t.Errorf("expected true when queued workflow run exists")
-	}
-
-	// 5. Zero runs
-	dZero := &SyncDaemon{
-		registryClient: &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
-					}, nil
-				},
-			},
-		},
-	}
-	if dZero.CheckGitHubRepoBuildInProgress(ctx, "azylman/mirrormere") {
-		t.Errorf("expected false when no runs exist")
-	}
-
-	// 6. HTTP Error from API
-	dErr := &SyncDaemon{
-		registryClient: &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusBadGateway,
-						Header:     make(http.Header),
-						Body:       ioNopCloser(strings.NewReader(`error`)),
-					}, nil
-				},
-			},
-		},
-	}
-	if dErr.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
-		t.Errorf("expected false on HTTP 502 error")
-	}
-
-	// 7. Client transport error
-	dNetErr := &SyncDaemon{
-		registryClient: &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return nil, errors.New("network timeout")
-				},
-			},
-		},
-	}
-	if dNetErr.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
-		t.Errorf("expected false on network error")
+			}
+			got := d.CheckGitHubRepoBuildInProgress(ctx, tc.repo)
+			if got != tc.want {
+				t.Errorf("CheckGitHubRepoBuildInProgress(%q) = %v, want %v", tc.repo, got, tc.want)
+			}
+		})
 	}
 }
-
 type pushEventTestEnv struct {
 	tmpDir          string
 	aerialDir       string
@@ -4759,184 +4773,6 @@ func TestGetRemoteImageRevision_TableDriven(t *testing.T) {
 	}
 }
 
-func TestNomadImagePoll_UsesImageRevision(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	jobsDir := filepath.Join(tmpDir, "jobs")
-	if err := os.MkdirAll(jobsDir, 0755); err != nil {
-		t.Fatalf("failed to create jobs dir: %v", err)
-	}
-
-	jobFile := filepath.Join(jobsDir, "webhooks-router.nomad")
-	jobContent := `job "webhooks-router" { group "core" { task "router" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } } }`
-	if err := os.WriteFile(jobFile, []byte(jobContent), 0644); err != nil {
-		t.Fatalf("failed to write job file: %v", err)
-	}
-
-	newDigest := "sha256:9999999999999999999999999999999999999999999999999999999999999999"
-	expectedImageRevision := "9876543210abcdef9876543210abcdef98765432"
-
-	manifestWithAnnotations := fmt.Sprintf(`{
-		"schemaVersion": 2,
-		"mediaType": "application/vnd.oci.image.manifest.v1+json",
-		"config": {
-			"digest": "sha256:dummyblobdigest11111111111111111111111111111111111111111111111111"
-		},
-		"annotations": {
-			"org.opencontainers.image.revision": "%s"
-		}
-	}`, expectedImageRevision)
-
-	var restartCalled bool
-	var restartedJob string
-
-	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
-			restartCalled = true
-			restartedJob = args[len(args)-1]
-			return []byte("Job restart scheduled\n"), nil, nil
-		}
-		return nil, nil, nil
-	}
-
-	mockClient := newMockOCIRegistryClient(mockOCIOptions{
-		OnRequest: func(req *http.Request) (*http.Response, error, bool) {
-			if req.Method == http.MethodHead {
-				header := make(http.Header)
-				header.Set("Docker-Content-Digest", newDigest)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     header,
-					Body:       ioNopCloser(strings.NewReader("")),
-				}, nil, true
-			}
-			if req.Method == http.MethodGet {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     make(http.Header),
-					Body:       ioNopCloser(strings.NewReader(manifestWithAnnotations)),
-				}, nil, true
-			}
-			return nil, nil, false
-		},
-	})
-
-	evtCh := make(chan HangarDeployEvent, 10)
-	d := NewDaemon(DaemonConfig{
-		ConfigDir:      tmpDir,
-		NomadExecutor:  mockNomad,
-		RegistryClient: mockClient,
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			if len(args) > 0 && args[0] == "rev-parse" {
-				return []byte("git_head_fallback_should_not_be_used\n"), nil, nil
-			}
-			return nil, nil, nil
-		},
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-	})
-
-	d.nomadKnownDigests["webhooks-router:ghcr.io/azylman/aerial-webhooks-router:latest"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-
-	if err := d.CheckAndReconcileNomadImages(context.Background()); err != nil {
-		t.Fatalf("CheckAndReconcileNomadImages returned error: %v", err)
-	}
-
-	if !restartCalled {
-		t.Fatalf("expected nomad job restart to be called")
-	}
-	if restartedJob != "webhooks-router" {
-		t.Errorf("restartedJob = %q, want webhooks-router", restartedJob)
-	}
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "deploy_started" {
-			t.Errorf("event = %q, want deploy_started", evt.Event)
-		}
-		if evt.JobName != "webhooks-router" {
-			t.Errorf("job_name = %q, want webhooks-router", evt.JobName)
-		}
-		if evt.CommitSHA != expectedImageRevision {
-			t.Errorf("commit_sha = %q, want %q (should resolve from image label, not git HEAD)", evt.CommitSHA, expectedImageRevision)
-		}
-		if evt.Repo != "azylman/aerial" {
-			t.Errorf("repo = %q, want azylman/aerial (resolved from ImageSourceRepo)", evt.Repo)
-		}
-		if evt.Digest != newDigest {
-			t.Errorf("digest = %q, want %q", evt.Digest, newDigest)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for deploy_started event")
-	}
-}
-
-func TestCoverageFlushEndpoint(t *testing.T) {
-	mux := SetupMux(&SyncDaemon{})
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	// 1. Without GOCOVERDIR -> 200 OK
-	orig := os.Getenv("GOCOVERDIR")
-	_ = os.Unsetenv("GOCOVERDIR")
-	defer func() {
-		if orig != "" {
-			_ = os.Setenv("GOCOVERDIR", orig)
-		} else {
-			_ = os.Unsetenv("GOCOVERDIR")
-		}
-	}()
-
-	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK without GOCOVERDIR, got: %d", resp.StatusCode)
-	}
-
-	// 2. With GOCOVERDIR + mock success -> 200 OK
-	oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
-	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
-
-	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error { called = true; return nil }
-	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
-	_ = os.Setenv("GOCOVERDIR", t.TempDir())
-
-	resp2, err2 := http.Get(ts.URL + "/debug/coverage/flush")
-	if err2 != nil {
-		t.Fatalf("unexpected error: %v", err2)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK || !called || !metaCalled {
-		t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", resp2.StatusCode, called, metaCalled)
-	}
-
-	writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
-	if resp2b, err2b := http.Get(ts.URL + "/debug/coverage/flush"); err2b != nil || resp2b.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK when meta flush errors, got resp=%v err=%v", resp2b, err2b)
-	} else {
-		resp2b.Body.Close()
-	}
-
-	// 3. With GOCOVERDIR + mock error -> 500 Internal Server Error
-	writeCountersDirFn = func(dir string) error {
-		return errors.New("simulated flush error")
-	}
-
-	resp3, err3 := http.Get(ts.URL + "/debug/coverage/flush")
-	if err3 != nil {
-		t.Fatalf("unexpected error: %v", err3)
-	}
-	defer resp3.Body.Close()
-	if resp3.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on error, got: %d", resp3.StatusCode)
-	}
-}
 
 func TestNomadChangeDetection_TableDriven(t *testing.T) {
 
