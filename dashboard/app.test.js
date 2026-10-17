@@ -1107,49 +1107,65 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
         });
 
         describe('getBuildTimingInfo(build, nowMs)', () => {
-            it('computes start, end, and duration for completed, running, and queued builds', () => {
+            it('computes compact start, end, and duration for same-day, cross-day, running, and queued builds', () => {
                 const nullTiming = getBuildTimingInfo(null);
                 assert.equal(nullTiming.startText, '--');
-                assert.equal(nullTiming.endText, '--');
+                assert.equal(nullTiming.endText, '');
                 assert.equal(nullTiming.durationText, '--');
 
+                const sameDayStart = new Date(2026, 9, 17, 8, 0, 5).toISOString();
+                const sameDayEnd = new Date(2026, 9, 17, 8, 15, 35).toISOString();
                 const completedBuild = {
                     status: 'completed',
-                    created_at: '2026-10-17T08:00:00Z',
-                    updated_at: '2026-10-17T08:15:30Z',
+                    created_at: sameDayStart,
+                    updated_at: sameDayEnd,
                     chunks: [
-                        { id: 'c1', status: 'merged', started_at: '2026-10-17T08:00:05Z', updated_at: '2026-10-17T08:15:35Z' }
+                        { id: 'c1', status: 'merged', started_at: sameDayStart, updated_at: sameDayEnd }
                     ]
                 };
                 const compTiming = getBuildTimingInfo(completedBuild);
-                assert.notEqual(compTiming.startText, '--');
-                assert.notEqual(compTiming.endText, '--');
+                assert.equal(compTiming.startText, '10/17 08:00');
+                assert.equal(compTiming.endText, '08:15');
                 assert.equal(compTiming.durationText, '15m 30s');
 
+                const crossDayEnd = new Date(2026, 9, 18, 1, 5, 35).toISOString();
+                const crossDayBuild = {
+                    status: 'completed',
+                    created_at: sameDayStart,
+                    updated_at: crossDayEnd,
+                    chunks: [
+                        { id: 'c1', status: 'merged', started_at: sameDayStart, updated_at: crossDayEnd }
+                    ]
+                };
+                const crossTiming = getBuildTimingInfo(crossDayBuild);
+                assert.equal(crossTiming.startText, '10/17 08:00');
+                assert.equal(crossTiming.endText, '10/18 01:05');
+
+                const runStart = new Date(2026, 9, 17, 8, 1, 0).toISOString();
                 const runningBuild = {
                     status: 'running',
-                    created_at: '2026-10-17T08:00:00Z',
+                    created_at: sameDayStart,
                     chunks: [
-                        { id: 'c1', status: 'running', started_at: '2026-10-17T08:01:00Z' },
+                        { id: 'c1', status: 'running', started_at: runStart },
                         { id: 'c2', status: 'pending', started_at: '0001-01-01T00:00:00Z' }
                     ]
                 };
-                const nowMs = new Date('2026-10-17T08:05:12Z').getTime();
+                const nowMs = new Date(2026, 9, 17, 8, 5, 12).getTime();
                 const runTiming = getBuildTimingInfo(runningBuild, nowMs);
-                assert.notEqual(runTiming.startText, '--');
-                assert.equal(runTiming.endText, '--');
+                assert.equal(runTiming.startText, '10/17 08:01');
+                assert.equal(runTiming.endText, '');
                 assert.equal(runTiming.durationText, '4m 12s');
 
                 const queuedBuild = {
                     status: 'queued',
-                    created_at: '2026-10-17T08:00:00Z',
+                    created_at: sameDayStart,
                     chunks: [
                         { id: 'c1', status: 'pending', started_at: '0001-01-01T00:00:00Z' }
                     ]
                 };
                 const qTiming = getBuildTimingInfo(queuedBuild, nowMs);
-                assert.notEqual(qTiming.startText, '--');
-                assert.equal(qTiming.endText, '--');
+                assert.equal(qTiming.startText, '10/17 08:00');
+                assert.equal(qTiming.endText, '');
                 assert.equal(qTiming.durationText, '--');
             });
         });
@@ -1231,7 +1247,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.ok(!card0.innerHTML.includes('Render HUD build queue'), 'top-level card should omit objective preview');
                 assert.ok(card0.innerHTML.includes('build-duration-badge'), 'top-level card should include duration badge');
                 assert.ok(card0.innerHTML.includes('START:'), 'top-level card should include START time');
-                assert.ok(card0.innerHTML.includes('END:'), 'top-level card should include END time');
+                assert.ok(!card0.innerHTML.includes('END:'), 'running top-level card should omit END time');
                 assert.ok(card0.innerHTML.includes('2 / 4 CHUNKS'));
                 assert.ok(!card0.innerHTML.includes('build-repo-badge'));
                 assert.equal(card0.getAttribute('data-build-id'), 'build-101');
@@ -1239,6 +1255,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
                 const card1 = elements['builds-grid'].children[1];
                 assert.ok(card1.innerHTML.includes('12m 45s'), 'completed card should display computed duration');
+                assert.ok(card1.innerHTML.includes('END:'), 'completed top-level card should include END time');
             });
 
             it('filters build cards by queue state, search query, and chunk repo', () => {
