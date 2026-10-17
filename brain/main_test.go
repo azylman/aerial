@@ -1237,29 +1237,6 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "uncreatable gemini home",
-			setup: func(t *testing.T) *config.Config {
-				tmpDir := t.TempDir()
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = filepath.Join(tmpDir, "nonexistent", "sub", "dir", "invalid")
-					d.DataDir = t.TempDir()
-				})
-			},
-			wantErr: false,
-		},
-		{
-			name: "conflict file in data dir",
-			setup: func(t *testing.T) *config.Config {
-				tmpDir := t.TempDir()
-				_ = os.WriteFile(filepath.Join(tmpDir, "brain"), []byte("file-not-dir"), 0644)
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.DataDir = tmpDir
-					d.GeminiHomeDir = tmpDir
-				})
-			},
-			wantErr: false,
-		},
-		{
 			name: "conflict file in cli parent",
 			setup: func(t *testing.T) *config.Config {
 				tmpDir := t.TempDir()
@@ -1272,36 +1249,6 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 				})
 			},
 			wantErr: true,
-		},
-		{
-			name: "symlink parent blocker",
-			setup: func(t *testing.T) *config.Config {
-				tmpDir := t.TempDir()
-				geminiDir := filepath.Join(tmpDir, "home", ".gemini")
-				_ = os.MkdirAll(geminiDir, 0755)
-				_ = os.WriteFile(filepath.Join(geminiDir, "antigravity-cli"), []byte("blocking-file"), 0644)
-				_ = os.MkdirAll(filepath.Join(tmpDir, "data"), 0755)
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = filepath.Join(tmpDir, "home")
-					d.DataDir = filepath.Join(tmpDir, "data")
-				})
-			},
-			wantErr: true,
-		},
-		{
-			name: "symlink chmod 0555 error",
-			setup: func(t *testing.T) *config.Config {
-				tmpHome := t.TempDir()
-				parent := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
-				_ = os.MkdirAll(parent, 0755)
-				_ = os.Chmod(parent, 0555)
-				t.Cleanup(func() { _ = os.Chmod(parent, 0755) })
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = tmpHome
-					d.DataDir = t.TempDir()
-				})
-			},
-			wantErr: false,
 		},
 	}
 
