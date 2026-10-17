@@ -2008,9 +2008,11 @@ function getBuildStatusBadgeInfo(build) {
 
 function formatBuildTimestamp(ms, includeDate) {
     const d = new Date(ms);
-    const hours = String(d.getHours()).padStart(2, '0');
+    const rawHours = d.getHours();
+    const ampm = rawHours >= 12 ? 'pm' : 'am';
+    const hours = rawHours % 12 || 12;
     const mins = String(d.getMinutes()).padStart(2, '0');
-    const timeStr = `${hours}:${mins}`;
+    const timeStr = `${hours}:${mins}${ampm}`;
     if (!includeDate) {
         return timeStr;
     }
