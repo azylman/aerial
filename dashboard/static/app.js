@@ -1860,9 +1860,617 @@ function setupSchedulesControls() {
 
 
 // ==========================================
+// VANADIS BUILD QUEUE STATE & LOGIC
+// ==========================================
+var buildsState = {
+    builds: [],
+    selectedFilter: 'ALL',
+    searchQuery: '',
+    isLoading: false,
+    hasLoaded: false,
+    error: null,
+    totalCount: 0,
+    runningCount: 0,
+    queuedCount: 0,
+    completedCount: 0,
+    selectedBuildId: null,
+    cache: {}
+};
+
+function classifyBuildQueueState(build) {
+    if (!build) return 'queued';
+    const status = typeof build === 'string' ? build.trim().toLowerCase() : String(build.status || build.queue_state || '').trim().toLowerCase();
+    const chunks = (typeof build === 'object' && Array.isArray(build.chunks)) ? build.chunks : [];
+
+    switch (status) {
+        case 'completed':
+        case 'merged':
+        case 'failed':
+        case 'cancelled':
+        case 'canceled':
+            return 'completed';
+        case 'queued':
+        case 'pending':
+            return 'queued';
+        case 'running': {
+            if (chunks.length > 0) {
+                const allPending = chunks.every(c => String(c && c.status || '').trim().toLowerCase() === 'pending');
+                if (allPending) {
+                    return 'queued';
+                }
+            }
+            return 'running';
+        }
+        default:
+            if (typeof build === 'object' && build.queue_state) {
+                const qs = String(build.queue_state).trim().toLowerCase();
+                if (qs === 'running' || qs === 'queued' || qs === 'completed') {
+                    return qs;
+                }
+            }
+            return 'queued';
+    }
+}
+
+function computeBuildChunkStats(build) {
+    if (!build) {
+        return {
+            total: 0,
+            completed: 0,
+            running: 0,
+            pending: 0,
+            failed: 0,
+            percent: 0,
+            total_chunks: 0,
+            completed_chunks: 0,
+            running_chunks: 0,
+            pending_chunks: 0,
+            failed_chunks: 0
+        };
+    }
+
+    const chunks = Array.isArray(build.chunks) ? build.chunks : [];
+    if (chunks.length > 0) {
+        let completed = 0;
+        let running = 0;
+        let pending = 0;
+        let failed = 0;
+        for (const c of chunks) {
+            const st = String(c && c.status || '').trim().toLowerCase();
+            if (st === 'completed' || st === 'merged') {
+                completed++;
+            } else if (st === 'running' || st === 'in_progress') {
+                running++;
+            } else if (st === 'failed') {
+                failed++;
+            } else {
+                pending++;
+            }
+        }
+        const total = chunks.length;
+        const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+        return {
+            total,
+            completed,
+            running,
+            pending,
+            failed,
+            percent,
+            total_chunks: total,
+            completed_chunks: completed,
+            running_chunks: running,
+            pending_chunks: pending,
+            failed_chunks: failed
+        };
+    }
+
+    const total = Number(build.total_chunks) || 0;
+    const completed = Number(build.completed_chunks) || 0;
+    const running = Number(build.running_chunks) || 0;
+    const pending = Number(build.pending_chunks) || 0;
+    const failed = Number(build.failed_chunks) || 0;
+    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    return {
+        total,
+        completed,
+        running,
+        pending,
+        failed,
+        percent,
+        total_chunks: total,
+        completed_chunks: completed,
+        running_chunks: running,
+        pending_chunks: pending,
+        failed_chunks: failed
+    };
+}
+
+function getBuildStatusBadgeInfo(build) {
+    if (!build) return { text: '⏳ QUEUED', cls: 'status-queued' };
+    const rawStatus = String(build.status || '').trim().toLowerCase();
+    const qState = classifyBuildQueueState(build);
+
+    if (rawStatus === 'failed') {
+        return { text: '✕ FAILED', cls: 'status-failed' };
+    }
+    if (rawStatus === 'cancelled' || rawStatus === 'canceled') {
+        return { text: '⊘ CANCELLED', cls: 'status-cancelled' };
+    }
+    if (qState === 'running') {
+        return { text: '⚡ RUNNING', cls: 'status-running' };
+    }
+    if (qState === 'completed') {
+        return { text: '✓ COMPLETED', cls: 'status-completed' };
+    }
+    return { text: '⏳ QUEUED', cls: 'status-queued' };
+}
+
+function renderBuildsPills() {
+    let running = 0;
+    let queued = 0;
+    let completed = 0;
+    const builds = Array.isArray(buildsState.builds) ? buildsState.builds : [];
+    for (const b of builds) {
+        const qState = classifyBuildQueueState(b);
+        if (qState === 'running') running++;
+        else if (qState === 'queued') queued++;
+        else if (qState === 'completed') completed++;
+    }
+
+    const allCount = typeof buildsState.totalCount === 'number' && buildsState.totalCount > builds.length ? buildsState.totalCount : builds.length;
+    const runningCount = typeof buildsState.runningCount === 'number' ? buildsState.runningCount : running;
+    const queuedCount = typeof buildsState.queuedCount === 'number' ? buildsState.queuedCount : queued;
+    const completedCount = typeof buildsState.completedCount === 'number' ? buildsState.completedCount : completed;
+
+    const allEl = document.getElementById('pill-count-builds-all');
+    if (allEl) allEl.textContent = String(allCount);
+
+    const runEl = document.getElementById('pill-count-builds-running');
+    if (runEl) runEl.textContent = String(runningCount);
+
+    const qEl = document.getElementById('pill-count-builds-queued');
+    if (qEl) qEl.textContent = String(queuedCount);
+
+    const compEl = document.getElementById('pill-count-builds-completed');
+    if (compEl) compEl.textContent = String(completedCount);
+
+    const pillsBar = document.getElementById('builds-filter-pills');
+    if (pillsBar && typeof pillsBar.querySelectorAll === 'function') {
+        const pills = pillsBar.querySelectorAll('.cat-pill');
+        if (pills && pills.forEach) {
+            pills.forEach(pill => {
+                const filter = pill.getAttribute('data-filter') || 'ALL';
+                if (filter === buildsState.selectedFilter) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+        }
+    }
+}
+
+function updateBuildsMetrics() {
+    let running = 0;
+    let queued = 0;
+    let completed = 0;
+    let totalCompletedChunks = 0;
+    let totalChunks = 0;
+
+    const builds = Array.isArray(buildsState.builds) ? buildsState.builds : [];
+    for (const b of builds) {
+        const qState = classifyBuildQueueState(b);
+        if (qState === 'running') running++;
+        else if (qState === 'queued') queued++;
+        else if (qState === 'completed') completed++;
+
+        const stats = computeBuildChunkStats(b);
+        totalCompletedChunks += stats.completed;
+        totalChunks += stats.total;
+    }
+
+    const runningCount = typeof buildsState.runningCount === 'number' ? buildsState.runningCount : running;
+    const queuedCount = typeof buildsState.queuedCount === 'number' ? buildsState.queuedCount : queued;
+    const completedCount = typeof buildsState.completedCount === 'number' ? buildsState.completedCount : completed;
+
+    const runningEl = document.getElementById('builds-running-count');
+    if (runningEl) runningEl.textContent = String(runningCount);
+
+    const queuedEl = document.getElementById('builds-queued-count');
+    if (queuedEl) queuedEl.textContent = String(queuedCount);
+
+    const completedEl = document.getElementById('builds-completed-count');
+    if (completedEl) completedEl.textContent = String(completedCount);
+
+    const chunksProgressEl = document.getElementById('builds-chunks-progress');
+    if (chunksProgressEl) chunksProgressEl.textContent = `${totalCompletedChunks}/${totalChunks}`;
+
+    const badgeEl = document.getElementById('builds-badge-count');
+    if (badgeEl) {
+        const activeCount = runningCount + queuedCount;
+        badgeEl.textContent = String(activeCount);
+    }
+
+    renderBuildsPills();
+}
+
+function renderBuildQueueCards() {
+    const grid = document.getElementById('builds-grid');
+    if (!grid) return;
+
+    const builds = Array.isArray(buildsState.builds) ? buildsState.builds : [];
+    const filter = buildsState.selectedFilter || 'ALL';
+    const query = (buildsState.searchQuery || '').trim().toLowerCase();
+
+    const filtered = builds.filter(b => {
+        const qState = classifyBuildQueueState(b);
+        if (filter !== 'ALL' && qState.toUpperCase() !== filter.toUpperCase()) {
+            return false;
+        }
+        if (query) {
+            const title = String(b.title || '').toLowerCase();
+            const obj = String(b.objective || '').toLowerCase();
+            const repo = String(b.repo || '').toLowerCase();
+            const id = String(b.id || '').toLowerCase();
+            if (!title.includes(query) && !obj.includes(query) && !repo.includes(query) && !id.includes(query)) {
+                return false;
+            }
+        }
+        return true;
+    });
+
+    const resultsCountEl = document.getElementById('builds-results-count');
+    if (resultsCountEl) {
+        resultsCountEl.textContent = `SHOWING ${filtered.length} / ${builds.length} BUILDS`;
+    }
+
+    grid.innerHTML = '';
+
+    if (filtered.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'task-idle-card';
+        empty.style.gridColumn = '1 / -1';
+        empty.innerHTML = `
+            <div class="idle-indicator">
+                <span class="pulse-dot healthy"></span>
+                <span>NO BUILDS MATCHING SELECTION</span>
+            </div>
+            <div>STATUS: ZERO ACTIVE QUEUED ENTRIES</div>
+        `;
+        grid.appendChild(empty);
+        return;
+    }
+
+    filtered.forEach(b => {
+        const card = document.createElement('div');
+        card.className = 'build-card';
+        card.setAttribute('data-build-id', b.id || '');
+
+        const badgeInfo = getBuildStatusBadgeInfo(b);
+        const stats = computeBuildChunkStats(b);
+        const tier = typeof b.tier === 'number' ? b.tier : (b.tier || 0);
+        const repo = b.repo || 'azylman/aerial';
+        const title = b.title || b.id || 'Untitled Build';
+        const objective = b.objective || 'No objective provided';
+
+        card.innerHTML = `
+            <div class="build-card-header">
+                <div class="build-badge-group">
+                    <span class="build-status-badge ${badgeInfo.cls}">${badgeInfo.text}</span>
+                    <span class="build-tier-badge">TIER ${escapeHtml(String(tier))}</span>
+                    <span class="build-repo-badge">${escapeHtml(repo)}</span>
+                </div>
+                <span class="build-id-chip">${escapeHtml(b.id || '')}</span>
+            </div>
+            <div class="build-card-body">
+                <h3 class="build-title">${escapeHtml(title)}</h3>
+                <p class="build-objective-preview">${escapeHtml(objective)}</p>
+            </div>
+            <div class="build-chunk-progress-wrap">
+                <div class="build-chunk-progress-header">
+                    <span class="build-chunk-progress-label">${stats.completed} / ${stats.total} CHUNKS</span>
+                    <span class="build-chunk-progress-pct">${stats.percent}%</span>
+                </div>
+                <div class="build-progress-bar-bg">
+                    <div class="build-progress-bar-fill" style="width: ${stats.percent}%;"></div>
+                </div>
+            </div>
+        `;
+
+        card.onclick = () => openBuildDetailDrawer(b.id);
+        grid.appendChild(card);
+    });
+}
+
+function renderBuildDetailContent(build, chunks) {
+    if (!build) return '';
+    const bodyEl = document.getElementById('drawer-body');
+    const safeChunks = Array.isArray(chunks) ? chunks : (Array.isArray(build.chunks) ? build.chunks : []);
+    const stats = computeBuildChunkStats({ ...build, chunks: safeChunks });
+    const badgeInfo = getBuildStatusBadgeInfo(build);
+
+    let chunksHtml = '';
+    if (safeChunks.length === 0) {
+        chunksHtml = '<div class="drawer-no-chunks">NO CHUNKS REGISTERED</div>';
+    } else {
+        chunksHtml = safeChunks.map((chunk, idx) => {
+            const chunkIndex = typeof chunk.chunk_index === 'number' ? chunk.chunk_index : (idx + 1);
+            const chunkTitle = escapeHtml(chunk.title || `Chunk ${chunkIndex}`);
+            const chunkStatus = escapeHtml(String(chunk.status || 'pending').toUpperCase());
+            const statusClass = `chunk-status-${String(chunk.status || 'pending').toLowerCase()}`;
+            const effort = chunk.effort ? `<span class="chunk-effort-badge">${escapeHtml(chunk.effort)}</span>` : '';
+            const repo = chunk.repo ? `<span class="chunk-repo-badge">${escapeHtml(chunk.repo)}</span>` : '';
+
+            let prLink = '';
+            if (chunk.pr_number) {
+                const targetRepo = chunk.repo || build.repo || 'azylman/aerial';
+                const prUrl = `https://github.com/${escapeHtml(targetRepo)}/pull/${chunk.pr_number}`;
+                prLink = `<a class="chunk-pr-link" href="${prUrl}" target="_blank" rel="noopener noreferrer">#${chunk.pr_number} ↗</a>`;
+            }
+
+            const diffStat = chunk.diff_stat ? `
+                <div class="chunk-section">
+                    <span class="chunk-section-label">DIFF STAT</span>
+                    <pre class="chunk-code-block diff-stat-block">${escapeHtml(chunk.diff_stat)}</pre>
+                </div>` : '';
+
+            const targetFiles = (Array.isArray(chunk.target_files) && chunk.target_files.length > 0) ? `
+                <div class="chunk-section">
+                    <span class="chunk-section-label">TARGET FILES</span>
+                    <div class="chunk-tags-list">
+                        ${chunk.target_files.map(f => `<span class="chunk-tag file-tag">${escapeHtml(f)}</span>`).join('')}
+                    </div>
+                </div>` : '';
+
+            const targetSymbols = (Array.isArray(chunk.target_symbols) && chunk.target_symbols.length > 0) ? `
+                <div class="chunk-section">
+                    <span class="chunk-section-label">TARGET SYMBOLS</span>
+                    <div class="chunk-tags-list">
+                        ${chunk.target_symbols.map(s => `<span class="chunk-tag symbol-tag">${escapeHtml(s)}</span>`).join('')}
+                    </div>
+                </div>` : '';
+
+            const acceptanceCriteria = (Array.isArray(chunk.acceptance_criteria) && chunk.acceptance_criteria.length > 0) ? `
+                <div class="chunk-section">
+                    <span class="chunk-section-label">ACCEPTANCE CRITERIA</span>
+                    <ul class="chunk-criteria-list">
+                        ${chunk.acceptance_criteria.map(c => `<li>${escapeHtml(c)}</li>`).join('')}
+                    </ul>
+                </div>` : '';
+
+            const instructions = chunk.instructions ? `
+                <div class="chunk-section">
+                    <span class="chunk-section-label">INSTRUCTIONS</span>
+                    <div class="chunk-instructions-box">${escapeHtml(chunk.instructions)}</div>
+                </div>` : '';
+
+            return `
+                <div class="chunk-card" data-chunk-index="${chunkIndex}">
+                    <div class="chunk-header">
+                        <div class="chunk-header-left">
+                            <span class="chunk-index-badge">#${chunkIndex}</span>
+                            <h4 class="chunk-title">${chunkTitle}</h4>
+                        </div>
+                        <div class="chunk-header-right">
+                            ${effort}
+                            ${repo}
+                            <span class="chunk-status-badge ${statusClass}">${chunkStatus}</span>
+                            ${prLink}
+                        </div>
+                    </div>
+                    <div class="chunk-body">
+                        ${instructions}
+                        ${targetFiles}
+                        ${targetSymbols}
+                        ${acceptanceCriteria}
+                        ${diffStat}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    const sharedContextHtml = build.shared_context ? `
+        <div class="build-drawer-section">
+            <span class="build-drawer-section-label">SHARED BUILD CONTEXT</span>
+            <pre class="build-context-box">${escapeHtml(build.shared_context)}</pre>
+        </div>` : '';
+
+    const html = `
+        <div class="build-drawer-header-summary">
+            <div class="build-drawer-title-row">
+                <span class="build-status-badge ${badgeInfo.cls}">${badgeInfo.text}</span>
+                <span class="build-tier-badge">TIER ${escapeHtml(String(build.tier || 0))}</span>
+                <span class="build-repo-badge">${escapeHtml(build.repo || 'azylman/aerial')}</span>
+                <span class="build-id-pill">${escapeHtml(build.id || '')}</span>
+            </div>
+            <h3 class="build-drawer-title">${escapeHtml(build.title || build.id)}</h3>
+            <div class="build-drawer-section">
+                <span class="build-drawer-section-label">OBJECTIVE</span>
+                <p class="build-objective-text">${escapeHtml(build.objective || 'No objective provided')}</p>
+            </div>
+            ${sharedContextHtml}
+            <div class="build-drawer-progress-bar">
+                <div class="build-chunk-progress-header">
+                    <span class="build-chunk-progress-label">${stats.completed} / ${stats.total} CHUNKS COMPLETED</span>
+                    <span class="build-chunk-progress-pct">${stats.percent}%</span>
+                </div>
+                <div class="build-progress-bar-bg">
+                    <div class="build-progress-bar-fill" style="width: ${stats.percent}%;"></div>
+                </div>
+            </div>
+        </div>
+        <div class="build-drawer-chunks-section">
+            <h4 class="chunks-section-title">ORDERED BUILD CHUNKS (${safeChunks.length})</h4>
+            <div class="chunks-list">
+                ${chunksHtml}
+            </div>
+        </div>
+    `;
+
+    if (bodyEl) {
+        bodyEl.innerHTML = html;
+    }
+    return html;
+}
+
+function openBuildDetailDrawer(buildId) {
+    if (!buildId) return;
+    buildsState.selectedBuildId = buildId;
+
+    const drawer = document.getElementById('diagnostic-drawer');
+    const overlay = document.getElementById('drawer-overlay');
+    const titleEl = document.getElementById('drawer-service-name');
+    const bodyEl = document.getElementById('drawer-body');
+
+    if (drawer) drawer.classList.add('active');
+    if (overlay) overlay.classList.add('active');
+
+    let cached = buildsState.cache[buildId];
+    if (!cached) {
+        const found = (buildsState.builds || []).find(b => b.id === buildId);
+        if (found) {
+            cached = { build: found, chunks: Array.isArray(found.chunks) ? found.chunks : [] };
+        }
+    }
+
+    if (cached) {
+        if (titleEl) titleEl.textContent = `BUILD // ${String(cached.build.id || buildId).toUpperCase()}`;
+        renderBuildDetailContent(cached.build, cached.chunks);
+    } else {
+        if (titleEl) titleEl.textContent = `BUILD // ${String(buildId).toUpperCase()}`;
+        if (bodyEl) {
+            bodyEl.innerHTML = `
+                <div class="drawer-loading-box">
+                    <span class="pulse-dot healthy"></span>
+                    <span>LOADING BUILD TELEMETRY // ${escapeHtml(buildId)}...</span>
+                </div>
+            `;
+        }
+    }
+
+    const url = getApiBase() + '/api/builds/' + encodeURIComponent(buildId);
+    fetch(url)
+        .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+        })
+        .then(data => {
+            const build = data.build || data.entry || (cached ? cached.build : null) || { id: buildId };
+            const chunks = Array.isArray(data.chunks) ? data.chunks : (build.chunks || []);
+            buildsState.cache[buildId] = { build, chunks };
+            if (buildsState.selectedBuildId === buildId) {
+                if (titleEl) titleEl.textContent = `BUILD // ${String(build.title || build.id).toUpperCase()}`;
+                renderBuildDetailContent(build, chunks);
+            }
+        })
+        .catch(err => {
+            console.error('[Permet HUD] Error fetching build details:', err);
+            if (buildsState.selectedBuildId === buildId && !cached && bodyEl) {
+                bodyEl.innerHTML = `
+                    <div class="empty-state">
+                        <span class="empty-icon text-danger">⚠️</span>
+                        <p>FAILED TO LOAD BUILD DETAILS</p>
+                        <span class="empty-sub">${escapeHtml(err.message || 'Network error')}</span>
+                    </div>
+                `;
+            }
+        });
+}
+
+async function fetchBuilds() {
+    if (buildsState.isLoading) return;
+    buildsState.isLoading = true;
+    buildsState.error = null;
+
+    const banner = document.getElementById('builds-reconnect-banner');
+    try {
+        const res = await fetch(getApiBase() + '/api/builds');
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (data.status === 'degraded' || data.error) {
+            if (banner) banner.style.display = 'flex';
+        } else {
+            if (banner) banner.style.display = 'none';
+        }
+
+        buildsState.builds = Array.isArray(data.builds) ? data.builds : [];
+        buildsState.totalCount = typeof data.total === 'number' ? data.total : buildsState.builds.length;
+        if (typeof data.running_count === 'number') buildsState.runningCount = data.running_count;
+        if (typeof data.queued_count === 'number') buildsState.queuedCount = data.queued_count;
+        if (typeof data.completed_count === 'number') buildsState.completedCount = data.completed_count;
+
+        buildsState.builds.forEach(b => {
+            if (b && b.id) {
+                if (!buildsState.cache[b.id] || (Array.isArray(b.chunks) && b.chunks.length > 0)) {
+                    buildsState.cache[b.id] = { build: b, chunks: Array.isArray(b.chunks) ? b.chunks : [] };
+                }
+            }
+        });
+
+        buildsState.isLoading = false;
+        buildsState.hasLoaded = true;
+
+        updateBuildsMetrics();
+        renderBuildQueueCards();
+    } catch (err) {
+        console.error('[Permet HUD] Error fetching builds:', err);
+        buildsState.isLoading = false;
+        buildsState.error = err.message || 'Vanadis service unreachable';
+        if (banner) banner.style.display = 'flex';
+    }
+}
+
+function setupBuildsControls() {
+    const searchInput = document.getElementById('builds-search-input');
+    const clearBtn = document.getElementById('builds-search-clear');
+    const refreshBtn = document.getElementById('builds-refresh-btn');
+    const pillsBar = document.getElementById('builds-filter-pills');
+
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            buildsState.searchQuery = searchInput.value.trim().toLowerCase();
+            if (clearBtn) {
+                clearBtn.style.display = buildsState.searchQuery ? 'block' : 'none';
+            }
+            renderBuildQueueCards();
+        });
+    }
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            if (searchInput) searchInput.value = '';
+            buildsState.searchQuery = '';
+            clearBtn.style.display = 'none';
+            renderBuildQueueCards();
+            if (searchInput) searchInput.focus();
+        });
+    }
+
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', fetchBuilds);
+    }
+
+    if (pillsBar) {
+        pillsBar.querySelectorAll('.cat-pill').forEach(pill => {
+            pill.addEventListener('click', () => {
+                buildsState.selectedFilter = pill.getAttribute('data-filter') || 'ALL';
+                renderBuildsPills();
+                renderBuildQueueCards();
+            });
+        });
+    }
+}
+
+
+// ==========================================
 // DECLARATIVE MULTI-TAB SPA ROUTER
 // ==========================================
 let currentTabKey = null;
+let buildsPollInterval = null;
 
 var TABS = {
     telemetry: {
@@ -1936,6 +2544,23 @@ var TABS = {
             }
         },
         onLeave: () => {}
+    },
+    builds: {
+        btnId: 'tab-builds-btn',
+        viewId: 'builds-view',
+        hash: '#builds',
+        onEnter: () => {
+            fetchBuilds();
+            if (!buildsPollInterval) {
+                buildsPollInterval = setInterval(fetchBuilds, 5000);
+            }
+        },
+        onLeave: () => {
+            if (buildsPollInterval) {
+                clearInterval(buildsPollInterval);
+                buildsPollInterval = null;
+            }
+        }
     }
 };
 
@@ -2046,6 +2671,7 @@ function setupGlobalKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
         const memorySearch = document.getElementById('memory-search-input');
         const schedulesSearch = document.getElementById('schedules-search-input');
+        const buildsSearch = document.getElementById('builds-search-input');
 
         if (e.key === '/') {
             if (currentTabKey === 'memory' && memorySearch && document.activeElement !== memorySearch) {
@@ -2054,6 +2680,9 @@ function setupGlobalKeyboardShortcuts() {
             } else if (currentTabKey === 'schedules' && schedulesSearch && document.activeElement !== schedulesSearch) {
                 e.preventDefault();
                 schedulesSearch.focus();
+            } else if (currentTabKey === 'builds' && buildsSearch && document.activeElement !== buildsSearch) {
+                e.preventDefault();
+                buildsSearch.focus();
             }
         }
         if (e.key === 'Escape') {
@@ -2072,6 +2701,18 @@ function setupGlobalKeyboardShortcuts() {
                 renderScheduleCards();
                 renderScheduleRuns();
                 schedulesSearch.blur();
+            } else if (currentTabKey === 'builds') {
+                const drawer = document.getElementById('diagnostic-drawer');
+                if (drawer && drawer.classList.contains('active')) {
+                    closeDiagnosticDrawer();
+                } else if (buildsSearch && document.activeElement === buildsSearch) {
+                    buildsSearch.value = '';
+                    buildsState.searchQuery = '';
+                    const clearBtn = document.getElementById('builds-search-clear');
+                    if (clearBtn) clearBtn.style.display = 'none';
+                    renderBuildQueueCards();
+                    buildsSearch.blur();
+                }
             }
         }
     });
@@ -2081,9 +2722,11 @@ function setupGlobalKeyboardShortcuts() {
 setupTabs();
 setupMemoryControls();
 setupSchedulesControls();
+setupBuildsControls();
 setupGlobalKeyboardShortcuts();
 
 // Eagerly populate badge counts across tabs on initial load
 fetchSchedules();
 fetchFacts();
+fetchBuilds();
 

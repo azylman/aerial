@@ -64,6 +64,11 @@
                     <span>MEMORY ARCHIVE</span>
                     <span class="tab-badge" id="memory-badge-count">0</span>
                 </button>
+                <button class="view-tab-btn" id="tab-builds-btn" role="tab" aria-selected="false" aria-controls="builds-view">
+                    <span class="tab-icon">🛠️</span>
+                    <span>BUILD QUEUE</span>
+                    <span class="tab-badge" id="builds-badge-count">0</span>
+                </button>
             </nav>
 
             <!-- TACTICAL QUICK-LAUNCH DOCK -->
@@ -349,6 +354,78 @@
             <div class="memory-grid" id="memory-cards-grid" aria-live="polite">
                 <!-- Dynamically populated or skeleton loaded -->
             </div>
+        </div>
+
+        <!-- VIEW 5: BUILD QUEUE -->
+        <div id="builds-view" class="view-panel" role="tabpanel">
+            <!-- RECONNECTION / DEGRADED WARNING BANNER -->
+            <div id="builds-reconnect-banner" class="reconnect-banner" style="display: none;">
+                <span class="reconnect-icon">⚡</span>
+                <span class="reconnect-text">RECONNECTING TO VANADIS // STALE-WHILE-REVALIDATE ACTIVE</span>
+            </div>
+
+            <!-- BUILDS SUMMARY BAR -->
+            <section class="summary-bar">
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">RUNNING BUILDS</span>
+                    <span class="value" id="builds-running-count">0</span>
+                    <span class="sub-label">ACTIVE PIPELINES</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">QUEUED BUILDS</span>
+                    <span class="value" id="builds-queued-count">0</span>
+                    <span class="sub-label">PENDING DISPATCH</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">COMPLETED BUILDS</span>
+                    <span class="value" id="builds-completed-count">0</span>
+                    <span class="sub-label">FINISHED RUNS</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">CHUNK PROGRESS</span>
+                    <span class="value text-success" id="builds-chunks-progress">0/0</span>
+                    <span class="sub-label">COMPLETED / TOTAL</span>
+                </div>
+            </section>
+
+            <!-- SEARCH & ACTIONS TOOLBAR -->
+            <section class="builds-toolbar-card">
+                <div class="toolbar-search-wrap">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="builds-search-input" class="cyber-input" placeholder="SEARCH BUILDS, REPOS, OBJECTIVES (PRESS '/' TO FOCUS)..." autocomplete="off" spellcheck="false">
+                    <button id="builds-search-clear" class="search-clear-btn" style="display: none;">&times;</button>
+                </div>
+                <div class="toolbar-actions">
+                    <button id="builds-refresh-btn" class="cyber-btn-secondary" title="Sync builds from Vanadis">
+                        <span class="refresh-icon">⟳</span> SYNC BUILDS
+                    </button>
+                </div>
+            </section>
+
+            <!-- FILTER PILLS -->
+            <div class="category-pills-bar" id="builds-filter-pills" role="toolbar" aria-label="Build Queue Filter Pills">
+                <button class="cat-pill active" data-filter="ALL">ALL <span class="pill-count" id="pill-count-builds-all">0</span></button>
+                <button class="cat-pill" data-filter="RUNNING">RUNNING <span class="pill-count" id="pill-count-builds-running">0</span></button>
+                <button class="cat-pill" data-filter="QUEUED">QUEUED <span class="pill-count" id="pill-count-builds-queued">0</span></button>
+                <button class="cat-pill" data-filter="COMPLETED">COMPLETED <span class="pill-count" id="pill-count-builds-completed">0</span></button>
+            </div>
+
+            <!-- RESULTS TELEMETRY BAR -->
+            <div class="results-telemetry-bar">
+                <span id="builds-results-count">SHOWING 0 / 0 BUILDS</span>
+                <span class="telemetry-hint">PRESS [ESC] TO CLEAR SEARCH</span>
+            </div>
+
+            <!-- BUILDS GRID SECTION -->
+            <section id="builds-grid-section" class="builds-grid-section">
+                <div class="builds-grid" id="builds-grid" aria-live="polite">
+                    <!-- Dynamically populated via app.js -->
+                </div>
+            </section>
         </div>
     </div>
 
