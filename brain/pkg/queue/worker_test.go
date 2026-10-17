@@ -3164,24 +3164,22 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 	t.Parallel()
 
 	burstTests := []struct {
-		name             string
-		burst            []db.Message
-		wantModel        string
-		wantSilent       bool
-		wantLowEffort    bool
-		wantMediumEffort bool
+		name       string
+		burst      []db.Message
+		wantModel  string
+		wantSilent bool
+		wantEffort string
 	}{
-		{name: "NilBurst", burst: nil, wantModel: "", wantSilent: false, wantLowEffort: false, wantMediumEffort: false},
+		{name: "NilBurst", burst: nil, wantModel: "", wantSilent: false, wantEffort: "high"},
 		{
 			name: "NormalBurst",
 			burst: []db.Message{
 				{ID: "m1", Effort: "high", Metadata: db.MessageMetadata{Model: "gemini-3.1-pro"}},
 				{ID: "m2", Metadata: db.MessageMetadata{Silent: false}},
 			},
-			wantModel:        "gemini-3.1-pro",
-			wantSilent:       false,
-			wantLowEffort:    false,
-			wantMediumEffort: false,
+			wantModel:  "gemini-3.1-pro",
+			wantSilent: false,
+			wantEffort: "high",
 		},
 		{
 			name: "SilentFlashBurst",
@@ -3189,40 +3187,36 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 				{ID: "m1", Metadata: db.MessageMetadata{Silent: true}},
 				{ID: "m2", Metadata: db.MessageMetadata{Model: "  gemini-4-flash  "}},
 			},
-			wantModel:        "gemini-4-flash",
-			wantSilent:       true,
-			wantLowEffort:    true,
-			wantMediumEffort: false,
+			wantModel:  "gemini-4-flash",
+			wantSilent: true,
+			wantEffort: "low",
 		},
 		{
 			name: "LowEffortFieldBurst",
 			burst: []db.Message{
 				{ID: "m1", Effort: " LOW "},
 			},
-			wantModel:        "",
-			wantSilent:       false,
-			wantLowEffort:    true,
-			wantMediumEffort: false,
+			wantModel:  "",
+			wantSilent: false,
+			wantEffort: "low",
 		},
 		{
 			name: "MediumEffortFieldBurst",
 			burst: []db.Message{
 				{ID: "m1", Effort: " MEDIUM "},
 			},
-			wantModel:        "",
-			wantSilent:       false,
-			wantLowEffort:    false,
-			wantMediumEffort: true,
+			wantModel:  "",
+			wantSilent: false,
+			wantEffort: "medium",
 		},
 		{
 			name: "FlashMediumModelBurstNotLow",
 			burst: []db.Message{
 				{ID: "m1", Metadata: db.MessageMetadata{Model: "gemini-3.8-flash-medium"}},
 			},
-			wantModel:        "gemini-3.8-flash-medium",
-			wantSilent:       false,
-			wantLowEffort:    false,
-			wantMediumEffort: true,
+			wantModel:  "gemini-3.8-flash-medium",
+			wantSilent: false,
+			wantEffort: "medium",
 		},
 	}
 
@@ -3235,11 +3229,8 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 			if got := extractBurstSilent(tt.burst); got != tt.wantSilent {
 				t.Errorf("extractBurstSilent = %t, want %t", got, tt.wantSilent)
 			}
-			if got := isLowEffortBurst(tt.burst); got != tt.wantLowEffort {
-				t.Errorf("isLowEffortBurst = %t, want %t", got, tt.wantLowEffort)
-			}
-			if got := isMediumEffortBurst(tt.burst); got != tt.wantMediumEffort {
-				t.Errorf("isMediumEffortBurst = %t, want %t", got, tt.wantMediumEffort)
+			if got := resolveBurstEffort(tt.burst); got != tt.wantEffort {
+				t.Errorf("resolveBurstEffort = %q, want %q", got, tt.wantEffort)
 			}
 		})
 	}
