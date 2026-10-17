@@ -685,8 +685,9 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 		fmt.Fprintf(&sb, "Build Title: %s\n", bTitle)
 	}
 	fmt.Fprintf(&sb, "Repository: %s\n", activeRepo)
-	fmt.Fprintf(&sb, "Tier: %d\n", build.Tier)
-	fmt.Fprintf(&sb, "Overall Objective: %s\n\n", build.Objective)
+	fmt.Fprintf(&sb, "Tier: %d\n\n", build.Tier)
+
+	fmt.Fprintf(&sb, "=== Build Objective ===\n%s\n\n", strings.TrimSpace(build.Objective))
 
 	if sharedCtx := strings.TrimSpace(build.SharedContext); sharedCtx != "" {
 		fmt.Fprintf(&sb, "=== Shared Build Context ===\n%s\n\n", sharedCtx)
@@ -750,7 +751,7 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 
 	sb.WriteString("=== Mandatory Execution Contract ===\n")
 	fmt.Fprintf(&sb, "1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n", activeRepo)
-	sb.WriteString("2. Implement ONLY this chunk following TDD, run package tests and `./scripts/verify.sh --staged`, and write `PR_DESCRIPTION.md`.\n")
+	sb.WriteString("2. Implement ONLY this chunk following TDD, optimizing all design and implementation choices for the `Build Objective`, run package tests and `./scripts/verify.sh --staged`, and write `PR_DESCRIPTION.md`.\n")
 	sb.WriteString("3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n")
 	if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
 		fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)
