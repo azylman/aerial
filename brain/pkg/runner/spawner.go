@@ -162,31 +162,38 @@ type MockDaemonSpawner struct {
 	SpawnFn func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
 }
 
+func spawnDefaultMockPipes(cfg DaemonConfig, closeOutW bool, logPrefix string) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+
+	go func() {
+		if _, err := io.Copy(io.Discard, inR); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
+			log.Printf("%s Warning: failed to discard stdin: %v", logPrefix, err)
+		}
+	}()
+	go func() {
+		defer closeQuietly(errW)
+		if closeOutW {
+			defer closeQuietly(outW)
+		}
+		sessID := cfg.SessionID
+		if sessID == "" || !IsValidUUID(sessID) {
+			sessID = "550e8400-e29b-41d4-a716-446655440000"
+		}
+		if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
+			log.Printf("%s Warning: failed to write init event: %v", logPrefix, err)
+		}
+	}()
+
+	handle := &MockProcessHandle{pid: 12345}
+	return inW, outR, errR, handle, nil
+}
+
 func NewMockDaemonSpawner() *MockDaemonSpawner {
 	return &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-
-			go func() {
-				if _, err := io.Copy(io.Discard, inR); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
-					log.Printf("[DaemonSpawner] Warning: failed to discard stdin: %v", err)
-				}
-			}()
-			go func() {
-				defer closeQuietly(errW)
-				sessID := cfg.SessionID
-				if sessID == "" || !IsValidUUID(sessID) {
-					sessID = "550e8400-e29b-41d4-a716-446655440000"
-				}
-				if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
-					log.Printf("[DaemonSpawner] Warning: failed to write init event: %v", err)
-				}
-			}()
-
-			handle := &MockProcessHandle{pid: 12345}
-			return inW, outR, errR, handle, nil
+			return spawnDefaultMockPipes(cfg, false, "[DaemonSpawner]")
 		},
 	}
 }
@@ -210,29 +217,7 @@ type MockSpawner struct {
 func NewMockSpawner() *MockSpawner {
 	m := &MockSpawner{}
 	m.SpawnFn = func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		inR, inW := io.Pipe()
-		outR, outW := io.Pipe()
-		errR, errW := io.Pipe()
-
-		go func() {
-			if _, err := io.Copy(io.Discard, inR); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
-				log.Printf("[MockSpawner] Warning: failed to discard stdin: %v", err)
-			}
-		}()
-		go func() {
-			defer closeQuietly(errW)
-			defer closeQuietly(outW)
-			sessID := cfg.SessionID
-			if sessID == "" || !IsValidUUID(sessID) {
-				sessID = "550e8400-e29b-41d4-a716-446655440000"
-			}
-			if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
-				log.Printf("[MockSpawner] Warning: failed to write init event: %v", err)
-			}
-		}()
-
-		handle := &MockProcessHandle{pid: 12345}
-		return inW, outR, errR, handle, nil
+		return spawnDefaultMockPipes(cfg, true, "[MockSpawner]")
 	}
 	return m
 }

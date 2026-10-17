@@ -852,22 +852,24 @@ func (p *UnifiedProcessPool) tryAcquireTargetLock(targetKey string) (*targetLock
 	}
 }
 
-func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
-	p.targetMu.Lock()
-	if p.targetLocks == nil {
-		p.targetLocks = make(map[string]*targetLock)
+func acquirePoolTargetLock(ctx context.Context, mu *sync.Mutex, locks *map[string]*targetLock, targetKey string, timeout time.Duration) (*targetLock, error) {
+	if mu == nil || locks == nil {
+		return nil, errors.New("target lock state is uninitialized")
 	}
-	tl, ok := p.targetLocks[targetKey]
+	mu.Lock()
+	if *locks == nil {
+		*locks = make(map[string]*targetLock)
+	}
+	tl, ok := (*locks)[targetKey]
 	if !ok {
 		tl = &targetLock{
 			sem: make(chan struct{}, 1),
 		}
-		p.targetLocks[targetKey] = tl
+		(*locks)[targetKey] = tl
 	}
 	tl.refs++
-	p.targetMu.Unlock()
+	mu.Unlock()
 
-	timeout := p.cfg.TargetLockTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -878,24 +880,38 @@ func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey st
 	case tl.sem <- struct{}{}:
 		return tl, nil
 	case <-lockCtx.Done():
-		p.releaseTargetLock(targetKey, tl, false)
+		releasePoolTargetLock(mu, *locks, targetKey, tl, false)
 		return nil, fmt.Errorf("timeout waiting for target lock for %s: %w", targetKey, lockCtx.Err())
 	}
 }
 
-func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {
+func releasePoolTargetLock(mu *sync.Mutex, locks map[string]*targetLock, targetKey string, tl *targetLock, held bool) {
+	if tl == nil {
+		return
+	}
 	if held {
 		select {
 		case <-tl.sem:
 		default:
 		}
 	}
-	p.targetMu.Lock()
-	tl.refs--
-	if tl.refs <= 0 {
-		delete(p.targetLocks, targetKey)
+	if mu == nil {
+		return
 	}
-	p.targetMu.Unlock()
+	mu.Lock()
+	tl.refs--
+	if tl.refs <= 0 && locks != nil {
+		delete(locks, targetKey)
+	}
+	mu.Unlock()
+}
+
+func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
+	return acquirePoolTargetLock(ctx, &p.targetMu, &p.targetLocks, targetKey, p.cfg.TargetLockTimeout)
+}
+
+func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {
+	releasePoolTargetLock(&p.targetMu, p.targetLocks, targetKey, tl, held)
 }
 
 // AcquireLease blocks until the target lock is acquired, ensures a daemon is initialized,
@@ -1072,29 +1088,7 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 		turn.Ctx = ctx
 	}
 
-	compiledPrompt := turn.Prompt
-	if l.isCold {
-		scopeInst := strings.TrimSpace(turn.ScopeInstructions)
-		if scopeInst == "" {
-			scopeInst = strings.TrimSpace(turn.ChannelInstructions)
-		}
-		if scopeInst != "" && !strings.Contains(compiledPrompt, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(compiledPrompt, "<CHANNEL_INSTRUCTIONS>") {
-			scopeBlock := fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
-			compiledPrompt = scopeBlock + "\n\n" + compiledPrompt
-		}
-		if l.prevSessID != "" && !strings.Contains(compiledPrompt, "<PREVIOUS_SESSION>") {
-			prevBlock := fmt.Sprintf("<PREVIOUS_SESSION>\nPrevious Session ID: %s\n</PREVIOUS_SESSION>", l.prevSessID)
-			compiledPrompt = prevBlock + "\n\n" + compiledPrompt
-		}
-		if strings.TrimSpace(turn.ThreadSummary) != "" && !strings.Contains(compiledPrompt, "<THREAD_SUMMARY>") {
-			sumBlock := fmt.Sprintf("<THREAD_SUMMARY>\n%s\n</THREAD_SUMMARY>", strings.TrimSpace(turn.ThreadSummary))
-			compiledPrompt = sumBlock + "\n\n" + compiledPrompt
-		}
-	}
-	if strings.TrimSpace(turn.CoordinationContext) != "" && !strings.Contains(compiledPrompt, "<COORDINATION_CONTEXT>") {
-		coordBlock := fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(turn.CoordinationContext))
-		compiledPrompt = coordBlock + "\n\n" + compiledPrompt
-	}
+	compiledPrompt := compileLeasePrompt(turn, l.isCold, l.prevSessID)
 
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 	combinedSink := &leaseTurnSinkWrapper{

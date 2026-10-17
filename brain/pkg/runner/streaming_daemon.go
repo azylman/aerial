@@ -312,35 +312,11 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	}
 	d.mu.RUnlock()
 
-	payloadPrompt := prompt
-	if d.cfg.AmbientContextRetriever != nil && !strings.Contains(prompt, "<ambient_context>") {
-		ctx := context.Background()
-		if turnCtx != nil && turnCtx.Ctx != nil {
-			ctx = turnCtx.Ctx
-		}
-		ambCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		ambBlock, aErr := d.cfg.AmbientContextRetriever(ambCtx)
-		cancel()
-		if aErr != nil {
-			log.Printf("[StreamingDaemon] Warning: AmbientContextRetriever failed: %v", aErr)
-		} else if strings.TrimSpace(ambBlock) != "" {
-			payloadPrompt = strings.TrimSpace(ambBlock) + "\n\n" + payloadPrompt
-		}
+	ctx := context.Background()
+	if turnCtx != nil && turnCtx.Ctx != nil {
+		ctx = turnCtx.Ctx
 	}
-	if d.cfg.MemoryRetriever != nil && !strings.Contains(prompt, "<retrieved_memory>") {
-		ctx := context.Background()
-		if turnCtx != nil && turnCtx.Ctx != nil {
-			ctx = turnCtx.Ctx
-		}
-		memCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		memBlock, mErr := d.cfg.MemoryRetriever(memCtx, prompt)
-		cancel()
-		if mErr != nil {
-			log.Printf("[StreamingDaemon] Warning: MemoryRetriever failed: %v", mErr)
-		} else if strings.TrimSpace(memBlock) != "" {
-			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + payloadPrompt
-		}
-	}
+	payloadPrompt := injectRetrievedContext(ctx, prompt, d.cfg.AmbientContextRetriever, 500*time.Millisecond, d.cfg.MemoryRetriever, 2*time.Second, "[StreamingDaemon]")
 
 	wireMsg := streamInputPayload{
 		Event: "user",
@@ -809,13 +785,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				rescued := d.cfg.TranscriptRescuer(d.SessionID(), activeTurn.CreatedAt)
 				if rescued != "" && IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
 					log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after error/empty result: %s", d.SessionID(), rescued)
-					if errMsg != "" {
-						if IsCapacityBlip(errMsg, "") {
-							metrics.RecordRunnerError("capacity_throttle", currentModel)
-						} else if IsQuotaPause(errMsg, "") {
-							metrics.RecordRunnerError("quota_paused", currentModel)
-						}
-					}
+					recordStreamErrorMetric(errMsg, currentModel, false)
 					res := &TurnResult{
 						ConversationID: d.SessionID(),
 						Response:       strings.TrimSpace(rescued),
@@ -829,13 +799,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			}
 			if strings.EqualFold(status, "ERROR") {
 				if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
-					if IsCapacityBlip(errMsg, "") {
-						metrics.RecordRunnerError("capacity_throttle", currentModel)
-					} else if IsQuotaPause(errMsg, "") {
-						metrics.RecordRunnerError("quota_paused", currentModel)
-					} else {
-						metrics.RecordRunnerError("process_error", currentModel)
-					}
+					recordStreamErrorMetric(errMsg, currentModel, true)
 					if errMsg == "" {
 						errMsg = "daemon execution failed"
 					}
@@ -844,11 +808,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				}
 				if errMsg != "" {
 					log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
-					if IsCapacityBlip(errMsg, "") {
-						metrics.RecordRunnerError("capacity_throttle", currentModel)
-					} else if IsQuotaPause(errMsg, "") {
-						metrics.RecordRunnerError("quota_paused", currentModel)
-					}
+					recordStreamErrorMetric(errMsg, currentModel, false)
 				}
 			}
 		}
@@ -923,3 +883,15 @@ func populateUsage(res *TurnResult, raw map[string]any) {
 	}
 }
 
+func recordStreamErrorMetric(errMsg, model string, recordProcessErr bool) {
+	if errMsg == "" && !recordProcessErr {
+		return
+	}
+	if IsCapacityBlip(errMsg, "") {
+		metrics.RecordRunnerError("capacity_throttle", model)
+	} else if IsQuotaPause(errMsg, "") {
+		metrics.RecordRunnerError("quota_paused", model)
+	} else if recordProcessErr {
+		metrics.RecordRunnerError("process_error", model)
+	}
+}

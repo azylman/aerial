@@ -64,14 +64,7 @@ func (r *TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, 
 	lowerErr := strings.ToLower(errDetail)
 
 	// Check context window / token limit cold start failure
-	isContextWindow := strings.Contains(lowerErr, "context window") ||
-		strings.Contains(lowerErr, "context length") ||
-		strings.Contains(lowerErr, "maximum context length") ||
-		strings.Contains(lowerErr, "token limit exceeded") ||
-		strings.Contains(lowerErr, "prompt is too long") ||
-		strings.Contains(lowerErr, "request too large")
-
-	if isContextWindow {
+	if hasContextWindowKeyword(lowerErr) {
 		outcome.IsTransient = false
 		outcome.IsSessionCorruption = false
 		outcome.ErrorDetail = "prompt length exceeds maximum model context window (hard failure)"
@@ -79,23 +72,10 @@ func (r *TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, 
 	}
 
 	// Check session corruption
-	corruptionKeywords := []string{
-		"session corrupt",
-		"corrupted session",
-		"invalid session",
-		"session not found",
-		"failed to load conversation",
-		"corrupted transcript",
-		"failed to parse session",
-		"stream was interrupted",
-		"the stream was interrupted",
-	}
-	for _, kw := range corruptionKeywords {
-		if strings.Contains(lowerErr, kw) {
-			outcome.IsSessionCorruption = true
-			outcome.IsTransient = false
-			return outcome
-		}
+	if hasCorruptionKeyword(lowerErr) {
+		outcome.IsSessionCorruption = true
+		outcome.IsTransient = false
+		return outcome
 	}
 
 	// Check quota pauses and rate limits

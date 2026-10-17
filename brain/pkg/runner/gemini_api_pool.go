@@ -903,27 +903,13 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	}
 
 	// Prepare conversation contents with user prompt
-	payloadPrompt := prompt
-	if s.pool != nil && s.pool.cfg.AmbientContextRetriever != nil && !strings.Contains(prompt, "<ambient_context>") {
-		ambCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
-		ambBlock, aErr := s.pool.cfg.AmbientContextRetriever(ambCtx)
-		cancel()
-		if aErr != nil {
-			log.Printf("[GeminiAPISession] Warning: AmbientContextRetriever failed: %v", aErr)
-		} else if strings.TrimSpace(ambBlock) != "" {
-			payloadPrompt = strings.TrimSpace(ambBlock) + "\n\n" + payloadPrompt
-		}
+	var ambRetriever AmbientContextRetriever
+	var memRetriever MemoryRetriever
+	if s.pool != nil {
+		ambRetriever = s.pool.cfg.AmbientContextRetriever
+		memRetriever = s.pool.cfg.MemoryRetriever
 	}
-	if s.pool != nil && s.pool.cfg.MemoryRetriever != nil && !strings.Contains(prompt, "<retrieved_memory>") {
-		memCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-		memBlock, mErr := s.pool.cfg.MemoryRetriever(memCtx, prompt)
-		cancel()
-		if mErr != nil {
-			log.Printf("[GeminiAPISession] Warning: MemoryRetriever failed: %v", mErr)
-		} else if strings.TrimSpace(memBlock) != "" {
-			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + payloadPrompt
-		}
-	}
+	payloadPrompt := injectRetrievedContext(ctx, prompt, ambRetriever, 300*time.Millisecond, memRetriever, 1500*time.Millisecond, "[GeminiAPISession]")
 
 	workingContents := make([]geminiContent, len(s.history), len(s.history)+1)
 	copy(workingContents, s.history)
@@ -1320,49 +1306,11 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 }
 
 func (p *GeminiAPIPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
-	p.targetMu.Lock()
-	if p.targetLocks == nil {
-		p.targetLocks = make(map[string]*targetLock)
-	}
-	tl, ok := p.targetLocks[targetKey]
-	if !ok {
-		tl = &targetLock{
-			sem: make(chan struct{}, 1),
-		}
-		p.targetLocks[targetKey] = tl
-	}
-	tl.refs++
-	p.targetMu.Unlock()
-
-	timeout := p.cfg.TargetLockTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	lockCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	select {
-	case tl.sem <- struct{}{}:
-		return tl, nil
-	case <-lockCtx.Done():
-		p.releaseTargetLock(targetKey, tl, false)
-		return nil, fmt.Errorf("timeout waiting for target lock for %s: %w", targetKey, lockCtx.Err())
-	}
+	return acquirePoolTargetLock(ctx, &p.targetMu, &p.targetLocks, targetKey, p.cfg.TargetLockTimeout)
 }
 
 func (p *GeminiAPIPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {
-	if held {
-		select {
-		case <-tl.sem:
-		default:
-		}
-	}
-	p.targetMu.Lock()
-	tl.refs--
-	if tl.refs <= 0 {
-		delete(p.targetLocks, targetKey)
-	}
-	p.targetMu.Unlock()
+	releasePoolTargetLock(&p.targetMu, p.targetLocks, targetKey, tl, held)
 }
 
 // AcquireLease blocks until the target lock is acquired, ensures a session is initialized,
@@ -1470,29 +1418,7 @@ func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*T
 		turn.Ctx = ctx
 	}
 
-	compiledPrompt := turn.Prompt
-	if l.isCold {
-		scopeInst := strings.TrimSpace(turn.ScopeInstructions)
-		if scopeInst == "" {
-			scopeInst = strings.TrimSpace(turn.ChannelInstructions)
-		}
-		if scopeInst != "" && !strings.Contains(compiledPrompt, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(compiledPrompt, "<CHANNEL_INSTRUCTIONS>") {
-			scopeBlock := fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
-			compiledPrompt = scopeBlock + "\n\n" + compiledPrompt
-		}
-		if l.prevSessID != "" && !strings.Contains(compiledPrompt, "<PREVIOUS_SESSION>") {
-			prevBlock := fmt.Sprintf("<PREVIOUS_SESSION>\nPrevious Session ID: %s\n</PREVIOUS_SESSION>", l.prevSessID)
-			compiledPrompt = prevBlock + "\n\n" + compiledPrompt
-		}
-		if strings.TrimSpace(turn.ThreadSummary) != "" && !strings.Contains(compiledPrompt, "<THREAD_SUMMARY>") {
-			sumBlock := fmt.Sprintf("<THREAD_SUMMARY>\n%s\n</THREAD_SUMMARY>", strings.TrimSpace(turn.ThreadSummary))
-			compiledPrompt = sumBlock + "\n\n" + compiledPrompt
-		}
-	}
-	if strings.TrimSpace(turn.CoordinationContext) != "" && !strings.Contains(compiledPrompt, "<COORDINATION_CONTEXT>") {
-		coordBlock := fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(turn.CoordinationContext))
-		compiledPrompt = coordBlock + "\n\n" + compiledPrompt
-	}
+	compiledPrompt := compileLeasePrompt(turn, l.isCold, l.prevSessID)
 
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 	combinedSink := &leaseTurnSinkWrapper{
