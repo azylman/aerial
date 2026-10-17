@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/coverage"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -193,10 +194,81 @@ type VanadisChunk struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+// VanadisBuildEntry represents a summarized VanadisBuild including overall queue state and chunk aggregates.
+type VanadisBuildEntry struct {
+	VanadisBuild
+	QueueState      string         `json:"queue_state"` // "running" | "queued" | "completed"
+	TotalChunks     int            `json:"total_chunks"`
+	CompletedChunks int            `json:"completed_chunks"`
+	RunningChunks   int            `json:"running_chunks"`
+	PendingChunks   int            `json:"pending_chunks"`
+	FailedChunks    int            `json:"failed_chunks"`
+	Chunks          []VanadisChunk `json:"chunks"`
+}
+
+// ClassifyBuildQueueState computes the overall queue state ("running", "queued", or "completed")
+// based on buildStatus and child chunks.
+func ClassifyBuildQueueState(buildStatus string, chunks []VanadisChunk) string {
+	switch strings.ToLower(strings.TrimSpace(buildStatus)) {
+	case "completed", "merged", "failed", "cancelled", "canceled":
+		return "completed"
+	case "queued", "pending":
+		return "queued"
+	case "running":
+		if len(chunks) > 0 {
+			allPending := true
+			for _, c := range chunks {
+				if strings.ToLower(strings.TrimSpace(c.Status)) != "pending" {
+					allPending = false
+					break
+				}
+			}
+			if allPending {
+				return "queued"
+			}
+		}
+		return "running"
+	default:
+		return "queued"
+	}
+}
+
+// SummarizeBuildEntry constructs a VanadisBuildEntry with non-nil chunks, chunk status counts, and computed queue state.
+func SummarizeBuildEntry(build VanadisBuild, chunks []VanadisChunk) VanadisBuildEntry {
+	if chunks == nil {
+		chunks = []VanadisChunk{}
+	}
+	var completed, running, pending, failed int
+	for _, c := range chunks {
+		switch strings.ToLower(strings.TrimSpace(c.Status)) {
+		case "completed", "merged":
+			completed++
+		case "running", "coding", "pr_opened", "deploying":
+			running++
+		case "failed":
+			failed++
+		case "pending":
+			pending++
+		}
+	}
+	queueState := ClassifyBuildQueueState(build.Status, chunks)
+	return VanadisBuildEntry{
+		VanadisBuild:    build,
+		QueueState:      queueState,
+		TotalChunks:     len(chunks),
+		CompletedChunks: completed,
+		RunningChunks:   running,
+		PendingChunks:   pending,
+		FailedChunks:    failed,
+		Chunks:          chunks,
+	}
+}
+
 // VanadisStore defines the persistence contract for Vanadis builds and chunks.
 type VanadisStore interface {
 	CreateBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error
 	GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
+	ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error)
 	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
@@ -395,6 +467,15 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	}
 	defer rows.Close()
 
+	chunks, err := scanChunks(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &b, chunks, nil
+}
+
+func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 	chunks := make([]VanadisChunk, 0)
 	for rows.Next() {
 		var c VanadisChunk
@@ -402,7 +483,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 		if err := rows.Scan(
 			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &c.DiffStat, &startedAt, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
-			return nil, nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
+			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
 		}
 		if startedAt.Valid {
 			c.StartedAt = startedAt.Time
@@ -422,10 +503,84 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 		chunks = append(chunks, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("error iterating vanadis chunks: %w", err)
+		return nil, fmt.Errorf("error iterating vanadis chunks: %w", err)
+	}
+	return chunks, nil
+}
+
+// ListBuilds queries recent Vanadis builds with their ordered chunks, summarized as VanadisBuildEntry items.
+func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("database connection is nil")
 	}
 
-	return &b, chunks, nil
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	buildQuery := `
+		SELECT id, repo, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
+		FROM vanadis_builds
+		ORDER BY created_at DESC, id DESC
+		LIMIT $1;
+	`
+	rows, err := s.db.Query(ctx, buildQuery, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query vanadis builds: %w", err)
+	}
+	defer rows.Close()
+
+	var builds []VanadisBuild
+	var buildIDs []string
+	for rows.Next() {
+		var b VanadisBuild
+		if err := rows.Scan(
+			&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan vanadis build: %w", err)
+		}
+		builds = append(builds, b)
+		buildIDs = append(buildIDs, b.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating vanadis builds: %w", err)
+	}
+
+	if len(builds) == 0 {
+		return []VanadisBuildEntry{}, nil
+	}
+
+	chunksQuery := `
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'low'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
+		FROM vanadis_chunks
+		WHERE build_id = ANY($1)
+		ORDER BY build_id, chunk_index ASC;
+	`
+	cRows, err := s.db.Query(ctx, chunksQuery, buildIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query vanadis chunks: %w", err)
+	}
+	defer cRows.Close()
+
+	allChunks, err := scanChunks(cRows)
+	if err != nil {
+		return nil, err
+	}
+
+	chunksByBuild := make(map[string][]VanadisChunk, len(builds))
+	for _, c := range allChunks {
+		chunksByBuild[c.BuildID] = append(chunksByBuild[c.BuildID], c)
+	}
+
+	entries := make([]VanadisBuildEntry, len(builds))
+	for i, b := range builds {
+		cList := chunksByBuild[b.ID]
+		if cList == nil {
+			cList = []VanadisChunk{}
+		}
+		entries[i] = SummarizeBuildEntry(b, cList)
+	}
+	return entries, nil
 }
 
 // UpdateChunkStatus updates the lifecycle status of a VanadisChunk.
@@ -968,6 +1123,8 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 	mux.HandleFunc("GET /health", server.handleHealth)
 	mux.HandleFunc("GET /healthz", server.handleHealth)
 	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("GET /builds", server.handleListBuilds)
+	mux.HandleFunc("GET /runs", server.handleListBuilds)
 	mux.HandleFunc("POST /builds", server.handleCreateBuild)
 	mux.HandleFunc("POST /runs", server.handleCreateBuild)
 	mux.HandleFunc("/builds/", server.handleBuildByID)
@@ -1220,6 +1377,67 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"build":  build,
 		"chunks": chunks,
+		"entry":  SummarizeBuildEntry(*build, chunks),
+	})
+}
+
+func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "vanadis store not configured"})
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	limit := 50
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	allBuilds, err := s.store.ListBuilds(r.Context(), limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	var runningCount, queuedCount, completedCount int
+	for _, b := range allBuilds {
+		switch b.QueueState {
+		case "running":
+			runningCount++
+		case "queued":
+			queuedCount++
+		case "completed":
+			completedCount++
+		}
+	}
+
+	queueStateFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("queue_state")))
+	statusFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+
+	filtered := make([]VanadisBuildEntry, 0, len(allBuilds))
+	for _, b := range allBuilds {
+		if queueStateFilter != "" && !strings.EqualFold(b.QueueState, queueStateFilter) {
+			continue
+		}
+		if statusFilter != "" && !strings.EqualFold(b.QueueState, statusFilter) && !strings.EqualFold(b.Status, statusFilter) {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "ok",
+		"total":           len(filtered),
+		"running_count":   runningCount,
+		"queued_count":    queuedCount,
+		"completed_count": completedCount,
+		"builds":          filtered,
 	})
 }
 
