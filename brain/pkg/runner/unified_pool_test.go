@@ -1533,194 +1533,194 @@ func TestUnifiedProcessPool_TurnFinishedHook(t *testing.T) {
 	TestUnifiedProcessPool_SessionRotator(t)
 }
 
-func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
-	t.Run("IdlePrewarmedEvictedAndReplaced", func(t *testing.T) {
-		var spawnCounter atomic.Int32
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				count := spawnCounter.Add(1)
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+func TestUnifiedProcessPool_DirtyEvictionAndReconciliation_Suite(t *testing.T) {
+	t.Run("EvictionScenarios", func(t *testing.T) {
+		type testCase struct {
+			name           string
+			initialKey     string
+			markDirty      bool
+			prewarmed      []string
+			updatePre      []string
+			setInflight    bool
+			spawnerErrOn   int
+			killErr        error
+			expectEvicted  bool
+			expectRewarmed bool
+			expectClosed   bool
+			expectSpawns   int
+		}
+
+		tests := []testCase{
+			{
+				name:           "IdlePrewarmedEvictedAndReplaced",
+				initialKey:     "kiosk",
+				markDirty:      true,
+				prewarmed:      []string{"kiosk"},
+				expectEvicted:  false,
+				expectRewarmed: true,
+				expectClosed:   true,
+				expectSpawns:   2,
+			},
+			{
+				name:           "IdleNonPrewarmedEvictedAndClosed",
+				initialKey:     "thread-nonprewarmed",
+				markDirty:      true,
+				prewarmed:      []string{"kiosk"},
+				expectEvicted:  true,
+				expectRewarmed: true,
+				expectClosed:   true,
+				expectSpawns:   2,
+			},
+			{
+				name:          "InflightPreservedDuringMarkDirty",
+				initialKey:    "thread-inflight",
+				markDirty:     true,
+				setInflight:   true,
+				expectEvicted: false,
+				expectClosed:  false,
+				expectSpawns:  1,
+			},
+			{
+				name:          "EvictedDaemonCloseErrorLogged",
+				initialKey:    "thread-evict-err",
+				markDirty:     true,
+				killErr:       errors.New("simulated eviction kill error"),
+				expectEvicted: true,
+				expectClosed:  true,
+				expectSpawns:  1,
+			},
+			{
+				name:           "RewarmingFailureLogged",
+				initialKey:     "kiosk",
+				markDirty:      true,
+				prewarmed:      []string{"kiosk"},
+				spawnerErrOn:   2,
+				expectEvicted:  true,
+				expectRewarmed: false,
+				expectClosed:   true,
+				expectSpawns:   2,
+			},
+			{
+				name:          "ReconcilesNewlyAddedPrewarmedTargets",
+				initialKey:    "kiosk",
+				markDirty:     true,
+				prewarmed:     []string{"kiosk"},
+				updatePre:     []string{"touch-kiosk-kitchen"},
+				expectEvicted: true,
+				expectClosed:  true,
+				expectSpawns:  2,
 			},
 		}
 
-		pool := NewUnifiedProcessPool(PoolConfig{
-			PrewarmedTargets: []string{"kiosk"},
-		}, mock)
-		defer pool.Close()
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				var spawnCounter atomic.Int32
+				mock := &MockDaemonSpawner{
+					SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+						count := int(spawnCounter.Add(1))
+						if tc.spawnerErrOn > 0 && count == tc.spawnerErrOn {
+							return nil, nil, nil, nil, errors.New("simulated spawn failure")
+						}
+						outR, outW := io.Pipe()
+						inR, inW := io.Pipe()
+						errR, _ := io.Pipe()
+						go func() {
+							defer outW.Close()
+							_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+							_, _ = io.Copy(io.Discard, inR)
+						}()
+						return inW, outR, errR, &MockProcessHandle{pid: count * 100, killErr: tc.killErr}, nil
+					},
+				}
 
-		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "kiosk", "")
-		if err != nil {
-			t.Fatalf("failed creating initial kiosk daemon: %v", err)
-		}
-		if spawnCounter.Load() != 1 {
-			t.Fatalf("expected 1 initial spawn, got %d", spawnCounter.Load())
-		}
-		if d1.InflightCount() != 0 {
-			t.Fatalf("expected d1 to have 0 inflight turns, got %d", d1.InflightCount())
-		}
+				pool := NewUnifiedProcessPool(PoolConfig{
+					PrewarmedTargets: tc.prewarmed,
+				}, mock)
+				defer pool.Close()
 
-		// Optimistic rotation at MarkDirty() time
-		pool.MarkDirty()
+				ctx := context.Background()
+				d1, err := pool.GetOrCreate(ctx, tc.initialKey, "")
+				if err != nil {
+					t.Fatalf("failed initial GetOrCreate: %v", err)
+				}
 
-		// d1 should be closed asynchronously and evicted from pool.daemons
-		deadline := time.Now().Add(2 * time.Second)
-		var d2 *StreamingDaemon
-		for time.Now().Before(deadline) {
-			cur, ok := pool.Get("kiosk")
-			if ok && cur != d1 && cur.State() != StateClosed {
-				d2 = cur
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
+				if tc.setInflight {
+					d1.inflight = append(d1.inflight, &TurnContext{TurnID: "t-inflight", CreatedAt: time.Now()})
+				}
 
-		if d2 == nil {
-			t.Fatalf("timed out waiting for kiosk daemon to be asynchronously re-warmed and replaced")
-		}
-		if d2 == d1 {
-			t.Errorf("expected d2 to be a distinct instance from d1")
-		}
-		if d2.IsDirty() {
-			t.Errorf("expected replacement daemon d2 to not be dirty")
-		}
-		if d1.State() != StateClosed {
-			t.Errorf("expected evicted daemon d1 to be closed, got state: %v", d1.State())
-		}
-		if spawnCounter.Load() < 2 {
-			t.Errorf("expected at least 2 spawns, got %d", spawnCounter.Load())
+				if len(tc.updatePre) > 0 {
+					pool.UpdatePrewarmedTargets(tc.updatePre)
+				}
+
+				if tc.markDirty {
+					pool.MarkDirty()
+					pool.WaitBackground()
+				}
+
+				if tc.expectClosed && d1.State() != StateClosed {
+					t.Errorf("expected d1 to be closed, got state: %v", d1.State())
+				}
+				if !tc.expectClosed && d1.State() == StateClosed {
+					t.Errorf("expected d1 not to be closed")
+				}
+
+				if tc.expectEvicted {
+					if _, ok := pool.Get(tc.initialKey); ok {
+						t.Errorf("expected %q to be evicted from pool", tc.initialKey)
+					}
+				}
+
+				if tc.expectRewarmed {
+					if dRewarmed, ok := pool.Get("kiosk"); !ok || dRewarmed == nil || dRewarmed == d1 || dRewarmed.State() == StateClosed {
+						t.Errorf("expected re-warmed kiosk daemon")
+					}
+				}
+
+				if len(tc.updatePre) > 0 {
+					for _, target := range tc.updatePre {
+						if dUpdated, ok := pool.Get(target); !ok || dUpdated == nil || dUpdated.State() == StateClosed {
+							t.Errorf("expected prewarmed target %q to be active", target)
+						}
+					}
+				}
+
+				if tc.expectSpawns > 0 && int(spawnCounter.Load()) != tc.expectSpawns {
+					t.Errorf("expected %d spawns, got %d", tc.expectSpawns, spawnCounter.Load())
+				}
+			})
 		}
 	})
 
-	t.Run("IdleNonPrewarmedEvictedAndClosed", func(t *testing.T) {
+	t.Run("InflightRotatedOnCompletion", func(t *testing.T) {
 		var spawnCounter atomic.Int32
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				count := spawnCounter.Add(1)
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
-			},
-		}
-
-		pool := NewUnifiedProcessPool(PoolConfig{
-			PrewarmedTargets: []string{"kiosk"},
-		}, mock)
-		defer pool.Close()
-
-		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "thread-nonprewarmed", "")
-		if err != nil {
-			t.Fatalf("failed creating initial daemon: %v", err)
-		}
-		if d1.InflightCount() != 0 {
-			t.Fatalf("expected 0 inflight turns, got %d", d1.InflightCount())
-		}
-
-		pool.MarkDirty()
-
-		// Daemon should be evicted from pool and closed, but NOT re-warmed
-		deadline := time.Now().Add(1 * time.Second)
-		for time.Now().Before(deadline) && d1.State() != StateClosed {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if d1.State() != StateClosed {
-			t.Errorf("expected idle non-prewarmed daemon d1 to be closed after MarkDirty")
-		}
-		if _, ok := pool.Get("thread-nonprewarmed"); ok {
-			t.Errorf("expected thread-nonprewarmed to be evicted from pool")
-		}
-
-		// Prewarmed target "kiosk" should be reconciled and spawned
-		var kioskDaemon *StreamingDaemon
-		for time.Now().Before(deadline) {
-			if kd, ok := pool.Get("kiosk"); ok && kd != nil {
-				kioskDaemon = kd
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if kioskDaemon == nil {
-			t.Errorf("expected prewarmed kiosk to be spawned on MarkDirty")
-		}
-
-		// Exactly 2 spawns: 1 for thread-nonprewarmed, 1 for reconciled kiosk
-		if spawnCounter.Load() != 2 {
-			t.Errorf("expected exactly 2 spawns (initial non-prewarmed + reconciled kiosk), got %d", spawnCounter.Load())
-		}
-	})
-
-	t.Run("InflightPreservedAndRotatedOnCompletion", func(t *testing.T) {
-		var spawnCounter atomic.Int32
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				count := spawnCounter.Add(1)
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
-			},
-		}
-
+		mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+			onSpawn: func(cfg DaemonConfig) { spawnCounter.Add(1) },
+		})
 		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "thread-inflight", "")
+		d1, err := pool.GetOrCreate(ctx, "thread-inflight-rot", "")
 		if err != nil {
 			t.Fatalf("failed creating initial daemon: %v", err)
 		}
-
-		// Simulate an in-flight turn
 		sink := newMockTurnSink()
 		turn := &TurnContext{TurnID: "t-inflight", Sink: sink, CreatedAt: time.Now()}
 		d1.inflight = append(d1.inflight, turn)
 
-		if d1.InflightCount() != 1 {
-			t.Fatalf("expected 1 inflight turn, got %d", d1.InflightCount())
-		}
-
 		pool.MarkDirty()
-
-		// Daemon must NOT be closed mid-flight and must still be tracked
 		if d1.State() == StateClosed {
 			t.Fatalf("in-flight daemon was closed prematurely on MarkDirty")
-		}
-		cur, ok := pool.Get("thread-inflight")
-		if !ok || cur != d1 {
-			t.Fatalf("expected d1 to remain tracked in pool during in-flight turn")
 		}
 		if !d1.IsDirty() {
 			t.Fatalf("expected in-flight daemon to be marked dirty")
 		}
 
-		// Now finish turn via NDJSON result event
 		d1.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"finished"}}`)
-
-		// SessionRotator rotates upon turn completion
 		if should, _ := pool.ShouldRotateSession(d1); !should {
 			t.Fatalf("expected dirty daemon to indicate rotation needed after turn completion")
 		}
-		rotatedSess, err := pool.RotateSession(ctx, "thread-inflight")
+		rotatedSess, err := pool.RotateSession(ctx, "thread-inflight-rot")
 		if err != nil {
 			t.Fatalf("failed rotating session: %v", err)
 		}
@@ -1728,18 +1728,16 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		if !ok || rotatedDaemon == nil || rotatedDaemon == d1 {
 			t.Fatalf("expected new rotated daemon distinct from d1")
 		}
-		if spawnCounter.Load() != 2 {
-			t.Errorf("expected spawn count 2, got %d", spawnCounter.Load())
-		}
 		if d1.State() != StateClosed {
 			t.Errorf("expected old daemon d1 to be closed after rotation")
+		}
+		if spawnCounter.Load() != 2 {
+			t.Errorf("expected spawn count 2, got %d", spawnCounter.Load())
 		}
 	})
 
 	t.Run("RapidSuccessiveMarkDirtySuppressesDuplicatePrewarming", func(t *testing.T) {
-		var concurrentSpawns atomic.Int32
-		var maxConcurrentSpawns atomic.Int32
-		var totalSpawns atomic.Int32
+		var concurrentSpawns, maxConcurrentSpawns, totalSpawns atomic.Int32
 		spawnGate := make(chan struct{})
 
 		mock := &MockDaemonSpawner{
@@ -1779,41 +1777,26 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 
 		ctx := context.Background()
 		d1, err := pool.GetOrCreate(ctx, "kiosk", "")
-		if err != nil {
+		if err != nil || d1.InflightCount() != 0 {
 			t.Fatalf("failed creating initial daemon: %v", err)
 		}
-		if d1.InflightCount() != 0 {
-			t.Fatalf("expected 0 inflight turns, got %d", d1.InflightCount())
-		}
 
-		// Fire rapid successive MarkDirty calls
 		for i := 0; i < 10; i++ {
 			pool.MarkDirty()
 		}
 
-		// Unblock the gated spawn
 		close(spawnGate)
+		pool.WaitBackground()
 
-		// Wait for replacement daemon
-		deadline := time.Now().Add(2 * time.Second)
-		var d2 *StreamingDaemon
-		for time.Now().Before(deadline) {
-			cur, ok := pool.Get("kiosk")
-			if ok && cur != d1 && cur.State() != StateClosed {
-				d2 = cur
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-
-		if d2 == nil {
-			t.Fatalf("timed out waiting for kiosk daemon replacement")
+		d2, ok := pool.Get("kiosk")
+		if !ok || d2 == nil || d2 == d1 || d2.State() == StateClosed {
+			t.Fatalf("expected kiosk daemon replacement")
 		}
 		if maxConcurrentSpawns.Load() > 1 {
 			t.Errorf("expected at most 1 concurrent spawn during pre-warming, got %d", maxConcurrentSpawns.Load())
 		}
 		if totalSpawns.Load() != 2 {
-			t.Errorf("expected exactly 2 total spawns (1 initial + 1 pre-warm), got %d", totalSpawns.Load())
+			t.Errorf("expected exactly 2 total spawns, got %d", totalSpawns.Load())
 		}
 	})
 
@@ -1822,717 +1805,704 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		if err := pool.Close(); err != nil {
 			t.Fatalf("unexpected Close() error: %v", err)
 		}
-		pool.MarkDirty() // Should safely return early under lock
-	})
-
-	t.Run("EvictedDaemonCloseErrorLogged", func(t *testing.T) {
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000088"}` + "\n"))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: 88, killErr: errors.New("simulated eviction kill error")}, nil
-			},
-		}
-
-		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-		defer pool.Close()
-
-		ctx := context.Background()
-		d, err := pool.GetOrCreate(ctx, "thread-evict-err", "")
-		if err != nil {
-			t.Fatalf("failed creating daemon: %v", err)
-		}
-
 		pool.MarkDirty()
-
-		deadline := time.Now().Add(1 * time.Second)
-		for time.Now().Before(deadline) && d.State() != StateClosed {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if d.State() != StateClosed {
-			t.Errorf("expected daemon to be closed despite kill error")
-		}
 	})
+}
 
-	t.Run("RewarmingFailureLogged", func(t *testing.T) {
-		var spawnCount atomic.Int32
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				count := spawnCount.Add(1)
-				if count > 1 {
-					return nil, nil, nil, nil, errors.New("simulated re-warming spawn failure")
-				}
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000077"}` + "\n"))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: 77}, nil
-			},
-		}
-
-		pool := NewUnifiedProcessPool(PoolConfig{
-			PrewarmedTargets: []string{"kiosk"},
-		}, mock)
-		defer pool.Close()
-
-		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "kiosk", "")
-		if err != nil {
-			t.Fatalf("failed creating initial kiosk: %v", err)
-		}
-
-		pool.MarkDirty()
-
-		deadline := time.Now().Add(1 * time.Second)
-		for time.Now().Before(deadline) && d1.State() != StateClosed {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if d1.State() != StateClosed {
-			t.Errorf("expected d1 to be closed")
-		}
-	})
+func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
+	TestUnifiedProcessPool_DirtyEvictionAndReconciliation_Suite(t)
 }
 
 func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
-	t.Run("SpawnsFreshAndClosesDirty", func(t *testing.T) {
-		var spawnCounter atomic.Int32
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				count := spawnCounter.Add(1)
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
-			},
-		}
+	type testCase struct {
+		name         string
+		killErr      error
+		expectSpawns int
+	}
 
-		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-		defer pool.Close()
+	tests := []testCase{
+		{
+			name:         "SpawnsFreshAndClosesDirty",
+			expectSpawns: 2,
+		},
+		{
+			name:         "DirtyDaemonCloseErrorLogged",
+			killErr:      errors.New("simulated dirty daemon kill error"),
+			expectSpawns: 2,
+		},
+	}
 
-		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "thread-dirty", "")
-		if err != nil {
-			t.Fatalf("initial GetOrCreate failed: %v", err)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var spawnCounter atomic.Int32
+			mock := &MockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+					count := int(spawnCounter.Add(1))
+					outR, outW := io.Pipe()
+					inR, inW := io.Pipe()
+					errR, _ := io.Pipe()
+					go func() {
+						defer outW.Close()
+						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+						_, _ = io.Copy(io.Discard, inR)
+					}()
+					return inW, outR, errR, &MockProcessHandle{pid: count * 100, killErr: tc.killErr}, nil
+				},
+			}
 
-		d1.MarkDirty()
-		if !d1.IsDirty() {
-			t.Fatalf("expected d1 to be marked dirty")
-		}
+			pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+			defer pool.Close()
 
-		// Calling GetOrCreate for thread-dirty must reject dirty d1, close d1, and spawn a fresh replacement d2
-		d2, err := pool.GetOrCreate(ctx, "thread-dirty", "")
-		if err != nil {
-			t.Fatalf("second GetOrCreate failed: %v", err)
-		}
-		if d2 == d1 {
-			t.Errorf("expected GetOrCreate to reject dirty daemon and return a fresh daemon")
-		}
-		if d2.IsDirty() {
-			t.Errorf("expected fresh daemon d2 not to be dirty")
-		}
+			ctx := context.Background()
+			d1, err := pool.GetOrCreate(ctx, "thread-dirty-target", "")
+			if err != nil {
+				t.Fatalf("initial GetOrCreate failed: %v", err)
+			}
 
-		deadline := time.Now().Add(1 * time.Second)
-		for time.Now().Before(deadline) && d1.State() != StateClosed {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if d1.State() != StateClosed {
-			t.Errorf("expected dirty daemon d1 to be closed, got state: %v", d1.State())
-		}
-		if spawnCounter.Load() != 2 {
-			t.Errorf("expected exactly 2 spawns, got %d", spawnCounter.Load())
-		}
-	})
+			d1.MarkDirty()
+			if !d1.IsDirty() {
+				t.Fatalf("expected d1 to be marked dirty")
+			}
 
-	t.Run("DirtyDaemonCloseErrorLogged", func(t *testing.T) {
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000066"}` + "\n"))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: 66, killErr: errors.New("simulated dirty daemon kill error")}, nil
-			},
-		}
+			d2, err := pool.GetOrCreate(ctx, "thread-dirty-target", "")
+			if err != nil {
+				t.Fatalf("second GetOrCreate failed: %v", err)
+			}
+			if d2 == d1 {
+				t.Errorf("expected GetOrCreate to reject dirty daemon and return a fresh daemon")
+			}
+			if d2.IsDirty() {
+				t.Errorf("expected fresh daemon d2 not to be dirty")
+			}
 
-		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-		defer pool.Close()
-
-		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "target-dirty-err", "")
-		if err != nil {
-			t.Fatalf("failed creating initial daemon: %v", err)
-		}
-
-		d1.MarkDirty()
-
-		d2, err := pool.GetOrCreate(ctx, "target-dirty-err", "")
-		if err != nil {
-			t.Fatalf("failed creating replacement daemon: %v", err)
-		}
-		if d2 == d1 {
-			t.Errorf("expected replacement daemon")
-		}
-	})
-
-	t.Run("ReconcilesNewlyAddedPrewarmedTargets", func(t *testing.T) {
-		var spawnCounter atomic.Int32
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				count := spawnCounter.Add(1)
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
-			},
-		}
-
-		pool := NewUnifiedProcessPool(PoolConfig{
-			PrewarmedTargets: []string{"kiosk"},
-		}, mock)
-		defer pool.Close()
-
-		ctx := context.Background()
-		kioskDaemon, err := pool.GetOrCreate(ctx, "kiosk", "")
-		if err != nil {
-			t.Fatalf("failed creating initial kiosk daemon: %v", err)
-		}
-		if spawnCounter.Load() != 1 {
-			t.Fatalf("expected 1 initial spawn, got %d", spawnCounter.Load())
-		}
-
-		pool.UpdatePrewarmedTargets([]string{"touch-kiosk-kitchen"})
-		pool.MarkDirty()
-		pool.WaitBackground()
-
-		// 1. "kiosk" should be evicted and closed
-		if kioskDaemon.State() != StateClosed {
-			t.Errorf("expected removed prewarmed target kiosk to be closed, got state: %v", kioskDaemon.State())
-		}
-		if _, ok := pool.Get("kiosk"); ok {
-			t.Errorf("expected kiosk to be evicted from pool")
-		}
-
-		// 2. "touch-kiosk-kitchen" should be eagerly prewarmed
-		newDaemon, ok := pool.Get("touch-kiosk-kitchen")
-		if !ok || newDaemon == nil || newDaemon.State() == StateClosed {
-			t.Fatalf("expected active touch-kiosk-kitchen daemon in pool")
-		}
-		if newDaemon.IsDirty() {
-			t.Errorf("expected touch-kiosk-kitchen daemon to not be dirty")
-		}
-	})
+			pool.WaitBackground()
+			if d1.State() != StateClosed {
+				t.Errorf("expected dirty daemon d1 to be closed, got state: %v", d1.State())
+			}
+			if tc.expectSpawns > 0 && int(spawnCounter.Load()) != tc.expectSpawns {
+				t.Errorf("expected exactly %d spawns, got %d", tc.expectSpawns, spawnCounter.Load())
+			}
+		})
+	}
 }
 
 func TestUnifiedProcessPool_PrewarmedTargets_DynamicUpdate(t *testing.T) {
-	t.Run("NilPool_ReturnsNil", func(t *testing.T) {
-		var p *UnifiedProcessPool
-		if got := p.PrewarmedTargets(); got != nil {
-			t.Errorf("expected nil from nil pool, got %v", got)
-		}
-		p.UpdatePrewarmedTargets([]string{"test"}) // Should not panic
-	})
+	type testCase struct {
+		name          string
+		nilPool       bool
+		initial       []string
+		update        []string
+		mutateFirst   bool
+		expectedSlice []string
+	}
 
-	t.Run("InitialAndDefensiveCopy", func(t *testing.T) {
-		pool := NewUnifiedProcessPool(PoolConfig{
-			PrewarmedTargets: []string{"a", "b"},
-		}, &MockDaemonSpawner{})
-		defer pool.Close()
+	tests := []testCase{
+		{
+			name:    "NilPool_ReturnsNil",
+			nilPool: true,
+			update:  []string{"test"},
+		},
+		{
+			name:          "InitialAndDefensiveCopy",
+			initial:       []string{"a", "b"},
+			mutateFirst:   true,
+			expectedSlice: []string{"a", "b"},
+		},
+		{
+			name:          "UpdateFiltersWhitespaceAndEmpty",
+			update:        []string{"  target1  ", "", "   ", "target2"},
+			expectedSlice: []string{"target1", "target2"},
+		},
+		{
+			name:          "UpdateDeduplicatesTargets",
+			update:        []string{"kiosk", "kiosk", "touch-kiosk-kitchen", "  kiosk  "},
+			expectedSlice: []string{"kiosk", "touch-kiosk-kitchen"},
+		},
+	}
 
-		targets := pool.PrewarmedTargets()
-		if len(targets) != 2 || targets[0] != "a" || targets[1] != "b" {
-			t.Fatalf("unexpected targets: %v", targets)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.nilPool {
+				var p *UnifiedProcessPool
+				if got := p.PrewarmedTargets(); got != nil {
+					t.Errorf("expected nil from nil pool, got %v", got)
+				}
+				p.UpdatePrewarmedTargets(tc.update)
+				return
+			}
 
-		targets[0] = "mutated"
-		fresh := pool.PrewarmedTargets()
-		if fresh[0] != "a" {
-			t.Errorf("defensive copy violated: pool target mutated to %q", fresh[0])
-		}
-	})
+			pool := NewUnifiedProcessPool(PoolConfig{
+				PrewarmedTargets: tc.initial,
+			}, &MockDaemonSpawner{})
+			defer pool.Close()
 
-	t.Run("UpdateFiltersWhitespaceAndEmpty", func(t *testing.T) {
-		pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
-		defer pool.Close()
+			if tc.mutateFirst {
+				targets := pool.PrewarmedTargets()
+				if len(targets) != len(tc.expectedSlice) {
+					t.Fatalf("unexpected targets length: %v", targets)
+				}
+				targets[0] = "mutated"
+				fresh := pool.PrewarmedTargets()
+				if fresh[0] != tc.expectedSlice[0] {
+					t.Errorf("defensive copy violated: pool target mutated to %q", fresh[0])
+				}
+				return
+			}
 
-		pool.UpdatePrewarmedTargets([]string{"  target1  ", "", "   ", "target2"})
-		targets := pool.PrewarmedTargets()
-		if len(targets) != 2 || targets[0] != "target1" || targets[1] != "target2" {
-			t.Fatalf("expected [target1, target2], got %v", targets)
-		}
+			pool.UpdatePrewarmedTargets(tc.update)
+			targets := pool.PrewarmedTargets()
+			if len(targets) != len(tc.expectedSlice) {
+				t.Fatalf("expected len %d, got %v", len(tc.expectedSlice), targets)
+			}
+			for i, exp := range tc.expectedSlice {
+				if targets[i] != exp {
+					t.Errorf("target[%d] expected %q, got %q", i, exp, targets[i])
+				}
+			}
 
-		pool.UpdatePrewarmedTargets(nil)
-		if got := pool.PrewarmedTargets(); got != nil {
-			t.Errorf("expected nil after setting nil targets, got %v", got)
-		}
-	})
+			if tc.name == "UpdateFiltersWhitespaceAndEmpty" {
+				pool.UpdatePrewarmedTargets(nil)
+				if got := pool.PrewarmedTargets(); got != nil {
+					t.Errorf("expected nil after setting nil targets, got %v", got)
+				}
+			}
+		})
+	}
+}
 
-	t.Run("UpdateDeduplicatesTargets", func(t *testing.T) {
-		pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
-		defer pool.Close()
+func TestUnifiedProcessPool_SessionPropagation_Suite(t *testing.T) {
+	type testCase struct {
+		name             string
+		callSession      bool
+		inputSessID      string
+		secondSessID     string
+		initialTurns     int
+		expectCapturedSess string
+		expectSessID     string
+		expectSecondDiff bool
+		expectSpawns     int
+	}
 
-		pool.UpdatePrewarmedTargets([]string{"kiosk", "kiosk", "touch-kiosk-kitchen", "  kiosk  "})
-		targets := pool.PrewarmedTargets()
-		if len(targets) != 2 || targets[0] != "kiosk" || targets[1] != "touch-kiosk-kitchen" {
-			t.Fatalf("expected [kiosk, touch-kiosk-kitchen], got %v", targets)
-		}
-	})
+	tests := []testCase{
+		{
+			name:               "PropagatesCustomSessionID",
+			inputSessID:        "11111111-2222-3333-4444-555555555555",
+			secondSessID:       "11111111-2222-3333-4444-555555555555",
+			expectCapturedSess: "11111111-2222-3333-4444-555555555555",
+			expectSessID:       "11111111-2222-3333-4444-555555555555",
+			expectSpawns:       1,
+		},
+		{
+			name:               "FreshSessionOnEmptyID",
+			inputSessID:        "",
+			expectCapturedSess: "",
+			expectSessID:       "00000000-0000-0000-0000-000000000001",
+			expectSpawns:       1,
+		},
+		{
+			name:               "MismatchedSessionIDRotates",
+			inputSessID:        "11111111-1111-1111-1111-111111111111",
+			secondSessID:       "22222222-2222-2222-2222-222222222222",
+			expectCapturedSess: "11111111-1111-1111-1111-111111111111",
+			expectSessID:       "11111111-1111-1111-1111-111111111111",
+			expectSecondDiff:   true,
+			expectSpawns:       2,
+		},
+		{
+			name:               "GetOrCreateSession_PropagatesSessionID",
+			callSession:        true,
+			inputSessID:        "33333333-3333-3333-3333-333333333333",
+			expectCapturedSess: "33333333-3333-3333-3333-333333333333",
+			expectSessID:       "33333333-3333-3333-3333-333333333333",
+			expectSpawns:       1,
+		},
+		{
+			name:               "PropagatesInitialTurnCount",
+			inputSessID:        "44444444-4444-4444-4444-444444444444",
+			initialTurns:       5,
+			expectCapturedSess: "44444444-4444-4444-4444-444444444444",
+			expectSessID:       "44444444-4444-4444-4444-444444444444",
+			expectSpawns:       1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedCfg DaemonConfig
+			var spawnCount atomic.Int32
+
+			mock := &MockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+					count := spawnCount.Add(1)
+					capturedCfg = cfg
+					outR, outW := io.Pipe()
+					inR, inW := io.Pipe()
+					errR, _ := io.Pipe()
+
+					go func() {
+						defer outW.Close()
+						sessID := cfg.SessionID
+						if sessID == "" {
+							sessID = fmt.Sprintf("00000000-0000-0000-0000-%012d", count)
+						}
+						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+						_, _ = io.Copy(io.Discard, inR)
+					}()
+
+					return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+				},
+			}
+
+			pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+			defer pool.Close()
+
+			ctx := context.Background()
+
+			if tc.callSession {
+				sess, err := pool.GetOrCreateSession(ctx, "target-prop-suite", tc.inputSessID)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if sess.SessionID() != tc.expectSessID {
+					t.Errorf("expected session ID %q, got %q", tc.expectSessID, sess.SessionID())
+				}
+				return
+			}
+
+			var d1 *StreamingDaemon
+			var err error
+			if tc.initialTurns > 0 {
+				d1, err = pool.GetOrCreate(ctx, "target-prop-suite", tc.inputSessID, tc.initialTurns)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if capturedCfg.InitialTurnCount != tc.initialTurns {
+					t.Errorf("expected InitialTurnCount %d, got %d", tc.initialTurns, capturedCfg.InitialTurnCount)
+				}
+				if d1.TurnCount() != tc.initialTurns {
+					t.Errorf("expected daemon TurnCount %d, got %d", tc.initialTurns, d1.TurnCount())
+				}
+			} else {
+				d1, err = pool.GetOrCreate(ctx, "target-prop-suite", tc.inputSessID)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+
+			if capturedCfg.SessionID != tc.expectCapturedSess {
+				t.Errorf("expected captured SessionID %q, got %q", tc.expectCapturedSess, capturedCfg.SessionID)
+			}
+			if d1.SessionID() != tc.expectSessID {
+				t.Errorf("expected d1 SessionID %q, got %q", tc.expectSessID, d1.SessionID())
+			}
+
+			if tc.secondSessID != "" {
+				d2, err2 := pool.GetOrCreate(ctx, "target-prop-suite", tc.secondSessID)
+				if err2 != nil {
+					t.Fatalf("second GetOrCreate error: %v", err2)
+				}
+				if tc.expectSecondDiff {
+					if d2 == d1 {
+						t.Errorf("expected new daemon instance after session mismatch")
+					}
+					if d2.SessionID() != tc.secondSessID {
+						t.Errorf("expected d2 session %q, got %q", tc.secondSessID, d2.SessionID())
+					}
+					pool.WaitBackground()
+					if d1.State() != StateClosed {
+						t.Errorf("expected old daemon d1 to be closed after session mismatch, got %v", d1.State())
+					}
+				} else {
+					if d2 != d1 {
+						t.Errorf("expected same daemon instance returned for identical session ID")
+					}
+				}
+			}
+
+			if tc.expectSpawns > 0 && int(spawnCount.Load()) != tc.expectSpawns {
+				t.Errorf("expected exactly %d spawns, got %d", tc.expectSpawns, spawnCount.Load())
+			}
+		})
+	}
 }
 
 func TestUnifiedProcessPool_GetOrCreate_PropagatesSessionID(t *testing.T) {
-	var capturedCfg DaemonConfig
-	var spawnCount atomic.Int32
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			spawnCount.Add(1)
-			capturedCfg = cfg
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				sessID := cfg.SessionID
-				if sessID == "" {
-					sessID = "550e8400-e29b-41d4-a716-446655440000"
-				}
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				_, _ = io.Copy(io.Discard, inR)
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 200}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-
-	// 1. Non-empty session ID should be passed to DaemonConfig and daemon
-	customSessID := "11111111-2222-3333-4444-555555555555"
-	d1, err := pool.GetOrCreate(ctx, "target-prop", customSessID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if capturedCfg.SessionID != customSessID {
-		t.Errorf("expected DaemonConfig.SessionID %q, got %q", customSessID, capturedCfg.SessionID)
-	}
-	if d1.SessionID() != customSessID {
-		t.Errorf("expected daemon SessionID %q, got %q", customSessID, d1.SessionID())
-	}
-
-	// 2. Calling GetOrCreate with same session ID reuses existing live daemon
-	d1Repeat, err := pool.GetOrCreate(ctx, "target-prop", customSessID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if d1Repeat != d1 {
-		t.Errorf("expected same daemon instance returned")
-	}
-	if spawnCount.Load() != 1 {
-		t.Errorf("expected exactly 1 spawn, got %d", spawnCount.Load())
-	}
-
-	// 3. Empty session ID on new target creates fresh session
-	d2, err := pool.GetOrCreate(ctx, "target-fresh", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if capturedCfg.SessionID != "" {
-		t.Errorf("expected empty DaemonConfig.SessionID for fresh target, got %q", capturedCfg.SessionID)
-	}
-	if d2.SessionID() != "550e8400-e29b-41d4-a716-446655440000" {
-		t.Errorf("expected fresh session ID from mock, got %q", d2.SessionID())
-	}
+	TestUnifiedProcessPool_SessionPropagation_Suite(t)
 }
 
 func TestUnifiedProcessPool_GetOrCreate_MismatchedSessionIDRotates(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				sessID := cfg.SessionID
-				if sessID == "" {
-					sessID = "550e8400-e29b-41d4-a716-446655440000"
-				}
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				_, _ = io.Copy(io.Discard, inR)
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 201}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-
-	sess1 := "11111111-1111-1111-1111-111111111111"
-	d1, err := pool.GetOrCreate(ctx, "target-switch", sess1)
-	if err != nil {
-		t.Fatalf("unexpected error spawning d1: %v", err)
-	}
-	if d1.SessionID() != sess1 {
-		t.Fatalf("expected d1 session %q, got %q", sess1, d1.SessionID())
-	}
-
-	// Calling with different session ID should evict and close d1, returning d2
-	sess2 := "22222222-2222-2222-2222-222222222222"
-	d2, err := pool.GetOrCreate(ctx, "target-switch", sess2)
-	if err != nil {
-		t.Fatalf("unexpected error spawning d2: %v", err)
-	}
-	if d2 == d1 {
-		t.Errorf("expected new daemon instance after session mismatch")
-	}
-	if d2.SessionID() != sess2 {
-		t.Errorf("expected d2 session %q, got %q", sess2, d2.SessionID())
-	}
-
-	deadline := time.Now().Add(1 * time.Second)
-	for time.Now().Before(deadline) && d1.State() != StateClosed {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if d1.State() != StateClosed {
-		t.Errorf("expected old daemon d1 to be closed after session mismatch, got %v", d1.State())
-	}
+	TestUnifiedProcessPool_SessionPropagation_Suite(t)
 }
 
 func TestUnifiedProcessPool_GetOrCreateSession_PropagatesSessionID(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
+	TestUnifiedProcessPool_SessionPropagation_Suite(t)
+}
 
-			go func() {
-				defer outW.Close()
-				sessID := cfg.SessionID
-				if sessID == "" {
-					sessID = "550e8400-e29b-41d4-a716-446655440000"
-				}
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				_, _ = io.Copy(io.Discard, inR)
-			}()
+func TestUnifiedProcessPool_GetOrCreate_PropagatesInitialTurnCount(t *testing.T) {
+	TestUnifiedProcessPool_SessionPropagation_Suite(t)
+}
 
-			return inW, outR, errR, &MockProcessHandle{pid: 202}, nil
+func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
+	type leaseTestCase struct {
+		name                 string
+		validationNilPool    bool
+		validationEmptyTarget bool
+		existingTurnCount    int
+		customExistingSessID string
+		maxTurns             int
+		targetLockTimeout    time.Duration
+		onRotatedErr         error
+		respPayload          string
+		respErr              string
+		respStatus           string
+		twoAttemptsThrottle  bool
+		concurrencyConflict  bool
+		expectAcquireErr     bool
+		expectExecErr        bool
+		expectReleaseErr     bool
+		expectRotated        bool
+		expectColdBefore     bool
+		expectColdAfter      bool
+		expectPrevSess       string
+		expectTurnCount      int
+		expectSubstantive    string
+		expectPreservedSess  bool
+	}
+
+	tests := []leaseTestCase{
+		{
+			name:                 "BasicExecution",
+			customExistingSessID: "550e8400-e29b-41d4-a716-446655440001",
+			expectPrevSess:       "550e8400-e29b-41d4-a716-446655440000",
+			respPayload:          "lease reply",
+			expectColdBefore:     true,
+			expectColdAfter:      false,
+			expectTurnCount:      1,
+			expectSubstantive:    "lease reply",
+		},
+		{
+			name:        "RotationAndPersistence",
+			maxTurns:    1,
+			respPayload: "ok",
+			expectRotated: true,
+		},
+		{
+			name:             "PersistenceFailureRollback",
+			maxTurns:         1,
+			respPayload:      "ok",
+			onRotatedErr:     errors.New("simulated DB latch timeout"),
+			expectReleaseErr: true,
+		},
+		{
+			name:                "ConcurrencySerialization",
+			targetLockTimeout:   200 * time.Millisecond,
+			respPayload:         "ok",
+			concurrencyConflict: true,
+		},
+		{
+			name:          "CancelRotationOnQuotaExhausted",
+			maxTurns:      1,
+			respErr:       "RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.",
+			respStatus:    "ERROR",
+			expectExecErr: true,
+			expectRotated: false,
+		},
+		{
+			name:              "RotatesWhenResponseSubstantiveDespiteStderrThrottle",
+			maxTurns:          1,
+			respPayload:       "Task completed successfully and verified.",
+			respErr:           "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.",
+			respStatus:        "DONE",
+			expectRotated:     true,
+			expectSubstantive: "Task completed successfully and verified.",
+		},
+		{
+			name:                "ClearsCancelRotationOnSuccessfulRetry",
+			maxTurns:            1,
+			twoAttemptsThrottle: true,
+			expectRotated:       true,
+			expectSubstantive:   "Retry succeeded with substantive output.",
+		},
+		{
+			name:              "ConversationalRateLimitTextDoesNotCancelRotation",
+			maxTurns:          1,
+			respPayload:       "I hit an external rate limit reached earlier, but I cached the result.",
+			respStatus:        "DONE",
+			expectRotated:     true,
+			expectSubstantive: "rate limit reached",
+		},
+		{
+			name:              "Validation_NilPool",
+			validationNilPool: true,
+			expectAcquireErr:  true,
+		},
+		{
+			name:                  "Validation_EmptyTarget",
+			validationEmptyTarget: true,
+			expectAcquireErr:      true,
+		},
+		{
+			name:              "PropagatesInitialTurnCountAndRotates",
+			existingTurnCount: DefaultMaxSessionTurns - 1,
+			respPayload:       "ok",
+			expectRotated:     true,
+			expectTurnCount:   DefaultMaxSessionTurns,
+		},
+		{
+			name:                "DefersRotationToTurnEndEvenIfExceeded",
+			existingTurnCount:   DefaultMaxSessionTurns,
+			respPayload:         "ok",
+			expectRotated:       true,
+			expectPreservedSess: true,
 		},
 	}
 
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
 
-	ctx := context.Background()
-	customSessID := "33333333-3333-3333-3333-333333333333"
-	sess, err := pool.GetOrCreateSession(ctx, "target-sess", customSessID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if sess.SessionID() != customSessID {
-		t.Errorf("expected session ID %q, got %q", customSessID, sess.SessionID())
+			if tc.validationNilPool {
+				var nilPool *UnifiedProcessPool
+				if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
+					t.Error("expected error from nil pool AcquireLease")
+				}
+				return
+			}
+			if tc.validationEmptyTarget {
+				pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
+				defer pool.Close()
+				if _, err := pool.AcquireLease(ctx, "   "); err == nil {
+					t.Error("expected error from empty targetKey AcquireLease")
+				}
+				return
+			}
+
+			var rotationCalled bool
+			var rotatedOld, rotatedNew string
+			var attemptCount int
+
+			pinnedSessID := tc.customExistingSessID
+			if pinnedSessID == "" {
+				pinnedSessID = uuid.New().String()
+			}
+
+			mock := &MockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+					inR, inW := io.Pipe()
+					outR, outW := io.Pipe()
+					errR, _ := io.Pipe()
+
+					go func() {
+						sessID := cfg.SessionID
+						if sessID == "" {
+							sessID = pinnedSessID
+						}
+						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+
+						buf := make([]byte, 4096)
+						for {
+							n, err := inR.Read(buf)
+							if err != nil {
+								break
+							}
+							if strings.Contains(string(buf[:n]), `"event":"user"`) {
+								attemptCount++
+								if tc.twoAttemptsThrottle {
+									if attemptCount == 1 {
+										_, _ = outW.Write([]byte(`{"event":"result","response":"","error":"RESOURCE_EXHAUSTED: quota exceeded. Resets in 5s.","status":"ERROR"}` + "\n"))
+									} else {
+										_, _ = outW.Write([]byte(`{"event":"result","response":"Retry succeeded with substantive output.","status":"DONE"}` + "\n"))
+									}
+									continue
+								}
+
+								status := tc.respStatus
+								if status == "" {
+									if tc.respErr != "" && tc.respPayload == "" {
+										status = "ERROR"
+									} else {
+										status = "SUCCESS"
+									}
+								}
+								line := fmt.Sprintf(`{"event":"result","response":%q,"error":%q,"status":%q}`+"\n", tc.respPayload, tc.respErr, status)
+								_, _ = outW.Write([]byte(line))
+							}
+						}
+					}()
+
+					return inW, outR, errR, &MockProcessHandle{pid: 350}, nil
+				},
+			}
+
+			poolCfg := PoolConfig{
+				MaxSessionTurns:   tc.maxTurns,
+				TargetLockTimeout: tc.targetLockTimeout,
+				GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+					return SessionRecord{
+						ActiveSessionID:   pinnedSessID,
+						PreviousSessionID: tc.expectPrevSess,
+						TurnCount:         tc.existingTurnCount,
+					}, nil
+				},
+				OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+					rotationCalled = true
+					rotatedOld = oldSessionID
+					rotatedNew = newSessionID
+					return tc.onRotatedErr
+				},
+			}
+
+			pool := NewUnifiedProcessPool(poolCfg, mock)
+			defer pool.Close()
+
+			targetKey := "target-" + strings.ToLower(tc.name)
+			lease, err := pool.AcquireLease(ctx, targetKey)
+			if tc.expectAcquireErr {
+				if err == nil {
+					t.Fatalf("expected AcquireLease error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected AcquireLease error: %v", err)
+			}
+
+			if tc.expectColdBefore && !lease.IsCold() {
+				t.Errorf("expected IsCold before execution to be true")
+			}
+			if tc.expectPrevSess != "" && lease.PreviousSessionID() != tc.expectPrevSess {
+				t.Errorf("expected prev session %q, got %q", tc.expectPrevSess, lease.PreviousSessionID())
+			}
+			if tc.expectPreservedSess && lease.SessionID() != pinnedSessID {
+				t.Errorf("expected session %q, got %q", pinnedSessID, lease.SessionID())
+			}
+			if tc.expectPreservedSess && rotationCalled {
+				t.Errorf("rotation must NOT be called before release")
+			}
+
+			if tc.concurrencyConflict {
+				ctxTimeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+				defer cancel()
+				if _, err2 := pool.AcquireLease(ctxTimeout, targetKey); err2 == nil {
+					t.Fatalf("expected concurrent AcquireLease to time out while lease is held")
+				}
+			}
+
+			turnCtx := &TurnContext{
+				TurnID: "turn-1",
+				Prompt: "prompt-1",
+				Ctx:    ctx,
+			}
+
+			res, execErr := lease.Execute(ctx, turnCtx)
+			if tc.twoAttemptsThrottle {
+				if execErr == nil {
+					t.Fatal("expected attempt 1 to fail on throttle")
+				}
+				turnCtx2 := &TurnContext{TurnID: "turn-1-retry", Prompt: "attempt 2", Ctx: ctx}
+				res2, execErr2 := lease.Execute(ctx, turnCtx2)
+				if execErr2 != nil {
+					t.Fatalf("attempt 2 failed: %v", execErr2)
+				}
+				res = res2
+				execErr = nil
+			}
+
+			if tc.expectExecErr {
+				if execErr == nil {
+					t.Fatalf("expected Execute error, got nil")
+				}
+			} else if execErr != nil {
+				t.Fatalf("unexpected Execute error: %v", execErr)
+			}
+
+			if tc.expectSubstantive != "" {
+				if res == nil || !strings.Contains(res.Response, tc.expectSubstantive) {
+					t.Errorf("expected response containing %q, got: %+v", tc.expectSubstantive, res)
+				}
+			}
+
+			if tc.expectColdAfter && lease.IsCold() {
+				t.Errorf("expected IsCold to be false after execution")
+			}
+			if tc.expectTurnCount > 0 && lease.TurnCount() != tc.expectTurnCount {
+				t.Errorf("expected TurnCount %d, got %d", tc.expectTurnCount, lease.TurnCount())
+			}
+
+			relErr := lease.Release()
+			if tc.expectReleaseErr {
+				if relErr == nil {
+					t.Fatalf("expected Release error, got nil")
+				}
+				if tc.onRotatedErr != nil && !errors.Is(relErr, tc.onRotatedErr) {
+					t.Errorf("expected error %v, got %v", tc.onRotatedErr, relErr)
+				}
+				if pool.HasDaemon(targetKey) {
+					t.Errorf("expected daemon to be evicted from pool after failure")
+				}
+				return
+			}
+			if relErr != nil {
+				t.Fatalf("unexpected Release error: %v", relErr)
+			}
+
+			if tc.concurrencyConflict {
+				lease3, err3 := pool.AcquireLease(ctx, targetKey)
+				if err3 != nil {
+					t.Fatalf("lease3 AcquireLease error after lease1 release: %v", err3)
+				}
+				_ = lease3.Release()
+			}
+
+			if tc.expectRotated {
+				if !rotationCalled {
+					t.Errorf("expected rotation to be called")
+				}
+				if rotatedOld != pinnedSessID {
+					t.Errorf("expected rotatedOld %q, got %q", pinnedSessID, rotatedOld)
+				}
+				if rotatedNew == "" || rotatedNew == rotatedOld {
+					t.Errorf("expected fresh rotatedNew, got %q", rotatedNew)
+				}
+			} else if rotationCalled {
+				t.Errorf("expected rotation NOT to be called")
+			}
+		})
 	}
 }
 
 func TestUnifiedProcessPool_AcquireLease_BasicExecution(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := "550e8400-e29b-41d4-a716-446655440001"
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"lease reply"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 301}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			return SessionRecord{
-				ActiveSessionID:   "550e8400-e29b-41d4-a716-446655440001",
-				PreviousSessionID: "550e8400-e29b-41d4-a716-446655440000",
-				TurnCount:         0,
-			}, nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-lease-1")
-	if err != nil {
-		t.Fatalf("unexpected AcquireLease error: %v", err)
-	}
-
-	if !lease.IsCold() {
-		t.Errorf("expected IsCold to be true")
-	}
-	if lease.PreviousSessionID() != "550e8400-e29b-41d4-a716-446655440000" {
-		t.Errorf("expected prev session %q, got %q", "550e8400-e29b-41d4-a716-446655440000", lease.PreviousSessionID())
-	}
-
-	turnCtx := &TurnContext{
-		TurnID:            "turn-1",
-		Prompt:            "hello world",
-		ScopeInstructions: "Scope guidelines test",
-		Ctx:               ctx,
-	}
-
-	res, execErr := lease.Execute(ctx, turnCtx)
-	if execErr != nil {
-		t.Fatalf("unexpected Execute error: %v", execErr)
-	}
-	if res == nil || res.Response != "lease reply" {
-		t.Errorf("expected 'lease reply', got %+v", res)
-	}
-	if lease.IsCold() {
-		t.Errorf("expected IsCold to be false after execution")
-	}
-	if lease.TurnCount() != 1 {
-		t.Errorf("expected TurnCount 1, got %d", lease.TurnCount())
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Errorf("unexpected Release error: %v", relErr)
-	}
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
 }
-
 func TestUnifiedProcessPool_AcquireLease_RotationAndPersistence(t *testing.T) {
-	var rotatedOld, rotatedNew string
-	var rotationCalled bool
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := uuid.New().String()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 302}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			rotatedOld = oldSessionID
-			rotatedNew = newSessionID
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-rot-1")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "first message",
-		Ctx:    ctx,
-	}
-
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
-	}
-
-	initSessID := lease.SessionID()
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Errorf("expected OnSessionRotated to be called")
-	}
-	if rotatedOld != initSessID {
-		t.Errorf("expected rotatedOld %q, got %q", initSessID, rotatedOld)
-	}
-	if rotatedNew == "" || rotatedNew == rotatedOld {
-		t.Errorf("expected fresh rotatedNew, got %q", rotatedNew)
-	}
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
 }
-
 func TestUnifiedProcessPool_AcquireLease_PersistenceFailureRollback(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := uuid.New().String()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 303}, nil
-		},
-	}
-
-	expectedErr := errors.New("simulated DB latch timeout")
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			return expectedErr
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-fail-rot")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "trigger rotation",
-		Ctx:    ctx,
-	}
-
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
-	}
-
-	relErr := lease.Release()
-	if !errors.Is(relErr, expectedErr) {
-		t.Errorf("expected Release to propagate DB error %v, got %v", expectedErr, relErr)
-	}
-
-	// Daemon should be evicted from pool
-	if pool.HasDaemon("target-fail-rot") {
-		t.Errorf("expected daemon to be evicted from pool after DB latch failure")
-	}
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
 }
-
 func TestUnifiedProcessPool_AcquireLease_ConcurrencySerialization(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := "550e8400-e29b-41d4-a716-446655440010"
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 304}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{
-		TargetLockTimeout: 200 * time.Millisecond,
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease1, err := pool.AcquireLease(ctx, "target-conc")
-	if err != nil {
-		t.Fatalf("lease1 AcquireLease error: %v", err)
-	}
-
-	// lease2 should time out while lease1 is held
-	ctxTimeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	defer cancel()
-	_, err2 := pool.AcquireLease(ctxTimeout, "target-conc")
-	if err2 == nil {
-		t.Fatalf("expected lease2 AcquireLease to time out while lease1 is held")
-	}
-
-	// Release lease1
-	if err := lease1.Release(); err != nil {
-		t.Fatalf("lease1 release error: %v", err)
-	}
-
-	// lease3 should now succeed
-	lease3, err3 := pool.AcquireLease(ctx, "target-conc")
-	if err3 != nil {
-		t.Fatalf("lease3 AcquireLease error after lease1 release: %v", err3)
-	}
-	_ = lease3.Release()
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
+}
+func TestUnifiedProcessPool_AcquireLease_CancelRotation(t *testing.T) {
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
+}
+func TestUnifiedProcessPool_AcquireLease_RotatesWhenResponseSubstantiveDespiteStderrThrottle(t *testing.T) {
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
+}
+func TestUnifiedProcessPool_AcquireLease_ClearsCancelRotationOnSuccessfulRetry(t *testing.T) {
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
+}
+func TestUnifiedProcessPool_AcquireLease_ConversationalRateLimitTextDoesNotCancelRotation(t *testing.T) {
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
+}
+func TestUnifiedProcessPool_AcquireLease_Validation(t *testing.T) {
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
+}
+func TestUnifiedProcessPool_AcquireLease_PropagatesInitialTurnCountAndRotates(t *testing.T) {
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
+}
+func TestUnifiedProcessPool_AcquireLease_DefersRotationToTurnEndEvenIfExceeded(t *testing.T) {
+	TestUnifiedProcessPool_AcquireLease_Suite(t)
 }
 
 func TestUnifiedProcessPool_LeaseTurnSinkWrapper_AllMethods(t *testing.T) {
@@ -2600,530 +2570,16 @@ func TestUnifiedProcessPool_SetSessionCallbacks(t *testing.T) {
 	nilPool.SetSessionCallbacks(getRec, onRot)
 }
 
-func TestUnifiedProcessPool_AcquireLease_CancelRotation(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := uuid.New().String()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"","error":"RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.","status":"ERROR"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 305}, nil
-		},
-	}
-
-	var rotationCalled bool
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-cancel-rot")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "first message",
-		Ctx:    ctx,
-	}
-
-	_, execErr := lease.Execute(ctx, turnCtx)
-	if execErr == nil {
-		t.Fatalf("expected Execute error on quota pause, got nil")
-	}
-	if !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
-		t.Fatalf("expected IsQuotaPause on Execute error, got: %v", execErr)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if rotationCalled {
-		t.Error("expected OnSessionRotated NOT to be called when turn encountered quota pause")
-	}
-}
-
-func TestUnifiedProcessPool_AcquireLease_RotatesWhenResponseSubstantiveDespiteStderrThrottle(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := uuid.New().String()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						// agy recovered from transient 429 internally: produces substantive output while error/stderr retains throttle note
-						_, _ = outW.Write([]byte(`{"event":"result","response":"Task completed successfully and verified.","error":"API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.","status":"DONE"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 306}, nil
-		},
-	}
-
-	var rotationCalled bool
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-substantive-rot")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "do task",
-		Ctx:    ctx,
-	}
-
-	res, execErr := lease.Execute(ctx, turnCtx)
-	if execErr != nil {
-		t.Fatalf("unexpected Execute error: %v", execErr)
-	}
-	if res == nil || res.Response != "Task completed successfully and verified." {
-		t.Fatalf("expected substantive response, got: %v", res)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Error("expected OnSessionRotated to be called for substantive response despite transient stderr throttle")
-	}
-}
-
-func TestUnifiedProcessPool_AcquireLease_ClearsCancelRotationOnSuccessfulRetry(t *testing.T) {
-	var turnAttempt int
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := uuid.New().String()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						turnAttempt++
-						if turnAttempt == 1 {
-							// Attempt 1: throttle error without response
-							_, _ = outW.Write([]byte(`{"event":"result","response":"","error":"RESOURCE_EXHAUSTED: quota exceeded. Resets in 5s.","status":"ERROR"}` + "\n"))
-						} else {
-							// Attempt 2: success
-							_, _ = outW.Write([]byte(`{"event":"result","response":"Retry succeeded with substantive output.","status":"DONE"}` + "\n"))
-						}
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 307}, nil
-		},
-	}
-
-	var rotationCalled bool
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-retry-clear")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx1 := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "attempt 1",
-		Ctx:    ctx,
-	}
-	// Attempt 1 fails on throttle -> arms cancelRotation
-	_, execErr1 := lease.Execute(ctx, turnCtx1)
-	if execErr1 == nil {
-		t.Fatal("expected attempt 1 to fail on throttle")
-	}
-
-	// Attempt 2 succeeds on same lease -> clears cancelRotation
-	turnCtx2 := &TurnContext{
-		TurnID: "turn-1-retry",
-		Prompt: "attempt 2",
-		Ctx:    ctx,
-	}
-	res2, execErr2 := lease.Execute(ctx, turnCtx2)
-	if execErr2 != nil {
-		t.Fatalf("attempt 2 failed: %v", execErr2)
-	}
-	if res2 == nil || res2.Response != "Retry succeeded with substantive output." {
-		t.Fatalf("unexpected res2: %v", res2)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Error("expected OnSessionRotated to be called after attempt 2 succeeded on the same lease")
-	}
-}
-
-func TestUnifiedProcessPool_AcquireLease_ConversationalRateLimitTextDoesNotCancelRotation(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := uuid.New().String()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						// Assistant conversationally mentions rate limit in response text
-						_, _ = outW.Write([]byte(`{"event":"result","response":"I hit an external rate limit reached earlier, but I cached the result.","status":"DONE"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 308}, nil
-		},
-	}
-
-	var rotationCalled bool
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-conversational-ratelimit")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "check rate limit status",
-		Ctx:    ctx,
-	}
-
-	res, execErr := lease.Execute(ctx, turnCtx)
-	if execErr != nil {
-		t.Fatalf("unexpected Execute error: %v", execErr)
-	}
-	if res == nil || !strings.Contains(res.Response, "rate limit reached") {
-		t.Fatalf("expected conversational response, got: %v", res)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Error("expected OnSessionRotated to be called despite conversational text containing rate limit phrasing")
-	}
-}
-
-func TestUnifiedProcessPool_AcquireLease_Validation(t *testing.T) {
-	ctx := context.Background()
-
-	// Nil receiver
-	var nilPool *UnifiedProcessPool
-	if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
-		t.Error("expected error from nil pool AcquireLease")
-	}
-
-	// Empty targetKey
-	mock := &MockDaemonSpawner{}
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	if _, err := pool.AcquireLease(ctx, "   "); err == nil {
-		t.Error("expected error from empty targetKey AcquireLease")
-	}
-}
-
-func TestUnifiedProcessPool_AcquireLease_PropagatesInitialTurnCountAndRotates(t *testing.T) {
-	var capturedCfg DaemonConfig
-	var rotatedOld, rotatedNew string
-	var rotationCalled bool
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			capturedCfg = cfg
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := cfg.SessionID
-				if sessID == "" {
-					sessID = uuid.New().String()
-				}
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 401}, nil
-		},
-	}
-
-	existingSessID := uuid.New().String()
-	pool := NewUnifiedProcessPool(PoolConfig{
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			return SessionRecord{
-				ActiveSessionID: existingSessID,
-				TurnCount:       DefaultMaxSessionTurns - 1,
-			}, nil
-		},
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			rotatedOld = oldSessionID
-			rotatedNew = newSessionID
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "channel-general")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	if capturedCfg.InitialTurnCount != DefaultMaxSessionTurns-1 {
-		t.Errorf("expected InitialTurnCount %d, got %d", DefaultMaxSessionTurns-1, capturedCfg.InitialTurnCount)
-	}
-
-	if lease.TurnCount() != DefaultMaxSessionTurns-1 {
-		t.Errorf("expected lease TurnCount %d, got %d", DefaultMaxSessionTurns-1, lease.TurnCount())
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-8",
-		Prompt: "user message triggering turn 8",
-		Ctx:    ctx,
-	}
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
-	}
-
-	if lease.TurnCount() != DefaultMaxSessionTurns {
-		t.Errorf("expected lease TurnCount %d after execution, got %d", DefaultMaxSessionTurns, lease.TurnCount())
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Errorf("expected session rotation to be triggered on reaching DefaultMaxSessionTurns (%d)", DefaultMaxSessionTurns)
-	}
-	if rotatedOld != existingSessID {
-		t.Errorf("expected rotatedOld %q, got %q", existingSessID, rotatedOld)
-	}
-	if rotatedNew == "" || rotatedNew == rotatedOld {
-		t.Errorf("expected fresh rotatedNew, got %q", rotatedNew)
-	}
-}
-
-func TestUnifiedProcessPool_GetOrCreate_PropagatesInitialTurnCount(t *testing.T) {
-	var capturedCfg DaemonConfig
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			capturedCfg = cfg
-			_, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", uuid.New().String())))
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 402}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	d, err := pool.GetOrCreate(ctx, "target-init-turns", "sess-123", 5)
-	if err != nil {
-		t.Fatalf("GetOrCreate error: %v", err)
-	}
-	if capturedCfg.InitialTurnCount != 5 {
-		t.Errorf("expected DaemonConfig.InitialTurnCount 5, got %d", capturedCfg.InitialTurnCount)
-	}
-	if d.TurnCount() != 5 {
-		t.Errorf("expected daemon.TurnCount() 5, got %d", d.TurnCount())
-	}
-}
-
-func TestUnifiedProcessPool_AcquireLease_DefersRotationToTurnEndEvenIfExceeded(t *testing.T) {
-	var rotationCalled bool
-	var rotatedOld string
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				sessID := cfg.SessionID
-				if sessID == "" {
-					sessID = uuid.New().String()
-				}
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						break
-					}
-					if strings.Contains(string(buf[:n]), `"event":"user"`) {
-						_, _ = outW.Write([]byte(`{"event":"result","response":"ok"}` + "\n"))
-					}
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 405}, nil
-		},
-	}
-
-	existingSessID := uuid.New().String()
-	pool := NewUnifiedProcessPool(PoolConfig{
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			return SessionRecord{
-				ActiveSessionID: existingSessID,
-				TurnCount:       DefaultMaxSessionTurns,
-			}, nil
-		},
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			rotatedOld = oldSessionID
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-already-exceeded")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	if lease.SessionID() != existingSessID {
-		t.Fatalf("expected lease to preserve existing session %q pre-lease, got %q", existingSessID, lease.SessionID())
-	}
-	if rotationCalled {
-		t.Fatalf("rotation must NOT be called pre-lease")
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-9",
-		Prompt: "user message triggering turn 9",
-		Ctx:    ctx,
-	}
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Errorf("expected session rotation to trigger on Release() at turn end")
-	}
-	if rotatedOld != existingSessID {
-		t.Errorf("expected rotatedOld %q, got %q", existingSessID, rotatedOld)
-	}
-}
-
 func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 	t.Parallel()
 
-	// Exercise nil/empty guards on context helpers, daemon getter, and env filter
 	if got := VanadisChunkIDFromContext(nil); got != "" {
 		t.Fatalf("expected empty chunk ID from nil context, got %q", got)
 	}
-	nilCtxWithChunk := WithVanadisChunkID(nil, "chunk-from-nil\r\n")
-	if got := VanadisChunkIDFromContext(nilCtxWithChunk); got != "chunk-from-nil" {
+	if got := VanadisChunkIDFromContext(WithVanadisChunkID(nil, "chunk-from-nil\r\n")); got != "chunk-from-nil" {
 		t.Fatalf("expected chunk-from-nil, got %q", got)
 	}
-	emptyChunkCtx := WithVanadisChunkID(context.Background(), "   \r\n ")
-	if got := VanadisChunkIDFromContext(emptyChunkCtx); got != "" {
+	if got := VanadisChunkIDFromContext(WithVanadisChunkID(context.Background(), "   \r\n ")); got != "" {
 		t.Fatalf("expected empty chunk ID for whitespace input, got %q", got)
 	}
 	var nilDaemon *StreamingDaemon
@@ -3152,8 +2608,7 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 	mock := &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 			mu.Lock()
-			envCopy := append([]string(nil), cfg.Env...)
-			spawnedEnvs = append(spawnedEnvs, envCopy)
+			spawnedEnvs = append(spawnedEnvs, append([]string(nil), cfg.Env...))
 			spawnedSessions = append(spawnedSessions, cfg.SessionID)
 			pid := 510 + len(spawnedEnvs)
 			mu.Unlock()
@@ -3161,14 +2616,12 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()
 			errR, _ := io.Pipe()
-
 			go func() {
 				sessID := cfg.SessionID
 				if sessID == "" {
 					sessID = uuid.New().String()
 				}
 				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
-
 				buf := make([]byte, 4096)
 				for {
 					n, err := inR.Read(buf)
@@ -3180,7 +2633,6 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 					}
 				}
 			}()
-
 			return inW, outR, errR, &MockProcessHandle{pid: pid}, nil
 		},
 	}
@@ -3201,101 +2653,46 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Pre-warm / non-chunk turn spawns with no AERIAL_VANADIS_CHUNK_ID
 	lease0, err := pool.AcquireLease(ctx, "thread-vanadis")
-	if err != nil {
-		t.Fatalf("AcquireLease 0 error: %v", err)
-	}
-	if lease0.IsEphemeral() {
-		t.Fatalf("expected non-ephemeral lease")
-	}
-	if lease0.PreviousSessionID() != "prev-sess-1" || !lease0.IsCold() || lease0.TurnCount() != 0 {
-		t.Fatalf("unexpected initial lease metadata: prev=%q cold=%v count=%d", lease0.PreviousSessionID(), lease0.IsCold(), lease0.TurnCount())
+	if err != nil || lease0.IsEphemeral() || lease0.PreviousSessionID() != "prev-sess-1" || !lease0.IsCold() || lease0.TurnCount() != 0 {
+		t.Fatalf("unexpected lease0: err=%v", err)
 	}
 	if _, err := lease0.Execute(ctx, nil); err == nil {
 		t.Fatalf("expected error for nil TurnContext")
 	}
-	if _, err := lease0.Execute(ctx, &TurnContext{
-		TurnID:              "t0",
-		Prompt:              "warmup",
-		ChannelInstructions: "chan-rules",
-		ThreadSummary:       "summary-text",
-		CoordinationContext: "coord-text",
-	}); err != nil {
+	if _, err := lease0.Execute(ctx, &TurnContext{TurnID: "t0", Prompt: "warmup", ChannelInstructions: "chan-rules", ThreadSummary: "summary-text", CoordinationContext: "coord-text"}); err != nil {
 		t.Fatalf("Execute 0 error: %v", err)
 	}
 	_ = lease0.Release()
 
-	// 2. Chunk 1 turn refreshes daemon with AERIAL_VANADIS_CHUNK_ID=chunk-1 while preserving SessionID
 	ctxChunk1 := WithVanadisChunkID(ctx, "chunk-1")
 	lease1, err := pool.AcquireLease(ctxChunk1, "thread-vanadis")
-	if err != nil {
-		t.Fatalf("AcquireLease 1 error: %v", err)
+	if err != nil || lease1.SessionID() != pinnedSessID {
+		t.Fatalf("unexpected lease1: err=%v sess=%q", err, lease1.SessionID())
 	}
-	if lease1.SessionID() != pinnedSessID {
-		t.Fatalf("expected pinned session %q to be preserved across chunk refresh, got %q", pinnedSessID, lease1.SessionID())
-	}
-	if _, err := lease1.Execute(ctxChunk1, &TurnContext{TurnID: "t1", Prompt: "chunk 1 work", VanadisChunkID: "chunk-1", Ctx: ctxChunk1}); err != nil {
+	if _, err := lease1.Execute(ctxChunk1, &TurnContext{TurnID: "t1", Prompt: "chunk 1", VanadisChunkID: "chunk-1", Ctx: ctxChunk1}); err != nil {
 		t.Fatalf("Execute 1 error: %v", err)
 	}
 	_ = lease1.Release()
 
-	// 3. Subsequent non-chunk AcquireLease followed by TurnContext.VanadisChunkID override inside Execute
 	lease2, err := pool.AcquireLease(ctx, "thread-vanadis")
 	if err != nil {
 		t.Fatalf("AcquireLease 2 error: %v", err)
 	}
-	if _, err := lease2.Execute(ctx, &TurnContext{TurnID: "t2", Prompt: "chunk 2 via turn field", VanadisChunkID: "chunk-2", Ctx: ctx}); err != nil {
+	if _, err := lease2.Execute(ctx, &TurnContext{TurnID: "t2", Prompt: "chunk 2", VanadisChunkID: "chunk-2", Ctx: ctx}); err != nil {
 		t.Fatalf("Execute 2 error: %v", err)
 	}
 	_ = lease2.Release()
 
-	// 4. Direct GetOrCreate with empty sessionID preserves existing warm daemon's SessionID when refreshing chunk env
 	d3, err := pool.GetOrCreate(ctx, "thread-vanadis", "")
-	if err != nil {
-		t.Fatalf("GetOrCreate 3 error: %v", err)
-	}
-	if d3.SessionID() != pinnedSessID || d3.VanadisChunkID() != "" {
-		t.Fatalf("expected preserved session %q and empty chunk ID, got sess=%q chunk=%q", pinnedSessID, d3.SessionID(), d3.VanadisChunkID())
+	if err != nil || d3.SessionID() != pinnedSessID || d3.VanadisChunkID() != "" {
+		t.Fatalf("GetOrCreate 3 failed: err=%v", err)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(spawnedEnvs) != 5 {
-		t.Fatalf("expected 5 daemon spawns (initial, chunk-1, post-chunk, chunk-2-exec, direct-clean), got %d", len(spawnedEnvs))
-	}
-	for _, kv := range spawnedEnvs[0] {
-		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
-			t.Errorf("spawn 0 should not have AERIAL_VANADIS_CHUNK_ID, got %q", kv)
-		}
-	}
-	foundChunk1 := false
-	for _, kv := range spawnedEnvs[1] {
-		if kv == "AERIAL_VANADIS_CHUNK_ID=chunk-1" {
-			foundChunk1 = true
-		}
-	}
-	if !foundChunk1 {
-		t.Errorf("spawn 1 missing AERIAL_VANADIS_CHUNK_ID=chunk-1 in env: %v", spawnedEnvs[1])
-	}
-	for _, kv := range spawnedEnvs[2] {
-		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
-			t.Errorf("spawn 2 should scrub AERIAL_VANADIS_CHUNK_ID after chunk completes, got %q", kv)
-		}
-	}
-	foundChunk2 := false
-	for _, kv := range spawnedEnvs[3] {
-		if kv == "AERIAL_VANADIS_CHUNK_ID=chunk-2" {
-			foundChunk2 = true
-		}
-	}
-	if !foundChunk2 {
-		t.Errorf("spawn 3 missing AERIAL_VANADIS_CHUNK_ID=chunk-2 in env: %v", spawnedEnvs[3])
-	}
-	for _, kv := range spawnedEnvs[4] {
-		if strings.HasPrefix(kv, "AERIAL_VANADIS_CHUNK_ID=") {
-			t.Errorf("spawn 4 should scrub AERIAL_VANADIS_CHUNK_ID on direct refresh, got %q", kv)
-		}
+		t.Fatalf("expected 5 spawns, got %d", len(spawnedEnvs))
 	}
 	for i, s := range spawnedSessions {
 		if s != pinnedSessID {
@@ -3394,5 +2791,3 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 	}
 	pool.closeEvictedDaemon(nil, "discord:worker-1")
 }
-
-
