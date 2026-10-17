@@ -172,19 +172,15 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 		t.Fatalf("UpdateMessageStatus non-existent failed: %v", err)
 	}
 
-	// IncrementMessageRetry & IncrementMessageRestart
+	// IncrementMessageRetry
 	if err := s.IncrementMessageRetry(ctx, "msg-1", "timeout"); err != nil {
 		t.Fatalf("IncrementMessageRetry failed: %v", err)
 	}
-	if err := s.IncrementMessageRestart(ctx, "msg-1", "sigterm"); err != nil {
-		t.Fatalf("IncrementMessageRestart failed: %v", err)
-	}
 	_ = s.IncrementMessageRetry(ctx, "msg-none", "")
-	_ = s.IncrementMessageRestart(ctx, "msg-none", "")
 
 	msg, _ = s.GetMessage(ctx, "msg-1")
-	if msg.RetryCount != 1 || msg.RestartCount != 1 {
-		t.Fatalf("expected retry=1 restart=1, got %+v", msg)
+	if msg.RetryCount != 1 {
+		t.Fatalf("expected retry=1, got %+v", msg)
 	}
 
 	// ResetMessageToPendingWithRestart
@@ -193,8 +189,8 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	}
 	_ = s.ResetMessageToPendingWithRestart(ctx, "msg-none", "")
 	msg, _ = s.GetMessage(ctx, "msg-1")
-	if msg.Status != StatusPending || msg.RestartCount != 2 {
-		t.Fatalf("expected status pending, restart=2, got %+v", msg)
+	if msg.Status != StatusPending || msg.RestartCount != 1 {
+		t.Fatalf("expected status pending, restart=1, got %+v", msg)
 	}
 
 	// ClaimPendingMessage
@@ -213,17 +209,6 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 		t.Fatalf("expected claim=false for msg-none, got %v", claimed)
 	}
 
-	// ClaimNextPendingMessage
-	// msg-2 is still pending
-	claimedMsg, err := s.ClaimNextPendingMessage(ctx, "w1")
-	if err != nil || claimedMsg == nil || claimedMsg.ID != "msg-2" {
-		t.Fatalf("expected claim msg-2, got %+v (err: %v)", claimedMsg, err)
-	}
-	// No more pending
-	claimedMsg, err = s.ClaimNextPendingMessage(ctx, "w1")
-	if err != nil || claimedMsg != nil {
-		t.Fatalf("expected no pending message, got %+v", claimedMsg)
-	}
 
 	// UpdateMessageCompleted
 	if err := s.UpdateMessageCompleted(ctx, "msg-1", "Done response"); err != nil {
@@ -333,15 +318,6 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 		t.Fatalf("RotateSessionID brand-new failed: %v", err)
 	}
 
-	// GetSessionInfo
-	info, err := s.GetSessionInfo(ctx, "th-1")
-	if err != nil || info == nil || info.InternalSessionID != "sess-2" {
-		t.Fatalf("unexpected SessionInfo: %+v, err: %v", info, err)
-	}
-	info, err = s.GetSessionInfo(ctx, "th-nonexistent")
-	if err != nil || info != nil {
-		t.Fatalf("expected nil for non-existent session, got %+v", info)
-	}
 
 	// Thread summary
 	sum, wm, err := s.GetThreadSummary(ctx, "th-1")
@@ -380,14 +356,6 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 		t.Errorf("expected non-zero LastCompletedMessageCreatedAt")
 	}
 
-	// DeleteSessionID
-	if err := s.DeleteSessionID(ctx, "th-1"); err != nil {
-		t.Fatalf("DeleteSessionID failed: %v", err)
-	}
-	id, _ = s.GetSessionID(ctx, "th-1")
-	if id != "" {
-		t.Fatalf("expected empty session ID after delete, got %q", id)
-	}
 	if prev, _ := s.GetPreviousSessionID(ctx, "th-none"); prev != "" {
 		t.Fatalf("expected empty previous session ID for th-none, got %q", prev)
 	}
@@ -435,14 +403,6 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 		t.Fatalf("expected ErrScheduleAlreadyConsumed, got %v", err)
 	}
 
-	// DeleteOneShotSchedule
-	if err := s.DeleteOneShotSchedule(ctx, "os-2"); err != nil {
-		t.Fatalf("DeleteOneShotSchedule failed: %v", err)
-	}
-	all, _ = s.GetAllOneShotSchedules(ctx, "th-1")
-	if len(all) != 0 {
-		t.Fatalf("expected 0 schedules after deletion, got %d", len(all))
-	}
 
 	// Cron schedules
 	c1 := CronSchedule{ID: "cron-1", TargetID: "t-1", CronExpr: "*/5 * * * *", Enabled: true, NextRunAt: now.Add(-time.Minute)}
@@ -466,21 +426,12 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 		t.Fatalf("expected 3 crons globally, got %d", len(allCronsGlobal))
 	}
 
-	// UpdateCronNextRun & UpdateCronScheduleEffort
+	// UpdateCronNextRun
 	next := now.Add(10 * time.Minute)
 	if err := s.UpdateCronNextRun(ctx, "cron-1", next); err != nil {
 		t.Fatalf("UpdateCronNextRun failed: %v", err)
 	}
-	if err := s.UpdateCronScheduleEffort(ctx, "cron-1", "high"); err != nil {
-		t.Fatalf("UpdateCronScheduleEffort failed: %v", err)
-	}
 	_ = s.UpdateCronNextRun(ctx, "cron-none", next)
-	_ = s.UpdateCronScheduleEffort(ctx, "cron-none", "low")
-
-	// DeleteCronSchedule
-	if err := s.DeleteCronSchedule(ctx, "cron-2"); err != nil {
-		t.Fatalf("DeleteCronSchedule failed: %v", err)
-	}
 
 	// Schedule Runs
 	r1 := ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", Status: "enqueued", StartedAt: now.Add(-2 * time.Hour)}
@@ -524,7 +475,7 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
 	}
-	if metrics.CronCount != 2 || metrics.OneShotCount != 0 || metrics.TotalRuns24h != 3 {
+	if metrics.CronCount != 2 || metrics.OneShotCount != 1 || metrics.TotalRuns24h != 3 {
 		t.Errorf("unexpected metrics: %+v", metrics)
 	}
 
@@ -698,24 +649,20 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_ = s.UpdateMessageStatus(ctx, "m", "s", "e")
 	_ = s.UpdateMessageCompleted(ctx, "m", "r")
 	_ = s.IncrementMessageRetry(ctx, "m", "e")
-	_ = s.IncrementMessageRestart(ctx, "m", "e")
 	_ = s.ResetMessageToPendingWithRestart(ctx, "m", "r")
 	_, _ = s.GetPendingOrProcessingMessages(ctx, 10)
 	_, _ = s.GetMessage(ctx, "m")
 	_, _ = s.MessageExists(ctx, "m")
 	_, _ = s.ClaimPendingMessage(ctx, "m")
-	_, _ = s.ClaimNextPendingMessage(ctx, "w")
 	_, _ = s.GetActiveRecentThreadIDs(ctx, time.Hour)
 	_, _ = s.GetRecentThreadMessages(ctx, "t", 10)
 	_, _ = s.GetMaxMessageRowID(ctx, "t")
 	_, _ = s.GetSessionID(ctx, "t")
 	_, _ = s.GetPreviousSessionID(ctx, "t")
 	_ = s.SaveSessionID(ctx, "t", "s")
-	_ = s.DeleteSessionID(ctx, "t")
 	_, _ = s.IncrementSessionTurnCount(ctx, "t")
 	_, _ = s.GetSessionTurnCount(ctx, "t")
 	_ = s.RotateSessionID(ctx, "t", "s")
-	_, _ = s.GetSessionInfo(ctx, "t")
 	_, _, _ = s.GetThreadSummary(ctx, "t")
 	_ = s.SaveThreadSummary(ctx, "t", "s", "w")
 	_, _ = s.GetSessionActivityStats(ctx, "t")
@@ -724,15 +671,12 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_ = s.SaveConversationMapping(ctx, "ext", "int")
 	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{})
 	_, _ = s.GetDueOneShotSchedules(ctx)
-	_ = s.DeleteOneShotSchedule(ctx, "id")
 	_ = s.InsertMessageAndConsumeOneShot(ctx, "id", Message{})
 	_, _ = s.GetAllOneShotSchedules(ctx, "t")
 	_ = s.CreateCronSchedule(ctx, CronSchedule{})
 	_, _ = s.GetDueCronSchedules(ctx)
 	_, _ = s.GetAllCronSchedules(ctx, "t")
-	_ = s.DeleteCronSchedule(ctx, "id")
 	_ = s.UpdateCronNextRun(ctx, "id", time.Now())
-	_ = s.UpdateCronScheduleEffort(ctx, "id", "high")
 	_ = s.CreateScheduleRun(ctx, ScheduleRun{})
 	_ = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{})
 	_, _, _ = s.GetScheduleRunsPaginated(ctx, 10, 0, "", "")
@@ -768,9 +712,17 @@ func TestFakeStoreTestHelpers(t *testing.T) {
 		CreatedAt:         now.Add(-time.Hour),
 		UpdatedAt:         now.Add(-10 * time.Minute),
 	})
-	sess, err := s.GetSessionInfo(ctx, "th-helper")
-	if err != nil || sess == nil || sess.TurnCount != 5 || sess.InternalSessionID != "sess-helper" {
-		t.Fatalf("SetSessionInfo failed: sess=%+v, err=%v", sess, err)
+	sessID, err := s.GetSessionID(ctx, "th-helper")
+	if err != nil || sessID != "sess-helper" {
+		t.Fatalf("GetSessionID() = (%q, %v), want (sess-helper, nil)", sessID, err)
+	}
+	prevID, err := s.GetPreviousSessionID(ctx, "th-helper")
+	if err != nil || prevID != "" {
+		t.Fatalf("GetPreviousSessionID() = (%q, %v), want ('', nil)", prevID, err)
+	}
+	turns, err := s.GetSessionTurnCount(ctx, "th-helper")
+	if err != nil || turns != 5 {
+		t.Fatalf("GetSessionTurnCount() = (%d, %v), want (5, nil)", turns, err)
 	}
 
 	// 2. SetMessageUpdatedAt

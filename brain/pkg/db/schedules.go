@@ -140,17 +140,6 @@ func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	return scanOneShotRows(rows)
 }
 
-func DeleteOneShotSchedule(database DBTX, id string) error {
-	if database == nil || id == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := database.ExecContext(ctx, `DELETE FROM one_shot_schedules WHERE id = $1`, id)
-	return err
-}
-
 func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Message) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
@@ -277,29 +266,6 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	defer rows.Close()
 
 	return scanCronRows(rows)
-}
-
-func UpdateCronScheduleEffort(database DBTX, id, effort string) error {
-	if database == nil || id == "" {
-		return nil
-	}
-	effort = normalizeScheduleEffort(effort)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := database.ExecContext(ctx, `UPDATE cron_schedules SET effort = $1 WHERE id = $2`, effort, id)
-	return err
-}
-
-func DeleteCronSchedule(database DBTX, id string) error {
-	if database == nil || id == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := database.ExecContext(ctx, `DELETE FROM cron_schedules WHERE id = $1`, id)
-	return err
 }
 
 func UpdateCronNextRun(database DBTX, id string, nextRunAt time.Time) error {

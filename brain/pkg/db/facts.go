@@ -207,34 +207,32 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
-func UpdateFactEmbeddingWithContext(ctx context.Context, database DBTX, id int64, embedding []float32) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	if len(embedding) != ExpectedEmbeddingDim {
 		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
 
 	vec := pgvector.NewVector(embedding)
-	_, err := database.ExecContext(ctx, "UPDATE facts SET embedding = $1 WHERE id = $2", vec, id)
+	_, err := s.db.ExecContext(ctx, "UPDATE facts SET embedding = $1 WHERE id = $2", vec, id)
 	return err
 }
 
 func UpdateFactEmbedding(database DBTX, id int64, embedding []float32) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return UpdateFactEmbeddingWithContext(ctx, database, id, embedding)
+	return (&SQLStore{db: database}).UpdateFactEmbedding(context.Background(), id, embedding)
 }
 
-func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, limit int) ([]Fact, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	query := "SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts WHERE embedding IS NULL ORDER BY id ASC"
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := database.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +249,7 @@ func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, li
 	return results, rows.Err()
 }
 
-func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
+func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithEmbedding, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -286,10 +284,6 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 		})
 	}
 	return results, nil
-}
-
-func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithEmbedding, error) {
-	return GetAllFactsWithEmbeddings(database)
 }
 
 const (

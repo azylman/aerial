@@ -200,19 +200,7 @@ func TestSchedules_NilDatabaseAndNormalization(t *testing.T) {
 		t.Fatalf("expected effort 'high', got %q", crons[0].Effort)
 	}
 
-	// 4. UpdateCronScheduleEffort normalization
-	if err := UpdateCronScheduleEffort(db, "c-norm-1", "something_else"); err != nil {
-		t.Fatalf("UpdateCronScheduleEffort failed: %v", err)
-	}
-	crons, err = GetAllCronSchedules(db, "t1")
-	if err != nil || len(crons) == 0 {
-		t.Fatalf("GetAllCronSchedules failed: %v", err)
-	}
-	if crons[0].Effort != "medium" {
-		t.Fatalf("expected effort updated to 'medium', got %q", crons[0].Effort)
-	}
-
-	// 5. CreateScheduleRun normalization
+	// 4. CreateScheduleRun normalization
 	run := ScheduleRun{
 		ID:           "run-norm-1",
 		ScheduleID:   "c-norm-1",
