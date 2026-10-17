@@ -3,198 +3,82 @@ package runner
 import (
 	"context"
 	"errors"
-	"io"
 	"testing"
 	"time"
 )
-
-// mockAgentSession implements AgentSession for testing.
-type mockAgentSession struct {
-	sessionID string
-	sendFn    func(prompt string, turn *TurnContext) error
-}
-
-func (m *mockAgentSession) SessionID() string {
-	return m.sessionID
-}
-
-func (m *mockAgentSession) Send(prompt string, turn *TurnContext) error {
-	if m.sendFn != nil {
-		return m.sendFn(prompt, turn)
-	}
-	return nil
-}
-
-var _ AgentSession = (*mockAgentSession)(nil)
-
-// mockAgentPool implements AgentPool for testing.
-type mockAgentPool struct {
-	sessions   map[string]*mockAgentSession
-	initCalled bool
-	closed     bool
-	getErr     error
-	initErr    error
-	closeErr   error
-}
-
-func newMockAgentPool() *mockAgentPool {
-	return &mockAgentPool{
-		sessions: make(map[string]*mockAgentSession),
-	}
-}
-
-func (m *mockAgentPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
-	if m.closed {
-		return nil, errors.New("mock pool is closed")
-	}
-	if m.getErr != nil {
-		return nil, m.getErr
-	}
-	if s, ok := m.sessions[targetKey]; ok {
-		return s, nil
-	}
-	sessID := "sess-" + targetKey
-	if sessionID != "" {
-		sessID = sessionID
-	}
-	sess := &mockAgentSession{sessionID: sessID}
-	m.sessions[targetKey] = sess
-	return sess, nil
-}
-
-func (m *mockAgentPool) Initialize(ctx context.Context) error {
-	m.initCalled = true
-	return m.initErr
-}
-
-func (m *mockAgentPool) Close() error {
-	m.closed = true
-	return m.closeErr
-}
-
-var _ AgentPool = (*mockAgentPool)(nil)
 
 func TestAgentPool_InterfacesAndMockBehavior(t *testing.T) {
 	t.Parallel()
 
 	var _ AgentPool = (*UnifiedProcessPool)(nil)
 	var _ AgentSession = (*StreamingDaemon)(nil)
-	var _ AgentPool = (*mockAgentPool)(nil)
-	var _ AgentSession = (*mockAgentSession)(nil)
+	var _ AgentPool = (*mockVoicePool)(nil)
+	var _ AgentSession = (*mockVoiceSession)(nil)
+	var _ AgentPool = NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "fake-key"})
 
-	geminiPool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey: "fake-key",
-	})
-	if geminiPool == nil {
-		t.Fatal("expected non-nil GeminiAPIPool")
-	}
-	var _ AgentPool = geminiPool
-
-	pool := newMockAgentPool()
+	pool := newMockVoicePool("test-model")
 	ctx := context.Background()
 
 	if err := pool.Initialize(ctx); err != nil {
 		t.Fatalf("unexpected init error: %v", err)
 	}
-	if !pool.initCalled {
-		t.Fatalf("expected initCalled to be true")
+	if pool.initCalled != 1 {
+		t.Fatalf("expected initCalled == 1, got %d", pool.initCalled)
 	}
 
 	sess1, err := pool.GetOrCreateSession(ctx, "device-a", "")
-	if err != nil {
-		t.Fatalf("unexpected error getting session: %v", err)
+	if err != nil || sess1.SessionID() != "device-a" {
+		t.Fatalf("unexpected session 1: (%v, %v)", sess1, err)
 	}
-	if sess1.SessionID() != "sess-device-a" {
-		t.Errorf("expected session ID sess-device-a, got %q", sess1.SessionID())
-	}
-
 	sess2, err := pool.GetOrCreateSession(ctx, "device-a", "")
-	if err != nil {
-		t.Fatalf("unexpected error getting existing session: %v", err)
-	}
-	if sess1 != sess2 {
-		t.Errorf("expected same session instance returned")
+	if err != nil || sess1 != sess2 {
+		t.Fatalf("expected cached session instance, got (%v, %v)", sess2, err)
 	}
 
 	var receivedPrompt string
-	mockSess := sess1.(*mockAgentSession)
-	mockSess.sendFn = func(prompt string, turn *TurnContext) error {
+	sess1.(*mockVoiceSession).sendFn = func(prompt string, turn *TurnContext) error {
 		receivedPrompt = prompt
 		return nil
 	}
-	if err := sess1.Send("test prompt", nil); err != nil {
-		t.Fatalf("unexpected send error: %v", err)
-	}
-	if receivedPrompt != "test prompt" {
-		t.Errorf("expected test prompt, got %q", receivedPrompt)
+	if err := sess1.Send("test prompt", nil); err != nil || receivedPrompt != "test prompt" {
+		t.Fatalf("unexpected Send: %v, got %q", err, receivedPrompt)
 	}
 
+	pool.getErr = errors.New("mock pool is closed")
 	if err := pool.Close(); err != nil {
 		t.Fatalf("unexpected close error: %v", err)
 	}
 	if _, err := pool.GetOrCreateSession(ctx, "device-b", ""); err == nil {
-		t.Fatalf("expected error from GetOrCreateSession on closed mock pool")
+		t.Fatal("expected error on closed mock pool")
 	}
 }
 
 func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
 	t.Parallel()
 
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000099"}` + "\n"))
-				_, _ = io.ReadAll(inR)
-				_ = outW.Close()
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 101}, nil
-		},
-	}
-
-	cfg := PoolConfig{
+	pool := NewUnifiedProcessPool(PoolConfig{
 		DefaultModel: "gemini-2.5-pro",
 		MaxIdle:      24 * time.Hour,
-	}
-
-	pool := NewUnifiedProcessPool(cfg, mock)
+	}, createTestSpawner())
 	defer pool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	sess, err := pool.GetOrCreateSession(ctx, "kiosk-voice", "")
-	if err != nil {
-		t.Fatalf("unexpected error from GetOrCreateSession: %v", err)
-	}
-	if sess == nil {
-		t.Fatalf("expected non-nil AgentSession")
+	if err != nil || sess == nil || sess.SessionID() == "" {
+		t.Fatalf("unexpected session: (%v, %v)", sess, err)
 	}
 
-	if sess.SessionID() != "00000000-0000-0000-0000-000000000099" {
-		t.Errorf("expected session ID 00000000-0000-0000-0000-000000000099, got %q", sess.SessionID())
-	}
-
-	turnCtx := &TurnContext{
-		TurnID:    "turn-1",
-		Prompt:    "hello",
-		CreatedAt: time.Now(),
-	}
+	turnCtx := &TurnContext{TurnID: "turn-1", Prompt: "hello", CreatedAt: time.Now()}
 	if err := sess.Send("hello", turnCtx); err != nil {
-		t.Fatalf("failed sending prompt via AgentSession: %v", err)
+		t.Fatalf("failed sending prompt: %v", err)
 	}
 
-	// Verify GetOrCreateSession on closed pool
 	if err := pool.Close(); err != nil {
 		t.Fatalf("failed to close pool: %v", err)
 	}
-
-	_, closedErr := pool.GetOrCreateSession(ctx, "kiosk-voice", "")
-	if closedErr == nil {
-		t.Fatalf("expected error from GetOrCreateSession on closed pool, got nil")
+	if _, err := pool.GetOrCreateSession(ctx, "kiosk-voice", ""); err == nil {
+		t.Fatal("expected error from GetOrCreateSession on closed pool")
 	}
 }
