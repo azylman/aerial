@@ -115,218 +115,171 @@ func TestUnifiedProcessPool_Defaults(t *testing.T) {
 	}
 }
 
-func TestUnifiedProcessPool_LifecycleBasic(t *testing.T) {
+func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name             string
-		model            string
-		defaultModel     string
-		checkModel       bool
-		wantModel        string
-		checkDaemonModel bool
-		nilPool          bool
-		reuseScenario    bool
-		multipleTargets  bool
-		spawnFail        bool
-		closePool        bool
-		closeErrScenario bool
-		prewarmFail      bool
-		prewarmedTargets []string
-		wantErr          string
+		name         string
+		model        string
+		defaultModel string
+		nilPool      bool
+		wantModel    string
+		checkDaemon  bool
 	}{
 		{
-			name:          "ReusesExistingAndReplacesClosed",
-			reuseScenario: true,
-		},
-		{
-			name:      "SpawnFailure",
-			spawnFail: true,
-			wantErr:   "failed to start daemon",
-		},
-		{
-			name:            "MultipleTargets",
-			multipleTargets: true,
-		},
-		{
-			name:      "ClosedPoolRejections",
-			closePool: true,
-			wantErr:   "closed",
-		},
-		{
-			name:             "CloseErrorAndIdempotent",
-			closeErrScenario: true,
-			wantErr:          "errors closing pool daemons",
-		},
-		{
-			name:             "InitializePrewarmFailure",
-			prewarmFail:      true,
-			prewarmedTargets: []string{"bad-prewarm"},
-		},
-		{
-			name:             "ModelBound",
-			model:            "gemini-3.8-flash-low",
-			checkModel:       true,
-			wantModel:        "gemini-3.8-flash-low",
-			checkDaemonModel: true,
+			name:        "ModelBound",
+			model:       "gemini-3.8-flash-low",
+			wantModel:   "gemini-3.8-flash-low",
+			checkDaemon: true,
 		},
 		{
 			name:         "ModelFallback",
 			defaultModel: "gemini-2.5-pro",
-			checkModel:   true,
 			wantModel:    "gemini-2.5-pro",
 		},
 		{
-			name:       "NilPoolModelAndClose",
-			nilPool:    true,
-			checkModel: true,
-			wantModel:  "",
+			name:      "NilPoolModel",
+			nilPool:   true,
+			wantModel: "",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.nilPool {
-				var nilPool *UnifiedProcessPool
-				if nilPool.Model() != tc.wantModel {
-					t.Errorf("expected empty string from nilPool.Model(), got %q", nilPool.Model())
-				}
-				if err := nilPool.Close(); err != nil {
-					t.Errorf("expected nil error from nilPool.Close(), got %v", err)
-				}
-				return
-			}
-
-			if tc.reuseScenario {
-				var spawnCount atomic.Int32
-				mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-					initSessID: "00000000-0000-0000-0000-000000000001",
-					onSpawn:    func(cfg DaemonConfig) { spawnCount.Add(1) },
-				})
-				pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-				defer pool.Close()
-
-				d1, err := pool.GetOrCreate(context.Background(), "thread-1", "")
-				if err != nil {
-					t.Fatalf("first GetOrCreate failed: %v", err)
-				}
-				d2, err := pool.GetOrCreate(context.Background(), "thread-1", "")
-				if err != nil || d1 != d2 || spawnCount.Load() != 1 {
-					t.Fatalf("reuse failed: d1=%p, d2=%p, err=%v, count=%d", d1, d2, err, spawnCount.Load())
-				}
-
-				if err := d1.Close(); err != nil {
-					t.Fatalf("failed closing d1: %v", err)
-				}
-				d3, err := pool.GetOrCreate(context.Background(), "thread-1", "")
-				if err != nil || d3 == d1 || spawnCount.Load() != 2 {
-					t.Fatalf("replacement failed: d1=%p, d3=%p, err=%v, count=%d", d1, d3, err, spawnCount.Load())
-				}
-				return
-			}
-
-			if tc.spawnFail {
-				mock := &MockDaemonSpawner{
-					SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-						return nil, nil, nil, nil, errors.New("simulated spawn failure")
-					},
-				}
-				pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-				defer pool.Close()
-				_, err := pool.GetOrCreate(context.Background(), "failed-target", "")
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("expected failed to start daemon error, got %v", err)
-				}
-				return
-			}
-
-			if tc.multipleTargets {
-				var spawnCount atomic.Int32
-				mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-					onSpawn: func(cfg DaemonConfig) { spawnCount.Add(1) },
-				})
-				pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-				defer pool.Close()
-				d1, err1 := pool.GetOrCreate(context.Background(), "thread-alpha", "")
-				d2, err2 := pool.GetOrCreate(context.Background(), "device-voice", "")
-				if err1 != nil || err2 != nil || d1 == d2 || spawnCount.Load() != 2 {
-					t.Errorf("multiple targets failed: d1=%p, d2=%p, count=%d", d1, d2, spawnCount.Load())
-				}
-				return
-			}
-
-			if tc.closePool {
-				pool := NewUnifiedProcessPool(PoolConfig{}, newPipeMockSpawner(pipeMockSpawnerOpts{}))
-				if err := pool.Close(); err != nil {
-					t.Fatalf("close failed: %v", err)
-				}
-				if err := pool.Initialize(context.Background()); err == nil {
-					t.Error("expected error calling Initialize on closed pool")
-				}
-				if _, err := pool.GetOrCreate(context.Background(), "any", ""); err == nil {
-					t.Error("expected error calling GetOrCreate on closed pool")
-				}
-				return
-			}
-
-			if tc.closeErrScenario {
-				mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 600, killErr: errors.New("kill failed")})
-				pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-				if _, err := pool.GetOrCreate(context.Background(), "error-target", ""); err != nil {
-					t.Fatalf("failed GetOrCreate: %v", err)
-				}
-				err1 := pool.Close()
-				if err1 == nil || !strings.Contains(err1.Error(), tc.wantErr) {
-					t.Fatalf("expected close error, got %v", err1)
-				}
-				err2 := pool.Close()
-				if err2 == nil || err2.Error() != err1.Error() {
-					t.Errorf("expected idempotent close error, got %v", err2)
-				}
-				return
-			}
-
-			if tc.prewarmFail {
-				mock := &MockDaemonSpawner{
-					SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-						return nil, nil, nil, nil, errors.New("prewarm boom")
-					},
-				}
-				pool := NewUnifiedProcessPool(PoolConfig{PrewarmedTargets: tc.prewarmedTargets}, mock)
-				defer pool.Close()
-				if err := pool.Initialize(context.Background()); err != nil {
-					t.Fatalf("unexpected Initialize error: %v", err)
-				}
-				return
-			}
-
-			if tc.checkModel {
-				mock := NewMockSpawner()
-				pool := NewUnifiedProcessPool(PoolConfig{
+			var pool *UnifiedProcessPool
+			var mock *MockSpawner
+			if !tc.nilPool {
+				mock = NewMockSpawner()
+				pool = NewUnifiedProcessPool(PoolConfig{
 					Model:        tc.model,
 					DefaultModel: tc.defaultModel,
 				}, mock)
 				defer pool.Close()
+			}
 
-				if pool.Model() != tc.wantModel {
-					t.Fatalf("expected pool model %s, got %s", tc.wantModel, pool.Model())
+			if got := pool.Model(); got != tc.wantModel {
+				t.Fatalf("expected pool model %q, got %q", tc.wantModel, got)
+			}
+			if tc.checkDaemon {
+				daemon, err := pool.GetOrCreate(context.Background(), "target-1", "")
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
 				}
-				if tc.checkDaemonModel {
-					daemon, err := pool.GetOrCreate(context.Background(), "target-1", "")
-					if err != nil {
-						t.Fatalf("unexpected error: %v", err)
-					}
-					if daemon == nil {
-						t.Fatalf("expected non-nil daemon")
-					}
-					mock.mu.Lock()
-					spawnCfg := mock.lastSpawnCfg
-					mock.mu.Unlock()
-					if spawnCfg.Model != tc.wantModel {
-						t.Fatalf("expected spawned daemon model %s, got %s", tc.wantModel, spawnCfg.Model)
-					}
+				if daemon == nil {
+					t.Fatalf("expected non-nil daemon")
+				}
+				mock.mu.Lock()
+				spawnCfg := mock.lastSpawnCfg
+				mock.mu.Unlock()
+				if spawnCfg.Model != tc.wantModel {
+					t.Fatalf("expected spawned daemon model %s, got %s", tc.wantModel, spawnCfg.Model)
 				}
 			}
 		})
+	}
+}
+
+func TestUnifiedProcessPool_GetOrCreateAndReuse(t *testing.T) {
+	t.Parallel()
+
+	// Nil pool close returns nil
+	var nilPool *UnifiedProcessPool
+	if err := nilPool.Close(); err != nil {
+		t.Errorf("expected nil error from nilPool.Close(), got %v", err)
+	}
+
+	// Existing daemon reuse and replacement of closed daemon
+	var reuseSpawnCount atomic.Int32
+	reuseMock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		initSessID: "00000000-0000-0000-0000-000000000001",
+		onSpawn:    func(cfg DaemonConfig) { reuseSpawnCount.Add(1) },
+	})
+	reusePool := NewUnifiedProcessPool(PoolConfig{}, reuseMock)
+	defer reusePool.Close()
+
+	d1, err := reusePool.GetOrCreate(context.Background(), "thread-1", "")
+	if err != nil {
+		t.Fatalf("first GetOrCreate failed: %v", err)
+	}
+	d2, err := reusePool.GetOrCreate(context.Background(), "thread-1", "")
+	if err != nil || d1 != d2 || reuseSpawnCount.Load() != 1 {
+		t.Fatalf("reuse failed: d1=%p, d2=%p, err=%v, count=%d", d1, d2, err, reuseSpawnCount.Load())
+	}
+
+	if err := d1.Close(); err != nil {
+		t.Fatalf("failed closing d1: %v", err)
+	}
+	d3, err := reusePool.GetOrCreate(context.Background(), "thread-1", "")
+	if err != nil || d3 == d1 || reuseSpawnCount.Load() != 2 {
+		t.Fatalf("replacement failed: d1=%p, d3=%p, err=%v, count=%d", d1, d3, err, reuseSpawnCount.Load())
+	}
+
+	// Multiple distinct targets spawn separate daemons
+	var multiSpawnCount atomic.Int32
+	multiMock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		onSpawn: func(cfg DaemonConfig) { multiSpawnCount.Add(1) },
+	})
+	multiPool := NewUnifiedProcessPool(PoolConfig{}, multiMock)
+	defer multiPool.Close()
+
+	dAlpha, errAlpha := multiPool.GetOrCreate(context.Background(), "thread-alpha", "")
+	dVoice, errVoice := multiPool.GetOrCreate(context.Background(), "device-voice", "")
+	if errAlpha != nil || errVoice != nil || dAlpha == dVoice || multiSpawnCount.Load() != 2 {
+		t.Errorf("multiple targets failed: dAlpha=%p, dVoice=%p, count=%d", dAlpha, dVoice, multiSpawnCount.Load())
+	}
+}
+
+func TestUnifiedProcessPool_SpawnCloseAndPrewarmErrors(t *testing.T) {
+	t.Parallel()
+
+	// Spawn failure
+	spawnFailMock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return nil, nil, nil, nil, errors.New("simulated spawn failure")
+		},
+	}
+	spawnFailPool := NewUnifiedProcessPool(PoolConfig{}, spawnFailMock)
+	defer spawnFailPool.Close()
+	if _, err := spawnFailPool.GetOrCreate(context.Background(), "failed-target", ""); err == nil || !strings.Contains(err.Error(), "failed to start daemon") {
+		t.Errorf("expected failed to start daemon error, got %v", err)
+	}
+
+	// Closed pool rejections
+	closedPool := NewUnifiedProcessPool(PoolConfig{}, newPipeMockSpawner(pipeMockSpawnerOpts{}))
+	if err := closedPool.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+	if err := closedPool.Initialize(context.Background()); err == nil {
+		t.Error("expected error calling Initialize on closed pool")
+	}
+	if _, err := closedPool.GetOrCreate(context.Background(), "any", ""); err == nil {
+		t.Error("expected error calling GetOrCreate on closed pool")
+	}
+
+	// Close error and idempotent close
+	closeErrMock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 600, killErr: errors.New("kill failed")})
+	closeErrPool := NewUnifiedProcessPool(PoolConfig{}, closeErrMock)
+	if _, err := closeErrPool.GetOrCreate(context.Background(), "error-target", ""); err != nil {
+		t.Fatalf("failed GetOrCreate: %v", err)
+	}
+	err1 := closeErrPool.Close()
+	if err1 == nil || !strings.Contains(err1.Error(), "errors closing pool daemons") {
+		t.Fatalf("expected close error, got %v", err1)
+	}
+	err2 := closeErrPool.Close()
+	if err2 == nil || err2.Error() != err1.Error() {
+		t.Errorf("expected idempotent close error, got %v", err2)
+	}
+
+	// Prewarm failure is non-fatal on Initialize
+	prewarmFailMock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return nil, nil, nil, nil, errors.New("prewarm boom")
+		},
+	}
+	prewarmPool := NewUnifiedProcessPool(PoolConfig{PrewarmedTargets: []string{"bad-prewarm"}}, prewarmFailMock)
+	defer prewarmPool.Close()
+	if err := prewarmPool.Initialize(context.Background()); err != nil {
+		t.Fatalf("unexpected Initialize error: %v", err)
 	}
 }
 

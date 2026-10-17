@@ -65,13 +65,12 @@ func TestThrowawayTurnSink_ErrorDelivery(t *testing.T) {
 func TestThrowawayTurnSink_ContextCancelled(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		preCancel  bool
-		waitCancel bool
-		wantErr    error
+		name             string
+		cancelBeforeWait bool
+		wantErr          error
 	}{
-		{name: "PreCancelled", preCancel: true, wantErr: context.Canceled},
-		{name: "CancelledWhileWaiting", waitCancel: true, wantErr: context.DeadlineExceeded},
+		{name: "PreCancelled", cancelBeforeWait: true, wantErr: context.Canceled},
+		{name: "CancelledWhileWaiting", cancelBeforeWait: false, wantErr: context.DeadlineExceeded},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,10 +78,10 @@ func TestThrowawayTurnSink_ContextCancelled(t *testing.T) {
 			sink := NewThrowawayTurnSink()
 			var ctx context.Context
 			var cancel context.CancelFunc
-			if tc.preCancel {
+			if tc.cancelBeforeWait {
 				ctx, cancel = context.WithCancel(context.Background())
 				cancel()
-			} else if tc.waitCancel {
+			} else {
 				ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
 				defer cancel()
 			}
@@ -528,13 +527,12 @@ func TestBufferingTurnSink_NonSubstantiveErrorPropagated(t *testing.T) {
 func TestBufferingTurnSink_WaitContextCancelled(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		preCancel  bool
-		waitCancel bool
-		wantErr    error
+		name             string
+		cancelBeforeWait bool
+		wantErr          error
 	}{
-		{name: "PreCancelled", preCancel: true, wantErr: context.Canceled},
-		{name: "CancelledWhileWaiting", waitCancel: true, wantErr: context.DeadlineExceeded},
+		{name: "PreCancelled", cancelBeforeWait: true, wantErr: context.Canceled},
+		{name: "CancelledWhileWaiting", cancelBeforeWait: false, wantErr: context.DeadlineExceeded},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -542,10 +540,10 @@ func TestBufferingTurnSink_WaitContextCancelled(t *testing.T) {
 			sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 			var ctx context.Context
 			var cancel context.CancelFunc
-			if tc.preCancel {
+			if tc.cancelBeforeWait {
 				ctx, cancel = context.WithCancel(context.Background())
 				cancel()
-			} else if tc.waitCancel {
+			} else {
 				ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
 				defer cancel()
 			}
