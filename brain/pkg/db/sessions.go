@@ -3,24 +3,13 @@ package db
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/session"
 )
-
-type ConversationTurnState struct {
-	ExternalID    string
-	InternalID    string
-	IsProcessing  bool
-	LastMessageID string
-	LastPrompt    string
-	UpdatedAt     time.Time
-}
 
 // GetSessionID retrieves the active session ID for a thread.
 func GetSessionID(database DBTX, threadID string) (string, error) {
@@ -32,7 +21,7 @@ func GetSessionID(database DBTX, threadID string) (string, error) {
 
 	var sessionID string
 	err := database.QueryRowContext(ctx, "SELECT internal_session_id FROM sessions WHERE thread_id = $1", threadID).Scan(&sessionID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return sessionID, err
@@ -72,16 +61,22 @@ func ParseDBTime(val any) (time.Time, bool) {
 		if trimmed == "" {
 			return time.Time{}, false
 		}
+		if idx := strings.Index(trimmed, " m="); idx != -1 {
+			trimmed = strings.TrimSpace(trimmed[:idx])
+		}
 		for _, layout := range []string{
-			time.RFC3339Nano,
-			time.RFC3339,
 			"2006-01-02 15:04:05.999999999 -0700 MST",
-			"2006-01-02 15:04:05 -0700 MST",
+			"2006-01-02 15:04:05.999999999 -0700 -0700",
 			"2006-01-02 15:04:05.999999999-07:00",
 			"2006-01-02 15:04:05.999999999",
+			time.RFC3339Nano,
+			time.RFC3339,
+			time.DateTime,
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05Z",
+			"2006-01-02 15:04:05 -0700 MST",
 			"2006-01-02 15:04:05.999999999Z07:00",
 			"2006-01-02 15:04:05-07:00",
-			"2006-01-02 15:04:05",
 			"2006-01-02T15:04:05",
 		} {
 			if t, err := time.Parse(layout, trimmed); err == nil {
@@ -104,6 +99,31 @@ type SessionInfo struct {
 	UpdatedAt         time.Time
 }
 
+func scanSessionInfo(scanner interface{ Scan(dest ...any) error }) (SessionInfo, error) {
+	var (
+		info         SessionInfo
+		rawCreatedAt any
+		rawUpdatedAt any
+	)
+	if err := scanner.Scan(
+		&info.ThreadID,
+		&info.InternalSessionID,
+		&info.PreviousSessionID,
+		&info.TurnCount,
+		&rawCreatedAt,
+		&rawUpdatedAt,
+	); err != nil {
+		return SessionInfo{}, err
+	}
+	if t, ok := ParseDBTime(rawCreatedAt); ok {
+		info.CreatedAt = t
+	}
+	if t, ok := ParseDBTime(rawUpdatedAt); ok {
+		info.UpdatedAt = t
+	}
+	return info, nil
+}
+
 // GetSessionInfo retrieves the full session state for a thread in a single atomic query.
 func GetSessionInfo(database DBTX, threadID string) (*SessionInfo, error) {
 	if database == nil || threadID == "" {
@@ -112,35 +132,17 @@ func GetSessionInfo(database DBTX, threadID string) (*SessionInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var (
-		info         SessionInfo
-		rawCreatedAt any
-		rawUpdatedAt any
-	)
 	query := `
 	SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
 	FROM sessions
 	WHERE thread_id = $1
 	`
-	err := database.QueryRowContext(ctx, query, threadID).Scan(
-		&info.ThreadID,
-		&info.InternalSessionID,
-		&info.PreviousSessionID,
-		&info.TurnCount,
-		&rawCreatedAt,
-		&rawUpdatedAt,
-	)
-	if err == sql.ErrNoRows {
+	info, err := scanSessionInfo(database.QueryRowContext(ctx, query, threadID))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	if t, ok := ParseDBTime(rawCreatedAt); ok {
-		info.CreatedAt = t
-	}
-	if t, ok := ParseDBTime(rawUpdatedAt); ok {
-		info.UpdatedAt = t
 	}
 	return &info, nil
 }
@@ -276,104 +278,6 @@ func SaveConversationMapping(database DBTX, externalID, internalID string) error
 	return SaveSessionID(database, externalID, internalID)
 }
 
-// RegisterTurn records a new conversation turn into the database queue.
-func RegisterTurn(database DBTX, externalID, messageID, prompt string) error {
-	if database == nil || externalID == "" {
-		return nil
-	}
-	msg := Message{
-		ID:        messageID,
-		ThreadID:  externalID,
-		Content:   prompt,
-		Status:    StatusProcessing,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}
-	return InsertMessage(database, msg)
-}
-
-// SetTurnProcessing updates the turn processing status.
-func SetTurnProcessing(database DBTX, externalID string, isProcessing bool, lastMessageID string) error {
-	if database == nil || externalID == "" {
-		return nil
-	}
-	status := StatusCompleted
-	if isProcessing {
-		status = StatusProcessing
-	}
-	if lastMessageID != "" {
-		return UpdateMessageStatus(database, lastMessageID, status, "")
-	}
-	return nil
-}
-
-// GetTurnState retrieves the current active state for a conversation turn.
-func GetTurnState(database DBTX, externalID string) (*ConversationTurnState, error) {
-	if database == nil || externalID == "" {
-		return nil, nil
-	}
-	sessID, err := GetSessionID(database, externalID)
-	if err != nil {
-		log.Printf("[DB] Warning resolving session ID for thread %s: %v", externalID, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var m Message
-	query := `
-	SELECT id, thread_id, status, content, updated_at
-	FROM messages
-	WHERE thread_id = $1
-	ORDER BY created_at DESC
-	LIMIT 1
-	`
-	err = database.QueryRowContext(ctx, query, externalID).Scan(&m.ID, &m.ThreadID, &m.Status, &m.Content, &m.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return &ConversationTurnState{
-			ExternalID: externalID,
-			InternalID: sessID,
-		}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &ConversationTurnState{
-		ExternalID:    externalID,
-		InternalID:    sessID,
-		IsProcessing:  m.Status == StatusProcessing,
-		LastMessageID: m.ID,
-		LastPrompt:    m.Content,
-		UpdatedAt:     m.UpdatedAt,
-	}, nil
-}
-
-// GetInterruptedTurns retrieves turns that were interrupted mid-processing across server restarts.
-func GetInterruptedTurns(database DBTX) ([]ConversationTurnState, error) {
-	if database == nil {
-		return nil, nil
-	}
-	messages, err := GetPendingOrProcessingMessages(database)
-	if err != nil {
-		return nil, err
-	}
-	var results []ConversationTurnState
-	for _, m := range messages {
-		sessID, err := GetSessionID(database, m.ThreadID)
-		if err != nil {
-			log.Printf("[DB] Warning resolving session ID for thread %s: %v", m.ThreadID, err)
-		}
-		results = append(results, ConversationTurnState{
-			ExternalID:    m.ThreadID,
-			InternalID:    sessID,
-			IsProcessing:  m.Status == StatusProcessing,
-			LastMessageID: m.ID,
-			LastPrompt:    m.Content,
-			UpdatedAt:     m.UpdatedAt,
-		})
-	}
-	return results, nil
-}
-
 // SaveThreadSummaryWithContext persists a thread summary and its last summarized message ID watermark in the sessions table.
 func SaveThreadSummaryWithContext(ctx context.Context, database DBTX, threadID, summary, lastSummarizedMsgID string) error {
 	if database == nil || threadID == "" {
@@ -393,7 +297,7 @@ func SaveThreadSummaryWithContext(ctx context.Context, database DBTX, threadID, 
 }
 
 // SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
-func SaveThreadSummary(database *sql.DB, threadID, summary, lastSummarizedMsgID string) error {
+func SaveThreadSummary(database DBTX, threadID, summary, lastSummarizedMsgID string) error {
 	if database == nil || threadID == "" {
 		return nil
 	}
@@ -420,7 +324,7 @@ func GetThreadSummaryWithContext(ctx context.Context, database DBTX, threadID st
 }
 
 // GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
-func GetThreadSummary(database *sql.DB, threadID string) (summary string, lastSummarizedMsgID string, err error) {
+func GetThreadSummary(database DBTX, threadID string) (summary string, lastSummarizedMsgID string, err error) {
 	if database == nil || threadID == "" {
 		return "", "", nil
 	}
@@ -490,54 +394,6 @@ func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, thre
 	return stats, nil
 }
 
-// SaveActiveTasks mirrors active background task metadata into PostgreSQL for cold-boot recovery using atomic upsert.
-func SaveActiveTasks(database DBTX, threadID string, tasks []session.TaskMetadata) error {
-	if database == nil || threadID == "" {
-		return nil
-	}
-	encoded, err := json.Marshal(tasks)
-	if err != nil {
-		return fmt.Errorf("failed to marshal active tasks: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	query := `
-	INSERT INTO sessions (thread_id, active_tasks, created_at, updated_at)
-	VALUES ($1, $2, $3, $3)
-	ON CONFLICT (thread_id) DO UPDATE SET
-		active_tasks = EXCLUDED.active_tasks,
-		updated_at = EXCLUDED.updated_at
-	`
-	now := time.Now().UTC()
-	_, err = database.ExecContext(ctx, query, threadID, string(encoded), now)
-	return err
-}
-
-// GetSessionActiveTasks retrieves mirrored active background tasks from PostgreSQL upon cold boot.
-func GetSessionActiveTasks(database DBTX, threadID string) ([]session.TaskMetadata, error) {
-	if database == nil || threadID == "" {
-		return nil, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var tasksJSON string
-	err := database.QueryRowContext(ctx, "SELECT COALESCE(active_tasks, '[]') FROM sessions WHERE thread_id = $1", threadID).Scan(&tasksJSON)
-	if err == sql.ErrNoRows || strings.TrimSpace(tasksJSON) == "" {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	var tasks []session.TaskMetadata
-	if err := json.Unmarshal([]byte(tasksJSON), &tasks); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal active tasks: %w", err)
-	}
-	return tasks, nil
-}
-
 // DefaultUnrotatedSessionMaxAge defines the default recency horizon (2 hours) for detecting
 // unrotated runaway sessions. Dormant sessions older than this horizon are excluded from alerting.
 const DefaultUnrotatedSessionMaxAge = 2 * time.Hour
@@ -591,26 +447,9 @@ func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int, max
 
 	var sessions []SessionInfo
 	for rows.Next() {
-		var (
-			info         SessionInfo
-			rawCreatedAt any
-			rawUpdatedAt any
-		)
-		if err := rows.Scan(
-			&info.ThreadID,
-			&info.InternalSessionID,
-			&info.PreviousSessionID,
-			&info.TurnCount,
-			&rawCreatedAt,
-			&rawUpdatedAt,
-		); err != nil {
+		info, err := scanSessionInfo(rows)
+		if err != nil {
 			return nil, err
-		}
-		if t, ok := ParseDBTime(rawCreatedAt); ok {
-			info.CreatedAt = t
-		}
-		if t, ok := ParseDBTime(rawUpdatedAt); ok {
-			info.UpdatedAt = t
 		}
 		sessions = append(sessions, info)
 	}

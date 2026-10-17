@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -224,109 +225,98 @@ func InsertMessage(database DBTX, msg Message) (err error) {
 	return err
 }
 
-// UpdateMessageStatus updates the execution status and error message of a message.
-func UpdateMessageStatus(database DBTX, id string, status string, errorMsg string) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(schedule_run_id, '') AS schedule_run_id, metadata, created_at, updated_at"
+
+func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary bool) (Message, error) {
+	var m Message
+	var errMsg, respText, schedID sql.NullString
+	if err := scanner.Scan(
+		&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary,
+		&m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &schedID, &m.Metadata, &m.CreatedAt, &m.UpdatedAt,
+	); err != nil {
+		return Message{}, err
 	}
-	if id == "" {
+	if errMsg.Valid {
+		m.ErrorMessage = errMsg.String
+	}
+	if respText.Valid {
+		m.ResponseText = respText.String
+	}
+	if schedID.Valid {
+		m.ScheduleRunID = schedID.String
+	}
+	if autoCleanSummary && m.Summary == "" {
+		m.Summary = CleanTaskSummary(m.Content)
+	}
+	return m, nil
+}
+
+func execMessageUpdate(database DBTX, id, query string, args ...any) error {
+	if database == nil {
+		return ErrNilDatabase
+	}
+	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("message id cannot be empty")
 	}
-	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	_, err := database.ExecContext(ctx, query, args...)
+	return err
+}
 
+// UpdateMessageStatus updates the execution status and error message of a message.
+func UpdateMessageStatus(database DBTX, id string, status string, errorMsg string) error {
+	now := time.Now().UTC()
 	query := `
 	UPDATE messages
 	SET status = $1, error_message = $2, updated_at = $3
 	WHERE id = $4
 	`
-	_, err := database.ExecContext(ctx, query, status, errorMsg, now, id)
-	return err
+	return execMessageUpdate(database, id, query, status, errorMsg, now, id)
 }
 
 // UpdateMessageCompleted marks a message as completed with its response text.
 func UpdateMessageCompleted(database DBTX, id string, responseText string) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
-	}
-	if id == "" {
-		return fmt.Errorf("message id cannot be empty")
-	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	query := `
 	UPDATE messages
 	SET status = $1, response_text = $2, error_message = '', updated_at = $3
 	WHERE id = $4
 	`
-	_, err := database.ExecContext(ctx, query, StatusCompleted, responseText, now, id)
-	return err
+	return execMessageUpdate(database, id, query, StatusCompleted, responseText, now, id)
 }
 
 // IncrementMessageRetry increments the retry count and records the failure reason.
 func IncrementMessageRetry(database DBTX, id string, errorMsg string) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
-	}
-	if id == "" {
-		return fmt.Errorf("message id cannot be empty")
-	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	query := `
 	UPDATE messages
 	SET retry_count = retry_count + 1, error_message = $1, updated_at = $2
 	WHERE id = $3
 	`
-	_, err := database.ExecContext(ctx, query, errorMsg, now, id)
-	return err
+	return execMessageUpdate(database, id, query, errorMsg, now, id)
 }
 
 // IncrementMessageRestart atomically increments the restart count and records the restart reason.
 func IncrementMessageRestart(database DBTX, id string, errorMsg string) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
-	}
-	if id == "" {
-		return fmt.Errorf("message id cannot be empty")
-	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	query := `
 	UPDATE messages
 	SET restart_count = restart_count + 1, error_message = $1, updated_at = $2
 	WHERE id = $3
 	`
-	_, err := database.ExecContext(ctx, query, errorMsg, now, id)
-	return err
+	return execMessageUpdate(database, id, query, errorMsg, now, id)
 }
 
 // ResetMessageToPendingWithRestart atomically increments restart_count, sets status to PENDING, and updates error_message.
 func ResetMessageToPendingWithRestart(database DBTX, id string, reason string) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
-	}
-	if id == "" {
-		return fmt.Errorf("message id cannot be empty")
-	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	query := `
 	UPDATE messages
 	SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2
 	WHERE id = $3 AND status = 'PROCESSING'
 	`
-	_, err := database.ExecContext(ctx, query, reason, now, id)
-	return err
+	return execMessageUpdate(database, id, query, reason, now, id)
 }
 
 // GetPendingOrProcessingMessages returns active messages awaiting processing or recovery.
@@ -345,12 +335,12 @@ func GetPendingOrProcessingMessages(database DBTX) (msgs []Message, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	query := `
-	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(restart_count, 0), COALESCE(effort, ''), COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), metadata, created_at, updated_at
+	query := fmt.Sprintf(`
+	SELECT %s
 	FROM messages
 	WHERE status IN ('PENDING', 'PROCESSING')
 	ORDER BY created_at ASC
-	`
+	`, messageSelectCols)
 	rows, err := database.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -359,22 +349,9 @@ func GetPendingOrProcessingMessages(database DBTX) (msgs []Message, err error) {
 
 	var results []Message
 	for rows.Next() {
-		var m Message
-		var errMsg, respText, schedID sql.NullString
-		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &schedID, &m.Metadata, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		m, err := scanMessage(rows, true)
+		if err != nil {
 			return nil, err
-		}
-		if errMsg.Valid {
-			m.ErrorMessage = errMsg.String
-		}
-		if respText.Valid {
-			m.ResponseText = respText.String
-		}
-		if schedID.Valid {
-			m.ScheduleRunID = schedID.String
-		}
-		if m.Summary == "" {
-			m.Summary = CleanTaskSummary(m.Content)
 		}
 		results = append(results, m)
 	}
@@ -392,31 +369,17 @@ func GetMessage(database DBTX, id string) (*Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `
-	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(restart_count, 0), COALESCE(effort, ''), COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), metadata, created_at, updated_at
+	query := fmt.Sprintf(`
+	SELECT %s
 	FROM messages
 	WHERE id = $1
-	`
-	var m Message
-	var errMsg, respText, schedID sql.NullString
-	err := database.QueryRowContext(ctx, query, id).Scan(&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &schedID, &m.Metadata, &m.CreatedAt, &m.UpdatedAt)
-	if err == sql.ErrNoRows {
+	`, messageSelectCols)
+	m, err := scanMessage(database.QueryRowContext(ctx, query, id), true)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	if errMsg.Valid {
-		m.ErrorMessage = errMsg.String
-	}
-	if respText.Valid {
-		m.ResponseText = respText.String
-	}
-	if schedID.Valid {
-		m.ScheduleRunID = schedID.String
-	}
-	if m.Summary == "" {
-		m.Summary = CleanTaskSummary(m.Content)
 	}
 	return &m, nil
 }
@@ -539,19 +502,17 @@ func GetRecentThreadMessages(database DBTX, threadID string, limit int) (msgs []
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `
-	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, summary, status,
-	       retry_count, COALESCE(restart_count, 0), COALESCE(effort, ''), error_message, response_text, schedule_run_id, metadata, created_at, updated_at
+	query := fmt.Sprintf(`
+	SELECT %s
 	FROM (
-		SELECT id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, summary, status,
-		       retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, error_message, response_text, schedule_run_id, metadata, created_at, updated_at
+		SELECT %s
 		FROM messages
 		WHERE thread_id = $1
 		ORDER BY created_at DESC
 		LIMIT $2
 	) recent
 	ORDER BY created_at ASC
-	`
+	`, messageSelectCols, messageSelectCols)
 	rows, err := database.QueryContext(ctx, query, threadID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query recent thread messages: %w", err)
@@ -560,22 +521,9 @@ func GetRecentThreadMessages(database DBTX, threadID string, limit int) (msgs []
 
 	msgs = make([]Message, 0)
 	for rows.Next() {
-		var m Message
-		var errMsg, respText, schedID sql.NullString
-		if err := rows.Scan(
-			&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary,
-			&m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &schedID, &m.Metadata, &m.CreatedAt, &m.UpdatedAt,
-		); err != nil {
+		m, err := scanMessage(rows, false)
+		if err != nil {
 			return nil, fmt.Errorf("failed to scan recent message: %w", err)
-		}
-		if errMsg.Valid {
-			m.ErrorMessage = errMsg.String
-		}
-		if respText.Valid {
-			m.ResponseText = respText.String
-		}
-		if schedID.Valid {
-			m.ScheduleRunID = schedID.String
 		}
 		msgs = append(msgs, m)
 	}

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"context"
 	"database/sql"
 	"fmt"
@@ -12,6 +13,15 @@ import (
 type SQLStore struct {
 	db         DBTX
 	isPostgres bool
+}
+
+var ErrNilDatabase = errors.New("database is nil")
+
+func (s *SQLStore) checkDB() error {
+	if s == nil || isDBTXNil(s.db) {
+		return ErrNilDatabase
+	}
+	return nil
 }
 
 func isDBTXNil(d DBTX) bool {
@@ -55,8 +65,8 @@ func (s *SQLStore) Close() error {
 }
 
 func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 
 	type beginner interface {
@@ -84,262 +94,262 @@ func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) err
 
 // FactStore implementation
 func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	return InsertFactWithContext(ctx, s.db, s.isPostgres, category, factText, importance, embedding)
 }
 
 func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return SearchSimilarFactsWithContext(ctx, s.db, s.isPostgres, embedding, queryText, limit, minScore)
 }
 
 func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetFactsPaginatedWithContext(ctx, s.db, s.isPostgres, filter)
 }
 
 func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]FactWithEmbedding, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetAllFactsWithEmbeddings(s.db)
 }
 
 func (s *SQLStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return s.GetAllFactsWithEmbeddings(ctx)
 }
 
 func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetActiveConversationsForExtraction(s.db, activeHours)
 }
 
 func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateConversationFactWatermark(s.db, threadID, maxRowID)
 }
 
 func (s *SQLStore) UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateConversationFactExtractedAt(s.db, threadID)
 }
 
 func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, 0, err
 	}
 	return FindDuplicateFactWithContext(ctx, s.db, s.isPostgres, embedding, minSim)
 }
 
 func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return ReinforceFactWithContext(ctx, s.db, s.isPostgres, id, newText, newEmbedding, boost)
 }
 
 func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return 0, 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return 0, 0, err
 	}
 	return DecayAndPruneFactsWithContext(ctx, s.db, s.isPostgres, decayStep, pruneFloor, pruneAgeDays)
 }
 
 func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetFactsMissingEmbeddingsWithContext(ctx, s.db, limit)
 }
 
 func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateFactEmbeddingWithContext(ctx, s.db, id, embedding)
 }
 
 // ScheduleStore implementation
 func (s *SQLStore) CreateOneShotSchedule(ctx context.Context, sched OneShotSchedule) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return CreateOneShotSchedule(s.db, sched)
 }
 
 func (s *SQLStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetDueOneShotSchedules(s.db)
 }
 
 func (s *SQLStore) DeleteOneShotSchedule(ctx context.Context, id string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return DeleteOneShotSchedule(s.db, id)
 }
 
 func (s *SQLStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return InsertMessageAndConsumeOneShot(s.db, scheduleID, msg)
 }
 
 func (s *SQLStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetAllOneShotSchedules(s.db, threadID)
 }
 
 func (s *SQLStore) CreateCronSchedule(ctx context.Context, c CronSchedule) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return CreateCronSchedule(s.db, c)
 }
 
 func (s *SQLStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetDueCronSchedules(s.db)
 }
 
 func (s *SQLStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetAllCronSchedules(s.db, targetID)
 }
 
 func (s *SQLStore) DeleteCronSchedule(ctx context.Context, id string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return DeleteCronSchedule(s.db, id)
 }
 
 func (s *SQLStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateCronNextRun(s.db, id, nextRunAt)
 }
 
 func (s *SQLStore) UpdateCronScheduleEffort(ctx context.Context, id, effort string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateCronScheduleEffort(s.db, id, effort)
 }
 
 func (s *SQLStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return CreateScheduleRun(s.db, run)
 }
 
 func (s *SQLStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateScheduleRunStatus(s.db, params)
 }
 
 func (s *SQLStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, 0, err
 	}
 	return GetScheduleRunsPaginated(s.db, limit, offset, scheduleID, status)
 }
 
 func (s *SQLStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return ScheduleSummaryMetrics{}, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return ScheduleSummaryMetrics{}, err
 	}
 	return GetScheduleSummaryMetrics(s.db)
 }
 
 func (s *SQLStore) ReconcileOrphanedScheduleRuns(ctx context.Context) (int64, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	return ReconcileOrphanedScheduleRuns(s.db)
 }
 
 func (s *SQLStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge time.Duration) (int64, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	return PruneScheduleRuns(s.db, maxCount, maxAge)
 }
 
 // MessageStore implementation
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return InsertMessage(s.db, msg)
 }
 
 func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateMessageStatus(s.db, id, status, errorMsg)
 }
 
 func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpdateMessageCompleted(s.db, id, responseText)
 }
 
 func (s *SQLStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return IncrementMessageRetry(s.db, id, errorMsg)
 }
 
 func (s *SQLStore) IncrementMessageRestart(ctx context.Context, id, errorMsg string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return IncrementMessageRestart(s.db, id, errorMsg)
 }
 
 func (s *SQLStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return ResetMessageToPendingWithRestart(s.db, id, reason)
 }
 
 func (s *SQLStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	msgs, err := GetPendingOrProcessingMessages(s.db)
 	if err != nil {
@@ -352,29 +362,29 @@ func (s *SQLStore) GetPendingOrProcessingMessages(ctx context.Context, limit int
 }
 
 func (s *SQLStore) GetMessage(ctx context.Context, id string) (*Message, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetMessage(s.db, id)
 }
 
 func (s *SQLStore) MessageExists(ctx context.Context, id string) (bool, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return false, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return false, err
 	}
 	return MessageExists(s.db, id)
 }
 
 func (s *SQLStore) ClaimPendingMessage(ctx context.Context, id string) (bool, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return false, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return false, err
 	}
 	return ClaimPendingMessage(s.db, id)
 }
 
 func (s *SQLStore) ClaimNextPendingMessage(ctx context.Context, workerID string) (*Message, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	msgs, err := GetPendingOrProcessingMessages(s.db)
 	if err != nil || len(msgs) == 0 {
@@ -393,164 +403,164 @@ func (s *SQLStore) ClaimNextPendingMessage(ctx context.Context, workerID string)
 }
 
 func (s *SQLStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetActiveRecentThreadIDs(s.db, since)
 }
 
 func (s *SQLStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetRecentThreadMessages(s.db, threadID, limit)
 }
 
 func (s *SQLStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	return GetMaxMessageRowID(s.db, threadID)
 }
 
 // SessionStore implementation
 func (s *SQLStore) GetSessionID(ctx context.Context, threadID string) (string, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return "", fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return "", err
 	}
 	return GetSessionID(s.db, threadID)
 }
 
 func (s *SQLStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return SaveSessionID(s.db, threadID, sessionID)
 }
 
 func (s *SQLStore) DeleteSessionID(ctx context.Context, threadID string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return DeleteSessionID(s.db, threadID)
 }
 
 func (s *SQLStore) IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	return IncrementSessionTurnCount(s.db, sessionKey)
 }
 
 func (s *SQLStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return 0, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	return GetSessionTurnCount(s.db, sessionKey)
 }
 
 func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return RotateSessionID(s.db, sessionKey, newSessionID)
 }
 
 func (s *SQLStore) GetSessionInfo(ctx context.Context, threadID string) (*SessionInfo, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetSessionInfo(s.db, threadID)
 }
 
 func (s *SQLStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return FindUnrotatedSessions(ctx, s.db, minTurns, maxAge...)
 }
 
 func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return "", fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return "", err
 	}
 	return GetPreviousSessionID(s.db, threadID)
 }
 
 func (s *SQLStore) GetThreadSummary(ctx context.Context, threadID string) (string, string, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return "", "", fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return "", "", err
 	}
 	return GetThreadSummaryWithContext(ctx, s.db, threadID)
 }
 
 func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return SaveThreadSummaryWithContext(ctx, s.db, threadID, summary, lastSummarizedMsgID)
 }
 
 func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetSessionActivityStatsWithContext(ctx, s.db, threadID)
 }
 
 func (s *SQLStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetActiveTasks(s.db)
 }
 
 func (s *SQLStore) GetExternalConversationID(ctx context.Context, internalID string) (string, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return "", fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return "", err
 	}
 	return GetExternalConversationID(s.db, internalID)
 }
 
 func (s *SQLStore) SaveConversationMapping(ctx context.Context, externalID, internalID string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return SaveConversationMapping(s.db, externalID, internalID)
 }
 
 // TranscriptStore implementation
 func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return GetSessionSyncStatesWithContext(ctx, s.db, s.isPostgres)
 }
 
 func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return UpsertSessionSummaryWithContext(ctx, s.db, s.isPostgres, summary)
 }
 
 func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	return BatchInsertTranscriptStepsWithContext(ctx, s.db, s.isPostgres, steps)
 }
 
 func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return SearchSessionSummariesWithContext(ctx, s.db, s.isPostgres, embedding, queryText, limit, minScore)
 }
 
 func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
-	if s == nil || isDBTXNil(s.db) {
-		return nil, fmt.Errorf("database is nil")
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	return SearchTranscriptStepsWithContext(ctx, s.db, s.isPostgres, queryText, sessionFilter, toolFilter, limit)
 }

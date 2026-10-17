@@ -407,22 +407,6 @@ func TestSessionsValidationAndEdgeCases(t *testing.T) {
 		t.Errorf("expected error for empty key in RotateSessionID")
 	}
 
-	// 2. GetTurnState on thread with no messages (sql.ErrNoRows branch)
-	_ = SaveSessionID(database, "th-empty-msgs", "sess-init-1")
-	state, err := GetTurnState(database, "th-empty-msgs")
-	if err != nil {
-		t.Fatalf("GetTurnState failed on thread without messages: %v", err)
-	}
-	if state == nil || state.ExternalID != "th-empty-msgs" || state.InternalID != "sess-init-1" || state.LastMessageID != "" {
-		t.Errorf("unexpected state on empty thread: %+v", state)
-	}
-
-	if s, err := GetTurnState(nil, "th1"); err != nil || s != nil {
-		t.Errorf("expected nil, nil on GetTurnState(nil, th1), got (%v, %v)", s, err)
-	}
-	if s, err := GetTurnState(database, ""); err != nil || s != nil {
-		t.Errorf("expected nil, nil on GetTurnState(db, \"\"), got (%v, %v)", s, err)
-	}
 
 	// 3. GetThreadSummary closed DB error
 	tmpPath := filepath.Join(t.TempDir(), "closed5.db")
