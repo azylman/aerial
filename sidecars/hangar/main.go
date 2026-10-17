@@ -1057,59 +1057,14 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 		}
 	}
 
-	SortNomadChangesHangarLast(changes)
-
 	d.nomadMu.Lock()
 	defer d.nomadMu.Unlock()
 
 	recCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	// Phase 1: Teardowns (stop deleted jobs)
-	for _, change := range changes {
-		if change.Action == "delete" {
-			d.stopDeletedNomadJob(recCtx, "[Hangar:Nomad]", repoPath, change.JobName)
-		}
-	}
-
-	// Phase 2: Applications (validate, then run)
-	for _, change := range changes {
-		if change.Action != "delete" {
-			fullPath := filepath.Join(repoPath, change.Path)
-			if _, statErr := os.Stat(fullPath); statErr != nil {
-				log.Printf("[Hangar:Nomad] Notice: job file %s not found on disk, skipping", fullPath)
-				continue
-			}
-
-			if content, readErr := os.ReadFile(fullPath); readErr == nil {
-				if d.shouldDeferNomadJob(recCtx, change.JobName, string(content), false) {
-					continue
-				}
-			}
-
-			if valErr := d.ValidateNomadJob(recCtx, fullPath); valErr != nil {
-				log.Printf("[Hangar:Nomad] ERROR: Validation failed for %s: %v", change.Path, valErr)
-				return valErr
-			}
-
-			baseEvt := HangarDeployEvent{
-				JobName:   change.JobName,
-				Repo:      repo,
-				CommitSHA: commit,
-				PRNumber:  prNumber,
-				TargetID:  targetID,
-			}
-
-			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", change.JobName, change.Path)
-			out, sanitizedCombined, err := d.runNomadJobWithEvents(recCtx, baseEvt, "job", "run", "-detach", fullPath)
-			if err != nil {
-				return fmt.Errorf("nomad job run failed for %s: %s (%w)", change.Path, sanitizedCombined, err)
-			}
-			log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", change.JobName, SanitizeLog(strings.TrimSpace(string(out))))
-		}
-	}
-
-	return nil
+	_, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, repo, commit, targetID, strconv.Itoa(prNumber))
+	return err
 }
 
 
@@ -2294,38 +2249,51 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 
 	SortNomadChangesHangarLast(changes)
 
-	var applied []string
+	// Phase 1: Teardowns (stop deleted jobs)
 	for _, ch := range changes {
 		if ch.Action == "delete" {
 			d.stopDeletedNomadJob(ctx, "[Hangar:Nomad]", repoPath, ch.JobName)
-			continue
 		}
-		fullPath := filepath.Join(repoPath, ch.Path)
-		if !IsSafeJobPath(repoPath, fullPath) {
-			continue
-		}
-		if content, readErr := os.ReadFile(fullPath); readErr == nil {
-			if d.shouldDeferNomadJob(ctx, ch.JobName, string(content), false) {
+	}
+
+	// Phase 2: Applications (validate, then run)
+	var applied []string
+	for _, ch := range changes {
+		if ch.Action != "delete" {
+			fullPath := filepath.Join(repoPath, ch.Path)
+			if !IsSafeJobPath(repoPath, fullPath) {
 				continue
 			}
-		}
-		if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
-			return applied, errVal
-		}
+			if _, statErr := os.Stat(fullPath); statErr != nil {
+				log.Printf("[Hangar:Nomad] Notice: job file %s not found on disk, skipping", fullPath)
+				continue
+			}
+			if content, readErr := os.ReadFile(fullPath); readErr == nil {
+				if d.shouldDeferNomadJob(ctx, ch.JobName, string(content), false) {
+					continue
+				}
+			}
+			if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
+				log.Printf("[Hangar:Nomad] ERROR: Validation failed for %s: %v", ch.Path, errVal)
+				return applied, errVal
+			}
 
-		baseEvt := HangarDeployEvent{
-			JobName:   ch.JobName,
-			Repo:      repo,
-			CommitSHA: commit,
-			PRNumber:  prNumber,
-			TargetID:  targetID,
-		}
+			baseEvt := HangarDeployEvent{
+				JobName:   ch.JobName,
+				Repo:      repo,
+				CommitSHA: commit,
+				PRNumber:  prNumber,
+				TargetID:  targetID,
+			}
 
-		if _, _, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath); errRun != nil {
-			return applied, errRun
+			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", ch.JobName, ch.Path)
+			out, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath)
+			if errRun != nil {
+				return applied, fmt.Errorf("nomad job run failed for %s: %s (%w)", ch.Path, sanitizedCombined, errRun)
+			}
+			log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", ch.JobName, SanitizeLog(strings.TrimSpace(string(out))))
+			applied = append(applied, ch.JobName)
 		}
-
-		applied = append(applied, ch.JobName)
 	}
 	return applied, nil
 }
