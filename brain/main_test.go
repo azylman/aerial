@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -9,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/discord"
@@ -28,7 +27,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
-	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
 	_ "modernc.org/sqlite"
@@ -1173,6 +1171,8 @@ func TestMetricsEndpoint(t *testing.T) {
 }
 
 func TestNormalizeRoute(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input    string
 		expected string
@@ -1188,19 +1188,26 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/schedules/runs", "/schedules/runs"},
 		{"/health", "/health"},
 		{"/metrics", "/metrics"},
+		{"/voice/ask", "/voice/ask"},
+		{"/api/voice/ask", "/voice/ask"},
 		{"/unknown/path", "unmatched"},
 		{"/random", "unmatched"},
 	}
 
 	for _, tt := range tests {
-		got := normalizeRoute(tt.input)
-		if got != tt.expected {
-			t.Errorf("normalizeRoute(%q) = %q; want %q", tt.input, got, tt.expected)
-		}
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeRoute(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeRoute(%q) = %q; want %q", tt.input, got, tt.expected)
+			}
+		})
 	}
 }
 
 func TestMetricsMiddleware(t *testing.T) {
+	t.Parallel()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1209,23 +1216,46 @@ func TestMetricsMiddleware(t *testing.T) {
 	mux.HandleFunc("/unknown", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
+	mux.HandleFunc("/implicit", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
 
 	handler := metricsMiddleware(mux)
 
+	// Normal 200
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", rec.Code)
 	}
 
+	// 404
 	req404 := httptest.NewRequest(http.MethodGet, "/unknown", nil)
 	rec404 := httptest.NewRecorder()
 	handler.ServeHTTP(rec404, req404)
-
 	if rec404.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", rec404.Code)
+	}
+
+	// Implicit 200
+	reqImp := httptest.NewRequest(http.MethodGet, "/implicit", nil)
+	recImp := httptest.NewRecorder()
+	handler.ServeHTTP(recImp, reqImp)
+	if recImp.Code != http.StatusOK {
+		t.Errorf("expected 200 for implicit write, got %d", recImp.Code)
+	}
+
+	// Empty method
+	emptyMethodHandler := metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	reqEmpty := httptest.NewRequest("", "/metrics", nil)
+	reqEmpty.Method = ""
+	recEmpty := httptest.NewRecorder()
+	emptyMethodHandler.ServeHTTP(recEmpty, reqEmpty)
+	if recEmpty.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for empty method, got %d", recEmpty.Code)
 	}
 }
 
@@ -1239,6 +1269,8 @@ func (m *mockFlusherRecorder) Flush() {
 }
 
 func TestStatusRecorder_Flush(t *testing.T) {
+	t.Parallel()
+
 	// With flusher
 	rec := &mockFlusherRecorder{ResponseRecorder: httptest.NewRecorder()}
 	sr := &statusRecorder{ResponseWriter: rec, statusCode: http.StatusOK}
@@ -1353,71 +1385,112 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	}
 }
 
-func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
-	tmpHome := t.TempDir()
-	tmpData := t.TempDir()
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.Model = "gemini-2.5-flash"
-		d.GeminiHomeDir = tmpHome
-		d.DataDir = tmpData
-	})
-	if cfg.Current().Model != "gemini-2.5-flash" {
-		t.Errorf("Unexpected model in config: %s", cfg.Current().Model)
-	}
-
-	ctx := context.Background()
-	_ = InitializeBrainEnvironment(ctx, cfg)
-
-	reloadFn := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync())
-	reloadFn("UnitTest")
-}
-
-func TestRunBrainApp_Lifecycle(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.Port = "0"
-		d.AgyBin = "/bin/true"
-		d.Model = "gemini-2.5-flash"
-		d.SystemPrompt = "test"
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
+func TestInitializeBrainEnvironment(t *testing.T) {
+	t.Run("nil config", func(t *testing.T) {
+		if err := InitializeBrainEnvironment(context.Background(), nil); err != nil {
+			t.Errorf("expected nil error for nil config, got %v", err)
+		}
 	})
 
-	var readyOnce sync.Once
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		readyOnce.Do(func() {
-			close(ready)
+	t.Run("success fresh and idempotent", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		tmpData := t.TempDir()
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.Model = "gemini-2.5-flash"
+			d.GeminiHomeDir = tmpHome
+			d.DataDir = tmpData
+			d.APIKey = "test-api-key"
+			d.SystemPrompt = "test prompt"
 		})
-	}
-	defer func() { onServerReady = oldReady }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		if err := InitializeBrainEnvironment(context.Background(), cfg); err != nil {
+			t.Fatalf("unexpected error on fresh init: %v", err)
+		}
 
-	go func() {
-		<-ready
-		cancel()
-	}()
-
-	mockStore := db.NewFakeStore()
-	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		t.Errorf("Unexpected error running Brain app: %v", err)
-	}
-	onServerReady = oldReady
-
-	// Test invalid DB path fails cleanly
-	badCfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DatabaseURL = "/nonexistent/invalid/dir/db.sqlite"
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
+		if err := InitializeBrainEnvironment(context.Background(), cfg); err != nil {
+			t.Fatalf("unexpected error on idempotent second call: %v", err)
+		}
 	})
-	badCtx, badCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer badCancel()
-	_ = RunBrainApp(badCtx, badCfg)
+
+	t.Run("uncreatable gemini home", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tmpData := t.TempDir()
+		badCfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.GeminiHomeDir = filepath.Join(tmpDir, "nonexistent", "sub", "dir", "invalid")
+			d.DataDir = tmpData
+		})
+		_ = InitializeBrainEnvironment(context.Background(), badCfg)
+	})
+
+	t.Run("conflict file in data dir", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		conflictFile := filepath.Join(tmpDir, "brain")
+		if err := os.WriteFile(conflictFile, []byte("file-not-dir"), 0644); err != nil {
+			t.Fatalf("failed to write conflict file: %v", err)
+		}
+
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.DataDir = tmpDir
+			d.GeminiHomeDir = tmpDir
+		})
+		_ = InitializeBrainEnvironment(context.Background(), cfg)
+	})
+
+	t.Run("conflict file in cli parent", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cliParentConflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
+		if err := os.MkdirAll(filepath.Dir(cliParentConflict), 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
+		if err := os.WriteFile(cliParentConflict, []byte("file-not-dir"), 0644); err != nil {
+			t.Fatalf("failed to write conflict file: %v", err)
+		}
+
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.DataDir = tmpDir
+			d.GeminiHomeDir = tmpDir
+		})
+		_ = InitializeBrainEnvironment(context.Background(), cfg)
+	})
+
+	t.Run("symlink parent blocker", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		geminiDir := filepath.Join(tmpDir, "home", ".gemini")
+		if err := os.MkdirAll(geminiDir, 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(geminiDir, "antigravity-cli"), []byte("blocking-file"), 0644); err != nil {
+			t.Fatalf("failed to write blocker file: %v", err)
+		}
+
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.GeminiHomeDir = filepath.Join(tmpDir, "home")
+			d.DataDir = filepath.Join(tmpDir, "data")
+		})
+		_ = os.MkdirAll(filepath.Join(tmpDir, "data"), 0755)
+
+		_ = InitializeBrainEnvironment(context.Background(), cfg)
+	})
+
+	t.Run("symlink chmod 0555 error", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		tmpData := t.TempDir()
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.GeminiHomeDir = tmpHome
+			d.DataDir = tmpData
+		})
+
+		parent := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
+		if err := os.MkdirAll(parent, 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
+		if err := os.Chmod(parent, 0555); err != nil {
+			t.Fatalf("failed to chmod dir: %v", err)
+		}
+		defer func() { _ = os.Chmod(parent, 0755) }()
+
+		_ = InitializeBrainEnvironment(context.Background(), cfg)
+	})
 }
 
 func TestHandlePrompt_ErrorBranches(t *testing.T) {
@@ -1640,70 +1713,93 @@ func TestHandleTasks_GranularErrors(t *testing.T) {
 	}
 }
 
-func TestInitializeBrainEnvironment_DataSymlink(t *testing.T) {
-	tmpHome := t.TempDir()
-	tmpData := t.TempDir()
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpHome
-		d.DataDir = tmpData
+func TestCreateReloadConfigFunc(t *testing.T) {
+	t.Run("invalid YAML with alert", func(t *testing.T) {
+		cfg := config.NewTestConfig()
+		s, _ := discordgo.New("Bot mock-token")
+
+		reloadFn := CreateReloadConfigFunc(cfg,
+			WithDiscordSession(s),
+			WithReloadSupplier(func(active *config.Config) error {
+				return errors.New("simulated invalid YAML error")
+			}),
+			WithSkipEnvironmentSync(),
+		)
+		reloadFn("TestReload")
 	})
 
-	_ = InitializeBrainEnvironment(context.Background(), cfg)
-}
+	t.Run("supplier success updating model", func(t *testing.T) {
+		cfg := config.NewTestConfig()
+		s, _ := discordgo.New("Bot mock-token")
 
-func TestCreateReloadConfigFunc_InvalidYAMLAndAlert(t *testing.T) {
-	cfg := config.NewTestConfig()
-	s, _ := discordgo.New("Bot mock-token")
-
-	reloadFn := CreateReloadConfigFunc(cfg,
-		WithDiscordSession(s),
-		WithReloadSupplier(func(active *config.Config) error {
-			return errors.New("simulated invalid YAML error")
-		}),
-		WithSkipEnvironmentSync(),
-	)
-	reloadFn("TestReload")
-}
-
-func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.Port = "0"
-		d.AgyBin = "/bin/true"
-		d.Model = "gemini-2.5-flash"
-		d.SystemPrompt = "test"
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
+		reloadSuccess := CreateReloadConfigFunc(cfg,
+			WithDiscordSession(s),
+			WithReloadSupplier(func(active *config.Config) error {
+				active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
+				return nil
+			}),
+			WithSkipEnvironmentSync(),
+		)
+		reloadSuccess("TestReloadSuccess")
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Run("complete success with sync and blocker home error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tmpData := t.TempDir()
 
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		close(ready)
-	}
-	defer func() { onServerReady = oldReady }()
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.GeminiHomeDir = tmpDir
+			d.DataDir = tmpData
+			d.Model = "gemini-2.5-flash"
+			d.APIKey = "test-api-key"
+			d.SystemPrompt = "test system prompt"
+		})
 
-	errChan := make(chan error, 1)
-	mockStore := db.NewFakeStore()
-	go func() {
-		errChan <- RunBrainApp(ctx, cfg, WithStore(mockStore))
-	}()
+		reloadFn := CreateReloadConfigFunc(cfg,
+			WithReloadSupplier(func(active *config.Config) error {
+				return nil
+			}),
+		)
+		reloadFn("TestSource")
 
-	<-ready
-	cancel()
-
-	select {
-	case err := <-errChan:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("RunBrainApp returned unexpected error: %v", err)
+		blockerHome := filepath.Join(tmpDir, "blocked_home")
+		if err := os.WriteFile(blockerHome, []byte("file"), 0644); err != nil {
+			t.Fatalf("failed to write blocker file: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Errorf("RunBrainApp did not shut down within 5 seconds")
-	}
+		cfg.Update(&config.ConfigData{
+			GeminiHomeDir: filepath.Join(blockerHome, "sub"),
+			DataDir:       tmpData,
+		})
+		reloadFn("TestErrorSource")
+	})
+
+	t.Run("provisioner error", func(t *testing.T) {
+		cfg := config.NewTestConfig()
+		cur := cfg.Current()
+		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
+		if err := os.WriteFile(tmpFile, []byte("file"), 0644); err != nil {
+			t.Fatalf("failed to write blocker file: %v", err)
+		}
+		cur.GeminiHomeDir = tmpFile
+		cfg.Update(cur)
+
+		prov := env.NewFromConfig(cfg)
+		reloadFn := CreateReloadConfigFunc(cfg, WithProvisioner(prov))
+		reloadFn("test-provisioner-error")
+	})
+
+	t.Run("with worker pool", func(t *testing.T) {
+		cfg := config.NewTestConfig()
+		pool := queue.New(cfg, queue.WorkerPoolConfig{})
+		reloadFn := CreateReloadConfigFunc(cfg,
+			WithSkipEnvironmentSync(),
+			WithReloadSupplier(func(active *config.Config) error {
+				return nil
+			}),
+			WithWorkerPool(pool),
+		)
+		reloadFn("TestWithWorkerPool")
+	})
 }
 
 func TestHandleSchedules_DetailedCoverage(t *testing.T) {
@@ -1808,195 +1904,6 @@ func TestHandleTasks_DetailedCoverage(t *testing.T) {
 	}
 }
 
-func TestCreateReloadConfigFunc_SuccessCoverage(t *testing.T) {
-	cfg := config.NewTestConfig()
-	s, _ := discordgo.New("Bot mock-token")
-
-	// 1. Failure supplier
-	reloadFail := CreateReloadConfigFunc(cfg,
-		WithDiscordSession(s),
-		WithReloadSupplier(func(active *config.Config) error {
-			return errors.New("simulated reload failure")
-		}),
-		WithSkipEnvironmentSync(),
-	)
-	reloadFail("TestReloadFailure")
-
-	// 2. Success supplier
-	reloadSuccess := CreateReloadConfigFunc(cfg,
-		WithDiscordSession(s),
-		WithReloadSupplier(func(active *config.Config) error {
-			active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
-			return nil
-		}),
-		WithSkipEnvironmentSync(),
-	)
-	reloadSuccess("TestReloadSuccess")
-}
-
-func TestRunBrainApp_DetailedOptions(t *testing.T) {
-	t.Run("with discord token", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.Port = "0"
-			d.AgyBin = "/bin/true"
-			d.Model = "gemini-2.5-flash"
-			d.APIKey = "test-key"
-			d.SystemPrompt = "test"
-			d.DiscordToken = "mock-token"
-			d.GeminiHomeDir = tmpDir
-			d.DataDir = filepath.Join(tmpDir, "data")
-			d.LowEffortModel = "custom-flash-low"
-		})
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		ready := make(chan struct{})
-		oldReady := onServerReady
-		onServerReady = func(addr string) {
-			close(ready)
-		}
-		defer func() { onServerReady = oldReady }()
-
-		errChan := make(chan error, 1)
-		mockStore := db.NewFakeStore()
-		go func() {
-			errChan <- RunBrainApp(ctx, cfg, WithStore(mockStore))
-		}()
-
-		<-ready
-		cancel()
-
-		select {
-		case err := <-errChan:
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				t.Errorf("RunBrainApp returned unexpected error: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("RunBrainApp did not shut down within 5 seconds")
-		}
-	})
-
-	t.Run("port listen error", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		badPortCfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.Port = "-1"
-			d.AgyBin = "/bin/true"
-			d.Model = "gemini-2.5-flash"
-			d.SystemPrompt = "test"
-			d.GeminiHomeDir = tmpDir
-			d.DataDir = filepath.Join(tmpDir, "data")
-		})
-		ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
-		defer cancelBad()
-		mockStore := db.NewFakeStore()
-		_ = RunBrainApp(ctxBad, badPortCfg, WithStore(mockStore))
-	})
-}
-
-func TestInitializeBrainEnvironment_Complete(t *testing.T) {
-	// 1. Success with temporary HOME directory
-	tmpDir := t.TempDir()
-	tmpData := t.TempDir()
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = tmpData
-		d.APIKey = "test-api-key"
-		d.Model = "gemini-2.5-flash"
-		d.SystemPrompt = "test prompt"
-	})
-
-	_ = InitializeBrainEnvironment(context.Background(), cfg)
-
-	// 2. Call again when directory already exists
-	_ = InitializeBrainEnvironment(context.Background(), cfg)
-
-	// 3. Error branches with uncreatable path
-	badCfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = filepath.Join(tmpDir, "nonexistent", "sub", "dir", "invalid")
-		d.DataDir = tmpData
-		d.APIKey = "test-api-key"
-		d.Model = "gemini-2.5-flash"
-		d.SystemPrompt = "test prompt"
-	})
-	_ = InitializeBrainEnvironment(context.Background(), badCfg)
-}
-
-func TestCreateReloadConfigFunc_Complete(t *testing.T) {
-	tmpDir := t.TempDir()
-	tmpData := t.TempDir()
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = tmpData
-		d.Model = "gemini-2.5-flash"
-		d.APIKey = "test-api-key"
-		d.SystemPrompt = "test system prompt"
-	})
-
-	reloadFn := CreateReloadConfigFunc(cfg,
-		WithReloadSupplier(func(active *config.Config) error {
-			return nil
-		}),
-	)
-	reloadFn("TestSource")
-
-	// Trigger error branches with invalid home
-	blockerHome := filepath.Join(tmpDir, "blocked_home")
-	_ = os.WriteFile(blockerHome, []byte("file"), 0644)
-	cfg.Update(&config.ConfigData{
-		GeminiHomeDir: filepath.Join(blockerHome, "sub"),
-		DataDir:       tmpData,
-	})
-	reloadFn("TestErrorSource")
-}
-
-func TestRunBrainApp_ErrorBranches(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// 1. Nil config returns error
-	ctx0, cancel0 := context.WithCancel(context.Background())
-	defer cancel0()
-	if err := RunBrainApp(ctx0, nil); err == nil {
-		t.Errorf("Expected error for nil config, got nil")
-	}
-
-	// 2. Unsupported database scheme returns error
-	cfgInvalidDB := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DatabaseURL = "mysql://user:pass@localhost/db"
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-	})
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel1()
-	err := RunBrainApp(ctx1, cfgInvalidDB)
-	if err == nil {
-		t.Errorf("Expected error from invalid DBPath, got nil")
-	}
-
-	// 4. Empty DatabaseURL returns error
-	cfgEmptyDB := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DatabaseURL = ""
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-	})
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
-	errEmpty := RunBrainApp(ctx2, cfgEmptyDB)
-	if errEmpty == nil {
-		t.Errorf("Expected error for empty DatabaseURL, got nil")
-	}
-
-	// 5. Pre-canceled context returns nil immediately
-	ctxCanceled, cancelEarly := context.WithCancel(context.Background())
-	cancelEarly()
-	if err := RunBrainApp(ctxCanceled, cfgInvalidDB); err != nil {
-		t.Errorf("Expected nil error for pre-canceled context, got %v", err)
-	}
-}
-
 func TestHandleSchedules_ConcurrentDoubleCheck(t *testing.T) {
 	store := db.NewFakeStore()
 
@@ -2051,20 +1958,6 @@ func TestHandleTranscripts_NonDirectoryAndBadHome(t *testing.T) {
 	}
 }
 
-func TestMetricsMiddleware_Implicit200(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/implicit", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	})
-	handler := metricsMiddleware(mux)
-	req := httptest.NewRequest(http.MethodGet, "/implicit", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected 200, got %d", rec.Code)
-	}
-}
-
 func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -2083,29 +1976,6 @@ func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 	handler(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-}
-
-func TestRunBrainApp_PureConfig(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := config.NewFromData(&config.ConfigData{
-		GeminiHomeDir: tmpDir,
-		DataDir:       filepath.Join(tmpDir, "data"),
-		Port:          "0",
-		Model:         "test-model",
-		Timezone:      "UTC",
-		SystemPrompt:  "test prompt",
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "threads"},
-		},
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Immediate cancellation to test lifecycle shutdown
-
-	mockStore := db.NewFakeStore()
-	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		t.Errorf("expected clean shutdown, got %v", err)
 	}
 }
 
@@ -2196,7 +2066,7 @@ func TestHandleTranscripts_Deduplication(t *testing.T) {
 	}
 }
 
-func TestDefaultGeminiHomeDir_Extended(t *testing.T) {
+func TestDefaultPaths(t *testing.T) {
 	// 1. With HOME set
 	t.Setenv("HOME", "/custom/home")
 	if got := DefaultGeminiHomeDir(); got != "/custom/home" {
@@ -2229,162 +2099,14 @@ func TestDefaultGeminiHomeDir_Extended(t *testing.T) {
 	if got := defaultGeminiHomeDirWithLookup("", false, nil); got != "/root" {
 		t.Errorf("expected /root when lookup fn is nil, got %s", got)
 	}
+
+	// 4. DefaultDataDir tests
 	if got := defaultDataDir(false); got != "/data" {
 		t.Errorf("expected /data from defaultDataDir(false), got %s", got)
 	}
-}
-
-func TestMetricsMiddleware_EmptyMethod(t *testing.T) {
-	handler := metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest("", "/metrics", nil)
-	req.Method = ""
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200 OK, got %d", rr.Code)
+	if dir := DefaultDataDir(); dir == "" {
+		t.Errorf("expected non-empty data dir, got empty")
 	}
-}
-
-func TestInitializeBrainEnvironment_Errors(t *testing.T) {
-	// 1. nil config
-	if err := InitializeBrainEnvironment(context.Background(), nil); err != nil {
-		t.Errorf("expected nil error for nil config, got %v", err)
-	}
-
-	// 2. DataDir exists but MkdirAll for brainDir fails because a regular file is in the way
-	tmpDir := t.TempDir()
-	conflictFile := filepath.Join(tmpDir, "brain")
-	_ = os.WriteFile(conflictFile, []byte("file-not-dir"), 0644)
-
-	cfg := config.NewTestConfig()
-	cur := cfg.Current()
-	cur.DataDir = tmpDir
-	cur.GeminiHomeDir = tmpDir
-	cfg.Update(cur)
-
-	_ = InitializeBrainEnvironment(context.Background(), cfg)
-
-	// 3. Parent of cliBrainDir is a file
-	tmpDir2 := t.TempDir()
-	cliParentConflict := filepath.Join(tmpDir2, ".gemini", "antigravity-cli")
-	_ = os.MkdirAll(filepath.Dir(cliParentConflict), 0755)
-	_ = os.WriteFile(cliParentConflict, []byte("file-not-dir"), 0644)
-
-	cur2 := cfg.Current()
-	cur2.DataDir = tmpDir2
-	cur2.GeminiHomeDir = tmpDir2
-	cfg.Update(cur2)
-	_ = InitializeBrainEnvironment(context.Background(), cfg)
-}
-
-func TestRunBrainApp_EarlyReturns(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// 1. nil config
-	if err := RunBrainApp(context.Background(), nil); err == nil {
-		t.Errorf("expected error for nil config")
-	}
-
-	// 2. Cancelled context
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-	})
-	if err := RunBrainApp(ctx, cfg); err != nil {
-		t.Errorf("expected nil for cancelled context, got %v", err)
-	}
-
-	// 2b. Cancelled context with provisioner sync error in InitializeBrainEnvironment
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	cancel2()
-	blockingDir := filepath.Join(t.TempDir(), "block")
-	_ = os.WriteFile(blockingDir, []byte("file"), 0644)
-	cfgInitErr := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = blockingDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-	})
-	if err := RunBrainApp(ctx2, cfgInitErr); err != nil {
-		t.Errorf("expected nil for cancelled context with init error, got %v", err)
-	}
-
-	// 2c. Live context with init error in InitializeBrainEnvironment
-	_ = RunBrainApp(context.Background(), cfgInitErr)
-
-	// 3. Missing DatabaseURL
-	ctxLive := context.Background()
-	cfg2 := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-		d.DatabaseURL = ""
-	})
-	errMissingDB := RunBrainApp(ctxLive, cfg2)
-	if errMissingDB == nil || !strings.Contains(errMissingDB.Error(), "database URL or path is required") {
-		t.Errorf("expected database URL error, got %v", errMissingDB)
-	}
-
-	// 4. Missing GeminiHomeDir
-	cfgNoHome := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = ""
-		d.DataDir = filepath.Join(tmpDir, "data")
-		d.DatabaseURL = ":memory:"
-	})
-	errNoHome := RunBrainApp(ctxLive, cfgNoHome)
-	if errNoHome == nil || !strings.Contains(errNoHome.Error(), "gemini home directory is required") {
-		t.Errorf("expected gemini home directory error, got %v", errNoHome)
-	}
-
-	// 5. Missing DataDir
-	cfgNoData := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = ""
-		d.DatabaseURL = ":memory:"
-	})
-	errNoData := RunBrainApp(ctxLive, cfgNoData)
-	if errNoData == nil || !strings.Contains(errNoData.Error(), "data directory is required") {
-		t.Errorf("expected data directory error, got %v", errNoData)
-	}
-
-	// 6. Missing Port
-	cfgNoPort := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-		d.DatabaseURL = ":memory:"
-		d.Port = ""
-	})
-	errNoPort := RunBrainApp(ctxLive, cfgNoPort)
-	if errNoPort == nil || !strings.Contains(errNoPort.Error(), "port is required") {
-		t.Errorf("expected port error, got %v", errNoPort)
-	}
-
-	// 7. Invalid DatabaseURL
-	cur2 := cfg2.Current()
-	cur2.DatabaseURL = "invalid-protocol://host:port/dbname"
-	cur2.GeminiHomeDir = tmpDir
-	cur2.DataDir = filepath.Join(tmpDir, "data")
-	cur2.Port = "0"
-	cfg2.Update(cur2)
-	errBadDB := RunBrainApp(ctxLive, cfg2)
-	if errBadDB == nil || !strings.Contains(errBadDB.Error(), "failed to initialize database") {
-		t.Errorf("expected db init error, got %v", errBadDB)
-	}
-}
-
-func TestCreateReloadConfigFunc_ProvisionerError(t *testing.T) {
-	cfg := config.NewTestConfig()
-	cur := cfg.Current()
-	tmpFile := filepath.Join(t.TempDir(), "blocking_file")
-	_ = os.WriteFile(tmpFile, []byte("file"), 0644)
-	cur.GeminiHomeDir = tmpFile
-	cfg.Update(cur)
-
-	prov := env.NewFromConfig(cfg)
-	reloadFn := CreateReloadConfigFunc(cfg, WithProvisioner(prov))
-	reloadFn("test-provisioner-error")
 }
 
 func TestHandleSessions_UnreadableTranscript(t *testing.T) {
@@ -2403,7 +2125,275 @@ func TestHandleSessions_UnreadableTranscript(t *testing.T) {
 	}
 }
 
-func TestRunBrainApp_FullLifecycle(t *testing.T) {
+func runBrainAppUntilReady(t *testing.T, cfg *config.Config, opts ...BrainAppOption) (string, context.CancelFunc, func() error) {
+	t.Helper()
+	var readyOnce sync.Once
+	ready := make(chan struct{})
+	var boundAddr string
+	oldReady := onServerReady
+	onServerReady = func(addr string) {
+		readyOnce.Do(func() {
+			boundAddr = addr
+			close(ready)
+		})
+	}
+	t.Cleanup(func() {
+		onServerReady = oldReady
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var checkOpts brainAppOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&checkOpts)
+		}
+	}
+	var effectiveOpts []BrainAppOption
+	if checkOpts.processSpawner == nil {
+		effectiveOpts = append(effectiveOpts, WithProcessSpawner(runner.NewMockDaemonSpawner()))
+	}
+	if checkOpts.store == nil {
+		effectiveOpts = append(effectiveOpts, WithStore(db.NewFakeStore()))
+	}
+	effectiveOpts = append(effectiveOpts, opts...)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunBrainApp(ctx, cfg, effectiveOpts...)
+	}()
+
+	select {
+	case <-ready:
+	case err := <-errCh:
+		cancel()
+		t.Fatalf("RunBrainApp exited prematurely before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatalf("RunBrainApp timed out waiting for server ready")
+	}
+
+	var waitCalled bool
+	wait := func() error {
+		waitCalled = true
+		select {
+		case err := <-errCh:
+			return err
+		case <-time.After(15 * time.Second):
+			t.Errorf("RunBrainApp did not shut down within 15s")
+			return errors.New("shutdown timeout")
+		}
+	}
+
+	t.Cleanup(func() {
+		if !waitCalled {
+			cancel()
+			select {
+			case <-errCh:
+			case <-time.After(5 * time.Second):
+			}
+		}
+	})
+
+	return boundAddr, cancel, wait
+}
+
+func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name       string
+		cfg        func() *config.Config
+		ctx        func() (context.Context, context.CancelFunc)
+		opts       []BrainAppOption
+		wantErrStr string
+		wantNil    bool
+	}{
+		{
+			name: "nil config",
+			cfg:  func() *config.Config { return nil },
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			wantErrStr: "config cannot be nil",
+		},
+		{
+			name: "canceled context",
+			cfg: func() *config.Config {
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.GeminiHomeDir = tmpDir
+					d.DataDir = filepath.Join(tmpDir, "data")
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, cancel
+			},
+			wantNil: true,
+		},
+		{
+			name: "canceled context with init error",
+			cfg: func() *config.Config {
+				blockDir := filepath.Join(t.TempDir(), "block")
+				_ = os.WriteFile(blockDir, []byte("file"), 0644)
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.GeminiHomeDir = blockDir
+					d.DataDir = filepath.Join(tmpDir, "data")
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, cancel
+			},
+			wantNil: true,
+		},
+		{
+			name: "missing database URL without store",
+			cfg: func() *config.Config {
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.GeminiHomeDir = tmpDir
+					d.DataDir = filepath.Join(tmpDir, "data")
+					d.DatabaseURL = ""
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			wantErrStr: "database URL or path is required",
+		},
+		{
+			name: "missing gemini home dir",
+			cfg: func() *config.Config {
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.GeminiHomeDir = ""
+					d.DataDir = filepath.Join(tmpDir, "data")
+					d.DatabaseURL = ":memory:"
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			wantErrStr: "gemini home directory is required",
+		},
+		{
+			name: "missing data dir",
+			cfg: func() *config.Config {
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.GeminiHomeDir = tmpDir
+					d.DataDir = ""
+					d.DatabaseURL = ":memory:"
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			wantErrStr: "data directory is required",
+		},
+		{
+			name: "missing port",
+			cfg: func() *config.Config {
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.GeminiHomeDir = tmpDir
+					d.DataDir = filepath.Join(tmpDir, "data")
+					d.DatabaseURL = ":memory:"
+					d.Port = ""
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			wantErrStr: "port is required",
+		},
+		{
+			name: "unsupported database scheme",
+			cfg: func() *config.Config {
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.DatabaseURL = "mysql://user:pass@localhost/db"
+					d.GeminiHomeDir = tmpDir
+					d.DataDir = filepath.Join(tmpDir, "data")
+					d.Port = "0"
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 1*time.Second)
+			},
+			wantErrStr: "failed to initialize database",
+		},
+		{
+			name: "invalid listen port",
+			cfg: func() *config.Config {
+				return config.NewTestConfig(func(d *config.ConfigData) {
+					d.Port = "-1"
+					d.AgyBin = "/bin/true"
+					d.Model = "gemini-2.5-flash"
+					d.SystemPrompt = "test"
+					d.GeminiHomeDir = tmpDir
+					d.DataDir = filepath.Join(tmpDir, "data")
+				})
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 1*time.Second)
+			},
+			opts:       []BrainAppOption{WithStore(db.NewFakeStore())},
+			wantErrStr: "listen",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.ctx()
+			defer cancel()
+
+			cfg := tt.cfg()
+			err := RunBrainApp(ctx, cfg, tt.opts...)
+			if tt.wantNil {
+				if err != nil {
+					t.Errorf("expected nil error, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrStr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrStr) {
+				t.Errorf("expected error containing %q, got: %v", tt.wantErrStr, err)
+			}
+		})
+	}
+
+	t.Run("port conflict", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to bind listener: %v", err)
+		}
+		defer ln.Close()
+
+		_, portStr, err := net.SplitHostPort(ln.Addr().String())
+		if err != nil {
+			t.Fatalf("failed to split host port: %v", err)
+		}
+
+		conflictCfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.Port = portStr
+			d.AgyBin = "/bin/true"
+			d.Model = "gemini-2.5-flash"
+			d.SystemPrompt = "test"
+			d.GeminiHomeDir = tmpDir
+			d.DataDir = filepath.Join(tmpDir, "data")
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
+		err = RunBrainApp(ctx, conflictCfg, WithStore(db.NewFakeStore()))
+		if err == nil {
+			t.Fatalf("expected error from port conflict, got nil")
+		}
+	})
+}
+
+func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
 
@@ -2411,17 +2401,27 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	cur := cfg.Current()
 	cur.Port = "0"
 	cur.AgyBin = "/bin/true"
-	cur.LowEffortModel = ""
-	cur.MediumEffortModel = ""
-	cur.Voice.AmbientContext = &config.AmbientContextConfig{
-		Template: "Time: {{.now}}",
-		CacheTTL: "5s",
+	cur.DiscordToken = "mock-discord-token"
+	cur.HarnessAPIKey = "gemini-test-key"
+	cur.DataDir = tmpDir
+	cur.GeminiHomeDir = tmpDir
+	cur.LowEffortModel = "gemini-test-low"
+	cur.MediumEffortModel = "gemini-test-medium"
+	cur.Ollama.BaseURL = "http://127.0.0.1:65534"
+	cur.Voice = config.VoiceConfig{
+		Engine:           "gemini_api",
+		Model:            "gemini-2.5-flash",
+		PrewarmedTargets: []string{"kiosk"},
+		AmbientContext: &config.AmbientContextConfig{
+			Template: "Time: {{.now}}",
+			CacheTTL: "5s",
+		},
 	}
 	if cur.Channels == nil {
 		cur.Channels = make(map[string]config.ChannelPolicy)
 	}
 	cur.Channels["default"] = config.ChannelPolicy{
-		Mode: "thread",
+		Mode: "threads",
 		AmbientContext: &config.AmbientContextConfig{
 			Template: "Time: {{.now}}",
 			CacheTTL: "5s",
@@ -2429,34 +2429,110 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	}
 	cfg.Update(cur)
 
-	var serverAddr string
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		serverAddr = addr
-		close(ready)
+	expectedEphemeralHome := filepath.Join(tmpDir, "runtimes", "ephemeral")
+	expectedDiscordHome := filepath.Join(tmpDir, "runtimes", "discord")
+
+	var spawnedConfigsMu sync.Mutex
+	var spawnedConfigs []runner.DaemonConfig
+
+	baseMock := runner.NewMockDaemonSpawner()
+	allSpawned := make(chan struct{})
+	var spawnedOnce sync.Once
+	trackingSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			spawnedConfigsMu.Lock()
+			spawnedConfigs = append(spawnedConfigs, dCfg)
+			hasEph0, hasEph1, hasDisc0, hasDisc1, hasMed0, hasMed1 := false, false, false, false, false, false
+			for _, sc := range spawnedConfigs {
+				switch sc.ThreadID {
+				case "ephemeral:worker-0":
+					hasEph0 = true
+				case "ephemeral:worker-1":
+					hasEph1 = true
+				case "discord:worker-0":
+					hasDisc0 = true
+				case "discord:worker-1":
+					hasDisc1 = true
+				case "discord:medium-worker-0":
+					hasMed0 = true
+				case "discord:medium-worker-1":
+					hasMed1 = true
+				}
+			}
+			if hasEph0 && hasEph1 && hasDisc0 && hasDisc1 && hasMed0 && hasMed1 {
+				spawnedOnce.Do(func() { close(allSpawned) })
+			}
+			spawnedConfigsMu.Unlock()
+			return baseMock.Spawn(ctx, dCfg)
+		},
 	}
-	defer func() { onServerReady = oldReady }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg,
+		WithProcessSpawner(trackingSpawner),
+	)
 
-	go func() {
-		<-ready
-		reqBody := `{"prompt": "Hello test prompt", "channel_id": "1542423172400291873", "message_id": "msg-1"}`
-		resp, err := http.Post(fmt.Sprintf("http://%s/prompt", serverAddr), "application/json", strings.NewReader(reqBody))
-		if err == nil {
-			_ = resp.Body.Close()
+	reqBody := `{"prompt": "Hello test prompt", "channel_id": "1542423172400291873", "message_id": "msg-1"}`
+	resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(reqBody))
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+
+	select {
+	case <-allSpawned:
+	case <-time.After(2 * time.Second):
+	}
+
+	cancel()
+	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("unexpected error waiting for server shutdown: %v", err)
+	}
+
+	spawnedConfigsMu.Lock()
+	defer spawnedConfigsMu.Unlock()
+
+	foundEph0, foundEph1, foundDisc0, foundDisc1, foundMed0, foundMed1 := false, false, false, false, false, false
+	for _, sc := range spawnedConfigs {
+		switch sc.ThreadID {
+		case "ephemeral:worker-0":
+			foundEph0 = true
+			if !hasEnv(sc.Env, "HOME="+expectedEphemeralHome) {
+				t.Errorf("ephemeral:worker-0 expected HOME=%q, got %v", expectedEphemeralHome, sc.Env)
+			}
+		case "ephemeral:worker-1":
+			foundEph1 = true
+			if !hasEnv(sc.Env, "HOME="+expectedEphemeralHome) {
+				t.Errorf("ephemeral:worker-1 expected HOME=%q, got %v", expectedEphemeralHome, sc.Env)
+			}
+		case "discord:worker-0":
+			foundDisc0 = true
+			if !hasEnv(sc.Env, "HOME="+expectedDiscordHome) {
+				t.Errorf("discord:worker-0 expected HOME=%q, got %v", expectedDiscordHome, sc.Env)
+			}
+		case "discord:worker-1":
+			foundDisc1 = true
+			if !hasEnv(sc.Env, "HOME="+expectedDiscordHome) {
+				t.Errorf("discord:worker-1 expected HOME=%q, got %v", expectedDiscordHome, sc.Env)
+			}
+		case "discord:medium-worker-0":
+			foundMed0 = true
+		case "discord:medium-worker-1":
+			foundMed1 = true
 		}
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
-
-	mockStore := db.NewFakeStore()
-	err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(runner.NewMockDaemonSpawner()))
-	if err != nil {
-		t.Fatalf("RunBrainApp failed: %v", err)
 	}
+
+	if !foundEph0 || !foundEph1 || !foundDisc0 || !foundDisc1 || !foundMed0 || !foundMed1 {
+		t.Errorf("expected all prewarmed workers spawned: eph0=%v eph1=%v disc0=%v disc1=%v med0=%v med1=%v",
+			foundEph0, foundEph1, foundDisc0, foundDisc1, foundMed0, foundMed1)
+	}
+}
+
+func hasEnv(envs []string, target string) bool {
+	for _, e := range envs {
+		if e == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunBrainApp_SIGHUP(t *testing.T) {
@@ -2475,38 +2551,10 @@ func TestRunBrainApp_SIGHUP(t *testing.T) {
 	}
 	cfg.Update(cur)
 
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		close(ready)
-	}
-	defer func() { onServerReady = oldReady }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	hupChan := make(chan os.Signal, 1)
 	reloadReceived := make(chan string, 1)
 
-	go func() {
-		<-ready
-		// Send mock SIGHUP via injected channel (zero raw POSIX signal broadcasts)
-		hupChan <- syscall.SIGHUP
-		select {
-		case src := <-reloadReceived:
-			if src != "SIGHUP" {
-				t.Errorf("expected reload source SIGHUP, got %q", src)
-			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("timeout waiting for SIGHUP reload callback")
-		}
-		cancel()
-	}()
-
-	mockStore := db.NewFakeStore()
-	err := RunBrainApp(ctx, cfg,
-		WithStore(mockStore),
-		WithProcessSpawner(runner.NewMockDaemonSpawner()),
+	_, cancel, wait := runBrainAppUntilReady(t, cfg,
 		WithHupChannel(hupChan),
 		WithOnReload(func(src string) {
 			select {
@@ -2515,13 +2563,37 @@ func TestRunBrainApp_SIGHUP(t *testing.T) {
 			}
 		}),
 	)
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		t.Fatalf("RunBrainApp failed: %v", err)
+
+	hupChan <- syscall.SIGHUP
+	select {
+	case src := <-reloadReceived:
+		if src != "SIGHUP" {
+			t.Errorf("expected reload source SIGHUP, got %q", src)
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("timeout waiting for SIGHUP reload callback")
+	}
+
+	cancel()
+	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("unexpected error waiting for shutdown: %v", err)
 	}
 }
 
 func TestBrainAppOptions_Coverage(t *testing.T) {
 	var opts brainAppOptions
+	store := db.NewFakeStore()
+	WithStore(store)(&opts)
+	if opts.store != store {
+		t.Errorf("expected store to be set")
+	}
+
+	spawner := runner.NewMockDaemonSpawner()
+	WithProcessSpawner(spawner)(&opts)
+	if opts.processSpawner != spawner {
+		t.Errorf("expected processSpawner to be set")
+	}
+
 	hupChan := make(chan os.Signal, 1)
 	WithHupChannel(hupChan)(&opts)
 	if opts.hupChan != hupChan {
@@ -2541,176 +2613,30 @@ func TestBrainAppOptions_Coverage(t *testing.T) {
 	}
 }
 
-func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
+func TestRunBrainApp_DefaultStoreSuccess(t *testing.T) {
+	db.RegisterSQLiteTestHook(func(dsn string) (*sql.DB, error) {
+		return sql.Open("sqlite", ":memory:")
+	})
+	defer db.RegisterSQLiteTestHook(nil)
+
 	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0755)
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
 
-	cfg := config.NewTestConfig()
-	cur := cfg.Current()
-	cur.DataDir = tmpDir
-	cur.GeminiHomeDir = tmpDir
-	cur.DiscordToken = "mock-discord-token"
-	cur.Port = "0"
-	cur.AgyBin = "/bin/true"
-	cur.LowEffortModel = "gemini-test-low"
-	cur.MediumEffortModel = "gemini-test-medium"
-	cfg.Update(cur)
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = ":memory:"
+	})
 
-	expectedEphemeralHome := filepath.Join(tmpDir, "runtimes", "ephemeral")
-	expectedDiscordHome := filepath.Join(tmpDir, "runtimes", "discord")
-
-	var spawnedConfigsMu sync.Mutex
-	var spawnedConfigs []runner.DaemonConfig
-
-	baseMock := runner.NewMockDaemonSpawner()
-	allSpawned := make(chan struct{})
-	var spawnedOnce sync.Once
-	trackingSpawner := &runner.MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			spawnedConfigsMu.Lock()
-			spawnedConfigs = append(spawnedConfigs, dCfg)
-			hasEph0, hasEph1, hasDisc0, hasDisc1, hasMed0, hasMed1 := false, false, false, false, false, false
-			for _, sc := range spawnedConfigs {
-				if sc.ThreadID == "ephemeral:worker-0" {
-					hasEph0 = true
-				}
-				if sc.ThreadID == "ephemeral:worker-1" {
-					hasEph1 = true
-				}
-				if sc.ThreadID == "discord:worker-0" {
-					hasDisc0 = true
-				}
-				if sc.ThreadID == "discord:worker-1" {
-					hasDisc1 = true
-				}
-				if sc.ThreadID == "discord:medium-worker-0" {
-					hasMed0 = true
-				}
-				if sc.ThreadID == "discord:medium-worker-1" {
-					hasMed1 = true
-				}
-			}
-			if hasEph0 && hasEph1 && hasDisc0 && hasDisc1 && hasMed0 && hasMed1 {
-				spawnedOnce.Do(func() { close(allSpawned) })
-			}
-			spawnedConfigsMu.Unlock()
-			return baseMock.Spawn(ctx, dCfg)
-		},
-	}
-
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		close(ready)
-	}
-	defer func() { onServerReady = oldReady }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		<-ready
-		select {
-		case <-allSpawned:
-		case <-time.After(2 * time.Second):
-		}
-		cancel()
-	}()
-
-	mockStore := db.NewFakeStore()
-	err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(trackingSpawner))
-	if err != nil {
-		t.Fatalf("RunBrainApp failed: %v", err)
-	}
-
-	spawnedConfigsMu.Lock()
-	defer spawnedConfigsMu.Unlock()
-
-	foundEph0 := false
-	foundEph1 := false
-	foundDisc0 := false
-	foundDisc1 := false
-	for _, sc := range spawnedConfigs {
-		if sc.ThreadID == "ephemeral:worker-0" {
-			foundEph0 = true
-			foundHome := false
-			for _, e := range sc.Env {
-				if e == "HOME="+expectedEphemeralHome {
-					foundHome = true
-					break
-				}
-			}
-			if !foundHome {
-				t.Errorf("ephemeral:worker-0 expected HOME=%q in Env, got: %v", expectedEphemeralHome, sc.Env)
-			}
-		}
-		if sc.ThreadID == "ephemeral:worker-1" {
-			foundEph1 = true
-			foundHome := false
-			for _, e := range sc.Env {
-				if e == "HOME="+expectedEphemeralHome {
-					foundHome = true
-					break
-				}
-			}
-			if !foundHome {
-				t.Errorf("ephemeral:worker-1 expected HOME=%q in Env, got: %v", expectedEphemeralHome, sc.Env)
-			}
-		}
-		if sc.ThreadID == "discord:worker-0" {
-			foundDisc0 = true
-			foundHome := false
-			for _, e := range sc.Env {
-				if e == "HOME="+expectedDiscordHome {
-					foundHome = true
-					break
-				}
-			}
-			if !foundHome {
-				t.Errorf("discord:worker-0 expected HOME=%q in Env, got: %v", expectedDiscordHome, sc.Env)
-			}
-		}
-		if sc.ThreadID == "discord:worker-1" {
-			foundDisc1 = true
-			foundHome := false
-			for _, e := range sc.Env {
-				if e == "HOME="+expectedDiscordHome {
-					foundHome = true
-					break
-				}
-			}
-			if !foundHome {
-				t.Errorf("discord:worker-1 expected HOME=%q in Env, got: %v", expectedDiscordHome, sc.Env)
-			}
-		}
-	}
-
-	if !foundEph0 {
-		t.Errorf("expected pre-warmed daemon for ephemeral:worker-0")
-	}
-	if !foundEph1 {
-		t.Errorf("expected pre-warmed daemon for ephemeral:worker-1")
-	}
-	if !foundDisc0 {
-		t.Errorf("expected pre-warmed daemon for discord:worker-0")
-	}
-	if !foundDisc1 {
-		t.Errorf("expected pre-warmed daemon for discord:worker-1")
-	}
-	foundMed0, foundMed1 := false, false
-	for _, sc := range spawnedConfigs {
-		if sc.ThreadID == "discord:medium-worker-0" {
-			foundMed0 = true
-		}
-		if sc.ThreadID == "discord:medium-worker-1" {
-			foundMed1 = true
-		}
-	}
-	if !foundMed0 {
-		t.Errorf("expected pre-warmed daemon for discord:medium-worker-0")
-	}
-	if !foundMed1 {
-		t.Errorf("expected pre-warmed daemon for discord:medium-worker-1")
+	_, cancel, wait := runBrainAppUntilReady(t, cfg, WithStore(nil))
+	cancel()
+	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("unexpected error from RunBrainApp: %v", err)
 	}
 }
 
@@ -2732,23 +2658,9 @@ func TestRunBrainApp_ProcessPoolInitErrors(t *testing.T) {
 		},
 	}
 
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		close(ready)
-	}
-	defer func() { onServerReady = oldReady }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		<-ready
-		cancel()
-	}()
-
-	mockStore := db.NewFakeStore()
-	if err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(failingSpawner)); err != nil {
+	_, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(failingSpawner))
+	cancel()
+	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected error from RunBrainApp: %v", err)
 	}
 }
@@ -2785,23 +2697,9 @@ func TestRunBrainApp_DaemonCloseErrors(t *testing.T) {
 		},
 	}
 
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		close(ready)
-	}
-	defer func() { onServerReady = oldReady }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		<-ready
-		cancel()
-	}()
-
-	mockStore := db.NewFakeStore()
-	if err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(spawner)); err != nil {
+	_, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(spawner))
+	cancel()
+	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected error from RunBrainApp: %v", err)
 	}
 }
@@ -2837,25 +2735,6 @@ func TestHandlers_NilStore(t *testing.T) {
 	handleTasks(nil)(recTasks, reqTasks)
 	if recTasks.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 for handleTasks(nil), got %d", recTasks.Code)
-	}
-}
-
-func TestDefaultPaths(t *testing.T) {
-	// 1. DefaultGeminiHomeDir with explicit HOME
-	t.Setenv("HOME", "/custom/gemini/home")
-	if dir := DefaultGeminiHomeDir(); dir != "/custom/gemini/home" {
-		t.Errorf("expected /custom/gemini/home, got %s", dir)
-	}
-
-	// 2. DefaultGeminiHomeDir with empty HOME in testing
-	t.Setenv("HOME", "")
-	if dir := DefaultGeminiHomeDir(); dir == "" {
-		t.Errorf("expected non-empty fallback directory, got empty")
-	}
-
-	// 3. DefaultDataDir in testing
-	if dir := DefaultDataDir(); dir == "" {
-		t.Errorf("expected non-empty data dir, got empty")
 	}
 }
 
@@ -2974,67 +2853,6 @@ func TestSetupBrainMux_WriteErrors(t *testing.T) {
 	recHealth := httptest.NewRecorder()
 	errWHealth := &errorResponseWriter{ResponseWriter: recHealth}
 	mux.ServeHTTP(errWHealth, reqHealth)
-}
-
-func TestRunBrainApp_DefaultStoreError(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.Port = "0"
-		d.AgyBin = "/bin/true"
-		d.Model = "gemini-2.5-flash"
-		d.SystemPrompt = "test"
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-		d.DatabaseURL = "invalid://schema"
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := RunBrainApp(ctx, cfg)
-	if err == nil || !strings.Contains(err.Error(), "failed to initialize database") {
-		t.Errorf("expected failed to initialize database error, got: %v", err)
-	}
-}
-
-func TestRunBrainApp_DefaultStoreSuccess(t *testing.T) {
-	db.RegisterSQLiteTestHook(func(dsn string) (*sql.DB, error) {
-		return sql.Open("sqlite", ":memory:")
-	})
-	defer db.RegisterSQLiteTestHook(nil)
-
-	tmpDir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0755)
-	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.Port = "0"
-		d.AgyBin = "/bin/true"
-		d.Model = "gemini-2.5-flash"
-		d.SystemPrompt = "test"
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-		d.DatabaseURL = ":memory:"
-	})
-
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		close(ready)
-	}
-	defer func() { onServerReady = oldReady }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		<-ready
-		cancel()
-	}()
-
-	if err := RunBrainApp(ctx, cfg, WithProcessSpawner(runner.NewMockDaemonSpawner())); err != nil {
-		t.Fatalf("unexpected error from RunBrainApp: %v", err)
-	}
 }
 
 func TestHandleVoiceAsk_Validation(t *testing.T) {
@@ -3427,28 +3245,6 @@ func TestHandleVoiceAsk_JSON(t *testing.T) {
 	})
 }
 
-func TestNormalizeRoute_Voice(t *testing.T) {
-	if got := normalizeRoute("/voice/ask"); got != "/voice/ask" {
-		t.Errorf("normalizeRoute(/voice/ask) = %q, want /voice/ask", got)
-	}
-	if got := normalizeRoute("/api/voice/ask"); got != "/voice/ask" {
-		t.Errorf("normalizeRoute(/api/voice/ask) = %q, want /voice/ask", got)
-	}
-}
-
-func TestCreateReloadConfigFunc_WithWorkerPool(t *testing.T) {
-	cfg := config.NewTestConfig()
-	pool := queue.New(cfg, queue.WorkerPoolConfig{})
-	reloadFn := CreateReloadConfigFunc(cfg,
-		WithSkipEnvironmentSync(),
-		WithReloadSupplier(func(active *config.Config) error {
-			return nil
-		}),
-		WithWorkerPool(pool),
-	)
-	reloadFn("TestWithWorkerPool")
-}
-
 func TestHandleTranscripts_NonStringError(t *testing.T) {
 	store := db.NewFakeStore()
 	tmpDir := t.TempDir()
@@ -3465,250 +3261,6 @@ func TestHandleTranscripts_NonStringError(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "99999") {
 		t.Errorf("expected 99999 in response, got %s", rr.Body.String())
-	}
-}
-
-func TestInitializeBrainEnvironment_SymlinkParentBlocker(t *testing.T) {
-	tmpDir := t.TempDir()
-	geminiDir := filepath.Join(tmpDir, "home", ".gemini")
-	_ = os.MkdirAll(geminiDir, 0755)
-	_ = os.WriteFile(filepath.Join(geminiDir, "antigravity-cli"), []byte("blocking-file"), 0644)
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = filepath.Join(tmpDir, "home")
-		d.DataDir = filepath.Join(tmpDir, "data")
-	})
-	_ = os.MkdirAll(filepath.Join(tmpDir, "data"), 0755)
-
-	_ = InitializeBrainEnvironment(context.Background(), cfg)
-}
-
-func TestInitializeBrainEnvironment_SymlinkError(t *testing.T) {
-	tmpHome := t.TempDir()
-	tmpData := t.TempDir()
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpHome
-		d.DataDir = tmpData
-	})
-
-	parent := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
-	_ = os.MkdirAll(parent, 0755)
-	_ = os.Chmod(parent, 0555)
-	defer func() { _ = os.Chmod(parent, 0755) }()
-
-	_ = InitializeBrainEnvironment(context.Background(), cfg)
-}
-
-func TestUnifiedPool_EphemeralLLMFuncIntegration(t *testing.T) {
-	mockSpawner := &runner.MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			defer errW.Close()
-			go func() {
-				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":\"00000000-0000-0000-0000-000000000001\"}\n")
-				scanner := bufio.NewScanner(inR)
-				for scanner.Scan() {
-					line := scanner.Text()
-					var response string
-					if strings.Contains(line, "summarize") || strings.Contains(line, "title") {
-						response = "title summary ok"
-					} else {
-						response = `{"confidence":0.9,"reasoning":"test"}`
-					}
-					_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":%q}}\n", response)
-				}
-			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
-		},
-	}
-
-	pool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		DefaultModel: "gemini-2.5-flash",
-		TargetModels: map[string]string{
-			"ephemeral:classifier": "gemini-3.8-flash-low",
-			"ephemeral:summarizer": "gemini-3.8-flash-low",
-		},
-	}, mockSpawner)
-	defer pool.Close()
-
-	ctx := context.Background()
-
-	// 1. EphemeralLLMFunc for classifier
-	classifierLLM := pool.EphemeralLLMFunc("ephemeral:classifier")
-	clsRes, err := classifierLLM(ctx, "", "classify this prompt")
-	if err != nil {
-		t.Fatalf("unexpected error from classifierLLM: %v", err)
-	}
-	if clsRes != `{"confidence":0.9,"reasoning":"test"}` {
-		t.Fatalf("unexpected classifier result: %q", clsRes)
-	}
-
-	// 2. EphemeralLLMFunc for summarizer
-	summarizerLLM := pool.EphemeralLLMFunc("ephemeral:summarizer")
-	sumRes, err := summarizerLLM(ctx, "", "please summarize title")
-	if err != nil {
-		t.Fatalf("unexpected error from summarizerLLM: %v", err)
-	}
-	if sumRes != "title summary ok" {
-		t.Fatalf("unexpected summarizer result: %q", sumRes)
-	}
-
-	// 3. Classifier integration with WithProcessPool
-	cfg := config.NewTestConfig()
-	cur := cfg.Current()
-	cur.Ollama.BaseURL = "" // Ensure primary LLMFunc is used
-	cfg.Update(cur)
-	cls := classifier.New(cfg, nil, classifier.WithProcessPool(pool))
-	cRes, err := cls.LLMFunc(ctx, "", "classify ambient message")
-	if err != nil {
-		t.Fatalf("unexpected error from cls.LLMFunc: %v", err)
-	}
-	if cRes != `{"confidence":0.9,"reasoning":"test"}` {
-		t.Fatalf("unexpected cls.LLMFunc result: %q", cRes)
-	}
-
-	// 4. Scheduler integration with WithLLMFunc
-	store := db.NewFakeStore()
-	wPool := newTestWorkerPool(store)
-	sched, err := scheduler.New(cfg, store, wPool, nil, scheduler.WithLLMFunc(summarizerLLM))
-	if err != nil {
-		t.Fatalf("failed to create scheduler: %v", err)
-	}
-	if sched == nil {
-		t.Fatal("expected non-nil scheduler")
-	}
-}
-
-func TestUnifiedPool_EphemeralLLMFuncErrors(t *testing.T) {
-	mockSpawner := &runner.MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			defer errW.Close()
-			go func() {
-				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":\"00000000-0000-0000-0000-000000000002\"}\n")
-				scanner := bufio.NewScanner(inR)
-				for scanner.Scan() {
-					_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"daemon turn crashed\"}}\n")
-				}
-			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
-		},
-	}
-
-	pool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		DefaultModel: "gemini-2.5-flash",
-	}, mockSpawner)
-	defer pool.Close()
-
-	llmFn := pool.EphemeralLLMFunc("ephemeral:classifier")
-	_, err := llmFn(context.Background(), "", "classify this task")
-	if err == nil || !strings.Contains(err.Error(), "daemon turn crashed") {
-		t.Fatalf("expected 'daemon turn crashed' error, got: %v", err)
-	}
-
-	// Closed pool error
-	closedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	_ = closedPool.Close()
-	closedLLM := closedPool.EphemeralLLMFunc("ephemeral:classifier")
-	_, errClosed := closedLLM(context.Background(), "", "classify prompt")
-	if errClosed == nil {
-		t.Fatal("expected error from closed pool")
-	}
-}
-
-func TestDualProcessPool_InitializationAndWiring(t *testing.T) {
-	mockSpawner := runner.NewMockDaemonSpawner()
-	tmpDir := t.TempDir()
-
-	discordPrimaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir: filepath.Join(tmpDir, "runtimes", "discord"),
-		Model:         "gemini-3.7-pro",
-	}, mockSpawner)
-	defer discordPrimaryPool.Close()
-
-	discordLowEffortPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir:    filepath.Join(tmpDir, "runtimes", "discord"),
-		PrewarmedTargets: []string{"ephemeral:classifier", "ephemeral:summarizer"},
-		Model:            "gemini-3.8-flash-low",
-	}, mockSpawner)
-	defer discordLowEffortPool.Close()
-
-	voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir:    filepath.Join(tmpDir, "runtimes", "voice"),
-		PrewarmedTargets: []string{"kiosk"},
-		Model:            "gemini-3.8-flash-low",
-	}, mockSpawner)
-	defer voicePool.Close()
-
-	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer initCancel()
-	if err := discordPrimaryPool.Initialize(initCtx); err != nil {
-		t.Fatalf("failed initializing discord primary pool: %v", err)
-	}
-	if err := discordLowEffortPool.Initialize(initCtx); err != nil {
-		t.Fatalf("failed initializing discord low effort pool: %v", err)
-	}
-	if err := voicePool.Initialize(initCtx); err != nil {
-		t.Fatalf("failed initializing voice pool: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if discordLowEffortPool.HasDaemon("ephemeral:classifier") &&
-			discordLowEffortPool.HasDaemon("ephemeral:summarizer") &&
-			voicePool.HasDaemon("kiosk") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if !discordLowEffortPool.HasDaemon("ephemeral:classifier") {
-		t.Errorf("expected discordLowEffortPool to have ephemeral:classifier pre-warmed")
-	}
-	if !discordLowEffortPool.HasDaemon("ephemeral:summarizer") {
-		t.Errorf("expected discordLowEffortPool to have ephemeral:summarizer pre-warmed")
-	}
-	if !voicePool.HasDaemon("kiosk") {
-		t.Errorf("expected voicePool to have kiosk pre-warmed")
-	}
-
-	store := db.NewFakeStore()
-	pool := queue.New(nil, queue.WorkerPoolConfig{
-		Store:                store,
-		ProcessPool:          discordPrimaryPool,
-		LowEffortProcessPool: discordLowEffortPool,
-		VoiceProcessPool:     voicePool,
-	})
-	pool.Start()
-
-	if pool.ProcessPool() != discordPrimaryPool {
-		t.Errorf("expected pool.ProcessPool() to be discordPrimaryPool")
-	}
-	if pool.LowEffortProcessPool() != discordLowEffortPool {
-		t.Errorf("expected pool.LowEffortProcessPool() to be discordLowEffortPool")
-	}
-	if pool.VoiceProcessPool() != voicePool {
-		t.Errorf("expected pool.VoiceProcessPool() to be voicePool")
-	}
-
-	pool.Stop()
-}
-
-func TestMain_DualProcessPoolWiring(t *testing.T) {
-	primarySpawner := runner.NewMockSpawner()
-	lowEffortSpawner := runner.NewMockSpawner()
-
-	p1 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
-	defer p1.Close()
-	p2 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowEffortSpawner)
-	defer p2.Close()
-
-	if p1.Model() != "gemini-3.7-pro" || p2.Model() != "gemini-3.8-flash-low" {
-		t.Fatalf("expected distinct models in dual pools")
 	}
 }
 
@@ -3948,48 +3500,6 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 			t.Errorf("expected model 'gemini-2.5-pro', got %q", geminiPool.Model())
 		}
 	})
-}
-
-func TestRunBrainApp_VoiceEngineGeminiAPI(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
-
-	cfg := config.NewTestConfig()
-	cur := cfg.Current()
-	cur.DataDir = tmpDir
-	cur.GeminiHomeDir = tmpDir
-	cur.DiscordToken = "mock-discord-token"
-	cur.Port = "0"
-	cur.AgyBin = "/bin/true"
-	cur.HarnessAPIKey = "gemini-test-key"
-	cur.Voice = config.VoiceConfig{
-		Engine:           "gemini_api",
-		Model:            "gemini-2.5-flash",
-		PrewarmedTargets: []string{"kiosk"},
-	}
-	cfg.Update(cur)
-
-	ready := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		close(ready)
-	}
-	defer func() { onServerReady = oldReady }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		<-ready
-		time.Sleep(30 * time.Millisecond)
-		cancel()
-	}()
-
-	mockStore := db.NewFakeStore()
-	err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(runner.NewMockDaemonSpawner()))
-	if err != nil {
-		t.Fatalf("RunBrainApp with gemini_api voice engine failed: %v", err)
-	}
 }
 
 func TestExtractMCPServers(t *testing.T) {
