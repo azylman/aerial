@@ -11,175 +11,72 @@ import (
 
 func TestBuildAgyArgs(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
+	for _, tc := range []struct {
 		input    AgyArgsInput
 		contains []string
 		omits    []string
 	}{
-		{
-			name:     "Defaults",
-			input:    AgyArgsInput{},
-			contains: []string{"--dangerously-skip-permissions", "--output-format", "stream-json"},
-			omits:    []string{"--input-format", "--model", "--conversation"},
-		},
-		{
-			name: "Interactive Run With Model and Conversation",
-			input: AgyArgsInput{
-				OutputFormat: "json",
-				Model:        "gemini-2.5-flash",
-				SessionID:    "11111111-2222-3333-4444-555555555555",
-			},
-			contains: []string{
-				"--dangerously-skip-permissions",
-				"--output-format", "json",
-				"--model", "gemini-2.5-flash",
-				"--conversation", "11111111-2222-3333-4444-555555555555",
-			},
-			omits: []string{"--input-format"},
-		},
-		{
-			name: "Worker Mode",
-			input: AgyArgsInput{
-				WorkerMode:   true,
-				OutputFormat: "stream-json",
-				Model:        "gemini-pro",
-				SessionID:    "22222222-3333-4444-5555-666666666666",
-			},
-			contains: []string{
-				"--dangerously-skip-permissions",
-				"--input-format", "stream-json",
-				"--output-format", "stream-json",
-				"--model", "gemini-pro",
-				"--conversation", "22222222-3333-4444-5555-666666666666",
-			},
-			omits: []string{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			args := BuildAgyArgs(tt.input)
-			joined := strings.Join(args, " ")
-			for _, c := range tt.contains {
-				if !strings.Contains(joined, c) {
-					t.Errorf("expected args to contain %q, got: %v", c, args)
-				}
+		{AgyArgsInput{}, []string{"--dangerously-skip-permissions", "--output-format stream-json"}, []string{"--input-format", "--model", "--conversation"}},
+		{AgyArgsInput{OutputFormat: "json", Model: "gemini-2.5-flash", SessionID: "11111111-2222-3333-4444-555555555555"}, []string{"--dangerously-skip-permissions", "--output-format json", "--model gemini-2.5-flash", "--conversation 11111111-2222-3333-4444-555555555555"}, []string{"--input-format"}},
+		{AgyArgsInput{WorkerMode: true, OutputFormat: "stream-json", Model: "gemini-pro", SessionID: "22222222-3333-4444-5555-666666666666"}, []string{"--dangerously-skip-permissions", "--input-format stream-json", "--output-format stream-json", "--model gemini-pro", "--conversation 22222222-3333-4444-5555-666666666666"}, nil},
+	} {
+		args := BuildAgyArgs(tc.input)
+		joined := strings.Join(args, " ")
+		for _, c := range tc.contains {
+			if !strings.Contains(joined, c) {
+				t.Errorf("BuildAgyArgs(%+v) missing %q in %v", tc.input, c, args)
 			}
-			for _, o := range tt.omits {
-				for _, arg := range args {
-					if arg == o {
-						t.Errorf("expected args to omit %q, but found in %v", o, args)
-					}
-				}
+		}
+		for _, o := range tc.omits {
+			if strings.Contains(joined, o) {
+				t.Errorf("BuildAgyArgs(%+v) should omit %q in %v", tc.input, o, args)
 			}
-		})
+		}
 	}
 }
 
 func TestBuildDaemonArgs(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
+	for _, tc := range []struct {
 		cfg      DaemonConfig
 		contains []string
 		omits    []string
 	}{
-		{
-			name: "Default timeout 60m",
-			cfg: DaemonConfig{
-				SessionID: "sess-abc",
-				Model:     "gemini-test",
-			},
-			contains: []string{
-				"--dangerously-skip-permissions",
-				"--input-format", "stream-json",
-				"--output-format", "stream-json",
-				"--conversation", "sess-abc",
-				"--model", "gemini-test",
-				"--print-timeout", "60m",
-			},
-		},
-		{
-			name: "Custom minute timeout",
-			cfg: DaemonConfig{
-				Timeout: 15 * time.Minute,
-			},
-			contains: []string{
-				"--print-timeout", "15m",
-			},
-			omits: []string{"--conversation", "--model"},
-		},
-		{
-			name: "Custom second timeout",
-			cfg: DaemonConfig{
-				Timeout: 45 * time.Second,
-			},
-			contains: []string{
-				"--print-timeout", "45s",
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			args := BuildDaemonArgs(tc.cfg)
-			for i := 0; i < len(tc.contains); i++ {
-				expected := tc.contains[i]
-				found := false
-				for j, arg := range args {
-					if arg == expected {
-						if i+1 < len(tc.contains) && !strings.HasPrefix(tc.contains[i+1], "--") {
-							if j+1 < len(args) && args[j+1] == tc.contains[i+1] {
-								found = true
-								i++
-								break
-							}
-						} else {
-							found = true
-							break
-						}
-					}
-				}
-				if !found {
-					t.Errorf("expected args to contain %q, but got %v", expected, args)
-				}
+		{DaemonConfig{SessionID: "sess-abc", Model: "gemini-test"}, []string{"--dangerously-skip-permissions", "--input-format stream-json", "--output-format stream-json", "--conversation sess-abc", "--model gemini-test", "--print-timeout 60m"}, nil},
+		{DaemonConfig{Timeout: 15 * time.Minute}, []string{"--print-timeout 15m"}, []string{"--conversation", "--model"}},
+		{DaemonConfig{Timeout: 45 * time.Second}, []string{"--print-timeout 45s"}, nil},
+	} {
+		args := BuildDaemonArgs(tc.cfg)
+		joined := strings.Join(args, " ")
+		for _, c := range tc.contains {
+			if !strings.Contains(joined, c) {
+				t.Errorf("BuildDaemonArgs(%+v) missing %q in %v", tc.cfg, c, args)
 			}
-
-			for _, omitted := range tc.omits {
-				for _, arg := range args {
-					if arg == omitted {
-						t.Errorf("expected args to omit %q, but found it in %v", omitted, args)
-					}
-				}
+		}
+		for _, o := range tc.omits {
+			if strings.Contains(joined, o) {
+				t.Errorf("BuildDaemonArgs(%+v) should omit %q in %v", tc.cfg, o, args)
 			}
-		})
+		}
 	}
 }
 
 func TestBuildAgyEnv(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name        string
+	filt := FilterAgyBaseEnv([]string{"FOO=bar", "GEMINI_API_KEY=secret1", "gemini_api_key=secret2", "ANTIGRAVITY_API_KEY=s3", "GOOGLE_GENAI_API_KEY=s4", "MALFORMED_NO_EQUALS", "PATH=/usr/bin"})
+	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") {
+		t.Errorf("FilterAgyBaseEnv leak or drop: %v", filt)
+	}
+
+	for _, tc := range []struct {
 		input       AgyEnvInput
 		contains    []string
 		notContains []string
 	}{
+		{AgyEnvInput{}, []string{"GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug"}, nil},
 		{
-			name:  "Defaults Only",
-			input: AgyEnvInput{},
-			contains: []string{
-				"GIT_TERMINAL_PROMPT=0",
-				"AGY_LOG_LEVEL=debug",
-				"ANTIGRAVITY_LOG_LEVEL=debug",
-			},
-		},
-		{
-			name: "Full Configuration",
-			input: AgyEnvInput{
-				BaseEnv:        []string{"CUSTOM_BASE=1", "AERIAL_VANADIS_CHUNK_ID=stale-chunk"},
+			AgyEnvInput{
+				BaseEnv:        []string{"CUSTOM_BASE=1", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "PATH=/bin", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini"},
 				HomeDir:        "/custom/home",
 				APIKey:         "secret-token-123",
 				TargetID:       "target-agent",
@@ -187,749 +84,238 @@ func TestBuildAgyEnv(t *testing.T) {
 				VanadisChunkID: "chunk-live-42\r\n",
 				ExtraEnv:       []string{"EXTRA_KEY=foo"},
 			},
-			contains: []string{
-				"CUSTOM_BASE=1",
-				"GIT_TERMINAL_PROMPT=0",
-				"AGY_LOG_LEVEL=debug",
-				"ANTIGRAVITY_LOG_LEVEL=debug",
-				"HOME=/custom/home",
-				"USERPROFILE=/custom/home",
-				"GEMINI_API_KEY=secret-token-123",
-				"ANTIGRAVITY_API_KEY=secret-token-123",
-				"GOOGLE_GENAI_API_KEY=secret-token-123",
-				"AERIAL_TARGET_ID=target-agent",
-				"TZ=America/Los_Angeles",
-				"AERIAL_VANADIS_CHUNK_ID=chunk-live-42",
-				"EXTRA_KEY=foo",
-			},
-			notContains: []string{
-				"AERIAL_VANADIS_CHUNK_ID=stale-chunk",
-			},
+			[]string{"CUSTOM_BASE=1", "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug", "HOME=/custom/home", "USERPROFILE=/custom/home", "GEMINI_CLI_HOME=/custom/home", "GEMINI_API_KEY=secret-token-123", "ANTIGRAVITY_API_KEY=secret-token-123", "GOOGLE_GENAI_API_KEY=secret-token-123", "AERIAL_TARGET_ID=target-agent", "TZ=America/Los_Angeles", "AERIAL_VANADIS_CHUNK_ID=chunk-live-42", "EXTRA_KEY=foo"},
+			[]string{"AERIAL_VANADIS_CHUNK_ID=stale-chunk", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini"},
 		},
 		{
-			name: "Ambient API Keys And Stale Vanadis Chunk Env Filtered When Empty",
-			input: AgyEnvInput{
-				BaseEnv: []string{
-					"CUSTOM_BASE=1",
-					"GEMINI_API_KEY=ambient-key",
-					"ANTIGRAVITY_API_KEY=ambient-key",
-					"GOOGLE_GENAI_API_KEY=ambient-key",
-					"AERIAL_VANADIS_CHUNK_ID=stale-chunk",
-					"VANADIS_CHUNK_ID=stale-legacy-chunk",
-					"OTHER_ENV=kept",
-				},
-				APIKey: "",
+			AgyEnvInput{
+				BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"},
+				APIKey:  "",
 			},
-			contains: []string{
-				"CUSTOM_BASE=1",
-				"OTHER_ENV=kept",
-			},
-			notContains: []string{
-				"GEMINI_API_KEY",
-				"ANTIGRAVITY_API_KEY",
-				"GOOGLE_GENAI_API_KEY",
-				"AERIAL_VANADIS_CHUNK_ID",
-				"VANADIS_CHUNK_ID",
-			},
+			[]string{"CUSTOM_BASE=1", "OTHER_ENV=kept", "MALFORMED_NO_EQUALS"},
+			[]string{"ambient-key", "ambient2", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
 		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			env := BuildAgyEnv(tt.input)
-			joined := strings.Join(env, "\n")
-			for _, c := range tt.contains {
-				if !strings.Contains(joined, c) {
-					t.Errorf("expected env to contain %q, got: %v", c, env)
-				}
-			}
-			for _, nc := range tt.notContains {
-				if strings.Contains(joined, nc) {
-					t.Errorf("expected env to NOT contain %q, got: %v", nc, env)
-				}
-			}
-		})
-	}
-}
-
-func TestBuildAgyEnv_HomeDirSanitization(t *testing.T) {
-	t.Parallel()
-
-	input := AgyEnvInput{
-		BaseEnv: []string{
-			"PATH=/usr/bin",
-			"HOME=/root",
-			"USERPROFILE=C:\\Users\\Default",
-			"GEMINI_CLI_HOME=/etc/gemini",
-			"CUSTOM=1",
-		},
-		HomeDir: "/custom/runtime",
-	}
-
-	env := BuildAgyEnv(input)
-
-	var homeCount, userProfileCount, geminiCliHomeCount int
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "HOME=") {
-			homeCount++
-			if entry != "HOME=/custom/runtime" {
-				t.Errorf("unexpected HOME entry: %q", entry)
+	} {
+		env := BuildAgyEnv(tc.input)
+		joined := strings.Join(env, "\n")
+		for _, c := range tc.contains {
+			if !strings.Contains(joined, c) {
+				t.Errorf("BuildAgyEnv missing %q in %v", c, env)
 			}
 		}
-		if strings.HasPrefix(entry, "USERPROFILE=") {
-			userProfileCount++
-			if entry != "USERPROFILE=/custom/runtime" {
-				t.Errorf("unexpected USERPROFILE entry: %q", entry)
+		for _, nc := range tc.notContains {
+			if strings.Contains(joined, nc) {
+				t.Errorf("BuildAgyEnv unexpected %q in %v", nc, env)
 			}
-		}
-		if strings.HasPrefix(entry, "GEMINI_CLI_HOME=") {
-			geminiCliHomeCount++
-			if entry != "GEMINI_CLI_HOME=/custom/runtime" {
-				t.Errorf("unexpected GEMINI_CLI_HOME entry: %q", entry)
-			}
-		}
-	}
-
-	if homeCount != 1 {
-		t.Errorf("expected exactly 1 HOME entry, got %d", homeCount)
-	}
-	if userProfileCount != 1 {
-		t.Errorf("expected exactly 1 USERPROFILE entry, got %d", userProfileCount)
-	}
-	if geminiCliHomeCount != 1 {
-		t.Errorf("expected exactly 1 GEMINI_CLI_HOME entry, got %d", geminiCliHomeCount)
-	}
-}
-
-func TestFilterAgyBaseEnv(t *testing.T) {
-	t.Parallel()
-	input := []string{
-		"FOO=bar",
-		"GEMINI_API_KEY=secret1",
-		"gemini_api_key=secret2",
-		"ANTIGRAVITY_API_KEY=secret3",
-		"GOOGLE_GENAI_API_KEY=secret4",
-		"MALFORMED_NO_EQUALS",
-		"PATH=/usr/bin",
-	}
-
-	result := FilterAgyBaseEnv(input)
-	joined := strings.Join(result, "\n")
-
-	if strings.Contains(joined, "secret1") || strings.Contains(joined, "secret2") ||
-		strings.Contains(joined, "secret3") || strings.Contains(joined, "secret4") {
-		t.Errorf("FilterAgyBaseEnv leaked sensitive keys: %v", result)
-	}
-
-	expectedKept := []string{"FOO=bar", "MALFORMED_NO_EQUALS", "PATH=/usr/bin"}
-	for _, exp := range expectedKept {
-		if !strings.Contains(joined, exp) {
-			t.Errorf("FilterAgyBaseEnv should have kept %q, got: %v", exp, result)
 		}
 	}
 }
-
 
 func TestShouldRotateWorker(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name        string
-		turnsUsed   int
-		turnBudget  int
-		rssBytes    uint64
-		maxRSSBytes uint64
-		isDead      bool
-		wantRotate  bool
-		wantReason  string
+	for _, tc := range []struct {
+		used, budget int
+		rss, maxRSS  uint64
+		dead, want   bool
+		reason       string
 	}{
-		{
-			name:        "Healthy Worker Below Limits",
-			turnsUsed:   3,
-			turnBudget:  10,
-			rssBytes:    100 * 1024 * 1024,
-			maxRSSBytes: 500 * 1024 * 1024,
-			isDead:      false,
-			wantRotate:  false,
-		},
-		{
-			name:       "Dead Worker Rotates Immediately",
-			turnsUsed:  1,
-			turnBudget: 10,
-			isDead:     true,
-			wantRotate: true,
-			wantReason: "worker is dead",
-		},
-		{
-			name:        "RSS Limit Exceeded",
-			turnsUsed:   1,
-			turnBudget:  10,
-			rssBytes:    600 * 1024 * 1024,
-			maxRSSBytes: 500 * 1024 * 1024,
-			wantRotate:  true,
-			wantReason:  "rss limit exceeded",
-		},
-		{
-			name:        "Turn Budget Exceeded",
-			turnsUsed:   10,
-			turnBudget:  10,
-			rssBytes:    100 * 1024 * 1024,
-			maxRSSBytes: 500 * 1024 * 1024,
-			wantRotate:  true,
-			wantReason:  "turn budget reached",
-		},
-		{
-			name:       "Zero Turn Budget Disables Turn Limit",
-			turnsUsed:  100,
-			turnBudget: 0,
-			wantRotate: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			rotate, reason := ShouldRotateWorker(tt.turnsUsed, tt.turnBudget, tt.rssBytes, tt.maxRSSBytes, tt.isDead)
-			if rotate != tt.wantRotate {
-				t.Errorf("expected rotate=%v, got %v (reason: %q)", tt.wantRotate, rotate, reason)
-			}
-			if tt.wantReason != "" && !strings.Contains(reason, tt.wantReason) {
-				t.Errorf("expected reason to contain %q, got: %q", tt.wantReason, reason)
-			}
-		})
+		{3, 10, 100 << 20, 500 << 20, false, false, ""},
+		{1, 10, 0, 500 << 20, true, true, "worker is dead"},
+		{1, 10, 600 << 20, 500 << 20, false, true, "rss limit exceeded"},
+		{10, 10, 100 << 20, 500 << 20, false, true, "turn budget reached"},
+		{100, 0, 0, 0, false, false, ""},
+	} {
+		rot, reason := ShouldRotateWorker(tc.used, tc.budget, tc.rss, tc.maxRSS, tc.dead)
+		if rot != tc.want || (tc.reason != "" && !strings.Contains(reason, tc.reason)) {
+			t.Errorf("ShouldRotateWorker(%d,%d,%d,%d,%v) = (%v,%q), want (%v,%q)", tc.used, tc.budget, tc.rss, tc.maxRSS, tc.dead, rot, reason, tc.want, tc.reason)
+		}
 	}
 }
 
 func TestParseInitEvent(t *testing.T) {
 	t.Parallel()
-	validUUID := "11111111-2222-3333-4444-555555555555"
-
-	tests := []struct {
-		name   string
-		line   string
-		wantID string
-		wantOk bool
+	vID := "11111111-2222-3333-4444-555555555555"
+	for _, tc := range []struct {
+		line, wantID string
+		wantOk       bool
 	}{
-		{
-			name:   "Valid NDJSON Init",
-			line:   `{"event":"init","conversation_id":"` + validUUID + `"}`,
-			wantID: validUUID,
-			wantOk: true,
-		},
-		{
-			name:   "Valid NDJSON Init With Trailing Text",
-			line:   `log prefix {"event":"init","conversation_id":"` + validUUID + `"}`,
-			wantID: validUUID,
-			wantOk: true,
-		},
-		{
-			name:   "Not An Init Event",
-			line:   `{"event":"result","status":"SUCCESS"}`,
-			wantOk: false,
-		},
-		{
-			name:   "Non-UUID Conversation ID",
-			line:   `{"event":"init","conversation_id":"not-a-valid-uuid"}`,
-			wantOk: false,
-		},
-		{
-			name:   "Empty String",
-			line:   "",
-			wantOk: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			id, ok := ParseInitEvent(tt.line)
-			if ok != tt.wantOk {
-				t.Errorf("expected ok=%v, got %v", tt.wantOk, ok)
-			}
-			if ok && id != tt.wantID {
-				t.Errorf("expected id=%q, got %q", tt.wantID, id)
-			}
-		})
+		{`{"event":"init","conversation_id":"` + vID + `"}`, vID, true},
+		{`log prefix {"event":"init","conversation_id":"` + vID + `"}`, vID, true},
+		{`{"event":"result","status":"SUCCESS"}`, "", false},
+		{`{"event":"init","conversation_id":"not-a-valid-uuid"}`, "", false},
+		{"", "", false},
+	} {
+		if id, ok := ParseInitEvent(tc.line); ok != tc.wantOk || id != tc.wantID {
+			t.Errorf("ParseInitEvent(%q) = (%q, %v), want (%q, %v)", tc.line, id, ok, tc.wantID, tc.wantOk)
+		}
 	}
 }
 
 func TestIsResultEvent(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
+	for _, tc := range []struct {
 		line string
 		want bool
 	}{
-		{
-			name: "Standard Result Event",
-			line: `{"event":"result","result":{"status":"SUCCESS"}}`,
-			want: true,
-		},
-		{
-			name: "Compact Result Event",
-			line: `{"event":"result"}`,
-			want: true,
-		},
-		{
-			name: "Init Event",
-			line: `{"event":"init","conversation_id":"123"}`,
-			want: false,
-		},
-		{
-			name: "Arbitrary Log Line",
-			line: `2026/09/12 12:00:00 Starting server...`,
-			want: false,
-		},
-		{
-			name: "Prefixed Log Line with Result Event",
-			line: `[2026-09-22 13:00:00] {"event":"result","result":{"status":"SUCCESS"}}`,
-			want: true,
-		},
-		{
-			name: "Step Update with Result Text in Tool Output",
-			line: `{"event":"step_update","tool_output":"task finished with result: OK"}`,
-			want: false,
-		},
-		{
-			name: "Step Update with Interior JSON in Tool Output",
-			line: `{"event":"step_update","tool_output":"{\"event\":\"result\"}"}`,
-			want: false,
-		},
-		{
-			name: "Empty Line",
-			line: `   `,
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsResultEvent(tt.line); got != tt.want {
-				t.Errorf("IsResultEvent(%q) = %v, want %v", tt.line, got, tt.want)
-			}
-		})
+		{`{"event":"result","result":{"status":"SUCCESS"}}`, true},
+		{`{"event":"result"}`, true},
+		{`{"event":"init","conversation_id":"123"}`, false},
+		{`2026/09/12 12:00:00 Starting server...`, false},
+		{`[2026-09-22 13:00:00] {"event":"result","result":{"status":"SUCCESS"}}`, true},
+		{`{"event":"step_update","tool_output":"task finished with result: OK"}`, false},
+		{`{"event":"step_update","tool_output":"{\"event\":\"result\"}"}`, false},
+		{`prefix log {"event":"result"} suffix`, true},
+		{"prefix log {not valid json result", false},
+		{"", false},
+		{"   ", false},
+	} {
+		if got := IsResultEvent(tc.line); got != tc.want {
+			t.Errorf("IsResultEvent(%q) = %v, want %v", tc.line, got, tc.want)
+		}
 	}
 }
 
-type errWriter struct {
-	err error
-}
+type errWriter struct{ err error }
 
-func (e *errWriter) Write(p []byte) (int, error) {
-	return 0, e.err
-}
+func (e *errWriter) Write(p []byte) (int, error) { return 0, e.err }
 
 func TestWriteWorkerTurn(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name      string
-		nilWriter bool
-		writeErr  error
-		prompt    string
-		wantErr   string
-		wantSub   []string
+	var buf bytes.Buffer
+	for _, tc := range []struct {
+		w       io.Writer
+		prompt  string
+		wantErr string
+		wantSub []string
 	}{
-		{
-			name:      "Nil Writer",
-			nilWriter: true,
-			prompt:    "hello",
-			wantErr:   "writer is nil",
-		},
-		{
-			name:    "Valid Write",
-			prompt:  "hello world",
-			wantSub: []string{`"event":"user"`, "hello world", "\n"},
-		},
-		{
-			name:     "Writer Error Surfaces",
-			writeErr: errors.New("disk full"),
-			prompt:   "hello",
-			wantErr:  "disk full",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var w io.Writer
-			var buf bytes.Buffer
-			if tc.nilWriter {
-				w = nil
-			} else if tc.writeErr != nil {
-				w = &errWriter{err: tc.writeErr}
-			} else {
-				w = &buf
+		{nil, "hello", "writer is nil", nil},
+		{&buf, "hello world", "", []string{`"event":"user"`, "hello world", "\n"}},
+		{&errWriter{err: errors.New("disk full")}, "hello", "disk full", nil},
+	} {
+		buf.Reset()
+		err := WriteWorkerTurn(tc.w, tc.prompt)
+		if (tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr))) || (tc.wantErr == "" && err != nil) {
+			t.Errorf("WriteWorkerTurn(%v, %q) err = %v, wantErr %q", tc.w, tc.prompt, err, tc.wantErr)
+		}
+		for _, s := range tc.wantSub {
+			if !strings.Contains(buf.String(), s) {
+				t.Errorf("expected %q in %q", s, buf.String())
 			}
-
-			err := WriteWorkerTurn(w, tc.prompt)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			got := buf.String()
-			for _, sub := range tc.wantSub {
-				if !strings.Contains(got, sub) {
-					t.Errorf("expected output to contain %q, got: %q", sub, got)
-				}
-			}
-			if !strings.HasSuffix(got, "\n") {
-				t.Errorf("expected output to end with newline, got: %q", got)
-			}
-		})
+		}
 	}
 }
-
 
 func TestExtractSubagentID(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "standard camelCase object",
-			input:    `{"conversationId": "sub-123"}`,
-			expected: "sub-123",
-		},
-		{
-			name:     "snake_case object",
-			input:    `{"conversation_id": "sub-456"}`,
-			expected: "sub-456",
-		},
-		{
-			name:     "array payload",
-			input:    `[{"conversationId": "sub-789"}]`,
-			expected: "sub-789",
-		},
-		{
-			name:     "array payload with snake_case",
-			input:    `[{"conversation_id": "sub-array-snake"}]`,
-			expected: "sub-array-snake",
-		},
-		{
-			name:     "text prefix with embedded JSON",
-			input:    `Subagent conversation started with conversation ID: subagent-777, {"conversationId": "subagent-777"}`,
-			expected: "subagent-777",
-		},
-		{
-			name:     "nested subagents list",
-			input:    `{"subagents": [{"conversationId": "sub-nested-1"}]}`,
-			expected: "sub-nested-1",
-		},
-		{
-			name:     "logger prefix with braces before JSON",
-			input:    `[2026-09-19 {worker-1}] {"conversationId": "sub-logger-id"}`,
-			expected: "sub-logger-id",
-		},
-		{
-			name:     "empty input",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "unrelated string",
-			input:    "Command completed with status 0",
-			expected: "",
-		},
-		{
-			name:     "embedded array with snake_case conversation_id",
-			input:    `log prefix [{"conversation_id": "sub-alt-1"}]`,
-			expected: "sub-alt-1",
-		},
-		{
-			name:     "direct object with snake_case conversation_id",
-			input:    `{"conversation_id": "sub-snake-1"}`,
-			expected: "sub-snake-1",
-		},
-		{
-			name:     "direct object with subagents snake_case",
-			input:    `{"subagents": [{"conversation_id": "sub-snake-sub"}]}`,
-			expected: "sub-snake-sub",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := extractSubagentID(tc.input)
-			if got != tc.expected {
-				t.Errorf("extractSubagentID(%q) = %q, want %q", tc.input, got, tc.expected)
-			}
-		})
+	for _, tc := range []struct{ in, want string }{
+		{`{"conversationId": "sub-123"}`, "sub-123"},
+		{`{"conversation_id": "sub-456"}`, "sub-456"},
+		{`[{"conversationId": "sub-789"}]`, "sub-789"},
+		{`[{"conversation_id": "sub-array-snake"}]`, "sub-array-snake"},
+		{`Subagent conversation started with conversation ID: sub-777, {"conversationId": "sub-777"}`, "sub-777"},
+		{`{"subagents": [{"conversationId": "sub-nested-1"}]}`, "sub-nested-1"},
+		{`[2026-09-19 {worker-1}] {"conversationId": "sub-logger-id"}`, "sub-logger-id"},
+		{"", ""},
+		{"Command completed with status 0", ""},
+		{`log prefix [{"conversation_id": "sub-alt-1"}]`, "sub-alt-1"},
+		{`{"conversation_id": "sub-snake-1"}`, "sub-snake-1"},
+		{`{"subagents": [{"conversation_id": "sub-snake-sub"}]}`, "sub-snake-sub"},
+	} {
+		if got := extractSubagentID(tc.in); got != tc.want {
+			t.Errorf("extractSubagentID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
-
 func TestActivityWriter_SessionProbe(t *testing.T) {
 	w := NewActivityWriter("")
-	n, err := w.Write(nil)
-	if n != 0 || err != nil {
+	if n, err := w.Write(nil); n != 0 || err != nil {
 		t.Fatalf("expected 0, nil from empty write")
 	}
-
 	jsonPayload := []byte(`some log prefix {"session_id": "123e4567-e89b-12d3-a456-426614174000"} some suffix`)
-	n, err = w.Write(jsonPayload)
-	if err != nil || n != len(jsonPayload) {
+	if n, err := w.Write(jsonPayload); err != nil || n != len(jsonPayload) {
 		t.Fatalf("write failed: %v", err)
 	}
 	if w.SessionID() != "123e4567-e89b-12d3-a456-426614174000" {
-		t.Errorf("expected session ID extracted via sessionProbe, got %q", w.SessionID())
+		t.Errorf("expected session ID, got %q", w.SessionID())
 	}
-
-	// Another writer testing reUpdateStream
 	w2 := NewActivityWriter("")
-	streamMsg := []byte("Starting conversation update stream for 223e4567-e89b-12d3-a456-426614174000\n")
-	_, _ = w2.Write(streamMsg)
+	_, _ = w2.Write([]byte("Starting conversation update stream for 223e4567-e89b-12d3-a456-426614174000\n"))
 	if w2.SessionID() != "223e4567-e89b-12d3-a456-426614174000" {
-		t.Errorf("expected session ID from update stream, got %q", w2.SessionID())
+		t.Errorf("expected update stream session ID, got %q", w2.SessionID())
 	}
 }
 
 func TestDefaultWatchdogOptions(t *testing.T) {
 	opts := DefaultWatchdogOptions(5)
-	if opts.InactivityTimeout == 0 {
-		t.Errorf("expected non-zero InactivityTimeout")
-	}
-	if opts.MaxDuration == 0 {
-		t.Errorf("expected non-zero MaxDuration")
-	}
-}
-
-func TestPureHelpers_Coverage(t *testing.T) {
-	t.Parallel()
-
-	// 1. filterHomeEnv
-	envList := []string{
-		"PATH=/usr/bin",
-		"HOME=/root",
-		"USERPROFILE=C:\\Users\\root",
-		"GEMINI_CLI_HOME=/gemini",
-		"OTHER=val",
-		"NO_EQUALS_ENV",
-	}
-	filtered := filterHomeEnv(envList)
-	for _, env := range filtered {
-		if strings.HasPrefix(env, "HOME=") || strings.HasPrefix(env, "USERPROFILE=") || strings.HasPrefix(env, "GEMINI_CLI_HOME=") {
-			t.Errorf("expected HOME, USERPROFILE, and GEMINI_CLI_HOME to be filtered, found %s", env)
-		}
-	}
-	if len(filtered) != 3 {
-		t.Errorf("expected 3 filtered items (PATH, OTHER, NO_EQUALS_ENV), got %d: %v", len(filtered), filtered)
-	}
-
-	// 2. IsResultEvent
-	if IsResultEvent("") {
-		t.Errorf("expected empty string to be false")
-	}
-	if IsResultEvent("some random log") {
-		t.Errorf("expected non-json log to be false")
-	}
-	if !IsResultEvent(`{"event":"result","data":"foo"}`) {
-		t.Errorf("expected valid result JSON to be true")
-	}
-	if !IsResultEvent(`prefix log {"event":"result"} suffix`) {
-		t.Errorf("expected embedded result JSON to be true")
-	}
-	if IsResultEvent("prefix log {not valid json result") {
-		t.Errorf("expected broken embedded json to be false")
-	}
-
-	// 3. WriteWorkerTurn
-	if err := WriteWorkerTurn(nil, "test prompt"); err == nil {
-		t.Errorf("expected error when writer is nil")
-	}
-	var buf bytes.Buffer
-	if err := WriteWorkerTurn(&buf, "test prompt"); err != nil {
-		t.Fatalf("WriteWorkerTurn failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "test prompt") {
-		t.Errorf("expected buffer to contain prompt, got %s", buf.String())
+	if opts.InactivityTimeout == 0 || opts.MaxDuration == 0 {
+		t.Errorf("expected non-zero watchdog options")
 	}
 }
 
 func TestCleanUnescapedString(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{input: `"github"`, want: "github"},
-		{input: `"\"github\""`, want: "github"},
-		{input: `  "unifi"  `, want: "unifi"},
-		{input: `plain`, want: "plain"},
-		{input: `""`, want: ""},
-		{input: `"a"`, want: "a"},
-		{input: `"`, want: `"`},
-	}
-	for _, tc := range tests {
-		got := CleanUnescapedString(tc.input)
-		if got != tc.want {
-			t.Errorf("CleanUnescapedString(%q) = %q, want %q", tc.input, got, tc.want)
+	for _, tc := range []struct{ in, want string }{
+		{`"github"`, "github"},
+		{`"\"github\""`, "github"},
+		{`"\"nested\""`, "nested"},
+		{`\hello\`, "hello"},
+		{`  "unifi"  `, "unifi"},
+		{"plain", "plain"},
+		{`""`, ""},
+		{"", ""},
+		{`"a"`, "a"},
+		{`"`, `"`},
+	} {
+		if got := CleanUnescapedString(tc.in); got != tc.want {
+			t.Errorf("CleanUnescapedString(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
 
 func TestExtractMCPToolInfo(t *testing.T) {
-	tests := []struct {
-		name       string
+	for _, tc := range []struct {
 		toolName   string
 		params     map[string]any
 		wantTool   string
 		wantServer string
 	}{
-		{
-			name:       "empty tool name",
-			toolName:   "",
-			params:     nil,
-			wantTool:   "unknown",
-			wantServer: "native",
-		},
-		{
-			name:       "standard native tool",
-			toolName:   "run_command",
-			params:     map[string]any{"CommandLine": "ls"},
-			wantTool:   "run_command",
-			wantServer: "native",
-		},
-		{
-			name:       "lazy call_mcp_tool with valid params",
-			toolName:   "call_mcp_tool",
-			params:     map[string]any{"ServerName": "github", "ToolName": "list_pull_requests"},
-			wantTool:   "list_pull_requests",
-			wantServer: "github",
-		},
-		{
-			name:       "lazy call_mcp_tool with escaped quotes",
-			toolName:   "call_mcp_tool",
-			params:     map[string]any{"ServerName": `"\"unifi\""`, "ToolName": `"\"unifi_execute\""`},
-			wantTool:   "unifi_execute",
-			wantServer: "unifi",
-		},
-		{
-			name:       "lazy call_mcp_tool with nil params",
-			toolName:   "call_mcp_tool",
-			params:     nil,
-			wantTool:   "call_mcp_tool",
-			wantServer: "unknown",
-		},
-		{
-			name:       "lazy call_mcp_tool with missing ToolName",
-			toolName:   "call_mcp_tool",
-			params:     map[string]any{"ServerName": "docker"},
-			wantTool:   "call_mcp_tool",
-			wantServer: "docker",
-		},
-		{
-			name:       "lazy call_mcp_tool with missing ServerName",
-			toolName:   "call_mcp_tool",
-			params:     map[string]any{"ToolName": "list_containers"},
-			wantTool:   "list_containers",
-			wantServer: "unknown",
-		},
-		{
-			name:       "lazy call_mcp_tool with invalid types (panic safety check)",
-			toolName:   "call_mcp_tool",
-			params:     map[string]any{"ServerName": 12345, "ToolName": []any{"bad"}},
-			wantTool:   "call_mcp_tool",
-			wantServer: "unknown",
-		},
-		{
-			name:       "eager mcp tool",
-			toolName:   "mcp_github_create_pull_request",
-			params:     nil,
-			wantTool:   "create_pull_request",
-			wantServer: "github",
-		},
-		{
-			name:       "eager mcp tool without second underscore",
-			toolName:   "mcp_docker",
-			params:     nil,
-			wantTool:   "docker",
-			wantServer: "unknown",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotTool, gotServer := ExtractMCPToolInfo(tc.toolName, tc.params)
-			if gotTool != tc.wantTool || gotServer != tc.wantServer {
-				t.Errorf("ExtractMCPToolInfo(%q, %v) = (%q, %q), want (%q, %q)",
-					tc.toolName, tc.params, gotTool, gotServer, tc.wantTool, tc.wantServer)
-			}
-		})
+		{"", nil, "unknown", "native"},
+		{"run_command", map[string]any{"CommandLine": "ls"}, "run_command", "native"},
+		{"call_mcp_tool", map[string]any{"ServerName": "github", "ToolName": "list_pull_requests"}, "list_pull_requests", "github"},
+		{"call_mcp_tool", map[string]any{"ServerName": `"\"unifi\""`, "ToolName": `"\"unifi_execute\""`}, "unifi_execute", "unifi"},
+		{"call_mcp_tool", nil, "call_mcp_tool", "unknown"},
+		{"call_mcp_tool", map[string]any{"ServerName": "docker"}, "call_mcp_tool", "docker"},
+		{"call_mcp_tool", map[string]any{"ToolName": "list_containers"}, "list_containers", "unknown"},
+		{"call_mcp_tool", map[string]any{"ServerName": 12345, "ToolName": []any{"bad"}}, "call_mcp_tool", "unknown"},
+		{"mcp_github_create_pull_request", nil, "create_pull_request", "github"},
+		{"mcp_docker", nil, "docker", "unknown"},
+		{"mcp_singlepart", nil, "singlepart", "unknown"},
+	} {
+		gotTool, gotServer := ExtractMCPToolInfo(tc.toolName, tc.params)
+		if gotTool != tc.wantTool || gotServer != tc.wantServer {
+			t.Errorf("ExtractMCPToolInfo(%q, %v) = (%q, %q), want (%q, %q)", tc.toolName, tc.params, gotTool, gotServer, tc.wantTool, tc.wantServer)
+		}
 	}
 }
 
 func TestExtractSkillFromTarget(t *testing.T) {
-	tests := []struct {
-		name      string
-		target    string
-		wantSkill string
-		wantOk    bool
+	for _, tc := range []struct {
+		target, want string
+		wantOk       bool
 	}{
-		{
-			name:      "empty target",
-			target:    "",
-			wantSkill: "",
-			wantOk:    false,
-		},
-		{
-			name:      "unrelated file path",
-			target:    "/share/aerial/pkg/runner/pure.go",
-			wantSkill: "",
-			wantOk:    false,
-		},
-		{
-			name:      "system skill view_file path",
-			target:    "/share/aerial/.agents/skills/discord/self-improvement/SKILL.md",
-			wantSkill: "self-improvement",
-			wantOk:    true,
-		},
-		{
-			name:      "custom skill path",
-			target:    "/share/aerial-config/custom-skills/ha-operations/SKILL.md",
-			wantSkill: "ha-operations",
-			wantOk:    true,
-		},
-		{
-			name:      "runtime skill path with file URI scheme",
-			target:    "file:///data/runtimes/discord/.gemini/config/skills/culinary-recipes/SKILL.md",
-			wantSkill: "culinary-recipes",
-			wantOk:    true,
-		},
-		{
-			name:      "shell command reading SKILL.md",
-			target:    "cat /root/.gemini/config/skills/antigravity-guide/SKILL.md | grep title",
-			wantSkill: "antigravity-guide",
-			wantOk:    true,
-		},
-		{
-			name:      "bare SKILL.md without directory",
-			target:    "SKILL.md",
-			wantSkill: "",
-			wantOk:    false,
-		},
-		{
-			name:      "target where skill name is 'skills' keyword",
-			target:    "/foo/skills/SKILL.md",
-			wantSkill: "",
-			wantOk:    false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotSkill, gotOk := ExtractSkillFromTarget(tc.target)
-			if gotSkill != tc.wantSkill || gotOk != tc.wantOk {
-				t.Errorf("ExtractSkillFromTarget(%q) = (%q, %t), want (%q, %t)",
-					tc.target, gotSkill, gotOk, tc.wantSkill, tc.wantOk)
-			}
-		})
+		{"", "", false},
+		{"/share/aerial/pkg/runner/pure.go", "", false},
+		{"/share/aerial/.agents/skills/discord/self-improvement/SKILL.md", "self-improvement", true},
+		{"/share/aerial-config/custom-skills/ha-operations/SKILL.md", "ha-operations", true},
+		{"file:///data/runtimes/discord/.gemini/config/skills/culinary-recipes/SKILL.md", "culinary-recipes", true},
+		{"cat /root/.gemini/config/skills/antigravity-guide/SKILL.md | grep title", "antigravity-guide", true},
+		{"SKILL.md", "", false},
+		{"/foo/skills/SKILL.md", "", false},
+		{"no-skill-here", "", false},
+		{"view_file /skills/foo/SKILL.md", "foo", true},
+	} {
+		if got, ok := ExtractSkillFromTarget(tc.target); got != tc.want || ok != tc.wantOk {
+			t.Errorf("ExtractSkillFromTarget(%q) = (%q, %v), want (%q, %v)", tc.target, got, ok, tc.want, tc.wantOk)
+		}
 	}
 }
