@@ -605,11 +605,36 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	sb.WriteString("=== Mandatory Execution Contract ===\n")
 	fmt.Fprintf(&sb, "1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n", activeRepo)
 	sb.WriteString("2. Implement ONLY this chunk following TDD, run package tests and `./scripts/verify.sh --staged`, and write `PR_DESCRIPTION.md`.\n")
-	sb.WriteString("3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches.\n")
+	sb.WriteString("3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n")
+	if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
+		fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)
+	}
 	fmt.Fprintf(&sb, "4. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n", active.ID)
 	sb.WriteString("5. Terminate turn immediately after submission.\n")
 
 	return sb.String(), nil
+}
+
+func formatSymbolGrepCommand(targetFiles, targetSymbols []string) string {
+	var cleanSymbols []string
+	for _, sym := range targetSymbols {
+		if s := strings.TrimSpace(sym); s != "" {
+			cleanSymbols = append(cleanSymbols, s)
+		}
+	}
+	var cleanFiles []string
+	for _, file := range targetFiles {
+		f := strings.TrimSpace(file)
+		f = strings.TrimPrefix(f, "./")
+		f = strings.TrimPrefix(f, "/")
+		if f != "" {
+			cleanFiles = append(cleanFiles, fmt.Sprintf(`"$SCRATCH_DIR/%s"`, f))
+		}
+	}
+	if len(cleanSymbols) == 0 || len(cleanFiles) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("grep -n -E %q %s", strings.Join(cleanSymbols, "|"), strings.Join(cleanFiles, " "))
 }
 
 // ExecuteChunkWorker processes Vanadis chunk execution jobs from River.

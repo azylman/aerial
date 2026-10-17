@@ -743,12 +743,22 @@ func TestFormatChunkPrompt(t *testing.T) {
 		"Target Symbols: VanadisServer, FormatChunkPrompt",
 		"=== Acceptance Criteria ===\n- Coverage >= 95.0%\n- Table driven tests pass\n",
 		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)",
-		"Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches.",
+		"Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.",
+		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
 		"--vanadis-chunk build-999-chunk-2",
 	} {
 		if !strings.Contains(p1, want) {
 			t.Fatalf("prompt for chunk 1 missing %q:\n%s", want, p1)
 		}
+	}
+	if strings.Contains(p0, "Run after init:") {
+		t.Fatalf("expected chunk 0 without target symbols to omit grep command:\n%s", p0)
+	}
+	if got := formatSymbolGrepCommand([]string{"  ", "./pkg/foo.go"}, []string{" ", "Bar"}); got != `grep -n -E "Bar" "$SCRATCH_DIR/pkg/foo.go"` {
+		t.Fatalf("unexpected formatSymbolGrepCommand output: %s", got)
+	}
+	if got := formatSymbolGrepCommand([]string{"   "}, []string{"Bar"}); got != "" {
+		t.Fatalf("expected empty command for blank files, got %q", got)
 	}
 
 	// Verify build with empty shared context does not render header
