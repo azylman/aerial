@@ -7,95 +7,56 @@ import (
 	"time"
 )
 
-func TestPools_EvictSession_Coverage(t *testing.T) {
+func TestUnifiedProcessPool_EvictAndRescuerCoverage(t *testing.T) {
 	t.Parallel()
 
-	// 1. UnifiedProcessPool.EvictSession
-	{
-		var nilUnified *UnifiedProcessPool
-		if err := nilUnified.EvictSession("target-1"); err != nil {
-			t.Errorf("expected nil error on nil UnifiedProcessPool.EvictSession")
-		}
-
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-				go func() {
-					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000001\"}\n"))
-					_, _ = io.Copy(io.Discard, inR)
-				}()
-				return inW, outR, errR, NewMockProcessHandle(99999), nil
-			},
-		}
-
-		uPool := NewUnifiedProcessPool(PoolConfig{Model: "gemini-2.5-flash"}, mock)
-		defer uPool.Close()
-
-		// Evicting nonexistent target
-		if err := uPool.EvictSession("nonexistent"); err != nil {
-			t.Errorf("expected nil error on nonexistent target eviction: %v", err)
-		}
-
-		// Spawn daemon, then evict
-		sess, err := uPool.GetOrCreate(context.Background(), "target-evict-live", "")
-		if err != nil {
-			t.Fatalf("unexpected error spawning daemon: %v", err)
-		}
-		if sess == nil {
-			t.Fatalf("expected non-nil daemon")
-		}
-
-		if err := uPool.EvictSession("target-evict-live"); err != nil {
-			t.Errorf("unexpected error evicting active daemon: %v", err)
-		}
-
-		// Verify daemon was removed from pool
-		if uPool.HasDaemon("target-evict-live") {
-			t.Errorf("expected target-evict-live to be removed from pool")
-		}
+	// 1. EvictSession coverage
+	var nilUnified *UnifiedProcessPool
+	if err := nilUnified.EvictSession("target-1"); err != nil {
+		t.Errorf("expected nil error on nil UnifiedProcessPool.EvictSession")
 	}
-}
 
-func TestThrowawayTurnSink_NoOpCallbacks_Coverage(t *testing.T) {
-	t.Parallel()
-
-	sink := NewThrowawayTurnSink()
-	sink.OnTurnStarted()
-	sink.OnThinking()
-	sink.OnToolCall("run_command", "bash")
-	sink.OnToolCompleted("run_command", "default", 100*time.Millisecond, "DONE")
-	sink.OnSkillActivated("self-improvement", "trigger")
-	sink.OnTextDelta("some text")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	_, _ = sink.ResultContext(ctx)
-
-	res := &TurnResult{Response: "completed response"}
-	sink.OnResult(res)
-
-	// Call again to verify sync.Once branch
-	sink.OnResult(res)
-
-	select {
-	case out := <-sink.resCh:
-		if out != "completed response" {
-			t.Errorf("expected 'completed response', got %q", out)
-		}
-	default:
-		t.Errorf("expected response in resCh")
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000001\"}\n"))
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			return inW, outR, errR, NewMockProcessHandle(99999), nil
+		},
 	}
-}
 
-func TestUnifiedProcessPool_SetTranscriptRescuer_Coverage(t *testing.T) {
-	t.Parallel()
+	uPool := NewUnifiedProcessPool(PoolConfig{Model: "gemini-2.5-flash"}, mock)
+	defer uPool.Close()
 
+	if err := uPool.EvictSession("nonexistent"); err != nil {
+		t.Errorf("expected nil error on nonexistent target eviction: %v", err)
+	}
+
+	sess, err := uPool.GetOrCreate(context.Background(), "target-evict-live", "")
+	if err != nil {
+		t.Fatalf("unexpected error spawning daemon: %v", err)
+	}
+	if sess == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	if err := uPool.EvictSession("target-evict-live"); err != nil {
+		t.Errorf("unexpected error evicting active daemon: %v", err)
+	}
+
+	if uPool.HasDaemon("target-evict-live") {
+		t.Errorf("expected target-evict-live to be removed from pool")
+	}
+
+	// 2. SetTranscriptRescuer coverage
 	var nilPool *UnifiedProcessPool
 	nilPool.SetTranscriptRescuer(func(convID string, since time.Time) string { return "" })
 
-	mock := &MockDaemonSpawner{
+	mockRescuer := &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
@@ -108,117 +69,132 @@ func TestUnifiedProcessPool_SetTranscriptRescuer_Coverage(t *testing.T) {
 		},
 	}
 
-	uPool := NewUnifiedProcessPool(PoolConfig{Model: "gemini-2.5-flash"}, mock)
-	defer uPool.Close()
+	uPoolRescuer := NewUnifiedProcessPool(PoolConfig{Model: "gemini-2.5-flash"}, mockRescuer)
+	defer uPoolRescuer.Close()
 
-	_, _ = uPool.GetOrCreate(context.Background(), "target-rescuer", "")
+	_, _ = uPoolRescuer.GetOrCreate(context.Background(), "target-rescuer", "")
 
 	rescuerCalled := false
-	uPool.SetTranscriptRescuer(func(convID string, since time.Time) string {
+	uPoolRescuer.SetTranscriptRescuer(func(convID string, since time.Time) string {
 		rescuerCalled = true
 		return "rescued"
 	})
 
-	if uPool.cfg.TranscriptRescuer == nil {
+	if uPoolRescuer.cfg.TranscriptRescuer == nil {
 		t.Errorf("expected cfg.TranscriptRescuer to be set")
 	}
-	_ = uPool.cfg.TranscriptRescuer("conv-1", time.Now())
+	_ = uPoolRescuer.cfg.TranscriptRescuer("conv-1", time.Now())
 	if !rescuerCalled {
 		t.Errorf("expected rescuer callback to be invoked")
+	}
+
+	// 3. ThrowawayTurnSink coverage
+	sink := NewThrowawayTurnSink()
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnToolCall("run_command", "bash")
+	sink.OnToolCompleted("run_command", "default", 100*time.Millisecond, "DONE")
+	sink.OnSkillActivated("self-improvement", "trigger")
+	sink.OnTextDelta("some text")
+
+	sinkCtx, sinkCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer sinkCancel()
+	_, _ = sink.ResultContext(sinkCtx)
+
+	res := &TurnResult{Response: "completed response"}
+	sink.OnResult(res)
+	sink.OnResult(res)
+
+	select {
+	case out := <-sink.resCh:
+		if out != "completed response" {
+			t.Errorf("expected 'completed response', got %q", out)
+		}
+	default:
+		t.Errorf("expected response in resCh")
 	}
 }
 
 func TestIsDaemonMatch_Comprehensive(t *testing.T) {
 	t.Parallel()
 
-	// 1. nil daemon
-	if isDaemonMatch(nil, "") {
-		t.Errorf("expected false for nil daemon")
-	}
-
-	// 2. closed daemon
 	dClosed := &StreamingDaemon{state: StateClosed}
-	if isDaemonMatch(dClosed, "") {
-		t.Errorf("expected false for closed daemon")
-	}
-
-	// 3. dirty daemon
 	dDirty := &StreamingDaemon{dirty: true, state: StateReady}
-	if isDaemonMatch(dDirty, "") {
-		t.Errorf("expected false for dirty daemon")
-	}
-
-	// 4. empty trimmedSess matches any non-closed, non-dirty daemon
 	dReady := &StreamingDaemon{state: StateReady, sessionID: "sess-abc"}
-	if !isDaemonMatch(dReady, "") {
-		t.Errorf("expected true for empty trimmedSess on ready daemon")
-	}
-
-	// 5. daemon with empty sessionID matches matching session
 	dEmptySess := &StreamingDaemon{state: StateReady, sessionID: ""}
-	if !isDaemonMatch(dEmptySess, "sess-target") {
-		t.Errorf("expected true for daemon with empty sessionID against any session")
+
+	tests := []struct {
+		name string
+		d    *StreamingDaemon
+		sess string
+		want bool
+	}{
+		{name: "NilDaemon", d: nil, sess: "", want: false},
+		{name: "ClosedDaemon", d: dClosed, sess: "", want: false},
+		{name: "DirtyDaemon", d: dDirty, sess: "", want: false},
+		{name: "EmptyTrimmedSess", d: dReady, sess: "", want: true},
+		{name: "EmptyDaemonSessionID", d: dEmptySess, sess: "sess-target", want: true},
+		{name: "MatchingSessionID", d: dReady, sess: "sess-abc", want: true},
+		{name: "MismatchedSessionID", d: dReady, sess: "sess-xyz", want: false},
 	}
 
-	// 6. daemon with matching sessionID
-	if !isDaemonMatch(dReady, "sess-abc") {
-		t.Errorf("expected true for matching sessionID")
-	}
-
-	// 7. daemon with non-matching sessionID
-	if isDaemonMatch(dReady, "sess-xyz") {
-		t.Errorf("expected false for mismatched sessionID")
+	for _, tc := range tests {
+		got := isDaemonMatch(tc.d, tc.sess)
+		if got != tc.want {
+			t.Errorf("%s: isDaemonMatch = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
 func TestPure_Helpers_BranchCoverage(t *testing.T) {
 	t.Parallel()
 
-	// CleanUnescapedString edge cases
-	if CleanUnescapedString("") != "" {
-		t.Errorf("expected empty string")
+	cleanTests := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: ""},
+		{input: `"\"nested\""`, want: "nested"},
+		{input: `\hello\`, want: "hello"},
 	}
-	if CleanUnescapedString(`"\"nested\""`) != "nested" {
-		t.Errorf("expected nested unwrapped")
-	}
-	if CleanUnescapedString(`\hello\`) != "hello" {
-		t.Errorf("expected hello unwrapped")
-	}
-
-	// ExtractMCPToolInfo branches
-	can, srv := ExtractMCPToolInfo("", nil)
-	if can != "unknown" || srv != "native" {
-		t.Errorf("expected unknown/native, got %s/%s", can, srv)
+	for _, tc := range cleanTests {
+		if got := CleanUnescapedString(tc.input); got != tc.want {
+			t.Errorf("CleanUnescapedString(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 
-	can, srv = ExtractMCPToolInfo("call_mcp_tool", nil)
-	if can != "call_mcp_tool" || srv != "unknown" {
-		t.Errorf("expected call_mcp_tool/unknown, got %s/%s", can, srv)
+	mcpTests := []struct {
+		callName string
+		args     map[string]any
+		wantCan  string
+		wantSrv  string
+	}{
+		{callName: "", args: nil, wantCan: "unknown", wantSrv: "native"},
+		{callName: "call_mcp_tool", args: nil, wantCan: "call_mcp_tool", wantSrv: "unknown"},
+		{callName: "call_mcp_tool", args: map[string]any{"ServerName": "my-server"}, wantCan: "call_mcp_tool", wantSrv: "my-server"},
+		{callName: "call_mcp_tool", args: map[string]any{"ToolName": "my-tool"}, wantCan: "my-tool", wantSrv: "unknown"},
+		{callName: "mcp_singlepart", args: nil, wantCan: "singlepart", wantSrv: "unknown"},
+	}
+	for _, tc := range mcpTests {
+		gotCan, gotSrv := ExtractMCPToolInfo(tc.callName, tc.args)
+		if gotCan != tc.wantCan || gotSrv != tc.wantSrv {
+			t.Errorf("ExtractMCPToolInfo(%q, %v) = (%q, %q), want (%q, %q)", tc.callName, tc.args, gotCan, gotSrv, tc.wantCan, tc.wantSrv)
+		}
 	}
 
-	can, srv = ExtractMCPToolInfo("call_mcp_tool", map[string]any{"ServerName": "my-server"})
-	if can != "call_mcp_tool" || srv != "my-server" {
-		t.Errorf("expected call_mcp_tool/my-server, got %s/%s", can, srv)
+	skillTests := []struct {
+		target string
+		want   string
+		wantOK bool
+	}{
+		{target: "", want: "", wantOK: false},
+		{target: "no-skill-here", want: "", wantOK: false},
+		{target: "view_file /skills/foo/SKILL.md", want: "foo", wantOK: true},
 	}
-
-	can, srv = ExtractMCPToolInfo("call_mcp_tool", map[string]any{"ToolName": "my-tool"})
-	if can != "my-tool" || srv != "unknown" {
-		t.Errorf("expected my-tool/unknown, got %s/%s", can, srv)
-	}
-
-	can, srv = ExtractMCPToolInfo("mcp_singlepart", nil)
-	if can != "singlepart" || srv != "unknown" {
-		t.Errorf("expected singlepart/unknown, got %s/%s", can, srv)
-	}
-
-	// ExtractSkillFromTarget branches
-	if s, ok := ExtractSkillFromTarget(""); ok || s != "" {
-		t.Errorf("expected false for empty target")
-	}
-	if s, ok := ExtractSkillFromTarget("no-skill-here"); ok || s != "" {
-		t.Errorf("expected false for no SKILL.md")
-	}
-	if s, ok := ExtractSkillFromTarget("view_file /skills/foo/SKILL.md"); !ok || s != "foo" {
-		t.Errorf("expected foo, got %s (ok=%v)", s, ok)
+	for _, tc := range skillTests {
+		got, ok := ExtractSkillFromTarget(tc.target)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("ExtractSkillFromTarget(%q) = (%q, %v), want (%q, %v)", tc.target, got, ok, tc.want, tc.wantOK)
+		}
 	}
 }
