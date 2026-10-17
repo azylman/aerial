@@ -40,33 +40,6 @@ func FilterNomadConfigFiles(changedFiles []string) []string {
 	return result
 }
 
-// BuildDiscordAlertContent constructs markdown content for automated GitOps alerts.
-func BuildDiscordAlertContent(title, repoPath, faultyCommit, rolledBackTo, stage, errorMsg string) string {
-	sanitizedErr := strings.TrimSpace(errorMsg)
-	if len(sanitizedErr) > 1200 {
-		sanitizedErr = sanitizedErr[:1200] + "\n[... truncated for length]"
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🚨 **GitSync GitOps Alert: %s**\n\n", strings.TrimSpace(title)))
-	if repoPath != "" {
-		sb.WriteString(fmt.Sprintf("**Repository:** `%s`\n", filepath.Clean(repoPath)))
-	}
-	if stage != "" {
-		sb.WriteString(fmt.Sprintf("**Stage:** `%s`\n", stage))
-	}
-	if faultyCommit != "" {
-		sb.WriteString(fmt.Sprintf("**Commit:** `%s`\n", faultyCommit))
-	}
-	if rolledBackTo != "" {
-		sb.WriteString(fmt.Sprintf("**Rolled Back To:** `%s`\n", rolledBackTo))
-	}
-	if sanitizedErr != "" {
-		sb.WriteString(fmt.Sprintf("\n**Error:**\n```\n%s\n```\n", sanitizedErr))
-	}
-
-	return sb.String()
-}
 
 // CalculateSyncStatus evaluates repository statuses and determines the overall daemon status.
 // Precedence: "error" > "lagging" > "synced".
@@ -474,27 +447,6 @@ func ParseWwwAuthenticate(header string) (realm, service, scope string, err erro
 	return realm, service, scope, nil
 }
 
-// ContainsDigest checks whether the specified target digest matches any entry in the image's RepoDigests.
-func ContainsDigest(repoDigests []string, targetDigest string) bool {
-	target := strings.TrimSpace(targetDigest)
-	if target == "" {
-		return false
-	}
-	for _, entry := range repoDigests {
-		e := strings.TrimSpace(entry)
-		if e == target {
-			return true
-		}
-		if strings.HasSuffix(e, "@"+target) {
-			return true
-		}
-		parts := strings.Split(e, "@")
-		if len(parts) == 2 && parts[1] == target {
-			return true
-		}
-	}
-	return false
-}
 
 
 // ParseGitHubSlug extracts and lowercases the "owner/repo" slug from a GitHub remote URL.
@@ -563,16 +515,6 @@ func IsNomadJobFile(p string) bool {
 	return strings.HasSuffix(lower, ".nomad") || strings.HasSuffix(lower, ".nomad.hcl")
 }
 
-// FilterNomadChanges filters a list of changed file paths and returns only those that affect Nomad jobs.
-func FilterNomadChanges(changedFiles []string) []string {
-	var result []string
-	for _, f := range changedFiles {
-		if IsNomadJobFile(f) {
-			result = append(result, f)
-		}
-	}
-	return result
-}
 
 // ExtractJobName extracts the Nomad job name from job specification content (e.g. job "name" { ... }).
 // If parsing fails, it falls back to the file basename stripped of .nomad extensions.
@@ -788,6 +730,44 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 	return changes
 }
 
+// walkNomadJobFiles iterates over the specified directories, deduplicating them and visiting
+// each valid Nomad job file. If visit returns false, traversal terminates early.
+func walkNomadJobFiles(dirs []string, visit func(dir, jobPath, jobName, content string) bool) {
+	seenDirs := make(map[string]struct{})
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		cleanDir := filepath.Clean(dir)
+		if _, seen := seenDirs[cleanDir]; seen {
+			continue
+		}
+		seenDirs[cleanDir] = struct{}{}
+
+		entries, err := os.ReadDir(cleanDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
+				continue
+			}
+			fullPath := filepath.Join(cleanDir, entry.Name())
+			if !IsSafeJobPath(cleanDir, fullPath) {
+				continue
+			}
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				continue
+			}
+			jobName := ExtractJobName(string(content), entry.Name())
+			if !visit(cleanDir, fullPath, jobName, string(content)) {
+				return
+			}
+		}
+	}
+}
+
 // FindJobDefinitionInRepos searches candidate repositories for a Nomad job specification
 // that defines the specified jobName, excluding the repo at skipRepoPath.
 // Returns the file path where the job is defined and true if found, or ("", false) if not found.
@@ -800,7 +780,7 @@ func FindJobDefinitionInRepos(jobName string, skipRepoPath string, candidateRepo
 		cleanSkip = filepath.Clean(skipRepoPath)
 	}
 
-	seenDirs := make(map[string]struct{})
+	var dirs []string
 	for _, repo := range candidateRepos {
 		if repo == "" {
 			continue
@@ -809,41 +789,21 @@ func FindJobDefinitionInRepos(jobName string, skipRepoPath string, candidateRepo
 		if cleanSkip != "" && cleanRepo == cleanSkip {
 			continue
 		}
-
-		// Candidate directories in each repo where job specifications might reside
-		candidateDirs := []string{
+		dirs = append(dirs,
 			filepath.Join(cleanRepo, "jobs"),
 			filepath.Join(cleanRepo, "nomad", "jobs"),
-		}
-
-		for _, dir := range candidateDirs {
-			cleanDir := filepath.Clean(dir)
-			if _, seen := seenDirs[cleanDir]; seen {
-				continue
-			}
-			seenDirs[cleanDir] = struct{}{}
-
-			entries, err := os.ReadDir(cleanDir)
-			if err != nil {
-				continue
-			}
-
-			for _, entry := range entries {
-				if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
-					continue
-				}
-				fullPath := filepath.Join(cleanDir, entry.Name())
-				content, err := os.ReadFile(fullPath)
-				if err != nil {
-					continue
-				}
-				if ExtractJobName(string(content), entry.Name()) == jobName {
-					return fullPath, true
-				}
-			}
-		}
+		)
 	}
-	return "", false
+
+	var foundPath string
+	walkNomadJobFiles(dirs, func(dir, jobPath, name, content string) bool {
+		if name == jobName {
+			foundPath = jobPath
+			return false
+		}
+		return true
+	})
+	return foundPath, foundPath != ""
 }
 
 // GitPushEventRequest represents an incoming git push event.
@@ -991,37 +951,23 @@ type MatchedNomadJob struct {
 
 // FindNomadJobsByImage searches a directory for Nomad job specifications referencing the target image.
 func FindNomadJobsByImage(jobsDir, imageRef string) []MatchedNomadJob {
-	var matches []MatchedNomadJob
 	if jobsDir == "" || imageRef == "" {
 		return nil
 	}
-	entries, err := os.ReadDir(jobsDir)
-	if err != nil {
-		return nil
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
-			continue
-		}
-		fullPath := filepath.Join(jobsDir, entry.Name())
-		if !IsSafeJobPath(jobsDir, fullPath) {
-			continue
-		}
-		content, err := os.ReadFile(fullPath)
-		if err != nil {
-			continue
-		}
-		images := ExtractNomadJobImages(string(content))
+	var matches []MatchedNomadJob
+	walkNomadJobFiles([]string{jobsDir}, func(dir, jobPath, jobName, content string) bool {
+		images := ExtractNomadJobImages(content)
 		for _, img := range images {
 			if ImageMatches(imageRef, img) {
 				matches = append(matches, MatchedNomadJob{
-					JobName: ExtractJobName(string(content), entry.Name()),
-					JobPath: fullPath,
+					JobName: jobName,
+					JobPath: jobPath,
 				})
 				break
 			}
 		}
-	}
+		return true
+	})
 	return matches
 }
 
