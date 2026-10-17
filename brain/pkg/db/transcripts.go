@@ -11,22 +11,17 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-// GetSessionSyncStates retrieves a snapshot map of session IDs to sync states.
-func GetSessionSyncStates(database DBTX) (map[string]SessionSyncState, error) {
-	return GetSessionSyncStatesWithContext(context.Background(), database, false)
+func recordTranscriptQuery(op string, start time.Time, errp *error) {
+	status := "success"
+	if errp != nil && *errp != nil {
+		status = "error"
+	}
+	metrics.RecordDBQuery(op, status, time.Since(start))
 }
 
 // GetSessionSyncStatesWithContext retrieves sync states with context and database driver detection.
-func GetSessionSyncStatesWithContext(ctx context.Context, database DBTX, isPg bool) (map[string]SessionSyncState, error) {
-	start := time.Now()
-	var err error
-	defer func() {
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		metrics.RecordDBQuery("get_session_sync_states", status, time.Since(start))
-	}()
+func GetSessionSyncStatesWithContext(ctx context.Context, database DBTX, isPg bool) (results map[string]SessionSyncState, err error) {
+	defer recordTranscriptQuery("get_session_sync_states", time.Now(), &err)
 
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
@@ -44,7 +39,7 @@ func GetSessionSyncStatesWithContext(ctx context.Context, database DBTX, isPg bo
 	}
 	defer rows.Close()
 
-	results := make(map[string]SessionSyncState)
+	results = make(map[string]SessionSyncState)
 	for rows.Next() {
 		var (
 			id        string
@@ -72,21 +67,9 @@ func GetSessionSyncStatesWithContext(ctx context.Context, database DBTX, isPg bo
 	return results, nil
 }
 
-// UpsertSessionSummary inserts or updates a session summary record.
-func UpsertSessionSummary(database DBTX, summary SessionSummary) error {
-	return UpsertSessionSummaryWithContext(context.Background(), database, false, summary)
-}
-
 // UpsertSessionSummaryWithContext inserts or updates a session summary record with context.
 func UpsertSessionSummaryWithContext(ctx context.Context, database DBTX, isPg bool, summary SessionSummary) (err error) {
-	start := time.Now()
-	defer func() {
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		metrics.RecordDBQuery("upsert_session_summary", status, time.Since(start))
-	}()
+	defer recordTranscriptQuery("upsert_session_summary", time.Now(), &err)
 
 	if database == nil {
 		return fmt.Errorf("database is nil")
@@ -161,21 +144,9 @@ func UpsertSessionSummaryWithContext(ctx context.Context, database DBTX, isPg bo
 	return nil
 }
 
-// BatchInsertTranscriptSteps inserts multiple execution steps with conflict-ignoring semantics.
-func BatchInsertTranscriptSteps(database DBTX, steps []TranscriptStep) error {
-	return BatchInsertTranscriptStepsWithContext(context.Background(), database, false, steps)
-}
-
 // BatchInsertTranscriptStepsWithContext inserts steps with chunking and context.
 func BatchInsertTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg bool, steps []TranscriptStep) (err error) {
-	start := time.Now()
-	defer func() {
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		metrics.RecordDBQuery("batch_insert_transcript_steps", status, time.Since(start))
-	}()
+	defer recordTranscriptQuery("batch_insert_transcript_steps", time.Now(), &err)
 
 	if database == nil {
 		return fmt.Errorf("database is nil")
@@ -235,21 +206,9 @@ func BatchInsertTranscriptStepsWithContext(ctx context.Context, database DBTX, i
 	return nil
 }
 
-// SearchSessionSummaries searches macro session summaries using hybrid RRF scoring.
-func SearchSessionSummaries(database DBTX, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
-	return SearchSessionSummariesWithContext(context.Background(), database, false, embedding, queryText, limit, minScore)
-}
-
 // SearchSessionSummariesWithContext searches macro session summaries with context.
 func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, queryText string, limit int, minScore float64) (results []SessionSummary, err error) {
-	start := time.Now()
-	defer func() {
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		metrics.RecordDBQuery("search_session_summaries", status, time.Since(start))
-	}()
+	defer recordTranscriptQuery("search_session_summaries", time.Now(), &err)
 
 	if database == nil {
 		return nil, nil
@@ -386,21 +345,9 @@ func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg 
 	return summaries, nil
 }
 
-// SearchTranscriptSteps searches micro execution steps using FTS with optional session and tool filters.
-func SearchTranscriptSteps(database DBTX, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
-	return SearchTranscriptStepsWithContext(context.Background(), database, false, queryText, sessionFilter, toolFilter, limit)
-}
-
 // SearchTranscriptStepsWithContext searches micro execution steps with context.
 func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg bool, queryText, sessionFilter, toolFilter string, limit int) (results []TranscriptStep, err error) {
-	start := time.Now()
-	defer func() {
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		metrics.RecordDBQuery("search_transcript_steps", status, time.Since(start))
-	}()
+	defer recordTranscriptQuery("search_transcript_steps", time.Now(), &err)
 
 	if database == nil {
 		return nil, nil

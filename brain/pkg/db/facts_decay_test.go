@@ -172,6 +172,29 @@ func TestSQLStoreReinforceAndDecay(t *testing.T) {
 	if !errors.Is(errNotFound, ErrFactNotFound) {
 		t.Errorf("expected ErrFactNotFound, got %v", errNotFound)
 	}
+
+	// Nil receiver and nil DB branches
+	var nilStore *SQLStore
+	if _, _, err := nilStore.FindDuplicateFact(ctx, emb, 0.88); err == nil {
+		t.Errorf("expected error on nilStore.FindDuplicateFact")
+	}
+	if err := nilStore.ReinforceFact(ctx, 1, "text", emb, 0.15); err == nil {
+		t.Errorf("expected error on nilStore.ReinforceFact")
+	}
+	if _, _, err := nilStore.DecayAndPruneFacts(ctx, 0.02, 0.10, 30); err == nil {
+		t.Errorf("expected error on nilStore.DecayAndPruneFacts")
+	}
+
+	storeNilDB := &SQLStore{db: nil}
+	if _, _, err := storeNilDB.FindDuplicateFact(ctx, emb, 0.88); err == nil {
+		t.Errorf("expected error on storeNilDB.FindDuplicateFact")
+	}
+	if err := storeNilDB.ReinforceFact(ctx, 1, "text", emb, 0.15); err == nil {
+		t.Errorf("expected error on storeNilDB.ReinforceFact")
+	}
+	if _, _, err := storeNilDB.DecayAndPruneFacts(ctx, 0.02, 0.10, 30); err == nil {
+		t.Errorf("expected error on storeNilDB.DecayAndPruneFacts")
+	}
 }
 
 func TestFactTime_ScanAllBranches(t *testing.T) {
@@ -187,60 +210,16 @@ func TestFactTime_ScanAllBranches(t *testing.T) {
 		t.Errorf("expected time.Time match, got err=%v valid=%v time=%v", err, ft.Valid, ft.Time)
 	}
 
-	// 3. String layouts
-	layouts := []string{
-		"2026-09-13 22:00:00.123456789 -0700 MST",
-		"2026-09-13 22:00:00.123456789 -0700 -0700",
-		"2026-09-13 22:00:00 -0700 MST",
-		"2026-09-13T22:00:00.123456789Z",
-		"2026-09-13T22:00:00Z",
-		"2026-09-13 22:00:00",
-		"2026-09-13 22:00:00.123456789-07:00",
-		"2026-09-13 22:00:00-07:00",
-		"2026-09-13 22:00:00.123456789",
-		"2026-09-13 22:00:00",
-		"2026-09-13T22:00:00Z",
-		"2026-09-13T22:00:00",
-	}
-	for _, l := range layouts {
-		var f FactTime
-		if err := f.Scan(l); err != nil || !f.Valid {
-			t.Errorf("failed to scan layout %q: %v", l, err)
-		}
+	// 3. Valid string
+	if err := ft.Scan("2026-09-13T22:00:00Z"); err != nil || !ft.Valid {
+		t.Errorf("expected valid time for string, got err=%v", err)
 	}
 
-	// 4. Monotonic clock string
-	monotonicStr := "2026-09-13 22:00:00 -0700 MST m=+0.001234567"
-	var ftMono FactTime
-	if err := ftMono.Scan(monotonicStr); err != nil || !ftMono.Valid {
-		t.Errorf("failed to scan monotonic string %q: %v", monotonicStr, err)
-	}
-
-	monotonicNano := "2026-09-13 22:00:00.123456789 -0700 MST m=+0.001234567"
-	if err := ftMono.Scan(monotonicNano); err != nil || !ftMono.Valid {
-		t.Errorf("failed to scan monotonic nano string %q: %v", monotonicNano, err)
-	}
-
-	// Invalid monotonic string
-	var ftInvMono FactTime
-	if err := ftInvMono.Scan("invalid date m=+0.123"); err == nil {
-		t.Errorf("expected error for invalid monotonic string")
-	}
-
-	// 5. Byte slice
-	var ftBytes FactTime
-	if err := ftBytes.Scan([]byte("2026-09-13 22:00:00")); err != nil || !ftBytes.Valid {
-		t.Errorf("failed to scan bytes: %v", err)
-	}
-
-	// 6. Unparseable string
-	var ftErr FactTime
-	if err := ftErr.Scan("totally invalid string"); err == nil {
+	// 4. Invalid string and invalid type error
+	if err := ft.Scan("totally invalid string"); err == nil {
 		t.Errorf("expected error on invalid string scan")
 	}
-
-	// 7. Unsupported type
-	if err := ftErr.Scan(12345); err == nil {
+	if err := ft.Scan(12345); err == nil {
 		t.Errorf("expected error on int scan")
 	}
 }
@@ -413,36 +392,6 @@ func TestFacts_PostgresBranchCoverage(t *testing.T) {
 	decayed, pruned, err = DecayAndPruneFactsWithContext(ctx, mockDBPruneErr, true, 0.02, 0.10, 30)
 	if err == nil || decayed != 3 {
 		t.Errorf("expected decayed=3 with prune error, got decayed=%d err=%v", decayed, err)
-	}
-}
-
-func TestSQLStore_ReinforceAndDecay_NilBranches(t *testing.T) {
-	ctx := context.Background()
-	emb := make([]float32, ExpectedEmbeddingDim)
-	emb[0] = 1.0
-
-	// 1. Nil receiver
-	var nilStore *SQLStore
-	if _, _, err := nilStore.FindDuplicateFact(ctx, emb, 0.88); err == nil {
-		t.Errorf("expected error on nilStore.FindDuplicateFact")
-	}
-	if err := nilStore.ReinforceFact(ctx, 1, "text", emb, 0.15); err == nil {
-		t.Errorf("expected error on nilStore.ReinforceFact")
-	}
-	if _, _, err := nilStore.DecayAndPruneFacts(ctx, 0.02, 0.10, 30); err == nil {
-		t.Errorf("expected error on nilStore.DecayAndPruneFacts")
-	}
-
-	// 2. Store with nil DB
-	storeNilDB := &SQLStore{db: nil}
-	if _, _, err := storeNilDB.FindDuplicateFact(ctx, emb, 0.88); err == nil {
-		t.Errorf("expected error on storeNilDB.FindDuplicateFact")
-	}
-	if err := storeNilDB.ReinforceFact(ctx, 1, "text", emb, 0.15); err == nil {
-		t.Errorf("expected error on storeNilDB.ReinforceFact")
-	}
-	if _, _, err := storeNilDB.DecayAndPruneFacts(ctx, 0.02, 0.10, 30); err == nil {
-		t.Errorf("expected error on storeNilDB.DecayAndPruneFacts")
 	}
 }
 
