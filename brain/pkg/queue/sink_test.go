@@ -371,32 +371,21 @@ func TestDiscordTurnSink_ConcurrentDeltas(t *testing.T) {
 	}
 }
 
-func TestVoiceTurnSink_LifecycleAndRebind(t *testing.T) {
+func TestVoiceTurnSink_RebindReplayMatrix(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name                 string
-		deviceID             string
-		initialConn          bool
-		failWrite            bool
-		zeroCapStruct        bool
 		chunksToSend         []string
 		wantInitialMsgs      int
 		rebindAckSeq         uint64
-		rebindNil            bool
 		wantReplayedMsgs     int
 		wantFirstSeq         uint64
 		appendAfterRebind    string
 		wantTotalAfterRebind int
-		wantRebindErrSub     string
-		terminalAction       string // "result", "error"
-		checkEmptyAfter      bool
-		callResultAndError   bool
 	}{
 		{
 			name:                 "RebindAndReplay",
-			deviceID:             "device-test-1",
-			initialConn:          true,
 			chunksToSend:         []string{"Hello ", "world", "!"},
 			wantInitialMsgs:      3,
 			rebindAckSeq:         1,
@@ -406,14 +395,12 @@ func TestVoiceTurnSink_LifecycleAndRebind(t *testing.T) {
 		},
 		{
 			name:             "AckAll",
-			deviceID:         "device-ack",
 			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
 			rebindAckSeq:     5,
 			wantReplayedMsgs: 0,
 		},
 		{
 			name:             "AckNone",
-			deviceID:         "device-ack",
 			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
 			rebindAckSeq:     0,
 			wantReplayedMsgs: 5,
@@ -421,7 +408,6 @@ func TestVoiceTurnSink_LifecycleAndRebind(t *testing.T) {
 		},
 		{
 			name:             "AckPartial",
-			deviceID:         "device-ack",
 			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
 			rebindAckSeq:     3,
 			wantReplayedMsgs: 2,
@@ -429,57 +415,9 @@ func TestVoiceTurnSink_LifecycleAndRebind(t *testing.T) {
 		},
 		{
 			name:             "AckBeyondBuffer",
-			deviceID:         "device-ack",
 			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
 			rebindAckSeq:     10,
 			wantReplayedMsgs: 0,
-		},
-		{
-			name:              "RebindNilAndResume",
-			deviceID:          "device-ack",
-			chunksToSend:      []string{"c1", "c2", "c3", "c4", "c5"},
-			rebindNil:         true,
-			appendAfterRebind: "c6",
-			rebindAckSeq:      5,
-			wantReplayedMsgs:  1,
-		},
-		{
-			name:               "ErrorPropagationAndWriteErrors",
-			deviceID:           "device-fail",
-			initialConn:        true,
-			failWrite:          true,
-			chunksToSend:       []string{"chunk1"},
-			rebindAckSeq:       0,
-			wantRebindErrSub:   "failed to replay chunk seq=1",
-			callResultAndError: true,
-		},
-		{
-			name:            "OnResultClearsBuffer",
-			deviceID:        "device-result",
-			initialConn:     true,
-			chunksToSend:    []string{"c1"},
-			terminalAction:  "result",
-			checkEmptyAfter: true,
-		},
-		{
-			name:            "OnErrorClearsBuffer",
-			deviceID:        "device-error",
-			initialConn:     true,
-			chunksToSend:    []string{"c1"},
-			terminalAction:  "error",
-			checkEmptyAfter: true,
-		},
-		{
-			name:           "NilConnection",
-			deviceID:       "device-nil",
-			chunksToSend:   []string{"delta 1"},
-			terminalAction: "result",
-		},
-		{
-			name:          "ZeroCapStruct",
-			deviceID:      "device-zero",
-			zeroCapStruct: true,
-			chunksToSend:  []string{"test"},
 		},
 	}
 
@@ -487,23 +425,11 @@ func TestVoiceTurnSink_LifecycleAndRebind(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var sink *VoiceTurnSink
-			var conn1 *mockWebSocketWriter
-			if tc.initialConn {
+			var conn1 WebSocketWriter
+			if tc.wantInitialMsgs > 0 {
 				conn1 = &mockWebSocketWriter{}
-				if tc.failWrite {
-					conn1.writeErr = errors.New("socket broken pipe")
-				}
-				sink = NewVoiceTurnSink(conn1, tc.deviceID)
-			} else if tc.zeroCapStruct {
-				sink = &VoiceTurnSink{deviceID: tc.deviceID}
-			} else {
-				sink = NewVoiceTurnSink(nil, tc.deviceID)
 			}
-
-			if tc.deviceID != "" && sink.DeviceID() != tc.deviceID {
-				t.Fatalf("expected %s, got %s", tc.deviceID, sink.DeviceID())
-			}
+			sink := NewVoiceTurnSink(conn1, "device-ack")
 
 			sink.OnTurnStarted()
 			sink.OnThinking()
@@ -513,92 +439,133 @@ func TestVoiceTurnSink_LifecycleAndRebind(t *testing.T) {
 				sink.OnTextDelta(chunk)
 			}
 
-			if conn1 != nil && tc.wantInitialMsgs > 0 {
-				msgs1 := conn1.getMessages()
-				if len(msgs1) != tc.wantInitialMsgs {
-					t.Fatalf("expected %d initial messages, got %d", tc.wantInitialMsgs, len(msgs1))
+			if conn1 != nil {
+				m := conn1.(*mockWebSocketWriter)
+				if len(m.getMessages()) != tc.wantInitialMsgs {
+					t.Fatalf("expected %d initial messages, got %d", tc.wantInitialMsgs, len(m.getMessages()))
 				}
 			}
 
-			if tc.rebindNil {
-				if err := sink.Rebind(nil, 0); err != nil {
-					t.Fatalf("expected nil error on rebind nil, got %v", err)
-				}
-				if tc.appendAfterRebind != "" {
-					sink.OnTextDelta(tc.appendAfterRebind)
-				}
-				connResume := &mockWebSocketWriter{}
-				if err := sink.Rebind(connResume, tc.rebindAckSeq); err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if len(connResume.getMessages()) != tc.wantReplayedMsgs {
-					t.Fatalf("expected %d replayed message, got %d", tc.wantReplayedMsgs, len(connResume.getMessages()))
-				}
-				return
+			conn2 := &mockWebSocketWriter{}
+			if err := sink.Rebind(conn2, tc.rebindAckSeq); err != nil {
+				t.Fatalf("unexpected rebind error: %v", err)
 			}
 
-			if tc.wantRebindErrSub != "" || tc.wantReplayedMsgs > 0 || tc.rebindAckSeq > 0 || (tc.initialConn && tc.wantInitialMsgs > 0) {
-				conn2 := &mockWebSocketWriter{}
-				if tc.failWrite {
-					conn2.writeErr = errors.New("socket broken pipe")
-				}
-				err := sink.Rebind(conn2, tc.rebindAckSeq)
-				if tc.wantRebindErrSub != "" {
-					if err == nil || !strings.Contains(err.Error(), tc.wantRebindErrSub) {
-						t.Fatalf("expected wrapped rebind error containing %q, got: %v", tc.wantRebindErrSub, err)
-					}
-				} else {
-					if err != nil {
-						t.Fatalf("unexpected rebind error: %v", err)
-					}
-					msgs2 := conn2.getMessages()
-					if len(msgs2) != tc.wantReplayedMsgs {
-						t.Fatalf("expected %d replayed messages, got %d", tc.wantReplayedMsgs, len(msgs2))
-					}
-					if tc.wantFirstSeq > 0 && len(msgs2) > 0 {
-						chunk, ok := msgs2[0].(TokenChunk)
-						if !ok || chunk.Seq != tc.wantFirstSeq {
-							t.Fatalf("expected first seq %d, got %+v", tc.wantFirstSeq, msgs2[0])
-						}
-					}
-					if tc.appendAfterRebind != "" {
-						sink.OnTextDelta(tc.appendAfterRebind)
-						msgs2After := conn2.getMessages()
-						if len(msgs2After) != tc.wantTotalAfterRebind {
-							t.Fatalf("expected %d total messages on conn2, got %d", tc.wantTotalAfterRebind, len(msgs2After))
-						}
-					}
+			msgs2 := conn2.getMessages()
+			if len(msgs2) != tc.wantReplayedMsgs {
+				t.Fatalf("expected %d replayed messages, got %d", tc.wantReplayedMsgs, len(msgs2))
+			}
+			if tc.wantFirstSeq > 0 && len(msgs2) > 0 {
+				chunk, ok := msgs2[0].(TokenChunk)
+				if !ok || chunk.Seq != tc.wantFirstSeq {
+					t.Fatalf("expected first seq %d, got %+v", tc.wantFirstSeq, msgs2[0])
 				}
 			}
-
-			if tc.callResultAndError {
-				sink.OnResult(&runner.TurnResult{Response: "done"})
-				sink.OnError(errors.New("subsequent error"))
-			}
-
-			switch tc.terminalAction {
-			case "result":
-				sink.OnResult(&runner.TurnResult{Response: "test complete"})
-				sink.OnResult(nil)
-			case "error":
-				sink.OnError(errors.New("timeout reached"))
-				sink.OnError(nil)
-			}
-
-			if tc.checkEmptyAfter {
-				reconn := &mockWebSocketWriter{}
-				_ = sink.Rebind(reconn, 0)
-				if len(reconn.getMessages()) != 0 {
-					t.Fatalf("expected empty buffer after terminal action, got %d", len(reconn.getMessages()))
-				}
-			}
-
-			if tc.zeroCapStruct {
-				if len(sink.ringBuf) != 1 {
-					t.Fatalf("expected 1 item, got %d", len(sink.ringBuf))
+			if tc.appendAfterRebind != "" {
+				sink.OnTextDelta(tc.appendAfterRebind)
+				msgs2After := conn2.getMessages()
+				if len(msgs2After) != tc.wantTotalAfterRebind {
+					t.Fatalf("expected %d total messages on conn2, got %d", tc.wantTotalAfterRebind, len(msgs2After))
 				}
 			}
 		})
+	}
+}
+
+func TestVoiceTurnSink_RebindNilAndWriteErrors(t *testing.T) {
+	t.Parallel()
+
+	// RebindNilAndResume
+	sink := NewVoiceTurnSink(nil, "device-ack")
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnToolCall("tool", "cmd")
+	for _, c := range []string{"c1", "c2", "c3", "c4", "c5"} {
+		sink.OnTextDelta(c)
+	}
+	if err := sink.Rebind(nil, 0); err != nil {
+		t.Fatalf("expected nil error on rebind nil, got %v", err)
+	}
+	sink.OnTextDelta("c6")
+	connResume := &mockWebSocketWriter{}
+	if err := sink.Rebind(connResume, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(connResume.getMessages()) != 1 {
+		t.Fatalf("expected 1 replayed message, got %d", len(connResume.getMessages()))
+	}
+
+	// ErrorPropagationAndWriteErrors
+	connFail1 := &mockWebSocketWriter{writeErr: errors.New("socket broken pipe")}
+	sinkFail := NewVoiceTurnSink(connFail1, "device-fail")
+	sinkFail.OnTurnStarted()
+	sinkFail.OnThinking()
+	sinkFail.OnToolCall("tool", "cmd")
+	sinkFail.OnTextDelta("chunk1")
+
+	connFail2 := &mockWebSocketWriter{writeErr: errors.New("socket broken pipe")}
+	err := sinkFail.Rebind(connFail2, 0)
+	if err == nil || !strings.Contains(err.Error(), "failed to replay chunk seq=1") {
+		t.Fatalf("expected wrapped rebind error containing %q, got: %v", "failed to replay chunk seq=1", err)
+	}
+	sinkFail.OnResult(&runner.TurnResult{Response: "done"})
+	sinkFail.OnError(errors.New("subsequent error"))
+}
+
+func TestVoiceTurnSink_BufferClearAndEdgeGuards(t *testing.T) {
+	t.Parallel()
+
+	// OnResultClearsBuffer
+	sinkResult := NewVoiceTurnSink(&mockWebSocketWriter{}, "device-result")
+	sinkResult.OnTurnStarted()
+	sinkResult.OnThinking()
+	sinkResult.OnToolCall("tool", "cmd")
+	sinkResult.OnTextDelta("c1")
+	sinkResult.OnResult(&runner.TurnResult{Response: "test complete"})
+	sinkResult.OnResult(nil)
+	reconnResult := &mockWebSocketWriter{}
+	_ = sinkResult.Rebind(reconnResult, 0)
+	if len(reconnResult.getMessages()) != 0 {
+		t.Fatalf("expected empty buffer after terminal action, got %d", len(reconnResult.getMessages()))
+	}
+
+	// OnErrorClearsBuffer
+	sinkError := NewVoiceTurnSink(&mockWebSocketWriter{}, "device-error")
+	sinkError.OnTurnStarted()
+	sinkError.OnThinking()
+	sinkError.OnToolCall("tool", "cmd")
+	sinkError.OnTextDelta("c1")
+	sinkError.OnError(errors.New("timeout reached"))
+	sinkError.OnError(nil)
+	reconnError := &mockWebSocketWriter{}
+	_ = sinkError.Rebind(reconnError, 0)
+	if len(reconnError.getMessages()) != 0 {
+		t.Fatalf("expected empty buffer after terminal action, got %d", len(reconnError.getMessages()))
+	}
+
+	// NilConnection
+	sinkNil := NewVoiceTurnSink(nil, "device-nil")
+	if sinkNil.DeviceID() != "device-nil" {
+		t.Fatalf("expected device-nil, got %s", sinkNil.DeviceID())
+	}
+	sinkNil.OnTurnStarted()
+	sinkNil.OnThinking()
+	sinkNil.OnToolCall("tool", "cmd")
+	sinkNil.OnTextDelta("delta 1")
+	sinkNil.OnResult(&runner.TurnResult{Response: "test complete"})
+	sinkNil.OnResult(nil)
+
+	// ZeroCapStruct
+	sinkZero := &VoiceTurnSink{deviceID: "device-zero"}
+	if sinkZero.DeviceID() != "device-zero" {
+		t.Fatalf("expected device-zero, got %s", sinkZero.DeviceID())
+	}
+	sinkZero.OnTurnStarted()
+	sinkZero.OnThinking()
+	sinkZero.OnToolCall("tool", "cmd")
+	sinkZero.OnTextDelta("test")
+	if len(sinkZero.ringBuf) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(sinkZero.ringBuf))
 	}
 }
 
