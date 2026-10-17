@@ -145,11 +145,11 @@ type RiverInserter interface {
 	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
 }
 
-// normalizeChunkEffort trims and lowercases effort, defaulting "" to "low" and validating "low", "medium", "high".
+// normalizeChunkEffort trims and lowercases effort, defaulting "" to "medium" and validating "low", "medium", "high".
 func normalizeChunkEffort(effort string) (string, error) {
 	trimmed := strings.ToLower(strings.TrimSpace(effort))
 	if trimmed == "" {
-		return "low", nil
+		return "medium", nil
 	}
 	switch trimmed {
 	case "low", "medium", "high":
@@ -456,7 +456,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	}
 
 	chunksQuery := `
-		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'low'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE build_id = $1
 		ORDER BY chunk_index ASC;
@@ -498,7 +498,7 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 			c.AcceptanceCriteria = []string{}
 		}
 		if strings.TrimSpace(c.Effort) == "" {
-			c.Effort = "low"
+			c.Effort = "medium"
 		}
 		chunks = append(chunks, c)
 	}
@@ -551,7 +551,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	}
 
 	chunksQuery := `
-		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'low'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE build_id = ANY($1)
 		ORDER BY build_id, chunk_index ASC;
@@ -1011,7 +1011,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	reqPayload := BrainPromptRequest{
 		ChannelID:      build.ThreadID,
 		Prompt:         prompt,
-		Effort:         firstNonEmpty(strings.TrimSpace(chunk.Effort), "low"),
+		Effort:         firstNonEmpty(strings.TrimSpace(chunk.Effort), "medium"),
 		Silent:         true,
 		VanadisChunkID: strings.TrimSpace(chunk.ID),
 	}

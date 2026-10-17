@@ -653,7 +653,7 @@ func TestPostgresVanadisStore(t *testing.T) {
 		},
 	})
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
-	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || gotB.SharedContext != "Shared Context" || len(gotC) != 2 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "low" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
+	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || gotB.SharedContext != "Shared Context" || len(gotC) != 2 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "medium" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
 	}
 

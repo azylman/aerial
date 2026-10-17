@@ -134,7 +134,7 @@ type ScheduleRecurringArgs struct {
 	Prompt         string `json:"prompt" jsonschema:"Instructions to execute on every occurrence."`
 	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"Title prefix for spawned threads (e.g. 'Weekly Meal Plan')."`
 	Timezone       string `json:"timezone,omitempty" jsonschema:"Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
-	Effort         string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model). Defaults to 'low'."`
+	Effort         string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (primary high-effort model), 'medium' (medium-effort model), or 'low' (lightweight low-effort model). Defaults to 'medium'."`
 }
 
 type ScheduleRecurringOutput struct {
@@ -160,11 +160,7 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 			args.Timezone = DefaultTimezone
 		}
 	}
-	effort := strings.ToLower(strings.TrimSpace(args.Effort))
-	if effort != "high" {
-		effort = "low"
-	}
-	args.Effort = effort
+	args.Effort = normalizeScheduleEffort(args.Effort)
 
 	if args.ChannelID == "" {
 		return ScheduleRecurringOutput{}, fmt.Errorf("'channel_id' is required")
@@ -228,7 +224,7 @@ type ScheduleOnceArgs struct {
 	RunAt    string `json:"run_at" jsonschema:"ISO 8601 timestamp (e.g. '2026-08-28T21:00:00Z') or relative duration (e.g. '30m', '2h', '1d')."`
 	Prompt   string `json:"prompt" jsonschema:"Content/instructions of the reminder."`
 	Timezone string `json:"timezone,omitempty" jsonschema:"Timezone for absolute timestamp evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
-	Effort   string `json:"effort,omitempty" jsonschema:"Effort tier: 'low' (lightweight low-effort model) or 'high' (primary high-effort model). Defaults to 'low'."`
+	Effort   string `json:"effort,omitempty" jsonschema:"Effort tier: 'low' (lightweight low-effort model), 'medium' (medium-effort model), or 'high' (primary high-effort model). Defaults to 'medium'."`
 }
 
 type ScheduleOnceOutput struct {
@@ -267,10 +263,7 @@ func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnce
 		return ScheduleOnceOutput{}, err
 	}
 
-	effort := strings.ToLower(strings.TrimSpace(args.Effort))
-	if effort != "high" {
-		effort = "low"
-	}
+	effort := normalizeScheduleEffort(args.Effort)
 
 	id := uuid.New().String()
 	sched := OneShotSchedule{
@@ -377,7 +370,7 @@ func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArg
 
 type UpdateCronScheduleArgs struct {
 	ScheduleID     string  `json:"schedule_id" jsonschema:"The ID of the recurring cron schedule to update."`
-	Effort         *string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model)."`
+	Effort         *string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (primary high-effort model), 'medium' (medium-effort model), or 'low' (lightweight low-effort model)."`
 	CronExpression *string `json:"cron_expression,omitempty" jsonschema:"New 5-field cron expression or macro."`
 	Prompt         *string `json:"prompt,omitempty" jsonschema:"New prompt instructions to execute on every occurrence."`
 	TitlePrefix    *string `json:"title_prefix,omitempty" jsonschema:"New title prefix for spawned threads."`
@@ -421,11 +414,7 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 		Message:     "Recurring schedule updated successfully.",
 	}
 	if args.Effort != nil {
-		eff := strings.ToLower(strings.TrimSpace(*args.Effort))
-		if eff != "low" {
-			eff = "high"
-		}
-		resp.Effort = eff
+		resp.Effort = normalizeScheduleEffort(*args.Effort)
 	}
 	if nextRun != nil {
 		resp.NextRunAt = nextRun.Format(time.RFC3339)

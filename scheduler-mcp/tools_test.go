@@ -707,8 +707,8 @@ func TestScheduleOnce_EffortDefaultAndExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out1.Effort != "low" {
-		t.Fatalf("expected effort 'low', got %q", out1.Effort)
+	if out1.Effort != "medium" {
+		t.Fatalf("expected effort 'medium', got %q", out1.Effort)
 	}
 
 	// 2. Explicit "high" effort is preserved
@@ -744,8 +744,8 @@ func TestScheduleRecurring_EffortDefaultAndExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out1.Effort != "low" {
-		t.Fatalf("expected recurring effort 'low', got %q", out1.Effort)
+	if out1.Effort != "medium" {
+		t.Fatalf("expected recurring effort 'medium', got %q", out1.Effort)
 	}
 
 	// 2. Explicit "high" effort is preserved
@@ -786,8 +786,8 @@ func TestScheduleRecurring_EffortDefaultAndExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out4.Effort != "low" {
-		t.Fatalf("expected recurring effort 'low', got %q", out4.Effort)
+	if out4.Effort != "medium" {
+		t.Fatalf("expected recurring effort 'medium', got %q", out4.Effort)
 	}
 }
 
@@ -811,12 +811,12 @@ func TestScheduleOnce_TargetIDAndEffortCanonicalization(t *testing.T) {
 		t.Fatalf("expected effort 'high', got %q", out1.Effort)
 	}
 
-	// 2. Using TargetID and invalid effort -> "low"
+	// 2. Using TargetID and explicit "low" effort -> "low"
 	out2, err := handleScheduleOnce(context.Background(), db, ScheduleOnceArgs{
 		TargetID: "target-canonical-2",
-		Prompt:   "canonical invalid",
+		Prompt:   "canonical low",
 		RunAt:    "15m",
-		Effort:   "medium",
+		Effort:   "  LOW  ",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -861,8 +861,8 @@ func TestScheduleOnce_CoalesceNullAndEmptyString(t *testing.T) {
 	if err != nil || len(schedules) != 1 {
 		t.Fatalf("expected 1 schedule, got %v, err: %v", schedules, err)
 	}
-	if schedules[0].Effort != "low" {
-		t.Fatalf("expected COALESCE(NULLIF(effort, ''), 'low') to produce 'low', got %q", schedules[0].Effort)
+	if schedules[0].Effort != "medium" {
+		t.Fatalf("expected COALESCE(NULLIF(effort, ''), 'medium') to produce 'medium', got %q", schedules[0].Effort)
 	}
 
 	// Raw SQL insert with empty string into cron_schedules
@@ -876,8 +876,8 @@ func TestScheduleOnce_CoalesceNullAndEmptyString(t *testing.T) {
 	if err != nil || len(crons) != 1 {
 		t.Fatalf("expected 1 cron schedule, got %v, err: %v", crons, err)
 	}
-	if crons[0].Effort != "low" {
-		t.Fatalf("expected cron COALESCE(NULLIF(effort, ''), 'low') to produce 'low', got %q", crons[0].Effort)
+	if crons[0].Effort != "medium" {
+		t.Fatalf("expected cron COALESCE(NULLIF(effort, ''), 'medium') to produce 'medium', got %q", crons[0].Effort)
 	}
 }
 
@@ -917,8 +917,8 @@ func TestInsertOneShotSchedule_NilDBAndDefaults(t *testing.T) {
 	if list[0].CreatedAt.IsZero() {
 		t.Fatal("expected CreatedAt to be auto-populated, got zero")
 	}
-	if list[0].Effort != "low" {
-		t.Fatalf("expected effort 'low', got %q", list[0].Effort)
+	if list[0].Effort != "medium" {
+		t.Fatalf("expected effort 'medium', got %q", list[0].Effort)
 	}
 }
 

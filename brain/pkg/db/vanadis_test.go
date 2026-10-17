@@ -172,7 +172,7 @@ func runVanadisTests(t *testing.T, store Store) {
 	if !reflect.DeepEqual(gotChunks[1].AcceptanceCriteria, []string{"Worker processes chunk successfully"}) {
 		t.Errorf("unexpected chunk[1] AcceptanceCriteria: %#v", gotChunks[1].AcceptanceCriteria)
 	}
-	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 || gotChunks[2].Effort != "low" || !gotChunks[2].StartedAt.Equal(explicitStart) {
+	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 || gotChunks[2].Effort != "medium" || !gotChunks[2].StartedAt.Equal(explicitStart) {
 		t.Errorf("unexpected chunk[2]: %+v", gotChunks[2])
 	}
 	if len(gotChunks[2].TargetFiles) != 0 {
@@ -520,8 +520,8 @@ func TestNormalizeVanadisEffort(t *testing.T) {
 		expected    string
 		expectError bool
 	}{
-		{"", "low", false},
-		{"   ", "low", false},
+		{"", "medium", false},
+		{"   ", "medium", false},
 		{"low", "low", false},
 		{"LOW", "low", false},
 		{"  Medium  ", "medium", false},

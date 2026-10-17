@@ -28,8 +28,8 @@ func TestOneShotSchedule_EffortDefaultAndCoalesce(t *testing.T) {
 	if len(due) == 0 {
 		t.Fatalf("expected due schedule, got 0")
 	}
-	if due[0].Effort != "low" {
-		t.Fatalf("expected default effort 'low', got %q", due[0].Effort)
+	if due[0].Effort != "medium" {
+		t.Fatalf("expected default effort 'medium', got %q", due[0].Effort)
 	}
 
 	// 2. Explicit high effort is preserved
@@ -100,8 +100,8 @@ func TestSchedules_CoalesceNullAndEmptyStringEffort(t *testing.T) {
 	for _, s := range dueOS {
 		if s.ID == "os-raw-empty" {
 			foundOS = true
-			if s.Effort != "low" {
-				t.Fatalf("expected effort to COALESCE to 'low', got %q", s.Effort)
+			if s.Effort != "medium" {
+				t.Fatalf("expected effort to COALESCE to 'medium', got %q", s.Effort)
 			}
 		}
 	}
@@ -113,8 +113,8 @@ func TestSchedules_CoalesceNullAndEmptyStringEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAllOneShotSchedules failed: %v", err)
 	}
-	if len(allOS) == 0 || allOS[0].Effort != "low" {
-		t.Fatalf("expected allOS effort to COALESCE to 'low', got %v", allOS)
+	if len(allOS) == 0 || allOS[0].Effort != "medium" {
+		t.Fatalf("expected allOS effort to COALESCE to 'medium', got %v", allOS)
 	}
 
 	// 2. Raw insert into cron_schedules with empty string effort
@@ -132,8 +132,8 @@ func TestSchedules_CoalesceNullAndEmptyStringEffort(t *testing.T) {
 	for _, c := range dueCron {
 		if c.ID == "cron-raw-empty" {
 			foundCron = true
-			if c.Effort != "low" {
-				t.Fatalf("expected cron effort to COALESCE to 'low', got %q", c.Effort)
+			if c.Effort != "medium" {
+				t.Fatalf("expected cron effort to COALESCE to 'medium', got %q", c.Effort)
 			}
 		}
 	}
@@ -145,8 +145,8 @@ func TestSchedules_CoalesceNullAndEmptyStringEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAllCronSchedules failed: %v", err)
 	}
-	if len(allCron) == 0 || allCron[0].Effort != "low" {
-		t.Fatalf("expected allCron effort to COALESCE to 'low', got %v", allCron)
+	if len(allCron) == 0 || allCron[0].Effort != "medium" {
+		t.Fatalf("expected allCron effort to COALESCE to 'medium', got %v", allCron)
 	}
 
 	// 3. Raw insert into schedule_runs with empty string effort
@@ -160,8 +160,8 @@ func TestSchedules_CoalesceNullAndEmptyStringEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetScheduleRunsPaginated failed: %v", err)
 	}
-	if total != 1 || len(runs) != 1 || runs[0].Effort != "low" {
-		t.Fatalf("expected runs[0].Effort to COALESCE to 'low', got %q (total=%d)", runs[0].Effort, total)
+	if total != 1 || len(runs) != 1 || runs[0].Effort != "medium" {
+		t.Fatalf("expected runs[0].Effort to COALESCE to 'medium', got %q (total=%d)", runs[0].Effort, total)
 	}
 }
 
@@ -208,8 +208,8 @@ func TestSchedules_NilDatabaseAndNormalization(t *testing.T) {
 	if err != nil || len(crons) == 0 {
 		t.Fatalf("GetAllCronSchedules failed: %v", err)
 	}
-	if crons[0].Effort != "low" {
-		t.Fatalf("expected effort updated to 'low', got %q", crons[0].Effort)
+	if crons[0].Effort != "medium" {
+		t.Fatalf("expected effort updated to 'medium', got %q", crons[0].Effort)
 	}
 
 	// 5. CreateScheduleRun normalization
@@ -229,7 +229,7 @@ func TestSchedules_NilDatabaseAndNormalization(t *testing.T) {
 	if err != nil || len(runs) == 0 {
 		t.Fatalf("GetScheduleRunsPaginated failed: %v", err)
 	}
-	if runs[0].Effort != "low" {
-		t.Fatalf("expected run effort normalized to 'low', got %q", runs[0].Effort)
+	if runs[0].Effort != "medium" {
+		t.Fatalf("expected run effort normalized to 'medium', got %q", runs[0].Effort)
 	}
 }
