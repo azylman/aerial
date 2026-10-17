@@ -354,6 +354,236 @@ func TestBuildScheduleRunsUpstreamURL_TableDriven(t *testing.T) {
 	}
 }
 
+func TestBuildVanadisBuildsUpstreamURL_TableDriven(t *testing.T) {
+	tests := []struct {
+		name      string
+		baseURL   string
+		query     url.Values
+		wantLimit int
+		wantErr   bool
+		wantQuery map[string]string
+	}{
+		{
+			name:    "empty base URL returns error",
+			baseURL: "",
+			wantErr: true,
+		},
+		{
+			name:    "control characters in URL return error",
+			baseURL: "http://vanadis:\x7f8080",
+			wantErr: true,
+		},
+		{
+			name:      "defaults applied when query is empty",
+			baseURL:   "http://vanadis.aerial/",
+			query:     url.Values{},
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+		{
+			name:      "nil query receives default limit 50",
+			baseURL:   "http://vanadis.aerial",
+			query:     nil,
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+		{
+			name:    "valid limit and query params within boundaries",
+			baseURL: "http://vanadis.aerial",
+			query: url.Values{
+				"limit":       []string{"25"},
+				"status":      []string{"  running  "},
+				"queue_state": []string{"  running  "},
+			},
+			wantLimit: 25,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit":       "25",
+				"status":      "running",
+				"queue_state": "running",
+			},
+		},
+		{
+			name:    "limit > 100 clamped to 100",
+			baseURL: "http://vanadis.aerial",
+			query: url.Values{
+				"limit": []string{"200"},
+			},
+			wantLimit: 100,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "100",
+			},
+		},
+		{
+			name:    "limit < 1 clamped to 1",
+			baseURL: "http://vanadis.aerial",
+			query: url.Values{
+				"limit": []string{"0"},
+			},
+			wantLimit: 1,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "1",
+			},
+		},
+		{
+			name:    "negative limit clamped to 1",
+			baseURL: "http://vanadis.aerial",
+			query: url.Values{
+				"limit": []string{"-10"},
+			},
+			wantLimit: 1,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "1",
+			},
+		},
+		{
+			name:    "invalid non-integer limit falls back to default 50",
+			baseURL: "http://vanadis.aerial",
+			query: url.Values{
+				"limit": []string{"invalid"},
+			},
+			wantLimit: 50,
+			wantErr:   false,
+			wantQuery: map[string]string{
+				"limit": "50",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, gotLimit, err := BuildVanadisBuildsUpstreamURL(tt.baseURL, tt.query)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BuildVanadisBuildsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if gotLimit != tt.wantLimit {
+				t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
+			}
+
+			parsed, err := url.Parse(gotURL)
+			if err != nil {
+				t.Fatalf("failed to parse returned URL: %v", err)
+			}
+			if !strings.HasSuffix(parsed.Path, "/builds") {
+				t.Errorf("path does not end with /builds: %q", parsed.Path)
+			}
+
+			q := parsed.Query()
+			for k, v := range tt.wantQuery {
+				if got := q.Get(k); got != v {
+					t.Errorf("query param %q = %q, want %q", k, got, v)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildVanadisBuildDetailUpstreamURL_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		baseURL     string
+		requestPath string
+		wantID      string
+		wantURL     string
+		wantErr     bool
+	}{
+		{
+			name:        "empty base URL returns error",
+			baseURL:     "",
+			requestPath: "/api/builds/build-123",
+			wantErr:     true,
+		},
+		{
+			name:        "control characters in URL return error",
+			baseURL:     "http://vanadis:\x7f8080",
+			requestPath: "/api/builds/build-123",
+			wantErr:     true,
+		},
+		{
+			name:        "valid /api/builds/ prefix",
+			baseURL:     "http://vanadis.aerial",
+			requestPath: "/api/builds/build-1792214230",
+			wantID:      "build-1792214230",
+			wantURL:     "http://vanadis.aerial/builds/build-1792214230",
+			wantErr:     false,
+		},
+		{
+			name:        "valid /dashboard/api/builds/ prefix with trailing slash baseURL",
+			baseURL:     "http://vanadis.aerial/",
+			requestPath: "/dashboard/api/builds/build-1792214230",
+			wantID:      "build-1792214230",
+			wantURL:     "http://vanadis.aerial/builds/build-1792214230",
+			wantErr:     false,
+		},
+		{
+			name:        "missing expected prefix returns error",
+			baseURL:     "http://vanadis.aerial",
+			requestPath: "/api/other/build-123",
+			wantErr:     true,
+		},
+		{
+			name:        "empty build ID on /api/builds/ returns error",
+			baseURL:     "http://vanadis.aerial",
+			requestPath: "/api/builds/",
+			wantErr:     true,
+		},
+		{
+			name:        "empty build ID on /dashboard/api/builds/ returns error",
+			baseURL:     "http://vanadis.aerial",
+			requestPath: "/dashboard/api/builds/",
+			wantErr:     true,
+		},
+		{
+			name:        "path traversal with .. returns error",
+			baseURL:     "http://vanadis.aerial",
+			requestPath: "/api/builds/../evil",
+			wantErr:     true,
+		},
+		{
+			name:        "path traversal with embedded slash returns error",
+			baseURL:     "http://vanadis.aerial",
+			requestPath: "/api/builds/build/subpath",
+			wantErr:     true,
+		},
+		{
+			name:        "control characters in build ID return error",
+			baseURL:     "http://vanadis.aerial",
+			requestPath: "/api/builds/build-\x00bad",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, gotID, err := BuildVanadisBuildDetailUpstreamURL(tt.baseURL, tt.requestPath)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BuildVanadisBuildDetailUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if gotID != tt.wantID {
+				t.Errorf("gotID = %q, want %q", gotID, tt.wantID)
+			}
+			if gotURL != tt.wantURL {
+				t.Errorf("gotURL = %q, want %q", gotURL, tt.wantURL)
+			}
+		})
+	}
+}
+
 func TestCalculateClusterStatus_TableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
