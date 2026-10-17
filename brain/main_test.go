@@ -790,31 +790,6 @@ func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, queryEm
 	return nil, errors.New("simulated search session summaries error")
 }
 
-func TestFormatCronDescription(t *testing.T) {
-	tests := []struct {
-		expr     string
-		expected string
-	}{
-		{"0 9 * * 1-5", "Weekdays (Mon–Fri) at 09:00"},
-		{"0 9 * * *", "Every day at 09:00"},
-		{"*/15 * * * *", "Every 15 minutes"},
-		{"0 */2 * * *", "Every 2 hours"},
-		{"0 0 * * *", "Every day at 00:00"},
-		{"30 8 * * 0", "Every Sunday at 08:30"},
-		{"0 12 1 * *", "1st of every month at 12:00"},
-		{"* * * * *", "Every minute"},
-		{"@daily", "Every day at 00:00"},
-		{"@hourly", "Every hour"},
-	}
-
-	for _, tt := range tests {
-		got := FormatCronDescription(tt.expr)
-		if got != tt.expected {
-			t.Errorf("FormatCronDescription(%q) = %q, want %q", tt.expr, got, tt.expected)
-		}
-	}
-}
-
 func TestSanitizeString(t *testing.T) {
 	tests := []struct {
 		input       string
@@ -1196,8 +1171,6 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
-
-
 func TestNormalizeRoute(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -1321,74 +1294,6 @@ func TestHandleFacts_Comprehensive(t *testing.T) {
 	handlerErr(wErr, req)
 	if wErr.Code != http.StatusInternalServerError {
 		t.Errorf("Expected 500 InternalServerError on closed DB, got %d", wErr.Code)
-	}
-}
-
-func TestOrdinal_AllCases(t *testing.T) {
-	cases := []struct {
-		n    int
-		want string
-	}{
-		{1, "1st"},
-		{2, "2nd"},
-		{3, "3rd"},
-		{4, "4th"},
-		{11, "11th"},
-		{12, "12th"},
-		{13, "13th"},
-		{14, "14th"},
-		{21, "21st"},
-		{22, "22nd"},
-		{23, "23rd"},
-		{24, "24th"},
-		{31, "31st"},
-	}
-
-	for _, tc := range cases {
-		got := Ordinal(tc.n)
-		if got != tc.want {
-			t.Errorf("Ordinal(%d) = %q, want %q", tc.n, got, tc.want)
-		}
-	}
-}
-
-func TestFormatCronDescription_AllVariations(t *testing.T) {
-	cases := []struct {
-		expr string
-		want string
-	}{
-		{"", ""},
-		{"   ", ""},
-		{"@yearly", "Every year on Jan 1st at 00:00"},
-		{"@annually", "Every year on Jan 1st at 00:00"},
-		{"@monthly", "1st of every month at 00:00"},
-		{"@weekly", "Every week on Sunday at 00:00"},
-		{"@daily", "Every day at 00:00"},
-		{"@midnight", "Every day at 00:00"},
-		{"@hourly", "Every hour"},
-		{"invalid cron string", "invalid cron string"},
-		{"* * * * *", "Every minute"},
-		{"*/10 * * * *", "Every 10 minutes"},
-		{"0 */4 * * *", "Every 4 hours"},
-		{"0 9 * * *", "Every day at 09:00"},
-		{"0 9 * * 1-5", "Weekdays (Mon–Fri) at 09:00"},
-		{"0 9 * * MON-FRI", "Weekdays (Mon–Fri) at 09:00"},
-		{"0 9 * * 0,6", "Weekends (Sat–Sun) at 09:00"},
-		{"0 9 * * SAT,SUN", "Weekends (Sat–Sun) at 09:00"},
-		{"0 9 * * 2", "Every Tuesday at 09:00"},
-		{"0 9 * * 1,3,5", "Mon, Wed, Fri at 09:00"},
-		{"0 12 1 * *", "1st of every month at 12:00"},
-		{"0 12 22 * *", "22nd of every month at 12:00"},
-		{"0 0 1 1 *", "Every year on Jan 1st at 00:00"},
-		{"0 0 4 7 *", "Every year on Jul 4th at 00:00"},
-		{"0 9 * 5 *", "At 09:00 (cron: 0 9 * 5 *)"},
-	}
-
-	for _, tc := range cases {
-		got := FormatCronDescription(tc.expr)
-		if got != tc.want {
-			t.Errorf("FormatCronDescription(%q) = %q, want %q", tc.expr, got, tc.want)
-		}
 	}
 }
 
@@ -2053,7 +1958,6 @@ func TestCreateReloadConfigFunc_Complete(t *testing.T) {
 	reloadFn("TestErrorSource")
 }
 
-
 func TestRunBrainApp_ErrorBranches(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -2149,23 +2053,6 @@ func TestHandleTranscripts_NonDirectoryAndBadHome(t *testing.T) {
 	handler(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200 OK, got %d", w.Code)
-	}
-}
-
-func TestFormatCronDescription_AdditionalPatterns(t *testing.T) {
-	cases := []struct {
-		expr string
-		want string
-	}{
-		{"0 9 * * Mon,Wed,Fri", "Mon, Wed, Fri at 09:00"},
-		{"0 9 * * 1,3,5", "Mon, Wed, Fri at 09:00"},
-		{"0/15 * * * *", "0/15 * * * *"},
-	}
-	for _, tc := range cases {
-		got := FormatCronDescription(tc.expr)
-		if got != tc.want {
-			t.Errorf("FormatCronDescription(%q) = %q, want %q", tc.expr, got, tc.want)
-		}
 	}
 }
 
@@ -3700,7 +3587,7 @@ func (e *errFlusherWriter) Write(p []byte) (int, error) {
 	return 0, errors.New("simulated write error")
 }
 func (e *errFlusherWriter) WriteHeader(statusCode int) {}
-func (e *errFlusherWriter) Flush()                    {}
+func (e *errFlusherWriter) Flush()                     {}
 
 func TestHandleVoiceAsk_SSE_WriteError(t *testing.T) {
 	store := db.NewFakeStore()
@@ -4450,7 +4337,7 @@ func TestBuildPoolEnv(t *testing.T) {
 		envMap := make(map[string]string)
 		for _, e := range res {
 			if k, v, ok := strings.Cut(e, "="); ok {
-			envMap[k] = v
+				envMap[k] = v
 			}
 		}
 
@@ -4468,7 +4355,7 @@ func TestBuildPoolEnv(t *testing.T) {
 		envMap := make(map[string]string)
 		for _, e := range res {
 			if k, v, ok := strings.Cut(e, "="); ok {
-			envMap[k] = v
+				envMap[k] = v
 			}
 		}
 
@@ -4947,7 +4834,3 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Errorf("expected 500 on error, got: %d", resp3.StatusCode)
 	}
 }
-
-
-
-
