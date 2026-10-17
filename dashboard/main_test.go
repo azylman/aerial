@@ -1849,17 +1849,19 @@ vanadis_url: "http://vanadis:8089"
 		{
 			name: "Custom_WithHangarURL",
 			lookup: func(k string) string {
+				userConfigPath := filepath.Join(tmpDir, "custom-user-config.yaml")
+				_ = os.WriteFile(userConfigPath, []byte("dashboard:\n  vanadis_url: http://vanadis-config:9090\n"), 0644)
 				m := map[string]string{
 					"PORT": "9090", "BRAIN_URL": "http://brain-custom:9090", "GITHUB_REPO": "custom/repo",
 					"GITHUB_PAT": "custom_pat", "GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
 					"HANGAR_URL": "http://hangar-custom:9090", "GITSYNC_URL": "http://gitsync-custom:9090",
-					"AERIAL_CONFIG_PATH": "/custom/config.yaml", "GIT_COMMIT": "0123456789",
-					"VANADIS_URL": "http://vanadis-custom:9090",
+					"AERIAL_CONFIG_PATH": userConfigPath, "GIT_COMMIT": "0123456789",
+					"VANADIS_URL": "http://vanadis-env-ignored:9090",
 				}
 				return m[k]
 			},
 			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "9090" || cfg.BrainURL != "http://brain-custom:9090" || cfg.GHRepo != "custom/repo" || cfg.GHToken != "custom_pat" || cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" || cfg.ConfigPath != "/custom/config.yaml" || cfg.GitCommit != "0123456" || cfg.VanadisURL != "http://vanadis-custom:9090" {
+				if cfg.Port != "9090" || cfg.BrainURL != "http://brain-custom:9090" || cfg.GHRepo != "custom/repo" || cfg.GHToken != "custom_pat" || cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" || cfg.GitCommit != "0123456" || cfg.VanadisURL != "http://vanadis-config:9090" {
 					t.Errorf("unexpected custom config: %+v", cfg)
 				}
 			},
@@ -3186,6 +3188,88 @@ dashboard:
 				if got[i] != tt.expected[i] {
 					t.Errorf("expected [%d]=%q, got %q", i, tt.expected[i], got[i])
 				}
+			}
+		})
+	}
+}
+
+func TestLoadDashboardVanadisURL_TableDriven(t *testing.T) {
+	tempDir := t.TempDir()
+
+	tests := []struct {
+		name     string
+		yamlData string
+		noFile   bool
+		expected string
+	}{
+		{
+			name:     "empty path returns empty string",
+			yamlData: "",
+			noFile:   true,
+			expected: "",
+		},
+		{
+			name:     "non-existent file returns empty string",
+			yamlData: "",
+			noFile:   true,
+			expected: "",
+		},
+		{
+			name:     "invalid yaml returns empty string",
+			yamlData: "dashboard: [invalid-yaml",
+			expected: "",
+		},
+		{
+			name: "dashboard.vanadis_url resolution with trimming",
+			yamlData: `
+dashboard:
+  vanadis_url: "  http://vanadis.internal:8088  "
+`,
+			expected: "http://vanadis.internal:8088",
+		},
+		{
+			name: "root vanadis_url fallback",
+			yamlData: `
+vanadis_url: "http://vanadis-root.internal:8088"
+`,
+			expected: "http://vanadis-root.internal:8088",
+		},
+		{
+			name: "dashboard.vanadis_url takes precedence over root vanadis_url",
+			yamlData: `
+dashboard:
+  vanadis_url: "http://vanadis-dash.internal:8088"
+vanadis_url: "http://vanadis-root.internal:8088"
+`,
+			expected: "http://vanadis-dash.internal:8088",
+		},
+		{
+			name: "empty values return empty string",
+			yamlData: `
+dashboard:
+  vanadis_url: ""
+vanadis_url: ""
+`,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := ""
+			if !tt.noFile {
+				f := filepath.Join(tempDir, tt.name+".yaml")
+				if err := os.WriteFile(f, []byte(tt.yamlData), 0644); err != nil {
+					t.Fatalf("failed to write test yaml: %v", err)
+				}
+				path = f
+			} else if tt.name == "non-existent file returns empty string" {
+				path = filepath.Join(tempDir, "non-existent.yaml")
+			}
+
+			got := loadDashboardVanadisURL(path)
+			if got != tt.expected {
+				t.Fatalf("expected %q, got %q", tt.expected, got)
 			}
 		})
 	}
