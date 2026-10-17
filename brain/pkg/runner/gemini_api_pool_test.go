@@ -514,182 +514,150 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 	}
 }
 
-func TestGeminiAPIPool_LifecycleAndAccessors_Suite(t *testing.T) {
+func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name             string
-		nilPool          bool
-		apiKey           string
-		model            string
-		prewarmedTargets []string
-		testDirty        bool
-		testClose        bool
-		testEdgeCases    bool
-	}{
-		{
-			name:    "NilPoolAccessors",
-			nilPool: true,
-		},
-		{
-			name:             "PoolAccessorsAndSessions",
-			apiKey:           "my-api-key",
-			model:            "gemini-2.5-pro",
-			prewarmedTargets: []string{"initial-1", "initial-2"},
-		},
-		{
-			name:      "MarkDirty_SessionRecreation",
-			apiKey:    "test-key",
-			model:     "gemini-2.5-flash",
-			testDirty: true,
-		},
-		{
-			name:             "PrewarmedAndCloseOperations",
-			apiKey:           "test-key",
-			model:            "gemini-2.5-flash",
-			prewarmedTargets: []string{"living-room", "kitchen", "office"},
-			testClose:        true,
-		},
-		{
-			name:          "SessionEdgeCasesAndJSONRPCBody",
-			testEdgeCases: true,
-		},
+	// Nil pool accessors
+	var nilPool *GeminiAPIPool
+	if nilPool.Model() != "" || nilPool.APIKey() != "" {
+		t.Errorf("expected empty string from nilPool accessors")
+	}
+	nilPool.MarkDirty()
+	nilPool.UpdatePrewarmedTargets([]string{"t"})
+	if targets := nilPool.PrewarmedTargets(); targets != nil {
+		t.Errorf("expected nil PrewarmedTargets for nil pool, got %v", targets)
+	}
+	if err := nilPool.sanitizeError(nil); err != nil {
+		t.Errorf("expected sanitizeError(nil) == nil, got %v", err)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			switch {
-			case tc.nilPool:
-				var nilPool *GeminiAPIPool
-				if nilPool.Model() != "" || nilPool.APIKey() != "" {
-					t.Errorf("expected empty string from nilPool accessors")
-				}
-				nilPool.MarkDirty()
-				nilPool.UpdatePrewarmedTargets([]string{"t"})
-				if targets := nilPool.PrewarmedTargets(); targets != nil {
-					t.Errorf("expected nil PrewarmedTargets for nil pool, got %v", targets)
-				}
-				if err := nilPool.sanitizeError(nil); err != nil {
-					t.Errorf("expected sanitizeError(nil) == nil, got %v", err)
-				}
-			case tc.testDirty:
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-					APIKey: tc.apiKey,
-					Model:  tc.model,
-				})
-				defer pool.Close()
+	// Pool accessors and sessions
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:           "my-api-key",
+		Model:            "gemini-2.5-pro",
+		PrewarmedTargets: []string{"initial-1", "initial-2"},
+	})
+	defer pool.Close()
 
-				ctx := context.Background()
-				s1, err := pool.GetOrCreateSession(ctx, "kiosk-1", "sess-1")
-				if err != nil {
-					t.Fatalf("unexpected err: %v", err)
-				}
-				s1Again, err := pool.GetOrCreateSession(ctx, "kiosk-1", "")
-				if err != nil || s1 != s1Again {
-					t.Fatalf("expected identical session instance before MarkDirty")
-				}
+	if pool.Model() != "gemini-2.5-pro" || pool.APIKey() != "my-api-key" {
+		t.Errorf("unexpected accessors: %q %q", pool.Model(), pool.APIKey())
+	}
+	sess, err := pool.GetOrCreateSession(context.Background(), "target-123", "custom-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	geminiSess, ok := sess.(*GeminiAPISession)
+	if !ok || geminiSess.TargetKey() != "target-123" || geminiSess.SessionID() != "custom-uuid" {
+		t.Errorf("unexpected session attributes: %v", sess)
+	}
 
-				pool.MarkDirty()
-				s1After, err := pool.GetOrCreateSession(ctx, "kiosk-1", "sess-2")
-				if err != nil || s1 == s1After || s1After.SessionID() != "sess-2" {
-					t.Fatalf("expected new session after MarkDirty")
-				}
-			case tc.testClose:
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-					APIKey:           tc.apiKey,
-					Model:            tc.model,
-					PrewarmedTargets: tc.prewarmedTargets,
-				})
-				ctx := context.Background()
-				if err := pool.Initialize(ctx); err != nil {
-					t.Fatalf("unexpected Initialize error: %v", err)
-				}
-				for _, target := range tc.prewarmedTargets {
-					sess, err := pool.GetOrCreateSession(ctx, target, "")
-					if err != nil || sess.SessionID() != target {
-						t.Errorf("unexpected prewarmed session for %s: %v", target, err)
-					}
-				}
+	targets := pool.PrewarmedTargets()
+	if len(targets) != 2 || targets[0] != "initial-1" {
+		t.Fatalf("unexpected prewarmed targets: %v", targets)
+	}
+	targets[0] = "mutated"
+	if pool.PrewarmedTargets()[0] == "mutated" {
+		t.Errorf("expected defensive copy for PrewarmedTargets")
+	}
 
-				sessBeforeClose := pool.sessions["living-room"]
-				if err := pool.Close(); err != nil {
-					t.Fatalf("unexpected Close error: %v", err)
-				}
+	pool.UpdatePrewarmedTargets([]string{"alpha", "beta"})
+	if len(pool.PrewarmedTargets()) != 2 || pool.PrewarmedTargets()[0] != "alpha" {
+		t.Errorf("failed to update prewarmed targets")
+	}
+}
 
-				// Operations on closed pool
-				if _, err := pool.GetOrCreateSession(ctx, "new-target", ""); err == nil {
-					t.Errorf("expected error on closed pool GetOrCreateSession")
-				}
-				if err := pool.Initialize(ctx); err == nil {
-					t.Errorf("expected error on closed pool Initialize")
-				}
-				pool.UpdatePrewarmedTargets([]string{"noop"})
-				pool.MarkDirty()
+func TestGeminiAPIPool_MarkDirtySessionRecreation(t *testing.T) {
+	t.Parallel()
 
-				sink := newMockTurnSink()
-				turn := &TurnContext{TurnID: "turn-closed", Prompt: "hello", Sink: sink}
-				if err := sessBeforeClose.Send("hello", turn); err == nil {
-					t.Errorf("expected error calling Send on closed pool session")
-				}
-			case tc.testEdgeCases:
-				sess := &GeminiAPISession{targetKey: "fallback-target"}
-				if sess.SessionID() != "fallback-target" {
-					t.Errorf("expected fallback session ID")
-				}
-				if sess.transcriptPath() != "" {
-					t.Errorf("expected empty transcript path when dataDir is empty")
-				}
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey: "test-key",
+		Model:  "gemini-2.5-flash",
+	})
+	defer pool.Close()
 
-				rpcTests := []struct {
-					body      string
-					expectErr bool
-				}{
-					{body: "", expectErr: true},
-					{body: "not json", expectErr: true},
-					{body: `{"jsonrpc":"2.0","result":{}}`, expectErr: false},
-				}
-				for _, rt := range rpcTests {
-					res, err := parseJSONRPCBody([]byte(rt.body))
-					if (err != nil) != rt.expectErr || (err == nil && res == nil) {
-						t.Errorf("body %q: got res=%v, err=%v", rt.body, res, err)
-					}
-				}
-			default:
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-					APIKey:           tc.apiKey,
-					Model:            tc.model,
-					PrewarmedTargets: tc.prewarmedTargets,
-				})
-				defer pool.Close()
+	ctx := context.Background()
+	s1, err := pool.GetOrCreateSession(ctx, "kiosk-1", "sess-1")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	s1Again, err := pool.GetOrCreateSession(ctx, "kiosk-1", "")
+	if err != nil || s1 != s1Again {
+		t.Fatalf("expected identical session instance before MarkDirty")
+	}
 
-				if pool.Model() != tc.model || pool.APIKey() != tc.apiKey {
-					t.Errorf("unexpected accessors: %q %q", pool.Model(), pool.APIKey())
-				}
-				sess, err := pool.GetOrCreateSession(context.Background(), "target-123", "custom-uuid")
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				geminiSess, ok := sess.(*GeminiAPISession)
-				if !ok || geminiSess.TargetKey() != "target-123" || geminiSess.SessionID() != "custom-uuid" {
-					t.Errorf("unexpected session attributes: %v", sess)
-				}
+	pool.MarkDirty()
+	s1After, err := pool.GetOrCreateSession(ctx, "kiosk-1", "sess-2")
+	if err != nil || s1 == s1After || s1After.SessionID() != "sess-2" {
+		t.Fatalf("expected new session after MarkDirty")
+	}
+}
 
-				targets := pool.PrewarmedTargets()
-				if len(targets) != 2 || targets[0] != "initial-1" {
-					t.Fatalf("unexpected prewarmed targets: %v", targets)
-				}
-				targets[0] = "mutated"
-				if pool.PrewarmedTargets()[0] == "mutated" {
-					t.Errorf("expected defensive copy for PrewarmedTargets")
-				}
+func TestGeminiAPIPool_PrewarmedAndClose(t *testing.T) {
+	t.Parallel()
 
-				pool.UpdatePrewarmedTargets([]string{"alpha", "beta"})
-				if len(pool.PrewarmedTargets()) != 2 || pool.PrewarmedTargets()[0] != "alpha" {
-					t.Errorf("failed to update prewarmed targets")
-				}
-			}
-		})
+	prewarmedTargets := []string{"living-room", "kitchen", "office"}
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:           "test-key",
+		Model:            "gemini-2.5-flash",
+		PrewarmedTargets: prewarmedTargets,
+	})
+	ctx := context.Background()
+	if err := pool.Initialize(ctx); err != nil {
+		t.Fatalf("unexpected Initialize error: %v", err)
+	}
+	for _, target := range prewarmedTargets {
+		sess, err := pool.GetOrCreateSession(ctx, target, "")
+		if err != nil || sess.SessionID() != target {
+			t.Errorf("unexpected prewarmed session for %s: %v", target, err)
+		}
+	}
+
+	sessBeforeClose := pool.sessions["living-room"]
+	if err := pool.Close(); err != nil {
+		t.Fatalf("unexpected Close error: %v", err)
+	}
+
+	// Operations on closed pool
+	if _, err := pool.GetOrCreateSession(ctx, "new-target", ""); err == nil {
+		t.Errorf("expected error on closed pool GetOrCreateSession")
+	}
+	if err := pool.Initialize(ctx); err == nil {
+		t.Errorf("expected error on closed pool Initialize")
+	}
+	pool.UpdatePrewarmedTargets([]string{"noop"})
+	pool.MarkDirty()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{TurnID: "turn-closed", Prompt: "hello", Sink: sink}
+	if err := sessBeforeClose.Send("hello", turn); err == nil {
+		t.Errorf("expected error calling Send on closed pool session")
+	}
+}
+
+func TestGeminiAPISession_EdgeCasesAndJSONRPCBody(t *testing.T) {
+	t.Parallel()
+
+	sess := &GeminiAPISession{targetKey: "fallback-target"}
+	if sess.SessionID() != "fallback-target" {
+		t.Errorf("expected fallback session ID")
+	}
+	if sess.transcriptPath() != "" {
+		t.Errorf("expected empty transcript path when dataDir is empty")
+	}
+
+	rpcTests := []struct {
+		body      string
+		expectErr bool
+	}{
+		{body: "", expectErr: true},
+		{body: "not json", expectErr: true},
+		{body: `{"jsonrpc":"2.0","result":{}}`, expectErr: false},
+	}
+	for _, rt := range rpcTests {
+		res, err := parseJSONRPCBody([]byte(rt.body))
+		if (err != nil) != rt.expectErr || (err == nil && res == nil) {
+			t.Errorf("body %q: got res=%v, err=%v", rt.body, res, err)
+		}
 	}
 }
 
@@ -703,256 +671,235 @@ func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[s
 	return "", errors.New("execute failed")
 }
 
-func TestMCPDispatcher_Suite(t *testing.T) {
+func TestMCPDispatcher_ListDeclarationsJSONAndSSE(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		testList    bool
-		testExec    bool
-		testEdge    bool
-		testHeaders bool
-	}{
-		{
-			name:     "ListDeclarations_JSONAndSSE",
-			testList: true,
-		},
-		{
-			name:     "Execute_SuccessAndErrorPaths",
-			testExec: true,
-		},
-		{
-			name:     "Dispatcher_DeclarationsAndExecutionEdgeCases",
-			testEdge: true,
-		},
-		{
-			name:        "HeadersAndMultiPartContent",
-			testHeaders: true,
-		},
+	tsJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"result": {
+				"tools": [
+					{
+						"name": "schedule_once",
+						"description": "Schedule a reminder",
+						"inputSchema": {
+							"$schema": "http://json-schema.org/draft-07/schema#",
+							"type": "object",
+							"properties": {"prompt": {"type": "string"}},
+							"required": ["prompt"]
+						}
+					}
+				]
+			}
+		}`))
+	}))
+	defer tsJSON.Close()
+
+	tsSSE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"ha_call_write_tool\",\"description\":\"Call HA service\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}}}}]}}\n\n"))
+	}))
+	defer tsSSE.Close()
+
+	disp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "scheduler", ServerURL: tsJSON.URL},
+		{Name: "ha-mcp", ServerURL: tsSSE.URL, Headers: map[string]string{"Authorization": "Bearer token123"}},
+	}, tsJSON.Client())
+
+	decls, err := disp.ListDeclarations(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected ListDeclarations error: %v", err)
+	}
+	if len(decls) != 2 {
+		t.Fatalf("expected 2 declarations, got %d", len(decls))
+	}
+	names := map[string]bool{}
+	for _, d := range decls {
+		names[d.Name] = true
+		if _, hasSchema := d.Parameters["$schema"]; hasSchema {
+			t.Errorf("expected $schema to be stripped from %s", d.Name)
+		}
+	}
+	if !names["schedule_once"] || !names["ha_call_write_tool"] {
+		t.Errorf("missing expected tools: %v", names)
+	}
+}
+
+func TestMCPDispatcher_ExecutePaths(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Method == "tools/list" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"good_tool"},{"name":"error_tool"},{"name":"raw_tool"}]}}`))
+			return
+		}
+		switch req.Params.Name {
+		case "good_tool":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Light turned on\"}]}}\n\n"))
+		case "error_tool":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"Device not reachable"}]}}`))
+		case "raw_tool":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}`))
+		default:
+			http.Error(w, "unknown tool", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	disp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "test-mcp", ServerURL: ts.URL},
+	}, ts.Client())
+
+	ctx := context.Background()
+
+	// Good tool
+	out, err := disp.Execute(ctx, "good_tool", map[string]interface{}{"entity": "light.1"})
+	if err != nil || out != "Light turned on" {
+		t.Errorf("unexpected execute good_tool result: %q, %v", out, err)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			switch {
-			case tc.testList:
-				tsJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(`{
-						"jsonrpc": "2.0",
-						"id": 1,
-						"result": {
-							"tools": [
-								{
-									"name": "schedule_once",
-									"description": "Schedule a reminder",
-									"inputSchema": {
-										"$schema": "http://json-schema.org/draft-07/schema#",
-										"type": "object",
-										"properties": {"prompt": {"type": "string"}},
-										"required": ["prompt"]
-									}
-								}
-							]
-						}
-					}`))
-				}))
-				defer tsJSON.Close()
+	// Error tool
+	outErr, err := disp.Execute(ctx, "error_tool", nil)
+	if err == nil || !strings.Contains(err.Error(), "Device not reachable") || outErr != "Device not reachable" {
+		t.Errorf("unexpected error_tool result: %q, %v", outErr, err)
+	}
 
-				tsSSE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "text/event-stream")
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"ha_call_write_tool\",\"description\":\"Call HA service\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}}}}]}}\n\n"))
-				}))
-				defer tsSSE.Close()
+	// Raw tool
+	rawOut, err := disp.Execute(ctx, "raw_tool", nil)
+	if err != nil || !strings.Contains(rawOut, `"status":"ok"`) {
+		t.Errorf("unexpected raw_tool result: %q, %v", rawOut, err)
+	}
 
-				disp := NewDefaultMCPDispatcher([]MCPServerConfig{
-					{Name: "scheduler", ServerURL: tsJSON.URL},
-					{Name: "ha-mcp", ServerURL: tsSSE.URL, Headers: map[string]string{"Authorization": "Bearer token123"}},
-				}, tsJSON.Client())
+	// Unknown tool
+	if _, err := disp.Execute(ctx, "non_existent", nil); err == nil {
+		t.Errorf("expected error for non_existent tool")
+	}
+}
 
-				decls, err := disp.ListDeclarations(context.Background())
-				if err != nil {
-					t.Fatalf("unexpected ListDeclarations error: %v", err)
-				}
-				if len(decls) != 2 {
-					t.Fatalf("expected 2 declarations, got %d", len(decls))
-				}
-				names := map[string]bool{}
-				for _, d := range decls {
-					names[d.Name] = true
-					if _, hasSchema := d.Parameters["$schema"]; hasSchema {
-						t.Errorf("expected $schema to be stripped from %s", d.Name)
-					}
-				}
-				if !names["schedule_once"] || !names["ha_call_write_tool"] {
-					t.Errorf("missing expected tools: %v", names)
-				}
-			case tc.testExec:
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var req struct {
-						Method string `json:"method"`
-						Params struct {
-							Name string `json:"name"`
-						} `json:"params"`
-					}
-					_ = json.NewDecoder(r.Body).Decode(&req)
+func TestMCPDispatcher_DeclarationsAndExecutionEdgeCases(t *testing.T) {
+	t.Parallel()
 
-					if req.Method == "tools/list" {
-						w.Header().Set("Content-Type", "application/json")
-						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"good_tool"},{"name":"error_tool"},{"name":"raw_tool"}]}}`))
-						return
-					}
-					switch req.Params.Name {
-					case "good_tool":
-						w.Header().Set("Content-Type", "text/event-stream")
-						_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Light turned on\"}]}}\n\n"))
-					case "error_tool":
-						w.Header().Set("Content-Type", "application/json")
-						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"Device not reachable"}]}}`))
-					case "raw_tool":
-						w.Header().Set("Content-Type", "application/json")
-						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}`))
-					default:
-						http.Error(w, "unknown tool", http.StatusNotFound)
-					}
-				}))
-				defer ts.Close()
+	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer ts500.Close()
 
-				disp := NewDefaultMCPDispatcher([]MCPServerConfig{
-					{Name: "test-mcp", ServerURL: ts.URL},
-				}, ts.Client())
+	tsRPCErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}`))
+	}))
+	defer tsRPCErr.Close()
 
-				ctx := context.Background()
+	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not a json response`))
+	}))
+	defer tsBadJSON.Close()
 
-				// Good tool
-				out, err := disp.Execute(ctx, "good_tool", map[string]interface{}{"entity": "light.1"})
-				if err != nil || out != "Light turned on" {
-					t.Errorf("unexpected execute good_tool result: %q, %v", out, err)
-				}
+	tsEmptyName := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"","description":"empty"},{"name":"valid_t","description":"ok"}]}}`))
+	}))
+	defer tsEmptyName.Close()
 
-				// Error tool
-				outErr, err := disp.Execute(ctx, "error_tool", nil)
-				if err == nil || !strings.Contains(err.Error(), "Device not reachable") || outErr != "Device not reachable" {
-					t.Errorf("unexpected error_tool result: %q, %v", outErr, err)
-				}
+	// Nil and empty dispatcher checks
+	var nilDisp *DefaultMCPDispatcher
+	if decls, err := nilDisp.ListDeclarations(context.Background()); err != nil || decls != nil {
+		t.Errorf("expected nil decls from nil dispatcher")
+	}
+	if _, err := nilDisp.Execute(context.Background(), "tool", nil); err == nil {
+		t.Errorf("expected error executing on nil dispatcher")
+	}
 
-				// Raw tool
-				rawOut, err := disp.Execute(ctx, "raw_tool", nil)
-				if err != nil || !strings.Contains(rawOut, `"status":"ok"`) {
-					t.Errorf("unexpected raw_tool result: %q, %v", rawOut, err)
-				}
+	emptyDisp := NewDefaultMCPDispatcher(nil, nil)
+	if decls, err := emptyDisp.ListDeclarations(context.Background()); err != nil || decls != nil {
+		t.Errorf("expected nil decls from empty dispatcher")
+	}
 
-				// Unknown tool
-				if _, err := disp.Execute(ctx, "non_existent", nil); err == nil {
-					t.Errorf("expected error for non_existent tool")
-				}
-			case tc.testEdge:
-				ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					http.Error(w, "server error", http.StatusInternalServerError)
-				}))
-				defer ts500.Close()
+	skipDisp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "empty-url", ServerURL: "   "}}, http.DefaultClient)
+	if decls, err := skipDisp.ListDeclarations(context.Background()); err != nil || len(decls) != 0 {
+		t.Errorf("expected empty decls for empty server URL")
+	}
 
-				tsRPCErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}`))
-				}))
-				defer tsRPCErr.Close()
+	// Dispatcher with various error servers
+	errDisp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "srv-500", ServerURL: ts500.URL},
+		{Name: "srv-rpc-err", ServerURL: tsRPCErr.URL},
+		{Name: "srv-bad-json", ServerURL: tsBadJSON.URL},
+		{Name: "srv-empty-name", ServerURL: tsEmptyName.URL},
+		{Name: "srv-unreachable", ServerURL: "http://127.0.0.1:0"},
+	}, ts500.Client())
 
-				tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`not a json response`))
-				}))
-				defer tsBadJSON.Close()
+	decls, err := errDisp.ListDeclarations(context.Background())
+	if err != nil || len(decls) != 1 || decls[0].Name != "valid_t" {
+		t.Fatalf("expected 1 valid declaration valid_t, got %d decls (%v)", len(decls), err)
+	}
 
-				tsEmptyName := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"","description":"empty"},{"name":"valid_t","description":"ok"}]}}`))
-				}))
-				defer tsEmptyName.Close()
+	// Execution error table
+	execErrorTests := []struct {
+		toolName   string
+		serverName string
+		serverURL  string
+	}{
+		{"crash_tool", "srv-500", ts500.URL},
+		{"rpc_err_tool", "srv-rpc-err", tsRPCErr.URL},
+		{"bad_json_tool", "srv-bad-json", tsBadJSON.URL},
+		{"unreachable_tool", "srv-unreachable", "http://127.0.0.1:0"},
+	}
+	for _, et := range execErrorTests {
+		errDisp.toolRoutes[et.toolName] = MCPServerConfig{Name: et.serverName, ServerURL: et.serverURL}
+		if _, err := errDisp.Execute(context.Background(), et.toolName, nil); err == nil {
+			t.Errorf("expected error executing %s on %s", et.toolName, et.serverURL)
+		}
+	}
+}
 
-				// Nil and empty dispatcher checks
-				var nilDisp *DefaultMCPDispatcher
-				if decls, err := nilDisp.ListDeclarations(context.Background()); err != nil || decls != nil {
-					t.Errorf("expected nil decls from nil dispatcher")
-				}
-				if _, err := nilDisp.Execute(context.Background(), "tool", nil); err == nil {
-					t.Errorf("expected error executing on nil dispatcher")
-				}
+func TestMCPDispatcher_HeadersAndMultiPartContent(t *testing.T) {
+	t.Parallel()
 
-				emptyDisp := NewDefaultMCPDispatcher(nil, nil)
-				if decls, err := emptyDisp.ListDeclarations(context.Background()); err != nil || decls != nil {
-					t.Errorf("expected nil decls from empty dispatcher")
-				}
-
-				skipDisp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "empty-url", ServerURL: "   "}}, http.DefaultClient)
-				if decls, err := skipDisp.ListDeclarations(context.Background()); err != nil || len(decls) != 0 {
-					t.Errorf("expected empty decls for empty server URL")
-				}
-
-				// Dispatcher with various error servers
-				errDisp := NewDefaultMCPDispatcher([]MCPServerConfig{
-					{Name: "srv-500", ServerURL: ts500.URL},
-					{Name: "srv-rpc-err", ServerURL: tsRPCErr.URL},
-					{Name: "srv-bad-json", ServerURL: tsBadJSON.URL},
-					{Name: "srv-empty-name", ServerURL: tsEmptyName.URL},
-					{Name: "srv-unreachable", ServerURL: "http://127.0.0.1:0"},
-				}, ts500.Client())
-
-				decls, err := errDisp.ListDeclarations(context.Background())
-				if err != nil || len(decls) != 1 || decls[0].Name != "valid_t" {
-					t.Fatalf("expected 1 valid declaration valid_t, got %d decls (%v)", len(decls), err)
-				}
-
-				// Execution error table
-				execErrorTests := []struct {
-					toolName   string
-					serverName string
-					serverURL  string
-				}{
-					{"crash_tool", "srv-500", ts500.URL},
-					{"rpc_err_tool", "srv-rpc-err", tsRPCErr.URL},
-					{"bad_json_tool", "srv-bad-json", tsBadJSON.URL},
-					{"unreachable_tool", "srv-unreachable", "http://127.0.0.1:0"},
-				}
-				for _, et := range execErrorTests {
-					errDisp.toolRoutes[et.toolName] = MCPServerConfig{Name: et.serverName, ServerURL: et.serverURL}
-					if _, err := errDisp.Execute(context.Background(), et.toolName, nil); err == nil {
-						t.Errorf("expected error executing %s on %s", et.toolName, et.serverURL)
-					}
-				}
-			case tc.testHeaders:
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Header.Get("X-Custom-Auth") != "Bearer secret123" {
-						http.Error(w, "missing header", http.StatusUnauthorized)
-						return
-					}
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{
-						"jsonrpc": "2.0",
-						"id": 1,
-						"result": {
-							"content": [
-								{"type": "text", "text": "line one"},
-								{"type": "text", "text": "line two"}
-							]
-						}
-					}`))
-				}))
-				defer ts.Close()
-
-				disp := NewDefaultMCPDispatcher([]MCPServerConfig{
-					{Name: "auth-srv", ServerURL: ts.URL, Headers: map[string]string{"X-Custom-Auth": "Bearer secret123"}},
-				}, ts.Client())
-				disp.toolRoutes["multi_tool"] = MCPServerConfig{Name: "auth-srv", ServerURL: ts.URL, Headers: map[string]string{"X-Custom-Auth": "Bearer secret123"}}
-
-				res, err := disp.Execute(context.Background(), "multi_tool", map[string]interface{}{"foo": "bar"})
-				if err != nil || res != "line one\nline two" {
-					t.Errorf("unexpected multi-part execution: %q, %v", res, err)
-				}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Custom-Auth") != "Bearer secret123" {
+			http.Error(w, "missing header", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"result": {
+				"content": [
+					{"type": "text", "text": "line one"},
+					{"type": "text", "text": "line two"}
+				]
 			}
-		})
+		}`))
+	}))
+	defer ts.Close()
+
+	disp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "auth-srv", ServerURL: ts.URL, Headers: map[string]string{"X-Custom-Auth": "Bearer secret123"}},
+	}, ts.Client())
+	disp.toolRoutes["multi_tool"] = MCPServerConfig{Name: "auth-srv", ServerURL: ts.URL, Headers: map[string]string{"X-Custom-Auth": "Bearer secret123"}}
+
+	res, err := disp.Execute(context.Background(), "multi_tool", map[string]interface{}{"foo": "bar"})
+	if err != nil || res != "line one\nline two" {
+		t.Errorf("unexpected multi-part execution: %q, %v", res, err)
 	}
 }
 
@@ -1320,82 +1267,6 @@ func TestIsMissingSessionIDErr_TableDriven(t *testing.T) {
 func TestCleanParameters(t *testing.T) {
 	t.Parallel()
 
-	complexSchema := map[string]interface{}{
-		"$schema":              "http://json-schema.org/draft-07/schema#",
-		"title":                "TestSchema",
-		"type":                 "object",
-		"additionalProperties": false,
-		"$ref":                 "#/defs",
-		"$id":                  "id1",
-		"definitions":          map[string]interface{}{},
-		"default":              "val",
-		"properties": map[string]interface{}{
-			"prompt": map[string]interface{}{
-				"type":                 "string",
-				"title":                "Prompt Title",
-				"additionalProperties": false,
-			},
-			"raw_field": "not-a-map",
-			"items_slice": map[string]interface{}{
-				"type": "array",
-				"items": []interface{}{
-					map[string]interface{}{"type": "int", "additionalProperties": false},
-					"not-a-map",
-				},
-			},
-			"items_map": map[string]interface{}{
-				"type": "array",
-				"items": map[string]interface{}{
-					"type": "bool",
-				},
-			},
-			"empty_child": map[string]interface{}{},
-			"optional_list": map[string]interface{}{
-				"type": []interface{}{"null", "array"},
-				"items": map[string]interface{}{
-					"type": "string",
-				},
-			},
-			"reversed_null": map[string]interface{}{
-				"type": []string{"string", "null"},
-			},
-			"branch_field": map[string]interface{}{
-				"anyOf": []interface{}{
-					map[string]interface{}{"type": "null"},
-					map[string]interface{}{"type": "string"},
-				},
-			},
-		},
-		"allOf": []map[string]interface{}{
-			{"type": "string"},
-		},
-	}
-
-	deeplyNestedSchema := func() map[string]interface{} {
-		root := map[string]interface{}{
-			"type":                 "object",
-			"additionalProperties": false,
-		}
-		curr := root
-		for i := 0; i < 20; i++ {
-			child := map[string]interface{}{
-				"type":                 "object",
-				"additionalProperties": false,
-			}
-			curr["properties"] = map[string]interface{}{
-				"nested": child,
-			}
-			curr = child
-		}
-		curr["properties"] = map[string]interface{}{
-			"leaf": map[string]interface{}{
-				"type":                 "string",
-				"additionalProperties": false,
-			},
-		}
-		return root
-	}()
-
 	testCases := []struct {
 		name             string
 		input            map[string]interface{}
@@ -1403,8 +1274,6 @@ func TestCleanParameters(t *testing.T) {
 		nullable         bool
 		checkNonNilProps bool
 		checkAnyOfPres   bool
-		checkStripped    bool
-		checkDeeplyNest  bool
 	}{
 		{name: "NilSchema", input: nil, expectedType: "OBJECT", checkNonNilProps: true},
 		{name: "EmptySchema", input: map[string]interface{}{}, expectedType: "OBJECT", checkNonNilProps: true},
@@ -1485,98 +1354,12 @@ func TestCleanParameters(t *testing.T) {
 			expectedType:   "OBJECT",
 			checkAnyOfPres: true,
 		},
-		{
-			name:          "Strips_Disallowed_Keys_And_Preserves_Structure",
-			input:         complexSchema,
-			checkStripped: true,
-		},
-		{
-			name:            "DeeplyNestedSchema_Preserved",
-			input:           deeplyNestedSchema,
-			checkDeeplyNest: true,
-		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cleaned := cleanParameters(tc.input)
-
-			if tc.checkStripped {
-				disallowed := []string{"additionalproperties", "$schema", "title", "default", "$ref", "$id", "definitions"}
-				var checkKeys func(m map[string]interface{}, path string)
-				checkKeys = func(m map[string]interface{}, path string) {
-					for k, v := range m {
-						for _, dis := range disallowed {
-							if strings.EqualFold(k, dis) {
-								t.Errorf("found disallowed key %q at path %s", k, path)
-							}
-						}
-						if childMap, ok := v.(map[string]interface{}); ok {
-							checkKeys(childMap, path+"."+k)
-						} else if childSlice, ok := v.([]interface{}); ok {
-							for idx, elem := range childSlice {
-								if elemMap, ok := elem.(map[string]interface{}); ok {
-									checkKeys(elemMap, fmt.Sprintf("%s.%s[%d]", path, k, idx))
-								}
-							}
-						}
-					}
-				}
-				checkKeys(cleaned, "root")
-
-				if cleaned["type"] != "OBJECT" {
-					t.Errorf("expected root type OBJECT, got %v", cleaned["type"])
-				}
-				props := cleaned["properties"].(map[string]interface{})
-				prompt := props["prompt"].(map[string]interface{})
-				if prompt["type"] != "STRING" {
-					t.Errorf("expected prompt type STRING, got %v", prompt["type"])
-				}
-				emptyChild := props["empty_child"].(map[string]interface{})
-				if emptyChild["type"] != "OBJECT" {
-					t.Errorf("expected empty_child type OBJECT, got %v", emptyChild["type"])
-				}
-				optList := props["optional_list"].(map[string]interface{})
-				if optList["type"] != "ARRAY" || optList["nullable"] != true {
-					t.Errorf("expected optional_list ARRAY nullable, got %+v", optList)
-				}
-				revNull := props["reversed_null"].(map[string]interface{})
-				if revNull["type"] != "STRING" || revNull["nullable"] != true {
-					t.Errorf("expected reversed_null STRING nullable, got %+v", revNull)
-				}
-				return
-			}
-
-			if tc.checkDeeplyNest {
-				if cleaned == nil {
-					t.Fatalf("expected non-nil result from deeply nested schema")
-				}
-				probe := cleaned
-				for level := 0; level < 20; level++ {
-					if _, hasAddl := probe["additionalProperties"]; hasAddl {
-						t.Fatalf("level %d still had additionalProperties", level)
-					}
-					props, ok := probe["properties"].(map[string]interface{})
-					if !ok {
-						t.Fatalf("level %d missing properties map", level)
-					}
-					child, ok := props["nested"].(map[string]interface{})
-					if !ok {
-						t.Fatalf("level %d missing nested child", level)
-					}
-					probe = child
-				}
-				leafProps, ok := probe["properties"].(map[string]interface{})
-				if !ok {
-					t.Fatalf("leaf parent missing properties")
-				}
-				leaf, ok := leafProps["leaf"].(map[string]interface{})
-				if !ok || leaf["type"] != "STRING" {
-					t.Fatalf("leaf not preserved at depth 20: %+v", leaf)
-				}
-				return
-			}
 
 			if cleaned["type"] != tc.expectedType {
 				t.Errorf("%s: expected type %q, got %q", tc.name, tc.expectedType, cleaned["type"])
@@ -1593,6 +1376,163 @@ func TestCleanParameters(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
+	t.Parallel()
+
+	complexSchema := map[string]interface{}{
+		"$schema":              "http://json-schema.org/draft-07/schema#",
+		"title":                "TestSchema",
+		"type":                 "object",
+		"additionalProperties": false,
+		"$ref":                 "#/defs",
+		"$id":                  "id1",
+		"definitions":          map[string]interface{}{},
+		"default":              "val",
+		"properties": map[string]interface{}{
+			"prompt": map[string]interface{}{
+				"type":                 "string",
+				"title":                "Prompt Title",
+				"additionalProperties": false,
+			},
+			"raw_field": "not-a-map",
+			"items_slice": map[string]interface{}{
+				"type": "array",
+				"items": []interface{}{
+					map[string]interface{}{"type": "int", "additionalProperties": false},
+					"not-a-map",
+				},
+			},
+			"items_map": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "bool",
+				},
+			},
+			"empty_child": map[string]interface{}{},
+			"optional_list": map[string]interface{}{
+				"type": []interface{}{"null", "array"},
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+			},
+			"reversed_null": map[string]interface{}{
+				"type": []string{"string", "null"},
+			},
+			"branch_field": map[string]interface{}{
+				"anyOf": []interface{}{
+					map[string]interface{}{"type": "null"},
+					map[string]interface{}{"type": "string"},
+				},
+			},
+		},
+		"allOf": []map[string]interface{}{
+			{"type": "string"},
+		},
+	}
+
+	cleaned := cleanParameters(complexSchema)
+
+	disallowed := []string{"additionalproperties", "$schema", "title", "default", "$ref", "$id", "definitions"}
+	var checkKeys func(m map[string]interface{}, path string)
+	checkKeys = func(m map[string]interface{}, path string) {
+		for k, v := range m {
+			for _, dis := range disallowed {
+				if strings.EqualFold(k, dis) {
+					t.Errorf("found disallowed key %q at path %s", k, path)
+				}
+			}
+			if childMap, ok := v.(map[string]interface{}); ok {
+				checkKeys(childMap, path+"."+k)
+			} else if childSlice, ok := v.([]interface{}); ok {
+				for idx, elem := range childSlice {
+					if elemMap, ok := elem.(map[string]interface{}); ok {
+						checkKeys(elemMap, fmt.Sprintf("%s.%s[%d]", path, k, idx))
+					}
+				}
+			}
+		}
+	}
+	checkKeys(cleaned, "root")
+
+	if cleaned["type"] != "OBJECT" {
+		t.Errorf("expected root type OBJECT, got %v", cleaned["type"])
+	}
+	props := cleaned["properties"].(map[string]interface{})
+	prompt := props["prompt"].(map[string]interface{})
+	if prompt["type"] != "STRING" {
+		t.Errorf("expected prompt type STRING, got %v", prompt["type"])
+	}
+	emptyChild := props["empty_child"].(map[string]interface{})
+	if emptyChild["type"] != "OBJECT" {
+		t.Errorf("expected empty_child type OBJECT, got %v", emptyChild["type"])
+	}
+	optList := props["optional_list"].(map[string]interface{})
+	if optList["type"] != "ARRAY" || optList["nullable"] != true {
+		t.Errorf("expected optional_list ARRAY nullable, got %+v", optList)
+	}
+	revNull := props["reversed_null"].(map[string]interface{})
+	if revNull["type"] != "STRING" || revNull["nullable"] != true {
+		t.Errorf("expected reversed_null STRING nullable, got %+v", revNull)
+	}
+}
+
+func TestCleanParameters_DeeplyNestedSchema(t *testing.T) {
+	t.Parallel()
+
+	deeplyNestedSchema := func() map[string]interface{} {
+		root := map[string]interface{}{
+			"type":                 "object",
+			"additionalProperties": false,
+		}
+		curr := root
+		for i := 0; i < 20; i++ {
+			child := map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+			}
+			curr["properties"] = map[string]interface{}{
+				"nested": child,
+			}
+			curr = child
+		}
+		curr["properties"] = map[string]interface{}{
+			"leaf": map[string]interface{}{
+				"type":                 "string",
+				"additionalProperties": false,
+			},
+		}
+		return root
+	}()
+
+	cleaned := cleanParameters(deeplyNestedSchema)
+	if cleaned == nil {
+		t.Fatalf("expected non-nil result from deeply nested schema")
+	}
+	probe := cleaned
+	for level := 0; level < 20; level++ {
+		if _, hasAddl := probe["additionalProperties"]; hasAddl {
+			t.Fatalf("level %d still had additionalProperties", level)
+		}
+		props, ok := probe["properties"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("level %d missing properties map", level)
+		}
+		child, ok := props["nested"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("level %d missing nested child", level)
+		}
+		probe = child
+	}
+	leafProps, ok := probe["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("leaf parent missing properties")
+	}
+	leaf, ok := leafProps["leaf"].(map[string]interface{})
+	if !ok || leaf["type"] != "STRING" {
+		t.Fatalf("leaf not preserved at depth 20: %+v", leaf)
 	}
 }
 
@@ -1768,108 +1708,87 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	}
 }
 
-func TestGeminiAPIPool_SessionAndResponseBehavior(t *testing.T) {
+func TestGeminiAPIPool_EmptyResponseHistoryNotPoisoned(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name            string
-		testEmptyHist   bool
-		testVoiceRules  bool
-		testNilReceiver bool
-		testRotator     bool
-	}{
-		{
-			name:          "EmptyResponseHistoryNotPoisoned",
-			testEmptyHist: true,
-		},
-		{
-			name:           "LoadVoiceRulesFromDataDir",
-			testVoiceRules: true,
-		},
-		{
-			name:            "NilReceiverAndDefaultClient",
-			testNilReceiver: true,
-		},
-		{
-			name:        "SessionRotator",
-			testRotator: true,
-		},
+	tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"))
+	}))
+	defer tsGemini.Close()
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:     "test-key",
+		Model:      "gemini-2.5-flash",
+		BaseURL:    tsGemini.URL,
+		HTTPClient: tsGemini.Client(),
+	})
+	defer pool.Close()
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-empty", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	sink := newMockTurnSink()
+	turn := &TurnContext{TurnID: "turn-empty", Prompt: "hello", Sink: sink}
+	if err := sess.Send("hello", turn); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	apiSess := sess.(*GeminiAPISession)
+	if len(apiSess.history) != 0 {
+		t.Errorf("expected empty history, got %d items: %+v", len(apiSess.history), apiSess.history)
+	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			switch {
-			case tc.testEmptyHist:
-				tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"))
-				}))
-				defer tsGemini.Close()
+func TestGeminiAPIPool_LoadVoiceRulesFromDataDir(t *testing.T) {
+	t.Parallel()
 
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-					APIKey:     "test-key",
-					Model:      "gemini-2.5-flash",
-					BaseURL:    tsGemini.URL,
-					HTTPClient: tsGemini.Client(),
-				})
-				defer pool.Close()
+	tmpDir := t.TempDir()
+	rulesDir := filepath.Join(tmpDir, "runtimes", "voice", ".gemini", "config", "rules")
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		t.Fatalf("failed to create rules dir: %v", err)
+	}
+	ruleContent := "# Test Voice Rules\nBe succinct and direct."
+	if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write test rule file: %v", err)
+	}
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{DataDir: tmpDir})
+	defer pool.Close()
+	if !strings.Contains(pool.cfg.SystemPrompt, ruleContent) {
+		t.Errorf("expected system prompt to contain rule content, got: %q", pool.cfg.SystemPrompt)
+	}
+}
 
-				sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-empty", "")
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				sink := newMockTurnSink()
-				turn := &TurnContext{TurnID: "turn-empty", Prompt: "hello", Sink: sink}
-				if err := sess.Send("hello", turn); err != nil {
-					t.Fatalf("Send failed: %v", err)
-				}
-				apiSess := sess.(*GeminiAPISession)
-				if len(apiSess.history) != 0 {
-					t.Errorf("expected empty history, got %d items: %+v", len(apiSess.history), apiSess.history)
-				}
-			case tc.testVoiceRules:
-				tmpDir := t.TempDir()
-				rulesDir := filepath.Join(tmpDir, "runtimes", "voice", ".gemini", "config", "rules")
-				if err := os.MkdirAll(rulesDir, 0755); err != nil {
-					t.Fatalf("failed to create rules dir: %v", err)
-				}
-				ruleContent := "# Test Voice Rules\nBe succinct and direct."
-				if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte(ruleContent), 0644); err != nil {
-					t.Fatalf("failed to write test rule file: %v", err)
-				}
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{DataDir: tmpDir})
-				defer pool.Close()
-				if !strings.Contains(pool.cfg.SystemPrompt, ruleContent) {
-					t.Errorf("expected system prompt to contain rule content, got: %q", pool.cfg.SystemPrompt)
-				}
-			case tc.testNilReceiver:
-				var nilPool *GeminiAPIPool
-				if nilPool.Model() != "" || nilPool.APIKey() != "" || nilPool.PrewarmedTargets() != nil {
-					t.Errorf("nilPool getters returned unexpected values")
-				}
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "key", Model: "gemini-2.5-flash"})
-				if pool.cfg.HTTPClient == nil {
-					t.Errorf("expected default HTTPClient to be initialized")
-				}
-				_ = pool.Close()
-			case tc.testRotator:
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "dummy"})
-				defer pool.Close()
-				ctx := context.Background()
-				sess, err := pool.GetOrCreateSession(ctx, "target-rot", "")
-				if err != nil {
-					t.Fatalf("GetOrCreateSession failed: %v", err)
-				}
-				if should, _ := pool.ShouldRotateSession(sess); should {
-					t.Errorf("expected ShouldRotateSession to return false")
-				}
-				rotSess, err := pool.RotateSession(ctx, "target-rot")
-				if err != nil || rotSess == nil {
-					t.Fatalf("RotateSession failed: sess=%v, err=%v", rotSess, err)
-				}
-			}
-		})
+func TestGeminiAPIPool_NilReceiverAndDefaultClient(t *testing.T) {
+	t.Parallel()
+
+	var nilPool *GeminiAPIPool
+	if nilPool.Model() != "" || nilPool.APIKey() != "" || nilPool.PrewarmedTargets() != nil {
+		t.Errorf("nilPool getters returned unexpected values")
+	}
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "key", Model: "gemini-2.5-flash"})
+	if pool.cfg.HTTPClient == nil {
+		t.Errorf("expected default HTTPClient to be initialized")
+	}
+	_ = pool.Close()
+}
+
+func TestGeminiAPIPool_SessionRotator(t *testing.T) {
+	t.Parallel()
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "dummy"})
+	defer pool.Close()
+	ctx := context.Background()
+	sess, err := pool.GetOrCreateSession(ctx, "target-rot", "")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	if should, _ := pool.ShouldRotateSession(sess); should {
+		t.Errorf("expected ShouldRotateSession to return false")
+	}
+	rotSess, err := pool.RotateSession(ctx, "target-rot")
+	if err != nil || rotSess == nil {
+		t.Fatalf("RotateSession failed: sess=%v, err=%v", rotSess, err)
 	}
 }
 
@@ -1938,152 +1857,135 @@ func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	}
 }
 
-func TestMCPDispatcher_DeclarativeSuites(t *testing.T) {
+func TestMCPDispatcher_MissingSessionRetry(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name            string
-		testRetry       bool
-		testListError   bool
-		testGoogleEmail bool
-	}{
-		{
-			name:      "MissingSessionRetry",
-			testRetry: true,
-		},
-		{
-			name:          "ListDeclarations_ErrorAndRetryBranches",
-			testListError: true,
-		},
-		{
-			name:            "NormalizeGoogleUserEmail",
-			testGoogleEmail: true,
-		},
+	var initCalls, execCalls int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			atomic.AddInt32(&initCalls, 1)
+			w.Header().Set("mcp-session-id", "new-sess-123")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_exec","description":"Test Exec"}]}}`))
+		case "tools/call":
+			callNum := atomic.AddInt32(&execCalls, 1)
+			if callNum == 1 || r.Header.Get("mcp-session-id") != "new-sess-123" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Success after retry"}]}}`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "exec-retry-srv", ServerURL: ts.URL}}, ts.Client())
+	res, err := dispatcher.Execute(context.Background(), "test_exec", nil)
+	if err != nil || res != "Success after retry" {
+		t.Fatalf("Execute failed: res=%q, err=%v", res, err)
+	}
+	if initCount := atomic.LoadInt32(&initCalls); initCount < 1 || initCount > 2 {
+		t.Errorf("expected 1-2 init calls, got %d", initCount)
+	}
+	if atomic.LoadInt32(&execCalls) != 2 {
+		t.Errorf("expected 2 exec calls, got %d", atomic.LoadInt32(&execCalls))
+	}
+}
+
+func TestMCPDispatcher_ListDeclarationsErrorAndRetry(t *testing.T) {
+	t.Parallel()
+
+	var nilDisp *DefaultMCPDispatcher
+	nilDecls, err := nilDisp.ListDeclarations(context.Background())
+	if err != nil || nilDecls != nil {
+		t.Errorf("expected nil, nil for nil dispatcher, got %v, %v", nilDecls, err)
 	}
 
-	for _, tc := range tests {
+	tsRetryFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
+	}))
+	defer tsRetryFail.Close()
+
+	dispFail := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "retry-fail-srv", ServerURL: tsRetryFail.URL}}, tsRetryFail.Client())
+	decls, err := dispFail.ListDeclarations(context.Background())
+	if err != nil || len(decls) != 0 {
+		t.Errorf("expected 0 decls from failing srv, got %d, err=%v", len(decls), err)
+	}
+	if _, err := dispFail.Execute(context.Background(), "non_existent_tool", nil); err == nil {
+		t.Errorf("expected error executing non-existent tool")
+	}
+}
+
+func TestMCPDispatcher_NormalizeGoogleUserEmail(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name            string
+		inputEmail      string
+		calendarID      string
+		expectedEmail   string
+		shouldHaveEmail bool
+	}{
+		{name: "Primary", inputEmail: "primary", calendarID: "primary", shouldHaveEmail: false},
+		{name: "Me", inputEmail: "me", shouldHaveEmail: false},
+		{name: "UserEmail", inputEmail: "user@example.com", expectedEmail: "user@example.com", shouldHaveEmail: true},
+	}
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			switch {
-			case tc.testRetry:
-				var initCalls, execCalls int32
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var req struct {
-						Method string `json:"method"`
-					}
-					_ = json.NewDecoder(r.Body).Decode(&req)
-					w.Header().Set("Content-Type", "application/json")
-					switch req.Method {
-					case "initialize":
-						atomic.AddInt32(&initCalls, 1)
-						w.Header().Set("mcp-session-id", "new-sess-123")
-						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`))
-					case "notifications/initialized":
-						w.WriteHeader(http.StatusOK)
-					case "tools/list":
-						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_exec","description":"Test Exec"}]}}`))
-					case "tools/call":
-						callNum := atomic.AddInt32(&execCalls, 1)
-						if callNum == 1 || r.Header.Get("mcp-session-id") != "new-sess-123" {
-							w.WriteHeader(http.StatusBadRequest)
-							_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
-							return
-						}
-						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Success after retry"}]}}`))
-					default:
-						http.Error(w, "not found", http.StatusNotFound)
-					}
-				}))
-				defer ts.Close()
+			var receivedParams map[string]interface{}
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				var req struct {
+					Method string `json:"method"`
+					Params struct {
+						Arguments map[string]interface{} `json:"arguments"`
+					} `json:"params"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				if req.Method == "tools/list" {
+					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_events","description":"test","inputSchema":{"type":"object"}}]}}`))
+					return
+				}
+				receivedParams = req.Params.Arguments
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`))
+			}))
+			defer ts.Close()
 
-				dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "exec-retry-srv", ServerURL: ts.URL}}, ts.Client())
-				res, err := dispatcher.Execute(context.Background(), "test_exec", nil)
-				if err != nil || res != "Success after retry" {
-					t.Fatalf("Execute failed: res=%q, err=%v", res, err)
-				}
-				if initCount := atomic.LoadInt32(&initCalls); initCount < 1 || initCount > 2 {
-					t.Errorf("expected 1-2 init calls, got %d", initCount)
-				}
-				if atomic.LoadInt32(&execCalls) != 2 {
-					t.Errorf("expected 2 exec calls, got %d", atomic.LoadInt32(&execCalls))
-				}
-			case tc.testListError:
-				var nilDisp *DefaultMCPDispatcher
-				nilDecls, err := nilDisp.ListDeclarations(context.Background())
-				if err != nil || nilDecls != nil {
-					t.Errorf("expected nil, nil for nil dispatcher, got %v, %v", nilDecls, err)
-				}
+			disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "google", ServerURL: ts.URL}}, ts.Client())
+			ctx := context.Background()
+			_, _ = disp.ListDeclarations(ctx)
 
-				tsRetryFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusBadRequest)
-					_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
-				}))
-				defer tsRetryFail.Close()
-
-				dispFail := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "retry-fail-srv", ServerURL: tsRetryFail.URL}}, tsRetryFail.Client())
-				decls, err := dispFail.ListDeclarations(context.Background())
-				if err != nil || len(decls) != 0 {
-					t.Errorf("expected 0 decls from failing srv, got %d, err=%v", len(decls), err)
-				}
-				if _, err := dispFail.Execute(context.Background(), "non_existent_tool", nil); err == nil {
-					t.Errorf("expected error executing non-existent tool")
-				}
-			case tc.testGoogleEmail:
-				var receivedParams map[string]interface{}
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					var req struct {
-						Method string `json:"method"`
-						Params struct {
-							Arguments map[string]interface{} `json:"arguments"`
-						} `json:"params"`
-					}
-					_ = json.NewDecoder(r.Body).Decode(&req)
-					if req.Method == "tools/list" {
-						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_events","description":"test","inputSchema":{"type":"object"}}]}}`))
-						return
-					}
-					receivedParams = req.Params.Arguments
-					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`))
-				}))
-				defer ts.Close()
-
-				disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "google", ServerURL: ts.URL}}, ts.Client())
-				ctx := context.Background()
-				_, _ = disp.ListDeclarations(ctx)
-
-				cases := []struct {
-					inputEmail      string
-					calendarID      string
-					expectedEmail   string
-					shouldHaveEmail bool
-				}{
-					{inputEmail: "primary", calendarID: "primary", shouldHaveEmail: false},
-					{inputEmail: "me", shouldHaveEmail: false},
-					{inputEmail: "user@example.com", expectedEmail: "user@example.com", shouldHaveEmail: true},
-				}
-
-				for _, tc := range cases {
-					receivedParams = nil
-					args := map[string]interface{}{"user_google_email": tc.inputEmail}
-					if tc.calendarID != "" {
-						args["calendar_id"] = tc.calendarID
-					}
-					if _, err := disp.Execute(ctx, "get_events", args); err != nil {
-						t.Fatalf("Execute failed for %s: %v", tc.inputEmail, err)
-					}
-					val, exists := receivedParams["user_google_email"]
-					if exists != tc.shouldHaveEmail {
-						t.Errorf("case %q: expected exists=%v, got %v", tc.inputEmail, tc.shouldHaveEmail, exists)
-					}
-					if tc.shouldHaveEmail && val != tc.expectedEmail {
-						t.Errorf("case %q: expected %q, got %v", tc.inputEmail, tc.expectedEmail, val)
-					}
-					if tc.calendarID != "" && receivedParams["calendar_id"] != tc.calendarID {
-						t.Errorf("case %q: expected calendar_id=%q, got %v", tc.inputEmail, tc.calendarID, receivedParams["calendar_id"])
-					}
-				}
+			args := map[string]interface{}{"user_google_email": tc.inputEmail}
+			if tc.calendarID != "" {
+				args["calendar_id"] = tc.calendarID
+			}
+			if _, err := disp.Execute(ctx, "get_events", args); err != nil {
+				t.Fatalf("Execute failed for %s: %v", tc.inputEmail, err)
+			}
+			val, exists := receivedParams["user_google_email"]
+			if exists != tc.shouldHaveEmail {
+				t.Errorf("case %q: expected exists=%v, got %v", tc.inputEmail, tc.shouldHaveEmail, exists)
+			}
+			if tc.shouldHaveEmail && val != tc.expectedEmail {
+				t.Errorf("case %q: expected %q, got %v", tc.inputEmail, tc.expectedEmail, val)
+			}
+			if tc.calendarID != "" && receivedParams["calendar_id"] != tc.calendarID {
+				t.Errorf("case %q: expected calendar_id=%q, got %v", tc.inputEmail, tc.calendarID, receivedParams["calendar_id"])
 			}
 		})
 	}
