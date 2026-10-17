@@ -10,7 +10,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
-	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
@@ -157,23 +156,10 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 			p.mu.Lock()
 			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
 				hasActiveTasks := false
-				if p.processPool != nil {
-					if gp, ok := p.processPool.(interface {
-						Get(string) (*runner.StreamingDaemon, bool)
-					}); ok {
-						if d, ok := gp.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-							hasActiveTasks = true
-						}
-					}
-				}
-				if !hasActiveTasks && p.lowEffortProcessPool != nil {
-					if gp, ok := p.lowEffortProcessPool.(interface {
-						Get(string) (*runner.StreamingDaemon, bool)
-					}); ok {
-						if d, ok := gp.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-							hasActiveTasks = true
-						}
-					}
+				if d := getStreamingDaemon(p.processPool, threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
+					hasActiveTasks = true
+				} else if d := getStreamingDaemon(p.lowEffortProcessPool, threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
+					hasActiveTasks = true
 				}
 				if hasActiveTasks {
 					p.mu.Unlock()
@@ -202,36 +188,28 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	}
 	sb.WriteString(fmt.Sprintf("- channel_id: %s\n", channelID))
 	if m.Metadata.ChannelName != "" {
-		cleanChannelName := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.ChannelName, "\n", " "), "\r", "")
-		cleanChannelName = strings.TrimSpace(sanitizer.SanitizePromptTags(cleanChannelName))
-		if cleanChannelName != "" {
-			if !strings.HasPrefix(cleanChannelName, "#") {
-				cleanChannelName = "#" + cleanChannelName
+		if clean := sanitizePromptHeaderField(m.Metadata.ChannelName); clean != "" {
+			if !strings.HasPrefix(clean, "#") {
+				clean = "#" + clean
 			}
-			sb.WriteString(fmt.Sprintf("- channel_name: %q\n", cleanChannelName))
+			sb.WriteString(fmt.Sprintf("- channel_name: %q\n", clean))
 		}
 	}
 	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", m.ThreadID))
 	if m.Metadata.ThreadName != "" {
-		cleanThreadName := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.ThreadName, "\n", " "), "\r", "")
-		cleanThreadName = strings.TrimSpace(sanitizer.SanitizePromptTags(cleanThreadName))
-		if cleanThreadName != "" {
-			sb.WriteString(fmt.Sprintf("- thread_name: %q\n", cleanThreadName))
+		if clean := sanitizePromptHeaderField(m.Metadata.ThreadName); clean != "" {
+			sb.WriteString(fmt.Sprintf("- thread_name: %q\n", clean))
 		}
 	}
 	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
 	sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.AuthorID))
-	cleanUsername := strings.ReplaceAll(strings.ReplaceAll(m.AuthorName, "\n", " "), "\r", "")
-	cleanGlobalName := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.AuthorGlobalName, "\n", " "), "\r", "")
-	sb.WriteString(fmt.Sprintf("- author_username: %s\n", cleanUsername))
-	sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", cleanGlobalName))
+	sb.WriteString(fmt.Sprintf("- author_username: %s\n", sanitizePromptHeaderField(m.AuthorName)))
+	sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", sanitizePromptHeaderField(m.Metadata.AuthorGlobalName)))
 	sb.WriteString(fmt.Sprintf("- author_bot: %t\n", m.Metadata.AuthorBot))
 	sb.WriteString(fmt.Sprintf("- is_admin: %t\n", m.Metadata.IsAdmin))
 	if m.Metadata.VanadisChunkID != "" {
-		cleanChunkID := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.VanadisChunkID, "\n", " "), "\r", "")
-		cleanChunkID = strings.TrimSpace(sanitizer.SanitizePromptTags(cleanChunkID))
-		if cleanChunkID != "" {
-			sb.WriteString(fmt.Sprintf("- vanadis_chunk_id: %s\n", cleanChunkID))
+		if clean := sanitizePromptHeaderField(m.Metadata.VanadisChunkID); clean != "" {
+			sb.WriteString(fmt.Sprintf("- vanadis_chunk_id: %s\n", clean))
 		}
 	}
 
@@ -633,36 +611,20 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 
 	// Layer 6: Thread Summary (if present)
 	if strings.TrimSpace(input.ThreadSummary) != "" {
-		sumText := strings.TrimSpace(input.ThreadSummary)
-		if !strings.HasPrefix(sumText, "<THREAD_SUMMARY>") {
-			sumText = fmt.Sprintf("<THREAD_SUMMARY>\n%s\n</THREAD_SUMMARY>", sumText)
-		}
-		if basePrompt != "" {
-			basePrompt = sumText + "\n\n" + basePrompt
-		} else {
-			basePrompt = sumText
-		}
+		basePrompt = prependPromptLayer(basePrompt, wrapPromptTag(input.ThreadSummary, "<THREAD_SUMMARY>", "</THREAD_SUMMARY>"))
 	}
 
 	// Layer 5: Channel History Lookback (if present)
 	if len(input.LookbackHistory) > 0 {
 		if formattedHist := FormatChannelHistory(input.LookbackHistory, input.Timezone); formattedHist != "" {
-			if basePrompt != "" {
-				basePrompt = formattedHist + "\n\n" + basePrompt
-			} else {
-				basePrompt = formattedHist
-			}
+			basePrompt = prependPromptLayer(basePrompt, formattedHist)
 		}
 	}
 
 	// Layer 4: Previous Session ID (on cold start)
 	if input.IsColdStart && strings.TrimSpace(input.PreviousSessionID) != "" {
 		if prevBlock := FormatPreviousSession(input.PreviousSessionID); prevBlock != "" {
-			if basePrompt != "" {
-				basePrompt = prevBlock + "\n\n" + basePrompt
-			} else {
-				basePrompt = prevBlock
-			}
+			basePrompt = prependPromptLayer(basePrompt, prevBlock)
 		}
 	}
 
@@ -672,47 +634,23 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 		if !strings.HasPrefix(scopeInst, "<SCOPE_INSTRUCTIONS>") {
 			scopeInst = fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
 		}
-		if basePrompt != "" {
-			basePrompt = scopeInst + "\n\n" + basePrompt
-		} else {
-			basePrompt = scopeInst
-		}
+		basePrompt = prependPromptLayer(basePrompt, scopeInst)
 	} else if strings.TrimSpace(input.ChannelInstructions) != "" {
 		chanInst := strings.TrimSpace(input.ChannelInstructions)
 		if !strings.HasPrefix(chanInst, "<CHANNEL_INSTRUCTIONS>") && !strings.HasPrefix(chanInst, "<SCOPE_INSTRUCTIONS>") {
 			chanInst = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>", chanInst)
 		}
-		if basePrompt != "" {
-			basePrompt = chanInst + "\n\n" + basePrompt
-		} else {
-			basePrompt = chanInst
-		}
+		basePrompt = prependPromptLayer(basePrompt, chanInst)
 	}
 
 	// Layer 1: Coordination Context Hook (if present)
 	if strings.TrimSpace(input.InjectedHookContext) != "" {
-		hookText := strings.TrimSpace(input.InjectedHookContext)
-		if !strings.HasPrefix(hookText, "<COORDINATION_CONTEXT>") {
-			hookText = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", hookText)
-		}
-		if basePrompt != "" {
-			basePrompt = hookText + "\n\n" + basePrompt
-		} else {
-			basePrompt = hookText
-		}
+		basePrompt = prependPromptLayer(basePrompt, wrapPromptTag(input.InjectedHookContext, "<COORDINATION_CONTEXT>", "</COORDINATION_CONTEXT>"))
 	}
 
 	// Layer 0: Ambient Context (if present)
 	if strings.TrimSpace(input.AmbientContext) != "" {
-		ambText := strings.TrimSpace(input.AmbientContext)
-		if !strings.HasPrefix(ambText, "<ambient_context>") {
-			ambText = fmt.Sprintf("<ambient_context>\n%s\n</ambient_context>", ambText)
-		}
-		if basePrompt != "" {
-			basePrompt = ambText + "\n\n" + basePrompt
-		} else {
-			basePrompt = ambText
-		}
+		basePrompt = prependPromptLayer(basePrompt, wrapPromptTag(input.AmbientContext, "<ambient_context>", "</ambient_context>"))
 	}
 
 	return strings.TrimSpace(basePrompt)
@@ -788,4 +726,24 @@ func EvaluateMessageStaleness(
 	now time.Time,
 ) (isStale bool, reason string) {
 	return EvaluateBurstStaleness([]db.Message{msg}, stalenessTTL, isColdThread, lastSessionActivity, now)
+}
+
+func sanitizePromptHeaderField(s string) string {
+	clean := strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", "")
+	return strings.TrimSpace(sanitizer.SanitizePromptTags(clean))
+}
+
+func prependPromptLayer(base, layer string) string {
+	if base != "" {
+		return layer + "\n\n" + base
+	}
+	return layer
+}
+
+func wrapPromptTag(text, openTag, closeTag string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, openTag) {
+		return fmt.Sprintf("%s\n%s\n%s", openTag, trimmed, closeTag)
+	}
+	return trimmed
 }

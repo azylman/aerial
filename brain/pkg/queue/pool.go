@@ -166,6 +166,32 @@ func resolveStore(dbOrStore any) db.Store {
 	}
 }
 
+func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
+	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+		sessID, err := store.GetSessionID(ctx, targetKey)
+		if err != nil {
+			return runner.SessionRecord{}, err
+		}
+		turns, err := store.GetSessionTurnCount(ctx, targetKey)
+		if err != nil {
+			turns = 0
+		}
+		prevID, err := store.GetPreviousSessionID(ctx, targetKey)
+		if err != nil {
+			prevID = ""
+		}
+		return runner.SessionRecord{
+			ActiveSessionID:   sessID,
+			PreviousSessionID: prevID,
+			TurnCount:         turns,
+		}, nil
+	}
+	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+		return store.RotateSessionID(ctx, targetKey, newSessionID)
+	}
+	return getRec, onRot
+}
+
 // New creates a new WorkerPool with pure *config.Config dependency injection.
 func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.Store == nil && cfg.DB != nil {
@@ -348,84 +374,36 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			poolCfg.SessionManager = p.sessionMgr
 		}
 		if store := p.Store(); store != nil {
-			poolCfg.OnSessionRotated = func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-				return store.RotateSessionID(ctx, targetKey, newSessionID)
-			}
-			poolCfg.GetSessionRecord = func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
-				sessID, err := store.GetSessionID(ctx, targetKey)
-				if err != nil {
-					return runner.SessionRecord{}, err
-				}
-				turns, err := store.GetSessionTurnCount(ctx, targetKey)
-				if err != nil {
-					turns = 0
-				}
-				prevID, err := store.GetPreviousSessionID(ctx, targetKey)
-				if err != nil {
-					prevID = ""
-				}
-				return runner.SessionRecord{
-					ActiveSessionID:   sessID,
-					PreviousSessionID: prevID,
-					TurnCount:         turns,
-				}, nil
-			}
+			poolCfg.GetSessionRecord, poolCfg.OnSessionRotated = makeSessionCallbacks(store)
 		}
 		p.processPool = runner.NewUnifiedProcessPool(poolCfg, nil)
 	}
 
 	if p.sessionMgr != nil {
-		if tr, ok := p.processPool.(interface {
-			SetTranscriptRescuer(func(convID string, since time.Time) string)
-		}); ok {
-			tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
-		}
-		if tr, ok := p.lowEffortProcessPool.(interface {
-			SetTranscriptRescuer(func(convID string, since time.Time) string)
-		}); ok {
-			tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
-		}
-		if sm, ok := p.processPool.(interface {
-			SetSessionManager(*session.Manager)
-		}); ok {
-			sm.SetSessionManager(p.sessionMgr)
-		}
-		if sm, ok := p.lowEffortProcessPool.(interface {
-			SetSessionManager(*session.Manager)
-		}); ok {
-			sm.SetSessionManager(p.sessionMgr)
+		for _, pool := range []runner.AgentPool{p.processPool, p.lowEffortProcessPool} {
+			if pool == nil {
+				continue
+			}
+			if tr, ok := pool.(interface {
+				SetTranscriptRescuer(func(convID string, since time.Time) string)
+			}); ok {
+				tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
+			}
+			if sm, ok := pool.(interface {
+				SetSessionManager(*session.Manager)
+			}); ok {
+				sm.SetSessionManager(p.sessionMgr)
+			}
 		}
 	}
 
 	if store := p.Store(); store != nil {
-		getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
-			sessID, err := store.GetSessionID(ctx, targetKey)
-			if err != nil {
-				return runner.SessionRecord{}, err
-			}
-			turns, err := store.GetSessionTurnCount(ctx, targetKey)
-			if err != nil {
-				turns = 0
-			}
-			prevID, err := store.GetPreviousSessionID(ctx, targetKey)
-			if err != nil {
-				prevID = ""
-			}
-			return runner.SessionRecord{
-				ActiveSessionID:   sessID,
-				PreviousSessionID: prevID,
-				TurnCount:         turns,
-			}, nil
-		}
-		onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			return store.RotateSessionID(ctx, targetKey, newSessionID)
-		}
+		getRec, onRot := makeSessionCallbacks(store)
 		if sc, ok := p.processPool.(interface {
 			SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
 		}); ok {
 			sc.SetSessionCallbacks(getRec, onRot)
 		}
-
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -461,15 +439,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 				if sess == nil {
 					return
 				}
-				sysChan := ""
-				if p.appCfg != nil {
-					if cur := p.appCfg.Current(); cur != nil {
-						sysChan = cur.SystemChannel
-					}
-				}
-				if sysChan == "" {
-					sysChan = config.DefaultConfigData().SystemChannel
-				}
+				sysChan := p.systemChannel()
 
 				// Defensively sanitize snippet: rune-slice to 600 runes, escape code fences, and neutralize mentions
 				snippet := raw
@@ -513,15 +483,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 				if sess == nil {
 					return
 				}
-				sysChan := ""
-				if p.appCfg != nil {
-					if cur := p.appCfg.Current(); cur != nil {
-						sysChan = cur.SystemChannel
-					}
-				}
-				if sysChan == "" {
-					sysChan = config.DefaultConfigData().SystemChannel
-				}
+				sysChan := p.systemChannel()
 
 				alertMsg := fmt.Sprintf("**Endpoint**: `%s`\n**Status**: Failed after 3 retry attempts with exponential backoff (failing closed to strict mention-only mode).\n**Error Trace**:\n```\n%v\n```",
 					endpoint, endpointErr)
@@ -534,6 +496,15 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 
 	return p
+}
+
+func (p *WorkerPool) systemChannel() string {
+	if p != nil && p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && cur.SystemChannel != "" {
+			return cur.SystemChannel
+		}
+	}
+	return config.DefaultConfigData().SystemChannel
 }
 
 // NewWorkerPool is a compatibility wrapper for New.
@@ -735,15 +706,7 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 		lastReportedTurnCount[s.ThreadID] = s.TurnCount
 	}
 
-	sysChan := ""
-	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil {
-			sysChan = cur.SystemChannel
-		}
-	}
-	if sysChan == "" {
-		sysChan = config.DefaultConfigData().SystemChannel
-	}
+	sysChan := p.systemChannel()
 
 	alertMsg := fmt.Sprintf("⚠️ **Unrotated Runaway Sessions Detected**\n\nThe following sessions have exceeded the turn limit (%d turns) without rotating:\n%s\n\n*Purely informational watchdog alert. Sessions may require investigation if turn count continues increasing.*",
 		session.DefaultMaxSessionTurns, strings.Join(lines, "\n"))
@@ -850,26 +813,31 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 	}
 }
 
+func unwrapUnifiedPool(pool runner.AgentPool) *runner.UnifiedProcessPool {
+	if pool == nil {
+		return nil
+	}
+	if up, ok := pool.(*runner.UnifiedProcessPool); ok {
+		return up
+	}
+	if uw, ok := pool.(interface {
+		Underlying() *runner.UnifiedProcessPool
+	}); ok {
+		return uw.Underlying()
+	}
+	return nil
+}
+
 func (p *WorkerPool) Stop() {
 	p.StopWithTimeout(p.cfg.DrainTimeout)
 	p.mu.Lock()
-	procPool := p.processPool
-	lowPool := p.lowEffortProcessPool
-	voicePool := p.voiceProcessPool
+	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.voiceProcessPool}
 	p.mu.Unlock()
-	if procPool != nil {
-		if closeErr := procPool.Close(); closeErr != nil {
-			log.Printf("[WorkerPool] Warning: failed to close unified process pool: %v", closeErr)
-		}
-	}
-	if lowPool != nil {
-		if closeErr := lowPool.Close(); closeErr != nil {
-			log.Printf("[WorkerPool] Warning: failed to close low effort process pool: %v", closeErr)
-		}
-	}
-	if voicePool != nil {
-		if closeErr := voicePool.Close(); closeErr != nil {
-			log.Printf("[WorkerPool] Warning: failed to close voice process pool: %v", closeErr)
+	for _, pool := range pools {
+		if pool != nil {
+			if closeErr := pool.Close(); closeErr != nil {
+				log.Printf("[WorkerPool] Warning: failed to close process pool: %v", closeErr)
+			}
 		}
 	}
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
@@ -882,15 +850,7 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if up, ok := p.processPool.(*runner.UnifiedProcessPool); ok {
-		return up
-	}
-	if uw, ok := p.processPool.(interface {
-		Underlying() *runner.UnifiedProcessPool
-	}); ok {
-		return uw.Underlying()
-	}
-	return nil
+	return unwrapUnifiedPool(p.processPool)
 }
 
 // LowEffortProcessPool returns the configured runner.UnifiedProcessPool for low effort turns, or nil if unconfigured or p is nil.
@@ -900,15 +860,7 @@ func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if up, ok := p.lowEffortProcessPool.(*runner.UnifiedProcessPool); ok {
-		return up
-	}
-	if ip, ok := p.lowEffortProcessPool.(interface {
-		Underlying() *runner.UnifiedProcessPool
-	}); ok {
-		return ip.Underlying()
-	}
-	return nil
+	return unwrapUnifiedPool(p.lowEffortProcessPool)
 }
 
 // VoiceProcessPool returns the configured runner.AgentPool for voice turns, or nil if unconfigured or p is nil.
@@ -937,32 +889,21 @@ func (p *WorkerPool) MarkDirty() {
 		return
 	}
 	p.mu.Lock()
-	procPool := p.processPool
-	lowPool := p.lowEffortProcessPool
-	voicePool := p.voiceProcessPool
+	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.voiceProcessPool}
 	var voiceTargets []string
 	if p.appCfg != nil {
 		voiceTargets = p.appCfg.VoicePrewarmedTargets()
 	}
 	p.mu.Unlock()
-	if procPool != nil {
-		if md, ok := procPool.(interface{ MarkDirty() }); ok {
+	for _, pool := range pools {
+		if pool == nil {
+			continue
+		}
+		if targetUpdater, ok := pool.(interface{ UpdatePrewarmedTargets([]string) }); ok && voiceTargets != nil {
+			targetUpdater.UpdatePrewarmedTargets(voiceTargets)
+		}
+		if md, ok := pool.(interface{ MarkDirty() }); ok {
 			md.MarkDirty()
-		}
-	}
-	if lowPool != nil {
-		if md, ok := lowPool.(interface{ MarkDirty() }); ok {
-			md.MarkDirty()
-		}
-	}
-	if voicePool != nil {
-		if targetUpdater, ok := voicePool.(interface{ UpdatePrewarmedTargets([]string) }); ok {
-			if voiceTargets != nil {
-				targetUpdater.UpdatePrewarmedTargets(voiceTargets)
-			}
-		}
-		if dirtyMarker, ok := voicePool.(interface{ MarkDirty() }); ok {
-			dirtyMarker.MarkDirty()
 		}
 	}
 }

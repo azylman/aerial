@@ -158,53 +158,58 @@ func DefaultHistoryFetcher(dg *discordgo.Session, dbOrStore any) HistoryFetcherF
 			return fetchHistoryFromDB(store, channelID, before, limit, ctx)
 		}
 
-		botUserID := ""
-		botUsername := "aerial"
-		if dg.State != nil && dg.State.User != nil {
-			botUserID = dg.State.User.ID
-			botUsername = dg.State.User.Username
-		}
-
-		results := make([]HistoryMessage, 0, len(discordMsgs))
-		for _, dm := range discordMsgs {
-			if dm == nil {
-				continue
-			}
-			role := "User"
-			authorName := "User"
-			if dm.Author != nil {
-				authorName = dm.Author.Username
-				if (botUserID != "" && dm.Author.ID == botUserID) || strings.EqualFold(dm.Author.Username, botUsername) || strings.EqualFold(dm.Author.Username, "aerial") {
-					role = "Assistant"
-				} else if dm.Author.Bot {
-					role = "Bot"
-				}
-			} else if dm.WebhookID != "" {
-				role = "Bot"
-				authorName = "Webhook"
-			}
-
-			createdAt := dm.Timestamp
-			if createdAt.IsZero() {
-				if ts, err := discordgo.SnowflakeTimestamp(dm.ID); err == nil {
-					createdAt = ts
-				} else {
-					createdAt = time.Now().UTC()
-				}
-			}
-
-			results = append(results, HistoryMessage{
-				ID:         dm.ID,
-				AuthorName: authorName,
-				Role:       role,
-				Content:    dm.Content,
-				CreatedAt:  createdAt,
-			})
-		}
-
+		results := convertDiscordMessagesToHistory(dg, discordMsgs)
 		metrics.RecordChannelHistoryFetch("discord_api", "success", time.Since(start), len(results))
 		return results, nil
 	}
+}
+
+// convertDiscordMessagesToHistory maps raw discordgo messages into normalized HistoryMessages.
+func convertDiscordMessagesToHistory(dg *discordgo.Session, discordMsgs []*discordgo.Message) []HistoryMessage {
+	botUserID := ""
+	botUsername := "aerial"
+	if dg != nil && dg.State != nil && dg.State.User != nil {
+		botUserID = dg.State.User.ID
+		botUsername = dg.State.User.Username
+	}
+
+	results := make([]HistoryMessage, 0, len(discordMsgs))
+	for _, dm := range discordMsgs {
+		if dm == nil {
+			continue
+		}
+		role := "User"
+		authorName := "User"
+		if dm.Author != nil {
+			authorName = dm.Author.Username
+			if (botUserID != "" && dm.Author.ID == botUserID) || strings.EqualFold(dm.Author.Username, botUsername) || strings.EqualFold(dm.Author.Username, "aerial") {
+				role = "Assistant"
+			} else if dm.Author.Bot {
+				role = "Bot"
+			}
+		} else if dm.WebhookID != "" {
+			role = "Bot"
+			authorName = "Webhook"
+		}
+
+		createdAt := dm.Timestamp
+		if createdAt.IsZero() {
+			if ts, err := discordgo.SnowflakeTimestamp(dm.ID); err == nil {
+				createdAt = ts
+			} else {
+				createdAt = time.Now().UTC()
+			}
+		}
+
+		results = append(results, HistoryMessage{
+			ID:         dm.ID,
+			AuthorName: authorName,
+			Role:       role,
+			Content:    dm.Content,
+			CreatedAt:  createdAt,
+		})
+	}
+	return results
 }
 
 // FilterAssistantMessages removes messages authored by Aerial or marked with Role "Assistant".
@@ -324,50 +329,7 @@ func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, dbOrSt
 		return nil, err
 	}
 	
-	botUserID := ""
-	botUsername := "aerial"
-	if dg.State != nil && dg.State.User != nil {
-		botUserID = dg.State.User.ID
-		botUsername = dg.State.User.Username
-	}
-
-	results := make([]HistoryMessage, 0, len(discordMsgs))
-	for _, dm := range discordMsgs {
-		if dm == nil {
-			continue
-		}
-		role := "User"
-		authorName := "User"
-		if dm.Author != nil {
-			authorName = dm.Author.Username
-			if (botUserID != "" && dm.Author.ID == botUserID) || strings.EqualFold(dm.Author.Username, botUsername) || strings.EqualFold(dm.Author.Username, "aerial") {
-				role = "Assistant"
-			} else if dm.Author.Bot {
-				role = "Bot"
-			}
-		} else if dm.WebhookID != "" {
-			role = "Bot"
-			authorName = "Webhook"
-		}
-
-		createdAt := dm.Timestamp
-		if createdAt.IsZero() {
-			if ts, err := discordgo.SnowflakeTimestamp(dm.ID); err == nil {
-				createdAt = ts
-			} else {
-				createdAt = time.Now().UTC()
-			}
-		}
-
-		results = append(results, HistoryMessage{
-			ID:         dm.ID,
-			AuthorName: authorName,
-			Role:       role,
-			Content:    dm.Content,
-			CreatedAt:  createdAt,
-		})
-	}
-	
+	results := convertDiscordMessagesToHistory(dg, discordMsgs)
 	metrics.RecordChannelHistoryFetch("discord_api_thread", "success", time.Since(start), len(results))
 	return results, nil
 }
