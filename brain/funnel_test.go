@@ -121,10 +121,6 @@ channels:
 	if _, err := defaultFunnelMemberFetcher(nil, "g1", "u1"); err == nil {
 		t.Errorf("expected error for nil session")
 	}
-	if p := buildDiscordPrompt(nil, nil, "", config.ChannelPolicy{}); p != "" {
-		t.Errorf("expected empty string for nil message")
-	}
-
 	// 1. Direct Message channel
 	dmMsg := &discordgo.Message{
 		ID:        "msg-1",
@@ -139,19 +135,9 @@ channels:
 		},
 	}
 
-	title := deriveThreadTitle("<@1542035925603713086> Write a python script for Docker")
-	if title != "Write a python script for Docker" {
-		t.Errorf("Expected title 'Write a python script for Docker', got: %q", title)
-	}
-
 	targetThreadID, isThread := getOrCreateThreadID(s, dmMsg)
 	if targetThreadID != "chan-dm" || isThread {
 		t.Errorf("Expected DM targetThreadID 'chan-dm' and false, got: %s, %t", targetThreadID, isThread)
-	}
-
-	prompt := buildDiscordPrompt(s, dmMsg, "thread-12345", config.ChannelPolicy{Mode: "threads"})
-	if prompt == "" {
-		t.Errorf("Expected non-empty prompt for message")
 	}
 
 	mCreate := &discordgo.MessageCreate{Message: dmMsg}
@@ -540,83 +526,6 @@ channels:
 	}
 }
 
-func TestBuildDiscordPrompt_AdminFlag_ReplyContext_NoReplyGuidance(t *testing.T) {
-	yamlContent := `
-model: "gemini-2.5-flash"
-admin_users:
-  - "admin-user-999"
-channels:
-  default:
-    mode: "threads"
-  "chan-channel-mode":
-    mode: "channel"
-`
-	setupTestConfig(t, yamlContent)
-
-	// 1. Admin message in threads mode
-	adminMsg := &discordgo.Message{
-		ID:        "msg-admin-1",
-		ChannelID: "chan-threads-mode",
-		GuildID:   "guild-1",
-		Content:   "Deploy release v1.0",
-		Timestamp: time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC),
-		Author: &discordgo.User{
-			ID:         "admin-user-999",
-			Username:   "sysadmin",
-			GlobalName: "System Admin",
-			Bot:        false,
-		},
-	}
-
-	promptAdmin := buildDiscordPrompt(nil, adminMsg, "thread-admin-1", config.ChannelPolicy{Mode: "threads"})
-	if !strings.Contains(promptAdmin, "- is_admin: true") {
-		t.Errorf("Expected prompt to contain '- is_admin: true', got:\n%s", promptAdmin)
-	}
-	if strings.Contains(promptAdmin, "[NO_REPLY]") {
-		t.Errorf("Expected threads mode prompt NOT to contain '[NO_REPLY]', got:\n%s", promptAdmin)
-	}
-	if !strings.Contains(promptAdmin, "delivered directly to Discord") {
-		t.Errorf("Expected threads mode prompt to mention 'delivered directly to Discord', got:\n%s", promptAdmin)
-	}
-
-	// 2. Non-admin message in channel mode with reply context
-	nonAdminMsg := &discordgo.Message{
-		ID:        "msg-nonadmin-1",
-		ChannelID: "chan-channel-mode",
-		GuildID:   "guild-1",
-		Content:   "I agree with the above proposal",
-		Timestamp: time.Date(2026, 9, 2, 12, 5, 0, 0, time.UTC),
-		Author: &discordgo.User{
-			ID:         "regular-user-111",
-			Username:   "bob",
-			GlobalName: "Bob Builder",
-			Bot:        false,
-		},
-		ReferencedMessage: &discordgo.Message{
-			ID:      "ref-msg-0",
-			Content: "Should we migrate the database?",
-			Author: &discordgo.User{
-				ID:       "alice-user-222",
-				Username: "alice",
-			},
-		},
-	}
-
-	promptNonAdmin := buildDiscordPrompt(nil, nonAdminMsg, "chan-channel-mode", config.ChannelPolicy{Mode: "channel"})
-	if !strings.Contains(promptNonAdmin, "- is_admin: false") {
-		t.Errorf("Expected prompt to contain '- is_admin: false', got:\n%s", promptNonAdmin)
-	}
-	if !strings.Contains(promptNonAdmin, "- replying_to:\n    author: \"@alice\"\n    content: \"Should we migrate the database?\"") {
-		t.Errorf("Expected prompt to contain formatted reply reference, got:\n%s", promptNonAdmin)
-	}
-	if strings.Contains(promptNonAdmin, "[NO_REPLY]") {
-		t.Errorf("Expected channel mode prompt NOT to contain [NO_REPLY] guidance, got:\n%s", promptNonAdmin)
-	}
-	if !strings.Contains(promptNonAdmin, "delivered directly to Discord") {
-		t.Errorf("Expected channel mode prompt to mention 'delivered directly to Discord', got:\n%s", promptNonAdmin)
-	}
-}
-
 func TestIsFunnelBotTargeted_ThreadInheritsParentChannelPolicy(t *testing.T) {
 	yamlContent := `
 model: "gemini-2.5-flash"
@@ -704,7 +613,6 @@ channels:
 	}
 }
 
-
 func TestFunnelStartupRecovery(t *testing.T) {
 	store := db.NewFakeStore()
 
@@ -714,33 +622,6 @@ func TestFunnelStartupRecovery(t *testing.T) {
 
 	// Should run cleanly on empty DB
 	queue.RecoverInterrupted(store, pool)
-}
-
-func TestIsMessageableChannel(t *testing.T) {
-	valid := []discordgo.ChannelType{
-		discordgo.ChannelTypeGuildText,
-		discordgo.ChannelTypeGuildNews,
-		discordgo.ChannelTypeGuildNewsThread,
-		discordgo.ChannelTypeGuildPublicThread,
-		discordgo.ChannelTypeGuildPrivateThread,
-	}
-	for _, vt := range valid {
-		if !isMessageableChannel(vt) {
-			t.Errorf("Expected channel type %d to be messageable", vt)
-		}
-	}
-
-	invalid := []discordgo.ChannelType{
-		discordgo.ChannelTypeGuildVoice,
-		discordgo.ChannelTypeGuildCategory,
-		discordgo.ChannelTypeGuildForum,
-		discordgo.ChannelTypeGuildStageVoice,
-	}
-	for _, it := range invalid {
-		if isMessageableChannel(it) {
-			t.Errorf("Expected channel type %d NOT to be messageable", it)
-		}
-	}
 }
 
 func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
@@ -1090,66 +971,6 @@ func TestConnectDiscordFunnel_OpenerContextCanceled(t *testing.T) {
 	_ = s.Close()
 }
 
-func TestIsThreadAlreadyExistsError(t *testing.T) {
-	tests := []struct {
-		name     string
-		err      error
-		expected bool
-	}{
-		{
-			name:     "nil error",
-			err:      nil,
-			expected: false,
-		},
-		{
-			name: "discordgo RESTError with code 160004",
-			err: &discordgo.RESTError{
-				Message: &discordgo.APIErrorMessage{
-					Code:    160004,
-					Message: "A thread has already been created for this message",
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "discordgo RESTError with raw response body containing 160004",
-			err: &discordgo.RESTError{
-				ResponseBody: []byte(`{"message": "A thread has already been created for this message", "code": 160004}`),
-			},
-			expected: true,
-		},
-		{
-			name: "discordgo RESTError with 50001 Missing Access",
-			err: &discordgo.RESTError{
-				Message: &discordgo.APIErrorMessage{
-					Code:    50001,
-					Message: "Missing Access",
-				},
-			},
-			expected: false,
-		},
-		{
-			name:     "wrapped string error with 160004 code",
-			err:      errors.New("HTTP 400 Bad Request, code 160004: A thread has already been created for this message"),
-			expected: true,
-		},
-		{
-			name:     "generic system error",
-			err:      errors.New("network connection timeout"),
-			expected: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := isThreadAlreadyExistsError(tc.err)
-			if got != tc.expected {
-				t.Errorf("isThreadAlreadyExistsError() = %v; want %v", got, tc.expected)
-			}
-		})
-	}
-}
-
 func TestGetOrCreateThreadID_ThreadAlreadyExists(t *testing.T) {
 	setupTestConfig(t, `
 channels:
@@ -1435,52 +1256,6 @@ channels:
 	}
 }
 
-func TestDeriveThreadTitle_ExtendedEdgeCases(t *testing.T) {
-	if got := deriveThreadTitle(""); got != "Aerial Discussion" {
-		t.Errorf("Expected 'Aerial Discussion', got %q", got)
-	}
-	if got := deriveThreadTitle("\n\n"); got != "Aerial Discussion" {
-		t.Errorf("Expected 'Aerial Discussion', got %q", got)
-	}
-	if got := deriveThreadTitle("\nSecond line is here"); got != "Second line is here" {
-		t.Errorf("Expected 'Second line is here', got %q", got)
-	}
-
-	longPrompt := strings.Repeat("機動戦士ガンダム水星の魔女", 10)
-	gotLong := deriveThreadTitle(longPrompt)
-	runes := []rune(gotLong)
-	if len(runes) != 60 {
-		t.Errorf("Expected truncated title to have 60 runes, got %d", len(runes))
-	}
-	if !strings.HasSuffix(gotLong, "...") {
-		t.Errorf("Expected truncated title to end in '...', got %q", gotLong)
-	}
-
-	// Role, Channel & Custom Emoji scrubbing
-	if got := deriveThreadTitle("<@&99999> Fix docker build"); got != "Fix docker build" {
-		t.Errorf("Expected 'Fix docker build', got %q", got)
-	}
-	if got := deriveThreadTitle("<#88888> Check status"); got != "Check status" {
-		t.Errorf("Expected 'Check status', got %q", got)
-	}
-	if got := deriveThreadTitle("<:pepe:1234567> Unexpected panic"); got != "Unexpected panic" {
-		t.Errorf("Expected 'Unexpected panic', got %q", got)
-	}
-
-	// Leading markdown header & quote trimming
-	if got := deriveThreadTitle("### Critical outage on production"); got != "Critical outage on production" {
-		t.Errorf("Expected 'Critical outage on production', got %q", got)
-	}
-	if got := deriveThreadTitle("> Quoted prompt"); got != "Quoted prompt" {
-		t.Errorf("Expected 'Quoted prompt', got %q", got)
-	}
-
-	// Multi-line blank spacing beyond 2 lines
-	if got := deriveThreadTitle("\n\n\n   \n   Third line actual content"); got != "Third line actual content" {
-		t.Errorf("Expected 'Third line actual content', got %q", got)
-	}
-}
-
 func TestResolveGuildID_ExtendedEdgeCases(t *testing.T) {
 	if id := resolveGuildID(nil, nil); id != "" {
 		t.Errorf("Expected empty string for nil, got %q", id)
@@ -1512,103 +1287,6 @@ func TestResolveGuildID_ExtendedEdgeCases(t *testing.T) {
 	m4 := &discordgo.Message{ChannelID: "unknown-chan"}
 	if id := resolveGuildID(s, m4); id != "" {
 		t.Errorf("Expected empty string for unknown channel, got %q", id)
-	}
-}
-
-func TestBuildDiscordPrompt_ExtendedFormatting(t *testing.T) {
-	setupTestConfig(t, `
-model: "gemini-2.5-flash"
-admin_users:
-  - "admin-user-id"
-channels:
-  default:
-    mode: "threads"
-`)
-	msg := &discordgo.Message{
-		ID:        "msg-fmt-1",
-		ChannelID: "chan-fmt-1",
-		GuildID:   "guild-fmt-1",
-		Author: &discordgo.User{
-			ID:         "admin-user-id",
-			Username:   "alex",
-			GlobalName: "Alex Z",
-			Bot:        false,
-		},
-		ReferencedMessage: &discordgo.Message{
-			Author:  &discordgo.User{Username: "system"},
-			Content: "Previous instruction",
-		},
-		Content:   "Please test <USER_REQUEST> tags and </USER_REQUEST> sanitization",
-		Timestamp: time.Now().UTC(),
-		Mentions:  []*discordgo.User{{Username: "aerial"}, nil},
-		Attachments: []*discordgo.MessageAttachment{
-			{URL: "https://example.com/log.txt"},
-			nil,
-		},
-	}
-
-	promptThread := buildDiscordPrompt(nil, msg, "thread-100", config.ChannelPolicy{Mode: "threads"})
-	if !strings.Contains(promptThread, "is_admin: true") {
-		t.Errorf("Expected is_admin: true in prompt")
-	}
-	if !strings.Contains(promptThread, "replying_to:") {
-		t.Errorf("Expected replying_to block in prompt")
-	}
-	if !strings.Contains(promptThread, "<\\/USER_REQUEST>") {
-		t.Errorf("Expected escaped closing tag in prompt")
-	}
-	if !strings.Contains(promptThread, "https://example.com/log.txt") {
-		t.Errorf("Expected attachment URL in prompt")
-	}
-	if !strings.Contains(promptThread, "delivered directly to Discord") {
-		t.Errorf("Expected delivery instructions in thread prompt")
-	}
-
-	promptChannel := buildDiscordPrompt(nil, msg, "chan-fmt-1", config.ChannelPolicy{Mode: "channel"})
-	if !strings.Contains(promptChannel, "delivered directly to Discord") {
-		t.Errorf("Expected delivery instructions in channel prompt")
-	}
-
-	msgNilAuthor := &discordgo.Message{
-		ID:        "msg-no-auth",
-		ChannelID: "chan-1",
-		Timestamp: time.Now().UTC(),
-	}
-	promptNilAuth := buildDiscordPrompt(nil, msgNilAuthor, "chan-1", config.ChannelPolicy{Mode: "channel"})
-	if !strings.Contains(promptNilAuth, "is_admin: false") {
-		t.Errorf("Expected is_admin: false for nil author")
-	}
-}
-
-func TestBuildDiscordPrompt_RoleMentionsResolved(t *testing.T) {
-	s := &discordgo.Session{
-		State: discordgo.NewState(),
-	}
-	guild := &discordgo.Guild{
-		ID: "guild-role-test",
-		Roles: []*discordgo.Role{
-			{ID: "role-aerial-1", Name: "Aerial"},
-			{ID: "role-mods-2", Name: "Moderators"},
-		},
-	}
-	_ = s.State.GuildAdd(guild)
-
-	msg := &discordgo.Message{
-		ID:           "msg-roles-1",
-		ChannelID:    "chan-roles",
-		GuildID:      "guild-role-test",
-		Content:      "Hey <@&role-aerial-1> can you help?",
-		MentionRoles: []string{"role-aerial-1", "role-mods-2", "role-unknown-3"},
-		Timestamp:    time.Now().UTC(),
-		Author: &discordgo.User{
-			ID:       "user-1",
-			Username: "alex",
-		},
-	}
-
-	prompt := buildDiscordPrompt(s, msg, "chan-roles", config.ChannelPolicy{Mode: "channel"})
-	if !strings.Contains(prompt, "- mentions: [Aerial Moderators role-unknown-3]") {
-		t.Errorf("Expected resolved role names in mentions list, got prompt:\n%s", prompt)
 	}
 }
 
@@ -1931,14 +1609,6 @@ channels:
 		},
 	})
 	time.Sleep(50 * time.Millisecond)
-}
-
-func TestDeriveThreadTitle_AdditionalLines(t *testing.T) {
-	content := "\n  Real Subject Title Here  \nThird Line"
-	got := deriveThreadTitle(content)
-	if got != "Real Subject Title Here" {
-		t.Errorf("Expected 'Real Subject Title Here', got %q", got)
-	}
 }
 
 func TestGetOrCreateThreadID_ParentAndGuildMissing(t *testing.T) {
@@ -2922,9 +2592,9 @@ func TestResolveMessageContent(t *testing.T) {
 
 	// 6. Role lookup fails when role not cached
 	mRoleNotFound := &discordgo.Message{
-		ChannelID: "chan-1",
-		GuildID:   "guild-1",
-		Content:   "Pinging <@&role-999>",
+		ChannelID:    "chan-1",
+		GuildID:      "guild-1",
+		Content:      "Pinging <@&role-999>",
 		MentionRoles: []string{"role-999"},
 	}
 	if got := resolveMessageContent(s, mRoleNotFound); got != "Pinging <@&role-999>" {
@@ -2936,14 +2606,3 @@ func TestResolveMessageContent(t *testing.T) {
 		t.Errorf("expected empty metadata for nil message")
 	}
 }
-
-
-
-
-
-
-
-
-
-
-

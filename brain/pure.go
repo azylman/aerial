@@ -6,10 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
-	_ "time/tzdata"
 
-	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -196,139 +193,24 @@ func DeriveThreadTitle(content string) string {
 	return string(runes)
 }
 
-// DiscordPromptInput contains all pre-resolved inputs needed to build a Discord prompt purely without I/O.
-type DiscordPromptInput struct {
-	Message        *discordgo.Message
-	TargetThreadID string
-	Policy         config.ChannelPolicy
-	AdminUsers     []string
-	Timezone       string
-	RoleNames      map[string]string
-}
-
-// BuildDiscordPrompt constructs a deterministic user prompt from message metadata without session I/O.
-func BuildDiscordPrompt(input DiscordPromptInput) string {
-	m := input.Message
-	if m == nil {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
-	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
-	sb.WriteString(fmt.Sprintf("- channel_id: %s\n", m.ChannelID))
-	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", input.TargetThreadID))
-	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
-
-	if m.Author != nil {
-		isAdmin := config.IsAdmin(input.AdminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
-		cleanUsername := strings.ReplaceAll(strings.ReplaceAll(m.Author.Username, "\n", " "), "\r", "")
-		cleanGlobalName := strings.ReplaceAll(strings.ReplaceAll(m.Author.GlobalName, "\n", " "), "\r", "")
-		sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.Author.ID))
-		sb.WriteString(fmt.Sprintf("- author_username: %s\n", cleanUsername))
-		sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", cleanGlobalName))
-		sb.WriteString(fmt.Sprintf("- author_bot: %t\n", m.Author.Bot))
-		sb.WriteString(fmt.Sprintf("- is_admin: %t\n", isAdmin))
-	} else {
-		sb.WriteString(fmt.Sprintf("- is_admin: %t\n", false))
-	}
-
-	if m.ReferencedMessage != nil {
-		authorName := "Unknown"
-		if m.ReferencedMessage.Author != nil {
-			authorName = strings.ReplaceAll(strings.ReplaceAll(m.ReferencedMessage.Author.Username, "\n", " "), "\r", "")
-		}
-		sb.WriteString("- replying_to:\n")
-		sb.WriteString(fmt.Sprintf("    author: \"@%s\"\n", authorName))
-		cleanRefContent := strings.ReplaceAll(m.ReferencedMessage.Content, "</USER_REQUEST>", "<\\/USER_REQUEST>")
-		cleanRefContent = strings.ReplaceAll(cleanRefContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
-		sb.WriteString(fmt.Sprintf("    content: %q\n", cleanRefContent))
-	}
-
-	sanitizedContent := strings.ReplaceAll(m.Content, "</USER_REQUEST>", "<\\/USER_REQUEST>")
-	sanitizedContent = strings.ReplaceAll(sanitizedContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
-	sb.WriteString(fmt.Sprintf("- content: %s\n", sanitizedContent))
-
-	ts := m.Timestamp
-	if strings.TrimSpace(input.Timezone) != "" {
-		if loc, err := time.LoadLocation(strings.TrimSpace(input.Timezone)); err == nil && loc != nil {
-			ts = ts.In(loc)
-		}
-	}
-	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", ts.Format(time.RFC3339)))
-
-	var mentions []string
-	var mentionUserIDs []string
-	for _, u := range m.Mentions {
-		if u != nil {
-			cleanU := strings.ReplaceAll(strings.ReplaceAll(u.Username, "\n", " "), "\r", "")
-			mentions = append(mentions, cleanU)
-			if u.ID != "" {
-				mentionUserIDs = append(mentionUserIDs, u.ID)
-			}
-		}
-	}
-	var mentionRoleIDs []string
-	for _, roleID := range m.MentionRoles {
-		roleName := roleID
-		if input.RoleNames != nil {
-			if rName, ok := input.RoleNames[roleID]; ok && rName != "" {
-				roleName = rName
-			}
-		}
-		cleanR := strings.ReplaceAll(strings.ReplaceAll(roleName, "\n", " "), "\r", "")
-		mentions = append(mentions, cleanR)
-		if roleID != "" {
-			mentionRoleIDs = append(mentionRoleIDs, roleID)
-		}
-	}
-	sb.WriteString(fmt.Sprintf("- mentions: %v\n", mentions))
-	sb.WriteString(fmt.Sprintf("- mention_user_ids: %v\n", mentionUserIDs))
-	sb.WriteString(fmt.Sprintf("- mention_role_ids: %v\n", mentionRoleIDs))
-
-	var attachments []string
-	for _, a := range m.Attachments {
-		if a != nil {
-			attachments = append(attachments, a.URL)
-		}
-	}
-	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
-
-	sb.WriteString("Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n")
-	sb.WriteString("</USER_REQUEST>")
-	return sb.String()
-}
-
 // IsThreadAlreadyExistsError returns true if the error indicates a Discord thread already exists for a message (code 160004).
 func IsThreadAlreadyExistsError(err error) bool {
 	if err == nil {
 		return false
 	}
 	var restErr *discordgo.RESTError
-	if errors.As(err, &restErr) && restErr != nil {
+	if !errors.As(err, &restErr) {
+		var restErrVal discordgo.RESTError
+		if errors.As(err, &restErrVal) {
+			restErr = &restErrVal
+		}
+	}
+	if restErr != nil {
 		if restErr.Message != nil && restErr.Message.Code == discordErrCodeThreadAlreadyCreated {
 			return true
 		}
-		if len(restErr.ResponseBody) > 0 {
-			bodyStr := strings.ToLower(string(restErr.ResponseBody))
-			if strings.Contains(bodyStr, "160004") || strings.Contains(bodyStr, "already been created") {
-				return true
-			}
-		}
-		return false
-	}
-	var restErrVal discordgo.RESTError
-	if errors.As(err, &restErrVal) {
-		if restErrVal.Message != nil && restErrVal.Message.Code == discordErrCodeThreadAlreadyCreated {
-			return true
-		}
-		if len(restErrVal.ResponseBody) > 0 {
-			bodyStr := strings.ToLower(string(restErrVal.ResponseBody))
-			if strings.Contains(bodyStr, "160004") || strings.Contains(bodyStr, "already been created") {
-				return true
-			}
-		}
-		return false
+		bodyStr := strings.ToLower(string(restErr.ResponseBody))
+		return strings.Contains(bodyStr, "160004") || strings.Contains(bodyStr, "already been created")
 	}
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "160004") || strings.Contains(errStr, "already been created")
