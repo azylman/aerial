@@ -1138,22 +1138,29 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                     {
                         id: 'build-101',
                         tier: 2,
-                        repo: 'azylman/aerial',
                         title: 'Add Status Dashboard View',
                         objective: 'Render HUD build queue',
                         status: 'running',
                         total_chunks: 4,
-                        completed_chunks: 2
+                        completed_chunks: 2,
+                        chunks: [
+                            { id: 'c1', status: 'completed', repo: 'azylman/aerial' },
+                            { id: 'c2', status: 'completed', repo: 'azylman/aerial' },
+                            { id: 'c3', status: 'running', repo: 'azylman/aerial' },
+                            { id: 'c4', status: 'pending', repo: 'azylman/aerial' }
+                        ]
                     },
                     {
                         id: 'build-102',
                         tier: 1,
-                        repo: 'azylman/aerial',
                         title: 'Fix nomad discovery',
                         objective: 'Repair discovery bug',
                         status: 'completed',
                         total_chunks: 1,
-                        completed_chunks: 1
+                        completed_chunks: 1,
+                        chunks: [
+                            { id: 'c5', status: 'completed', repo: 'azylman/aerial-sidecars' }
+                        ]
                     }
                 ];
                 buildsState.selectedFilter = 'ALL';
@@ -1168,10 +1175,11 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.ok(card0.innerHTML.includes('Add Status Dashboard View'));
                 assert.ok(card0.innerHTML.includes('TIER 2'));
                 assert.ok(card0.innerHTML.includes('2 / 4 CHUNKS'));
+                assert.ok(!card0.innerHTML.includes('build-repo-badge'));
                 assert.ok(typeof card0.onclick === 'function');
             });
 
-            it('filters build cards by queue state and search query', () => {
+            it('filters build cards by queue state, search query, and chunk repo', () => {
                 const elements = {};
                 sandbox.document.getElementById = (id) => {
                     if (!elements[id]) {
@@ -1196,6 +1204,17 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.equal(elements['builds-grid'].children.length, 1);
                 assert.ok(elements['builds-grid'].children[0].innerHTML.includes('Fix nomad discovery'));
 
+                // Filter by chunk repo
+                elements['builds-grid'].children = [];
+                buildsState.selectedFilter = 'ALL';
+                buildsState.searchQuery = 'aerial-sidecars';
+
+                renderBuildQueueCards();
+
+                assert.equal(elements['builds-results-count'].textContent, 'SHOWING 1 / 2 BUILDS');
+                assert.equal(elements['builds-grid'].children.length, 1);
+                assert.ok(elements['builds-grid'].children[0].innerHTML.includes('Fix nomad discovery'));
+
                 // Reset filter and search
                 buildsState.selectedFilter = 'ALL';
                 buildsState.searchQuery = '';
@@ -1207,7 +1226,6 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 const build = {
                     id: 'build-999',
                     tier: 2,
-                    repo: 'azylman/aerial',
                     title: 'Vanadis HUD Integration',
                     objective: 'Integrate build queue into dashboard',
                     shared_context: 'Vanadis runs on http://vanadis.aerial',
@@ -1247,6 +1265,8 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.ok(html.includes('Integrate build queue into dashboard'));
                 assert.ok(html.includes('Vanadis runs on http://vanadis.aerial'));
                 assert.ok(html.includes('TIER 2'));
+                assert.ok(!html.includes('build-repo-badge'));
+                assert.ok(html.includes('chunk-repo-badge'));
                 assert.ok(html.includes('#1'));
                 assert.ok(html.includes('Add queue endpoint'));
                 assert.ok(html.includes('#779 ↗'));

@@ -308,7 +308,6 @@ CREATE INDEX IF NOT EXISTS idx_production_coverage_service ON production_code_co
 -- Vanadis Builds Table
 CREATE TABLE IF NOT EXISTS vanadis_builds (
     id TEXT PRIMARY KEY,
-    repo TEXT NOT NULL,
     thread_id TEXT NOT NULL,
     tier INTEGER NOT NULL DEFAULT 2,
     title TEXT NOT NULL DEFAULT '',
@@ -320,7 +319,7 @@ CREATE TABLE IF NOT EXISTS vanadis_builds (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_vanadis_builds_repo_status ON vanadis_builds (repo, status);
+CREATE INDEX IF NOT EXISTS idx_vanadis_builds_status ON vanadis_builds (status);
 CREATE INDEX IF NOT EXISTS idx_vanadis_builds_thread_id ON vanadis_builds (thread_id);
 
 -- Vanadis Chunks Table

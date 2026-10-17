@@ -467,7 +467,6 @@ type VanadisAdvancementResult struct {
 	Matched          bool                  `json:"matched"`
 	Advanced         bool                  `json:"advanced"`
 	BuildID          string                `json:"build_id"`
-	Repo             string                `json:"repo"`
 	ThreadID         string                `json:"thread_id"`
 	Tier             int                   `json:"tier"`
 	Title            string                `json:"title"`
@@ -935,16 +934,16 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 	}()
 
 	selectChunkQuery := `
-		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.repo, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
+		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
 		WHERE c.repo = $1 AND c.pr_number = $2
 		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
 
-	var chunkID, buildID, cTitle, cStatus, bRepo, threadID, bTitle, objective, bStatus, bStatusMsgID string
+	var chunkID, buildID, cTitle, cStatus, threadID, bTitle, objective, bStatus, bStatusMsgID string
 	var chunkIdx, tier int
 	err = tx.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
-		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &bRepo, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
+		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &VanadisAdvancementResult{Matched: false}, nil
@@ -958,7 +957,6 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 			Matched:          true,
 			Advanced:         false,
 			BuildID:          buildID,
-			Repo:             bRepo,
 			ThreadID:         threadID,
 			Tier:             tier,
 			Title:            bTitle,
@@ -1025,7 +1023,6 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 			Matched:          true,
 			Advanced:         true,
 			BuildID:          buildID,
-			Repo:             bRepo,
 			ThreadID:         threadID,
 			Tier:             tier,
 			Title:            bTitle,
@@ -1051,7 +1048,6 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 		Matched:          true,
 		Advanced:         true,
 		BuildID:          buildID,
-		Repo:             bRepo,
 		ThreadID:         threadID,
 		Tier:             tier,
 		Title:            bTitle,
@@ -1728,16 +1724,16 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 
 	// 1. Check if (repo, prNumber) belongs to a vanadis_chunks row
 	selectChunkQuery := `
-		SELECT c.id, c.build_id, b.repo, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
+		SELECT c.id, c.build_id, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
 		WHERE c.repo = $1 AND c.pr_number = $2
 		ORDER BY c.updated_at DESC LIMIT 1`
 
-	var cID, buildID, bRepo, threadID, bTitle, objective, bStatus, bStatusMsgID string
+	var cID, buildID, threadID, bTitle, objective, bStatus, bStatusMsgID string
 	var tier int
 	err := pgReg.pool.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
-		&cID, &buildID, &bRepo, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
+		&cID, &buildID, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
 	)
 	if err == nil && buildID != "" {
 		// Parent Vanadis build found
@@ -1761,7 +1757,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 			}
 			chunkRepo := csRepo
 			if chunkRepo == "" {
-				chunkRepo = bRepo
+				chunkRepo = "azylman/aerial"
 			}
 			chunkStatus := csStatus
 			var cJobs []string
@@ -1911,7 +1907,7 @@ func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
 	}
 	total := len(res.Chunks)
 	lines := []string{
-		fmt.Sprintf("Vanadis build %s completed on %s (Tier %d, %d chunks merged).", res.BuildID, res.Repo, res.Tier, total),
+		fmt.Sprintf("Vanadis build %s completed (Tier %d, %d chunks merged).", res.BuildID, res.Tier, total),
 	}
 	if obj := strings.TrimSpace(res.Objective); obj != "" {
 		lines = append(lines, fmt.Sprintf("Objective: %s", obj))
@@ -1919,9 +1915,13 @@ func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
 	if total > 0 {
 		lines = append(lines, "", "Merged Chunks Ledger:")
 		for _, c := range res.Chunks {
-			prLabel := ""
+			cRepo := strings.TrimSpace(c.Repo)
+			if cRepo == "" {
+				cRepo = "azylman/aerial"
+			}
+			prLabel := fmt.Sprintf(" (%s)", cRepo)
 			if c.PRNumber > 0 {
-				prLabel = fmt.Sprintf(" (PR #%d)", c.PRNumber)
+				prLabel = fmt.Sprintf(" (%s, PR #%d)", cRepo, c.PRNumber)
 			}
 			line := fmt.Sprintf("- Chunk %d/%d: %s%s", c.ChunkIndex+1, total, c.Title, prLabel)
 			lines = append(lines, line)

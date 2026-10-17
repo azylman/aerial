@@ -1,4 +1,4 @@
-h1:Wzxdv3y8w5Hy5mhfhsld/NEbknmva+ocBINp4n/Jp8M=
+h1:TM19GMzZea8TbeHL5ifSX3WyOonwnf3HFlODokoGsxA=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -8,4 +8,5 @@ h1:Wzxdv3y8w5Hy5mhfhsld/NEbknmva+ocBINp4n/Jp8M=
 20261016164005_add_vanadis_structured_context_fields.sql h1:E+rQbT1s935jDSx4LJNKhabIbfz24DxUFfxs0jlWT5k=
 20261016173130_add_vanadis_build_title.sql h1:XIzSE8fI8otW2fvWmEIz6XgyVOl31bL+/6+WjY56gec=
 20261016182900_add_vanadis_chunk_started_at.sql h1:vVc9g7NHipBvMppj/DP8hEgwogulvqHA6r2F0YjpnDM=
-20261017070511_drop_vanadis_chunks_diff_stat.sql h1:G6zkfSoKP5JJRbn9VEtFbd4qb0RwSfuuU32lIhHGjY8=
+20261017065400_drop_vanadis_builds_repo.sql h1:EcQTX20K+W+zfZ0fI9fwpwRzO+/kbdDgqq7iPSPkQNk=
+20261017070511_drop_vanadis_chunks_diff_stat.sql h1:XCtX+rlDVUsR31y08Cnd407HG6pmJxJK+MCQpwgTLEc=

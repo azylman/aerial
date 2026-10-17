@@ -104,10 +104,6 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 	if buildID == "" {
 		return fmt.Errorf("build id cannot be empty")
 	}
-	repo := normalizeRepo(build.Repo)
-	if repo == "" {
-		return fmt.Errorf("repo cannot be empty")
-	}
 	threadID := strings.TrimSpace(build.ThreadID)
 	if threadID == "" {
 		return fmt.Errorf("thread_id cannot be empty")
@@ -157,10 +153,10 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 		buildStatusMessageID := strings.TrimSpace(build.StatusMessageID)
 		sharedContext := strings.TrimSpace(build.SharedContext)
 		buildQuery := `
-			INSERT INTO vanadis_builds (id, repo, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+			INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		`
-		if _, err := execDB.ExecContext(ctx, buildQuery, buildID, repo, threadID, tier, buildTitle, objective, sharedContext, status, buildStatusMessageID); err != nil {
+		if _, err := execDB.ExecContext(ctx, buildQuery, buildID, threadID, tier, buildTitle, objective, sharedContext, status, buildStatusMessageID); err != nil {
 			return fmt.Errorf("failed to insert vanadis build: %w", err)
 		}
 
@@ -174,7 +170,7 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 			instructions := strings.TrimSpace(c.Instructions)
 			chunkRepo := normalizeRepo(c.Repo)
 			if chunkRepo == "" {
-				chunkRepo = repo
+				chunkRepo = "azylman/aerial"
 			}
 			cStatus := strings.TrimSpace(c.Status)
 			if cStatus == "" {
@@ -242,13 +238,13 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 	}
 
 	buildQuery := `
-		SELECT id, repo, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, shared_context, status, status_message_id, created_at, updated_at
+		SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, shared_context, status, status_message_id, created_at, updated_at
 		FROM vanadis_builds
 		WHERE id = $1;
 	`
 	var b VanadisBuild
 	err := s.db.QueryRowContext(ctx, buildQuery, buildID).Scan(
-		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
+		&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrVanadisBuildNotFound

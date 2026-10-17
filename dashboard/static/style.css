@@ -2661,16 +2661,6 @@ body::after {
     font-family: var(--font-mono);
 }
 
-.build-repo-badge {
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-muted);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    font-size: 0.68rem;
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-family: var(--font-mono);
-}
-
 .build-id-chip {
     font-size: 0.68rem;
     color: var(--text-dim);

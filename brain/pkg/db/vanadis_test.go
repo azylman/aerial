@@ -15,7 +15,6 @@ func runVanadisTests(t *testing.T, store Store) {
 	// 1. Validation errors on CreateVanadisBuild
 	validBuild := VanadisBuild{
 		ID:            "build-101",
-		Repo:          "aerial",
 		ThreadID:      "1555405874565091380",
 		Objective:     "Implement vanadis build queue",
 		SharedContext: "Shared context for build 101",
@@ -36,10 +35,9 @@ func runVanadisTests(t *testing.T, store Store) {
 		build  VanadisBuild
 		chunks []VanadisChunk
 	}{
-		{"empty build id", VanadisBuild{ID: "", Repo: "aerial", ThreadID: "123", Objective: "obj"}, nil},
-		{"empty repo", VanadisBuild{ID: "b1", Repo: "", ThreadID: "123", Objective: "obj"}, nil},
-		{"empty thread_id", VanadisBuild{ID: "b1", Repo: "aerial", ThreadID: "", Objective: "obj"}, nil},
-		{"empty objective", VanadisBuild{ID: "b1", Repo: "aerial", ThreadID: "123", Objective: ""}, nil},
+		{"empty build id", VanadisBuild{ID: "", ThreadID: "123", Objective: "obj"}, nil},
+		{"empty thread_id", VanadisBuild{ID: "b1", ThreadID: "", Objective: "obj"}, nil},
+		{"empty objective", VanadisBuild{ID: "b1", ThreadID: "123", Objective: ""}, nil},
 		{"empty chunk id", validBuild, []VanadisChunk{{ID: "", Title: "t", Instructions: "i"}}},
 		{"mismatched chunk build_id", validBuild, []VanadisChunk{{ID: "c1", BuildID: "other-build", Title: "t", Instructions: "i"}}},
 		{"empty chunk title", validBuild, []VanadisChunk{{ID: "c1", Title: "", Instructions: "i"}}},
@@ -61,6 +59,7 @@ func runVanadisTests(t *testing.T, store Store) {
 			ID:                 "chunk-101-1",
 			BuildID:            "build-101",
 			ChunkIndex:         1,
+			Repo:               "aerial-config",
 			Title:              "Task 2: River worker",
 			Instructions:       "Implement VanadisWorker",
 			TargetFiles:        []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`},
@@ -75,7 +74,7 @@ func runVanadisTests(t *testing.T, store Store) {
 			Title:        "Task 3: Verification",
 			Instructions: "Run tests",
 			TargetFiles:  nil,
-			Effort:       "", // should default to "low"
+			Effort:       "", // should default to "medium"
 			Status:       "queued",
 			PRNumber:     42,
 			StartedAt:    explicitStart,
@@ -94,7 +93,6 @@ func runVanadisTests(t *testing.T, store Store) {
 	// Duplicate chunk ID in a new build should fail and rollback the build
 	dupChunkBuild := VanadisBuild{
 		ID:        "build-dup-chunk",
-		Repo:      "aerial",
 		ThreadID:  "1555405874565091380",
 		Objective: "Should rollback",
 		Tier:      3,
@@ -112,14 +110,13 @@ func runVanadisTests(t *testing.T, store Store) {
 	if err != nil {
 		t.Fatalf("GetVanadisBuild failed: %v", err)
 	}
-	if gotBuild.ID != "build-101" || gotBuild.Repo != "azylman/aerial" || gotBuild.ThreadID != "1555405874565091380" || gotBuild.Tier != 2 || gotBuild.Title != "Implement vanadis build queue" || gotBuild.Objective != "Implement vanadis build queue" || gotBuild.Status != "running" || gotBuild.SharedContext != "Shared context for build 101" {
+	if gotBuild.ID != "build-101" || gotBuild.ThreadID != "1555405874565091380" || gotBuild.Tier != 2 || gotBuild.Title != "Implement vanadis build queue" || gotBuild.Objective != "Implement vanadis build queue" || gotBuild.Status != "running" || gotBuild.SharedContext != "Shared context for build 101" {
 		t.Errorf("unexpected build fields: %+v", gotBuild)
 	}
 
 	// Verify explicit Title on CreateVanadisBuild is preserved independently of Objective, and chunk created with 'running' gets StartedAt
 	titledBuild := VanadisBuild{
 		ID:        "build-titled-102",
-		Repo:      "aerial",
 		ThreadID:  "1555405874565091380",
 		Title:     "Redesign Vanadis Build Status Cards",
 		Objective: "Detailed objective for redesigning the cards",
@@ -147,7 +144,7 @@ func runVanadisTests(t *testing.T, store Store) {
 	if len(gotChunks) != 3 {
 		t.Fatalf("expected 3 chunks, got %d", len(gotChunks))
 	}
-	if gotChunks[0].ID != "chunk-101-0" || gotChunks[0].ChunkIndex != 0 || gotChunks[0].Status != "pending" || gotChunks[0].Effort != "medium" || !gotChunks[0].StartedAt.IsZero() {
+	if gotChunks[0].ID != "chunk-101-0" || gotChunks[0].ChunkIndex != 0 || gotChunks[0].Repo != "azylman/aerial" || gotChunks[0].Status != "pending" || gotChunks[0].Effort != "medium" || !gotChunks[0].StartedAt.IsZero() {
 		t.Errorf("unexpected chunk[0]: %+v", gotChunks[0])
 	}
 	if !reflect.DeepEqual(gotChunks[0].TargetFiles, []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"}) {
@@ -159,7 +156,7 @@ func runVanadisTests(t *testing.T, store Store) {
 	if !reflect.DeepEqual(gotChunks[0].AcceptanceCriteria, []string{"Unit tests pass", "Coverage >= 95%"}) {
 		t.Errorf("unexpected chunk[0] AcceptanceCriteria: %#v", gotChunks[0].AcceptanceCriteria)
 	}
-	if gotChunks[1].ID != "chunk-101-1" || gotChunks[1].ChunkIndex != 1 || gotChunks[1].Effort != "high" {
+	if gotChunks[1].ID != "chunk-101-1" || gotChunks[1].ChunkIndex != 1 || gotChunks[1].Repo != "azylman/aerial-config" || gotChunks[1].Effort != "high" {
 		t.Errorf("unexpected chunk[1]: %+v", gotChunks[1])
 	}
 	if !reflect.DeepEqual(gotChunks[1].TargetFiles, []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`}) {
@@ -171,7 +168,7 @@ func runVanadisTests(t *testing.T, store Store) {
 	if !reflect.DeepEqual(gotChunks[1].AcceptanceCriteria, []string{"Worker processes chunk successfully"}) {
 		t.Errorf("unexpected chunk[1] AcceptanceCriteria: %#v", gotChunks[1].AcceptanceCriteria)
 	}
-	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 || gotChunks[2].Effort != "medium" || !gotChunks[2].StartedAt.Equal(explicitStart) {
+	if gotChunks[2].ID != "chunk-101-2" || gotChunks[2].ChunkIndex != 2 || gotChunks[2].Repo != "azylman/aerial" || gotChunks[2].Status != "queued" || gotChunks[2].PRNumber != 42 || gotChunks[2].Effort != "medium" || !gotChunks[2].StartedAt.Equal(explicitStart) {
 		t.Errorf("unexpected chunk[2]: %+v", gotChunks[2])
 	}
 	if len(gotChunks[2].TargetFiles) != 0 {
@@ -322,7 +319,6 @@ func TestVanadis_FakeStore(t *testing.T) {
 	ctx := context.Background()
 	err := store.CreateVanadisBuild(ctx, VanadisBuild{
 		ID:        "build-dup-idx",
-		Repo:      "aerial",
 		ThreadID:  "123",
 		Objective: "obj",
 	}, []VanadisChunk{
@@ -437,7 +433,7 @@ func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
 	closedStore := NewSQLStore(closedDB)
 	_ = closedDB.Close()
 
-	validBuild := VanadisBuild{ID: "b1", Repo: "aerial", ThreadID: "123", Objective: "obj"}
+	validBuild := VanadisBuild{ID: "b1", ThreadID: "123", Objective: "obj"}
 	if err := closedStore.CreateVanadisBuild(ctx, validBuild, nil); err == nil {
 		t.Errorf("expected error on closed CreateVanadisBuild")
 	}
@@ -490,7 +486,6 @@ func TestVanadis_SQLStore_PostgresBranches(t *testing.T) {
 
 	err := pgStore.CreateVanadisBuild(ctx, VanadisBuild{
 		ID:        "b-pg-1",
-		Repo:      "aerial",
 		ThreadID:  "123",
 		Objective: "pg branch",
 	}, []VanadisChunk{

@@ -3344,19 +3344,18 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 
 		prompt := formatVanadisBuildCompletedPrompt(&VanadisAdvancementResult{
 			BuildID:   "build-777",
-			Repo:      "azylman/aerial",
 			Tier:      3,
 			Objective: "Ship Vanadis Phase 3",
 			Chunks: []VanadisChunkSummary{
-				{ChunkIndex: 0, Title: "Schema", PRNumber: 101},
-				{ChunkIndex: 1, Title: "Worker", PRNumber: 0},
+				{ChunkIndex: 0, Repo: "azylman/aerial", Title: "Schema", PRNumber: 101},
+				{ChunkIndex: 1, Repo: "", Title: "Worker", PRNumber: 0},
 			},
 		})
 		for _, sub := range []string{
-			"Vanadis build build-777 completed on azylman/aerial (Tier 3, 2 chunks merged).",
+			"Vanadis build build-777 completed (Tier 3, 2 chunks merged).",
 			"Objective: Ship Vanadis Phase 3",
-			"- Chunk 1/2: Schema (PR #101)",
-			"- Chunk 2/2: Worker",
+			"- Chunk 1/2: Schema (azylman/aerial, PR #101)",
+			"- Chunk 2/2: Worker (azylman/aerial)",
 			"All Vanadis build chunks have merged into main.",
 		} {
 			if !strings.Contains(prompt, sub) {
@@ -3401,7 +3400,6 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 			Matched:          true,
 			Advanced:         true,
 			BuildID:          "build-mid",
-			Repo:             "azylman/aerial",
 			ThreadID:         validThread,
 			MergedChunkIndex: 0,
 			MergedChunkTitle: "Chunk One",
@@ -3436,7 +3434,6 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 			Matched:          true,
 			Advanced:         true,
 			BuildID:          "build-done",
-			Repo:             "azylman/aerial",
 			ThreadID:         validThread,
 			Tier:             2,
 			Objective:        "Complete all chunks",
@@ -3473,7 +3470,6 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 				Matched:          true,
 				Advanced:         true,
 				BuildID:          "build-wire",
-				Repo:             "azylman/aerial",
 				ThreadID:         validThread,
 				MergedChunkIndex: 0,
 				MergedChunkTitle: "Chunk 1",
@@ -3794,13 +3790,12 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 				*(dest[2].(*int)) = chunkIdx
 				*(dest[3].(*string)) = fmt.Sprintf("Title %d", chunkIdx)
 				*(dest[4].(*string)) = cStatus
-				*(dest[5].(*string)) = "azylman/aerial"
-				*(dest[6].(*string)) = "123456789012345678"
-				*(dest[7].(*int)) = 2
-				*(dest[8].(*string)) = "Test Build Title"
-				*(dest[9].(*string)) = "Test Objective"
-				*(dest[10].(*string)) = bStatus
-				*(dest[11].(*string)) = "msg-12345"
+				*(dest[5].(*string)) = "123456789012345678"
+				*(dest[6].(*int)) = 2
+				*(dest[7].(*string)) = "Test Build Title"
+				*(dest[8].(*string)) = "Test Objective"
+				*(dest[9].(*string)) = bStatus
+				*(dest[10].(*string)) = "msg-12345"
 				return nil
 			}}
 		}
@@ -4043,13 +4038,12 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
 					*dest[0].(*string) = "chunk-1"
 					*dest[1].(*string) = "build-abc"
-					*dest[2].(*string) = "aerial"
-					*dest[3].(*string) = "1555405874565091380"
-					*dest[4].(*int) = 2
-					*dest[5].(*string) = "Vanadis Build Title"
-					*dest[6].(*string) = "Vanadis Objective"
-					*dest[7].(*string) = "running"
-					*dest[8].(*string) = "old-build-msg"
+					*dest[2].(*string) = "1555405874565091380"
+					*dest[3].(*int) = 2
+					*dest[4].(*string) = "Vanadis Build Title"
+					*dest[5].(*string) = "Vanadis Objective"
+					*dest[6].(*string) = "running"
+					*dest[7].(*string) = "old-build-msg"
 					return nil
 				}}
 			}
@@ -4058,7 +4052,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 			chunks := []VanadisChunkSummary{
 				{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, StartedAt: chunk0Start, UpdatedAt: chunk0Update},
-				{ID: "chunk-1", ChunkIndex: 1, Repo: "aerial", Title: "Chunk 1", Status: "running", PRNumber: 102},
+				{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "Chunk 1", Status: "running", PRNumber: 102},
 			}
 			return &mockVanadisPgxRows{items: chunks}, nil
 		},
@@ -4074,7 +4068,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 	}
 	calls = mockDisp.WidgetCalls()
 	lastCall = calls[len(calls)-1]
-	if lastCall.ID != "build-abc" || lastCall.Title != "Vanadis Build Title" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 2 || lastCall.Chunks[1].Status != "deployed" || !lastCall.Chunks[0].StartedAt.Equal(chunk0Start) || lastCall.Chunks[1].StartedAt.IsZero() || lastCall.Chunks[1].UpdatedAt.IsZero() {
+	if lastCall.ID != "build-abc" || lastCall.Title != "Vanadis Build Title" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 2 || lastCall.Chunks[1].Status != "deployed" || lastCall.Chunks[1].Repo != "azylman/aerial" || !lastCall.Chunks[0].StartedAt.Equal(chunk0Start) || lastCall.Chunks[1].StartedAt.IsZero() || lastCall.Chunks[1].UpdatedAt.IsZero() {
 		t.Errorf("unexpected vanadis widget request: %+v", lastCall)
 	}
 }

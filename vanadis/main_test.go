@@ -68,19 +68,18 @@ func (r *mockRows) Scan(dest ...any) error {
 	if r.scanErr != nil {
 		return r.scanErr
 	}
-	if len(r.builds) > 0 || len(dest) == 11 {
+	if len(r.builds) > 0 || len(dest) == 10 {
 		b := r.builds[r.idx-1]
 		*(dest[0].(*string)) = b.ID
-		*(dest[1].(*string)) = b.Repo
-		*(dest[2].(*string)) = b.ThreadID
-		*(dest[3].(*int)) = b.Tier
-		*(dest[4].(*string)) = b.Title
-		*(dest[5].(*string)) = b.Objective
-		*(dest[6].(*string)) = b.SharedContext
-		*(dest[7].(*string)) = b.Status
-		*(dest[8].(*string)) = b.StatusMessageID
-		*(dest[9].(*time.Time)) = b.CreatedAt
-		*(dest[10].(*time.Time)) = b.UpdatedAt
+		*(dest[1].(*string)) = b.ThreadID
+		*(dest[2].(*int)) = b.Tier
+		*(dest[3].(*string)) = b.Title
+		*(dest[4].(*string)) = b.Objective
+		*(dest[5].(*string)) = b.SharedContext
+		*(dest[6].(*string)) = b.Status
+		*(dest[7].(*string)) = b.StatusMessageID
+		*(dest[8].(*time.Time)) = b.CreatedAt
+		*(dest[9].(*time.Time)) = b.UpdatedAt
 		return nil
 	}
 	c := r.items[r.idx-1]
@@ -446,7 +445,6 @@ func TestPostgresVanadisStore(t *testing.T) {
 
 	validBuild := VanadisBuild{
 		ID:            "b-1",
-		Repo:          "aerial",
 		ThreadID:      "12345",
 		Objective:     "Ship Vanadis",
 		SharedContext: "Shared ctx test",
@@ -473,10 +471,9 @@ func TestPostgresVanadisStore(t *testing.T) {
 		build  VanadisBuild
 		chunks []VanadisChunk
 	}{
-		{"empty build id", VanadisBuild{Repo: "aerial", ThreadID: "1", Objective: "o"}, nil},
-		{"empty repo", VanadisBuild{ID: "b", ThreadID: "1", Objective: "o"}, nil},
-		{"empty thread", VanadisBuild{ID: "b", Repo: "aerial", Objective: "o"}, nil},
-		{"empty objective", VanadisBuild{ID: "b", Repo: "aerial", ThreadID: "1"}, nil},
+		{"empty build id", VanadisBuild{ThreadID: "1", Objective: "o"}, nil},
+		{"empty thread", VanadisBuild{ID: "b", Objective: "o"}, nil},
+		{"empty objective", VanadisBuild{ID: "b", ThreadID: "1"}, nil},
 		{"empty chunk id", validBuild, []VanadisChunk{{Title: "t", Instructions: "i"}}},
 		{"mismatched chunk build_id", validBuild, []VanadisChunk{{ID: "c", BuildID: "other", Title: "t", Instructions: "i"}}},
 		{"empty chunk title", validBuild, []VanadisChunk{{ID: "c", Instructions: "i"}}},
@@ -578,16 +575,15 @@ func TestPostgresVanadisStore(t *testing.T) {
 
 	populateBuildRow := func(dest ...any) error {
 		*(dest[0].(*string)) = "b-1"
-		*(dest[1].(*string)) = "azylman/aerial"
-		*(dest[2].(*string)) = "thread-1"
-		*(dest[3].(*int)) = 2
-		*(dest[4].(*string)) = "Build Title"
-		*(dest[5].(*string)) = "Objective"
-		*(dest[6].(*string)) = "Shared Context"
-		*(dest[7].(*string)) = "running"
-		*(dest[8].(*string)) = "msg-1"
+		*(dest[1].(*string)) = "thread-1"
+		*(dest[2].(*int)) = 2
+		*(dest[3].(*string)) = "Build Title"
+		*(dest[4].(*string)) = "Objective"
+		*(dest[5].(*string)) = "Shared Context"
+		*(dest[6].(*string)) = "running"
+		*(dest[7].(*string)) = "msg-1"
+		*(dest[8].(*time.Time)) = time.Now()
 		*(dest[9].(*time.Time)) = time.Now()
-		*(dest[10].(*time.Time)) = time.Now()
 		return nil
 	}
 
@@ -720,7 +716,6 @@ func TestFormatChunkPrompt(t *testing.T) {
 	t.Parallel()
 	build := VanadisBuild{
 		ID:            "build-999",
-		Repo:          "azylman/aerial",
 		ThreadID:      "1555000111",
 		Tier:          2,
 		Title:         "Build Vanadis Queue Execution Pipeline",
@@ -886,10 +881,9 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	// 4. Active build tests
 	_ = memStore.CreateBuild(ctx, VanadisBuild{
 		ID:        "b-run",
-		Repo:      "azylman/aerial",
+
 		ThreadID:  "thread-777",
 		Tier:      2,
-		Objective: "Test execution",
 		Status:    "running",
 	}, []VanadisChunk{
 		{ID: "c-0", BuildID: "b-run", ChunkIndex: 0, Title: "C0", Instructions: "I0", Status: "merged", PRNumber: 10},
@@ -1499,8 +1493,8 @@ func TestPostgresVanadisStore_ListBuilds(t *testing.T) {
 
 	// 10. Successful multi-build listing with chunks and limit clamp
 	now := time.Now().UTC()
-	b1 := VanadisBuild{ID: "b-1", Repo: "azylman/aerial", ThreadID: "100", Status: "running", CreatedAt: now.Add(-time.Hour), UpdatedAt: now}
-	b2 := VanadisBuild{ID: "b-2", Repo: "azylman/aerial", ThreadID: "101", Status: "completed", CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now}
+	b1 := VanadisBuild{ID: "b-1", ThreadID: "100", Status: "running", CreatedAt: now.Add(-time.Hour), UpdatedAt: now}
+	b2 := VanadisBuild{ID: "b-2", ThreadID: "101", Status: "completed", CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now}
 	c1 := VanadisChunk{ID: "c-1", BuildID: "b-1", ChunkIndex: 0, Title: "chunk 1", Status: "running", CreatedAt: now, UpdatedAt: now}
 	c2 := VanadisChunk{ID: "c-2", BuildID: "b-1", ChunkIndex: 1, Title: "chunk 2", Status: "pending", CreatedAt: now, UpdatedAt: now}
 	c3 := VanadisChunk{ID: "c-3", BuildID: "b-2", ChunkIndex: 0, Title: "chunk 3", Status: "merged", CreatedAt: now, UpdatedAt: now}
@@ -1540,9 +1534,9 @@ func TestHTTPEndpoints_ListBuilds(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	bRunning := VanadisBuild{ID: "b-run", Repo: "azylman/aerial", ThreadID: "111", Status: "running", CreatedAt: now.Add(-time.Minute), UpdatedAt: now}
-	bCompleted := VanadisBuild{ID: "b-comp", Repo: "azylman/aerial", ThreadID: "222", Status: "completed", CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now}
-	bQueued := VanadisBuild{ID: "b-q", Repo: "azylman/aerial", ThreadID: "333", Status: "running", CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now}
+	bRunning := VanadisBuild{ID: "b-run", ThreadID: "111", Status: "running", CreatedAt: now.Add(-time.Minute), UpdatedAt: now}
+	bCompleted := VanadisBuild{ID: "b-comp", ThreadID: "222", Status: "completed", CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now}
+	bQueued := VanadisBuild{ID: "b-q", ThreadID: "333", Status: "running", CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now}
 
 	memStore := newMemoryVanadisStore()
 	_ = memStore.CreateBuild(context.Background(), bRunning, []VanadisChunk{

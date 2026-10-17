@@ -2255,10 +2255,6 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 	if buildID == "" {
 		return fmt.Errorf("build id cannot be empty")
 	}
-	repo := normalizeRepo(build.Repo)
-	if repo == "" {
-		return fmt.Errorf("repo cannot be empty")
-	}
 	threadID := strings.TrimSpace(build.ThreadID)
 	if threadID == "" {
 		return fmt.Errorf("thread_id cannot be empty")
@@ -2316,7 +2312,6 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 
 	f.vanadisBuilds[buildID] = &VanadisBuild{
 		ID:              buildID,
-		Repo:            repo,
 		ThreadID:        threadID,
 		Tier:            tier,
 		Title:           buildTitle,
@@ -2332,7 +2327,7 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		cid := strings.TrimSpace(c.ID)
 		chunkRepo := normalizeRepo(c.Repo)
 		if chunkRepo == "" {
-			chunkRepo = repo
+			chunkRepo = "azylman/aerial"
 		}
 		cStatus := strings.TrimSpace(c.Status)
 		if cStatus == "" {

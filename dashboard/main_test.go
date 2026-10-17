@@ -890,7 +890,6 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 				Builds: []VanadisBuildDTO{
 					{
 						ID:         "build-101",
-						Repo:       "azylman/aerial",
 						Tier:       2,
 						Title:      "Vanadis Feature",
 						Status:     "running",
@@ -906,7 +905,6 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"build": VanadisBuildDTO{
 						ID:     "build-101",
-						Repo:   "azylman/aerial",
 						Title:  "Vanadis Feature",
 						Status: "running",
 					},
