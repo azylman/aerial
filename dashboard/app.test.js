@@ -70,7 +70,17 @@ const {
     parseFactImportance,
     compareFactsImportanceDesc,
     renderDeployments,
-    TABS
+    TABS,
+    buildsState,
+    classifyBuildQueueState,
+    computeBuildChunkStats,
+    renderBuildQueueCards,
+    renderBuildDetailContent,
+    renderBuildsPills,
+    updateBuildsMetrics,
+    fetchBuilds,
+    openBuildDetailDrawer,
+    setupBuildsControls
 } = sandbox;
 
 describe('Permet HUD Pure Logic Unit Tests', () => {
@@ -425,15 +435,19 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
     });
 
     describe('4-View Navigation Architecture (TABS)', () => {
-        it('includes telemetry, tasks, schedules, and memory tabs', () => {
+        it('includes telemetry, tasks, schedules, memory, and builds tabs', () => {
             assert.ok(TABS.telemetry, 'Missing telemetry tab');
             assert.ok(TABS.tasks, 'Missing tasks tab');
             assert.ok(TABS.schedules, 'Missing schedules tab');
             assert.ok(TABS.memory, 'Missing memory tab');
+            assert.ok(TABS.builds, 'Missing builds tab');
 
             assert.equal(TABS.tasks.btnId, 'tab-tasks-btn');
             assert.equal(TABS.tasks.viewId, 'tasks-view');
             assert.equal(TABS.tasks.hash, '#tasks');
+            assert.equal(TABS.builds.btnId, 'tab-builds-btn');
+            assert.equal(TABS.builds.viewId, 'builds-view');
+            assert.equal(TABS.builds.hash, '#builds');
         });
     });
 
@@ -612,7 +626,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
         });
 
         it('verifies eager metrics fetch on bootstrap in app.js', () => {
-            assert.ok(appJsCode.includes('fetchSchedules()') && appJsCode.includes('fetchFacts()'), 'app.js should include eager metrics bootstrap');
+            assert.ok(appJsCode.includes('fetchSchedules()') && appJsCode.includes('fetchFacts()') && appJsCode.includes('fetchBuilds()'), 'app.js should include eager metrics bootstrap');
         });
     });
 
@@ -997,4 +1011,327 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             }
         });
     });
+
+    describe('Vanadis Build Queue & Chunk Drawer Unit Tests', () => {
+        describe('classifyBuildQueueState(build)', () => {
+            it('classifies terminal statuses as completed', () => {
+                assert.equal(classifyBuildQueueState({ status: 'completed' }), 'completed');
+                assert.equal(classifyBuildQueueState({ status: 'merged' }), 'completed');
+                assert.equal(classifyBuildQueueState({ status: 'failed' }), 'completed');
+                assert.equal(classifyBuildQueueState({ status: 'cancelled' }), 'completed');
+                assert.equal(classifyBuildQueueState({ status: 'canceled' }), 'completed');
+                assert.equal(classifyBuildQueueState('COMPLETED'), 'completed');
+            });
+
+            it('classifies queued and pending statuses as queued', () => {
+                assert.equal(classifyBuildQueueState({ status: 'queued' }), 'queued');
+                assert.equal(classifyBuildQueueState({ status: 'pending' }), 'queued');
+                assert.equal(classifyBuildQueueState('QUEUED'), 'queued');
+            });
+
+            it('classifies running builds with all pending chunks as queued', () => {
+                const build = {
+                    status: 'running',
+                    chunks: [
+                        { id: 'c1', status: 'pending' },
+                        { id: 'c2', status: 'pending' }
+                    ]
+                };
+                assert.equal(classifyBuildQueueState(build), 'queued');
+            });
+
+            it('classifies running builds with active or finished chunks as running', () => {
+                const buildRunningChunk = {
+                    status: 'running',
+                    chunks: [
+                        { id: 'c1', status: 'completed' },
+                        { id: 'c2', status: 'running' },
+                        { id: 'c3', status: 'pending' }
+                    ]
+                };
+                assert.equal(classifyBuildQueueState(buildRunningChunk), 'running');
+
+                const buildNoChunks = { status: 'running', chunks: [] };
+                assert.equal(classifyBuildQueueState(buildNoChunks), 'running');
+            });
+
+            it('falls back to build.queue_state or defaults to queued', () => {
+                assert.equal(classifyBuildQueueState({ status: 'unknown', queue_state: 'running' }), 'running');
+                assert.equal(classifyBuildQueueState({ status: 'unknown' }), 'queued');
+                assert.equal(classifyBuildQueueState(null), 'queued');
+            });
+        });
+
+        describe('computeBuildChunkStats(build)', () => {
+            it('returns zero stats for null or undefined input', () => {
+                const stats = computeBuildChunkStats(null);
+                assert.equal(stats.total, 0);
+                assert.equal(stats.completed, 0);
+                assert.equal(stats.percent, 0);
+            });
+
+            it('computes stats from chunk array accurately', () => {
+                const build = {
+                    chunks: [
+                        { id: 'c1', status: 'completed' },
+                        { id: 'c2', status: 'merged' },
+                        { id: 'c3', status: 'running' },
+                        { id: 'c4', status: 'in_progress' },
+                        { id: 'c5', status: 'failed' },
+                        { id: 'c6', status: 'pending' }
+                    ]
+                };
+                const stats = computeBuildChunkStats(build);
+                assert.equal(stats.total, 6);
+                assert.equal(stats.completed, 2);
+                assert.equal(stats.running, 2);
+                assert.equal(stats.failed, 1);
+                assert.equal(stats.pending, 1);
+                assert.equal(stats.percent, 33);
+            });
+
+            it('falls back to precomputed build chunk properties', () => {
+                const build = {
+                    total_chunks: 4,
+                    completed_chunks: 2,
+                    running_chunks: 1,
+                    pending_chunks: 1,
+                    failed_chunks: 0
+                };
+                const stats = computeBuildChunkStats(build);
+                assert.equal(stats.total, 4);
+                assert.equal(stats.completed, 2);
+                assert.equal(stats.percent, 50);
+            });
+        });
+
+        describe('renderBuildQueueCards() & Filtering', () => {
+            it('renders build cards and updates results count', () => {
+                const elements = {};
+                sandbox.document.getElementById = (id) => {
+                    if (!elements[id]) {
+                        elements[id] = {
+                            textContent: '',
+                            innerHTML: '',
+                            children: [],
+                            appendChild: function(child) {
+                                this.children.push(child);
+                            }
+                        };
+                    }
+                    return elements[id];
+                };
+
+                sandbox.document.createElement = (tag) => {
+                    return {
+                        tagName: tag.toUpperCase(),
+                        className: '',
+                        attributes: {},
+                        setAttribute: function(k, v) { this.attributes[k] = v; },
+                        getAttribute: function(k) { return this.attributes[k]; },
+                        style: {},
+                        innerHTML: ''
+                    };
+                };
+
+                buildsState.builds = [
+                    {
+                        id: 'build-101',
+                        tier: 2,
+                        repo: 'azylman/aerial',
+                        title: 'Add Status Dashboard View',
+                        objective: 'Render HUD build queue',
+                        status: 'running',
+                        total_chunks: 4,
+                        completed_chunks: 2
+                    },
+                    {
+                        id: 'build-102',
+                        tier: 1,
+                        repo: 'azylman/aerial',
+                        title: 'Fix nomad discovery',
+                        objective: 'Repair discovery bug',
+                        status: 'completed',
+                        total_chunks: 1,
+                        completed_chunks: 1
+                    }
+                ];
+                buildsState.selectedFilter = 'ALL';
+                buildsState.searchQuery = '';
+
+                renderBuildQueueCards();
+
+                assert.equal(elements['builds-results-count'].textContent, 'SHOWING 2 / 2 BUILDS');
+                assert.equal(elements['builds-grid'].children.length, 2);
+
+                const card0 = elements['builds-grid'].children[0];
+                assert.ok(card0.innerHTML.includes('Add Status Dashboard View'));
+                assert.ok(card0.innerHTML.includes('TIER 2'));
+                assert.ok(card0.innerHTML.includes('2 / 4 CHUNKS'));
+                assert.ok(typeof card0.onclick === 'function');
+            });
+
+            it('filters build cards by queue state and search query', () => {
+                const elements = {};
+                sandbox.document.getElementById = (id) => {
+                    if (!elements[id]) {
+                        elements[id] = {
+                            textContent: '',
+                            innerHTML: '',
+                            children: [],
+                            appendChild: function(child) {
+                                this.children.push(child);
+                            }
+                        };
+                    }
+                    return elements[id];
+                };
+
+                buildsState.selectedFilter = 'COMPLETED';
+                buildsState.searchQuery = 'nomad';
+
+                renderBuildQueueCards();
+
+                assert.equal(elements['builds-results-count'].textContent, 'SHOWING 1 / 2 BUILDS');
+                assert.equal(elements['builds-grid'].children.length, 1);
+                assert.ok(elements['builds-grid'].children[0].innerHTML.includes('Fix nomad discovery'));
+
+                // Reset filter and search
+                buildsState.selectedFilter = 'ALL';
+                buildsState.searchQuery = '';
+            });
+        });
+
+        describe('renderBuildDetailContent(build, chunks)', () => {
+            it('renders detailed build content and ordered chunks in drawer', () => {
+                const build = {
+                    id: 'build-999',
+                    tier: 2,
+                    repo: 'azylman/aerial',
+                    title: 'Vanadis HUD Integration',
+                    objective: 'Integrate build queue into dashboard',
+                    shared_context: 'Vanadis runs on http://vanadis.aerial',
+                    status: 'running'
+                };
+                const chunks = [
+                    {
+                        id: 'chunk-1',
+                        chunk_index: 1,
+                        title: 'Add queue endpoint',
+                        status: 'completed',
+                        effort: 'low',
+                        repo: 'azylman/aerial',
+                        pr_number: 779,
+                        diff_stat: 'main.go | 10 ++\n 1 file changed',
+                        target_files: ['vanadis/main.go'],
+                        target_symbols: ['buildsHandler'],
+                        acceptance_criteria: ['unit tests pass'],
+                        instructions: 'Implement GET /api/builds'
+                    },
+                    {
+                        id: 'chunk-2',
+                        chunk_index: 2,
+                        title: 'Render UI drawer',
+                        status: 'in_progress',
+                        effort: 'medium',
+                        repo: 'azylman/aerial',
+                        target_files: ['dashboard/static/app.js'],
+                        target_symbols: ['renderBuildDetailContent'],
+                        acceptance_criteria: ['drawer opens'],
+                        instructions: 'Add drawer rendering logic'
+                    }
+                ];
+
+                const html = renderBuildDetailContent(build, chunks);
+
+                assert.ok(html.includes('Vanadis HUD Integration'));
+                assert.ok(html.includes('Integrate build queue into dashboard'));
+                assert.ok(html.includes('Vanadis runs on http://vanadis.aerial'));
+                assert.ok(html.includes('TIER 2'));
+                assert.ok(html.includes('#1'));
+                assert.ok(html.includes('Add queue endpoint'));
+                assert.ok(html.includes('#779 ↗'));
+                assert.ok(html.includes('https://github.com/azylman/aerial/pull/779'));
+                assert.ok(html.includes('vanadis/main.go'));
+                assert.ok(html.includes('buildsHandler'));
+                assert.ok(html.includes('unit tests pass'));
+                assert.ok(html.includes('Implement GET /api/builds'));
+                assert.ok(html.includes('1 / 2 CHUNKS COMPLETED'));
+            });
+
+            it('escapes HTML special characters in build and chunk fields', () => {
+                const dangerousBuild = {
+                    id: 'build-<xss>',
+                    title: '<script>alert("build")</script>',
+                    objective: '<b>Bold</b> & dangerous',
+                    status: 'running'
+                };
+                const dangerousChunks = [
+                    {
+                        chunk_index: 1,
+                        title: '<img src=x onerror=alert(1)>',
+                        status: 'pending',
+                        instructions: '<script>evil()</script>'
+                    }
+                ];
+
+                const html = renderBuildDetailContent(dangerousBuild, dangerousChunks);
+                assert.ok(!html.includes('<script>alert("build")</script>'));
+                assert.ok(html.includes('&lt;script&gt;alert(&quot;build&quot;)&lt;/script&gt;'));
+                assert.ok(!html.includes('<img src=x onerror=alert(1)>'));
+                assert.ok(!html.includes('<script>evil()</script>'));
+            });
+        });
+
+        describe('updateBuildsMetrics() & renderBuildsPills()', () => {
+            it('updates summary counts, progress, and badge count', () => {
+                const elements = {};
+                sandbox.document.getElementById = (id) => {
+                    if (!elements[id]) {
+                        elements[id] = { textContent: '', className: '', style: {} };
+                    }
+                    return elements[id];
+                };
+
+                buildsState.builds = [
+                    { id: 'b1', status: 'running', total_chunks: 2, completed_chunks: 1 },
+                    { id: 'b2', status: 'queued', total_chunks: 3, completed_chunks: 0 },
+                    { id: 'b3', status: 'completed', total_chunks: 1, completed_chunks: 1 }
+                ];
+                buildsState.runningCount = undefined;
+                buildsState.queuedCount = undefined;
+                buildsState.completedCount = undefined;
+                buildsState.totalCount = 3;
+
+                updateBuildsMetrics();
+
+                assert.equal(elements['builds-running-count'].textContent, '1');
+                assert.equal(elements['builds-queued-count'].textContent, '1');
+                assert.equal(elements['builds-completed-count'].textContent, '1');
+                assert.equal(elements['builds-chunks-progress'].textContent, '2/6');
+                assert.equal(elements['builds-badge-count'].textContent, '2');
+
+                assert.equal(elements['pill-count-builds-all'].textContent, '3');
+                assert.equal(elements['pill-count-builds-running'].textContent, '1');
+                assert.equal(elements['pill-count-builds-queued'].textContent, '1');
+                assert.equal(elements['pill-count-builds-completed'].textContent, '1');
+            });
+        });
+
+        describe('TABS.builds Lifecycle', () => {
+            it('fetches builds and starts/stops polling on enter and leave', () => {
+                assert.ok(TABS.builds, 'TABS.builds must be registered');
+                assert.equal(typeof TABS.builds.onEnter, 'function');
+                assert.equal(typeof TABS.builds.onLeave, 'function');
+
+                vm.runInContext("fetchBuilds = () => { buildsState.fetchCount = (buildsState.fetchCount || 0) + 1; };", sandbox);
+
+                TABS.builds.onEnter();
+                assert.ok(sandbox.buildsState.fetchCount >= 1, 'onEnter should trigger fetchBuilds');
+
+                TABS.builds.onLeave();
+            });
+        });
+    });
+
 });
