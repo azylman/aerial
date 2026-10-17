@@ -12,15 +12,18 @@ import (
 )
 
 // GetSessionID retrieves the active session ID for a thread.
-func GetSessionID(database DBTX, threadID string) (string, error) {
-	if database == nil || threadID == "" {
+func (s *SQLStore) GetSessionID(ctx context.Context, threadID string) (string, error) {
+	if err := s.checkDB(); err != nil {
+		return "", err
+	}
+	if threadID == "" {
 		return "", nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var sessionID string
-	err := database.QueryRowContext(ctx, "SELECT internal_session_id FROM sessions WHERE thread_id = $1", threadID).Scan(&sessionID)
+	err := s.db.QueryRowContext(queryCtx, "SELECT internal_session_id FROM sessions WHERE thread_id = $1", threadID).Scan(&sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -28,16 +31,19 @@ func GetSessionID(database DBTX, threadID string) (string, error) {
 }
 
 // GetPreviousSessionID retrieves the previous session ID for a thread.
-func GetPreviousSessionID(database DBTX, threadID string) (string, error) {
-	if database == nil || threadID == "" {
+func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
+	if err := s.checkDB(); err != nil {
+		return "", err
+	}
+	if threadID == "" {
 		return "", nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var prevSessionID string
-	err := database.QueryRowContext(ctx, "SELECT COALESCE(previous_session_id, '') FROM sessions WHERE thread_id = $1", threadID).Scan(&prevSessionID)
-	if err == sql.ErrNoRows {
+	err := s.db.QueryRowContext(queryCtx, "SELECT COALESCE(previous_session_id, '') FROM sessions WHERE thread_id = $1", threadID).Scan(&prevSessionID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return prevSessionID, err
@@ -125,12 +131,15 @@ func scanSessionInfo(scanner interface{ Scan(dest ...any) error }) (SessionInfo,
 }
 
 // SaveSessionID associates an internal session ID with a thread ID.
-func SaveSessionID(database DBTX, threadID, sessionID string) error {
-	if database == nil || threadID == "" || sessionID == "" {
+func (s *SQLStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if threadID == "" || sessionID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `
@@ -144,20 +153,20 @@ func SaveSessionID(database DBTX, threadID, sessionID string) error {
 		internal_session_id = EXCLUDED.internal_session_id,
 		updated_at = EXCLUDED.updated_at
 	`
-	_, err := database.ExecContext(ctx, query, threadID, sessionID, now, now)
+	_, err := s.db.ExecContext(queryCtx, query, threadID, sessionID, now, now)
 	return err
 }
 
 // IncrementSessionTurnCount atomically increments and returns the turn count for a session key.
-func IncrementSessionTurnCount(database DBTX, sessionKey string) (int, error) {
-	if database == nil {
-		return 0, fmt.Errorf("database is nil")
+func (s *SQLStore) IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	if sessionKey == "" {
 		return 0, fmt.Errorf("session key cannot be empty")
 	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `
@@ -169,7 +178,7 @@ func IncrementSessionTurnCount(database DBTX, sessionKey string) (int, error) {
 	RETURNING turn_count;
 	`
 	var turnCount int
-	err := database.QueryRowContext(ctx, query, sessionKey, now, now).Scan(&turnCount)
+	err := s.db.QueryRowContext(queryCtx, query, sessionKey, now, now).Scan(&turnCount)
 	if err != nil {
 		return 0, err
 	}
@@ -177,15 +186,15 @@ func IncrementSessionTurnCount(database DBTX, sessionKey string) (int, error) {
 }
 
 // RotateSessionID updates the internal session ID, stores the previous session ID, and resets turn count to zero.
-func RotateSessionID(database DBTX, sessionKey, newSessionID string) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	if sessionKey == "" {
 		return fmt.Errorf("session key cannot be empty")
 	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `
@@ -202,45 +211,51 @@ func RotateSessionID(database DBTX, sessionKey, newSessionID string) error {
 		created_at = EXCLUDED.created_at,
 		updated_at = EXCLUDED.updated_at;
 	`
-	_, err := database.ExecContext(ctx, query, sessionKey, newSessionID, now, now)
+	_, err := s.db.ExecContext(queryCtx, query, sessionKey, newSessionID, now, now)
 	return err
 }
 
 // GetSessionTurnCount returns the current turn count for a session.
-func GetSessionTurnCount(database DBTX, sessionKey string) (int, error) {
-	if database == nil || sessionKey == "" {
+func (s *SQLStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, err
+	}
+	if sessionKey == "" {
 		return 0, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var count int
-	err := database.QueryRowContext(ctx, "SELECT turn_count FROM sessions WHERE thread_id = $1", sessionKey).Scan(&count)
-	if err == sql.ErrNoRows {
+	err := s.db.QueryRowContext(queryCtx, "SELECT turn_count FROM sessions WHERE thread_id = $1", sessionKey).Scan(&count)
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
 	return count, err
 }
 
 // GetExternalConversationID retrieves the external thread ID given an internal session ID.
-func GetExternalConversationID(database DBTX, internalID string) (string, error) {
-	if database == nil || internalID == "" {
+func (s *SQLStore) GetExternalConversationID(ctx context.Context, internalID string) (string, error) {
+	if err := s.checkDB(); err != nil {
+		return "", err
+	}
+	if internalID == "" {
 		return "", nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var threadID string
-	err := database.QueryRowContext(ctx, "SELECT thread_id FROM sessions WHERE internal_session_id = $1", internalID).Scan(&threadID)
-	if err == sql.ErrNoRows {
+	err := s.db.QueryRowContext(queryCtx, "SELECT thread_id FROM sessions WHERE internal_session_id = $1", internalID).Scan(&threadID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return threadID, err
 }
 
 // SaveConversationMapping associates an external conversation ID with an internal session ID.
-func SaveConversationMapping(database DBTX, externalID, internalID string) error {
-	return SaveSessionID(database, externalID, internalID)
+func (s *SQLStore) SaveConversationMapping(ctx context.Context, externalID, internalID string) error {
+	return s.SaveSessionID(ctx, externalID, internalID)
 }
 
 // SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
@@ -252,6 +267,9 @@ func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, las
 		return nil
 	}
 	now := time.Now().UTC()
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	query := `
 	INSERT INTO sessions (thread_id, summary, last_summarized_message_id, created_at, updated_at)
 	VALUES ($1, $2, $3, $4, $4)
@@ -260,18 +278,8 @@ func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, las
 		last_summarized_message_id = EXCLUDED.last_summarized_message_id,
 		updated_at = EXCLUDED.updated_at
 	`
-	_, err := s.db.ExecContext(ctx, query, threadID, summary, lastSummarizedMsgID, now)
+	_, err := s.db.ExecContext(queryCtx, query, threadID, summary, lastSummarizedMsgID, now)
 	return err
-}
-
-// SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
-func SaveThreadSummary(database DBTX, threadID, summary, lastSummarizedMsgID string) error {
-	if database == nil || threadID == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return (&SQLStore{db: database}).SaveThreadSummary(ctx, threadID, summary, lastSummarizedMsgID)
 }
 
 // GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
@@ -282,26 +290,19 @@ func (s *SQLStore) GetThreadSummary(ctx context.Context, threadID string) (summa
 	if threadID == "" {
 		return "", "", nil
 	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	var sum, lastMsgID sql.NullString
 	query := `SELECT summary, last_summarized_message_id FROM sessions WHERE thread_id = $1`
-	err = s.db.QueryRowContext(ctx, query, threadID).Scan(&sum, &lastMsgID)
-	if err == sql.ErrNoRows {
+	err = s.db.QueryRowContext(queryCtx, query, threadID).Scan(&sum, &lastMsgID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
 	if err != nil {
 		return "", "", err
 	}
 	return sum.String, lastMsgID.String, nil
-}
-
-// GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
-func GetThreadSummary(database DBTX, threadID string) (summary string, lastSummarizedMsgID string, err error) {
-	if database == nil || threadID == "" {
-		return "", "", nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return (&SQLStore{db: database}).GetThreadSummary(ctx, threadID)
 }
 
 // GetSessionActivityStats queries the database to determine the most recent session activity.
@@ -313,6 +314,9 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 		return &SessionActivityStats{}, nil
 	}
 
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	var (
 		internalSessionID sql.NullString
 		turnCount         sql.NullInt64
@@ -320,7 +324,7 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 	)
 
 	err := s.db.QueryRowContext(
-		ctx,
+		queryCtx,
 		`SELECT internal_session_id, turn_count, updated_at FROM sessions WHERE thread_id = $1`,
 		threadID,
 	).Scan(&internalSessionID, &turnCount, &rawSessUpdatedAt)
@@ -336,7 +340,7 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 	)
 
 	msgErr := s.db.QueryRowContext(
-		ctx,
+		queryCtx,
 		`SELECT COUNT(*), MAX(updated_at), MAX(created_at) FROM messages 
 		 WHERE thread_id = $1 
 		   AND status = 'COMPLETED' 
@@ -374,17 +378,14 @@ const DefaultUnrotatedSessionMaxAge = 2 * time.Hour
 
 // FindUnrotatedSessions returns sessions whose turn count strictly exceeds minTurns (defaulting to session.DefaultMaxSessionTurns if minTurns <= 0)
 // and were updated within maxAge (defaulting to DefaultUnrotatedSessionMaxAge if maxAge is empty; pass <= 0 to disable age filtering), ordered by turn_count DESC.
-func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	if minTurns <= 0 {
 		minTurns = session.DefaultMaxSessionTurns
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	limitAge := DefaultUnrotatedSessionMaxAge
@@ -404,7 +405,7 @@ func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int, max
 		WHERE turn_count > $1 AND updated_at >= $2
 		ORDER BY turn_count DESC
 		`
-		rows, err = database.QueryContext(queryCtx, query, minTurns, cutoff)
+		rows, err = s.db.QueryContext(queryCtx, query, minTurns, cutoff)
 	} else {
 		query := `
 		SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
@@ -412,7 +413,7 @@ func FindUnrotatedSessions(ctx context.Context, database DBTX, minTurns int, max
 		WHERE turn_count > $1
 		ORDER BY turn_count DESC
 		`
-		rows, err = database.QueryContext(queryCtx, query, minTurns)
+		rows, err = s.db.QueryContext(queryCtx, query, minTurns)
 	}
 	if err != nil {
 		return nil, err

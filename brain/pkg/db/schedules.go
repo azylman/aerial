@@ -77,19 +77,19 @@ func normalizeScheduleEffort(effort string) string {
 	}
 }
 
-func CreateOneShotSchedule(database DBTX, s OneShotSchedule) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) CreateOneShotSchedule(ctx context.Context, sched OneShotSchedule) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
-	if s.CreatedAt.IsZero() {
-		s.CreatedAt = time.Now().UTC()
+	if sched.CreatedAt.IsZero() {
+		sched.CreatedAt = time.Now().UTC()
 	}
-	s.Effort = normalizeScheduleEffort(s.Effort)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	sched.Effort = normalizeScheduleEffort(sched.Effort)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6)`
-	_, err := database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt, s.Effort)
+	_, err := s.db.ExecContext(queryCtx, query, sched.ID, sched.ThreadID, sched.Prompt, sched.RunAt, sched.CreatedAt, sched.Effort)
 	return err
 }
 
@@ -123,15 +123,15 @@ func scanCronRows(rows *sql.Rows) ([]CronSchedule, error) {
 	return results, nil
 }
 
-func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= $1`
-	rows, err := database.QueryContext(ctx, query, time.Now().UTC())
+	rows, err := s.db.QueryContext(queryCtx, query, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -140,21 +140,21 @@ func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	return scanOneShotRows(rows)
 }
 
-func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Message) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	exec := database
+	exec := s.db
 	type beginner interface {
 		BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 	}
 	var tx *sql.Tx
-	if b, ok := database.(beginner); ok {
+	if b, ok := s.db.(beginner); ok {
 		var err error
-		tx, err = b.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		tx, err = b.BeginTx(queryCtx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 		if err != nil {
 			return err
 		}
@@ -162,13 +162,13 @@ func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Messag
 		exec = tx
 	}
 
-	if err := InsertMessage(exec, msg); err != nil {
+	if err := (&SQLStore{db: exec, isPostgres: s.isPostgres}).InsertMessage(queryCtx, msg); err != nil {
 		return err
 	}
 
 	var deletedID string
 	deleteQuery := `DELETE FROM one_shot_schedules WHERE id = $1 RETURNING id;`
-	err := exec.QueryRowContext(ctx, deleteQuery, scheduleID).Scan(&deletedID)
+	err := exec.QueryRowContext(queryCtx, deleteQuery, scheduleID).Scan(&deletedID)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("one-shot schedule %s not found or already consumed", scheduleID)
 	}
@@ -182,11 +182,11 @@ func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Messag
 	return nil
 }
 
-func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules`
@@ -194,10 +194,10 @@ func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, 
 	var err error
 	if threadID != "" {
 		query += ` WHERE thread_id = $1 ORDER BY run_at ASC`
-		rows, err = database.QueryContext(ctx, query, threadID)
+		rows, err = s.db.QueryContext(queryCtx, query, threadID)
 	} else {
 		query += ` ORDER BY run_at ASC`
-		rows, err = database.QueryContext(ctx, query)
+		rows, err = s.db.QueryContext(queryCtx, query)
 	}
 	if err != nil {
 		return nil, err
@@ -207,9 +207,9 @@ func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, 
 	return scanOneShotRows(rows)
 }
 
-func CreateCronSchedule(database DBTX, c CronSchedule) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) CreateCronSchedule(ctx context.Context, c CronSchedule) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	if c.CreatedAt.IsZero() {
 		c.CreatedAt = time.Now().UTC()
@@ -218,23 +218,23 @@ func CreateCronSchedule(database DBTX, c CronSchedule) error {
 		c.Timezone = "America/Los_Angeles"
 	}
 	c.Effort = normalizeScheduleEffort(c.Effort)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err := database.ExecContext(ctx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, c.Effort)
+	_, err := s.db.ExecContext(queryCtx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, c.Effort)
 	return err
 }
 
-func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1`
-	rows, err := database.QueryContext(ctx, query, time.Now().UTC())
+	rows, err := s.db.QueryContext(queryCtx, query, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -243,11 +243,11 @@ func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
 	return scanCronRows(rows)
 }
 
-func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE`
@@ -255,10 +255,10 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	var err error
 	if targetID != "" {
 		query += ` AND target_id = $1 ORDER BY created_at ASC`
-		rows, err = database.QueryContext(ctx, query, targetID)
+		rows, err = s.db.QueryContext(queryCtx, query, targetID)
 	} else {
 		query += ` ORDER BY created_at ASC`
-		rows, err = database.QueryContext(ctx, query)
+		rows, err = s.db.QueryContext(queryCtx, query)
 	}
 	if err != nil {
 		return nil, err
@@ -268,45 +268,52 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	return scanCronRows(rows)
 }
 
-func UpdateCronNextRun(database DBTX, id string, nextRunAt time.Time) error {
-	if database == nil || id == "" {
+func (s *SQLStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if id == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	_, err := database.ExecContext(ctx, `UPDATE cron_schedules SET next_run_at = $1 WHERE id = $2`, nextRunAt, id)
+	_, err := s.db.ExecContext(queryCtx, `UPDATE cron_schedules SET next_run_at = $1 WHERE id = $2`, nextRunAt, id)
 	return err
 }
 
-func CreateScheduleRun(database DBTX, run ScheduleRun) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	if run.ID == "" {
 		return fmt.Errorf("schedule run id cannot be empty")
 	}
-	if run.Status == "" {
-		run.Status = "enqueued"
-	}
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now().UTC()
 	}
-
-	var completedAtVal interface{}
-	if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
-		completedAtVal = *run.CompletedAt
+	if run.Status == "" {
+		run.Status = "enqueued"
 	}
 	run.Effort = normalizeScheduleEffort(run.Effort)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	var completedAtVal interface{}
+	if run.CompletedAt != nil {
+		completedAtVal = *run.CompletedAt
+	}
+
 	query := `
-	INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model)
+	INSERT INTO schedule_runs (
+		id, schedule_id, schedule_type, message_id, target_id,
+		thread_id, title, prompt, status, started_at,
+		completed_at, duration_ms, error, effort, model
+	)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`
-	_, err := database.ExecContext(ctx, query,
+	_, err := s.db.ExecContext(queryCtx, query,
 		run.ID,
 		run.ScheduleID,
 		run.ScheduleType,
@@ -326,15 +333,15 @@ func CreateScheduleRun(database DBTX, run ScheduleRun) error {
 	return err
 }
 
-func UpdateScheduleRunStatus(database DBTX, params UpdateRunParams) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	if params.RunID == "" {
 		return fmt.Errorf("schedule run id cannot be empty")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var sets []string
@@ -381,13 +388,13 @@ func UpdateScheduleRunStatus(database DBTX, params UpdateRunParams) error {
 	query := fmt.Sprintf("UPDATE schedule_runs SET %s WHERE id = $%d", strings.Join(sets, ", "), idx)
 	args = append(args, params.RunID)
 
-	_, err := database.ExecContext(ctx, query, args...)
+	_, err := s.db.ExecContext(queryCtx, query, args...)
 	return err
 }
 
-func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
-	if database == nil {
-		return nil, 0, fmt.Errorf("database is nil")
+func (s *SQLStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, 0, err
 	}
 	if limit <= 0 || limit > 100 {
 		limit = 50
@@ -416,12 +423,12 @@ func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, stat
 		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	countQuery := "SELECT COUNT(*) FROM schedule_runs" + whereSQL
 	var total int
-	if err := database.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("failed to count schedule runs: %w", err)
 	}
 
@@ -434,7 +441,7 @@ func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, stat
 	`, whereSQL, argIdx, argIdx+1)
 
 	queryArgs := append(args, limit, offset)
-	rows, err := database.QueryContext(ctx, selectQuery, queryArgs...)
+	rows, err := s.db.QueryContext(queryCtx, selectQuery, queryArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query schedule runs: %w", err)
 	}
@@ -452,26 +459,29 @@ func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, stat
 		}
 		runs = append(runs, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate schedule runs: %w", err)
+	}
 
 	return runs, total, nil
 }
 
-func GetScheduleSummaryMetrics(database DBTX) (ScheduleSummaryMetrics, error) {
-	if database == nil {
-		return ScheduleSummaryMetrics{}, fmt.Errorf("database is nil")
+func (s *SQLStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error) {
+	if err := s.checkDB(); err != nil {
+		return ScheduleSummaryMetrics{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	var metrics ScheduleSummaryMetrics
 
 	// 1. Cron count (enabled only)
-	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM cron_schedules WHERE enabled = TRUE").Scan(&metrics.CronCount); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM cron_schedules WHERE enabled = TRUE").Scan(&metrics.CronCount); err != nil {
 		return metrics, fmt.Errorf("failed to count cron schedules: %w", err)
 	}
 
 	// 2. One-shot count
-	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM one_shot_schedules").Scan(&metrics.OneShotCount); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM one_shot_schedules").Scan(&metrics.OneShotCount); err != nil {
 		return metrics, fmt.Errorf("failed to count one-shot schedules: %w", err)
 	}
 
@@ -479,11 +489,11 @@ func GetScheduleSummaryMetrics(database DBTX) (ScheduleSummaryMetrics, error) {
 
 	// 3. Next run timestamp
 	var cronNext, oneShotNext sql.NullTime
-	errCron := database.QueryRowContext(ctx, "SELECT next_run_at FROM cron_schedules WHERE enabled = TRUE ORDER BY next_run_at ASC LIMIT 1").Scan(&cronNext)
+	errCron := s.db.QueryRowContext(queryCtx, "SELECT next_run_at FROM cron_schedules WHERE enabled = TRUE ORDER BY next_run_at ASC LIMIT 1").Scan(&cronNext)
 	if errCron != nil && errCron != sql.ErrNoRows {
 		return metrics, fmt.Errorf("failed to query next cron run: %w", errCron)
 	}
-	errOneShot := database.QueryRowContext(ctx, "SELECT run_at FROM one_shot_schedules ORDER BY run_at ASC LIMIT 1").Scan(&oneShotNext)
+	errOneShot := s.db.QueryRowContext(queryCtx, "SELECT run_at FROM one_shot_schedules ORDER BY run_at ASC LIMIT 1").Scan(&oneShotNext)
 	if errOneShot != nil && errOneShot != sql.ErrNoRows {
 		return metrics, fmt.Errorf("failed to query next one-shot run: %w", errOneShot)
 	}
@@ -510,7 +520,7 @@ func GetScheduleSummaryMetrics(database DBTX) (ScheduleSummaryMetrics, error) {
 	WHERE started_at >= $1
 	`
 	var totalRuns, completedRuns int
-	if err := database.QueryRowContext(ctx, runs24hQuery, cutoff24h).Scan(&totalRuns, &completedRuns); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, runs24hQuery, cutoff24h).Scan(&totalRuns, &completedRuns); err != nil {
 		return metrics, fmt.Errorf("failed to query 24h run metrics: %w", err)
 	}
 
@@ -524,12 +534,12 @@ func GetScheduleSummaryMetrics(database DBTX) (ScheduleSummaryMetrics, error) {
 	return metrics, nil
 }
 
-func ReconcileOrphanedScheduleRuns(database DBTX) (int64, error) {
-	if database == nil {
-		return 0, fmt.Errorf("database is nil")
+func (s *SQLStore) ReconcileOrphanedScheduleRuns(ctx context.Context) (int64, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `
@@ -539,16 +549,16 @@ func ReconcileOrphanedScheduleRuns(database DBTX) (int64, error) {
 	    completed_at = $1
 	WHERE status IN ('enqueued', 'running')
 	`
-	res, err := database.ExecContext(ctx, query, now)
+	res, err := s.db.ExecContext(queryCtx, query, now)
 	if err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
 }
 
-func PruneScheduleRuns(database DBTX, maxCount int, maxAge time.Duration) (int64, error) {
-	if database == nil {
-		return 0, fmt.Errorf("database is nil")
+func (s *SQLStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge time.Duration) (int64, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, err
 	}
 	if maxCount <= 0 {
 		maxCount = 1000
@@ -557,7 +567,7 @@ func PruneScheduleRuns(database DBTX, maxCount int, maxAge time.Duration) (int64
 		maxAge = 30 * 24 * time.Hour
 	}
 	cutoff := time.Now().UTC().Add(-maxAge)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	query := `
@@ -569,7 +579,7 @@ func PruneScheduleRuns(database DBTX, maxCount int, maxAge time.Duration) (int64
 		   LIMIT $2
 	   )
 	`
-	res, err := database.ExecContext(ctx, query, cutoff, maxCount)
+	res, err := s.db.ExecContext(queryCtx, query, cutoff, maxCount)
 	if err != nil {
 		return 0, err
 	}

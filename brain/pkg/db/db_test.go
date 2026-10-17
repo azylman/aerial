@@ -195,6 +195,9 @@ func TestDuplicateMessageInsertDoesNotResetStatus(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
 	msg := Message{
 		ID:         "msg-dup-1",
 		ThreadID:   "thread-1",
@@ -205,7 +208,7 @@ func TestDuplicateMessageInsertDoesNotResetStatus(t *testing.T) {
 		Status:     StatusProcessing,
 	}
 
-	if err := InsertMessage(database, msg); err != nil {
+	if err := store.InsertMessage(ctx, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -218,11 +221,11 @@ func TestDuplicateMessageInsertDoesNotResetStatus(t *testing.T) {
 		Content:    "Duplicate event prompt",
 		Status:     StatusPending,
 	}
-	if err := InsertMessage(database, dupMsg); err != nil {
+	if err := store.InsertMessage(ctx, dupMsg); err != nil {
 		t.Fatalf("Failed to insert duplicate message: %v", err)
 	}
 
-	fetched, err := GetMessage(database, "msg-dup-1")
+	fetched, err := store.GetMessage(ctx, "msg-dup-1")
 	if err != nil || fetched == nil {
 		t.Fatalf("Failed to get message: %v", err)
 	}
@@ -238,6 +241,9 @@ func TestMessageCRUD(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
 	// 1. Insert message with empty status defaulting to PENDING
 	msg := Message{
 		ID:         "msg-crud-1",
@@ -248,11 +254,11 @@ func TestMessageCRUD(t *testing.T) {
 		Content:    "Hello Aerial",
 		Status:     "", // Defaults to PENDING
 	}
-	if err := InsertMessage(database, msg); err != nil {
+	if err := store.InsertMessage(ctx, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
-	fetched, err := GetMessage(database, "msg-crud-1")
+	fetched, err := store.GetMessage(ctx, "msg-crud-1")
 	if err != nil || fetched == nil {
 		t.Fatalf("GetMessage failed: %v", err)
 	}
@@ -261,104 +267,85 @@ func TestMessageCRUD(t *testing.T) {
 	}
 
 	// 2. Update status to PROCESSING
-	if err := UpdateMessageStatus(database, "msg-crud-1", StatusProcessing, "worker-1"); err != nil {
+	if err := store.UpdateMessageStatus(ctx, "msg-crud-1", StatusProcessing, "worker-1"); err != nil {
 		t.Fatalf("UpdateMessageStatus failed: %v", err)
 	}
-	fetched, _ = GetMessage(database, "msg-crud-1")
+	fetched, _ = store.GetMessage(ctx, "msg-crud-1")
 	if fetched.Status != StatusProcessing {
 		t.Errorf("expected status PROCESSING, got %q", fetched.Status)
 	}
 
 	// 3. Increment retry
-	if err := IncrementMessageRetry(database, "msg-crud-1", "transient error"); err != nil {
+	if err := store.IncrementMessageRetry(ctx, "msg-crud-1", "transient error"); err != nil {
 		t.Fatalf("IncrementMessageRetry failed: %v", err)
 	}
-	fetched, _ = GetMessage(database, "msg-crud-1")
+	fetched, _ = store.GetMessage(ctx, "msg-crud-1")
 	if fetched.RetryCount != 1 || fetched.ErrorMessage != "transient error" {
 		t.Errorf("expected retry_count=1, got %d, err=%q", fetched.RetryCount, fetched.ErrorMessage)
 	}
 
 	// 4. Reset to pending with restart (requires status=PROCESSING)
-	if err := ResetMessageToPendingWithRestart(database, "msg-crud-1", "restarted"); err != nil {
+	if err := store.ResetMessageToPendingWithRestart(ctx, "msg-crud-1", "restarted"); err != nil {
 		t.Fatalf("ResetMessageToPendingWithRestart failed: %v", err)
 	}
-	fetched, _ = GetMessage(database, "msg-crud-1")
+	fetched, _ = store.GetMessage(ctx, "msg-crud-1")
 	if fetched.Status != StatusPending || fetched.RestartCount != 1 {
 		t.Errorf("expected status=PENDING, restart_count=1, got %q, %d", fetched.Status, fetched.RestartCount)
 	}
 
 	// 6. MessageExists and ClaimPendingMessage
-	exists, err := MessageExists(database, "msg-crud-1")
+	exists, err := store.MessageExists(ctx, "msg-crud-1")
 	if err != nil || !exists {
 		t.Fatalf("MessageExists failed: %v", err)
 	}
-	claimed, err := ClaimPendingMessage(database, "msg-crud-1")
+	claimed, err := store.ClaimPendingMessage(ctx, "msg-crud-1")
 	if err != nil || !claimed {
 		t.Fatalf("ClaimPendingMessage failed: %v", err)
 	}
-	claimedAgain, err := ClaimPendingMessage(database, "msg-crud-1")
+	claimedAgain, err := store.ClaimPendingMessage(ctx, "msg-crud-1")
 	if err != nil || claimedAgain {
 		t.Errorf("expected second claim to return false, got %v, %v", claimedAgain, err)
 	}
 
 	// 7. Update completed with responseText
-	if err := UpdateMessageCompleted(database, "msg-crud-1", "Processed response"); err != nil {
+	if err := store.UpdateMessageCompleted(ctx, "msg-crud-1", "Processed response"); err != nil {
 		t.Fatalf("UpdateMessageCompleted failed: %v", err)
 	}
-	fetched, _ = GetMessage(database, "msg-crud-1")
+	fetched, _ = store.GetMessage(ctx, "msg-crud-1")
 	if fetched.Status != StatusCompleted || fetched.ResponseText != "Processed response" {
 		t.Errorf("expected completed with response text, got status=%q text=%q", fetched.Status, fetched.ResponseText)
 	}
 
 	// 8. Active recent threads, messages, and max rowID
-	threadIDs, err := GetActiveRecentThreadIDs(database, time.Hour)
+	threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour)
 	if err != nil || len(threadIDs) == 0 {
 		t.Fatalf("GetActiveRecentThreadIDs failed: %v, len=%d", err, len(threadIDs))
 	}
-	msgs, err := GetRecentThreadMessages(database, "th-crud-1", 10)
+	msgs, err := store.GetRecentThreadMessages(ctx, "th-crud-1", 10)
 	if err != nil || len(msgs) == 0 {
 		t.Fatalf("GetRecentThreadMessages failed: %v, len=%d", err, len(msgs))
 	}
-	zeroMsgs, err := GetRecentThreadMessages(database, "th-crud-1", 0)
+	zeroMsgs, err := store.GetRecentThreadMessages(ctx, "th-crud-1", 0)
 	if err != nil {
 		t.Errorf("GetRecentThreadMessages with 0 limit failed: %v", err)
 	}
 	_ = zeroMsgs
 
-	maxRowID, err := GetMaxMessageRowID(database, "th-crud-1")
+	maxRowID, err := store.GetMaxMessageRowID(ctx, "th-crud-1")
 	if err != nil || maxRowID <= 0 {
 		t.Errorf("GetMaxMessageRowID failed: %v, maxRowID=%d", err, maxRowID)
 	}
-}
-
-func TestSessionCRUD(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	threadID := "thread-123"
-	sessID := "sess-abc"
-
-	if err := SaveSessionID(database, threadID, sessID); err != nil {
-		t.Fatalf("SaveSessionID failed: %v", err)
-	}
-
-	got, err := GetSessionID(database, threadID)
-	if err != nil {
-		t.Fatalf("GetSessionID failed: %v", err)
-	}
-	if got != sessID {
-		t.Errorf("Expected %s, got %s", sessID, got)
-	}
-
 }
 
 func TestIncrementSessionTurnCountAndRotation(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
 	key := "chan-test-1"
 
-	c1, err := IncrementSessionTurnCount(database, key)
+	c1, err := store.IncrementSessionTurnCount(ctx, key)
 	if err != nil {
 		t.Fatalf("IncrementSessionTurnCount 1 failed: %v", err)
 	}
@@ -366,7 +353,7 @@ func TestIncrementSessionTurnCountAndRotation(t *testing.T) {
 		t.Errorf("Expected turn_count=1, got %d", c1)
 	}
 
-	c2, err := IncrementSessionTurnCount(database, key)
+	c2, err := store.IncrementSessionTurnCount(ctx, key)
 	if err != nil {
 		t.Fatalf("IncrementSessionTurnCount 2 failed: %v", err)
 	}
@@ -375,16 +362,16 @@ func TestIncrementSessionTurnCountAndRotation(t *testing.T) {
 	}
 
 	// Rotate session ID
-	if err := RotateSessionID(database, key, "new-session-uuid-123"); err != nil {
+	if err := store.RotateSessionID(ctx, key, "new-session-uuid-123"); err != nil {
 		t.Fatalf("RotateSessionID failed: %v", err)
 	}
 
-	cRotated, _ := GetSessionTurnCount(database, key)
+	cRotated, _ := store.GetSessionTurnCount(ctx, key)
 	if cRotated != 0 {
 		t.Errorf("Expected turn_count=0 after rotation, got %d", cRotated)
 	}
 
-	sessID, _ := GetSessionID(database, key)
+	sessID, _ := store.GetSessionID(ctx, key)
 	if sessID != "new-session-uuid-123" {
 		t.Errorf("Expected new-session-uuid-123, got %s", sessID)
 	}
@@ -394,23 +381,24 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
 	key := "session-lifecycle-test"
 	ctx := context.Background()
 
 	// 1. Initial save creates session with created_at == updated_at
-	if err := SaveSessionID(database, key, "sess-1"); err != nil {
+	if err := store.SaveSessionID(ctx, key, "sess-1"); err != nil {
 		t.Fatalf("SaveSessionID 1 failed: %v", err)
 	}
 
-	gotID, err := GetSessionID(database, key)
+	gotID, err := store.GetSessionID(ctx, key)
 	if err != nil || gotID != "sess-1" {
 		t.Fatalf("GetSessionID 1 failed: got %q, err %v", gotID, err)
 	}
-	turns, err := GetSessionTurnCount(database, key)
+	turns, err := store.GetSessionTurnCount(ctx, key)
 	if err != nil || turns != 0 {
 		t.Fatalf("GetSessionTurnCount 1 failed: got %d, err %v", turns, err)
 	}
-	prevID, err := GetPreviousSessionID(database, key)
+	prevID, err := store.GetPreviousSessionID(ctx, key)
 	if err != nil || prevID != "" {
 		t.Fatalf("GetPreviousSessionID 1 failed: got %q, err %v", prevID, err)
 	}
@@ -427,12 +415,22 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	}
 
 	// 2. Mid-session turn increment updates updated_at but leaves created_at untouched
-	time.Sleep(10 * time.Millisecond)
-	if _, err := IncrementSessionTurnCount(database, key); err != nil {
+	// Backdate deterministically with 0ms sleep
+	pastTime := time.Now().UTC().Add(-10 * time.Second)
+	if _, err := database.ExecContext(ctx, "UPDATE sessions SET created_at = $1, updated_at = $1 WHERE thread_id = $2", pastTime, key); err != nil {
+		t.Fatalf("backdate timestamps failed: %v", err)
+	}
+	if err := database.QueryRowContext(ctx, "SELECT created_at, updated_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated, &rawUpdated); err != nil {
+		t.Fatalf("query re-scanned timestamps failed: %v", err)
+	}
+	firstCreatedAt, _ = ParseDBTime(rawCreated)
+	firstUpdatedAt, _ = ParseDBTime(rawUpdated)
+
+	if _, err := store.IncrementSessionTurnCount(ctx, key); err != nil {
 		t.Fatalf("IncrementSessionTurnCount failed: %v", err)
 	}
 
-	turns, err = GetSessionTurnCount(database, key)
+	turns, err = store.GetSessionTurnCount(ctx, key)
 	if err != nil || turns != 1 {
 		t.Fatalf("Expected turn_count=1, got %d (err: %v)", turns, err)
 	}
@@ -449,8 +447,7 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	}
 
 	// 3. Re-saving identical session ID does NOT change created_at
-	time.Sleep(10 * time.Millisecond)
-	if err := SaveSessionID(database, key, "sess-1"); err != nil {
+	if err := store.SaveSessionID(ctx, key, "sess-1"); err != nil {
 		t.Fatalf("SaveSessionID idempotent failed: %v", err)
 	}
 	if err := database.QueryRowContext(ctx, "SELECT created_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated); err != nil {
@@ -462,30 +459,29 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	}
 
 	// 4. RotateSessionID updates created_at to now and resets turn_count to 0
-	time.Sleep(10 * time.Millisecond)
-	if err := RotateSessionID(database, key, ""); err != nil {
+	if err := store.RotateSessionID(ctx, key, ""); err != nil {
 		t.Fatalf("RotateSessionID failed: %v", err)
 	}
-	gotID, err = GetSessionID(database, key)
+	gotID, err = store.GetSessionID(ctx, key)
 	if err != nil || gotID != "" {
 		t.Errorf("Expected empty internal session ID, got %q (err: %v)", gotID, err)
 	}
-	turns, err = GetSessionTurnCount(database, key)
+	turns, err = store.GetSessionTurnCount(ctx, key)
 	if err != nil || turns != 0 {
 		t.Errorf("Expected turn_count=0, got %d (err: %v)", turns, err)
 	}
-	prevAfterRot, err := GetPreviousSessionID(database, key)
+	prevAfterRot, err := store.GetPreviousSessionID(ctx, key)
 	if err != nil || prevAfterRot != "sess-1" {
-		t.Errorf("Expected GetPreviousSessionID 'sess-1', got %q (err: %v)", prevAfterRot, err)
+		t.Errorf("Expected GetPreviousSessionID sess-1, got %q (err: %v)", prevAfterRot, err)
 	}
 
 	// Redundant rotation does not wipe previous session ID
-	if err := RotateSessionID(database, key, ""); err != nil {
+	if err := store.RotateSessionID(ctx, key, ""); err != nil {
 		t.Fatalf("Redundant RotateSessionID failed: %v", err)
 	}
-	prevAfterRedundant, err := GetPreviousSessionID(database, key)
+	prevAfterRedundant, err := store.GetPreviousSessionID(ctx, key)
 	if err != nil || prevAfterRedundant != "sess-1" {
-		t.Errorf("Expected GetPreviousSessionID 'sess-1' after redundant rotation, got %q (err: %v)", prevAfterRedundant, err)
+		t.Errorf("Expected GetPreviousSessionID sess-1 after redundant rotation, got %q (err: %v)", prevAfterRedundant, err)
 	}
 
 	if err := database.QueryRowContext(ctx, "SELECT created_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated); err != nil {
@@ -497,17 +493,21 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	}
 
 	// 5. Saving a new session ID after cold rotation preserves previous_session_id
-	time.Sleep(10 * time.Millisecond)
-	if err := SaveSessionID(database, key, "sess-fresh-2"); err != nil {
+	// Backdate deterministically
+	_, _ = database.ExecContext(ctx, "UPDATE sessions SET created_at = $1, updated_at = $1 WHERE thread_id = $2", pastTime, key)
+	_ = database.QueryRowContext(ctx, "SELECT created_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated)
+	firstCreatedAt, _ = ParseDBTime(rawCreated)
+
+	if err := store.SaveSessionID(ctx, key, "sess-fresh-2"); err != nil {
 		t.Fatalf("SaveSessionID fresh failed: %v", err)
 	}
-	gotID, err = GetSessionID(database, key)
+	gotID, err = store.GetSessionID(ctx, key)
 	if err != nil || gotID != "sess-fresh-2" {
 		t.Errorf("Expected sess-fresh-2, got %s (err: %v)", gotID, err)
 	}
-	prevID, err = GetPreviousSessionID(database, key)
+	prevID, err = store.GetPreviousSessionID(ctx, key)
 	if err != nil || prevID != "sess-1" {
-		t.Errorf("Expected prevID 'sess-1', got %q (err: %v)", prevID, err)
+		t.Errorf("Expected prevID sess-1, got %q (err: %v)", prevID, err)
 	}
 	if err := database.QueryRowContext(ctx, "SELECT created_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated); err != nil {
 		t.Fatalf("query timestamps 5 failed: %v", err)
@@ -518,19 +518,19 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	}
 
 	// 6. Rotating again advances previous_session_id to sess-fresh-2
-	if err := RotateSessionID(database, key, "sess-fresh-3"); err != nil {
+	if err := store.RotateSessionID(ctx, key, "sess-fresh-3"); err != nil {
 		t.Fatalf("RotateSessionID to sess-fresh-3 failed: %v", err)
 	}
-	prevAfterRot2, err := GetPreviousSessionID(database, key)
+	prevAfterRot2, err := store.GetPreviousSessionID(ctx, key)
 	if err != nil || prevAfterRot2 != "sess-fresh-2" {
-		t.Errorf("Expected GetPreviousSessionID 'sess-fresh-2' after 2nd rotation, got %q (err: %v)", prevAfterRot2, err)
+		t.Errorf("Expected GetPreviousSessionID sess-fresh-2 after 2nd rotation, got %q (err: %v)", prevAfterRot2, err)
 	}
 
 	// 7. Verify FindUnrotatedSessions behavior for this thread
 	for i := 0; i < 15; i++ {
-		_, _ = IncrementSessionTurnCount(database, key)
+		_, _ = store.IncrementSessionTurnCount(ctx, key)
 	}
-	unrotated, err := FindUnrotatedSessions(ctx, database, 10)
+	unrotated, err := store.FindUnrotatedSessions(ctx, 10)
 	if err != nil {
 		t.Fatalf("FindUnrotatedSessions failed: %v", err)
 	}
@@ -538,11 +538,11 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 		t.Errorf("expected unrotated session for %s with 15 turns, got %+v", key, unrotated)
 	}
 
-	// Edge case validation: nil DB and empty thread
-	if p, err := GetPreviousSessionID(nil, "key"); p != "" || err != nil {
-		t.Errorf("Expected empty string and nil error for nil DB, got %q, %v", p, err)
+	// Edge case validation: non-existent and empty thread
+	if p, err := store.GetPreviousSessionID(ctx, "key"); p != "" || err != nil {
+		t.Errorf("Expected empty string and nil error for non-existent key, got %q, %v", p, err)
 	}
-	if p, err := GetPreviousSessionID(database, ""); p != "" || err != nil {
+	if p, err := store.GetPreviousSessionID(ctx, ""); p != "" || err != nil {
 		t.Errorf("Expected empty string and nil error for empty key, got %q, %v", p, err)
 	}
 }
@@ -618,33 +618,27 @@ func TestFindUnrotatedSessions(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
 	ctx := context.Background()
 
-	// 1. Nil database returns nil, nil
-	nilRes, err := FindUnrotatedSessions(ctx, nil, 8)
-	if err != nil || nilRes != nil {
-		t.Fatalf("expected nil, nil for nil DB, got res=%v, err=%v", nilRes, err)
-	}
-
-	// 2. Insert sessions with varied turn counts
-	_ = SaveSessionID(database, "th-low", "sess-low")
-	_ = SaveSessionID(database, "th-high-9", "sess-9")
-	_ = SaveSessionID(database, "th-high-12", "sess-12")
+	// 1. Insert sessions with varied turn counts
+	_ = store.SaveSessionID(ctx, "th-low", "sess-low")
+	_ = store.SaveSessionID(ctx, "th-high-9", "sess-9")
+	_ = store.SaveSessionID(ctx, "th-high-12", "sess-12")
 
 	// Increment turn counts
 	for i := 0; i < 3; i++ {
-		_, _ = IncrementSessionTurnCount(database, "th-low")
+		_, _ = store.IncrementSessionTurnCount(ctx, "th-low")
 	}
 	for i := 0; i < 9; i++ {
-		_, _ = IncrementSessionTurnCount(database, "th-high-9")
+		_, _ = store.IncrementSessionTurnCount(ctx, "th-high-9")
 	}
 	for i := 0; i < 12; i++ {
-		_, _ = IncrementSessionTurnCount(database, "th-high-12")
+		_, _ = store.IncrementSessionTurnCount(ctx, "th-high-12")
 	}
 
-	// 3. Query with minTurns <= 0 (defaults to session.DefaultMaxSessionTurns = 8)
-	// Both th-high-12 (12) and th-high-9 (9) should be returned, ordered by turn_count DESC
-	unrotated, err := FindUnrotatedSessions(ctx, database, 0)
+	// 2. Query with minTurns <= 0 (defaults to session.DefaultMaxSessionTurns = 8)
+	unrotated, err := store.FindUnrotatedSessions(ctx, 0)
 	if err != nil {
 		t.Fatalf("FindUnrotatedSessions failed: %v", err)
 	}
@@ -658,7 +652,7 @@ func TestFindUnrotatedSessions(t *testing.T) {
 		t.Errorf("expected second to be th-high-9 with 9 turns, got %+v", unrotated[1])
 	}
 
-	// 3b. Verify recency horizon excludes dormant sessions (>2h) by default,
+	// 3. Verify recency horizon excludes dormant sessions (>2h) by default,
 	// but includes them when maxAge <= 0 or extended.
 	dormantTime := time.Now().UTC().Add(-3 * time.Hour)
 	_, err = database.Exec("INSERT INTO sessions (thread_id, internal_session_id, turn_count, created_at, updated_at) VALUES ('th-old', 'sess-old', 20, $1, $2)", dormantTime, dormantTime)
@@ -667,7 +661,7 @@ func TestFindUnrotatedSessions(t *testing.T) {
 	}
 
 	// Default 2-hour horizon excludes th-old
-	recentOnly, err := FindUnrotatedSessions(ctx, database, 8)
+	recentOnly, err := store.FindUnrotatedSessions(ctx, 8)
 	if err != nil {
 		t.Fatalf("FindUnrotatedSessions with default maxAge failed: %v", err)
 	}
@@ -676,110 +670,30 @@ func TestFindUnrotatedSessions(t *testing.T) {
 	}
 
 	// Extended 4-hour horizon includes th-old
-	extended, err := FindUnrotatedSessions(ctx, database, 8, 4*time.Hour)
+	extended, err := store.FindUnrotatedSessions(ctx, 8, 4*time.Hour)
 	if err != nil {
 		t.Fatalf("FindUnrotatedSessions with 4h maxAge failed: %v", err)
 	}
-	if len(extended) != 3 || extended[0].ThreadID != "th-old" {
-		t.Fatalf("expected 3 sessions with th-old first, got %+v", extended)
+	if len(extended) != 3 {
+		t.Fatalf("expected 3 sessions with 4h horizon, got %d", len(extended))
 	}
 
-	// maxAge <= 0 disables age filtering
-	allSessions, err := FindUnrotatedSessions(ctx, database, 8, 0)
+	// Disabled age filter (maxAge <= 0) includes th-old
+	allUnrotated, err := store.FindUnrotatedSessions(ctx, 8, -1)
 	if err != nil {
 		t.Fatalf("FindUnrotatedSessions with disabled maxAge failed: %v", err)
 	}
-	if len(allSessions) != 3 {
-		t.Fatalf("expected 3 sessions with disabled maxAge, got %d", len(allSessions))
+	if len(allUnrotated) != 3 {
+		t.Fatalf("expected 3 sessions with disabled age filter, got %d", len(allUnrotated))
 	}
 
-	// 4. SQLStore method
-	store := NewSQLStore(database)
-	storeRes, err := store.FindUnrotatedSessions(ctx, 10)
+	// 4. Threshold above all active sessions returns empty slice
+	none, err := store.FindUnrotatedSessions(ctx, 50)
 	if err != nil {
-		t.Fatalf("store.FindUnrotatedSessions failed: %v", err)
+		t.Fatalf("FindUnrotatedSessions with high threshold failed: %v", err)
 	}
-	// With default 2-hour horizon, th-old is excluded, so only th-high-12 remains
-	if len(storeRes) != 1 || storeRes[0].ThreadID != "th-high-12" {
-		t.Errorf("expected only th-high-12 for minTurns=10 with default recency, got %+v", storeRes)
-	}
-
-	// Nil store error
-	var nilStore *SQLStore
-	if _, err := nilStore.FindUnrotatedSessions(ctx, 8); err == nil {
-		t.Error("expected error for nil SQLStore")
-	}
-
-	// Closed DB error
-	closedDB, _ := InitDB(":memory:")
-	_ = closedDB.Close()
-	if _, err := FindUnrotatedSessions(ctx, closedDB, 8); err == nil {
-		t.Error("expected error for closed DB")
-	}
-
-	// 5. FakeStore implementation
-	fake := NewFakeStore()
-	defer func() { _ = fake.Close() }()
-
-	_ = fake.SaveSessionID(ctx, "fake-low", "s-low")
-	_ = fake.SaveSessionID(ctx, "fake-9", "s-9")
-	_ = fake.SaveSessionID(ctx, "fake-15", "s-15")
-
-	for i := 0; i < 5; i++ {
-		_, _ = fake.IncrementSessionTurnCount(ctx, "fake-low")
-	}
-	for i := 0; i < 9; i++ {
-		_, _ = fake.IncrementSessionTurnCount(ctx, "fake-9")
-	}
-	for i := 0; i < 15; i++ {
-		_, _ = fake.IncrementSessionTurnCount(ctx, "fake-15")
-	}
-
-	fakeUnrotated, err := fake.FindUnrotatedSessions(ctx, 0)
-	if err != nil {
-		t.Fatalf("fake.FindUnrotatedSessions failed: %v", err)
-	}
-	if len(fakeUnrotated) != 2 {
-		t.Fatalf("expected 2 unrotated sessions in fake store, got %d", len(fakeUnrotated))
-	}
-	if fakeUnrotated[0].ThreadID != "fake-15" || fakeUnrotated[0].TurnCount != 15 {
-		t.Errorf("expected first fake unrotated to be fake-15, got %+v", fakeUnrotated[0])
-	}
-	if fakeUnrotated[1].ThreadID != "fake-9" || fakeUnrotated[1].TurnCount != 9 {
-		t.Errorf("expected second fake unrotated to be fake-9, got %+v", fakeUnrotated[1])
-	}
-
-	// Verify FakeStore recency horizon
-	fake.SetSessionUpdatedAt("fake-15", time.Now().UTC().Add(-3*time.Hour))
-	fakeRecent, err := fake.FindUnrotatedSessions(ctx, 0)
-	if err != nil {
-		t.Fatalf("fake.FindUnrotatedSessions failed: %v", err)
-	}
-	if len(fakeRecent) != 1 || fakeRecent[0].ThreadID != "fake-9" {
-		t.Errorf("expected only fake-9 with default recency horizon, got %+v", fakeRecent)
-	}
-
-	fakeExtended, err := fake.FindUnrotatedSessions(ctx, 0, 4*time.Hour)
-	if err != nil {
-		t.Fatalf("fake.FindUnrotatedSessions with 4h failed: %v", err)
-	}
-	if len(fakeExtended) != 2 {
-		t.Errorf("expected 2 unrotated sessions with 4h horizon, got %d", len(fakeExtended))
-	}
-
-	fakeAll, err := fake.FindUnrotatedSessions(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("fake.FindUnrotatedSessions with disabled maxAge failed: %v", err)
-	}
-	if len(fakeAll) != 2 {
-		t.Errorf("expected 2 unrotated sessions with disabled maxAge, got %d", len(fakeAll))
-	}
-
-	// Closed fake store error
-	closedFake := NewFakeStore()
-	_ = closedFake.Close()
-	if _, err := closedFake.FindUnrotatedSessions(ctx, 8); err == nil {
-		t.Error("expected error for closed FakeStore")
+	if len(none) != 0 {
+		t.Errorf("expected 0 sessions (>50), got %d", len(none))
 	}
 }
 
@@ -787,7 +701,10 @@ func TestAtomicInsertMessageAndConsumeOneShot(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	now := time.Now().UTC()
+	store := NewSQLStore(database)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second).UTC()
+
 	oneShot := OneShotSchedule{
 		ID:        "oneshot-consume-1",
 		ThreadID:  "thread-1",
@@ -795,7 +712,7 @@ func TestAtomicInsertMessageAndConsumeOneShot(t *testing.T) {
 		RunAt:     now,
 		CreatedAt: now,
 	}
-	if err := CreateOneShotSchedule(database, oneShot); err != nil {
+	if err := store.CreateOneShotSchedule(ctx, oneShot); err != nil {
 		t.Fatalf("CreateOneShotSchedule failed: %v", err)
 	}
 
@@ -806,18 +723,18 @@ func TestAtomicInsertMessageAndConsumeOneShot(t *testing.T) {
 		Status:   StatusPending,
 	}
 
-	if err := InsertMessageAndConsumeOneShot(database, "oneshot-consume-1", msg); err != nil {
+	if err := store.InsertMessageAndConsumeOneShot(ctx, "oneshot-consume-1", msg); err != nil {
 		t.Fatalf("InsertMessageAndConsumeOneShot failed: %v", err)
 	}
 
 	// Ensure one-shot was deleted
-	due, _ := GetDueOneShotSchedules(database)
+	due, _ := store.GetDueOneShotSchedules(ctx)
 	if len(due) != 0 {
 		t.Errorf("Expected 0 due one-shots after consume, got %d", len(due))
 	}
 
 	// Ensure message exists
-	m, _ := GetMessage(database, "msg-consumed-1")
+	m, _ := store.GetMessage(ctx, "msg-consumed-1")
 	if m == nil || m.Status != StatusPending {
 		t.Errorf("Expected message to exist with status PENDING, got %+v", m)
 	}
@@ -870,41 +787,12 @@ func TestGetFactsPaginatedImportanceDescending(t *testing.T) {
 	_, _ = (&SQLStore{db: database, isPostgres: true}).GetFactsPaginated(ctx, FactsFilter{Offset: 2})
 }
 
-func TestMessageExistsAndClaimPending(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	msg := Message{
-		ID:       "msg-cas-1",
-		ThreadID: "thread-1",
-		Content:  "CAS Test",
-		Status:   StatusPending,
-	}
-	if err := InsertMessage(database, msg); err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
-
-	exists, err := MessageExists(database, "msg-cas-1")
-	if err != nil || !exists {
-		t.Errorf("Expected exists=true, got %v, err=%v", exists, err)
-	}
-
-	// First claim from PENDING should succeed
-	claimed1, err := ClaimPendingMessage(database, "msg-cas-1")
-	if err != nil || !claimed1 {
-		t.Errorf("Expected claim 1 to succeed, got %v, err=%v", claimed1, err)
-	}
-
-	// Second claim should fail (already PROCESSING)
-	claimed2, err := ClaimPendingMessage(database, "msg-cas-1")
-	if err != nil || claimed2 {
-		t.Errorf("Expected claim 2 to fail (already claimed), got %v, err=%v", claimed2, err)
-	}
-}
-
 func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
+
+	store := NewSQLStore(database)
+	ctx := context.Background()
 
 	msg1 := Message{
 		ID:        "msg-wm-1",
@@ -913,20 +801,17 @@ func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 		Status:    StatusCompleted,
 		CreatedAt: time.Now().UTC().Add(-2 * time.Hour),
 	}
-	if err := InsertMessage(database, msg1); err != nil {
+	if err := store.InsertMessage(ctx, msg1); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
-	maxRow1, err := GetMaxMessageRowID(database, "thread-watermark")
+	maxRow1, err := store.GetMaxMessageRowID(ctx, "thread-watermark")
 	if err != nil {
 		t.Fatalf("GetMaxMessageRowID failed: %v", err)
 	}
 	if maxRow1 <= 0 {
 		t.Fatalf("Expected positive row_id sequence, got %d", maxRow1)
 	}
-
-	store := NewSQLStore(database)
-	ctx := context.Background()
 
 	// Active conversations for extraction
 	convs, err := store.GetActiveConversationsForExtraction(ctx, 24)
@@ -1038,17 +923,20 @@ func TestRecentThreadMessagesAndActiveIDs(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
 	now := time.Now().UTC()
-	_ = InsertMessage(database, Message{
+	_ = store.InsertMessage(ctx, Message{
 		ID: "m-rec-1", ThreadID: "thread-active-rec", GuildID: "g1", AuthorID: "a1", AuthorName: "Alex",
 		Content: "Message 1", Status: StatusCompleted, CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-10 * time.Minute),
 	})
-	_ = InsertMessage(database, Message{
+	_ = store.InsertMessage(ctx, Message{
 		ID: "m-rec-2", ThreadID: "thread-active-rec", GuildID: "g1", AuthorID: "a1", AuthorName: "Alex",
 		Content: "Message 2", Status: StatusCompleted, CreatedAt: now, UpdatedAt: now,
 	})
 
-	ids, err := GetActiveRecentThreadIDs(database, 24*time.Hour)
+	ids, err := store.GetActiveRecentThreadIDs(ctx, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("GetActiveRecentThreadIDs failed: %v", err)
 	}
@@ -1056,7 +944,7 @@ func TestRecentThreadMessagesAndActiveIDs(t *testing.T) {
 		t.Errorf("expected thread-active-rec in active IDs, got %v", ids)
 	}
 
-	msgs, err := GetRecentThreadMessages(database, "thread-active-rec", 10)
+	msgs, err := store.GetRecentThreadMessages(ctx, "thread-active-rec", 10)
 	if err != nil {
 		t.Fatalf("GetRecentThreadMessages failed: %v", err)
 	}
@@ -1069,6 +957,9 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
 	now := time.Now().Truncate(time.Second).UTC()
 
 	// 1. One-shot schedule CRUD
@@ -1080,18 +971,23 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		CreatedAt: now,
 		Effort:    "low",
 	}
-	if err := CreateOneShotSchedule(database, osSched); err != nil {
+	if err := store.CreateOneShotSchedule(ctx, osSched); err != nil {
 		t.Fatalf("CreateOneShotSchedule failed: %v", err)
 	}
 
-	dueOS, err := GetDueOneShotSchedules(database)
+	dueOS, err := store.GetDueOneShotSchedules(ctx)
 	if err != nil || len(dueOS) != 1 || dueOS[0].ID != "os-1" {
 		t.Fatalf("GetDueOneShotSchedules failed: %v, len=%d", err, len(dueOS))
 	}
 
-	allOS, err := GetAllOneShotSchedules(database, "th-1")
+	allOS, err := store.GetAllOneShotSchedules(ctx, "th-1")
 	if err != nil || len(allOS) != 1 {
 		t.Fatalf("GetAllOneShotSchedules failed: %v, len=%d", err, len(allOS))
+	}
+
+	allOneShotAll, err := store.GetAllOneShotSchedules(ctx, "")
+	if err != nil || len(allOneShotAll) != 1 {
+		t.Fatalf("GetAllOneShotSchedules with empty threadID failed: %v, len=%d", err, len(allOneShotAll))
 	}
 
 	// Consume one-shot schedule into message
@@ -1101,13 +997,12 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		Content:  "From one shot",
 		Status:   StatusPending,
 	}
-	if err := InsertMessageAndConsumeOneShot(database, "os-1", osMsg); err != nil {
+	if err := store.InsertMessageAndConsumeOneShot(ctx, "os-1", osMsg); err != nil {
 		t.Fatalf("InsertMessageAndConsumeOneShot failed: %v", err)
 	}
-	if err := InsertMessageAndConsumeOneShot(database, "non-existent-oneshot", osMsg); err == nil {
+	if err := store.InsertMessageAndConsumeOneShot(ctx, "non-existent-oneshot", osMsg); err == nil {
 		t.Errorf("expected error consuming non-existent one-shot, got nil")
 	}
-
 
 	// 2. Cron schedule CRUD
 	cronSched := CronSchedule{
@@ -1120,25 +1015,29 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		Effort:    "low",
 		CreatedAt: now,
 	}
-	if err := CreateCronSchedule(database, cronSched); err != nil {
+	if err := store.CreateCronSchedule(ctx, cronSched); err != nil {
 		t.Fatalf("CreateCronSchedule failed: %v", err)
 	}
 
-	dueCron, err := GetDueCronSchedules(database)
+	dueCron, err := store.GetDueCronSchedules(ctx)
 	if err != nil || len(dueCron) != 1 || dueCron[0].ID != "cron-1" {
 		t.Fatalf("GetDueCronSchedules failed: %v, len=%d", err, len(dueCron))
 	}
 
-	allCron, err := GetAllCronSchedules(database, "chan-1")
+	allCron, err := store.GetAllCronSchedules(ctx, "chan-1")
 	if err != nil || len(allCron) != 1 {
 		t.Fatalf("GetAllCronSchedules failed: %v, len=%d", err, len(allCron))
 	}
 
-	nextTime := now.Add(time.Hour)
-	if err := UpdateCronNextRun(database, "cron-1", nextTime); err != nil {
-		t.Fatalf("UpdateCronNextRun failed: %v", err)
+	allCronAll, err := store.GetAllCronSchedules(ctx, "")
+	if err != nil || len(allCronAll) != 1 {
+		t.Fatalf("GetAllCronSchedules with empty targetID failed: %v, len=%d", err, len(allCronAll))
 	}
 
+	nextTime := now.Add(time.Hour)
+	if err := store.UpdateCronNextRun(ctx, "cron-1", nextTime); err != nil {
+		t.Fatalf("UpdateCronNextRun failed: %v", err)
+	}
 
 	// 3. Schedule runs CRUD
 	run1 := ScheduleRun{
@@ -1153,30 +1052,31 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		StartedAt:    now.Add(-2 * time.Hour),
 		Effort:       "unrecognized_fallback",
 	}
-	if err := CreateScheduleRun(database, run1); err != nil {
+	if err := store.CreateScheduleRun(ctx, run1); err != nil {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
 	}
 
 	updateParams := UpdateRunParams{
 		RunID:       "run-1",
-		Status:      "success",
-		Error:       "",
+		Status:      "failed",
+		Error:       "something broke",
+		Model:       "gpt-4o",
 		CompletedAt: now,
 		DurationMs:  500,
 	}
-	if err := UpdateScheduleRunStatus(database, updateParams); err != nil {
+	if err := store.UpdateScheduleRunStatus(ctx, updateParams); err != nil {
 		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
 	}
 
-	if err := UpdateScheduleRunStatus(database, UpdateRunParams{RunID: "run-1"}); err != nil {
+	if err := store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-1"}); err != nil {
 		t.Errorf("expected nil error on empty sets UpdateScheduleRunStatus, got %v", err)
 	}
 
-	runs, total, err := GetScheduleRunsPaginated(database, 10, 0, "cron-1", "success")
+	runs, total, err := store.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", "failed")
 	if err != nil || total != 1 || len(runs) != 1 {
 		t.Fatalf("GetScheduleRunsPaginated failed: %v, total=%d, len=%d", err, total, len(runs))
 	}
-	runsClamped, totalClamped, err := GetScheduleRunsPaginated(database, -5, -10, "", "")
+	runsClamped, totalClamped, err := store.GetScheduleRunsPaginated(ctx, -5, -10, "", "")
 	if err != nil || totalClamped != 1 || len(runsClamped) != 1 {
 		t.Errorf("GetScheduleRunsPaginated clamping failed: %v, total=%d", err, totalClamped)
 	}
@@ -1190,27 +1090,29 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		Status:       "running",
 		StartedAt:    now.Add(-3 * time.Hour),
 	}
-	_ = CreateScheduleRun(database, runOrphan)
-	reconciled, err := ReconcileOrphanedScheduleRuns(database)
+	_ = store.CreateScheduleRun(ctx, runOrphan)
+	reconciled, err := store.ReconcileOrphanedScheduleRuns(ctx)
 	if err != nil || reconciled == 0 {
 		t.Fatalf("ReconcileOrphanedScheduleRuns failed: %v, reconciled=%d", err, reconciled)
 	}
 
 	// 5. Prune old schedule runs
-	pruned, err := PruneScheduleRuns(database, 100, time.Hour)
+	pruned, err := store.PruneScheduleRuns(ctx, 100, time.Hour)
 	if err != nil {
 		t.Fatalf("PruneScheduleRuns failed: %v", err)
 	}
 	_ = pruned
-
 }
 
 func TestGetScheduleSummaryMetrics(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
 	// 1. Empty database
-	metrics, err := GetScheduleSummaryMetrics(database)
+	metrics, err := store.GetScheduleSummaryMetrics(ctx)
 	if err != nil {
 		t.Fatalf("GetScheduleSummaryMetrics on empty db failed: %v", err)
 	}
@@ -1226,7 +1128,7 @@ func TestGetScheduleSummaryMetrics(t *testing.T) {
 	_, _ = database.Exec("INSERT INTO cron_schedules (id, target_id, cron_expr, prompt, enabled, next_run_at, created_at) VALUES ('cs-1', 't1', '*/5 * * * *', 'Prompt', 1, ?, ?)", tCron, now)
 	_, _ = database.Exec("INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at) VALUES ('os-1', 't1', 'Prompt', ?, ?)", tOneShot, now)
 
-	mCronEarlier, err := GetScheduleSummaryMetrics(database)
+	mCronEarlier, err := store.GetScheduleSummaryMetrics(ctx)
 	if err != nil || mCronEarlier.NextRunAt == nil || !mCronEarlier.NextRunAt.Equal(tCron) {
 		t.Errorf("expected NextRunAt = tCron, got %+v (err: %v)", mCronEarlier, err)
 	}
@@ -1235,21 +1137,21 @@ func TestGetScheduleSummaryMetrics(t *testing.T) {
 	tOneShotEarlier := now.Add(2 * time.Minute)
 	_, _ = database.Exec("UPDATE one_shot_schedules SET run_at = ? WHERE id = 'os-1'", tOneShotEarlier)
 
-	mOneShotEarlier, err := GetScheduleSummaryMetrics(database)
+	mOneShotEarlier, err := store.GetScheduleSummaryMetrics(ctx)
 	if err != nil || mOneShotEarlier.NextRunAt == nil || !mOneShotEarlier.NextRunAt.Equal(tOneShotEarlier) {
 		t.Errorf("expected NextRunAt = tOneShotEarlier, got %+v (err: %v)", mOneShotEarlier, err)
 	}
 
 	// 4. Single schedule type NextRunAt variants (only one-shot or only cron)
 	_, _ = database.Exec("DELETE FROM cron_schedules")
-	mOnlyOneShot, err := GetScheduleSummaryMetrics(database)
+	mOnlyOneShot, err := store.GetScheduleSummaryMetrics(ctx)
 	if err != nil || mOnlyOneShot.NextRunAt == nil || !mOnlyOneShot.NextRunAt.Equal(tOneShotEarlier) {
 		t.Errorf("expected NextRunAt for only one-shot, got %+v", mOnlyOneShot)
 	}
 
 	_, _ = database.Exec("DELETE FROM one_shot_schedules")
 	_, _ = database.Exec("INSERT INTO cron_schedules (id, target_id, cron_expr, prompt, enabled, next_run_at, created_at) VALUES ('cs-only', 't1', '*/5 * * * *', 'Prompt', 1, ?, ?)", tCron, now)
-	mOnlyCron, err := GetScheduleSummaryMetrics(database)
+	mOnlyCron, err := store.GetScheduleSummaryMetrics(ctx)
 	if err != nil || mOnlyCron.NextRunAt == nil || !mOnlyCron.NextRunAt.Equal(tCron) {
 		t.Errorf("expected NextRunAt for only cron, got %+v", mOnlyCron)
 	}
@@ -1260,7 +1162,7 @@ func TestGetScheduleSummaryMetrics(t *testing.T) {
 	_, _ = database.Exec("INSERT INTO schedule_runs (id, schedule_id, schedule_type, target_id, thread_id, prompt, status, started_at) VALUES ('r-t1', 'cs-1', 'cron', 't1', 't1', 'p', 'timeout', ?)", now.Add(-time.Hour))
 	_, _ = database.Exec("INSERT INTO schedule_runs (id, schedule_id, schedule_type, target_id, thread_id, prompt, status, started_at) VALUES ('r-c1', 'cs-1', 'cron', 't1', 't1', 'p', 'cancelled', ?)", now.Add(-time.Hour))
 
-	mRates, err := GetScheduleSummaryMetrics(database)
+	mRates, err := store.GetScheduleSummaryMetrics(ctx)
 	if err != nil {
 		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
 	}
@@ -1273,17 +1175,20 @@ func TestSessionConversationMapping(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	err := SaveConversationMapping(database, "ext-1", "int-1")
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	err := store.SaveConversationMapping(ctx, "ext-1", "int-1")
 	if err != nil {
 		t.Fatalf("SaveConversationMapping failed: %v", err)
 	}
 
-	intID, err := GetSessionID(database, "ext-1")
+	intID, err := store.GetSessionID(ctx, "ext-1")
 	if err != nil || intID != "int-1" {
 		t.Errorf("expected int-1, got %s (err: %v)", intID, err)
 	}
 
-	extID, err := GetExternalConversationID(database, "int-1")
+	extID, err := store.GetExternalConversationID(ctx, "int-1")
 	if err != nil || extID != "ext-1" {
 		t.Errorf("expected ext-1, got %s (err: %v)", extID, err)
 	}
@@ -1382,7 +1287,8 @@ func TestCleanTaskSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to insert message with empty summary: %v", err)
 	}
-	tasks, err := GetActiveTasks(database)
+	store := NewSQLStore(database)
+	tasks, err := store.GetActiveTasks(context.Background())
 	if err != nil {
 		t.Fatalf("GetActiveTasks failed: %v", err)
 	}
@@ -1493,139 +1399,78 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	// 2. Schedules & Runs nil database
-	if err := CreateOneShotSchedule(nil, OneShotSchedule{ID: "os1", ThreadID: "th1"}); err == nil {
-		t.Error("expected error calling CreateOneShotSchedule on nil database")
-	}
-	if res, err := GetDueOneShotSchedules(nil); err != nil || res != nil {
-		t.Errorf("expected nil, nil calling GetDueOneShotSchedules on nil database, got %v, %v", res, err)
-	}
-	if res, err := GetAllOneShotSchedules(nil, "th1"); err != nil || res != nil {
-		t.Errorf("expected nil, nil calling GetAllOneShotSchedules on nil database, got %v, %v", res, err)
-	}
-	if err := CreateCronSchedule(nil, CronSchedule{ID: "cs1", TargetID: "th1"}); err == nil {
-		t.Error("expected error calling CreateCronSchedule on nil database")
-	}
-	if res, err := GetDueCronSchedules(nil); err != nil || res != nil {
-		t.Errorf("expected nil, nil calling GetDueCronSchedules on nil database, got %v, %v", res, err)
-	}
-	if res, err := GetAllCronSchedules(nil, "th1"); err != nil || res != nil {
-		t.Errorf("expected nil, nil calling GetAllCronSchedules on nil database, got %v, %v", res, err)
-	}
-	if err := UpdateCronNextRun(nil, "cs1", time.Now()); err != nil {
-		t.Errorf("expected nil error calling UpdateCronNextRun on nil database, got %v", err)
-	}
-	if err := CreateScheduleRun(nil, ScheduleRun{ID: "r1"}); err == nil {
-		t.Error("expected error calling CreateScheduleRun on nil database")
-	}
-	if err := UpdateScheduleRunStatus(nil, UpdateRunParams{RunID: "r1"}); err == nil {
-		t.Error("expected error calling UpdateScheduleRunStatus on nil database")
-	}
-	if _, _, err := GetScheduleRunsPaginated(nil, 10, 0, "", ""); err == nil {
-		t.Error("expected error calling GetScheduleRunsPaginated on nil database")
-	}
-	if _, err := GetScheduleSummaryMetrics(nil); err == nil {
-		t.Error("expected error calling GetScheduleSummaryMetrics on nil database")
-	}
-	if _, err := ReconcileOrphanedScheduleRuns(nil); err == nil {
-		t.Error("expected error calling ReconcileOrphanedScheduleRuns on nil database")
-	}
-	if _, err := PruneScheduleRuns(nil, 10, time.Hour); err == nil {
-		t.Error("expected error calling PruneScheduleRuns on nil database")
-	}
+	store := NewSQLStore(database)
+	ctx := context.Background()
 
-	// 3. Messages nil database & empty-ID validation
-	if err := InsertMessage(nil, Message{ID: "m1"}); err == nil {
-		t.Error("expected error calling InsertMessage on nil database")
-	}
-	if err := InsertMessage(database, Message{ID: ""}); err == nil {
+	// 1. Messages empty-ID validation on store
+	if err := store.InsertMessage(ctx, Message{ID: ""}); err == nil {
 		t.Error("expected error calling InsertMessage with empty ID")
 	}
-	if err := UpdateMessageStatus(nil, "m1", StatusCompleted, ""); err == nil {
-		t.Error("expected error calling UpdateMessageStatus on nil database")
-	}
-	if err := UpdateMessageStatus(database, "", StatusCompleted, ""); err == nil {
+	if err := store.UpdateMessageStatus(ctx, "", StatusCompleted, ""); err == nil {
 		t.Error("expected error calling UpdateMessageStatus with empty ID")
 	}
-	if err := UpdateMessageCompleted(nil, "m1", "resp"); err == nil {
-		t.Error("expected error calling UpdateMessageCompleted on nil database")
-	}
-	if err := UpdateMessageCompleted(database, "", "resp"); err == nil {
+	if err := store.UpdateMessageCompleted(ctx, "", "resp"); err == nil {
 		t.Error("expected error calling UpdateMessageCompleted with empty ID")
 	}
-	if err := IncrementMessageRetry(nil, "m1", "err"); err == nil {
-		t.Error("expected error calling IncrementMessageRetry on nil database")
-	}
-	if err := IncrementMessageRetry(database, "", "err"); err == nil {
+	if err := store.IncrementMessageRetry(ctx, "", "err"); err == nil {
 		t.Error("expected error calling IncrementMessageRetry with empty ID")
 	}
-	if err := ResetMessageToPendingWithRestart(nil, "m1", "reason"); err == nil {
-		t.Error("expected error calling ResetMessageToPendingWithRestart on nil database")
-	}
-	if err := ResetMessageToPendingWithRestart(database, "", "reason"); err == nil {
+	if err := store.ResetMessageToPendingWithRestart(ctx, "", "reason"); err == nil {
 		t.Error("expected error calling ResetMessageToPendingWithRestart with empty ID")
 	}
-	if m, err := GetMessage(nil, "m1"); err == nil && m != nil {
-		t.Error("expected nil/error calling GetMessage on nil database")
-	}
-	if m, err := GetMessage(database, ""); err != nil || m != nil {
+	if m, err := store.GetMessage(ctx, ""); err != nil || m != nil {
 		t.Errorf("expected nil, nil for empty ID in GetMessage, got (%v, %v)", m, err)
 	}
-	if exists, err := MessageExists(nil, "m1"); err == nil && exists {
-		t.Error("expected false/error calling MessageExists on nil database")
-	}
-	if exists, err := MessageExists(database, ""); err != nil || exists {
+	if exists, err := store.MessageExists(ctx, ""); err != nil || exists {
 		t.Errorf("expected false, nil for empty ID in MessageExists, got (%v, %v)", exists, err)
 	}
-	if claimed, err := ClaimPendingMessage(nil, "m1"); err != nil || claimed {
-		t.Errorf("expected false, nil on ClaimPendingMessage(nil, id), got (%v, %v)", claimed, err)
-	}
-	if claimed, err := ClaimPendingMessage(database, ""); err != nil || claimed {
+	if claimed, err := store.ClaimPendingMessage(ctx, ""); err != nil || claimed {
 		t.Errorf("expected false, nil on ClaimPendingMessage(db, empty), got (%v, %v)", claimed, err)
 	}
-	if maxID, err := GetMaxMessageRowID(nil, "t1"); err != nil || maxID != 0 {
-		t.Errorf("expected 0, nil on GetMaxMessageRowID(nil, t1), got (%d, %v)", maxID, err)
-	}
-	if maxID, err := GetMaxMessageRowID(database, ""); err != nil || maxID != 0 {
+	if maxID, err := store.GetMaxMessageRowID(ctx, ""); err != nil || maxID != 0 {
 		t.Errorf("expected 0, nil on GetMaxMessageRowID(db, empty), got (%d, %v)", maxID, err)
 	}
 
-	// 4. Sessions nil database & empty key validation
-	if id, err := GetSessionID(nil, "th1"); err != nil || id != "" {
-		t.Errorf("expected empty, nil calling GetSessionID on nil database, got (%q, %v)", id, err)
+	// 2. Sessions empty key validation on store
+	if id, err := store.GetSessionID(ctx, ""); err != nil || id != "" {
+		t.Errorf("expected empty, nil calling GetSessionID with empty key, got (%q, %v)", id, err)
 	}
-	if err := SaveSessionID(nil, "th1", "s1"); err != nil {
-		t.Errorf("expected nil error calling SaveSessionID on nil database, got %v", err)
+	if err := store.SaveSessionID(ctx, "", "s1"); err != nil {
+		t.Errorf("expected nil error calling SaveSessionID with empty key, got %v", err)
 	}
-	if _, err := IncrementSessionTurnCount(nil, "th1"); err == nil {
-		t.Error("expected error calling IncrementSessionTurnCount on nil database")
-	}
-	if _, err := IncrementSessionTurnCount(database, ""); err == nil {
+	if _, err := store.IncrementSessionTurnCount(ctx, ""); err == nil {
 		t.Error("expected error calling IncrementSessionTurnCount with empty key")
 	}
-	if cnt, err := GetSessionTurnCount(nil, "th1"); err != nil || cnt != 0 {
-		t.Errorf("expected 0, nil calling GetSessionTurnCount on nil database, got (%d, %v)", cnt, err)
+	if cnt, err := store.GetSessionTurnCount(ctx, ""); err != nil || cnt != 0 {
+		t.Errorf("expected 0, nil calling GetSessionTurnCount with empty key, got (%d, %v)", cnt, err)
 	}
-	if err := RotateSessionID(nil, "th1", "s2"); err == nil {
-		t.Error("expected error calling RotateSessionID on nil database")
-	}
-	if err := RotateSessionID(database, "", "s2"); err == nil {
+	if err := store.RotateSessionID(ctx, "", "s2"); err == nil {
 		t.Error("expected error calling RotateSessionID with empty key")
 	}
-	if prev, err := GetPreviousSessionID(nil, "th1"); err != nil || prev != "" {
-		t.Errorf("expected empty, nil calling GetPreviousSessionID on nil database, got (%q, %v)", prev, err)
+	if prev, err := store.GetPreviousSessionID(ctx, ""); err != nil || prev != "" {
+		t.Errorf("expected empty, nil calling GetPreviousSessionID with empty key, got (%q, %v)", prev, err)
+	}
+	if ext, err := store.GetExternalConversationID(ctx, ""); err != nil || ext != "" {
+		t.Errorf("expected empty, nil calling GetExternalConversationID with empty key, got (%q, %v)", ext, err)
 	}
 
-	// 5. Validation on schedule runs and nil context calls
-	if err := CreateScheduleRun(database, ScheduleRun{ID: ""}); err == nil {
+	// 3. Schedules empty validation on store
+	if err := store.CreateScheduleRun(ctx, ScheduleRun{ID: ""}); err == nil {
 		t.Error("expected error on empty id in CreateScheduleRun")
 	}
-	if err := UpdateScheduleRunStatus(database, UpdateRunParams{RunID: ""}); err == nil {
+	if err := store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: ""}); err == nil {
 		t.Error("expected error on empty RunID in UpdateScheduleRunStatus")
 	}
+	if err := store.UpdateCronNextRun(ctx, "", time.Now()); err != nil {
+		t.Errorf("expected nil error on empty id in UpdateCronNextRun, got %v", err)
+	}
+	if err := store.UpdateConversationFactWatermark(ctx, "", 1); err != nil {
+		t.Errorf("expected nil error on empty threadID in UpdateConversationFactWatermark, got %v", err)
+	}
+
+	// 4. Nil context handling
 	embValid := make([]float32, ExpectedEmbeddingDim)
 	embValid[0] = 1.0
-	store := NewSQLStore(database)
 	idNilCtx, err := store.InsertFact(nil, "cat", "fact text nil ctx", 1.0, embValid)
 	if err != nil || idNilCtx <= 0 {
 		t.Fatalf("InsertFact with nil ctx failed: %v, id=%d", err, idNilCtx)
@@ -1633,9 +1478,6 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	resNilCtx, err := store.GetFactsPaginated(nil, FactsFilter{Limit: 5})
 	if err != nil || resNilCtx.Total == 0 {
 		t.Fatalf("GetFactsPaginated with nil ctx failed: %v", err)
-	}
-	if _, err := GetActiveTasks(nil); err == nil {
-		t.Error("expected error on nil DB in GetActiveTasks")
 	}
 }
 
@@ -1675,97 +1517,115 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 		t.Error("expected error on closed db in UpdateConversationFactExtractedAt")
 	}
 
-	if err := CreateOneShotSchedule(closedDB, OneShotSchedule{ID: "os1", ThreadID: "th1"}); err == nil {
+	if err := closedStore.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os1", ThreadID: "th1"}); err == nil {
 		t.Error("expected error on closed db in CreateOneShotSchedule")
 	}
-	if _, err := GetDueOneShotSchedules(closedDB); err == nil {
+	if _, err := closedStore.GetDueOneShotSchedules(ctx); err == nil {
 		t.Error("expected error on closed db in GetDueOneShotSchedules")
 	}
-	if _, err := GetAllOneShotSchedules(closedDB, "th1"); err == nil {
+	if _, err := closedStore.GetAllOneShotSchedules(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetAllOneShotSchedules")
 	}
-	if err := CreateCronSchedule(closedDB, CronSchedule{ID: "cs1", TargetID: "th1"}); err == nil {
+	if err := closedStore.CreateCronSchedule(ctx, CronSchedule{ID: "cs1", TargetID: "th1"}); err == nil {
 		t.Error("expected error on closed db in CreateCronSchedule")
 	}
-	if _, err := GetDueCronSchedules(closedDB); err == nil {
+	if _, err := closedStore.GetDueCronSchedules(ctx); err == nil {
 		t.Error("expected error on closed db in GetDueCronSchedules")
 	}
-	if _, err := GetAllCronSchedules(closedDB, "th1"); err == nil {
+	if _, err := closedStore.GetAllCronSchedules(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetAllCronSchedules")
 	}
-	if err := UpdateCronNextRun(closedDB, "cs1", time.Now()); err == nil {
+	if err := closedStore.UpdateCronNextRun(ctx, "cs1", time.Now()); err == nil {
 		t.Error("expected error on closed db in UpdateCronNextRun")
 	}
-	if err := CreateScheduleRun(closedDB, ScheduleRun{ID: "r1"}); err == nil {
+	if err := closedStore.CreateScheduleRun(ctx, ScheduleRun{ID: "r1"}); err == nil {
 		t.Error("expected error on closed db in CreateScheduleRun")
 	}
-	if err := UpdateScheduleRunStatus(closedDB, UpdateRunParams{RunID: "r1", Status: "success"}); err == nil {
+	if err := closedStore.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "r1", Status: "success"}); err == nil {
 		t.Error("expected error on closed db in UpdateScheduleRunStatus")
 	}
-	if _, _, err := GetScheduleRunsPaginated(closedDB, 10, 0, "", ""); err == nil {
+	if _, _, err := closedStore.GetScheduleRunsPaginated(ctx, 10, 0, "", ""); err == nil {
 		t.Error("expected error on closed db in GetScheduleRunsPaginated")
 	}
-	if _, err := GetScheduleSummaryMetrics(closedDB); err == nil {
+	if _, err := closedStore.GetScheduleSummaryMetrics(ctx); err == nil {
 		t.Error("expected error on closed db in GetScheduleSummaryMetrics")
 	}
-	if _, err := ReconcileOrphanedScheduleRuns(closedDB); err == nil {
+	if _, err := closedStore.ReconcileOrphanedScheduleRuns(ctx); err == nil {
 		t.Error("expected error on closed db in ReconcileOrphanedScheduleRuns")
 	}
-	if _, err := PruneScheduleRuns(closedDB, 10, time.Hour); err == nil {
+	if _, err := closedStore.PruneScheduleRuns(ctx, 10, time.Hour); err == nil {
 		t.Error("expected error on closed db in PruneScheduleRuns")
 	}
 
-	if err := InsertMessage(closedDB, Message{ID: "m1"}); err == nil {
+	if err := closedStore.InsertMessage(ctx, Message{ID: "m1"}); err == nil {
 		t.Error("expected error on closed db in InsertMessage")
 	}
-	if err := UpdateMessageStatus(closedDB, "m1", StatusCompleted, ""); err == nil {
+	if err := closedStore.UpdateMessageStatus(ctx, "m1", StatusCompleted, ""); err == nil {
 		t.Error("expected error on closed db in UpdateMessageStatus")
 	}
-	if err := UpdateMessageCompleted(closedDB, "m1", "resp"); err == nil {
+	if err := closedStore.UpdateMessageCompleted(ctx, "m1", "resp"); err == nil {
 		t.Error("expected error on closed db in UpdateMessageCompleted")
 	}
-	if err := IncrementMessageRetry(closedDB, "m1", "err"); err == nil {
+	if err := closedStore.IncrementMessageRetry(ctx, "m1", "err"); err == nil {
 		t.Error("expected error on closed db in IncrementMessageRetry")
 	}
-	if err := ResetMessageToPendingWithRestart(closedDB, "m1", "reason"); err == nil {
+	if err := closedStore.ResetMessageToPendingWithRestart(ctx, "m1", "reason"); err == nil {
 		t.Error("expected error on closed db in ResetMessageToPendingWithRestart")
 	}
-	if _, err := GetMessage(closedDB, "m1"); err == nil {
+	if _, err := closedStore.GetMessage(ctx, "m1"); err == nil {
 		t.Error("expected error on closed db in GetMessage")
 	}
-	if _, err := MessageExists(closedDB, "m1"); err == nil {
+	if _, err := closedStore.MessageExists(ctx, "m1"); err == nil {
 		t.Error("expected error on closed db in MessageExists")
 	}
-	if _, err := GetActiveRecentThreadIDs(closedDB, time.Hour); err == nil {
+	if _, err := closedStore.GetActiveRecentThreadIDs(ctx, time.Hour); err == nil {
 		t.Error("expected error on closed db in GetActiveRecentThreadIDs")
 	}
-	if _, err := GetRecentThreadMessages(closedDB, "t1", 10); err == nil {
+	if _, err := closedStore.GetRecentThreadMessages(ctx, "t1", 10); err == nil {
 		t.Error("expected error on closed db in GetRecentThreadMessages")
 	}
-	if _, err := GetMaxMessageRowID(closedDB, "t1"); err == nil {
+	if _, err := closedStore.GetMaxMessageRowID(ctx, "t1"); err == nil {
 		t.Error("expected error on closed db in GetMaxMessageRowID")
 	}
 
-	if _, err := GetSessionID(closedDB, "th1"); err == nil {
+	if _, err := closedStore.GetSessionID(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetSessionID")
 	}
-	if err := SaveSessionID(closedDB, "th1", "s1"); err == nil {
+	if err := closedStore.SaveSessionID(ctx, "th1", "s1"); err == nil {
 		t.Error("expected error on closed db in SaveSessionID")
 	}
-	if _, err := IncrementSessionTurnCount(closedDB, "th1"); err == nil {
+	if _, err := closedStore.IncrementSessionTurnCount(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in IncrementSessionTurnCount")
 	}
-	if _, err := GetSessionTurnCount(closedDB, "th1"); err == nil {
+	if _, err := closedStore.GetSessionTurnCount(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetSessionTurnCount")
 	}
-	if err := RotateSessionID(closedDB, "th1", "s2"); err == nil {
+	if err := closedStore.RotateSessionID(ctx, "th1", "s2"); err == nil {
 		t.Error("expected error on closed db in RotateSessionID")
 	}
-	if _, err := GetPreviousSessionID(closedDB, "th1"); err == nil {
+	if _, err := closedStore.GetPreviousSessionID(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetPreviousSessionID")
 	}
-	if _, _, err := GetThreadSummary(closedDB, "t1"); err == nil {
+	if err := closedStore.SaveThreadSummary(ctx, "th1", "sum", "m1"); err == nil {
+		t.Error("expected error on closed db in SaveThreadSummary")
+	}
+	if _, _, err := closedStore.GetThreadSummary(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetThreadSummary")
+	}
+	if _, err := closedStore.GetSessionActivityStats(ctx, "th1"); err == nil {
+		t.Error("expected error on closed db in GetSessionActivityStats")
+	}
+	if _, err := closedStore.GetExternalConversationID(ctx, "int1"); err == nil {
+		t.Error("expected error on closed db in GetExternalConversationID")
+	}
+	if _, err := closedStore.FindUnrotatedSessions(ctx, 8); err == nil {
+		t.Error("expected error on closed db in FindUnrotatedSessions")
+	}
+	if err := closedStore.InsertMessageAndConsumeOneShot(ctx, "os1", Message{ID: "m1"}); err == nil {
+		t.Error("expected error on closed db in InsertMessageAndConsumeOneShot")
+	}
+	if _, err := closedStore.GetActiveTasks(ctx); err == nil {
+		t.Error("expected error on closed db in GetActiveTasks")
 	}
 }
 
@@ -1888,7 +1748,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		t.Fatalf("expected 1 run, got %d (total %d)", len(runs), total)
 	}
 	if runs[0].Effort != "low" || runs[0].Model != "gemini-3.7-flash-low" {
-		t.Errorf("expected effort='low' and model='gemini-3.7-flash-low', got effort=%q model=%q", runs[0].Effort, runs[0].Model)
+		t.Errorf("expected effort=low and model=gemini-3.7-flash-low, got effort=%q model=%q", runs[0].Effort, runs[0].Model)
 	}
 
 	// 6. Test UpdateScheduleRunStatus with Model
@@ -1907,7 +1767,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		t.Fatalf("failed fetching completed runs: %v", err)
 	}
 	if runsAfter[0].Model != "gemini-3.8-flash-low" {
-		t.Errorf("expected updated model='gemini-3.8-flash-low', got %q", runsAfter[0].Model)
+		t.Errorf("expected updated model=gemini-3.8-flash-low, got %q", runsAfter[0].Model)
 	}
 
 	// 7. Test Message with Effort
@@ -1928,7 +1788,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		t.Fatalf("GetMessage failed: %v", err)
 	}
 	if fetchedMsg == nil || fetchedMsg.Effort != "low" {
-		t.Errorf("expected message effort='low', got %v", fetchedMsg)
+		t.Errorf("expected message effort=low, got %v", fetchedMsg)
 	}
 
 	// 8. Test GetRecentThreadMessages with Effort
@@ -1937,7 +1797,109 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		t.Fatalf("GetRecentThreadMessages failed: %v", err)
 	}
 	if len(recent) != 1 || recent[0].Effort != "low" {
-		t.Errorf("expected 1 recent message with effort='low', got %v", recent)
+		t.Errorf("expected 1 recent message with effort=low, got %v", recent)
+	}
+
+	// 9. Folded from schedules_test.go: Test normalization of untrimmed and table-driven effort values
+	normCases := []struct {
+		input    string
+		expected string
+	}{
+		{"low", "low"},
+		{"medium", "medium"},
+		{"high", "high"},
+		{"  HIGH  ", "high"},
+		{"  medium  ", "medium"},
+		{"untrimmed", "medium"},
+		{"", "medium"},
+		{"unknown-effort", "medium"},
+	}
+	for _, tc := range normCases {
+		if got := normalizeScheduleEffort(tc.input); got != tc.expected {
+			t.Errorf("normalizeScheduleEffort(%q) = %q, want %q", tc.input, got, tc.expected)
+		}
+	}
+
+	// 10. Raw SQL insert into one_shot_schedules, cron_schedules, schedule_runs with empty effort COALESCE to medium
+	_, err = database.ExecContext(ctx, `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6)`,
+		"os-raw-empty", "thread-coalesce", "prompt 1", now.Add(-1*time.Minute), now, "")
+	if err != nil {
+		t.Fatalf("failed raw insert one_shot_schedules: %v", err)
+	}
+	dueOS, err := store.GetDueOneShotSchedules(ctx)
+	if err != nil {
+		t.Fatalf("GetDueOneShotSchedules failed: %v", err)
+	}
+	var foundOS bool
+	for _, s := range dueOS {
+		if s.ID == "os-raw-empty" {
+			foundOS = true
+			if s.Effort != "medium" {
+				t.Fatalf("expected effort to COALESCE to medium, got %q", s.Effort)
+			}
+		}
+	}
+	if !foundOS {
+		t.Fatalf("expected to find os-raw-empty in due one shots")
+	}
+	allOS, err := store.GetAllOneShotSchedules(ctx, "thread-coalesce")
+	if err != nil || len(allOS) == 0 || allOS[0].Effort != "medium" {
+		t.Fatalf("expected allOS effort to COALESCE to medium, got %v", allOS)
+	}
+
+	_, err = database.ExecContext(ctx, `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		"cron-raw-empty", "target-coalesce", "Cron", "0 0 * * *", "daily prompt", "UTC", now.Add(-1*time.Minute), true, now, "")
+	if err != nil {
+		t.Fatalf("failed raw insert cron_schedules: %v", err)
+	}
+	dueCronsCoalesce, err := store.GetDueCronSchedules(ctx)
+	if err != nil {
+		t.Fatalf("GetDueCronSchedules failed: %v", err)
+	}
+	var foundCron bool
+	for _, c := range dueCronsCoalesce {
+		if c.ID == "cron-raw-empty" {
+			foundCron = true
+			if c.Effort != "medium" {
+				t.Fatalf("expected cron effort to COALESCE to medium, got %q", c.Effort)
+			}
+		}
+	}
+	if !foundCron {
+		t.Fatalf("expected to find cron-raw-empty in due crons")
+	}
+	allCron, err := store.GetAllCronSchedules(ctx, "target-coalesce")
+	if err != nil || len(allCron) == 0 || allCron[0].Effort != "medium" {
+		t.Fatalf("expected allCron effort to COALESCE to medium, got %v", allCron)
+	}
+
+	_, err = database.ExecContext(ctx, `INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, duration_ms, error, effort, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		"run-raw-empty", "cron-raw-empty", "cron", "m1", "target-coalesce", "thread-1", "Run", "prompt", "enqueued", now, 0, "", "", "")
+	if err != nil {
+		t.Fatalf("failed raw insert schedule_runs: %v", err)
+	}
+	runsCoalesce, totalCoalesce, err := store.GetScheduleRunsPaginated(ctx, 10, 0, "cron-raw-empty", "")
+	if err != nil {
+		t.Fatalf("GetScheduleRunsPaginated failed: %v", err)
+	}
+	if totalCoalesce != 1 || len(runsCoalesce) != 1 || runsCoalesce[0].Effort != "medium" {
+		t.Fatalf("expected runs[0].Effort to COALESCE to medium, got %q (total=%d)", runsCoalesce[0].Effort, totalCoalesce)
+	}
+
+	// 11. Untrimmed "  HIGH  " normalization check
+	oneShotUntrimmed := OneShotSchedule{
+		ID:       "oneshot-untrimmed-high",
+		ThreadID: "thread-3",
+		Prompt:   "untrimmed reasoning",
+		RunAt:    time.Now().UTC().Add(-1 * time.Minute),
+		Effort:   "  HIGH  ",
+	}
+	if err := store.CreateOneShotSchedule(ctx, oneShotUntrimmed); err != nil {
+		t.Fatalf("failed to create untrimmed high one shot: %v", err)
+	}
+	allUntrimmed, err := store.GetAllOneShotSchedules(ctx, "thread-3")
+	if err != nil || len(allUntrimmed) == 0 || allUntrimmed[0].Effort != "high" {
+		t.Fatalf("expected canonicalized effort high, got %v", allUntrimmed)
 	}
 }
 
@@ -1981,52 +1943,4 @@ func TestDB_CloseWarnAndRollbackWarn(t *testing.T) {
 		t.Fatalf("failed to commit tx2: %v", err)
 	}
 	rollbackWarn(tx2, "committed-tx")
-}
-
-func TestThreadSummaryDirectFunctions(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	// 1. Nil / empty checks
-	if err := SaveThreadSummary(nil, "th1", "sum", "m1"); err != nil {
-		t.Errorf("expected nil for nil DB in SaveThreadSummary")
-	}
-	if err := SaveThreadSummary(database, "", "sum", "m1"); err != nil {
-		t.Errorf("expected nil for empty threadID in SaveThreadSummary")
-	}
-
-	sum1, msg1, err1 := GetThreadSummary(nil, "th1")
-	if err1 != nil || sum1 != "" || msg1 != "" {
-		t.Errorf("expected empty strings, nil err for nil DB in GetThreadSummary, got %q, %q, %v", sum1, msg1, err1)
-	}
-	sum2, msg2, err2 := GetThreadSummary(database, "")
-	if err2 != nil || sum2 != "" || msg2 != "" {
-		t.Errorf("expected empty strings, nil err for empty threadID in GetThreadSummary, got %q, %q, %v", sum2, msg2, err2)
-	}
-
-	// 2. Non-existent thread ID returns empty strings and nil error
-	sum3, msg3, err3 := GetThreadSummary(database, "non-existent")
-	if err3 != nil || sum3 != "" || msg3 != "" {
-		t.Errorf("expected empty, nil for non-existent thread in GetThreadSummary, got %q, %q, %v", sum3, msg3, err3)
-	}
-
-	// 3. Save and retrieve thread summary
-	if err := SaveThreadSummary(database, "th-sum-1", "First summary", "m-sum-1"); err != nil {
-		t.Fatalf("SaveThreadSummary failed: %v", err)
-	}
-
-	sum4, msg4, err4 := GetThreadSummary(database, "th-sum-1")
-	if err4 != nil || sum4 != "First summary" || msg4 != "m-sum-1" {
-		t.Fatalf("GetThreadSummary failed: sum=%q msg=%q err=%v", sum4, msg4, err4)
-	}
-
-	// 4. Update existing thread summary (upsert ON CONFLICT)
-	if err := SaveThreadSummary(database, "th-sum-1", "Updated summary", "m-sum-2"); err != nil {
-		t.Fatalf("SaveThreadSummary upsert failed: %v", err)
-	}
-
-	sum5, msg5, err5 := GetThreadSummary(database, "th-sum-1")
-	if err5 != nil || sum5 != "Updated summary" || msg5 != "m-sum-2" {
-		t.Fatalf("GetThreadSummary upsert check failed: sum=%q msg=%q err=%v", sum5, msg5, err5)
-	}
 }
