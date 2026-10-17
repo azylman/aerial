@@ -278,22 +278,13 @@ func TestMessageCRUD(t *testing.T) {
 		t.Errorf("expected retry_count=1, got %d, err=%q", fetched.RetryCount, fetched.ErrorMessage)
 	}
 
-	// 4. Increment restart
-	if err := IncrementMessageRestart(database, "msg-crud-1", "restart error"); err != nil {
-		t.Fatalf("IncrementMessageRestart failed: %v", err)
-	}
-	fetched, _ = GetMessage(database, "msg-crud-1")
-	if fetched.RestartCount != 1 {
-		t.Errorf("expected restart_count=1, got %d", fetched.RestartCount)
-	}
-
-	// 5. Reset to pending with restart (requires status=PROCESSING)
+	// 4. Reset to pending with restart (requires status=PROCESSING)
 	if err := ResetMessageToPendingWithRestart(database, "msg-crud-1", "restarted"); err != nil {
 		t.Fatalf("ResetMessageToPendingWithRestart failed: %v", err)
 	}
 	fetched, _ = GetMessage(database, "msg-crud-1")
-	if fetched.Status != StatusPending || fetched.RestartCount != 2 {
-		t.Errorf("expected status=PENDING, restart_count=2, got %q, %d", fetched.Status, fetched.RestartCount)
+	if fetched.Status != StatusPending || fetched.RestartCount != 1 {
+		t.Errorf("expected status=PENDING, restart_count=1, got %q, %d", fetched.Status, fetched.RestartCount)
 	}
 
 	// 6. MessageExists and ClaimPendingMessage
@@ -359,13 +350,6 @@ func TestSessionCRUD(t *testing.T) {
 		t.Errorf("Expected %s, got %s", sessID, got)
 	}
 
-	if err := DeleteSessionID(database, threadID); err != nil {
-		t.Fatalf("DeleteSessionID failed: %v", err)
-	}
-	got, _ = GetSessionID(database, threadID)
-	if got != "" {
-		t.Errorf("Expected empty sessionID after deletion, got %s", got)
-	}
 }
 
 func TestIncrementSessionTurnCountAndRotation(t *testing.T) {
@@ -411,26 +395,36 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	key := "session-lifecycle-test"
+	ctx := context.Background()
 
 	// 1. Initial save creates session with created_at == updated_at
 	if err := SaveSessionID(database, key, "sess-1"); err != nil {
 		t.Fatalf("SaveSessionID 1 failed: %v", err)
 	}
 
-	info1, err := GetSessionInfo(database, key)
-	if err != nil {
-		t.Fatalf("GetSessionInfo 1 failed: %v", err)
+	gotID, err := GetSessionID(database, key)
+	if err != nil || gotID != "sess-1" {
+		t.Fatalf("GetSessionID 1 failed: got %q, err %v", gotID, err)
 	}
-	if info1 == nil {
-		t.Fatalf("Expected non-nil SessionInfo")
+	turns, err := GetSessionTurnCount(database, key)
+	if err != nil || turns != 0 {
+		t.Fatalf("GetSessionTurnCount 1 failed: got %d, err %v", turns, err)
 	}
-	if info1.ThreadID != key || info1.InternalSessionID != "sess-1" || info1.TurnCount != 0 {
-		t.Errorf("Unexpected session info: %+v", info1)
+	prevID, err := GetPreviousSessionID(database, key)
+	if err != nil || prevID != "" {
+		t.Fatalf("GetPreviousSessionID 1 failed: got %q, err %v", prevID, err)
 	}
-	if info1.CreatedAt.IsZero() || info1.UpdatedAt.IsZero() {
-		t.Errorf("Expected non-zero timestamps: created=%v, updated=%v", info1.CreatedAt, info1.UpdatedAt)
+
+	var firstCreatedAt, firstUpdatedAt time.Time
+	var rawCreated, rawUpdated any
+	if err := database.QueryRowContext(ctx, "SELECT created_at, updated_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated, &rawUpdated); err != nil {
+		t.Fatalf("query timestamps failed: %v", err)
 	}
-	firstCreatedAt := info1.CreatedAt
+	firstCreatedAt, _ = ParseDBTime(rawCreated)
+	firstUpdatedAt, _ = ParseDBTime(rawUpdated)
+	if firstCreatedAt.IsZero() || firstUpdatedAt.IsZero() {
+		t.Errorf("Expected non-zero timestamps: created=%v, updated=%v", firstCreatedAt, firstUpdatedAt)
+	}
 
 	// 2. Mid-session turn increment updates updated_at but leaves created_at untouched
 	time.Sleep(10 * time.Millisecond)
@@ -438,18 +432,20 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 		t.Fatalf("IncrementSessionTurnCount failed: %v", err)
 	}
 
-	info2, err := GetSessionInfo(database, key)
-	if err != nil {
-		t.Fatalf("GetSessionInfo 2 failed: %v", err)
+	turns, err = GetSessionTurnCount(database, key)
+	if err != nil || turns != 1 {
+		t.Fatalf("Expected turn_count=1, got %d (err: %v)", turns, err)
 	}
-	if info2.TurnCount != 1 {
-		t.Errorf("Expected turn_count=1, got %d", info2.TurnCount)
+	if err := database.QueryRowContext(ctx, "SELECT created_at, updated_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated, &rawUpdated); err != nil {
+		t.Fatalf("query timestamps 2 failed: %v", err)
 	}
-	if !info2.CreatedAt.Equal(firstCreatedAt) {
-		t.Errorf("created_at was mutated on turn increment: before=%v, after=%v", firstCreatedAt, info2.CreatedAt)
+	created2, _ := ParseDBTime(rawCreated)
+	updated2, _ := ParseDBTime(rawUpdated)
+	if !created2.Equal(firstCreatedAt) {
+		t.Errorf("created_at was mutated on turn increment: before=%v, after=%v", firstCreatedAt, created2)
 	}
-	if !info2.UpdatedAt.After(info1.UpdatedAt) {
-		t.Errorf("updated_at did not advance on turn increment: before=%v, after=%v", info1.UpdatedAt, info2.UpdatedAt)
+	if !updated2.After(firstUpdatedAt) {
+		t.Errorf("updated_at did not advance on turn increment: before=%v, after=%v", firstUpdatedAt, updated2)
 	}
 
 	// 3. Re-saving identical session ID does NOT change created_at
@@ -457,12 +453,12 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	if err := SaveSessionID(database, key, "sess-1"); err != nil {
 		t.Fatalf("SaveSessionID idempotent failed: %v", err)
 	}
-	info3, err := GetSessionInfo(database, key)
-	if err != nil {
-		t.Fatalf("GetSessionInfo 3 failed: %v", err)
+	if err := database.QueryRowContext(ctx, "SELECT created_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated); err != nil {
+		t.Fatalf("query timestamps 3 failed: %v", err)
 	}
-	if !info3.CreatedAt.Equal(firstCreatedAt) {
-		t.Errorf("created_at mutated on idempotent SaveSessionID: before=%v, after=%v", firstCreatedAt, info3.CreatedAt)
+	created3, _ := ParseDBTime(rawCreated)
+	if !created3.Equal(firstCreatedAt) {
+		t.Errorf("created_at mutated on idempotent SaveSessionID: before=%v, after=%v", firstCreatedAt, created3)
 	}
 
 	// 4. RotateSessionID updates created_at to now and resets turn_count to 0
@@ -470,15 +466,13 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	if err := RotateSessionID(database, key, ""); err != nil {
 		t.Fatalf("RotateSessionID failed: %v", err)
 	}
-	info4, err := GetSessionInfo(database, key)
-	if err != nil {
-		t.Fatalf("GetSessionInfo 4 failed: %v", err)
+	gotID, err = GetSessionID(database, key)
+	if err != nil || gotID != "" {
+		t.Errorf("Expected empty internal session ID, got %q (err: %v)", gotID, err)
 	}
-	if info4.InternalSessionID != "" || info4.TurnCount != 0 {
-		t.Errorf("Expected cold session state, got: %+v", info4)
-	}
-	if info4.PreviousSessionID != "sess-1" {
-		t.Errorf("Expected info4.PreviousSessionID 'sess-1', got %q", info4.PreviousSessionID)
+	turns, err = GetSessionTurnCount(database, key)
+	if err != nil || turns != 0 {
+		t.Errorf("Expected turn_count=0, got %d (err: %v)", turns, err)
 	}
 	prevAfterRot, err := GetPreviousSessionID(database, key)
 	if err != nil || prevAfterRot != "sess-1" {
@@ -494,8 +488,12 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 		t.Errorf("Expected GetPreviousSessionID 'sess-1' after redundant rotation, got %q (err: %v)", prevAfterRedundant, err)
 	}
 
-	if !info4.CreatedAt.After(firstCreatedAt) {
-		t.Errorf("RotateSessionID did not advance created_at: first=%v, rotated=%v", firstCreatedAt, info4.CreatedAt)
+	if err := database.QueryRowContext(ctx, "SELECT created_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated); err != nil {
+		t.Fatalf("query timestamps 4 failed: %v", err)
+	}
+	created4, _ := ParseDBTime(rawCreated)
+	if !created4.After(firstCreatedAt) {
+		t.Errorf("RotateSessionID did not advance created_at: first=%v, rotated=%v", firstCreatedAt, created4)
 	}
 
 	// 5. Saving a new session ID after cold rotation preserves previous_session_id
@@ -503,18 +501,20 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	if err := SaveSessionID(database, key, "sess-fresh-2"); err != nil {
 		t.Fatalf("SaveSessionID fresh failed: %v", err)
 	}
-	info5, err := GetSessionInfo(database, key)
-	if err != nil {
-		t.Fatalf("GetSessionInfo 5 failed: %v", err)
+	gotID, err = GetSessionID(database, key)
+	if err != nil || gotID != "sess-fresh-2" {
+		t.Errorf("Expected sess-fresh-2, got %s (err: %v)", gotID, err)
 	}
-	if info5.InternalSessionID != "sess-fresh-2" {
-		t.Errorf("Expected sess-fresh-2, got %s", info5.InternalSessionID)
+	prevID, err = GetPreviousSessionID(database, key)
+	if err != nil || prevID != "sess-1" {
+		t.Errorf("Expected prevID 'sess-1', got %q (err: %v)", prevID, err)
 	}
-	if info5.PreviousSessionID != "sess-1" {
-		t.Errorf("Expected info5.PreviousSessionID 'sess-1', got %q", info5.PreviousSessionID)
+	if err := database.QueryRowContext(ctx, "SELECT created_at FROM sessions WHERE thread_id = $1", key).Scan(&rawCreated); err != nil {
+		t.Fatalf("query timestamps 5 failed: %v", err)
 	}
-	if !info5.CreatedAt.After(firstCreatedAt) {
-		t.Errorf("Fresh session created_at is not newer than initial: initial=%v, fresh=%v", firstCreatedAt, info5.CreatedAt)
+	created5, _ := ParseDBTime(rawCreated)
+	if !created5.After(firstCreatedAt) {
+		t.Errorf("Fresh session created_at is not newer than initial: initial=%v, fresh=%v", firstCreatedAt, created5)
 	}
 
 	// 6. Rotating again advances previous_session_id to sess-fresh-2
@@ -524,6 +524,18 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	prevAfterRot2, err := GetPreviousSessionID(database, key)
 	if err != nil || prevAfterRot2 != "sess-fresh-2" {
 		t.Errorf("Expected GetPreviousSessionID 'sess-fresh-2' after 2nd rotation, got %q (err: %v)", prevAfterRot2, err)
+	}
+
+	// 7. Verify FindUnrotatedSessions behavior for this thread
+	for i := 0; i < 15; i++ {
+		_, _ = IncrementSessionTurnCount(database, key)
+	}
+	unrotated, err := FindUnrotatedSessions(ctx, database, 10)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions failed: %v", err)
+	}
+	if len(unrotated) == 0 || unrotated[0].ThreadID != key || unrotated[0].TurnCount != 15 {
+		t.Errorf("expected unrotated session for %s with 15 turns, got %+v", key, unrotated)
 	}
 
 	// Edge case validation: nil DB and empty thread
@@ -601,56 +613,6 @@ func TestParseDBTime(t *testing.T) {
 	}
 }
 
-func TestGetSessionInfo_EdgeCasesAndSQLStore(t *testing.T) {
-	ctx := context.Background()
-
-	// 1. nil db
-	info, err := GetSessionInfo(nil, "key")
-	if info != nil || err != nil {
-		t.Errorf("expected nil, nil for nil db, got info=%v, err=%v", info, err)
-	}
-
-	// 2. empty threadID
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	info, err = GetSessionInfo(database, "")
-	if info != nil || err != nil {
-		t.Errorf("expected nil, nil for empty threadID, got info=%v, err=%v", info, err)
-	}
-
-	// 3. non-existent thread
-	info, err = GetSessionInfo(database, "non-existent-thread")
-	if info != nil || err != nil {
-		t.Errorf("expected nil, nil for missing thread, got info=%v, err=%v", info, err)
-	}
-
-	// 4. SQLStore nil checks
-	var nilStore *SQLStore
-	if _, err := nilStore.GetSessionInfo(ctx, "key"); err == nil {
-		t.Error("expected error for nil SQLStore")
-	}
-
-	emptyStore := &SQLStore{}
-	if _, err := emptyStore.GetSessionInfo(ctx, "key"); err == nil {
-		t.Error("expected error for empty SQLStore with nil DB")
-	}
-
-	// 5. Valid SQLStore
-	store := NewSQLStore(database)
-	_ = store.SaveSessionID(ctx, "key-store-test", "sess-test")
-	storeInfo, err := store.GetSessionInfo(ctx, "key-store-test")
-	if err != nil || storeInfo == nil || storeInfo.InternalSessionID != "sess-test" {
-		t.Errorf("unexpected store GetSessionInfo result: info=%+v, err=%v", storeInfo, err)
-	}
-
-	// 6. Query error (closed DB)
-	closedDB, _ := InitDB(":memory:")
-	_ = closedDB.Close()
-	if _, err := GetSessionInfo(closedDB, "any-key"); err == nil {
-		t.Error("expected error when querying closed DB")
-	}
-}
 
 func TestFindUnrotatedSessions(t *testing.T) {
 	database := setupTestDB(t)
@@ -1141,9 +1103,6 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		t.Errorf("expected error consuming non-existent one-shot, got nil")
 	}
 
-	if err := DeleteOneShotSchedule(database, "os-1"); err != nil {
-		t.Fatalf("DeleteOneShotSchedule failed: %v", err)
-	}
 
 	// 2. Cron schedule CRUD
 	cronSched := CronSchedule{
@@ -1175,15 +1134,6 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		t.Fatalf("UpdateCronNextRun failed: %v", err)
 	}
 
-	if err := UpdateCronScheduleEffort(database, "", "high"); err != nil {
-		t.Errorf("expected nil error on empty id in UpdateCronScheduleEffort, got %v", err)
-	}
-	if err := UpdateCronScheduleEffort(database, "cron-1", "low"); err != nil {
-		t.Errorf("expected nil error on low effort in UpdateCronScheduleEffort, got %v", err)
-	}
-	if err := UpdateCronScheduleEffort(database, "cron-1", "unrecognized"); err != nil {
-		t.Errorf("expected nil error on unrecognized effort in UpdateCronScheduleEffort, got %v", err)
-	}
 
 	// 3. Schedule runs CRUD
 	run1 := ScheduleRun{
@@ -1248,9 +1198,6 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 	}
 	_ = pruned
 
-	if err := DeleteCronSchedule(database, "cron-1"); err != nil {
-		t.Fatalf("DeleteCronSchedule failed: %v", err)
-	}
 }
 
 func TestGetScheduleSummaryMetrics(t *testing.T) {
@@ -1571,9 +1518,6 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	if res, err := GetDueOneShotSchedules(nil); err != nil || res != nil {
 		t.Errorf("expected nil, nil calling GetDueOneShotSchedules on nil database, got %v, %v", res, err)
 	}
-	if err := DeleteOneShotSchedule(nil, "os1"); err != nil {
-		t.Errorf("expected nil error calling DeleteOneShotSchedule on nil database, got %v", err)
-	}
 	if res, err := GetAllOneShotSchedules(nil, "th1"); err != nil || res != nil {
 		t.Errorf("expected nil, nil calling GetAllOneShotSchedules on nil database, got %v, %v", res, err)
 	}
@@ -1586,14 +1530,8 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	if res, err := GetAllCronSchedules(nil, "th1"); err != nil || res != nil {
 		t.Errorf("expected nil, nil calling GetAllCronSchedules on nil database, got %v, %v", res, err)
 	}
-	if err := DeleteCronSchedule(nil, "cs1"); err != nil {
-		t.Errorf("expected nil error calling DeleteCronSchedule on nil database, got %v", err)
-	}
 	if err := UpdateCronNextRun(nil, "cs1", time.Now()); err != nil {
 		t.Errorf("expected nil error calling UpdateCronNextRun on nil database, got %v", err)
-	}
-	if err := UpdateCronScheduleEffort(nil, "cs1", "high"); err != nil {
-		t.Errorf("expected nil error calling UpdateCronScheduleEffort on nil database, got %v", err)
 	}
 	if err := CreateScheduleRun(nil, ScheduleRun{ID: "r1"}); err == nil {
 		t.Error("expected error calling CreateScheduleRun on nil database")
@@ -1639,12 +1577,6 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	if err := IncrementMessageRetry(database, "", "err"); err == nil {
 		t.Error("expected error calling IncrementMessageRetry with empty ID")
 	}
-	if err := IncrementMessageRestart(nil, "m1", "err"); err == nil {
-		t.Error("expected error calling IncrementMessageRestart on nil database")
-	}
-	if err := IncrementMessageRestart(database, "", "err"); err == nil {
-		t.Error("expected error calling IncrementMessageRestart with empty ID")
-	}
 	if err := ResetMessageToPendingWithRestart(nil, "m1", "reason"); err == nil {
 		t.Error("expected error calling ResetMessageToPendingWithRestart on nil database")
 	}
@@ -1682,9 +1614,6 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	}
 	if err := SaveSessionID(nil, "th1", "s1"); err != nil {
 		t.Errorf("expected nil error calling SaveSessionID on nil database, got %v", err)
-	}
-	if err := DeleteSessionID(nil, "th1"); err != nil {
-		t.Errorf("expected nil error calling DeleteSessionID on nil database, got %v", err)
 	}
 	if _, err := IncrementSessionTurnCount(nil, "th1"); err == nil {
 		t.Error("expected error calling IncrementSessionTurnCount on nil database")
@@ -1766,9 +1695,6 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	if _, err := GetDueOneShotSchedules(closedDB); err == nil {
 		t.Error("expected error on closed db in GetDueOneShotSchedules")
 	}
-	if err := DeleteOneShotSchedule(closedDB, "os1"); err == nil {
-		t.Error("expected error on closed db in DeleteOneShotSchedule")
-	}
 	if _, err := GetAllOneShotSchedules(closedDB, "th1"); err == nil {
 		t.Error("expected error on closed db in GetAllOneShotSchedules")
 	}
@@ -1780,9 +1706,6 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	}
 	if _, err := GetAllCronSchedules(closedDB, "th1"); err == nil {
 		t.Error("expected error on closed db in GetAllCronSchedules")
-	}
-	if err := DeleteCronSchedule(closedDB, "cs1"); err == nil {
-		t.Error("expected error on closed db in DeleteCronSchedule")
 	}
 	if err := UpdateCronNextRun(closedDB, "cs1", time.Now()); err == nil {
 		t.Error("expected error on closed db in UpdateCronNextRun")
@@ -1818,9 +1741,6 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	if err := IncrementMessageRetry(closedDB, "m1", "err"); err == nil {
 		t.Error("expected error on closed db in IncrementMessageRetry")
 	}
-	if err := IncrementMessageRestart(closedDB, "m1", "err"); err == nil {
-		t.Error("expected error on closed db in IncrementMessageRestart")
-	}
 	if err := ResetMessageToPendingWithRestart(closedDB, "m1", "reason"); err == nil {
 		t.Error("expected error on closed db in ResetMessageToPendingWithRestart")
 	}
@@ -1845,9 +1765,6 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	}
 	if err := SaveSessionID(closedDB, "th1", "s1"); err == nil {
 		t.Error("expected error on closed db in SaveSessionID")
-	}
-	if err := DeleteSessionID(closedDB, "th1"); err == nil {
-		t.Error("expected error on closed db in DeleteSessionID")
 	}
 	if _, err := IncrementSessionTurnCount(closedDB, "th1"); err == nil {
 		t.Error("expected error on closed db in IncrementSessionTurnCount")
@@ -1955,21 +1872,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		t.Errorf("expected foundLow=true and foundHigh=true, got foundLow=%v foundHigh=%v", foundLow, foundHigh)
 	}
 
-	// 4. Test UpdateCronScheduleEffort
-	if err := store.UpdateCronScheduleEffort(ctx, "cron-high-1", "low"); err != nil {
-		t.Fatalf("UpdateCronScheduleEffort failed: %v", err)
-	}
-	allCrons, err := store.GetAllCronSchedules(ctx, "target-chan-1")
-	if err != nil {
-		t.Fatalf("GetAllCronSchedules failed: %v", err)
-	}
-	for _, c := range allCrons {
-		if c.ID == "cron-high-1" && c.Effort != "low" {
-			t.Errorf("expected cron-high-1 effort updated to 'low', got %q", c.Effort)
-		}
-	}
-
-	// 5. Test ScheduleRun with Effort and Model
+	// 4. Test ScheduleRun with Effort and Model
 	runID := "run-test-1"
 	run := ScheduleRun{
 		ID:           runID,

@@ -35,7 +35,6 @@ type FactStore interface {
 	InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error)
 	SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
-	GetAllFactsWithEmbeddings(ctx context.Context) ([]FactWithEmbedding, error)
 	GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error)
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
@@ -51,16 +50,13 @@ type FactStore interface {
 type ScheduleStore interface {
 	CreateOneShotSchedule(ctx context.Context, s OneShotSchedule) error
 	GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error)
-	DeleteOneShotSchedule(ctx context.Context, id string) error
 	InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error
 	GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error)
 
 	CreateCronSchedule(ctx context.Context, c CronSchedule) error
 	GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error)
 	GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error)
-	DeleteCronSchedule(ctx context.Context, id string) error
 	UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error
-	UpdateCronScheduleEffort(ctx context.Context, id, effort string) error
 
 	CreateScheduleRun(ctx context.Context, run ScheduleRun) error
 	UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error
@@ -76,13 +72,11 @@ type MessageStore interface {
 	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error
 	UpdateMessageCompleted(ctx context.Context, id, responseText string) error
 	IncrementMessageRetry(ctx context.Context, id, errorMsg string) error
-	IncrementMessageRestart(ctx context.Context, id, errorMsg string) error
 	ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error
 	GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)
 	MessageExists(ctx context.Context, id string) (bool, error)
 	ClaimPendingMessage(ctx context.Context, id string) (bool, error)
-	ClaimNextPendingMessage(ctx context.Context, workerID string) (*Message, error)
 	GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error)
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
@@ -94,11 +88,9 @@ type SessionStore interface {
 	GetSessionID(ctx context.Context, threadID string) (string, error)
 	GetPreviousSessionID(ctx context.Context, threadID string) (string, error)
 	SaveSessionID(ctx context.Context, threadID, sessionID string) error
-	DeleteSessionID(ctx context.Context, threadID string) error
 	IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error
-	GetSessionInfo(ctx context.Context, threadID string) (*SessionInfo, error)
 	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
 	GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error)

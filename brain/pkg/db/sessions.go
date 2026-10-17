@@ -124,29 +124,6 @@ func scanSessionInfo(scanner interface{ Scan(dest ...any) error }) (SessionInfo,
 	return info, nil
 }
 
-// GetSessionInfo retrieves the full session state for a thread in a single atomic query.
-func GetSessionInfo(database DBTX, threadID string) (*SessionInfo, error) {
-	if database == nil || threadID == "" {
-		return nil, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	query := `
-	SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
-	FROM sessions
-	WHERE thread_id = $1
-	`
-	info, err := scanSessionInfo(database.QueryRowContext(ctx, query, threadID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &info, nil
-}
-
 // SaveSessionID associates an internal session ID with a thread ID.
 func SaveSessionID(database DBTX, threadID, sessionID string) error {
 	if database == nil || threadID == "" || sessionID == "" {
@@ -168,18 +145,6 @@ func SaveSessionID(database DBTX, threadID, sessionID string) error {
 		updated_at = EXCLUDED.updated_at
 	`
 	_, err := database.ExecContext(ctx, query, threadID, sessionID, now, now)
-	return err
-}
-
-// DeleteSessionID removes the session association for a thread.
-func DeleteSessionID(database DBTX, threadID string) error {
-	if database == nil || threadID == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := database.ExecContext(ctx, "DELETE FROM sessions WHERE thread_id = $1", threadID)
 	return err
 }
 
@@ -278,9 +243,12 @@ func SaveConversationMapping(database DBTX, externalID, internalID string) error
 	return SaveSessionID(database, externalID, internalID)
 }
 
-// SaveThreadSummaryWithContext persists a thread summary and its last summarized message ID watermark in the sessions table.
-func SaveThreadSummaryWithContext(ctx context.Context, database DBTX, threadID, summary, lastSummarizedMsgID string) error {
-	if database == nil || threadID == "" {
+// SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
+func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if threadID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
@@ -292,7 +260,7 @@ func SaveThreadSummaryWithContext(ctx context.Context, database DBTX, threadID, 
 		last_summarized_message_id = EXCLUDED.last_summarized_message_id,
 		updated_at = EXCLUDED.updated_at
 	`
-	_, err := database.ExecContext(ctx, query, threadID, summary, lastSummarizedMsgID, now)
+	_, err := s.db.ExecContext(ctx, query, threadID, summary, lastSummarizedMsgID, now)
 	return err
 }
 
@@ -303,17 +271,20 @@ func SaveThreadSummary(database DBTX, threadID, summary, lastSummarizedMsgID str
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return SaveThreadSummaryWithContext(ctx, database, threadID, summary, lastSummarizedMsgID)
+	return (&SQLStore{db: database}).SaveThreadSummary(ctx, threadID, summary, lastSummarizedMsgID)
 }
 
-// GetThreadSummaryWithContext retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
-func GetThreadSummaryWithContext(ctx context.Context, database DBTX, threadID string) (summary string, lastSummarizedMsgID string, err error) {
-	if database == nil || threadID == "" {
+// GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
+func (s *SQLStore) GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error) {
+	if err := s.checkDB(); err != nil {
+		return "", "", err
+	}
+	if threadID == "" {
 		return "", "", nil
 	}
 	var sum, lastMsgID sql.NullString
 	query := `SELECT summary, last_summarized_message_id FROM sessions WHERE thread_id = $1`
-	err = database.QueryRowContext(ctx, query, threadID).Scan(&sum, &lastMsgID)
+	err = s.db.QueryRowContext(ctx, query, threadID).Scan(&sum, &lastMsgID)
 	if err == sql.ErrNoRows {
 		return "", "", nil
 	}
@@ -330,12 +301,15 @@ func GetThreadSummary(database DBTX, threadID string) (summary string, lastSumma
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return GetThreadSummaryWithContext(ctx, database, threadID)
+	return (&SQLStore{db: database}).GetThreadSummary(ctx, threadID)
 }
 
-// GetSessionActivityStatsWithContext queries the database to determine the most recent session activity.
-func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, threadID string) (*SessionActivityStats, error) {
-	if database == nil || strings.TrimSpace(threadID) == "" {
+// GetSessionActivityStats queries the database to determine the most recent session activity.
+func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(threadID) == "" {
 		return &SessionActivityStats{}, nil
 	}
 
@@ -345,7 +319,7 @@ func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, thre
 		rawSessUpdatedAt  any
 	)
 
-	err := database.QueryRowContext(
+	err := s.db.QueryRowContext(
 		ctx,
 		`SELECT internal_session_id, turn_count, updated_at FROM sessions WHERE thread_id = $1`,
 		threadID,
@@ -361,7 +335,7 @@ func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, thre
 		rawMsgCreated  any
 	)
 
-	msgErr := database.QueryRowContext(
+	msgErr := s.db.QueryRowContext(
 		ctx,
 		`SELECT COUNT(*), MAX(updated_at), MAX(created_at) FROM messages 
 		 WHERE thread_id = $1 

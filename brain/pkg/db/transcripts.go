@@ -421,3 +421,40 @@ func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg b
 	}
 	return steps, nil
 }
+
+// TranscriptStore implementation on *SQLStore
+
+func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	return GetSessionSyncStatesWithContext(ctx, s.db, s.isPostgres)
+}
+
+func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	return UpsertSessionSummaryWithContext(ctx, s.db, s.isPostgres, summary)
+}
+
+func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	return BatchInsertTranscriptStepsWithContext(ctx, s.db, s.isPostgres, steps)
+}
+
+func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	return SearchSessionSummariesWithContext(ctx, s.db, s.isPostgres, embedding, queryText, limit, minScore)
+}
+
+func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	return SearchTranscriptStepsWithContext(ctx, s.db, s.isPostgres, queryText, sessionFilter, toolFilter, limit)
+}

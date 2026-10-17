@@ -297,17 +297,6 @@ func IncrementMessageRetry(database DBTX, id string, errorMsg string) error {
 	return execMessageUpdate(database, id, query, errorMsg, now, id)
 }
 
-// IncrementMessageRestart atomically increments the restart count and records the restart reason.
-func IncrementMessageRestart(database DBTX, id string, errorMsg string) error {
-	now := time.Now().UTC()
-	query := `
-	UPDATE messages
-	SET restart_count = restart_count + 1, error_message = $1, updated_at = $2
-	WHERE id = $3
-	`
-	return execMessageUpdate(database, id, query, errorMsg, now, id)
-}
-
 // ResetMessageToPendingWithRestart atomically increments restart_count, sets status to PENDING, and updates error_message.
 func ResetMessageToPendingWithRestart(database DBTX, id string, reason string) error {
 	now := time.Now().UTC()

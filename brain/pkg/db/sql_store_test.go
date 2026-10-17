@@ -187,9 +187,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if _, err := s.GetDueOneShotSchedules(ctx); err == nil {
 		t.Errorf("expected error on GetDueOneShotSchedules nil store")
 	}
-	if err := s.DeleteOneShotSchedule(ctx, "id"); err == nil {
-		t.Errorf("expected error on DeleteOneShotSchedule nil store")
-	}
 	if err := s.InsertMessageAndConsumeOneShot(ctx, "id", Message{}); err == nil {
 		t.Errorf("expected error on InsertMessageAndConsumeOneShot nil store")
 	}
@@ -204,9 +201,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	}
 	if _, err := s.GetAllCronSchedules(ctx, "t"); err == nil {
 		t.Errorf("expected error on GetAllCronSchedules nil store")
-	}
-	if err := s.DeleteCronSchedule(ctx, "id"); err == nil {
-		t.Errorf("expected error on DeleteCronSchedule nil store")
 	}
 	if err := s.UpdateCronNextRun(ctx, "id", time.Now()); err == nil {
 		t.Errorf("expected error on UpdateCronNextRun nil store")
@@ -242,9 +236,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if err := s.IncrementMessageRetry(ctx, "id", ""); err == nil {
 		t.Errorf("expected error on IncrementMessageRetry nil store")
 	}
-	if err := s.IncrementMessageRestart(ctx, "id", ""); err == nil {
-		t.Errorf("expected error on IncrementMessageRestart nil store")
-	}
 	if err := s.ResetMessageToPendingWithRestart(ctx, "id", ""); err == nil {
 		t.Errorf("expected error on ResetMessageToPendingWithRestart nil store")
 	}
@@ -259,9 +250,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	}
 	if _, err := s.ClaimPendingMessage(ctx, "id"); err == nil {
 		t.Errorf("expected error on ClaimPendingMessage nil store")
-	}
-	if _, err := s.ClaimNextPendingMessage(ctx, "w"); err == nil {
-		t.Errorf("expected error on ClaimNextPendingMessage nil store")
 	}
 	if _, err := s.GetActiveRecentThreadIDs(ctx, time.Hour); err == nil {
 		t.Errorf("expected error on GetActiveRecentThreadIDs nil store")
@@ -278,9 +266,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	}
 	if err := s.SaveSessionID(ctx, "t", "s"); err == nil {
 		t.Errorf("expected error on SaveSessionID nil store")
-	}
-	if err := s.DeleteSessionID(ctx, "t"); err == nil {
-		t.Errorf("expected error on DeleteSessionID nil store")
 	}
 	if _, err := s.IncrementSessionTurnCount(ctx, "k"); err == nil {
 		t.Errorf("expected error on IncrementSessionTurnCount nil store")
@@ -325,9 +310,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if _, err := s.SearchTranscriptSteps(ctx, "q", "s", "t", 10); err == nil {
 		t.Errorf("expected error on SearchTranscriptSteps nil store")
 	}
-	if err := s.UpdateCronScheduleEffort(ctx, "cs1", "high"); err == nil {
-		t.Errorf("expected error on UpdateCronScheduleEffort nil store")
-	}
 	if _, err := s.GetActiveTasks(ctx); err == nil {
 		t.Errorf("expected error on GetActiveTasks nil store")
 	}
@@ -348,14 +330,8 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if err := storeWithNilDB.SaveConversationMapping(ctx, "ext", "int"); err == nil {
 		t.Errorf("expected error calling SaveConversationMapping with nil db")
 	}
-	if err := storeWithNilDB.UpdateCronScheduleEffort(ctx, "cs1", "high"); err == nil {
-		t.Errorf("expected error calling UpdateCronScheduleEffort with nil db")
-	}
 	if _, err := storeWithNilDB.SearchSimilarFacts(ctx, nil, "", 10, 0.1); err == nil {
 		t.Errorf("expected error on SearchSimilarFacts storeWithNilDB")
-	}
-	if _, err := storeWithNilDB.GetAllFactsWithEmbeddings(ctx); err == nil {
-		t.Errorf("expected error on GetAllFactsWithEmbeddings storeWithNilDB")
 	}
 	if err := storeWithNilDB.CreateOneShotSchedule(ctx, OneShotSchedule{}); err == nil {
 		t.Errorf("expected error on CreateOneShotSchedule storeWithNilDB")
@@ -512,20 +488,7 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 		t.Errorf("expected to find m-sqlstore-task in active tasks")
 	}
 
-	// 3. ClaimNextPendingMessage when non-pending vs pending
-	emptyStore := NewSQLStore(setupTestDB(t))
-	_ = emptyStore.InsertMessage(ctx, Message{ID: "m-comp-only", ThreadID: "t1", Status: StatusCompleted})
-	claimedEmpty, err := emptyStore.ClaimNextPendingMessage(ctx, "w1")
-	if err != nil || claimedEmpty != nil {
-		t.Errorf("expected nil, nil when no pending messages exist, got (%v, %v)", claimedEmpty, err)
-	}
-
-	claimed, err := store.ClaimNextPendingMessage(ctx, "w1")
-	if err != nil || claimed == nil || claimed.ID != "m-sqlstore-task" {
-		t.Fatalf("expected claim for m-sqlstore-task, got (%v, %v)", claimed, err)
-	}
-
-	// 4. GetPendingOrProcessingMessages truncation and closed DB error
+	// 3. GetPendingOrProcessingMessages truncation and closed DB error
 	_ = store.InsertMessage(ctx, Message{ID: "m-proc-1", ThreadID: "t1", Status: StatusProcessing})
 	_ = store.InsertMessage(ctx, Message{ID: "m-proc-2", ThreadID: "t1", Status: StatusProcessing})
 	msgs, err := store.GetPendingOrProcessingMessages(ctx, 1)
@@ -546,17 +509,8 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	if _, err := closedStore.GetPendingOrProcessingMessages(ctx, 10); err == nil {
 		t.Errorf("expected error from closedStore.GetPendingOrProcessingMessages, got nil")
 	}
-	if _, err := closedStore.ClaimNextPendingMessage(ctx, "w1"); err == nil {
-		t.Errorf("expected error from closedStore.ClaimNextPendingMessage, got nil")
-	}
 
-	// 5. UpdateCronScheduleEffort validation and success
-	if err := store.UpdateCronScheduleEffort(ctx, "", "high"); err != nil {
-		t.Errorf("expected nil error for empty id in store.UpdateCronScheduleEffort, got %v", err)
-	}
-	if err := store.UpdateCronScheduleEffort(ctx, "cs1", "bad-effort"); err != nil {
-		t.Errorf("expected nil error for bad effort in store.UpdateCronScheduleEffort, got %v", err)
-	}
+	// 4. Cron schedule creation
 	cron := CronSchedule{
 		ID:        "cs-effort-1",
 		TargetID:  "chan-1",
@@ -568,20 +522,19 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	if err := store.CreateCronSchedule(ctx, cron); err != nil {
 		t.Fatalf("failed to create cron schedule: %v", err)
 	}
-	if err := store.UpdateCronScheduleEffort(ctx, "cs-effort-1", "low"); err != nil {
-		t.Fatalf("store.UpdateCronScheduleEffort failed: %v", err)
-	}
 
-	// 6. Comprehensive pass-through coverage for remaining SQLStore methods
-	_, _ = store.GetAllFactsWithEmbeddings(ctx)
+	// 5. Comprehensive pass-through coverage for remaining SQLStore methods
+	_, _ = store.SearchSimilarFacts(ctx, nil, "query", 5, 0.1)
+	_ = store.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-pass", ThreadID: "chan-1", Prompt: "p", RunAt: time.Now().Add(time.Hour)})
+	_, _ = store.GetDueOneShotSchedules(ctx)
+	_ = store.InsertMessageAndConsumeOneShot(ctx, "os-pass", Message{ID: "m-os-pass", ThreadID: "chan-1", Status: StatusPending})
+	_, _ = store.ClaimPendingMessage(ctx, "m-os-pass")
 	_, _ = store.GetFactsByThreadWithEmbeddings(ctx, "ext-thread-99")
 	_, _ = store.GetActiveConversationsForExtraction(ctx, 24)
 	_ = store.UpdateConversationFactWatermark(ctx, "ext-thread-99", 10)
 	_ = store.UpdateConversationFactExtractedAt(ctx, "ext-thread-99")
 	_, _ = store.GetAllOneShotSchedules(ctx, "ext-thread-99")
 	_, _ = store.GetAllCronSchedules(ctx, "chan-1")
-	_ = store.DeleteOneShotSchedule(ctx, "nonexistent")
-	_ = store.DeleteCronSchedule(ctx, "nonexistent")
 	_ = store.UpdateCronNextRun(ctx, "cs-effort-1", time.Now().Add(2*time.Hour))
 	_, _, _ = store.GetScheduleRunsPaginated(ctx, 10, 0, "cs1", "success")
 	_, _ = store.GetScheduleSummaryMetrics(ctx)
@@ -590,7 +543,6 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	_ = store.UpdateMessageStatus(ctx, "m-sqlstore-task", StatusProcessing, "w1")
 	_ = store.UpdateMessageCompleted(ctx, "m-sqlstore-task", "done")
 	_ = store.IncrementMessageRetry(ctx, "m-sqlstore-task", "err")
-	_ = store.IncrementMessageRestart(ctx, "m-sqlstore-task", "err")
 	_ = store.ResetMessageToPendingWithRestart(ctx, "m-sqlstore-task", "reason")
 	_, _ = store.GetMessage(ctx, "m-sqlstore-task")
 	_, _ = store.MessageExists(ctx, "m-sqlstore-task")
@@ -603,5 +555,12 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	_, _ = store.GetSessionTurnCount(ctx, "ext-thread-99")
 	_ = store.RotateSessionID(ctx, "ext-thread-99", "sess-2")
 	_, _ = store.GetPreviousSessionID(ctx, "ext-thread-99")
-	_ = store.DeleteSessionID(ctx, "ext-thread-99")
+
+	var nilStore *SQLStore
+	if err := execDB(nilStore, func(DBTX) error { return nil }); err == nil {
+		t.Errorf("expected error calling execDB on nil SQLStore")
+	}
+	if _, err := queryDB[int](nilStore, func(DBTX) (int, error) { return 0, nil }); err == nil {
+		t.Errorf("expected error calling queryDB on nil SQLStore")
+	}
 }

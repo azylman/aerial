@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -229,10 +230,10 @@ func (f *FakeStore) InsertMessage(ctx context.Context, msg Message) error {
 	return nil
 }
 
-func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
+func (f *FakeStore) mutateMessage(method, id string, fn func(*Message)) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("UpdateMessageStatus"); err != nil {
+	if err := f.checkClosedAndFail(method); err != nil {
 		return err
 	}
 
@@ -240,79 +241,38 @@ func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMs
 	if !ok {
 		return nil
 	}
-	m.Status = status
-	m.ErrorMessage = errorMsg
+	fn(m)
 	m.UpdatedAt = time.Now().UTC()
 	return nil
+}
+
+func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
+	return f.mutateMessage("UpdateMessageStatus", id, func(m *Message) {
+		m.Status = status
+		m.ErrorMessage = errorMsg
+	})
 }
 
 func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("UpdateMessageCompleted"); err != nil {
-		return err
-	}
-
-	m, ok := f.messages[id]
-	if !ok {
-		return nil
-	}
-	m.Status = StatusCompleted
-	m.ResponseText = responseText
-	m.UpdatedAt = time.Now().UTC()
-	return nil
+	return f.mutateMessage("UpdateMessageCompleted", id, func(m *Message) {
+		m.Status = StatusCompleted
+		m.ResponseText = responseText
+	})
 }
 
 func (f *FakeStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("IncrementMessageRetry"); err != nil {
-		return err
-	}
-
-	m, ok := f.messages[id]
-	if !ok {
-		return nil
-	}
-	m.RetryCount++
-	m.ErrorMessage = errorMsg
-	m.UpdatedAt = time.Now().UTC()
-	return nil
-}
-
-func (f *FakeStore) IncrementMessageRestart(ctx context.Context, id, errorMsg string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("IncrementMessageRestart"); err != nil {
-		return err
-	}
-
-	m, ok := f.messages[id]
-	if !ok {
-		return nil
-	}
-	m.RestartCount++
-	m.ErrorMessage = errorMsg
-	m.UpdatedAt = time.Now().UTC()
-	return nil
+	return f.mutateMessage("IncrementMessageRetry", id, func(m *Message) {
+		m.RetryCount++
+		m.ErrorMessage = errorMsg
+	})
 }
 
 func (f *FakeStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("ResetMessageToPendingWithRestart"); err != nil {
-		return err
-	}
-
-	m, ok := f.messages[id]
-	if !ok {
-		return nil
-	}
-	m.Status = StatusPending
-	m.RestartCount++
-	m.ErrorMessage = reason
-	m.UpdatedAt = time.Now().UTC()
-	return nil
+	return f.mutateMessage("ResetMessageToPendingWithRestart", id, func(m *Message) {
+		m.Status = StatusPending
+		m.RestartCount++
+		m.ErrorMessage = reason
+	})
 }
 
 func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error) {
@@ -376,24 +336,6 @@ func (f *FakeStore) ClaimPendingMessage(ctx context.Context, id string) (bool, e
 	return true, nil
 }
 
-func (f *FakeStore) ClaimNextPendingMessage(ctx context.Context, workerID string) (*Message, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("ClaimNextPendingMessage"); err != nil {
-		return nil, err
-	}
-
-	// Deterministic FIFO scan
-	for _, id := range f.messageOrder {
-		m := f.messages[id]
-		if m != nil && m.Status == StatusPending {
-			m.Status = StatusProcessing
-			m.UpdatedAt = time.Now().UTC()
-			return cloneMessage(m), nil
-		}
-	}
-	return nil, nil
-}
 
 func (f *FakeStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error) {
 	f.mu.RLock()
@@ -591,16 +533,6 @@ func (f *FakeStore) SaveSessionID(ctx context.Context, threadID, sessionID strin
 	return nil
 }
 
-func (f *FakeStore) DeleteSessionID(ctx context.Context, threadID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("DeleteSessionID"); err != nil {
-		return err
-	}
-
-	delete(f.sessions, threadID)
-	return nil
-}
 
 func (f *FakeStore) IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
 	f.mu.Lock()
@@ -666,19 +598,6 @@ func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionI
 	return nil
 }
 
-func (f *FakeStore) GetSessionInfo(ctx context.Context, threadID string) (*SessionInfo, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	if err := f.checkClosedAndFail("GetSessionInfo"); err != nil {
-		return nil, err
-	}
-
-	s, ok := f.sessions[threadID]
-	if !ok || s == nil {
-		return nil, nil
-	}
-	return cloneSessionInfo(s), nil
-}
 
 func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
 	f.mu.RLock()
@@ -844,16 +763,6 @@ func (f *FakeStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedu
 	return due, nil
 }
 
-func (f *FakeStore) DeleteOneShotSchedule(ctx context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("DeleteOneShotSchedule"); err != nil {
-		return err
-	}
-
-	delete(f.oneShots, id)
-	return nil
-}
 
 func (f *FakeStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error {
 	f.mu.Lock()
@@ -952,16 +861,6 @@ func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([
 	return results, nil
 }
 
-func (f *FakeStore) DeleteCronSchedule(ctx context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("DeleteCronSchedule"); err != nil {
-		return err
-	}
-
-	delete(f.crons, id)
-	return nil
-}
 
 func (f *FakeStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
 	f.mu.Lock()
@@ -978,20 +877,6 @@ func (f *FakeStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt 
 	return nil
 }
 
-func (f *FakeStore) UpdateCronScheduleEffort(ctx context.Context, id, effort string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("UpdateCronScheduleEffort"); err != nil {
-		return err
-	}
-
-	c, ok := f.crons[id]
-	if !ok {
-		return nil
-	}
-	c.Effort = effort
-	return nil
-}
 
 func (f *FakeStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error {
 	f.mu.Lock()
@@ -1359,10 +1244,10 @@ func (f *FakeStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (
 	return &FactsResult{Facts: list[offset:end], Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
 }
 
-func (f *FakeStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]FactWithEmbedding, error) {
+func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	if err := f.checkClosedAndFail("GetAllFactsWithEmbeddings"); err != nil {
+	if err := f.checkClosedAndFail("GetFactsByThreadWithEmbeddings"); err != nil {
 		return nil, err
 	}
 
@@ -1379,10 +1264,6 @@ func (f *FakeStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]FactWithEm
 		return results[i].Fact.CreatedAt.Before(results[j].Fact.CreatedAt)
 	})
 	return results, nil
-}
-
-func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
-	return f.GetAllFactsWithEmbeddings(ctx)
 }
 
 func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
@@ -1562,6 +1443,17 @@ func (f *FakeStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding
 // Transaction implementation (Copy-on-write staging delta with rollback)
 // =========================================================================
 
+func cloneMap[K comparable, V any](src map[K]V, cloneFn func(V) V) map[K]V {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[K]V, len(src))
+	for k, v := range src {
+		dst[k] = cloneFn(v)
+	}
+	return dst
+}
+
 func (f *FakeStore) WithTx(ctx context.Context, fn func(txStore Store) error) error {
 	f.mu.Lock()
 	if err := f.checkClosedAndFail("WithTx"); err != nil {
@@ -1572,55 +1464,20 @@ func (f *FakeStore) WithTx(ctx context.Context, fn func(txStore Store) error) er
 	// Create an isolated snapshot copy of current state
 	txCopy := &FakeStore{
 		failNext:         make(map[string]error),
-		messages:         make(map[string]*Message, len(f.messages)),
-		messageOrder:     make([]string, len(f.messageOrder)),
+		messages:         cloneMap(f.messages, cloneMessage),
+		messageOrder:     append([]string(nil), f.messageOrder...),
 		nextRowID:        f.nextRowID,
-		sessions:         make(map[string]*SessionInfo, len(f.sessions)),
-		threadSummaries:  make(map[string]threadSummaryRecord, len(f.threadSummaries)),
-		oneShots:         make(map[string]*OneShotSchedule, len(f.oneShots)),
-		crons:            make(map[string]*CronSchedule, len(f.crons)),
-		runs:             make(map[string]*ScheduleRun, len(f.runs)),
-		facts:            make(map[int64]*FactWithEmbedding, len(f.facts)),
+		sessions:         cloneMap(f.sessions, cloneSessionInfo),
+		threadSummaries:  maps.Clone(f.threadSummaries),
+		oneShots:         cloneMap(f.oneShots, cloneOneShot),
+		crons:            cloneMap(f.crons, cloneCron),
+		runs:             cloneMap(f.runs, cloneRun),
+		facts:            cloneMap(f.facts, cloneFactWithEmbedding),
 		nextFactID:       f.nextFactID,
-		watermarks:       make(map[string]int64, len(f.watermarks)),
-		extractedAt:      make(map[string]time.Time, len(f.extractedAt)),
-		sessionSummaries: make(map[string]*SessionSummary, len(f.sessionSummaries)),
-		transcriptSteps:  make(map[string][]TranscriptStep, len(f.transcriptSteps)),
-	}
-
-	copy(txCopy.messageOrder, f.messageOrder)
-	for k, v := range f.messages {
-		txCopy.messages[k] = cloneMessage(v)
-	}
-	for k, v := range f.sessions {
-		txCopy.sessions[k] = cloneSessionInfo(v)
-	}
-	for k, v := range f.threadSummaries {
-		txCopy.threadSummaries[k] = v
-	}
-	for k, v := range f.oneShots {
-		txCopy.oneShots[k] = cloneOneShot(v)
-	}
-	for k, v := range f.crons {
-		txCopy.crons[k] = cloneCron(v)
-	}
-	for k, v := range f.runs {
-		txCopy.runs[k] = cloneRun(v)
-	}
-	for k, v := range f.facts {
-		txCopy.facts[k] = cloneFactWithEmbedding(v)
-	}
-	for k, v := range f.watermarks {
-		txCopy.watermarks[k] = v
-	}
-	for k, v := range f.extractedAt {
-		txCopy.extractedAt[k] = v
-	}
-	for k, v := range f.sessionSummaries {
-		txCopy.sessionSummaries[k] = cloneSessionSummary(v)
-	}
-	for k, v := range f.transcriptSteps {
-		txCopy.transcriptSteps[k] = cloneTranscriptSteps(v)
+		watermarks:       maps.Clone(f.watermarks),
+		extractedAt:      maps.Clone(f.extractedAt),
+		sessionSummaries: cloneMap(f.sessionSummaries, cloneSessionSummary),
+		transcriptSteps:  cloneMap(f.transcriptSteps, cloneTranscriptSteps),
 	}
 	f.mu.Unlock()
 
