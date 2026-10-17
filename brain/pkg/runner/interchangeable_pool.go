@@ -109,38 +109,22 @@ func (p *InterchangeablePool) GetOrCreateSession(ctx context.Context, targetKey 
 	}
 
 	if p.closed.Load() {
-		select {
-		case p.available <- workerKey:
-		default:
-		}
+		p.returnWorker(workerKey)
 		return nil, errors.New("interchangeable pool is closed")
 	}
 
 	if p.underlying == nil {
-		select {
-		case p.available <- workerKey:
-		default:
-		}
+		p.returnWorker(workerKey)
 		return nil, errors.New("underlying pool is nil")
 	}
 
 	daemon, err := p.underlying.GetOrCreate(ctx, workerKey, "")
 	if err != nil {
-		if !p.closed.Load() {
-			select {
-			case p.available <- workerKey:
-			default:
-			}
-		}
+		p.returnWorker(workerKey)
 		return nil, err
 	}
 	if daemon == nil {
-		if !p.closed.Load() {
-			select {
-			case p.available <- workerKey:
-			default:
-			}
-		}
+		p.returnWorker(workerKey)
 		return nil, errors.New("underlying pool returned nil daemon")
 	}
 
@@ -196,12 +180,7 @@ func (p *InterchangeablePool) rotateAndRelease(workerKey string) {
 			}
 		}
 
-		if !p.closed.Load() {
-			select {
-			case p.available <- workerKey:
-			default:
-			}
-		}
+		p.returnWorker(workerKey)
 	}()
 }
 
@@ -519,29 +498,18 @@ func (p *InterchangeablePool) AcquireLease(ctx context.Context, targetKey string
 	}
 
 	if p.closed.Load() {
-		select {
-		case p.available <- workerKey:
-		default:
-		}
+		p.returnWorker(workerKey)
 		return nil, errors.New("interchangeable pool is closed")
 	}
 
 	if p.underlying == nil {
-		select {
-		case p.available <- workerKey:
-		default:
-		}
+		p.returnWorker(workerKey)
 		return nil, errors.New("underlying pool is nil")
 	}
 
 	lease, err := p.underlying.AcquireLease(ctx, workerKey)
 	if err != nil {
-		if !p.closed.Load() {
-			select {
-			case p.available <- workerKey:
-			default:
-			}
-		}
+		p.returnWorker(workerKey)
 		return nil, err
 	}
 
@@ -613,4 +581,14 @@ func (l *interchangeableSessionLease) Release() error {
 		}
 	})
 	return err
+}
+
+func (p *InterchangeablePool) returnWorker(workerKey string) {
+	if p == nil {
+		return
+	}
+	select {
+	case p.available <- workerKey:
+	default:
+	}
 }

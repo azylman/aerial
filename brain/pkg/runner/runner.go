@@ -27,6 +27,67 @@ func IsValidUUID(s string) bool {
 	return reStrictUUID.MatchString(s)
 }
 
+func extractUUIDByRegex(text string) string {
+	if match := reUpdateStream.FindStringSubmatch(text); len(match) > 1 {
+		candidate := strings.TrimSpace(match[1])
+		if IsValidUUID(candidate) {
+			return candidate
+		}
+	}
+	if match := reGeneralSession.FindStringSubmatch(text); len(match) > 1 {
+		candidate := strings.TrimSpace(match[1])
+		if IsValidUUID(candidate) {
+			return candidate
+		}
+	}
+	if match := reUUIDInText.FindString(text); match != "" {
+		candidate := strings.TrimSpace(match)
+		if IsValidUUID(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+var corruptionKeywords = []string{
+	"session corrupt",
+	"corrupted session",
+	"invalid session",
+	"session not found",
+	"failed to load conversation",
+	"corrupted transcript",
+	"failed to parse session",
+	"stream was interrupted",
+	"the stream was interrupted",
+}
+
+var contextWindowKeywords = []string{
+	"context window",
+	"context length",
+	"maximum context length",
+	"token limit exceeded",
+	"prompt is too long",
+	"request too large",
+}
+
+func hasContextWindowKeyword(lower string) bool {
+	for _, kw := range contextWindowKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCorruptionKeyword(lower string) bool {
+	for _, kw := range corruptionKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // sessionProbe provides structured JSON unmarshaling for discovering conversation / session UUIDs.
 type sessionProbe struct {
 	Event          string          `json:"event,omitempty"`
@@ -113,21 +174,8 @@ func (w *ActivityWriter) Write(p []byte) (int, error) {
 			}
 		}
 		if w.sessionID.Load() == nil {
-			if match := reUpdateStream.FindSubmatch(window); len(match) > 1 {
-				sess := strings.TrimSpace(string(match[1]))
-				if IsValidUUID(sess) {
-					w.sessionID.Store(&sess)
-				}
-			} else if match := reGeneralSession.FindSubmatch(window); len(match) > 1 {
-				sess := strings.TrimSpace(string(match[1]))
-				if IsValidUUID(sess) {
-					w.sessionID.Store(&sess)
-				}
-			} else if match := reUUIDInText.Find(window); len(match) > 0 {
-				sess := strings.TrimSpace(string(match))
-				if IsValidUUID(sess) {
-					w.sessionID.Store(&sess)
-				}
+			if sess := extractUUIDByRegex(string(window)); sess != "" {
+				w.sessionID.Store(&sess)
 			}
 		}
 	}
@@ -600,22 +648,8 @@ func ExtractSessionID(output string, _ time.Time) string {
 			}
 		}
 
-		if match := reUpdateStream.FindStringSubmatch(output); len(match) > 1 {
-			candidate := strings.TrimSpace(match[1])
-			if IsValidUUID(candidate) {
-				return candidate
-			}
-		}
-
-		if match := reGeneralSession.FindStringSubmatch(output); len(match) > 1 {
-			candidate := strings.TrimSpace(match[1])
-			if IsValidUUID(candidate) {
-				return candidate
-			}
-		}
-
-		if match := reUUIDInText.FindString(output); match != "" {
-			return match
+		if id := extractUUIDByRegex(output); id != "" {
+			return id
 		}
 	}
 
@@ -707,26 +741,6 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		}
 	}
 
-	corruptionKeywords := []string{
-		"session corrupt",
-		"corrupted session",
-		"invalid session",
-		"session not found",
-		"failed to load conversation",
-		"corrupted transcript",
-		"failed to parse session",
-		"stream was interrupted",
-		"the stream was interrupted",
-	}
-
-	contextWindowKeywords := []string{
-		"context window exceeded",
-		"maximum context length",
-		"token limit exceeded",
-		"context length exceeded",
-		"prompt is too long",
-	}
-
 	isMCPSessionError := func(s string) bool {
 		lower := strings.ToLower(s)
 		return strings.Contains(lower, "failed to connect (session id") ||
@@ -737,20 +751,13 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 
 	checkCorruption := func(s string) bool {
 		lower := strings.ToLower(s)
-		for _, kw := range contextWindowKeywords {
-			if strings.Contains(lower, kw) {
-				return true
-			}
+		if hasContextWindowKeyword(lower) {
+			return true
 		}
 		if isMCPSessionError(lower) {
 			return false
 		}
-		for _, kw := range corruptionKeywords {
-			if strings.Contains(lower, kw) {
-				return true
-			}
-		}
-		return false
+		return hasCorruptionKeyword(lower)
 	}
 
 	if exitCode == 0 {
@@ -772,10 +779,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 				errTarget += " " + trimmedStdout
 			}
 			errTargetLower := strings.ToLower(errTarget)
-			for _, kw := range contextWindowKeywords {
-				if strings.Contains(errTargetLower, kw) {
-					return true, false, true, "context window exceeded"
-				}
+			if hasContextWindowKeyword(errTargetLower) {
+				return true, false, true, "context window exceeded"
 			}
 			if checkCorruption(errTargetLower) {
 				return true, false, true, extractErrorDetail(trimmedStderr, exitCode)
@@ -1043,19 +1048,14 @@ func IsYieldTrap(exitCode int, stdout, stderr string) (bool, int) {
 	if exitCode != 0 {
 		return false, 0
 	}
-	if match := reTerminatingBackgroundTasks.FindStringSubmatch(stderr); len(match) > 1 {
-		count := 1
+	for _, output := range []string{stderr, stdout} {
+		if match := reTerminatingBackgroundTasks.FindStringSubmatch(output); len(match) > 1 {
+			count := 1
 		if c, err := strconv.Atoi(match[1]); err == nil && c > 0 {
 			count = c
 		}
 		return true, count
-	}
-	if match := reTerminatingBackgroundTasks.FindStringSubmatch(stdout); len(match) > 1 {
-		count := 1
-		if c, err := strconv.Atoi(match[1]); err == nil && c > 0 {
-			count = c
 		}
-		return true, count
 	}
 	return false, 0
 }

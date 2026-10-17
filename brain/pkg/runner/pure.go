@@ -1,11 +1,14 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
+	"time"
 )
 
 // AgyArgsInput holds the configuration parameters for building CLI arguments.
@@ -51,9 +54,11 @@ type AgyEnvInput struct {
 	ExtraEnv       []string
 }
 
-// FilterAgyBaseEnv removes ambient GEMINI_API_KEY, ANTIGRAVITY_API_KEY, and GOOGLE_GENAI_API_KEY
-// from an environment slice unless they are explicitly desired.
-func FilterAgyBaseEnv(env []string) []string {
+func filterEnvKeys(env []string, excluded ...string) []string {
+	excludeMap := make(map[string]struct{}, len(excluded))
+	for _, k := range excluded {
+		excludeMap[strings.ToUpper(strings.TrimSpace(k))] = struct{}{}
+	}
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
 		key, _, ok := strings.Cut(e, "=")
@@ -62,50 +67,30 @@ func FilterAgyBaseEnv(env []string) []string {
 			continue
 		}
 		upper := strings.ToUpper(strings.TrimSpace(key))
-		if upper == "GEMINI_API_KEY" || upper == "ANTIGRAVITY_API_KEY" || upper == "GOOGLE_GENAI_API_KEY" {
+		if _, skip := excludeMap[upper]; skip {
 			continue
 		}
 		filtered = append(filtered, e)
 	}
 	return filtered
+}
+
+// FilterAgyBaseEnv removes ambient GEMINI_API_KEY, ANTIGRAVITY_API_KEY, and GOOGLE_GENAI_API_KEY
+// from an environment slice unless they are explicitly desired.
+func FilterAgyBaseEnv(env []string) []string {
+	return filterEnvKeys(env, "GEMINI_API_KEY", "ANTIGRAVITY_API_KEY", "GOOGLE_GENAI_API_KEY")
 }
 
 // filterHomeEnv removes existing HOME, USERPROFILE, and GEMINI_CLI_HOME
 // from an environment slice to prevent duplicate variables.
 func filterHomeEnv(env []string) []string {
-	filtered := make([]string, 0, len(env))
-	for _, e := range env {
-		key, _, ok := strings.Cut(e, "=")
-		if !ok {
-			filtered = append(filtered, e)
-			continue
-		}
-		upper := strings.ToUpper(strings.TrimSpace(key))
-		if upper == "HOME" || upper == "USERPROFILE" || upper == "GEMINI_CLI_HOME" {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	return filtered
+	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME")
 }
 
 // filterVanadisChunkEnv removes any pre-existing AERIAL_VANADIS_CHUNK_ID or VANADIS_CHUNK_ID
 // from an environment slice so non-chunk turns never inherit stale chunk IDs.
 func filterVanadisChunkEnv(env []string) []string {
-	filtered := make([]string, 0, len(env))
-	for _, e := range env {
-		key, _, ok := strings.Cut(e, "=")
-		if !ok {
-			filtered = append(filtered, e)
-			continue
-		}
-		upper := strings.ToUpper(strings.TrimSpace(key))
-		if upper == "AERIAL_VANADIS_CHUNK_ID" || upper == "VANADIS_CHUNK_ID" {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	return filtered
+	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID")
 }
 
 func sanitizeEnvValue(val string) string {
@@ -366,4 +351,64 @@ func ExtractSkillFromTarget(target string) (skillName string, ok bool) {
 	}
 
 	return "", false
+}
+
+// compileLeasePrompt compiles cold-start guidelines, session info, and coordination context into the turn prompt.
+func compileLeasePrompt(turn *TurnContext, isCold bool, prevSessID string) string {
+	if turn == nil {
+		return ""
+	}
+	compiledPrompt := turn.Prompt
+	if isCold {
+		scopeInst := strings.TrimSpace(turn.ScopeInstructions)
+		if scopeInst == "" {
+			scopeInst = strings.TrimSpace(turn.ChannelInstructions)
+		}
+		if scopeInst != "" && !strings.Contains(compiledPrompt, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(compiledPrompt, "<CHANNEL_INSTRUCTIONS>") {
+			scopeBlock := fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
+			compiledPrompt = scopeBlock + "\n\n" + compiledPrompt
+		}
+		if prevSessID != "" && !strings.Contains(compiledPrompt, "<PREVIOUS_SESSION>") {
+			prevBlock := fmt.Sprintf("<PREVIOUS_SESSION>\nPrevious Session ID: %s\n</PREVIOUS_SESSION>", prevSessID)
+			compiledPrompt = prevBlock + "\n\n" + compiledPrompt
+		}
+		if strings.TrimSpace(turn.ThreadSummary) != "" && !strings.Contains(compiledPrompt, "<THREAD_SUMMARY>") {
+			sumBlock := fmt.Sprintf("<THREAD_SUMMARY>\n%s\n</THREAD_SUMMARY>", strings.TrimSpace(turn.ThreadSummary))
+			compiledPrompt = sumBlock + "\n\n" + compiledPrompt
+		}
+	}
+	if strings.TrimSpace(turn.CoordinationContext) != "" && !strings.Contains(compiledPrompt, "<COORDINATION_CONTEXT>") {
+		coordBlock := fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(turn.CoordinationContext))
+		compiledPrompt = coordBlock + "\n\n" + compiledPrompt
+	}
+	return compiledPrompt
+}
+
+// injectRetrievedContext retrieves ambient context and memory within specified timeouts and prepends them to prompt.
+func injectRetrievedContext(ctx context.Context, prompt string, amb AmbientContextRetriever, ambTimeout time.Duration, mem MemoryRetriever, memTimeout time.Duration, logPrefix string) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payloadPrompt := prompt
+	if amb != nil && !strings.Contains(prompt, "<ambient_context>") {
+		ambCtx, cancel := context.WithTimeout(ctx, ambTimeout)
+		ambBlock, aErr := amb(ambCtx)
+		cancel()
+		if aErr != nil {
+			log.Printf("%s Warning: AmbientContextRetriever failed: %v", logPrefix, aErr)
+		} else if strings.TrimSpace(ambBlock) != "" {
+			payloadPrompt = strings.TrimSpace(ambBlock) + "\n\n" + payloadPrompt
+		}
+	}
+	if mem != nil && !strings.Contains(prompt, "<retrieved_memory>") {
+		memCtx, cancel := context.WithTimeout(ctx, memTimeout)
+		memBlock, mErr := mem(memCtx, prompt)
+		cancel()
+		if mErr != nil {
+			log.Printf("%s Warning: MemoryRetriever failed: %v", logPrefix, mErr)
+		} else if strings.TrimSpace(memBlock) != "" {
+			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + payloadPrompt
+		}
+	}
+	return payloadPrompt
 }
