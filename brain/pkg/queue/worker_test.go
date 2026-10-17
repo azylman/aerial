@@ -951,225 +951,44 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	teNull.rotateSessionID("thread-evict-3", "")
 }
 
-func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name             string
-		channelMode      string
-		preWriteDBBytes  int64
-		preWriteWALBytes int64
-	}{
-		{
-			name:             "ChannelMode_DBLimit",
-			channelMode:      "channel",
-			preWriteDBBytes:  session.DefaultMaxSessionDBBytes + 1024,
-			preWriteWALBytes: 600 * 1024,
-		},
-		{
-			name:             "ChannelMode_DBLimit_WALIgnored",
-			channelMode:      "channel",
-			preWriteDBBytes:  1000 * 1024,
-			preWriteWALBytes: 600 * 1024,
-		},
-		{
-			name:            "ThreadMode_DBLimit",
-			channelMode:     "thread",
-			preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := setupTestStore(t)
-			tmpDir := t.TempDir()
-			sessMgr := session.New(tmpDir, tmpDir)
-
-			oldSess := "sess-" + tc.name
-			convDir := filepath.Join(tmpDir, "conversations")
-			_ = os.MkdirAll(convDir, 0755)
-			if tc.preWriteDBBytes > 0 {
-				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0644)
-			}
-			if tc.preWriteWALBytes > 0 {
-				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0644)
-			}
-
-			threadID := "thread-" + tc.name
-			_ = saveSessionID(store, threadID, oldSess)
-			_, _ = incrementSessionTurnCount(store, threadID)
-
-			doneCh := make(chan struct{}, 1)
-
-			appCfg := config.NewFromData(&config.ConfigData{
-				Channels: map[string]config.ChannelPolicy{
-					"default": {Mode: tc.channelMode},
-				},
-			})
-
-			wpCfg := WorkerPoolConfig{
-				SessionManager: sessMgr,
-				Store:          store,
-				TimeoutMinutes: 1,
-				BackoffBase:    5 * time.Millisecond,
-				MaxAttempts:    1,
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					return nil
-				},
-				TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-					return func() {}
-				},
-				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					select {
-					case doneCh <- struct{}{}:
-					default:
-					}
-				},
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return mockJSONResponse(sessionID, "OK"), "", 0, nil
-				},
-			}
-
-			pool := New(appCfg, wpCfg)
-			pool.Start()
-			defer pool.Stop()
-
-			msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "test message"}
-			_ = insertMessage(store, msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(10 * time.Second):
-				t.Fatal("Timeout waiting for message completion")
-			}
-
-			curSess, _ := getSessionID(store, threadID)
-			if curSess != oldSess {
-				t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
-			}
-		})
-	}
-}
-
-func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		channelMode     string
-		preWriteDBBytes int64
-	}{
-		{
-			name:            "DBAboveThreshold",
-			channelMode:     "thread",
-			preWriteDBBytes: session.DefaultMaxQuotaPauseDBBytes + 1024,
-		},
-		{
-			name:            "DBBelowThreshold",
-			channelMode:     "thread",
-			preWriteDBBytes: 200 * 1024,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := setupTestStore(t)
-			tmpDir := t.TempDir()
-			sessMgr := session.New(tmpDir, tmpDir)
-
-			oldSess := "sess-" + tc.name
-			convDir := filepath.Join(tmpDir, "conversations")
-			_ = os.MkdirAll(convDir, 0755)
-			if tc.preWriteDBBytes > 0 {
-				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0644)
-			}
-
-			threadID := "thread-" + tc.name
-			_ = saveSessionID(store, threadID, oldSess)
-
-			doneCh := make(chan struct{}, 1)
-
-			appCfg := config.NewFromData(&config.ConfigData{
-				Channels: map[string]config.ChannelPolicy{
-					"default": {Mode: tc.channelMode},
-				},
-			})
-
-			wpCfg := WorkerPoolConfig{
-				SessionManager: sessMgr,
-				Store:          store,
-				TimeoutMinutes: 1,
-				BackoffBase:    5 * time.Millisecond,
-				MaxAttempts:    1,
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					return nil
-				},
-				TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-					return func() {}
-				},
-				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					select {
-					case doneCh <- struct{}{}:
-					default:
-					}
-				},
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
-				},
-			}
-
-			pool := New(appCfg, wpCfg)
-			pool.Start()
-			defer pool.Stop()
-
-			msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "test message"}
-			_ = insertMessage(store, msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(10 * time.Second):
-				t.Fatal("Timeout waiting for message completion")
-			}
-
-			curSess, _ := getSessionID(store, threadID)
-			if curSess != oldSess {
-				t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
-			}
-		})
-	}
-}
-
-func TestWorker_SessionDBRotation_PostExecutionPreserved(t *testing.T) {
-	t.Parallel()
+func runSessionDBRotationTurn(t *testing.T, name, channelMode string, preWriteDBBytes, preWriteWALBytes int64, maxAttempts int, configureCfg func(*WorkerPoolConfig, string, string)) {
+	t.Helper()
 	store := setupTestStore(t)
 	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, tmpDir)
 
-	oldSess := "sess-post-execution"
+	oldSess := "sess-" + name
 	convDir := filepath.Join(tmpDir, "conversations")
 	_ = os.MkdirAll(convDir, 0755)
+	if preWriteDBBytes > 0 {
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, preWriteDBBytes), 0644)
+	}
+	if preWriteWALBytes > 0 {
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, preWriteWALBytes), 0644)
+	}
 
-	threadID := "thread-post-execution"
+	threadID := "thread-" + name
 	_ = saveSessionID(store, threadID, oldSess)
+	_, _ = incrementSessionTurnCount(store, threadID)
 
 	doneCh := make(chan struct{}, 1)
 
 	appCfg := config.NewFromData(&config.ConfigData{
 		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
+			"default": {Mode: channelMode},
 		},
 	})
+
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
 
 	wpCfg := WorkerPoolConfig{
 		SessionManager: sessMgr,
 		Store:          store,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    1,
+		MaxAttempts:    maxAttempts,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
 		},
@@ -1183,16 +1002,19 @@ func TestWorker_SessionDBRotation_PostExecutionPreserved(t *testing.T) {
 			}
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0644)
-			return mockJSONResponse(oldSess, "Execution heavy DB output"), "", 0, nil
+			return mockJSONResponse(sessionID, "OK"), "", 0, nil
 		},
+	}
+
+	if configureCfg != nil {
+		configureCfg(&wpCfg, convDir, oldSess)
 	}
 
 	pool := New(appCfg, wpCfg)
 	pool.Start()
 	defer pool.Stop()
 
-	msg := db.Message{ID: "msg-post-execution", ThreadID: threadID, Content: "test message"}
+	msg := db.Message{ID: "msg-" + name, ThreadID: threadID, Content: "test message"}
 	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
@@ -1208,48 +1030,69 @@ func TestWorker_SessionDBRotation_PostExecutionPreserved(t *testing.T) {
 	}
 }
 
+func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		channelMode      string
+		preWriteDBBytes  int64
+		preWriteWALBytes int64
+	}{
+		{name: "ChannelMode_DBLimit", channelMode: "channel", preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024, preWriteWALBytes: 600 * 1024},
+		{name: "ChannelMode_DBLimit_WALIgnored", channelMode: "channel", preWriteDBBytes: 1000 * 1024, preWriteWALBytes: 600 * 1024},
+		{name: "ThreadMode_DBLimit", channelMode: "thread", preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runSessionDBRotationTurn(t, tc.name, tc.channelMode, tc.preWriteDBBytes, tc.preWriteWALBytes, 1, nil)
+		})
+	}
+}
+
+func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		preWriteDBBytes int64
+	}{
+		{name: "DBAboveThreshold", preWriteDBBytes: session.DefaultMaxQuotaPauseDBBytes + 1024},
+		{name: "DBBelowThreshold", preWriteDBBytes: 200 * 1024},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runSessionDBRotationTurn(t, tc.name, "thread", tc.preWriteDBBytes, 0, 1, func(cfg *WorkerPoolConfig, convDir, oldSess string) {
+				cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
+				}
+			})
+		})
+	}
+}
+
+func TestWorker_SessionDBRotation_PostExecutionPreserved(t *testing.T) {
+	t.Parallel()
+	runSessionDBRotationTurn(t, "post-execution", "thread", 0, 0, 1, func(cfg *WorkerPoolConfig, convDir, oldSess string) {
+		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0644)
+			return mockJSONResponse(oldSess, "Execution heavy DB output"), "", 0, nil
+		}
+	})
+}
+
 func TestWorker_SessionDBRotation_WatchdogRetryPreservesSession(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, tmpDir)
-
-	oldSess := "sess-watchdog"
-	convDir := filepath.Join(tmpDir, "conversations")
-	_ = os.MkdirAll(convDir, 0755)
-
-	threadID := "thread-watchdog"
-	_ = saveSessionID(store, threadID, oldSess)
-
 	var mu sync.Mutex
 	var attempts []string
-	doneCh := make(chan struct{}, 1)
+	oldSessName := "sess-watchdog"
 
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
-	wpCfg := WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    2,
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			select {
-			case doneCh <- struct{}{}:
-			default:
-			}
-		},
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+	runSessionDBRotationTurn(t, "watchdog", "thread", 0, 0, 2, func(cfg *WorkerPoolConfig, convDir, oldSess string) {
+		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			mu.Lock()
 			attempts = append(attempts, sessionID)
 			currentAttempt := len(attempts)
@@ -1260,80 +1103,27 @@ func TestWorker_SessionDBRotation_WatchdogRetryPreservesSession(t *testing.T) {
 				return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
 			}
 			return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
-		},
-	}
-
-	pool := New(appCfg, wpCfg)
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-watchdog", ThreadID: threadID, Content: "test message"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for message completion")
-	}
-
-	curSess, _ := getSessionID(store, threadID)
-	if curSess != oldSess {
-		t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
-	}
+		}
+	})
 
 	if len(attempts) != 2 {
 		t.Fatalf("Expected 2 attempts, got: %d", len(attempts))
 	}
 	for i, a := range attempts {
-		if a != oldSess {
-			t.Errorf("Expected attempt %d to use session %q, got: %q", i+1, oldSess, a)
+		if a != oldSessName {
+			t.Errorf("Expected attempt %d to use session %q, got: %q", i+1, oldSessName, a)
 		}
 	}
 }
 
 func TestWorker_SessionDBRotation_TransientRetryPreservesSession(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, tmpDir)
-
-	oldSess := "sess-transient"
-	convDir := filepath.Join(tmpDir, "conversations")
-	_ = os.MkdirAll(convDir, 0755)
-
-	threadID := "thread-transient"
-	_ = saveSessionID(store, threadID, oldSess)
-
 	var mu sync.Mutex
 	var attempts []string
-	doneCh := make(chan struct{}, 1)
+	oldSessName := "sess-transient"
 
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
-	wpCfg := WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    2,
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			select {
-			case doneCh <- struct{}{}:
-			default:
-			}
-		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+	runSessionDBRotationTurn(t, "transient", "thread", 0, 0, 2, func(cfg *WorkerPoolConfig, convDir, oldSess string) {
+		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			attempts = append(attempts, sessionID)
 			currentAttempt := len(attempts)
@@ -1344,34 +1134,15 @@ func TestWorker_SessionDBRotation_TransientRetryPreservesSession(t *testing.T) {
 				return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
 			}
 			return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
-		},
-	}
-
-	pool := New(appCfg, wpCfg)
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-transient", ThreadID: threadID, Content: "test message"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for message completion")
-	}
-
-	curSess, _ := getSessionID(store, threadID)
-	if curSess != oldSess {
-		t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
-	}
+		}
+	})
 
 	if len(attempts) != 2 {
 		t.Fatalf("Expected 2 attempts, got: %d", len(attempts))
 	}
 	for i, a := range attempts {
-		if a != oldSess {
-			t.Errorf("Expected attempt %d to use session %q, got: %q", i+1, oldSess, a)
+		if a != oldSessName {
+			t.Errorf("Expected attempt %d to use session %q, got: %q", i+1, oldSessName, a)
 		}
 	}
 }
@@ -1851,51 +1622,44 @@ func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
 
 	sink := newDiscordTurnSink(updater)
 
-	tests := []struct {
-		action      string
-		tool        string
-		arg         string
-		delta       string
-		wantPhase   string
-		wantTool    string
-		wantCommand string
-	}{
-		{action: "thinking", wantPhase: "thinking"},
-		{action: "tool_call", tool: "run_command", arg: "echo hello", wantPhase: "tool", wantTool: "run_command", wantCommand: "echo"},
-		{action: "tool_completed", tool: "run_command", wantPhase: "thinking"},
-		{action: "text_delta", delta: "Streaming response token", wantPhase: "responding"},
-		{action: "thinking", wantPhase: "thinking"},
-		{action: "whitespace_delta", delta: "   \n\t  ", wantPhase: "thinking"},
-		{action: "tool_call", tool: "get_me", wantPhase: "tool", wantTool: "get_me"},
-		{action: "tool_error", tool: "get_me", wantPhase: "thinking"},
-	}
-
-	for _, step := range tests {
-		switch step.action {
-		case "thinking":
-			sink.OnThinking()
-		case "tool_call":
-			sink.OnToolCall(step.tool, step.arg)
-		case "tool_completed":
-			sink.OnToolCompleted(step.tool, "native", 100*time.Millisecond, "ok")
-		case "tool_error":
-			sink.OnToolCompleted(step.tool, "github", 50*time.Millisecond, "error")
-		case "text_delta", "whitespace_delta":
-			sink.OnTextDelta(step.delta)
-		}
-
+	assertUpdater := func(step, wantPhase, wantTool, wantCmd string) {
+		t.Helper()
 		updater.mu.Lock()
-		if updater.phase != step.wantPhase {
-			t.Errorf("[%s] phase = %q, want %q", step.action, updater.phase, step.wantPhase)
+		defer updater.mu.Unlock()
+		if updater.phase != wantPhase {
+			t.Errorf("[%s] phase = %q, want %q", step, updater.phase, wantPhase)
 		}
-		if step.wantTool != "" && updater.activeTool != step.wantTool {
-			t.Errorf("[%s] activeTool = %q, want %q", step.action, updater.activeTool, step.wantTool)
+		if wantTool != "" && updater.activeTool != wantTool {
+			t.Errorf("[%s] activeTool = %q, want %q", step, updater.activeTool, wantTool)
 		}
-		if step.wantCommand != "" && updater.activeCommand != step.wantCommand {
-			t.Errorf("[%s] activeCommand = %q, want %q", step.action, updater.activeCommand, step.wantCommand)
+		if wantCmd != "" && updater.activeCommand != wantCmd {
+			t.Errorf("[%s] activeCommand = %q, want %q", step, updater.activeCommand, wantCmd)
 		}
-		updater.mu.Unlock()
 	}
+
+	sink.OnThinking()
+	assertUpdater("thinking", "thinking", "", "")
+
+	sink.OnToolCall("run_command", "echo hello")
+	assertUpdater("tool_call", "tool", "run_command", "echo")
+
+	sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, "ok")
+	assertUpdater("tool_completed", "thinking", "", "")
+
+	sink.OnTextDelta("Streaming response token")
+	assertUpdater("text_delta", "responding", "", "")
+
+	sink.OnThinking()
+	assertUpdater("thinking", "thinking", "", "")
+
+	sink.OnTextDelta("   \n\t  ")
+	assertUpdater("whitespace_delta", "thinking", "", "")
+
+	sink.OnToolCall("get_me", "")
+	assertUpdater("tool_call", "tool", "get_me", "")
+
+	sink.OnToolCompleted("get_me", "github", 50*time.Millisecond, "error")
+	assertUpdater("tool_error", "thinking", "", "")
 
 	nilSink := newDiscordTurnSink(nil)
 	nilSink.OnThinking()
@@ -3082,161 +2846,138 @@ func (m *mockRotateStore) RotateSessionID(ctx context.Context, sessionKey, newSe
 	return m.FakeStore.RotateSessionID(ctx, sessionKey, newSessionID)
 }
 
+func runCheckTurnEndRotation(t *testing.T, store db.Store, mode string, initTurns int, shouldRotate bool, rotateErr error) (*turnExecution, *mockRotatorPool, string) {
+	t.Helper()
+	threadID := "thread-test"
+	if store == nil {
+		fakeStore := setupTestStore(t)
+		_ = fakeStore.SaveSessionID(context.Background(), threadID, "sess-old")
+		store = fakeStore
+	}
+
+	pool := &WorkerPool{
+		ctx: context.Background(),
+		cfg: WorkerPoolConfig{Store: store},
+	}
+	rotPool := &mockRotatorPool{
+		shouldRotate: shouldRotate,
+		rotReason:    "turn_limit",
+		rotateErr:    rotateErr,
+		newSession:   &mockRotatorSession{sessionID: "sess-new"},
+	}
+	te := &turnExecution{
+		pool:             pool,
+		threadID:         threadID,
+		currentSessionID: "sess-old",
+		turnCount:        initTurns,
+		policy:           config.ChannelPolicy{Mode: mode},
+	}
+	execSession := &mockRotatorSession{sessionID: "sess-old"}
+
+	te.checkTurnEndRotation(rotPool, execSession)
+	return te, rotPool, threadID
+}
+
 func TestTurnExecution_CheckTurnEndRotation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name               string
-		channelMode        string
-		initialSession     string
-		newSession         string
-		initialTurns       int
-		shouldRotate       bool
-		rotReason          string
-		rotateErr          error
-		simulateDBError    bool
-		wantRotateCalled   bool
-		wantTurnCount      int
-		wantCurrentSession string
-		wantPrevSession    string
-		wantDBSession      string
-		wantEvictedKey     string
+		name            string
+		channelMode     string
+		shouldRotate    bool
+		wantTurnCount   int
+		wantSession     string
+		wantPrevSession string
 	}{
-		{
-			name:               "NormalRotation_Thread",
-			channelMode:        "thread",
-			initialSession:     "sess-old-1",
-			newSession:         "sess-new-1",
-			initialTurns:       10,
-			shouldRotate:       true,
-			rotReason:          "turn_limit",
-			wantRotateCalled:   true,
-			wantTurnCount:      0,
-			wantCurrentSession: "sess-new-1",
-			wantPrevSession:    "sess-old-1",
-			wantDBSession:      "sess-new-1",
-		},
-		{
-			name:               "NormalRotation_Channel",
-			channelMode:        "channel",
-			initialSession:     "sess-old-chan",
-			newSession:         "sess-new-chan",
-			initialTurns:       5,
-			shouldRotate:       true,
-			rotReason:          "ttl_expired",
-			wantRotateCalled:   true,
-			wantTurnCount:      0,
-			wantCurrentSession: "sess-new-chan",
-			wantDBSession:      "sess-new-chan",
-		},
-		{
-			name:               "NoRotation",
-			channelMode:        "thread",
-			initialSession:     "sess-active-2",
-			newSession:         "sess-should-not-use",
-			initialTurns:       3,
-			shouldRotate:       false,
-			wantRotateCalled:   false,
-			wantTurnCount:      3,
-			wantCurrentSession: "sess-active-2",
-			wantDBSession:      "sess-active-2",
-		},
-		{
-			name:               "SpawnFailure",
-			channelMode:        "thread",
-			initialSession:     "sess-old-3",
-			initialTurns:       12,
-			shouldRotate:       true,
-			rotReason:          "turn_limit",
-			rotateErr:          errors.New("spawn failed: oom"),
-			wantRotateCalled:   true,
-			wantTurnCount:      12,
-			wantCurrentSession: "",
-			wantDBSession:      "",
-			wantEvictedKey:     "thread-test",
-		},
-		{
-			name:               "DBLatchFailure",
-			channelMode:        "thread",
-			initialSession:     "sess-old-4",
-			newSession:         "sess-new-4",
-			initialTurns:       10,
-			shouldRotate:       true,
-			rotReason:          "turn_limit",
-			simulateDBError:    true,
-			wantRotateCalled:   true,
-			wantTurnCount:      10,
-			wantCurrentSession: "",
-			wantDBSession:      "",
-			wantEvictedKey:     "thread-test",
-		},
+		{name: "NormalRotation_Thread", channelMode: "thread", shouldRotate: true, wantTurnCount: 0, wantSession: "sess-new", wantPrevSession: "sess-old"},
+		{name: "NormalRotation_Channel", channelMode: "channel", shouldRotate: true, wantTurnCount: 0, wantSession: "sess-new"},
+		{name: "NoRotation", channelMode: "thread", shouldRotate: false, wantTurnCount: 3, wantSession: "sess-old"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			fakeStore := setupTestStore(t)
-			threadID := "thread-test"
-			if tt.wantEvictedKey != "" {
-				threadID = tt.wantEvictedKey
+			initTurns := tt.wantTurnCount
+			if tt.shouldRotate {
+				initTurns = 10
 			}
-			_ = fakeStore.SaveSessionID(context.Background(), threadID, tt.initialSession)
+			te, rotPool, threadID := runCheckTurnEndRotation(t, nil, tt.channelMode, initTurns, tt.shouldRotate, nil)
 
-			var store db.Store = fakeStore
-			if tt.simulateDBError {
-				store = &mockRotateStore{
-					FakeStore: fakeStore,
-					rotateFn: func(ctx context.Context, sessionKey, newSessionID string) error {
-						if newSessionID != "" {
-							return errors.New("db connection lost")
-						}
-						return fakeStore.RotateSessionID(ctx, sessionKey, newSessionID)
-					},
-				}
-			}
-
-			pool := &WorkerPool{
-				ctx: context.Background(),
-				cfg: WorkerPoolConfig{Store: store},
-			}
-			rotPool := &mockRotatorPool{
-				shouldRotate: tt.shouldRotate,
-				rotReason:    tt.rotReason,
-				rotateErr:    tt.rotateErr,
-				newSession:   &mockRotatorSession{sessionID: tt.newSession},
-			}
-			te := &turnExecution{
-				pool:             pool,
-				threadID:         threadID,
-				currentSessionID: tt.initialSession,
-				turnCount:        tt.initialTurns,
-				policy:           config.ChannelPolicy{Mode: tt.channelMode},
-			}
-			execSession := &mockRotatorSession{sessionID: tt.initialSession}
-
-			te.checkTurnEndRotation(rotPool, execSession)
-
-			if rotPool.rotateCalled != tt.wantRotateCalled {
-				t.Errorf("rotPool.rotateCalled = %t, want %t", rotPool.rotateCalled, tt.wantRotateCalled)
+			if rotPool.rotateCalled != tt.shouldRotate {
+				t.Errorf("rotPool.rotateCalled = %t, want %t", rotPool.rotateCalled, tt.shouldRotate)
 			}
 			if te.turnCount != tt.wantTurnCount {
 				t.Errorf("te.turnCount = %d, want %d", te.turnCount, tt.wantTurnCount)
 			}
-			if te.currentSessionID != tt.wantCurrentSession {
-				t.Errorf("te.currentSessionID = %q, want %q", te.currentSessionID, tt.wantCurrentSession)
+			if te.currentSessionID != tt.wantSession {
+				t.Errorf("te.currentSessionID = %q, want %q", te.currentSessionID, tt.wantSession)
 			}
 			if tt.wantPrevSession != "" && te.previousSessionID != tt.wantPrevSession {
 				t.Errorf("te.previousSessionID = %q, want %q", te.previousSessionID, tt.wantPrevSession)
 			}
-			if tt.wantEvictedKey != "" && rotPool.evictedKey != tt.wantEvictedKey {
-				t.Errorf("rotPool.evictedKey = %q, want %q", rotPool.evictedKey, tt.wantEvictedKey)
-			}
 
-			dbSessID, _ := fakeStore.GetSessionID(context.Background(), threadID)
-			if dbSessID != tt.wantDBSession {
-				t.Errorf("DB session ID = %q, want %q", dbSessID, tt.wantDBSession)
+			dbSessID, _ := te.pool.cfg.Store.GetSessionID(context.Background(), threadID)
+			if dbSessID != tt.wantSession {
+				t.Errorf("DB session ID = %q, want %q", dbSessID, tt.wantSession)
 			}
 		})
+	}
+}
+
+func TestTurnExecution_CheckTurnEndRotation_SpawnFailure(t *testing.T) {
+	t.Parallel()
+	te, rotPool, threadID := runCheckTurnEndRotation(t, nil, "thread", 12, true, errors.New("spawn failed: oom"))
+
+	if !rotPool.rotateCalled {
+		t.Errorf("rotPool.rotateCalled = false, want true")
+	}
+	if te.turnCount != 12 {
+		t.Errorf("te.turnCount = %d, want 12", te.turnCount)
+	}
+	if te.currentSessionID != "" {
+		t.Errorf("te.currentSessionID = %q, want empty", te.currentSessionID)
+	}
+	if rotPool.evictedKey != threadID {
+		t.Errorf("rotPool.evictedKey = %q, want %q", rotPool.evictedKey, threadID)
+	}
+	dbSessID, _ := te.pool.cfg.Store.GetSessionID(context.Background(), threadID)
+	if dbSessID != "" {
+		t.Errorf("DB session ID = %q, want empty", dbSessID)
+	}
+}
+
+func TestTurnExecution_CheckTurnEndRotation_DBLatchFailure(t *testing.T) {
+	t.Parallel()
+	fakeStore := setupTestStore(t)
+	threadID := "thread-test"
+	_ = fakeStore.SaveSessionID(context.Background(), threadID, "sess-old")
+	store := &mockRotateStore{
+		FakeStore: fakeStore,
+		rotateFn: func(ctx context.Context, sessionKey, newSessionID string) error {
+			if newSessionID != "" {
+				return errors.New("db connection lost")
+			}
+			return fakeStore.RotateSessionID(ctx, sessionKey, newSessionID)
+		},
+	}
+
+	te, rotPool, _ := runCheckTurnEndRotation(t, store, "thread", 10, true, nil)
+
+	if !rotPool.rotateCalled {
+		t.Errorf("rotPool.rotateCalled = false, want true")
+	}
+	if te.turnCount != 10 {
+		t.Errorf("te.turnCount = %d, want 10", te.turnCount)
+	}
+	if te.currentSessionID != "" {
+		t.Errorf("te.currentSessionID = %q, want empty", te.currentSessionID)
+	}
+	if rotPool.evictedKey != threadID {
+		t.Errorf("rotPool.evictedKey = %q, want %q", rotPool.evictedKey, threadID)
+	}
+	dbSessID, _ := fakeStore.GetSessionID(context.Background(), threadID)
+	if dbSessID != "" {
+		t.Errorf("DB session ID = %q, want empty", dbSessID)
 	}
 }
 
