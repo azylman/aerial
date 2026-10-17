@@ -319,11 +319,17 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, runnerFn)),
 		)
 	}
-	if cfg.LLMFunc == nil && cfg.ProcessPool != nil {
-		if ep, ok := cfg.ProcessPool.(interface {
-			EphemeralLLMFunc(string) runner.LLMFunc
-		}); ok {
-			cfg.LLMFunc = ep.EphemeralLLMFunc("ephemeral:summarizer")
+	if cfg.LLMFunc == nil {
+		for _, candidate := range []runner.AgentPool{cfg.LowEffortProcessPool, cfg.ProcessPool} {
+			if candidate == nil {
+				continue
+			}
+			if ep, ok := candidate.(interface {
+				EphemeralLLMFunc(string) runner.LLMFunc
+			}); ok {
+				cfg.LLMFunc = ep.EphemeralLLMFunc("ephemeral:summarizer")
+				break
+			}
 		}
 	}
 	if cfg.ResolveChannelPolicy == nil {
