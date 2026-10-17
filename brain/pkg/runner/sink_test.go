@@ -63,27 +63,35 @@ func TestThrowawayTurnSink_ErrorDelivery(t *testing.T) {
 }
 
 func TestThrowawayTurnSink_ContextCancelled(t *testing.T) {
-	t.Run("PreCancelled", func(t *testing.T) {
-		sink := NewThrowawayTurnSink()
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		_, err := sink.ResultContext(ctx)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected context.Canceled, got %v", err)
-		}
-	})
-
-	t.Run("CancelledWhileWaiting", func(t *testing.T) {
-		sink := NewThrowawayTurnSink()
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		defer cancel()
-
-		_, err := sink.ResultContext(ctx)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
-		}
-	})
+	t.Parallel()
+	tests := []struct {
+		name       string
+		preCancel  bool
+		waitCancel bool
+		wantErr    error
+	}{
+		{name: "PreCancelled", preCancel: true, wantErr: context.Canceled},
+		{name: "CancelledWhileWaiting", waitCancel: true, wantErr: context.DeadlineExceeded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sink := NewThrowawayTurnSink()
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if tc.preCancel {
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			} else if tc.waitCancel {
+				ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+			}
+			_, err := sink.ResultContext(ctx)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+		})
+	}
 }
 
 func TestIsSubstantiveResponse(t *testing.T) {
@@ -267,194 +275,193 @@ func TestBufferingTurnSink_OnResultPrecedence(t *testing.T) {
 }
 
 func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
-	t.Run("OnToolCall resets accumulated buffer and suppresses pre-tool monologue resurrection", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		sink.OnTextDelta("Pre-tool commentary that must be discarded.")
-		if sink.AccumulatedText() == "" {
-			t.Fatalf("expected non-empty buffer before tool call")
-		}
-
-		sink.OnToolCall("run_command", "bash")
-		if sink.AccumulatedText() != "" {
-			t.Errorf("expected empty buffer after OnToolCall, got %q", sink.AccumulatedText())
-		}
-		if sink.EmittedAny() {
-			t.Errorf("expected emittedAny to be false after OnToolCall")
-		}
-
-		// When no subsequent deltas arrive after tool execution (silent turn or waiting step),
-		// OnResult suppresses resurrected pre-tool chatter in res.Response.
-		sink.OnResult(&TurnResult{Response: "Pre-tool commentary that must be discarded."})
-		res, err := sink.Wait(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected wait error: %v", err)
-		}
-		if res.Response != "" {
-			t.Errorf("expected empty response for tool-executed turn with no post-tool deltas, got %q", res.Response)
-		}
-	})
-
-	t.Run("OnToolCompleted resets accumulated buffer", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		sink.OnTextDelta("Stray delta leaked while tool was executing.")
-		if sink.AccumulatedText() == "" {
-			t.Fatalf("expected non-empty buffer before tool completion")
-		}
-
-		sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, "DONE")
-		if sink.AccumulatedText() != "" {
-			t.Errorf("expected empty buffer after OnToolCompleted, got %q", sink.AccumulatedText())
-		}
-		if sink.EmittedAny() {
-			t.Errorf("expected emittedAny to be false after OnToolCompleted")
-		}
-	})
-
-	t.Run("Multi-step turn lifecycle isolates final deliverable", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-
-		// Step 1: Pre-tool commentary
-		sink.OnTextDelta("Let me run tests first...")
-		sink.OnToolCall("run_command", "go test ./...")
-
-		// Tool running: stray logs leaked
-		sink.OnTextDelta("tool progress chunk...")
-		sink.OnToolCompleted("run_command", "native", 500*time.Millisecond, "DONE")
-
-		// Step 2: Final response generated without tools
-		sink.OnTextDelta("All tests passed! ")
-		sink.OnTextDelta("Locked in and ready.")
-
-		// agy emits result with concatenated multi-step text
-		sink.OnResult(&TurnResult{
-			Response: "Let me run tests first... All tests passed! Locked in and ready.",
+	t.Parallel()
+	tests := []struct {
+		name                 string
+		preDeltas            []string
+		triggerToolCall      bool
+		toolName             string
+		toolInput            string
+		midDeltas            []string
+		triggerToolComplete  bool
+		postDeltas           []string
+		resultPayload        string
+		wantAccumulatedAfter string
+		wantEmittedAny       bool
+		wantResponse         string
+	}{
+		{
+			name:                 "OnToolCall resets accumulated buffer and suppresses pre-tool monologue resurrection",
+			preDeltas:            []string{"Pre-tool commentary that must be discarded."},
+			triggerToolCall:      true,
+			toolName:             "run_command",
+			toolInput:            "bash",
+			resultPayload:        "Pre-tool commentary that must be discarded.",
+			wantAccumulatedAfter: "",
+			wantEmittedAny:       false,
+			wantResponse:         "",
+		},
+		{
+			name:                 "OnToolCompleted resets accumulated buffer",
+			preDeltas:            []string{"Stray delta leaked while tool was executing."},
+			triggerToolComplete:  true,
+			toolName:             "run_command",
+			wantAccumulatedAfter: "",
+			wantEmittedAny:       false,
+		},
+		{
+			name:                "Multi-step turn lifecycle isolates final deliverable",
+			preDeltas:           []string{"Let me run tests first..."},
+			triggerToolCall:     true,
+			toolName:            "run_command",
+			toolInput:           "go test ./...",
+			midDeltas:           []string{"tool progress chunk..."},
+			triggerToolComplete: true,
+			postDeltas:          []string{"All tests passed! ", "Locked in and ready."},
+			resultPayload:       "Let me run tests first... All tests passed! Locked in and ready.",
+			wantResponse:        "All tests passed! Locked in and ready.",
+		},
+		{
+			name:                "Non-streaming turn with tool execution preserves final result",
+			triggerToolCall:     true,
+			toolName:            "run_command",
+			toolInput:           "bash -c 'echo hello'",
+			triggerToolComplete: true,
+			resultPayload:       "Completed task output.",
+			wantResponse:        "Completed task output.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+			for _, d := range tc.preDeltas {
+				sink.OnTextDelta(d)
+			}
+			if len(tc.preDeltas) > 0 && sink.AccumulatedText() == "" {
+				t.Fatalf("expected non-empty buffer before tool transition")
+			}
+			if tc.triggerToolCall {
+				sink.OnToolCall(tc.toolName, tc.toolInput)
+			}
+			for _, d := range tc.midDeltas {
+				sink.OnTextDelta(d)
+			}
+			if tc.triggerToolComplete {
+				sink.OnToolCompleted(tc.toolName, "native", 100*time.Millisecond, "DONE")
+			}
+			if tc.wantAccumulatedAfter != "" || (!tc.triggerToolComplete && tc.triggerToolCall) || (tc.triggerToolComplete && len(tc.postDeltas) == 0 && tc.resultPayload == "") {
+				if sink.AccumulatedText() != tc.wantAccumulatedAfter {
+					t.Errorf("expected accumulated text %q, got %q", tc.wantAccumulatedAfter, sink.AccumulatedText())
+				}
+				if sink.EmittedAny() != tc.wantEmittedAny {
+					t.Errorf("expected emittedAny %v, got %v", tc.wantEmittedAny, sink.EmittedAny())
+				}
+			}
+			for _, d := range tc.postDeltas {
+				sink.OnTextDelta(d)
+			}
+			if tc.resultPayload != "" {
+				sink.OnResult(&TurnResult{Response: tc.resultPayload})
+				res, err := sink.Wait(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected wait error: %v", err)
+			}
+			if res.Response != tc.wantResponse {
+				t.Errorf("expected response %q, got %q", tc.wantResponse, res.Response)
+			}
+			}
 		})
-
-		res, err := sink.Wait(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected wait error: %v", err)
-		}
-		expected := "All tests passed! Locked in and ready."
-		if res.Response != expected {
-			t.Errorf("expected clean terminal response %q, got %q", expected, res.Response)
-		}
-	})
-
-	t.Run("Non-streaming turn with tool execution preserves final result", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		// In a non-streaming runner (e.g. legacy runner adapter, mock runner),
-		// tool hooks fire (e.g. from watchdog or adapter) without any streamed text deltas.
-		sink.OnToolCall("run_command", "bash -c 'echo hello'")
-		sink.OnToolCompleted("run_command", "native", 50*time.Millisecond, "DONE")
-
-		// The runner finishes and delivers the full substantive output in OnResult
-		sink.OnResult(&TurnResult{Response: "Completed task output."})
-
-		res, err := sink.Wait(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected wait error: %v", err)
-		}
-		if res.Response != "Completed task output." {
-			t.Errorf("expected non-streaming response preserved, got %q", res.Response)
-		}
-	})
+	}
 }
 
 func TestBufferingTurnSink_StepResetPurgesBuffer(t *testing.T) {
-	t.Run("Step transition purges intermediate chatter from prior steps", func(t *testing.T) {
-		var stepHookCalls []int
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{
-			OnStepStarted: func(idx int) {
-				stepHookCalls = append(stepHookCalls, idx)
+	t.Parallel()
+	type stepEvent struct {
+		stepIdx int
+		deltas  []string
+	}
+	tests := []struct {
+		name          string
+		steps         []stepEvent
+		resultPayload string
+		wantResponse  string
+		wantHookCalls []int
+	}{
+		{
+			name: "Step transition purges intermediate chatter from prior steps",
+			steps: []stepEvent{
+				{stepIdx: 348, deltas: []string{"I will wait for the background task to complete..."}},
+				{stepIdx: 349, deltas: []string{"Checking tasks..."}},
+				{stepIdx: 352, deltas: []string{"All tasks completed cleanly! ", "Deliverable is ready."}},
 			},
+			resultPayload: "I will wait for the background task to complete... Checking tasks... All tasks completed cleanly! Deliverable is ready.",
+			wantResponse:  "All tasks completed cleanly! Deliverable is ready.",
+			wantHookCalls: []int{348, 349, 352},
+		},
+		{
+			name: "Step transition with silent terminal step suppresses resurrected chatter",
+			steps: []stepEvent{
+				{stepIdx: 1, deltas: []string{"Intermediate waiting commentary."}},
+				{stepIdx: 2, deltas: nil},
+			},
+			resultPayload: "Intermediate waiting commentary.",
+			wantResponse:  "",
+		},
+		{
+			name: "Single step with deltas retains output without purge",
+			steps: []stepEvent{
+				{stepIdx: 1, deltas: []string{"Clean direct response."}},
+			},
+			resultPayload: "Clean direct response.",
+			wantResponse:  "Clean direct response.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var hookCalls []int
+			cfg := BufferingTurnSinkConfig{}
+			if tc.wantHookCalls != nil {
+				cfg.OnStepStarted = func(idx int) {
+					hookCalls = append(hookCalls, idx)
+				}
+			}
+			sink := NewBufferingTurnSink(cfg)
+			for i, s := range tc.steps {
+				sink.OnStepStarted(s.stepIdx)
+				if i > 0 && len(s.deltas) == 0 {
+					if sink.AccumulatedText() != "" {
+						t.Errorf("expected empty buffer after step start %d, got %q", s.stepIdx, sink.AccumulatedText())
+					}
+				}
+				for _, d := range s.deltas {
+					sink.OnTextDelta(d)
+				}
+				if len(s.deltas) > 0 && sink.AccumulatedText() == "" {
+					t.Fatalf("expected non-empty buffer during step %d", s.stepIdx)
+				}
+			}
+			sink.OnResult(&TurnResult{Response: tc.resultPayload})
+			res, err := sink.Wait(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected wait error: %v", err)
+			}
+			if res.Response != tc.wantResponse {
+				t.Errorf("expected response %q, got %q", tc.wantResponse, res.Response)
+			}
+			if tc.wantHookCalls != nil {
+				if len(hookCalls) != len(tc.wantHookCalls) {
+					t.Fatalf("expected hook calls %v, got %v", tc.wantHookCalls, hookCalls)
+				}
+				for i, want := range tc.wantHookCalls {
+					if hookCalls[i] != want {
+						t.Errorf("step hook call %d: got %d, want %d", i, hookCalls[i], want)
+					}
+				}
+			}
 		})
-
-		// Step 348: Model emits intermediate waiting text
-		sink.OnStepStarted(348)
-		sink.OnTextDelta("I will wait for the background task to complete...")
-		if sink.AccumulatedText() == "" {
-			t.Fatalf("expected non-empty buffer during step 348")
-		}
-
-		// Step 349: Subagent review completes (system update) -> step index advances
-		sink.OnStepStarted(349)
-		if sink.AccumulatedText() != "" {
-			t.Errorf("expected buffer reset after step 349, got %q", sink.AccumulatedText())
-		}
-
-		// Step 350: Intermediate triage delta
-		sink.OnTextDelta("Checking tasks...")
-
-		// Step 352: Terminal deliverable step
-		sink.OnStepStarted(352)
-		if sink.AccumulatedText() != "" {
-			t.Errorf("expected buffer reset after step 352, got %q", sink.AccumulatedText())
-		}
-		sink.OnTextDelta("All tasks completed cleanly! ")
-		sink.OnTextDelta("Deliverable is ready.")
-
-		// Incoming agy result with concatenated multi-step text
-		sink.OnResult(&TurnResult{
-			Response: "I will wait for the background task to complete... Checking tasks... All tasks completed cleanly! Deliverable is ready.",
-		})
-
-		res, err := sink.Wait(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected wait error: %v", err)
-		}
-		expected := "All tasks completed cleanly! Deliverable is ready."
-		if res.Response != expected {
-			t.Errorf("expected clean terminal response %q, got %q", expected, res.Response)
-		}
-
-		// Verify step hooks fired in order
-		if len(stepHookCalls) != 3 || stepHookCalls[0] != 348 || stepHookCalls[1] != 349 || stepHookCalls[2] != 352 {
-			t.Errorf("unexpected step hook calls: %v", stepHookCalls)
-		}
-	})
-
-	t.Run("Step transition with silent terminal step suppresses resurrected chatter", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-
-		// Step 1: Model emits waiting text
-		sink.OnStepStarted(1)
-		sink.OnTextDelta("Intermediate waiting commentary.")
-
-		// Step 2: Tool execution with zero post-tool deltas
-		sink.OnStepStarted(2)
-		if sink.AccumulatedText() != "" {
-			t.Errorf("expected buffer reset on step 2, got %q", sink.AccumulatedText())
-		}
-
-		// agy returns concatenated result containing step 1 text
-		sink.OnResult(&TurnResult{
-			Response: "Intermediate waiting commentary.",
-		})
-
-		res, err := sink.Wait(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected wait error: %v", err)
-		}
-		if res.Response != "" {
-			t.Errorf("expected resurrected chatter to be suppressed, got %q", res.Response)
-		}
-	})
-
-	t.Run("Single step with deltas retains output without purge", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		sink.OnStepStarted(1)
-		sink.OnTextDelta("Clean direct response.")
-
-		sink.OnResult(&TurnResult{Response: "Clean direct response."})
-
-		res, err := sink.Wait(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected wait error: %v", err)
-		}
-		if res.Response != "Clean direct response." {
-			t.Errorf("expected response preserved, got %q", res.Response)
-		}
-	})
+	}
 }
 
 func TestBufferingTurnSink_DeltaRescueOnError(t *testing.T) {
@@ -519,27 +526,35 @@ func TestBufferingTurnSink_NonSubstantiveErrorPropagated(t *testing.T) {
 }
 
 func TestBufferingTurnSink_WaitContextCancelled(t *testing.T) {
-	t.Run("PreCancelled", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		_, err := sink.Wait(ctx)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected context.Canceled, got %v", err)
-		}
-	})
-
-	t.Run("CancelledWhileWaiting", func(t *testing.T) {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		defer cancel()
-
-		_, err := sink.Wait(ctx)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
-		}
-	})
+	t.Parallel()
+	tests := []struct {
+		name       string
+		preCancel  bool
+		waitCancel bool
+		wantErr    error
+	}{
+		{name: "PreCancelled", preCancel: true, wantErr: context.Canceled},
+		{name: "CancelledWhileWaiting", waitCancel: true, wantErr: context.DeadlineExceeded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if tc.preCancel {
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			} else if tc.waitCancel {
+				ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+			}
+			_, err := sink.Wait(ctx)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+		})
+	}
 }
 
 func TestBufferingTurnSink_ToolAndSkillHooks(t *testing.T) {

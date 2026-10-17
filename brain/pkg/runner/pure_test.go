@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -521,36 +522,66 @@ func (e *errWriter) Write(p []byte) (int, error) {
 
 func TestWriteWorkerTurn(t *testing.T) {
 	t.Parallel()
-	t.Run("Nil Writer", func(t *testing.T) {
-		t.Parallel()
-		err := WriteWorkerTurn(nil, "hello")
-		if err == nil {
-			t.Fatal("expected error on nil writer")
-		}
-	})
+	tests := []struct {
+		name      string
+		useNil    bool
+		useErr    bool
+		prompt    string
+		wantErr   string
+		wantSub   []string
+	}{
+		{
+			name:    "Nil Writer",
+			useNil:  true,
+			prompt:  "hello",
+			wantErr: "writer is nil",
+		},
+		{
+			name:    "Valid Write",
+			prompt:  "hello world",
+			wantSub: []string{`"event":"user"`, "hello world", "\n"},
+		},
+		{
+			name:    "Writer Error Surfaces",
+			useErr:  true,
+			prompt:  "hello",
+			wantErr: "disk full",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var w io.Writer
+			var buf bytes.Buffer
+			if tc.useNil {
+				w = nil
+			} else if tc.useErr {
+				w = &errWriter{err: errors.New("disk full")}
+			} else {
+				w = &buf
+			}
 
-	t.Run("Valid Write", func(t *testing.T) {
-		t.Parallel()
-		var buf bytes.Buffer
-		err := WriteWorkerTurn(&buf, "hello world")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		got := buf.String()
-		if !strings.Contains(got, `"event":"user"`) || !strings.Contains(got, "hello world") || !strings.HasSuffix(got, "\n") {
-			t.Errorf("unexpected output payload: %q", got)
-		}
-	})
-
-	t.Run("Writer Error Surfaces", func(t *testing.T) {
-		t.Parallel()
-		expectedErr := errors.New("disk full")
-		ew := &errWriter{err: expectedErr}
-		err := WriteWorkerTurn(ew, "hello")
-		if err == nil || !strings.Contains(err.Error(), "disk full") {
-			t.Fatalf("expected writer error to surface, got: %v", err)
-		}
-	})
+			err := WriteWorkerTurn(w, tc.prompt)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got := buf.String()
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("expected output to contain %q, got: %q", sub, got)
+				}
+			}
+			if !strings.HasSuffix(got, "\n") {
+				t.Errorf("expected output to end with newline, got: %q", got)
+			}
+		})
+	}
 }
 
 
@@ -636,8 +667,22 @@ func TestExtractSubagentID(t *testing.T) {
 }
 
 func TestWriteWorkerTurn_NilWriter(t *testing.T) {
-	if err := WriteWorkerTurn(nil, "hello"); err == nil {
-		t.Errorf("expected error on nil writer")
+	t.Parallel()
+	tests := []struct {
+		name    string
+		prompt  string
+		wantErr bool
+	}{
+		{name: "NilWriterReturnsError", prompt: "hello", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := WriteWorkerTurn(nil, tc.prompt)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("WriteWorkerTurn(nil) err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
