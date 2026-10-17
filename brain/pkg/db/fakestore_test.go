@@ -855,3 +855,52 @@ func TestFakeStoreActiveTasksAndConversationMapping(t *testing.T) {
 	}
 }
 
+func TestFakeStore_FindUnrotatedSessionsAndSessionUpdatedAt(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+
+	// 1. Initial save and increment turns
+	if err := s.SaveSessionID(ctx, "thread-1", "session-1"); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := s.IncrementSessionTurnCount(ctx, "thread-1"); err != nil {
+			t.Fatalf("IncrementSessionTurnCount failed: %v", err)
+		}
+	}
+
+	// 2. SetSessionUpdatedAt to past
+	past := time.Now().UTC().Add(-2 * time.Hour)
+	s.SetSessionUpdatedAt("thread-1", past)
+
+	// 3. FindUnrotatedSessions with default maxAge (1h) - should not find thread-1 since it's 2h old
+	unrotated, err := s.FindUnrotatedSessions(ctx, 5)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions failed: %v", err)
+	}
+	if len(unrotated) != 0 {
+		t.Errorf("expected 0 unrotated sessions within 1h, got %d", len(unrotated))
+	}
+
+	// 4. FindUnrotatedSessions with 4h maxAge - should find thread-1
+	unrotatedLong, err := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions with 4h failed: %v", err)
+	}
+	if len(unrotatedLong) != 1 || unrotatedLong[0].ThreadID != "thread-1" {
+		t.Errorf("expected 1 unrotated session, got %+v", unrotatedLong)
+	}
+
+	// 5. FindUnrotatedSessions with minTurns <= 0 (defaults to session.DefaultMaxSessionTurns)
+	_, err = s.FindUnrotatedSessions(ctx, 0)
+	if err != nil {
+		t.Fatalf("FindUnrotatedSessions with 0 minTurns failed: %v", err)
+	}
+
+	// 6. Closed store returns error
+	_ = s.Close()
+	if _, err := s.FindUnrotatedSessions(ctx, 5); !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("expected ErrConnDone on closed FindUnrotatedSessions, got %v", err)
+	}
+}
+

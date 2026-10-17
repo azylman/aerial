@@ -319,6 +319,9 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if err := s.SaveConversationMapping(ctx, "ext", "int"); err == nil {
 		t.Errorf("expected error on SaveConversationMapping nil store")
 	}
+	if _, err := s.FindUnrotatedSessions(ctx, 8); err == nil {
+		t.Errorf("expected error on FindUnrotatedSessions nil store")
+	}
 
 	storeWithNilDB := &SQLStore{db: nil}
 	if _, err := storeWithNilDB.GetActiveTasks(ctx); err == nil {
@@ -521,46 +524,5 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	}
 	if err := store.CreateCronSchedule(ctx, cron); err != nil {
 		t.Fatalf("failed to create cron schedule: %v", err)
-	}
-
-	// 5. Comprehensive pass-through coverage for remaining SQLStore methods
-	_, _ = store.SearchSimilarFacts(ctx, nil, "query", 5, 0.1)
-	_ = store.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-pass", ThreadID: "chan-1", Prompt: "p", RunAt: time.Now().Add(time.Hour)})
-	_, _ = store.GetDueOneShotSchedules(ctx)
-	_ = store.InsertMessageAndConsumeOneShot(ctx, "os-pass", Message{ID: "m-os-pass", ThreadID: "chan-1", Status: StatusPending})
-	_, _ = store.ClaimPendingMessage(ctx, "m-os-pass")
-	_, _ = store.GetFactsByThreadWithEmbeddings(ctx, "ext-thread-99")
-	_, _ = store.GetActiveConversationsForExtraction(ctx, 24)
-	_ = store.UpdateConversationFactWatermark(ctx, "ext-thread-99", 10)
-	_ = store.UpdateConversationFactExtractedAt(ctx, "ext-thread-99")
-	_, _ = store.GetAllOneShotSchedules(ctx, "ext-thread-99")
-	_, _ = store.GetAllCronSchedules(ctx, "chan-1")
-	_ = store.UpdateCronNextRun(ctx, "cs-effort-1", time.Now().Add(2*time.Hour))
-	_, _, _ = store.GetScheduleRunsPaginated(ctx, 10, 0, "cs1", "success")
-	_, _ = store.GetScheduleSummaryMetrics(ctx)
-	_, _ = store.ReconcileOrphanedScheduleRuns(ctx)
-	_, _ = store.PruneScheduleRuns(ctx, 100, 24*time.Hour)
-	_ = store.UpdateMessageStatus(ctx, "m-sqlstore-task", StatusProcessing, "w1")
-	_ = store.UpdateMessageCompleted(ctx, "m-sqlstore-task", "done")
-	_ = store.IncrementMessageRetry(ctx, "m-sqlstore-task", "err")
-	_ = store.ResetMessageToPendingWithRestart(ctx, "m-sqlstore-task", "reason")
-	_, _ = store.GetMessage(ctx, "m-sqlstore-task")
-	_, _ = store.MessageExists(ctx, "m-sqlstore-task")
-	_, _ = store.GetActiveRecentThreadIDs(ctx, time.Hour)
-	_, _ = store.GetRecentThreadMessages(ctx, "ext-thread-99", 10)
-	_, _ = store.GetMaxMessageRowID(ctx, "ext-thread-99")
-	_, _ = store.GetSessionID(ctx, "ext-thread-99")
-	_ = store.SaveSessionID(ctx, "ext-thread-99", "sess-1")
-	_, _ = store.IncrementSessionTurnCount(ctx, "ext-thread-99")
-	_, _ = store.GetSessionTurnCount(ctx, "ext-thread-99")
-	_ = store.RotateSessionID(ctx, "ext-thread-99", "sess-2")
-	_, _ = store.GetPreviousSessionID(ctx, "ext-thread-99")
-
-	var nilStore *SQLStore
-	if err := execDB(nilStore, func(DBTX) error { return nil }); err == nil {
-		t.Errorf("expected error calling execDB on nil SQLStore")
-	}
-	if _, err := queryDB[int](nilStore, func(DBTX) (int, error) { return 0, nil }); err == nil {
-		t.Errorf("expected error calling queryDB on nil SQLStore")
 	}
 }
