@@ -2366,7 +2366,6 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 			AcceptanceCriteria: criteria,
 			Status:             cStatus,
 			PRNumber:           c.PRNumber,
-			DiffStat:           c.DiffStat,
 			StartedAt:          startedAt,
 			CreatedAt:          now,
 			UpdatedAt:          now,
@@ -2463,8 +2462,8 @@ func (f *FakeStore) UpdateVanadisChunkStatus(ctx context.Context, chunkID, statu
 	return nil
 }
 
-// AttachVanadisChunkPR links an opened Pull Request and diff stat to a VanadisChunk and marks it 'pr_opened'.
-func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int, diffStat string) error {
+// AttachVanadisChunkPR links an opened Pull Request to a VanadisChunk and marks it 'pr_opened'.
+func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -2485,7 +2484,6 @@ func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, pr
 		return ErrVanadisChunkNotFound
 	}
 	c.PRNumber = prNumber
-	c.DiffStat = diffStat
 	c.Status = "pr_opened"
 	if c.StartedAt.IsZero() {
 		if !c.CreatedAt.IsZero() {

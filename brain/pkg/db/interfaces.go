@@ -186,7 +186,7 @@ type VanadisStore interface {
 	GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
 	GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error)
 	UpdateVanadisChunkStatus(ctx context.Context, chunkID, status string) error
-	AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int, diffStat string) error
+	AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int) error
 	UpdateVanadisBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
 }

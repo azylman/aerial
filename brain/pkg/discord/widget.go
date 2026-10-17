@@ -16,7 +16,6 @@ type StatusWidgetChunk struct {
 	Title         string    `json:"title"`
 	Status        string    `json:"status"`
 	PRNumber      int       `json:"pr_number,omitempty"`
-	DiffStat      string    `json:"diff_stat,omitempty"`
 	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
 	StartedAt     time.Time `json:"started_at,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at,omitempty"`

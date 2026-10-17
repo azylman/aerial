@@ -1071,8 +1071,6 @@ submit_scratch() {
         meta_json=$(jq -n --argjson jobs "$changed_jobs_json" '{jobs: $jobs}')
     fi
 
-    local diff_stat=""
-    diff_stat=$(git show --stat --format="" HEAD 2>/dev/null || true)
 
     local reg_payload
     reg_payload=$(jq -n \
@@ -1084,8 +1082,7 @@ submit_scratch() {
         --arg title "$clean_title" \
         --arg metadata "$meta_json" \
         --arg vanadis_chunk_id "$vanadis_chunk_id" \
-        --arg diff_stat "$diff_stat" \
-        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $metadata, vanadis_chunk_id: $vanadis_chunk_id, diff_stat: $diff_stat}')
+        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $metadata, vanadis_chunk_id: $vanadis_chunk_id}')
 
     if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
         if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then

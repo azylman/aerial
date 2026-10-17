@@ -96,14 +96,13 @@ func (r *mockRows) Scan(dest ...any) error {
 	*(dest[9].(*[]string)) = c.AcceptanceCriteria
 	*(dest[10].(*string)) = c.Status
 	*(dest[11].(*int)) = c.PRNumber
-	*(dest[12].(*string)) = c.DiffStat
 	if !c.StartedAt.IsZero() {
-		*(dest[13].(*sql.NullTime)) = sql.NullTime{Time: c.StartedAt, Valid: true}
+		*(dest[12].(*sql.NullTime)) = sql.NullTime{Time: c.StartedAt, Valid: true}
 	} else {
-		*(dest[13].(*sql.NullTime)) = sql.NullTime{}
+		*(dest[12].(*sql.NullTime)) = sql.NullTime{}
 	}
-	*(dest[14].(*time.Time)) = c.CreatedAt
-	*(dest[15].(*time.Time)) = c.UpdatedAt
+	*(dest[13].(*time.Time)) = c.CreatedAt
+	*(dest[14].(*time.Time)) = c.UpdatedAt
 	return nil
 }
 
@@ -737,7 +736,6 @@ func TestFormatChunkPrompt(t *testing.T) {
 			TargetFiles:  []string{"brain/schema.sql"},
 			Status:       "merged",
 			PRNumber:     101,
-			DiffStat:     "1 file changed, 25 insertions(+)",
 		},
 		{
 			ID:                 "build-999-chunk-2",
@@ -791,7 +789,6 @@ func TestFormatChunkPrompt(t *testing.T) {
 		"Build Title: Build Vanadis Queue Execution Pipeline",
 		"=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.",
 		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)",
-		"DiffStat: 1 file changed, 25 insertions(+)",
 		"=== Active Chunk (Chunk 2 of 3) ===",
 		"Repository: azylman/aerial",
 		"Target Files: vanadis/main.go, vanadis/main_test.go",

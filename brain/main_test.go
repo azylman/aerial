@@ -4669,7 +4669,7 @@ func TestHandlePRRegister(t *testing.T) {
 		}
 	}
 
-	// 7. Successful Registration with vanadis_chunk_id and diff_stat
+	// 7. Successful Registration with vanadis_chunk_id
 	{
 		err := store.CreateVanadisBuild(context.Background(), db.VanadisBuild{
 			ID:        "build-reg-1",
@@ -4688,7 +4688,7 @@ func TestHandlePRRegister(t *testing.T) {
 			t.Fatalf("CreateVanadisBuild failed: %v", err)
 		}
 
-		payload := `{"repo":"aerial","pr_number":510,"branch":"feat/vanadis-chunk","head_sha":"head510","target_id":"discord:worker-0","title":"feat: vanadis chunk","vanadis_chunk_id":"chunk-reg-1","diff_stat":" 2 files changed, 45 insertions(+)"}`
+		payload := `{"repo":"aerial","pr_number":510,"branch":"feat/vanadis-chunk","head_sha":"head510","target_id":"discord:worker-0","title":"feat: vanadis chunk","vanadis_chunk_id":"chunk-reg-1"}`
 		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
 		rec := httptest.NewRecorder()
 		handler(rec, req)
@@ -4705,14 +4705,14 @@ func TestHandlePRRegister(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetVanadisChunk failed: %v", err)
 		}
-		if chunk.PRNumber != 510 || chunk.Status != "pr_opened" || chunk.DiffStat != "2 files changed, 45 insertions(+)" {
+		if chunk.PRNumber != 510 || chunk.Status != "pr_opened" {
 			t.Errorf("Unexpected Vanadis chunk state after PR register: %+v", chunk)
 		}
 	}
 
 	// 8. Registration with non-existent vanadis_chunk_id returns 500
 	{
-		payload := `{"repo":"aerial","pr_number":511,"branch":"feat/vanadis-chunk-bad","head_sha":"head511","target_id":"1555405874565091380","vanadis_chunk_id":"missing-chunk-id","diff_stat":"1 file changed"}`
+		payload := `{"repo":"aerial","pr_number":511,"branch":"feat/vanadis-chunk-bad","head_sha":"head511","target_id":"1555405874565091380","vanadis_chunk_id":"missing-chunk-id"}`
 		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
 		rec := httptest.NewRecorder()
 		handler(rec, req)
@@ -4732,7 +4732,7 @@ func TestHandlePRRegister(t *testing.T) {
 		})
 		poolHandler := handlePRRegister(store, testPool)
 
-		payload := `{"repo":"aerial","pr_number":601,"branch":"feat/standalone","head_sha":"sha601","target_id":"1555405874565091380","title":"feat: standalone pr","diff_stat":"+10 -2"}`
+		payload := `{"repo":"aerial","pr_number":601,"branch":"feat/standalone","head_sha":"sha601","target_id":"1555405874565091380","title":"feat: standalone pr"}`
 		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
 		rec := httptest.NewRecorder()
 		poolHandler(rec, req)
@@ -4779,7 +4779,7 @@ func TestHandlePRRegister(t *testing.T) {
 		})
 		poolHandler := handlePRRegister(store, testPool)
 
-		payload := `{"repo":"aerial","pr_number":602,"branch":"feat/vanadis-widget","head_sha":"sha602","target_id":"1555405874565091380","title":"feat: vanadis widget","vanadis_chunk_id":"chunk-reg-widget-0","diff_stat":"+50 -1"}`
+		payload := `{"repo":"aerial","pr_number":602,"branch":"feat/vanadis-widget","head_sha":"sha602","target_id":"1555405874565091380","title":"feat: vanadis widget","vanadis_chunk_id":"chunk-reg-widget-0"}`
 		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
 		rec := httptest.NewRecorder()
 		poolHandler(rec, req)

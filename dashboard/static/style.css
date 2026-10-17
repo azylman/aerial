@@ -2993,17 +2993,6 @@ body::after {
     border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.diff-stat-block {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--text-dim);
-    background: rgba(0, 0, 0, 0.35);
-    padding: 8px;
-    border-radius: 4px;
-    overflow-x: auto;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
 .drawer-no-chunks {
     font-size: 0.8rem;
     color: var(--text-dim);
