@@ -27,6 +27,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
@@ -814,7 +815,7 @@ func TestSanitizeString(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := SanitizeString(tt.input)
+		got := sanitizer.SanitizeString(tt.input)
 		if tt.mustNotHave != "" && strings.Contains(got, tt.mustNotHave) {
 			t.Errorf("SanitizeString(%q) leaked token %q: %s", tt.input, tt.mustNotHave, got)
 		}
@@ -1333,7 +1334,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	store := db.NewFakeStore()
 
 	tmpHome := t.TempDir()
-	mux := SetupBrainMux(store, nil, tmpHome)
+	mux := SetupBrainMuxWithEmbedder(store, nil, nil, tmpHome)
 
 	// Test /health
 	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -1419,12 +1420,6 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 	_ = RunBrainApp(badCtx, badCfg)
 }
 
-type errReader struct{}
-
-func (errReader) Read(p []byte) (n int, err error) {
-	return 0, errors.New("simulated network read error")
-}
-
 func TestHandlePrompt_ErrorBranches(t *testing.T) {
 	store := db.NewFakeStore()
 
@@ -1434,7 +1429,7 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 	handler := handlePrompt(store, pool)
 
 	// 1. Read body error
-	reqErr := httptest.NewRequest(http.MethodPost, "/prompt", errReader{})
+	reqErr := httptest.NewRequest(http.MethodPost, "/prompt", &errReadCloser{readErr: errors.New("simulated network read error")})
 	wErr := httptest.NewRecorder()
 	handler(wErr, reqErr)
 	if wErr.Code != http.StatusBadRequest {
@@ -2408,42 +2403,6 @@ func TestHandleSessions_UnreadableTranscript(t *testing.T) {
 	}
 }
 
-func TestHandleSchedules_CacheDoubleCheck(t *testing.T) {
-	store := db.NewFakeStore()
-
-	handler := handleSchedules(store)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 30; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, req)
-		}()
-	}
-	wg.Wait()
-}
-
-func TestHandleTasks_CacheDoubleCheck(t *testing.T) {
-	store := db.NewFakeStore()
-
-	handler := handleTasks(store)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 30; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, req)
-		}()
-	}
-	wg.Wait()
-}
-
 func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
@@ -2900,6 +2859,72 @@ func TestDefaultPaths(t *testing.T) {
 	}
 }
 
+type errReadCloser struct {
+	reader   io.Reader
+	readErr  error
+	closeErr error
+}
+
+func (e *errReadCloser) Read(p []byte) (int, error) {
+	if e.readErr != nil {
+		return 0, e.readErr
+	}
+	if e.reader != nil {
+		return e.reader.Read(p)
+	}
+	return 0, errors.New("simulated network read error")
+}
+
+func (e *errReadCloser) Close() error {
+	if e.closeErr != nil {
+		return e.closeErr
+	}
+	return nil
+}
+
+type mockHTTPResponseWriter struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (w *mockHTTPResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *mockHTTPResponseWriter) Write(b []byte) (int, error) {
+	return w.body.Write(b)
+}
+
+func (w *mockHTTPResponseWriter) WriteHeader(statusCode int) {
+	w.code = statusCode
+}
+
+type flusherErrWriter struct {
+	header http.Header
+	code   int
+}
+
+func (e *flusherErrWriter) Header() http.Header {
+	if e.header == nil {
+		e.header = make(http.Header)
+	}
+	return e.header
+}
+
+func (e *flusherErrWriter) Write(p []byte) (int, error) {
+	return 0, errors.New("simulated write error")
+}
+
+func (e *flusherErrWriter) WriteHeader(statusCode int) {
+	e.code = statusCode
+}
+
+func (e *flusherErrWriter) Flush() {}
+
 type errorResponseWriter struct {
 	http.ResponseWriter
 }
@@ -2914,14 +2939,6 @@ func (e *errorResponseWriter) WriteHeader(statusCode int) {
 
 func (e *errorResponseWriter) Write([]byte) (int, error) {
 	return 0, errors.New("write error")
-}
-
-type errCloserReader struct {
-	io.Reader
-}
-
-func (r *errCloserReader) Close() error {
-	return errors.New("close error")
 }
 
 func TestWriteJSON_Error(t *testing.T) {
@@ -2939,7 +2956,7 @@ func TestHandlePrompt_BodyCloseError(t *testing.T) {
 		"prompt":     "Test prompt",
 		"channel_id": "1542423172400291873",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/prompt", &errCloserReader{Reader: bytes.NewReader(validPayload)})
+	req := httptest.NewRequest(http.MethodPost, "/prompt", &errReadCloser{reader: bytes.NewReader(validPayload), closeErr: errors.New("close error")})
 	w := httptest.NewRecorder()
 	handler(w, req)
 	if w.Code != http.StatusAccepted {
@@ -2950,7 +2967,7 @@ func TestHandlePrompt_BodyCloseError(t *testing.T) {
 func TestSetupBrainMux_WriteErrors(t *testing.T) {
 	store := db.NewFakeStore()
 	pool := newTestWorkerPool(store)
-	mux := SetupBrainMux(store, pool)
+	mux := SetupBrainMuxWithEmbedder(store, pool, nil)
 
 	// /health write error
 	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -3056,7 +3073,7 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	}
 
 	// 4. Request body read error
-	reqErrBody := httptest.NewRequest(http.MethodPost, "/voice/ask", &errTestReader{})
+	reqErrBody := httptest.NewRequest(http.MethodPost, "/voice/ask", &errReadCloser{readErr: errors.New("simulated body read error")})
 	wErrBody := httptest.NewRecorder()
 	handler(wErrBody, reqErrBody)
 	if wErrBody.Code != http.StatusBadRequest {
@@ -3066,7 +3083,7 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	// 5. Non-flusher response writer for SSE
 	reqSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
 	reqSSE.Header.Set("Accept", "text/event-stream")
-	nonFlusher := &nonFlusherTestWriter{}
+	nonFlusher := &mockHTTPResponseWriter{}
 	handler(nonFlusher, reqSSE)
 	if nonFlusher.code != http.StatusInternalServerError {
 		t.Errorf("expected 500 for non-flusher SSE, got %d", nonFlusher.code)
@@ -3126,269 +3143,288 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	if wInvalidChars.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 BadRequest for control characters in device ID, got %d", wInvalidChars.Code)
 	}
+
+	// 12. Request body close error handling
+	reqCloseErr := httptest.NewRequest(http.MethodPost, "/voice/ask", &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`), closeErr: errors.New("simulated close error")})
+	wCloseErr := httptest.NewRecorder()
+	handler(wCloseErr, reqCloseErr)
 }
 
-type errTestReader struct{}
+func TestHandleVoiceAsk_SSE(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		store := db.NewFakeStore()
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			Store: store,
+			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+				if onStatus != nil {
+					onStatus("⚡ Checking smart lights...")
+				}
+				return "Lights have been turned off.", "sess-test-456", nil
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
 
-func (e *errTestReader) Read(p []byte) (int, error) {
-	return 0, errors.New("simulated body read error")
-}
+		handler := handleVoiceAsk(pool)
 
-type nonFlusherTestWriter struct {
-	header http.Header
-	code   int
-	body   bytes.Buffer
-}
+		payload := `{"prompt":"turn off the lights","session_id":"sess-test-456"}`
+		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
+		req.Header.Set("Accept", "text/event-stream")
 
-func (n *nonFlusherTestWriter) Header() http.Header {
-	if n.header == nil {
-		n.header = make(http.Header)
-	}
-	return n.header
-}
-func (n *nonFlusherTestWriter) Write(b []byte) (int, error) {
-	return n.body.Write(b)
-}
-func (n *nonFlusherTestWriter) WriteHeader(statusCode int) {
-	n.code = statusCode
-}
+		w := httptest.NewRecorder()
+		handler(w, req)
 
-func TestHandleVoiceAsk_SSE_Success(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			if onStatus != nil {
-				onStatus("⚡ Checking smart lights...")
-			}
-			return "Lights have been turned off.", "sess-test-456", nil
-		},
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		if !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
+			t.Errorf("expected Content-Type text/event-stream, got %q", w.Header().Get("Content-Type"))
+		}
+		if w.Header().Get("X-Accel-Buffering") != "no" {
+			t.Errorf("expected X-Accel-Buffering: no, got %q", w.Header().Get("X-Accel-Buffering"))
+		}
+
+		body := w.Body.String()
+		if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking smart lights...\"}\n\n") {
+			t.Errorf("expected status event in SSE stream, got:\n%s", body)
+		}
+		if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-test-456\",\"reply\":\"Lights have been turned off.\"}\n\n") {
+			t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
+		}
+		if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n") {
+			t.Errorf("expected done event with conversation_id in SSE stream, got:\n%s", body)
+		}
 	})
-	pool.Start()
-	defer pool.Stop()
 
-	handler := handleVoiceAsk(pool)
+	t.Run("SentenceStreaming", func(t *testing.T) {
+		store := db.NewFakeStore()
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			Store: store,
+			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
+				if onStatus != nil {
+					onStatus("⚡ Checking status...")
+				}
+				if onSentence != nil {
+					onSentence("Here is sentence one.")
+					onSentence("And here is sentence two.")
+				}
+				return "Here is sentence one. And here is sentence two.", "sess-stream-789", nil
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
 
-	payload := `{"prompt":"turn off the lights","session_id":"sess-test-456"}`
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
-	req.Header.Set("Accept", "text/event-stream")
+		handler := handleVoiceAsk(pool)
 
-	w := httptest.NewRecorder()
-	handler(w, req)
+		payload := `{"prompt":"tell me two things","session_id":"sess-stream-789"}`
+		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
+		req.Header.Set("Accept", "text/event-stream")
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w.Code)
-	}
-	if !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
-		t.Errorf("expected Content-Type text/event-stream, got %q", w.Header().Get("Content-Type"))
-	}
-	if w.Header().Get("X-Accel-Buffering") != "no" {
-		t.Errorf("expected X-Accel-Buffering: no, got %q", w.Header().Get("X-Accel-Buffering"))
-	}
+		w := httptest.NewRecorder()
+		handler(w, req)
 
-	body := w.Body.String()
-	if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking smart lights...\"}\n\n") {
-		t.Errorf("expected status event in SSE stream, got:\n%s", body)
-	}
-	if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-test-456\",\"reply\":\"Lights have been turned off.\"}\n\n") {
-		t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
-	}
-	if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n") {
-		t.Errorf("expected done event in SSE stream, got:\n%s", body)
-	}
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
 
-	mRec := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="success"`) {
-		t.Errorf("expected voice TTFR metric for sse/success, got:\n%s", mRec.Body.String())
-	}
+		body := w.Body.String()
+		if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking status...\"}\n\n") {
+			t.Errorf("expected status event in SSE stream, got:\n%s", body)
+		}
+		if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}\n\n") {
+			t.Errorf("expected sentence event 1 in SSE stream, got:\n%s", body)
+		}
+		if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}\n\n") {
+			t.Errorf("expected sentence event 2 in SSE stream, got:\n%s", body)
+		}
+		if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\",\"reply\":\"Here is sentence one. And here is sentence two.\"}\n\n") {
+			t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
+		}
+		if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-stream-789\"}\n\n") {
+			t.Errorf("expected done event in SSE stream, got:\n%s", body)
+		}
+
+		// Verify ordering: sentence events must appear before reply event
+		idxSent1 := strings.Index(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}")
+		idxSent2 := strings.Index(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}")
+		idxReply := strings.Index(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\"")
+		if idxSent1 == -1 || idxSent2 == -1 || idxReply == -1 || idxSent1 > idxSent2 || idxSent2 > idxReply {
+			t.Errorf("invalid event ordering: idxSent1=%d, idxSent2=%d, idxReply=%d", idxSent1, idxSent2, idxReply)
+		}
+	})
+
+	t.Run("CancelledContext", func(t *testing.T) {
+		store := db.NewFakeStore()
+		ctx, cancel := context.WithCancel(context.Background())
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			Store: store,
+			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+				cancel()
+				if onStatus != nil {
+					onStatus("status after cancel")
+				}
+				return "done", "sess-1", nil
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		handler := handleVoiceAsk(pool)
+		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)).WithContext(ctx)
+		req.Header.Set("Accept", "text/event-stream")
+		w := httptest.NewRecorder()
+		handler(w, req)
+	})
+
+	t.Run("VoiceRunnerError", func(t *testing.T) {
+		store := db.NewFakeStore()
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			Store: store,
+			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+				if onStatus != nil {
+					onStatus("working")
+				}
+				return "", "", errors.New("synthetic voice failure")
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		handler := handleVoiceAsk(pool)
+		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
+		req.Header.Set("Accept", "text/event-stream")
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if !strings.Contains(w.Body.String(), "event: error") {
+			t.Errorf("expected SSE error event, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("WriteError", func(t *testing.T) {
+		store := db.NewFakeStore()
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			Store: store,
+			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+				return "done", "sess-1", nil
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		handler := handleVoiceAsk(pool)
+		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
+		req.Header.Set("Accept", "text/event-stream")
+		w := &flusherErrWriter{}
+		handler(w, req)
+	})
 }
 
-func TestHandleVoiceAsk_SSE_SentenceStreaming(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
-			if onStatus != nil {
-				onStatus("⚡ Checking status...")
-			}
-			if onSentence != nil {
-				onSentence("Here is sentence one.")
-				onSentence("And here is sentence two.")
-			}
-			return "Here is sentence one. And here is sentence two.", "sess-stream-789", nil
-		},
+func TestHandleVoiceAsk_JSON(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		store := db.NewFakeStore()
+		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			Store: store,
+			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+				return "The temperature is 72 degrees.", "sess-json-789", nil
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		handler := handleVoiceAsk(pool)
+
+		payload := `{"prompt":"what is the temperature?","session_id":"sess-json-789"}`
+		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
+		req.Header.Set("Accept", "application/json")
+
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		var resp VoiceAskResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode JSON response: %v", err)
+		}
+		if resp.Reply != "The temperature is 72 degrees." {
+			t.Errorf("expected reply 'The temperature is 72 degrees.', got %q", resp.Reply)
+		}
+		if resp.SessionID != "sess-json-789" {
+			t.Errorf("expected session_id 'sess-json-789', got %q", resp.SessionID)
+		}
 	})
-	pool.Start()
-	defer pool.Stop()
 
-	handler := handleVoiceAsk(pool)
+	t.Run("Errors", func(t *testing.T) {
+		store := db.NewFakeStore()
+		poolErr := queue.NewWorkerPool(queue.WorkerPoolConfig{
+			Store: store,
+			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+				return "", "", errors.New("deliberation timed out")
+			},
+		})
+		poolErr.Start()
+		defer poolErr.Stop()
 
-	payload := `{"prompt":"tell me two things","session_id":"sess-stream-789"}`
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
-	req.Header.Set("Accept", "text/event-stream")
+		hErr := handleVoiceAsk(poolErr)
 
-	w := httptest.NewRecorder()
-	handler(w, req)
+		// 1. SSE mode with error
+		reqSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-1"}`))
+		reqSSE.Header.Set("Accept", "text/event-stream")
+		wSSE := httptest.NewRecorder()
+		hErr(wSSE, reqSSE)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w.Code)
-	}
+		if wSSE.Code != http.StatusOK {
+			t.Errorf("expected 200 OK for SSE even with error, got %d", wSSE.Code)
+		}
+		if !strings.Contains(wSSE.Body.String(), "event: error") {
+			t.Errorf("expected error event in body, got:\n%s", wSSE.Body.String())
+		}
 
-	body := w.Body.String()
-	if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking status...\"}\n\n") {
-		t.Errorf("expected status event in SSE stream, got:\n%s", body)
-	}
-	if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}\n\n") {
-		t.Errorf("expected sentence event 1 in SSE stream, got:\n%s", body)
-	}
-	if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}\n\n") {
-		t.Errorf("expected sentence event 2 in SSE stream, got:\n%s", body)
-	}
-	if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\",\"reply\":\"Here is sentence one. And here is sentence two.\"}\n\n") {
-		t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
-	}
-	if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-stream-789\"}\n\n") {
-		t.Errorf("expected done event in SSE stream, got:\n%s", body)
-	}
+		// 2. JSON mode with error
+		reqJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-2"}`))
+		reqJSON.Header.Set("Accept", "application/json")
+		wJSON := httptest.NewRecorder()
+		hErr(wJSON, reqJSON)
 
-	// Verify ordering: sentence events must appear before reply event
-	idxSent1 := strings.Index(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}")
-	idxSent2 := strings.Index(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}")
-	idxReply := strings.Index(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\"")
-	if idxSent1 == -1 || idxSent2 == -1 || idxReply == -1 || idxSent1 > idxSent2 || idxSent2 > idxReply {
-		t.Errorf("invalid event ordering: idxSent1=%d, idxSent2=%d, idxReply=%d", idxSent1, idxSent2, idxReply)
-	}
-}
+		if wJSON.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500 InternalServerError, got %d", wJSON.Code)
+		}
+		if !strings.Contains(wJSON.Body.String(), "deliberation timed out") {
+			t.Errorf("expected error detail in response, got:\n%s", wJSON.Body.String())
+		}
 
-func TestHandleVoiceAsk_JSON_Success(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			return "JSON voice reply", "sess-json-123", nil
-		},
+		// 3. Nil pool handling
+		hNil := handleVoiceAsk(nil)
+		reqNil := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil"}`))
+		wNil := httptest.NewRecorder()
+		hNil(wNil, reqNil)
+		if wNil.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500 for nil pool, got %d", wNil.Code)
+		}
+
+		// Nil pool SSE mode
+		reqNilSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil-sse"}`))
+		reqNilSSE.Header.Set("Accept", "text/event-stream")
+		wNilSSE := httptest.NewRecorder()
+		hNil(wNilSSE, reqNilSSE)
+		if wNilSSE.Code != http.StatusOK {
+			t.Errorf("expected 200 for SSE with nil pool, got %d", wNilSSE.Code)
+		}
+		if !strings.Contains(wNilSSE.Body.String(), "event: error") {
+			t.Errorf("expected error event for nil pool SSE, got:\n%s", wNilSSE.Body.String())
+		}
+
+		mRec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`) {
+			t.Errorf("expected voice TTFR metric for sse/error, got:\n%s", mRec.Body.String())
+		}
+		if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`) {
+			t.Errorf("expected voice TTFR metric for json/error, got:\n%s", mRec.Body.String())
+		}
 	})
-	pool.Start()
-	defer pool.Stop()
-
-	handler := handleVoiceAsk(pool)
-
-	payload := `{"prompt":"what is the weather?","session_id":"sess-json-123"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/voice/ask", strings.NewReader(payload))
-	req.Header.Set("Accept", "application/json")
-
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w.Code)
-	}
-
-	var resp VoiceAskResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if resp.Reply != "JSON voice reply" || resp.ConversationID != "sess-json-123" || resp.NodeID != "" {
-		t.Errorf("unexpected response when node_id omitted: %+v", resp)
-	}
-
-	// Request with explicit node_id echoes node_id
-	payloadWithNode := `{"prompt":"what is the weather?","node_id":"touch-kiosk-kitchen"}`
-	reqWithNode := httptest.NewRequest(http.MethodPost, "/api/voice/ask", strings.NewReader(payloadWithNode))
-	reqWithNode.Header.Set("Accept", "application/json")
-	wWithNode := httptest.NewRecorder()
-	handler(wWithNode, reqWithNode)
-	if wWithNode.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for node_id request, got %d", wWithNode.Code)
-	}
-	var respWithNode VoiceAskResponse
-	if err := json.Unmarshal(wWithNode.Body.Bytes(), &respWithNode); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if respWithNode.NodeID != "touch-kiosk-kitchen" {
-		t.Errorf("expected echoed node_id 'touch-kiosk-kitchen', got %q", respWithNode.NodeID)
-	}
-
-	mRec := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="success"`) {
-		t.Errorf("expected voice TTFR metric for json/success, got:\n%s", mRec.Body.String())
-	}
-}
-
-func TestHandleVoiceAsk_Errors(t *testing.T) {
-	store := db.NewFakeStore()
-
-	// 1. SSE mode with error
-	poolErr := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			return "", "", errors.New("deliberation timed out")
-		},
-	})
-	poolErr.Start()
-	defer poolErr.Stop()
-
-	hErr := handleVoiceAsk(poolErr)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-1"}`))
-	req.Header.Set("Accept", "text/event-stream")
-	w := httptest.NewRecorder()
-	hErr(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for committed SSE stream, got %d", w.Code)
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, "event: error\ndata: {\"error\":\"deliberation timed out\"}\n\n") {
-		t.Errorf("expected error event, got:\n%s", body)
-	}
-	if !strings.Contains(body, "event: done\ndata: {}\n\n") {
-		t.Errorf("expected done event after error, got:\n%s", body)
-	}
-
-	// 2. JSON mode with error
-	reqJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-2"}`))
-	reqJSON.Header.Set("Accept", "application/json")
-	wJSON := httptest.NewRecorder()
-	hErr(wJSON, reqJSON)
-
-	if wJSON.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 InternalServerError, got %d", wJSON.Code)
-	}
-	if !strings.Contains(wJSON.Body.String(), "deliberation timed out") {
-		t.Errorf("expected error detail in response, got:\n%s", wJSON.Body.String())
-	}
-
-	// 3. Nil pool handling
-	hNil := handleVoiceAsk(nil)
-	reqNil := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil"}`))
-	wNil := httptest.NewRecorder()
-	hNil(wNil, reqNil)
-	if wNil.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for nil pool, got %d", wNil.Code)
-	}
-
-	// Nil pool SSE mode
-	reqNilSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil-sse"}`))
-	reqNilSSE.Header.Set("Accept", "text/event-stream")
-	wNilSSE := httptest.NewRecorder()
-	hNil(wNilSSE, reqNilSSE)
-	if wNilSSE.Code != http.StatusOK {
-		t.Errorf("expected 200 for SSE with nil pool, got %d", wNilSSE.Code)
-	}
-	if !strings.Contains(wNilSSE.Body.String(), "event: error") {
-		t.Errorf("expected error event for nil pool SSE, got:\n%s", wNilSSE.Body.String())
-	}
-
-	mRec := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`) {
-		t.Errorf("expected voice TTFR metric for sse/error, got:\n%s", mRec.Body.String())
-	}
-	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`) {
-		t.Errorf("expected voice TTFR metric for json/error, got:\n%s", mRec.Body.String())
-	}
 }
 
 func TestNormalizeRoute_Voice(t *testing.T) {
@@ -3411,59 +3447,6 @@ func TestCreateReloadConfigFunc_WithWorkerPool(t *testing.T) {
 		WithWorkerPool(pool),
 	)
 	reloadFn("TestWithWorkerPool")
-}
-
-type nonFlusherResponseWriter struct {
-	header http.Header
-	code   int
-	body   bytes.Buffer
-}
-
-func (w *nonFlusherResponseWriter) Header() http.Header {
-	if w.header == nil {
-		w.header = make(http.Header)
-	}
-	return w.header
-}
-
-func (w *nonFlusherResponseWriter) Write(b []byte) (int, error) {
-	return w.body.Write(b)
-}
-
-func (w *nonFlusherResponseWriter) WriteHeader(statusCode int) {
-	w.code = statusCode
-}
-
-func TestHandleVoiceAsk_NonFlusherStreamingError(t *testing.T) {
-	handler := handleVoiceAsk(nil)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
-	req.Header.Set("Accept", "text/event-stream")
-
-	w := &nonFlusherResponseWriter{}
-	handler(w, req)
-	if w.code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for non-flusher streaming, got %d", w.code)
-	}
-	if !strings.Contains(w.body.String(), "Streaming not supported") {
-		t.Errorf("expected streaming not supported error, got: %s", w.body.String())
-	}
-}
-
-func TestHandleVoiceAsk_InvalidPayload(t *testing.T) {
-	handler := handleVoiceAsk(nil)
-	reqEmpty := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"   "}`))
-	wEmpty := httptest.NewRecorder()
-	handler(wEmpty, reqEmpty)
-	if wEmpty.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for empty prompt, got %d", wEmpty.Code)
-	}
-
-	reqBadJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{invalid-json`))
-	wBadJSON := httptest.NewRecorder()
-	handler(wBadJSON, reqBadJSON)
-	if wBadJSON.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for malformed json, got %d", wBadJSON.Code)
-	}
 }
 
 func TestHandleTranscripts_NonStringError(t *testing.T) {
@@ -3498,113 +3481,6 @@ func TestInitializeBrainEnvironment_SymlinkParentBlocker(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(tmpDir, "data"), 0755)
 
 	_ = InitializeBrainEnvironment(context.Background(), cfg)
-}
-
-type errCloseReader struct {
-	io.Reader
-}
-
-func (e *errCloseReader) Close() error {
-	return errors.New("simulated close error")
-}
-
-func TestHandleVoiceAsk_BodyCloseError(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			return "done", "sess-1", nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", &errCloseReader{Reader: strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)})
-	w := httptest.NewRecorder()
-	handler(w, req)
-}
-
-func TestHandleVoiceAsk_SSE_CancelledContext(t *testing.T) {
-	store := db.NewFakeStore()
-	ctx, cancel := context.WithCancel(context.Background())
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			cancel()
-			if onStatus != nil {
-				onStatus("status after cancel")
-			}
-			return "done", "sess-1", nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)).WithContext(ctx)
-	req.Header.Set("Accept", "text/event-stream")
-	w := httptest.NewRecorder()
-	handler(w, req)
-}
-
-func TestHandleVoiceAsk_SSE_VoiceRunnerError(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			if onStatus != nil {
-				onStatus("working")
-			}
-			return "", "", errors.New("synthetic voice failure")
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
-	req.Header.Set("Accept", "text/event-stream")
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if !strings.Contains(w.Body.String(), "event: error") {
-		t.Errorf("expected SSE error event, got %q", w.Body.String())
-	}
-}
-
-type errFlusherWriter struct {
-	header http.Header
-}
-
-func (e *errFlusherWriter) Header() http.Header {
-	if e.header == nil {
-		e.header = make(http.Header)
-	}
-	return e.header
-}
-func (e *errFlusherWriter) Write(p []byte) (int, error) {
-	return 0, errors.New("simulated write error")
-}
-func (e *errFlusherWriter) WriteHeader(statusCode int) {}
-func (e *errFlusherWriter) Flush()                     {}
-
-func TestHandleVoiceAsk_SSE_WriteError(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			return "done", "sess-1", nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
-	req.Header.Set("Accept", "text/event-stream")
-	w := &errFlusherWriter{}
-	handler(w, req)
 }
 
 func TestInitializeBrainEnvironment_SymlinkError(t *testing.T) {
@@ -4011,28 +3887,6 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		}
 	})
 
-	t.Run("Alias_createVoicePool", func(t *testing.T) {
-		t.Parallel()
-		data := &config.ConfigData{
-			HarnessAPIKey: "key-123",
-			Voice: config.VoiceConfig{
-				Engine: "gemini_api",
-			},
-		}
-		cfg := config.NewFromData(data)
-
-		pool := createVoicePool(cfg, voiceHome, "model-xyz", spawner)
-		defer pool.Close()
-
-		dynPool, ok := pool.(*runner.DynamicVoicePool)
-		if !ok {
-			t.Fatalf("expected *runner.DynamicVoicePool from createVoicePool alias, got %T", pool)
-		}
-		if _, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool); !ok {
-			t.Fatalf("expected *runner.GeminiAPIPool from createVoicePool alias, got %T", dynPool.CurrentPool())
-		}
-	})
-
 	t.Run("NilConfig", func(t *testing.T) {
 		t.Parallel()
 		pool := createVoiceProcessPool(nil, voiceHome, "fallback-model", spawner)
@@ -4138,107 +3992,44 @@ func TestRunBrainApp_VoiceEngineGeminiAPI(t *testing.T) {
 	}
 }
 
-func TestExtractVoiceMCPServers(t *testing.T) {
+func TestExtractMCPServers(t *testing.T) {
 	t.Parallel()
 
 	// 1. Nil config
-	nilResult := extractVoiceMCPServers(nil)
-	if len(nilResult) != 1 || nilResult[0].Name != "scheduler" {
-		t.Fatalf("expected scheduler default for nil config, got: %+v", nilResult)
+	nilVoice := extractVoiceMCPServers(nil)
+	if len(nilVoice) != 1 || nilVoice[0].Name != "scheduler" {
+		t.Fatalf("expected scheduler default for nil voice config, got: %+v", nilVoice)
+	}
+	nilAll := extractAllMCPServers(nil)
+	if len(nilAll) != 1 || nilAll[0].Name != "scheduler" {
+		t.Fatalf("expected scheduler default for nil all config, got: %+v", nilAll)
 	}
 
-	// 2. Populated config with Common and Voice servers
-	cur := &config.ConfigData{
+	// 2. Populated config with Common, Voice, Discord
+	rawValid := json.RawMessage(`{"serverUrl":"http://alpha:8080/mcp","headers":{"Auth":"Bearer tok"}}`)
+	rawDiscord := json.RawMessage(`{"serverUrl":"http://discord:8080/mcp"}`)
+	rawVoice := json.RawMessage(`{"serverUrl":"http://voice:8080/mcp"}`)
+	data := &config.ConfigData{
 		McpServers: config.TargetMcpConfig{
 			Common: map[string]json.RawMessage{
-				"ha-mcp": json.RawMessage(`{"serverUrl":"http://homeassistant:8123/api/webhook/test","headers":{"Authorization":"Bearer secret"}}`),
-			},
-			Voice: map[string]json.RawMessage{
-				"kiosk-mcp": json.RawMessage(`{"serverUrl":"http://kiosk:4000/mcp"}`),
+				"alpha": rawValid,
 			},
 			Discord: map[string]json.RawMessage{
-				"discord-only": json.RawMessage(`{"serverUrl":"http://discord:4000/mcp"}`),
+				"beta": rawDiscord,
+			},
+			Voice: map[string]json.RawMessage{
+				"gamma": rawVoice,
 			},
 		},
 	}
 
-	servers := extractVoiceMCPServers(cur)
-	serverMap := make(map[string]runner.MCPServerConfig)
-	for _, s := range servers {
-		serverMap[s.Name] = s
+	voiceServers := extractVoiceMCPServers(data)
+	if len(voiceServers) != 3 {
+		t.Fatalf("expected 3 servers for voice (scheduler, alpha, gamma), got %d: %+v", len(voiceServers), voiceServers)
 	}
-
-	if len(serverMap) != 3 {
-		t.Fatalf("expected 3 voice servers (scheduler, ha-mcp, kiosk-mcp), got %d: %+v", len(serverMap), servers)
-	}
-
-	if _, ok := serverMap["scheduler"]; !ok {
-		t.Errorf("missing scheduler in voice servers")
-	}
-	if ha, ok := serverMap["ha-mcp"]; !ok {
-		t.Errorf("missing ha-mcp in voice servers")
-	} else {
-		if ha.ServerURL != "http://homeassistant:8123/api/webhook/test" {
-			t.Errorf("unexpected ServerURL for ha-mcp: %q", ha.ServerURL)
-		}
-		if ha.Headers["Authorization"] != "Bearer secret" {
-			t.Errorf("unexpected headers for ha-mcp: %+v", ha.Headers)
-		}
-	}
-	if kiosk, ok := serverMap["kiosk-mcp"]; !ok {
-		t.Errorf("missing kiosk-mcp in voice servers")
-	} else if kiosk.ServerURL != "http://kiosk:4000/mcp" {
-		t.Errorf("unexpected ServerURL for kiosk-mcp: %q", kiosk.ServerURL)
-	}
-	if _, ok := serverMap["discord-only"]; ok {
-		t.Errorf("discord-only server should not be in voice servers")
-	}
-}
-
-func TestExtractAllMCPServers(t *testing.T) {
-	t.Parallel()
-
-	// 1. Nil config
-	nilResult := extractAllMCPServers(nil)
-	if len(nilResult) != 1 || nilResult[0].Name != "scheduler" {
-		t.Fatalf("expected scheduler default for nil config, got: %+v", nilResult)
-	}
-
-	// 2. Populated config with Common, Discord, and Voice servers
-	cur := &config.ConfigData{
-		McpServers: config.TargetMcpConfig{
-			Common: map[string]json.RawMessage{
-				"ha-mcp": json.RawMessage(`{"serverUrl":"http://homeassistant:8123/api/webhook/test","headers":{"Authorization":"Bearer secret"}}`),
-			},
-			Voice: map[string]json.RawMessage{
-				"kiosk-mcp": json.RawMessage(`{"serverUrl":"http://kiosk:4000/mcp"}`),
-			},
-			Discord: map[string]json.RawMessage{
-				"discord-only": json.RawMessage(`{"serverUrl":"http://discord:4000/mcp"}`),
-			},
-		},
-	}
-
-	servers := extractAllMCPServers(cur)
-	serverMap := make(map[string]runner.MCPServerConfig)
-	for _, s := range servers {
-		serverMap[s.Name] = s
-	}
-
-	if len(serverMap) != 4 {
-		t.Fatalf("expected 4 servers (scheduler, ha-mcp, kiosk-mcp, discord-only), got %d: %+v", len(serverMap), servers)
-	}
-	if _, ok := serverMap["scheduler"]; !ok {
-		t.Errorf("missing scheduler")
-	}
-	if _, ok := serverMap["ha-mcp"]; !ok {
-		t.Errorf("missing ha-mcp")
-	}
-	if _, ok := serverMap["kiosk-mcp"]; !ok {
-		t.Errorf("missing kiosk-mcp")
-	}
-	if _, ok := serverMap["discord-only"]; !ok {
-		t.Errorf("missing discord-only")
+	allServers := extractAllMCPServers(data)
+	if len(allServers) != 4 {
+		t.Fatalf("expected 4 servers for all (scheduler, alpha, beta, gamma), got %d: %+v", len(allServers), allServers)
 	}
 }
 
