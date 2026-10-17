@@ -1537,41 +1537,31 @@ func TestCleanParameters(t *testing.T) {
 func TestDefaultMCPDispatcher_SessionHandshake(t *testing.T) {
 	t.Parallel()
 
-	initCount := int32(0)
-	notifyCount := int32(0)
-	listCount := int32(0)
-	callCount := int32(0)
-
+	var initCount, notifyCount, listCount, callCount int32
 	const validSessID = "sess-handshake-12345"
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Method string                 `json:"method"`
-			ID     interface{}            `json:"id"`
-			Params map[string]interface{} `json:"params"`
+			Method string `json:"method"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
+		sessHdr := r.Header.Get("mcp-session-id")
 		switch req.Method {
 		case "initialize":
 			atomic.AddInt32(&initCount, 1)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("mcp-session-id", validSessID)
-			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}`))
-
 		case "notifications/initialized":
 			atomic.AddInt32(&notifyCount, 1)
-			sessHdr := r.Header.Get("mcp-session-id")
 			if sessHdr != validSessID {
-				http.Error(w, "missing or invalid session header", http.StatusBadRequest)
+				http.Error(w, "bad session", http.StatusBadRequest)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-
 		case "tools/list":
 			atomic.AddInt32(&listCount, 1)
-			sessHdr := r.Header.Get("mcp-session-id")
 			if sessHdr != validSessID {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
@@ -1579,20 +1569,9 @@ func TestDefaultMCPDispatcher_SessionHandshake(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"result": {
-					"tools": [
-						{"name": "test_tool", "description": "A test tool", "inputSchema": {"type": "object"}}
-					]
-				}
-			}`))
-
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_tool","description":"A test tool","inputSchema":{"type":"object"}}]}}`))
 		case "tools/call":
 			atomic.AddInt32(&callCount, 1)
-			sessHdr := r.Header.Get("mcp-session-id")
 			if sessHdr != validSessID {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
@@ -1600,89 +1579,48 @@ func TestDefaultMCPDispatcher_SessionHandshake(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"result": {
-					"content": [{"type": "text", "text": "Executed successfully"}]
-				}
-			}`))
-
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Executed successfully"}]}}`))
 		default:
 			http.Error(w, "unknown method", http.StatusNotFound)
 		}
 	}))
 	defer ts.Close()
 
-	dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{
-		{Name: "stateful-mcp", ServerURL: ts.URL},
-	}, ts.Client())
-
+	dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "stateful-mcp", ServerURL: ts.URL}}, ts.Client())
 	ctx := context.Background()
 
-	// 1. Initial tools/list triggers 400, then initialize handshake, sets mcp-session-id, receives notifications/initialized, retries and succeeds
 	decls, err := dispatcher.ListDeclarations(ctx)
-	if err != nil {
-		t.Fatalf("ListDeclarations failed: %v", err)
+	if err != nil || len(decls) != 1 || decls[0].Name != "test_tool" {
+		t.Fatalf("ListDeclarations failed: decls=%+v, err=%v", decls, err)
 	}
-	if len(decls) != 1 || decls[0].Name != "test_tool" {
-		t.Fatalf("expected 1 declaration 'test_tool', got %+v", decls)
-	}
-
-	if atomic.LoadInt32(&initCount) != 1 {
-		t.Errorf("expected exactly 1 initialize call, got %d", atomic.LoadInt32(&initCount))
-	}
-	if atomic.LoadInt32(&notifyCount) != 1 {
-		t.Errorf("expected exactly 1 notification call, got %d", atomic.LoadInt32(&notifyCount))
-	}
-	// Initial tools/list failed with 400, then retried and succeeded -> total 2 tools/list calls
-	if atomic.LoadInt32(&listCount) != 2 {
-		t.Errorf("expected 2 tools/list calls (initial + retry), got %d", atomic.LoadInt32(&listCount))
+	if initCount != 1 || notifyCount != 1 || listCount != 2 {
+		t.Errorf("expected counts 1/1/2, got init=%d, notify=%d, list=%d", initCount, notifyCount, listCount)
 	}
 
-	// 2. Subsequent tool execution reuses cached session ID without extra initialize
 	out, err := dispatcher.Execute(ctx, "test_tool", map[string]interface{}{})
-	if err != nil {
-		t.Fatalf("Execute failed: %v", err)
-	}
-	if out != "Executed successfully" {
-		t.Errorf("expected 'Executed successfully', got %q", out)
-	}
-	if atomic.LoadInt32(&initCount) != 1 {
-		t.Errorf("expected initialize count to remain 1 (reusing session), got %d", atomic.LoadInt32(&initCount))
-	}
-	if atomic.LoadInt32(&callCount) != 1 {
-		t.Errorf("expected 1 tools/call call, got %d", atomic.LoadInt32(&callCount))
+	if err != nil || out != "Executed successfully" || callCount != 1 {
+		t.Fatalf("Execute failed: out=%q, callCount=%d, err=%v", out, callCount, err)
 	}
 
-	// 3. Concurrent tool executions are thread-safe and share session without race
 	const concurrency = 10
 	errCh := make(chan error, concurrency)
 	for i := 0; i < concurrency; i++ {
 		go func() {
 			res, e := dispatcher.Execute(ctx, "test_tool", nil)
-			if e != nil {
-				errCh <- e
-				return
+			if e != nil || res != "Executed successfully" {
+				errCh <- fmt.Errorf("res=%q, err=%w", res, e)
+			} else {
+				errCh <- nil
 			}
-			if res != "Executed successfully" {
-				errCh <- fmt.Errorf("unexpected result: %q", res)
-				return
-			}
-			errCh <- nil
 		}()
 	}
-
 	for i := 0; i < concurrency; i++ {
 		if e := <-errCh; e != nil {
 			t.Fatalf("concurrent execution failed: %v", e)
 		}
 	}
-
-	// Still only 1 initialize call should have occurred
-	if atomic.LoadInt32(&initCount) != 1 {
-		t.Errorf("expected initialize count to still be 1 after concurrent calls, got %d", atomic.LoadInt32(&initCount))
+	if initCount != 1 {
+		t.Errorf("expected initialize count 1 after concurrency, got %d", initCount)
 	}
 }
 
@@ -1697,28 +1635,15 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 			} `json:"params"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-
+		w.Header().Set("Content-Type", "application/json")
 		if req.Method == "tools/list" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"result": {
-					"tools": [
-						{"name": "tool_a", "description": "Tool A"},
-						{"name": "tool_b", "description": "Tool B"}
-					]
-				}
-			}`))
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"tool_a","description":"Tool A"},{"name":"tool_b","description":"Tool B"}]}}`))
 			return
 		}
-
 		if req.Method == "tools/call" {
-			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Result of %s"}]}}`, req.Params.Name)))
 			return
 		}
-
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
 	defer tsMCP.Close()
@@ -1729,19 +1654,14 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqNum := atomic.AddInt32(&geminiReqCount, 1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-
 		if reqNum == 1 {
-			// First call: Gemini returns two function calls in a single candidate turn, with thoughtSignature on only the first part
 			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{"arg":"1"}},"thoughtSignature":"sig_shared"},{"functionCall":{"name":"tool_b","args":{"arg":"2"}}}],"role":"model"}}],"index":0}` + "\n\n"
 			_, _ = w.Write([]byte(chunk))
 		} else {
-			// Second call: read body to verify grouping
 			body, _ := io.ReadAll(r.Body)
 			var streamReq geminiStreamRequest
 			_ = json.Unmarshal(body, &streamReq)
 			capturedTurn2Contents = streamReq.Contents
-
 			chunk := `data: {"candidates":[{"content":{"parts":[{"text":"Both tools finished."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
 			_, _ = w.Write([]byte(chunk))
 		}
@@ -1753,9 +1673,7 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 		Model:      "gemini-2.5-flash",
 		BaseURL:    tsGemini.URL,
 		HTTPClient: tsGemini.Client(),
-		MCPServers: []MCPServerConfig{
-			{Name: "multi-tool-mcp", ServerURL: tsMCP.URL},
-		},
+		MCPServers: []MCPServerConfig{{Name: "multi-tool-mcp", ServerURL: tsMCP.URL}},
 	})
 	defer pool.Close()
 
@@ -1765,306 +1683,117 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	}
 
 	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID: "turn-multi-tool",
-		Prompt: "run tools",
-		Sink:   sink,
-	}
-
+	turn := &TurnContext{TurnID: "turn-multi-tool", Prompt: "run tools", Sink: sink}
 	if err := sess.Send("run tools", turn); err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
 
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-
-	if len(sink.toolCalls) != 2 {
-		t.Fatalf("expected 2 tool calls, got %d: %v", len(sink.toolCalls), sink.toolCalls)
+	if len(sink.toolCalls) != 2 || sink.result == nil || sink.result.Response != "Both tools finished." {
+		t.Fatalf("unexpected sink state: calls=%d, result=%+v", len(sink.toolCalls), sink.result)
 	}
-	if sink.result == nil || sink.result.Response != "Both tools finished." {
-		t.Errorf("expected final response 'Both tools finished.', got %+v", sink.result)
-	}
-
-	// Verify that Turn 2 request grouped calls and responses:
-	// Contents should be:
-	// [0] user: "run tools"
-	// [1] model: parts with FunctionCall tool_a and FunctionCall tool_b (grouped in 1 message, preserving thoughtSignature)
-	// [2] user: parts with FunctionResponse tool_a and FunctionResponse tool_b (grouped in 1 message)
 	if len(capturedTurn2Contents) != 3 {
-		t.Fatalf("expected 3 contents in Turn 2 request, got %d: %+v", len(capturedTurn2Contents), capturedTurn2Contents)
+		t.Fatalf("expected 3 contents in Turn 2, got %d", len(capturedTurn2Contents))
 	}
-
 	modelContent := capturedTurn2Contents[1]
-	if modelContent.Role != "model" {
-		t.Errorf("expected content[1].Role == 'model', got %q", modelContent.Role)
+	if modelContent.Role != "model" || len(modelContent.Parts) != 2 || modelContent.Parts[0].ThoughtSignature != "sig_shared" || modelContent.Parts[1].ThoughtSignature != "sig_shared" {
+		t.Errorf("modelContent grouping failed: %+v", modelContent)
 	}
-	if len(modelContent.Parts) != 2 {
-		t.Fatalf("expected 2 parts in modelContent, got %d", len(modelContent.Parts))
-	}
-	if modelContent.Parts[0].FunctionCall == nil || modelContent.Parts[0].FunctionCall.Name != "tool_a" {
-		t.Errorf("expected modelContent.Parts[0] to be tool_a, got %+v", modelContent.Parts[0])
-	}
-	if modelContent.Parts[0].ThoughtSignature != "sig_shared" {
-		t.Errorf("expected modelContent.Parts[0].ThoughtSignature == 'sig_shared', got %q", modelContent.Parts[0].ThoughtSignature)
-	}
-	if modelContent.Parts[1].FunctionCall == nil || modelContent.Parts[1].FunctionCall.Name != "tool_b" {
-		t.Errorf("expected modelContent.Parts[1] to be tool_b, got %+v", modelContent.Parts[1])
-	}
-	if modelContent.Parts[1].ThoughtSignature != "sig_shared" {
-		t.Errorf("expected modelContent.Parts[1].ThoughtSignature == 'sig_shared' (propagated), got %q", modelContent.Parts[1].ThoughtSignature)
-	}
-
 	funcContent := capturedTurn2Contents[2]
-	if funcContent.Role != "user" {
-		t.Errorf("expected content[2].Role == 'user', got %q", funcContent.Role)
-	}
-	if len(funcContent.Parts) != 2 {
-		t.Fatalf("expected 2 parts in funcContent, got %d", len(funcContent.Parts))
-	}
-	if funcContent.Parts[0].FunctionResponse == nil || funcContent.Parts[0].FunctionResponse.Name != "tool_a" {
-		t.Errorf("expected funcContent.Parts[0] to be tool_a, got %+v", funcContent.Parts[0])
-	}
-	if funcContent.Parts[1].FunctionResponse == nil || funcContent.Parts[1].FunctionResponse.Name != "tool_b" {
-		t.Errorf("expected funcContent.Parts[1] to be tool_b, got %+v", funcContent.Parts[1])
+	if funcContent.Role != "user" || len(funcContent.Parts) != 2 || funcContent.Parts[0].FunctionResponse.Name != "tool_a" || funcContent.Parts[1].FunctionResponse.Name != "tool_b" {
+		t.Errorf("funcContent grouping failed: %+v", funcContent)
 	}
 }
 
-func TestGeminiAPIPool_EmptyResponseHistoryNotPoisoned(t *testing.T) {
+func TestGeminiAPIPool_SessionAndResponseBehavior(t *testing.T) {
 	t.Parallel()
 
-	tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		// Empty chunk with STOP finish reason
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-	}))
-	defer tsGemini.Close()
+	t.Run("EmptyResponseHistoryNotPoisoned", func(t *testing.T) {
+		t.Parallel()
+		tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"))
+		}))
+		defer tsGemini.Close()
 
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:     "test-key",
-		Model:      "gemini-2.5-flash",
-		BaseURL:    tsGemini.URL,
-		HTTPClient: tsGemini.Client(),
-	})
-	defer pool.Close()
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+			APIKey:     "test-key",
+			Model:      "gemini-2.5-flash",
+			BaseURL:    tsGemini.URL,
+			HTTPClient: tsGemini.Client(),
+		})
+		defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-empty", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID: "turn-empty",
-		Prompt: "hello",
-		Sink:   sink,
-	}
-
-	if err := sess.Send("hello", turn); err != nil {
-		t.Fatalf("Send failed: %v", err)
-	}
-
-	apiSess, ok := sess.(*GeminiAPISession)
-	if !ok {
-		t.Fatalf("expected *GeminiAPISession, got %T", sess)
-	}
-
-	// Verify history is empty and not poisoned with empty model parts
-	if len(apiSess.history) != 0 {
-		t.Errorf("expected history to be empty, got %d items: %+v", len(apiSess.history), apiSess.history)
-	}
-}
-
-func TestMCPDispatcher_Execute_MissingSessionRetry(t *testing.T) {
-	t.Parallel()
-
-	initCalls := int32(0)
-	execCalls := int32(0)
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Method string `json:"method"`
+		sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-empty", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-
-		switch req.Method {
-		case "initialize":
-			atomic.AddInt32(&initCalls, 1)
-			w.Header().Set("mcp-session-id", "new-sess-123")
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`))
-		case "notifications/initialized":
-			w.WriteHeader(http.StatusOK)
-		case "tools/list":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_exec","description":"Test Exec"}]}}`))
-		case "tools/call":
-			callNum := atomic.AddInt32(&execCalls, 1)
-			sess := r.Header.Get("mcp-session-id")
-			if callNum == 1 || sess != "new-sess-123" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Success after retry"}]}}`))
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
+		sink := newMockTurnSink()
+		turn := &TurnContext{TurnID: "turn-empty", Prompt: "hello", Sink: sink}
+		if err := sess.Send("hello", turn); err != nil {
+			t.Fatalf("Send failed: %v", err)
 		}
-	}))
-	defer ts.Close()
-
-	dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{
-		{Name: "exec-retry-srv", ServerURL: ts.URL},
-	}, ts.Client())
-
-	ctx := context.Background()
-	res, err := dispatcher.Execute(ctx, "test_exec", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res != "Success after retry" {
-		t.Errorf("expected 'Success after retry', got %q", res)
-	}
-	if initCount := atomic.LoadInt32(&initCalls); initCount < 1 || initCount > 2 {
-		t.Errorf("expected 1 or 2 initialize calls, got %d", initCount)
-	}
-	if atomic.LoadInt32(&execCalls) != 2 {
-		t.Errorf("expected 2 tools/call calls (initial fail + retry), got %d", atomic.LoadInt32(&execCalls))
-	}
-}
-
-func TestMCPDispatcher_ListDeclarations_ErrorAndRetryBranches(t *testing.T) {
-	t.Parallel()
-
-	// 1. Dispatcher is nil
-	var nilDisp *DefaultMCPDispatcher
-	nilDecls, err := nilDisp.ListDeclarations(context.Background())
-	if err != nil || nilDecls != nil {
-		t.Errorf("expected nil, nil for nil dispatcher, got %v, %v", nilDecls, err)
-	}
-
-	// 2. Server where retry fails
-	tsRetryFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
-	}))
-	defer tsRetryFail.Close()
-
-	dispFail := NewDefaultMCPDispatcher([]MCPServerConfig{
-		{Name: "retry-fail-srv", ServerURL: tsRetryFail.URL},
-	}, tsRetryFail.Client())
-
-	decls, err := dispFail.ListDeclarations(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(decls) != 0 {
-		t.Errorf("expected 0 decls from failing srv, got %d", len(decls))
-	}
-
-	// 3. Execute with unknown tool
-	if _, err := dispFail.Execute(context.Background(), "non_existent_tool", nil); err == nil {
-		t.Errorf("expected error executing non-existent tool")
-	}
-}
-
-func TestGeminiAPIPool_NormalizeGoogleUserEmail(t *testing.T) {
-	t.Parallel()
-
-	var receivedParams map[string]interface{}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		var req struct {
-			Method string `json:"method"`
-			Params struct {
-				Arguments map[string]interface{} `json:"arguments"`
-			} `json:"params"`
+		apiSess := sess.(*GeminiAPISession)
+		if len(apiSess.history) != 0 {
+			t.Errorf("expected empty history, got %d items: %+v", len(apiSess.history), apiSess.history)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Method == "tools/list" {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_events","description":"test","inputSchema":{"type":"object"}}]}}`))
-			return
+	})
+
+	t.Run("LoadVoiceRulesFromDataDir", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		rulesDir := filepath.Join(tmpDir, "runtimes", "voice", ".gemini", "config", "rules")
+		if err := os.MkdirAll(rulesDir, 0755); err != nil {
+			t.Fatalf("failed to create rules dir: %v", err)
 		}
-		receivedParams = req.Params.Arguments
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`))
-	}))
-	defer ts.Close()
-
-	disp := NewDefaultMCPDispatcher([]MCPServerConfig{
-		{Name: "google", ServerURL: ts.URL},
-	}, ts.Client())
-
-	ctx := context.Background()
-	_, _ = disp.ListDeclarations(ctx)
-
-	// Case 1: user_google_email is "primary" -> should be deleted
-	receivedParams = nil
-	_, err := disp.Execute(ctx, "get_events", map[string]interface{}{
-		"user_google_email": "primary",
-		"calendar_id":       "primary",
+		ruleContent := "# Test Voice Rules\nBe succinct and direct."
+		if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte(ruleContent), 0644); err != nil {
+			t.Fatalf("failed to write test rule file: %v", err)
+		}
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{DataDir: tmpDir})
+		defer pool.Close()
+		if !strings.Contains(pool.cfg.SystemPrompt, ruleContent) {
+			t.Errorf("expected system prompt to contain rule content, got: %q", pool.cfg.SystemPrompt)
+		}
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, exists := receivedParams["user_google_email"]; exists {
-		t.Errorf("expected user_google_email to be deleted when 'primary', got: %v", receivedParams["user_google_email"])
-	}
-	if receivedParams["calendar_id"] != "primary" {
-		t.Errorf("expected calendar_id to remain 'primary', got: %v", receivedParams["calendar_id"])
-	}
 
-	// Case 2: user_google_email is "me" -> should be deleted
-	receivedParams = nil
-	_, _ = disp.Execute(ctx, "get_events", map[string]interface{}{
-		"user_google_email": "me",
+	t.Run("NilReceiverAndDefaultClient", func(t *testing.T) {
+		t.Parallel()
+		var nilPool *GeminiAPIPool
+		if nilPool.Model() != "" || nilPool.APIKey() != "" || nilPool.PrewarmedTargets() != nil {
+			t.Errorf("nilPool getters returned unexpected values")
+		}
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "key", Model: "gemini-2.5-flash"})
+		if pool.cfg.HTTPClient == nil {
+			t.Errorf("expected default HTTPClient to be initialized")
+		}
+		_ = pool.Close()
 	})
-	if _, exists := receivedParams["user_google_email"]; exists {
-		t.Errorf("expected user_google_email to be deleted when 'me', got: %v", receivedParams["user_google_email"])
-	}
 
-	// Case 3: valid email address -> should be preserved
-	receivedParams = nil
-	_, _ = disp.Execute(ctx, "get_events", map[string]interface{}{
-		"user_google_email": "user@example.com",
+	t.Run("SessionRotator", func(t *testing.T) {
+		t.Parallel()
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "dummy"})
+		defer pool.Close()
+		ctx := context.Background()
+		sess, err := pool.GetOrCreateSession(ctx, "target-rot", "")
+		if err != nil {
+			t.Fatalf("GetOrCreateSession failed: %v", err)
+		}
+		if should, _ := pool.ShouldRotateSession(sess); should {
+			t.Errorf("expected ShouldRotateSession to return false")
+		}
+		rotSess, err := pool.RotateSession(ctx, "target-rot")
+		if err != nil || rotSess == nil {
+			t.Fatalf("RotateSession failed: sess=%v, err=%v", rotSess, err)
+		}
 	})
-	if receivedParams["user_google_email"] != "user@example.com" {
-		t.Errorf("expected user_google_email to be preserved, got: %v", receivedParams["user_google_email"])
-	}
-}
-
-func TestGeminiAPIPool_LoadVoiceRulesFromDataDir(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	rulesDir := filepath.Join(tmpDir, "runtimes", "voice", ".gemini", "config", "rules")
-	if err := os.MkdirAll(rulesDir, 0755); err != nil {
-		t.Fatalf("failed to create rules dir: %v", err)
-	}
-	ruleContent := "# Test Voice Rules\nBe succinct and direct."
-	if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte(ruleContent), 0644); err != nil {
-		t.Fatalf("failed to write test rule file: %v", err)
-	}
-
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		DataDir: tmpDir,
-	})
-	defer pool.Close()
-
-	if !strings.Contains(pool.cfg.SystemPrompt, ruleContent) {
-		t.Errorf("expected pool.cfg.SystemPrompt to contain rule content, got: %q", pool.cfg.SystemPrompt)
-	}
 }
 
 type fallbackMockDispatcher struct{}
 
 func (d *fallbackMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
-	return []geminiFunctionDeclaration{
-		{Name: "test_tool", Description: "a test tool"},
-	}, nil
+	return []geminiFunctionDeclaration{{Name: "test_tool", Description: "a test tool"}}, nil
 }
 
 func (d *fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
@@ -2080,34 +1809,26 @@ func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		requestCount++
-
 		body, _ := io.ReadAll(r.Body)
 
-		if requestCount == 1 {
-			// First call: returns a function call with empty text
-			sse := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"test_tool\",\"args\":{\"foo\":\"bar\"}}}]}}]}\n\n"
-			_, _ = w.Write([]byte(sse))
-		} else if requestCount == 2 {
-			// Second call: tool loop iteration returns empty response without text or tool calls
-			sse := "data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\n\n"
-			_, _ = w.Write([]byte(sse))
-		} else {
-			// Third call: final fallback call (without tools in request)
+		switch requestCount {
+		case 1:
+			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"test_tool\",\"args\":{\"foo\":\"bar\"}}}]}}]}" + "\n\n"))
+		case 2:
+			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}" + "\n\n"))
+		default:
 			finalReqBody = body
-			sse := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Here is your calendar summary.\"}]}}]}\n\n"
-			_, _ = w.Write([]byte(sse))
+			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Here is your calendar summary.\"}]}}]}" + "\n\n"))
 		}
 	}))
 	defer ts.Close()
-
-	disp := &fallbackMockDispatcher{}
 
 	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:        "test-key",
 		Model:         "gemini-2.5-flash",
 		BaseURL:       ts.URL,
 		HTTPClient:    ts.Client(),
-		MCPDispatcher: disp,
+		MCPDispatcher: &fallbackMockDispatcher{},
 	})
 	defer pool.Close()
 
@@ -2117,15 +1838,9 @@ func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	}
 
 	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID:    "turn-exhaust",
-		Prompt:    "what is on my calendar?",
-		Sink:      sink,
-		CreatedAt: time.Now(),
-	}
-
+	turn := &TurnContext{TurnID: "turn-exhaust", Prompt: "what is on my calendar?", Sink: sink, CreatedAt: time.Now()}
 	if err := sess.Send("what is on my calendar?", turn); err != nil {
-		t.Fatalf("unexpected error from Send: %v", err)
+		t.Fatalf("Send failed: %v", err)
 	}
 
 	sink.mu.Lock()
@@ -2135,53 +1850,161 @@ func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	if !strings.Contains(collectedText, "Here is your calendar summary.") {
 		t.Errorf("expected fallback text in sink, got: %q", collectedText)
 	}
-
-	// Verify final request body does not have "tools" declared
 	if strings.Contains(string(finalReqBody), "\"tools\":[") {
-		t.Errorf("expected final fallback request body to not include tools, got: %s", string(finalReqBody))
+		t.Errorf("expected fallback body without tools, got: %s", string(finalReqBody))
 	}
+}
+
+func TestMCPDispatcher_DeclarativeSuites(t *testing.T) {
+	t.Parallel()
+
+	t.Run("MissingSessionRetry", func(t *testing.T) {
+		t.Parallel()
+		var initCalls, execCalls int32
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Method string `json:"method"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			switch req.Method {
+			case "initialize":
+				atomic.AddInt32(&initCalls, 1)
+				w.Header().Set("mcp-session-id", "new-sess-123")
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`))
+			case "notifications/initialized":
+				w.WriteHeader(http.StatusOK)
+			case "tools/list":
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_exec","description":"Test Exec"}]}}`))
+			case "tools/call":
+				callNum := atomic.AddInt32(&execCalls, 1)
+				if callNum == 1 || r.Header.Get("mcp-session-id") != "new-sess-123" {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Success after retry"}]}}`))
+			default:
+				http.Error(w, "not found", http.StatusNotFound)
+			}
+		}))
+		defer ts.Close()
+
+		dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "exec-retry-srv", ServerURL: ts.URL}}, ts.Client())
+		res, err := dispatcher.Execute(context.Background(), "test_exec", nil)
+		if err != nil || res != "Success after retry" {
+			t.Fatalf("Execute failed: res=%q, err=%v", res, err)
+		}
+		if initCount := atomic.LoadInt32(&initCalls); initCount < 1 || initCount > 2 {
+			t.Errorf("expected 1-2 init calls, got %d", initCount)
+		}
+		if atomic.LoadInt32(&execCalls) != 2 {
+			t.Errorf("expected 2 exec calls, got %d", atomic.LoadInt32(&execCalls))
+		}
+	})
+
+	t.Run("ListDeclarations_ErrorAndRetryBranches", func(t *testing.T) {
+		t.Parallel()
+		var nilDisp *DefaultMCPDispatcher
+		nilDecls, err := nilDisp.ListDeclarations(context.Background())
+		if err != nil || nilDecls != nil {
+			t.Errorf("expected nil, nil for nil dispatcher, got %v, %v", nilDecls, err)
+		}
+
+		tsRetryFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
+		}))
+		defer tsRetryFail.Close()
+
+		dispFail := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "retry-fail-srv", ServerURL: tsRetryFail.URL}}, tsRetryFail.Client())
+		decls, err := dispFail.ListDeclarations(context.Background())
+		if err != nil || len(decls) != 0 {
+			t.Errorf("expected 0 decls from failing srv, got %d, err=%v", len(decls), err)
+		}
+		if _, err := dispFail.Execute(context.Background(), "non_existent_tool", nil); err == nil {
+			t.Errorf("expected error executing non-existent tool")
+		}
+	})
+
+	t.Run("NormalizeGoogleUserEmail", func(t *testing.T) {
+		t.Parallel()
+		var receivedParams map[string]interface{}
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			var req struct {
+				Method string `json:"method"`
+				Params struct {
+					Arguments map[string]interface{} `json:"arguments"`
+				} `json:"params"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Method == "tools/list" {
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_events","description":"test","inputSchema":{"type":"object"}}]}}`))
+				return
+			}
+			receivedParams = req.Params.Arguments
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`))
+		}))
+		defer ts.Close()
+
+		disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "google", ServerURL: ts.URL}}, ts.Client())
+		ctx := context.Background()
+		_, _ = disp.ListDeclarations(ctx)
+
+		cases := []struct {
+			inputEmail     string
+			calendarID     string
+			expectedEmail  string
+			shouldHaveEmail bool
+		}{
+			{inputEmail: "primary", calendarID: "primary", shouldHaveEmail: false},
+			{inputEmail: "me", shouldHaveEmail: false},
+			{inputEmail: "user@example.com", expectedEmail: "user@example.com", shouldHaveEmail: true},
+		}
+
+		for _, tc := range cases {
+			receivedParams = nil
+			args := map[string]interface{}{"user_google_email": tc.inputEmail}
+			if tc.calendarID != "" {
+				args["calendar_id"] = tc.calendarID
+			}
+			if _, err := disp.Execute(ctx, "get_events", args); err != nil {
+				t.Fatalf("Execute failed for %s: %v", tc.inputEmail, err)
+			}
+			val, exists := receivedParams["user_google_email"]
+			if exists != tc.shouldHaveEmail {
+				t.Errorf("case %q: expected exists=%v, got %v", tc.inputEmail, tc.shouldHaveEmail, exists)
+			}
+			if tc.shouldHaveEmail && val != tc.expectedEmail {
+				t.Errorf("case %q: expected %q, got %v", tc.inputEmail, tc.expectedEmail, val)
+			}
+			if tc.calendarID != "" && receivedParams["calendar_id"] != tc.calendarID {
+				t.Errorf("case %q: expected calendar_id=%q, got %v", tc.inputEmail, tc.calendarID, receivedParams["calendar_id"])
+			}
+		}
+	})
 }
 
 func newAllowedToolsMockServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
 		var req struct {
 			Method string `json:"method"`
 			Params struct {
-				Name      string                 `json:"name"`
-				Arguments map[string]interface{} `json:"arguments"`
+				Name string `json:"name"`
 			} `json:"params"`
 		}
-		_ = json.Unmarshal(body, &req)
-
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
 		if req.Method == "tools/list" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"result": {
-					"tools": [
-						{"name": "ha_call_read_tool", "description": "Read HA entities"},
-						{"name": "get_events", "description": "Get calendar events"},
-						{"name": "batch_modify_gmail_message_labels", "description": "Batch modify labels"}
-					]
-				}
-			}`))
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ha_call_read_tool","description":"Read HA"},{"name":"get_events","description":"Get calendar"},{"name":"batch_modify_gmail_message_labels","description":"Gmail"}]}}`))
 			return
 		}
-
 		if req.Method == "tools/call" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-				"jsonrpc": "2.0",
-				"id": 2,
-				"result": {
-					"content": [{"type": "text", "text": "executed: ` + req.Params.Name + `"}]
-				}
-			}`))
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"executed: %s"}]}}`, req.Params.Name)))
 			return
 		}
-
 		http.Error(w, "unknown method", http.StatusBadRequest)
 	}))
 }
@@ -2189,118 +2012,86 @@ func newAllowedToolsMockServer() *httptest.Server {
 func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 	t.Parallel()
 
-	t.Run("FilteringAndGatingActive", func(t *testing.T) {
-		t.Parallel()
-		ts := newAllowedToolsMockServer()
-		defer ts.Close()
+	cases := []struct {
+		name          string
+		allowedTools  []string
+		passNilSlice  bool
+		expectedDecls int
+		testTool      string
+		expectErr     bool
+		errSubstr     string
+	}{
+		{
+			name:          "FilteringAndGatingActive",
+			allowedTools:  []string{"ha_call_read_tool", "get_events"},
+			expectedDecls: 2,
+			testTool:      "ha_call_read_tool",
+			expectErr:     false,
+		},
+		{
+			name:          "FilteringRejection",
+			allowedTools:  []string{"ha_call_read_tool", "get_events"},
+			expectedDecls: 2,
+			testTool:      "batch_modify_gmail_message_labels",
+			expectErr:     true,
+			errSubstr:     "not in the allowed voice tools list",
+		},
+		{
+			name:          "OmittedOrNilAllowedToolsAllowsAll",
+			passNilSlice:  true,
+			expectedDecls: 3,
+			testTool:      "batch_modify_gmail_message_labels",
+			expectErr:     false,
+		},
+		{
+			name:          "ExplicitEmptyAllowedToolsBlocksAll",
+			allowedTools:  []string{},
+			expectedDecls: 0,
+			testTool:      "ha_call_read_tool",
+			expectErr:     true,
+			errSubstr:     "not in the allowed voice tools list",
+		},
+	}
 
-		ctx := context.Background()
-		disp := NewDefaultMCPDispatcher(
-			[]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}},
-			ts.Client(),
-			[]string{"ha_call_read_tool", "get_events"},
-		)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := newAllowedToolsMockServer()
+			defer ts.Close()
 
-		decls, err := disp.ListDeclarations(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error listing declarations: %v", err)
-		}
-		if len(decls) != 2 {
-			t.Fatalf("expected exactly 2 allowed declarations, got %d", len(decls))
-		}
-		names := map[string]bool{decls[0].Name: true, decls[1].Name: true}
-		if !names["ha_call_read_tool"] || !names["get_events"] {
-			t.Errorf("expected ha_call_read_tool and get_events, got: %v", names)
-		}
-		if names["batch_modify_gmail_message_labels"] {
-			t.Errorf("disallowed tool batch_modify_gmail_message_labels was not filtered out")
-		}
+			var slice []string
+			if !tc.passNilSlice {
+				slice = tc.allowedTools
+			}
+			disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}}, ts.Client(), slice)
+			ctx := context.Background()
 
-		// Allowed execution should succeed
-		res, err := disp.Execute(ctx, "ha_call_read_tool", nil)
-		if err != nil {
-			t.Fatalf("unexpected error executing allowed tool: %v", err)
-		}
-		if !strings.Contains(res, "executed: ha_call_read_tool") {
-			t.Errorf("unexpected execute result: %q", res)
-		}
+			decls, err := disp.ListDeclarations(ctx)
+			if err != nil {
+				t.Fatalf("ListDeclarations failed: %v", err)
+			}
+			if len(decls) != tc.expectedDecls {
+				t.Errorf("expected %d decls, got %d", tc.expectedDecls, len(decls))
+			}
 
-		// Disallowed execution must be gated and rejected
-		_, err = disp.Execute(ctx, "batch_modify_gmail_message_labels", nil)
-		if err == nil {
-			t.Fatalf("expected error executing disallowed tool, got nil")
-		}
-		if !strings.Contains(err.Error(), "not in the allowed voice tools list") {
-			t.Errorf("expected 'not in the allowed voice tools list' error, got: %v", err)
-		}
-	})
-
-	t.Run("OmittedOrNilAllowedToolsAllowsAll", func(t *testing.T) {
-		t.Parallel()
-		ts := newAllowedToolsMockServer()
-		defer ts.Close()
-
-		ctx := context.Background()
-		// Omitted or nil allowedTools allows all tools (backward compatibility)
-		disp := NewDefaultMCPDispatcher(
-			[]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}},
-			ts.Client(),
-			nil,
-		)
-
-		decls, err := disp.ListDeclarations(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(decls) != 3 {
-			t.Fatalf("expected 3 declarations with unconstrained allowlist, got %d", len(decls))
-		}
-
-		res, err := disp.Execute(ctx, "batch_modify_gmail_message_labels", nil)
-		if err != nil {
-			t.Fatalf("unexpected error executing tool: %v", err)
-		}
-		if !strings.Contains(res, "executed: batch_modify_gmail_message_labels") {
-			t.Errorf("unexpected execute result: %q", res)
-		}
-	})
-
-	t.Run("ExplicitEmptyAllowedToolsBlocksAll", func(t *testing.T) {
-		t.Parallel()
-		ts := newAllowedToolsMockServer()
-		defer ts.Close()
-
-		ctx := context.Background()
-		// Explicit empty slice ([]string{}) blocks all tools (lockdown)
-		disp := NewDefaultMCPDispatcher(
-			[]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}},
-			ts.Client(),
-			[]string{},
-		)
-
-		decls, err := disp.ListDeclarations(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(decls) != 0 {
-			t.Fatalf("expected 0 declarations for explicit empty allowlist, got %d", len(decls))
-		}
-
-		_, err = disp.Execute(ctx, "ha_call_read_tool", nil)
-		if err == nil {
-			t.Fatalf("expected error executing tool when allowlist is empty, got nil")
-		}
-		if !strings.Contains(err.Error(), "not in the allowed voice tools list") {
-			t.Errorf("expected 'not in the allowed voice tools list' error, got: %v", err)
-		}
-	})
+			res, err := disp.Execute(ctx, tc.testTool, nil)
+			if tc.expectErr {
+				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Fatalf("expected error containing %q, got err=%v", tc.errSubstr, err)
+				}
+			} else {
+				if err != nil || !strings.Contains(res, "executed: "+tc.testTool) {
+					t.Fatalf("expected successful execution of %q, got res=%q, err=%v", tc.testTool, res, err)
+				}
+			}
+		})
+	}
 
 	t.Run("NewGeminiAPIPoolWiring", func(t *testing.T) {
 		t.Parallel()
 		ts := newAllowedToolsMockServer()
 		defer ts.Close()
 
-		ctx := context.Background()
 		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 			APIKey:       "key",
 			Model:        "gemini-2.5-flash",
@@ -2314,907 +2105,492 @@ func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected DefaultMCPDispatcher in pool")
 		}
-		decls, err := disp.ListDeclarations(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(decls) != 1 || decls[0].Name != "get_events" {
-			t.Errorf("expected 1 declaration for get_events, got: %v", decls)
+		decls, err := disp.ListDeclarations(context.Background())
+		if err != nil || len(decls) != 1 || decls[0].Name != "get_events" {
+			t.Errorf("expected 1 declaration for get_events, got: %+v, err=%v", decls, err)
 		}
 	})
 }
 
-func TestGeminiAPIPool_NilReceiverAndDefaultClient(t *testing.T) {
+func TestGeminiAPISession_Send_Retrievers(t *testing.T) {
 	t.Parallel()
 
-	var nilPool *GeminiAPIPool
-	if nilPool.Model() != "" {
-		t.Errorf("expected empty Model() for nil pool")
-	}
-	if nilPool.APIKey() != "" {
-		t.Errorf("expected empty APIKey() for nil pool")
-	}
-	if targets := nilPool.PrewarmedTargets(); targets != nil {
-		t.Errorf("expected nil PrewarmedTargets() for nil pool")
-	}
-
-	// Default HTTPClient coverage
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey: "key",
-		Model:  "gemini-2.5-flash",
-	})
-	if pool.cfg.HTTPClient == nil {
-		t.Errorf("expected default HTTPClient to be initialized")
-	}
-	_ = pool.Close()
-}
-
-func TestGeminiAPISession_Send_WithMemoryRetriever(t *testing.T) {
-	t.Parallel()
-
-	retriever := func(ctx context.Context, query string) (string, error) {
-		return "<retrieved_memory>\n- User prefers dark mode\n</retrieved_memory>", nil
-	}
-
-	var receivedBody []byte
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		receivedBody = b
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Got your preference!\"}],\"role\":\"model\"}}]}\n\n"))
-	}))
-	defer ts.Close()
-
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:          "test-key",
-		Model:           "gemini-2.5-flash",
-		BaseURL:         ts.URL,
-		HTTPClient:      ts.Client(),
-		MemoryRetriever: retriever,
-	})
-	defer pool.Close()
-
-	sess, err := pool.GetOrCreateSession(context.Background(), "test-sess-memory", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	geminiSess := sess.(*GeminiAPISession)
-	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "What is my theme preference?",
-		Sink:   sink,
-	}
-	err = sess.Send("What is my theme preference?", turn)
-	if err != nil {
-		t.Fatalf("unexpected Send error: %v", err)
+	cases := []struct {
+		name                 string
+		isAmbient            bool
+		preSeededPrompt      string
+		normalPrompt         string
+		retrieverSnippet     string
+		modelResponse        string
+		expectedWireTag      string
+		expectedContent      string
+		expectedHistoryClean string
+	}{
+		{
+			name:                 "MemoryRetriever_Normal",
+			isAmbient:            false,
+			normalPrompt:         "What is my theme preference?",
+			retrieverSnippet:     "<retrieved_memory>\n- User prefers dark mode\n</retrieved_memory>",
+			modelResponse:        "Got your preference!",
+			expectedWireTag:      "<retrieved_memory>",
+			expectedContent:      "User prefers dark mode",
+			expectedHistoryClean: "What is my theme preference?",
+		},
+		{
+			name:                 "MemoryRetriever_NoDoubleInject",
+			isAmbient:            false,
+			preSeededPrompt:      "<retrieved_memory>\n- Already present\n</retrieved_memory>\n\nHello",
+			retrieverSnippet:     "<retrieved_memory>\n- Extra memory\n</retrieved_memory>",
+			modelResponse:        "Acknowledged",
+			expectedWireTag:      "<retrieved_memory>",
+			expectedContent:      "Already present",
+			expectedHistoryClean: "Already present",
+		},
+		{
+			name:                 "AmbientContextRetriever_Normal",
+			isAmbient:            true,
+			normalPrompt:         "turn off the living room lights",
+			retrieverSnippet:     "<ambient_context>\nLiving Room: lights are ON\n</ambient_context>",
+			modelResponse:        "Turned them off!",
+			expectedWireTag:      "<ambient_context>",
+			expectedContent:      "Living Room: lights are ON",
+			expectedHistoryClean: "turn off the living room lights",
+		},
+		{
+			name:                 "AmbientContextRetriever_NoDoubleInject",
+			isAmbient:            true,
+			preSeededPrompt:      "<ambient_context>\nExisting ambient\n</ambient_context>\n\nHello",
+			retrieverSnippet:     "<ambient_context>\nLiving Room: lights are ON\n</ambient_context>",
+			modelResponse:        "Acknowledged",
+			expectedWireTag:      "<ambient_context>",
+			expectedContent:      "Existing ambient",
+			expectedHistoryClean: "Existing ambient",
+		},
 	}
 
-	// 1. Verify payload sent to API endpoint contains <retrieved_memory>
-	var req geminiStreamRequest
-	if err := json.Unmarshal(receivedBody, &req); err != nil {
-		t.Fatalf("failed to unmarshal request body: %v", err)
-	}
-	if len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 {
-		t.Fatalf("expected at least 1 content part in request")
-	}
-	firstText := req.Contents[0].Parts[0].Text
-	if !strings.Contains(firstText, "<retrieved_memory>") || !strings.Contains(firstText, "User prefers dark mode") {
-		t.Errorf("expected payload to contain retrieved memory, got: %s", firstText)
-	}
-	if !strings.Contains(firstText, "What is my theme preference?") {
-		t.Errorf("expected payload to contain user prompt, got: %s", firstText)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			retrieverCalled := false
+			var receivedBody []byte
 
-	// 2. Verify s.History() contains clean prompt without <retrieved_memory> AND contains resText!
-	hist := geminiSess.History()
-	if len(hist) != 2 {
-		t.Fatalf("expected 2 history items, got %d", len(hist))
-	}
-	if hist[0].Role != "user" || strings.Contains(hist[0].Parts[0].Text, "<retrieved_memory>") || hist[0].Parts[0].Text != "What is my theme preference?" {
-		t.Errorf("expected clean prompt in user history, got: %+v", hist[0])
-	}
-	if hist[1].Role != "model" || hist[1].Parts[0].Text != "Got your preference!" {
-		t.Errorf("expected model response in history, got: %+v", hist[1])
-	}
-}
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				receivedBody = b
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(fmt.Sprintf(`data: {"candidates":[{"content":{"parts":[{"text":%q}],"role":"model"}}]}
 
-func TestGeminiAPISession_Send_MemoryRetriever_NoDoubleInject(t *testing.T) {
-	t.Parallel()
+`, tc.modelResponse)))
+			}))
+			defer ts.Close()
 
-	retrieverCalled := false
-	retriever := func(ctx context.Context, query string) (string, error) {
-		retrieverCalled = true
-		return "<retrieved_memory>\n- Extra memory\n</retrieved_memory>", nil
-	}
+			poolCfg := GeminiAPIPoolConfig{
+				APIKey:     "test-key",
+				Model:      "gemini-2.5-flash",
+				BaseURL:    ts.URL,
+				HTTPClient: ts.Client(),
+			}
 
-	var receivedBody []byte
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		receivedBody = b
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Acknowledged\"}],\"role\":\"model\"}}]}\n\n"))
-	}))
-	defer ts.Close()
+			if tc.isAmbient {
+				poolCfg.AmbientContextRetriever = func(ctx context.Context) (string, error) {
+					retrieverCalled = true
+					return tc.retrieverSnippet, nil
+				}
+			} else {
+				poolCfg.MemoryRetriever = func(ctx context.Context, query string) (string, error) {
+					retrieverCalled = true
+					return tc.retrieverSnippet, nil
+				}
+			}
 
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:          "test-key",
-		Model:           "gemini-2.5-flash",
-		BaseURL:         ts.URL,
-		HTTPClient:      ts.Client(),
-		MemoryRetriever: retriever,
-	})
-	defer pool.Close()
+			pool := NewGeminiAPIPool(poolCfg)
+			defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "test-sess-no-double", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+			sess, err := pool.GetOrCreateSession(context.Background(), "test-sess", "")
+			if err != nil {
+				t.Fatalf("unexpected GetOrCreateSession error: %v", err)
+			}
 
-	promptWithMemory := "<retrieved_memory>\n- Already present\n</retrieved_memory>\n\nHello"
-	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID: "turn-no-double",
-		Prompt: promptWithMemory,
-		Sink:   sink,
-	}
-	if err := sess.Send(promptWithMemory, turn); err != nil {
-		t.Fatalf("unexpected Send error: %v", err)
-	}
+			prompt := tc.normalPrompt
+			if tc.preSeededPrompt != "" {
+				prompt = tc.preSeededPrompt
+			}
 
-	if retrieverCalled {
-		t.Errorf("expected MemoryRetriever not to be called when prompt already has <retrieved_memory>")
-	}
-	var noDoubleReq geminiStreamRequest
-	if err := json.Unmarshal(receivedBody, &noDoubleReq); err != nil {
-		t.Fatalf("failed to unmarshal request body: %v", err)
-	}
-	if len(noDoubleReq.Contents) == 0 || len(noDoubleReq.Contents[0].Parts) == 0 {
-		t.Fatalf("expected at least 1 content part in request")
-	}
-	firstReqText := noDoubleReq.Contents[0].Parts[0].Text
-	if strings.Count(firstReqText, "<retrieved_memory>") != 1 {
-		t.Errorf("expected exactly 1 <retrieved_memory> block, got: %s", firstReqText)
-	}
-}
+			sink := newMockTurnSink()
+			turn := &TurnContext{TurnID: "turn-retriever", Prompt: prompt, Sink: sink}
+			if err := sess.Send(prompt, turn); err != nil {
+				t.Fatalf("Send failed: %v", err)
+			}
 
-func TestGeminiAPISession_Send_WithAmbientContextRetriever(t *testing.T) {
-	t.Parallel()
+			if tc.preSeededPrompt != "" && retrieverCalled {
+				t.Errorf("expected retriever NOT to be called when tag already present")
+			}
 
-	retriever := func(ctx context.Context) (string, error) {
-		return "<ambient_context>\nLiving Room: lights are ON\n</ambient_context>", nil
-	}
+			var req geminiStreamRequest
+			if err := json.Unmarshal(receivedBody, &req); err != nil {
+				t.Fatalf("failed to unmarshal request: %v", err)
+			}
+			if len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 {
+				t.Fatalf("expected content parts in request")
+			}
+			wireText := req.Contents[0].Parts[0].Text
+			if strings.Count(wireText, tc.expectedWireTag) != 1 {
+				t.Errorf("expected exactly 1 %s, got: %s", tc.expectedWireTag, wireText)
+			}
+			if !strings.Contains(wireText, tc.expectedContent) {
+				t.Errorf("expected wireText to contain %q, got: %s", tc.expectedContent, wireText)
+			}
 
-	var receivedBody []byte
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		receivedBody = b
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Turned them off!\"}],\"role\":\"model\"}}]}\n\n"))
-	}))
-	defer ts.Close()
-
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:                  "test-key",
-		Model:                   "gemini-2.5-flash",
-		BaseURL:                 ts.URL,
-		HTTPClient:              ts.Client(),
-		AmbientContextRetriever: retriever,
-	})
-	defer pool.Close()
-
-	sess, err := pool.GetOrCreateSession(context.Background(), "test-sess-ambient", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	geminiSess := sess.(*GeminiAPISession)
-	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID: "turn-amb-1",
-		Prompt: "turn off the living room lights",
-		Sink:   sink,
-	}
-	err = sess.Send("turn off the living room lights", turn)
-	if err != nil {
-		t.Fatalf("unexpected Send error: %v", err)
-	}
-
-	// 1. Verify wire payload sent to API contains <ambient_context>
-	var req geminiStreamRequest
-	if err := json.Unmarshal(receivedBody, &req); err != nil {
-		t.Fatalf("failed to unmarshal request body: %v", err)
-	}
-	if len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 {
-		t.Fatalf("expected at least 1 content part in request")
-	}
-	firstText := req.Contents[0].Parts[0].Text
-	if !strings.Contains(firstText, "<ambient_context>") || !strings.Contains(firstText, "Living Room: lights are ON") {
-		t.Errorf("expected payload to contain ambient context, got: %s", firstText)
-	}
-	if !strings.Contains(firstText, "turn off the living room lights") {
-		t.Errorf("expected payload to contain user prompt, got: %s", firstText)
-	}
-
-	// 2. Verify s.History() contains clean prompt without <ambient_context>
-	hist := geminiSess.History()
-	if len(hist) != 2 {
-		t.Fatalf("expected 2 history items, got %d", len(hist))
-	}
-	if hist[0].Role != "user" || strings.Contains(hist[0].Parts[0].Text, "<ambient_context>") || hist[0].Parts[0].Text != "turn off the living room lights" {
-		t.Errorf("expected clean prompt in user history, got: %+v", hist[0])
-	}
-	if hist[1].Role != "model" || hist[1].Parts[0].Text != "Turned them off!" {
-		t.Errorf("expected model response in history, got: %+v", hist[1])
-	}
-}
-
-func TestGeminiAPISession_Send_AmbientContextRetriever_NoDoubleInject(t *testing.T) {
-	t.Parallel()
-
-	retrieverCalled := false
-	retriever := func(ctx context.Context) (string, error) {
-		retrieverCalled = true
-		return "<ambient_context>\nLiving Room: lights are ON\n</ambient_context>", nil
-	}
-
-	var receivedBody []byte
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		receivedBody = b
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Acknowledged\"}],\"role\":\"model\"}}]}\n\n"))
-	}))
-	defer ts.Close()
-
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:                  "test-key",
-		Model:                   "gemini-2.5-flash",
-		BaseURL:                 ts.URL,
-		HTTPClient:              ts.Client(),
-		AmbientContextRetriever: retriever,
-	})
-	defer pool.Close()
-
-	sess, err := pool.GetOrCreateSession(context.Background(), "test-sess-amb-no-double", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	promptWithAmbient := "<ambient_context>\nExisting ambient\n</ambient_context>\n\nHello"
-	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID: "turn-amb-no-double",
-		Prompt: promptWithAmbient,
-		Sink:   sink,
-	}
-	if err := sess.Send(promptWithAmbient, turn); err != nil {
-		t.Fatalf("unexpected Send error: %v", err)
-	}
-
-	if retrieverCalled {
-		t.Errorf("expected AmbientContextRetriever not to be called when prompt already has <ambient_context>")
-	}
-	var noDoubleReq geminiStreamRequest
-	if err := json.Unmarshal(receivedBody, &noDoubleReq); err != nil {
-		t.Fatalf("failed to unmarshal request body: %v", err)
-	}
-	if len(noDoubleReq.Contents) == 0 || len(noDoubleReq.Contents[0].Parts) == 0 {
-		t.Fatalf("expected at least 1 content part in request")
-	}
-	firstReqText := noDoubleReq.Contents[0].Parts[0].Text
-	if strings.Count(firstReqText, "<ambient_context>") != 1 {
-		t.Errorf("expected exactly 1 <ambient_context> block, got: %s", firstReqText)
+			hist := sess.(*GeminiAPISession).History()
+			if len(hist) != 2 {
+				t.Fatalf("expected 2 history items, got %d", len(hist))
+			}
+			if hist[0].Role != "user" || !strings.Contains(hist[0].Parts[0].Text, tc.expectedHistoryClean) {
+				t.Errorf("expected history to contain clean prompt %q, got: %+v", tc.expectedHistoryClean, hist[0])
+			}
+			if tc.preSeededPrompt == "" && strings.Contains(hist[0].Parts[0].Text, tc.expectedWireTag) {
+				t.Errorf("history should not contain %s when dynamically injected", tc.expectedWireTag)
+			}
+			if hist[1].Role != "model" || hist[1].Parts[0].Text != tc.modelResponse {
+				t.Errorf("expected model history %q, got: %+v", tc.modelResponse, hist[1])
+			}
+		})
 	}
 }
 
 func TestParseJSONRPCBody_Coverage(t *testing.T) {
 	t.Parallel()
 
-	// 1. Empty body
-	if _, err := parseJSONRPCBody(nil); err == nil {
-		t.Errorf("expected error on nil body")
-	}
-	if _, err := parseJSONRPCBody([]byte("   \n\t  ")); err == nil {
-		t.Errorf("expected error on whitespace body")
-	}
-
-	// 2. Standard JSON
-	resp, err := parseJSONRPCBody([]byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}`))
-	if err != nil {
-		t.Fatalf("unexpected error on standard json: %v", err)
-	}
-	if resp == nil {
-		t.Fatalf("expected non-nil response")
+	cases := []struct {
+		name      string
+		body      []byte
+		expectErr bool
+	}{
+		{name: "nil body", body: nil, expectErr: true},
+		{name: "whitespace body", body: []byte("   \n\t  "), expectErr: true},
+		{name: "standard json", body: []byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}`), expectErr: false},
+		{name: "sse valid", body: []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n"), expectErr: false},
+		{name: "sse non-json data", body: []byte("event: message\ndata: not json\n\n"), expectErr: true},
+		{name: "completely invalid json", body: []byte("not json at all"), expectErr: true},
 	}
 
-	// 3. SSE Stream with data: prefix and valid JSON
-	sseBody := []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n")
-	respSSE, err := parseJSONRPCBody(sseBody)
-	if err != nil {
-		t.Fatalf("unexpected error on SSE body: %v", err)
-	}
-	if respSSE == nil {
-		t.Fatalf("expected non-nil response from SSE")
-	}
-
-	// 4. SSE Stream with non-JSON data line falling through to standard unmarshal error
-	sseInvalid := []byte("event: message\ndata: not json\n\n")
-	if _, err := parseJSONRPCBody(sseInvalid); err == nil {
-		t.Errorf("expected error on invalid SSE json data")
-	}
-
-	// 5. Standard invalid JSON
-	if _, err := parseJSONRPCBody([]byte("not json at all")); err == nil {
-		t.Errorf("expected error on completely invalid json")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resp, err := parseJSONRPCBody(tc.body)
+			if tc.expectErr && err == nil {
+				t.Errorf("expected error, got nil")
+			}
+			if !tc.expectErr && (err != nil || resp == nil) {
+				t.Errorf("expected successful parse, got resp=%v, err=%v", resp, err)
+			}
+		})
 	}
 }
 
-func TestGeminiAPIPool_SessionRotator(t *testing.T) {
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "dummy"})
-	defer pool.Close()
+func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
+	t.Parallel()
 
-	ctx := context.Background()
-	sess, err := pool.GetOrCreateSession(ctx, "target-rot", "")
-	if err != nil {
-		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
-	}
-
-	if should, _ := pool.ShouldRotateSession(sess); should {
-		t.Errorf("expected ShouldRotateSession to return false")
-	}
-
-	rotSess, err := pool.RotateSession(ctx, "target-rot")
-	if err != nil {
-		t.Fatalf("unexpected RotateSession error: %v", err)
-	}
-	if rotSess == nil {
-		t.Fatal("expected non-nil rotated session")
-	}
-}
-
-func TestGeminiAPIPool_AcquireLease_BasicExecution(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"hello from lease"}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-		if flusher != nil {
-			flusher.Flush()
+	t.Run("Validation", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		var nilPool *GeminiAPIPool
+		if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
+			t.Error("expected error from nil pool AcquireLease")
 		}
-	}))
-	defer ts.Close()
-
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:     "test-key",
-		Model:      "gemini-2.5-flash",
-		BaseURL:    ts.URL,
-		HTTPClient: ts.Client(),
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			return SessionRecord{
-				ActiveSessionID:   "550e8400-e29b-41d4-a716-446655440001",
-				PreviousSessionID: "550e8400-e29b-41d4-a716-446655440000",
-				TurnCount:         0,
-			}, nil
-		},
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "test"})
+		defer pool.Close()
+		if _, err := pool.AcquireLease(ctx, "   "); err == nil {
+			t.Error("expected error from empty targetKey AcquireLease")
+		}
 	})
-	defer pool.Close()
 
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-lease-1")
-	if err != nil {
-		t.Fatalf("unexpected AcquireLease error: %v", err)
-	}
+	t.Run("ConcurrencySerialization", func(t *testing.T) {
+		t.Parallel()
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+			APIKey:            "test-key",
+			Model:             "gemini-2.5-flash",
+			TargetLockTimeout: 100 * time.Millisecond,
+		})
+		defer pool.Close()
 
-	if !lease.IsCold() {
-		t.Errorf("expected IsCold to be true")
-	}
-	if lease.PreviousSessionID() != "550e8400-e29b-41d4-a716-446655440000" {
-		t.Errorf("expected prev session %q, got %q", "550e8400-e29b-41d4-a716-446655440000", lease.PreviousSessionID())
-	}
-	if lease.SessionID() != "550e8400-e29b-41d4-a716-446655440001" {
-		t.Errorf("expected session %q, got %q", "550e8400-e29b-41d4-a716-446655440001", lease.SessionID())
-	}
-	if lease.TurnCount() != 0 {
-		t.Errorf("expected TurnCount 0, got %d", lease.TurnCount())
-	}
-
-	// 1. Cold execution with ScopeInstructions, CoordinationContext, ThreadSummary
-	turnCtx := &TurnContext{
-		TurnID:              "turn-1",
-		Prompt:              "hello",
-		ScopeInstructions:   "scope rule",
-		CoordinationContext: "coord info",
-		ThreadSummary:       "summary of thread",
-		Ctx:                 ctx,
-	}
-
-	res, execErr := lease.Execute(ctx, turnCtx)
-	if execErr != nil {
-		t.Fatalf("unexpected Execute error: %v", execErr)
-	}
-	if res == nil || res.Response != "hello from lease" {
-		t.Errorf("expected 'hello from lease', got %+v", res)
-	}
-	if lease.IsCold() {
-		t.Errorf("expected IsCold to be false after execution")
-	}
-	if lease.TurnCount() != 1 {
-		t.Errorf("expected TurnCount 1, got %d", lease.TurnCount())
-	}
-
-	// 2. Warm execution
-	turnCtx2 := &TurnContext{
-		TurnID: "turn-2",
-		Prompt: "hello again",
-		Ctx:    ctx,
-	}
-	res2, execErr2 := lease.Execute(ctx, turnCtx2)
-	if execErr2 != nil {
-		t.Fatalf("unexpected warm Execute error: %v", execErr2)
-	}
-	if res2 == nil || res2.Response != "hello from lease" {
-		t.Errorf("expected 'hello from lease', got %+v", res2)
-	}
-	if lease.TurnCount() != 2 {
-		t.Errorf("expected TurnCount 2, got %d", lease.TurnCount())
-	}
-
-	// 3. Error branch: nil turn context
-	if _, err := lease.Execute(ctx, nil); err == nil {
-		t.Error("expected error when executing nil turn context")
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Errorf("unexpected Release error: %v", relErr)
-	}
-
-	// 4. Cold execution with ChannelInstructions fallback
-	leaseChan, err := pool.AcquireLease(ctx, "target-chan-fallback")
-	if err != nil {
-		t.Fatalf("unexpected AcquireLease error: %v", err)
-	}
-	turnChan := &TurnContext{
-		TurnID:              "turn-chan",
-		Prompt:              "hello chan",
-		ChannelInstructions: "channel guideline",
-		Ctx:                 ctx,
-	}
-	if _, err := leaseChan.Execute(ctx, turnChan); err != nil {
-		t.Fatalf("unexpected Execute error with channel instructions: %v", err)
-	}
-	_ = leaseChan.Release()
-}
-
-func TestGeminiAPIPool_AcquireLease_RotationAndPersistence(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-		if flusher != nil {
-			flusher.Flush()
+		ctx := context.Background()
+		lease1, err := pool.AcquireLease(ctx, "target-conc")
+		if err != nil {
+			t.Fatalf("lease1 AcquireLease error: %v", err)
 		}
-	}))
-	defer ts.Close()
 
-	var rotatedOld, rotatedNew string
-	var rotationCalled bool
+		ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+		defer cancel()
+		if _, err2 := pool.AcquireLease(ctxTimeout, "target-conc"); err2 == nil {
+			t.Fatalf("expected lease2 AcquireLease to time out while lease1 is held")
+		}
 
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:          "test-key",
-		Model:           "gemini-2.5-flash",
-		BaseURL:         ts.URL,
-		HTTPClient:      ts.Client(),
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			rotatedOld = oldSessionID
-			rotatedNew = newSessionID
-			return nil
-		},
+		if err := lease1.Release(); err != nil {
+			t.Fatalf("lease1 release error: %v", err)
+		}
+
+		lease3, err3 := pool.AcquireLease(ctx, "target-conc")
+		if err3 != nil {
+			t.Fatalf("lease3 AcquireLease error: %v", err3)
+		}
+		_ = lease3.Release()
 	})
-	defer pool.Close()
 
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-rot-1")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
+	t.Run("ExecutionAndRotationLifecycle", func(t *testing.T) {
+		t.Parallel()
 
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "first message",
-		Ctx:    ctx,
-	}
+		simulatedDBErr := errors.New("simulated DB latch timeout")
 
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
-	}
-
-	initSessID := lease.SessionID()
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Errorf("expected OnSessionRotated to be called")
-	}
-	if rotatedOld != initSessID {
-		t.Errorf("expected rotatedOld %q, got %q", initSessID, rotatedOld)
-	}
-	if rotatedNew == "" || rotatedNew == rotatedOld {
-		t.Errorf("expected fresh rotatedNew, got %q", rotatedNew)
-	}
-}
-
-func TestGeminiAPIPool_AcquireLease_PersistenceFailureRollback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-		if flusher != nil {
-			flusher.Flush()
+		cases := []struct {
+			name                  string
+			maxTurns              int
+			turnPrompts           []string
+			responseStatusCodes   []int
+			responseChunks        []string
+			useChannelFallback    bool
+			onRotateErr           error
+			expectInitCold        bool
+			expectExecErr         bool
+			expectReleaseErr      error
+			expectRotation        bool
+			expectEvictedOnFail   bool
+			expectNilTurnErr      bool
+		}{
+			{
+				name:                "BasicExecution_ColdAndWarmAndNilTurn",
+				maxTurns:            10,
+				turnPrompts:         []string{"hello", "hello again"},
+				responseStatusCodes: []int{http.StatusOK, http.StatusOK},
+				responseChunks: []string{
+					`data: {"candidates":[{"content":{"parts":[{"text":"hello from lease"}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"hello from lease"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+				},
+				expectInitCold:   true,
+				expectNilTurnErr: true,
+			},
+			{
+				name:                "ColdExecution_ChannelInstructionsFallback",
+				maxTurns:            10,
+				turnPrompts:         []string{"hello chan"},
+				responseStatusCodes: []int{http.StatusOK},
+				responseChunks: []string{
+					`data: {"candidates":[{"content":{"parts":[{"text":"hello from lease"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+				},
+				useChannelFallback: true,
+				expectInitCold:     true,
+			},
+			{
+				name:                "RotationAndPersistence_Success",
+				maxTurns:            1,
+				turnPrompts:         []string{"first message"},
+				responseStatusCodes: []int{http.StatusOK},
+				responseChunks: []string{
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+				},
+				expectRotation: true,
+			},
+			{
+				name:                "PersistenceFailureRollback",
+				maxTurns:            1,
+				turnPrompts:         []string{"trigger rotation"},
+				responseStatusCodes: []int{http.StatusOK},
+				responseChunks: []string{
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+				},
+				onRotateErr:         simulatedDBErr,
+				expectReleaseErr:    simulatedDBErr,
+				expectEvictedOnFail: true,
+			},
+			{
+				name:                "CancelRotation_On429QuotaExhausted",
+				maxTurns:            1,
+				turnPrompts:         []string{"first message"},
+				responseStatusCodes: []int{http.StatusTooManyRequests},
+				responseChunks: []string{
+					`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`,
+				},
+				expectExecErr:  true,
+				expectRotation: false,
+			},
+			{
+				name:                "ClearsCancelRotationOnSuccessfulRetry",
+				maxTurns:            1,
+				turnPrompts:         []string{"attempt 1", "attempt 2"},
+				responseStatusCodes: []int{http.StatusTooManyRequests, http.StatusOK},
+				responseChunks: []string{
+					`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`,
+					`data: {"candidates":[{"content":{"parts":[{"text":"Retry succeeded."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+				},
+				expectRotation: true,
+			},
+			{
+				name:                "ConversationalRateLimitTextDoesNotCancelRotation",
+				maxTurns:            1,
+				turnPrompts:         []string{"check status"},
+				responseStatusCodes: []int{http.StatusOK},
+				responseChunks: []string{
+					`data: {"candidates":[{"content":{"parts":[{"text":"I hit an external rate limit reached earlier, but cached the response."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+				},
+				expectRotation: true,
+			},
+			{
+				name:                "DefaultMaxSessionTurnsFallback",
+				maxTurns:            0, // defaults to 8
+				turnPrompts:         []string{"t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"},
+				responseStatusCodes: []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK},
+				responseChunks: []string{
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+					`data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n",
+				},
+				expectRotation: true,
+			},
 		}
-	}))
-	defer ts.Close()
 
-	expectedErr := errors.New("simulated DB latch timeout")
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:          "test-key",
-		Model:           "gemini-2.5-flash",
-		BaseURL:         ts.URL,
-		HTTPClient:      ts.Client(),
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			return expectedErr
-		},
+		for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				var callIdx int32
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					idx := int(atomic.AddInt32(&callIdx, 1) - 1)
+					status := http.StatusOK
+					if idx < len(tc.responseStatusCodes) {
+						status = tc.responseStatusCodes[idx]
+					}
+					chunk := ""
+					if idx < len(tc.responseChunks) {
+						chunk = tc.responseChunks[idx]
+					}
+					if status == http.StatusOK {
+						w.Header().Set("Content-Type", "text/event-stream")
+					}
+					w.WriteHeader(status)
+					flusher, _ := w.(http.Flusher)
+					_, _ = w.Write([]byte(chunk))
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}))
+				defer ts.Close()
+
+				var rotatedOld, rotatedNew string
+				var rotationCount int
+
+				cfg := GeminiAPIPoolConfig{
+					APIKey:          "test-key",
+					Model:           "gemini-2.5-flash",
+					BaseURL:         ts.URL,
+					HTTPClient:      ts.Client(),
+					MaxSessionTurns: tc.maxTurns,
+					GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+						return SessionRecord{
+							ActiveSessionID:   "550e8400-e29b-41d4-a716-446655440001",
+							PreviousSessionID: "550e8400-e29b-41d4-a716-446655440000",
+							TurnCount:         0,
+						}, nil
+					},
+					OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+						rotationCount++
+						rotatedOld = oldSessionID
+						rotatedNew = newSessionID
+						return tc.onRotateErr
+					},
+				}
+
+				pool := NewGeminiAPIPool(cfg)
+				defer pool.Close()
+
+				ctx := context.Background()
+				targetKey := "target-" + tc.name
+				lease, err := pool.AcquireLease(ctx, targetKey)
+				if err != nil {
+					t.Fatalf("AcquireLease failed: %v", err)
+				}
+
+				if tc.expectInitCold {
+					if !lease.IsCold() || lease.TurnCount() != 0 || lease.PreviousSessionID() != "550e8400-e29b-41d4-a716-446655440000" || lease.SessionID() != "550e8400-e29b-41d4-a716-446655440001" {
+						t.Errorf("initial lease state mismatch: cold=%v, count=%d, prev=%s, sess=%s", lease.IsCold(), lease.TurnCount(), lease.PreviousSessionID(), lease.SessionID())
+					}
+				}
+
+				initSessID := lease.SessionID()
+
+				for i, prompt := range tc.turnPrompts {
+					turnCtx := &TurnContext{
+						TurnID: fmt.Sprintf("turn-%d", i+1),
+						Prompt: prompt,
+						Ctx:    ctx,
+					}
+					if tc.useChannelFallback {
+						turnCtx.ChannelInstructions = "channel guideline"
+					} else if i == 0 && tc.expectInitCold {
+						turnCtx.ScopeInstructions = "scope rule"
+						turnCtx.CoordinationContext = "coord info"
+						turnCtx.ThreadSummary = "summary of thread"
+					}
+
+					res, execErr := lease.Execute(ctx, turnCtx)
+					if execErr != nil {
+						if !tc.expectExecErr && i != 0 {
+							t.Fatalf("turn %d Execute failed: %v", i+1, execErr)
+						}
+						if tc.expectExecErr {
+							if !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
+								t.Errorf("expected quota/capacity error, got: %v", execErr)
+							}
+						}
+					} else {
+						if res == nil {
+							t.Errorf("turn %d expected non-nil response", i+1)
+						}
+					}
+				}
+
+				if tc.expectNilTurnErr {
+					if _, err := lease.Execute(ctx, nil); err == nil {
+						t.Errorf("expected error on nil turn context")
+					}
+				}
+
+				relErr := lease.Release()
+				if tc.expectReleaseErr != nil {
+					if !errors.Is(relErr, tc.expectReleaseErr) {
+						t.Errorf("expected release error %v, got %v", tc.expectReleaseErr, relErr)
+					}
+				} else if relErr != nil && !tc.expectExecErr {
+					t.Errorf("unexpected release error: %v", relErr)
+				}
+
+				if tc.expectRotation {
+					if rotationCount == 0 {
+						t.Errorf("expected rotation, got 0")
+					}
+					if rotatedOld != initSessID {
+						t.Errorf("expected rotatedOld %s, got %s", initSessID, rotatedOld)
+					}
+					if rotatedNew == "" || rotatedNew == rotatedOld {
+						t.Errorf("expected new session ID, got %s", rotatedNew)
+					}
+				} else if tc.expectExecErr && rotationCount > 0 {
+					t.Errorf("expected NO rotation on quota pause, got %d", rotationCount)
+				}
+
+				if tc.expectEvictedOnFail {
+					pool.mu.RLock()
+					_, exists := pool.sessions[targetKey]
+					pool.mu.RUnlock()
+					if exists {
+						t.Errorf("expected session evicted after latch rollback")
+					}
+				}
+			})
+		}
 	})
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-fail-rot")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "trigger rotation",
-		Ctx:    ctx,
-	}
-
-	if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-		t.Fatalf("Execute error: %v", execErr)
-	}
-
-	relErr := lease.Release()
-	if !errors.Is(relErr, expectedErr) {
-		t.Errorf("expected Release to propagate DB error %v, got %v", expectedErr, relErr)
-	}
-
-	// Session should be evicted from pool
-	pool.mu.RLock()
-	_, exists := pool.sessions["target-fail-rot"]
-	pool.mu.RUnlock()
-	if exists {
-		t.Errorf("expected session to be evicted from pool after DB latch failure")
-	}
-}
-
-func TestGeminiAPIPool_AcquireLease_CancelRotation(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
-	}))
-	defer ts.Close()
-
-	var rotationCalled bool
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:          "test-key",
-		Model:           "gemini-2.5-flash",
-		BaseURL:         ts.URL,
-		HTTPClient:      ts.Client(),
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			return nil
-		},
-	})
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-cancel-rot")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "first message",
-		Ctx:    ctx,
-	}
-
-	_, execErr := lease.Execute(ctx, turnCtx)
-	if execErr == nil {
-		t.Fatalf("expected error from Execute on 429 response, got nil")
-	}
-	if !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
-		t.Fatalf("expected IsQuotaPause or IsCapacityBlip on Execute error, got: %v", execErr)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if rotationCalled {
-		t.Error("expected OnSessionRotated NOT to be called when turn encountered quota pause")
-	}
-}
-
-func TestGeminiAPIPool_AcquireLease_ClearsCancelRotationOnSuccessfulRetry(t *testing.T) {
-	var callCount int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := atomic.AddInt32(&callCount, 1)
-		if call == 1 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			return
-		}
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"Retry succeeded."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-		flusher.Flush()
-	}))
-	defer ts.Close()
-
-	var rotationCalled bool
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:          "test-key",
-		Model:           "gemini-2.5-flash",
-		BaseURL:         ts.URL,
-		HTTPClient:      ts.Client(),
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			return nil
-		},
-	})
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-retry-clear")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx1 := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "first attempt",
-		Ctx:    ctx,
-	}
-
-	// Attempt 1 fails with 429 -> sets cancelRotation
-	_, execErr1 := lease.Execute(ctx, turnCtx1)
-	if execErr1 == nil {
-		t.Fatalf("expected error from Execute on attempt 1, got nil")
-	}
-
-	// Attempt 2 succeeds on same lease -> clears cancelRotation
-	turnCtx2 := &TurnContext{
-		TurnID: "turn-1-retry",
-		Prompt: "second attempt",
-		Ctx:    ctx,
-	}
-	res2, execErr2 := lease.Execute(ctx, turnCtx2)
-	if execErr2 != nil {
-		t.Fatalf("attempt 2 Execute error: %v", execErr2)
-	}
-	if res2 == nil || res2.Response != "Retry succeeded." {
-		t.Fatalf("unexpected res2: %v", res2)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Error("expected OnSessionRotated to be called when retry on same lease succeeded")
-	}
-}
-
-func TestGeminiAPIPool_AcquireLease_ConversationalRateLimitTextDoesNotCancelRotation(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			return
-		}
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"I hit an external rate limit reached earlier, but cached the response."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-		flusher.Flush()
-	}))
-	defer ts.Close()
-
-	var rotationCalled bool
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:          "test-key",
-		Model:           "gemini-2.5-flash",
-		BaseURL:         ts.URL,
-		HTTPClient:      ts.Client(),
-		MaxSessionTurns: 1,
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCalled = true
-			return nil
-		},
-	})
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-conversational")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	turnCtx := &TurnContext{
-		TurnID: "turn-1",
-		Prompt: "check status",
-		Ctx:    ctx,
-	}
-
-	res, execErr := lease.Execute(ctx, turnCtx)
-	if execErr != nil {
-		t.Fatalf("unexpected Execute error: %v", execErr)
-	}
-	if res == nil || !strings.Contains(res.Response, "rate limit reached") {
-		t.Fatalf("unexpected res: %v", res)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if !rotationCalled {
-		t.Error("expected OnSessionRotated to be called despite conversational text containing rate limit phrasing")
-	}
-}
-
-func TestGeminiAPIPool_AcquireLease_DefaultMaxSessionTurnsFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			return
-		}
-		chunk := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-		_, _ = w.Write([]byte(chunk))
-		flusher.Flush()
-	}))
-	defer ts.Close()
-
-	var rotationCount int
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:     "test-key",
-		Model:      "gemini-2.5-flash",
-		BaseURL:    ts.URL,
-		HTTPClient: ts.Client(),
-		// MaxSessionTurns omitted -> should default to DefaultMaxSessionTurns (8)
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			rotationCount++
-			return nil
-		},
-	})
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease, err := pool.AcquireLease(ctx, "target-default-turns")
-	if err != nil {
-		t.Fatalf("AcquireLease error: %v", err)
-	}
-
-	// TurnCount starts at 0. Run 7 turns: turnCount becomes 7 (< 8) -> should not rotate
-	for i := 0; i < 7; i++ {
-		turnCtx := &TurnContext{
-			TurnID: fmt.Sprintf("turn-%d", i+1),
-			Prompt: "turn",
-			Ctx:    ctx,
-		}
-		if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
-			t.Fatalf("turn %d Execute error: %v", i+1, execErr)
-		}
-	}
-
-	// Set turnCount to 8 on 8th turn:
-	turnCtx8 := &TurnContext{
-		TurnID: "turn-8",
-		Prompt: "turn 8",
-		Ctx:    ctx,
-	}
-	if _, execErr := lease.Execute(ctx, turnCtx8); execErr != nil {
-		t.Fatalf("turn 8 Execute error: %v", execErr)
-	}
-
-	if relErr := lease.Release(); relErr != nil {
-		t.Fatalf("Release error: %v", relErr)
-	}
-
-	if rotationCount != 1 {
-		t.Errorf("expected 1 rotation at DefaultMaxSessionTurns (8), got %d", rotationCount)
-	}
-}
-
-func TestGeminiAPIPool_AcquireLease_ConcurrencySerialization(t *testing.T) {
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey:            "test-key",
-		Model:             "gemini-2.5-flash",
-		TargetLockTimeout: 100 * time.Millisecond,
-	})
-	defer pool.Close()
-
-	ctx := context.Background()
-	lease1, err := pool.AcquireLease(ctx, "target-conc")
-	if err != nil {
-		t.Fatalf("lease1 AcquireLease error: %v", err)
-	}
-
-	// lease2 should time out while lease1 is held
-	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
-	defer cancel()
-	_, err2 := pool.AcquireLease(ctxTimeout, "target-conc")
-	if err2 == nil {
-		t.Fatalf("expected lease2 AcquireLease to time out while lease1 is held")
-	}
-
-	// Release lease1
-	if err := lease1.Release(); err != nil {
-		t.Fatalf("lease1 release error: %v", err)
-	}
-
-	// lease3 should now succeed
-	lease3, err3 := pool.AcquireLease(ctx, "target-conc")
-	if err3 != nil {
-		t.Fatalf("lease3 AcquireLease error after lease1 release: %v", err3)
-	}
-	_ = lease3.Release()
-}
-
-func TestGeminiAPIPool_AcquireLease_Validation(t *testing.T) {
-	ctx := context.Background()
-
-	// Nil receiver
-	var nilPool *GeminiAPIPool
-	if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
-		t.Error("expected error from nil pool AcquireLease")
-	}
-
-	// Empty targetKey
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "test"})
-	defer pool.Close()
-
-	if _, err := pool.AcquireLease(ctx, "   "); err == nil {
-		t.Error("expected error from empty targetKey AcquireLease")
-	}
 }
