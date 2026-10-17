@@ -17,37 +17,35 @@ func (p *WorkerPool) Enqueue(msg db.Message) {
 	p.EnqueueBurst(msg)
 }
 
-func isMediumEffortMessage(m db.Message) bool {
-	effort := strings.TrimSpace(m.Effort)
-	if strings.EqualFold(effort, "medium") {
-		return true
+func resolveMessageEffort(m db.Message) string {
+	effort := strings.ToLower(strings.TrimSpace(m.Effort))
+	switch effort {
+	case "medium", "low", "high":
+		return effort
 	}
 	if effort != "" {
-		return false
+		return "high"
 	}
-	return strings.Contains(strings.ToLower(strings.TrimSpace(m.Metadata.Model)), "medium")
-}
-
-func isLowEffortMessage(m db.Message) bool {
-	if isMediumEffortMessage(m) {
-		return false
+	model := strings.ToLower(strings.TrimSpace(m.Metadata.Model))
+	if strings.Contains(model, "medium") {
+		return "medium"
 	}
-	effort := strings.TrimSpace(m.Effort)
-	if strings.EqualFold(effort, "low") {
-		return true
+	if strings.Contains(model, "flash") {
+		return "low"
 	}
-	if effort != "" {
-		return false
-	}
-	return strings.Contains(strings.ToLower(strings.TrimSpace(m.Metadata.Model)), "flash")
+	return "high"
 }
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
-	if isMediumEffortMessage(m) && p != nil && p.mediumEffortProcessPool != nil {
-		return "medium_effort:" + m.ThreadID
-	}
-	if isLowEffortMessage(m) && p != nil && p.lowEffortProcessPool != nil {
-		return "low_effort:" + m.ThreadID
+	switch resolveMessageEffort(m) {
+	case "medium":
+		if p != nil && p.mediumEffortProcessPool != nil {
+			return "medium_effort:" + m.ThreadID
+		}
+	case "low":
+		if p != nil && p.lowEffortProcessPool != nil {
+			return "low_effort:" + m.ThreadID
+		}
 	}
 	return m.ThreadID
 }

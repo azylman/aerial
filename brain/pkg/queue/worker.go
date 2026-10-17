@@ -481,25 +481,20 @@ func extractBurstVanadisChunkID(burst []db.Message) string {
 	return ""
 }
 
-func isMediumEffortBurst(burst []db.Message) bool {
+func resolveBurstEffort(burst []db.Message) string {
+	hasLow := false
 	for _, m := range burst {
-		if isMediumEffortMessage(m) {
-			return true
+		switch resolveMessageEffort(m) {
+		case "medium":
+			return "medium"
+		case "low":
+			hasLow = true
 		}
 	}
-	return false
-}
-
-func isLowEffortBurst(burst []db.Message) bool {
-	if isMediumEffortBurst(burst) {
-		return false
+	if hasLow {
+		return "low"
 	}
-	for _, m := range burst {
-		if isLowEffortMessage(m) {
-			return true
-		}
-	}
-	return false
+	return "high"
 }
 
 func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
@@ -591,23 +586,17 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	if !te.resolveTurnPolicy() {
 		return
 	}
-	isMediumEffort := isMediumEffortBurst(te.burst)
-	isLowEffort := isLowEffortBurst(te.burst)
-	isEphemeralPool := (isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil) ||
-		(isMediumEffort && te.pool != nil && te.pool.mediumEffortProcessPool != nil)
-	te.isEphemeral = isEphemeralPool
+	activePool := te.resolveExecutionPool()
+	te.activePool = activePool
+	te.isEphemeral = te.isNonPrimaryPool(activePool)
 	if te.evaluateAmbientWake() {
 		return
 	}
 
 	// 1. Resolve active execution pool (primary vs medium vs low effort)
-	isMediumEffort = isMediumEffortBurst(te.burst)
-	isLowEffort = isLowEffortBurst(te.burst)
-	isEphemeralPool = (isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil) ||
-		(isMediumEffort && te.pool != nil && te.pool.mediumEffortProcessPool != nil)
-	te.isEphemeral = isEphemeralPool
-	activePool := te.resolveExecutionPool(isLowEffort, isMediumEffort)
+	activePool = te.resolveExecutionPool()
 	te.activePool = activePool
+	te.isEphemeral = te.isNonPrimaryPool(activePool)
 
 	if activePool == nil {
 		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
@@ -640,7 +629,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	te.currentSessionID = lease.SessionID()
 	te.previousSessionID = lease.PreviousSessionID()
 	te.isCold = lease.IsCold()
-	te.isEphemeral = lease.IsEphemeral() || isEphemeralPool
+	te.isEphemeral = lease.IsEphemeral() || te.isNonPrimaryPool(activePool)
 	te.turnCount = lease.TurnCount()
 
 	if te.currentSessionID != "" && te.isCold {
@@ -1542,12 +1531,16 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		// Check if any message in the burst requested medium or low effort routing
-		isMediumEffort := isMediumEffortBurst(te.burst)
-		isLowEffort := isLowEffortBurst(te.burst)
-		if isMediumEffort && strings.TrimSpace(mediumEffortModel) != "" {
-			currentModel = mediumEffortModel
-		} else if isLowEffort && strings.TrimSpace(lowEffortModel) != "" {
-			currentModel = lowEffortModel
+		burstEffort := resolveBurstEffort(te.burst)
+		switch burstEffort {
+		case "medium":
+			if strings.TrimSpace(mediumEffortModel) != "" {
+				currentModel = mediumEffortModel
+			}
+		case "low":
+			if strings.TrimSpace(lowEffortModel) != "" {
+				currentModel = lowEffortModel
+			}
 		}
 		if reqModel := extractBurstModel(te.burst); reqModel != "" {
 			currentModel = reqModel
@@ -1601,8 +1594,11 @@ func (te *turnExecution) executeWithRetries() {
 		var errDetail string
 		runStart := time.Now()
 
-		activePool := te.resolveExecutionPool(isLowEffort, isMediumEffort)
-		te.activePool = activePool
+		activePool := te.activePool
+		if activePool == nil {
+			activePool = te.resolveExecutionPool()
+			te.activePool = activePool
+		}
 
 		var resp *runner.AgyResponse
 		var outcome runner.TurnOutcome
@@ -1716,7 +1712,7 @@ func (te *turnExecution) executeWithRetries() {
 		if isFailure {
 			promptToSend = te.turnPrompt
 			targetSess := ""
-			if (isLowEffort || isMediumEffort) && te.pool != nil && activePool != nil && activePool != te.pool.processPool {
+			if te.isNonPrimaryPool(activePool) {
 				if d := getStreamingDaemon(activePool, te.threadID); d != nil && d.SessionID() != "" {
 					targetSess = d.SessionID()
 				}
@@ -1865,17 +1861,11 @@ func (te *turnExecution) executeWithRetries() {
 				if !isAlreadyRetry {
 					retryPrompt := fmt.Sprintf("[QUOTA_RETRY] %s", te.turnPrompt)
 					oneShotID := uuid.New().String()
-					retryEffort := "high"
-					if isMediumEffort {
-						retryEffort = "medium"
-					} else if isLowEffort {
-						retryEffort = "low"
-					}
 					oneShot := db.OneShotSchedule{
 						ID:        oneShotID,
 						ThreadID:  te.threadID,
 						Prompt:    retryPrompt,
-						Effort:    retryEffort,
+						Effort:    burstEffort,
 						RunAt:     runAt,
 						CreatedAt: time.Now().UTC(),
 					}
@@ -2200,7 +2190,7 @@ func (te *turnExecution) executeWithRetries() {
 				newLease, lErr := leasedPool.AcquireLease(corruptLeaseCtx, te.threadID)
 				if lErr == nil {
 					te.lease = newLease
-					te.isEphemeral = newLease.IsEphemeral() || (isLowEffort && te.pool.lowEffortProcessPool != nil) || (isMediumEffort && te.pool.mediumEffortProcessPool != nil)
+					te.isEphemeral = newLease.IsEphemeral() || te.isNonPrimaryPool(activePool)
 					te.currentSessionID = newLease.SessionID()
 				}
 			}
@@ -2480,25 +2470,27 @@ func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr,
 	}
 }
 
-func (te *turnExecution) resolveExecutionPool(isLowEffort, isMediumEffort bool) runner.AgentPool {
+func (te *turnExecution) resolveExecutionPool() runner.AgentPool {
 	if te.pool == nil {
 		return nil
 	}
-	if isMediumEffort {
+	switch resolveBurstEffort(te.burst) {
+	case "medium":
 		if te.pool.mediumEffortProcessPool != nil {
 			return te.pool.mediumEffortProcessPool
 		}
 		log.Printf("[Worker] Notice: mediumEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-		return te.pool.processPool
-	}
-	if isLowEffort {
+	case "low":
 		if te.pool.lowEffortProcessPool != nil {
 			return te.pool.lowEffortProcessPool
 		}
 		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-		return te.pool.processPool
 	}
 	return te.pool.processPool
+}
+
+func (te *turnExecution) isNonPrimaryPool(activePool runner.AgentPool) bool {
+	return te != nil && te.pool != nil && activePool != nil && activePool != te.pool.processPool
 }
 
 func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
