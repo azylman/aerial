@@ -1696,15 +1696,19 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                 string
-		effort               string
+		name                  string
+		effort                string
 		useFallbackNilLowPool bool
-		wantPrimaryCount     int
-		wantLowCount         int
+		useFallbackNilMedPool bool
+		wantPrimaryCount      int
+		wantLowCount          int
+		wantMedCount          int
 	}{
-		{name: "LowEffortRoutesToLowPool", effort: "low", wantPrimaryCount: 0, wantLowCount: 1},
-		{name: "NormalRoutesToPrimaryPool", effort: "", wantPrimaryCount: 1, wantLowCount: 0},
-		{name: "FallbackNilLowPoolRoutesToPrimary", effort: "low", useFallbackNilLowPool: true, wantPrimaryCount: 1, wantLowCount: 0},
+		{name: "LowEffortRoutesToLowPool", effort: "low", wantPrimaryCount: 0, wantLowCount: 1, wantMedCount: 0},
+		{name: "MediumEffortRoutesToMediumPool", effort: "medium", wantPrimaryCount: 0, wantLowCount: 0, wantMedCount: 1},
+		{name: "NormalRoutesToPrimaryPool", effort: "", wantPrimaryCount: 1, wantLowCount: 0, wantMedCount: 0},
+		{name: "FallbackNilLowPoolRoutesToPrimary", effort: "low", useFallbackNilLowPool: true, wantPrimaryCount: 1, wantLowCount: 0, wantMedCount: 0},
+		{name: "FallbackNilMediumPoolRoutesToPrimary", effort: "medium", useFallbackNilMedPool: true, wantPrimaryCount: 1, wantLowCount: 0, wantMedCount: 0},
 	}
 
 	for _, tt := range tests {
@@ -1714,7 +1718,7 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			tmpHome := t.TempDir()
 			tempData := t.TempDir()
 
-			var primarySpawnCount, lowSpawnCount atomic.Int32
+			var primarySpawnCount, lowSpawnCount, medSpawnCount atomic.Int32
 
 			primarySpawner := newScriptedDaemonSpawner("c1111111-2222-3333-4444-555555555555",
 				"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"executed on primary\",\"usage\":{\"total_tokens\":10}}}\n")
@@ -1732,6 +1736,14 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 				return oldLowSpawn(ctx, cfg)
 			}
 
+			medSpawner := newScriptedDaemonSpawner("f1111111-2222-3333-4444-555555555555",
+				"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"executed on medium effort\",\"usage\":{\"total_tokens\":8}}}\n")
+			oldMedSpawn := medSpawner.SpawnFn
+			medSpawner.SpawnFn = func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				medSpawnCount.Add(1)
+				return oldMedSpawn(ctx, cfg)
+			}
+
 			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
 			defer primaryPool.Close()
 
@@ -1742,18 +1754,27 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 				lowPool = lp
 			}
 
+			var medPool runner.AgentPool
+			if !tt.useFallbackNilMedPool {
+				mp := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, medSpawner)
+				defer mp.Close()
+				medPool = mp
+			}
+
 			cfg := config.NewTestConfig(func(d *config.ConfigData) {
 				d.DataDir = tempData
 				d.LowEffortModel = "gemini-3.8-flash-low"
+				d.MediumEffortModel = "gemini-3.8-flash-medium"
 			})
 
 			doneCh := make(chan struct{}, 1)
 			pool := New(cfg, WorkerPoolConfig{
-				ProcessPool:          primaryPool,
-				LowEffortProcessPool: lowPool,
-				SessionManager:       session.New(tmpHome, tempData),
-				Store:                store,
-				TimeoutMinutes:       1,
+				ProcessPool:             primaryPool,
+				LowEffortProcessPool:    lowPool,
+				MediumEffortProcessPool: medPool,
+				SessionManager:          session.New(tmpHome, tempData),
+				Store:                   store,
+				TimeoutMinutes:          1,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusCompleted {
 						select {
@@ -1789,6 +1810,9 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			}
 			if l := int(lowSpawnCount.Load()); l != tt.wantLowCount {
 				t.Errorf("lowSpawnCount = %d, want %d", l, tt.wantLowCount)
+			}
+			if m := int(medSpawnCount.Load()); m != tt.wantMedCount {
+				t.Errorf("medSpawnCount = %d, want %d", m, tt.wantMedCount)
 			}
 		})
 	}
@@ -2317,6 +2341,7 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 		expectedEffort string
 	}{
 		{name: "LowEffort", effort: "low", expectedEffort: "low"},
+		{name: "MediumEffort", effort: "medium", expectedEffort: "medium"},
 		{name: "HighEffort", effort: "high", expectedEffort: "high"},
 		{name: "DefaultEffort", effort: "", expectedEffort: "high"},
 	}
@@ -3139,22 +3164,24 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 	t.Parallel()
 
 	burstTests := []struct {
-		name          string
-		burst         []db.Message
-		wantModel     string
-		wantSilent    bool
-		wantLowEffort bool
+		name             string
+		burst            []db.Message
+		wantModel        string
+		wantSilent       bool
+		wantLowEffort    bool
+		wantMediumEffort bool
 	}{
-		{name: "NilBurst", burst: nil, wantModel: "", wantSilent: false, wantLowEffort: false},
+		{name: "NilBurst", burst: nil, wantModel: "", wantSilent: false, wantLowEffort: false, wantMediumEffort: false},
 		{
 			name: "NormalBurst",
 			burst: []db.Message{
 				{ID: "m1", Effort: "high", Metadata: db.MessageMetadata{Model: "gemini-3.1-pro"}},
 				{ID: "m2", Metadata: db.MessageMetadata{Silent: false}},
 			},
-			wantModel:     "gemini-3.1-pro",
-			wantSilent:    false,
-			wantLowEffort: false,
+			wantModel:        "gemini-3.1-pro",
+			wantSilent:       false,
+			wantLowEffort:    false,
+			wantMediumEffort: false,
 		},
 		{
 			name: "SilentFlashBurst",
@@ -3162,18 +3189,40 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 				{ID: "m1", Metadata: db.MessageMetadata{Silent: true}},
 				{ID: "m2", Metadata: db.MessageMetadata{Model: "  gemini-4-flash  "}},
 			},
-			wantModel:     "gemini-4-flash",
-			wantSilent:    true,
-			wantLowEffort: true,
+			wantModel:        "gemini-4-flash",
+			wantSilent:       true,
+			wantLowEffort:    true,
+			wantMediumEffort: false,
 		},
 		{
 			name: "LowEffortFieldBurst",
 			burst: []db.Message{
 				{ID: "m1", Effort: " LOW "},
 			},
-			wantModel:     "",
-			wantSilent:    false,
-			wantLowEffort: true,
+			wantModel:        "",
+			wantSilent:       false,
+			wantLowEffort:    true,
+			wantMediumEffort: false,
+		},
+		{
+			name: "MediumEffortFieldBurst",
+			burst: []db.Message{
+				{ID: "m1", Effort: " MEDIUM "},
+			},
+			wantModel:        "",
+			wantSilent:       false,
+			wantLowEffort:    false,
+			wantMediumEffort: true,
+		},
+		{
+			name: "FlashMediumModelBurstNotLow",
+			burst: []db.Message{
+				{ID: "m1", Metadata: db.MessageMetadata{Model: "gemini-3.8-flash-medium"}},
+			},
+			wantModel:        "gemini-3.8-flash-medium",
+			wantSilent:       false,
+			wantLowEffort:    false,
+			wantMediumEffort: true,
 		},
 	}
 
@@ -3188,6 +3237,9 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 			}
 			if got := isLowEffortBurst(tt.burst); got != tt.wantLowEffort {
 				t.Errorf("isLowEffortBurst = %t, want %t", got, tt.wantLowEffort)
+			}
+			if got := isMediumEffortBurst(tt.burst); got != tt.wantMediumEffort {
+				t.Errorf("isMediumEffortBurst = %t, want %t", got, tt.wantMediumEffort)
 			}
 		})
 	}

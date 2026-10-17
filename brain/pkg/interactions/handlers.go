@@ -156,6 +156,13 @@ func (r *Router) handleRotate(s *discordgo.Session, i *discordgo.InteractionCrea
 				}
 			}
 		}
+		if medPool := pool.MediumEffortProcessPool(); medPool != nil {
+			if d, ok := medPool.Get(targetThreadID); ok && d != nil {
+				if err := d.Close(); err != nil {
+					log.Printf("[Interactions] Warning: failed to close medium-effort process on rotate: %v", err)
+				}
+			}
+		}
 	}
 
 	msg := fmt.Sprintf("🔄 Session rotated for <#%s>. Fresh context initialized (`%s`).", targetThreadID, newSessionID[:8])
@@ -191,6 +198,13 @@ func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionC
 			if d, ok := lowPool.Get(targetThreadID); ok && d != nil {
 				if err := d.Close(); err != nil {
 					log.Printf("[Interactions] Warning: failed to close low-effort process on interrupt: %v", err)
+				}
+			}
+		}
+		if medPool := pool.MediumEffortProcessPool(); medPool != nil {
+			if d, ok := medPool.Get(targetThreadID); ok && d != nil {
+				if err := d.Close(); err != nil {
+					log.Printf("[Interactions] Warning: failed to close medium-effort process on interrupt: %v", err)
 				}
 			}
 		}

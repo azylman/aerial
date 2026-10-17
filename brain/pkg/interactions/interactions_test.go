@@ -985,12 +985,15 @@ func TestRouter_HandleRotate_StoreFailure_And_Pool(t *testing.T) {
 	mockSpawner := runner.NewMockDaemonSpawner()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
 	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	medPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-3.8-flash-medium"}, mockSpawner)
 	_, _ = procPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
 	_, _ = lowPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
+	_, _ = medPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
 
 	router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{
-		ProcessPool:          procPool,
-		LowEffortProcessPool: lowPool,
+		ProcessPool:             procPool,
+		LowEffortProcessPool:    lowPool,
+		MediumEffortProcessPool: medPool,
 	})
 
 	interaction := &discordgo.InteractionCreate{
@@ -1027,13 +1030,16 @@ func TestRouter_HandleInterrupt_AllFlagsAndFailures(t *testing.T) {
 	mockSpawner := runner.NewMockDaemonSpawner()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
 	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	medPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-3.8-flash-medium"}, mockSpawner)
 	_, _ = procPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
 	_, _ = lowPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
+	_, _ = medPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
 
 	router.deps.Store = store
 	router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{
-		ProcessPool:          procPool,
-		LowEffortProcessPool: lowPool,
+		ProcessPool:             procPool,
+		LowEffortProcessPool:    lowPool,
+		MediumEffortProcessPool: medPool,
 	})
 
 	interaction := &discordgo.InteractionCreate{

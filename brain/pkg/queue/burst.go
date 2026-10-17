@@ -17,12 +17,35 @@ func (p *WorkerPool) Enqueue(msg db.Message) {
 	p.EnqueueBurst(msg)
 }
 
+func isMediumEffortMessage(m db.Message) bool {
+	effort := strings.TrimSpace(m.Effort)
+	if strings.EqualFold(effort, "medium") {
+		return true
+	}
+	if effort != "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(m.Metadata.Model)), "medium")
+}
+
 func isLowEffortMessage(m db.Message) bool {
-	return strings.EqualFold(strings.TrimSpace(m.Effort), "low") ||
-		strings.Contains(strings.ToLower(strings.TrimSpace(m.Metadata.Model)), "flash")
+	if isMediumEffortMessage(m) {
+		return false
+	}
+	effort := strings.TrimSpace(m.Effort)
+	if strings.EqualFold(effort, "low") {
+		return true
+	}
+	if effort != "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(m.Metadata.Model)), "flash")
 }
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
+	if isMediumEffortMessage(m) && p != nil && p.mediumEffortProcessPool != nil {
+		return "medium_effort:" + m.ThreadID
+	}
 	if isLowEffortMessage(m) && p != nil && p.lowEffortProcessPool != nil {
 		return "low_effort:" + m.ThreadID
 	}
@@ -91,7 +114,7 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 
 func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) {
 	defer p.wg.Done()
-	threadID := strings.TrimPrefix(scopeKey, "low_effort:")
+	threadID := strings.TrimPrefix(strings.TrimPrefix(scopeKey, "low_effort:"), "medium_effort:")
 
 	idleTimeout := p.cfg.IdleTimeout
 	if idleTimeout <= 0 {
@@ -159,6 +182,8 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 				if d := getStreamingDaemon(p.processPool, threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
 					hasActiveTasks = true
 				} else if d := getStreamingDaemon(p.lowEffortProcessPool, threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
+					hasActiveTasks = true
+				} else if d := getStreamingDaemon(p.mediumEffortProcessPool, threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
 					hasActiveTasks = true
 				}
 				if hasActiveTasks {

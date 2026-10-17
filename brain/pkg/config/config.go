@@ -246,7 +246,8 @@ type ConfigData struct {
 	OpenObserveUser string                     `yaml:"openobserve_user,omitempty" json:"openobserve_user,omitempty"`
 	OpenObservePassword string                     `yaml:"openobserve_password,omitempty" json:"openobserve_password,omitempty"`
 	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
-	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
+	LowEffortModel    string                   `yaml:"low_effort_model" json:"low_effort_model"`
+	MediumEffortModel string                   `yaml:"medium_effort_model" json:"medium_effort_model"`
 	ClassifierURL   string                     `yaml:"classifier_url,omitempty" json:"classifier_url,omitempty"`
 	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"`
 	ClassifierProtocol string                 `yaml:"classifier_protocol,omitempty" json:"classifier_protocol,omitempty"`
@@ -285,6 +286,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		OpenObservePassword       string                   `yaml:"openobserve_password"`
 		Ollama                    OllamaConfig             `yaml:"ollama"`
 		LowEffortModel            string                   `yaml:"low_effort_model"`
+		MediumEffortModel         string                   `yaml:"medium_effort_model"`
 		ClassifierURL             string                   `yaml:"classifier_url"`
 		ClassifierModel           string                   `yaml:"classifier_model"`
 		ClassifierProtocol        string                   `yaml:"classifier_protocol"`
@@ -334,6 +336,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.OpenObservePassword = raw.OpenObservePassword
 	c.Ollama = raw.Ollama
 	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
+	c.MediumEffortModel = strings.TrimSpace(raw.MediumEffortModel)
 	c.ClassifierURL = strings.TrimSpace(raw.ClassifierURL)
 	c.ClassifierModel = strings.TrimSpace(raw.ClassifierModel)
 	c.ClassifierProtocol = strings.ToLower(strings.TrimSpace(raw.ClassifierProtocol))
@@ -577,7 +580,8 @@ func DefaultConfigData() *ConfigData {
 		},
 		Port:            "8080",
 		AgyBin:          "agy",
-		LowEffortModel:  "gemini-3.8-flash-low",
+		LowEffortModel:    "gemini-3.8-flash-low",
+		MediumEffortModel: "gemini-3.8-flash-medium",
 		ClassifierURL:      "",
 		ClassifierModel:    "",
 		ClassifierProtocol: "",
@@ -897,6 +901,9 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	if lem := getEnvFromLookup(lookup, "LOW_EFFORT_MODEL", getEnvFromLookup(lookup, "AMBIENT_CLASSIFIER_MODEL", "")); lem != "" {
 		data.LowEffortModel = lem
 	}
+	if mem := getEnvFromLookup(lookup, "MEDIUM_EFFORT_MODEL", ""); mem != "" {
+		data.MediumEffortModel = mem
+	}
 	if cu := getEnvFromLookup(lookup, "CLASSIFIER_URL", ""); cu != "" {
 		data.ClassifierURL = cu
 	}
@@ -1117,6 +1124,9 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 	}
 	if strings.TrimSpace(parsed.LowEffortModel) == "" {
 		parsed.LowEffortModel = DefaultConfigData().LowEffortModel
+	}
+	if strings.TrimSpace(parsed.MediumEffortModel) == "" {
+		parsed.MediumEffortModel = DefaultConfigData().MediumEffortModel
 	}
 
 	if parsed.ClassifierProtocol != "" {
