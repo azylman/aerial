@@ -51,6 +51,19 @@ func TestFakeStoreWithTx(t *testing.T) {
 
 	t.Run("commit mutates parent store", func(t *testing.T) {
 		s := NewFakeStore()
+		now := time.Now().UTC()
+
+		// Seed store with all entity types to verify tx copy
+		_ = s.InsertMessage(ctx, Message{ID: "m-tx-seed", ThreadID: "th-tx"})
+		_ = s.SaveSessionID(ctx, "th-tx", "sess-tx")
+		_ = s.SaveThreadSummary(ctx, "th-tx", "Sum", "wm")
+		_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-tx", ThreadID: "th-tx", RunAt: now})
+		_ = s.CreateCronSchedule(ctx, CronSchedule{ID: "cron-tx", TargetID: "tgt-tx", Enabled: true, NextRunAt: now})
+		_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-tx", ScheduleID: "cron-tx", Status: "running", StartedAt: now})
+		_, _ = s.InsertFact(ctx, "cat", "Fact text", 0.9, []float32{1.0, 0.0})
+		_ = s.UpdateConversationFactWatermark(ctx, "th-tx", 10)
+		_ = s.UpdateConversationFactExtractedAt(ctx, "th-tx")
+
 		err := s.WithTx(ctx, func(tx Store) error {
 			if err := tx.InsertMessage(ctx, Message{ID: "msg-1", ThreadID: "th-1"}); err != nil {
 				return err
@@ -72,6 +85,9 @@ func TestFakeStoreWithTx(t *testing.T) {
 		sessID, err := s.GetSessionID(ctx, "th-1")
 		if err != nil || sessID != "sess-1" {
 			t.Fatalf("expected sess-1, got %q (err: %v)", sessID, err)
+		}
+		if exists, _ := s.MessageExists(ctx, "m-tx-seed"); !exists {
+			t.Errorf("expected m-tx-seed to exist after commit")
 		}
 	})
 
@@ -653,23 +669,23 @@ func TestFakeStoreFactOperations(t *testing.T) {
 }
 
 func TestFakeStoreCloneNil(t *testing.T) {
-	if cloneMessage(nil) != nil {
-		t.Errorf("expected nil message clone")
+	if got := cloneMessage(nil); got != nil {
+		t.Errorf("cloneMessage(nil) = %v, want nil", got)
 	}
-	if cloneSessionInfo(nil) != nil {
-		t.Errorf("expected nil session clone")
+	if got := cloneSessionInfo(nil); got != nil {
+		t.Errorf("cloneSessionInfo(nil) = %v, want nil", got)
 	}
-	if cloneOneShot(nil) != nil {
-		t.Errorf("expected nil one-shot clone")
+	if got := cloneOneShot(nil); got != nil {
+		t.Errorf("cloneOneShot(nil) = %v, want nil", got)
 	}
-	if cloneCron(nil) != nil {
-		t.Errorf("expected nil cron clone")
+	if got := cloneCron(nil); got != nil {
+		t.Errorf("cloneCron(nil) = %v, want nil", got)
 	}
-	if cloneRun(nil) != nil {
-		t.Errorf("expected nil run clone")
+	if got := cloneRun(nil); got != nil {
+		t.Errorf("cloneRun(nil) = %v, want nil", got)
 	}
-	if cloneFactWithEmbedding(nil) != nil {
-		t.Errorf("expected nil fact clone")
+	if got := cloneFactWithEmbedding(nil); got != nil {
+		t.Errorf("cloneFactWithEmbedding(nil) = %v, want nil", got)
 	}
 }
 
@@ -692,7 +708,6 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _ = s.GetActiveRecentThreadIDs(ctx, time.Hour)
 	_, _ = s.GetRecentThreadMessages(ctx, "t", 10)
 	_, _ = s.GetMaxMessageRowID(ctx, "t")
-
 	_, _ = s.GetSessionID(ctx, "t")
 	_, _ = s.GetPreviousSessionID(ctx, "t")
 	_ = s.SaveSessionID(ctx, "t", "s")
@@ -707,7 +722,6 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _ = s.GetActiveTasks(ctx)
 	_, _ = s.GetExternalConversationID(ctx, "t")
 	_ = s.SaveConversationMapping(ctx, "ext", "int")
-
 	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{})
 	_, _ = s.GetDueOneShotSchedules(ctx)
 	_ = s.DeleteOneShotSchedule(ctx, "id")
@@ -726,7 +740,6 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _ = s.GetScheduleSummaryMetrics(ctx)
 	_, _ = s.ReconcileOrphanedScheduleRuns(ctx)
 	_, _ = s.PruneScheduleRuns(ctx, 10, time.Hour)
-
 	_, _ = s.InsertFact(ctx, "c", "f", 1.0, nil)
 	_, _ = s.SearchSimilarFacts(ctx, nil, "", 10, 0.5)
 	_, _ = s.GetFactsPaginated(ctx, FactsFilter{})
@@ -740,36 +753,6 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _ = s.GetFactsMissingEmbeddings(ctx, 10)
 	_ = s.UpdateFactEmbedding(ctx, 1, nil)
 	_ = s.WithTx(ctx, func(tx Store) error { return nil })
-}
-
-func TestFakeStoreWithTxFullState(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	// Seed store with all entity types
-	_ = s.InsertMessage(ctx, Message{ID: "m-tx-seed", ThreadID: "th-tx"})
-	_ = s.SaveSessionID(ctx, "th-tx", "sess-tx")
-	_ = s.SaveThreadSummary(ctx, "th-tx", "Sum", "wm")
-	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-tx", ThreadID: "th-tx", RunAt: now})
-	_ = s.CreateCronSchedule(ctx, CronSchedule{ID: "cron-tx", TargetID: "tgt-tx", Enabled: true, NextRunAt: now})
-	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-tx", ScheduleID: "cron-tx", Status: "running", StartedAt: now})
-	_, _ = s.InsertFact(ctx, "cat", "Fact text", 0.9, []float32{1.0, 0.0})
-	_ = s.UpdateConversationFactWatermark(ctx, "th-tx", 10)
-	_ = s.UpdateConversationFactExtractedAt(ctx, "th-tx")
-
-	err := s.WithTx(ctx, func(tx Store) error {
-		_ = tx.InsertMessage(ctx, Message{ID: "m-tx-new", ThreadID: "th-tx"})
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("WithTx with full state failed: %v", err)
-	}
-
-	exists, _ := s.MessageExists(ctx, "m-tx-new")
-	if !exists {
-		t.Errorf("expected m-tx-new to exist after commit")
-	}
 }
 
 func TestFakeStoreTestHelpers(t *testing.T) {
