@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,41 +39,124 @@ func newMockTurnSink() *mockTurnSink {
 	return &mockTurnSink{done: make(chan struct{})}
 }
 
+func (s *mockTurnSink) notifyDone() {
+	if s.done != nil {
+		select {
+		case <-s.done:
+		default:
+			close(s.done)
+		}
+	}
+}
+
 func (s *mockTurnSink) OnTurnStarted() {
-	s.mu.Lock(); defer s.mu.Unlock(); s.started = true
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.started = true
 }
+
 func (s *mockTurnSink) OnThinking() {
-	s.mu.Lock(); defer s.mu.Unlock(); s.thinking++
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.thinking++
 }
+
 func (s *mockTurnSink) OnStepStarted(stepIndex int) {
-	s.mu.Lock(); defer s.mu.Unlock(); s.stepStarts = append(s.stepStarts, stepIndex)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stepStarts = append(s.stepStarts, stepIndex)
 }
+
 func (s *mockTurnSink) OnToolCall(toolName, commandName string) {
-	s.mu.Lock(); defer s.mu.Unlock(); s.toolCalls = append(s.toolCalls, toolName+":"+commandName)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolCalls = append(s.toolCalls, toolName+":"+commandName)
 }
+
 func (s *mockTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.completedTools = append(s.completedTools, toolName+":"+mcpServer+":"+status)
 	s.completedToolDetails = append(s.completedToolDetails, mockCompletedTool{toolName, mcpServer, duration, status})
 }
+
 func (s *mockTurnSink) OnSkillActivated(skillName, source string) {
-	s.mu.Lock(); defer s.mu.Unlock(); s.activatedSkills = append(s.activatedSkills, skillName+":"+source)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activatedSkills = append(s.activatedSkills, skillName+":"+source)
 }
+
 func (s *mockTurnSink) OnTextDelta(delta string) {
-	s.mu.Lock(); defer s.mu.Unlock(); s.deltas = append(s.deltas, delta)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deltas = append(s.deltas, delta)
 }
+
 func (s *mockTurnSink) OnResult(res *TurnResult) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.result = res
-	if s.done != nil {
-		select { case <-s.done: default: close(s.done) }
+	s.notifyDone()
+}
+
+func (s *mockTurnSink) OnError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+	s.notifyDone()
+}
+
+func closeAll(closers ...io.Closer) {
+	for _, c := range closers {
+		closeQuietly(c)
 	}
 }
-func (s *mockTurnSink) OnError(err error) {
-	s.mu.Lock(); defer s.mu.Unlock()
-	s.err = err
-	if s.done != nil {
-		select { case <-s.done: default: close(s.done) }
+
+func enqueueInflightTurn(d *StreamingDaemon, turnID string, sink TurnSink, opts ...func(*TurnContext)) *TurnContext {
+	turn := &TurnContext{
+		TurnID:    turnID,
+		Prompt:    "test",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	for _, opt := range opts {
+		opt(turn)
+	}
+	d.inflightMu.Lock()
+	d.inflight = append(d.inflight, turn)
+	d.inflightMu.Unlock()
+	return turn
+}
+
+func waitAndAssertSinkResult(t *testing.T, label string, sink *mockTurnSink, wantResp, wantStderr, wantErrSubstr string) {
+	t.Helper()
+	select {
+	case <-sink.done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s: timed out waiting for sink result", label)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	if wantErrSubstr != "" {
+		if sink.err == nil || !strings.Contains(sink.err.Error(), wantErrSubstr) {
+			t.Errorf("%s: expected error containing %q, got %v", label, wantErrSubstr, sink.err)
+		}
+		if sink.result != nil {
+			t.Errorf("%s: expected nil result on error, got %+v", label, sink.result)
+		}
+		return
+	}
+
+	if sink.err != nil {
+		t.Errorf("%s: expected nil error, got %v", label, sink.err)
+	}
+	if sink.result == nil || sink.result.Response != wantResp {
+		t.Errorf("%s: expected response %q, got %+v", label, wantResp, sink.result)
+	}
+	if wantStderr != "" && (sink.result == nil || sink.result.Stderr != wantStderr) {
+		t.Errorf("%s: expected stderr %q, got %+v", label, wantStderr, sink.result)
 	}
 }
 
@@ -115,33 +197,56 @@ func startTestStreamingDaemon(t *testing.T, cfg DaemonConfig, initLine string, d
 	}
 	t.Cleanup(func() {
 		_ = daemon.Close()
-		closeQuietly(inR)
-		closeQuietly(inW)
-		closeQuietly(outW)
-		closeQuietly(errW)
+		closeAll(inR, inW, outW, errW)
 	})
 	return &daemonTestHarness{daemon: daemon, inR: inR, inW: inW, outW: outW, errW: errW, handle: handle}
+}
+
+func tryStartWithPipes(t *testing.T, ctx context.Context, cfg DaemonConfig, closeOutImmediately bool, initLine string, optHandle ...*MockProcessHandle) (*MockProcessHandle, error) {
+	t.Helper()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeAll(outR, outW, inR, inW, errR, errW)
+
+	handle := &MockProcessHandle{pid: 777}
+	if len(optHandle) > 0 && optHandle[0] != nil {
+		handle = optHandle[0]
+	}
+
+	if initLine != "" {
+		go func() {
+			defer outW.Close()
+			_, _ = outW.Write([]byte(initLine))
+		}()
+	} else if closeOutImmediately {
+		closeQuietly(outW)
+	}
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, c DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, handle, nil
+		},
+	}
+	_, err := StartStreamingDaemon(ctx, cfg, mock)
+	return handle, err
 }
 
 func TestStreamingDaemon_HandshakeSuccessAndDefaults(t *testing.T) {
 	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Timeout: 2 * time.Second}
 	h := startTestStreamingDaemon(t, cfg, "", false)
-	daemon := h.daemon
-	if daemon.State() != StateReady { t.Errorf("expected state %s, got %s", StateReady, daemon.State()) }
-	if daemon.SessionID() != cfg.SessionID { t.Errorf("expected latched session ID, got %s", daemon.SessionID()) }
-	if daemon.TurnCount() != 0 { t.Errorf("expected 0 turns, got %d", daemon.TurnCount()) }
-	if daemon.StepCount() != 0 { t.Errorf("expected 0 steps, got %d", daemon.StepCount()) }
-	if daemon.TaskTracker() == nil { t.Error("expected non-nil TaskTracker") }
-	if time.Since(daemon.LastUsed()) > 5*time.Second { t.Errorf("last used timestamp is too old: %v", daemon.LastUsed()) }
+	d := h.daemon
 
+	if d.State() != StateReady || d.SessionID() != cfg.SessionID || d.TurnCount() != 0 || d.StepCount() != 0 || d.TaskTracker() == nil || time.Since(d.LastUsed()) > 5*time.Second {
+		t.Errorf("unexpected initial state: state=%s, session=%s, turns=%d, steps=%d", d.State(), d.SessionID(), d.TurnCount(), d.StepCount())
+	}
 	if DefaultHandshakeTimeout != 30*time.Second {
-		t.Fatalf("expected DefaultHandshakeTimeout to be 30s, got %v", DefaultHandshakeTimeout)
+		t.Fatalf("expected DefaultHandshakeTimeout 30s, got %v", DefaultHandshakeTimeout)
 	}
 	hDefault := startTestStreamingDaemon(t, DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000099", Timeout: 0}, "{\"event\":\"init\",\"conversation_id\":\"00000000-0000-0000-0000-000000000099\"}\n", false)
 	if hDefault.daemon.SessionID() != "00000000-0000-0000-0000-000000000099" {
 		t.Errorf("expected session ID 00000000-0000-0000-0000-000000000099, got: %s", hDefault.daemon.SessionID())
 	}
-
 	hInitTurn := startTestStreamingDaemon(t, DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000002", InitialTurnCount: 4}, "", false)
 	if hInitTurn.daemon.TurnCount() != 4 {
 		t.Errorf("expected TurnCount 4, got %d", hInitTurn.daemon.TurnCount())
@@ -149,36 +254,28 @@ func TestStreamingDaemon_HandshakeSuccessAndDefaults(t *testing.T) {
 }
 
 func TestStreamingDaemon_HandshakeFailures(t *testing.T) {
-	inR, inW := io.Pipe(); outR, outW := io.Pipe(); errR, errW := io.Pipe()
 	mockHandle := &MockProcessHandle{pid: 888, killErr: errors.New("kill error on startup")}
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			return inW, outR, errR, mockHandle, nil
-		},
-	}
-	_, err := StartStreamingDaemon(context.Background(), DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Timeout: 50 * time.Millisecond}, mock)
-	closeQuietly(outR); closeQuietly(outW); closeQuietly(inR); closeQuietly(inW); closeQuietly(errR); closeQuietly(errW)
+	handle, err := tryStartWithPipes(t, context.Background(), DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Timeout: 50 * time.Millisecond}, false, "", mockHandle)
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting for init event") {
 		t.Fatalf("expected handshake timeout error, got: %v", err)
 	}
-	mockHandle.mu.Lock()
-	if !mockHandle.killed { t.Error("expected process to be killed on handshake timeout") }
-	mockHandle.mu.Unlock()
+	handle.mu.Lock()
+	killed := handle.killed
+	handle.mu.Unlock()
+	if !killed {
+		t.Error("expected process to be killed on handshake timeout")
+	}
 
-	inR, inW = io.Pipe(); outR, outW = io.Pipe(); errR, errW = io.Pipe()
-	closeQuietly(outW)
-	mock = &MockDaemonSpawner{SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		return inW, outR, errR, &MockProcessHandle{pid: 777}, nil
-	}}
-	_, err = StartStreamingDaemon(context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), mock)
-	closeQuietly(outR); closeQuietly(inR); closeQuietly(inW); closeQuietly(errR); closeQuietly(errW)
+	_, err = tryStartWithPipes(t, context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), true, "")
 	if err == nil || !strings.Contains(err.Error(), "daemon stdout closed before init event") {
 		t.Fatalf("expected stdout closed error, got: %v", err)
 	}
 
-	mock = &MockDaemonSpawner{SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		return nil, nil, nil, nil, errors.New("spawn binary not found")
-	}}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return nil, nil, nil, nil, errors.New("spawn binary not found")
+		},
+	}
 	if _, err := StartStreamingDaemon(context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), mock); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
 		t.Fatalf("expected spawn error, got: %v", err)
 	}
@@ -187,222 +284,176 @@ func TestStreamingDaemon_HandshakeFailures(t *testing.T) {
 		t.Fatalf("expected spawn error with nil spawner, got: %v", err)
 	}
 
-	inR, inW = io.Pipe(); outR, outW = io.Pipe(); errR, errW = io.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	mock = &MockDaemonSpawner{SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		return inW, outR, errR, &MockProcessHandle{pid: 555}, nil
-	}}
-	_, err = StartStreamingDaemon(ctx, cfgForSession("00000000-0000-0000-0000-000000000001"), mock)
-	closeQuietly(outR); closeQuietly(outW); closeQuietly(inR); closeQuietly(inW); closeQuietly(errR); closeQuietly(errW)
+	_, err = tryStartWithPipes(t, ctx, cfgForSession("00000000-0000-0000-0000-000000000001"), false, "")
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("expected cancellation error, got: %v", err)
 	}
 }
 
 func TestStreamingDaemon_HandshakeMalformedInit(t *testing.T) {
-	tests := []struct{ name, line string }{
-		{name: "invalid json", line: "not json at all\n"},
-		{name: "missing session_id", line: `{"event":"init"}` + "\n"},
-		{name: "not an init event", line: `{"event":"other","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"},
-		{name: "invalid uuid in init event", line: `{"event":"init","session_id":"not-a-valid-uuid"}` + "\n"},
+	tests := []struct {
+		name, line string
+	}{
+		{"invalid json", "not json at all\n"},
+		{"missing session_id", `{"event":"init"}` + "\n"},
+		{"not an init event", `{"event":"other","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"},
+		{"invalid uuid in init event", `{"event":"init","session_id":"not-a-valid-uuid"}` + "\n"},
 	}
 
 	for _, tc := range tests {
-		inR, inW := io.Pipe(); outR, outW := io.Pipe(); errR, errW := io.Pipe()
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-				return inW, outR, errR, &MockProcessHandle{pid: 666}, nil
-			},
-		}
-		go func(l string) { defer outW.Close(); _, _ = outW.Write([]byte(l)) }(tc.line)
-		daemon, err := StartStreamingDaemon(context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), mock)
-		closeQuietly(inR); closeQuietly(inW); closeQuietly(outR); closeQuietly(errR); closeQuietly(errW)
-		if daemon != nil { _ = daemon.Close() }
+		_, err := tryStartWithPipes(t, context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), false, tc.line)
 		if err == nil || !strings.Contains(err.Error(), "failed parsing init event") {
 			t.Errorf("%s: expected 'failed parsing init event' error, got %v", tc.name, err)
 		}
 	}
 }
 
-func TestStreamingDaemon_DispatchEventsAndYieldWaiting(t *testing.T) {
+func TestStreamingDaemon_DispatchEvents(t *testing.T) {
 	h := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000001"), "", false)
-	daemon := h.daemon
-
 	sink := newMockTurnSink()
-	turn := &TurnContext{TurnID: "turn-1", Prompt: "hello", Sink: sink, CreatedAt: time.Now().Add(-100 * time.Millisecond)}
+	enqueueInflightTurn(h.daemon, "turn-1", sink, func(tc *TurnContext) {
+		tc.Prompt = "hello"
+		tc.CreatedAt = time.Now().Add(-100 * time.Millisecond)
+	})
 
-	daemon.inflightMu.Lock()
-	daemon.inflight = append(daemon.inflight, turn)
-	daemon.inflightMu.Unlock()
+	events := `{"event":"step_update","thinking":true}` + "\n" +
+		`{"event":"step_update","delta":"chunk1"}` + "\n" +
+		`{"event":"step_update","tool_call":{"name":"bash","command":"ls -la"}}` + "\n" +
+		`{"event":"step_update","delta":"chunk2"}` + "\n" +
+		"invalid json line\n" +
+		`{"event":"result","result":{"response":"completed answer"}}` + "\n"
+	_, _ = h.outW.Write([]byte(events))
 
-	_, _ = h.outW.Write([]byte(`{"event":"step_update","thinking":true}` + "\n"))
-	_, _ = h.outW.Write([]byte(`{"event":"step_update","delta":"chunk1"}` + "\n"))
-	_, _ = h.outW.Write([]byte(`{"event":"step_update","tool_call":{"name":"bash","command":"ls -la"}}` + "\n"))
-	_, _ = h.outW.Write([]byte(`{"event":"step_update","delta":"chunk2"}` + "\n"))
-	_, _ = h.outW.Write([]byte("invalid json line\n"))
-	_, _ = h.outW.Write([]byte(`{"event":"result","result":{"response":"completed answer"}}` + "\n"))
-
-	select {
-	case <-sink.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for result event")
-	}
+	waitAndAssertSinkResult(t, "DispatchEvents", sink, "completed answer", "", "")
 
 	sink.mu.Lock()
-	if sink.thinking != 1 { t.Errorf("expected 1 thinking event, got %d", sink.thinking) }
-	if len(sink.deltas) != 2 || sink.deltas[0] != "chunk1" || sink.deltas[1] != "chunk2" {
-		t.Errorf("unexpected deltas: %v", sink.deltas)
-	}
-	if len(sink.toolCalls) != 1 || sink.toolCalls[0] != "bash:ls -la" {
-		t.Errorf("unexpected tool calls: %v", sink.toolCalls)
-	}
-	if sink.result == nil || sink.result.Response != "completed answer" {
-		t.Errorf("unexpected result: %+v", sink.result)
-	}
+	thinking, deltas, toolCalls := sink.thinking, sink.deltas, sink.toolCalls
 	sink.mu.Unlock()
 
-	if daemon.StepCount() != 4 { t.Errorf("expected 4 steps, got %d", daemon.StepCount()) }
-	if daemon.TurnCount() != 1 { t.Errorf("expected 1 turn, got %d", daemon.TurnCount()) }
-	if daemon.State() != StateReady { t.Errorf("expected StateReady, got %s", daemon.State()) }
+	if thinking != 1 || len(deltas) != 2 || deltas[0] != "chunk1" || deltas[1] != "chunk2" || len(toolCalls) != 1 || toolCalls[0] != "bash:ls -la" {
+		t.Errorf("unexpected events: thinking=%d, deltas=%v, tools=%v", thinking, deltas, toolCalls)
+	}
+	if h.daemon.StepCount() != 4 || h.daemon.TurnCount() != 1 || h.daemon.State() != StateReady {
+		t.Errorf("unexpected daemon metrics: steps=%d, turns=%d, state=%s", h.daemon.StepCount(), h.daemon.TurnCount(), h.daemon.State())
+	}
+}
 
+func TestStreamingDaemon_DispatchResultYieldWaiting(t *testing.T) {
 	hYield := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000002"), "", false)
 	hYield.daemon.TaskTracker().Add(TaskMetadata{TaskID: "bg-1", CommandLine: "run long task", StartedAt: time.Now()})
 
 	sinkYield := newMockTurnSink()
-	turnYield := &TurnContext{TurnID: "turn-1", Prompt: "start background task", Sink: sinkYield, CreatedAt: time.Now()}
-
-	hYield.daemon.inflightMu.Lock()
-	hYield.daemon.inflight = append(hYield.daemon.inflight, turnYield)
-	hYield.daemon.inflightMu.Unlock()
+	enqueueInflightTurn(hYield.daemon, "turn-1", sinkYield, func(tc *TurnContext) {
+		tc.Prompt = "start background task"
+	})
 
 	_, _ = hYield.outW.Write([]byte(`{"event":"result","response":"task started"}` + "\n"))
 
-	select {
-	case <-sinkYield.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for result event")
-	}
+	waitAndAssertSinkResult(t, "YieldWaiting", sinkYield, "task started", "", "")
 
 	if hYield.daemon.State() != StateYieldWaiting {
 		t.Errorf("expected StateYieldWaiting when active background tasks exist, got %s", hYield.daemon.State())
 	}
-	if sinkYield.result == nil || sinkYield.result.Response != "task started" {
-		t.Errorf("expected response 'task started', got %+v", sinkYield.result)
+}
+
+func TestStreamingDaemon_UnexpectedStdoutEOFDuringInflight(t *testing.T) {
+	h := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000001"), "", false)
+	sink := newMockTurnSink()
+	enqueueInflightTurn(h.daemon, "turn-eof", sink)
+	closeQuietly(h.outW)
+
+	waitAndAssertSinkResult(t, "UnexpectedStdoutEOF", sink, "", "", "unexpected EOF")
+	if h.daemon.State() != StateClosed {
+		t.Errorf("expected StateClosed on stdout EOF, got %s", h.daemon.State())
 	}
 }
 
-func TestStreamingDaemon_LifecycleAndCloseScenarios(t *testing.T) {
-	// 1. UnexpectedStdoutEOFDuringInflight
-	hEOF := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000001"), "", false)
-	sinkEOF := newMockTurnSink()
-	hEOF.daemon.inflightMu.Lock()
-	hEOF.daemon.inflight = append(hEOF.daemon.inflight, &TurnContext{TurnID: "turn-eof", Sink: sinkEOF, CreatedAt: time.Now()})
-	hEOF.daemon.inflightMu.Unlock()
-	closeQuietly(hEOF.outW)
-	select {
-	case <-sinkEOF.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for EOF error callback on sink")
-	}
-	sinkEOF.mu.Lock()
-	if sinkEOF.err == nil || !strings.Contains(sinkEOF.err.Error(), "unexpected EOF") {
-		t.Errorf("unexpected sink error: %v", sinkEOF.err)
-	}
-	sinkEOF.mu.Unlock()
-	if hEOF.daemon.State() != StateClosed {
-		t.Errorf("expected StateClosed on stdout EOF, got %s", hEOF.daemon.State())
-	}
-
-	// 2. CloseWhileInflight
+func TestStreamingDaemon_CloseWhileInflightAndKillError(t *testing.T) {
 	hClose := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000002"), "", false)
-	sink2 := newMockTurnSink()
-	hClose.daemon.inflightMu.Lock()
-	hClose.daemon.inflight = append(hClose.daemon.inflight, &TurnContext{TurnID: "turn-close", Sink: sink2, CreatedAt: time.Now()})
-	hClose.daemon.inflightMu.Unlock()
-	if err := hClose.daemon.Close(); err != nil { t.Fatalf("unexpected error closing daemon: %v", err) }
-	if err := hClose.daemon.Close(); err != nil { t.Fatalf("idempotent close returned error: %v", err) }
-	closeQuietly(hClose.outW)
-	sink2.mu.Lock()
-	if sink2.err == nil || !strings.Contains(sink2.err.Error(), "daemon closed while turn was in-flight") {
-		t.Errorf("expected 'daemon closed while turn was in-flight' error, got %v", sink2.err)
+	sink := newMockTurnSink()
+	enqueueInflightTurn(hClose.daemon, "turn-close", sink)
+	if err := hClose.daemon.Close(); err != nil || hClose.daemon.Close() != nil {
+		t.Fatalf("unexpected or non-idempotent close error")
 	}
-	sink2.mu.Unlock()
-	if hClose.daemon.State() != StateClosed { t.Errorf("expected StateClosed, got %s", hClose.daemon.State()) }
+	closeQuietly(hClose.outW)
+
+	waitAndAssertSinkResult(t, "CloseWhileInflight", sink, "", "", "daemon closed while turn was in-flight")
 	hClose.handle.mu.Lock()
-	if !hClose.handle.killed { t.Error("expected process handle to be killed on Close") }
+	killed := hClose.handle.killed
 	hClose.handle.mu.Unlock()
+	if hClose.daemon.State() != StateClosed || !killed {
+		t.Errorf("expected StateClosed and killed handle, got state=%s killed=%v", hClose.daemon.State(), killed)
+	}
 
-	// 3. CloseStreamQuietly
-	closeStreamQuietly(nil, "nil-stream")
-	closeStreamQuietly(&errCloser{err: errors.New("stream close failure")}, "err-stream")
-
-	// 4. CloseProcessKillError
 	hKill := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000003"), "", false)
 	hKill.handle.killErr = errors.New("kill failed")
 	closeQuietly(hKill.outW)
-	if closeErr := hKill.daemon.Close(); closeErr == nil || !strings.Contains(closeErr.Error(), "kill failed") {
-		t.Errorf("expected kill failed error from Close(), got %v", closeErr)
+	if err := hKill.daemon.Close(); err == nil || !strings.Contains(err.Error(), "kill failed") {
+		t.Errorf("expected kill failed error from Close(), got %v", err)
 	}
+}
 
-	// 5. ResultAfterCloseDoesNotReopenState
+func TestStreamingDaemon_CloseRaceAndStderrDrain(t *testing.T) {
 	hRace := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000004"), "", false)
-	hRace.daemon.inflightMu.Lock()
-	hRace.daemon.inflight = append(hRace.daemon.inflight, &TurnContext{TurnID: "turn-close-race", Sink: newMockTurnSink(), CreatedAt: time.Now()})
-	hRace.daemon.inflightMu.Unlock()
-	if err := hRace.daemon.Close(); err != nil { t.Fatalf("failed to close daemon: %v", err) }
+	enqueueInflightTurn(hRace.daemon, "turn-close-race", newMockTurnSink())
+	if err := hRace.daemon.Close(); err != nil {
+		t.Fatalf("failed to close daemon: %v", err)
+	}
 	hRace.daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"late result"}}`)
 	if hRace.daemon.State() != StateClosed {
 		t.Errorf("daemon state regressed from StateClosed to %s on late result event", hRace.daemon.State())
 	}
 
-	// 6. StderrClosedOnClose
 	hStderr := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000005"), "", false)
 	go func() {
 		_, _ = hStderr.errW.Write([]byte("some stderr log\n"))
 		closeQuietly(hStderr.errW)
 	}()
-	if err := hStderr.daemon.Close(); err != nil { t.Fatalf("unexpected Close error: %v", err) }
+	if err := hStderr.daemon.Close(); err != nil {
+		t.Fatalf("unexpected Close error: %v", err)
+	}
+}
 
-	// 7. NilSinkCleanlyPopsOnResult
-	hNilSink := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000006"), "", false)
-	turnNil := &TurnContext{TurnID: "turn-nil-sink", Sink: nil, CreatedAt: time.Now()}
+func TestStreamingDaemon_NilSinkAndNilActiveTurnGuards(t *testing.T) {
+	h := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000006"), "", false)
+	enqueueInflightTurn(h.daemon, "turn-nil-sink", nil)
 	sinkActive := newMockTurnSink()
-	turnActive := &TurnContext{TurnID: "turn-with-sink", Sink: sinkActive, CreatedAt: time.Now()}
-	hNilSink.daemon.inflightMu.Lock()
-	hNilSink.daemon.inflight = append(hNilSink.daemon.inflight, turnNil, turnActive)
-	hNilSink.daemon.inflightMu.Unlock()
+	enqueueInflightTurn(h.daemon, "turn-with-sink", sinkActive)
 
-	hNilSink.daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"nil-sink-delta"}`)
-	hNilSink.daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"turn1 answer"}}`)
+	h.daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"nil-sink-delta"}`)
+	h.daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"turn1 answer"}}`)
 
-	hNilSink.daemon.inflightMu.Lock()
-	rem := len(hNilSink.daemon.inflight)
+	h.daemon.inflightMu.Lock()
+	rem := len(h.daemon.inflight)
 	headID := ""
-	if rem > 0 { headID = hNilSink.daemon.inflight[0].TurnID }
-	hNilSink.daemon.inflightMu.Unlock()
-	if rem != 1 || headID != "turn-with-sink" {
-		t.Fatalf("expected 1 turn remaining (turn-with-sink), got %d (%s)", rem, headID)
+	if rem > 0 {
+		headID = h.daemon.inflight[0].TurnID
 	}
-	if hNilSink.daemon.TurnCount() != 1 { t.Errorf("expected turnCount 1, got %d", hNilSink.daemon.TurnCount()) }
+	h.daemon.inflightMu.Unlock()
+	if rem != 1 || headID != "turn-with-sink" || h.daemon.TurnCount() != 1 {
+		t.Fatalf("expected 1 turn remaining (turn-with-sink) with turnCount=1, got rem=%d (%s) turns=%d", rem, headID, h.daemon.TurnCount())
+	}
 
-	hNilSink.daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"turn2-delta"}`)
-	hNilSink.daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"turn2 answer"}}`)
+	h.daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"turn2-delta"}`)
+	h.daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"turn2 answer"}}`)
+	waitAndAssertSinkResult(t, "turn2", sinkActive, "turn2 answer", "", "")
 	sinkActive.mu.Lock()
-	if len(sinkActive.deltas) != 1 || sinkActive.deltas[0] != "turn2-delta" {
-		t.Errorf("expected turn2 deltas, got %v", sinkActive.deltas)
-	}
-	if sinkActive.result == nil || sinkActive.result.Response != "turn2 answer" {
-		t.Errorf("expected turn2 result, got %+v", sinkActive.result)
-	}
+	deltas := sinkActive.deltas
 	sinkActive.mu.Unlock()
-	if hNilSink.daemon.TurnCount() != 2 { t.Errorf("expected turnCount 2, got %d", hNilSink.daemon.TurnCount()) }
+	if len(deltas) != 1 || deltas[0] != "turn2-delta" || h.daemon.TurnCount() != 2 {
+		t.Errorf("unexpected turn2 deltas or turnCount: deltas=%v turns=%d", deltas, h.daemon.TurnCount())
+	}
 
-	// 8. NilActiveTurn_NoPanic
 	hNoPanic := startTestStreamingDaemon(t, DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000302", Model: "test-model"}, "", false)
 	hNoPanic.daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"OK","response":"Unsolicited"}}`)
+}
 
-	// 9. SetTranscriptRescuer
+func TestStreamingDaemon_SetTranscriptRescuerAndStreamQuietly(t *testing.T) {
+	closeStreamQuietly(nil, "nil-stream")
+	closeStreamQuietly(&errCloser{err: errors.New("stream close failure")}, "err-stream")
+
 	var nilDaemon *StreamingDaemon
 	nilDaemon.SetTranscriptRescuer(nil)
 	dRescuer := &StreamingDaemon{}
@@ -411,69 +462,61 @@ func TestStreamingDaemon_LifecycleAndCloseScenarios(t *testing.T) {
 		rescuerCalled = true
 		return "rescued"
 	})
-	if dRescuer.cfg.TranscriptRescuer == nil { t.Fatalf("expected TranscriptRescuer to be set") }
-	dRescuer.cfg.TranscriptRescuer("conv", time.Now())
-	if !rescuerCalled { t.Fatalf("expected rescuer function to be executed") }
+	if dRescuer.cfg.TranscriptRescuer == nil || dRescuer.cfg.TranscriptRescuer("conv", time.Now()) != "rescued" || !rescuerCalled {
+		t.Fatalf("TranscriptRescuer was not properly configured or executed")
+	}
 }
 
-func TestStreamingDaemon_Send_PipeliningErrorsAndConcurrency(t *testing.T) {
-	// 1. SendFIFOPipelining
+func TestStreamingDaemon_SendFIFOPipelining(t *testing.T) {
 	hPipe := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000002"), "", true)
-	sink1 := newMockTurnSink()
-	turn1 := &TurnContext{TurnID: "turn-1", Prompt: "first prompt", Sink: sink1, CreatedAt: time.Now()}
-	sink2 := newMockTurnSink()
-	turn2 := &TurnContext{TurnID: "turn-2", Prompt: "second prompt", Sink: sink2, CreatedAt: time.Now()}
-	if err := hPipe.daemon.Send(turn1.Prompt, turn1); err != nil { t.Fatalf("failed sending turn1: %v", err) }
-	if err := hPipe.daemon.Send(turn2.Prompt, turn2); err != nil { t.Fatalf("failed sending turn2: %v", err) }
-	if hPipe.daemon.InflightCount() != 2 { t.Fatalf("expected 2 inflight turns, got %d", hPipe.daemon.InflightCount()) }
+	sink1, sink2 := newMockTurnSink(), newMockTurnSink()
+	if err := hPipe.daemon.Send("first prompt", &TurnContext{TurnID: "turn-1", Prompt: "first prompt", Sink: sink1, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("failed sending turn1: %v", err)
+	}
+	if err := hPipe.daemon.Send("second prompt", &TurnContext{TurnID: "turn-2", Prompt: "second prompt", Sink: sink2, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("failed sending turn2: %v", err)
+	}
+	if hPipe.daemon.InflightCount() != 2 {
+		t.Fatalf("expected 2 inflight turns, got %d", hPipe.daemon.InflightCount())
+	}
 	go func() {
-		_, _ = hPipe.outW.Write([]byte(`{"event":"step_update","delta":"hello "}` + "\n"))
-		_, _ = hPipe.outW.Write([]byte(`{"event":"result","result":{"response":"hello world"}}` + "\n"))
-		_, _ = hPipe.outW.Write([]byte(`{"event":"step_update","delta":"second "}` + "\n"))
-		_, _ = hPipe.outW.Write([]byte(`{"event":"result","result":{"response":"second response"}}` + "\n"))
+		payload := `{"event":"step_update","delta":"hello "}` + "\n" +
+			`{"event":"result","result":{"response":"hello world"}}` + "\n" +
+			`{"event":"step_update","delta":"second "}` + "\n" +
+			`{"event":"result","result":{"response":"second response"}}` + "\n"
+		_, _ = hPipe.outW.Write([]byte(payload))
 	}()
-	select {
-	case <-sink1.done:
-		if sink1.result == nil || sink1.result.Response != "hello world" {
-			t.Errorf("turn 1 unexpected result: %+v", sink1.result)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("turn 1 timed out")
-	}
-	select {
-	case <-sink2.done:
-		if sink2.result == nil || sink2.result.Response != "second response" {
-			t.Errorf("turn 2 unexpected result: %+v", sink2.result)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("turn 2 timed out")
-	}
+	waitAndAssertSinkResult(t, "turn 1", sink1, "hello world", "", "")
+	waitAndAssertSinkResult(t, "turn 2", sink2, "second response", "", "")
 	if hPipe.daemon.InflightCount() != 0 {
 		t.Errorf("expected 0 inflight turns remaining, got %d", hPipe.daemon.InflightCount())
 	}
+}
 
-	// 2. SendClosed
+func TestStreamingDaemon_SendClosedAndWriteErrors(t *testing.T) {
 	hClosed := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000003"), "", false)
-	if hClosed.daemon.IsDirty() { t.Error("expected fresh daemon not to be dirty") }
-	if err := hClosed.daemon.Close(); err != nil { t.Fatalf("failed to close daemon: %v", err) }
-	turnClosed := &TurnContext{TurnID: "turn-closed", Prompt: "test"}
-	if err := hClosed.daemon.Send(turnClosed.Prompt, turnClosed); err == nil || !strings.Contains(err.Error(), "cannot send to closed streaming daemon") {
+	if hClosed.daemon.IsDirty() {
+		t.Error("expected fresh daemon not to be dirty")
+	}
+	if err := hClosed.daemon.Close(); err != nil {
+		t.Fatalf("failed to close daemon: %v", err)
+	}
+	if err := hClosed.daemon.Send("test", &TurnContext{TurnID: "turn-closed", Prompt: "test"}); err == nil || !strings.Contains(err.Error(), "cannot send to closed streaming daemon") {
 		t.Fatalf("expected 'cannot send to closed streaming daemon', got: %v", err)
 	}
 
-	// 3. SendStdinWriteError
 	hWriteErr := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000004"), "", false)
-	_ = hWriteErr.inR.Close(); _ = hWriteErr.inW.Close()
-	turnWriteErr := &TurnContext{TurnID: "turn-write-err", Prompt: "fail", Sink: newMockTurnSink()}
-	if err := hWriteErr.daemon.Send(turnWriteErr.Prompt, turnWriteErr); err == nil || !strings.Contains(err.Error(), "failed writing prompt to daemon stdin") {
+	_ = hWriteErr.inR.Close()
+	_ = hWriteErr.inW.Close()
+	if err := hWriteErr.daemon.Send("fail", &TurnContext{TurnID: "turn-write-err", Prompt: "fail", Sink: newMockTurnSink()}); err == nil || !strings.Contains(err.Error(), "failed writing prompt to daemon stdin") {
 		t.Fatalf("expected write error, got: %v", err)
 	}
-	if !hWriteErr.daemon.IsDirty() { t.Error("expected daemon to be marked dirty after stdin write error") }
-	if hWriteErr.daemon.State() != StateClosed {
-		t.Errorf("expected daemon state %s after write error, got %s", StateClosed, hWriteErr.daemon.State())
+	if !hWriteErr.daemon.IsDirty() || hWriteErr.daemon.State() != StateClosed {
+		t.Errorf("expected dirty and closed state, got dirty=%v state=%s", hWriteErr.daemon.IsDirty(), hWriteErr.daemon.State())
 	}
+}
 
-	// 4. SendConcurrency
+func TestStreamingDaemon_SendConcurrency(t *testing.T) {
 	hConc := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000005"), "", true)
 	const concurrency = 20
 	var wg sync.WaitGroup
@@ -482,14 +525,16 @@ func TestStreamingDaemon_Send_PipeliningErrorsAndConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			turn := &TurnContext{TurnID: fmt.Sprintf("turn-%d", idx), Sink: newMockTurnSink(), CreatedAt: time.Now()}
-			if sendErr := hConc.daemon.Send(fmt.Sprintf("prompt-%d", idx), turn); sendErr != nil {
-				errCh <- sendErr
+			if err := hConc.daemon.Send(fmt.Sprintf("prompt-%d", idx), &TurnContext{TurnID: fmt.Sprintf("turn-%d", idx), Sink: newMockTurnSink(), CreatedAt: time.Now()}); err != nil {
+				errCh <- err
 			}
 		}(i)
 	}
-	wg.Wait(); close(errCh)
-	for sendErr := range errCh { t.Errorf("concurrent send failed: %v", sendErr) }
+	wg.Wait()
+	close(errCh)
+	for sendErr := range errCh {
+		t.Errorf("concurrent send failed: %v", sendErr)
+	}
 	if hConc.daemon.InflightCount() != concurrency {
 		t.Errorf("expected %d inflight turns, got %d", concurrency, hConc.daemon.InflightCount())
 	}
@@ -499,13 +544,11 @@ func TestStreamingDaemon_DispatchEdgeCasesAndNestedDeltas(t *testing.T) {
 	h := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000001"), "", false)
 	daemon := h.daemon
 
-	daemon.dispatchNDJSONLine("")
-	daemon.dispatchNDJSONLine("   \n")
-	daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"orphan"}`)
+	for _, line := range []string{"", "   \n", `{"event":"step_update","delta":"orphan"}`} {
+		daemon.dispatchNDJSONLine(line)
+	}
 
-	daemon.inflightMu.Lock()
-	daemon.inflight = append(daemon.inflight, &TurnContext{TurnID: "nil-sink", Sink: nil})
-	daemon.inflightMu.Unlock()
+	enqueueInflightTurn(daemon, "nil-sink", nil)
 	daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"no-sink"}`)
 
 	daemon.inflightMu.Lock()
@@ -513,46 +556,37 @@ func TestStreamingDaemon_DispatchEdgeCasesAndNestedDeltas(t *testing.T) {
 	daemon.inflightMu.Unlock()
 
 	sink := newMockTurnSink()
-	daemon.inflightMu.Lock()
-	daemon.inflight = append(daemon.inflight, &TurnContext{TurnID: "t-1", Sink: sink})
-	daemon.inflightMu.Unlock()
+	enqueueInflightTurn(daemon, "t-1", sink)
 	daemon.dispatchNDJSONLine(`{"event":"unknown_event_type"}`)
-
 	daemon.dispatchNDJSONLine(`{"event":"step_update","delta":""}`)
-	if len(sink.deltas) != 0 { t.Errorf("expected 0 deltas for empty string, got %d", len(sink.deltas)) }
+	if len(sink.deltas) != 0 {
+		t.Errorf("expected 0 deltas for empty string, got %d", len(sink.deltas))
+	}
 
 	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","tool_name":"no_idx_tool"}}`)
-	if len(sink.toolCalls) != 1 || sink.toolCalls[0] != "no_idx_tool:" {
-		t.Errorf("expected tool start for no_idx_tool, got %+v", sink.toolCalls)
-	}
 	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","tool_name":"no_idx_tool"}}`)
-	if len(sink.completedToolDetails) != 1 || sink.completedToolDetails[0].ToolName != "no_idx_tool" {
-		t.Errorf("expected tool completion for no_idx_tool, got %+v", sink.completedToolDetails)
+	if len(sink.toolCalls) != 1 || sink.toolCalls[0] != "no_idx_tool:" || len(sink.completedToolDetails) != 1 || sink.completedToolDetails[0].ToolName != "no_idx_tool" {
+		t.Errorf("unexpected tool tracking: calls=%+v, details=%+v", sink.toolCalls, sink.completedToolDetails)
 	}
 
-	if res := extractResponseString(map[string]any{}); res != "" { t.Errorf("expected empty string, got %q", res) }
-	if res := extractResponseString(map[string]any{"result": map[string]any{"response": "nested"}}); res != "nested" {
-		t.Errorf("expected 'nested', got %q", res)
-	}
-	if res := extractResponseString(map[string]any{"response": "flat"}); res != "flat" { t.Errorf("expected 'flat', got %q", res) }
-	if res := extractResponseString(map[string]any{"result": "not-a-map"}); res != "" {
-		t.Errorf("expected empty string for non-map result, got %q", res)
-	}
-
-	sinkNested := newMockTurnSink()
 	daemon.inflightMu.Lock()
-	daemon.inflight = []*TurnContext{{TurnID: "t-nested", Sink: sinkNested, CreatedAt: time.Now()}}
+	daemon.inflight = nil
 	daemon.inflightMu.Unlock()
 
-	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"nested chunk 1"}}`)
-	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","delta":"nested chunk 2"}}`)
-	daemon.dispatchNDJSONLine(`{"event":"step_update","text_delta":"root text_delta"}`)
-	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","thinking":"internal thought"}}`)
+	sinkNested := newMockTurnSink()
+	enqueueInflightTurn(daemon, "t-nested", sinkNested)
 
-	if len(sinkNested.deltas) != 3 {
-		t.Fatalf("expected 3 deltas, got %d: %v", len(sinkNested.deltas), sinkNested.deltas)
+	nestedEvents := []string{
+		`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"nested chunk 1"}}`,
+		`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","delta":"nested chunk 2"}}`,
+		`{"event":"step_update","text_delta":"root text_delta"}`,
+		`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","thinking":"internal thought"}}`,
 	}
-	if sinkNested.deltas[0] != "nested chunk 1" || sinkNested.deltas[1] != "nested chunk 2" || sinkNested.deltas[2] != "root text_delta" {
+	for _, ne := range nestedEvents {
+		daemon.dispatchNDJSONLine(ne)
+	}
+
+	if len(sinkNested.deltas) != 3 || sinkNested.deltas[0] != "nested chunk 1" || sinkNested.deltas[1] != "nested chunk 2" || sinkNested.deltas[2] != "root text_delta" {
 		t.Errorf("unexpected deltas: %v", sinkNested.deltas)
 	}
 	if sinkNested.thinking != 1 {
@@ -579,37 +613,12 @@ func TestStreamingDaemon_ResultStatusAndErrorHandling(t *testing.T) {
 		}
 		daemon := &StreamingDaemon{cfg: cfg, sessionID: cfg.SessionID}
 		sink := newMockTurnSink()
-		turn := &TurnContext{TurnID: "turn-" + tc.name, Model: "gemini-3.8-flash-high", Sink: sink, CreatedAt: time.Now()}
-		daemon.inflight = []*TurnContext{turn}
+		enqueueInflightTurn(daemon, "turn-"+tc.name, sink, func(trn *TurnContext) {
+			trn.Model = "gemini-3.8-flash-high"
+		})
 
 		daemon.dispatchNDJSONLine(tc.ndjsonLine)
-
-		select {
-		case <-sink.done:
-		case <-time.After(500 * time.Millisecond):
-			t.Fatalf("%s: timed out waiting for sink", tc.name)
-		}
-
-		sink.mu.Lock()
-		if tc.wantErrSubstr != "" {
-			if sink.err == nil || !strings.Contains(sink.err.Error(), tc.wantErrSubstr) {
-				t.Errorf("%s: expected error containing %q, got %v", tc.name, tc.wantErrSubstr, sink.err)
-			}
-			if sink.result != nil {
-				t.Errorf("%s: expected nil result on error, got %+v", tc.name, sink.result)
-			}
-		} else {
-			if sink.err != nil {
-				t.Errorf("%s: expected nil error, got %v", tc.name, sink.err)
-			}
-			if sink.result == nil || sink.result.Response != tc.wantResp {
-				t.Errorf("%s: expected response %q, got %+v", tc.name, tc.wantResp, sink.result)
-			}
-			if tc.wantStderr != "" && (sink.result == nil || sink.result.Stderr != tc.wantStderr) {
-				t.Errorf("%s: expected stderr %q, got %+v", tc.name, tc.wantStderr, sink.result)
-			}
-		}
-		sink.mu.Unlock()
+		waitAndAssertSinkResult(t, tc.name, sink, tc.wantResp, tc.wantStderr, tc.wantErrSubstr)
 	}
 }
 
@@ -624,41 +633,17 @@ func TestStreamingDaemon_TranscriptRescue_ResultEvents(t *testing.T) {
 
 	for _, tc := range tests {
 		cfg := DaemonConfig{
-			SessionID: "00000000-0000-0000-0000-000000000101",
+			SessionID:         "00000000-0000-0000-0000-000000000101",
 			TranscriptRescuer: func(convID string, since time.Time) string { return tc.rescuedText },
 		}
 		h := startTestStreamingDaemon(t, cfg, "", true)
 		sink := newMockTurnSink()
-		turn := &TurnContext{TurnID: "turn-" + tc.name, Prompt: "hello", Sink: sink, CreatedAt: time.Now()}
-		if err := h.daemon.Send("hello", turn); err != nil {
+		if err := h.daemon.Send("hello", &TurnContext{TurnID: "turn-" + tc.name, Prompt: "hello", Sink: sink, CreatedAt: time.Now()}); err != nil {
 			t.Fatalf("%s: send failed: %v", tc.name, err)
 		}
 
 		_, _ = h.outW.Write([]byte(tc.resultLine))
-
-		select {
-		case <-sink.done:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s: timed out waiting for sink result", tc.name)
-		}
-
-		sink.mu.Lock()
-		if tc.wantErrSubstr != "" {
-			if sink.err == nil || !strings.Contains(sink.err.Error(), tc.wantErrSubstr) {
-				t.Errorf("%s: expected error containing %q, got %v", tc.name, tc.wantErrSubstr, sink.err)
-			}
-			if sink.result != nil {
-				t.Errorf("%s: expected nil result on error, got %+v", tc.name, sink.result)
-			}
-		} else {
-			if sink.err != nil {
-				t.Errorf("%s: expected nil error, got %v", tc.name, sink.err)
-			}
-			if sink.result == nil || sink.result.Response != tc.wantResp {
-				t.Errorf("%s: expected response %q, got %+v", tc.name, tc.wantResp, sink.result)
-			}
-		}
-		sink.mu.Unlock()
+		waitAndAssertSinkResult(t, tc.name, sink, tc.wantResp, "", tc.wantErrSubstr)
 	}
 }
 
@@ -672,49 +657,25 @@ func TestStreamingDaemon_TranscriptRescue_UnexpectedEOF(t *testing.T) {
 
 	for _, tc := range tests {
 		cfg := DaemonConfig{
-			SessionID: "00000000-0000-0000-0000-000000000103",
+			SessionID:         "00000000-0000-0000-0000-000000000103",
 			TranscriptRescuer: func(convID string, since time.Time) string { return tc.rescuedText },
 		}
 		h := startTestStreamingDaemon(t, cfg, "", true)
 		sink := newMockTurnSink()
-		turn := &TurnContext{TurnID: "turn-" + tc.name, Prompt: "hello", Sink: sink, CreatedAt: time.Now()}
-		if err := h.daemon.Send("hello", turn); err != nil {
+		if err := h.daemon.Send("hello", &TurnContext{TurnID: "turn-" + tc.name, Prompt: "hello", Sink: sink, CreatedAt: time.Now()}); err != nil {
 			t.Fatalf("%s: send failed: %v", tc.name, err)
 		}
 
 		_ = h.outW.Close()
-
-		select {
-		case <-sink.done:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s: timed out waiting for sink result", tc.name)
-		}
-
-		sink.mu.Lock()
-		if tc.wantErrSubstr != "" {
-			if sink.err == nil || !strings.Contains(sink.err.Error(), tc.wantErrSubstr) {
-				t.Errorf("%s: expected error containing %q, got %v", tc.name, tc.wantErrSubstr, sink.err)
-			}
-			if sink.result != nil {
-				t.Errorf("%s: expected nil result on unrescued EOF, got %+v", tc.name, sink.result)
-			}
-		} else {
-			if sink.err != nil {
-				t.Errorf("%s: expected error to be suppressed on EOF when rescued, got %v", tc.name, sink.err)
-			}
-			if sink.result == nil || sink.result.Response != tc.wantResp {
-				t.Errorf("%s: expected response %q on EOF, got %+v", tc.name, tc.wantResp, sink.result)
-			}
-		}
-		sink.mu.Unlock()
+		waitAndAssertSinkResult(t, tc.name, sink, tc.wantResp, "", tc.wantErrSubstr)
 	}
 }
 
 func TestStreamingDaemon_Send_ContextRetrievers(t *testing.T) {
 	tests := []struct {
 		name, memoryBlock, ambientBlock, prompt, wantContentSub string
-		turnCount                                                int
-		wantMemCalled, wantAmbCalled                             bool
+		turnCount                                               int
+		wantMemCalled, wantAmbCalled                            bool
 	}{
 		{name: "MemoryInjected", memoryBlock: "<retrieved_memory>\n- User prefers dark mode\n</retrieved_memory>", prompt: "Hello Aerial", wantContentSub: "<retrieved_memory>\n- User prefers dark mode\n</retrieved_memory>", wantMemCalled: true},
 		{name: "MemorySkippedWhenAlreadyPresent", memoryBlock: "<retrieved_memory>second</retrieved_memory>", prompt: "<retrieved_memory>first</retrieved_memory>\nHello", wantContentSub: "<retrieved_memory>first</retrieved_memory>"},
@@ -746,39 +707,31 @@ func TestStreamingDaemon_Send_ContextRetrievers(t *testing.T) {
 			h.daemon.mu.Unlock()
 		}
 
-		var receivedStdin bytes.Buffer
-		readDone := make(chan struct{})
+		readDone := make(chan []byte, 1)
 		go func() {
-			defer close(readDone)
 			buf := make([]byte, 2048)
 			n, _ := h.inR.Read(buf)
-			receivedStdin.Write(buf[:n])
+			readDone <- buf[:n]
 		}()
 
-		turn := &TurnContext{TurnID: "turn-" + tc.name, Prompt: tc.prompt, Sink: newMockTurnSink(), CreatedAt: time.Now()}
-		if err := h.daemon.Send(turn.Prompt, turn); err != nil {
+		if err := h.daemon.Send(tc.prompt, &TurnContext{TurnID: "turn-" + tc.name, Prompt: tc.prompt, Sink: newMockTurnSink(), CreatedAt: time.Now()}); err != nil {
 			t.Fatalf("%s: failed sending turn: %v", tc.name, err)
 		}
 
+		var received []byte
 		select {
-		case <-readDone:
+		case received = <-readDone:
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: timed out reading stdin", tc.name)
 		}
 
-		if memCalled.Load() != tc.wantMemCalled {
-			t.Errorf("%s: memCalled = %v, want %v", tc.name, memCalled.Load(), tc.wantMemCalled)
-		}
-		if ambCalled.Load() != tc.wantAmbCalled {
-			t.Errorf("%s: ambCalled = %v, want %v", tc.name, ambCalled.Load(), tc.wantAmbCalled)
+		if memCalled.Load() != tc.wantMemCalled || ambCalled.Load() != tc.wantAmbCalled {
+			t.Errorf("%s: mem=%v (want %v), amb=%v (want %v)", tc.name, memCalled.Load(), tc.wantMemCalled, ambCalled.Load(), tc.wantAmbCalled)
 		}
 
 		var payload streamInputPayload
-		if err := json.Unmarshal(receivedStdin.Bytes(), &payload); err != nil {
-			t.Fatalf("%s: failed unmarshaling stdin JSON: %v, raw: %s", tc.name, err, receivedStdin.String())
-		}
-		if !strings.Contains(payload.Message.Content, tc.wantContentSub) {
-			t.Errorf("%s: expected payload content to contain %q, got %q", tc.name, tc.wantContentSub, payload.Message.Content)
+		if err := json.Unmarshal(received, &payload); err != nil || !strings.Contains(payload.Message.Content, tc.wantContentSub) {
+			t.Errorf("%s: unmarshal err=%v, content=%q, wantSub=%q", tc.name, err, payload.Message.Content, tc.wantContentSub)
 		}
 	}
 }
@@ -798,28 +751,34 @@ func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
 		{raw: map[string]any{"content": "root-content"}, want: "root-content"},
 		{raw: map[string]any{"text": "root-text"}, want: "root-text"},
 		{raw: map[string]any{"unknown": "val"}, want: ""},
+		{raw: map[string]any{"result": "not-a-map"}, want: ""},
+		{raw: map[string]any{}, want: ""},
 		{raw: nil, want: ""},
 	}
 
 	for _, tc := range cases {
-		got := extractResponseString(tc.raw)
-		if got != tc.want {
+		if got := extractResponseString(tc.raw); got != tc.want {
 			t.Errorf("extractResponseString(%v) = %q, want %q", tc.raw, got, tc.want)
 		}
 	}
 
-	res := &TurnResult{}
-	populateUsage(nil, nil); populateUsage(res, nil); populateUsage(nil, map[string]any{"usage": map[string]any{}})
-	populateUsage(res, map[string]any{"usage": map[string]any{"input_tokens": float64(10), "output_tokens": float64(20), "total_tokens": float64(30)}})
-	if res.Usage.InputTokens != 10 || res.Usage.OutputTokens != 20 || res.Usage.TotalTokens != 30 {
-		t.Errorf("unexpected usage from root: %+v", res.Usage)
+	assertUsage := func(r *TurnResult, in, out, tot int) {
+		t.Helper()
+		if r.Usage.InputTokens != in || r.Usage.OutputTokens != out || r.Usage.TotalTokens != tot {
+			t.Errorf("unexpected usage: %+v", r.Usage)
+		}
 	}
+
+	res := &TurnResult{}
+	populateUsage(nil, nil)
+	populateUsage(res, nil)
+	populateUsage(nil, map[string]any{"usage": map[string]any{}})
+	populateUsage(res, map[string]any{"usage": map[string]any{"input_tokens": float64(10), "output_tokens": float64(20), "total_tokens": float64(30)}})
+	assertUsage(res, 10, 20, 30)
 
 	res2 := &TurnResult{}
 	populateUsage(res2, map[string]any{"result": map[string]any{"usage": map[string]any{"input_tokens": float64(40), "output_tokens": float64(50), "total_tokens": float64(90)}}})
-	if res2.Usage.InputTokens != 40 || res2.Usage.OutputTokens != 50 || res2.Usage.TotalTokens != 90 {
-		t.Errorf("unexpected usage from nested: %+v", res2.Usage)
-	}
+	assertUsage(res2, 40, 50, 90)
 }
 
 func TestStreamingDaemon_OnTurnFinishedCallback(t *testing.T) {
@@ -828,14 +787,15 @@ func TestStreamingDaemon_OnTurnFinishedCallback(t *testing.T) {
 	daemon.SetOnTurnFinished(func(d *StreamingDaemon) { cbCalled <- d })
 
 	sink := newMockTurnSink()
-	turn := &TurnContext{TurnID: "t-1", Sink: sink, CreatedAt: time.Now()}
-	daemon.inflight = append(daemon.inflight, turn)
+	enqueueInflightTurn(daemon, "t-1", sink)
 
 	daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`)
 
 	select {
 	case d := <-cbCalled:
-		if d != daemon { t.Errorf("expected callback with daemon %p, got %p", daemon, d) }
+		if d != daemon {
+			t.Errorf("expected callback with daemon %p, got %p", daemon, d)
+		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for onTurnFinished callback")
 	}
@@ -843,9 +803,8 @@ func TestStreamingDaemon_OnTurnFinishedCallback(t *testing.T) {
 	var secondCbCalled atomic.Bool
 	daemon.SetOnTurnFinished(func(d *StreamingDaemon) { secondCbCalled.Store(true) })
 
-	turn1 := &TurnContext{TurnID: "t-1", Sink: newMockTurnSink(), CreatedAt: time.Now()}
-	turn2 := &TurnContext{TurnID: "t-2", Sink: newMockTurnSink(), CreatedAt: time.Now()}
-	daemon.inflight = []*TurnContext{turn1, turn2}
+	enqueueInflightTurn(daemon, "t-1", newMockTurnSink())
+	enqueueInflightTurn(daemon, "t-2", newMockTurnSink())
 
 	daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"done-1"}}`)
 	if secondCbCalled.Load() {
@@ -863,22 +822,20 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 		t.Fatalf("send failed: %v", err)
 	}
 
-	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":1,\"tool_name\":\"run_command\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"echo hello\"}}}}\n"))
-	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"step_index\":1,\"tool_name\":\"run_command\"}}\n"))
-	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":2,\"tool_name\":\"call_mcp_tool\",\"tool_info\":{\"parameters\":{\"ServerName\":\"github\",\"ToolName\":\"get_me\"}}}}\n"))
-	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"step_index\":2,\"tool_name\":\"call_mcp_tool\"}}\n"))
-	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":3,\"tool_name\":\"view_file\",\"tool_info\":{\"parameters\":{\"AbsolutePath\":\"/share/aerial-config/custom-skills/home-assistant/SKILL.md\"}}}}\n"))
-	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"step_index\":3,\"tool_name\":\"view_file\"}}\n"))
-	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":4,\"tool_name\":\"manage_task\",\"tool_info\":{\"parameters\":{}}}}\n"))
-	_, _ = h.outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"done\"}}\n"))
+	events := `{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":1,"tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"echo hello"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":1,"tool_name":"run_command"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":2,"tool_name":"call_mcp_tool","tool_info":{"parameters":{"ServerName":"github","ToolName":"get_me"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":2,"tool_name":"call_mcp_tool"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":3,"tool_name":"view_file","tool_info":{"parameters":{"AbsolutePath":"/share/aerial-config/custom-skills/home-assistant/SKILL.md"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":3,"tool_name":"view_file"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":4,"tool_name":"manage_task","tool_info":{"parameters":{}}}}` + "\n" +
+		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}` + "\n"
+	_, _ = h.outW.Write([]byte(events))
 
-	select {
-	case <-sink.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for turn completion")
-	}
+	waitAndAssertSinkResult(t, "ToolEvents", sink, "done", "", "")
 
-	sink.mu.Lock(); defer sink.mu.Unlock()
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
 	if len(sink.completedToolDetails) != 4 {
 		t.Fatalf("expected 4 completed tool records, got %d: %+v", len(sink.completedToolDetails), sink.completedToolDetails)
 	}
@@ -896,11 +853,8 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 		}
 	}
 
-	if len(sink.activatedSkills) != 1 {
-		t.Fatalf("expected 1 skill activation, got %d: %+v", len(sink.activatedSkills), sink.activatedSkills)
-	}
-	if sink.activatedSkills[0] != "home-assistant:discord" {
-		t.Errorf("expected skill activation 'home-assistant:discord', got %q", sink.activatedSkills[0])
+	if len(sink.activatedSkills) != 1 || sink.activatedSkills[0] != "home-assistant:discord" {
+		t.Errorf("unexpected skill activation: %+v", sink.activatedSkills)
 	}
 
 	expectedToolCalls := []string{"run_command:echo hello", "get_me:", "view_file:", "manage_task:"}
@@ -916,29 +870,20 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 
 func TestStreamingDaemon_ToolDrainingOnUnexpectedEOF(t *testing.T) {
 	h := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000202"), "", true)
-	daemon := h.daemon
-
 	sink := newMockTurnSink()
-	turn := &TurnContext{TurnID: "turn-eof-1", Prompt: "run tool until crash", Sink: sink, CreatedAt: time.Now()}
-	if err := daemon.Send(turn.Prompt, turn); err != nil {
+	if err := h.daemon.Send("run tool until crash", &TurnContext{TurnID: "turn-eof-1", Prompt: "run tool until crash", Sink: sink, CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
 
 	_, _ = h.outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":10,\"tool_name\":\"long_job\",\"tool_info\":{\"parameters\":{}}}}\n"))
 	_ = h.outW.Close()
 
-	select {
-	case <-sink.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for sink to finalize on EOF")
-	}
+	waitAndAssertSinkResult(t, "ToolDraining", sink, "", "", "unexpected EOF")
 
-	sink.mu.Lock(); defer sink.mu.Unlock()
-	if len(sink.completedToolDetails) != 1 {
-		t.Fatalf("expected 1 aborted tool drained, got %d", len(sink.completedToolDetails))
-	}
-	if c := sink.completedToolDetails[0]; c.ToolName != "long_job" || c.Status != "aborted" {
-		t.Errorf("expected long_job aborted, got %+v", c)
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.completedToolDetails) != 1 || sink.completedToolDetails[0].ToolName != "long_job" || sink.completedToolDetails[0].Status != "aborted" {
+		t.Fatalf("expected long_job aborted tool drained, got %+v", sink.completedToolDetails)
 	}
 }
 
@@ -955,33 +900,21 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 		OnError:       mockSink.OnError,
 	})
 
-	turn := &TurnContext{
-		TurnID:    "turn-step-aware",
-		SessionID: testSessionUUID,
-		Model:     "gemini-3.8-flash-high",
-		Prompt:    "test step-aware purging",
-		CreatedAt: time.Now(),
-		Sink:      bufSink,
-	}
+	enqueueInflightTurn(daemon, "turn-step-aware", bufSink, func(tc *TurnContext) {
+		tc.SessionID = testSessionUUID
+		tc.Model = "gemini-3.8-flash-high"
+		tc.Prompt = "test step-aware purging"
+	})
 
-	daemon.inflightMu.Lock()
-	daemon.inflight = append(daemon.inflight, turn)
-	daemon.inflightMu.Unlock()
-
-	stepUpdates := []string{
-		`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Let me wait for task..."}}`,
-		`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"Reviewing logs..."}}`,
-		`{"event":"step_update","step_index":3,"step_update":{"state":"ACTIVE","step_type":"agent_response","text_delta":"All work completed! Ready to roll."}}`,
+	steps := []struct{ line, want string }{
+		{`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Let me wait for task..."}}`, "Let me wait for task..."},
+		{`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"Reviewing logs..."}}`, "Reviewing logs..."},
+		{`{"event":"step_update","step_index":3,"step_update":{"state":"ACTIVE","step_type":"agent_response","text_delta":"All work completed! Ready to roll."}}`, "All work completed! Ready to roll."},
 	}
-	expectedAccum := []string{
-		"Let me wait for task...",
-		"Reviewing logs...",
-		"All work completed! Ready to roll.",
-	}
-	for i, su := range stepUpdates {
-		daemon.dispatchNDJSONLine(su)
-		if bufSink.AccumulatedText() != expectedAccum[i] {
-			t.Fatalf("step %d: got %q, want %q", i+1, bufSink.AccumulatedText(), expectedAccum[i])
+	for i, s := range steps {
+		daemon.dispatchNDJSONLine(s.line)
+		if bufSink.AccumulatedText() != s.want {
+			t.Fatalf("step %d: got %q, want %q", i+1, bufSink.AccumulatedText(), s.want)
 		}
 	}
 
