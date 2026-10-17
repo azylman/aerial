@@ -17,25 +17,66 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
-	var spawnCount atomic.Int32
+// pipeMockSpawnerOpts configures the shared pipe mock spawner helper.
+type pipeMockSpawnerOpts struct {
+	pid        int
+	killErr    error
+	initSessID string
+	onSpawn    func(cfg DaemonConfig)
+	echoRes    string // if set, reading from stdin responds with this SUCCESS result payload
+}
 
-	mock := &MockDaemonSpawner{
+// newPipeMockSpawner creates a MockDaemonSpawner backed by pipes with standard init event handling.
+func newPipeMockSpawner(opts pipeMockSpawnerOpts) *MockDaemonSpawner {
+	var count atomic.Int32
+	return &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			spawnCount.Add(1)
+			idx := count.Add(1)
+			if opts.onSpawn != nil {
+				opts.onSpawn(cfg)
+			}
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
 			errR, _ := io.Pipe()
 
+			sessID := opts.initSessID
+			if sessID == "" {
+				if cfg.SessionID != "" {
+					sessID = cfg.SessionID
+				} else {
+					sessID = fmt.Sprintf("00000000-0000-0000-0000-%012d", idx)
+				}
+			}
+
 			go func() {
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000010"}` + "\n"))
-				_, _ = io.ReadAll(inR)
-				_ = outW.Close()
+				defer outW.Close()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				if opts.echoRes != "" {
+					buf := make([]byte, 1024)
+					n, _ := inR.Read(buf)
+					if n > 0 {
+						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", opts.echoRes)))
+					}
+				} else {
+					_, _ = io.Copy(io.Discard, inR)
+				}
 			}()
 
-			return inW, outR, errR, &MockProcessHandle{pid: 100}, nil
+			pid := opts.pid
+			if pid == 0 {
+				pid = int(idx * 100)
+			}
+			return inW, outR, errR, &MockProcessHandle{pid: pid, killErr: opts.killErr}, nil
 		},
 	}
+}
+
+func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
+	var spawnCount atomic.Int32
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		initSessID: "00000000-0000-0000-0000-000000000010",
+		onSpawn:    func(cfg DaemonConfig) { spawnCount.Add(1) },
+	})
 
 	cfg := PoolConfig{
 		PrewarmedTargets: []string{"kiosk"},
@@ -50,7 +91,6 @@ func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
 		t.Fatalf("failed to initialize pool: %v", err)
 	}
 
-	// Concurrent callers requesting "kiosk" should join the same daemon, not re-spawn
 	d1, err1 := pool.GetOrCreate(context.Background(), "kiosk", "")
 	d2, err2 := pool.GetOrCreate(context.Background(), "kiosk", "")
 
@@ -75,149 +115,127 @@ func TestUnifiedProcessPool_Defaults(t *testing.T) {
 	}
 }
 
+func TestUnifiedProcessPool_LifecycleBasic(t *testing.T) {
+	t.Run("ReusesExistingAndReplacesClosed", func(t *testing.T) {
+		var spawnCount atomic.Int32
+		mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+			initSessID: "00000000-0000-0000-0000-000000000001",
+			onSpawn:    func(cfg DaemonConfig) { spawnCount.Add(1) },
+		})
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		defer pool.Close()
+
+		d1, err := pool.GetOrCreate(context.Background(), "thread-1", "")
+		if err != nil {
+			t.Fatalf("first GetOrCreate failed: %v", err)
+		}
+		d2, err := pool.GetOrCreate(context.Background(), "thread-1", "")
+		if err != nil || d1 != d2 || spawnCount.Load() != 1 {
+			t.Fatalf("reuse failed: d1=%p, d2=%p, err=%v, count=%d", d1, d2, err, spawnCount.Load())
+		}
+
+		if err := d1.Close(); err != nil {
+			t.Fatalf("failed closing d1: %v", err)
+		}
+		d3, err := pool.GetOrCreate(context.Background(), "thread-1", "")
+		if err != nil || d3 == d1 || spawnCount.Load() != 2 {
+			t.Fatalf("replacement failed: d1=%p, d3=%p, err=%v, count=%d", d1, d3, err, spawnCount.Load())
+		}
+	})
+
+	t.Run("SpawnFailure", func(t *testing.T) {
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				return nil, nil, nil, nil, errors.New("simulated spawn failure")
+			},
+		}
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		defer pool.Close()
+		_, err := pool.GetOrCreate(context.Background(), "failed-target", "")
+		if err == nil || !strings.Contains(err.Error(), "failed to start daemon") {
+			t.Errorf("expected failed to start daemon error, got %v", err)
+		}
+	})
+
+	t.Run("MultipleTargets", func(t *testing.T) {
+		var spawnCount atomic.Int32
+		mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+			onSpawn: func(cfg DaemonConfig) { spawnCount.Add(1) },
+		})
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		defer pool.Close()
+		d1, err1 := pool.GetOrCreate(context.Background(), "thread-alpha", "")
+		d2, err2 := pool.GetOrCreate(context.Background(), "device-voice", "")
+		if err1 != nil || err2 != nil || d1 == d2 || spawnCount.Load() != 2 {
+			t.Errorf("multiple targets failed: d1=%p, d2=%p, count=%d", d1, d2, spawnCount.Load())
+		}
+	})
+
+	t.Run("ClosedPoolRejections", func(t *testing.T) {
+		pool := NewUnifiedProcessPool(PoolConfig{}, newPipeMockSpawner(pipeMockSpawnerOpts{}))
+		if err := pool.Close(); err != nil {
+			t.Fatalf("close failed: %v", err)
+		}
+		if err := pool.Initialize(context.Background()); err == nil {
+			t.Error("expected error calling Initialize on closed pool")
+		}
+		if _, err := pool.GetOrCreate(context.Background(), "any", ""); err == nil {
+			t.Error("expected error calling GetOrCreate on closed pool")
+		}
+	})
+
+	t.Run("CloseErrorAndIdempotent", func(t *testing.T) {
+		mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 600, killErr: errors.New("kill failed")})
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		if _, err := pool.GetOrCreate(context.Background(), "error-target", ""); err != nil {
+			t.Fatalf("failed GetOrCreate: %v", err)
+		}
+		err1 := pool.Close()
+		if err1 == nil || !strings.Contains(err1.Error(), "errors closing pool daemons") {
+			t.Fatalf("expected close error, got %v", err1)
+		}
+		err2 := pool.Close()
+		if err2 == nil || err2.Error() != err1.Error() {
+			t.Errorf("expected idempotent close error, got %v", err2)
+		}
+	})
+
+	t.Run("InitializePrewarmFailure", func(t *testing.T) {
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				return nil, nil, nil, nil, errors.New("prewarm boom")
+			},
+		}
+		pool := NewUnifiedProcessPool(PoolConfig{PrewarmedTargets: []string{"bad-prewarm"}}, mock)
+		defer pool.Close()
+		if err := pool.Initialize(context.Background()); err != nil {
+			t.Fatalf("unexpected Initialize error: %v", err)
+		}
+	})
+}
+
 func TestUnifiedProcessPool_GetOrCreate_ReusesExistingAndReplacesClosed(t *testing.T) {
-	var spawnCount atomic.Int32
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			spawnCount.Add(1)
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
-				_, _ = io.Copy(io.Discard, inR)
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 200}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	d1, err := pool.GetOrCreate(context.Background(), "thread-1", "")
-	if err != nil {
-		t.Fatalf("first GetOrCreate failed: %v", err)
-	}
-
-	// Reusing live daemon
-	d2, err := pool.GetOrCreate(context.Background(), "thread-1", "")
-	if err != nil {
-		t.Fatalf("second GetOrCreate failed: %v", err)
-	}
-	if d1 != d2 {
-		t.Errorf("expected d1 and d2 to be identical instance")
-	}
-	if spawnCount.Load() != 1 {
-		t.Errorf("expected spawnCount 1, got %d", spawnCount.Load())
-	}
-
-	// Close daemon to simulate termination
-	if err := d1.Close(); err != nil {
-		t.Fatalf("failed closing d1: %v", err)
-	}
-
-	// Calling GetOrCreate on closed daemon should spawn a replacement
-	d3, err := pool.GetOrCreate(context.Background(), "thread-1", "")
-	if err != nil {
-		t.Fatalf("third GetOrCreate failed: %v", err)
-	}
-	if d3 == d1 {
-		t.Errorf("expected new daemon instance after replacement")
-	}
-	if spawnCount.Load() != 2 {
-		t.Errorf("expected spawnCount 2, got %d", spawnCount.Load())
-	}
+	TestUnifiedProcessPool_LifecycleBasic(t)
 }
 
 func TestUnifiedProcessPool_GetOrCreate_SpawnFailure(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			return nil, nil, nil, nil, errors.New("simulated spawn failure")
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	d, err := pool.GetOrCreate(context.Background(), "failed-target", "")
-	if err == nil {
-		t.Fatalf("expected error from failed spawn, got nil daemon: %v", d)
-	}
-	if !strings.Contains(err.Error(), "failed to start daemon") {
-		t.Errorf("unexpected error format: %v", err)
-	}
+	TestUnifiedProcessPool_LifecycleBasic(t)
 }
 
 func TestUnifiedProcessPool_MultipleTargets(t *testing.T) {
-	var spawnCount atomic.Int32
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			spawnCount.Add(1)
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000002"}` + "\n"))
-			}()
-			_ = inR.Close()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 300}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	d1, err1 := pool.GetOrCreate(context.Background(), "thread-alpha", "")
-	d2, err2 := pool.GetOrCreate(context.Background(), "device-voice", "")
-
-	if err1 != nil || err2 != nil {
-		t.Fatalf("failed getting targets: %v, %v", err1, err2)
-	}
-	if d1 == d2 {
-		t.Errorf("expected different instances for distinct target keys")
-	}
-	if spawnCount.Load() != 2 {
-		t.Errorf("expected exactly 2 spawns, got %d", spawnCount.Load())
-	}
+	TestUnifiedProcessPool_LifecycleBasic(t)
 }
 
 func TestUnifiedProcessPool_ClosedPoolRejections(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
+	TestUnifiedProcessPool_LifecycleBasic(t)
+}
 
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000003"}` + "\n"))
-			}()
-			_ = inR.Close()
+func TestUnifiedProcessPool_CloseErrorAndIdempotent(t *testing.T) {
+	TestUnifiedProcessPool_LifecycleBasic(t)
+}
 
-			return inW, outR, errR, &MockProcessHandle{pid: 400}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	if err := pool.Close(); err != nil {
-		t.Fatalf("failed closing pool: %v", err)
-	}
-
-	if err := pool.Initialize(context.Background()); err == nil {
-		t.Error("expected error calling Initialize on closed pool")
-	}
-
-	if _, err := pool.GetOrCreate(context.Background(), "any", ""); err == nil {
-		t.Error("expected error calling GetOrCreate on closed pool")
-	}
+func TestUnifiedProcessPool_InitializePrewarmFailure(t *testing.T) {
+	TestUnifiedProcessPool_LifecycleBasic(t)
 }
 
 func TestUnifiedProcessPool_CloseDuringSpawn(t *testing.T) {
@@ -252,79 +270,18 @@ func TestUnifiedProcessPool_CloseDuringSpawn(t *testing.T) {
 	}()
 
 	<-spawnStarted
-	// Close pool while spawn is in-flight
 	_ = pool.Close()
 	close(allowSpawnToComplete)
 
 	err := <-errChan
-	if err == nil {
-		t.Fatal("expected error from GetOrCreate when pool was closed during spawn")
-	}
-	if !strings.Contains(err.Error(), "process pool is closed") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestUnifiedProcessPool_CloseErrorAndIdempotent(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000005"}` + "\n"))
-			}()
-			_ = inR.Close()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 600, killErr: errors.New("kill failed")}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	_, err := pool.GetOrCreate(context.Background(), "error-target", "")
-	if err != nil {
-		t.Fatalf("failed GetOrCreate: %v", err)
-	}
-
-	errClose := pool.Close()
-	if errClose == nil {
-		t.Fatal("expected error on pool.Close() due to kill failure")
-	}
-	if !strings.Contains(errClose.Error(), "errors closing pool daemons") {
-		t.Errorf("unexpected close error: %v", errClose)
-	}
-
-	// Second Close() should return the same error (idempotent)
-	errClose2 := pool.Close()
-	if errClose2 == nil || errClose2.Error() != errClose.Error() {
-		t.Errorf("expected idempotent close error, got %v", errClose2)
-	}
-}
-
-func TestUnifiedProcessPool_InitializePrewarmFailure(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			return nil, nil, nil, nil, errors.New("prewarm boom")
-		},
-	}
-
-	cfg := PoolConfig{
-		PrewarmedTargets: []string{"bad-prewarm"},
-	}
-	pool := NewUnifiedProcessPool(cfg, mock)
-	defer pool.Close()
-
-	if err := pool.Initialize(context.Background()); err != nil {
-		t.Fatalf("unexpected Initialize error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "process pool is closed") {
+		t.Fatalf("expected process pool closed error, got %v", err)
 	}
 }
 
 func TestUnifiedProcessPool_Initialize_Sequential(t *testing.T) {
 	var mu sync.Mutex
-	var activeSpawns int
-	maxConcurrentSpawns := 0
+	var activeSpawns, maxConcurrentSpawns int
 	var order []string
 
 	mock := &MockDaemonSpawner{
@@ -337,7 +294,6 @@ func TestUnifiedProcessPool_Initialize_Sequential(t *testing.T) {
 			order = append(order, cfg.ThreadID)
 			mu.Unlock()
 
-			// Simulate work during startup
 			select {
 			case <-ctx.Done():
 				mu.Lock()
@@ -365,10 +321,9 @@ func TestUnifiedProcessPool_Initialize_Sequential(t *testing.T) {
 		},
 	}
 
-	cfg := PoolConfig{
+	pool := NewUnifiedProcessPool(PoolConfig{
 		PrewarmedTargets: []string{"seq-target-1", "seq-target-2", "seq-target-3"},
-	}
-	pool := NewUnifiedProcessPool(cfg, mock)
+	}, mock)
 	defer pool.Close()
 
 	if err := pool.Initialize(context.Background()); err != nil {
@@ -378,42 +333,20 @@ func TestUnifiedProcessPool_Initialize_Sequential(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if maxConcurrentSpawns != 1 {
-		t.Errorf("expected max concurrent spawns to be exactly 1, got %d", maxConcurrentSpawns)
-	}
-	if len(order) != 3 {
-		t.Fatalf("expected 3 targets spawned, got %d", len(order))
-	}
-	if order[0] != "seq-target-1" || order[1] != "seq-target-2" || order[2] != "seq-target-3" {
-		t.Errorf("expected sequential order [seq-target-1, seq-target-2, seq-target-3], got %v", order)
+	if maxConcurrentSpawns != 1 || len(order) != 3 || order[0] != "seq-target-1" || order[1] != "seq-target-2" || order[2] != "seq-target-3" {
+		t.Errorf("sequential initialization check failed: max=%d, order=%v", maxConcurrentSpawns, order)
 	}
 }
 
 func TestUnifiedProcessPool_Initialize_ContextCancellation(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000010"}` + "\n"))
-				_, _ = io.ReadAll(inR)
-				_ = outW.Close()
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 100}, nil
-		},
-	}
-
-	cfg := PoolConfig{
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 100})
+	pool := NewUnifiedProcessPool(PoolConfig{
 		PrewarmedTargets: []string{"cancel-target-1", "cancel-target-2"},
-	}
-	pool := NewUnifiedProcessPool(cfg, mock)
+	}, mock)
 	defer pool.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // pre-cancelled
+	cancel()
 
 	err := pool.Initialize(ctx)
 	if !errors.Is(err, context.Canceled) {
@@ -422,254 +355,240 @@ func TestUnifiedProcessPool_Initialize_ContextCancellation(t *testing.T) {
 }
 
 func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
-	pool := NewUnifiedProcessPool(PoolConfig{}, nil)
-
-	// Case 1: nil daemon
-	shouldRotate, reason := pool.ShouldRotate(nil)
-	if shouldRotate || reason != "" {
-		t.Errorf("expected false for nil daemon, got %v (%s)", shouldRotate, reason)
+	tests := []struct {
+		name             string
+		daemon           *StreamingDaemon
+		transcriptSteps  int
+		transcriptBytes  int64
+		sessionDBBytes   int64
+		transcriptTurns  int
+		poolCfg          PoolConfig
+		setupSessionMgr  bool
+		wantRotate       bool
+		wantReasonSubstr string
+	}{
+		{
+			name:       "nil daemon",
+			daemon:     nil,
+			wantRotate: false,
+		},
+		{
+			name: "turn count exceeded",
+			daemon: &StreamingDaemon{
+				turnCount: DefaultMaxSessionTurns,
+				state:     StateReady,
+			},
+			wantRotate:       true,
+			wantReasonSubstr: "turn count threshold exceeded",
+		},
+		{
+			name: "raw daemon step count alone does not trigger",
+			daemon: &StreamingDaemon{
+				turnCount: 2,
+				stepCount: 185,
+				state:     StateReady,
+			},
+			wantRotate: false,
+		},
+		{
+			name: "below threshold",
+			daemon: &StreamingDaemon{
+				turnCount: 5,
+				stepCount: 100,
+				state:     StateReady,
+			},
+			wantRotate: false,
+		},
+		{
+			name: "inflight turn gating",
+			daemon: &StreamingDaemon{
+				turnCount: 15,
+				stepCount: 250,
+				inflight:  []*TurnContext{{TurnID: "turn-inflight"}},
+				state:     StateReady,
+			},
+			wantRotate: false,
+		},
+		{
+			name: "dirty daemon with 0 inflight",
+			daemon: &StreamingDaemon{
+				dirty: true,
+				state: StateReady,
+			},
+			wantRotate:       true,
+			wantReasonSubstr: "daemon marked dirty during in-flight turn",
+		},
+		{
+			name: "dirty daemon with inflight > 0",
+			daemon: &StreamingDaemon{
+				dirty:    true,
+				state:    StateExecuting,
+				inflight: []*TurnContext{{TurnID: "turn-inflight"}},
+			},
+			wantRotate: false,
+		},
+		{
+			name: "transcript step count threshold exceeded",
+			daemon: &StreamingDaemon{
+				turnCount: DefaultMinSessionTurns,
+				state:     StateReady,
+			},
+			setupSessionMgr:  true,
+			transcriptSteps:  DefaultMaxSessionSteps - 1,
+			wantRotate:       true,
+			wantReasonSubstr: "transcript step count threshold exceeded",
+		},
+		{
+			name: "transcript file size threshold exceeded",
+			daemon: &StreamingDaemon{
+				turnCount: DefaultMinSessionTurns,
+				state:     StateReady,
+			},
+			setupSessionMgr:  true,
+			transcriptBytes:  session.DefaultMaxTranscriptBytes + 10,
+			wantRotate:       true,
+			wantReasonSubstr: "transcript file size threshold exceeded",
+		},
+		{
+			name: "session DB size threshold exceeded",
+			daemon: &StreamingDaemon{
+				turnCount: DefaultMinSessionTurns,
+				state:     StateReady,
+			},
+			setupSessionMgr:  true,
+			sessionDBBytes:   session.DefaultMaxSessionDBBytes + 10,
+			wantRotate:       true,
+			wantReasonSubstr: "session DB size threshold exceeded",
+		},
+		{
+			name: "transcript turn count threshold exceeded",
+			daemon: &StreamingDaemon{
+				state: StateReady,
+			},
+			setupSessionMgr:  true,
+			transcriptTurns:  DefaultMaxSessionTurns,
+			wantRotate:       true,
+			wantReasonSubstr: "transcript turn count threshold exceeded",
+		},
+		{
+			name: "under min turns standard thresholds do not rotate",
+			daemon: &StreamingDaemon{
+				turnCount: 1,
+				state:     StateReady,
+			},
+			setupSessionMgr: true,
+			transcriptSteps: DefaultMaxSessionSteps,
+			sessionDBBytes:  DefaultMaxSessionDBBytes,
+			wantRotate:      false,
+		},
+		{
+			name: "under min turns 3x emergency step blowout rotates",
+			daemon: &StreamingDaemon{
+				turnCount: 1,
+				state:     StateReady,
+			},
+			setupSessionMgr:  true,
+			transcriptSteps:  DefaultEmergencyRotationMultiplier * DefaultMaxSessionSteps,
+			wantRotate:       true,
+			wantReasonSubstr: "transcript step count emergency threshold exceeded",
+		},
+		{
+			name: "under min turns 3x emergency transcript size blowout rotates",
+			daemon: &StreamingDaemon{
+				turnCount: 1,
+				state:     StateReady,
+			},
+			setupSessionMgr:  true,
+			transcriptBytes:  DefaultEmergencyRotationMultiplier*DefaultMaxTranscriptBytes + 10,
+			wantRotate:       true,
+			wantReasonSubstr: "transcript file size emergency threshold exceeded",
+		},
+		{
+			name: "under min turns 3x emergency DB size blowout rotates",
+			daemon: &StreamingDaemon{
+				turnCount: 2,
+				state:     StateReady,
+			},
+			setupSessionMgr:  true,
+			sessionDBBytes:   DefaultEmergencyRotationMultiplier*DefaultMaxSessionDBBytes + 10,
+			wantRotate:       true,
+			wantReasonSubstr: "session DB size emergency threshold exceeded",
+		},
+		{
+			name: "under min turns dirty daemon rotates immediately",
+			daemon: &StreamingDaemon{
+				turnCount: 1,
+				dirty:     true,
+				state:     StateReady,
+			},
+			wantRotate:       true,
+			wantReasonSubstr: "daemon marked dirty",
+		},
+		{
+			name: "custom min turns and emergency multiplier",
+			daemon: &StreamingDaemon{
+				turnCount: 3,
+				state:     StateReady,
+			},
+			setupSessionMgr: true,
+			sessionDBBytes:  2*DefaultMaxSessionDBBytes + 10,
+			poolCfg: PoolConfig{
+				MinSessionTurns:             5,
+				EmergencyRotationMultiplier: 2,
+			},
+			wantRotate:       true,
+			wantReasonSubstr: "session DB size emergency threshold exceeded",
+		},
 	}
 
-	// Case 2: turnCount >= DefaultMaxSessionTurns
-	d := &StreamingDaemon{
-		turnCount: DefaultMaxSessionTurns,
-		state:     StateReady,
-	}
-	shouldRotate, reason = pool.ShouldRotate(d)
-	if !shouldRotate || !strings.Contains(reason, "turn count threshold exceeded") {
-		t.Fatalf("expected rotation on turnCount >= DefaultMaxSessionTurns, got %v (%s)", shouldRotate, reason)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.poolCfg
+			tmpDir := t.TempDir()
+			if tt.setupSessionMgr {
+				cfg.SessionManager = session.New(tmpDir, tmpDir)
+				if tt.daemon != nil {
+					sessID := "sess-" + uuid.NewString()
+					tt.daemon.sessionID = sessID
+					if tt.transcriptSteps > 0 {
+						logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
+						_ = os.MkdirAll(logsDir, 0755)
+						_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tt.transcriptSteps)), 0644)
+					}
+					if tt.transcriptBytes > 0 {
+						logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
+						_ = os.MkdirAll(logsDir, 0755)
+						_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), make([]byte, tt.transcriptBytes), 0644)
+					}
+					if tt.sessionDBBytes > 0 {
+						convDir := filepath.Join(tmpDir, "conversations")
+						_ = os.MkdirAll(convDir, 0755)
+						_ = os.WriteFile(filepath.Join(convDir, sessID+".db"), make([]byte, tt.sessionDBBytes), 0644)
+					}
+					if tt.transcriptTurns > 0 {
+						logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
+						_ = os.MkdirAll(logsDir, 0755)
+						var sb strings.Builder
+						for i := 0; i < tt.transcriptTurns; i++ {
+							sb.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1))
+							sb.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1))
+						}
+						_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(sb.String()), 0644)
+					}
+				}
+			}
 
-	// Case 3: raw daemon stepCount (NDJSON chunk volume) alone does not trigger rotation without SessionManager transcript limit
-	d.turnCount = 2
-	d.stepCount = 185
-	shouldRotate, reason = pool.ShouldRotate(d)
-	if shouldRotate || reason != "" {
-		t.Fatalf("expected no rotation on raw daemon stepCount >= 180 without transcript limit, got %v (%s)", shouldRotate, reason)
-	}
+			pool := NewUnifiedProcessPool(cfg, nil)
+			defer pool.Close()
 
-	// Case 4: below threshold
-	d.turnCount = 5
-	d.stepCount = 100
-	shouldRotate, reason = pool.ShouldRotate(d)
-	if shouldRotate || reason != "" {
-		t.Errorf("expected no rotation when below thresholds, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 5: inflight turn gating (turnCount/stepCount exceeded, but inflight > 0)
-	d.turnCount = 15
-	d.stepCount = 250
-	d.inflight = []*TurnContext{{TurnID: "turn-inflight"}}
-	shouldRotate, reason = pool.ShouldRotate(d)
-	if shouldRotate || reason != "" {
-		t.Errorf("expected no rotation when inflight turns exist, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 6: dirty daemon with 0 in-flight turns
-	dDirty := &StreamingDaemon{
-		dirty: true,
-		state: StateReady,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dDirty)
-	if !shouldRotate || reason != "daemon marked dirty during in-flight turn" {
-		t.Fatalf("expected rotation for dirty daemon with 0 inflight, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 7: dirty daemon with >0 in-flight turns
-	dDirtyInflight := &StreamingDaemon{
-		dirty:    true,
-		state:    StateExecuting,
-		inflight: []*TurnContext{{TurnID: "turn-inflight"}},
-	}
-	shouldRotate, reason = pool.ShouldRotate(dDirtyInflight)
-	if shouldRotate || reason != "" {
-		t.Fatalf("expected no rotation for dirty daemon with >0 inflight, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 8: SessionManager transcript step count limit exceeded
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, tmpDir)
-	pool.SetSessionManager(sessMgr)
-
-	sessIDSteps := "sess-rotate-steps"
-	sessDirSteps := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDSteps, ".system_generated", "logs")
-	if err := os.MkdirAll(sessDirSteps, 0755); err != nil {
-		t.Fatalf("failed to create logs dir: %v", err)
-	}
-	transcriptContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps-1)
-	if err := os.WriteFile(filepath.Join(sessDirSteps, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	dSessSteps := &StreamingDaemon{
-		sessionID: sessIDSteps,
-		state:     StateReady,
-		turnCount: DefaultMinSessionTurns,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dSessSteps)
-	if !shouldRotate || !strings.Contains(reason, "transcript step count threshold exceeded") {
-		t.Fatalf("expected rotation on transcript steps exceeded, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 9: SessionManager transcript file size limit exceeded (at turnCount >= DefaultMinSessionTurns)
-	sessIDSize := "sess-rotate-size"
-	sessDirSize := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDSize, ".system_generated", "logs")
-	if err := os.MkdirAll(sessDirSize, 0755); err != nil {
-		t.Fatalf("failed to create logs dir: %v", err)
-	}
-	largeData := make([]byte, session.DefaultMaxTranscriptBytes+10)
-	if err := os.WriteFile(filepath.Join(sessDirSize, "transcript.jsonl"), largeData, 0644); err != nil {
-		t.Fatalf("failed to write large transcript: %v", err)
-	}
-
-	dSessSize := &StreamingDaemon{
-		sessionID: sessIDSize,
-		state:     StateReady,
-		turnCount: DefaultMinSessionTurns,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dSessSize)
-	if !shouldRotate || !strings.Contains(reason, "transcript file size threshold exceeded") {
-		t.Fatalf("expected rotation on transcript size exceeded, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 10: SessionManager DB size limit exceeded (at turnCount >= DefaultMinSessionTurns)
-	sessIDDB := "sess-rotate-db"
-	convDir := filepath.Join(tmpDir, "conversations")
-	if err := os.MkdirAll(convDir, 0755); err != nil {
-		t.Fatalf("failed to create conversations dir: %v", err)
-	}
-	largeDBData := make([]byte, session.DefaultMaxSessionDBBytes+10)
-	if err := os.WriteFile(filepath.Join(convDir, sessIDDB+".db"), largeDBData, 0644); err != nil {
-		t.Fatalf("failed to write large session DB: %v", err)
-	}
-
-	dSessDB := &StreamingDaemon{
-		sessionID: sessIDDB,
-		state:     StateReady,
-		turnCount: DefaultMinSessionTurns,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dSessDB)
-	if !shouldRotate || !strings.Contains(reason, "session DB size threshold exceeded") {
-		t.Fatalf("expected rotation on session DB size exceeded, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 11: SessionManager transcript turn count limit exceeded
-	sessIDTurns := "sess-rotate-turns"
-	sessDirTurns := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDTurns, ".system_generated", "logs")
-	if err := os.MkdirAll(sessDirTurns, 0755); err != nil {
-		t.Fatalf("failed to create logs dir: %v", err)
-	}
-	var turnContent strings.Builder
-	for i := 0; i < DefaultMaxSessionTurns; i++ {
-		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1))
-		turnContent.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1))
-	}
-	if err := os.WriteFile(filepath.Join(sessDirTurns, "transcript.jsonl"), []byte(turnContent.String()), 0644); err != nil {
-		t.Fatalf("failed to write transcript turns: %v", err)
-	}
-
-	dSessTurns := &StreamingDaemon{
-		sessionID: sessIDTurns,
-		state:     StateReady,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dSessTurns)
-	if !shouldRotate || !strings.Contains(reason, "transcript turn count threshold exceeded") {
-		t.Fatalf("expected rotation on transcript turns exceeded, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 12: Under min turns (< DefaultMinSessionTurns), standard 1x thresholds do NOT rotate
-	sessIDUnderMin := "sess-under-min"
-	sessDirUnderMin := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDUnderMin, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDirUnderMin, 0755)
-	// Write 1x steps and 1x size at turn 1
-	underMinStepsContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps)
-	_ = os.WriteFile(filepath.Join(sessDirUnderMin, "transcript.jsonl"), []byte(underMinStepsContent), 0644)
-	_ = os.WriteFile(filepath.Join(convDir, sessIDUnderMin+".db"), make([]byte, DefaultMaxSessionDBBytes), 0644)
-
-	dUnderMin := &StreamingDaemon{
-		sessionID: sessIDUnderMin,
-		state:     StateReady,
-		turnCount: 1, // Below DefaultMinSessionTurns (3)
-	}
-	shouldRotate, reason = pool.ShouldRotate(dUnderMin)
-	if shouldRotate || reason != "" {
-		t.Fatalf("expected no rotation under min turns for 1x thresholds, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 13: Under min turns (< DefaultMinSessionTurns), 3x emergency thresholds DO rotate
-	// 13a: 3x step count blowout
-	sessIDEmergSteps := "sess-emerg-steps"
-	sessDirEmergSteps := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDEmergSteps, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDirEmergSteps, 0755)
-	emergStepsContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultEmergencyRotationMultiplier*DefaultMaxSessionSteps)
-	_ = os.WriteFile(filepath.Join(sessDirEmergSteps, "transcript.jsonl"), []byte(emergStepsContent), 0644)
-	dEmergSteps := &StreamingDaemon{
-		sessionID: sessIDEmergSteps,
-		state:     StateReady,
-		turnCount: 1,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dEmergSteps)
-	if !shouldRotate || !strings.Contains(reason, "transcript step count emergency threshold exceeded") {
-		t.Fatalf("expected emergency step rotation under min turns, got %v (%s)", shouldRotate, reason)
-	}
-
-	// 13b: 3x transcript size blowout
-	sessIDEmergSize := "sess-emerg-size"
-	sessDirEmergSize := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessIDEmergSize, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDirEmergSize, 0755)
-	_ = os.WriteFile(filepath.Join(sessDirEmergSize, "transcript.jsonl"), make([]byte, DefaultEmergencyRotationMultiplier*DefaultMaxTranscriptBytes+10), 0644)
-	dEmergSize := &StreamingDaemon{
-		sessionID: sessIDEmergSize,
-		state:     StateReady,
-		turnCount: 1,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dEmergSize)
-	if !shouldRotate || !strings.Contains(reason, "transcript file size emergency threshold exceeded") {
-		t.Fatalf("expected emergency size rotation under min turns, got %v (%s)", shouldRotate, reason)
-	}
-
-	// 13c: 3x DB size blowout
-	sessIDEmergDB := "sess-emerg-db"
-	_ = os.WriteFile(filepath.Join(convDir, sessIDEmergDB+".db"), make([]byte, DefaultEmergencyRotationMultiplier*DefaultMaxSessionDBBytes+10), 0644)
-	dEmergDB := &StreamingDaemon{
-		sessionID: sessIDEmergDB,
-		state:     StateReady,
-		turnCount: 2,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dEmergDB)
-	if !shouldRotate || !strings.Contains(reason, "session DB size emergency threshold exceeded") {
-		t.Fatalf("expected emergency DB rotation under min turns, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 14: Under min turns, dirty daemon rotates immediately regardless of turn count
-	dDirtyUnderMin := &StreamingDaemon{
-		sessionID: "sess-dirty-undermin",
-		state:     StateReady,
-		turnCount: 1,
-		dirty:     true,
-	}
-	shouldRotate, reason = pool.ShouldRotate(dDirtyUnderMin)
-	if !shouldRotate || !strings.Contains(reason, "daemon marked dirty") {
-		t.Fatalf("expected dirty daemon to rotate under min turns, got %v (%s)", shouldRotate, reason)
-	}
-
-	// Case 15: Custom MinSessionTurns and EmergencyRotationMultiplier configuration
-	customPool := NewUnifiedProcessPool(PoolConfig{
-		MinSessionTurns:             5,
-		EmergencyRotationMultiplier: 2,
-		SessionManager:              sessMgr,
-	}, nil)
-	sessIDCustom := "sess-custom-config"
-	_ = os.WriteFile(filepath.Join(convDir, sessIDCustom+".db"), make([]byte, 2*DefaultMaxSessionDBBytes+10), 0644)
-	dCustom := &StreamingDaemon{
-		sessionID: sessIDCustom,
-		state:     StateReady,
-		turnCount: 3, // < custom min turns (5)
-	}
-	// At turn 3, 2x DB size hits emergency multiplier (2x) and rotates
-	shouldRotate, reason = customPool.ShouldRotate(dCustom)
-	if !shouldRotate || !strings.Contains(reason, "session DB size emergency threshold exceeded") {
-		t.Fatalf("expected emergency rotation with custom multiplier=2, got %v (%s)", shouldRotate, reason)
+			gotRotate, gotReason := pool.ShouldRotate(tt.daemon)
+			if gotRotate != tt.wantRotate {
+				t.Fatalf("ShouldRotate() got %v, want %v (reason: %q)", gotRotate, tt.wantRotate, gotReason)
+			}
+			if tt.wantReasonSubstr != "" && !strings.Contains(gotReason, tt.wantReasonSubstr) {
+				t.Errorf("ShouldRotate() reason %q does not contain %q", gotReason, tt.wantReasonSubstr)
+			}
+		})
 	}
 }
 
@@ -686,44 +605,22 @@ func TestUnifiedProcessPool_SetSessionManager(t *testing.T) {
 		t.Errorf("expected session manager to be updated")
 	}
 
-	// nil pool safety
 	var nilPool *UnifiedProcessPool
 	nilPool.SetSessionManager(sm)
 }
 
 func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testing.T) {
-	var spawnCounter atomic.Int32
 	var lastSpawnedSessionID atomic.Pointer[string]
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			count := spawnCounter.Add(1)
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		onSpawn: func(cfg DaemonConfig) {
 			sID := cfg.SessionID
 			lastSpawnedSessionID.Store(&sID)
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				sessJSON := cfg.SessionID
-				if sessJSON == "" {
-					sessJSON = fmt.Sprintf("00000000-0000-0000-0000-%012d", count)
-				}
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessJSON)))
-				_, _ = io.Copy(io.Discard, inR)
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
 		},
-	}
+	})
 
 	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, tmpDir)
-
-	pool := NewUnifiedProcessPool(PoolConfig{
-		SessionManager: sessMgr,
-	}, mock)
+	pool := NewUnifiedProcessPool(PoolConfig{SessionManager: sessMgr}, mock)
 	defer pool.Close()
 
 	ctx := context.Background()
@@ -734,12 +631,11 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
 
-	// Make d1 exceed turn count threshold
 	d1.mu.Lock()
 	d1.turnCount = DefaultMaxSessionTurns
 	d1.mu.Unlock()
 
-	// 2. Next GetOrCreate should trigger pre-flight rotation
+	// 2. Pre-flight rotation on next GetOrCreate
 	d2, err := pool.GetOrCreate(ctx, "target-1", "")
 	if err != nil {
 		t.Fatalf("failed GetOrCreate after threshold exceeded: %v", err)
@@ -751,128 +647,85 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 		t.Fatalf("expected old daemon to be closed, got %v", d1.State())
 	}
 
-	// 3. Requesting a sessionID that exceeds disk thresholds preserves session ID (rotation deferred to turn end)
-	oversizedSess := "550e8400-e29b-41d4-a716-446655440001"
-	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedSess, ".system_generated", "logs")
-	if err := os.MkdirAll(sessDir, 0755); err != nil {
-		t.Fatalf("failed to create logs dir: %v", err)
-	}
-	largeData := make([]byte, session.DefaultMaxTranscriptBytes+10)
-	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), largeData, 0644); err != nil {
-		t.Fatalf("failed to write large transcript: %v", err)
-	}
-
-	d3, err := pool.GetOrCreate(ctx, "target-oversized", oversizedSess)
-	if err != nil {
-		t.Fatalf("failed GetOrCreate for oversized session: %v", err)
-	}
-	if d3 == nil {
-		t.Fatalf("expected non-nil daemon")
-	}
-
-	// The session passed to daemon config should be preserved (turn-end rotation handles lifecycle)
-	lastSpawned := lastSpawnedSessionID.Load()
-	if lastSpawned == nil || *lastSpawned != oversizedSess {
-		t.Errorf("expected session to be preserved as %q, got %v", oversizedSess, lastSpawned)
-	}
-
-	// 4. Requesting a sessionID that exceeds DB thresholds preserves session ID (rotation deferred to turn end)
-	oversizedDBSess := "550e8400-e29b-41d4-a716-446655440002"
-	convDir := filepath.Join(tmpDir, "conversations")
-	if err := os.MkdirAll(convDir, 0755); err != nil {
-		t.Fatalf("failed to create conversations dir: %v", err)
-	}
-	largeDBData := make([]byte, session.DefaultMaxSessionDBBytes+10)
-	if err := os.WriteFile(filepath.Join(convDir, oversizedDBSess+".db"), largeDBData, 0644); err != nil {
-		t.Fatalf("failed to write large session DB: %v", err)
-	}
-
-	d4, err := pool.GetOrCreate(ctx, "target-oversized-db", oversizedDBSess)
-	if err != nil {
-		t.Fatalf("failed GetOrCreate for oversized DB session: %v", err)
-	}
-	if d4 == nil {
-		t.Fatalf("expected non-nil daemon")
+	// 3-6: Requesting oversized sessions preserves session ID (deferred to turn end)
+	guardTests := []struct {
+		name            string
+		target          string
+		sessID          string
+		transcriptBytes int64
+		sessionDBBytes  int64
+		transcriptSteps int
+		transcriptTurns int
+	}{
+		{
+			name:            "transcript size exceeded",
+			target:          "target-oversized",
+			sessID:          "550e8400-e29b-41d4-a716-446655440001",
+			transcriptBytes: session.DefaultMaxTranscriptBytes + 10,
+		},
+		{
+			name:           "db size exceeded",
+			target:         "target-oversized-db",
+			sessID:         "550e8400-e29b-41d4-a716-446655440002",
+			sessionDBBytes: session.DefaultMaxSessionDBBytes + 10,
+		},
+		{
+			name:            "transcript steps exceeded",
+			target:          "target-oversized-steps",
+			sessID:          "550e8400-e29b-41d4-a716-446655440003",
+			transcriptSteps: DefaultMaxSessionSteps,
+		},
+		{
+			name:            "transcript turns exceeded",
+			target:          "target-oversized-turns",
+			sessID:          "550e8400-e29b-41d4-a716-446655440004",
+			transcriptTurns: DefaultMaxSessionTurns,
+		},
 	}
 
-	lastSpawnedDB := lastSpawnedSessionID.Load()
-	if lastSpawnedDB == nil || *lastSpawnedDB != oversizedDBSess {
-		t.Errorf("expected session to be preserved as %q, got %v", oversizedDBSess, lastSpawnedDB)
-	}
+	for _, gt := range guardTests {
+		t.Run(gt.name, func(t *testing.T) {
+			logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", gt.sessID, ".system_generated", "logs")
+			if gt.transcriptBytes > 0 {
+				_ = os.MkdirAll(logsDir, 0755)
+				_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), make([]byte, gt.transcriptBytes), 0644)
+			}
+			if gt.sessionDBBytes > 0 {
+				convDir := filepath.Join(tmpDir, "conversations")
+				_ = os.MkdirAll(convDir, 0755)
+				_ = os.WriteFile(filepath.Join(convDir, gt.sessID+".db"), make([]byte, gt.sessionDBBytes), 0644)
+			}
+			if gt.transcriptSteps > 0 {
+				_ = os.MkdirAll(logsDir, 0755)
+				_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", gt.transcriptSteps)), 0644)
+			}
+			if gt.transcriptTurns > 0 {
+				_ = os.MkdirAll(logsDir, 0755)
+				var sb strings.Builder
+				for i := 0; i < gt.transcriptTurns; i++ {
+					sb.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1))
+					sb.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1))
+				}
+				_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(sb.String()), 0644)
+			}
 
-	// 5. Requesting a sessionID that exceeds transcript step count thresholds preserves session ID (rotation deferred to turn end)
-	oversizedStepsSess := "550e8400-e29b-41d4-a716-446655440003"
-	sessDirSteps := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedStepsSess, ".system_generated", "logs")
-	if err := os.MkdirAll(sessDirSteps, 0755); err != nil {
-		t.Fatalf("failed to create logs dir: %v", err)
-	}
-	transcriptContent := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps)
-	if err := os.WriteFile(filepath.Join(sessDirSteps, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	d5, err := pool.GetOrCreate(ctx, "target-oversized-steps", oversizedStepsSess)
-	if err != nil {
-		t.Fatalf("failed GetOrCreate for oversized steps session: %v", err)
-	}
-	if d5 == nil {
-		t.Fatalf("expected non-nil daemon")
-	}
-
-	lastSpawnedSteps := lastSpawnedSessionID.Load()
-	if lastSpawnedSteps == nil || *lastSpawnedSteps != oversizedStepsSess {
-		t.Errorf("expected session to be preserved as %q, got %v", oversizedStepsSess, lastSpawnedSteps)
-	}
-
-	// 6. Requesting a sessionID that exceeds transcript turn count thresholds preserves session ID (rotation deferred to turn end)
-	oversizedTurnsSess := "550e8400-e29b-41d4-a716-446655440004"
-	sessDirTurnsGuard := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", oversizedTurnsSess, ".system_generated", "logs")
-	if err := os.MkdirAll(sessDirTurnsGuard, 0755); err != nil {
-		t.Fatalf("failed to create logs dir: %v", err)
-	}
-	var turnContentGuard strings.Builder
-	for i := 0; i < DefaultMaxSessionTurns; i++ {
-		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1))
-		turnContentGuard.WriteString(fmt.Sprintf(`{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1))
-	}
-	if err := os.WriteFile(filepath.Join(sessDirTurnsGuard, "transcript.jsonl"), []byte(turnContentGuard.String()), 0644); err != nil {
-		t.Fatalf("failed to write transcript turns: %v", err)
-	}
-
-	d6, err := pool.GetOrCreate(ctx, "target-oversized-turns", oversizedTurnsSess)
-	if err != nil {
-		t.Fatalf("failed GetOrCreate for oversized turns session: %v", err)
-	}
-	if d6 == nil {
-		t.Fatalf("expected non-nil daemon")
-	}
-
-	lastSpawnedTurns := lastSpawnedSessionID.Load()
-	if lastSpawnedTurns == nil || *lastSpawnedTurns != oversizedTurnsSess {
-		t.Errorf("expected session to be preserved as %q, got %v", oversizedTurnsSess, lastSpawnedTurns)
+		d, err := pool.GetOrCreate(ctx, gt.target, gt.sessID)
+		if err != nil {
+			t.Fatalf("failed GetOrCreate: %v", err)
+		}
+		if d == nil {
+			t.Fatalf("expected non-nil daemon")
+		}
+		lastSpawned := lastSpawnedSessionID.Load()
+		if lastSpawned == nil || *lastSpawned != gt.sessID {
+			t.Errorf("expected session preserved as %q, got %v", gt.sessID, lastSpawned)
+		}
+		})
 	}
 }
 
 func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
-	var spawnCounter atomic.Int32
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			count := spawnCounter.Add(1)
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
-			}()
-			_ = inR.Close()
-
-			return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
-		},
-	}
-
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{})
 	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
 	defer pool.Close()
 
@@ -903,7 +756,7 @@ func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
 		t.Errorf("expected fresh metrics on rotated daemon, got turns=%d, steps=%d", d2.TurnCount(), d2.StepCount())
 	}
 
-	// 3. Rotate non-existent target key (creates new daemon cleanly)
+	// 3. Rotate non-existent target key
 	d3, err := pool.RotateDaemon(ctx, "non-existent-target", "")
 	if err != nil {
 		t.Fatalf("failed rotating non-existent target: %v", err)
@@ -923,26 +776,21 @@ func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
 }
 
 func TestUnifiedProcessPool_RotateDaemon_Errors(t *testing.T) {
-	var spawnCounter atomic.Int32
 	var failSpawn atomic.Bool
-
 	mock := &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 			if failSpawn.Load() {
 				return nil, nil, nil, nil, errors.New("simulated spawn failure")
 			}
-			count := spawnCounter.Add(1)
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
 			errR, _ := io.Pipe()
-
 			go func() {
 				defer outW.Close()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
 			}()
 			_ = inR.Close()
-
-			return inW, outR, errR, &MockProcessHandle{pid: int(count * 100), killErr: errors.New("kill failed")}, nil
+			return inW, outR, errR, &MockProcessHandle{pid: 100, killErr: errors.New("kill failed")}, nil
 		},
 	}
 
@@ -951,7 +799,6 @@ func TestUnifiedProcessPool_RotateDaemon_Errors(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Daemon with failing handle.Kill() should still rotate and log warning without failing
 	d1, err := pool.GetOrCreate(ctx, "kill-err-target", "")
 	if err != nil {
 		t.Fatalf("failed creating initial daemon: %v", err)
@@ -964,7 +811,6 @@ func TestUnifiedProcessPool_RotateDaemon_Errors(t *testing.T) {
 		t.Errorf("expected new daemon after rotation")
 	}
 
-	// When spawn fails during rotation, RotateDaemon returns formatted error
 	failSpawn.Store(true)
 	_, errFail := pool.RotateDaemon(ctx, "fail-spawn-target", "")
 	if errFail == nil || !strings.Contains(errFail.Error(), "failed creating rotated daemon") {
@@ -982,20 +828,7 @@ func TestUnifiedProcessPool_GetHasDaemonAndMarkDirty(t *testing.T) {
 	}
 	nilPool.MarkDirty()
 
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-			go func() {
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000099"}` + "\n"))
-				_, _ = io.ReadAll(inR)
-				_ = outW.Close()
-			}()
-			return inW, outR, errR, &MockProcessHandle{pid: 99}, nil
-		},
-	}
-
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 99, initSessID: "00000000-0000-0000-0000-000000000099"})
 	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
 	defer pool.Close()
 
@@ -1041,6 +874,11 @@ type mockSinkCapture struct {
 	thinking    bool
 	result      *TurnResult
 	err         error
+	done        chan struct{}
+}
+
+func newMockSinkCapture() *mockSinkCapture {
+	return &mockSinkCapture{done: make(chan struct{}, 1)}
 }
 
 func (s *mockSinkCapture) OnTurnStarted() {}
@@ -1052,8 +890,20 @@ func (s *mockSinkCapture) OnToolCall(tool, cmd string) {
 func (s *mockSinkCapture) OnToolCompleted(tool, server string, d time.Duration, status string) {}
 func (s *mockSinkCapture) OnSkillActivated(skill, source string)                               {}
 func (s *mockSinkCapture) OnTextDelta(delta string)                                            { s.delta += delta }
-func (s *mockSinkCapture) OnResult(res *TurnResult)                                            { s.result = res }
-func (s *mockSinkCapture) OnError(err error)                                                   { s.err = err }
+func (s *mockSinkCapture) OnResult(res *TurnResult) {
+	s.result = res
+	select {
+	case s.done <- struct{}{}:
+	default:
+	}
+}
+func (s *mockSinkCapture) OnError(err error) {
+	s.err = err
+	select {
+	case s.done <- struct{}{}:
+	default:
+	}
+}
 
 func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	outR, outW := io.Pipe()
@@ -1078,7 +928,7 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	defer inR.Close()
 	defer daemon.Close()
 
-	sink := &mockSinkCapture{}
+	sink := newMockSinkCapture()
 	turnCtx := &TurnContext{
 		TurnID:    "t-1",
 		Prompt:    "hello",
@@ -1102,7 +952,11 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	resPayload := `{"event":"result","result":{"status":"SUCCESS","response":"all done","usage":{"input_tokens":10,"output_tokens":20,"thinking_tokens":5,"cache_read_tokens":2,"total_tokens":37}}}` + "\n"
 	_, _ = outW.Write([]byte(resPayload))
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-sink.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn 1 result")
+	}
 
 	if sink.toolName != "cmd_exec" || sink.commandName != "git status" {
 		t.Errorf("unexpected tool call capture: %s / %s", sink.toolName, sink.commandName)
@@ -1121,7 +975,7 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	}
 
 	// 4. Test error result
-	sinkErr := &mockSinkCapture{}
+	sinkErr := newMockSinkCapture()
 	turnCtxErr := &TurnContext{
 		TurnID:    "t-2",
 		Prompt:    "err test",
@@ -1134,13 +988,17 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	errPayload := `{"event":"result","result":{"status":"ERROR","error":"custom failure message"}}` + "\n"
 	_, _ = outW.Write([]byte(errPayload))
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-sinkErr.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn 2 error")
+	}
 	if sinkErr.err == nil || !strings.Contains(sinkErr.err.Error(), "custom failure message") {
 		t.Errorf("expected custom failure message error, got %v", sinkErr.err)
 	}
 
 	// 5. Test empty error string default
-	sinkErrDef := &mockSinkCapture{}
+	sinkErrDef := newMockSinkCapture()
 	turnCtxDef := &TurnContext{
 		TurnID:    "t-3",
 		Prompt:    "def err test",
@@ -1153,7 +1011,11 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	errDefPayload := `{"event":"result","result":{"status":"ERROR"}}` + "\n"
 	_, _ = outW.Write([]byte(errDefPayload))
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-sinkErrDef.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn 3 error default")
+	}
 	if sinkErrDef.err == nil || !strings.Contains(sinkErrDef.err.Error(), "daemon execution failed") {
 		t.Errorf("expected daemon execution failed error, got %v", sinkErrDef.err)
 	}
@@ -1161,20 +1023,12 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 
 func TestUnifiedProcessPool_TargetModelsIgnored(t *testing.T) {
 	var capturedModel string
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		pid: 200,
+		onSpawn: func(cfg DaemonConfig) {
 			capturedModel = cfg.Model
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
-			}()
-			_ = inR.Close()
-			return inW, outR, errR, &MockProcessHandle{pid: 200}, nil
 		},
-	}
+	})
 
 	pool := NewUnifiedProcessPool(PoolConfig{
 		Model: "primary-model",
@@ -1184,16 +1038,14 @@ func TestUnifiedProcessPool_TargetModelsIgnored(t *testing.T) {
 	}, mock)
 	defer pool.Close()
 
-	// 1. Target with custom TargetModels is ignored; daemon always inherits pool.Model()
 	_, err := pool.GetOrCreate(context.Background(), "ephemeral:classifier", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting daemon: %v", err)
 	}
 	if capturedModel != "primary-model" {
-		t.Errorf("expected model primary-model (TargetModels ignored), got %q", capturedModel)
+		t.Errorf("expected model primary-model, got %q", capturedModel)
 	}
 
-	// 2. Standard target also uses pool.Model()
 	_, err = pool.GetOrCreate(context.Background(), "standard-target", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting standard daemon: %v", err)
@@ -1203,155 +1055,179 @@ func TestUnifiedProcessPool_TargetModelsIgnored(t *testing.T) {
 	}
 }
 
-func TestUnifiedProcessPool_ExecuteEphemeral_Success(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000002"}` + "\n"))
-
-				buf := make([]byte, 1024)
-				n, _ := inR.Read(buf)
-				if n > 0 {
-					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"ephemeral result ok"}}` + "\n"))
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 201}, nil
+func TestUnifiedProcessPool_ExecuteEphemeral(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetKey   string
+		prompt      string
+		poolCfg     PoolConfig
+		spawner     DaemonSpawner
+		isNilPool   bool
+		isClosed    bool
+		timeout     time.Duration
+		preCancel   bool
+		wantRes     string
+		wantErr     bool
+		wantErrSub  string
+		wantErrIs   error
+	}{
+		{
+			name:      "success",
+			targetKey: "ephemeral:classifier",
+			prompt:    "test prompt",
+			poolCfg:   PoolConfig{DefaultModel: "test-model"},
+			spawner:   newPipeMockSpawner(pipeMockSpawnerOpts{echoRes: "ephemeral result ok"}),
+			wantRes:   "ephemeral result ok",
+		},
+		{
+			name:      "nil pool error",
+			targetKey: "key",
+			prompt:    "prompt",
+			isNilPool: true,
+			wantErr:   true,
+		},
+		{
+			name:       "empty targetKey error",
+			targetKey:  "",
+			prompt:     "prompt",
+			spawner:    &MockDaemonSpawner{},
+			wantErr:    true,
+			wantErrSub: "target key cannot be empty",
+		},
+		{
+			name:       "whitespace targetKey error",
+			targetKey:  "   ",
+			prompt:     "prompt",
+			spawner:    &MockDaemonSpawner{},
+			wantErr:    true,
+			wantErrSub: "target key cannot be empty",
+		},
+		{
+			name:      "context already cancelled",
+			targetKey: "target",
+			prompt:    "prompt",
+			spawner:   newPipeMockSpawner(pipeMockSpawnerOpts{}),
+			preCancel: true,
+			wantErr:   true,
+			wantErrIs: context.Canceled,
+		},
+		{
+			name:      "context timeout awaiting result",
+			targetKey: "target",
+			prompt:    "prompt",
+			spawner:   newPipeMockSpawner(pipeMockSpawnerOpts{}),
+			timeout:   20 * time.Millisecond,
+			wantErr:   true,
+			wantErrIs: context.DeadlineExceeded,
+		},
+		{
+			name:      "spawn failure",
+			targetKey: "t1",
+			prompt:    "p1",
+			spawner: &MockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+					return nil, nil, nil, nil, errors.New("daemon spawn failed")
+				},
+			},
+			wantErr:    true,
+			wantErrSub: "daemon spawn failed",
+		},
+		{
+			name:      "closed pool failure",
+			targetKey: "t2",
+			prompt:    "p2",
+			spawner:   &MockDaemonSpawner{},
+			isClosed:  true,
+			wantErr:   true,
+		},
+		{
+			name:      "stdin write failure",
+			targetKey: "t3",
+			prompt:    "p3",
+			spawner: &MockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+					outR, outW := io.Pipe()
+					inR, inW := io.Pipe()
+					errR, _ := io.Pipe()
+					go func() {
+						defer outW.Close()
+						_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000004"}` + "\n"))
+					}()
+					_ = inR.Close()
+					_ = inW.Close()
+					return inW, outR, errR, &MockProcessHandle{pid: 203}, nil
+				},
+			},
+			wantErr: true,
 		},
 	}
 
-	pool := NewUnifiedProcessPool(PoolConfig{DefaultModel: "test-model"}, mock)
-	defer pool.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var pool *UnifiedProcessPool
+			if !tt.isNilPool {
+				pool = NewUnifiedProcessPool(tt.poolCfg, tt.spawner)
+				defer pool.Close()
+				if tt.isClosed {
+					_ = pool.Close()
+				}
+			}
 
-	res, err := pool.ExecuteEphemeral(context.Background(), "ephemeral:classifier", "test prompt")
-	if err != nil {
-		t.Fatalf("unexpected error from ExecuteEphemeral: %v", err)
+			ctx := context.Background()
+			if tt.preCancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			} else if tt.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.timeout)
+				defer cancel()
+			}
+
+			res, err := pool.ExecuteEphemeral(ctx, tt.targetKey, tt.prompt)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tt.wantErrIs != nil && !errors.Is(err, tt.wantErrIs) {
+					t.Errorf("expected error %v, got %v", tt.wantErrIs, err)
+				}
+				if tt.wantErrSub != "" && !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Errorf("expected error containing %q, got %v", tt.wantErrSub, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res != tt.wantRes {
+				t.Errorf("got response %q, want %q", res, tt.wantRes)
+			}
+		})
 	}
-	if res != "ephemeral result ok" {
-		t.Errorf("expected 'ephemeral result ok', got %q", res)
-	}
+}
+
+func TestUnifiedProcessPool_ExecuteEphemeral_Success(t *testing.T) {
+	TestUnifiedProcessPool_ExecuteEphemeral(t)
 }
 
 func TestUnifiedProcessPool_ExecuteEphemeral_NilPoolAndInvalidKey(t *testing.T) {
-	var nilPool *UnifiedProcessPool
-	if _, err := nilPool.ExecuteEphemeral(context.Background(), "key", "prompt"); err == nil {
-		t.Error("expected error from nil pool ExecuteEphemeral")
-	}
-
-	mock := &MockDaemonSpawner{}
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	if _, err := pool.ExecuteEphemeral(context.Background(), "", "prompt"); err == nil {
-		t.Error("expected error from empty targetKey")
-	}
-	if _, err := pool.ExecuteEphemeral(context.Background(), "   ", "prompt"); err == nil {
-		t.Error("expected error from whitespace targetKey")
-	}
+	TestUnifiedProcessPool_ExecuteEphemeral(t)
 }
 
 func TestUnifiedProcessPool_ExecuteEphemeral_ContextCancellation(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-			go func() {
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000003"}` + "\n"))
-			}()
-			go func() {
-				_, _ = io.ReadAll(inR)
-			}()
-			return inW, outR, errR, &MockProcessHandle{pid: 202}, nil
-		},
-	}
-
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	// 1. Context already cancelled before execution
-	ctxCancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := pool.ExecuteEphemeral(ctxCancelled, "target", "prompt"); !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got %v", err)
-	}
-
-	// 2. Context cancelled while awaiting result
-	ctxTimeout, cancelTimeout := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancelTimeout()
-	if _, err := pool.ExecuteEphemeral(ctxTimeout, "target", "prompt"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("expected context.DeadlineExceeded, got %v", err)
-	}
+	TestUnifiedProcessPool_ExecuteEphemeral(t)
 }
 
 func TestUnifiedProcessPool_ExecuteEphemeral_DaemonErrors(t *testing.T) {
-	// 1. Daemon spawn error
-	mockSpawnErr := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			return nil, nil, nil, nil, errors.New("daemon spawn failed")
-		},
-	}
-	pool1 := NewUnifiedProcessPool(PoolConfig{}, mockSpawnErr)
-	defer pool1.Close()
-	if _, err := pool1.ExecuteEphemeral(context.Background(), "t1", "p1"); err == nil {
-		t.Error("expected error on spawn failure")
-	}
-
-	// 2. Closed pool error
-	closedPool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
-	_ = closedPool.Close()
-	if _, err := closedPool.ExecuteEphemeral(context.Background(), "t2", "p2"); err == nil {
-		t.Error("expected error on closed pool")
-	}
-
-	// 3. Stdin write failure (closed daemon stdin)
-	mockWriteErr := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000004"}` + "\n"))
-			}()
-			_ = inR.Close() // Reading will fail/broken pipe on write
-			_ = inW.Close()
-			return inW, outR, errR, &MockProcessHandle{pid: 203}, nil
-		},
-	}
-	pool2 := NewUnifiedProcessPool(PoolConfig{}, mockWriteErr)
-	defer pool2.Close()
-	if _, err := pool2.ExecuteEphemeral(context.Background(), "t3", "p3"); err == nil {
-		t.Error("expected error on stdin write failure")
-	}
+	TestUnifiedProcessPool_ExecuteEphemeral(t)
 }
 
 func TestUnifiedProcessPool_EphemeralLLMFunc(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000005"}` + "\n"))
-
-				buf := make([]byte, 1024)
-				n, _ := inR.Read(buf)
-				if n > 0 {
-					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"llm result ok"}}` + "\n"))
-				}
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: 204}, nil
-		},
-	}
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		echoRes: "llm result ok",
+	})
 
 	pool := NewUnifiedProcessPool(PoolConfig{DefaultModel: "test-model"}, mock)
 	defer pool.Close()
@@ -1365,7 +1241,6 @@ func TestUnifiedProcessPool_EphemeralLLMFunc(t *testing.T) {
 		t.Errorf("expected 'llm result ok', got %q", res)
 	}
 
-	// Nil pool guard in EphemeralLLMFunc
 	var nilPool *UnifiedProcessPool
 	nilLLMFn := nilPool.EphemeralLLMFunc("key")
 	if _, err := nilLLMFn(context.Background(), "model", "prompt"); err == nil {
@@ -1378,22 +1253,12 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 		tmpDir := t.TempDir()
 		var capturedEnv []string
 
-		mock := &MockDaemonSpawner{
-			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+		mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+			pid: 301,
+			onSpawn: func(cfg DaemonConfig) {
 				capturedEnv = cfg.Env
-				outR, outW := io.Pipe()
-				inR, inW := io.Pipe()
-				errR, _ := io.Pipe()
-
-				go func() {
-					defer outW.Close()
-					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000099"}` + "\n"))
-				}()
-				_ = inR.Close()
-
-				return inW, outR, errR, &MockProcessHandle{pid: 301}, nil
 			},
-		}
+		})
 
 		poolCfg := PoolConfig{
 			DefaultModel:  "test-model",
@@ -1414,13 +1279,11 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 			t.Fatalf("unexpected error from GetOrCreate: %v", err)
 		}
 
-		// Verify .gemini folder was created
 		geminiPath := filepath.Join(tmpDir, ".gemini")
 		if fi, statErr := os.Stat(geminiPath); statErr != nil || !fi.IsDir() {
 			t.Errorf("expected .gemini directory at %s, err: %v", geminiPath, statErr)
 		}
 
-		// Verify capturedEnv contains sanitized variables
 		var homeCount, userProfileCount, geminiCliHomeCount int
 		for _, e := range capturedEnv {
 			if strings.HasPrefix(e, "HOME=") {
@@ -1443,14 +1306,8 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 			}
 		}
 
-		if homeCount != 1 {
-			t.Errorf("expected exactly 1 HOME in env, got %d", homeCount)
-		}
-		if userProfileCount != 1 {
-			t.Errorf("expected exactly 1 USERPROFILE in env, got %d", userProfileCount)
-		}
-		if geminiCliHomeCount != 1 {
-			t.Errorf("expected exactly 1 GEMINI_CLI_HOME in env, got %d", geminiCliHomeCount)
+		if homeCount != 1 || userProfileCount != 1 || geminiCliHomeCount != 1 {
+			t.Errorf("unexpected env var counts: HOME=%d, USERPROFILE=%d, GEMINI_CLI_HOME=%d", homeCount, userProfileCount, geminiCliHomeCount)
 		}
 	})
 
@@ -1461,15 +1318,10 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 			t.Fatalf("failed to write blocker file: %v", err)
 		}
 
-		invalidHome := filepath.Join(blockerFile, "subhome")
-
-		mock := &MockDaemonSpawner{}
-		poolCfg := PoolConfig{
+		pool := NewUnifiedProcessPool(PoolConfig{
 			DefaultModel:  "test-model",
-			GeminiHomeDir: invalidHome,
-		}
-
-		pool := NewUnifiedProcessPool(poolCfg, mock)
+			GeminiHomeDir: filepath.Join(blockerFile, "subhome"),
+		}, &MockDaemonSpawner{})
 		defer pool.Close()
 
 		_, err := pool.GetOrCreate(context.Background(), "kiosk", "")
@@ -1515,8 +1367,7 @@ func TestUnifiedProcessPool_ModelBound(t *testing.T) {
 		t.Fatalf("expected pool model gemini-3.8-flash-low, got %s", pool.Model())
 	}
 
-	ctx := context.Background()
-	daemon, err := pool.GetOrCreate(ctx, "target-1", "")
+	daemon, err := pool.GetOrCreate(context.Background(), "target-1", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1586,20 +1437,7 @@ func TestStreamingDaemon_Close_WaitErrorLogged(t *testing.T) {
 }
 
 func TestUnifiedProcessPool_CloseConcurrentMultipleDaemons(t *testing.T) {
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-			go func() {
-				_, _ = outW.Write([]byte(`{"event":"init","session_id":"550e8400-e29b-41d4-a716-446655440000"}` + "\n"))
-				_, _ = io.ReadAll(inR)
-				_ = outW.Close()
-			}()
-			return inW, outR, errR, &MockProcessHandle{pid: 300}, nil
-		},
-	}
-
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 300})
 	pool := NewUnifiedProcessPool(PoolConfig{Model: "gemini-3.8-flash-low"}, mock)
 	ctx := context.Background()
 
@@ -1622,30 +1460,15 @@ func TestUnifiedProcessPool_CloseConcurrentMultipleDaemons(t *testing.T) {
 
 func TestUnifiedProcessPool_SessionRotator(t *testing.T) {
 	var spawnCounter atomic.Int32
-
-	mock := &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			count := spawnCounter.Add(1)
-			outR, outW := io.Pipe()
-			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
-
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
-				_, _ = io.Copy(io.Discard, inR)
-			}()
-
-			return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
-		},
-	}
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		onSpawn: func(cfg DaemonConfig) { spawnCounter.Add(1) },
+	})
 
 	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
 	defer pool.Close()
 
 	ctx := context.Background()
 
-	// 1. ShouldRotateSession with nil session or nil pool
 	if should, _ := pool.ShouldRotateSession(nil); should {
 		t.Error("expected ShouldRotateSession(nil) to return false")
 	}
@@ -1659,12 +1482,10 @@ func TestUnifiedProcessPool_SessionRotator(t *testing.T) {
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
 
-	// 2. Clean daemon does not need rotation
 	if should, _ := pool.ShouldRotateSession(d1); should {
 		t.Error("expected clean daemon ShouldRotateSession to return false")
 	}
 
-	// 3. Mark dirty: ShouldRotateSession reports true
 	d1.MarkDirty()
 	should, reason := pool.ShouldRotateSession(d1)
 	if !should {
@@ -1674,22 +1495,17 @@ func TestUnifiedProcessPool_SessionRotator(t *testing.T) {
 		t.Errorf("expected reason to mention dirty, got: %s", reason)
 	}
 
-	// 4. Synchronously rotate session
 	rotatedSess, err := pool.RotateSession(ctx, "target-turn-hook")
 	if err != nil {
 		t.Fatalf("unexpected RotateSession error: %v", err)
 	}
-	if rotatedSess == nil {
-		t.Fatal("expected non-nil rotated session")
-	}
-	if rotatedSess == d1 {
-		t.Fatal("expected rotated session to be different from old daemon")
+	if rotatedSess == nil || rotatedSess == d1 {
+		t.Fatal("expected distinct non-nil rotated session")
 	}
 	if d1.State() != StateClosed {
 		t.Errorf("expected old daemon to be closed, got state: %v", d1.State())
 	}
 
-	// Rotated daemon is registered in the pool as current
 	curDaemon, ok := pool.Get("target-turn-hook")
 	if !ok || curDaemon != rotatedSess {
 		t.Errorf("expected rotated session to be registered in pool as current daemon")
@@ -1698,12 +1514,10 @@ func TestUnifiedProcessPool_SessionRotator(t *testing.T) {
 		t.Errorf("expected spawn count 2, got %d", spawnCounter.Load())
 	}
 
-	// Clean rotated session does not need rotation
 	if should, _ := pool.ShouldRotateSession(rotatedSess); should {
 		t.Error("expected newly rotated session ShouldRotateSession to return false")
 	}
 
-	// 5. Test closed pool behavior
 	if err := pool.Close(); err != nil {
 		t.Fatalf("unexpected pool.Close() error: %v", err)
 	}
