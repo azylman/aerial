@@ -828,14 +828,15 @@ func TestGetFactsPaginatedImportanceDescending(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	ctx := context.Background()
+	store := NewSQLStore(database)
 
 	// Insert facts with varying importance, categories, and casing
-	_, _ = InsertFactWithContext(ctx, database, false, "work", "Important Work Fact", 2.0, nil)
-	_, _ = InsertFactWithContext(ctx, database, false, "work", "Routine work fact", 1.0, nil)
-	_, _ = InsertFactWithContext(ctx, database, false, "personal", "Personal hobby fact", 1.5, nil)
+	_, _ = store.InsertFact(ctx, "work", "Important Work Fact", 2.0, nil)
+	_, _ = store.InsertFact(ctx, "work", "Routine work fact", 1.0, nil)
+	_, _ = store.InsertFact(ctx, "personal", "Personal hobby fact", 1.5, nil)
 
 	// 1. Importance descending ordering
-	res, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Limit: 10})
+	res, err := store.GetFactsPaginated(ctx, FactsFilter{Limit: 10})
 	if err != nil || len(res.Facts) != 3 {
 		t.Fatalf("GetFactsPaginated failed: %v, len=%d", err, len(res.Facts))
 	}
@@ -844,29 +845,29 @@ func TestGetFactsPaginatedImportanceDescending(t *testing.T) {
 	}
 
 	// 2. Case-insensitive query filtering
-	resQuery, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Query: "WORK"})
+	resQuery, err := store.GetFactsPaginated(ctx, FactsFilter{Query: "WORK"})
 	if err != nil || len(resQuery.Facts) != 2 {
 		t.Fatalf("case-insensitive query filter failed: %v, len=%d", err, len(resQuery.Facts))
 	}
 
 	// 3. Category filtering
-	resCat, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Category: "personal"})
+	resCat, err := store.GetFactsPaginated(ctx, FactsFilter{Category: "personal"})
 	if err != nil || len(resCat.Facts) != 1 || resCat.Facts[0].Category != "personal" {
 		t.Fatalf("category filter failed: %v, len=%d", err, len(resCat.Facts))
 	}
 
 	// 4. Offset variants (Limit=0, Offset>0, Negative offset clamped to 0)
-	resOffset, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Limit: 0, Offset: 1})
+	resOffset, err := store.GetFactsPaginated(ctx, FactsFilter{Limit: 0, Offset: 1})
 	if err != nil || len(resOffset.Facts) != 2 {
 		t.Errorf("offset with 0 limit failed: %v, len=%d", err, len(resOffset.Facts))
 	}
-	resNeg, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Limit: 10, Offset: -5})
+	resNeg, err := store.GetFactsPaginated(ctx, FactsFilter{Limit: 10, Offset: -5})
 	if err != nil || len(resNeg.Facts) != 3 {
 		t.Errorf("negative offset failed: %v, len=%d", err, len(resNeg.Facts))
 	}
 
-	// 5. GetFactsPaginatedWithContext isPg=true with Offset>0 (exercises paginationSQL = "OFFSET $1")
-	_, _ = GetFactsPaginatedWithContext(ctx, database, true, FactsFilter{Offset: 2})
+	// 5. GetFactsPaginated isPg=true with Offset>0 (exercises paginationSQL = "OFFSET $1")
+	_, _ = (&SQLStore{db: database, isPostgres: true}).GetFactsPaginated(ctx, FactsFilter{Offset: 2})
 }
 
 func TestMessageExistsAndClaimPending(t *testing.T) {
@@ -924,8 +925,11 @@ func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 		t.Fatalf("Expected positive row_id sequence, got %d", maxRow1)
 	}
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
 	// Active conversations for extraction
-	convs, err := GetActiveConversationsForExtraction(database, 24)
+	convs, err := store.GetActiveConversationsForExtraction(ctx, 24)
 	if err != nil {
 		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
 	}
@@ -934,12 +938,12 @@ func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 	}
 
 	// Advance watermark
-	if err := UpdateConversationFactWatermark(database, "thread-watermark", maxRow1); err != nil {
+	if err := store.UpdateConversationFactWatermark(ctx, "thread-watermark", maxRow1); err != nil {
 		t.Fatalf("UpdateConversationFactWatermark failed: %v", err)
 	}
 
 	// Re-query: should now be 0 since watermark matches latest message
-	convsAfter, err := GetActiveConversationsForExtraction(database, 24)
+	convsAfter, err := store.GetActiveConversationsForExtraction(ctx, 24)
 	if err != nil {
 		t.Fatalf("GetActiveConversationsForExtraction after watermark failed: %v", err)
 	}
@@ -991,27 +995,28 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 	_ = resFilter
 
 	// Edge case: Nil database
-	resNilDB, err := SearchSimilarFactsWithContext(ctx, nil, true, embValid, "test", 10, 0.2)
-	if err != nil || resNilDB != nil {
-		t.Errorf("expected nil, nil for nil DB in SearchSimilarFactsWithContext, got %v, %v", resNilDB, err)
+	var nilStore *SQLStore
+	if _, err := nilStore.SearchSimilarFacts(ctx, embValid, "test", 10, 0.2); err == nil {
+		t.Errorf("expected error for nil store in SearchSimilarFacts")
 	}
 
 	// Edge case: Empty embedding and empty query
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
-	resEmpty, err := SearchSimilarFactsWithContext(ctx, database, false, nil, "", 10, 0.2)
+	storeDB := NewSQLStore(database)
+	resEmpty, err := storeDB.SearchSimilarFacts(ctx, nil, "", 10, 0.2)
 	if err != nil || resEmpty != nil {
 		t.Errorf("expected nil, nil for empty embedding and query, got %v, %v", resEmpty, err)
 	}
 
 	// Edge case: Clamped limit and clamped minScore with nil context
-	resClamped, err := SearchSimilarFactsWithContext(nil, database, false, nil, "   ", -1, -0.5)
+	resClamped, err := storeDB.SearchSimilarFacts(nil, nil, "   ", -1, -0.5)
 	if err != nil || resClamped != nil {
 		t.Errorf("expected nil, nil for clamped query, got %v, %v", resClamped, err)
 	}
 
 	// Edge case: isPg=true on SQLite database triggers query error path
-	_, errPgOnSqlite := SearchSimilarFactsWithContext(ctx, database, true, embValid, "", 10, 0.2)
+	_, errPgOnSqlite := (&SQLStore{db: database, isPostgres: true}).SearchSimilarFacts(ctx, embValid, "", 10, 0.2)
 	if errPgOnSqlite == nil {
 		t.Errorf("expected error running pg vector query on sqlite db, got nil")
 	}
@@ -1022,9 +1027,9 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 			return database.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
 		},
 	}
-	candidateFacts, err := SearchSimilarFactsWithContext(ctx, mockCandidate, true, embValid, "", 20, 0.1)
+	candidateFacts, err := (&SQLStore{db: mockCandidate, isPostgres: true}).SearchSimilarFacts(ctx, embValid, "", 20, 0.1)
 	if err != nil {
-		t.Fatalf("SearchSimilarFactsWithContext candidateLimit>=30 failed: %v", err)
+		t.Fatalf("SearchSimilarFacts candidateLimit>=30 failed: %v", err)
 	}
 	_ = candidateFacts
 }
@@ -1292,22 +1297,25 @@ func TestFactEmbeddingAndThreadLookup(t *testing.T) {
 	vec[0] = 0.8
 	vec[1] = 0.2
 
-	id, err := InsertFact(database, "category", "Fact with emb", 1.0, vec)
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	id, err := store.InsertFact(ctx, "category", "Fact with emb", 1.0, vec)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
 
-	err = UpdateFactEmbedding(database, id, vec)
+	err = store.UpdateFactEmbedding(ctx, id, vec)
 	if err != nil {
 		t.Fatalf("UpdateFactEmbedding failed: %v", err)
 	}
 
-	err = UpdateConversationFactExtractedAt(database, "thread-lookup-1")
+	err = store.UpdateConversationFactExtractedAt(ctx, "thread-lookup-1")
 	if err != nil {
 		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
 	}
 
-	facts, err := GetFactsByThreadWithEmbeddings(database, "thread-lookup-1")
+	facts, err := store.GetFactsByThreadWithEmbeddings(ctx, "thread-lookup-1")
 	if err != nil {
 		t.Fatalf("GetFactsByThreadWithEmbeddings failed: %v", err)
 	}
@@ -1485,32 +1493,6 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	// 1. Facts nil database
-	if _, err := InsertFact(nil, "cat", "fact", 1.0, nil); err == nil {
-		t.Error("expected error calling InsertFact on nil database")
-	}
-	if _, err := GetFactsPaginated(nil, FactsFilter{}); err == nil {
-		t.Error("expected error calling GetFactsPaginated on nil database")
-	}
-	if res, err := SearchSimilarFacts(nil, nil, "query", 10, 0.5); err != nil || res != nil {
-		t.Errorf("expected nil, nil calling SearchSimilarFacts on nil database, got %v, %v", res, err)
-	}
-	if res, err := GetFactsByThreadWithEmbeddings(nil, "th1"); err != nil || res != nil {
-		t.Errorf("expected nil, nil calling GetFactsByThreadWithEmbeddings on nil database, got %v, %v", res, err)
-	}
-	if err := UpdateFactEmbedding(nil, 1, nil); err == nil {
-		t.Error("expected error calling UpdateFactEmbedding on nil database")
-	}
-	if res, err := GetActiveConversationsForExtraction(nil, 24); err != nil || res != nil {
-		t.Errorf("expected nil, nil calling GetActiveConversationsForExtraction on nil database, got %v, %v", res, err)
-	}
-	if err := UpdateConversationFactWatermark(nil, "th1", 10); err != nil {
-		t.Errorf("expected nil error calling UpdateConversationFactWatermark on nil database, got %v", err)
-	}
-	if err := UpdateConversationFactExtractedAt(nil, "th1"); err != nil {
-		t.Errorf("expected nil error calling UpdateConversationFactExtractedAt on nil database, got %v", err)
-	}
-
 	// 2. Schedules & Runs nil database
 	if err := CreateOneShotSchedule(nil, OneShotSchedule{ID: "os1", ThreadID: "th1"}); err == nil {
 		t.Error("expected error calling CreateOneShotSchedule on nil database")
@@ -1643,13 +1625,14 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	}
 	embValid := make([]float32, ExpectedEmbeddingDim)
 	embValid[0] = 1.0
-	idNilCtx, err := InsertFactWithContext(nil, database, false, "cat", "fact text nil ctx", 1.0, embValid)
+	store := NewSQLStore(database)
+	idNilCtx, err := store.InsertFact(nil, "cat", "fact text nil ctx", 1.0, embValid)
 	if err != nil || idNilCtx <= 0 {
-		t.Fatalf("InsertFactWithContext with nil ctx failed: %v, id=%d", err, idNilCtx)
+		t.Fatalf("InsertFact with nil ctx failed: %v, id=%d", err, idNilCtx)
 	}
-	resNilCtx, err := GetFactsPaginatedWithContext(nil, database, false, FactsFilter{Limit: 5})
+	resNilCtx, err := store.GetFactsPaginated(nil, FactsFilter{Limit: 5})
 	if err != nil || resNilCtx.Total == 0 {
-		t.Fatalf("GetFactsPaginatedWithContext with nil ctx failed: %v", err)
+		t.Fatalf("GetFactsPaginated with nil ctx failed: %v", err)
 	}
 	if _, err := GetActiveTasks(nil); err == nil {
 		t.Error("expected error on nil DB in GetActiveTasks")
@@ -1664,28 +1647,31 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	}
 	_ = closedDB.Close()
 
-	if _, err := InsertFact(closedDB, "cat", "fact", 1.0, nil); err == nil {
+	closedStore := NewSQLStore(closedDB)
+	ctx := context.Background()
+
+	if _, err := closedStore.InsertFact(ctx, "cat", "fact", 1.0, nil); err == nil {
 		t.Error("expected error on closed db in InsertFact")
 	}
-	if _, err := GetFactsPaginated(closedDB, FactsFilter{}); err == nil {
+	if _, err := closedStore.GetFactsPaginated(ctx, FactsFilter{}); err == nil {
 		t.Error("expected error on closed db in GetFactsPaginated")
 	}
-	if _, err := SearchSimilarFacts(closedDB, nil, "query", 10, 0.5); err == nil {
+	if _, err := closedStore.SearchSimilarFacts(ctx, nil, "query", 10, 0.5); err == nil {
 		t.Error("expected error on closed db in SearchSimilarFacts")
 	}
-	if _, err := GetFactsByThreadWithEmbeddings(closedDB, "th1"); err == nil {
+	if _, err := closedStore.GetFactsByThreadWithEmbeddings(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetFactsByThreadWithEmbeddings")
 	}
-	if err := UpdateFactEmbedding(closedDB, 1, nil); err == nil {
+	if err := closedStore.UpdateFactEmbedding(ctx, 1, nil); err == nil {
 		t.Error("expected error on closed db in UpdateFactEmbedding")
 	}
-	if _, err := GetActiveConversationsForExtraction(closedDB, 24); err == nil {
+	if _, err := closedStore.GetActiveConversationsForExtraction(ctx, 24); err == nil {
 		t.Error("expected error on closed db in GetActiveConversationsForExtraction")
 	}
-	if err := UpdateConversationFactWatermark(closedDB, "th1", 10); err == nil {
+	if err := closedStore.UpdateConversationFactWatermark(ctx, "th1", 10); err == nil {
 		t.Error("expected error on closed db in UpdateConversationFactWatermark")
 	}
-	if err := UpdateConversationFactExtractedAt(closedDB, "th1"); err == nil {
+	if err := closedStore.UpdateConversationFactExtractedAt(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in UpdateConversationFactExtractedAt")
 	}
 
@@ -1787,14 +1773,17 @@ func TestDB_Fact_InsertAndEmbedding_EdgeCases(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
 	// 1. Empty fact text error
-	_, err := InsertFact(database, "cat", "", 1.0, nil)
+	_, err := store.InsertFact(ctx, "cat", "", 1.0, nil)
 	if err == nil {
 		t.Error("expected error for empty fact text")
 	}
 
 	// 2. Defaults for category and importance
-	fID, err := InsertFact(database, "", "Default cat and imp", -1.0, nil)
+	fID, err := store.InsertFact(ctx, "", "Default cat and imp", -1.0, nil)
 	if err != nil {
 		t.Fatalf("failed to insert fact with defaults: %v", err)
 	}
@@ -1803,12 +1792,12 @@ func TestDB_Fact_InsertAndEmbedding_EdgeCases(t *testing.T) {
 	}
 
 	// 3. UpdateFactEmbedding dimension error
-	if err := UpdateFactEmbedding(database, fID, []float32{1.0, 2.0}); err == nil {
+	if err := store.UpdateFactEmbedding(ctx, fID, []float32{1.0, 2.0}); err == nil {
 		t.Error("expected error updating fact embedding with invalid dim")
 	}
 
 	// 4. GetFactsByThreadWithEmbeddings empty thread
-	facts, err := GetFactsByThreadWithEmbeddings(database, "")
+	facts, err := store.GetFactsByThreadWithEmbeddings(ctx, "")
 	if err != nil || len(facts) == 0 {
 		t.Errorf("expected non-empty facts for empty thread query, got %v, err: %v", facts, err)
 	}

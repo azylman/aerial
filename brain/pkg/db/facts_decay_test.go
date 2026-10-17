@@ -195,13 +195,72 @@ func TestSQLStoreReinforceAndDecay(t *testing.T) {
 	if _, _, err := storeNilDB.DecayAndPruneFacts(ctx, 0.02, 0.10, 30); err == nil {
 		t.Errorf("expected error on storeNilDB.DecayAndPruneFacts")
 	}
+
+	storeMem := NewSQLStore(database)
+	dup, sim, err = storeMem.FindDuplicateFact(ctx, []float32{1.0}, 0.88)
+	if err != nil || dup != nil || sim != 0 {
+		t.Errorf("expected nil duplicate without error for invalid embedding dimension")
+	}
+
+	// minSim <= 0 defaults to 0.88
+	_, _, _ = storeMem.FindDuplicateFact(nil, emb, -1.0)
+	_ = storeMem.UpdateConversationFactWatermark(ctx, "", 10)
+
+	// boost <= 0 and ctx == nil
+	_ = storeMem.ReinforceFact(nil, 9999, "text", emb, -0.5)
+
+	// default arguments and ctx == nil
+	_, _, _ = storeMem.DecayAndPruneFacts(nil, -1, -1, -1)
+
+	// Closed DB
+	dbClosed, err := InitDB(filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	_ = dbClosed.Close()
+	closedStore := NewSQLStore(dbClosed)
+
+	_, _, err = closedStore.DecayAndPruneFacts(context.Background(), 0.02, 0.10, 30)
+	if err == nil {
+		t.Errorf("expected error on closed db for DecayAndPruneFacts")
+	}
+
+	err = closedStore.ReinforceFact(context.Background(), 1, "text", emb, 0.15)
+	if err == nil {
+		t.Errorf("expected error on closed db for ReinforceFact")
+	}
 }
 
 func TestFactTime_ScanAllBranches(t *testing.T) {
-	// 1. Nil
+	// 1. Nil & Empty
 	var ft FactTime
 	if err := ft.Scan(nil); err != nil || ft.Valid {
 		t.Errorf("expected valid=false for nil, got err=%v valid=%v", err, ft.Valid)
+	}
+	var nilTime *time.Time
+	if err := ft.Scan(nilTime); err != nil || ft.Valid {
+		t.Errorf("expected valid=false for nil *time.Time")
+	}
+	if err := ft.Scan("   "); err != nil || ft.Valid {
+		t.Errorf("expected valid=false for whitespace string")
+	}
+	if err := ft.Scan([]byte("   ")); err != nil || ft.Valid {
+		t.Errorf("expected valid=false for whitespace []byte")
+	}
+	if err := ft.Scan([]byte("2026-09-13T22:00:00Z")); err != nil || !ft.Valid {
+		t.Errorf("expected valid=true for []byte date string")
+	}
+
+	// NullVector branches
+	var nv NullVector
+	if err := nv.Scan(nil); err != nil || nv.Valid {
+		t.Errorf("expected valid=false for nil NullVector")
+	}
+	if err := nv.Scan("[0.1,0.2]"); err != nil || !nv.Valid {
+		t.Errorf("expected valid=true for string NullVector")
+	}
+	if err := nv.Scan([]byte("[0.1,0.2]")); err != nil || !nv.Valid {
+		t.Errorf("expected valid=true for []byte NullVector")
 	}
 
 	// 2. time.Time
@@ -221,67 +280,6 @@ func TestFactTime_ScanAllBranches(t *testing.T) {
 	}
 	if err := ft.Scan(12345); err == nil {
 		t.Errorf("expected error on int scan")
-	}
-}
-
-func TestFacts_DecayAndReinforce_NilAndEdgeCases(t *testing.T) {
-	emb := make([]float32, ExpectedEmbeddingDim)
-	emb[0] = 1.0
-
-	// 1. FindDuplicateFactWithContext nil DB
-	dup, sim, err := FindDuplicateFactWithContext(nil, nil, false, emb, 0.88)
-	if err != nil || dup != nil || sim != 0 {
-		t.Errorf("expected nil duplicate without error for nil database")
-	}
-
-	// Invalid embedding dimension
-	dbMem, err := InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer dbMem.Close()
-
-	dup, sim, err = FindDuplicateFactWithContext(context.Background(), dbMem, false, []float32{1.0}, 0.88)
-	if err != nil || dup != nil || sim != 0 {
-		t.Errorf("expected nil duplicate without error for invalid embedding dimension")
-	}
-
-	// minSim <= 0 defaults to 0.88
-	_, _, _ = FindDuplicateFactWithContext(nil, dbMem, false, emb, -1.0)
-
-	// 2. ReinforceFactWithContext nil DB
-	err = ReinforceFactWithContext(nil, nil, false, 1, "text", emb, 0.15)
-	if err == nil {
-		t.Errorf("expected error for nil database in ReinforceFactWithContext")
-	}
-
-	// boost <= 0 and ctx == nil
-	_ = ReinforceFactWithContext(nil, dbMem, false, 9999, "text", emb, -0.5)
-
-	// 3. DecayAndPruneFactsWithContext nil DB
-	_, _, err = DecayAndPruneFactsWithContext(nil, nil, false, 0.02, 0.10, 30)
-	if err == nil {
-		t.Errorf("expected error for nil database in DecayAndPruneFactsWithContext")
-	}
-
-	// default arguments and ctx == nil
-	_, _, _ = DecayAndPruneFactsWithContext(nil, dbMem, false, -1, -1, -1)
-
-	// Closed DB
-	dbClosed, err := InitDB(filepath.Join(t.TempDir(), "closed.db"))
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	_ = dbClosed.Close()
-
-	_, _, err = DecayAndPruneFactsWithContext(context.Background(), dbClosed, false, 0.02, 0.10, 30)
-	if err == nil {
-		t.Errorf("expected error on closed db for DecayAndPruneFacts")
-	}
-
-	err = ReinforceFactWithContext(context.Background(), dbClosed, false, 1, "text", emb, 0.15)
-	if err == nil {
-		t.Errorf("expected error on closed db for ReinforceFact")
 	}
 }
 
@@ -332,13 +330,13 @@ func TestFacts_PostgresBranchCoverage(t *testing.T) {
 			return testCustomResult{rows: 1}, nil
 		},
 	}
-	err := ReinforceFactWithContext(ctx, mockDB, true, 10, "Postgres Fact", emb, 0.15)
+	err := (&SQLStore{db: mockDB, isPostgres: true}).ReinforceFact(ctx, 10, "Postgres Fact", emb, 0.15)
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
 
 	// b. Success without text (boost only)
-	err = ReinforceFactWithContext(ctx, mockDB, true, 10, "", nil, 0.15)
+	err = (&SQLStore{db: mockDB, isPostgres: true}).ReinforceFact(ctx, 10, "", nil, 0.15)
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -349,7 +347,7 @@ func TestFacts_PostgresBranchCoverage(t *testing.T) {
 			return testCustomResult{rows: 0}, nil
 		},
 	}
-	err = ReinforceFactWithContext(ctx, mockDBZero, true, 999, "", nil, 0.15)
+	err = (&SQLStore{db: mockDBZero, isPostgres: true}).ReinforceFact(ctx, 999, "", nil, 0.15)
 	if !errors.Is(err, ErrFactNotFound) {
 		t.Errorf("expected ErrFactNotFound, got %v", err)
 	}
@@ -360,20 +358,20 @@ func TestFacts_PostgresBranchCoverage(t *testing.T) {
 			return nil, fmt.Errorf("postgres exec error")
 		},
 	}
-	err = ReinforceFactWithContext(ctx, mockDBErr, true, 10, "", nil, 0.15)
+	err = (&SQLStore{db: mockDBErr, isPostgres: true}).ReinforceFact(ctx, 10, "", nil, 0.15)
 	if err == nil {
 		t.Errorf("expected error on postgres exec failure")
 	}
 
 	// 2. DecayAndPruneFactsWithContext on Postgres
 	// a. Success
-	decayed, pruned, err := DecayAndPruneFactsWithContext(ctx, mockDB, true, 0.02, 0.10, 30)
+	decayed, pruned, err := (&SQLStore{db: mockDB, isPostgres: true}).DecayAndPruneFacts(ctx, 0.02, 0.10, 30)
 	if err != nil || decayed != 1 || pruned != 1 {
 		t.Errorf("expected decayed=1 pruned=1, got decayed=%d pruned=%d err=%v", decayed, pruned, err)
 	}
 
 	// b. Decay error
-	decayed, pruned, err = DecayAndPruneFactsWithContext(ctx, mockDBErr, true, 0.02, 0.10, 30)
+	decayed, pruned, err = (&SQLStore{db: mockDBErr, isPostgres: true}).DecayAndPruneFacts(ctx, 0.02, 0.10, 30)
 	if err == nil {
 		t.Errorf("expected error on postgres decay failure")
 	}
@@ -389,7 +387,7 @@ func TestFacts_PostgresBranchCoverage(t *testing.T) {
 			return nil, fmt.Errorf("prune error")
 		},
 	}
-	decayed, pruned, err = DecayAndPruneFactsWithContext(ctx, mockDBPruneErr, true, 0.02, 0.10, 30)
+	decayed, pruned, err = (&SQLStore{db: mockDBPruneErr, isPostgres: true}).DecayAndPruneFacts(ctx, 0.02, 0.10, 30)
 	if err == nil || decayed != 3 {
 		t.Errorf("expected decayed=3 with prune error, got decayed=%d err=%v", decayed, err)
 	}
@@ -412,7 +410,7 @@ func TestFacts_Postgres_FindDuplicateFactCoverage(t *testing.T) {
 			return dbMem.QueryRowContext(ctx, "SELECT 1 WHERE 1 = 0")
 		},
 	}
-	dup, sim, err := FindDuplicateFactWithContext(ctx, mockNoRows, true, emb, 0.88)
+	dup, sim, err := (&SQLStore{db: mockNoRows, isPostgres: true}).FindDuplicateFact(ctx, emb, 0.88)
 	if err != nil || dup != nil || sim != 0 {
 		t.Errorf("expected nil duplicate for sql.ErrNoRows, got dup=%v sim=%f err=%v", dup, sim, err)
 	}
@@ -423,7 +421,7 @@ func TestFacts_Postgres_FindDuplicateFactCoverage(t *testing.T) {
 			return dbMem.QueryRowContext(ctx, "SELECT syntax error")
 		},
 	}
-	_, _, err = FindDuplicateFactWithContext(ctx, mockErr, true, emb, 0.88)
+	_, _, err = (&SQLStore{db: mockErr, isPostgres: true}).FindDuplicateFact(ctx, emb, 0.88)
 	if err == nil {
 		t.Errorf("expected error on query failure")
 	}
@@ -434,7 +432,7 @@ func TestFacts_Postgres_FindDuplicateFactCoverage(t *testing.T) {
 			return dbMem.QueryRowContext(ctx, "SELECT 42, 'cat', 'fact', 0.9, '2026-09-13 22:00:00', '2026-09-13 22:00:00', '2026-09-13 22:00:00', 2, 0.95")
 		},
 	}
-	dup, sim, err = FindDuplicateFactWithContext(ctx, mockMatch, true, emb, 0.88)
+	dup, sim, err = (&SQLStore{db: mockMatch, isPostgres: true}).FindDuplicateFact(ctx, emb, 0.88)
 	if err != nil || dup == nil || dup.ID != 42 || sim != 0.95 {
 		t.Errorf("expected matched fact id=42 sim=0.95, got dup=%+v sim=%f err=%v", dup, sim, err)
 	}
@@ -445,7 +443,7 @@ func TestFacts_Postgres_FindDuplicateFactCoverage(t *testing.T) {
 			return dbMem.QueryRowContext(ctx, "SELECT 43, 'cat', 'fact', 0.9, '2026-09-13 22:00:00', '2026-09-13 22:00:00', '2026-09-13 22:00:00', 1, 0.50")
 		},
 	}
-	dup, sim, err = FindDuplicateFactWithContext(ctx, mockLowSim, true, emb, 0.88)
+	dup, sim, err = (&SQLStore{db: mockLowSim, isPostgres: true}).FindDuplicateFact(ctx, emb, 0.88)
 	if err != nil || dup != nil || sim != 0.50 {
 		t.Errorf("expected nil duplicate with sim=0.50, got dup=%v sim=%f err=%v", dup, sim, err)
 	}
@@ -463,7 +461,7 @@ func TestSearchSimilarFacts_HybridAndPostgresBranches(t *testing.T) {
 	emb[0] = 1.0
 
 	// 1. Nil embedding and empty queryText returns nil
-	resNil, errNil := SearchSimilarFactsWithContext(ctx, dbMem, false, nil, "", 10, 0.2)
+	resNil, errNil := (&SQLStore{db: dbMem}).SearchSimilarFacts(ctx, nil, "", 10, 0.2)
 	if resNil != nil || errNil != nil {
 		t.Errorf("expected nil, nil for empty embedding and queryText, got %v, %v", resNil, errNil)
 	}
@@ -508,7 +506,7 @@ func TestSearchSimilarFacts_HybridAndPostgresBranches(t *testing.T) {
 			return dbMem.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
 		},
 	}
-	_, _ = SearchSimilarFactsWithContext(ctx, mockHybrid, true, emb, "search text", 10, 0.2)
+	_, _ = (&SQLStore{db: mockHybrid, isPostgres: true}).SearchSimilarFacts(ctx, emb, "search text", 10, 0.2)
 	if !strings.Contains(capturedQuery, "vector_hits") || !strings.Contains(capturedQuery, "text_hits") || !strings.Contains(capturedQuery, "FULL OUTER JOIN") {
 		t.Errorf("expected hybrid RRF query with vector_hits and text_hits, got: %s", capturedQuery)
 	}
@@ -521,7 +519,7 @@ func TestSearchSimilarFacts_HybridAndPostgresBranches(t *testing.T) {
 			return dbMem.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
 		},
 	}
-	_, _ = SearchSimilarFactsWithContext(ctx, mockDense, true, emb, "", 10, 0.2)
+	_, _ = (&SQLStore{db: mockDense, isPostgres: true}).SearchSimilarFacts(ctx, emb, "", 10, 0.2)
 	if !strings.Contains(capturedQuery, "WITH candidates AS") || !strings.Contains(capturedQuery, "similarity * importance") {
 		t.Errorf("expected dense-only query with candidates CTE, got: %s", capturedQuery)
 	}
@@ -534,7 +532,7 @@ func TestSearchSimilarFacts_HybridAndPostgresBranches(t *testing.T) {
 			return dbMem.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
 		},
 	}
-	_, _ = SearchSimilarFactsWithContext(ctx, mockSparse, true, nil, "only text", 10, 0.2)
+	_, _ = (&SQLStore{db: mockSparse, isPostgres: true}).SearchSimilarFacts(ctx, nil, "only text", 10, 0.2)
 	if !strings.Contains(capturedQuery, "WITH text_hits AS") || !strings.Contains(capturedQuery, "websearch_to_tsquery") {
 		t.Errorf("expected sparse-only query with text_hits CTE, got: %s", capturedQuery)
 	}
@@ -545,7 +543,7 @@ func TestSearchSimilarFacts_HybridAndPostgresBranches(t *testing.T) {
 			return nil, errors.New("simulated pg query failure")
 		},
 	}
-	_, err = SearchSimilarFactsWithContext(ctx, mockErr, true, emb, "test", 10, 0.2)
+	_, err = (&SQLStore{db: mockErr, isPostgres: true}).SearchSimilarFacts(ctx, emb, "test", 10, 0.2)
 	if err == nil || !strings.Contains(err.Error(), "hybrid search failed") {
 		t.Errorf("expected 'hybrid search failed' error, got %v", err)
 	}

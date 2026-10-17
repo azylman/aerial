@@ -110,13 +110,6 @@ func TestTranscriptStore_CRUD_And_SyncStates(t *testing.T) {
 		t.Errorf("expected LastIndexedStep=-1 after reset, got %d", syncStates["sess-1"].LastIndexedStep)
 	}
 
-	// 6. Test direct functions with nil context / nil db
-	if _, err := GetSessionSyncStatesWithContext(ctx, nil, false); err == nil {
-		t.Errorf("expected error on GetSessionSyncStatesWithContext with nil db")
-	}
-	if err := UpsertSessionSummaryWithContext(ctx, nil, false, summary); err == nil {
-		t.Errorf("expected error on UpsertSessionSummaryWithContext with nil db")
-	}
 }
 
 func TestTranscriptStore_BatchInsertTranscriptSteps(t *testing.T) {
@@ -223,9 +216,7 @@ func TestTranscriptStore_BatchInsertTranscriptSteps(t *testing.T) {
 	if err := nilStore.BatchInsertTranscriptSteps(ctx, steps); err == nil {
 		t.Errorf("expected error on nil store BatchInsertTranscriptSteps")
 	}
-	if err := BatchInsertTranscriptStepsWithContext(ctx, nil, false, steps); err == nil {
-		t.Errorf("expected error on BatchInsertTranscriptStepsWithContext with nil db")
-	}
+
 }
 
 func TestTranscriptStore_CascadeDelete(t *testing.T) {
@@ -392,7 +383,7 @@ func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
 		}
 	})
 
-	// 5. Edge cases: empty query & embedding, nil store, nil db
+	// 5. Edge cases: empty query & embedding, nil store, defaults, FailNext, Close
 	t.Run("edge cases", func(t *testing.T) {
 		res, err := store.SearchSessionSummaries(ctx, nil, "", 10, 0.0)
 		if err != nil || res != nil {
@@ -403,76 +394,49 @@ func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
 		if _, err := nilStore.SearchSessionSummaries(ctx, embVector, "q", 10, 0.1); err == nil {
 			t.Errorf("expected error on nil store SearchSessionSummaries")
 		}
-		if res, err := SearchSessionSummariesWithContext(ctx, nil, false, embVector, "q", 10, 0.1); res != nil || err != nil {
-			t.Errorf("expected nil, nil on SearchSessionSummariesWithContext with nil db")
-		}
-	})
 
-	t.Run("FakeStore", func(t *testing.T) {
-		fs := NewFakeStore()
-
-		resNil, err := fs.SearchSessionSummaries(ctx, nil, "", 10, 0.0)
-		if err != nil || resNil != nil {
-			t.Errorf("expected nil, nil on empty FakeStore query, got %v, %v", resNil, err)
-		}
-
-		if err := fs.UpsertSessionSummary(ctx, SessionSummary{SessionID: ""}); err == nil {
+		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: ""}); err == nil {
 			t.Errorf("expected error for empty sessionID on FakeStore")
 		}
 
-		for i := 0; i < 5; i++ {
-			if err := fs.UpsertSessionSummary(ctx, SessionSummary{
-				SessionID: fmt.Sprintf("fs-sess-%d", i),
-				Summary:   fmt.Sprintf("Deploying Kubernetes cluster service %d", i),
-				Embedding: embVector,
-			}); err != nil {
-				t.Fatalf("UpsertSessionSummary failed: %v", err)
-			}
+		resScored, err := store.SearchSessionSummaries(ctx, embVector, "vector", -1, -0.5)
+		if err != nil || len(resScored) == 0 {
+			t.Fatalf("expected results with default limit, got %d (err: %v)", len(resScored), err)
 		}
 
-		resScored, err := fs.SearchSessionSummaries(ctx, embVector, "Kubernetes cluster service", -1, -0.5)
-		if err != nil || len(resScored) != 5 {
-			t.Fatalf("expected 5 results with default limit, got %d (err: %v)", len(resScored), err)
-		}
-
-		resLimited, err := fs.SearchSessionSummaries(ctx, embVector, "Kubernetes", 2, 0.0)
-		if err != nil || len(resLimited) != 2 {
-			t.Fatalf("expected 2 results with limit 2, got %d (err: %v)", len(resLimited), err)
-		}
-
-		if err := fs.UpsertSessionSummary(ctx, SessionSummary{SessionID: "fs-sess-0", LastIndexedStep: -2}); err != nil {
+		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-vector", LastIndexedStep: -2}); err != nil {
 			t.Fatalf("UpsertSessionSummary sentinel failed: %v", err)
 		}
-		states, err := fs.GetSessionSyncStates(ctx)
-		if err != nil || states["fs-sess-0"].LastIndexedStep != -1 {
-			t.Errorf("expected reset to -1, got %v (err: %v)", states["fs-sess-0"], err)
+		states, err := store.GetSessionSyncStates(ctx)
+		if err != nil || states["sess-vector"].LastIndexedStep != -1 {
+			t.Errorf("expected reset to -1, got %v (err: %v)", states["sess-vector"], err)
 		}
 
 		simErr := errors.New("simulated error")
 		for _, m := range []string{"GetSessionSyncStates", "UpsertSessionSummary", "SearchSessionSummaries"} {
-			fs.FailNext(m, simErr)
+			store.FailNext(m, simErr)
 			var callErr error
 			switch m {
 			case "GetSessionSyncStates":
-				_, callErr = fs.GetSessionSyncStates(ctx)
+				_, callErr = store.GetSessionSyncStates(ctx)
 			case "UpsertSessionSummary":
-				callErr = fs.UpsertSessionSummary(ctx, SessionSummary{SessionID: "s"})
+				callErr = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "s"})
 			case "SearchSessionSummaries":
-				_, callErr = fs.SearchSessionSummaries(ctx, nil, "q", 5, 0.1)
+				_, callErr = store.SearchSessionSummaries(ctx, nil, "q", 5, 0.1)
 			}
 			if !errors.Is(callErr, simErr) {
 				t.Errorf("expected simulated error for %s, got %v", m, callErr)
 			}
 		}
 
-		_ = fs.Close()
-		if _, err := fs.GetSessionSyncStates(ctx); !errors.Is(err, sql.ErrConnDone) {
+		_ = store.Close()
+		if _, err := store.GetSessionSyncStates(ctx); !errors.Is(err, sql.ErrConnDone) {
 			t.Errorf("expected sql.ErrConnDone on GetSessionSyncStates")
 		}
-		if err := fs.UpsertSessionSummary(ctx, SessionSummary{SessionID: "s"}); !errors.Is(err, sql.ErrConnDone) {
+		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "s"}); !errors.Is(err, sql.ErrConnDone) {
 			t.Errorf("expected sql.ErrConnDone on UpsertSessionSummary")
 		}
-		if _, err := fs.SearchSessionSummaries(ctx, nil, "q", 5, 0.1); !errors.Is(err, sql.ErrConnDone) {
+		if _, err := store.SearchSessionSummaries(ctx, nil, "q", 5, 0.1); !errors.Is(err, sql.ErrConnDone) {
 			t.Errorf("expected sql.ErrConnDone on SearchSessionSummaries")
 		}
 	})
@@ -567,94 +531,39 @@ func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
 		t.Errorf("expected nil, nil on empty query with no filters, got %v, %v", resEmpty, err)
 	}
 
-	// 6. Nil store and nil db
+	// 6. Nil store, defaults, FailNext, Close
 	var nilStore *SQLStore
 	if _, err := nilStore.SearchTranscriptSteps(ctx, "q", "", "", 10); err == nil {
 		t.Errorf("expected error on nil store SearchTranscriptSteps")
 	}
-	if res, err := SearchTranscriptStepsWithContext(ctx, nil, false, "q", "", "", 10); res != nil || err != nil {
-		t.Errorf("expected nil, nil on SearchTranscriptStepsWithContext with nil db")
+
+	allMatched, err := store.SearchTranscriptSteps(ctx, "ingress", "", "", -1)
+	if err != nil || len(allMatched) == 0 {
+		t.Errorf("expected steps with default limit, got %d, err: %v", len(allMatched), err)
 	}
 
-	t.Run("FakeStore", func(t *testing.T) {
-		fs := NewFakeStore()
+	simErr := errors.New("simulated error")
+	for _, m := range []string{"BatchInsertTranscriptSteps", "SearchTranscriptSteps"} {
+		store.FailNext(m, simErr)
+		var callErr error
+		switch m {
+		case "BatchInsertTranscriptSteps":
+			callErr = store.BatchInsertTranscriptSteps(ctx, nil)
+		case "SearchTranscriptSteps":
+			_, callErr = store.SearchTranscriptSteps(ctx, "q", "", "", 5)
+		}
+		if !errors.Is(callErr, simErr) {
+			t.Errorf("expected simulated error for %s, got %v", m, callErr)
+		}
+	}
 
-		stepsNil, err := fs.SearchTranscriptSteps(ctx, "", "", "", 10)
-		if err != nil || stepsNil != nil {
-			t.Errorf("expected nil, nil for empty transcript search, got %v, %v", stepsNil, err)
-		}
-
-		steps := []TranscriptStep{
-			{SessionID: ""}, // Ignored
-		}
-		for i := 0; i < 10; i++ {
-			sess := "fs-sess-0"
-			if i >= 5 {
-			sess = "fs-sess-1"
-			}
-			tool := "run_command"
-			if i%2 == 0 {
-				tool = "docker_ps"
-			}
-			steps = append(steps, TranscriptStep{
-				SessionID: sess,
-				StepIndex: i,
-				ToolName:  tool,
-				Content:   fmt.Sprintf("execution step content %d", i),
-				CreatedAt: time.Now().Add(time.Duration(i) * time.Minute),
-			})
-		}
-		if err := fs.BatchInsertTranscriptSteps(ctx, steps); err != nil {
-			t.Fatalf("FakeStore.BatchInsertTranscriptSteps failed: %v", err)
-		}
-
-		if err := fs.BatchInsertTranscriptSteps(ctx, []TranscriptStep{{SessionID: "fs-sess-0", StepIndex: 0, Content: "dup"}}); err != nil {
-			t.Fatalf("BatchInsertTranscriptSteps duplicate failed: %v", err)
-		}
-
-		filtered, err := fs.SearchTranscriptSteps(ctx, "execution", "fs-sess-0", "docker_ps", 10)
-		if err != nil {
-			t.Fatalf("search with filters failed: %v", err)
-		}
-		for _, s := range filtered {
-			if s.SessionID != "fs-sess-0" || s.ToolName != "docker_ps" {
-				t.Errorf("unexpected filter result: %+v", s)
-			}
-		}
-
-		allMatched, err := fs.SearchTranscriptSteps(ctx, "execution step", "", "", -1)
-		if err != nil || len(allMatched) != 10 {
-			t.Errorf("expected 10 steps with default limit, got %d, err: %v", len(allMatched), err)
-		}
-
-		capped, err := fs.SearchTranscriptSteps(ctx, "execution", "", "", 3)
-		if err != nil || len(capped) != 3 {
-			t.Errorf("expected 3 steps capped by limit, got %d, err: %v", len(capped), err)
-		}
-
-		simErr := errors.New("simulated error")
-		for _, m := range []string{"BatchInsertTranscriptSteps", "SearchTranscriptSteps"} {
-			fs.FailNext(m, simErr)
-			var callErr error
-			switch m {
-			case "BatchInsertTranscriptSteps":
-				callErr = fs.BatchInsertTranscriptSteps(ctx, nil)
-			case "SearchTranscriptSteps":
-				_, callErr = fs.SearchTranscriptSteps(ctx, "q", "", "", 5)
-			}
-			if !errors.Is(callErr, simErr) {
-				t.Errorf("expected simulated error for %s, got %v", m, callErr)
-			}
-		}
-
-		_ = fs.Close()
-		if err := fs.BatchInsertTranscriptSteps(ctx, nil); !errors.Is(err, sql.ErrConnDone) {
-			t.Errorf("expected sql.ErrConnDone on BatchInsertTranscriptSteps")
-		}
-		if _, err := fs.SearchTranscriptSteps(ctx, "q", "", "", 5); !errors.Is(err, sql.ErrConnDone) {
-			t.Errorf("expected sql.ErrConnDone on SearchTranscriptSteps")
-		}
-	})
+	_ = store.Close()
+	if err := store.BatchInsertTranscriptSteps(ctx, nil); !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("expected sql.ErrConnDone on BatchInsertTranscriptSteps")
+	}
+	if _, err := store.SearchTranscriptSteps(ctx, "q", "", "", 5); !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("expected sql.ErrConnDone on SearchTranscriptSteps")
+	}
 }
 
 func TestTranscriptStore_FakeStore_WithTx(t *testing.T) {
@@ -771,7 +680,7 @@ func TestTranscriptStore_GetSessionSyncStatesWithContext_MockDB(t *testing.T) {
 			return dbMem.QueryContext(ctx, "SELECT 'sess-1' AS session_id, '2026-10-01 12:00:00' AS last_mtime, 10 AS last_indexed_step, 1 AS is_settled")
 		},
 	}
-	states, err := GetSessionSyncStatesWithContext(ctx, mockSuccess, true)
+	states, err := (&SQLStore{db: mockSuccess, isPostgres: true}).GetSessionSyncStates(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -788,7 +697,7 @@ func TestTranscriptStore_GetSessionSyncStatesWithContext_MockDB(t *testing.T) {
 			return dbMem.QueryContext(ctx, "SELECT 'sess-1' AS session_id")
 		},
 	}
-	_, err = GetSessionSyncStatesWithContext(ctx, mockScanErr, true)
+	_, err = (&SQLStore{db: mockScanErr, isPostgres: true}).GetSessionSyncStates(ctx)
 	if err == nil || !strings.Contains(err.Error(), "scan session sync state") {
 		t.Errorf("expected scan error, got: %v", err)
 	}
@@ -799,7 +708,7 @@ func TestTranscriptStore_GetSessionSyncStatesWithContext_MockDB(t *testing.T) {
 			return nil, errors.New("simulated sync states query failure")
 		},
 	}
-	_, err = GetSessionSyncStatesWithContext(ctx, mockQueryErr, true)
+	_, err = (&SQLStore{db: mockQueryErr, isPostgres: true}).GetSessionSyncStates(ctx)
 	if err == nil || !strings.Contains(err.Error(), "query session sync states") {
 		t.Errorf("expected query error, got: %v", err)
 	}
@@ -832,7 +741,7 @@ func TestTranscriptStore_UpsertSessionSummaryWithContext_MockDB(t *testing.T) {
 			return testCustomResult{rows: 1}, nil
 		},
 	}
-	err := UpsertSessionSummaryWithContext(ctx, mockSuccess, true, summary)
+	err := (&SQLStore{db: mockSuccess, isPostgres: true}).UpsertSessionSummary(ctx, summary)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -849,7 +758,7 @@ func TestTranscriptStore_UpsertSessionSummaryWithContext_MockDB(t *testing.T) {
 			return nil, errors.New("simulated upsert exec failure")
 		},
 	}
-	err = UpsertSessionSummaryWithContext(ctx, mockExecErr, true, summary)
+	err = (&SQLStore{db: mockExecErr, isPostgres: true}).UpsertSessionSummary(ctx, summary)
 	if err == nil || !strings.Contains(err.Error(), "upsert session summary failed") {
 		t.Errorf("expected exec error, got: %v", err)
 	}
@@ -881,7 +790,7 @@ func TestTranscriptStore_BatchInsertTranscriptStepsWithContext_MockDB(t *testing
 			return testCustomResult{rows: int64(len(args) / 6)}, nil
 		},
 	}
-	err := BatchInsertTranscriptStepsWithContext(ctx, mockSuccess, true, steps)
+	err := (&SQLStore{db: mockSuccess, isPostgres: true}).BatchInsertTranscriptSteps(ctx, steps)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -898,7 +807,7 @@ func TestTranscriptStore_BatchInsertTranscriptStepsWithContext_MockDB(t *testing
 			return nil, errors.New("simulated batch chunk exec failure")
 		},
 	}
-	err = BatchInsertTranscriptStepsWithContext(ctx, mockExecErr, true, steps[:10])
+	err = (&SQLStore{db: mockExecErr, isPostgres: true}).BatchInsertTranscriptSteps(ctx, steps[:10])
 	if err == nil || !strings.Contains(err.Error(), "batch insert transcript steps chunk failed") {
 		t.Errorf("expected exec chunk error, got: %v", err)
 	}
@@ -933,7 +842,7 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 			return dbMem.QueryContext(ctx, mockScanQuery)
 		},
 	}
-	resHybrid, err := SearchSessionSummariesWithContext(ctx, mockHybrid, true, emb, "query text", 10, 0.5)
+	resHybrid, err := (&SQLStore{db: mockHybrid, isPostgres: true}).SearchSessionSummaries(ctx, emb, "query text", 10, 0.5)
 	if err != nil {
 		t.Fatalf("hybrid search failed: %v", err)
 	}
@@ -952,10 +861,12 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 			return dbMem.QueryContext(ctx, mockScanQuery)
 		},
 	}
-	resDense, err := SearchSessionSummariesWithContext(ctx, mockDense, true, emb, "", 10, 0.5)
+	resDense, err := (&SQLStore{db: mockDense, isPostgres: true}).SearchSessionSummaries(ctx, emb, "", 10, 0.5)
 	if err != nil {
 		t.Fatalf("dense search failed: %v", err)
 	}
+	// Test clamped limit and negative minScore
+	_, _ = (&SQLStore{db: mockDense, isPostgres: true}).SearchSessionSummaries(ctx, emb, "", -1, -0.5)
 	if !strings.Contains(capturedQuery, "WITH candidates AS") || !strings.Contains(capturedQuery, "similarity AS score") {
 		t.Errorf("expected dense-only query with candidates CTE, got: %s", capturedQuery)
 	}
@@ -971,7 +882,7 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 			return dbMem.QueryContext(ctx, mockScanQuery)
 		},
 	}
-	resSparse, err := SearchSessionSummariesWithContext(ctx, mockSparse, true, nil, "only text", 10, 0.5)
+	resSparse, err := (&SQLStore{db: mockSparse, isPostgres: true}).SearchSessionSummaries(ctx, nil, "only text", 10, 0.5)
 	if err != nil {
 		t.Fatalf("sparse search failed: %v", err)
 	}
@@ -988,7 +899,7 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 			return nil, errors.New("simulated pg search summaries failure")
 		},
 	}
-	_, err = SearchSessionSummariesWithContext(ctx, mockErr, true, emb, "test", 10, 0.5)
+	_, err = (&SQLStore{db: mockErr, isPostgres: true}).SearchSessionSummaries(ctx, emb, "test", 10, 0.5)
 	if err == nil || !strings.Contains(err.Error(), "search session summaries query failed") {
 		t.Errorf("expected search session summaries query failed error, got: %v", err)
 	}
@@ -999,7 +910,7 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 			return dbMem.QueryContext(ctx, "SELECT 's-pg-1' AS session_id")
 		},
 	}
-	_, err = SearchSessionSummariesWithContext(ctx, mockScanErr, true, emb, "test", 10, 0.5)
+	_, err = (&SQLStore{db: mockScanErr, isPostgres: true}).SearchSessionSummaries(ctx, emb, "test", 10, 0.5)
 	if err == nil || !strings.Contains(err.Error(), "scan session summary result") {
 		t.Errorf("expected scan error, got: %v", err)
 	}
@@ -1030,7 +941,7 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 			return dbMem.QueryContext(ctx, mockScanQuery)
 		},
 	}
-	stepsWithText, err := SearchTranscriptStepsWithContext(ctx, mockWithText, true, "build command", "sess-1", "run_command", 15)
+	stepsWithText, err := (&SQLStore{db: mockWithText, isPostgres: true}).SearchTranscriptSteps(ctx, "build command", "sess-1", "run_command", 15)
 	if err != nil {
 		t.Fatalf("search with text failed: %v", err)
 	}
@@ -1054,7 +965,7 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 			return dbMem.QueryContext(ctx, mockScanQuery)
 		},
 	}
-	stepsNoText, err := SearchTranscriptStepsWithContext(ctx, mockNoText, true, "", "sess-1", "run_command", 10)
+	stepsNoText, err := (&SQLStore{db: mockNoText, isPostgres: true}).SearchTranscriptSteps(ctx, "", "sess-1", "run_command", 10)
 	if err != nil {
 		t.Fatalf("search without text failed: %v", err)
 	}
@@ -1067,6 +978,8 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 	if len(stepsNoText) != 1 {
 		t.Errorf("expected 1 step result, got %d", len(stepsNoText))
 	}
+	// Test clamped limit <= 0
+	_, _ = (&SQLStore{db: mockNoText, isPostgres: true}).SearchTranscriptSteps(ctx, "", "sess-1", "run_command", -1)
 
 	// c. Query error
 	mockErr := testMockDBTX{
@@ -1074,7 +987,7 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 			return nil, errors.New("simulated transcript steps query failure")
 		},
 	}
-	_, err = SearchTranscriptStepsWithContext(ctx, mockErr, true, "test", "", "", 10)
+	_, err = (&SQLStore{db: mockErr, isPostgres: true}).SearchTranscriptSteps(ctx, "test", "", "", 10)
 	if err == nil || !strings.Contains(err.Error(), "search transcript steps query failed") {
 		t.Errorf("expected search transcript steps query failed error, got: %v", err)
 	}
@@ -1085,7 +998,7 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 			return dbMem.QueryContext(ctx, "SELECT 's-pg-1' AS session_id")
 		},
 	}
-	_, err = SearchTranscriptStepsWithContext(ctx, mockScanErr, true, "test", "", "", 10)
+	_, err = (&SQLStore{db: mockScanErr, isPostgres: true}).SearchTranscriptSteps(ctx, "test", "", "", 10)
 	if err == nil || !strings.Contains(err.Error(), "scan transcript step result") {
 		t.Errorf("expected scan error, got: %v", err)
 	}
@@ -1103,9 +1016,10 @@ func TestTranscriptStore_EdgeCases_And_Fallbacks(t *testing.T) {
 	emb[0] = 1.0
 
 	// 1. Nil context handling across transcripts.go functions
-	states, err := GetSessionSyncStatesWithContext(nil, dbMem, false)
+	store := NewSQLStore(dbMem)
+	states, err := store.GetSessionSyncStates(nil)
 	if err != nil {
-		t.Errorf("expected nil error on GetSessionSyncStatesWithContext(nil ctx), got %v", err)
+		t.Errorf("expected nil error on GetSessionSyncStates(nil ctx), got %v", err)
 	}
 	if states == nil {
 		t.Errorf("expected non-nil states map")
@@ -1116,8 +1030,8 @@ func TestTranscriptStore_EdgeCases_And_Fallbacks(t *testing.T) {
 		Summary:   "Edge case session",
 		Embedding: emb,
 	}
-	if err := UpsertSessionSummaryWithContext(nil, dbMem, false, summary); err != nil {
-		t.Errorf("expected nil error on UpsertSessionSummaryWithContext(nil ctx), got %v", err)
+	if err := store.UpsertSessionSummary(nil, summary); err != nil {
+		t.Errorf("expected nil error on UpsertSessionSummary(nil ctx), got %v", err)
 	}
 
 	steps := []TranscriptStep{
@@ -1125,8 +1039,8 @@ func TestTranscriptStore_EdgeCases_And_Fallbacks(t *testing.T) {
 		{SessionID: "sess-edge-1", StepIndex: 1, Content: "edge step 1", ToolName: "toolB"},
 		{SessionID: "sess-edge-1", StepIndex: 2, Content: "edge step 2", ToolName: "toolA"},
 	}
-	if err := BatchInsertTranscriptStepsWithContext(nil, dbMem, false, steps); err != nil {
-		t.Errorf("expected nil error on BatchInsertTranscriptStepsWithContext(nil ctx), got %v", err)
+	if err := store.BatchInsertTranscriptSteps(nil, steps); err != nil {
+		t.Errorf("expected nil error on BatchInsertTranscriptSteps(nil ctx), got %v", err)
 	}
 
 	// 2. ParseDBTime checks

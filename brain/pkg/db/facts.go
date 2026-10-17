@@ -10,12 +10,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/brain/pkg/metrics"
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
 const (
 	ExpectedEmbeddingDim = 384
+	DefaultDenseWeight   = 0.70
+	DefaultSparseWeight  = 0.30
+	DefaultRRFK          = 60.0
 )
 
 type Fact struct {
@@ -34,21 +36,10 @@ type FactWithEmbedding struct {
 	Embedding []float32
 }
 
-func InsertFact(database DBTX, category, factText string, importance float64, embedding []float32) (id int64, err error) {
-	return InsertFactWithContext(context.Background(), database, false, category, factText, importance, embedding)
-}
-
-func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, category, factText string, importance float64, embedding []float32) (id int64, err error) {
-	start := time.Now()
-	defer func() {
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		metrics.RecordDBQuery("insert_fact", status, time.Since(start))
-	}()
-	if database == nil {
-		return 0, fmt.Errorf("database is nil")
+func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (id int64, err error) {
+	defer recordTranscriptQuery("insert_fact", time.Now(), &err)
+	if err = s.checkDB(); err != nil {
+		return 0, err
 	}
 	if factText == "" {
 		return 0, fmt.Errorf("fact text cannot be empty")
@@ -66,15 +57,12 @@ func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, catego
 		vecVal = pgvector.NewVector(embedding)
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `INSERT INTO facts (category, fact_text, importance, embedding, created_at, last_reinforced_at, last_decayed_at, reinforce_count) VALUES ($1, $2, $3, $4, $5, $5, $5, 1) RETURNING id`
 	var insertedID int64
-	err = database.QueryRowContext(queryCtx, query, category, factText, importance, vecVal, now).Scan(&insertedID)
+	err = s.db.QueryRowContext(queryCtx, query, category, factText, importance, vecVal, now).Scan(&insertedID)
 	if err != nil {
 		return 0, err
 	}
@@ -124,53 +112,31 @@ type FactTime struct {
 
 func (ft *FactTime) Scan(src any) error {
 	if src == nil {
-		ft.Time = time.Time{}
-		ft.Valid = false
+		*ft = FactTime{}
 		return nil
 	}
 	switch v := src.(type) {
-	case time.Time:
-		ft.Time = v
-		ft.Valid = true
-		return nil
 	case *time.Time:
-		if v != nil {
-			ft.Time = *v
-			ft.Valid = true
+		if v == nil {
+			*ft = FactTime{}
 			return nil
 		}
-		ft.Time = time.Time{}
-		ft.Valid = false
-		return nil
 	case string:
 		if strings.TrimSpace(v) == "" {
-			ft.Time = time.Time{}
-			ft.Valid = false
+			*ft = FactTime{}
 			return nil
 		}
-		t, ok := ParseDBTime(v)
-		if !ok {
-			return fmt.Errorf("failed to parse FactTime from %q", v)
-		}
-		ft.Time = t
-		ft.Valid = true
-		return nil
 	case []byte:
-		str := string(v)
-		if strings.TrimSpace(str) == "" {
-			ft.Time = time.Time{}
-			ft.Valid = false
+		if strings.TrimSpace(string(v)) == "" {
+			*ft = FactTime{}
 			return nil
 		}
-		t, ok := ParseDBTime(str)
-		if !ok {
-			return fmt.Errorf("failed to parse FactTime from %q", str)
-		}
-		ft.Time = t
-		ft.Valid = true
+	}
+	if t, ok := ParseDBTime(src); ok {
+		*ft = FactTime{Time: t, Valid: true}
 		return nil
 	}
-	return fmt.Errorf("unsupported Scan, storing driver.Value type %T into type *db.FactTime", src)
+	return fmt.Errorf("failed to parse FactTime from %v (%T)", src, src)
 }
 
 func scanFact(scanner interface{ Scan(dest ...any) error }) (Fact, error) {
@@ -215,24 +181,26 @@ func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding 
 		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
 
-	vec := pgvector.NewVector(embedding)
-	_, err := s.db.ExecContext(ctx, "UPDATE facts SET embedding = $1 WHERE id = $2", vec, id)
-	return err
-}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
 
-func UpdateFactEmbedding(database DBTX, id int64, embedding []float32) error {
-	return (&SQLStore{db: database}).UpdateFactEmbedding(context.Background(), id, embedding)
+	vec := pgvector.NewVector(embedding)
+	_, err := s.db.ExecContext(queryCtx, "UPDATE facts SET embedding = $1 WHERE id = $2", vec, id)
+	return err
 }
 
 func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	query := "SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts WHERE embedding IS NULL ORDER BY id ASC"
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(queryCtx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -249,15 +217,15 @@ func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]
 	return results, rows.Err()
 }
 
-func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithEmbedding, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	query := `SELECT id, category, fact_text, importance, embedding, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts ORDER BY created_at DESC`
-	rows, err := database.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(queryCtx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -286,20 +254,9 @@ func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithE
 	return results, nil
 }
 
-const (
-	DefaultDenseWeight  = 0.70
-	DefaultSparseWeight = 0.30
-	DefaultRRFK         = 60.0
-)
-
-// SearchSimilarFacts executes a hybrid search combining dense vector embeddings with sparse full-text search using Weighted Reciprocal Rank Fusion (RRF).
-func SearchSimilarFacts(database DBTX, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
-	return SearchSimilarFactsWithContext(context.Background(), database, false, embedding, queryText, limit, minScore)
-}
-
-func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	hasEmbedding := len(embedding) == ExpectedEmbeddingDim
 	queryText = strings.TrimSpace(queryText)
@@ -320,10 +277,7 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		candidateLimit = 30
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var query string
@@ -363,7 +317,7 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		LIMIT $8;
 		`
 		vec := pgvector.NewVector(embedding)
-		rows, err = database.QueryContext(ctx, query, vec, candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, vec, candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore, limit)
 	} else if hasEmbedding {
 		// Dense vector only query
 		query = `
@@ -398,7 +352,7 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		LIMIT $4;
 		`
 		vec := pgvector.NewVector(embedding)
-		rows, err = database.QueryContext(ctx, query, vec, candidateLimit, minScore, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, vec, candidateLimit, minScore, limit)
 	} else {
 		// Sparse full-text search only query
 		query = `
@@ -423,7 +377,7 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		ORDER BY ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) DESC
 		LIMIT $6;
 		`
-		rows, err = database.QueryContext(ctx, query, queryText, candidateLimit, 1.0, DefaultRRFK, minScore, limit)
+		rows, err = s.db.QueryContext(queryCtx, query, queryText, candidateLimit, 1.0, DefaultRRFK, minScore, limit)
 	}
 
 	if err != nil {
@@ -443,15 +397,15 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	return facts, nil
 }
 
-func GetActiveConversationsForExtraction(database DBTX, activeHours int) ([]string, error) {
-	if database == nil {
-		return nil, nil
+func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 	if activeHours <= 0 {
 		activeHours = 24
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(activeHours) * time.Hour)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	query := `
@@ -465,7 +419,7 @@ func GetActiveConversationsForExtraction(database DBTX, activeHours int) ([]stri
 	ORDER BY m.thread_id
 	LIMIT 20
 	`
-	rows, err := database.QueryContext(ctx, query, cutoff)
+	rows, err := s.db.QueryContext(queryCtx, query, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -484,12 +438,15 @@ func GetActiveConversationsForExtraction(database DBTX, activeHours int) ([]stri
 	return tids, nil
 }
 
-func UpdateConversationFactWatermark(database DBTX, threadID string, maxRowID int64) error {
-	if database == nil || threadID == "" {
+func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if threadID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `
@@ -504,16 +461,19 @@ func UpdateConversationFactWatermark(database DBTX, threadID string, maxRowID in
 		fact_extracted_at = EXCLUDED.fact_extracted_at,
 		updated_at = EXCLUDED.updated_at
 	`
-	_, err := database.ExecContext(ctx, query, threadID, maxRowID, now, now, now)
+	_, err := s.db.ExecContext(queryCtx, query, threadID, maxRowID, now, now, now)
 	return err
 }
 
-func UpdateConversationFactExtractedAt(database DBTX, threadID string) error {
-	maxRowID, err := GetMaxMessageRowID(database, threadID)
+func (s *SQLStore) UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	maxRowID, err := s.GetMaxMessageRowID(ctx, threadID)
 	if err != nil {
 		log.Printf("[DB] Warning getting max message row ID for thread %s: %v", threadID, err)
 	}
-	return UpdateConversationFactWatermark(database, threadID, maxRowID)
+	return s.UpdateConversationFactWatermark(ctx, threadID, maxRowID)
 }
 
 type FactsFilter struct {
@@ -537,14 +497,9 @@ func EscapeSQLLike(s string) string {
 	return s
 }
 
-// GetFactsPaginated retrieves facts based on the provided filter.
-func GetFactsPaginated(database DBTX, filter FactsFilter) (*FactsResult, error) {
-	return GetFactsPaginatedWithContext(context.Background(), database, false, filter)
-}
-
-func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool, filter FactsFilter) (*FactsResult, error) {
-	if database == nil {
-		return nil, fmt.Errorf("database is nil")
+func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
 	}
 
 	if filter.Offset < 0 {
@@ -573,15 +528,12 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	countQuery := "SELECT COUNT(*) FROM facts" + whereSQL
 	var total int
-	if err := database.QueryRowContext(queryCtx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, countQuery, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("failed to count facts: %w", err)
 	}
 
@@ -591,7 +543,7 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 		paginationSQL = fmt.Sprintf("LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 		queryArgs = append(queryArgs, filter.Limit, filter.Offset)
 	} else if filter.Offset > 0 {
-		if isPg || isPostgres(database) {
+		if s.isPostgres || isPostgres(s.db) {
 			paginationSQL = fmt.Sprintf("OFFSET $%d", argIdx)
 		} else {
 			paginationSQL = fmt.Sprintf("LIMIT -1 OFFSET $%d", argIdx)
@@ -610,7 +562,7 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 		%s
 	`, whereSQL, paginationSQL)
 
-	rows, err := database.QueryContext(ctx, selectQuery, queryArgs...)
+	rows, err := s.db.QueryContext(queryCtx, selectQuery, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query facts: %w", err)
 	}
@@ -633,18 +585,18 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	}, nil
 }
 
-func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, minSim float64) (*Fact, float64, error) {
-	if database == nil || len(embedding) != ExpectedEmbeddingDim {
+func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, 0, err
+	}
+	if len(embedding) != ExpectedEmbeddingDim {
 		return nil, 0, nil
 	}
 	if minSim <= 0 {
 		minSim = 0.88
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `
@@ -660,7 +612,7 @@ func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool,
 	var f Fact
 	var sim float64
 	var createdAt, lastReinforced, lastDecayed FactTime
-	err := database.QueryRowContext(queryCtx, query, vec).Scan(
+	err := s.db.QueryRowContext(queryCtx, query, vec).Scan(
 		&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt,
 		&lastReinforced, &lastDecayed, &f.ReinforceCount, &sim,
 	)
@@ -679,17 +631,14 @@ func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool,
 	return nil, sim, nil
 }
 
-func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id int64, newText string, newEmbedding []float32, boost float64) error {
-	if database == nil {
-		return fmt.Errorf("database is nil")
+func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error {
+	if err := s.checkDB(); err != nil {
+		return err
 	}
 	if boost <= 0 {
 		boost = 0.15
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	now := time.Now().UTC()
@@ -713,7 +662,7 @@ func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id 
 			    reinforce_count = reinforce_count + 1
 			WHERE id = $5
 		`
-		res, err = database.ExecContext(queryCtx, query, boost, newText, vecVal, now, id)
+		res, err = s.db.ExecContext(queryCtx, query, boost, newText, vecVal, now, id)
 	} else {
 		query = `
 			UPDATE facts
@@ -722,7 +671,7 @@ func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id 
 			    reinforce_count = reinforce_count + 1
 			WHERE id = $3
 		`
-		res, err = database.ExecContext(queryCtx, query, boost, now, id)
+		res, err = s.db.ExecContext(queryCtx, query, boost, now, id)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to reinforce fact: %w", err)
@@ -737,9 +686,9 @@ func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id 
 	return nil
 }
 
-func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
-	if database == nil {
-		return 0, 0, fmt.Errorf("database is nil")
+func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, 0, err
 	}
 	if decayStep <= 0 {
 		decayStep = 0.02
@@ -751,10 +700,7 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		pruneAgeDays = 30
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	now := time.Now().UTC()
@@ -771,7 +717,7 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		  AND (last_reinforced_at IS NULL OR last_reinforced_at < $3)
 		  AND importance > 0.0
 	`
-	resDecay, err := database.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff)
+	resDecay, err := s.db.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
 	}
@@ -786,7 +732,7 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		WHERE importance <= $1
 		  AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)
 	`
-	resPrune, err := database.ExecContext(queryCtx, pruneQuery, pruneFloor, cutoffDate)
+	resPrune, err := s.db.ExecContext(queryCtx, pruneQuery, pruneFloor, cutoffDate)
 	if err != nil {
 		return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
 	}
