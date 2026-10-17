@@ -204,296 +204,402 @@ func TestThrowawayTurnSink(t *testing.T) {
 func TestDiscordTurnSink_AllMethods(t *testing.T) {
 	t.Parallel()
 
-	t.Run("LifecycleAndDeltas", func(t *testing.T) {
-		t.Parallel()
-		mockEditor := &mockDiscordMessageEditor{}
-		var completedRes *runner.TurnResult
-		var completedErr error
-		stoppedTyping := false
+	tests := []struct {
+		name          string
+		callTool      bool
+		nilEditor     bool
+		emptyBadge    bool
+		withEditErr   bool
+		withDeleteErr bool
+		triggerError  bool
+		streamDeltas  bool
+		wantEdits     int
+		wantDeletes   int
+		wantText      string
+	}{
+		{
+			name:         "LifecycleAndDeltas",
+			callTool:     true,
+			streamDeltas: true,
+			wantEdits:    1,
+			wantDeletes:  1,
+			wantText:     "Hello world!",
+		},
+		{
+			name:         "ErrorLifecycle",
+			triggerError: true,
+			wantDeletes:  1,
+		},
+		{
+			name:          "EditorErrorsLoggedWithoutPanic",
+			callTool:      true,
+			withEditErr:   true,
+			withDeleteErr: true,
+			triggerError:  true,
+			wantEdits:     1,
+			wantDeletes:   2,
+		},
+		{
+			name:        "NilEditor",
+			callTool:    true,
+			nilEditor:   true,
+			wantEdits:   0,
+			wantDeletes: 0,
+		},
+		{
+			name:        "EmptyBadge",
+			callTool:    true,
+			emptyBadge:  true,
+			wantEdits:   0,
+			wantDeletes: 0,
+		},
+	}
 
-		sink := NewDiscordTurnSink(
-			mockEditor,
-			"chan-123",
-			"msg-456",
-			func(res *runner.TurnResult) { completedRes = res },
-			func(err error) { completedErr = err },
-		)
-		sink.SetStopTyping(func() { stoppedTyping = true })
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		sink.OnTurnStarted()
-		sink.OnThinking()
-		sink.OnToolCall("web_search", "search aerial")
+			var editor DiscordMessageEditor
+			var mockEditor *mockDiscordMessageEditor
+			if !tc.nilEditor {
+				mockEditor = &mockDiscordMessageEditor{}
+				if tc.withEditErr {
+					mockEditor.editErr = errors.New("edit network failure")
+				}
+				if tc.withDeleteErr {
+					mockEditor.deleteErr = errors.New("delete 404 not found")
+				}
+				editor = mockEditor
+			}
 
-		mockEditor.mu.Lock()
-		if len(mockEditor.editCalls) != 1 || mockEditor.editCalls[0].content != "⚙️ Executing web_search..." {
-			t.Fatalf("unexpected edit calls: %+v", mockEditor.editCalls)
-		}
-		mockEditor.mu.Unlock()
+			badge := "msg-456"
+			if tc.emptyBadge {
+				badge = ""
+			}
 
-		sink.OnTextDelta("Hello ")
-		sink.OnTextDelta("world!")
-		if sink.ResponseText() != "Hello world!" {
-			t.Fatalf("expected 'Hello world!', got %q", sink.ResponseText())
-		}
+			var completedRes *runner.TurnResult
+			var completedErr error
+			stoppedTyping := false
 
-		turnRes := &runner.TurnResult{Response: "Hello world!"}
-		sink.OnResult(turnRes)
+			sink := NewDiscordTurnSink(
+				editor,
+				"chan-123",
+				badge,
+				func(res *runner.TurnResult) { completedRes = res },
+				func(err error) { completedErr = err },
+			)
+			sink.SetStopTyping(func() { stoppedTyping = true })
 
-		if !stoppedTyping {
-			t.Fatal("expected stopTyping to have been called")
-		}
+			sink.OnTurnStarted()
+			sink.OnThinking()
+			if tc.callTool {
+				sink.OnToolCall("web_search", "search aerial")
+			}
 
-		mockEditor.mu.Lock()
-		if len(mockEditor.deleteCalls) != 1 || mockEditor.deleteCalls[0].channelID != "chan-123" || mockEditor.deleteCalls[0].messageID != "msg-456" {
-			t.Fatalf("unexpected delete target: %+v", mockEditor.deleteCalls)
-		}
-		mockEditor.mu.Unlock()
+			if tc.streamDeltas {
+				sink.OnTextDelta("Hello ")
+				sink.OnTextDelta("world!")
+				if sink.ResponseText() != tc.wantText {
+					t.Fatalf("expected %q, got %q", tc.wantText, sink.ResponseText())
+				}
+			}
 
-		if completedRes != turnRes || completedErr != nil {
-			t.Fatalf("unexpected completion: res=%+v err=%v", completedRes, completedErr)
-		}
-	})
+			expectedErr := errors.New("turn timeout")
+			if tc.triggerError {
+				sink.OnError(expectedErr)
+				if !stoppedTyping {
+					t.Fatal("expected stopTyping called on error")
+				}
+				if !errors.Is(completedErr, expectedErr) {
+					t.Fatalf("expected completedErr=%v, got %v", expectedErr, completedErr)
+				}
+			}
 
-	t.Run("ErrorLifecycle", func(t *testing.T) {
-		t.Parallel()
-		mockEditor := &mockDiscordMessageEditor{}
-		var completedErr error
-		stoppedTyping := false
+			if !tc.triggerError || tc.name == "EditorErrorsLoggedWithoutPanic" || tc.nilEditor || tc.emptyBadge {
+				turnRes := &runner.TurnResult{Response: "ok"}
+				if tc.streamDeltas {
+					turnRes.Response = "Hello world!"
+				}
+				sink.OnResult(turnRes)
+				if !stoppedTyping {
+					t.Fatal("expected stopTyping called on result")
+				}
+				if !tc.triggerError && completedRes != turnRes {
+					t.Fatalf("expected completedRes=%+v, got %+v", turnRes, completedRes)
+				}
+			}
 
-		sink := NewDiscordTurnSink(
-			mockEditor,
-			"chan-err",
-			"badge-err",
-			func(res *runner.TurnResult) { t.Fatal("onComplete should not be called on error") },
-			func(err error) { completedErr = err },
-		)
-		sink.SetStopTyping(func() { stoppedTyping = true })
+			if mockEditor != nil {
+				mockEditor.mu.Lock()
+				if len(mockEditor.editCalls) != tc.wantEdits || len(mockEditor.deleteCalls) != tc.wantDeletes {
+					t.Fatalf("edits=%d (want %d), deletes=%d (want %d)",
+						len(mockEditor.editCalls), tc.wantEdits, len(mockEditor.deleteCalls), tc.wantDeletes)
+				}
+				if tc.wantDeletes > 0 && badge != "" {
+					if mockEditor.deleteCalls[0].channelID != "chan-123" || mockEditor.deleteCalls[0].messageID != badge {
+						t.Fatalf("unexpected delete target: %+v", mockEditor.deleteCalls)
+					}
+				}
+				if tc.wantEdits > 0 {
+					if mockEditor.editCalls[0].content != "⚙️ Executing web_search..." {
+						t.Fatalf("unexpected edit call content: %s", mockEditor.editCalls[0].content)
+					}
+				}
+				mockEditor.mu.Unlock()
+			}
+		})
+	}
+}
 
-		expectedErr := errors.New("turn timeout")
-		sink.OnError(expectedErr)
+func TestDiscordTurnSink_ConcurrentDeltas(t *testing.T) {
+	t.Parallel()
+	sink := NewDiscordTurnSink(nil, "c", "b", nil, nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sink.OnTextDelta("chunk ")
+			_ = sink.ResponseText()
+		}()
+	}
+	wg.Wait()
 
-		if !stoppedTyping {
-			t.Fatal("expected stopTyping called on error")
-		}
-		if !errors.Is(completedErr, expectedErr) {
-			t.Fatalf("expected completedErr=%v, got %v", expectedErr, completedErr)
-		}
-
-		mockEditor.mu.Lock()
-		if len(mockEditor.deleteCalls) != 1 || mockEditor.deleteCalls[0].channelID != "chan-err" || mockEditor.deleteCalls[0].messageID != "badge-err" {
-			t.Fatalf("unexpected delete target: %+v", mockEditor.deleteCalls)
-		}
-		mockEditor.mu.Unlock()
-	})
-
-	t.Run("EditorErrorsLoggedWithoutPanic", func(t *testing.T) {
-		t.Parallel()
-		mockEditor := &mockDiscordMessageEditor{
-			editErr:   errors.New("edit network failure"),
-			deleteErr: errors.New("delete 404 not found"),
-		}
-		sink := NewDiscordTurnSink(mockEditor, "chan-fail", "badge-fail", nil, nil)
-		sink.OnToolCall("run_command", "git status")
-		sink.OnResult(&runner.TurnResult{Response: "ok"})
-		sink.OnError(errors.New("subsequent error"))
-
-		mockEditor.mu.Lock()
-		if len(mockEditor.editCalls) != 1 || len(mockEditor.deleteCalls) != 2 {
-			t.Fatalf("expected 1 edit and 2 deletes, got edits=%d deletes=%d", len(mockEditor.editCalls), len(mockEditor.deleteCalls))
-		}
-		mockEditor.mu.Unlock()
-	})
-
-	t.Run("NilEditorAndEmptyBadge", func(t *testing.T) {
-		t.Parallel()
-		sinkNilEditor := NewDiscordTurnSink(nil, "chan-nil", "badge-nil", nil, nil)
-		sinkNilEditor.OnToolCall("tool", "cmd")
-		sinkNilEditor.OnResult(&runner.TurnResult{Response: "done"})
-		sinkNilEditor.OnError(errors.New("err"))
-
-		mockEditor := &mockDiscordMessageEditor{}
-		sinkEmptyBadge := NewDiscordTurnSink(mockEditor, "chan-empty", "", nil, nil)
-		sinkEmptyBadge.OnToolCall("tool", "cmd")
-		sinkEmptyBadge.OnResult(&runner.TurnResult{Response: "done"})
-		sinkEmptyBadge.OnError(errors.New("err"))
-
-		mockEditor.mu.Lock()
-		if len(mockEditor.editCalls) != 0 || len(mockEditor.deleteCalls) != 0 {
-			t.Fatalf("expected 0 calls when badge empty, got edits=%d deletes=%d", len(mockEditor.editCalls), len(mockEditor.deleteCalls))
-		}
-		mockEditor.mu.Unlock()
-	})
-
-	t.Run("ConcurrentDeltas", func(t *testing.T) {
-		t.Parallel()
-		sink := NewDiscordTurnSink(nil, "c", "b", nil, nil)
-		var wg sync.WaitGroup
-		for i := 0; i < 20; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				sink.OnTextDelta("chunk ")
-				_ = sink.ResponseText()
-			}()
-		}
-		wg.Wait()
-
-		txt := sink.ResponseText()
-		if len(txt) != 20*len("chunk ") {
-			t.Fatalf("expected %d bytes, got %d", 20*len("chunk "), len(txt))
-		}
-	})
+	txt := sink.ResponseText()
+	if len(txt) != 20*len("chunk ") {
+		t.Fatalf("expected %d bytes, got %d", 20*len("chunk "), len(txt))
+	}
 }
 
 func TestVoiceTurnSink_LifecycleAndRebind(t *testing.T) {
 	t.Parallel()
 
-	t.Run("RebindAndReplay", func(t *testing.T) {
-		t.Parallel()
-		conn1 := &mockWebSocketWriter{}
-		sink := NewVoiceTurnSink(conn1, "device-test-1")
+	tests := []struct {
+		name                 string
+		deviceID             string
+		initialConn          bool
+		failWrite            bool
+		zeroCapStruct        bool
+		chunksToSend         []string
+		wantInitialMsgs      int
+		rebindAckSeq         uint64
+		rebindNil            bool
+		wantReplayedMsgs     int
+		wantFirstSeq         uint64
+		appendAfterRebind    string
+		wantTotalAfterRebind int
+		wantRebindErrSub     string
+		terminalAction       string // "result", "error"
+		checkEmptyAfter      bool
+		callResultAndError   bool
+	}{
+		{
+			name:                 "RebindAndReplay",
+			deviceID:             "device-test-1",
+			initialConn:          true,
+			chunksToSend:         []string{"Hello ", "world", "!"},
+			wantInitialMsgs:      3,
+			rebindAckSeq:         1,
+			wantReplayedMsgs:     2,
+			appendAfterRebind:    " Welcome!",
+			wantTotalAfterRebind: 3,
+		},
+		{
+			name:             "AckAll",
+			deviceID:         "device-ack",
+			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
+			rebindAckSeq:     5,
+			wantReplayedMsgs: 0,
+		},
+		{
+			name:             "AckNone",
+			deviceID:         "device-ack",
+			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
+			rebindAckSeq:     0,
+			wantReplayedMsgs: 5,
+			wantFirstSeq:     1,
+		},
+		{
+			name:             "AckPartial",
+			deviceID:         "device-ack",
+			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
+			rebindAckSeq:     3,
+			wantReplayedMsgs: 2,
+			wantFirstSeq:     4,
+		},
+		{
+			name:             "AckBeyondBuffer",
+			deviceID:         "device-ack",
+			chunksToSend:     []string{"c1", "c2", "c3", "c4", "c5"},
+			rebindAckSeq:     10,
+			wantReplayedMsgs: 0,
+		},
+		{
+			name:              "RebindNilAndResume",
+			deviceID:          "device-ack",
+			chunksToSend:      []string{"c1", "c2", "c3", "c4", "c5"},
+			rebindNil:         true,
+			appendAfterRebind: "c6",
+			rebindAckSeq:      5,
+			wantReplayedMsgs:  1,
+		},
+		{
+			name:               "ErrorPropagationAndWriteErrors",
+			deviceID:           "device-fail",
+			initialConn:        true,
+			failWrite:          true,
+			chunksToSend:       []string{"chunk1"},
+			rebindAckSeq:       0,
+			wantRebindErrSub:   "failed to replay chunk seq=1",
+			callResultAndError: true,
+		},
+		{
+			name:            "OnResultClearsBuffer",
+			deviceID:        "device-result",
+			initialConn:     true,
+			chunksToSend:    []string{"c1"},
+			terminalAction:  "result",
+			checkEmptyAfter: true,
+		},
+		{
+			name:            "OnErrorClearsBuffer",
+			deviceID:        "device-error",
+			initialConn:     true,
+			chunksToSend:    []string{"c1"},
+			terminalAction:  "error",
+			checkEmptyAfter: true,
+		},
+		{
+			name:           "NilConnection",
+			deviceID:       "device-nil",
+			chunksToSend:   []string{"delta 1"},
+			terminalAction: "result",
+		},
+		{
+			name:          "ZeroCapStruct",
+			deviceID:      "device-zero",
+			zeroCapStruct: true,
+			chunksToSend:  []string{"test"},
+		},
+	}
 
-		if sink.DeviceID() != "device-test-1" {
-			t.Fatalf("expected device-test-1, got %s", sink.DeviceID())
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		sink.OnTurnStarted()
-		sink.OnThinking()
-		sink.OnToolCall("voice_search", "weather")
-		sink.OnTextDelta("Hello ")
-		sink.OnTextDelta("world")
-		sink.OnTextDelta("!")
-
-		msgs1 := conn1.getMessages()
-		if len(msgs1) != 3 {
-			t.Fatalf("expected 3 messages on conn1, got %d", len(msgs1))
-		}
-
-		conn2 := &mockWebSocketWriter{}
-		if err := sink.Rebind(conn2, 1); err != nil {
-			t.Fatalf("unexpected rebind error: %v", err)
-		}
-
-		msgs2 := conn2.getMessages()
-		if len(msgs2) != 2 {
-			t.Fatalf("expected 2 replayed messages on conn2, got %d", len(msgs2))
-		}
-
-		sink.OnTextDelta(" Welcome!")
-		msgs2After := conn2.getMessages()
-		if len(msgs2After) != 3 {
-			t.Fatalf("expected 3 total messages on conn2, got %d", len(msgs2After))
-		}
-	})
-
-	t.Run("RebindAckScenarios", func(t *testing.T) {
-		t.Parallel()
-		sink := NewVoiceTurnSink(nil, "device-ack")
-		for i := 1; i <= 5; i++ {
-			sink.OnTextDelta(fmt.Sprintf("c%d", i))
-		}
-
-		ackTests := []struct {
-			name         string
-			lastAckSeq   uint64
-			wantCount    int
-			wantFirstSeq uint64
-		}{
-			{"AllAcked", 5, 0, 0},
-			{"NoneAcked", 0, 5, 1},
-			{"PartialAcked", 3, 2, 4},
-			{"BeyondBuffer", 10, 0, 0},
-		}
-
-		for _, at := range ackTests {
-			conn := &mockWebSocketWriter{}
-			if err := sink.Rebind(conn, at.lastAckSeq); err != nil {
-				t.Fatalf("%s: unexpected error: %v", at.name, err)
+			var sink *VoiceTurnSink
+			var conn1 *mockWebSocketWriter
+			if tc.initialConn {
+				conn1 = &mockWebSocketWriter{}
+				if tc.failWrite {
+					conn1.writeErr = errors.New("socket broken pipe")
+				}
+				sink = NewVoiceTurnSink(conn1, tc.deviceID)
+			} else if tc.zeroCapStruct {
+				sink = &VoiceTurnSink{deviceID: tc.deviceID}
+			} else {
+				sink = NewVoiceTurnSink(nil, tc.deviceID)
 			}
-			msgs := conn.getMessages()
-			if len(msgs) != at.wantCount {
-				t.Fatalf("%s: expected %d replayed, got %d", at.name, at.wantCount, len(msgs))
+
+			if tc.deviceID != "" && sink.DeviceID() != tc.deviceID {
+				t.Fatalf("expected %s, got %s", tc.deviceID, sink.DeviceID())
 			}
-			if at.wantCount > 0 {
-				chunk, ok := msgs[0].(TokenChunk)
-				if !ok || chunk.Seq != at.wantFirstSeq {
-					t.Fatalf("%s: expected first seq %d, got %+v", at.name, at.wantFirstSeq, msgs[0])
+
+			sink.OnTurnStarted()
+			sink.OnThinking()
+			sink.OnToolCall("tool", "cmd")
+
+			for _, chunk := range tc.chunksToSend {
+				sink.OnTextDelta(chunk)
+			}
+
+			if conn1 != nil && tc.wantInitialMsgs > 0 {
+				msgs1 := conn1.getMessages()
+				if len(msgs1) != tc.wantInitialMsgs {
+					t.Fatalf("expected %d initial messages, got %d", tc.wantInitialMsgs, len(msgs1))
 				}
 			}
-		}
 
-		if err := sink.Rebind(nil, 0); err != nil {
-			t.Fatalf("expected nil error on rebind nil, got %v", err)
-		}
-		sink.OnTextDelta("c6")
-		connE := &mockWebSocketWriter{}
-		if err := sink.Rebind(connE, 5); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(connE.getMessages()) != 1 {
-			t.Fatalf("expected 1 replayed message, got %d", len(connE.getMessages()))
-		}
-	})
+			if tc.rebindNil {
+				if err := sink.Rebind(nil, 0); err != nil {
+					t.Fatalf("expected nil error on rebind nil, got %v", err)
+				}
+				if tc.appendAfterRebind != "" {
+					sink.OnTextDelta(tc.appendAfterRebind)
+				}
+				connResume := &mockWebSocketWriter{}
+				if err := sink.Rebind(connResume, tc.rebindAckSeq); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(connResume.getMessages()) != tc.wantReplayedMsgs {
+					t.Fatalf("expected %d replayed message, got %d", tc.wantReplayedMsgs, len(connResume.getMessages()))
+				}
+				return
+			}
 
-	t.Run("ErrorPropagationAndWriteErrors", func(t *testing.T) {
-		t.Parallel()
-		connFail := &mockWebSocketWriter{writeErr: errors.New("socket broken pipe")}
-		sink := NewVoiceTurnSink(connFail, "device-fail")
-		sink.OnTextDelta("chunk1")
+			if tc.wantRebindErrSub != "" || tc.wantReplayedMsgs > 0 || tc.rebindAckSeq > 0 || (tc.initialConn && tc.wantInitialMsgs > 0) {
+				conn2 := &mockWebSocketWriter{}
+				if tc.failWrite {
+					conn2.writeErr = errors.New("socket broken pipe")
+				}
+				err := sink.Rebind(conn2, tc.rebindAckSeq)
+				if tc.wantRebindErrSub != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantRebindErrSub) {
+						t.Fatalf("expected wrapped rebind error containing %q, got: %v", tc.wantRebindErrSub, err)
+					}
+				} else {
+					if err != nil {
+						t.Fatalf("unexpected rebind error: %v", err)
+					}
+					msgs2 := conn2.getMessages()
+					if len(msgs2) != tc.wantReplayedMsgs {
+						t.Fatalf("expected %d replayed messages, got %d", tc.wantReplayedMsgs, len(msgs2))
+					}
+					if tc.wantFirstSeq > 0 && len(msgs2) > 0 {
+						chunk, ok := msgs2[0].(TokenChunk)
+						if !ok || chunk.Seq != tc.wantFirstSeq {
+							t.Fatalf("expected first seq %d, got %+v", tc.wantFirstSeq, msgs2[0])
+						}
+					}
+					if tc.appendAfterRebind != "" {
+						sink.OnTextDelta(tc.appendAfterRebind)
+						msgs2After := conn2.getMessages()
+						if len(msgs2After) != tc.wantTotalAfterRebind {
+							t.Fatalf("expected %d total messages on conn2, got %d", tc.wantTotalAfterRebind, len(msgs2After))
+						}
+					}
+				}
+			}
 
-		err := sink.Rebind(connFail, 0)
-		if err == nil || !strings.Contains(err.Error(), "failed to replay chunk seq=1") {
-			t.Fatalf("expected wrapped rebind error, got: %v", err)
-		}
+			if tc.callResultAndError {
+				sink.OnResult(&runner.TurnResult{Response: "done"})
+				sink.OnError(errors.New("subsequent error"))
+			}
 
-		sink.OnResult(&runner.TurnResult{Response: "done"})
-		sink.OnError(errors.New("subsequent error"))
-	})
+			switch tc.terminalAction {
+			case "result":
+				sink.OnResult(&runner.TurnResult{Response: "test complete"})
+				sink.OnResult(nil)
+			case "error":
+				sink.OnError(errors.New("timeout reached"))
+				sink.OnError(nil)
+			}
 
-	t.Run("OnResultAndOnError_MessageAndClear", func(t *testing.T) {
-		t.Parallel()
-		connR := &mockWebSocketWriter{}
-		sinkR := NewVoiceTurnSink(connR, "device-result")
-		sinkR.OnTextDelta("c1")
-		sinkR.OnResult(&runner.TurnResult{Response: "test complete"})
-		reconnR := &mockWebSocketWriter{}
-		_ = sinkR.Rebind(reconnR, 0)
-		if len(reconnR.getMessages()) != 0 {
-			t.Fatalf("expected empty buffer after OnResult, got %d", len(reconnR.getMessages()))
-		}
-		sinkR.OnResult(nil)
+			if tc.checkEmptyAfter {
+				reconn := &mockWebSocketWriter{}
+				_ = sink.Rebind(reconn, 0)
+				if len(reconn.getMessages()) != 0 {
+					t.Fatalf("expected empty buffer after terminal action, got %d", len(reconn.getMessages()))
+				}
+			}
 
-		connE := &mockWebSocketWriter{}
-		sinkE := NewVoiceTurnSink(connE, "device-error")
-		sinkE.OnTextDelta("c1")
-		sinkE.OnError(errors.New("timeout reached"))
-		reconnE := &mockWebSocketWriter{}
-		_ = sinkE.Rebind(reconnE, 0)
-		if len(reconnE.getMessages()) != 0 {
-			t.Fatalf("expected empty buffer after OnError, got %d", len(reconnE.getMessages()))
-		}
-		sinkE.OnError(nil)
-	})
-
-	t.Run("NilConnectionAndZeroCap", func(t *testing.T) {
-		t.Parallel()
-		sink := NewVoiceTurnSink(nil, "device-nil")
-		sink.OnTurnStarted()
-		sink.OnThinking()
-		sink.OnToolCall("tool", "cmd")
-		sink.OnTextDelta("delta 1")
-		sink.OnResult(&runner.TurnResult{})
-		sink.OnError(errors.New("error"))
-		if sink.DeviceID() != "device-nil" {
-			t.Fatalf("expected device-nil, got %s", sink.DeviceID())
-		}
-
-		sinkZero := &VoiceTurnSink{deviceID: "device-zero"}
-		sinkZero.OnTextDelta("test")
-		if len(sinkZero.ringBuf) != 1 {
-			t.Fatalf("expected 1 item, got %d", len(sinkZero.ringBuf))
-		}
-	})
+			if tc.zeroCapStruct {
+				if len(sink.ringBuf) != 1 {
+					t.Fatalf("expected 1 item, got %d", len(sink.ringBuf))
+				}
+			}
+		})
+	}
 }
 
 func TestVoiceTurnSink_RingBufferCapacityTrimming(t *testing.T) {
@@ -602,83 +708,137 @@ func TestTurnSinks_NoopMethods(t *testing.T) {
 func TestNewVoiceTurnSink(t *testing.T) {
 	t.Parallel()
 
-	t.Run("SentenceStreamingAndResultFallback", func(t *testing.T) {
-		t.Parallel()
-		var sentences []string
-		sink := newVoiceTurnSink(context.Background(), nil, func(s string) {
-			sentences = append(sentences, s)
-		}, NewSentenceDetector())
+	tests := []struct {
+		name                      string
+		cancelledCtx              bool
+		withDetector              bool
+		deltas                    []string
+		callResult                bool
+		resultResponse            string
+		onErrorErr                error
+		wantSentencesBeforeResult []string
+		wantSentences             []string
+		wantWaitResponse          string
+		wantWaitErrSub            string
+	}{
+		{
+			name:                      "SentenceStreamingAndResultFallback",
+			withDetector:              true,
+			deltas:                    []string{"First sentence. ", "Second incomplete"},
+			callResult:                true,
+			resultResponse:            "First sentence. Second incomplete",
+			wantSentencesBeforeResult: []string{"First sentence."},
+			wantSentences:             []string{"First sentence.", "Second incomplete"},
+		},
+		{
+			name:           "ResultFallbackWithoutDeltas",
+			withDetector:   true,
+			callResult:     true,
+			resultResponse: "Hello there. General Kenobi.",
+			wantSentences:  []string{"Hello there.", "General Kenobi."},
+		},
+		{
+			name:          "CancellationGuards",
+			cancelledCtx:  true,
+			withDetector:  true,
+			deltas:        []string{"Should not be emitted because context is cancelled. "},
+			wantSentences: nil,
+		},
+		{
+			name:             "AccumulatedDeltasOnEmptyResult",
+			withDetector:     true,
+			deltas:           []string{"Hello ", "world."},
+			callResult:       true,
+			resultResponse:   "",
+			wantWaitResponse: "Hello world.",
+		},
+		{
+			name:             "SubstantiveDeltasRecoveredOnError",
+			withDetector:     true,
+			deltas:           []string{"The quick brown fox jumps over the lazy dog."},
+			onErrorErr:       errors.New("API error (attempt 2): RESOURCE_EXHAUSTED (code 429)"),
+			wantWaitResponse: "The quick brown fox jumps over the lazy dog.",
+		},
+		{
+			name:           "EmptyDeltasOnErrorForwardsErrCh",
+			onErrorErr:     errors.New("hard failure without deltas"),
+			wantWaitErrSub: "hard failure without deltas",
+		},
+	}
 
-		sink.OnTurnStarted()
-		sink.OnThinking()
-		sink.OnTextDelta("First sentence. ")
-		sink.OnTextDelta("Second incomplete")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		if len(sentences) != 1 || sentences[0] != "First sentence." {
-			t.Fatalf("expected 1 sentence, got: %v", sentences)
-		}
+			ctx := context.Background()
+			if tc.cancelledCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
 
-		sink.OnResult(&runner.TurnResult{Response: "First sentence. Second incomplete"})
-		if len(sentences) != 2 || sentences[1] != "Second incomplete" {
-			t.Fatalf("expected 2 sentences after flush on result, got: %v", sentences)
-		}
+			var sentences []string
+			var detector *SentenceDetector
+			var onSentence func(string)
+			if tc.withDetector {
+				detector = NewSentenceDetector()
+				onSentence = func(s string) {
+					sentences = append(sentences, s)
+				}
+			}
 
-		var fallbackSentences []string
-		fallbackSink := newVoiceTurnSink(context.Background(), nil, func(s string) {
-			fallbackSentences = append(fallbackSentences, s)
-		}, NewSentenceDetector())
-		fallbackSink.OnResult(&runner.TurnResult{Response: "Hello there. General Kenobi."})
-		if len(fallbackSentences) != 2 || fallbackSentences[0] != "Hello there." || fallbackSentences[1] != "General Kenobi." {
-			t.Fatalf("unexpected fallback sentences: %v", fallbackSentences)
-		}
-	})
+			sink := newVoiceTurnSink(ctx, nil, onSentence, detector)
+			sink.OnTurnStarted()
+			sink.OnThinking()
 
-	t.Run("CancellationGuards", func(t *testing.T) {
-		t.Parallel()
-		var sentences []string
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		cancellingSink := newVoiceTurnSink(ctx, nil, func(s string) {
-			sentences = append(sentences, s)
-		}, NewSentenceDetector())
-		cancellingSink.OnTextDelta("Should not be emitted because context is cancelled. ")
-		if len(sentences) != 0 {
-			t.Fatalf("expected no sentences on cancelled context, got %d", len(sentences))
-		}
-	})
+			for _, d := range tc.deltas {
+				sink.OnTextDelta(d)
+			}
 
-	t.Run("DeltaAccumulationAndErrorRecovery", func(t *testing.T) {
-		t.Parallel()
+			if len(tc.wantSentencesBeforeResult) > 0 {
+				if len(sentences) != len(tc.wantSentencesBeforeResult) || sentences[0] != tc.wantSentencesBeforeResult[0] {
+					t.Fatalf("expected %v before result, got %v", tc.wantSentencesBeforeResult, sentences)
+				}
+			}
 
-		// Case 1: Streamed deltas with empty terminal response falls back to accumulated text
-		sink1 := newVoiceTurnSink(context.Background(), nil, nil, NewSentenceDetector())
-		sink1.OnTextDelta("Hello ")
-		sink1.OnTextDelta("world.")
-		sink1.OnResult(&runner.TurnResult{Response: ""})
+			if tc.callResult {
+				sink.OnResult(&runner.TurnResult{Response: tc.resultResponse})
+			}
 
-		res1, err1 := sink1.Wait(context.Background())
-		if err1 != nil || res1.Response != "Hello world." {
-			t.Fatalf("expected accumulated 'Hello world.', got res=%+v err=%v", res1, err1)
-		}
+			if tc.onErrorErr != nil {
+				sink.OnError(tc.onErrorErr)
+			}
 
-		// Case 2: Streamed deltas followed by OnError recovers substantive deltas on resCh
-		sink2 := newVoiceTurnSink(context.Background(), nil, nil, NewSentenceDetector())
-		sink2.OnTextDelta("The quick brown fox jumps over the lazy dog.")
-		sink2.OnError(errors.New("API error (attempt 2): RESOURCE_EXHAUSTED (code 429)"))
+			if tc.wantSentences != nil {
+				if len(sentences) != len(tc.wantSentences) {
+					t.Fatalf("expected %d sentences, got %d (%v)", len(tc.wantSentences), len(sentences), sentences)
+				}
+				for i, want := range tc.wantSentences {
+					if sentences[i] != want {
+						t.Errorf("sentence[%d] = %q, want %q", i, sentences[i], want)
+					}
+				}
+			} else if tc.cancelledCtx {
+				if len(sentences) != 0 {
+					t.Fatalf("expected no sentences on cancelled context, got %d", len(sentences))
+				}
+			}
 
-		res2, err2 := sink2.Wait(context.Background())
-		if err2 != nil || res2.Response != "The quick brown fox jumps over the lazy dog." {
-			t.Fatalf("expected recovered substantive deltas, got res=%+v err=%v", res2, err2)
-		}
-
-		// Case 3: Empty deltas with OnError forwards to errCh
-		sink3 := newVoiceTurnSink(context.Background(), nil, nil, nil)
-		expectedErr := errors.New("hard failure without deltas")
-		sink3.OnError(expectedErr)
-
-		res3, err3 := sink3.Wait(context.Background())
-		if res3 != nil || !errors.Is(err3, expectedErr) {
-			t.Fatalf("expected error on errCh, got res=%+v err=%v", res3, err3)
-		}
-	})
+			if tc.wantWaitResponse != "" || tc.wantWaitErrSub != "" {
+				res, err := sink.Wait(context.Background())
+				if tc.wantWaitErrSub != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantWaitErrSub) {
+						t.Fatalf("expected wait error containing %q, got: %v", tc.wantWaitErrSub, err)
+					}
+				} else {
+					if err != nil {
+						t.Fatalf("unexpected wait error: %v", err)
+					}
+					if res == nil || res.Response != tc.wantWaitResponse {
+						t.Fatalf("expected response %q, got %+v", tc.wantWaitResponse, res)
+					}
+				}
+			}
+		})
+	}
 }
