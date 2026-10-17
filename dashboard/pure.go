@@ -146,6 +146,85 @@ func BuildScheduleRunsUpstreamURL(brainBaseURL string, inQuery url.Values) (targ
 	return target.String(), limit, offset, nil
 }
 
+// BuildVanadisBuildsUpstreamURL validates the base URL and constructs the upstream /builds URL
+// with clamped limit (1..100, default 50), and optional status and queue_state query parameters.
+func BuildVanadisBuildsUpstreamURL(vanadisBaseURL string, inQuery url.Values) (targetURL string, limit int, err error) {
+	cleanBase := strings.TrimRight(strings.TrimSpace(vanadisBaseURL), "/")
+	if cleanBase == "" || strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
+		return "", 0, fmt.Errorf("invalid upstream URL configuration: %q", vanadisBaseURL)
+	}
+
+	target, err := url.Parse(cleanBase + "/builds")
+	if err != nil {
+		return "", 0, err
+	}
+
+	outQuery := target.Query()
+	limit = 50
+
+	if inQuery != nil {
+		if lStr := strings.TrimSpace(inQuery.Get("limit")); lStr != "" {
+			if n, err := strconv.Atoi(lStr); err == nil {
+				if n < 1 {
+					limit = 1
+				} else if n > 100 {
+					limit = 100
+				} else {
+					limit = n
+				}
+			}
+		}
+
+		if status := strings.TrimSpace(inQuery.Get("status")); status != "" {
+			outQuery.Set("status", status)
+		}
+		if queueState := strings.TrimSpace(inQuery.Get("queue_state")); queueState != "" {
+			outQuery.Set("queue_state", queueState)
+		}
+	}
+
+	outQuery.Set("limit", strconv.Itoa(limit))
+	target.RawQuery = outQuery.Encode()
+
+	return target.String(), limit, nil
+}
+
+// BuildVanadisBuildDetailUpstreamURL validates the base URL, extracts and validates the build ID
+// from requestPath, and constructs the upstream /builds/<id> URL.
+func BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL string, requestPath string) (targetURL string, buildID string, err error) {
+	cleanBase := strings.TrimRight(strings.TrimSpace(vanadisBaseURL), "/")
+	if cleanBase == "" || strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
+		return "", "", fmt.Errorf("invalid upstream URL configuration: %q", vanadisBaseURL)
+	}
+
+	var rawID string
+	if strings.HasPrefix(requestPath, "/dashboard/api/builds/") {
+		rawID = strings.TrimPrefix(requestPath, "/dashboard/api/builds/")
+	} else if strings.HasPrefix(requestPath, "/api/builds/") {
+		rawID = strings.TrimPrefix(requestPath, "/api/builds/")
+	} else {
+		return "", "", fmt.Errorf("invalid request path %q: missing expected prefix", requestPath)
+	}
+
+	buildID = strings.TrimSpace(rawID)
+	if buildID == "" {
+		return "", "", fmt.Errorf("missing or empty build ID")
+	}
+	if strings.Contains(buildID, "/") || strings.Contains(buildID, "..") {
+		return "", "", fmt.Errorf("invalid build ID %q: path traversal not allowed", buildID)
+	}
+	if strings.ContainsAny(buildID, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
+		return "", "", fmt.Errorf("invalid build ID %q: control characters not allowed", buildID)
+	}
+
+	target, err := url.Parse(cleanBase + "/builds/" + url.PathEscape(buildID))
+	if err != nil {
+		return "", "", err
+	}
+
+	return target.String(), buildID, nil
+}
+
 // CalculateClusterStatus computes cluster health from a slice of ServiceStatus items.
 // If any service is unhealthy, the cluster is considered degraded.
 func CalculateClusterStatus(services []ServiceStatus) string {

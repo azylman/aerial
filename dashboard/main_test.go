@@ -866,6 +866,336 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 	}
 }
 
+func TestVanadisBuildsHandlers(t *testing.T) {
+	mockVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/builds" && r.Method == http.MethodGet:
+			q := r.URL.Query()
+			if q.Get("status") == "error500" {
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				return
+			}
+			if q.Get("status") == "badjson" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{not valid json`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(BuildsAPIResponse{
+				Status:         "ok",
+				Total:          1,
+				RunningCount:   1,
+				QueuedCount:    0,
+				CompletedCount: 0,
+				Builds: []VanadisBuildDTO{
+					{
+						ID:         "build-101",
+						Repo:       "azylman/aerial",
+						Tier:       2,
+						Title:      "Vanadis Feature",
+						Status:     "running",
+						QueueState: "running",
+					},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/builds/"):
+			buildID := strings.TrimPrefix(r.URL.Path, "/builds/")
+			switch buildID {
+			case "build-101":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"build": VanadisBuildDTO{
+						ID:     "build-101",
+						Repo:   "azylman/aerial",
+						Title:  "Vanadis Feature",
+						Status: "running",
+					},
+					"chunks": []VanadisChunkDTO{
+						{
+							ID:         "chunk-1",
+							BuildID:    "build-101",
+							ChunkIndex: 1,
+							Title:      "Chunk 1",
+							Status:     "completed",
+						},
+					},
+					"entry": VanadisBuildDTO{
+						ID:         "build-101",
+						QueueState: "running",
+					},
+				})
+			case "build-badjson":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{invalid json detail`))
+			case "build-500":
+				http.Error(w, `{"error":"internal upstream error"}`, http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "build not found"})
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockVanadis.Close()
+
+	offlineURL := "http://127.0.0.1:54321"
+
+	tests := []struct {
+		name       string
+		isDetail   bool
+		vanadisURL string
+		method     string
+		target     string
+		wantStatus int
+		check      func(t *testing.T, body io.Reader)
+	}{
+		{
+			name:       "Builds_Success_WithQuery",
+			isDetail:   false,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds?limit=25&status=running&queue_state=running",
+			wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data BuildsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Status != "ok" || data.Total != 1 || len(data.Builds) != 1 || data.Builds[0].ID != "build-101" {
+					t.Errorf("unexpected builds response: %+v", data)
+				}
+			},
+		},
+		{
+			name:       "Builds_DegradedFallback",
+			isDetail:   false,
+			vanadisURL: offlineURL,
+			method:     http.MethodGet,
+			target:     "/api/builds",
+			wantStatus: http.StatusServiceUnavailable,
+			check: func(t *testing.T, body io.Reader) {
+				var data BuildsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode degraded response: %v", err)
+				}
+				if data.Status != "degraded" || data.Error != "Vanadis service unreachable. Retrying..." || data.Builds == nil || len(data.Builds) != 0 {
+					t.Errorf("unexpected degraded builds response: %+v", data)
+				}
+			},
+		},
+		{
+			name:       "Builds_MethodNotAllowed",
+			isDetail:   false,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodPost,
+			target:     "/api/builds",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "Builds_Upstream500",
+			isDetail:   false,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds?status=error500",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "Builds_BadGateway_InvalidJSON",
+			isDetail:   false,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds?status=badjson",
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "Builds_InvalidUpstreamURL",
+			isDetail:   false,
+			vanadisURL: "http://vanadis:\x7f8080",
+			method:     http.MethodGet,
+			target:     "/api/builds",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "BuildDetail_Success_APIPrefix",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds/build-101",
+			wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data BuildDetailAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Status != "ok" || data.Build == nil || data.Build.ID != "build-101" || len(data.Chunks) != 1 || data.Chunks[0].ID != "chunk-1" || data.Entry == nil {
+					t.Errorf("unexpected build detail response: %+v", data)
+				}
+			},
+		},
+		{
+			name:       "BuildDetail_Success_DashboardPrefix",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/dashboard/api/builds/build-101",
+			wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data BuildDetailAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Status != "ok" || data.Build == nil || data.Build.ID != "build-101" {
+					t.Errorf("unexpected build detail response: %+v", data)
+				}
+			},
+		},
+		{
+			name:       "BuildDetail_NotFound_404",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds/nonexistent-build",
+			wantStatus: http.StatusNotFound,
+			check: func(t *testing.T, body io.Reader) {
+				var data BuildDetailAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Status != "error" || data.Error != "build not found" || data.Chunks == nil || len(data.Chunks) != 0 {
+					t.Errorf("unexpected 404 response: %+v", data)
+				}
+			},
+		},
+		{
+			name:       "BuildDetail_MethodNotAllowed",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodDelete,
+			target:     "/api/builds/build-101",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "BuildDetail_DegradedFallback",
+			isDetail:   true,
+			vanadisURL: offlineURL,
+			method:     http.MethodGet,
+			target:     "/api/builds/build-101",
+			wantStatus: http.StatusServiceUnavailable,
+			check: func(t *testing.T, body io.Reader) {
+				var data BuildDetailAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode degraded response: %v", err)
+				}
+				if data.Status != "degraded" || data.Error != "Vanadis service unreachable. Retrying..." || data.Chunks == nil || len(data.Chunks) != 0 {
+					t.Errorf("unexpected degraded detail response: %+v", data)
+				}
+			},
+		},
+		{
+			name:       "BuildDetail_BadGateway_InvalidJSON",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds/build-badjson",
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "BuildDetail_Upstream500",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds/build-500",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "BuildDetail_EmptyID_BadRequest",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds/",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "BuildDetail_PathTraversal_BadRequest",
+			isDetail:   true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds/../traversal",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "BuildDetail_InvalidUpstreamURL",
+			isDetail:   true,
+			vanadisURL: "http://vanadis:\x7f8080",
+			method:     http.MethodGet,
+			target:     "/api/builds/build-101",
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var h http.HandlerFunc
+			if tt.isDetail {
+				h = buildDetailHandler(tt.vanadisURL)
+			} else {
+				h = buildsHandler(tt.vanadisURL)
+			}
+			req := httptest.NewRequest(tt.method, tt.target, nil)
+			rr := httptest.NewRecorder()
+			h(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d (body: %s)", tt.wantStatus, rr.Code, rr.Body.String())
+			}
+			if tt.check != nil {
+				tt.check(t, rr.Body)
+			}
+		})
+	}
+}
+
+func TestSetupDashboardMux_VanadisWiring(t *testing.T) {
+	mockVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/builds" {
+			_ = json.NewEncoder(w).Encode(BuildsAPIResponse{Status: "ok", Builds: []VanadisBuildDTO{}})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/builds/") {
+			_ = json.NewEncoder(w).Encode(BuildDetailAPIResponse{Status: "ok", Chunks: []VanadisChunkDTO{}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockVanadis.Close()
+
+	cfg := DashboardConfig{
+		VanadisURL: mockVanadis.URL,
+	}
+	handler := SetupDashboardMux(cfg, nil)
+
+	routes := []string{
+		"/api/builds",
+		"/dashboard/api/builds",
+		"/api/builds/test-build-1",
+		"/dashboard/api/builds/test-build-2",
+	}
+
+	for _, rt := range routes {
+		t.Run(rt, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, rt, nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Errorf("expected 200 OK for route %s, got %d (body: %s)", rt, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+
 func TestEmbeddedStaticAssetsIntegrity(t *testing.T) {
 	requiredFiles := []string{
 		"static/index.html",
@@ -1505,6 +1835,7 @@ github_repos:
   - "azylman/aerial"
   - "azylman/aerial-config"
 config_path: "/custom/aerial-config/config.yaml"
+vanadis_url: "http://vanadis:8089"
 `
 	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
 		t.Fatalf("failed to write test dashboard.yaml: %v", err)
@@ -1523,11 +1854,12 @@ config_path: "/custom/aerial-config/config.yaml"
 					"GITHUB_PAT": "custom_pat", "GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
 					"HANGAR_URL": "http://hangar-custom:9090", "GITSYNC_URL": "http://gitsync-custom:9090",
 					"AERIAL_CONFIG_PATH": "/custom/config.yaml", "GIT_COMMIT": "0123456789",
+					"VANADIS_URL": "http://vanadis-custom:9090",
 				}
 				return m[k]
 			},
 			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "9090" || cfg.BrainURL != "http://brain-custom:9090" || cfg.GHRepo != "custom/repo" || cfg.GHToken != "custom_pat" || cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" || cfg.ConfigPath != "/custom/config.yaml" || cfg.GitCommit != "0123456" {
+				if cfg.Port != "9090" || cfg.BrainURL != "http://brain-custom:9090" || cfg.GHRepo != "custom/repo" || cfg.GHToken != "custom_pat" || cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" || cfg.ConfigPath != "/custom/config.yaml" || cfg.GitCommit != "0123456" || cfg.VanadisURL != "http://vanadis-custom:9090" {
 					t.Errorf("unexpected custom config: %+v", cfg)
 				}
 			},
@@ -1550,7 +1882,7 @@ config_path: "/custom/aerial-config/config.yaml"
 			name:   "Defaults_NilLookup",
 			lookup: nil,
 			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "8080" || cfg.BrainURL != "http://brain:8080" || cfg.GHRepo != "azylman/aerial" || len(cfg.GHRepos) != 1 || cfg.GHRepos[0] != "azylman/aerial" || cfg.GHToken != "" || cfg.GitSyncURL != "http://hangar:8080" || cfg.HangarURL != "http://hangar:8080" || cfg.ConfigPath != "/share/aerial-config/config.yaml" || cfg.GitCommit != "latest" {
+				if cfg.Port != "8080" || cfg.BrainURL != "http://brain:8080" || cfg.GHRepo != "azylman/aerial" || len(cfg.GHRepos) != 1 || cfg.GHRepos[0] != "azylman/aerial" || cfg.GHToken != "" || cfg.GitSyncURL != "http://hangar:8080" || cfg.HangarURL != "http://hangar:8080" || cfg.ConfigPath != "/share/aerial-config/config.yaml" || cfg.GitCommit != "latest" || cfg.VanadisURL != "http://vanadis.aerial" {
 					t.Errorf("unexpected default config: %+v", cfg)
 				}
 			},
@@ -1578,7 +1910,7 @@ config_path: "/custom/aerial-config/config.yaml"
 				return ""
 			},
 			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "8084" || cfg.BrainURL != "http://brain:8088" || cfg.HangarURL != "http://hangar:8087" || cfg.GitSyncURL != "http://hangar:8087" || len(cfg.GHRepos) != 2 || cfg.GHRepos[1] != "azylman/aerial-config" || cfg.ConfigPath != "/custom/aerial-config/config.yaml" {
+				if cfg.Port != "8084" || cfg.BrainURL != "http://brain:8088" || cfg.HangarURL != "http://hangar:8087" || cfg.GitSyncURL != "http://hangar:8087" || len(cfg.GHRepos) != 2 || cfg.GHRepos[1] != "azylman/aerial-config" || cfg.ConfigPath != "/custom/aerial-config/config.yaml" || cfg.VanadisURL != "http://vanadis:8089" {
 					t.Errorf("unexpected YAML config: %+v", cfg)
 				}
 			},
@@ -1660,6 +1992,9 @@ func TestNewDashboardConfigFromEnv_Smoke(t *testing.T) {
 	}
 	if cfg.GitCommit == "" {
 		t.Errorf("expected non-empty GitCommit from NewDashboardConfigFromEnv")
+	}
+	if cfg.VanadisURL == "" {
+		t.Errorf("expected non-empty VanadisURL from NewDashboardConfigFromEnv")
 	}
 }
 
