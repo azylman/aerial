@@ -265,112 +265,102 @@ func TestFormatChannelHistory(t *testing.T) {
 	}
 }
 
-func TestHistoryFetchers(t *testing.T) {
+func TestFetchDiscordChannelHistory_NonSnowflakeFallback(t *testing.T) {
 	t.Parallel()
+	now := time.Now().UTC()
+	store := setupTestStore(t)
+	_ = insertMessage(store, db.Message{
+		ID: "msg-1", ThreadID: "chan-test", AuthorID: "user-1", AuthorName: "Alice",
+		Content: "Hello from database 1", CreatedAt: now.Add(-20 * time.Minute),
+	})
+	_ = insertMessage(store, db.Message{
+		ID: "msg-2", ThreadID: "chan-test", AuthorID: "bot-1", AuthorName: "MusicBot",
+		Content: "Playing track", CreatedAt: now.Add(-10 * time.Minute),
+	})
 
-	tests := []struct {
-		name     string
-		scenario string
-	}{
-		{name: "NonSnowflakeFallback DB query", scenario: "non_snowflake"},
-		{name: "DiscordAPISuccess role mappings", scenario: "discord_success"},
-		{name: "DiscordAPIErrorFallback to store", scenario: "discord_fallback"},
-		{name: "FetchRecentThreadHistory_DBFirst", scenario: "thread_history_db_first"},
+	fetcher := DefaultHistoryFetcher(nil, store)
+	history, err := fetcher(context.Background(), "chan-test", "", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(history) != 2 || history[0].AuthorName != "Alice" || history[1].AuthorName != "MusicBot" {
+		t.Fatalf("unexpected history results: %+v", history)
+	}
+}
+
+func TestFetchDiscordChannelHistory_RoleMappings(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	mockDiscordMsgs := []*discordgo.Message{
+		{ID: "1003", ChannelID: "123456789012345678", Content: "Aerial speaking", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}},
+		{ID: "1002", ChannelID: "123456789012345678", Content: "Music playing", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "888888", Username: "MusicBot", Bot: true}},
+		{ID: "1001", ChannelID: "123456789012345678", Content: "Hey everyone", Timestamp: now.Add(-15 * time.Minute), Author: &discordgo.User{ID: "777777", Username: "Alice", Bot: false}},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			now := time.Now().UTC()
-			switch tc.scenario {
-			case "non_snowflake":
-				store := setupTestStore(t)
-				_ = insertMessage(store, db.Message{
-					ID: "msg-1", ThreadID: "chan-test", AuthorID: "user-1", AuthorName: "Alice",
-					Content: "Hello from database 1", CreatedAt: now.Add(-20 * time.Minute),
-				})
-				_ = insertMessage(store, db.Message{
-					ID: "msg-2", ThreadID: "chan-test", AuthorID: "bot-1", AuthorName: "MusicBot",
-					Content: "Playing track", CreatedAt: now.Add(-10 * time.Minute),
-				})
+	dg, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New failed: %v", err)
+	}
+	dg.State = discordgo.NewState()
+	dg.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := json.Marshal(mockDiscordMsgs)
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(body)),
+		}, nil
+	})
 
-				fetcher := DefaultHistoryFetcher(nil, store)
-				history, err := fetcher(context.Background(), "chan-test", "", 10)
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if len(history) != 2 || history[0].AuthorName != "Alice" || history[1].AuthorName != "MusicBot" {
-					t.Fatalf("unexpected history results: %+v", history)
-				}
+	fetcher := DefaultHistoryFetcher(dg, nil)
+	history, err := fetcher(context.Background(), "123456789012345678", "1004", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(history) != 3 || history[0].Role != "Assistant" || history[1].Role != "Bot" || history[2].Role != "User" {
+		t.Fatalf("unexpected role mappings: %+v", history)
+	}
+}
 
-			case "discord_success":
-				mockDiscordMsgs := []*discordgo.Message{
-					{ID: "1003", ChannelID: "123456789012345678", Content: "Aerial speaking", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}},
-					{ID: "1002", ChannelID: "123456789012345678", Content: "Music playing", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "888888", Username: "MusicBot", Bot: true}},
-					{ID: "1001", ChannelID: "123456789012345678", Content: "Hey everyone", Timestamp: now.Add(-15 * time.Minute), Author: &discordgo.User{ID: "777777", Username: "Alice", Bot: false}},
-				}
+func TestFetchDiscordChannelHistory_ErrorFallbackToStore(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	store := setupTestStore(t)
+	_ = insertMessage(store, db.Message{
+		ID: "msg-db-1", ThreadID: "123456789012345678", AuthorID: "user-1", AuthorName: "Bob",
+		Content: "Fallback message from database", CreatedAt: now.Add(-5 * time.Minute),
+	})
 
-				dg, err := discordgo.New("Bot test-token")
-				if err != nil {
-					t.Fatalf("discordgo.New failed: %v", err)
-				}
-				dg.State = discordgo.NewState()
-				dg.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
-				dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-					body, _ := json.Marshal(mockDiscordMsgs)
-					return &http.Response{
-						StatusCode: 200,
-						Header:     http.Header{"Content-Type": []string{"application/json"}},
-						Body:       io.NopCloser(bytes.NewReader(body)),
-					}, nil
-				})
+	dg, _ := discordgo.New("Bot test-token")
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("discord API gateway 502 bad gateway")
+	})
 
-				fetcher := DefaultHistoryFetcher(dg, nil)
-				history, err := fetcher(context.Background(), "123456789012345678", "1004", 10)
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if len(history) != 3 || history[0].Role != "Assistant" || history[1].Role != "Bot" || history[2].Role != "User" {
-					t.Fatalf("unexpected role mappings: %+v", history)
-				}
+	fetcher := DefaultHistoryFetcher(dg, store)
+	history, err := fetcher(context.Background(), "123456789012345678", "", 10)
+	if err != nil {
+		t.Fatalf("expected successful fallback, got error: %v", err)
+	}
+	if len(history) != 1 || history[0].Content != "Fallback message from database" {
+		t.Fatalf("unexpected fallback content: %+v", history)
+	}
+}
 
-			case "discord_fallback":
-				store := setupTestStore(t)
-				_ = insertMessage(store, db.Message{
-					ID: "msg-db-1", ThreadID: "123456789012345678", AuthorID: "user-1", AuthorName: "Bob",
-					Content: "Fallback message from database", CreatedAt: now.Add(-5 * time.Minute),
-				})
+func TestFetchRecentThreadHistory_DBFirst(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	store := setupTestStore(t)
+	_ = insertMessage(store, db.Message{
+		ID: "msg-db-thread-1", ThreadID: "111111111111111111", AuthorID: "user-1", AuthorName: "Alice",
+		Content: "DB Thread Message", CreatedAt: now,
+	})
 
-				dg, _ := discordgo.New("Bot test-token")
-				dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-					return nil, errors.New("discord API gateway 502 bad gateway")
-				})
-
-				fetcher := DefaultHistoryFetcher(dg, store)
-				history, err := fetcher(context.Background(), "123456789012345678", "", 10)
-				if err != nil {
-					t.Fatalf("expected successful fallback, got error: %v", err)
-				}
-				if len(history) != 1 || history[0].Content != "Fallback message from database" {
-					t.Fatalf("unexpected fallback content: %+v", history)
-				}
-
-			case "thread_history_db_first":
-				store := setupTestStore(t)
-				_ = insertMessage(store, db.Message{
-					ID: "msg-db-thread-1", ThreadID: "111111111111111111", AuthorID: "user-1", AuthorName: "Alice",
-					Content: "DB Thread Message", CreatedAt: now,
-				})
-
-				history, err := FetchRecentThreadHistory(context.Background(), nil, store, "111111111111111111", 10)
-				if err != nil {
-					t.Fatalf("FetchRecentThreadHistory failed: %v", err)
-				}
-				if len(history) != 1 || history[0].Content != "DB Thread Message" {
-					t.Errorf("expected 1 message from DB, got %+v", history)
-				}
-			}
-		})
+	history, err := FetchRecentThreadHistory(context.Background(), nil, store, "111111111111111111", 10)
+	if err != nil {
+		t.Fatalf("FetchRecentThreadHistory failed: %v", err)
+	}
+	if len(history) != 1 || history[0].Content != "DB Thread Message" {
+		t.Errorf("expected 1 message from DB, got %+v", history)
 	}
 }
 
