@@ -268,158 +268,224 @@ func TestWebhookDispatcher_Hooks(t *testing.T) {
 }
 
 func TestWebhookDispatcher_ErrorsAndEdgeCases(t *testing.T) {
-	dispatcher := NewDefaultWebhookDispatcher()
+	tests := []struct {
+		name                string
+		statusCode          int
+		responseBody        string
+		timeoutMs           int
+		handlerDelay        time.Duration
+		nilEndpoint         bool
+		emptyURL            bool
+		nilRequests         bool
+		cancelCtx           bool
+		nilReceiver         bool
+		invalidHost         bool
+		dispatchInvalidArgs bool
+		errReaderBody       bool
+	}{
+		{
+			name:         "HTTP 500 error returns error",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error": "internal crash"}`,
+			timeoutMs:    500,
+		},
+		{
+			name:         "Timeout triggers deadline exceeded",
+			handlerDelay: 20 * time.Millisecond,
+			timeoutMs:    10,
+		},
+		{
+			name:         "Invalid JSON response returns unmarshal error",
+			statusCode:   http.StatusOK,
+			responseBody: `{not valid json`,
+			timeoutMs:    500,
+		},
+		{
+			name:        "nil and empty endpoints",
+			nilEndpoint: true,
+			emptyURL:    true,
+		},
+		{
+			name:        "nil requests",
+			nilRequests: true,
+		},
+		{
+			name:      "canceled parent context",
+			cancelCtx: true,
+		},
+		{
+			name:        "nil dispatcher receiver or nil client fallback",
+			nilReceiver: true,
+		},
+		{
+			name:        "invalid url format",
+			invalidHost: true,
+			timeoutMs:   5,
+		},
+		{
+			name:                "dispatch internal branch coverage",
+			dispatchInvalidArgs: true,
+			errReaderBody:       true,
+		},
+	}
 
-	t.Run("HTTP 500 error returns error", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error": "internal crash"}`))
-		}))
-		defer ts.Close()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dispatcher := NewDefaultWebhookDispatcher()
 
-		endpoint := &config.WebhookEndpoint{URL: ts.URL, TimeoutMs: 500, OnTimeoutAction: "drop"}
-		resp, err := dispatcher.CallWakeHook(context.Background(), endpoint, &WakeRequest{ChannelID: "c1"})
-		if err == nil || !strings.Contains(err.Error(), "500") {
-			t.Fatalf("expected error mentioning 500, got: %v", err)
-		}
-		if resp != nil {
-			t.Errorf("expected nil response on error, got %+v", resp)
-		}
-	})
-
-	t.Run("Timeout triggers deadline exceeded", func(t *testing.T) {
-		handlerDone := make(chan struct{})
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			select {
-			case <-handlerDone:
-			case <-time.After(20 * time.Millisecond):
+			if tc.nilEndpoint && tc.emptyURL {
+				if _, err := dispatcher.CallWakeHook(context.Background(), nil, &WakeRequest{}); err == nil {
+					t.Errorf("expected error for nil endpoint")
+				}
+				if _, err := dispatcher.CallWakeHook(context.Background(), &config.WebhookEndpoint{URL: ""}, &WakeRequest{}); err == nil {
+					t.Errorf("expected error for empty endpoint url")
+				}
+				return
 			}
-			w.WriteHeader(http.StatusOK)
-		}))
-		defer func() {
-			close(handlerDone)
-			ts.Close()
-		}()
 
-		endpoint := &config.WebhookEndpoint{URL: ts.URL, TimeoutMs: 10, OnTimeoutAction: "classify"}
-		resp, err := dispatcher.CallPreTurnHook(context.Background(), endpoint, &PreTurnRequest{ChannelID: "c1"})
-		if err == nil {
-			t.Fatalf("expected timeout error, got nil")
-		}
-		if resp != nil {
-			t.Errorf("expected nil response on timeout, got %+v", resp)
-		}
-	})
+			if tc.nilRequests {
+				ep := &config.WebhookEndpoint{URL: "http://127.0.0.1:9999"}
+				if _, err := dispatcher.CallWakeHook(context.Background(), ep, nil); err == nil {
+					t.Errorf("expected error for nil WakeRequest")
+				}
+				if _, err := dispatcher.CallPreTurnHook(context.Background(), ep, nil); err == nil {
+					t.Errorf("expected error for nil PreTurnRequest")
+				}
+				if _, err := dispatcher.CallPostTurnHook(context.Background(), ep, nil); err == nil {
+					t.Errorf("expected error for nil PostTurnRequest")
+				}
+				return
+			}
 
-	t.Run("Invalid JSON response returns unmarshal error", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{not valid json`))
-		}))
-		defer ts.Close()
+			if tc.nilReceiver {
+				var nilDispatcher *DefaultWebhookDispatcher
+				if _, err := nilDispatcher.CallWakeHook(context.Background(), &config.WebhookEndpoint{URL: "http://127.0.0.1"}, &WakeRequest{}); err == nil {
+					t.Errorf("expected error on nil dispatcher")
+				}
 
-		endpoint := &config.WebhookEndpoint{URL: ts.URL, TimeoutMs: 500}
-		resp, err := dispatcher.CallPostTurnHook(context.Background(), endpoint, &PostTurnRequest{ChannelID: "c1"})
-		if err == nil {
-			t.Fatalf("expected error on invalid JSON, got nil")
-		}
-		if resp != nil {
-			t.Errorf("expected nil response on unmarshal error, got %+v", resp)
-		}
-	})
+				customDisp := NewWebhookDispatcherWithClient(nil)
+				if customDisp.client == nil {
+					t.Errorf("expected non-nil client with NewWebhookDispatcherWithClient(nil)")
+				}
 
-	t.Run("nil and empty endpoints", func(t *testing.T) {
-		if _, err := dispatcher.CallWakeHook(context.Background(), nil, &WakeRequest{}); err == nil {
-			t.Errorf("expected error for nil endpoint")
-		}
-		if _, err := dispatcher.CallWakeHook(context.Background(), &config.WebhookEndpoint{URL: ""}, &WakeRequest{}); err == nil {
-			t.Errorf("expected error for empty endpoint url")
-		}
-	})
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(WakeResponse{Override: "wake"})
+				}))
+				defer ts.Close()
 
-	t.Run("nil requests", func(t *testing.T) {
-		ep := &config.WebhookEndpoint{URL: "http://127.0.0.1:9999"}
-		if _, err := dispatcher.CallWakeHook(context.Background(), ep, nil); err == nil {
-			t.Errorf("expected error for nil WakeRequest")
-		}
-		if _, err := dispatcher.CallPreTurnHook(context.Background(), ep, nil); err == nil {
-			t.Errorf("expected error for nil PreTurnRequest")
-		}
-		if _, err := dispatcher.CallPostTurnHook(context.Background(), ep, nil); err == nil {
-			t.Errorf("expected error for nil PostTurnRequest")
-		}
-	})
+				dispWithNilClient := &DefaultWebhookDispatcher{client: nil}
+				resp, err := dispWithNilClient.CallWakeHook(nil, &config.WebhookEndpoint{URL: ts.URL}, &WakeRequest{ChannelID: "c1"})
+				if err != nil || resp.Override != "wake" {
+					t.Fatalf("unexpected response with nil client and nil ctx: resp=%+v err=%v", resp, err)
+				}
+				return
+			}
 
-	t.Run("canceled parent context", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(WakeResponse{Override: "wake"})
-		}))
-		defer ts.Close()
+			if tc.invalidHost {
+				ep := &config.WebhookEndpoint{URL: "http://invalid-url-that-does-not-exist:9999", TimeoutMs: tc.timeoutMs}
+				if _, err := dispatcher.CallWakeHook(context.Background(), ep, &WakeRequest{ChannelID: "c1"}); err == nil {
+					t.Errorf("expected network error on invalid host")
+				}
+				return
+			}
 
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
+			if tc.dispatchInvalidArgs {
+				if err := dispatcher.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com"}, nil, nil); err == nil || !strings.Contains(err.Error(), "payload is nil") {
+					t.Errorf("expected nil payload error, got %v", err)
+				}
+				if err := dispatcher.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com"}, make(chan int), nil); err == nil || !strings.Contains(err.Error(), "failed to marshal") {
+					t.Errorf("expected marshal error, got %v", err)
+				}
+				if err := dispatcher.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com/\x7fbad"}, "ok", nil); err == nil || !strings.Contains(err.Error(), "failed to create http request") {
+					t.Errorf("expected http request creation error, got %v", err)
+				}
+				if tc.errReaderBody {
+					clientWithErrBody := &http.Client{
+						Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Body:       io.NopCloser(errReader{}),
+								Header:     make(http.Header),
+							}, nil
+						}),
+					}
+					dispWithErrBody := NewWebhookDispatcherWithClient(clientWithErrBody)
+					if err := dispWithErrBody.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com"}, "ok", &WakeResponse{}); err == nil || !strings.Contains(err.Error(), "failed to read webhook response body") {
+						t.Errorf("expected body read error, got %v", err)
+					}
+				}
+				return
+			}
 
-		ep := &config.WebhookEndpoint{URL: ts.URL}
-		if _, err := dispatcher.CallWakeHook(ctx, ep, &WakeRequest{ChannelID: "c1"}); err == nil {
-			t.Fatalf("expected error on canceled context")
-		}
-	})
+			if tc.cancelCtx {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(WakeResponse{Override: "wake"})
+				}))
+				defer ts.Close()
 
-	t.Run("nil dispatcher receiver or nil client fallback", func(t *testing.T) {
-		var nilDispatcher *DefaultWebhookDispatcher
-		if _, err := nilDispatcher.CallWakeHook(context.Background(), &config.WebhookEndpoint{URL: "http://127.0.0.1"}, &WakeRequest{}); err == nil {
-			t.Errorf("expected error on nil dispatcher")
-		}
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
 
-		customDisp := NewWebhookDispatcherWithClient(nil)
-		if customDisp.client == nil {
-			t.Errorf("expected non-nil client with NewWebhookDispatcherWithClient(nil)")
-		}
+				ep := &config.WebhookEndpoint{URL: ts.URL}
+				if _, err := dispatcher.CallWakeHook(ctx, ep, &WakeRequest{ChannelID: "c1"}); err == nil {
+					t.Fatalf("expected error on canceled context")
+				}
+				return
+			}
 
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(WakeResponse{Override: "wake"})
-		}))
-		defer ts.Close()
+			handlerDone := make(chan struct{})
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.handlerDelay > 0 {
+					select {
+					case <-r.Context().Done():
+					case <-handlerDone:
+					case <-time.After(tc.handlerDelay):
+					}
+				}
+				statusCode := tc.statusCode
+				if statusCode == 0 {
+					statusCode = http.StatusOK
+				}
+				w.WriteHeader(statusCode)
+				if tc.responseBody != "" {
+					_, _ = w.Write([]byte(tc.responseBody))
+				}
+			}))
+			defer func() {
+				close(handlerDone)
+				ts.Close()
+			}()
 
-		dispWithNilClient := &DefaultWebhookDispatcher{client: nil}
-		resp, err := dispWithNilClient.CallWakeHook(nil, &config.WebhookEndpoint{URL: ts.URL}, &WakeRequest{ChannelID: "c1"})
-		if err != nil || resp.Override != "wake" {
-			t.Fatalf("unexpected response with nil client and nil ctx: resp=%+v err=%v", resp, err)
-		}
-	})
-
-	t.Run("invalid url format", func(t *testing.T) {
-		ep := &config.WebhookEndpoint{URL: "http://invalid-url-that-does-not-exist:9999", TimeoutMs: 5}
-		if _, err := dispatcher.CallWakeHook(context.Background(), ep, &WakeRequest{ChannelID: "c1"}); err == nil {
-			t.Errorf("expected network error on invalid host")
-		}
-	})
-
-	t.Run("dispatch internal branch coverage", func(t *testing.T) {
-		if err := dispatcher.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com"}, nil, nil); err == nil || !strings.Contains(err.Error(), "payload is nil") {
-			t.Errorf("expected nil payload error, got %v", err)
-		}
-		if err := dispatcher.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com"}, make(chan int), nil); err == nil || !strings.Contains(err.Error(), "failed to marshal") {
-			t.Errorf("expected marshal error, got %v", err)
-		}
-		if err := dispatcher.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com/\x7fbad"}, "ok", nil); err == nil || !strings.Contains(err.Error(), "failed to create http request") {
-			t.Errorf("expected http request creation error, got %v", err)
-		}
-
-		clientWithErrBody := &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(errReader{}),
-					Header:     make(http.Header),
-				}, nil
-			}),
-		}
-		dispWithErrBody := NewWebhookDispatcherWithClient(clientWithErrBody)
-		if err := dispWithErrBody.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com"}, "ok", &WakeResponse{}); err == nil || !strings.Contains(err.Error(), "failed to read webhook response body") {
-			t.Errorf("expected body read error, got %v", err)
-		}
-	})
+			if tc.name == "HTTP 500 error returns error" {
+				endpoint := &config.WebhookEndpoint{URL: ts.URL, TimeoutMs: tc.timeoutMs, OnTimeoutAction: "drop"}
+				resp, err := dispatcher.CallWakeHook(context.Background(), endpoint, &WakeRequest{ChannelID: "c1"})
+				if err == nil || !strings.Contains(err.Error(), "500") {
+					t.Fatalf("expected error mentioning 500, got: %v", err)
+				}
+				if resp != nil {
+					t.Errorf("expected nil response on error, got %+v", resp)
+				}
+			} else if tc.name == "Timeout triggers deadline exceeded" {
+				endpoint := &config.WebhookEndpoint{URL: ts.URL, TimeoutMs: tc.timeoutMs, OnTimeoutAction: "classify"}
+				resp, err := dispatcher.CallPreTurnHook(context.Background(), endpoint, &PreTurnRequest{ChannelID: "c1"})
+				if err == nil {
+					t.Fatalf("expected timeout error, got nil")
+				}
+				if resp != nil {
+					t.Errorf("expected nil response on timeout, got %+v", resp)
+				}
+			} else if tc.name == "Invalid JSON response returns unmarshal error" {
+				endpoint := &config.WebhookEndpoint{URL: ts.URL, TimeoutMs: tc.timeoutMs}
+				resp, err := dispatcher.CallPostTurnHook(context.Background(), endpoint, &PostTurnRequest{ChannelID: "c1"})
+				if err == nil {
+					t.Fatalf("expected error on invalid JSON, got nil")
+				}
+				if resp != nil {
+					t.Errorf("expected nil response on unmarshal error, got %+v", resp)
+				}
+			}
+		})
+	}
 }
