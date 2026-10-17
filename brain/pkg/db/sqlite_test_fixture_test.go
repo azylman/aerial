@@ -169,7 +169,6 @@ CREATE INDEX IF NOT EXISTS idx_pr_registry_target_id ON pr_registry (target_id);
 
 CREATE TABLE IF NOT EXISTS vanadis_builds (
 	id TEXT PRIMARY KEY,
-	repo TEXT NOT NULL,
 	thread_id TEXT NOT NULL,
 	tier INTEGER NOT NULL DEFAULT 2,
 	title TEXT NOT NULL DEFAULT '',
@@ -181,7 +180,7 @@ CREATE TABLE IF NOT EXISTS vanadis_builds (
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_vanadis_builds_repo_status ON vanadis_builds (repo, status);
+CREATE INDEX IF NOT EXISTS idx_vanadis_builds_status ON vanadis_builds (status);
 CREATE INDEX IF NOT EXISTS idx_vanadis_builds_thread_id ON vanadis_builds (thread_id);
 
 CREATE TABLE IF NOT EXISTS vanadis_chunks (

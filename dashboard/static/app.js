@@ -2111,9 +2111,9 @@ function renderBuildQueueCards() {
         if (query) {
             const title = String(b.title || '').toLowerCase();
             const obj = String(b.objective || '').toLowerCase();
-            const repo = String(b.repo || '').toLowerCase();
+            const chunkRepos = Array.isArray(b.chunks) ? b.chunks.map(c => String((c && c.repo) || 'azylman/aerial')).join(' ').toLowerCase() : '';
             const id = String(b.id || '').toLowerCase();
-            if (!title.includes(query) && !obj.includes(query) && !repo.includes(query) && !id.includes(query)) {
+            if (!title.includes(query) && !obj.includes(query) && !chunkRepos.includes(query) && !id.includes(query)) {
                 return false;
             }
         }
@@ -2150,7 +2150,6 @@ function renderBuildQueueCards() {
         const badgeInfo = getBuildStatusBadgeInfo(b);
         const stats = computeBuildChunkStats(b);
         const tier = typeof b.tier === 'number' ? b.tier : (b.tier || 0);
-        const repo = b.repo || 'azylman/aerial';
         const title = b.title || b.id || 'Untitled Build';
         const objective = b.objective || 'No objective provided';
 
@@ -2159,7 +2158,6 @@ function renderBuildQueueCards() {
                 <div class="build-badge-group">
                     <span class="build-status-badge ${badgeInfo.cls}">${badgeInfo.text}</span>
                     <span class="build-tier-badge">TIER ${escapeHtml(String(tier))}</span>
-                    <span class="build-repo-badge">${escapeHtml(repo)}</span>
                 </div>
                 <span class="build-id-chip">${escapeHtml(b.id || '')}</span>
             </div>
@@ -2204,7 +2202,7 @@ function renderBuildDetailContent(build, chunks) {
 
             let prLink = '';
             if (chunk.pr_number) {
-                const targetRepo = chunk.repo || build.repo || 'azylman/aerial';
+                const targetRepo = chunk.repo || 'azylman/aerial';
                 const prUrl = `https://github.com/${escapeHtml(targetRepo)}/pull/${chunk.pr_number}`;
                 prLink = `<a class="chunk-pr-link" href="${prUrl}" target="_blank" rel="noopener noreferrer">#${chunk.pr_number} ↗</a>`;
             }
@@ -2277,7 +2275,6 @@ function renderBuildDetailContent(build, chunks) {
             <div class="build-drawer-title-row">
                 <span class="build-status-badge ${badgeInfo.cls}">${badgeInfo.text}</span>
                 <span class="build-tier-badge">TIER ${escapeHtml(String(build.tier || 0))}</span>
-                <span class="build-repo-badge">${escapeHtml(build.repo || 'azylman/aerial')}</span>
                 <span class="build-id-pill">${escapeHtml(build.id || '')}</span>
             </div>
             <h3 class="build-drawer-title">${escapeHtml(build.title || build.id)}</h3>

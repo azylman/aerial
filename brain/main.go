@@ -1153,13 +1153,9 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 					} else if build != nil {
 						widgetChunks := make([]discord.StatusWidgetChunk, len(chunks))
 						for i, c := range chunks {
-							cRepo := c.Repo
-							if cRepo == "" {
-								cRepo = build.Repo
-							}
 							widgetChunks[i] = discord.StatusWidgetChunk{
 								Index:     c.ChunkIndex,
-								Repo:      cRepo,
+								Repo:      c.Repo,
 								Title:     c.Title,
 								Status:    c.Status,
 								PRNumber:  c.PRNumber,

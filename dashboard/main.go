@@ -340,7 +340,6 @@ type VanadisChunkDTO struct {
 // VanadisBuildDTO represents a Vanadis build run or build entry.
 type VanadisBuildDTO struct {
 	ID              string            `json:"id"`
-	Repo            string            `json:"repo"`
 	ThreadID        string            `json:"thread_id"`
 	Tier            int               `json:"tier"`
 	Title           string            `json:"title"`

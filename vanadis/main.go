@@ -162,7 +162,6 @@ func normalizeChunkEffort(effort string) (string, error) {
 // VanadisBuild represents a multi-chunk autonomous engineering build run.
 type VanadisBuild struct {
 	ID              string    `json:"id"`
-	Repo            string    `json:"repo"`
 	ThreadID        string    `json:"thread_id"`
 	Tier            int       `json:"tier"`
 	Title           string    `json:"title"`
@@ -312,10 +311,6 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 	if buildID == "" {
 		return errors.New("build id cannot be empty")
 	}
-	repo := normalizeRepo(build.Repo)
-	if repo == "" {
-		return errors.New("repo cannot be empty")
-	}
 	threadID := strings.TrimSpace(build.ThreadID)
 	if threadID == "" {
 		return errors.New("thread_id cannot be empty")
@@ -365,10 +360,10 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 	statusMessageID := strings.TrimSpace(build.StatusMessageID)
 	sharedContext := strings.TrimSpace(build.SharedContext)
 	buildQuery := `
-		INSERT INTO vanadis_builds (id, repo, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 	`
-	if _, err := tx.Exec(ctx, buildQuery, buildID, repo, threadID, tier, buildTitle, objective, sharedContext, status, statusMessageID); err != nil {
+	if _, err := tx.Exec(ctx, buildQuery, buildID, threadID, tier, buildTitle, objective, sharedContext, status, statusMessageID); err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
 	}
 
@@ -382,7 +377,7 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 		instructions := strings.TrimSpace(c.Instructions)
 		chunkRepo := normalizeRepo(c.Repo)
 		if chunkRepo == "" {
-			chunkRepo = repo
+			chunkRepo = "azylman/aerial"
 		}
 		cStatus := strings.TrimSpace(c.Status)
 		if cStatus == "" {
@@ -439,13 +434,13 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	}
 
 	buildQuery := `
-		SELECT id, repo, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
+		SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
 		FROM vanadis_builds
 		WHERE id = $1;
 	`
 	var b VanadisBuild
 	err := s.db.QueryRow(ctx, buildQuery, buildID).Scan(
-		&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
+		&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrBuildNotFound
@@ -518,7 +513,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	}
 
 	buildQuery := `
-		SELECT id, repo, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
+		SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at
 		FROM vanadis_builds
 		ORDER BY created_at DESC, id DESC
 		LIMIT $1;
@@ -534,7 +529,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	for rows.Next() {
 		var b VanadisBuild
 		if err := rows.Scan(
-			&b.ID, &b.Repo, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
+			&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan vanadis build: %w", err)
 		}
@@ -681,7 +676,7 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 
 	total := len(chunks)
 	active := chunks[activeIdx]
-	activeRepo := firstNonEmpty(normalizeRepo(active.Repo), normalizeRepo(build.Repo), "azylman/aerial")
+	activeRepo := firstNonEmpty(normalizeRepo(active.Repo), "azylman/aerial")
 
 	var sb strings.Builder
 	sb.WriteString("[VANADIS BUILD CHUNK EXECUTION]\n")
@@ -703,7 +698,7 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	} else {
 		for k := 0; k < activeIdx; k++ {
 			c := chunks[k]
-			cRepo := firstNonEmpty(normalizeRepo(c.Repo), normalizeRepo(build.Repo), "azylman/aerial")
+			cRepo := firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial")
 			fmt.Fprintf(&sb, "- [Chunk %d/%d] %s (%s, PR #%d)\n", k+1, total, c.Title, cRepo, c.PRNumber)
 		}
 		sb.WriteString("\n")
@@ -747,7 +742,7 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 		sb.WriteString("DO NOT implement these remaining chunks in this turn—they are listed strictly for architectural boundary awareness.\n")
 		for k := activeIdx + 1; k < total; k++ {
 			c := chunks[k]
-			cRepo := firstNonEmpty(normalizeRepo(c.Repo), normalizeRepo(build.Repo), "azylman/aerial")
+			cRepo := firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial")
 			fmt.Fprintf(&sb, "- [Chunk %d/%d] %s (%s)\n", k+1, total, c.Title, cRepo)
 		}
 		sb.WriteString("\n")
@@ -1209,7 +1204,6 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	now := time.Now().UTC()
 	build := VanadisBuild{
 		ID:            buildID,
-		Repo:          repo,
 		ThreadID:      threadID,
 		Tier:          tier,
 		Title:         firstNonEmpty(strings.TrimSpace(req.Title), objective),
@@ -1295,7 +1289,6 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":            "accepted",
 		"build_id":          build.ID,
-		"repo":              build.Repo,
 		"thread_id":         build.ThreadID,
 		"tier":              build.Tier,
 		"status_message_id": build.StatusMessageID,

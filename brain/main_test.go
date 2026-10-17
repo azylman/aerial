@@ -4673,7 +4673,6 @@ func TestHandlePRRegister(t *testing.T) {
 	{
 		err := store.CreateVanadisBuild(context.Background(), db.VanadisBuild{
 			ID:        "build-reg-1",
-			Repo:      "aerial",
 			ThreadID:  "1555405874565091380",
 			Objective: "Test PR linkage",
 		}, []db.VanadisChunk{
@@ -4752,7 +4751,6 @@ func TestHandlePRRegister(t *testing.T) {
 	{
 		err := store.CreateVanadisBuild(context.Background(), db.VanadisBuild{
 			ID:        "build-reg-widget",
-			Repo:      "aerial",
 			ThreadID:  "1555405874565091380",
 			Title:     "Update Database Schema And Widget Card",
 			Objective: "Build widget delivery test",

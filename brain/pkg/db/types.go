@@ -5,7 +5,6 @@ import "time"
 // VanadisBuild represents a multi-chunk autonomous engineering build in vanadis_builds.
 type VanadisBuild struct {
 	ID              string    `json:"id"`
-	Repo            string    `json:"repo"`
 	ThreadID        string    `json:"thread_id"`
 	Tier            int       `json:"tier"`
 	Title           string    `json:"title"`
