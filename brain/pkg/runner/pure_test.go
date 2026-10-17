@@ -524,17 +524,17 @@ func TestWriteWorkerTurn(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
-		useNil    bool
-		useErr    bool
+		nilWriter bool
+		writeErr  error
 		prompt    string
 		wantErr   string
 		wantSub   []string
 	}{
 		{
-			name:    "Nil Writer",
-			useNil:  true,
-			prompt:  "hello",
-			wantErr: "writer is nil",
+			name:      "Nil Writer",
+			nilWriter: true,
+			prompt:    "hello",
+			wantErr:   "writer is nil",
 		},
 		{
 			name:    "Valid Write",
@@ -542,10 +542,10 @@ func TestWriteWorkerTurn(t *testing.T) {
 			wantSub: []string{`"event":"user"`, "hello world", "\n"},
 		},
 		{
-			name:    "Writer Error Surfaces",
-			useErr:  true,
-			prompt:  "hello",
-			wantErr: "disk full",
+			name:     "Writer Error Surfaces",
+			writeErr: errors.New("disk full"),
+			prompt:   "hello",
+			wantErr:  "disk full",
 		},
 	}
 	for _, tc := range tests {
@@ -553,10 +553,10 @@ func TestWriteWorkerTurn(t *testing.T) {
 			t.Parallel()
 			var w io.Writer
 			var buf bytes.Buffer
-			if tc.useNil {
+			if tc.nilWriter {
 				w = nil
-			} else if tc.useErr {
-				w = &errWriter{err: errors.New("disk full")}
+			} else if tc.writeErr != nil {
+				w = &errWriter{err: tc.writeErr}
 			} else {
 				w = &buf
 			}
@@ -666,25 +666,6 @@ func TestExtractSubagentID(t *testing.T) {
 	}
 }
 
-func TestWriteWorkerTurn_NilWriter(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		prompt  string
-		wantErr bool
-	}{
-		{name: "NilWriterReturnsError", prompt: "hello", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := WriteWorkerTurn(nil, tc.prompt)
-			if (err != nil) != tc.wantErr {
-				t.Errorf("WriteWorkerTurn(nil) err = %v, wantErr %v", err, tc.wantErr)
-			}
-		})
-	}
-}
 
 func TestActivityWriter_SessionProbe(t *testing.T) {
 	w := NewActivityWriter("")
