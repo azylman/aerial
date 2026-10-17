@@ -1222,7 +1222,6 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                         effort: 'low',
                         repo: 'azylman/aerial',
                         pr_number: 779,
-                        diff_stat: 'main.go | 10 ++\n 1 file changed',
                         target_files: ['vanadis/main.go'],
                         target_symbols: ['buildsHandler'],
                         acceptance_criteria: ['unit tests pass'],

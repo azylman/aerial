@@ -1038,7 +1038,6 @@ type PRRegisterRequest struct {
 	Title          string `json:"title,omitempty"`
 	Metadata       string `json:"metadata,omitempty"`
 	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
-	DiffStat       string `json:"diff_stat,omitempty"`
 }
 
 func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFunc {
@@ -1130,7 +1129,7 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 		}
 
 		if chunkID != "" {
-			if err := store.AttachVanadisChunkPR(r.Context(), chunkID, req.PRNumber, strings.TrimSpace(req.DiffStat)); err != nil {
+			if err := store.AttachVanadisChunkPR(r.Context(), chunkID, req.PRNumber); err != nil {
 				log.Printf("[HTTP] Failed to attach PR #%d to Vanadis chunk %s: %v", req.PRNumber, chunkID, err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to attach PR to Vanadis chunk"})
 				return
@@ -1164,7 +1163,6 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 								Title:     c.Title,
 								Status:    c.Status,
 								PRNumber:  c.PRNumber,
-								DiffStat:  c.DiffStat,
 								StartedAt: c.StartedAt,
 								UpdatedAt: c.UpdatedAt,
 							}
@@ -1220,7 +1218,6 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 							Title:     prTitle,
 							Status:    "open",
 							PRNumber:  req.PRNumber,
-							DiffStat:  req.DiffStat,
 							StartedAt: prStartedAt,
 							UpdatedAt: prUpdatedAt,
 						},

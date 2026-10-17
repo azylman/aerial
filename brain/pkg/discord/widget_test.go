@@ -120,7 +120,6 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 				Title:    "Schema migration",
 				Status:   "merged",
 				PRNumber: 735,
-				DiffStat: "+409 -116",
 			},
 			{
 				Index:         2,
@@ -171,7 +170,7 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 		t.Errorf("unexpected banner: %+v", banner)
 	}
 
-	// Chunk 1 has PRNumber > 0 and Repo, so it's a Section with Button, without [index] or diff_stat
+	// Chunk 1 has PRNumber > 0 and Repo, so it's a Section with Button, without [index]
 	c1Sec, ok := container.Components[2].(*discordgo.Section)
 	if !ok {
 		t.Fatalf("expected chunk 1 to be *discordgo.Section, got %T", container.Components[2])

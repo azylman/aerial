@@ -3348,14 +3348,14 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 			Tier:      3,
 			Objective: "Ship Vanadis Phase 3",
 			Chunks: []VanadisChunkSummary{
-				{ChunkIndex: 0, Title: "Schema", PRNumber: 101, DiffStat: "2 files (+50)"},
-				{ChunkIndex: 1, Title: "Worker", PRNumber: 0, DiffStat: ""},
+				{ChunkIndex: 0, Title: "Schema", PRNumber: 101},
+				{ChunkIndex: 1, Title: "Worker", PRNumber: 0},
 			},
 		})
 		for _, sub := range []string{
 			"Vanadis build build-777 completed on azylman/aerial (Tier 3, 2 chunks merged).",
 			"Objective: Ship Vanadis Phase 3",
-			"- Chunk 1/2: Schema (PR #101) — 2 files (+50)",
+			"- Chunk 1/2: Schema (PR #101)",
 			"- Chunk 2/2: Worker",
 			"All Vanadis build chunks have merged into main.",
 		} {
@@ -3642,16 +3642,15 @@ func (r *mockVanadisPgxRows) Scan(dest ...any) error {
 	*(dest[3].(*string)) = it.Title
 	*(dest[4].(*string)) = it.Status
 	*(dest[5].(*int)) = it.PRNumber
-	*(dest[6].(*string)) = it.DiffStat
-	if len(dest) > 7 {
+	if len(dest) > 6 {
 		if !it.StartedAt.IsZero() {
-			*(dest[7].(*sql.NullTime)) = sql.NullTime{Time: it.StartedAt, Valid: true}
+			*(dest[6].(*sql.NullTime)) = sql.NullTime{Time: it.StartedAt, Valid: true}
 		} else {
-			*(dest[7].(*sql.NullTime)) = sql.NullTime{}
+			*(dest[6].(*sql.NullTime)) = sql.NullTime{}
 		}
 	}
-	if len(dest) > 8 {
-		*(dest[8].(*time.Time)) = it.UpdatedAt
+	if len(dest) > 7 {
+		*(dest[7].(*time.Time)) = it.UpdatedAt
 	}
 	return nil
 }
@@ -4003,12 +4002,11 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					*dest[1].(*string) = "feat: awesome feature"
 					*dest[2].(*string) = "open"
 					*dest[3].(*string) = "old-msg-id"
-					*dest[4].(*string) = "+10 -2"
-					if len(dest) > 5 {
-						*dest[5].(*time.Time) = prStart
+					if len(dest) > 4 {
+						*dest[4].(*time.Time) = prStart
 					}
-					if len(dest) > 6 {
-						*dest[6].(*time.Time) = prUpdate
+					if len(dest) > 5 {
+						*dest[5].(*time.Time) = prUpdate
 					}
 					return nil
 				}}
@@ -4059,8 +4057,8 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		},
 		queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 			chunks := []VanadisChunkSummary{
-				{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, DiffStat: "+2 -1", StartedAt: chunk0Start, UpdatedAt: chunk0Update},
-				{ID: "chunk-1", ChunkIndex: 1, Repo: "aerial", Title: "Chunk 1", Status: "running", PRNumber: 102, DiffStat: "+5 -1"},
+				{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, StartedAt: chunk0Start, UpdatedAt: chunk0Update},
+				{ID: "chunk-1", ChunkIndex: 1, Repo: "aerial", Title: "Chunk 1", Status: "running", PRNumber: 102},
 			}
 			return &mockVanadisPgxRows{items: chunks}, nil
 		},

@@ -2209,11 +2209,7 @@ function renderBuildDetailContent(build, chunks) {
                 prLink = `<a class="chunk-pr-link" href="${prUrl}" target="_blank" rel="noopener noreferrer">#${chunk.pr_number} ↗</a>`;
             }
 
-            const diffStat = chunk.diff_stat ? `
-                <div class="chunk-section">
-                    <span class="chunk-section-label">DIFF STAT</span>
-                    <pre class="chunk-code-block diff-stat-block">${escapeHtml(chunk.diff_stat)}</pre>
-                </div>` : '';
+
 
             const targetFiles = (Array.isArray(chunk.target_files) && chunk.target_files.length > 0) ? `
                 <div class="chunk-section">
@@ -2264,7 +2260,6 @@ function renderBuildDetailContent(build, chunks) {
                         ${targetFiles}
                         ${targetSymbols}
                         ${acceptanceCriteria}
-                        ${diffStat}
                     </div>
                 </div>
             `;

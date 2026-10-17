@@ -188,7 +188,6 @@ type VanadisChunk struct {
 	AcceptanceCriteria []string  `json:"acceptance_criteria"`
 	Status             string    `json:"status"`
 	PRNumber           int       `json:"pr_number,omitempty"`
-	DiffStat           string    `json:"diff_stat,omitempty"`
 	StartedAt          time.Time `json:"started_at,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
@@ -374,8 +373,8 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 	}
 
 	chunkQuery := `
-		INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, diff_stat, started_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 	`
 	for _, c := range chunks {
 		chunkID := strings.TrimSpace(c.ID)
@@ -416,7 +415,7 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 			criteria = []string{}
 		}
 		if _, err := tx.Exec(ctx, chunkQuery,
-			chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, files, symbols, cEffort, criteria, cStatus, prNum, c.DiffStat, startedAt,
+			chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, files, symbols, cEffort, criteria, cStatus, prNum, startedAt,
 		); err != nil {
 			return fmt.Errorf("failed to insert vanadis chunk %s: %w", chunkID, err)
 		}
@@ -456,7 +455,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	}
 
 	chunksQuery := `
-		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE build_id = $1
 		ORDER BY chunk_index ASC;
@@ -481,7 +480,7 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 		var c VanadisChunk
 		var startedAt sql.NullTime
 		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &c.DiffStat, &startedAt, &c.CreatedAt, &c.UpdatedAt,
+			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
 		}
@@ -551,7 +550,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	}
 
 	chunksQuery := `
-		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), diff_stat, started_at, created_at, updated_at
+		SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, created_at, updated_at
 		FROM vanadis_chunks
 		WHERE build_id = ANY($1)
 		ORDER BY build_id, chunk_index ASC;
@@ -706,9 +705,6 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 			c := chunks[k]
 			cRepo := firstNonEmpty(normalizeRepo(c.Repo), normalizeRepo(build.Repo), "azylman/aerial")
 			fmt.Fprintf(&sb, "- [Chunk %d/%d] %s (%s, PR #%d)\n", k+1, total, c.Title, cRepo, c.PRNumber)
-			if diff := strings.TrimSpace(c.DiffStat); diff != "" {
-				fmt.Fprintf(&sb, "  DiffStat: %s\n", diff)
-			}
 		}
 		sb.WriteString("\n")
 	}
@@ -826,7 +822,6 @@ type StatusWidgetChunk struct {
 	Title         string    `json:"title"`
 	Status        string    `json:"status"`
 	PRNumber      int       `json:"pr_number,omitempty"`
-	DiffStat      string    `json:"diff_stat,omitempty"`
 	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
 	StartedAt     time.Time `json:"started_at,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at,omitempty"`
@@ -884,7 +879,6 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, build VanadisBuild,
 			Title:     c.Title,
 			Status:    c.Status,
 			PRNumber:  c.PRNumber,
-			DiffStat:  c.DiffStat,
 			StartedAt: c.StartedAt,
 			UpdatedAt: c.UpdatedAt,
 		}
