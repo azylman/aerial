@@ -267,102 +267,111 @@ func TestFormatChannelHistory(t *testing.T) {
 
 func TestHistoryFetchers(t *testing.T) {
 	t.Parallel()
-	now := time.Now().UTC()
 
-	t.Run("NonSnowflakeFallback DB query", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		_ = insertMessage(store, db.Message{
-			ID: "msg-1", ThreadID: "chan-test", AuthorID: "user-1", AuthorName: "Alice",
-			Content: "Hello from database 1", CreatedAt: now.Add(-20 * time.Minute),
+	tests := []struct {
+		name     string
+		scenario string
+	}{
+		{name: "NonSnowflakeFallback DB query", scenario: "non_snowflake"},
+		{name: "DiscordAPISuccess role mappings", scenario: "discord_success"},
+		{name: "DiscordAPIErrorFallback to store", scenario: "discord_fallback"},
+		{name: "FetchRecentThreadHistory_DBFirst", scenario: "thread_history_db_first"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Now().UTC()
+			switch tc.scenario {
+			case "non_snowflake":
+				store := setupTestStore(t)
+				_ = insertMessage(store, db.Message{
+					ID: "msg-1", ThreadID: "chan-test", AuthorID: "user-1", AuthorName: "Alice",
+					Content: "Hello from database 1", CreatedAt: now.Add(-20 * time.Minute),
+				})
+				_ = insertMessage(store, db.Message{
+					ID: "msg-2", ThreadID: "chan-test", AuthorID: "bot-1", AuthorName: "MusicBot",
+					Content: "Playing track", CreatedAt: now.Add(-10 * time.Minute),
+				})
+
+				fetcher := DefaultHistoryFetcher(nil, store)
+				history, err := fetcher(context.Background(), "chan-test", "", 10)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(history) != 2 || history[0].AuthorName != "Alice" || history[1].AuthorName != "MusicBot" {
+					t.Fatalf("unexpected history results: %+v", history)
+				}
+
+			case "discord_success":
+				mockDiscordMsgs := []*discordgo.Message{
+					{ID: "1003", ChannelID: "123456789012345678", Content: "Aerial speaking", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}},
+					{ID: "1002", ChannelID: "123456789012345678", Content: "Music playing", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "888888", Username: "MusicBot", Bot: true}},
+					{ID: "1001", ChannelID: "123456789012345678", Content: "Hey everyone", Timestamp: now.Add(-15 * time.Minute), Author: &discordgo.User{ID: "777777", Username: "Alice", Bot: false}},
+				}
+
+				dg, err := discordgo.New("Bot test-token")
+				if err != nil {
+					t.Fatalf("discordgo.New failed: %v", err)
+				}
+				dg.State = discordgo.NewState()
+				dg.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
+				dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					body, _ := json.Marshal(mockDiscordMsgs)
+					return &http.Response{
+						StatusCode: 200,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(bytes.NewReader(body)),
+					}, nil
+				})
+
+				fetcher := DefaultHistoryFetcher(dg, nil)
+				history, err := fetcher(context.Background(), "123456789012345678", "1004", 10)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(history) != 3 || history[0].Role != "Assistant" || history[1].Role != "Bot" || history[2].Role != "User" {
+					t.Fatalf("unexpected role mappings: %+v", history)
+				}
+
+			case "discord_fallback":
+				store := setupTestStore(t)
+				_ = insertMessage(store, db.Message{
+					ID: "msg-db-1", ThreadID: "123456789012345678", AuthorID: "user-1", AuthorName: "Bob",
+					Content: "Fallback message from database", CreatedAt: now.Add(-5 * time.Minute),
+				})
+
+				dg, _ := discordgo.New("Bot test-token")
+				dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					return nil, errors.New("discord API gateway 502 bad gateway")
+				})
+
+				fetcher := DefaultHistoryFetcher(dg, store)
+				history, err := fetcher(context.Background(), "123456789012345678", "", 10)
+				if err != nil {
+					t.Fatalf("expected successful fallback, got error: %v", err)
+				}
+				if len(history) != 1 || history[0].Content != "Fallback message from database" {
+					t.Fatalf("unexpected fallback content: %+v", history)
+				}
+
+			case "thread_history_db_first":
+				store := setupTestStore(t)
+				_ = insertMessage(store, db.Message{
+					ID: "msg-db-thread-1", ThreadID: "111111111111111111", AuthorID: "user-1", AuthorName: "Alice",
+					Content: "DB Thread Message", CreatedAt: now,
+				})
+
+				history, err := FetchRecentThreadHistory(context.Background(), nil, store, "111111111111111111", 10)
+				if err != nil {
+					t.Fatalf("FetchRecentThreadHistory failed: %v", err)
+				}
+				if len(history) != 1 || history[0].Content != "DB Thread Message" {
+					t.Errorf("expected 1 message from DB, got %+v", history)
+				}
+			}
 		})
-		_ = insertMessage(store, db.Message{
-			ID: "msg-2", ThreadID: "chan-test", AuthorID: "bot-1", AuthorName: "MusicBot",
-			Content: "Playing track", CreatedAt: now.Add(-10 * time.Minute),
-		})
-
-		fetcher := DefaultHistoryFetcher(nil, store)
-		history, err := fetcher(context.Background(), "chan-test", "", 10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(history) != 2 || history[0].AuthorName != "Alice" || history[1].AuthorName != "MusicBot" {
-			t.Fatalf("unexpected history results: %+v", history)
-		}
-	})
-
-	t.Run("DiscordAPISuccess role mappings", func(t *testing.T) {
-		t.Parallel()
-		mockDiscordMsgs := []*discordgo.Message{
-			{ID: "1003", ChannelID: "123456789012345678", Content: "Aerial speaking", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}},
-			{ID: "1002", ChannelID: "123456789012345678", Content: "Music playing", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "888888", Username: "MusicBot", Bot: true}},
-			{ID: "1001", ChannelID: "123456789012345678", Content: "Hey everyone", Timestamp: now.Add(-15 * time.Minute), Author: &discordgo.User{ID: "777777", Username: "Alice", Bot: false}},
-		}
-
-		dg, err := discordgo.New("Bot test-token")
-		if err != nil {
-			t.Fatalf("discordgo.New failed: %v", err)
-		}
-		dg.State = discordgo.NewState()
-		dg.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
-		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			body, _ := json.Marshal(mockDiscordMsgs)
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(bytes.NewReader(body)),
-			}, nil
-		})
-
-		fetcher := DefaultHistoryFetcher(dg, nil)
-		history, err := fetcher(context.Background(), "123456789012345678", "1004", 10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(history) != 3 || history[0].Role != "Assistant" || history[1].Role != "Bot" || history[2].Role != "User" {
-			t.Fatalf("unexpected role mappings: %+v", history)
-		}
-	})
-
-	t.Run("DiscordAPIErrorFallback to store", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		_ = insertMessage(store, db.Message{
-			ID: "msg-db-1", ThreadID: "123456789012345678", AuthorID: "user-1", AuthorName: "Bob",
-			Content: "Fallback message from database", CreatedAt: now.Add(-5 * time.Minute),
-		})
-
-		dg, _ := discordgo.New("Bot test-token")
-		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			return nil, errors.New("discord API gateway 502 bad gateway")
-		})
-
-		fetcher := DefaultHistoryFetcher(dg, store)
-		history, err := fetcher(context.Background(), "123456789012345678", "", 10)
-		if err != nil {
-			t.Fatalf("expected successful fallback, got error: %v", err)
-		}
-		if len(history) != 1 || history[0].Content != "Fallback message from database" {
-			t.Fatalf("unexpected fallback content: %+v", history)
-		}
-	})
-
-	t.Run("FetchRecentThreadHistory_DBFirst", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		_ = insertMessage(store, db.Message{
-			ID: "msg-db-thread-1", ThreadID: "111111111111111111", AuthorID: "user-1", AuthorName: "Alice",
-			Content: "DB Thread Message", CreatedAt: now,
-		})
-
-		history, err := FetchRecentThreadHistory(context.Background(), nil, store, "111111111111111111", 10)
-		if err != nil {
-			t.Fatalf("FetchRecentThreadHistory failed: %v", err)
-		}
-		if len(history) != 1 || history[0].Content != "DB Thread Message" {
-			t.Errorf("expected 1 message from DB, got %+v", history)
-		}
-	})
+	}
 }
 
 func TestSummarizeThreadHistory(t *testing.T) {
@@ -371,120 +380,123 @@ func TestSummarizeThreadHistory(t *testing.T) {
 		{ID: "msg-1", AuthorName: "User1", Role: "User", Content: "Hello thread", CreatedAt: time.Now().UTC()},
 	}
 
-	t.Run("XMLValidation", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name        string
-			mockOutput  string
-			expectError bool
-		}{
-			{name: "Valid XML", mockOutput: "<THREAD_SUMMARY>This is a valid summary.</THREAD_SUMMARY>", expectError: false},
-			{name: "Missing closing tag", mockOutput: "<THREAD_SUMMARY>Missing closing tag", expectError: true},
-			{name: "Missing opening tag", mockOutput: "Missing opening tag</THREAD_SUMMARY>", expectError: true},
-			{name: "No tags", mockOutput: "Just some text without tags.", expectError: true},
-			{name: "Malformed order", mockOutput: "</THREAD_SUMMARY><THREAD_SUMMARY>", expectError: true},
-		}
+	tests := []struct {
+		name        string
+		mockOutput  string
+		expectError bool
+		isTimeout   bool
+	}{
+		{name: "Valid XML", mockOutput: "<THREAD_SUMMARY>This is a valid summary.</THREAD_SUMMARY>", expectError: false},
+		{name: "Missing closing tag", mockOutput: "<THREAD_SUMMARY>Missing closing tag", expectError: true},
+		{name: "Missing opening tag", mockOutput: "Missing opening tag</THREAD_SUMMARY>", expectError: true},
+		{name: "No tags", mockOutput: "Just some text without tags.", expectError: true},
+		{name: "Malformed order", mockOutput: "</THREAD_SUMMARY><THREAD_SUMMARY>", expectError: true},
+		{name: "TimeoutFallback", isTimeout: true, expectError: true},
+	}
 
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.isTimeout {
 				mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
-					return tc.mockOutput, nil
+					deadline, ok := ctx.Deadline()
+					if !ok {
+						return "", errors.New("expected deadline in context")
+					}
+					if time.Until(deadline) > DefaultThreadSummaryTimeout || time.Until(deadline) < DefaultThreadSummaryTimeout-3*time.Second {
+						return "", fmt.Errorf("deadline not set to %v (remaining: %v)", DefaultThreadSummaryTimeout, time.Until(deadline))
+					}
+					return "", context.DeadlineExceeded
 				}
-				summary, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "thread-xml", msgs)
-				if tc.expectError {
-					if err == nil {
-						t.Fatalf("expected error for mock output %q, got none", tc.mockOutput)
-					}
-				} else {
-					if err != nil {
-						t.Fatalf("unexpected error: %v", err)
-					}
-					if summary != tc.mockOutput {
-						t.Errorf("expected %q, got %q", tc.mockOutput, summary)
-					}
-				}
-			})
-		}
-	})
 
-	t.Run("TimeoutFallback", func(t *testing.T) {
-		t.Parallel()
-		mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
-			deadline, ok := ctx.Deadline()
-			if !ok {
-				return "", errors.New("expected deadline in context")
+				_, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "thread-timeout", msgs)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("expected DeadlineExceeded error, got %v", err)
+				}
+				return
 			}
-			if time.Until(deadline) > DefaultThreadSummaryTimeout || time.Until(deadline) < DefaultThreadSummaryTimeout-3*time.Second {
-				return "", fmt.Errorf("deadline not set to %v (remaining: %v)", DefaultThreadSummaryTimeout, time.Until(deadline))
+
+			mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
+				return tc.mockOutput, nil
 			}
-			return "", context.DeadlineExceeded
-		}
-
-		_, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "thread-timeout", msgs)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("expected DeadlineExceeded error, got %v", err)
-		}
-	})
-
-	t.Run("Singleflight", func(t *testing.T) {
-		t.Parallel()
-		var calls atomic.Int32
-		var startedOnce sync.Once
-		started := make(chan struct{})
-		release := make(chan struct{})
-		var enterCount atomic.Int32
-		allEntered := make(chan struct{})
-
-		mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
-			calls.Add(1)
-			startedOnce.Do(func() {
-				close(started)
-			})
-			<-release
-			return "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>", nil
-		}
-
-		sfg := new(singleflight.Group)
-		done := make(chan string, 3)
-		for i := 0; i < 3; i++ {
-			go func() {
-				if enterCount.Add(1) == 3 {
-					close(allEntered)
+			summary, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "thread-xml", msgs)
+			if tc.expectError {
+				if err == nil {
+					t.Fatalf("expected error for mock output %q, got none", tc.mockOutput)
 				}
-				summary, _ := SummarizeThreadHistoryWithGroup(context.Background(), sfg, mockLLM, "test-model", "thread-sf", msgs)
-				done <- summary
-			}()
-		}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if summary != tc.mockOutput {
+					t.Errorf("expected %q, got %q", tc.mockOutput, summary)
+				}
+			}
+		})
+	}
+}
 
+func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
+	t.Parallel()
+	msgs := []HistoryMessage{
+		{ID: "msg-1", AuthorName: "User1", Role: "User", Content: "Hello thread", CreatedAt: time.Now().UTC()},
+	}
+
+	var calls atomic.Int32
+	var startedOnce sync.Once
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var enterCount atomic.Int32
+	allEntered := make(chan struct{})
+
+	mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
+		calls.Add(1)
+		startedOnce.Do(func() {
+			close(started)
+		})
+		<-release
+		return "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>", nil
+	}
+
+	sfg := new(singleflight.Group)
+	done := make(chan string, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			if enterCount.Add(1) == 3 {
+				close(allEntered)
+			}
+			summary, _ := SummarizeThreadHistoryWithGroup(context.Background(), sfg, mockLLM, "test-model", "thread-sf", msgs)
+			done <- summary
+		}()
+	}
+
+	select {
+	case <-started:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for mockLLM invocation")
+	}
+
+	select {
+	case <-allEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for goroutines to enter")
+	}
+	close(release)
+
+	for i := 0; i < 3; i++ {
 		select {
-		case <-started:
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for mockLLM invocation")
-		}
-
-		select {
-		case <-allEntered:
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for goroutines to enter")
-		}
-		close(release)
-
-		for i := 0; i < 3; i++ {
-			select {
-			case res := <-done:
-				if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {
-					t.Errorf("unexpected summary: %q", res)
-				}
-			case <-time.After(1 * time.Second):
-				t.Fatal("timed out waiting for singleflight summary")
+		case res := <-done:
+			if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {
+				t.Errorf("unexpected summary: %q", res)
 			}
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for singleflight summary")
 		}
+	}
 
-		if calls.Load() != 1 {
-			t.Errorf("expected 1 call to LLM, got %d", calls.Load())
-		}
-	})
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 call to LLM, got %d", calls.Load())
+	}
 }
 
 func TestFormatPreviousSession(t *testing.T) {

@@ -277,232 +277,252 @@ func TestStatusUpdater_ToolLifecycleAndFlushes(t *testing.T) {
 func TestStatusUpdater_CircuitBreakersAndRecovery(t *testing.T) {
 	t.Parallel()
 
-	t.Run("CircuitBreakerOn404", func(t *testing.T) {
-		t.Parallel()
-		h := newStatusUpdaterHarness()
-		h.editFn = func(channelID, messageID, text string) error {
-			h.edits.Add(1)
-			return errors.New("HTTP 404 Not Found, 10008 Unknown Message")
-		}
+	tests := []struct {
+		name     string
+		scenario string
+		errText  string
+	}{
+		{name: "CircuitBreakerOn404", scenario: "circuit_404", errText: "HTTP 404 Not Found, 10008 Unknown Message"},
+		{name: "CircuitBreakerOn403", scenario: "circuit_403", errText: "HTTP 403 Forbidden, 50013 Missing Permissions"},
+		{name: "TransientSendErrorSelfHeals", scenario: "transient_heals"},
+		{name: "ResetOnRetry", scenario: "reset_retry"},
+	}
 
-		updater := NewStatusUpdater(nil, "thread-404", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
-		updater.flush()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			switch tc.scenario {
+			case "circuit_404":
+				h := newStatusUpdaterHarness()
+				h.editFn = func(channelID, messageID, text string) error {
+					h.edits.Add(1)
+					return errors.New(tc.errText)
+				}
 
-		for i := 0; i < 5; i++ {
-			updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
-			updater.flush()
-		}
-		updater.Stop()
+				updater := NewStatusUpdater(nil, "thread-404", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
+				updater.flush()
 
-		if h.edits.Load() > 1 {
-			t.Errorf("expected circuit breaker to halt edits after 404, got %d edits", h.edits.Load())
-		}
-	})
+				for i := 0; i < 5; i++ {
+					updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
+					updater.flush()
+				}
+				updater.Stop()
 
-	t.Run("CircuitBreakerOn403", func(t *testing.T) {
-		t.Parallel()
-		h := newStatusUpdaterHarness()
-		h.sendFn = func(channelID, text string) (string, error) {
-			h.sends.Add(1)
-			return "", errors.New("HTTP 403 Forbidden, 50013 Missing Permissions")
-		}
+				if h.edits.Load() > 1 {
+					t.Errorf("expected circuit breaker to halt edits after 404, got %d edits", h.edits.Load())
+				}
 
-		updater := NewStatusUpdater(nil, "thread-403", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
-		updater.flush()
-		updater.flush()
-		updater.Stop()
+			case "circuit_403":
+				h := newStatusUpdaterHarness()
+				h.sendFn = func(channelID, text string) (string, error) {
+					h.sends.Add(1)
+					return "", errors.New(tc.errText)
+				}
 
-		if h.sends.Load() != 1 {
-			t.Errorf("expected circuit breaker to stop sends after 403, got %d sends", h.sends.Load())
-		}
-	})
+				updater := NewStatusUpdater(nil, "thread-403", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
+				updater.flush()
+				updater.flush()
+				updater.Stop()
 
-	t.Run("TransientSendErrorSelfHeals", func(t *testing.T) {
-		t.Parallel()
-		var attempts atomic.Int32
-		h := newStatusUpdaterHarness()
-		h.sendFn = func(channelID, text string) (string, error) {
-			if attempts.Add(1) == 1 {
-				return "", errors.New("connection reset by peer")
+				if h.sends.Load() != 1 {
+					t.Errorf("expected circuit breaker to stop sends after 403, got %d sends", h.sends.Load())
+				}
+
+			case "transient_heals":
+				var attempts atomic.Int32
+				h := newStatusUpdaterHarness()
+				h.sendFn = func(channelID, text string) (string, error) {
+					if attempts.Add(1) == 1 {
+						return "", errors.New("connection reset by peer")
+					}
+					return "msg-healed", nil
+				}
+
+				updater := NewStatusUpdater(nil, "thread-heals", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "heal_tool", State: "ACTIVE"})
+				updater.flush()
+
+				updater.mu.Lock()
+				isDirty := updater.dirty
+				msgID := updater.statusMessageID
+				updater.mu.Unlock()
+
+				if !isDirty || msgID != "" {
+					t.Errorf("expected dirty=true and msgID='' after transient failure, got dirty=%v msgID=%s", isDirty, msgID)
+				}
+
+				updater.flush()
+
+				updater.mu.Lock()
+				healedID := updater.statusMessageID
+				updater.mu.Unlock()
+
+				if healedID != "msg-healed" {
+					t.Errorf("expected statusMessageID to be msg-healed, got %s", healedID)
+				}
+
+				updater.Stop()
+				updater.DeleteStatusMessage()
+
+			case "reset_retry":
+				h := newStatusUpdaterHarness()
+				updater := NewStatusUpdater(nil, "thread-reset", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "flaky_tool", State: "ACTIVE"})
+				updater.flush()
+
+				updater.Reset()
+
+				select {
+				case <-h.deleteDone:
+				case <-time.After(1 * time.Second):
+					t.Fatal("timed out waiting for reset deleteFunc")
+				}
+
+				if h.deletes.Load() != 1 {
+					t.Errorf("expected 1 delete on Reset, got %d", h.deletes.Load())
+				}
+				updater.Stop()
 			}
-			return "msg-healed", nil
-		}
-
-		updater := NewStatusUpdater(nil, "thread-heals", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "heal_tool", State: "ACTIVE"})
-		updater.flush()
-
-		updater.mu.Lock()
-		isDirty := updater.dirty
-		msgID := updater.statusMessageID
-		updater.mu.Unlock()
-
-		if !isDirty || msgID != "" {
-			t.Errorf("expected dirty=true and msgID='' after transient failure, got dirty=%v msgID=%s", isDirty, msgID)
-		}
-
-		updater.flush()
-
-		updater.mu.Lock()
-		healedID := updater.statusMessageID
-		updater.mu.Unlock()
-
-		if healedID != "msg-healed" {
-			t.Errorf("expected statusMessageID to be msg-healed, got %s", healedID)
-		}
-
-		updater.Stop()
-		updater.DeleteStatusMessage()
-	})
-
-	t.Run("ResetOnRetry", func(t *testing.T) {
-		t.Parallel()
-		h := newStatusUpdaterHarness()
-		updater := NewStatusUpdater(nil, "thread-reset", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "flaky_tool", State: "ACTIVE"})
-		updater.flush()
-
-		updater.Reset()
-
-		select {
-		case <-h.deleteDone:
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for reset deleteFunc")
-		}
-
-		if h.deletes.Load() != 1 {
-			t.Errorf("expected 1 delete on Reset, got %d", h.deletes.Load())
-		}
-		updater.Stop()
-	})
+		})
+	}
 }
 
 func TestStatusUpdater_EventDrivenAndLifecycleEdges(t *testing.T) {
 	t.Parallel()
 
-	t.Run("ImmediateFlushOnToolStart", func(t *testing.T) {
-		t.Parallel()
-		h := newStatusUpdaterHarness()
-		updater := NewStatusUpdater(nil, "thread-immediate", true,
-			h.options(
-				WithStatusInterval(1*time.Hour),
-				WithStatusDebounce(1*time.Hour),
-			)...,
-		)
+	tests := []struct {
+		name     string
+		scenario string
+	}{
+		{name: "ImmediateFlushOnToolStart", scenario: "immediate_flush"},
+		{name: "SequentialToolsLatchOverride", scenario: "latch_override"},
+		{name: "LiveTimerRefreshDuringLongTool", scenario: "live_timer"},
+	}
 
-		updater.HandleStep(&runner.StepUpdateEvent{
-			StepType: "tool_call",
-			ToolName: "grep_search",
-			State:    "RUNNING",
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			switch tc.scenario {
+			case "immediate_flush":
+				h := newStatusUpdaterHarness()
+				updater := NewStatusUpdater(nil, "thread-immediate", true,
+					h.options(
+						WithStatusInterval(1*time.Hour),
+						WithStatusDebounce(1*time.Hour),
+					)...,
+				)
+
+				updater.HandleStep(&runner.StepUpdateEvent{
+					StepType: "tool_call",
+					ToolName: "grep_search",
+					State:    "RUNNING",
+				})
+
+				select {
+				case text := <-h.sendDone:
+					if !strings.Contains(text, "grep_search") {
+						t.Errorf("expected immediate message to mention grep_search, got: %s", text)
+					}
+				case <-time.After(1 * time.Second):
+					t.Fatal("timed out waiting for event-driven immediate flush on tool start")
+				}
+
+				updater.Stop()
+				updater.DeleteStatusMessage()
+
+			case "latch_override":
+				h := newStatusUpdaterHarness()
+				updater := NewStatusUpdater(nil, "thread-seq", true,
+					h.options(
+						WithStatusInterval(1*time.Hour),
+						WithStatusDebounce(0),
+						WithStatusToolLatch(1*time.Hour),
+					)...,
+				)
+
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "ACTIVE"})
+				updater.flush()
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "DONE"})
+
+				updater.mu.Lock()
+				if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_one") {
+					t.Errorf("expected tool_one latched, got %s", txt)
+				}
+				updater.mu.Unlock()
+
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_two", State: "ACTIVE"})
+				updater.mu.Lock()
+				if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_two") {
+					t.Errorf("expected tool_two to override latch, got %s", txt)
+				}
+				if updater.lastCompletedTool != "" {
+					t.Errorf("expected lastCompletedTool cleared, got %s", updater.lastCompletedTool)
+				}
+				updater.mu.Unlock()
+
+				updater.Stop()
+				updater.DeleteStatusMessage()
+
+			case "live_timer":
+				h := newStatusUpdaterHarness()
+				updater := NewStatusUpdater(nil, "thread-timer", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+
+				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "long_tool", State: "ACTIVE"})
+				updater.flush()
+
+				updater.mu.Lock()
+				updater.toolStart = time.Now().Add(-250 * time.Millisecond)
+				updater.mu.Unlock()
+				updater.flush()
+
+				updater.mu.Lock()
+				updater.toolStart = time.Now().Add(-500 * time.Millisecond)
+				updater.mu.Unlock()
+				updater.flush()
+
+				updater.Stop()
+				if h.edits.Load() < 2 {
+					t.Errorf("expected timer to refresh across ticks during long tool, got %d edits", h.edits.Load())
+				}
+			}
 		})
+	}
+}
 
-		select {
-		case text := <-h.sendDone:
-			if !strings.Contains(text, "grep_search") {
-				t.Errorf("expected immediate message to mention grep_search, got: %s", text)
-			}
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for event-driven immediate flush on tool start")
+func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
+	t.Parallel()
+	h := newStatusUpdaterHarness()
+	sendStarted := make(chan struct{})
+	sendRelease := make(chan struct{})
+
+	h.sendFn = func(channelID, text string) (string, error) {
+		h.sends.Add(1)
+		close(sendStarted)
+		<-sendRelease
+		return "msg-slow-send", nil
+	}
+
+	updater := NewStatusUpdater(nil, "thread-zombie", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "slow_tool", State: "ACTIVE"})
+	go updater.flush()
+
+	<-sendStarted
+	updater.DeleteStatusMessage()
+	close(sendRelease)
+
+	select {
+	case msgID := <-h.deleteDone:
+		if msgID != "msg-slow-send" {
+			t.Errorf("expected delete of msg-slow-send, got %s", msgID)
 		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for zombie deleteFunc")
+	}
 
-		updater.Stop()
-		updater.DeleteStatusMessage()
-	})
-
-	t.Run("SequentialToolsLatchOverride", func(t *testing.T) {
-		t.Parallel()
-		h := newStatusUpdaterHarness()
-		updater := NewStatusUpdater(nil, "thread-seq", true,
-			h.options(
-				WithStatusInterval(1*time.Hour),
-				WithStatusDebounce(0),
-				WithStatusToolLatch(1*time.Hour),
-			)...,
-		)
-
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "ACTIVE"})
-		updater.flush()
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "DONE"})
-
-		updater.mu.Lock()
-		if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_one") {
-			t.Errorf("expected tool_one latched, got %s", txt)
-		}
-		updater.mu.Unlock()
-
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_two", State: "ACTIVE"})
-		updater.mu.Lock()
-		if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_two") {
-			t.Errorf("expected tool_two to override latch, got %s", txt)
-		}
-		if updater.lastCompletedTool != "" {
-			t.Errorf("expected lastCompletedTool cleared, got %s", updater.lastCompletedTool)
-		}
-		updater.mu.Unlock()
-
-		updater.Stop()
-		updater.DeleteStatusMessage()
-	})
-
-	t.Run("ZombieLeakPrevention", func(t *testing.T) {
-		t.Parallel()
-		h := newStatusUpdaterHarness()
-		sendStarted := make(chan struct{})
-		sendRelease := make(chan struct{})
-
-		h.sendFn = func(channelID, text string) (string, error) {
-			h.sends.Add(1)
-			close(sendStarted)
-			<-sendRelease
-			return "msg-slow-send", nil
-		}
-
-		updater := NewStatusUpdater(nil, "thread-zombie", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "slow_tool", State: "ACTIVE"})
-		go updater.flush()
-
-		<-sendStarted
-		updater.DeleteStatusMessage()
-		close(sendRelease)
-
-		select {
-		case msgID := <-h.deleteDone:
-			if msgID != "msg-slow-send" {
-				t.Errorf("expected delete of msg-slow-send, got %s", msgID)
-			}
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for zombie deleteFunc")
-		}
-
-		updater.Stop()
-		if h.deletes.Load() != 1 {
-			t.Errorf("expected zombie message deleted, got %d deletes", h.deletes.Load())
-		}
-	})
-
-	t.Run("LiveTimerRefreshDuringLongTool", func(t *testing.T) {
-		t.Parallel()
-		h := newStatusUpdaterHarness()
-		updater := NewStatusUpdater(nil, "thread-timer", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-
-		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "long_tool", State: "ACTIVE"})
-		updater.flush()
-
-		updater.mu.Lock()
-		updater.toolStart = time.Now().Add(-250 * time.Millisecond)
-		updater.mu.Unlock()
-		updater.flush()
-
-		updater.mu.Lock()
-		updater.toolStart = time.Now().Add(-500 * time.Millisecond)
-		updater.mu.Unlock()
-		updater.flush()
-
-		updater.Stop()
-		if h.edits.Load() < 2 {
-			t.Errorf("expected timer to refresh across ticks during long tool, got %d edits", h.edits.Load())
-		}
-	})
+	updater.Stop()
+	if h.deletes.Load() != 1 {
+		t.Errorf("expected zombie message deleted, got %d deletes", h.deletes.Load())
+	}
 }
