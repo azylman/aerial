@@ -2326,6 +2326,7 @@ function openBuildDetailDrawer(buildId) {
 
     if (drawer) drawer.classList.add('active');
     if (overlay) overlay.classList.add('active');
+    if (bodyEl) bodyEl.scrollTop = 0;
 
     let cached = buildsState.cache[buildId];
     if (!cached) {

@@ -1331,6 +1331,31 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
                 TABS.builds.onLeave();
             });
+
+            it('positions diagnostic-drawer near top of viewport and resets scrollTop on openBuildDetailDrawer', () => {
+                const cssCode = fs.readFileSync(path.join(__dirname, 'static', 'style.css'), 'utf8');
+                const drawerMatch = cssCode.match(/\.diagnostic-drawer\s*\{([^}]+)\}/);
+                assert.ok(drawerMatch, '.diagnostic-drawer rule must exist');
+                assert.ok(drawerMatch[1].includes('top: 5vh'), '.diagnostic-drawer must anchor near top of viewport');
+                assert.ok(drawerMatch[1].includes('max-height: 90vh'), '.diagnostic-drawer must allow up to 90vh height');
+                assert.ok(!drawerMatch[1].includes('height: 420px'), '.diagnostic-drawer must not hardcode 420px bottom tray height');
+
+                const bodyEl = { innerHTML: '', scrollTop: 320 };
+                const drawerEl = { classList: { add: () => {} } };
+                const overlayEl = { classList: { add: () => {} } };
+                const titleEl = { textContent: '' };
+                sandbox.document.getElementById = (id) => {
+                    if (id === 'drawer-body') return bodyEl;
+                    if (id === 'diagnostic-drawer') return drawerEl;
+                    if (id === 'drawer-overlay') return overlayEl;
+                    if (id === 'drawer-service-name') return titleEl;
+                    return null;
+                };
+                sandbox.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ build: { id: 'b-top' }, chunks: [] }) });
+
+                sandbox.openBuildDetailDrawer('b-top');
+                assert.equal(bodyEl.scrollTop, 0, 'openBuildDetailDrawer should reset drawer-body scrollTop to 0');
+            });
         });
     });
 
