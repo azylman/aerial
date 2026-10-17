@@ -3742,7 +3742,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("variable tag injection and legacy restart fallbacks", func(t *testing.T) {
+	t.Run("image ready execution cases", func(t *testing.T) {
 		routerHCL := `variable "image_tag" {
 			type    = string
 			default = "latest"
@@ -3757,260 +3757,271 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) {
 				}
 			}
 		}`
-
-		// Case 1: CommitSHA provided -> injected into -var=image_tag
-		t.Run("commit SHA variable injection", func(t *testing.T) {
-			env := newImageReadyTestEnv(t)
-			routerPath := env.writeJob("jobs", "router.nomad", routerHCL)
-
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image:     "ghcr.io/azylman/aerial-webhooks-router:latest",
-				Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-				Repo:      "azylman/aerial",
-				CommitSHA: "sha12345",
-				PRNumber:  615,
-				TargetID:  "discord_thread_999",
-			})
-			if code != http.StatusOK || resp.Status != "accepted" {
-				t.Fatalf("expected 200 accepted, got %d (%+v)", code, resp)
-			}
-			runs := env.getRunCalls()
-			if len(runs) != 1 {
-				t.Fatalf("expected 1 run call, got %v", runs)
-			}
-			want := "job run -detach -var=image_tag=sha12345 " + routerPath
-			if runs[0] != want {
-				t.Errorf("got run call %q, want %q", runs[0], want)
-			}
-			if len(env.getRestartCalls()) > 0 {
-				t.Errorf("job restart should not be called for parameterized job")
-			}
-		})
-
-		// Case 2: Digest fallback when CommitSHA is empty
-		t.Run("digest fallback variable injection", func(t *testing.T) {
-			env := newImageReadyTestEnv(t)
-			env.writeJob("jobs", "router.nomad", routerHCL)
-
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
-				Digest:   "@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-				Repo:     "azylman/aerial",
-				PRNumber: 615,
-			})
-			if code != http.StatusOK || resp.Status != "accepted" {
-				t.Fatalf("expected 200 accepted for digest fallback, got %d (%+v)", code, resp)
-			}
-			runs := env.getRunCalls()
-			wantArg := "-var=image_tag=latest@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-			if len(runs) == 0 || !strings.Contains(runs[0], wantArg) {
-				t.Errorf("expected args to contain %q, got %v", wantArg, runs)
-			}
-		})
-
-		// Case 3: Unparameterized legacy job triggers restart fallback
-		t.Run("unparameterized legacy job triggers restart", func(t *testing.T) {
-			env := newImageReadyTestEnv(t)
-			env.writeJob("jobs", "legacy.nomad", `job "legacy" {
-				task "legacy" {
-					config {
-						image = "ghcr.io/azylman/legacy-app:latest"
-					}
-				}
-			}`)
-
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image:     "ghcr.io/azylman/legacy-app:latest",
-				CommitSHA: "legacy123",
-			})
-			if code != http.StatusOK || resp.Status != "accepted" {
-				t.Fatalf("expected 200 accepted for legacy app, got %d (%+v)", code, resp)
-			}
-			restarts := env.getRestartCalls()
-			if len(restarts) != 1 || restarts[0] != "legacy" {
-				t.Fatalf("expected restart for legacy job, got %v", restarts)
-			}
-			runs := env.getRunCalls()
-			for _, r := range runs {
-				if strings.Contains(r, "-var=image_tag=") {
-					t.Fatalf("expected no -var=image_tag for unparameterized job, got %v", runs)
+		legacyHCL := `job "legacy" {
+			task "legacy" {
+				config {
+					image = "ghcr.io/azylman/legacy-app:latest"
 				}
 			}
-		})
+		}`
 
-		// Case 4: Empty CommitSHA and empty Digest falls back to latest when remote digest 404s
-		t.Run("empty sha and digest fallback to latest", func(t *testing.T) {
-			env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
-				cfg.RegistryClient = &http.Client{
-					Transport: &roundTripperFunc{
-						fn: func(req *http.Request) (*http.Response, error) {
-							return &http.Response{
-								StatusCode: http.StatusNotFound,
-								Header:     make(http.Header),
-								Body:       ioNopCloser(strings.NewReader("not found")),
-							}, nil
+		type imageReadyCase struct {
+			name       string
+			jobFile    string
+			jobHCL     string
+			req        ImageReadyEventRequest
+			valErr     error
+			runErr     error
+			restartErr error
+			setup      func(env *imageReadyTestEnv, jobPath string)
+			wantCode   int
+			wantStatus string
+			wantRuns   int
+			wantRests  int
+			wantRunArg string
+		}
+
+		cases := []imageReadyCase{
+			{
+				name:    "commit SHA variable injection",
+				jobFile: "router.nomad",
+				jobHCL:  routerHCL,
+				req: ImageReadyEventRequest{
+					Image:     "ghcr.io/azylman/aerial-webhooks-router:latest",
+					Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+					Repo:      "azylman/aerial",
+					CommitSHA: "sha12345",
+					PRNumber:  615,
+					TargetID:  "discord_thread_999",
+				},
+				wantCode:   http.StatusOK,
+				wantStatus: "accepted",
+				wantRuns:   1,
+				wantRests:  0,
+				wantRunArg: "job run -detach -var=image_tag=sha12345 ",
+			},
+			{
+				name:    "digest fallback variable injection",
+				jobFile: "router.nomad",
+				jobHCL:  routerHCL,
+				req: ImageReadyEventRequest{
+					Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
+					Digest:   "@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+					Repo:     "azylman/aerial",
+					PRNumber: 615,
+				},
+				wantCode:   http.StatusOK,
+				wantStatus: "accepted",
+				wantRuns:   1,
+				wantRests:  0,
+				wantRunArg: "-var=image_tag=latest@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			},
+			{
+				name:    "unparameterized legacy job triggers restart",
+				jobFile: "legacy.nomad",
+				jobHCL:  legacyHCL,
+				req: ImageReadyEventRequest{
+					Image:     "ghcr.io/azylman/legacy-app:latest",
+					CommitSHA: "legacy123",
+				},
+				wantCode:   http.StatusOK,
+				wantStatus: "accepted",
+				wantRuns:   1,
+				wantRests:  1,
+			},
+			{
+				name:    "empty sha and digest fallback to latest",
+				jobFile: "router.nomad",
+				jobHCL:  routerHCL,
+				req: ImageReadyEventRequest{
+					Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
+					Repo:     "azylman/aerial",
+					PRNumber: 615,
+				},
+				setup: func(env *imageReadyTestEnv, jobPath string) {
+					env.daemon.registryClient = &http.Client{
+						Transport: &roundTripperFunc{
+							fn: func(req *http.Request) (*http.Response, error) {
+								return &http.Response{
+									StatusCode: http.StatusNotFound,
+									Header:     make(http.Header),
+									Body:       ioNopCloser(strings.NewReader("not found")),
+								}, nil
+							},
 						},
-					},
-				}
-			})
-			env.writeJob("jobs", "router.nomad", routerHCL)
-
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
-				Repo:     "azylman/aerial",
-				PRNumber: 615,
-			})
-			if code != http.StatusOK || resp.Status != "accepted" {
-				t.Fatalf("expected 200 accepted for empty sha/digest fallback, got %d (%+v)", code, resp)
-			}
-			runs := env.getRunCalls()
-			wantArg := "-var=image_tag=latest"
-			if len(runs) == 0 || !strings.Contains(runs[0], wantArg) {
-				t.Fatalf("expected args to contain %q, got %v", wantArg, runs)
-			}
-		})
-
-		// Case 5: Digest without sha256: prefix gets normalized
-		t.Run("digest prefix normalization", func(t *testing.T) {
-			env := newImageReadyTestEnv(t)
-			env.writeJob("jobs", "router.nomad", routerHCL)
-
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image:  "ghcr.io/azylman/aerial-webhooks-router:latest",
-				Digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-				Repo:   "azylman/aerial",
-			})
-			if code != http.StatusOK || resp.Status != "accepted" {
-				t.Fatalf("expected 200 accepted for unadorned digest, got %d (%+v)", code, resp)
-			}
-			runs := env.getRunCalls()
-			wantArg := "-var=image_tag=latest@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-			if len(runs) == 0 || !strings.Contains(runs[0], wantArg) {
-				t.Fatalf("expected args to contain %q with prepended sha256, got %v", wantArg, runs)
-			}
-		})
-
-		// Case 6: Unparameterized legacy job with restart warning succeeds
-		t.Run("unparameterized restart warning succeeds", func(t *testing.T) {
-			env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
-				cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					if len(args) >= 2 && args[0] == "job" && args[1] == "restart" {
-						return nil, []byte("restart failed warning"), errors.New("exit status 1")
 					}
-					return []byte("OK"), nil, nil
-				}
-			})
-			env.writeJob("jobs", "legacy.nomad", `job "legacy" { task "t" { config { image = "ghcr.io/azylman/legacy-app:latest" } } }`)
-
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image: "ghcr.io/azylman/legacy-app:latest",
-			})
-			if code != http.StatusOK || resp.Status != "accepted" {
-				t.Fatalf("expected 200 accepted even if restart fails warning, got %d (%+v)", code, resp)
-			}
-		})
-	})
-
-	t.Run("validation errors, read errors and execution failure propagation", func(t *testing.T) {
-		// 1. Validation failure on job
-		t.Run("validation failure returns 500", func(t *testing.T) {
-			env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
-				cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
-						return nil, []byte("syntax error in HCL"), errors.New("validate failed")
+				},
+				wantCode:   http.StatusOK,
+				wantStatus: "accepted",
+				wantRuns:   1,
+				wantRests:  0,
+				wantRunArg: "-var=image_tag=latest",
+			},
+			{
+				name:    "digest prefix normalization",
+				jobFile: "router.nomad",
+				jobHCL:  routerHCL,
+				req: ImageReadyEventRequest{
+					Image:  "ghcr.io/azylman/aerial-webhooks-router:latest",
+					Digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+					Repo:   "azylman/aerial",
+				},
+				wantCode:   http.StatusOK,
+				wantStatus: "accepted",
+				wantRuns:   1,
+				wantRests:  0,
+				wantRunArg: "-var=image_tag=latest@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			},
+			{
+				name:    "unparameterized restart warning succeeds",
+				jobFile: "legacy.nomad",
+				jobHCL:  legacyHCL,
+				req: ImageReadyEventRequest{
+					Image: "ghcr.io/azylman/legacy-app:latest",
+				},
+				restartErr: errors.New("exit status 1"),
+				wantCode:   http.StatusOK,
+				wantStatus: "accepted",
+				wantRuns:   1,
+				wantRests:  1,
+			},
+			{
+				name:    "validation failure returns 500",
+				jobFile: "val-fail.nomad",
+				jobHCL:  `job "val-fail" { task "t" { config { image = "ghcr.io/azylman/val-fail:latest" } } }`,
+				req: ImageReadyEventRequest{
+					Image: "ghcr.io/azylman/val-fail:latest",
+				},
+				valErr:     errors.New("validate failed"),
+				wantCode:   http.StatusInternalServerError,
+				wantStatus: "error",
+				wantRuns:   0,
+				wantRests:  0,
+			},
+			{
+				name:    "mid-flight file removal triggers read error",
+				jobFile: "read-fail.nomad",
+				jobHCL:  `job "read-fail" { task "t" { config { image = "ghcr.io/azylman/read-fail:latest" } } }`,
+				req: ImageReadyEventRequest{
+					Image: "ghcr.io/azylman/read-fail:latest",
+				},
+				setup: func(env *imageReadyTestEnv, jobPath string) {
+					env.daemon.registryClient = &http.Client{
+						Transport: &roundTripperFunc{
+							fn: func(req *http.Request) (*http.Response, error) {
+								if jobPath != "" {
+									_ = os.Remove(jobPath)
+								}
+								return &http.Response{
+									StatusCode: http.StatusOK,
+									Header:     make(http.Header),
+									Body:       ioNopCloser(strings.NewReader(`{"token":"abc"}`)),
+								}, nil
+							},
+						},
 					}
-					return []byte("OK"), nil, nil
-				}
-			})
-			env.writeJob("jobs", "val-fail.nomad", `job "val-fail" { task "t" { config { image = "ghcr.io/azylman/val-fail:latest" } } }`)
+				},
+				wantCode:   http.StatusInternalServerError,
+				wantStatus: "error",
+				wantRuns:   0,
+				wantRests:  0,
+			},
+			{
+				name:    "nomad job run error dispatches deploy_failed",
+				jobFile: "failing.nomad",
+				jobHCL:  `job "failing-job" { task "t" { config { image = "ghcr.io/azylman/aerial-broken:latest" } } }`,
+				req: ImageReadyEventRequest{
+					Image:     "ghcr.io/azylman/aerial-broken:latest",
+					Digest:    "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+					Repo:      "azylman/aerial",
+					CommitSHA: "broken_sha",
+					PRNumber:  999,
+					TargetID:  "thread_broken",
+				},
+				runErr:     errors.New("exit status 1"),
+				wantCode:   http.StatusInternalServerError,
+				wantStatus: "error",
+				wantRuns:   1,
+				wantRests:  0,
+			},
+		}
 
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image: "ghcr.io/azylman/val-fail:latest",
-			})
-			if code != http.StatusInternalServerError || resp.Status != "error" {
-				t.Fatalf("expected 500 error on validation failure, got %d (%+v)", code, resp)
-			}
-			if !strings.Contains(resp.Message, "validation failed") {
-				t.Errorf("expected validation failed in message, got %q", resp.Message)
-			}
-		})
-
-		// 2. Mid-flight os.Remove inside RegistryClient triggers read error
-		t.Run("mid-flight file removal triggers read error", func(t *testing.T) {
-			var jobPath string
-			env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
-				cfg.RegistryClient = &http.Client{
-					Transport: &roundTripperFunc{
-						fn: func(req *http.Request) (*http.Response, error) {
-							// Remove the job file before the loop reads it!
-							if jobPath != "" {
-								_ = os.Remove(jobPath)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var env *imageReadyTestEnv
+				env = newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
+					cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+						if len(args) >= 2 && args[0] == "job" {
+							switch args[1] {
+							case "validate":
+								if tc.valErr != nil {
+									return nil, []byte("syntax error in HCL"), tc.valErr
+								}
+								return []byte("OK"), nil, nil
+							case "run":
+								env.runMu.Lock()
+								env.runCalls = append(env.runCalls, strings.Join(args, " "))
+								env.runMu.Unlock()
+								if tc.runErr != nil {
+									return nil, []byte("Nomad agent connection refused"), tc.runErr
+								}
+								return []byte("Evaluation ID: eval-success-123"), nil, nil
+							case "restart":
+								env.restartMu.Lock()
+								if len(args) >= 3 {
+									env.restarts = append(env.restarts, args[len(args)-1])
+								}
+								env.restartMu.Unlock()
+								if tc.restartErr != nil {
+									return nil, []byte("restart failed warning"), tc.restartErr
+								}
+								return []byte("Restart triggered"), nil, nil
 							}
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Header:     make(http.Header),
-								Body:       ioNopCloser(strings.NewReader(`{"token":"abc"}`)),
-							}, nil
-						},
-					},
-				}
-			})
-			jobPath = env.writeJob("jobs", "read-fail.nomad", `job "read-fail" { task "t" { config { image = "ghcr.io/azylman/read-fail:latest" } } }`)
-
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image: "ghcr.io/azylman/read-fail:latest",
-			})
-			if code != http.StatusInternalServerError || resp.Status != "error" {
-				t.Fatalf("expected 500 error on read failure, got %d (%+v)", code, resp)
-			}
-			if !strings.Contains(resp.Message, "read error") {
-				t.Errorf("expected read error in message, got %q", resp.Message)
-			}
-		})
-
-		// 3. Nomad job run non-zero exit code emits deploy_failed
-		t.Run("nomad job run error dispatches deploy_failed", func(t *testing.T) {
-			env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
-				cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-						return nil, []byte("Nomad agent connection refused"), errors.New("exit status 1")
+						}
+						return []byte("OK"), nil, nil
 					}
-					return []byte("OK"), nil, nil
+				})
+				jobPath := env.writeJob("jobs", tc.jobFile, tc.jobHCL)
+				if tc.setup != nil {
+					tc.setup(env, jobPath)
 				}
-			})
-			env.writeJob("jobs", "failing.nomad", `job "failing-job" { task "t" { config { image = "ghcr.io/azylman/aerial-broken:latest" } } }`)
 
-			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
-				Image:     "ghcr.io/azylman/aerial-broken:latest",
-				Digest:    "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
-				Repo:      "azylman/aerial",
-				CommitSHA: "broken_sha",
-				PRNumber:  999,
-				TargetID:  "thread_broken",
-			})
-			if code != http.StatusInternalServerError || resp.Status != "error" {
-				t.Fatalf("expected 500 error when nomad job run fails, got %d (%+v)", code, resp)
-			}
-			if len(resp.MatchedJobs) != 0 {
-				t.Errorf("expected 0 applied matched jobs on failure, got %v", resp.MatchedJobs)
-			}
-
-			var sawFailed bool
-			deadline := time.After(2 * time.Second)
-			for !sawFailed {
-				select {
-				case evt := <-env.evtCh:
-					if evt.Event == "deploy_failed" {
-						sawFailed = true
-						if evt.Repo != "azylman/aerial" || evt.CommitSHA != "broken_sha" || evt.PRNumber != 999 || evt.TargetID != "thread_broken" {
-							t.Errorf("metadata missing in deploy_failed event: %+v", evt)
+				resp, code := env.daemon.ExecuteImageReadyEvent(ctx, tc.req)
+				if code != tc.wantCode || resp.Status != tc.wantStatus {
+					t.Fatalf("expected code %d status %q, got code %d status %q (%+v)", tc.wantCode, tc.wantStatus, code, resp.Status, resp)
+				}
+				runs := env.getRunCalls()
+				if len(runs) != tc.wantRuns {
+					t.Errorf("expected %d runs, got %d (%v)", tc.wantRuns, len(runs), runs)
+				}
+				if tc.wantRunArg != "" {
+					if len(runs) == 0 || !strings.Contains(runs[0], tc.wantRunArg) {
+						t.Errorf("expected run call to contain %q, got %v", tc.wantRunArg, runs)
+					}
+				}
+				restarts := env.getRestartCalls()
+				if len(restarts) != tc.wantRests {
+					t.Errorf("expected %d restarts, got %d (%v)", tc.wantRests, len(restarts), restarts)
+				}
+				if tc.runErr != nil {
+					var sawFailed bool
+					deadline := time.After(2 * time.Second)
+					for !sawFailed {
+						select {
+						case evt := <-env.evtCh:
+							if evt.Event == "deploy_failed" {
+								sawFailed = true
+								if evt.Repo != "azylman/aerial" || evt.CommitSHA != "broken_sha" || evt.PRNumber != 999 || evt.TargetID != "thread_broken" {
+									t.Errorf("metadata missing in deploy_failed event: %+v", evt)
+								}
+							}
+						case <-deadline:
+							t.Fatal("timed out waiting for deploy_failed")
 						}
 					}
-				case <-deadline:
-					t.Fatalf("timed out waiting for deploy_failed event")
 				}
-			}
-		})
+			})
+		}
 	})
 
 	t.Run("core composeDir matching and digest caching", func(t *testing.T) {
@@ -4042,10 +4053,6 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	_ = context.Background()
 
 	t.Run("enqueue image ready event validation and queueing", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		jobsDir := filepath.Join(tmpDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-
 		jobContent := `job "debounced-test" {
 			group "debounced-test" {
 				task "debounced-test" {
@@ -4056,13 +4063,9 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 				}
 			}
 		}`
-		_ = os.WriteFile(filepath.Join(jobsDir, "debounced-test.nomad"), []byte(jobContent), 0644)
-
-		d := NewDaemon(DaemonConfig{
-			Repos:      []string{tmpDir},
-			ComposeDir: tmpDir,
-			ConfigDir:  tmpDir,
-		})
+		env := newImageReadyTestEnv(t)
+		env.writeJob("jobs", "debounced-test.nomad", jobContent)
+		d := env.daemon
 
 		// 1. Missing image -> 400
 		respEmpty, codeEmpty := d.EnqueueImageReadyEvent(ImageReadyEventRequest{})
@@ -4108,45 +4111,36 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		loopCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		tmpDir := t.TempDir()
-		jobsDir := filepath.Join(tmpDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-
-		_ = os.WriteFile(filepath.Join(jobsDir, "service-a.nomad"), []byte(`job "service-a" { task "a" { config { image = "ghcr.io/azylman/service-a:latest" } } }`), 0644)
-		_ = os.WriteFile(filepath.Join(jobsDir, "service-b.nomad"), []byte(`job "service-b" { task "b" { config { image = "ghcr.io/azylman/service-b:latest" } } }`), 0644)
-
 		runSignal := make(chan string, 10)
-		mockRegistryClient := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					header := make(http.Header)
-					header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     header,
-						Body:       ioNopCloser(strings.NewReader("")),
-					}, nil
+		env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.RegistryClient = &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						header := make(http.Header)
+						header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					},
 				},
-			},
-		}
-
-		d := NewDaemon(DaemonConfig{
-			Repos:          []string{tmpDir},
-			ComposeDir:     tmpDir,
-			ConfigDir:      tmpDir,
-			RegistryClient: mockRegistryClient,
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-					call := strings.Join(args, " ")
 					select {
-					case runSignal <- call:
+					case runSignal <- strings.Join(args, " "):
 					default:
 					}
 				}
 				return []byte("OK"), nil, nil
-			},
+			}
 		})
 
+		env.writeJob("jobs", "service-a.nomad", `job "service-a" { task "a" { config { image = "ghcr.io/azylman/service-a:latest" } } }`)
+		env.writeJob("jobs", "service-b.nomad", `job "service-b" { task "b" { config { image = "ghcr.io/azylman/service-b:latest" } } }`)
+
+		d := env.daemon
 		d.imageRolloutDebounce = 20 * time.Millisecond
 		d.StartImageRolloutLoop(loopCtx)
 
@@ -4197,41 +4191,35 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		loopCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		tmpDir := t.TempDir()
-		jobsDir := filepath.Join(tmpDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-
-		_ = os.WriteFile(filepath.Join(jobsDir, "service-panic.nomad"), []byte(`job "service-panic" { task "p" { config { image = "ghcr.io/azylman/service-panic:latest" } } }`), 0644)
-
 		var runCount int
 		var runMu sync.Mutex
+		panickedCh := make(chan struct{}, 1)
 		recoveredCh := make(chan struct{}, 2)
 
-		mockRegistryClient := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					header := make(http.Header)
-					header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     header,
-						Body:       ioNopCloser(strings.NewReader("")),
-					}, nil
+		env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.RegistryClient = &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						header := make(http.Header)
+						header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					},
 				},
-			},
-		}
-
-		d := NewDaemon(DaemonConfig{
-			Repos:          []string{tmpDir},
-			ComposeDir:     tmpDir,
-			ConfigDir:      tmpDir,
-			RegistryClient: mockRegistryClient,
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				runMu.Lock()
 				runCount++
 				count := runCount
 				runMu.Unlock()
 				if count == 1 {
+					select {
+					case panickedCh <- struct{}{}:
+					default:
+					}
 					panic("simulated panic in rollout executor")
 				}
 				select {
@@ -4239,9 +4227,12 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 				default:
 				}
 				return []byte("OK"), nil, nil
-			},
+			}
 		})
 
+		env.writeJob("jobs", "service-panic.nomad", `job "service-panic" { task "p" { config { image = "ghcr.io/azylman/service-panic:latest" } } }`)
+
+		d := env.daemon
 		d.imageRolloutDebounce = 10 * time.Millisecond
 		d.StartImageRolloutLoop(loopCtx)
 
@@ -4254,8 +4245,12 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 			t.Fatalf("expected 202, got %d", code1)
 		}
 
-		// Wait briefly for debounce timer to fire first panic
-		<-time.After(25 * time.Millisecond)
+		// Wait deterministically for debounce timer to fire and worker to panic
+		select {
+		case <-panickedCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for first rollout panic")
+		}
 
 		// Second event tests that loop survived panic and executes successfully
 		_, code2 := d.EnqueueImageReadyEvent(ImageReadyEventRequest{
@@ -4282,34 +4277,24 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	})
 
 	t.Run("execute pending rollouts branches and hangar-last ordering", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		jobsDir := filepath.Join(tmpDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-
-		_ = os.WriteFile(filepath.Join(jobsDir, "hangar.nomad"), []byte(`job "hangar" { task "h" { config { image = "ghcr.io/azylman/aerial-hangar:latest" } } }`), 0644)
-		_ = os.WriteFile(filepath.Join(jobsDir, "webhooks-router.nomad"), []byte(`job "webhooks-router" { task "r" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } }`), 0644)
-
 		var mu sync.Mutex
 		var executedJobs []string
 
-		mockRegistryClient := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					header := make(http.Header)
-					header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     header,
-						Body:       ioNopCloser(strings.NewReader("")),
-					}, nil
+		env := newImageReadyTestEnv(t, func(cfg *DaemonConfig) {
+			cfg.RegistryClient = &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						header := make(http.Header)
+						header.Set("Docker-Content-Digest", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					},
 				},
-			},
-		}
-
-		d := NewDaemon(DaemonConfig{
-			ConfigDir:      tmpDir,
-			RegistryClient: mockRegistryClient,
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
 					jobPath := args[len(args)-1]
 					body, _ := os.ReadFile(jobPath)
@@ -4319,8 +4304,13 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 					mu.Unlock()
 				}
 				return []byte("Evaluation ID: 12345"), nil, nil
-			},
+			}
 		})
+
+		env.writeJob("jobs", "hangar.nomad", `job "hangar" { task "h" { config { image = "ghcr.io/azylman/aerial-hangar:latest" } } }`)
+		env.writeJob("jobs", "webhooks-router.nomad", `job "webhooks-router" { task "r" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } }`)
+
+		d := env.daemon
 
 		// 1. Empty rollouts (immediate return)
 		d.executePendingImageRollouts(context.Background())
@@ -4364,78 +4354,6 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		}
 		if executedJobs[0] != "webhooks-router" || executedJobs[1] != "hangar" {
 			t.Fatalf("expected webhooks-router first and hangar last, got %v", executedJobs)
-		}
-	})
-
-	t.Run("handle image ready event caches digest and emits deploy_started", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		jobsDir := filepath.Join(tmpDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-
-		_ = os.WriteFile(filepath.Join(jobsDir, "test-caching.nomad"), []byte(`job "test-caching" {
-			task "test-caching" {
-				driver = "docker"
-				config {
-					image = "ghcr.io/azylman/test-caching:latest"
-				}
-			}
-		}`), 0644)
-
-		expectedDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-		evtCh := make(chan HangarDeployEvent, 10)
-
-		mockRegistryClient := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					header := make(http.Header)
-					header.Set("Docker-Content-Digest", expectedDigest)
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     header,
-						Body:       ioNopCloser(strings.NewReader("")),
-					}, nil
-				},
-			},
-		}
-
-		d := NewDaemon(DaemonConfig{
-			ConfigDir:      tmpDir,
-			RegistryClient: mockRegistryClient,
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-				return []byte("Evaluation ID: 12345"), nil, nil
-			},
-			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-				if evt.Event == "deploy_started" {
-					evtCh <- evt
-				}
-				return nil
-			},
-		})
-
-		_, code := d.ExecuteImageReadyEvent(context.Background(), ImageReadyEventRequest{
-			Image:     "ghcr.io/azylman/test-caching:latest",
-			Repo:      "azylman/aerial",
-			CommitSHA: "testsha",
-			PRNumber:  123,
-		})
-		if code != http.StatusOK {
-			t.Fatalf("expected HTTP 200 from ExecuteImageReadyEvent, got %d", code)
-		}
-
-		d.nomadMu.Lock()
-		cachedDigest := d.nomadKnownDigests["test-caching:ghcr.io/azylman/test-caching:latest"]
-		d.nomadMu.Unlock()
-		if cachedDigest != expectedDigest {
-			t.Errorf("expected cached digest %q, got %q", expectedDigest, cachedDigest)
-		}
-
-		select {
-		case dispatchedEvt := <-evtCh:
-			if dispatchedEvt.Digest != expectedDigest {
-				t.Errorf("expected dispatched event digest %q, got %q", expectedDigest, dispatchedEvt.Digest)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for deploy_started event dispatch")
 		}
 	})
 }
@@ -4910,12 +4828,6 @@ func TestNomadChangeDetection_TableDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("ParseNomadGitStatus_whitespace_and_entries", func(t *testing.T) {
-		changes := ParseNomadGitStatus("\n\n   \n\t\nM jobs/app.nomad\nD jobs/old.nomad\n")
-		if len(changes) != 2 || changes[0].JobName != "app" || changes[0].Action != "apply" || changes[1].JobName != "old" || changes[1].Action != "delete" {
-			t.Fatalf("unexpected ParseNomadGitStatus result: %+v", changes)
-		}
-	})
 }
 
 func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
@@ -5108,6 +5020,14 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 	})
 }
 
+func newNomadReconcileDaemon(opts ...func(*DaemonConfig)) *SyncDaemon {
+	cfg := DaemonConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return NewDaemon(cfg)
+}
+
 func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 
 	t.Run("ValidateNomadJob_hermetic", func(t *testing.T) {
@@ -5118,122 +5038,22 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		dSuccess := NewDaemon(DaemonConfig{
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		dSuccess := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				return []byte("Job validation successful\n"), nil, nil
-			},
+			}
 		})
 		if err := dSuccess.ValidateNomadJob(ctx, jobFile); err != nil {
 			t.Fatalf("expected ValidateNomadJob success: %v", err)
 		}
 
-		dFail := NewDaemon(DaemonConfig{
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		dFail := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				return nil, []byte("syntax error"), errors.New("exit 1")
-			},
+			}
 		})
 		if err := dFail.ValidateNomadJob(ctx, filepath.Join(tmpDir, "invalid.nomad")); err == nil {
 			t.Fatal("expected ValidateNomadJob error, got nil")
-		}
-	})
-
-	t.Run("applyNomadChangesDirectly_branches", func(t *testing.T) {
-		ctx := context.Background()
-		tmpDir := t.TempDir()
-		validJobPath := filepath.Join(tmpDir, "jobs", "test.nomad")
-		if err := os.MkdirAll(filepath.Dir(validJobPath), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(validJobPath, []byte(`job "test" {}`), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		tests := []struct {
-			name        string
-			changes     []NomadFileChange
-			nomadExec   NomadExecutor
-			wantApplied []string
-			wantErr     bool
-		}{
-			{
-				name:    "delete action with stop error and success",
-				changes: []NomadFileChange{{Action: "delete", JobName: "del", Path: "jobs/del.nomad"}},
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					return nil, []byte("stop error"), errors.New("stop fail")
-				},
-				wantApplied: nil,
-			},
-			{
-				name:        "unsafe job path is ignored",
-				changes:     []NomadFileChange{{Action: "update", JobName: "evil", Path: "../evil.nomad"}},
-				wantApplied: nil,
-			},
-			{
-				name:    "validation error returns error",
-				changes: []NomadFileChange{{Action: "update", JobName: "test", Path: "jobs/test.nomad"}},
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
-						return nil, []byte("invalid"), errors.New("val fail")
-					}
-					return []byte("ok"), nil, nil
-				},
-				wantErr: true,
-			},
-			{
-				name:    "run error returns error",
-				changes: []NomadFileChange{{Action: "update", JobName: "test", Path: "jobs/test.nomad"}},
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-						return nil, []byte("run error"), errors.New("run fail")
-					}
-					return []byte("ok"), nil, nil
-				},
-				wantErr: true,
-			},
-			{
-				name:    "success applies job",
-				changes: []NomadFileChange{{Action: "update", JobName: "test", Path: "jobs/test.nomad"}},
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					return []byte("Evaluation ID: eval-123"), nil, nil
-				},
-				wantApplied: []string{"test"},
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				d := &SyncDaemon{nomadExecutor: tc.nomadExec}
-				applied, err := d.applyNomadChangesDirectly(ctx, tmpDir, tc.changes)
-				if (err != nil) != tc.wantErr || len(applied) != len(tc.wantApplied) {
-					t.Fatalf("applyNomadChangesDirectly() = (%v, %v), want (%v, wantErr:%v)", applied, err, tc.wantApplied, tc.wantErr)
-				}
-			})
-		}
-
-		// Metadata propagation branch
-		evtCh := make(chan HangarDeployEvent, 1)
-		dMeta := &SyncDaemon{
-			nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-				return []byte("Evaluation ID: eval-123"), nil, nil
-			},
-			deployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-				evtCh <- evt
-				return nil
-			},
-		}
-		applied, err := dMeta.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
-			{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
-		}, "azylman/aerial", "headsha123", "1555422677936644147", "123")
-		if err != nil || len(applied) != 1 || applied[0] != "test" {
-			t.Fatalf("applyNomadChangesDirectly with metadata failed: %v, %v", applied, err)
-		}
-		select {
-		case evt := <-evtCh:
-			if evt.PRNumber != 123 || evt.TargetID != "1555422677936644147" || evt.Repo != "azylman/aerial" || evt.CommitSHA != "headsha123" {
-				t.Fatalf("unexpected metadata: %+v", evt)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for deploy event")
 		}
 	})
 
@@ -5253,8 +5073,8 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 
 		var executedCalls [][]string
 		var mu sync.Mutex
-		dReconcile := NewDaemon(DaemonConfig{
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		dReconcile := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				mu.Lock()
 				executedCalls = append(executedCalls, args)
 				mu.Unlock()
@@ -5277,7 +5097,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 					return []byte("stopped"), nil, nil
 				}
 				return nil, nil, nil
-			},
+			}
 		})
 
 		// Empty changes
@@ -5295,6 +5115,13 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		_ = dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
 			{JobName: "missing", Path: "jobs/missing.nomad", Action: "apply"},
 		})
+
+		// Unsafe job path is ignored without error
+		if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
+			{JobName: "evil", Path: "../evil.nomad", Action: "update"},
+		}); err != nil {
+			t.Fatalf("expected nil for unsafe path ignored: %v", err)
+		}
 
 		// Apply change validation failure
 		if err := dReconcile.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
@@ -5341,17 +5168,42 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		if !foundStop || !foundRun || stopIdx > runIdx {
 			t.Fatalf("expected teardown before run, stopIdx=%d, runIdx=%d, stop=%v, run=%v", stopIdx, runIdx, foundStop, foundRun)
 		}
+
+		// Metadata propagation check
+		evtCh := make(chan HangarDeployEvent, 1)
+		dMeta := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				return []byte("Evaluation ID: eval-123"), nil, nil
+			}
+			cfg.DeployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
+				evtCh <- evt
+				return nil
+			}
+		})
+		if err := dMeta.ReconcileNomadChanges(ctx, tmpDir, []NomadFileChange{
+			{Action: "update", JobName: "valid", Path: "jobs/valid.nomad"},
+		}, "azylman/aerial", "headsha123", "1555422677936644147", "123"); err != nil {
+			t.Fatalf("ReconcileNomadChanges with metadata failed: %v", err)
+		}
+		select {
+		case evt := <-evtCh:
+			if evt.PRNumber != 123 || evt.TargetID != "1555422677936644147" || evt.Repo != "azylman/aerial" || evt.CommitSHA != "headsha123" {
+				t.Fatalf("unexpected metadata: %+v", evt)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for deploy event")
+		}
 	})
 
 	t.Run("ExecuteNomadTeardowns_and_cross_repo_purge_protection", func(t *testing.T) {
 		ctx := context.Background()
-		dBasic := NewDaemon(DaemonConfig{})
+		dBasic := newNomadReconcileDaemon()
 		dBasic.ExecuteNomadTeardowns(ctx, nil)
 
 		var stoppedJobs []string
 		var mu sync.Mutex
-		dTeardown := NewDaemon(DaemonConfig{
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		dTeardown := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				mu.Lock()
 				defer mu.Unlock()
 				if len(args) >= 4 && args[0] == "job" && args[1] == "stop" {
@@ -5362,7 +5214,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 					return []byte("ok"), nil, nil
 				}
 				return nil, nil, nil
-			},
+			}
 		})
 		dTeardown.ExecuteNomadTeardowns(ctx, []NomadChangeEvent{
 			{
@@ -5400,18 +5252,18 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		stoppedJobs = nil
 		mu.Unlock()
 
-		dCross := NewDaemon(DaemonConfig{
-			Repos:      []string{repoA, repoB},
-			ConfigDir:  repoA,
-			ComposeDir: repoB,
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		dCross := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.Repos = []string{repoA, repoB}
+			cfg.ConfigDir = repoA
+			cfg.ComposeDir = repoB
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				mu.Lock()
 				defer mu.Unlock()
 				if len(args) >= 3 && args[0] == "job" && args[1] == "stop" {
 					stoppedJobs = append(stoppedJobs, args[len(args)-1])
 				}
 				return []byte("OK"), nil, nil
-			},
+			}
 		})
 
 		// Job brain deleted in repoA, but exists in repoB -> should NOT be stopped
@@ -5461,7 +5313,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		ctx := context.Background()
 
 		// 1. Empty queue
-		dEmpty := NewDaemon(DaemonConfig{})
+		dEmpty := newNomadReconcileDaemon()
 		if err := dEmpty.ReconcilePendingNomad(ctx); err != nil {
 			t.Fatalf("expected nil for empty queue, got %v", err)
 		}
@@ -5484,14 +5336,14 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		tmpDir := t.TempDir()
 		_ = os.WriteFile(filepath.Join(tmpDir, "bot.nomad"), []byte(`job "bot" {}`), 0644)
 		evtCh := make(chan HangarDeployEvent, 10)
-		dMeta := NewDaemon(DaemonConfig{
-			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+		dMeta := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.DeployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
 				evtCh <- evt
 				return nil
-			},
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			}
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				return []byte("Evaluation ID: run-bot"), nil, nil
-			},
+			}
 		})
 		dMeta.recordPendingNomadChanges(tmpDir, []NomadFileChange{
 			{Path: "bot.nomad", Action: "apply", JobName: "bot"},
@@ -5512,13 +5364,13 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		// 4. Pending job fails validation (error aggregation)
 		invalidDir := t.TempDir()
 		_ = os.WriteFile(filepath.Join(invalidDir, "invalid.nomad"), []byte(`job "invalid" {}`), 0644)
-		dFailVal := NewDaemon(DaemonConfig{
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		dFailVal := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				if len(args) >= 3 && args[0] == "job" && args[1] == "validate" {
 					return nil, []byte("syntax error"), errors.New("val fail")
 				}
 				return []byte("ok"), nil, nil
-			},
+			}
 		})
 		dFailVal.recordPendingNomadChanges(invalidDir, []NomadFileChange{
 			{Path: "invalid.nomad", Action: "apply", JobName: "invalid"},
