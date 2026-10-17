@@ -560,46 +560,15 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	}()
 
 	defer func() {
-		if te.stopTyping != nil {
-			te.stopTyping()
-		}
-		if te.statusUpdater != nil {
-			te.statusUpdater.Stop()
-			te.statusUpdater.DeleteStatusMessage()
-		}
+		te.stopIndicators()
 	}()
 
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[WorkerPool] Panic in processBurst for thread %s: %v", te.threadID, r)
-			if te.stopTyping != nil {
-				te.stopTyping()
-			}
-			if te.statusUpdater != nil {
-				te.statusUpdater.Stop()
-				te.statusUpdater.DeleteStatusMessage()
-			}
+			te.stopIndicators()
 			metrics.RecordTurnCompleted("panic", te.triggerType, te.pool.GetRuntimeConfig(), time.Since(te.execStart))
-			errMsg := sanitizeErrorText(fmt.Sprintf("panic: %v", r))
-			te.turnStatus = "failed"
-			te.turnError = errMsg
-			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-			for _, m := range te.burst {
-				te.updateMessageStatus(m.ID, db.StatusFailed, errMsg)
-				if m.ScheduleRunID != "" {
-					te.updateScheduleRunStatus(db.UpdateRunParams{
-						RunID:       m.ScheduleRunID,
-						MessageID:   m.ID,
-						Status:      "failed",
-						CompletedAt: time.Now().UTC(),
-						DurationMs:  time.Since(te.execStart).Milliseconds(),
-						Error:       errMsg,
-					})
-				}
-				if te.pool.cfg.OnMessageCompleted != nil {
-					te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-				}
-			}
+			te.failBurstWithStatus("failed", fmt.Sprintf("panic: %v", r), "")
 		}
 	}()
 
@@ -620,12 +589,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	// 1. Resolve active execution pool (primary vs low effort)
 	isLowEffort = isLowEffortBurst(te.burst)
 	te.isEphemeral = isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil
-	activePool := te.pool.processPool
-	if isLowEffort && te.pool.lowEffortProcessPool != nil {
-		activePool = te.pool.lowEffortProcessPool
-	} else if isLowEffort && te.pool.lowEffortProcessPool == nil {
-		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-	}
+	activePool := te.resolveExecutionPool(isLowEffort)
 	te.activePool = activePool
 
 	if activePool == nil {
@@ -976,21 +940,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 
 		// Phase 1 (Leading ambient messages)
 		for i, m := range plan.LeadingAmbient {
-			info := plan.WakeInfos[i]
-			metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-			telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-			te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "completed",
-					CompletedAt: time.Now().UTC(),
-				})
-			}
-			if te.pool.cfg.OnMessageCompleted != nil {
-				te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-			}
+			te.completeAmbientMessage(m, plan.WakeInfos[i])
 		}
 
 		// Phase 2 (Active wake batch)
@@ -1028,20 +978,7 @@ func (te *turnExecution) markAmbientBurst() {
 		if i < len(te.wakeInfos) {
 			info = te.wakeInfos[i]
 		}
-		metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-		telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-		te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
-		if m.ScheduleRunID != "" {
-			te.updateScheduleRunStatus(db.UpdateRunParams{
-				RunID:       m.ScheduleRunID,
-				MessageID:   m.ID,
-				Status:      "completed",
-				CompletedAt: time.Now().UTC(),
-			})
-		}
-		if te.pool.cfg.OnMessageCompleted != nil {
-			te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-		}
+		te.completeAmbientMessage(m, info)
 	}
 }
 
@@ -1112,13 +1049,7 @@ func buildPostTurnRequest(te *turnExecution) *PostTurnRequest {
 }
 
 func (te *turnExecution) abortBurst(reason string) {
-	if te.stopTyping != nil {
-		te.stopTyping()
-	}
-	if te.statusUpdater != nil {
-		te.statusUpdater.Stop()
-		te.statusUpdater.DeleteStatusMessage()
-	}
+	te.stopIndicators()
 	if te.pool != nil {
 		metrics.RecordTurnCompleted("aborted", te.triggerType, "pre_turn", time.Since(te.execStart))
 	}
@@ -1144,13 +1075,7 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 	if delaySeconds <= 0 {
 		delaySeconds = 5
 	}
-	if te.stopTyping != nil {
-		te.stopTyping()
-	}
-	if te.statusUpdater != nil {
-		te.statusUpdater.Stop()
-		te.statusUpdater.DeleteStatusMessage()
-	}
+	te.stopIndicators()
 	maxAttempts := 3
 	if te.pool != nil && te.pool.cfg.MaxAttempts > 0 {
 		maxAttempts = te.pool.cfg.MaxAttempts
@@ -1224,20 +1149,7 @@ func (te *turnExecution) handleTrailing() {
 			continue
 		}
 		if !info.IsWake {
-			metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-			telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-			te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "completed",
-					CompletedAt: time.Now().UTC(),
-				})
-			}
-			if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
-				te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-			}
+			te.completeAmbientMessage(m, info)
 		} else {
 			metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
 			te.updateMessageStatus(m.ID, db.StatusPending, "")
@@ -1626,36 +1538,17 @@ func (te *turnExecution) executeWithRetries() {
 					te.isQuotaPaused = true
 					remaining := time.Until(lockedUntil)
 					log.Printf("[WorkerPool] Global quota pause active for thread %s (%v remaining). Aborting turn.", te.threadID, remaining)
-					te.stopTyping()
+					te.stopIndicators()
 					reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=false] global quota pause active", remaining)
 					metrics.RecordRunnerError("quota_paused", currentModel)
 					metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
-					te.turnStatus = "failed"
-					te.turnError = reason
-					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					if te.pool.cfg.DeliveryFunc != nil {
 						pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
 						if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
 							log.Printf("[WorkerPool] Failed to deliver quota pause message to thread %s: %v", te.threadID, err)
 						}
 					}
-							for _, m := range te.burst {
-						te.updateMessageStatus(m.ID, db.StatusFailed, reason)
-						if m.ScheduleRunID != "" {
-							te.updateScheduleRunStatus(db.UpdateRunParams{
-								RunID:       m.ScheduleRunID,
-								MessageID:   m.ID,
-								Status:      "failed",
-								CompletedAt: time.Now().UTC(),
-								DurationMs:  time.Since(te.execStart).Milliseconds(),
-								Error:       reason,
-								Model:       currentModel,
-							})
-						}
-						if te.pool.cfg.OnMessageCompleted != nil {
-							te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-						}
-					}
+					te.failBurstWithStatus("failed", reason, currentModel)
 					return
 				}
 			}
@@ -1802,12 +1695,8 @@ func (te *turnExecution) executeWithRetries() {
 			promptToSend = te.turnPrompt
 			targetSess := ""
 			if isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil && activePool != nil {
-				if dPool, ok := activePool.(interface {
-					Get(string) (*runner.StreamingDaemon, bool)
-				}); ok {
-					if d, ok := dPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
-						targetSess = d.SessionID()
-					}
+				if d := getStreamingDaemon(activePool, te.threadID); d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
 				}
 			}
 			if targetSess == "" && outcome.SessionID != "" {
@@ -1826,21 +1715,13 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 			if targetSess == "" && te.pool != nil && activePool != nil {
-				if dPool, ok := activePool.(interface {
-					Get(string) (*runner.StreamingDaemon, bool)
-				}); ok {
-					if d, ok := dPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
-						targetSess = d.SessionID()
-					}
+				if d := getStreamingDaemon(activePool, te.threadID); d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
 				}
 			}
 			if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != activePool {
-				if dPool, ok := te.pool.processPool.(interface {
-					Get(string) (*runner.StreamingDaemon, bool)
-				}); ok {
-					if d, ok := dPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
-						targetSess = d.SessionID()
-					}
+				if d := getStreamingDaemon(te.pool.processPool, te.threadID); d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
 				}
 			}
 
@@ -1920,13 +1801,8 @@ func (te *turnExecution) executeWithRetries() {
 							continue
 						case <-cancelChan:
 							log.Printf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
-							te.stopTyping()
-							te.turnStatus = "pending"
-							te.turnError = "interrupted by graceful deployment"
-							te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-							for _, m := range te.burst {
-								te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-							}
+							te.stopIndicators()
+							te.cancelBurstOnShutdown("pending", currentModel, false)
 							return
 						}
 					}
@@ -1934,34 +1810,11 @@ func (te *turnExecution) executeWithRetries() {
 					// If maxAttempts is exhausted on capacity blips, do NOT globally lock the queue.
 					// Mark failure locally for this turn and notify Discord if needed.
 					log.Printf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
-					te.stopTyping()
-					if te.statusUpdater != nil {
-						te.statusUpdater.Stop()
-						te.statusUpdater.DeleteStatusMessage()
-					}
+					te.stopIndicators()
 					reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
 					metrics.RecordRunnerError("capacity_exhausted", currentModel)
 					metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
-					te.turnStatus = "failed"
-					te.turnError = reason
-					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-							for _, m := range te.burst {
-						te.updateMessageStatus(m.ID, db.StatusFailed, reason)
-						if m.ScheduleRunID != "" {
-							te.updateScheduleRunStatus(db.UpdateRunParams{
-								RunID:       m.ScheduleRunID,
-								MessageID:   m.ID,
-								Status:      "failed",
-								CompletedAt: time.Now().UTC(),
-								DurationMs:  time.Since(te.execStart).Milliseconds(),
-								Error:       reason,
-								Model:       currentModel,
-							})
-						}
-						if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
-							te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-						}
-					}
+					te.failBurstWithStatus("failed", reason, currentModel)
 					if te.pool != nil && te.pool.cfg.DeliveryFunc != nil {
 						pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
 						if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
@@ -2013,12 +1866,7 @@ func (te *turnExecution) executeWithRetries() {
 				}
 
 				metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
-
-				te.stopTyping()
-				if te.statusUpdater != nil {
-					te.statusUpdater.Stop()
-					te.statusUpdater.DeleteStatusMessage()
-				}
+				te.stopIndicators()
 
 				if te.pool.cfg.DeliveryFunc != nil {
 					pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
@@ -2028,26 +1876,7 @@ func (te *turnExecution) executeWithRetries() {
 				}
 
 				reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
-				te.turnStatus = "failed"
-				te.turnError = reason
-				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-					for _, m := range te.burst {
-					te.updateMessageStatus(m.ID, db.StatusFailed, reason)
-					if m.ScheduleRunID != "" {
-						te.updateScheduleRunStatus(db.UpdateRunParams{
-							RunID:       m.ScheduleRunID,
-							MessageID:   m.ID,
-							Status:      "failed",
-							CompletedAt: time.Now().UTC(),
-							DurationMs:  time.Since(te.execStart).Milliseconds(),
-							Error:       reason,
-							Model:       currentModel,
-						})
-					}
-					if te.pool.cfg.OnMessageCompleted != nil {
-						te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-					}
-				}
+				te.failBurstWithStatus("failed", reason, currentModel)
 
 				return
 			}
@@ -2101,64 +1930,20 @@ func (te *turnExecution) executeWithRetries() {
 				}
 
 				// Exhausted all attempts on watchdog timeout
-				te.stopTyping()
-				if te.statusUpdater != nil {
-					te.statusUpdater.Stop()
-					te.statusUpdater.DeleteStatusMessage()
-				}
+				te.stopIndicators()
 
 				if te.pool.ctx.Err() != nil {
 					log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", te.threadID)
 					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-					te.turnStatus = "timeout"
-					te.turnError = "context cancelled during execution"
-					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-					for _, m := range te.burst {
-						te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-					}
+					te.cancelBurstOnShutdown("timeout", currentModel, false)
 					return
 				}
 
 				te.rotateSessionID(te.threadID, "")
 				metrics.RecordTurnCompleted("watchdog_timeout", te.triggerType, currentModel, time.Since(te.execStart))
 
-				if te.pool.cfg.DeliveryFunc != nil {
-					sanitizedSnippet := sanitizeErrorText(errDetail)
-					if len([]rune(sanitizedSnippet)) > 300 {
-						sanitizedSnippet = string([]rune(sanitizedSnippet)[:300])
-					}
-					var notif string
-					if isRateLimitError(errDetail, stderr) {
-						notif = notifier.ModelUnavailableMessage()
-					} else {
-						notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "execution timed out while processing the request: "+sanitizedSnippet)
-					}
-					if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
-						log.Printf("[WorkerPool] Failed to deliver watchdog notice for thread %s: %v", te.threadID, err)
-					}
-				}
-
-				sanitizedErr := sanitizeErrorText(errDetail)
-				te.turnStatus = "timeout"
-				te.turnError = sanitizedErr
-				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-					for _, m := range te.burst {
-					te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
-					if m.ScheduleRunID != "" {
-						te.updateScheduleRunStatus(db.UpdateRunParams{
-							RunID:       m.ScheduleRunID,
-							MessageID:   m.ID,
-							Status:      "failed",
-							CompletedAt: time.Now().UTC(),
-							DurationMs:  time.Since(te.execStart).Milliseconds(),
-							Error:       sanitizedErr,
-							Model:       currentModel,
-						})
-					}
-					if te.pool.cfg.OnMessageCompleted != nil {
-						te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-					}
-				}
+				te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution timed out while processing the request", "watchdog notice")
+				te.failBurstWithStatus("timeout", errDetail, currentModel)
 				log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting %d attempts on watchdog timeout: %s", len(te.burst), te.threadID, maxAttempts, errDetail)
 				return
 			}
@@ -2173,9 +1958,7 @@ func (te *turnExecution) executeWithRetries() {
 					lastErrDetail = parseErr.Error()
 				}
 			}
-			if resp == nil {
-				// Failed to obtain valid response from runner
-			} else {
+			if resp != nil {
 				extSess := resp.ConversationID
 				if extSess == "" {
 					extSess = runner.ExtractSessionID(stdout+"\n"+stderr, te.execStart)
@@ -2203,15 +1986,11 @@ func (te *turnExecution) executeWithRetries() {
 					var trackerDaemon *runner.StreamingDaemon
 					if !isYield && te.pool != nil {
 						if activePool != nil {
-							if dPool, ok := activePool.(interface {
-								Get(string) (*runner.StreamingDaemon, bool)
-							}); ok {
-								if d, ok := dPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-									isYield = true
-									taskCount = 1
-									detectionSource = "daemon_tracker"
-									trackerDaemon = d
-								}
+							if d := getStreamingDaemon(activePool, te.threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
+								isYield = true
+								taskCount = 1
+								detectionSource = "daemon_tracker"
+								trackerDaemon = d
 							}
 						}
 						if !isYield {
@@ -2222,15 +2001,11 @@ func (te *turnExecution) executeWithRetries() {
 								altPool = te.pool.lowEffortProcessPool
 							}
 							if altPool != nil {
-								if dPool, ok := altPool.(interface {
-									Get(string) (*runner.StreamingDaemon, bool)
-								}); ok {
-									if d, ok := dPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-										isYield = true
-										taskCount = 1
-										detectionSource = "daemon_tracker"
-										trackerDaemon = d
-									}
+								if d := getStreamingDaemon(altPool, te.threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
+									isYield = true
+									taskCount = 1
+									detectionSource = "daemon_tracker"
+									trackerDaemon = d
 								}
 							}
 						}
@@ -2299,11 +2074,7 @@ func (te *turnExecution) executeWithRetries() {
 						metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
 					}
 
-					te.stopTyping()
-					if te.statusUpdater != nil {
-						te.statusUpdater.Stop()
-						te.statusUpdater.DeleteStatusMessage()
-					}
+					te.stopIndicators()
 
 					responseText := resp.Response
 					baseDir := "/root/.gemini/antigravity-cli/brain"
@@ -2387,14 +2158,9 @@ func (te *turnExecution) executeWithRetries() {
 		// Reset messages to PENDING for clean deployment recovery on container restart.
 		if te.pool.ctx.Err() != nil {
 			log.Printf("[WorkerPool] Turn execution cancelled due to pool shutdown (thread: %s, attempt: %d/%d). Resetting to PENDING for clean deployment recovery.", te.threadID, attempt, maxAttempts)
-			te.stopTyping()
+			te.stopIndicators()
 			metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-			te.turnStatus = "failed"
-			te.turnError = "interrupted by graceful deployment"
-			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-			for _, m := range te.burst {
-				te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-			}
+			te.cancelBurstOnShutdown("failed", currentModel, false)
 			return
 		}
 
@@ -2408,17 +2174,7 @@ func (te *turnExecution) executeWithRetries() {
 			if te.statusUpdater != nil {
 				te.statusUpdater.Reset()
 			}
-			var notif string
-			if isRateLimitError(errDetail, stderr) {
-				notif = notifier.ModelUnavailableMessage()
-			} else {
-				notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "session reset due to context corruption")
-			}
-			if te.pool.cfg.DeliveryFunc != nil {
-				if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
-					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", te.threadID, err)
-				}
-			}
+			te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "session reset due to context corruption", "session reset notice")
 			te.rotateSessionID(te.threadID, "")
 			te.currentSessionID = ""
 			if te.lease != nil {
@@ -2443,23 +2199,7 @@ func (te *turnExecution) executeWithRetries() {
 				case <-time.After(backoff):
 				case <-te.pool.ctx.Done():
 					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-					te.turnStatus = "failed"
-					te.turnError = "context cancelled during execution"
-					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-					for _, m := range te.burst {
-						te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-						if m.ScheduleRunID != "" {
-							te.updateScheduleRunStatus(db.UpdateRunParams{
-								RunID:       m.ScheduleRunID,
-								MessageID:   m.ID,
-								Status:      "failed",
-								CompletedAt: time.Now().UTC(),
-								DurationMs:  time.Since(te.execStart).Milliseconds(),
-								Error:       "context cancelled during execution",
-								Model:       currentModel,
-							})
-						}
-					}
+					te.cancelBurstOnShutdown("failed", currentModel, true)
 					return
 				}
 			}
@@ -2480,23 +2220,7 @@ func (te *turnExecution) executeWithRetries() {
 				case <-time.After(backoff):
 				case <-te.pool.ctx.Done():
 					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-					te.turnStatus = "failed"
-					te.turnError = "context cancelled during execution"
-					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-					for _, m := range te.burst {
-						te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-						if m.ScheduleRunID != "" {
-							te.updateScheduleRunStatus(db.UpdateRunParams{
-								RunID:       m.ScheduleRunID,
-								MessageID:   m.ID,
-								Status:      "failed",
-								CompletedAt: time.Now().UTC(),
-								DurationMs:  time.Since(te.execStart).Milliseconds(),
-								Error:       "context cancelled during execution",
-								Model:       currentModel,
-							})
-						}
-					}
+					te.cancelBurstOnShutdown("failed", currentModel, true)
 					return
 				}
 			}
@@ -2504,20 +2228,11 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		// Non-transient hard failure: fail fast immediately on Attempt 1 without retries
-		te.stopTyping()
-		if te.statusUpdater != nil {
-			te.statusUpdater.Stop()
-			te.statusUpdater.DeleteStatusMessage()
-		}
+		te.stopIndicators()
 
 		if te.pool.ctx.Err() != nil {
 			log.Printf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
-			te.turnStatus = "failed"
-			te.turnError = "interrupted by graceful deployment"
-			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-			for _, m := range te.burst {
-				te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-			}
+			te.cancelBurstOnShutdown("failed", currentModel, false)
 			return
 		}
 
@@ -2527,116 +2242,29 @@ func (te *turnExecution) executeWithRetries() {
 			te.currentSessionID = ""
 		}
 
-		sanitizedErr := sanitizeErrorText(errDetail)
-		te.turnStatus = "failed"
-		te.turnError = sanitizedErr
-		te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 		metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
-
-		var notif string
-		if isRateLimitError(errDetail, stderr) {
-			notif = notifier.ModelUnavailableMessage()
-		} else {
-			snippet := sanitizedErr
-			if len([]rune(snippet)) > 300 {
-				snippet = string([]rune(snippet)[:300])
-			}
-			notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, fmt.Sprintf("execution failed with non-transient error: %s", snippet))
-		}
-		if te.pool.cfg.DeliveryFunc != nil {
-			if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
-				log.Printf("[WorkerPool] Failed to deliver non-transient failure notice for thread %s: %v", te.threadID, err)
-			}
-		}
+		te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution failed with non-transient error", "non-transient failure notice")
 
 		for _, m := range te.burst {
 			te.incrementMessageRetry(m.ID, errDetail)
-			te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "failed",
-					CompletedAt: time.Now().UTC(),
-					DurationMs:  time.Since(te.execStart).Milliseconds(),
-					Error:       sanitizedErr,
-					Model:       currentModel,
-				})
-			}
-			if te.pool.cfg.OnMessageCompleted != nil {
-				te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-			}
 		}
+		te.failBurstWithStatus("failed", errDetail, currentModel)
 		log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(te.burst), te.threadID, attempt, maxAttempts, errDetail)
 		return
 	}
 
 	// Total exhaustion after all attempts
-	te.stopTyping()
-	if te.statusUpdater != nil {
-		te.statusUpdater.Stop()
-		te.statusUpdater.DeleteStatusMessage()
-	}
+	te.stopIndicators()
 
 	if te.pool.ctx.Err() != nil {
 		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", te.threadID)
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.turnStatus = "failed"
-		te.turnError = "context cancelled during execution"
-		te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-		for _, m := range te.burst {
-			te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "failed",
-					CompletedAt: time.Now().UTC(),
-					DurationMs:  time.Since(te.execStart).Milliseconds(),
-					Error:       "context cancelled during execution",
-					Model:       currentModel,
-				})
-			}
-		}
+		te.cancelBurstOnShutdown("failed", currentModel, true)
 		return
 	}
-	var notif string
-	if lastErrDetail != "" && isRateLimitError(lastErrDetail, lastStderr) {
-		notif = notifier.ModelUnavailableMessage()
-	} else {
-		snippet := sanitizeErrorText(lastErrDetail)
-		if len([]rune(snippet)) > 300 {
-			snippet = string([]rune(snippet)[:300])
-		}
-		notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, fmt.Sprintf("execution failed after exhausting %d attempts: %s", maxAttempts, snippet))
-	}
-	if te.pool.cfg.DeliveryFunc != nil {
-		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
-			log.Printf("[WorkerPool] Failed to deliver exhaustion notice for thread %s: %v", te.threadID, err)
-		}
-	}
-	sanitizedErr := sanitizeErrorText(lastErrDetail)
-	te.turnStatus = "failed"
-	te.turnError = sanitizedErr
-	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+	te.deliverFailureNotice(currentAgyBin, currentAPIKey, lastErrDetail, lastStderr, fmt.Sprintf("execution failed after exhausting %d attempts", maxAttempts), "exhaustion notice")
 	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
-	for _, m := range te.burst {
-		te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
-		if m.ScheduleRunID != "" {
-			te.updateScheduleRunStatus(db.UpdateRunParams{
-				RunID:       m.ScheduleRunID,
-				MessageID:   m.ID,
-				Status:      "failed",
-				CompletedAt: time.Now().UTC(),
-				DurationMs:  time.Since(te.execStart).Milliseconds(),
-				Error:       sanitizedErr,
-				Model:       currentModel,
-			})
-		}
-		if te.pool.cfg.OnMessageCompleted != nil {
-			te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-		}
-	}
+	te.failBurstWithStatus("failed", lastErrDetail, currentModel)
 	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(te.burst), te.threadID, maxAttempts)
 }
 
@@ -2734,17 +2362,28 @@ func calculateCapacityBackoff(attempt int, resetDur time.Duration) time.Duration
 }
 
 func (te *turnExecution) failBurst(err error) {
-	te.stopTyping()
+	te.stopIndicators()
+	metrics.RecordTurnCompleted("failed", te.triggerType, "system", time.Since(te.execStart))
+	te.failBurstWithStatus("failed", err.Error(), "")
+}
+
+func (te *turnExecution) stopIndicators() {
+	if te.stopTyping != nil {
+		te.stopTyping()
+	}
 	if te.statusUpdater != nil {
 		te.statusUpdater.Stop()
 		te.statusUpdater.DeleteStatusMessage()
 	}
-	metrics.RecordTurnCompleted("failed", te.triggerType, "system", time.Since(te.execStart))
-	te.turnStatus = "failed"
-	te.turnError = err.Error()
+}
+
+func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) {
+	sanitizedErr := sanitizeErrorText(errText)
+	te.turnStatus = turnStatus
+	te.turnError = sanitizedErr
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 	for _, m := range te.burst {
-		te.updateMessageStatus(m.ID, db.StatusFailed, err.Error())
+		te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
 		if m.ScheduleRunID != "" {
 			te.updateScheduleRunStatus(db.UpdateRunParams{
 				RunID:       m.ScheduleRunID,
@@ -2752,11 +2391,106 @@ func (te *turnExecution) failBurst(err error) {
 				Status:      "failed",
 				CompletedAt: time.Now().UTC(),
 				DurationMs:  time.Since(te.execStart).Milliseconds(),
-				Error:       err.Error(),
+				Error:       sanitizedErr,
+				Model:       model,
 			})
 		}
-		if te.pool.cfg.OnMessageCompleted != nil {
+		if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
 			te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
 		}
 	}
+}
+
+func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
+	metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
+	telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
+	te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
+	if m.ScheduleRunID != "" {
+		te.updateScheduleRunStatus(db.UpdateRunParams{
+			RunID:       m.ScheduleRunID,
+			MessageID:   m.ID,
+			Status:      "completed",
+			CompletedAt: time.Now().UTC(),
+		})
+	}
+	if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
+		te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+	}
+}
+
+func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, failScheduleRun bool) {
+	te.turnStatus = turnStatus
+	te.turnError = "interrupted by graceful deployment"
+	if failScheduleRun {
+		te.turnError = "context cancelled during execution"
+	}
+	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+	for _, m := range te.burst {
+		te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+		if failScheduleRun && m.ScheduleRunID != "" {
+			te.updateScheduleRunStatus(db.UpdateRunParams{
+				RunID:       m.ScheduleRunID,
+				MessageID:   m.ID,
+				Status:      "failed",
+				CompletedAt: time.Now().UTC(),
+				DurationMs:  time.Since(te.execStart).Milliseconds(),
+				Error:       "context cancelled during execution",
+				Model:       currentModel,
+			})
+		}
+	}
+}
+
+func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {
+	if te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
+		return
+	}
+	var notif string
+	if isRateLimitError(errDetail, stderr) {
+		notif = notifier.ModelUnavailableMessage()
+	} else {
+		snippet := sanitizeErrorText(errDetail)
+		if len([]rune(snippet)) > 300 {
+			snippet = string([]rune(snippet)[:300])
+		}
+		desc := descPrefix
+		if desc == "" {
+			desc = snippet
+		} else if strings.HasSuffix(desc, ": ") || strings.HasSuffix(desc, " ") {
+			desc = desc + snippet
+		} else {
+			desc = desc + ": " + snippet
+		}
+		notif = te.pool.cfg.NotifierFunc(agyBin, apiKey, desc)
+	}
+	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
+		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
+	}
+}
+
+func (te *turnExecution) resolveExecutionPool(isLowEffort bool) runner.AgentPool {
+	if te.pool == nil {
+		return nil
+	}
+	if isLowEffort && te.pool.lowEffortProcessPool != nil {
+		return te.pool.lowEffortProcessPool
+	}
+	if isLowEffort && te.pool.lowEffortProcessPool == nil {
+		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
+	}
+	return te.pool.processPool
+}
+
+func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
+	if pool == nil {
+		return nil
+	}
+	if dPool, ok := pool.(interface {
+		Get(string) (*runner.StreamingDaemon, bool)
+	}); ok {
+		if d, ok := dPool.Get(threadID); ok && d != nil {
+			return d
+		}
+	}
+	return nil
 }
