@@ -337,7 +337,6 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     acceptance_criteria TEXT[] NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'pending',
     pr_number INTEGER,
-    diff_stat TEXT NOT NULL DEFAULT '',
     started_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
