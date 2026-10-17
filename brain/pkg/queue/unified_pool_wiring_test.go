@@ -154,6 +154,9 @@ func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
 				if got := p.LowEffortProcessPool(); got != nil {
 					t.Fatalf("expected nil from nil WorkerPool.LowEffortProcessPool(), got %v", got)
 				}
+				if got := p.MediumEffortProcessPool(); got != nil {
+					t.Fatalf("expected nil from nil WorkerPool.MediumEffortProcessPool(), got %v", got)
+				}
 				return
 			}
 
@@ -161,6 +164,9 @@ func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
 				p := New(nil, WorkerPoolConfig{})
 				if got := p.LowEffortProcessPool(); got != nil {
 					t.Fatalf("expected nil LowEffortProcessPool by default, got %v", got)
+				}
+				if got := p.MediumEffortProcessPool(); got != nil {
+					t.Fatalf("expected nil MediumEffortProcessPool by default, got %v", got)
 				}
 				return
 			}
@@ -177,13 +183,26 @@ func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
 				})
 				defer func() { _ = interPool.Close() }()
 
+				medUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+					Model: "gemini-3.8-flash-medium",
+				}, mockSpawner)
+				defer func() { _ = medUnderlying.Close() }()
+				medInterPool := runner.NewInterchangeablePool(medUnderlying, runner.InterchangeablePoolConfig{
+					WorkerCount: 2,
+				})
+				defer func() { _ = medInterPool.Close() }()
+
 				p := New(nil, WorkerPoolConfig{
-					LowEffortProcessPool: interPool,
+					LowEffortProcessPool:    interPool,
+					MediumEffortProcessPool: medInterPool,
 				})
 				defer p.Stop()
 
 				if got := p.LowEffortProcessPool(); got != underlying {
 					t.Fatalf("expected LowEffortProcessPool to return underlying pool %p, got %p", underlying, got)
+				}
+				if got := p.MediumEffortProcessPool(); got != medUnderlying {
+					t.Fatalf("expected MediumEffortProcessPool to return underlying pool %p, got %p", medUnderlying, got)
 				}
 				return
 			}

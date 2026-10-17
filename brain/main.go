@@ -110,8 +110,13 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		model := strings.TrimSpace(req.Model)
 		effort := strings.TrimSpace(req.Effort)
-		if effort == "" && strings.Contains(strings.ToLower(model), "flash") {
-			effort = "low"
+		if effort == "" {
+			modelLower := strings.ToLower(model)
+			if strings.Contains(modelLower, "medium") {
+				effort = "medium"
+			} else if strings.Contains(modelLower, "flash") {
+				effort = "low"
+			}
 		}
 
 		msg := db.Message{
@@ -1892,6 +1897,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	if lowEffortModel == "" {
 		lowEffortModel = "gemini-3.8-flash-low"
 	}
+	mediumEffortModel := cur.MediumEffortModel
+	if mediumEffortModel == "" {
+		mediumEffortModel = "gemini-3.8-flash-medium"
+	}
 
 	runtimeBase := cur.DataDir
 	if runtimeBase == "" {
@@ -1980,6 +1989,28 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
+	discordMediumEffortUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir:     discordHome,
+		Model:             mediumEffortModel,
+		AgyBin:            cur.AgyBin,
+		Cwd:               cur.DataDir,
+		Env:               poolEnv,
+		Timezone:          cur.Timezone,
+		TranscriptRescuer: sessionMgr.ExtractResponseSince,
+		PrewarmedTargets:  []string{"discord:medium-worker-0", "discord:medium-worker-1"},
+		SessionManager:    sessionMgr,
+	}, appOpts.processSpawner)
+
+	discordMediumEffortPool := runner.NewInterchangeablePool(discordMediumEffortUnderlying, runner.InterchangeablePoolConfig{
+		WorkerCount: 2,
+		KeyPrefix:   "discord:medium-worker",
+	})
+	defer func() {
+		if err := discordMediumEffortPool.Close(); err != nil {
+			log.Printf("[WARN] Failed to close discord medium effort process pool: %v", err)
+		}
+	}()
+
 	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner, memoryRetriever)
 	defer func() {
 		if err := voicePool.Close(); err != nil {
@@ -1987,7 +2018,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	PrewarmProcessPoolsSequentially(ctx, discordPrimaryPool, ephemeralPool, discordLowEffortPool, voicePool)
+	PrewarmProcessPoolsSequentially(ctx, discordPrimaryPool, ephemeralPool, discordLowEffortPool, discordMediumEffortPool, voicePool)
 	metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
 
 	cls := classifier.New(cfg, nil, classifier.WithProcessPool(ephemeralPool))
@@ -2034,13 +2065,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		Store:                store,
-		Classifier:           cls,
-		SessionManager:       sessionMgr,
-		ProcessPool:          discordPrimaryPool,
-		LowEffortProcessPool: discordLowEffortPool,
-		VoiceProcessPool:     voicePool,
-		AmbientResolver:      ambientResolver,
+		Store:                   store,
+		Classifier:              cls,
+		SessionManager:          sessionMgr,
+		ProcessPool:             discordPrimaryPool,
+		LowEffortProcessPool:    discordLowEffortPool,
+		MediumEffortProcessPool: discordMediumEffortPool,
+		VoiceProcessPool:        voicePool,
+		AmbientResolver:         ambientResolver,
 	})
 	pool.Start()
 

@@ -1971,6 +1971,15 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			},
 		},
 		{
+			name:   "MEDIUM_EFFORT_MODEL override",
+			envMap: map[string]string{"MEDIUM_EFFORT_MODEL": "gemini-med"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.MediumEffortModel != "gemini-med" {
+					t.Errorf("expected MediumEffortModel=gemini-med, got %q", d.MediumEffortModel)
+				}
+			},
+		},
+		{
 			name:   "AMBIENT_CLASSIFIER_MODEL fallback override",
 			envMap: map[string]string{"AMBIENT_CLASSIFIER_MODEL": "gemini-ambient"},
 			assertFn: func(t *testing.T, d *ConfigData) {

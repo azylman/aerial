@@ -96,6 +96,55 @@ func TestWorkerPool_LowEffortModelResolution(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_MediumEffortModelResolution(t *testing.T) {
+	t.Parallel()
+
+	appCfgVal := "app-cfg-med-model"
+	appCfgEmpty := ""
+	defaultModel := config.DefaultConfigData().MediumEffortModel
+
+	tests := []struct {
+		name       string
+		poolNil    bool
+		appCfgVal  *string
+		cfgModel   string
+		wantResult string
+	}{
+		{name: "NilPoolFallback", poolNil: true, wantResult: defaultModel},
+		{name: "CustomModelInCfg", cfgModel: "gemini-flash-med-test", wantResult: "gemini-flash-med-test"},
+		{name: "AppCfgOverride", appCfgVal: &appCfgVal, wantResult: "app-cfg-med-model"},
+		{name: "AppCfgEmptyWithCfgFallback", appCfgVal: &appCfgEmpty, cfgModel: "cfg-med-fallback", wantResult: "cfg-med-fallback"},
+		{name: "AppCfgEmptyAndCfgEmptyDefaults", appCfgVal: &appCfgEmpty, cfgModel: "", wantResult: defaultModel},
+		{name: "AppCfgNilAndCfgEmptyDefaults", cfgModel: "", wantResult: defaultModel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.poolNil {
+				var nilPool *WorkerPool
+				if got := nilPool.MediumEffortModel(); got != tt.wantResult {
+					t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantResult)
+				}
+				return
+			}
+
+			var appCfg *config.Config
+			if tt.appCfgVal != nil {
+				val := *tt.appCfgVal
+				appCfg = config.NewTestConfig(func(d *config.ConfigData) {
+					d.MediumEffortModel = val
+				})
+			}
+
+			p := New(appCfg, WorkerPoolConfig{MediumEffortModel: tt.cfgModel})
+			if got := p.MediumEffortModel(); got != tt.wantResult {
+				t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantResult)
+			}
+		})
+	}
+}
+
 func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 	t.Parallel()
 

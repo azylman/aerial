@@ -145,6 +145,28 @@ func TestHandlePromptValidation(t *testing.T) {
 	if sMsg.Effort != "low" || sMsg.Metadata.Model != "gemini-4-flash" || !sMsg.Metadata.Silent {
 		t.Errorf("Expected Effort='low', Metadata.Model='gemini-4-flash', Metadata.Silent=true, got Effort=%q Metadata=%+v", sMsg.Effort, sMsg.Metadata)
 	}
+
+	// Test prompt payload with medium flash model sets medium effort (not low)
+	medPayload, _ := json.Marshal(map[string]any{
+		"prompt":     "Execute medium chunk",
+		"channel_id": "1542423172400291873",
+		"message_id": "msg-med-1",
+		"model":      "gemini-3.8-flash-medium",
+		"silent":     true,
+	})
+	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(medPayload))
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("Expected status 202 StatusAccepted for medium prompt, got %d", w.Code)
+	}
+	mMsg, err := store.GetMessage(context.Background(), "msg-med-1")
+	if err != nil || mMsg == nil {
+		t.Fatalf("Failed to retrieve medium message: %v", err)
+	}
+	if mMsg.Effort != "medium" || mMsg.Metadata.Model != "gemini-3.8-flash-medium" {
+		t.Errorf("Expected Effort='medium', Metadata.Model='gemini-3.8-flash-medium', got Effort=%q Metadata=%+v", mMsg.Effort, mMsg.Metadata)
+	}
 }
 
 func TestHandleDirectMessage(t *testing.T) {
@@ -2544,6 +2566,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	cur.Port = "0"
 	cur.AgyBin = "/bin/true"
 	cur.LowEffortModel = ""
+	cur.MediumEffortModel = ""
 	cur.Voice.AmbientContext = &config.AmbientContextConfig{
 		Template: "Time: {{.now}}",
 		CacheTTL: "5s",
@@ -2684,6 +2707,7 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 	cur.Port = "0"
 	cur.AgyBin = "/bin/true"
 	cur.LowEffortModel = "gemini-test-low"
+	cur.MediumEffortModel = "gemini-test-medium"
 	cfg.Update(cur)
 
 	expectedEphemeralHome := filepath.Join(tmpDir, "runtimes", "ephemeral")
@@ -2699,7 +2723,7 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			spawnedConfigsMu.Lock()
 			spawnedConfigs = append(spawnedConfigs, dCfg)
-			hasEph0, hasEph1, hasDisc0, hasDisc1 := false, false, false, false
+			hasEph0, hasEph1, hasDisc0, hasDisc1, hasMed0, hasMed1 := false, false, false, false, false, false
 			for _, sc := range spawnedConfigs {
 				if sc.ThreadID == "ephemeral:worker-0" {
 					hasEph0 = true
@@ -2713,8 +2737,14 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 				if sc.ThreadID == "discord:worker-1" {
 					hasDisc1 = true
 				}
+				if sc.ThreadID == "discord:medium-worker-0" {
+					hasMed0 = true
+				}
+				if sc.ThreadID == "discord:medium-worker-1" {
+					hasMed1 = true
+				}
 			}
-			if hasEph0 && hasEph1 && hasDisc0 && hasDisc1 {
+			if hasEph0 && hasEph1 && hasDisc0 && hasDisc1 && hasMed0 && hasMed1 {
 				spawnedOnce.Do(func() { close(allSpawned) })
 			}
 			spawnedConfigsMu.Unlock()
@@ -2820,6 +2850,21 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 	}
 	if !foundDisc1 {
 		t.Errorf("expected pre-warmed daemon for discord:worker-1")
+	}
+	foundMed0, foundMed1 := false, false
+	for _, sc := range spawnedConfigs {
+		if sc.ThreadID == "discord:medium-worker-0" {
+			foundMed0 = true
+		}
+		if sc.ThreadID == "discord:medium-worker-1" {
+			foundMed1 = true
+		}
+	}
+	if !foundMed0 {
+		t.Errorf("expected pre-warmed daemon for discord:medium-worker-0")
+	}
+	if !foundMed1 {
+		t.Errorf("expected pre-warmed daemon for discord:medium-worker-1")
 	}
 }
 

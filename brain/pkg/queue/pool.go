@@ -53,8 +53,9 @@ type WorkerPoolConfig struct {
 	DiscordSession *discordgo.Session
 	AgyBin         string
 	APIKey         string
-	Model          string
-	LowEffortModel string
+	Model             string
+	LowEffortModel    string
+	MediumEffortModel string
 	SystemPrompt   string
 	TimeoutMinutes int
 	BackoffBase    time.Duration
@@ -65,9 +66,10 @@ type WorkerPoolConfig struct {
 	DrainTimeout       time.Duration
 	RetryDelayOverride time.Duration
 	SessionManager       *session.Manager
-	ProcessPool          runner.AgentPool
-	LowEffortProcessPool runner.AgentPool
-	VoiceProcessPool     runner.AgentPool
+	ProcessPool             runner.AgentPool
+	LowEffortProcessPool    runner.AgentPool
+	MediumEffortProcessPool runner.AgentPool
+	VoiceProcessPool        runner.AgentPool
 	MaintenanceInterval time.Duration
 
 	// Optional hooks for testing/custom overrides
@@ -111,9 +113,10 @@ type WorkerPool struct {
 	scopeLocks        sync.Map
 	webhookDispatcher WebhookDispatcher
 	summaryGroup      singleflight.Group
-	processPool          runner.AgentPool
-	lowEffortProcessPool runner.AgentPool
-	voiceProcessPool     runner.AgentPool
+	processPool             runner.AgentPool
+	lowEffortProcessPool    runner.AgentPool
+	mediumEffortProcessPool runner.AgentPool
+	voiceProcessPool        runner.AgentPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -205,6 +208,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 		if cfg.LowEffortModel != "" {
 			def.LowEffortModel = cfg.LowEffortModel
+		}
+		if cfg.MediumEffortModel != "" {
+			def.MediumEffortModel = cfg.MediumEffortModel
 		}
 		if cfg.SystemPrompt != "" {
 			def.SystemPrompt = cfg.SystemPrompt
@@ -340,9 +346,10 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	p := &WorkerPool{
 		appCfg:            appCfg,
 		cfg:               cfg,
-		processPool:          cfg.ProcessPool,
-		lowEffortProcessPool: cfg.LowEffortProcessPool,
-		voiceProcessPool:     cfg.VoiceProcessPool,
+		processPool:             cfg.ProcessPool,
+		lowEffortProcessPool:    cfg.LowEffortProcessPool,
+		mediumEffortProcessPool: cfg.MediumEffortProcessPool,
+		voiceProcessPool:        cfg.VoiceProcessPool,
 		sessionMgr:        sessMgr,
 		threadChs:         make(map[string]*threadWorkerState),
 		ctx:               ctx,
@@ -380,7 +387,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 
 	if p.sessionMgr != nil {
-		for _, pool := range []runner.AgentPool{p.processPool, p.lowEffortProcessPool} {
+		for _, pool := range []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool} {
 			if pool == nil {
 				continue
 			}
@@ -831,7 +838,7 @@ func unwrapUnifiedPool(pool runner.AgentPool) *runner.UnifiedProcessPool {
 func (p *WorkerPool) Stop() {
 	p.StopWithTimeout(p.cfg.DrainTimeout)
 	p.mu.Lock()
-	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.voiceProcessPool}
+	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool, p.voiceProcessPool}
 	p.mu.Unlock()
 	for _, pool := range pools {
 		if pool != nil {
@@ -863,6 +870,16 @@ func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
 	return unwrapUnifiedPool(p.lowEffortProcessPool)
 }
 
+// MediumEffortProcessPool returns the configured runner.UnifiedProcessPool for medium effort turns, or nil if unconfigured or p is nil.
+func (p *WorkerPool) MediumEffortProcessPool() *runner.UnifiedProcessPool {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return unwrapUnifiedPool(p.mediumEffortProcessPool)
+}
+
 // VoiceProcessPool returns the configured runner.AgentPool for voice turns, or nil if unconfigured or p is nil.
 func (p *WorkerPool) VoiceProcessPool() runner.AgentPool {
 	if p == nil {
@@ -889,7 +906,7 @@ func (p *WorkerPool) MarkDirty() {
 		return
 	}
 	p.mu.Lock()
-	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.voiceProcessPool}
+	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool, p.voiceProcessPool}
 	var voiceTargets []string
 	if p.appCfg != nil {
 		voiceTargets = p.appCfg.VoicePrewarmedTargets()
@@ -922,6 +939,22 @@ func (p *WorkerPool) LowEffortModel() string {
 		return strings.TrimSpace(p.cfg.LowEffortModel)
 	}
 	return config.DefaultConfigData().LowEffortModel
+}
+
+// MediumEffortModel returns the configured medium effort reasoning model name.
+func (p *WorkerPool) MediumEffortModel() string {
+	if p == nil {
+		return config.DefaultConfigData().MediumEffortModel
+	}
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(cur.MediumEffortModel) != "" {
+			return strings.TrimSpace(cur.MediumEffortModel)
+		}
+	}
+	if strings.TrimSpace(p.cfg.MediumEffortModel) != "" {
+		return strings.TrimSpace(p.cfg.MediumEffortModel)
+	}
+	return config.DefaultConfigData().MediumEffortModel
 }
 
 // ExecuteVoiceTurn synchronously executes a turn for voice queries, enforcing low effort reasoning
