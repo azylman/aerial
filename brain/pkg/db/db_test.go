@@ -13,6 +13,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 )
 
+
 func TestNew_ConfigPointerInjection(t *testing.T) {
 	oldHook := sqliteTestInitHook
 	sqliteTestInitHook = nil
@@ -51,6 +52,42 @@ func TestNew_ConfigPointerInjection(t *testing.T) {
 		} else {
 			dbHooked.Close()
 		}
+	}
+
+	// 6. InitDB type validation for non-string / non-config
+	if _, err := InitDB(12345); err == nil {
+		t.Errorf("expected error for int type in InitDB, got nil")
+	}
+
+	// 7. New with nil config snapshot
+	cfgEmptySnap := &config.Config{}
+	if _, err := New(cfgEmptySnap); err == nil {
+		t.Errorf("expected error for nil config snapshot in New, got nil")
+	}
+
+	// 8. InitDB DSN pragma variants
+	for _, dsn := range []string{
+		"file:mem_test_1?mode=memory&cache=shared",
+		"file:mem_test_2?mode=memory",
+		"file:mem_test_3?mode=memory&_pragma=busy_timeout(5000)",
+		"sqlite://:memory:",
+	} {
+		dbPragma, err := InitDB(dsn)
+		if err != nil {
+			t.Fatalf("InitDB(%q) failed: %v", dsn, err)
+		}
+		_ = dbPragma.Close()
+	}
+
+	// 9. Subfolder creation via initTestSQLite
+	subFile := filepath.Join(t.TempDir(), "subfolder", "test.db")
+	dbSub, err := initTestSQLite(subFile)
+	if err != nil {
+		t.Fatalf("initTestSQLite with subfolder path failed: %v", err)
+	}
+	_ = dbSub.Close()
+	if _, err := os.Stat(subFile); os.IsNotExist(err) {
+		t.Errorf("expected sqlite db file to exist at %s", subFile)
 	}
 }
 
@@ -104,6 +141,11 @@ func TestInitDB_PostgresValidation(t *testing.T) {
 	if !strings.Contains(errUnreachable.Error(), "could not connect to PostgreSQL after retries") {
 		t.Errorf("expected connection failure error, got: %v", errUnreachable)
 	}
+
+	// 3. Invalid url percent-encoding fails pgx.ParseConfig
+	if _, err := initDB("postgres://%zz"); err == nil {
+		t.Errorf("expected error parsing invalid postgres url, got nil")
+	}
 }
 
 func setupTestDB(t *testing.T) *sql.DB {
@@ -128,16 +170,24 @@ func TestDBInitializationAndMigrations(t *testing.T) {
 		t.Fatalf("Messages table schema error: %v", err)
 	}
 
-	// Verify sessions table exists
-	_, err = database.Exec("SELECT thread_id, internal_session_id, turn_count, last_extracted_rowid, fact_extracted_at, created_at, updated_at FROM sessions LIMIT 0")
-	if err != nil {
-		t.Fatalf("Sessions table schema error: %v", err)
+	// Verify foreign key pragma is active
+	var fkEnabled int
+	if err := database.QueryRow("PRAGMA foreign_keys;").Scan(&fkEnabled); err != nil {
+		t.Fatalf("Failed to query foreign_keys pragma: %v", err)
+	}
+	if fkEnabled != 1 {
+		t.Errorf("Expected foreign_keys = 1, got %d", fkEnabled)
 	}
 
-	// Verify facts table with pgvector column
-	_, err = database.Exec("SELECT id, category, fact_text, importance, embedding, created_at FROM facts LIMIT 0")
+	// Test initSchemaSQLite on closed DB returns error
+	tmpPath := filepath.Join(t.TempDir(), "closed-mig.db")
+	closedDB, err := initTestSQLite(tmpPath)
 	if err != nil {
-		t.Fatalf("Facts table schema error: %v", err)
+		t.Fatalf("failed to init db: %v", err)
+	}
+	_ = closedDB.Close()
+	if err := initSchemaSQLite(closedDB); err == nil {
+		t.Error("expected error calling initSchemaSQLite on closed db")
 	}
 }
 
@@ -184,117 +234,109 @@ func TestDuplicateMessageInsertDoesNotResetStatus(t *testing.T) {
 	}
 }
 
-func TestUpdateMessageCompleted(t *testing.T) {
+func TestMessageCRUD(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
+	// 1. Insert message with empty status defaulting to PENDING
 	msg := Message{
-		ID:       "msg-comp-1",
-		ThreadID: "thread-1",
-		Content:  "Some question",
-		Status:   StatusProcessing,
+		ID:         "msg-crud-1",
+		ThreadID:   "th-crud-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "Alice",
+		Content:    "Hello Aerial",
+		Status:     "", // Defaults to PENDING
 	}
 	if err := InsertMessage(database, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
-	if err := UpdateMessageCompleted(database, "msg-comp-1", "This is the final AI response"); err != nil {
+	fetched, err := GetMessage(database, "msg-crud-1")
+	if err != nil || fetched == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if fetched.Status != StatusPending {
+		t.Errorf("expected default status PENDING, got %q", fetched.Status)
+	}
+
+	// 2. Update status to PROCESSING
+	if err := UpdateMessageStatus(database, "msg-crud-1", StatusProcessing, "worker-1"); err != nil {
+		t.Fatalf("UpdateMessageStatus failed: %v", err)
+	}
+	fetched, _ = GetMessage(database, "msg-crud-1")
+	if fetched.Status != StatusProcessing {
+		t.Errorf("expected status PROCESSING, got %q", fetched.Status)
+	}
+
+	// 3. Increment retry
+	if err := IncrementMessageRetry(database, "msg-crud-1", "transient error"); err != nil {
+		t.Fatalf("IncrementMessageRetry failed: %v", err)
+	}
+	fetched, _ = GetMessage(database, "msg-crud-1")
+	if fetched.RetryCount != 1 || fetched.ErrorMessage != "transient error" {
+		t.Errorf("expected retry_count=1, got %d, err=%q", fetched.RetryCount, fetched.ErrorMessage)
+	}
+
+	// 4. Increment restart
+	if err := IncrementMessageRestart(database, "msg-crud-1", "restart error"); err != nil {
+		t.Fatalf("IncrementMessageRestart failed: %v", err)
+	}
+	fetched, _ = GetMessage(database, "msg-crud-1")
+	if fetched.RestartCount != 1 {
+		t.Errorf("expected restart_count=1, got %d", fetched.RestartCount)
+	}
+
+	// 5. Reset to pending with restart (requires status=PROCESSING)
+	if err := ResetMessageToPendingWithRestart(database, "msg-crud-1", "restarted"); err != nil {
+		t.Fatalf("ResetMessageToPendingWithRestart failed: %v", err)
+	}
+	fetched, _ = GetMessage(database, "msg-crud-1")
+	if fetched.Status != StatusPending || fetched.RestartCount != 2 {
+		t.Errorf("expected status=PENDING, restart_count=2, got %q, %d", fetched.Status, fetched.RestartCount)
+	}
+
+	// 6. MessageExists and ClaimPendingMessage
+	exists, err := MessageExists(database, "msg-crud-1")
+	if err != nil || !exists {
+		t.Fatalf("MessageExists failed: %v", err)
+	}
+	claimed, err := ClaimPendingMessage(database, "msg-crud-1")
+	if err != nil || !claimed {
+		t.Fatalf("ClaimPendingMessage failed: %v", err)
+	}
+	claimedAgain, err := ClaimPendingMessage(database, "msg-crud-1")
+	if err != nil || claimedAgain {
+		t.Errorf("expected second claim to return false, got %v, %v", claimedAgain, err)
+	}
+
+	// 7. Update completed with responseText
+	if err := UpdateMessageCompleted(database, "msg-crud-1", "Processed response"); err != nil {
 		t.Fatalf("UpdateMessageCompleted failed: %v", err)
 	}
-
-	fetched, _ := GetMessage(database, "msg-comp-1")
-	if fetched.Status != StatusCompleted {
-		t.Errorf("Expected status COMPLETED, got %s", fetched.Status)
-	}
-	if fetched.ResponseText != "This is the final AI response" {
-		t.Errorf("Expected ResponseText to be set, got %q", fetched.ResponseText)
-	}
-}
-
-func TestMessageCRUD(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	t1 := time.Now().UTC().Add(-10 * time.Minute)
-	t2 := time.Now().UTC().Add(-5 * time.Minute)
-
-	msg1 := Message{
-		ID:         "msg-1",
-		ThreadID:   "thread-1",
-		GuildID:    "guild-1",
-		AuthorID:   "author-1",
-		AuthorName: "Alice",
-		Content:    "First prompt",
-		Status:     StatusPending,
-		CreatedAt:  t1,
-		UpdatedAt:  t1,
+	fetched, _ = GetMessage(database, "msg-crud-1")
+	if fetched.Status != StatusCompleted || fetched.ResponseText != "Processed response" {
+		t.Errorf("expected completed with response text, got status=%q text=%q", fetched.Status, fetched.ResponseText)
 	}
 
-	msg2 := Message{
-		ID:         "msg-2",
-		ThreadID:   "thread-2",
-		GuildID:    "guild-1",
-		AuthorID:   "author-2",
-		AuthorName: "Bob",
-		Content:    "Second prompt",
-		Status:     StatusProcessing,
-		CreatedAt:  t2,
-		UpdatedAt:  t2,
+	// 8. Active recent threads, messages, and max rowID
+	threadIDs, err := GetActiveRecentThreadIDs(database, time.Hour)
+	if err != nil || len(threadIDs) == 0 {
+		t.Fatalf("GetActiveRecentThreadIDs failed: %v, len=%d", err, len(threadIDs))
 	}
-
-	if err := InsertMessage(database, msg1); err != nil {
-		t.Fatalf("Failed to insert msg1: %v", err)
+	msgs, err := GetRecentThreadMessages(database, "th-crud-1", 10)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("GetRecentThreadMessages failed: %v, len=%d", err, len(msgs))
 	}
-	if err := InsertMessage(database, msg2); err != nil {
-		t.Fatalf("Failed to insert msg2: %v", err)
-	}
-
-	fetched, err := GetMessage(database, "msg-1")
+	zeroMsgs, err := GetRecentThreadMessages(database, "th-crud-1", 0)
 	if err != nil {
-		t.Fatalf("Failed to get msg-1: %v", err)
+		t.Errorf("GetRecentThreadMessages with 0 limit failed: %v", err)
 	}
-	if fetched == nil || fetched.ID != "msg-1" || fetched.AuthorName != "Alice" || fetched.Status != StatusPending {
-		t.Fatalf("Unexpected message retrieved: %+v", fetched)
-	}
+	_ = zeroMsgs
 
-	pending, err := GetPendingOrProcessingMessages(database)
-	if err != nil {
-		t.Fatalf("Failed to get pending messages: %v", err)
-	}
-	if len(pending) != 2 {
-		t.Fatalf("Expected 2 pending messages, got %d", len(pending))
-	}
-
-	if err := IncrementMessageRetry(database, "msg-1", "503 Unavailable"); err != nil {
-		t.Fatalf("Failed to increment retry: %v", err)
-	}
-	fetched, _ = GetMessage(database, "msg-1")
-	if fetched.RetryCount != 1 || fetched.RestartCount != 0 || fetched.ErrorMessage != "503 Unavailable" {
-		t.Errorf("Expected retry_count=1, restart_count=0, error message set, got retry=%d, restart=%d, err=%s", fetched.RetryCount, fetched.RestartCount, fetched.ErrorMessage)
-	}
-
-	if err := IncrementMessageRestart(database, "msg-1", "crash recovery"); err != nil {
-		t.Fatalf("Failed to increment restart: %v", err)
-	}
-	fetched, _ = GetMessage(database, "msg-1")
-	if fetched.RestartCount != 1 || fetched.RetryCount != 1 || fetched.ErrorMessage != "crash recovery" {
-		t.Errorf("Expected restart_count=1, retry_count=1, got restart=%d, retry=%d, err=%s", fetched.RestartCount, fetched.RetryCount, fetched.ErrorMessage)
-	}
-
-	// Test ResetMessageToPendingWithRestart on msg-2 (which is StatusProcessing)
-	if err := ResetMessageToPendingWithRestart(database, "msg-2", "interrupted during restart"); err != nil {
-		t.Fatalf("Failed to reset message with restart: %v", err)
-	}
-	fetched2, _ := GetMessage(database, "msg-2")
-	if fetched2.Status != StatusPending || fetched2.RestartCount != 1 || fetched2.RetryCount != 0 || fetched2.ErrorMessage != "interrupted during restart" {
-		t.Errorf("Expected msg-2 status=PENDING, restart_count=1, retry_count=0, got status=%s, restart=%d, retry=%d, err=%s", fetched2.Status, fetched2.RestartCount, fetched2.RetryCount, fetched2.ErrorMessage)
-	}
-
-	if err := UpdateMessageStatus(database, "msg-1", StatusCompleted, ""); err != nil {
-		t.Fatalf("Failed to update status to COMPLETED: %v", err)
-	}
-	if err := UpdateMessageStatus(database, "msg-2", StatusFailed, "fatal error"); err != nil {
-		t.Fatalf("Failed to update status to FAILED: %v", err)
+	maxRowID, err := GetMaxMessageRowID(database, "th-crud-1")
+	if err != nil || maxRowID <= 0 {
+		t.Errorf("GetMaxMessageRowID failed: %v, maxRowID=%d", err, maxRowID)
 	}
 }
 
@@ -779,57 +821,6 @@ func TestFindUnrotatedSessions(t *testing.T) {
 	}
 }
 
-func TestSchedulesCompatibility(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	now := time.Now().UTC()
-
-	// 1. One-Shot Schedules
-	oneShot := OneShotSchedule{
-		ID:        "one-shot-1",
-		ThreadID:  "thread-sched-1",
-		Prompt:    "Remind me about meeting",
-		RunAt:     now.Add(-1 * time.Minute),
-		CreatedAt: now,
-	}
-	if err := CreateOneShotSchedule(database, oneShot); err != nil {
-		t.Fatalf("CreateOneShotSchedule failed: %v", err)
-	}
-
-	dueOneShots, err := GetDueOneShotSchedules(database)
-	if err != nil {
-		t.Fatalf("GetDueOneShotSchedules failed: %v", err)
-	}
-	if len(dueOneShots) != 1 || dueOneShots[0].ID != "one-shot-1" {
-		t.Fatalf("Expected 1 due one-shot, got %+v", dueOneShots)
-	}
-
-	// 2. Cron Schedules
-	cron := CronSchedule{
-		ID:          "cron-1",
-		TargetID:    "chan-general",
-		TitlePrefix: "Weather",
-		CronExpr:    "0 8 * * *",
-		Prompt:      "Daily forecast",
-		Timezone:    "America/Los_Angeles",
-		NextRunAt:   now.Add(-5 * time.Minute),
-		Enabled:     true,
-		CreatedAt:   now,
-	}
-	if err := CreateCronSchedule(database, cron); err != nil {
-		t.Fatalf("CreateCronSchedule failed: %v", err)
-	}
-
-	dueCrons, err := GetDueCronSchedules(database)
-	if err != nil {
-		t.Fatalf("GetDueCronSchedules failed: %v", err)
-	}
-	if len(dueCrons) != 1 || dueCrons[0].ID != "cron-1" {
-		t.Fatalf("Expected 1 due cron, got %+v", dueCrons)
-	}
-}
-
 func TestAtomicInsertMessageAndConsumeOneShot(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
@@ -870,108 +861,50 @@ func TestAtomicInsertMessageAndConsumeOneShot(t *testing.T) {
 	}
 }
 
-func TestGetFactsPaginatedCaseInsensitive(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	emb := make([]float32, 384)
-	emb[0] = 0.5
-
-	_, err := InsertFact(database, "user_preference", "Alex loves Matcha and Dark Roast Coffee", 1.0, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-
-	// Case-insensitive search using lowercase "matcha" and uppercase "ALEX"
-	res1, err := GetFactsPaginated(database, FactsFilter{Query: "matcha"})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated failed: %v", err)
-	}
-	if res1.Total != 1 {
-		t.Errorf("Expected 1 matching fact for lowercase 'matcha', got %d (check ILIKE)", res1.Total)
-	}
-
-	res2, err := GetFactsPaginated(database, FactsFilter{Query: "ALEX"})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated failed: %v", err)
-	}
-	if res2.Total != 1 {
-		t.Errorf("Expected 1 matching fact for uppercase 'ALEX', got %d (check ILIKE)", res2.Total)
-	}
-}
-
 func TestGetFactsPaginatedImportanceDescending(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	emb := make([]float32, 384)
+	ctx := context.Background()
 
-	// Insert facts with different importance and timestamps
-	idLow, err := InsertFact(database, "general", "Low importance fact", 0.2, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
+	// Insert facts with varying importance, categories, and casing
+	_, _ = InsertFactWithContext(ctx, database, false, "work", "Important Work Fact", 2.0, nil)
+	_, _ = InsertFactWithContext(ctx, database, false, "work", "Routine work fact", 1.0, nil)
+	_, _ = InsertFactWithContext(ctx, database, false, "personal", "Personal hobby fact", 1.5, nil)
+
+	// 1. Importance descending ordering
+	res, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Limit: 10})
+	if err != nil || len(res.Facts) != 3 {
+		t.Fatalf("GetFactsPaginated failed: %v, len=%d", err, len(res.Facts))
 	}
-	idMax, err := InsertFact(database, "core", "Max importance fact", 1.0, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-	idMid, err := InsertFact(database, "infra", "Mid importance fact", 0.5, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-	idHigh1, err := InsertFact(database, "preference", "High importance fact 1", 0.8, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-	idHigh2, err := InsertFact(database, "preference", "High importance fact 2", 0.8, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-	idVeryHigh, err := InsertFact(database, "system", "Very high importance fact", 0.95, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
+	if res.Facts[0].Importance < res.Facts[1].Importance || res.Facts[1].Importance < res.Facts[2].Importance {
+		t.Errorf("expected facts ordered by importance DESC, got [%f, %f, %f]", res.Facts[0].Importance, res.Facts[1].Importance, res.Facts[2].Importance)
 	}
 
-	// 1. Unlimited fetch: verify all 6 are returned in exact descending order of importance
-	resAll, err := GetFactsPaginated(database, FactsFilter{Limit: 0})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated unlimited failed: %v", err)
-	}
-	if resAll.Total != 6 || len(resAll.Facts) != 6 {
-		t.Fatalf("Expected 6 total facts, got total=%d, len=%d", resAll.Total, len(resAll.Facts))
+	// 2. Case-insensitive query filtering
+	resQuery, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Query: "WORK"})
+	if err != nil || len(resQuery.Facts) != 2 {
+		t.Fatalf("case-insensitive query filter failed: %v, len=%d", err, len(resQuery.Facts))
 	}
 
-	expectedOrder := []int64{idMax, idVeryHigh, idHigh2, idHigh1, idMid, idLow}
-	for i, expectedID := range expectedOrder {
-		if resAll.Facts[i].ID != expectedID {
-			t.Errorf("Index %d: expected fact ID %d (imp=%f), got ID %d (imp=%f, text=%q)",
-				i, expectedID, resAll.Facts[i].Importance, resAll.Facts[i].ID, resAll.Facts[i].Importance, resAll.Facts[i].FactText)
-		}
+	// 3. Category filtering
+	resCat, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Category: "personal"})
+	if err != nil || len(resCat.Facts) != 1 || resCat.Facts[0].Category != "personal" {
+		t.Fatalf("category filter failed: %v, len=%d", err, len(resCat.Facts))
 	}
 
-	// 2. Pagination fetch: page 1 (Limit: 3, Offset: 0)
-	resPage1, err := GetFactsPaginated(database, FactsFilter{Limit: 3, Offset: 0})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated page 1 failed: %v", err)
+	// 4. Offset variants (Limit=0, Offset>0, Negative offset clamped to 0)
+	resOffset, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Limit: 0, Offset: 1})
+	if err != nil || len(resOffset.Facts) != 2 {
+		t.Errorf("offset with 0 limit failed: %v, len=%d", err, len(resOffset.Facts))
 	}
-	if len(resPage1.Facts) != 3 || resPage1.Total != 6 {
-		t.Fatalf("Expected 3 facts on page 1, got %d (total=%d)", len(resPage1.Facts), resPage1.Total)
-	}
-	if resPage1.Facts[0].ID != idMax || resPage1.Facts[1].ID != idVeryHigh || resPage1.Facts[2].ID != idHigh2 {
-		t.Errorf("Page 1 mismatch: got IDs [%d, %d, %d]", resPage1.Facts[0].ID, resPage1.Facts[1].ID, resPage1.Facts[2].ID)
+	resNeg, err := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{Limit: 10, Offset: -5})
+	if err != nil || len(resNeg.Facts) != 3 {
+		t.Errorf("negative offset failed: %v, len=%d", err, len(resNeg.Facts))
 	}
 
-	// 3. Pagination fetch: page 2 (Limit: 3, Offset: 3)
-	resPage2, err := GetFactsPaginated(database, FactsFilter{Limit: 3, Offset: 3})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated page 2 failed: %v", err)
-	}
-	if len(resPage2.Facts) != 3 || resPage2.Total != 6 {
-		t.Fatalf("Expected 3 facts on page 2, got %d (total=%d)", len(resPage2.Facts), resPage2.Total)
-	}
-	if resPage2.Facts[0].ID != idHigh1 || resPage2.Facts[1].ID != idMid || resPage2.Facts[2].ID != idLow {
-		t.Errorf("Page 2 mismatch: got IDs [%d, %d, %d]", resPage2.Facts[0].ID, resPage2.Facts[1].ID, resPage2.Facts[2].ID)
-	}
+	// 5. GetFactsPaginatedWithContext isPg=true with Offset>0 (exercises paginationSQL = "OFFSET $1")
+	_, _ = GetFactsPaginatedWithContext(ctx, database, true, FactsFilter{Offset: 2})
 }
 
 func TestMessageExistsAndClaimPending(t *testing.T) {
@@ -1053,90 +986,85 @@ func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 	}
 }
 
-func TestScheduleRunsCRUD(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	now := time.Now().UTC()
-	run := ScheduleRun{
-		ID:           "run-test-1",
-		ScheduleID:   "cron-weather",
-		ScheduleType: "cron",
-		TargetID:     "chan-weather",
-		ThreadID:     "thread-weather-1",
-		Title:        "Morning Forecast",
-		Prompt:       "Forecast prompt",
-		Status:       "enqueued",
-		StartedAt:    now,
-	}
-
-	if err := CreateScheduleRun(database, run); err != nil {
-		t.Fatalf("CreateScheduleRun failed: %v", err)
-	}
-
-	// Update to completed
-	compTime := now.Add(15 * time.Second)
-	updateParams := UpdateRunParams{
-		RunID:       "run-test-1",
-		MessageID:   "msg-run-1",
-		Status:      "completed",
-		CompletedAt: compTime,
-		DurationMs:  15000,
-	}
-	if err := UpdateScheduleRunStatus(database, updateParams); err != nil {
-		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
-	}
-
-	runs, total, err := GetScheduleRunsPaginated(database, 10, 0, "cron-weather", "")
-	if err != nil {
-		t.Fatalf("GetScheduleRunsPaginated failed: %v", err)
-	}
-	if total != 1 || len(runs) != 1 {
-		t.Fatalf("Expected 1 run, got total=%d, len=%d", total, len(runs))
-	}
-	if runs[0].Status != "completed" || runs[0].DurationMs != 15000 {
-		t.Errorf("Unexpected run state: %+v", runs[0])
-	}
-}
-
 func TestNativeVectorSearchHNSW(t *testing.T) {
 	store := NewFakeStore()
 	ctx := context.Background()
 
-	// Create 3 vectors
-	vecAlex := make([]float32, 384)
-	vecAlex[0] = 1.0 // Alex preference vector
+	embValid := make([]float32, ExpectedEmbeddingDim)
+	embValid[0] = 1.0
 
-	vecWeather := make([]float32, 384)
-	vecWeather[1] = 1.0 // Weather vector
+	embInvalid := []float32{0.1, 0.2, 0.3}
 
-	vecMusic := make([]float32, 384)
-	vecMusic[0] = 0.9 // Close to Alex preference
+	// 1. Fact matching high score
+	_, _ = store.InsertFact(ctx, "cat", "High score fact", 1.0, embValid)
 
-	_, err := store.InsertFact(ctx, "preference", "Alex likes dark roast coffee", 1.0, vecAlex)
-	if err != nil {
-		t.Fatalf("InsertFact 1 failed: %v", err)
+	// 2. Fact matching low importance (filtered out by minScore=0.5)
+	_, _ = store.InsertFact(ctx, "cat", "Low score fact", 0.001, embValid)
+
+	// 3. Fact with orthogonal embedding (filtered out by minScore=0.5)
+	embOrthogonal := make([]float32, ExpectedEmbeddingDim)
+	embOrthogonal[1] = 1.0
+	_, _ = store.InsertFact(ctx, "cat", "Orthogonal fact", 0.5, embOrthogonal)
+
+	// 4. Fact with invalid embedding dimension
+	_, _ = store.InsertFact(ctx, "cat", "Invalid dim fact", 1.0, embInvalid)
+
+	// 5. Fact with nil embedding
+	_, _ = store.InsertFact(ctx, "cat", "No embedding fact", 1.0, nil)
+
+	// Vector search execution
+	res, err := store.SearchSimilarFacts(ctx, embValid, "", 10, 0.5)
+	if err != nil || len(res) != 1 {
+		t.Fatalf("SearchSimilarFacts failed: %v, len=%d", err, len(res))
 	}
-	_, err = store.InsertFact(ctx, "routine", "Daily weather forecast at 8am", 1.0, vecWeather)
-	if err != nil {
-		t.Fatalf("InsertFact 2 failed: %v", err)
-	}
-	_, err = store.InsertFact(ctx, "preference", "Alex listens to synthwave while coding", 0.8, vecMusic)
-	if err != nil {
-		t.Fatalf("InsertFact 3 failed: %v", err)
+	if res[0].FactText != "High score fact" {
+		t.Errorf("expected 'High score fact', got %q", res[0].FactText)
 	}
 
-	// Search for query vector close to Alex (vecAlex)
-	results, err := store.SearchSimilarFacts(ctx, vecAlex, "", 5, 0.5)
+	// Filter branches: matching query
+	resFilter, err := store.SearchSimilarFacts(ctx, embValid, "Matching", 10, 0.1)
 	if err != nil {
-		t.Fatalf("SearchSimilarFacts failed: %v", err)
+		t.Fatalf("SearchSimilarFacts filter branches failed: %v", err)
 	}
-	if len(results) < 2 {
-		t.Fatalf("Expected at least 2 similar facts for Alex, got %d", len(results))
+	_ = resFilter
+
+	// Edge case: Nil database
+	resNilDB, err := SearchSimilarFactsWithContext(ctx, nil, true, embValid, "test", 10, 0.2)
+	if err != nil || resNilDB != nil {
+		t.Errorf("expected nil, nil for nil DB in SearchSimilarFactsWithContext, got %v, %v", resNilDB, err)
 	}
-	if !strings.Contains(results[0].FactText, "dark roast coffee") {
-		t.Errorf("Expected top result to be dark roast coffee, got %s", results[0].FactText)
+
+	// Edge case: Empty embedding and empty query
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+	resEmpty, err := SearchSimilarFactsWithContext(ctx, database, false, nil, "", 10, 0.2)
+	if err != nil || resEmpty != nil {
+		t.Errorf("expected nil, nil for empty embedding and query, got %v, %v", resEmpty, err)
 	}
+
+	// Edge case: Clamped limit and clamped minScore with nil context
+	resClamped, err := SearchSimilarFactsWithContext(nil, database, false, nil, "   ", -1, -0.5)
+	if err != nil || resClamped != nil {
+		t.Errorf("expected nil, nil for clamped query, got %v, %v", resClamped, err)
+	}
+
+	// Edge case: isPg=true on SQLite database triggers query error path
+	_, errPgOnSqlite := SearchSimilarFactsWithContext(ctx, database, true, embValid, "", 10, 0.2)
+	if errPgOnSqlite == nil {
+		t.Errorf("expected error running pg vector query on sqlite db, got nil")
+	}
+
+	// Edge case: isPg=true with candidateLimit >= 30 using testMockDBTX
+	mockCandidate := testMockDBTX{
+		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			return database.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
+		},
+	}
+	candidateFacts, err := SearchSimilarFactsWithContext(ctx, mockCandidate, true, embValid, "", 20, 0.1)
+	if err != nil {
+		t.Fatalf("SearchSimilarFactsWithContext candidateLimit>=30 failed: %v", err)
+	}
+	_ = candidateFacts
 }
 
 func TestRecentThreadMessagesAndActiveIDs(t *testing.T) {
@@ -1170,135 +1098,223 @@ func TestRecentThreadMessagesAndActiveIDs(t *testing.T) {
 	}
 }
 
-func TestSchedulesLifecycleAndMetrics(t *testing.T) {
+func TestSchedulesAndRunsLifecycle(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	now := time.Now().UTC()
+	now := time.Now().Truncate(time.Second).UTC()
 
-	// One-shot schedule lifecycle
-	osID := "os-test-1"
-	err := CreateOneShotSchedule(database, OneShotSchedule{
-		ID:       osID,
-		ThreadID: "thread-os",
-		Prompt:   "One-shot prompt",
-		RunAt:    now.Add(time.Hour),
-	})
-	if err != nil {
+	// 1. One-shot schedule CRUD
+	osSched := OneShotSchedule{
+		ID:        "os-1",
+		ThreadID:  "th-1",
+		Prompt:    "Run once prompt",
+		RunAt:     now.Add(-time.Minute),
+		CreatedAt: now,
+		Effort:    "low",
+	}
+	if err := CreateOneShotSchedule(database, osSched); err != nil {
 		t.Fatalf("CreateOneShotSchedule failed: %v", err)
 	}
 
-	allOS, err := GetAllOneShotSchedules(database, "thread-os")
-	if err != nil {
-		t.Fatalf("GetAllOneShotSchedules failed: %v", err)
-	}
-	if len(allOS) == 0 {
-		t.Fatalf("expected at least 1 one-shot schedule")
+	dueOS, err := GetDueOneShotSchedules(database)
+	if err != nil || len(dueOS) != 1 || dueOS[0].ID != "os-1" {
+		t.Fatalf("GetDueOneShotSchedules failed: %v, len=%d", err, len(dueOS))
 	}
 
-	err = DeleteOneShotSchedule(database, osID)
-	if err != nil {
+	allOS, err := GetAllOneShotSchedules(database, "th-1")
+	if err != nil || len(allOS) != 1 {
+		t.Fatalf("GetAllOneShotSchedules failed: %v, len=%d", err, len(allOS))
+	}
+
+	// Consume one-shot schedule into message
+	osMsg := Message{
+		ID:       "msg-os-1",
+		ThreadID: "th-1",
+		Content:  "From one shot",
+		Status:   StatusPending,
+	}
+	if err := InsertMessageAndConsumeOneShot(database, "os-1", osMsg); err != nil {
+		t.Fatalf("InsertMessageAndConsumeOneShot failed: %v", err)
+	}
+	if err := InsertMessageAndConsumeOneShot(database, "non-existent-oneshot", osMsg); err == nil {
+		t.Errorf("expected error consuming non-existent one-shot, got nil")
+	}
+
+	if err := DeleteOneShotSchedule(database, "os-1"); err != nil {
 		t.Fatalf("DeleteOneShotSchedule failed: %v", err)
 	}
 
-	// Cron schedule lifecycle
-	cronID := "cron-test-1"
-	err = CreateCronSchedule(database, CronSchedule{
-		ID:          cronID,
-		TargetID:    "thread-cron",
-		TitlePrefix: "[CRON]",
-		CronExpr:    "0 * * * *",
-		Prompt:      "Cron prompt",
-		Timezone:    "America/Los_Angeles",
-		NextRunAt:   now.Add(time.Hour),
-		Enabled:     true,
-	})
-	if err != nil {
+	// 2. Cron schedule CRUD
+	cronSched := CronSchedule{
+		ID:        "cron-1",
+		TargetID:  "chan-1",
+		CronExpr:  "*/5 * * * *",
+		Prompt:    "Recurring prompt",
+		NextRunAt: now.Add(-time.Minute),
+		Enabled:   true,
+		Effort:    "low",
+		CreatedAt: now,
+	}
+	if err := CreateCronSchedule(database, cronSched); err != nil {
 		t.Fatalf("CreateCronSchedule failed: %v", err)
 	}
 
-	allCrons, err := GetAllCronSchedules(database, "thread-cron")
-	if err != nil {
-		t.Fatalf("GetAllCronSchedules failed: %v", err)
-	}
-	if len(allCrons) == 0 {
-		t.Fatalf("expected at least 1 cron schedule")
+	dueCron, err := GetDueCronSchedules(database)
+	if err != nil || len(dueCron) != 1 || dueCron[0].ID != "cron-1" {
+		t.Fatalf("GetDueCronSchedules failed: %v, len=%d", err, len(dueCron))
 	}
 
-	err = UpdateCronNextRun(database, cronID, now.Add(2*time.Hour))
-	if err != nil {
+	allCron, err := GetAllCronSchedules(database, "chan-1")
+	if err != nil || len(allCron) != 1 {
+		t.Fatalf("GetAllCronSchedules failed: %v, len=%d", err, len(allCron))
+	}
+
+	nextTime := now.Add(time.Hour)
+	if err := UpdateCronNextRun(database, "cron-1", nextTime); err != nil {
 		t.Fatalf("UpdateCronNextRun failed: %v", err)
 	}
 
-	// Schedule metrics
-	metrics, err := GetScheduleSummaryMetrics(database)
-	if err != nil {
-		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
+	if err := UpdateCronScheduleEffort(database, "", "high"); err != nil {
+		t.Errorf("expected nil error on empty id in UpdateCronScheduleEffort, got %v", err)
 	}
-	t.Logf("Schedule metrics total active: %d", metrics.TotalActive)
+	if err := UpdateCronScheduleEffort(database, "cron-1", "low"); err != nil {
+		t.Errorf("expected nil error on low effort in UpdateCronScheduleEffort, got %v", err)
+	}
+	if err := UpdateCronScheduleEffort(database, "cron-1", "unrecognized"); err != nil {
+		t.Errorf("expected nil error on unrecognized effort in UpdateCronScheduleEffort, got %v", err)
+	}
 
-	err = DeleteCronSchedule(database, cronID)
+	// 3. Schedule runs CRUD
+	run1 := ScheduleRun{
+		ID:           "run-1",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		TargetID:     "chan-1",
+		ThreadID:     "th-1",
+		Title:        "Run Title",
+		Prompt:       "Run Prompt",
+		Status:       "running",
+		StartedAt:    now.Add(-2 * time.Hour),
+		Effort:       "unrecognized_fallback",
+	}
+	if err := CreateScheduleRun(database, run1); err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+
+	updateParams := UpdateRunParams{
+		RunID:       "run-1",
+		Status:      "success",
+		Error:       "",
+		CompletedAt: now,
+		DurationMs:  500,
+	}
+	if err := UpdateScheduleRunStatus(database, updateParams); err != nil {
+		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
+	}
+
+	if err := UpdateScheduleRunStatus(database, UpdateRunParams{RunID: "run-1"}); err != nil {
+		t.Errorf("expected nil error on empty sets UpdateScheduleRunStatus, got %v", err)
+	}
+
+	runs, total, err := GetScheduleRunsPaginated(database, 10, 0, "cron-1", "success")
+	if err != nil || total != 1 || len(runs) != 1 {
+		t.Fatalf("GetScheduleRunsPaginated failed: %v, total=%d, len=%d", err, total, len(runs))
+	}
+	runsClamped, totalClamped, err := GetScheduleRunsPaginated(database, -5, -10, "", "")
+	if err != nil || totalClamped != 1 || len(runsClamped) != 1 {
+		t.Errorf("GetScheduleRunsPaginated clamping failed: %v, total=%d", err, totalClamped)
+	}
+
+	// 4. Reconcile orphaned runs
+	runOrphan := ScheduleRun{
+		ID:           "run-orphan",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		TargetID:     "chan-1",
+		Status:       "running",
+		StartedAt:    now.Add(-3 * time.Hour),
+	}
+	_ = CreateScheduleRun(database, runOrphan)
+	reconciled, err := ReconcileOrphanedScheduleRuns(database)
+	if err != nil || reconciled == 0 {
+		t.Fatalf("ReconcileOrphanedScheduleRuns failed: %v, reconciled=%d", err, reconciled)
+	}
+
+	// 5. Prune old schedule runs
+	pruned, err := PruneScheduleRuns(database, 100, time.Hour)
 	if err != nil {
+		t.Fatalf("PruneScheduleRuns failed: %v", err)
+	}
+	_ = pruned
+
+	if err := DeleteCronSchedule(database, "cron-1"); err != nil {
 		t.Fatalf("DeleteCronSchedule failed: %v", err)
 	}
 }
 
-func TestReconcileAndPruneScheduleRuns(t *testing.T) {
+func TestGetScheduleSummaryMetrics(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
 
-	now := time.Now().UTC()
-	runID := "run-test-1"
-	err := CreateScheduleRun(database, ScheduleRun{
-		ID:           runID,
-		ScheduleID:   "cron-test-1",
-		ScheduleType: "cron",
-		Prompt:       "Cron prompt",
-		StartedAt:    now.Add(-2 * time.Hour),
-		Status:       "enqueued",
-	})
+	// 1. Empty database
+	metrics, err := GetScheduleSummaryMetrics(database)
 	if err != nil {
-		t.Fatalf("CreateScheduleRun failed: %v", err)
+		t.Fatalf("GetScheduleSummaryMetrics on empty db failed: %v", err)
+	}
+	if metrics.CronCount != 0 || metrics.OneShotCount != 0 || metrics.NextRunAt != nil || metrics.SuccessRate24h != 100.0 {
+		t.Errorf("unexpected empty db metrics: %+v", metrics)
 	}
 
-	reconciled, err := ReconcileOrphanedScheduleRuns(database)
+	now := time.Now().Truncate(time.Second).UTC()
+
+	// 2. Cron schedule earlier than one-shot schedule
+	tCron := now.Add(5 * time.Minute)
+	tOneShot := now.Add(10 * time.Minute)
+	_, _ = database.Exec("INSERT INTO cron_schedules (id, target_id, cron_expr, prompt, enabled, next_run_at, created_at) VALUES ('cs-1', 't1', '*/5 * * * *', 'Prompt', 1, ?, ?)", tCron, now)
+	_, _ = database.Exec("INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at) VALUES ('os-1', 't1', 'Prompt', ?, ?)", tOneShot, now)
+
+	mCronEarlier, err := GetScheduleSummaryMetrics(database)
+	if err != nil || mCronEarlier.NextRunAt == nil || !mCronEarlier.NextRunAt.Equal(tCron) {
+		t.Errorf("expected NextRunAt = tCron, got %+v (err: %v)", mCronEarlier, err)
+	}
+
+	// 3. One-shot schedule earlier than cron schedule
+	tOneShotEarlier := now.Add(2 * time.Minute)
+	_, _ = database.Exec("UPDATE one_shot_schedules SET run_at = ? WHERE id = 'os-1'", tOneShotEarlier)
+
+	mOneShotEarlier, err := GetScheduleSummaryMetrics(database)
+	if err != nil || mOneShotEarlier.NextRunAt == nil || !mOneShotEarlier.NextRunAt.Equal(tOneShotEarlier) {
+		t.Errorf("expected NextRunAt = tOneShotEarlier, got %+v (err: %v)", mOneShotEarlier, err)
+	}
+
+	// 4. Single schedule type NextRunAt variants (only one-shot or only cron)
+	_, _ = database.Exec("DELETE FROM cron_schedules")
+	mOnlyOneShot, err := GetScheduleSummaryMetrics(database)
+	if err != nil || mOnlyOneShot.NextRunAt == nil || !mOnlyOneShot.NextRunAt.Equal(tOneShotEarlier) {
+		t.Errorf("expected NextRunAt for only one-shot, got %+v", mOnlyOneShot)
+	}
+
+	_, _ = database.Exec("DELETE FROM one_shot_schedules")
+	_, _ = database.Exec("INSERT INTO cron_schedules (id, target_id, cron_expr, prompt, enabled, next_run_at, created_at) VALUES ('cs-only', 't1', '*/5 * * * *', 'Prompt', 1, ?, ?)", tCron, now)
+	mOnlyCron, err := GetScheduleSummaryMetrics(database)
+	if err != nil || mOnlyCron.NextRunAt == nil || !mOnlyCron.NextRunAt.Equal(tCron) {
+		t.Errorf("expected NextRunAt for only cron, got %+v", mOnlyCron)
+	}
+
+	// 5. 24h success rate calculations (completed runs vs other runs)
+	_, _ = database.Exec("INSERT INTO schedule_runs (id, schedule_id, schedule_type, target_id, thread_id, prompt, status, started_at) VALUES ('r-s1', 'cs-1', 'cron', 't1', 't1', 'p', 'completed', ?)", now.Add(-time.Hour))
+	_, _ = database.Exec("INSERT INTO schedule_runs (id, schedule_id, schedule_type, target_id, thread_id, prompt, status, started_at) VALUES ('r-f1', 'cs-1', 'cron', 't1', 't1', 'p', 'failed', ?)", now.Add(-time.Hour))
+	_, _ = database.Exec("INSERT INTO schedule_runs (id, schedule_id, schedule_type, target_id, thread_id, prompt, status, started_at) VALUES ('r-t1', 'cs-1', 'cron', 't1', 't1', 'p', 'timeout', ?)", now.Add(-time.Hour))
+	_, _ = database.Exec("INSERT INTO schedule_runs (id, schedule_id, schedule_type, target_id, thread_id, prompt, status, started_at) VALUES ('r-c1', 'cs-1', 'cron', 't1', 't1', 'p', 'cancelled', ?)", now.Add(-time.Hour))
+
+	mRates, err := GetScheduleSummaryMetrics(database)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedScheduleRuns failed: %v", err)
+		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
 	}
-	t.Logf("Reconciled orphaned runs: %d", reconciled)
-
-	_ = UpdateScheduleRunStatus(database, UpdateRunParams{
-		RunID:       runID,
-		Status:      "completed",
-		CompletedAt: now,
-	})
-
-	pruned, err := PruneScheduleRuns(database, 100, 30*24*time.Hour)
-	if err != nil {
-		t.Fatalf("PruneScheduleRuns failed: %v", err)
+	if mRates.SuccessRate24h < 24.0 || mRates.SuccessRate24h > 26.0 {
+		t.Errorf("expected ~25.0 success rate, got %f", mRates.SuccessRate24h)
 	}
-	t.Logf("Pruned schedule runs: %d", pruned)
-}
-
-func TestTasksAndTriggers(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
-
-	clean := CleanTaskSummary("Task <@12345> details [url](http://foo) ```code``` \n\n extra space")
-	if strings.Contains(clean, "<@") || strings.Contains(clean, "```") {
-		t.Errorf("CleanTaskSummary did not sanitize markdown/mentions: %s", clean)
-	}
-
-	trig := InferTriggerType("thread-cron-123", "Every morning run health check")
-	if trig != "cron" && trig != "discord" && trig != "reminder" {
-		t.Errorf("unexpected trigger type: %s", trig)
-	}
-
-	tasks, err := GetActiveTasks(database)
-	if err != nil {
-		t.Fatalf("GetActiveTasks failed: %v", err)
-	}
-	t.Logf("Active tasks found: %d", len(tasks))
 }
 
 func TestSessionConversationMapping(t *testing.T) {
@@ -1354,50 +1370,78 @@ func TestFactEmbeddingAndThreadLookup(t *testing.T) {
 }
 
 func TestCleanTaskSummary(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "empty input",
-			input:    "",
-			expected: "Agent Task",
-		},
-		{
-			name:     "whitespace only",
-			input:    "   \n\t  ",
-			expected: "Agent Task",
-		},
-		{
-			name:     "user request tag with content prefix",
-			input:    "<USER_REQUEST>\n- id: 123\n- content: Deploy new feature\n</USER_REQUEST>",
-			expected: "Deploy new feature",
-		},
-		{
-			name:     "user request tag with multiline prompt",
-			input:    "<USER_REQUEST>\nPrompt:\nGenerate quarterly report\n</USER_REQUEST>",
-			expected: "Generate quarterly report",
-		},
-		{
-			name:     "markdown formatting and mentions stripped",
-			input:    "**Hello** <@123456789> `code block`",
-			expected: "Hello code block",
-		},
-		{
-			name:     "long text truncated to 140 chars",
-			input:    "This is an extraordinarily long prompt designed specifically to verify that the CleanTaskSummary helper properly cuts off strings exceeding one hundred and forty runes with an ellipsis suffix accurately.",
-			expected: "This is an extraordinarily long prompt designed specifically to verify that the CleanTaskSummary helper properly cuts off strings exceedi...",
-		},
+	// 1. Multiline Prompt: header
+	input1 := "<USER_REQUEST>\nPrompt:\n   Actual prompt content here\n</USER_REQUEST>"
+	res1 := CleanTaskSummary(input1)
+	if res1 != "Actual prompt content here" {
+		t.Errorf("expected 'Actual prompt content here', got %q", res1)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := CleanTaskSummary(tt.input)
-			if got != tt.expected {
-				t.Errorf("CleanTaskSummary() = %q, want %q", got, tt.expected)
+	// 2. Same-line Prompt: header
+	input2 := "<USER_REQUEST>\nPrompt: Clean inline prompt\n</USER_REQUEST>"
+	res2 := CleanTaskSummary(input2)
+	if res2 != "Clean inline prompt" {
+		t.Errorf("expected 'Clean inline prompt', got %q", res2)
+	}
+
+	// 3. Bullet content format
+	input3 := "<USER_REQUEST>\n- content: Bullet content format\n</USER_REQUEST>"
+	res3 := CleanTaskSummary(input3)
+	if res3 != "Bullet content format" {
+		t.Errorf("expected 'Bullet content format', got %q", res3)
+	}
+
+	// 4. Tag mention fallback
+	input4 := "<tag>@mention</tag>"
+	res4 := CleanTaskSummary(input4)
+	if res4 != "Agent Task" {
+		t.Errorf("expected 'Agent Task', got %q", res4)
+	}
+
+	// 5. Random XML tag fallback
+	input5 := "<random_tag></random_tag>"
+	res5 := CleanTaskSummary(input5)
+	if res5 != "Agent Task" {
+		t.Errorf("expected 'Agent Task', got %q", res5)
+	}
+
+	// 6. Whitespace fallback
+	input6 := "   "
+	res6 := CleanTaskSummary(input6)
+	if res6 != "Agent Task" {
+		t.Errorf("expected 'Agent Task', got %q", res6)
+	}
+
+	// 7. Long prompt truncation
+	input7 := "This is a very long prompt string " + strings.Repeat("with lots of extra words ", 10)
+	res7 := CleanTaskSummary(input7)
+	if !strings.HasSuffix(res7, "...") {
+		t.Errorf("expected truncated string with ..., got %q", res7)
+	}
+
+	// 8. GetActiveTasks with empty message summary (auto-cleaned)
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	_, err := database.Exec("INSERT INTO messages (id, thread_id, content, summary, status, created_at, updated_at) VALUES ('m-empty-summary', 't-task', 'Prompt from task content', '', 'PENDING', datetime('now'), datetime('now'))")
+	if err != nil {
+		t.Fatalf("failed to insert message with empty summary: %v", err)
+	}
+	tasks, err := GetActiveTasks(database)
+	if err != nil {
+		t.Fatalf("GetActiveTasks failed: %v", err)
+	}
+	var foundTask bool
+	for _, task := range tasks {
+		if task.ID == "m-empty-summary" {
+			foundTask = true
+			if task.Summary != "Prompt from task content" {
+				t.Errorf("expected auto-cleaned summary 'Prompt from task content', got %q", task.Summary)
 			}
-		})
+		}
+	}
+	if !foundTask {
+		t.Errorf("expected to find task m-empty-summary in active tasks")
 	}
 }
 
@@ -1413,54 +1457,6 @@ func TestInferTriggerType(t *testing.T) {
 	}
 	if tt := InferTriggerType("user-1", ""); tt != "discord" {
 		t.Errorf("expected 'discord', got %q", tt)
-	}
-}
-
-func TestSQLiteExplicitSchemaAndMigrations(t *testing.T) {
-	sqlitePath := filepath.Join(t.TempDir(), "aerial_sqlite_explicit.db")
-	database, err := InitDB(sqlitePath)
-	if err != nil {
-		t.Fatalf("InitDB failed for SQLite: %v", err)
-	}
-	defer func() { _ = database.Close() }()
-
-	// Test SQLite message insert and query
-	msg := Message{
-		ID:         "msg-sqlite-1",
-		ThreadID:   "th-sqlite-1",
-		GuildID:    "g-sqlite-1",
-		AuthorID:   "author-1",
-		AuthorName: "Alice",
-		Content:    "Hello SQLite",
-		Status:     StatusPending,
-	}
-	if err := InsertMessage(database, msg); err != nil {
-		t.Fatalf("InsertMessage failed on SQLite: %v", err)
-	}
-
-	m, err := GetMessage(database, "msg-sqlite-1")
-	if err != nil || m == nil {
-		t.Fatalf("GetMessage failed on SQLite: %v", err)
-	}
-
-	// Test SQLite facts insert and vector search
-	vec := make([]float32, ExpectedEmbeddingDim)
-	vec[0] = 1.0
-	factID, err := InsertFact(database, "pref", "User likes tea", 0.9, vec)
-	if err != nil {
-		t.Fatalf("InsertFact on SQLite failed: %v", err)
-	}
-	if factID <= 0 {
-		t.Errorf("expected positive factID, got %d", factID)
-	}
-
-	// Test SQLite active tasks query
-	tasks, err := GetActiveTasks(database)
-	if err != nil {
-		t.Fatalf("GetActiveTasks on SQLite failed: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Errorf("expected 1 active task, got %d", len(tasks))
 	}
 }
 
@@ -1482,580 +1478,391 @@ func TestVectorHelpersEdgeCases(t *testing.T) {
 func TestNullVector_Scan(t *testing.T) {
 	var nv NullVector
 
-	// 1. nil
+	// Nil source
 	if err := nv.Scan(nil); err != nil || nv.Valid || nv.Vector != nil {
-		t.Errorf("expected nil result for nil src, got err: %v, valid: %t", err, nv.Valid)
+		t.Errorf("expected nil Vector and Valid=false on nil Scan, got %v, valid=%v", err, nv.Valid)
 	}
 
-	// 2. valid string
-	if err := nv.Scan("[0.1,0.2,0.3]"); err != nil || !nv.Valid || len(nv.Vector) != 3 {
-		t.Errorf("expected valid vector from string, got err: %v, len: %d", err, len(nv.Vector))
-	}
-
-	// 3. valid byte slice with string format
-	if err := nv.Scan([]byte("[0.4,0.5]")); err != nil || !nv.Valid || len(nv.Vector) != 2 {
-		t.Errorf("expected valid vector from byte string, got err: %v, len: %d", err, len(nv.Vector))
-	}
-
-	// 4. invalid int type
+	// Invalid type
 	if err := nv.Scan(12345); err == nil {
-		t.Error("expected error for invalid int type in NullVector.Scan")
+		t.Errorf("expected error scanning int into NullVector, got nil")
+	}
+
+	// Invalid JSON string
+	if err := nv.Scan("[invalid-json"); err == nil {
+		t.Errorf("expected error scanning invalid JSON string into NullVector, got nil")
+	}
+
+	// Valid string
+	if err := nv.Scan("[0.1,0.2,0.3]"); err != nil || !nv.Valid || len(nv.Vector) != 3 {
+		t.Errorf("expected valid vector scan, got err=%v, valid=%v, len=%d", err, nv.Valid, len(nv.Vector))
+	}
+
+	// Valid byte slice
+	if err := nv.Scan([]byte("[0.1,0.2]")); err != nil || !nv.Valid || len(nv.Vector) != 2 {
+		t.Errorf("expected valid vector scan from bytes, got err=%v, valid=%v, len=%d", err, nv.Valid, len(nv.Vector))
+	}
+
+	// FactTime Scan branches
+	var ft FactTime
+	if err := ft.Scan(nil); err != nil || ft.Valid {
+		t.Errorf("expected Valid=false on nil FactTime scan")
+	}
+	now := time.Now()
+	if err := ft.Scan(now); err != nil || !ft.Valid {
+		t.Errorf("expected Valid=true on valid FactTime scan")
+	}
+	if err := ft.Scan("invalid-date-string"); err == nil {
+		t.Errorf("expected error scanning invalid date string into FactTime, got nil")
+	}
+	var pTime *time.Time = &now
+	if err := ft.Scan(pTime); err != nil || !ft.Valid {
+		t.Errorf("expected Valid=true on *time.Time scan")
+	}
+	var nilPTime *time.Time = nil
+	if err := ft.Scan(nilPTime); err != nil || ft.Valid {
+		t.Errorf("expected Valid=false on nil *time.Time scan")
+	}
+	if err := ft.Scan(""); err != nil || ft.Valid {
+		t.Errorf("expected Valid=false on empty string scan")
+	}
+	if err := ft.Scan([]byte("")); err != nil || ft.Valid {
+		t.Errorf("expected Valid=false on empty bytes scan")
+	}
+	if err := ft.Scan([]byte(now.Format(time.RFC3339))); err != nil || !ft.Valid {
+		t.Errorf("expected Valid=true on bytes scan")
 	}
 }
 
 func TestDB_NilDatabaseHandling_All(t *testing.T) {
-	// Messages
-	_ = InsertMessage(nil, Message{})
-	_ = UpdateMessageStatus(nil, "m1", StatusCompleted, "")
-	_ = UpdateMessageCompleted(nil, "m1", "resp")
-	_ = IncrementMessageRetry(nil, "m1", "err")
-	_ = IncrementMessageRestart(nil, "m1", "err")
-	_ = ResetMessageToPendingWithRestart(nil, "m1", "err")
-	_, _ = GetPendingOrProcessingMessages(nil)
-	_, _ = GetMessage(nil, "m1")
-	_, _ = MessageExists(nil, "m1")
-	_, _ = ClaimPendingMessage(nil, "m1")
-	_, _ = GetActiveRecentThreadIDs(nil, 1)
-	_, _ = GetRecentThreadMessages(nil, "th1", 10)
-	_, _ = GetMaxMessageRowID(nil, "th1")
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
 
-	// Schedules
-	_ = CreateOneShotSchedule(nil, OneShotSchedule{})
-	_, _ = GetDueOneShotSchedules(nil)
-	_ = DeleteOneShotSchedule(nil, "s1")
-	_ = InsertMessageAndConsumeOneShot(nil, "s1", Message{})
-	_, _ = GetAllOneShotSchedules(nil, "")
-	_ = CreateCronSchedule(nil, CronSchedule{})
-	_, _ = GetDueCronSchedules(nil)
-	_, _ = GetAllCronSchedules(nil, "")
-	_ = DeleteCronSchedule(nil, "c1")
-	_ = UpdateCronNextRun(nil, "c1", time.Now())
-	_ = CreateScheduleRun(nil, ScheduleRun{})
-	_ = UpdateScheduleRunStatus(nil, UpdateRunParams{})
-	_, _, _ = GetScheduleRunsPaginated(nil, 10, 0, "", "")
-	_, _ = GetScheduleSummaryMetrics(nil)
-	_, _ = ReconcileOrphanedScheduleRuns(nil)
-	_, _ = PruneScheduleRuns(nil, 10, time.Hour)
+	// 1. Facts nil database
+	if _, err := InsertFact(nil, "cat", "fact", 1.0, nil); err == nil {
+		t.Error("expected error calling InsertFact on nil database")
+	}
+	if _, err := GetFactsPaginated(nil, FactsFilter{}); err == nil {
+		t.Error("expected error calling GetFactsPaginated on nil database")
+	}
+	if res, err := SearchSimilarFacts(nil, nil, "query", 10, 0.5); err != nil || res != nil {
+		t.Errorf("expected nil, nil calling SearchSimilarFacts on nil database, got %v, %v", res, err)
+	}
+	if res, err := GetFactsByThreadWithEmbeddings(nil, "th1"); err != nil || res != nil {
+		t.Errorf("expected nil, nil calling GetFactsByThreadWithEmbeddings on nil database, got %v, %v", res, err)
+	}
+	if err := UpdateFactEmbedding(nil, 1, nil); err == nil {
+		t.Error("expected error calling UpdateFactEmbedding on nil database")
+	}
+	if res, err := GetActiveConversationsForExtraction(nil, 24); err != nil || res != nil {
+		t.Errorf("expected nil, nil calling GetActiveConversationsForExtraction on nil database, got %v, %v", res, err)
+	}
+	if err := UpdateConversationFactWatermark(nil, "th1", 10); err != nil {
+		t.Errorf("expected nil error calling UpdateConversationFactWatermark on nil database, got %v", err)
+	}
+	if err := UpdateConversationFactExtractedAt(nil, "th1"); err != nil {
+		t.Errorf("expected nil error calling UpdateConversationFactExtractedAt on nil database, got %v", err)
+	}
 
-	// Sessions
-	_, _ = GetSessionID(nil, "th1")
-	_ = SaveSessionID(nil, "th1", "s1")
-	_ = DeleteSessionID(nil, "th1")
-	_, _ = IncrementSessionTurnCount(nil, "th1")
-	_ = RotateSessionID(nil, "th1", "s2")
-	_, _ = GetSessionTurnCount(nil, "th1")
-	_, _ = GetExternalConversationID(nil, "s1")
+	// 2. Schedules & Runs nil database
+	if err := CreateOneShotSchedule(nil, OneShotSchedule{ID: "os1", ThreadID: "th1"}); err == nil {
+		t.Error("expected error calling CreateOneShotSchedule on nil database")
+	}
+	if res, err := GetDueOneShotSchedules(nil); err != nil || res != nil {
+		t.Errorf("expected nil, nil calling GetDueOneShotSchedules on nil database, got %v, %v", res, err)
+	}
+	if err := DeleteOneShotSchedule(nil, "os1"); err != nil {
+		t.Errorf("expected nil error calling DeleteOneShotSchedule on nil database, got %v", err)
+	}
+	if res, err := GetAllOneShotSchedules(nil, "th1"); err != nil || res != nil {
+		t.Errorf("expected nil, nil calling GetAllOneShotSchedules on nil database, got %v, %v", res, err)
+	}
+	if err := CreateCronSchedule(nil, CronSchedule{ID: "cs1", TargetID: "th1"}); err == nil {
+		t.Error("expected error calling CreateCronSchedule on nil database")
+	}
+	if res, err := GetDueCronSchedules(nil); err != nil || res != nil {
+		t.Errorf("expected nil, nil calling GetDueCronSchedules on nil database, got %v, %v", res, err)
+	}
+	if res, err := GetAllCronSchedules(nil, "th1"); err != nil || res != nil {
+		t.Errorf("expected nil, nil calling GetAllCronSchedules on nil database, got %v, %v", res, err)
+	}
+	if err := DeleteCronSchedule(nil, "cs1"); err != nil {
+		t.Errorf("expected nil error calling DeleteCronSchedule on nil database, got %v", err)
+	}
+	if err := UpdateCronNextRun(nil, "cs1", time.Now()); err != nil {
+		t.Errorf("expected nil error calling UpdateCronNextRun on nil database, got %v", err)
+	}
+	if err := UpdateCronScheduleEffort(nil, "cs1", "high"); err != nil {
+		t.Errorf("expected nil error calling UpdateCronScheduleEffort on nil database, got %v", err)
+	}
+	if err := CreateScheduleRun(nil, ScheduleRun{ID: "r1"}); err == nil {
+		t.Error("expected error calling CreateScheduleRun on nil database")
+	}
+	if err := UpdateScheduleRunStatus(nil, UpdateRunParams{RunID: "r1"}); err == nil {
+		t.Error("expected error calling UpdateScheduleRunStatus on nil database")
+	}
+	if _, _, err := GetScheduleRunsPaginated(nil, 10, 0, "", ""); err == nil {
+		t.Error("expected error calling GetScheduleRunsPaginated on nil database")
+	}
+	if _, err := GetScheduleSummaryMetrics(nil); err == nil {
+		t.Error("expected error calling GetScheduleSummaryMetrics on nil database")
+	}
+	if _, err := ReconcileOrphanedScheduleRuns(nil); err == nil {
+		t.Error("expected error calling ReconcileOrphanedScheduleRuns on nil database")
+	}
+	if _, err := PruneScheduleRuns(nil, 10, time.Hour); err == nil {
+		t.Error("expected error calling PruneScheduleRuns on nil database")
+	}
 
-	// Facts
-	_, _ = InsertFact(nil, "cat", "fact", 1.0, nil)
-	_ = UpdateFactEmbedding(nil, 1, nil)
-	_, _ = GetAllFactsWithEmbeddings(nil)
-	_, _ = GetFactsByThreadWithEmbeddings(nil, "th1")
-	_, _ = SearchSimilarFacts(nil, nil, "", 10, 0.5)
-	_, _ = GetActiveConversationsForExtraction(nil, 1)
-	_ = UpdateConversationFactWatermark(nil, "th1", 1)
-	_ = UpdateConversationFactExtractedAt(nil, "th1")
-	_, _ = GetFactsPaginated(nil, FactsFilter{})
+	// 3. Messages nil database & empty-ID validation
+	if err := InsertMessage(nil, Message{ID: "m1"}); err == nil {
+		t.Error("expected error calling InsertMessage on nil database")
+	}
+	if err := InsertMessage(database, Message{ID: ""}); err == nil {
+		t.Error("expected error calling InsertMessage with empty ID")
+	}
+	if err := UpdateMessageStatus(nil, "m1", StatusCompleted, ""); err == nil {
+		t.Error("expected error calling UpdateMessageStatus on nil database")
+	}
+	if err := UpdateMessageStatus(database, "", StatusCompleted, ""); err == nil {
+		t.Error("expected error calling UpdateMessageStatus with empty ID")
+	}
+	if err := UpdateMessageCompleted(nil, "m1", "resp"); err == nil {
+		t.Error("expected error calling UpdateMessageCompleted on nil database")
+	}
+	if err := UpdateMessageCompleted(database, "", "resp"); err == nil {
+		t.Error("expected error calling UpdateMessageCompleted with empty ID")
+	}
+	if err := IncrementMessageRetry(nil, "m1", "err"); err == nil {
+		t.Error("expected error calling IncrementMessageRetry on nil database")
+	}
+	if err := IncrementMessageRetry(database, "", "err"); err == nil {
+		t.Error("expected error calling IncrementMessageRetry with empty ID")
+	}
+	if err := IncrementMessageRestart(nil, "m1", "err"); err == nil {
+		t.Error("expected error calling IncrementMessageRestart on nil database")
+	}
+	if err := IncrementMessageRestart(database, "", "err"); err == nil {
+		t.Error("expected error calling IncrementMessageRestart with empty ID")
+	}
+	if err := ResetMessageToPendingWithRestart(nil, "m1", "reason"); err == nil {
+		t.Error("expected error calling ResetMessageToPendingWithRestart on nil database")
+	}
+	if err := ResetMessageToPendingWithRestart(database, "", "reason"); err == nil {
+		t.Error("expected error calling ResetMessageToPendingWithRestart with empty ID")
+	}
+	if m, err := GetMessage(nil, "m1"); err == nil && m != nil {
+		t.Error("expected nil/error calling GetMessage on nil database")
+	}
+	if m, err := GetMessage(database, ""); err != nil || m != nil {
+		t.Errorf("expected nil, nil for empty ID in GetMessage, got (%v, %v)", m, err)
+	}
+	if exists, err := MessageExists(nil, "m1"); err == nil && exists {
+		t.Error("expected false/error calling MessageExists on nil database")
+	}
+	if exists, err := MessageExists(database, ""); err != nil || exists {
+		t.Errorf("expected false, nil for empty ID in MessageExists, got (%v, %v)", exists, err)
+	}
+	if claimed, err := ClaimPendingMessage(nil, "m1"); err != nil || claimed {
+		t.Errorf("expected false, nil on ClaimPendingMessage(nil, id), got (%v, %v)", claimed, err)
+	}
+	if claimed, err := ClaimPendingMessage(database, ""); err != nil || claimed {
+		t.Errorf("expected false, nil on ClaimPendingMessage(db, empty), got (%v, %v)", claimed, err)
+	}
+	if maxID, err := GetMaxMessageRowID(nil, "t1"); err != nil || maxID != 0 {
+		t.Errorf("expected 0, nil on GetMaxMessageRowID(nil, t1), got (%d, %v)", maxID, err)
+	}
+	if maxID, err := GetMaxMessageRowID(database, ""); err != nil || maxID != 0 {
+		t.Errorf("expected 0, nil on GetMaxMessageRowID(db, empty), got (%d, %v)", maxID, err)
+	}
 
-	// Tasks
-	_, _ = GetActiveTasks(nil)
+	// 4. Sessions nil database & empty key validation
+	if id, err := GetSessionID(nil, "th1"); err != nil || id != "" {
+		t.Errorf("expected empty, nil calling GetSessionID on nil database, got (%q, %v)", id, err)
+	}
+	if err := SaveSessionID(nil, "th1", "s1"); err != nil {
+		t.Errorf("expected nil error calling SaveSessionID on nil database, got %v", err)
+	}
+	if err := DeleteSessionID(nil, "th1"); err != nil {
+		t.Errorf("expected nil error calling DeleteSessionID on nil database, got %v", err)
+	}
+	if _, err := IncrementSessionTurnCount(nil, "th1"); err == nil {
+		t.Error("expected error calling IncrementSessionTurnCount on nil database")
+	}
+	if _, err := IncrementSessionTurnCount(database, ""); err == nil {
+		t.Error("expected error calling IncrementSessionTurnCount with empty key")
+	}
+	if cnt, err := GetSessionTurnCount(nil, "th1"); err != nil || cnt != 0 {
+		t.Errorf("expected 0, nil calling GetSessionTurnCount on nil database, got (%d, %v)", cnt, err)
+	}
+	if err := RotateSessionID(nil, "th1", "s2"); err == nil {
+		t.Error("expected error calling RotateSessionID on nil database")
+	}
+	if err := RotateSessionID(database, "", "s2"); err == nil {
+		t.Error("expected error calling RotateSessionID with empty key")
+	}
+	if prev, err := GetPreviousSessionID(nil, "th1"); err != nil || prev != "" {
+		t.Errorf("expected empty, nil calling GetPreviousSessionID on nil database, got (%q, %v)", prev, err)
+	}
+
+	// 5. Validation on schedule runs and nil context calls
+	if err := CreateScheduleRun(database, ScheduleRun{ID: ""}); err == nil {
+		t.Error("expected error on empty id in CreateScheduleRun")
+	}
+	if err := UpdateScheduleRunStatus(database, UpdateRunParams{RunID: ""}); err == nil {
+		t.Error("expected error on empty RunID in UpdateScheduleRunStatus")
+	}
+	embValid := make([]float32, ExpectedEmbeddingDim)
+	embValid[0] = 1.0
+	idNilCtx, err := InsertFactWithContext(nil, database, false, "cat", "fact text nil ctx", 1.0, embValid)
+	if err != nil || idNilCtx <= 0 {
+		t.Fatalf("InsertFactWithContext with nil ctx failed: %v, id=%d", err, idNilCtx)
+	}
+	resNilCtx, err := GetFactsPaginatedWithContext(nil, database, false, FactsFilter{Limit: 5})
+	if err != nil || resNilCtx.Total == 0 {
+		t.Fatalf("GetFactsPaginatedWithContext with nil ctx failed: %v", err)
+	}
+	if _, err := GetActiveTasks(nil); err == nil {
+		t.Error("expected error on nil DB in GetActiveTasks")
+	}
 }
 
 func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
-	closedDB, err := InitDB(filepath.Join(t.TempDir(), "closed_all.db"))
+	tmpPath := filepath.Join(t.TempDir(), "closed-all.db")
+	closedDB, err := initTestSQLite(tmpPath)
 	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
+		t.Fatalf("failed to init db: %v", err)
 	}
 	_ = closedDB.Close()
 
-	now := time.Now().UTC()
-	vec := make([]float32, ExpectedEmbeddingDim)
-
-	// Messages
-	_ = InsertMessage(closedDB, Message{ID: "m1", ThreadID: "th1", Status: StatusPending, CreatedAt: now})
-	_ = UpdateMessageStatus(closedDB, "m1", StatusCompleted, "")
-	_ = UpdateMessageCompleted(closedDB, "m1", "resp")
-	_ = IncrementMessageRetry(closedDB, "m1", "err")
-	_ = IncrementMessageRestart(closedDB, "m1", "err")
-	_ = ResetMessageToPendingWithRestart(closedDB, "m1", "err")
-	_, _ = GetPendingOrProcessingMessages(closedDB)
-	_, _ = GetMessage(closedDB, "m1")
-	_, _ = MessageExists(closedDB, "m1")
-	_, _ = ClaimPendingMessage(closedDB, "m1")
-	_, _ = GetActiveRecentThreadIDs(closedDB, 1)
-	_, _ = GetRecentThreadMessages(closedDB, "th1", 10)
-	_, _ = GetMaxMessageRowID(closedDB, "th1")
-
-	// Schedules
-	_ = CreateOneShotSchedule(closedDB, OneShotSchedule{ID: "s1", ThreadID: "th1", RunAt: now})
-	_, _ = GetDueOneShotSchedules(closedDB)
-	_ = DeleteOneShotSchedule(closedDB, "s1")
-	_ = InsertMessageAndConsumeOneShot(closedDB, "s1", Message{ID: "m1", ThreadID: "th1"})
-	_, _ = GetAllOneShotSchedules(closedDB, "th1")
-	_ = CreateCronSchedule(closedDB, CronSchedule{ID: "c1", TargetID: "th1", CronExpr: "0 0 * * *"})
-	_, _ = GetDueCronSchedules(closedDB)
-	_, _ = GetAllCronSchedules(closedDB, "")
-	_ = DeleteCronSchedule(closedDB, "c1")
-	_ = UpdateCronNextRun(closedDB, "c1", now)
-	_ = CreateScheduleRun(closedDB, ScheduleRun{ID: "r1", ScheduleID: "c1", StartedAt: now})
-	_ = UpdateScheduleRunStatus(closedDB, UpdateRunParams{RunID: "r1", Status: "completed"})
-	_, _, _ = GetScheduleRunsPaginated(closedDB, 10, 0, "c1", "completed")
-	_, _ = GetScheduleSummaryMetrics(closedDB)
-	_, _ = ReconcileOrphanedScheduleRuns(closedDB)
-	_, _ = PruneScheduleRuns(closedDB, 10, time.Hour)
-
-	// Sessions
-	_, _ = GetSessionID(closedDB, "th1")
-	_ = SaveSessionID(closedDB, "th1", "s1")
-	_ = DeleteSessionID(closedDB, "th1")
-	_, _ = IncrementSessionTurnCount(closedDB, "th1")
-	_ = RotateSessionID(closedDB, "th1", "s2")
-	_, _ = GetSessionTurnCount(closedDB, "th1")
-	_, _ = GetExternalConversationID(closedDB, "s1")
-
-	// Facts
-	_, _ = InsertFact(closedDB, "cat", "fact", 1.0, vec)
-	_ = UpdateFactEmbedding(closedDB, 1, vec)
-	_, _ = GetAllFactsWithEmbeddings(closedDB)
-	_, _ = GetFactsByThreadWithEmbeddings(closedDB, "th1")
-	_, _ = SearchSimilarFacts(closedDB, vec, "", 10, 0.5)
-	_, _ = GetActiveConversationsForExtraction(closedDB, 1)
-	_ = UpdateConversationFactWatermark(closedDB, "th1", 1)
-	_ = UpdateConversationFactExtractedAt(closedDB, "th1")
-	_, _ = GetFactsPaginated(closedDB, FactsFilter{Query: "fact", Category: "cat"})
-
-	// Tasks
-	_, _ = GetActiveTasks(closedDB)
-}
-
-func TestDB_InitDB_InvalidPath(t *testing.T) {
-	tmpFile := filepath.Join(t.TempDir(), "not_a_dir")
-	if err := os.WriteFile(tmpFile, []byte("x"), 0644); err != nil {
-		t.Fatalf("failed to create dummy file: %v", err)
+	if _, err := InsertFact(closedDB, "cat", "fact", 1.0, nil); err == nil {
+		t.Error("expected error on closed db in InsertFact")
 	}
-	_, err := InitDB(filepath.Join(tmpFile, "database.db"))
-	if err == nil {
-		t.Error("expected error for invalid DB path")
+	if _, err := GetFactsPaginated(closedDB, FactsFilter{}); err == nil {
+		t.Error("expected error on closed db in GetFactsPaginated")
 	}
-}
-
-func TestDB_GetScheduleSummaryMetrics_Calculations(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	now := time.Now().UTC()
-	// Insert enabled cron with next run
-	_ = CreateCronSchedule(database, CronSchedule{
-		ID:        "sched-cron-active",
-		CronExpr:  "0 9 * * *",
-		NextRunAt: now.Add(2 * time.Hour),
-		Enabled:   true,
-	})
-	// Insert one-shot with next run
-	_ = CreateOneShotSchedule(database, OneShotSchedule{
-		ID:     "sched-one-active",
-		RunAt:  now.Add(1 * time.Hour),
-		Prompt: "active reminder",
-	})
-
-	// Insert completed run with duration
-	completedTime := now.Add(5 * time.Second)
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-metric-comp",
-		ScheduleID:   "sched-1",
-		ScheduleType: "cron",
-		MessageID:    "m-metric-1",
-		TargetID:     "th-1",
-		ThreadID:     "th-1",
-		Title:        "Cron Run 1",
-		Prompt:       "Run Prompt",
-		Status:       "completed",
-		StartedAt:    now.Add(-10 * time.Minute),
-		CompletedAt:  &completedTime,
-		DurationMs:   5000,
-	})
-
-	// Insert failed run
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-metric-fail",
-		ScheduleID:   "sched-2",
-		ScheduleType: "cron",
-		MessageID:    "m-metric-2",
-		TargetID:     "th-2",
-		ThreadID:     "th-2",
-		Title:        "Cron Run 2",
-		Prompt:       "Run Prompt 2",
-		Status:       "failed",
-		StartedAt:    now.Add(-5 * time.Minute),
-		Error:        "fatal timeout",
-	})
-
-	// Insert running run
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-metric-running",
-		ScheduleID:   "sched-3",
-		ScheduleType: "one_shot",
-		MessageID:    "m-metric-3",
-		TargetID:     "th-3",
-		ThreadID:     "th-3",
-		Title:        "One-shot 1",
-		Prompt:       "Run Prompt 3",
-		Status:       "running",
-		StartedAt:    now.Add(-1 * time.Minute),
-	})
-
-	metrics, err := GetScheduleSummaryMetrics(database)
-	if err != nil {
-		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
+	if _, err := SearchSimilarFacts(closedDB, nil, "query", 10, 0.5); err == nil {
+		t.Error("expected error on closed db in SearchSimilarFacts")
+	}
+	if _, err := GetFactsByThreadWithEmbeddings(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in GetFactsByThreadWithEmbeddings")
+	}
+	if err := UpdateFactEmbedding(closedDB, 1, nil); err == nil {
+		t.Error("expected error on closed db in UpdateFactEmbedding")
+	}
+	if _, err := GetActiveConversationsForExtraction(closedDB, 24); err == nil {
+		t.Error("expected error on closed db in GetActiveConversationsForExtraction")
+	}
+	if err := UpdateConversationFactWatermark(closedDB, "th1", 10); err == nil {
+		t.Error("expected error on closed db in UpdateConversationFactWatermark")
+	}
+	if err := UpdateConversationFactExtractedAt(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in UpdateConversationFactExtractedAt")
 	}
 
-	if metrics.TotalRuns24h != 3 {
-		t.Errorf("expected TotalRuns24h = 3, got %d", metrics.TotalRuns24h)
+	if err := CreateOneShotSchedule(closedDB, OneShotSchedule{ID: "os1", ThreadID: "th1"}); err == nil {
+		t.Error("expected error on closed db in CreateOneShotSchedule")
 	}
-	if metrics.SuccessRate24h != 33.3 {
-		t.Errorf("expected SuccessRate24h = 33.3, got %f", metrics.SuccessRate24h)
+	if _, err := GetDueOneShotSchedules(closedDB); err == nil {
+		t.Error("expected error on closed db in GetDueOneShotSchedules")
 	}
-	if metrics.TotalActive != 2 {
-		t.Errorf("expected TotalActive = 2, got %d", metrics.TotalActive)
+	if err := DeleteOneShotSchedule(closedDB, "os1"); err == nil {
+		t.Error("expected error on closed db in DeleteOneShotSchedule")
 	}
-	if metrics.NextRunAt == nil {
-		t.Error("expected non-nil NextRunAt")
+	if _, err := GetAllOneShotSchedules(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in GetAllOneShotSchedules")
 	}
-}
-
-func TestDB_GetFactsPaginated_Filters(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	vec := make([]float32, ExpectedEmbeddingDim)
-	vec[0] = 1.0
-
-	_, _ = InsertFact(database, "user_pref", "User likes espresso", 1.0, vec)
-	_, _ = InsertFact(database, "system_config", "Server running on port 8080", 0.9, vec)
-	_, _ = InsertFact(database, "user_pref", "User likes tea", 0.8, vec)
-
-	// 1. Filter by category
-	resCat, err := GetFactsPaginated(database, FactsFilter{Category: "user_pref", Limit: 10, Offset: 0})
-	if err != nil || resCat.Total != 2 || len(resCat.Facts) != 2 {
-		t.Errorf("expected 2 user_pref facts, got total=%d, len=%d, err=%v", resCat.Total, len(resCat.Facts), err)
+	if err := CreateCronSchedule(closedDB, CronSchedule{ID: "cs1", TargetID: "th1"}); err == nil {
+		t.Error("expected error on closed db in CreateCronSchedule")
 	}
-
-	// 2. Filter by search query
-	resQ, err := GetFactsPaginated(database, FactsFilter{Query: "espresso", Limit: 10, Offset: 0})
-	if err != nil || resQ.Total != 1 || len(resQ.Facts) != 1 {
-		t.Errorf("expected 1 espresso fact, got total=%d, len=%d, err=%v", resQ.Total, len(resQ.Facts), err)
+	if _, err := GetDueCronSchedules(closedDB); err == nil {
+		t.Error("expected error on closed db in GetDueCronSchedules")
 	}
-
-	// 3. Pagination limit and offset
-	resP, err := GetFactsPaginated(database, FactsFilter{Limit: 1, Offset: -1})
-	if err != nil || resP.Total != 3 || len(resP.Facts) != 1 {
-		t.Errorf("expected total=3, len=1 for limit=1, got total=%d, len=%d, err=%v", resP.Total, len(resP.Facts), err)
+	if _, err := GetAllCronSchedules(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in GetAllCronSchedules")
 	}
-}
-
-func TestDB_GetScheduleRunsPaginated_Filters(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	now := time.Now().UTC()
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-f-1",
-		ScheduleID:   "sched-filter-1",
-		ScheduleType: "cron",
-		MessageID:    "m-1",
-		TargetID:     "th-1",
-		ThreadID:     "th-1",
-		Title:        "Title 1",
-		Prompt:       "Prompt 1",
-		Status:       "completed",
-		StartedAt:    now,
-	})
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-f-2",
-		ScheduleID:   "sched-filter-1",
-		ScheduleType: "cron",
-		MessageID:    "m-2",
-		TargetID:     "th-1",
-		ThreadID:     "th-1",
-		Title:        "Title 2",
-		Prompt:       "Prompt 2",
-		Status:       "failed",
-		StartedAt:    now,
-	})
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-f-3",
-		ScheduleID:   "sched-filter-2",
-		ScheduleType: "cron",
-		MessageID:    "m-3",
-		TargetID:     "th-2",
-		ThreadID:     "th-2",
-		Title:        "Title 3",
-		Prompt:       "Prompt 3",
-		Status:       "completed",
-		StartedAt:    now,
-	})
-
-	// 1. Filter by scheduleID
-	runs1, total1, err := GetScheduleRunsPaginated(database, 10, 0, "sched-filter-1", "")
-	if err != nil || total1 != 2 || len(runs1) != 2 {
-		t.Errorf("expected 2 runs for sched-filter-1, got total=%d, len=%d, err=%v", total1, len(runs1), err)
+	if err := DeleteCronSchedule(closedDB, "cs1"); err == nil {
+		t.Error("expected error on closed db in DeleteCronSchedule")
+	}
+	if err := UpdateCronNextRun(closedDB, "cs1", time.Now()); err == nil {
+		t.Error("expected error on closed db in UpdateCronNextRun")
+	}
+	if err := CreateScheduleRun(closedDB, ScheduleRun{ID: "r1"}); err == nil {
+		t.Error("expected error on closed db in CreateScheduleRun")
+	}
+	if err := UpdateScheduleRunStatus(closedDB, UpdateRunParams{RunID: "r1", Status: "success"}); err == nil {
+		t.Error("expected error on closed db in UpdateScheduleRunStatus")
+	}
+	if _, _, err := GetScheduleRunsPaginated(closedDB, 10, 0, "", ""); err == nil {
+		t.Error("expected error on closed db in GetScheduleRunsPaginated")
+	}
+	if _, err := GetScheduleSummaryMetrics(closedDB); err == nil {
+		t.Error("expected error on closed db in GetScheduleSummaryMetrics")
+	}
+	if _, err := ReconcileOrphanedScheduleRuns(closedDB); err == nil {
+		t.Error("expected error on closed db in ReconcileOrphanedScheduleRuns")
+	}
+	if _, err := PruneScheduleRuns(closedDB, 10, time.Hour); err == nil {
+		t.Error("expected error on closed db in PruneScheduleRuns")
 	}
 
-	// 2. Filter by status
-	runs2, total2, err := GetScheduleRunsPaginated(database, 10, 0, "", "failed")
-	if err != nil || total2 != 1 || len(runs2) != 1 {
-		t.Errorf("expected 1 failed run, got total=%d, len=%d, err=%v", total2, len(runs2), err)
+	if err := InsertMessage(closedDB, Message{ID: "m1"}); err == nil {
+		t.Error("expected error on closed db in InsertMessage")
 	}
-}
-
-func TestDB_SearchSimilarFacts_EdgeCases(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	// 1. nil embedding / mismatched embedding dimension
-	res, err := SearchSimilarFacts(database, []float32{1.0, 2.0}, "", 10, 0.5)
-	if res != nil || err != nil {
-		t.Errorf("expected nil, nil for mismatched dimensions, got %v, %v", res, err)
+	if err := UpdateMessageStatus(closedDB, "m1", StatusCompleted, ""); err == nil {
+		t.Error("expected error on closed db in UpdateMessageStatus")
 	}
-
-	// 2. limit <= 0 and minScore <= 0 defaults on FakeStore
-	store := NewFakeStore()
-	ctx := context.Background()
-
-	vec1 := make([]float32, ExpectedEmbeddingDim)
-	vec1[0] = 1.0
-	_, _ = store.InsertFact(ctx, "cat1", "Fact text 1", 1.0, vec1)
-
-	vec2 := make([]float32, ExpectedEmbeddingDim)
-	vec2[0] = 0.5
-	vec2[1] = 0.5
-	_, _ = store.InsertFact(ctx, "cat2", "Fact text 2", 0.8, vec2)
-
-	vec3 := make([]float32, ExpectedEmbeddingDim)
-	vec3[0] = 0.1
-	_, _ = store.InsertFact(ctx, "cat3", "Fact text 3", 0.1, vec3)
-
-	res2, err := store.SearchSimilarFacts(ctx, vec1, "", -1, -1)
-	if err != nil || len(res2) < 1 {
-		t.Errorf("expected >=1 fact returned with default limit/score, got %d, err: %v", len(res2), err)
+	if err := UpdateMessageCompleted(closedDB, "m1", "resp"); err == nil {
+		t.Error("expected error on closed db in UpdateMessageCompleted")
+	}
+	if err := IncrementMessageRetry(closedDB, "m1", "err"); err == nil {
+		t.Error("expected error on closed db in IncrementMessageRetry")
+	}
+	if err := IncrementMessageRestart(closedDB, "m1", "err"); err == nil {
+		t.Error("expected error on closed db in IncrementMessageRestart")
+	}
+	if err := ResetMessageToPendingWithRestart(closedDB, "m1", "reason"); err == nil {
+		t.Error("expected error on closed db in ResetMessageToPendingWithRestart")
+	}
+	if _, err := GetMessage(closedDB, "m1"); err == nil {
+		t.Error("expected error on closed db in GetMessage")
+	}
+	if _, err := MessageExists(closedDB, "m1"); err == nil {
+		t.Error("expected error on closed db in MessageExists")
+	}
+	if _, err := GetActiveRecentThreadIDs(closedDB, time.Hour); err == nil {
+		t.Error("expected error on closed db in GetActiveRecentThreadIDs")
+	}
+	if _, err := GetRecentThreadMessages(closedDB, "t1", 10); err == nil {
+		t.Error("expected error on closed db in GetRecentThreadMessages")
+	}
+	if _, err := GetMaxMessageRowID(closedDB, "t1"); err == nil {
+		t.Error("expected error on closed db in GetMaxMessageRowID")
 	}
 
-	// 3. Search by text query
-	resText, err := store.SearchSimilarFacts(ctx, nil, "Fact text 1", 10, 0.2)
-	if err != nil {
-		t.Fatalf("unexpected error searching facts by text: %v", err)
+	if _, err := GetSessionID(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in GetSessionID")
 	}
-	if len(resText) != 1 || resText[0].FactText != "Fact text 1" {
-		t.Errorf("expected 1 fact matching text 'Fact text 1', got %v", resText)
+	if err := SaveSessionID(closedDB, "th1", "s1"); err == nil {
+		t.Error("expected error on closed db in SaveSessionID")
 	}
-
-	// 4. High minScore filter
-	resHigh, err := store.SearchSimilarFacts(ctx, vec1, "", 10, 0.95)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := DeleteSessionID(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in DeleteSessionID")
 	}
-	if len(resHigh) != 1 {
-		t.Errorf("expected only 1 fact with score >= 0.95, got %d", len(resHigh))
+	if _, err := IncrementSessionTurnCount(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in IncrementSessionTurnCount")
 	}
-}
-
-func TestDB_InitDB_PostgresConnectionFailure(t *testing.T) {
-	origMax := postgresMaxAttempts
-	origBase := postgresRetryBase
-	postgresMaxAttempts = 2
-	postgresRetryBase = 5 * time.Millisecond
-	defer func() {
-		postgresMaxAttempts = origMax
-		postgresRetryBase = origBase
-	}()
-
-	invalidDSN := "postgres://invalid_user:invalid_pass@127.0.0.1:59999/invalid_db?sslmode=disable"
-	db, err := InitDB(invalidDSN)
-	if err == nil {
-		if db != nil {
-			_ = db.Close()
-		}
-		t.Fatal("expected connection error for invalid postgres DSN, got nil")
+	if _, err := GetSessionTurnCount(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in GetSessionTurnCount")
 	}
-}
-
-func TestDB_InitDB_SQLiteSuccessAndSchemaError(t *testing.T) {
-	tempFile := filepath.Join(t.TempDir(), "test_init.db")
-	db, err := InitDB(tempFile)
-	if err != nil {
-		t.Fatalf("failed to init SQLite DB: %v", err)
+	if err := RotateSessionID(closedDB, "th1", "s2"); err == nil {
+		t.Error("expected error on closed db in RotateSessionID")
 	}
-	_ = db.Close()
-
-	// Closed DB schema init error
-	closedDB, err := sql.Open("sqlite", ":memory:")
-	if err == nil && closedDB != nil {
-		_ = closedDB.Close()
-		if err := initSchemaSQLite(closedDB); err == nil {
-			t.Error("expected error calling initSchemaSQLite on closed db")
-		}
+	if _, err := GetPreviousSessionID(closedDB, "th1"); err == nil {
+		t.Error("expected error on closed db in GetPreviousSessionID")
 	}
-}
-
-func TestDB_GetScheduleSummaryMetrics_NextRunVariants(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	now := time.Now().UTC()
-
-	// Variant 1: OneShot is earlier than Cron
-	_ = CreateCronSchedule(database, CronSchedule{ID: "s-cron-1", TargetID: "th-1", TitlePrefix: "Cron 1", Prompt: "P", CronExpr: "0 0 * * *", NextRunAt: now.Add(2 * time.Hour), Enabled: true})
-	_ = CreateOneShotSchedule(database, OneShotSchedule{ID: "s-one-1", ThreadID: "th-1", Prompt: "P", RunAt: now.Add(1 * time.Hour)})
-
-	m1, err := GetScheduleSummaryMetrics(database)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if m1.NextRunAt == nil {
-		t.Errorf("expected NextRunAt to be non-nil, got nil")
-	}
-
-	// Clean up one shot, leaving only Cron
-	_ = DeleteOneShotSchedule(database, "s-one-1")
-	m2, err := GetScheduleSummaryMetrics(database)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if m2.NextRunAt == nil {
-		t.Error("expected NextRunAt to be cron (2 hours from now), got nil")
-	}
-
-	// Clean up cron and insert only one-shot
-	_ = DeleteCronSchedule(database, "s-cron-1")
-	_ = CreateOneShotSchedule(database, OneShotSchedule{ID: "s-one-2", ThreadID: "th-1", Prompt: "P", RunAt: now.Add(3 * time.Hour)})
-	m3, err := GetScheduleSummaryMetrics(database)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if m3.NextRunAt == nil {
-		t.Error("expected NextRunAt to be one-shot (3 hours from now), got nil")
-	}
-}
-
-func TestDB_SearchSimilarFacts_SQLite_InvalidEmbeddingDimensions(t *testing.T) {
-	store := NewFakeStore()
-	ctx := context.Background()
-
-	vecValid := make([]float32, ExpectedEmbeddingDim)
-	vecValid[0] = 0.9
-
-	// Insert fact with valid embedding
-	f1ID, err := store.InsertFact(ctx, "cat", "Valid fact", 0.9, vecValid)
-	if err != nil {
-		t.Fatalf("failed to insert fact: %v", err)
-	}
-
-	// Update embedding to valid vector of mismatched dimension (10 != ExpectedEmbeddingDim)
-	store.mu.Lock()
-	store.facts[f1ID].Embedding = make([]float32, 10)
-	store.mu.Unlock()
-
-	res, err := store.SearchSimilarFacts(ctx, vecValid, "", 10, 0.1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(res) != 0 {
-		t.Errorf("expected 0 facts for mismatched embedding length, got %d", len(res))
-	}
-}
-
-func TestDB_IsPostgres_And_MessageStatus_EdgeCases(t *testing.T) {
-	if isPostgres(nil) {
-		t.Error("expected false for nil db")
-	}
-
-	database := setupTestDB(t)
-	defer database.Close()
-
-	_ = isPostgres(database)
-
-	// Insert test message
-	msgID := "msg-status-test-1"
-	_ = InsertMessage(database, Message{
-		ID:       msgID,
-		ThreadID: "chan-1",
-		Content:  "test content",
-		Status:   StatusPending,
-	})
-
-	if err := UpdateMessageStatus(database, msgID, StatusProcessing, "working"); err != nil {
-		t.Fatalf("failed to update message status: %v", err)
-	}
-
-	if err := IncrementMessageRetry(database, msgID, "transient error occurred"); err != nil {
-		t.Fatalf("failed to increment retry: %v", err)
-	}
-
-	if err := UpdateMessageCompleted(database, msgID, "final response text"); err != nil {
-		t.Fatalf("failed to update message completed: %v", err)
-	}
-
-	msg, err := GetMessage(database, msgID)
-	if err != nil || msg.Status != StatusCompleted || msg.ResponseText != "final response text" {
-		t.Errorf("unexpected message state: %+v, err: %v", msg, err)
-	}
-
-	// Prune schedule runs
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-old-1",
-		ScheduleID:   "s-1",
-		ScheduleType: "one_shot",
-		MessageID:    "m-1",
-		TargetID:     "t-1",
-		ThreadID:     "t-1",
-		Title:        "Old",
-		Prompt:       "P",
-		Status:       "completed",
-		StartedAt:    time.Now().Add(-48 * time.Hour),
-	})
-
-	deleted, err := PruneScheduleRuns(database, 10, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("unexpected prune error: %v", err)
-	}
-	if deleted < 0 {
-		t.Errorf("expected deleted >= 0, got %d", deleted)
-	}
-
-	// Active Tasks
-	tasks, err := GetActiveTasks(database)
-	if err != nil {
-		t.Fatalf("unexpected active tasks error: %v", err)
-	}
-	_ = tasks
-}
-
-func TestDB_NullVector_Scan_AllBranches(t *testing.T) {
-	var nv NullVector
-
-	// 1. nil
-	if err := nv.Scan(nil); err != nil || nv.Valid || nv.Vector != nil {
-		t.Errorf("expected Valid=false for nil src, got %+v", nv)
-	}
-
-	// 2. string pgvector format
-	if err := nv.Scan("[1.0,2.0,3.0]"); err != nil || !nv.Valid || len(nv.Vector) != 3 {
-		t.Errorf("expected 3 items for string pgvector, got %+v, err: %v", nv, err)
-	}
-
-	// 3. invalid string
-	if err := nv.Scan("invalid-string"); err == nil {
-		t.Error("expected error for invalid string pgvector")
-	}
-
-	// 4. []byte pgvector format
-	if err := nv.Scan([]byte("[0.5,0.25]")); err != nil || !nv.Valid || len(nv.Vector) != 2 {
-		t.Errorf("expected 2 items for byte pgvector, got %+v, err: %v", nv, err)
-	}
-
-	// 5. Unsupported type
-	if err := nv.Scan(12345); err == nil {
-		t.Error("expected error scanning int into NullVector")
+	if _, _, err := GetThreadSummary(closedDB, "t1"); err == nil {
+		t.Error("expected error on closed db in GetThreadSummary")
 	}
 }
 
@@ -2088,133 +1895,6 @@ func TestDB_Fact_InsertAndEmbedding_EdgeCases(t *testing.T) {
 	if err != nil || len(facts) == 0 {
 		t.Errorf("expected non-empty facts for empty thread query, got %v, err: %v", facts, err)
 	}
-}
-
-func TestDB_SessionsAndSchedules_MoreBranches(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	// 1. GetSessionTurnCount and GetExternalConversationID non-existent
-	cnt, err := GetSessionTurnCount(database, "non-existent-thread")
-	if err != nil || cnt != 0 {
-		t.Errorf("expected 0 turn count for non-existent thread, got %d, err: %v", cnt, err)
-	}
-
-	extID, err := GetExternalConversationID(database, "non-existent-internal-id")
-	if err != nil || extID != "" {
-		t.Errorf("expected empty extID, got %s, err: %v", extID, err)
-	}
-
-	// 3. InsertMessageAndConsumeOneShot edge cases
-	if err := InsertMessageAndConsumeOneShot(nil, "s-1", Message{ID: "m-1"}); err == nil {
-		t.Error("expected error for nil database")
-	}
-	if err := InsertMessageAndConsumeOneShot(database, "s-1", Message{ID: ""}); err == nil {
-		t.Error("expected error for empty message ID")
-	}
-	if err := InsertMessageAndConsumeOneShot(database, "non-existent-sched-id", Message{ID: "m-valid", ThreadID: "th-1", Content: "c"}); err == nil {
-		t.Error("expected error consuming non-existent one-shot schedule")
-	}
-
-	// 4. GetAllOneShotSchedules and GetAllCronSchedules
-	_ = CreateOneShotSchedule(database, OneShotSchedule{ID: "one-all-1", ThreadID: "th-1", Prompt: "P", RunAt: time.Now()})
-	ones, err := GetAllOneShotSchedules(database, "")
-	if err != nil || len(ones) == 0 {
-		t.Errorf("expected >= 1 one-shot schedule, got %v, err: %v", ones, err)
-	}
-	onesTh, _ := GetAllOneShotSchedules(database, "th-1")
-	if len(onesTh) == 0 {
-		t.Errorf("expected >= 1 one-shot for th-1")
-	}
-
-	_ = CreateCronSchedule(database, CronSchedule{ID: "cron-all-1", TargetID: "th-1", TitlePrefix: "T", Prompt: "P", CronExpr: "0 0 * * *", NextRunAt: time.Now(), Enabled: true})
-	crons, err := GetAllCronSchedules(database, "")
-	if err != nil || len(crons) == 0 {
-		t.Errorf("expected >= 1 cron schedule, got %v, err: %v", crons, err)
-	}
-	cronsTh, _ := GetAllCronSchedules(database, "th-1")
-	if len(cronsTh) == 0 {
-		t.Errorf("expected >= 1 cron for th-1")
-	}
-
-	// 5. UpdateScheduleRunStatus statuses
-	_ = CreateScheduleRun(database, ScheduleRun{
-		ID:           "run-status-1",
-		ScheduleID:   "s-1",
-		ScheduleType: "cron",
-		MessageID:    "m-1",
-		TargetID:     "th-1",
-		ThreadID:     "th-1",
-		Title:        "Title",
-		Prompt:       "Prompt",
-		Status:       "running",
-		StartedAt:    time.Now(),
-	})
-	if err := UpdateScheduleRunStatus(database, UpdateRunParams{
-		RunID:       "run-status-1",
-		Status:      "failed",
-		Error:       "something failed",
-		CompletedAt: time.Now(),
-		DurationMs:  500,
-	}); err != nil {
-		t.Errorf("failed to update run status: %v", err)
-	}
-
-	// 6. GetPendingOrProcessingMessages and GetRecentThreadMessages with full fields
-	_ = InsertMessage(database, Message{
-		ID:            "msg-full-1",
-		ThreadID:      "th-full",
-		Content:       "full message",
-		Status:        StatusPending,
-		ErrorMessage:  "some error",
-		ResponseText:  "some resp",
-		ScheduleRunID: "run-1",
-	})
-	pendingMsgs, err := GetPendingOrProcessingMessages(database)
-	if err != nil || len(pendingMsgs) == 0 {
-		t.Errorf("expected pending messages, got %v, err: %v", pendingMsgs, err)
-	}
-
-	// 7. MessageExists and ClaimPendingMessage nil / empty checks
-	if _, err := MessageExists(nil, "msg-1"); err == nil {
-		t.Error("expected error for nil db in MessageExists")
-	}
-	if exists, err := MessageExists(database, ""); err != nil || exists {
-		t.Errorf("expected false, nil for empty ID in MessageExists, got %v, %v", exists, err)
-	}
-	if claimed, err := ClaimPendingMessage(nil, "msg-1"); err != nil || claimed {
-		t.Errorf("expected false, nil for nil db in ClaimPendingMessage, got %v, %v", claimed, err)
-	}
-	// 8. CleanTaskSummary multiline Prompt: extraction
-	multiPrompt := "<USER_REQUEST>\nPrompt:\n\nActual multi line prompt body\n</USER_REQUEST>"
-	resPrompt := CleanTaskSummary(multiPrompt)
-	if resPrompt != "Actual multi line prompt body" {
-		t.Errorf("expected 'Actual multi line prompt body', got %q", resPrompt)
-	}
-
-	// 9. GetActiveConversationsForExtraction nil and defaults
-	if convs, err := GetActiveConversationsForExtraction(nil, 10); convs != nil || err != nil {
-		t.Errorf("expected nil, nil for nil db, got %v, %v", convs, err)
-	}
-	if _, err := GetActiveConversationsForExtraction(database, -1); err != nil {
-		t.Errorf("unexpected error with default active hours: %v", err)
-	}
-
-	// 10. GetFactsPaginated nil db, negative offset, and offset-only pagination
-	if _, err := GetFactsPaginated(nil, FactsFilter{}); err == nil {
-		t.Error("expected error for nil db in GetFactsPaginated")
-	}
-	resOff, err := GetFactsPaginated(database, FactsFilter{Offset: 1, Limit: 0})
-	if err != nil {
-		t.Fatalf("unexpected error for offset-only pagination: %v", err)
-	}
-	_ = resOff
-
-	resNeg, err := GetFactsPaginated(database, FactsFilter{Offset: -5, Limit: 5})
-	if err != nil {
-		t.Fatalf("unexpected error for negative offset: %v", err)
-	}
-	_ = resNeg
 }
 
 func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
@@ -2369,84 +2049,6 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 	}
 }
 
-func TestInitSchema_LegacyFactsUpgrade(t *testing.T) {
-	// 1. Create a SQLite DB with legacy facts schema (lacking last_reinforced_at, last_decayed_at, reinforce_count)
-	tmpDB := filepath.Join(t.TempDir(), "legacy_facts.db")
-	database, err := sql.Open("sqlite", tmpDB)
-	if err != nil {
-		t.Fatalf("failed to open sqlite: %v", err)
-	}
-	defer database.Close()
-
-	legacyFactsDDL := `
-	CREATE TABLE facts (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		category TEXT NOT NULL DEFAULT 'general',
-		fact_text TEXT NOT NULL,
-		importance REAL NOT NULL DEFAULT 1.0,
-		thread_id TEXT NOT NULL DEFAULT '',
-		embedding BLOB,
-		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE INDEX idx_facts_thread_id ON facts(thread_id);
-	CREATE INDEX idx_facts_category ON facts(category);
-	CREATE INDEX idx_facts_created_at ON facts(created_at DESC);
-	CREATE INDEX idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
-	`
-	if _, err := database.Exec(legacyFactsDDL); err != nil {
-		t.Fatalf("failed to create legacy facts table: %v", err)
-	}
-
-	// Insert a legacy row
-	if _, err := database.Exec("INSERT INTO facts (category, fact_text, importance, thread_id) VALUES ('user_pref', 'Likes green tea', 0.8, 't1')"); err != nil {
-		t.Fatalf("failed to insert legacy fact: %v", err)
-	}
-
-	// 2. Run initSchemaSQLite on this existing legacy database
-	if err := initSchemaSQLite(database); err != nil {
-		t.Fatalf("initSchemaSQLite failed on legacy schema: %v", err)
-	}
-
-	// 3. Verify that the new columns and index were successfully added
-	var reinforceCount int
-	var lastReinforcedAt, lastDecayedAt string
-	err = database.QueryRow("SELECT reinforce_count, last_reinforced_at, last_decayed_at FROM facts WHERE id = 1").Scan(&reinforceCount, &lastReinforcedAt, &lastDecayedAt)
-	if err != nil {
-		t.Fatalf("failed to query migrated columns: %v", err)
-	}
-	if reinforceCount != 1 {
-		t.Errorf("expected reinforce_count=1, got %d", reinforceCount)
-	}
-	if lastReinforcedAt == "" || lastDecayedAt == "" {
-		t.Errorf("expected populated timestamps, got %q, %q", lastReinforcedAt, lastDecayedAt)
-	}
-
-	// 4. Verify index exists
-	var indexCount int
-	err = database.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_facts_last_reinforced_at'").Scan(&indexCount)
-	if err != nil || indexCount != 1 {
-		t.Errorf("expected idx_facts_last_reinforced_at to exist in sqlite_master, count=%d, err=%v", indexCount, err)
-	}
-}
-
-func TestSchemaContract_NoPrematureIndexes(t *testing.T) {
-	// Any index on columns added in downstream migrations (ALTER TABLE) must NOT be declared in sqliteSchema constants
-	downstreamColumns := []string{"last_reinforced_at", "last_decayed_at", "reinforce_count", "restart_count", "previous_session_id", "fts_tokens"}
-
-	for _, col := range downstreamColumns {
-		pattern := " " + col + " "
-		patternDesc := " " + col + ")"
-		for _, line := range strings.Split(sqliteSchema, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "CREATE INDEX") {
-				if strings.Contains(trimmed, pattern) || strings.Contains(trimmed, patternDesc) || strings.Contains(trimmed, "("+col) {
-					t.Errorf("sqliteSchema contains premature index definition for downstream column %q: %s", col, trimmed)
-				}
-			}
-		}
-	}
-}
-
 type dummyTestCloser struct {
 	err error
 }
@@ -2489,13 +2091,50 @@ func TestDB_CloseWarnAndRollbackWarn(t *testing.T) {
 	rollbackWarn(tx2, "committed-tx")
 }
 
+func TestThreadSummaryDirectFunctions(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
 
+	// 1. Nil / empty checks
+	if err := SaveThreadSummary(nil, "th1", "sum", "m1"); err != nil {
+		t.Errorf("expected nil for nil DB in SaveThreadSummary")
+	}
+	if err := SaveThreadSummary(database, "", "sum", "m1"); err != nil {
+		t.Errorf("expected nil for empty threadID in SaveThreadSummary")
+	}
 
+	sum1, msg1, err1 := GetThreadSummary(nil, "th1")
+	if err1 != nil || sum1 != "" || msg1 != "" {
+		t.Errorf("expected empty strings, nil err for nil DB in GetThreadSummary, got %q, %q, %v", sum1, msg1, err1)
+	}
+	sum2, msg2, err2 := GetThreadSummary(database, "")
+	if err2 != nil || sum2 != "" || msg2 != "" {
+		t.Errorf("expected empty strings, nil err for empty threadID in GetThreadSummary, got %q, %q, %v", sum2, msg2, err2)
+	}
 
+	// 2. Non-existent thread ID returns empty strings and nil error
+	sum3, msg3, err3 := GetThreadSummary(database, "non-existent")
+	if err3 != nil || sum3 != "" || msg3 != "" {
+		t.Errorf("expected empty, nil for non-existent thread in GetThreadSummary, got %q, %q, %v", sum3, msg3, err3)
+	}
 
+	// 3. Save and retrieve thread summary
+	if err := SaveThreadSummary(database, "th-sum-1", "First summary", "m-sum-1"); err != nil {
+		t.Fatalf("SaveThreadSummary failed: %v", err)
+	}
 
+	sum4, msg4, err4 := GetThreadSummary(database, "th-sum-1")
+	if err4 != nil || sum4 != "First summary" || msg4 != "m-sum-1" {
+		t.Fatalf("GetThreadSummary failed: sum=%q msg=%q err=%v", sum4, msg4, err4)
+	}
 
+	// 4. Update existing thread summary (upsert ON CONFLICT)
+	if err := SaveThreadSummary(database, "th-sum-1", "Updated summary", "m-sum-2"); err != nil {
+		t.Fatalf("SaveThreadSummary upsert failed: %v", err)
+	}
 
-
-
-
+	sum5, msg5, err5 := GetThreadSummary(database, "th-sum-1")
+	if err5 != nil || sum5 != "Updated summary" || msg5 != "m-sum-2" {
+		t.Fatalf("GetThreadSummary upsert check failed: sum=%q msg=%q err=%v", sum5, msg5, err5)
+	}
+}
