@@ -94,23 +94,18 @@ func parsePostgresTextArray(raw string) []string {
 	return result
 }
 
-// CreateVanadisBuild inserts a VanadisBuild and all of its ordered VanadisChunks in a single transaction.
-func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database connection is nil")
-	}
-
+func validateAndNormalizeVanadisBuild(build VanadisBuild, chunks []VanadisChunk) (VanadisBuild, []VanadisChunk, error) {
 	buildID := strings.TrimSpace(build.ID)
 	if buildID == "" {
-		return fmt.Errorf("build id cannot be empty")
+		return VanadisBuild{}, nil, fmt.Errorf("build id cannot be empty")
 	}
 	threadID := strings.TrimSpace(build.ThreadID)
 	if threadID == "" {
-		return fmt.Errorf("thread_id cannot be empty")
+		return VanadisBuild{}, nil, fmt.Errorf("thread_id cannot be empty")
 	}
 	objective := strings.TrimSpace(build.Objective)
 	if objective == "" {
-		return fmt.Errorf("objective cannot be empty")
+		return VanadisBuild{}, nil, fmt.Errorf("objective cannot be empty")
 	}
 	buildTitle := strings.TrimSpace(build.Title)
 	if buildTitle == "" {
@@ -125,22 +120,131 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 		status = "running"
 	}
 
+	normBuild := build
+	normBuild.ID = buildID
+	normBuild.ThreadID = threadID
+	normBuild.Objective = objective
+	normBuild.Title = buildTitle
+	normBuild.Tier = tier
+	normBuild.Status = status
+	normBuild.SharedContext = strings.TrimSpace(build.SharedContext)
+	normBuild.StatusMessageID = strings.TrimSpace(build.StatusMessageID)
+
+	normChunks := make([]VanadisChunk, len(chunks))
 	for i, c := range chunks {
-		if strings.TrimSpace(c.ID) == "" {
-			return fmt.Errorf("chunk[%d] id cannot be empty", i)
+		cid := strings.TrimSpace(c.ID)
+		if cid == "" {
+			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] id cannot be empty", i)
 		}
 		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
-			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
+			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
 		}
-		if strings.TrimSpace(c.Title) == "" {
-			return fmt.Errorf("chunk[%d] title cannot be empty", i)
+		title := strings.TrimSpace(c.Title)
+		if title == "" {
+			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] title cannot be empty", i)
 		}
-		if strings.TrimSpace(c.Instructions) == "" {
-			return fmt.Errorf("chunk[%d] instructions cannot be empty", i)
+		instructions := strings.TrimSpace(c.Instructions)
+		if instructions == "" {
+			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] instructions cannot be empty", i)
 		}
-		if _, err := normalizeVanadisEffort(c.Effort); err != nil {
-			return fmt.Errorf("chunk[%d] %w", i, err)
+		effort, err := normalizeVanadisEffort(c.Effort)
+		if err != nil {
+			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] %w", i, err)
 		}
+		chunkRepo := normalizeRepo(c.Repo)
+		if chunkRepo == "" {
+			chunkRepo = "azylman/aerial"
+		}
+		cStatus := strings.TrimSpace(c.Status)
+		if cStatus == "" {
+			cStatus = "pending"
+		}
+		files := c.TargetFiles
+		if files == nil {
+			files = []string{}
+		}
+		symbols := c.TargetSymbols
+		if symbols == nil {
+			symbols = []string{}
+		}
+		criteria := c.AcceptanceCriteria
+		if criteria == nil {
+			criteria = []string{}
+		}
+
+		normChunks[i] = VanadisChunk{
+			ID:                 cid,
+			BuildID:            buildID,
+			ChunkIndex:         c.ChunkIndex,
+			Repo:               chunkRepo,
+			Title:              title,
+			Instructions:       instructions,
+			TargetFiles:        files,
+			TargetSymbols:      symbols,
+			Effort:             effort,
+			AcceptanceCriteria: criteria,
+			Status:             cStatus,
+			PRNumber:           c.PRNumber,
+			StartedAt:          c.StartedAt,
+		}
+	}
+
+	return normBuild, normChunks, nil
+}
+
+func scanVanadisChunk(scanner interface{ Scan(dest ...any) error }, isPostgres bool) (VanadisChunk, error) {
+	var c VanadisChunk
+	var startedAt sql.NullTime
+	var rawTargetFiles, rawTargetSymbols, rawAcceptanceCriteria string
+	var targetFilesDest, targetSymbolsDest, acceptanceCriteriaDest any
+	if isPostgres {
+		targetFilesDest = &c.TargetFiles
+		targetSymbolsDest = &c.TargetSymbols
+		acceptanceCriteriaDest = &c.AcceptanceCriteria
+	} else {
+		targetFilesDest = &rawTargetFiles
+		targetSymbolsDest = &rawTargetSymbols
+		acceptanceCriteriaDest = &rawAcceptanceCriteria
+	}
+
+	if err := scanner.Scan(
+		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetFilesDest, targetSymbolsDest, &c.Effort, acceptanceCriteriaDest, &c.Status, &c.PRNumber, &startedAt, &c.CreatedAt, &c.UpdatedAt,
+	); err != nil {
+		return VanadisChunk{}, err
+	}
+	if startedAt.Valid {
+		c.StartedAt = startedAt.Time
+	}
+	if !isPostgres {
+		c.TargetFiles = parsePostgresTextArray(rawTargetFiles)
+		c.TargetSymbols = parsePostgresTextArray(rawTargetSymbols)
+		c.AcceptanceCriteria = parsePostgresTextArray(rawAcceptanceCriteria)
+	} else {
+		if c.TargetFiles == nil {
+			c.TargetFiles = []string{}
+		}
+		if c.TargetSymbols == nil {
+			c.TargetSymbols = []string{}
+		}
+		if c.AcceptanceCriteria == nil {
+			c.AcceptanceCriteria = []string{}
+		}
+	}
+	if strings.TrimSpace(c.Effort) == "" {
+		c.Effort = "medium"
+	}
+	return c, nil
+}
+
+// CreateVanadisBuild inserts a VanadisBuild and all of its ordered VanadisChunks in a single transaction.
+func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database connection is nil")
+	}
+
+	normBuild, normChunks, err := validateAndNormalizeVanadisBuild(build, chunks)
+	if err != nil {
+		return err
 	}
 
 	return s.WithTx(ctx, func(txStore Store) error {
@@ -150,13 +254,11 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 		}
 		execDB := txSQL.db
 
-		buildStatusMessageID := strings.TrimSpace(build.StatusMessageID)
-		sharedContext := strings.TrimSpace(build.SharedContext)
 		buildQuery := `
 			INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		`
-		if _, err := execDB.ExecContext(ctx, buildQuery, buildID, threadID, tier, buildTitle, objective, sharedContext, status, buildStatusMessageID); err != nil {
+		if _, err := execDB.ExecContext(ctx, buildQuery, normBuild.ID, normBuild.ThreadID, normBuild.Tier, normBuild.Title, normBuild.Objective, normBuild.SharedContext, normBuild.Status, normBuild.StatusMessageID); err != nil {
 			return fmt.Errorf("failed to insert vanadis build: %w", err)
 		}
 
@@ -164,22 +266,7 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 			INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		`
-		for _, c := range chunks {
-			chunkID := strings.TrimSpace(c.ID)
-			title := strings.TrimSpace(c.Title)
-			instructions := strings.TrimSpace(c.Instructions)
-			chunkRepo := normalizeRepo(c.Repo)
-			if chunkRepo == "" {
-				chunkRepo = "azylman/aerial"
-			}
-			cStatus := strings.TrimSpace(c.Status)
-			if cStatus == "" {
-				cStatus = "pending"
-			}
-			cEffort, err := normalizeVanadisEffort(c.Effort)
-			if err != nil {
-				return fmt.Errorf("chunk %s: %w", chunkID, err)
-			}
+		for _, c := range normChunks {
 			var prNum sql.NullInt64
 			if c.PRNumber > 0 {
 				prNum = sql.NullInt64{Int64: int64(c.PRNumber), Valid: true}
@@ -187,29 +274,15 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 			var startedAt sql.NullTime
 			if !c.StartedAt.IsZero() {
 				startedAt = sql.NullTime{Time: c.StartedAt.UTC(), Valid: true}
-			} else if cStatus == "running" || cStatus == "coding" {
+			} else if c.Status == "running" || c.Status == "coding" {
 				startedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
 			}
 
 			var targetFilesArg, targetSymbolsArg, acceptanceCriteriaArg any
 			if txSQL.isPostgres {
-				files := c.TargetFiles
-				if files == nil {
-					files = []string{}
-				}
-				targetFilesArg = files
-
-				symbols := c.TargetSymbols
-				if symbols == nil {
-					symbols = []string{}
-				}
-				targetSymbolsArg = symbols
-
-				criteria := c.AcceptanceCriteria
-				if criteria == nil {
-					criteria = []string{}
-				}
-				acceptanceCriteriaArg = criteria
+				targetFilesArg = c.TargetFiles
+				targetSymbolsArg = c.TargetSymbols
+				acceptanceCriteriaArg = c.AcceptanceCriteria
 			} else {
 				targetFilesArg = formatPostgresTextArray(c.TargetFiles)
 				targetSymbolsArg = formatPostgresTextArray(c.TargetSymbols)
@@ -217,9 +290,9 @@ func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, c
 			}
 
 			if _, err := execDB.ExecContext(ctx, chunkQuery,
-				chunkID, buildID, c.ChunkIndex, chunkRepo, title, instructions, targetFilesArg, targetSymbolsArg, cEffort, acceptanceCriteriaArg, cStatus, prNum, startedAt,
+				c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, targetFilesArg, targetSymbolsArg, c.Effort, acceptanceCriteriaArg, c.Status, prNum, startedAt,
 			); err != nil {
-				return fmt.Errorf("failed to insert vanadis chunk %s: %w", chunkID, err)
+				return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
 			}
 		}
 		return nil
@@ -267,44 +340,9 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 
 	chunks := make([]VanadisChunk, 0)
 	for rows.Next() {
-		var c VanadisChunk
-		var startedAt sql.NullTime
-		var rawTargetFiles, rawTargetSymbols, rawAcceptanceCriteria string
-		var targetFilesDest, targetSymbolsDest, acceptanceCriteriaDest any
-		if s.isPostgres {
-			targetFilesDest = &c.TargetFiles
-			targetSymbolsDest = &c.TargetSymbols
-			acceptanceCriteriaDest = &c.AcceptanceCriteria
-		} else {
-			targetFilesDest = &rawTargetFiles
-			targetSymbolsDest = &rawTargetSymbols
-			acceptanceCriteriaDest = &rawAcceptanceCriteria
-		}
-		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetFilesDest, targetSymbolsDest, &c.Effort, acceptanceCriteriaDest, &c.Status, &c.PRNumber, &startedAt, &c.CreatedAt, &c.UpdatedAt,
-		); err != nil {
+		c, err := scanVanadisChunk(rows, s.isPostgres)
+		if err != nil {
 			return nil, nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
-		}
-		if startedAt.Valid {
-			c.StartedAt = startedAt.Time
-		}
-		if !s.isPostgres {
-			c.TargetFiles = parsePostgresTextArray(rawTargetFiles)
-			c.TargetSymbols = parsePostgresTextArray(rawTargetSymbols)
-			c.AcceptanceCriteria = parsePostgresTextArray(rawAcceptanceCriteria)
-		} else {
-			if c.TargetFiles == nil {
-				c.TargetFiles = []string{}
-			}
-			if c.TargetSymbols == nil {
-				c.TargetSymbols = []string{}
-			}
-			if c.AcceptanceCriteria == nil {
-				c.AcceptanceCriteria = []string{}
-			}
-		}
-		if strings.TrimSpace(c.Effort) == "" {
-			c.Effort = "medium"
 		}
 		chunks = append(chunks, c)
 	}
@@ -331,87 +369,14 @@ func (s *SQLStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanadi
 		FROM vanadis_chunks
 		WHERE id = $1;
 	`
-	var c VanadisChunk
-	var startedAt sql.NullTime
-	var rawTargetFiles, rawTargetSymbols, rawAcceptanceCriteria string
-	var targetFilesDest, targetSymbolsDest, acceptanceCriteriaDest any
-	if s.isPostgres {
-		targetFilesDest = &c.TargetFiles
-		targetSymbolsDest = &c.TargetSymbols
-		acceptanceCriteriaDest = &c.AcceptanceCriteria
-	} else {
-		targetFilesDest = &rawTargetFiles
-		targetSymbolsDest = &rawTargetSymbols
-		acceptanceCriteriaDest = &rawAcceptanceCriteria
-	}
-
-	err := s.db.QueryRowContext(ctx, query, chunkID).Scan(
-		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, targetFilesDest, targetSymbolsDest, &c.Effort, acceptanceCriteriaDest, &c.Status, &c.PRNumber, &startedAt, &c.CreatedAt, &c.UpdatedAt,
-	)
+	c, err := scanVanadisChunk(s.db.QueryRowContext(ctx, query, chunkID), s.isPostgres)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrVanadisChunkNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vanadis chunk: %w", err)
 	}
-	if startedAt.Valid {
-		c.StartedAt = startedAt.Time
-	}
-	if !s.isPostgres {
-		c.TargetFiles = parsePostgresTextArray(rawTargetFiles)
-		c.TargetSymbols = parsePostgresTextArray(rawTargetSymbols)
-		c.AcceptanceCriteria = parsePostgresTextArray(rawAcceptanceCriteria)
-	} else {
-		if c.TargetFiles == nil {
-			c.TargetFiles = []string{}
-		}
-		if c.TargetSymbols == nil {
-			c.TargetSymbols = []string{}
-		}
-		if c.AcceptanceCriteria == nil {
-			c.AcceptanceCriteria = []string{}
-		}
-	}
-	if strings.TrimSpace(c.Effort) == "" {
-		c.Effort = "medium"
-	}
 	return &c, nil
-}
-
-// UpdateVanadisChunkStatus updates the lifecycle status of a VanadisChunk.
-func (s *SQLStore) UpdateVanadisChunkStatus(ctx context.Context, chunkID, status string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database connection is nil")
-	}
-
-	chunkID = strings.TrimSpace(chunkID)
-	if chunkID == "" {
-		return fmt.Errorf("chunk id cannot be empty")
-	}
-	status = strings.TrimSpace(status)
-	if status == "" {
-		return fmt.Errorf("status cannot be empty")
-	}
-
-	query := `
-		UPDATE vanadis_chunks
-		SET status = $1,
-		    started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = $2;
-	`
-	res, err := s.db.ExecContext(ctx, query, status, chunkID)
-	if err != nil {
-		return fmt.Errorf("failed to update vanadis chunk status: %w", err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrVanadisChunkNotFound
-	}
-	return nil
 }
 
 // AttachVanadisChunkPR links an opened Pull Request to a VanadisChunk and marks it 'pr_opened'.
@@ -430,15 +395,12 @@ func (s *SQLStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prN
 
 	query := `
 		UPDATE vanadis_chunks
-		SET pr_number = $1,
-		    status = 'pr_opened',
-		    started_at = COALESCE(started_at, created_at, CURRENT_TIMESTAMP),
-		    updated_at = CURRENT_TIMESTAMP
+		SET pr_number = $1, status = 'pr_opened', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
 		WHERE id = $2;
 	`
 	res, err := s.db.ExecContext(ctx, query, prNumber, chunkID)
 	if err != nil {
-		return fmt.Errorf("failed to attach vanadis chunk pr: %w", err)
+		return fmt.Errorf("failed to attach pr to vanadis chunk: %w", err)
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
@@ -446,40 +408,6 @@ func (s *SQLStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prN
 	}
 	if rows == 0 {
 		return ErrVanadisChunkNotFound
-	}
-	return nil
-}
-
-// UpdateVanadisBuildStatus updates the lifecycle status of a VanadisBuild.
-func (s *SQLStore) UpdateVanadisBuildStatus(ctx context.Context, buildID, status string) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database connection is nil")
-	}
-
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
-		return fmt.Errorf("build id cannot be empty")
-	}
-	status = strings.TrimSpace(status)
-	if status == "" {
-		return fmt.Errorf("status cannot be empty")
-	}
-
-	query := `
-		UPDATE vanadis_builds
-		SET status = $1, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $2;
-	`
-	res, err := s.db.ExecContext(ctx, query, status, buildID)
-	if err != nil {
-		return fmt.Errorf("failed to update vanadis build status: %w", err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrVanadisBuildNotFound
 	}
 	return nil
 }

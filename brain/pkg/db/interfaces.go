@@ -171,13 +171,7 @@ type PRRecord struct {
 type PRRegistryStore interface {
 	UpsertPR(ctx context.Context, record PRRecord) error
 	GetPRByNumber(ctx context.Context, repo string, prNumber int) (*PRRecord, error)
-	GetPRByHeadSHA(ctx context.Context, repo string, headSHA string) (*PRRecord, error)
-	GetPRByMergeSHA(ctx context.Context, repo string, mergeSHA string) (*PRRecord, error)
-	UpdatePRMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error
-	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string) error
 	UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error
-	AtomicTransitionPRStatus(ctx context.Context, repo string, prNumber int, toStatus, notStatus string) (*PRRecord, error)
-	AtomicTransitionPRStatusByMergeSHA(ctx context.Context, repo string, mergeSHA string, toStatus, notStatus string) (*PRRecord, error)
 }
 
 // VanadisStore handles persistent tracking for Vanadis multi-chunk builds and chunks.
@@ -185,9 +179,7 @@ type VanadisStore interface {
 	CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error
 	GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
 	GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error)
-	UpdateVanadisChunkStatus(ctx context.Context, chunkID, status string) error
 	AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int) error
-	UpdateVanadisBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
 }
 

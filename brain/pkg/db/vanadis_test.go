@@ -210,48 +210,30 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("expected error for empty chunkID in GetVanadisChunk")
 	}
 
-	// 5. UpdateVanadisChunkStatus
-	if err := store.UpdateVanadisChunkStatus(ctx, "chunk-101-0", "running"); err != nil {
-		t.Fatalf("UpdateVanadisChunkStatus failed: %v", err)
+	// 5. AttachVanadisChunkPR (verify StartedAt is preserved on chunk-102-0, and populated if zero on chunk-101-1)
+	gotChunk102Before, err := store.GetVanadisChunk(ctx, "chunk-102-0")
+	if err != nil {
+		t.Fatalf("GetVanadisChunk failed: %v", err)
 	}
-	gotChunk0After, err := store.GetVanadisChunk(ctx, "chunk-101-0")
-	if err != nil || gotChunk0After.Status != "running" || gotChunk0After.StartedAt.IsZero() {
-		t.Fatalf("expected chunk status 'running' with non-zero StartedAt, got %+v (err: %v)", gotChunk0After, err)
-	}
-	initialStartedAt := gotChunk0After.StartedAt
-
-	if err := store.UpdateVanadisChunkStatus(ctx, "nonexistent-chunk", "running"); !errors.Is(err, ErrVanadisChunkNotFound) {
-		t.Errorf("expected ErrVanadisChunkNotFound, got %v", err)
-	}
-	if err := store.UpdateVanadisChunkStatus(ctx, "", "running"); err == nil {
-		t.Errorf("expected error for empty chunkID in UpdateVanadisChunkStatus")
-	}
-	if err := store.UpdateVanadisChunkStatus(ctx, "chunk-101-0", ""); err == nil {
-		t.Errorf("expected error for empty status in UpdateVanadisChunkStatus")
+	initialStartedAt := gotChunk102Before.StartedAt
+	if initialStartedAt.IsZero() {
+		t.Fatalf("expected non-zero initial StartedAt on chunk-102-0")
 	}
 
-	// 6. AttachVanadisChunkPR (verify StartedAt is preserved on chunk-101-0, and populated if zero on chunk-101-1)
-	if err := store.AttachVanadisChunkPR(ctx, "chunk-101-0", 512); err != nil {
+	if err := store.AttachVanadisChunkPR(ctx, "chunk-102-0", 512); err != nil {
 		t.Fatalf("AttachVanadisChunkPR failed: %v", err)
 	}
-	gotChunk0PR, err := store.GetVanadisChunk(ctx, "chunk-101-0")
+	gotChunk102PR, err := store.GetVanadisChunk(ctx, "chunk-102-0")
 	if err != nil {
 		t.Fatalf("GetVanadisChunk after AttachVanadisChunkPR failed: %v", err)
 	}
-	if gotChunk0PR.PRNumber != 512 || gotChunk0PR.Status != "pr_opened" {
-		t.Errorf("unexpected chunk after AttachVanadisChunkPR: %+v", gotChunk0PR)
+	if gotChunk102PR.PRNumber != 512 || gotChunk102PR.Status != "pr_opened" {
+		t.Errorf("unexpected chunk after AttachVanadisChunkPR: %+v", gotChunk102PR)
 	}
-	if !gotChunk0PR.StartedAt.Equal(initialStartedAt) {
-		t.Errorf("expected StartedAt %v preserved after AttachVanadisChunkPR, got %v", initialStartedAt, gotChunk0PR.StartedAt)
+	if !gotChunk102PR.StartedAt.Equal(initialStartedAt) {
+		t.Errorf("expected StartedAt %v preserved after AttachVanadisChunkPR, got %v", initialStartedAt, gotChunk102PR.StartedAt)
 	}
-	// Transitioning to 'merged' also preserves StartedAt
-	if err := store.UpdateVanadisChunkStatus(ctx, "chunk-101-0", "merged"); err != nil {
-		t.Fatalf("UpdateVanadisChunkStatus to merged failed: %v", err)
-	}
-	gotChunk0Merged, err := store.GetVanadisChunk(ctx, "chunk-101-0")
-	if err != nil || !gotChunk0Merged.StartedAt.Equal(initialStartedAt) {
-		t.Errorf("expected StartedAt %v preserved on merged, got %+v (err: %v)", initialStartedAt, gotChunk0Merged, err)
-	}
+
 	// AttachVanadisChunkPR on a chunk that never entered 'running' still populates StartedAt
 	if err := store.AttachVanadisChunkPR(ctx, "chunk-101-1", 513); err != nil {
 		t.Fatalf("AttachVanadisChunkPR on chunk-101-1 failed: %v", err)
@@ -270,25 +252,7 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("expected error for pr_number <= 0 in AttachVanadisChunkPR")
 	}
 
-	// 7. UpdateVanadisBuildStatus
-	if err := store.UpdateVanadisBuildStatus(ctx, "build-101", "completed"); err != nil {
-		t.Fatalf("UpdateVanadisBuildStatus failed: %v", err)
-	}
-	gotBuildAfter, _, err := store.GetVanadisBuild(ctx, "build-101")
-	if err != nil || gotBuildAfter.Status != "completed" {
-		t.Fatalf("expected build status 'completed', got %+v (err: %v)", gotBuildAfter, err)
-	}
-	if err := store.UpdateVanadisBuildStatus(ctx, "nonexistent-build", "completed"); !errors.Is(err, ErrVanadisBuildNotFound) {
-		t.Errorf("expected ErrVanadisBuildNotFound on UpdateVanadisBuildStatus, got %v", err)
-	}
-	if err := store.UpdateVanadisBuildStatus(ctx, "", "completed"); err == nil {
-		t.Errorf("expected error for empty buildID in UpdateVanadisBuildStatus")
-	}
-	if err := store.UpdateVanadisBuildStatus(ctx, "build-101", ""); err == nil {
-		t.Errorf("expected error for empty status in UpdateVanadisBuildStatus")
-	}
-
-	// 8. UpdateVanadisBuildStatusMessageID
+	// 6. UpdateVanadisBuildStatusMessageID
 	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "build-101", "  msg-build-999  "); err != nil {
 		t.Fatalf("UpdateVanadisBuildStatusMessageID failed: %v", err)
 	}
@@ -351,18 +315,8 @@ func TestVanadis_FakeStore_FailuresAndClosed(t *testing.T) {
 		t.Errorf("expected %v, got %v", simErr, err)
 	}
 
-	store.FailNext("UpdateVanadisChunkStatus", simErr)
-	if err := store.UpdateVanadisChunkStatus(ctx, "c1", "s"); !errors.Is(err, simErr) {
-		t.Errorf("expected %v, got %v", simErr, err)
-	}
-
 	store.FailNext("AttachVanadisChunkPR", simErr)
 	if err := store.AttachVanadisChunkPR(ctx, "c1", 1); !errors.Is(err, simErr) {
-		t.Errorf("expected %v, got %v", simErr, err)
-	}
-
-	store.FailNext("UpdateVanadisBuildStatus", simErr)
-	if err := store.UpdateVanadisBuildStatus(ctx, "b1", "s"); !errors.Is(err, simErr) {
 		t.Errorf("expected %v, got %v", simErr, err)
 	}
 
@@ -381,13 +335,7 @@ func TestVanadis_FakeStore_FailuresAndClosed(t *testing.T) {
 	if _, err := store.GetVanadisChunk(ctx, "c1"); !errors.Is(err, sql.ErrConnDone) {
 		t.Errorf("expected ErrConnDone, got %v", err)
 	}
-	if err := store.UpdateVanadisChunkStatus(ctx, "c1", "s"); !errors.Is(err, sql.ErrConnDone) {
-		t.Errorf("expected ErrConnDone, got %v", err)
-	}
 	if err := store.AttachVanadisChunkPR(ctx, "c1", 1); !errors.Is(err, sql.ErrConnDone) {
-		t.Errorf("expected ErrConnDone, got %v", err)
-	}
-	if err := store.UpdateVanadisBuildStatus(ctx, "b1", "s"); !errors.Is(err, sql.ErrConnDone) {
 		t.Errorf("expected ErrConnDone, got %v", err)
 	}
 	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "b1", "msg-1"); !errors.Is(err, sql.ErrConnDone) {
@@ -411,14 +359,8 @@ func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
 		if _, err := s.GetVanadisChunk(ctx, "c1"); err == nil {
 			t.Errorf("[%d] expected error on nil GetVanadisChunk", i)
 		}
-		if err := s.UpdateVanadisChunkStatus(ctx, "c1", "s"); err == nil {
-			t.Errorf("[%d] expected error on nil UpdateVanadisChunkStatus", i)
-		}
 		if err := s.AttachVanadisChunkPR(ctx, "c1", 1); err == nil {
 			t.Errorf("[%d] expected error on nil AttachVanadisChunkPR", i)
-		}
-		if err := s.UpdateVanadisBuildStatus(ctx, "b1", "s"); err == nil {
-			t.Errorf("[%d] expected error on nil UpdateVanadisBuildStatus", i)
 		}
 		if err := s.UpdateVanadisBuildStatusMessageID(ctx, "b1", "msg-1"); err == nil {
 			t.Errorf("[%d] expected error on nil UpdateVanadisBuildStatusMessageID", i)
@@ -443,14 +385,8 @@ func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
 	if _, err := closedStore.GetVanadisChunk(ctx, "c1"); err == nil {
 		t.Errorf("expected error on closed GetVanadisChunk")
 	}
-	if err := closedStore.UpdateVanadisChunkStatus(ctx, "c1", "s"); err == nil {
-		t.Errorf("expected error on closed UpdateVanadisChunkStatus")
-	}
 	if err := closedStore.AttachVanadisChunkPR(ctx, "c1", 1); err == nil {
 		t.Errorf("expected error on closed AttachVanadisChunkPR")
-	}
-	if err := closedStore.UpdateVanadisBuildStatus(ctx, "b1", "s"); err == nil {
-		t.Errorf("expected error on closed UpdateVanadisBuildStatus")
 	}
 	if err := closedStore.UpdateVanadisBuildStatusMessageID(ctx, "b1", "msg-1"); err == nil {
 		t.Errorf("expected error on closed UpdateVanadisBuildStatusMessageID")
