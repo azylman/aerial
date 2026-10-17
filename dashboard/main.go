@@ -1185,9 +1185,37 @@ type rawUserConfig struct {
 		QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
 		GitHubRepos      []string          `yaml:"github_repos"`
 		Repos            []string          `yaml:"repos"`
+		VanadisURL       string            `yaml:"vanadis_url"`
 	} `yaml:"dashboard"`
 	QuickLinks  []QuickLaunchLink `yaml:"quick_links"`
 	GitHubRepos []string          `yaml:"github_repos"`
+	VanadisURL  string            `yaml:"vanadis_url"`
+}
+
+// loadDashboardVanadisURL parses the Vanadis upstream URL configured in config.yaml.
+func loadDashboardVanadisURL(configPath string) string {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return ""
+	}
+	configPath = filepath.Clean(configPath)
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+
+	var cfg rawUserConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Printf("[Dashboard] Warning: failed to parse %s for vanadis url: %v", configPath, err)
+		return ""
+	}
+
+	val := strings.TrimSpace(cfg.Dashboard.VanadisURL)
+	if val == "" {
+		val = strings.TrimSpace(cfg.VanadisURL)
+	}
+	return val
 }
 
 // loadDashboardRepos parses the list of GitHub repositories configured for status dashboard monitoring.
@@ -2114,7 +2142,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		nomadAddr = "http://127.0.0.1:4646"
 	}
 
-	vanadisURL := strings.TrimSpace(lookup("VANADIS_URL"))
+	vanadisURL := loadDashboardVanadisURL(configPath)
 	if vanadisURL == "" && ycfg.VanadisURL != "" {
 		vanadisURL = strings.TrimSpace(ycfg.VanadisURL)
 	}
