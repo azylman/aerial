@@ -70,75 +70,6 @@ func TestFilterNomadConfigFiles_TableDriven(t *testing.T) {
 	}
 }
 
-func TestBuildDiscordAlertContent_TableDriven(t *testing.T) {
-	tests := []struct {
-		name         string
-		title        string
-		repoPath     string
-		faultyCommit string
-		rolledBackTo string
-		stage        string
-		errorMsg     string
-		checkSubstrs []string
-	}{
-		{
-			name:         "full alert formatting",
-			title:        "Reconcile Failed",
-			repoPath:     "/share/aerial",
-			faultyCommit: "abc1234",
-			rolledBackTo: "def5678",
-			stage:        "nomad apply",
-			errorMsg:     "job failed to place",
-			checkSubstrs: []string{
-				"🚨 **GitSync GitOps Alert: Reconcile Failed**",
-				"**Repository:**",
-				"**Stage:** `nomad apply`",
-				"**Commit:** `abc1234`",
-				"**Rolled Back To:** `def5678`",
-				"job failed to place",
-			},
-		},
-		{
-			name:         "error truncation over 1200 chars",
-			title:        "Validation Error",
-			repoPath:     "",
-			faultyCommit: "",
-			rolledBackTo: "",
-			stage:        "validation",
-			errorMsg:     strings.Repeat("X", 1300),
-			checkSubstrs: []string{
-				"🚨 **GitSync GitOps Alert: Validation Error**",
-				"**Stage:** `validation`",
-				strings.Repeat("X", 1200),
-				"[... truncated for length]",
-			},
-		},
-		{
-			name:         "empty optional fields",
-			title:        "Clean Alert",
-			repoPath:     "",
-			faultyCommit: "",
-			rolledBackTo: "",
-			stage:        "",
-			errorMsg:     "",
-			checkSubstrs: []string{
-				"🚨 **GitSync GitOps Alert: Clean Alert**",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			content := BuildDiscordAlertContent(tt.title, tt.repoPath, tt.faultyCommit, tt.rolledBackTo, tt.stage, tt.errorMsg)
-			for _, sub := range tt.checkSubstrs {
-				if !strings.Contains(content, sub) {
-					t.Errorf("expected alert to contain %q, but got:\n%s", sub, content)
-				}
-			}
-		})
-	}
-}
-
 func TestCalculateSyncStatus_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -655,127 +586,31 @@ func TestResolveDockerConfigPath_TableDriven(t *testing.T) {
 
 func TestParseImageReference_TableDriven(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      string
-		wantReg    string
-		wantRepo   string
-		wantTag    string
-		wantErr    bool
+		name     string
+		input    string
+		wantReg  string
+		wantRepo string
+		wantTag  string
+		wantErr  bool
 	}{
-		{
-			name:     "official single segment",
-			input:    "nginx",
-			wantReg:  "registry-1.docker.io",
-			wantRepo: "library/nginx",
-			wantTag:  "latest",
-		},
-		{
-			name:     "official single segment with tag",
-			input:    "redis:alpine",
-			wantReg:  "registry-1.docker.io",
-			wantRepo: "library/redis",
-			wantTag:  "alpine",
-		},
-		{
-			name:     "namespaced docker hub",
-			input:    "pgvector/pgvector:pg16",
-			wantReg:  "registry-1.docker.io",
-			wantRepo: "pgvector/pgvector",
-			wantTag:  "pg16",
-		},
-		{
-			name:     "explicit docker.io domain",
-			input:    "docker.io/library/ubuntu:latest",
-			wantReg:  "registry-1.docker.io",
-			wantRepo: "library/ubuntu",
-			wantTag:  "latest",
-		},
-		{
-			name:     "explicit index.docker.io domain",
-			input:    "index.docker.io/prom/node-exporter:v1.8.2",
-			wantReg:  "registry-1.docker.io",
-			wantRepo: "prom/node-exporter",
-			wantTag:  "v1.8.2",
-		},
-		{
-			name:     "ghcr private monorepo reference",
-			input:    "ghcr.io/azylman/aerial-brain:latest",
-			wantReg:  "ghcr.io",
-			wantRepo: "azylman/aerial-brain",
-			wantTag:  "latest",
-		},
-		{
-			name:     "ghcr public reference without tag defaults to latest",
-			input:    "ghcr.io/gethomepage/homepage",
-			wantReg:  "ghcr.io",
-			wantRepo: "gethomepage/homepage",
-			wantTag:  "latest",
-		},
-		{
-			name:     "gcr third-party reference",
-			input:    "gcr.io/cadvisor/cadvisor:v0.49.1",
-			wantReg:  "gcr.io",
-			wantRepo: "cadvisor/cadvisor",
-			wantTag:  "v0.49.1",
-		},
-		{
-			name:     "localhost registry with port",
-			input:    "localhost:5000/my-app:1.0",
-			wantReg:  "localhost:5000",
-			wantRepo: "my-app",
-			wantTag:  "1.0",
-		},
-		{
-			name:     "custom domain with port",
-			input:    "registry.internal:8443/deep/path/svc:dev",
-			wantReg:  "registry.internal:8443",
-			wantRepo: "deep/path/svc",
-			wantTag:  "dev",
-		},
-		{
-			name:     "pinned sha256 digest reference",
-			input:    "ghcr.io/azylman/brain@sha256:1f9fd513925ef06272dea861c4c8cb7c10a9eb6b5a4e7ad0e4ca00b49fc27866",
-			wantReg:  "ghcr.io",
-			wantRepo: "azylman/brain",
-			wantTag:  "sha256:1f9fd513925ef06272dea861c4c8cb7c10a9eb6b5a4e7ad0e4ca00b49fc27866",
-		},
-		{
-			name:    "empty string errors",
-			input:   "",
-			wantErr: true,
-		},
-		{
-			name:    "whitespace only errors",
-			input:   "   ",
-			wantErr: true,
-		},
-		{
-			name:    "spaces in reference errors",
-			input:   "ghcr.io/ azylman/brain:latest",
-			wantErr: true,
-		},
-		{
-			name:    "invalid digest prefix errors",
-			input:   "redis@md5:12345",
-			wantErr: true,
-		},
-		{
-			name:    "trailing colon without tag errors",
-			input:   "redis:",
-			wantErr: true,
-		},
-		{
-			name:    "missing repository name errors",
-			input:   ":latest",
-			wantErr: true,
-		},
-		{
-			name:     "nomad image_tag variable interpolation normalized to latest",
-			input:    "ghcr.io/azylman/aerial-vanadis:${var.image_tag}",
-			wantReg:  "ghcr.io",
-			wantRepo: "azylman/aerial-vanadis",
-			wantTag:  "latest",
-		},
+		{"official single segment", "nginx", "registry-1.docker.io", "library/nginx", "latest", false},
+		{"official single segment with tag", "redis:alpine", "registry-1.docker.io", "library/redis", "alpine", false},
+		{"namespaced docker hub", "pgvector/pgvector:pg16", "registry-1.docker.io", "pgvector/pgvector", "pg16", false},
+		{"explicit docker.io domain", "docker.io/library/ubuntu:latest", "registry-1.docker.io", "library/ubuntu", "latest", false},
+		{"explicit index.docker.io domain", "index.docker.io/prom/node-exporter:v1.8.2", "registry-1.docker.io", "prom/node-exporter", "v1.8.2", false},
+		{"ghcr private monorepo reference", "ghcr.io/azylman/aerial-brain:latest", "ghcr.io", "azylman/aerial-brain", "latest", false},
+		{"ghcr public reference without tag defaults to latest", "ghcr.io/gethomepage/homepage", "ghcr.io", "gethomepage/homepage", "latest", false},
+		{"gcr third-party reference", "gcr.io/cadvisor/cadvisor:v0.49.1", "gcr.io", "cadvisor/cadvisor", "v0.49.1", false},
+		{"localhost registry with port", "localhost:5000/my-app:1.0", "localhost:5000", "my-app", "1.0", false},
+		{"custom domain with port", "registry.internal:8443/deep/path/svc:dev", "registry.internal:8443", "deep/path/svc", "dev", false},
+		{"pinned sha256 digest reference", "ghcr.io/azylman/brain@sha256:1f9fd513925ef06272dea861c4c8cb7c10a9eb6b5a4e7ad0e4ca00b49fc27866", "ghcr.io", "azylman/brain", "sha256:1f9fd513925ef06272dea861c4c8cb7c10a9eb6b5a4e7ad0e4ca00b49fc27866", false},
+		{"empty string errors", "", "", "", "", true},
+		{"whitespace only errors", "   ", "", "", "", true},
+		{"spaces in reference errors", "ghcr.io/ azylman/brain:latest", "", "", "", true},
+		{"invalid digest prefix errors", "redis@md5:12345", "", "", "", true},
+		{"trailing colon without tag errors", "redis:", "", "", "", true},
+		{"missing repository name errors", ":latest", "", "", "", true},
+		{"nomad image_tag variable interpolation normalized to latest", "ghcr.io/azylman/aerial-vanadis:${var.image_tag}", "ghcr.io", "azylman/aerial-vanadis", "latest", false},
 	}
 
 	for _, tt := range tests {
@@ -812,63 +647,16 @@ func TestParseWwwAuthenticate_TableDriven(t *testing.T) {
 		wantScope   string
 		wantErr     bool
 	}{
-		{
-			name:        "docker hub standard challenge with quotes",
-			header:      `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:pgvector/pgvector:pull"`,
-			wantRealm:   "https://auth.docker.io/token",
-			wantService: "registry.docker.io",
-			wantScope:   "repository:pgvector/pgvector:pull",
-		},
-		{
-			name:        "ghcr standard challenge without scope",
-			header:      `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
-			wantRealm:   "https://ghcr.io/token",
-			wantService: "ghcr.io",
-			wantScope:   "",
-		},
-		{
-			name:        "case-insensitive bearer prefix and whitespace",
-			header:      `bearer  realm="https://auth.example.com/token" , service="example.com" `,
-			wantRealm:   "https://auth.example.com/token",
-			wantService: "example.com",
-			wantScope:   "",
-		},
-		{
-			name:        "unquoted values",
-			header:      `Bearer realm=https://auth.example.com/token,service=my.registry`,
-			wantRealm:   "https://auth.example.com/token",
-			wantService: "my.registry",
-			wantScope:   "",
-		},
-		{
-			name:        "unquoted single realm",
-			header:      `Bearer realm=https://auth.example.com/token`,
-			wantRealm:   "https://auth.example.com/token",
-			wantService: "",
-			wantScope:   "",
-		},
-		{
-			name:        "unclosed quote realm",
-			header:      `Bearer realm="https://auth.example.com/token`,
-			wantRealm:   "https://auth.example.com/token",
-			wantService: "",
-			wantScope:   "",
-		},
-		{
-			name:    "empty header",
-			header:  "",
-			wantErr: true,
-		},
-		{
-			name:    "non-bearer scheme",
-			header:  `Basic realm="WallyWorld"`,
-			wantErr: true,
-		},
-		{
-			name:    "missing realm",
-			header:  `Bearer service="registry.docker.io"`,
-			wantErr: true,
-		},
+		{"docker hub standard challenge with quotes", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:pgvector/pgvector:pull"`, "https://auth.docker.io/token", "registry.docker.io", "repository:pgvector/pgvector:pull", false},
+		{"ghcr standard challenge without scope", `Bearer realm="https://ghcr.io/token",service="ghcr.io"`, "https://ghcr.io/token", "ghcr.io", "", false},
+		{"case-insensitive bearer prefix and whitespace", `bearer  realm="https://auth.example.com/token" , service="example.com" `, "https://auth.example.com/token", "example.com", "", false},
+		{"unquoted values", `Bearer realm=https://auth.example.com/token,service=my.registry`, "https://auth.example.com/token", "my.registry", "", false},
+		{"unquoted single realm", `Bearer realm=https://auth.example.com/token`, "https://auth.example.com/token", "", "", false},
+		{"unclosed quote realm", `Bearer realm="https://auth.example.com/token`, "https://auth.example.com/token", "", "", false},
+		{"trailing parameter without value", `Bearer realm="https://example.com",service="test",trailingnoparam`, "https://example.com", "test", "", false},
+		{"empty header", "", "", "", "", true},
+		{"non-bearer scheme", `Basic realm="WallyWorld"`, "", "", "", true},
+		{"missing realm", `Bearer service="registry.docker.io"`, "", "", "", true},
 	}
 
 	for _, tt := range tests {
@@ -896,191 +684,35 @@ func TestParseWwwAuthenticate_TableDriven(t *testing.T) {
 	}
 }
 
-func TestContainsDigest_TableDriven(t *testing.T) {
-	tests := []struct {
-		name        string
-		repoDigests []string
-		target      string
-		want        bool
-	}{
-		{
-			name: "exact suffix match with repository",
-			repoDigests: []string{
-				"ghcr.io/azylman/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			},
-			target: "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			want:   true,
-		},
-		{
-			name: "exact match without repo prefix",
-			repoDigests: []string{
-				"sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			},
-			target: "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			want:   true,
-		},
-		{
-			name: "registry with port in repo digest",
-			repoDigests: []string{
-				"localhost:5000/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			},
-			target: "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			want:   true,
-		},
-		{
-			name: "multiple digests with match in middle",
-			repoDigests: []string{
-				"docker.io/library/redis@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-				"redis@sha256:2222222222222222222222222222222222222222222222222222222222222222",
-			},
-			target: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-			want:   true,
-		},
-		{
-			name: "digest mismatch",
-			repoDigests: []string{
-				"ghcr.io/azylman/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			},
-			target: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-			want:   false,
-		},
-		{
-			name:        "empty repo digests",
-			repoDigests: []string{},
-			target:      "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			want:        false,
-		},
-		{
-			name: "empty target digest",
-			repoDigests: []string{
-				"ghcr.io/azylman/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
-			},
-			target: "",
-			want:   false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ContainsDigest(tt.repoDigests, tt.target)
-			if got != tt.want {
-				t.Errorf("ContainsDigest() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseGitHubSlug_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{
-			name:     "standard https with .git",
-			input:    "https://github.com/azylman/aerial.git",
-			expected: "azylman/aerial",
-		},
-		{
-			name:     "standard https without .git",
-			input:    "https://github.com/azylman/mirrormere",
-			expected: "azylman/mirrormere",
-		},
-		{
-			name:     "https with trailing slash",
-			input:    "https://github.com/azylman/mirrormere/",
-			expected: "azylman/mirrormere",
-		},
-		{
-			name:     "https with auth credentials / token",
-			input:    "https://x-access-token:ghp_secret12345@github.com/azylman/mirrormere.git",
-			expected: "azylman/mirrormere",
-		},
-		{
-			name:     "scp-like ssh syntax with .git",
-			input:    "git@github.com:azylman/aerial.git",
-			expected: "azylman/aerial",
-		},
-		{
-			name:     "scp-like ssh syntax without .git",
-			input:    "git@github.com:azylman/aerial",
-			expected: "azylman/aerial",
-		},
-		{
-			name:     "ssh scheme with user",
-			input:    "ssh://git@github.com/azylman/aerial.git",
-			expected: "azylman/aerial",
-		},
-		{
-			name:     "ssh scheme with port",
-			input:    "ssh://git@github.com:22/azylman/aerial.git",
-			expected: "azylman/aerial",
-		},
-		{
-			name:     "mixed casing normalized to lowercase",
-			input:    "https://github.com/Azylman/MirrorMere.git",
-			expected: "azylman/mirrormere",
-		},
-		{
-			name:     "with query params and fragment",
-			input:    "https://github.com/azylman/aerial.git?ref=main#readme",
-			expected: "azylman/aerial",
-		},
-		{
-			name:     "leading and trailing whitespace and newlines",
-			input:    "  \n\thttps://github.com/azylman/aerial.git \r\n ",
-			expected: "azylman/aerial",
-		},
-		{
-			name:     "gitlab rejected",
-			input:    "https://gitlab.com/azylman/aerial.git",
-			expected: "",
-		},
-		{
-			name:     "spoofed host rejected",
-			input:    "https://notgithub.com/azylman/aerial.git",
-			expected: "",
-		},
-		{
-			name:     "subdomain spoof rejected",
-			input:    "https://github.com.evil.com/azylman/aerial.git",
-			expected: "",
-		},
-		{
-			name:     "gitlab ssh rejected",
-			input:    "git@gitlab.com:azylman/aerial.git",
-			expected: "",
-		},
-		{
-			name:     "local path rejected",
-			input:    "/share/aerial",
-			expected: "",
-		},
-		{
-			name:     "empty input",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "whitespace only",
-			input:    "   \n\t  ",
-			expected: "",
-		},
-		{
-			name:     "root github url rejected",
-			input:    "https://github.com/",
-			expected: "",
-		},
-		{
-			name:     "single segment path rejected",
-			input:    "https://github.com/azylman",
-			expected: "",
-		},
-		{
-			name:     "extra path segments rejected",
-			input:    "https://github.com/azylman/aerial/tree/main",
-			expected: "",
-		},
+		{"standard https with .git", "https://github.com/azylman/aerial.git", "azylman/aerial"},
+		{"standard https without .git", "https://github.com/azylman/mirrormere", "azylman/mirrormere"},
+		{"https with trailing slash", "https://github.com/azylman/mirrormere/", "azylman/mirrormere"},
+		{"https with auth credentials / token", "https://x-access-token:ghp_secret12345@github.com/azylman/mirrormere.git", "azylman/mirrormere"},
+		{"scp-like ssh syntax with .git", "git@github.com:azylman/aerial.git", "azylman/aerial"},
+		{"scp-like ssh syntax without .git", "git@github.com:azylman/aerial", "azylman/aerial"},
+		{"ssh scheme with user", "ssh://git@github.com/azylman/aerial.git", "azylman/aerial"},
+		{"ssh scheme with port", "ssh://git@github.com:22/azylman/aerial.git", "azylman/aerial"},
+		{"mixed casing normalized to lowercase", "https://github.com/Azylman/MirrorMere.git", "azylman/mirrormere"},
+		{"with query params and fragment", "https://github.com/azylman/aerial.git?ref=main#readme", "azylman/aerial"},
+		{"leading and trailing whitespace and newlines", "  \n\thttps://github.com/azylman/aerial.git \r\n ", "azylman/aerial"},
+		{"gitlab rejected", "https://gitlab.com/azylman/aerial.git", ""},
+		{"spoofed host rejected", "https://notgithub.com/azylman/aerial.git", ""},
+		{"subdomain spoof rejected", "https://github.com.evil.com/azylman/aerial.git", ""},
+		{"gitlab ssh rejected", "git@gitlab.com:azylman/aerial.git", ""},
+		{"local path rejected", "/share/aerial", ""},
+		{"empty input", "", ""},
+		{"whitespace only", "   \n\t  ", ""},
+		{"root github url rejected", "https://github.com/", ""},
+		{"single segment path rejected", "https://github.com/azylman", ""},
+		{"extra path segments rejected", "https://github.com/azylman/aerial/tree/main", ""},
+		{"invalid url", "http://:invalid-url", ""},
+		{"blank owner or repo", "https://github.com/ /aerial", ""},
 	}
 
 	for _, tc := range tests {
@@ -1114,44 +746,6 @@ func TestIsNomadJobFile_TableDriven(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsNomadJobFile(tt.path); got != tt.expected {
 				t.Errorf("IsNomadJobFile(%q) = %v, want %v", tt.path, got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestFilterNomadChanges_TableDriven(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []string
-		expected []string
-	}{
-		{
-			name:     "mixed file list",
-			input:    []string{"docker-compose.yml", "jobs/infisical.nomad", "README.md", "jobs/voice.nomad"},
-			expected: []string{"jobs/infisical.nomad", "jobs/voice.nomad"},
-		},
-		{
-			name:     "no nomad files",
-			input:    []string{"docker-compose.yml", "services/voice.yaml"},
-			expected: nil,
-		},
-		{
-			name:     "empty list",
-			input:    []string{},
-			expected: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FilterNomadChanges(tt.input)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("FilterNomadChanges() returned %d items, want %d", len(got), len(tt.expected))
-			}
-			for i := range got {
-				if got[i] != tt.expected[i] {
-					t.Errorf("FilterNomadChanges()[%d] = %q, want %q", i, got[i], tt.expected[i])
-				}
 			}
 		})
 	}
@@ -1356,58 +950,6 @@ R100	jobs/old.nomad	jobs/new.nomad
 	}
 }
 
-func TestPureSlugAndDigestHelpers(t *testing.T) {
-	// ParseGitHubSlug test cases
-	slugCases := []struct {
-		input string
-		want  string
-	}{
-		{"https://github.com/azylman/aerial.git?ref=main#hash", "azylman/aerial"},
-		{"git@github.com:azylman/aerial.git", "azylman/aerial"},
-		{"git@github.com:azylman/aerial", "azylman/aerial"},
-		{"git@gitlab.com:azylman/aerial.git", ""},
-		{"git@malformed", ""},
-		{"https://gitlab.com/azylman/aerial.git", ""},
-		{"https://github.com/invalid/path/extra/parts", ""},
-		{"https://github.com/singlepart", ""},
-		{"https://github.com/ /aerial", ""},
-		{"https://github.com/azylman/ ", ""},
-		{"http://github.com/azylman/aerial.git", "azylman/aerial"},
-		{"ssh://git@github.com/azylman/aerial.git", "azylman/aerial"},
-		{"", ""},
-		{"   ", ""},
-		{"http://:invalid-url", ""},
-	}
-	for _, tc := range slugCases {
-		got := ParseGitHubSlug(tc.input)
-		if got != tc.want {
-			t.Errorf("ParseGitHubSlug(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-
-	if cleanSlugPath("azylman/aerial?query#hash") != "azylman/aerial" {
-		t.Errorf("expected clean slug with query/hash")
-	}
-	if cleanSlugPath("too/many/parts") != "" {
-		t.Errorf("expected empty for too many parts")
-	}
-	if cleanSlugPath(" / ") != "" {
-		t.Errorf("expected empty for blank parts")
-	}
-
-
-	// ContainsDigest test cases
-	if !ContainsDigest([]string{"sha256:abc", "sha256:def"}, "sha256:abc") {
-		t.Errorf("expected true for existing digest")
-	}
-	if ContainsDigest([]string{"sha256:abc"}, "sha256:xyz") {
-		t.Errorf("expected false for nonexistent digest")
-	}
-	if ContainsDigest(nil, "sha256:abc") {
-		t.Errorf("expected false for nil slice")
-	}
-}
-
 func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1415,54 +957,14 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 		files    []string
 		expected bool
 	}{
-		{
-			name:     "aerial-config always false",
-			repoPath: "/share/aerial-config",
-			files:    []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"},
-			expected: false,
-		},
-		{
-			name:     "aerial core brain touched",
-			repoPath: "/share/aerial",
-			files:    []string{"brain/main.go"},
-			expected: true,
-		},
-		{
-			name:     "aerial core webhooks-router touched",
-			repoPath: "/share/aerial",
-			files:    []string{"webhooks-router/main.go"},
-			expected: true,
-		},
-		{
-			name:     "aerial core vanadis touched",
-			repoPath: "/share/aerial",
-			files:    []string{"vanadis/main.go"},
-			expected: true,
-		},
-		{
-			name:     "aerial core Dockerfile touched",
-			repoPath: "/share/aerial",
-			files:    []string{"Dockerfile"},
-			expected: true,
-		},
-		{
-			name:     "aerial core go.mod touched",
-			repoPath: "/share/aerial",
-			files:    []string{"go.mod"},
-			expected: true,
-		},
-		{
-			name:     "aerial core non-build files (docs, nomad, rules)",
-			repoPath: "/share/aerial",
-			files:    []string{"nomad/jobs/migrate.nomad", "README.md", "rules/discord/foo.md", "docs/spec.md"},
-			expected: false,
-		},
-		{
-			name:     "aerial core empty files",
-			repoPath: "/share/aerial",
-			files:    nil,
-			expected: false,
-		},
+		{"aerial-config always false", "/share/aerial-config", []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"}, false},
+		{"aerial core brain touched", "/share/aerial", []string{"brain/main.go"}, true},
+		{"aerial core webhooks-router touched", "/share/aerial", []string{"webhooks-router/main.go"}, true},
+		{"aerial core vanadis touched", "/share/aerial", []string{"vanadis/main.go"}, true},
+		{"aerial core Dockerfile touched", "/share/aerial", []string{"Dockerfile"}, true},
+		{"aerial core go.mod touched", "/share/aerial", []string{"go.mod"}, true},
+		{"aerial core non-build files (docs, nomad, rules)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "rules/discord/foo.md", "docs/spec.md"}, false},
+		{"aerial core empty files", "/share/aerial", nil, false},
 	}
 
 	for _, tt := range tests {
@@ -1580,6 +1082,13 @@ func TestFindNomadJobsByImage_TableDriven(t *testing.T) {
 	if len(emptyMatches) != 0 {
 		t.Errorf("expected 0 matches for empty dir, got %d", len(emptyMatches))
 	}
+
+	if res := FindNomadJobsByImage("/nonexistent/directory/path/12345", "test"); res != nil {
+		t.Errorf("expected nil for nonexistent dir, got %v", res)
+	}
+	if res := FindNomadJobsByImage(t.TempDir(), ""); res != nil {
+		t.Errorf("expected nil for empty imageRef, got %v", res)
+	}
 }
 
 func TestNormalizeGitHubSlug_TableDriven(t *testing.T) {
@@ -1594,6 +1103,8 @@ func TestNormalizeGitHubSlug_TableDriven(t *testing.T) {
 		{"https github url", "https://github.com/azylman/aerial.git", "azylman/aerial"},
 		{"git ssh url", "git@github.com:azylman/mirrormere.git", "azylman/mirrormere"},
 		{"local absolute path", "/share/aerial-sidecars", "azylman/aerial-sidecars"},
+		{"http github url", "http://github.com/azylman/aerial", "azylman/aerial"},
+		{"root slash", "/", ""},
 	}
 
 	for _, tt := range tests {
@@ -1668,139 +1179,63 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 	}
 }
 
-func TestPureFunctions_EdgeCasesCoverage(t *testing.T) {
-	// FindNomadJobsByImage with non-existent directory
-	if res := FindNomadJobsByImage("/nonexistent/directory/path/12345", "test"); res != nil {
-		t.Errorf("expected nil for nonexistent dir, got %v", res)
-	}
-	// FindNomadJobsByImage with empty image
-	if res := FindNomadJobsByImage(t.TempDir(), ""); res != nil {
-		t.Errorf("expected nil for empty imageRef, got %v", res)
-	}
-
-	// NormalizeGitHubSlug edge cases
-	if s := NormalizeGitHubSlug("/share/aerial"); s != "azylman/aerial" {
-		t.Errorf("NormalizeGitHubSlug(/share/aerial) = %q; want azylman/aerial", s)
-	}
-	if s := NormalizeGitHubSlug("/"); s != "" && s != "azylman/" {
-		t.Logf("NormalizeGitHubSlug(/) = %q", s)
-	}
-	if s := NormalizeGitHubSlug("git@github.com:azylman/mirrormere.git"); s != "azylman/mirrormere" {
-		t.Errorf("NormalizeGitHubSlug(git@github.com:azylman/mirrormere.git) = %q; want azylman/mirrormere", s)
-	}
-	if s := NormalizeGitHubSlug("http://github.com/azylman/aerial"); s != "azylman/aerial" {
-		t.Errorf("NormalizeGitHubSlug(http://github.com/azylman/aerial) = %q; want azylman/aerial", s)
-	}
-
-	// ResolveRepoPath edge cases
-	repos := []string{"/opt/aerial", "/opt/aerial-config"}
-	if r := ResolveRepoPath("", repos); r != "" {
-		t.Errorf("ResolveRepoPath empty query = %q; want empty", r)
-	}
-	if r := ResolveRepoPath("https://github.com/azylman/aerial.git", repos); r != "/opt/aerial" {
-		t.Errorf("ResolveRepoPath github url = %q; want /opt/aerial", r)
-	}
-	if r := ResolveRepoPath("/opt/aerial", repos); r != "/opt/aerial" {
-		t.Errorf("ResolveRepoPath exact path = %q; want /opt/aerial", r)
-	}
-}
-
 func TestFindJobDefinitionInRepos(t *testing.T) {
 	tempDir := t.TempDir()
 	repoA := filepath.Join(tempDir, "repo-a")
 	repoB := filepath.Join(tempDir, "repo-b")
+	repoEdge := filepath.Join(tempDir, "repo-edge")
 
 	jobsDirA := filepath.Join(repoA, "jobs")
 	nomadJobsDirB := filepath.Join(repoB, "nomad", "jobs")
+	jobsDirEdge := filepath.Join(repoEdge, "jobs")
 
-	if err := os.MkdirAll(jobsDirA, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(nomadJobsDirB, 0755); err != nil {
-		t.Fatal(err)
+	for _, d := range []string{jobsDirA, nomadJobsDirB, jobsDirEdge, filepath.Join(jobsDirEdge, "subdir.nomad")} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	jobSpecBrain := `job "brain" {
-  type = "service"
-}`
-	jobSpecPostgres := `job "postgres" {
-  type = "service"
-}`
+	jobSpecBrain := `job "brain" { type = "service" }`
+	jobSpecPostgres := `job "postgres" { type = "service" }`
+	jobSpecOther := `job "other" { type = "service" }`
 
-	if err := os.WriteFile(filepath.Join(jobsDirA, "brain.nomad"), []byte(jobSpecBrain), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(jobSpecBrain), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(nomadJobsDirB, "postgres.nomad"), []byte(jobSpecPostgres), 0644); err != nil {
-		t.Fatal(err)
-	}
+	_ = os.WriteFile(filepath.Join(jobsDirA, "brain.nomad"), []byte(jobSpecBrain), 0644)
+	_ = os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(jobSpecBrain), 0644)
+	_ = os.WriteFile(filepath.Join(nomadJobsDirB, "postgres.nomad"), []byte(jobSpecPostgres), 0644)
+	_ = os.WriteFile(filepath.Join(jobsDirEdge, "notes.txt"), []byte("not a nomad job"), 0644)
+	_ = os.WriteFile(filepath.Join(jobsDirEdge, "other.nomad"), []byte(jobSpecOther), 0644)
 
 	repos := []string{repoA, repoB}
+	edgeRepos := []string{"", repoEdge}
 
-	// Case 1: Job exists in repoB when repoA is skipped
-	foundPath, found := FindJobDefinitionInRepos("brain", repoA, repos)
-	if !found {
-		t.Errorf("expected brain to be found in repoB when skipping repoA")
-	}
-	expectedB := filepath.Join(nomadJobsDirB, "brain.nomad")
-	if foundPath != expectedB {
-		t.Errorf("expected path %s, got %s", expectedB, foundPath)
+	tests := []struct {
+		name         string
+		jobName      string
+		skipRepoPath string
+		candidate    []string
+		wantPath     string
+		wantFound    bool
+	}{
+		{"found in repoB when repoA skipped", "brain", repoA, repos, filepath.Join(nomadJobsDirB, "brain.nomad"), true},
+		{"not found when repoB skipped", "postgres", repoB, repos, "", false},
+		{"empty jobName", "", repoA, repos, "", false},
+		{"nil candidateRepos", "brain", "", nil, "", false},
+		{"matching other in edge repo with empty entry", "other", "", edgeRepos, filepath.Join(jobsDirEdge, "other.nomad"), true},
+		{"target not in edge repo", "target", "", edgeRepos, "", false},
 	}
 
-	// Case 2: Job does not exist when repoB is skipped (postgres only in repoB)
-	_, found = FindJobDefinitionInRepos("postgres", repoB, repos)
-	if found {
-		t.Errorf("expected postgres NOT to be found when skipping repoB")
-	}
-
-	// Case 3: Empty job name or empty repos
-	if _, found := FindJobDefinitionInRepos("", repoA, repos); found {
-		t.Errorf("expected false for empty jobName")
-	}
-	if _, found := FindJobDefinitionInRepos("brain", "", nil); found {
-		t.Errorf("expected false for empty candidateRepos")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotFound := FindJobDefinitionInRepos(tt.jobName, tt.skipRepoPath, tt.candidate)
+			if gotFound != tt.wantFound {
+				t.Errorf("FindJobDefinitionInRepos() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if tt.wantPath != "" && gotPath != tt.wantPath {
+				t.Errorf("FindJobDefinitionInRepos() path = %s, want %s", gotPath, tt.wantPath)
+			}
+		})
 	}
 }
-
-func TestFindJobDefinitionInRepos_EdgeCases(t *testing.T) {
-	tempDir := t.TempDir()
-	repo := filepath.Join(tempDir, "repo")
-	jobsDir := filepath.Join(repo, "jobs")
-	if err := os.MkdirAll(jobsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// 1. Directory entry inside jobsDir (entry.IsDir() branch)
-	subDir := filepath.Join(jobsDir, "subdir.nomad")
-	if err := os.MkdirAll(subDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// 2. Non-nomad file (!IsNomadJobFile branch)
-	if err := os.WriteFile(filepath.Join(jobsDir, "notes.txt"), []byte("not a nomad job"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// 3. Nomad file with different job name
-	otherJobSpec := `job "other" { type = "service" }`
-	if err := os.WriteFile(filepath.Join(jobsDir, "other.nomad"), []byte(otherJobSpec), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Candidate repos including empty string and skipRepoPath
-	repos := []string{"", repo}
-	if path, found := FindJobDefinitionInRepos("target", "", repos); found {
-		t.Errorf("expected target not found, got %s", path)
-	}
-
-	// Target matching "other"
-	if path, found := FindJobDefinitionInRepos("other", "", repos); !found || !strings.Contains(path, "other.nomad") {
-		t.Errorf("expected other to be found, got %s, %v", path, found)
-	}
-}
-
 
 func TestIsHangarJob_TableDriven(t *testing.T) {
 	tests := []struct {
@@ -1902,76 +1337,16 @@ func TestExtractRevisionFromAnnotations_TableDriven(t *testing.T) {
 		annotations map[string]string
 		want        string
 	}{
-		{
-			name: "org.opencontainers.image.revision",
-			annotations: map[string]string{
-				"org.opencontainers.image.revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-			},
-			want: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-		},
-		{
-			name: "aerial.commit_sha",
-			annotations: map[string]string{
-				"aerial.commit_sha": "0123456789abcdef0123456789abcdef01234567",
-			},
-			want: "0123456789abcdef0123456789abcdef01234567",
-		},
-		{
-			name: "org.label-schema.vcs-ref",
-			annotations: map[string]string{
-				"org.label-schema.vcs-ref": "abcdef0123456",
-			},
-			want: "abcdef0123456",
-		},
-		{
-			name: "precedence: OCI revision over aerial.commit_sha",
-			annotations: map[string]string{
-				"org.opencontainers.image.revision": "1111111111111111111111111111111111111111",
-				"aerial.commit_sha":                 "2222222222222222222222222222222222222222",
-			},
-			want: "1111111111111111111111111111111111111111",
-		},
-		{
-			name: "precedence: aerial.commit_sha over label-schema",
-			annotations: map[string]string{
-				"aerial.commit_sha":        "2222222222222222222222222222222222222222",
-				"org.label-schema.vcs-ref": "3333333333333333333333333333333333333333",
-			},
-			want: "2222222222222222222222222222222222222222",
-		},
-		{
-			name: "fallback to next key when earlier key has invalid SHA",
-			annotations: map[string]string{
-				"org.opencontainers.image.revision": "invalid-sha",
-				"aerial.commit_sha":                 "4444444444444444444444444444444444444444",
-			},
-			want: "4444444444444444444444444444444444444444",
-		},
-		{
-			name: "whitespace trimmed around valid SHA",
-			annotations: map[string]string{
-				"org.opencontainers.image.revision": "  5555555555555555555555555555555555555555  \n",
-			},
-			want: "5555555555555555555555555555555555555555",
-		},
-		{
-			name: "all keys invalid SHAs",
-			annotations: map[string]string{
-				"org.opencontainers.image.revision": "bad",
-				"aerial.commit_sha":                 "also-bad",
-			},
-			want: "",
-		},
-		{
-			name:        "empty annotations map",
-			annotations: map[string]string{},
-			want:        "",
-		},
-		{
-			name:        "nil annotations map",
-			annotations: nil,
-			want:        "",
-		},
+		{"org.opencontainers.image.revision", map[string]string{"org.opencontainers.image.revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"}, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"},
+		{"aerial.commit_sha", map[string]string{"aerial.commit_sha": "0123456789abcdef0123456789abcdef01234567"}, "0123456789abcdef0123456789abcdef01234567"},
+		{"org.label-schema.vcs-ref", map[string]string{"org.label-schema.vcs-ref": "abcdef0123456"}, "abcdef0123456"},
+		{"precedence: OCI revision over aerial.commit_sha", map[string]string{"org.opencontainers.image.revision": "1111111111111111111111111111111111111111", "aerial.commit_sha": "2222222222222222222222222222222222222222"}, "1111111111111111111111111111111111111111"},
+		{"precedence: aerial.commit_sha over label-schema", map[string]string{"aerial.commit_sha": "2222222222222222222222222222222222222222", "org.label-schema.vcs-ref": "3333333333333333333333333333333333333333"}, "2222222222222222222222222222222222222222"},
+		{"fallback to next key when earlier key has invalid SHA", map[string]string{"org.opencontainers.image.revision": "invalid-sha", "aerial.commit_sha": "4444444444444444444444444444444444444444"}, "4444444444444444444444444444444444444444"},
+		{"whitespace trimmed around valid SHA", map[string]string{"org.opencontainers.image.revision": "  5555555555555555555555555555555555555555  \n"}, "5555555555555555555555555555555555555555"},
+		{"all keys invalid SHAs", map[string]string{"org.opencontainers.image.revision": "bad", "aerial.commit_sha": "also-bad"}, ""},
+		{"empty annotations map", map[string]string{}, ""},
+		{"nil annotations map", nil, ""},
 	}
 
 	for _, tt := range tests {
@@ -1990,72 +1365,14 @@ func TestExtractRevisionFromConfigJSON_TableDriven(t *testing.T) {
 		configJSON []byte
 		want       string
 	}{
-		{
-			name: "standard config.Labels with OCI revision",
-			configJSON: []byte(`{
-				"config": {
-					"Labels": {
-						"org.opencontainers.image.revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-					}
-				}
-			}`),
-			want: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-		},
-		{
-			name: "standard config.Labels with aerial.commit_sha",
-			configJSON: []byte(`{
-				"config": {
-					"Labels": {
-						"aerial.commit_sha": "abcdef01234567"
-					}
-				}
-			}`),
-			want: "abcdef01234567",
-		},
-		{
-			name: "uppercase hex in config.Labels",
-			configJSON: []byte(`{
-				"config": {
-					"Labels": {
-						"org.opencontainers.image.revision": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"
-					}
-				}
-			}`),
-			want: "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2",
-		},
-		{
-			name: "root labels fallback",
-			configJSON: []byte(`{
-				"labels": {
-					"org.label-schema.vcs-ref": "9876543210fedcba"
-				}
-			}`),
-			want: "9876543210fedcba",
-		},
-		{
-			name: "missing labels in config",
-			configJSON: []byte(`{
-				"config": {
-					"Image": "sha256:12345"
-				}
-			}`),
-			want: "",
-		},
-		{
-			name:       "empty json object",
-			configJSON: []byte(`{}`),
-			want:       "",
-		},
-		{
-			name:       "malformed json",
-			configJSON: []byte(`not json`),
-			want:       "",
-		},
-		{
-			name:       "empty byte slice",
-			configJSON: []byte{},
-			want:       "",
-		},
+		{"standard config.Labels with OCI revision", []byte(`{"config":{"Labels":{"org.opencontainers.image.revision":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"}}}`), "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"},
+		{"standard config.Labels with aerial.commit_sha", []byte(`{"config":{"Labels":{"aerial.commit_sha":"abcdef01234567"}}}`), "abcdef01234567"},
+		{"uppercase hex in config.Labels", []byte(`{"config":{"Labels":{"org.opencontainers.image.revision":"A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"}}}`), "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"},
+		{"root labels fallback", []byte(`{"labels":{"org.label-schema.vcs-ref":"9876543210fedcba"}}`), "9876543210fedcba"},
+		{"missing labels in config", []byte(`{"config":{"Image":"sha256:12345"}}`), ""},
+		{"empty json object", []byte(`{}`), ""},
+		{"malformed json", []byte(`not json`), ""},
+		{"empty byte slice", []byte{}, ""},
 	}
 
 	for _, tt := range tests {
@@ -2069,23 +1386,7 @@ func TestExtractRevisionFromConfigJSON_TableDriven(t *testing.T) {
 }
 
 func TestExtractPlatformManifestDigest_TableDriven(t *testing.T) {
-	indexDoc := []byte(`{
-		"schemaVersion": 2,
-		"manifests": [
-			{
-				"digest": "sha256:arm64digest111111111111111111111111111111111111111111111111111111",
-				"platform": { "architecture": "arm64", "os": "linux" }
-			},
-			{
-				"digest": "sha256:amd64digest222222222222222222222222222222222222222222222222222222",
-				"platform": { "architecture": "amd64", "os": "linux" }
-			},
-			{
-				"digest": "sha256:windowsdigest3333333333333333333333333333333333333333333333333333",
-				"platform": { "architecture": "amd64", "os": "windows" }
-			}
-		]
-	}`)
+	indexDoc := []byte(`{"schemaVersion":2,"manifests":[{"digest":"sha256:arm64digest111111111111111111111111111111111111111111111111111111","platform":{"architecture":"arm64","os":"linux"}},{"digest":"sha256:amd64digest222222222222222222222222222222222222222222222222222222","platform":{"architecture":"amd64","os":"linux"}},{"digest":"sha256:windowsdigest3333333333333333333333333333333333333333333333333333","platform":{"architecture":"amd64","os":"windows"}}]}`)
 
 	tests := []struct {
 		name       string
@@ -2094,55 +1395,13 @@ func TestExtractPlatformManifestDigest_TableDriven(t *testing.T) {
 		targetArch string
 		want       string
 	}{
-		{
-			name:       "matching linux/amd64",
-			indexJSON:  indexDoc,
-			targetOS:   "linux",
-			targetArch: "amd64",
-			want:       "sha256:amd64digest222222222222222222222222222222222222222222222222222222",
-		},
-		{
-			name:       "case-insensitive matching LINUX/AMD64",
-			indexJSON:  indexDoc,
-			targetOS:   "LINUX",
-			targetArch: "AMD64",
-			want:       "sha256:amd64digest222222222222222222222222222222222222222222222222222222",
-		},
-		{
-			name:       "fallback to first entry when platform not found",
-			indexJSON:  indexDoc,
-			targetOS:   "darwin",
-			targetArch: "arm64",
-			want:       "sha256:arm64digest111111111111111111111111111111111111111111111111111111",
-		},
-		{
-			name:       "fallback to first entry when OS/Arch empty",
-			indexJSON:  indexDoc,
-			targetOS:   "",
-			targetArch: "",
-			want:       "sha256:arm64digest111111111111111111111111111111111111111111111111111111",
-		},
-		{
-			name:       "empty manifests list",
-			indexJSON:  []byte(`{"manifests": []}`),
-			targetOS:   "linux",
-			targetArch: "amd64",
-			want:       "",
-		},
-		{
-			name:       "malformed JSON",
-			indexJSON:  []byte(`not json`),
-			targetOS:   "linux",
-			targetArch: "amd64",
-			want:       "",
-		},
-		{
-			name:       "empty input",
-			indexJSON:  []byte{},
-			targetOS:   "linux",
-			targetArch: "amd64",
-			want:       "",
-		},
+		{"matching linux/amd64", indexDoc, "linux", "amd64", "sha256:amd64digest222222222222222222222222222222222222222222222222222222"},
+		{"case-insensitive matching LINUX/AMD64", indexDoc, "LINUX", "AMD64", "sha256:amd64digest222222222222222222222222222222222222222222222222222222"},
+		{"fallback to first entry when platform not found", indexDoc, "darwin", "arm64", "sha256:arm64digest111111111111111111111111111111111111111111111111111111"},
+		{"fallback to first entry when OS/Arch empty", indexDoc, "", "", "sha256:arm64digest111111111111111111111111111111111111111111111111111111"},
+		{"empty manifests list", []byte(`{"manifests": []}`), "linux", "amd64", ""},
+		{"malformed JSON", []byte(`not json`), "linux", "amd64", ""},
+		{"empty input", []byte{}, "linux", "amd64", ""},
 	}
 
 	for _, tt := range tests {
@@ -2161,41 +1420,11 @@ func TestExtractConfigBlobDigest_TableDriven(t *testing.T) {
 		manifestJSON []byte
 		want         string
 	}{
-		{
-			name: "standard OCI manifest with config digest",
-			manifestJSON: []byte(`{
-				"schemaVersion": 2,
-				"config": {
-					"mediaType": "application/vnd.oci.image.config.v1+json",
-					"digest": "sha256:configblobdigest111111111111111111111111111111111111111111111111",
-					"size": 1234
-				}
-			}`),
-			want: "sha256:configblobdigest111111111111111111111111111111111111111111111111",
-		},
-		{
-			name: "missing config digest",
-			manifestJSON: []byte(`{
-				"schemaVersion": 2,
-				"config": {}
-			}`),
-			want: "",
-		},
-		{
-			name:         "empty JSON",
-			manifestJSON: []byte(`{}`),
-			want:         "",
-		},
-		{
-			name:         "malformed JSON",
-			manifestJSON: []byte(`invalid json`),
-			want:         "",
-		},
-		{
-			name:         "empty byte slice",
-			manifestJSON: []byte{},
-			want:         "",
-		},
+		{"standard OCI manifest with config digest", []byte(`{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:configblobdigest111111111111111111111111111111111111111111111111","size":1234}}`), "sha256:configblobdigest111111111111111111111111111111111111111111111111"},
+		{"missing config digest", []byte(`{"schemaVersion":2,"config":{}}`), ""},
+		{"empty JSON", []byte(`{}`), ""},
+		{"malformed JSON", []byte(`invalid json`), ""},
+		{"empty byte slice", []byte{}, ""},
 	}
 
 	for _, tt := range tests {
@@ -2215,26 +1444,10 @@ func TestExtractManifestAnnotations_TableDriven(t *testing.T) {
 		json []byte
 		want map[string]string
 	}{
-		{
-			name: "empty input",
-			json: []byte{},
-			want: nil,
-		},
-		{
-			name: "invalid json",
-			json: []byte("not-json"),
-			want: nil,
-		},
-		{
-			name: "valid json with annotations",
-			json: []byte(`{"annotations":{"org.opencontainers.image.revision":"abcdef1234567890"}}`),
-			want: map[string]string{"org.opencontainers.image.revision": "abcdef1234567890"},
-		},
-		{
-			name: "valid json without annotations",
-			json: []byte(`{"schemaVersion": 2}`),
-			want: nil,
-		},
+		{"empty input", []byte{}, nil},
+		{"invalid json", []byte("not-json"), nil},
+		{"valid json with annotations", []byte(`{"annotations":{"org.opencontainers.image.revision":"abcdef1234567890"}}`), map[string]string{"org.opencontainers.image.revision": "abcdef1234567890"}},
+		{"valid json without annotations", []byte(`{"schemaVersion": 2}`), nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2266,79 +1479,17 @@ func TestHasNomadJobVariable_TableDriven(t *testing.T) {
 		varName string
 		want    bool
 	}{
-		{
-			name: "standard double quotes with block",
-			content: `variable "image_tag" {
-  type    = string
-  default = "latest"
-}`,
-			varName: "image_tag",
-			want:    true,
-		},
-		{
-			name: "single quotes with block",
-			content: `variable 'image_tag' {
-  type = string
-}`,
-			varName: "image_tag",
-			want:    true,
-		},
-		{
-			name:    "bare identifier",
-			content: `variable image_tag {}`,
-			varName: "image_tag",
-			want:    true,
-		},
-		{
-			name:    "compact brace without space",
-			content: `variable "image_tag"{`,
-			varName: "image_tag",
-			want:    true,
-		},
-		{
-			name:    "indented with trailing comment",
-			content: `  variable "image_tag" { # input parameter`,
-			varName: "image_tag",
-			want:    true,
-		},
-		{
-			name:    "hash commented out variable",
-			content: `# variable "image_tag" {`,
-			varName: "image_tag",
-			want:    false,
-		},
-		{
-			name:    "slash commented out variable",
-			content: `// variable "image_tag" {`,
-			varName: "image_tag",
-			want:    false,
-		},
-		{
-			name: "different variable name",
-			content: `variable "db_password" {
-  type = string
-}`,
-			varName: "image_tag",
-			want:    false,
-		},
-		{
-			name:    "prefix match does not trigger false positive",
-			content: `variable "image_tag_prefix" {}`,
-			varName: "image_tag",
-			want:    false,
-		},
-		{
-			name:    "empty content",
-			content: "",
-			varName: "image_tag",
-			want:    false,
-		},
-		{
-			name:    "empty varName",
-			content: `variable "image_tag" {}`,
-			varName: "",
-			want:    false,
-		},
+		{"standard double quotes with block", "variable \"image_tag\" {\n  type    = string\n  default = \"latest\"\n}", "image_tag", true},
+		{"single quotes with block", "variable 'image_tag' {\n  type = string\n}", "image_tag", true},
+		{"bare identifier", "variable image_tag {}", "image_tag", true},
+		{"compact brace without space", "variable \"image_tag\"{", "image_tag", true},
+		{"indented with trailing comment", "  variable \"image_tag\" { # input parameter", "image_tag", true},
+		{"hash commented out variable", "# variable \"image_tag\" {", "image_tag", false},
+		{"slash commented out variable", "// variable \"image_tag\" {", "image_tag", false},
+		{"different variable name", "variable \"db_password\" {\n  type = string\n}", "image_tag", false},
+		{"prefix match does not trigger false positive", "variable \"image_tag_prefix\" {}", "image_tag", false},
+		{"empty content", "", "image_tag", false},
+		{"empty varName", "variable \"image_tag\" {}", "", false},
 	}
 
 	for _, tc := range cases {
@@ -2351,4 +1502,3 @@ func TestHasNomadJobVariable_TableDriven(t *testing.T) {
 		})
 	}
 }
-

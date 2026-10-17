@@ -93,11 +93,7 @@ func SanitizeLog(input string) string {
 // SanitizeAll scrubs pattern-matched tokens as well as known literal secret values.
 func (d *SyncDaemon) SanitizeAll(input string) string {
 	out := SanitizeLog(input)
-	secrets := append([]string{
-		d.pat,
-		d.discordToken,
-		d.discordWebhookURL,
-	}, d.extraSecrets...)
+	secrets := append([]string{d.pat}, d.extraSecrets...)
 	for _, s := range secrets {
 		s = strings.TrimSpace(s)
 		if len(s) >= 4 {
@@ -164,12 +160,6 @@ type HangarStatusResponse struct {
 	Reconciliation *ReconciliationStatus `json:"reconciliation,omitempty"`
 }
 
-// GitSyncStatusResponse is an alias for backward compatibility.
-type GitSyncStatusResponse = HangarStatusResponse
-
-// DockerExecutor executes docker CLI commands.
-type DockerExecutor func(ctx context.Context, args ...string) (stdout []byte, stderr []byte, err error)
-
 func runSubprocess(ctx context.Context, bin, dir string, env []string, waitDelay time.Duration, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	if dir != "" {
@@ -196,22 +186,12 @@ func runSubprocess(ctx context.Context, bin, dir string, env []string, waitDelay
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-func defaultDockerExecutor(ctx context.Context, args ...string) ([]byte, []byte, error) {
-	return runSubprocess(ctx, "docker", "", nil, 10*time.Second, args...)
-}
-
-// scrubComposeEnv filters out container-internal path overrides (AERIAL_CONFIG_DIR, AERIAL_PROJECT_DIR)
-// so docker compose does not inherit container filesystem paths for host volume mounts.
-func scrubComposeEnv(environ []string) []string {
-	return ScrubComposeEnv(environ)
-}
-
 // ComposeExecutor executes docker compose commands.
 type ComposeExecutor func(ctx context.Context, dir string, args ...string) (stdout []byte, stderr []byte, err error)
 
 func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
 	cmdArgs := append([]string{"compose"}, args...)
-	return runSubprocess(ctx, "docker", dir, scrubComposeEnv(os.Environ()), 10*time.Second, cmdArgs...)
+	return runSubprocess(ctx, "docker", dir, ScrubComposeEnv(os.Environ()), 10*time.Second, cmdArgs...)
 }
 
 // GitExecutor executes git CLI commands.
@@ -225,7 +205,7 @@ func defaultNomadExecutor(nomadAddr, nomadToken string) NomadExecutor {
 		opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
-		env := scrubComposeEnv(os.Environ())
+		env := ScrubComposeEnv(os.Environ())
 		if nomadAddr != "" {
 			env = append(env, "NOMAD_ADDR="+nomadAddr)
 		}
@@ -281,7 +261,6 @@ type SyncDaemon struct {
 	brainInternalURL string
 	extraSecrets     []string
 	composeExecutor  ComposeExecutor
-	dockerExecutor   DockerExecutor
 	gitExecutor      GitExecutor
 
 	// Nomad Orchestration
@@ -307,21 +286,9 @@ type SyncDaemon struct {
 	repoLocks                   map[string]*sync.Mutex
 	pendingNomadServerRestartMu sync.Mutex
 	pendingNomadServerRestart   bool
-	reconcileStateMu            sync.RWMutex
-	reconcileStatus             ReconciliationStatus
 
 	// HTTP & Registry
 	registryClient *http.Client
-
-	// Discord Alerting
-	discordToken      string
-	discordChannel    string
-	discordWebhookURL string
-	discordChannelMu  sync.RWMutex
-	cachedChannelID   string
-	alertDedupeMu     sync.Mutex
-	lastAlertTimes    map[string]time.Time
-	alertHTTPClient   *http.Client
 
 	// Webhooks & Deploy Lifecycle
 	webhooksRouterURL      string
@@ -341,12 +308,6 @@ func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
 	return defaultComposeExecutor
 }
 
-func (d *SyncDaemon) getDockerExecutor() DockerExecutor {
-	if d != nil && d.dockerExecutor != nil {
-		return d.dockerExecutor
-	}
-	return defaultDockerExecutor
-}
 
 func (d *SyncDaemon) getNomadExecutor() NomadExecutor {
 	if d != nil && d.nomadExecutor != nil {
@@ -458,41 +419,9 @@ func (d *SyncDaemon) SetLastReconcile(t time.Time) {
 	d.lastReconcile = t
 }
 
-func (d *SyncDaemon) updateReconcileStatus(fn func(*ReconciliationStatus)) {
-	if d == nil || fn == nil {
-		return
-	}
-	d.reconcileStateMu.Lock()
-	defer d.reconcileStateMu.Unlock()
-	fn(&d.reconcileStatus)
-}
-
 // GetReconciliationStatus returns a safe snapshot of the current or recent reconciliation status.
 func (d *SyncDaemon) GetReconciliationStatus() ReconciliationStatus {
-	if d == nil {
-		return ReconciliationStatus{State: "idle", Stage: "idle"}
-	}
-	d.reconcileStateMu.RLock()
-	defer d.reconcileStateMu.RUnlock()
-
-	cp := d.reconcileStatus
-	// Check completion TTL (5 minutes grace period before reverting to idle)
-	if !cp.Active && (cp.State == "healthy" || cp.State == "failed") {
-		if !cp.CompletedAt.IsZero() && time.Since(cp.CompletedAt) > 5*time.Minute {
-			return ReconciliationStatus{State: "idle", Stage: "idle"}
-		}
-	}
-	if len(d.reconcileStatus.TargetServices) > 0 {
-		cp.TargetServices = make([]string, len(d.reconcileStatus.TargetServices))
-		copy(cp.TargetServices, d.reconcileStatus.TargetServices)
-	}
-	if cp.State == "" {
-		cp.State = "idle"
-	}
-	if cp.Stage == "" {
-		cp.Stage = cp.State
-	}
-	return cp
+	return ReconciliationStatus{State: "idle", Stage: "idle"}
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -843,14 +772,8 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 	return finalResp, token, nil
 }
 
-// fetchRegistryWithAuth performs an HTTP request against a container registry, handling OAuth2/Bearer
-// token challenges automatically and reusing existingBearer if still valid.
-func (d *SyncDaemon) fetchRegistryWithAuth(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
-	return d.doRegistryRequestWithAuth(ctx, http.MethodGet, targetURL, registry, repository, acceptHeader, existingBearer)
-}
-
 func (d *SyncDaemon) fetchRegistryBytes(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer, label string) ([]byte, string, error) {
-	resp, token, err := d.fetchRegistryWithAuth(ctx, targetURL, registry, repository, acceptHeader, existingBearer)
+	resp, token, err := d.doRegistryRequestWithAuth(ctx, http.MethodGet, targetURL, registry, repository, acceptHeader, existingBearer)
 	if err != nil {
 		return nil, "", err
 	}
@@ -927,18 +850,7 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 	return rev, nil
 }
 
-// CheckAndReconcileNewImages checks if any Nomad jobs have newer images available in their registry,
-// and triggers an asynchronous, debounced reconciliation if new images are detected.
-func (d *SyncDaemon) CheckAndReconcileNewImages(ctx context.Context) error {
-	return d.CheckAndReconcileNomadImages(ctx)
-}
 
-
-var snowflakeRegex = regexp.MustCompile(`^\d{17,20}$`)
-
-func isSnowflake(str string) bool {
-	return snowflakeRegex.MatchString(strings.TrimSpace(str))
-}
 
 func (d *SyncDaemon) getRepoLock(repoPath string) *sync.Mutex {
 	cleaned := filepath.Clean(repoPath)
@@ -973,209 +885,6 @@ func (d *SyncDaemon) consumePendingNomadServerRestart() bool {
 	restart := d.pendingNomadServerRestart
 	d.pendingNomadServerRestart = false
 	return restart
-}
-
-
-type rawSystemConfig struct {
-	SystemChannel string `yaml:"system_channel"`
-}
-
-// ResolveAlertChannel dynamically resolves the Discord alert channel name or snowflake ID.
-// Precedence:
-// 1. Explicit DiscordChannel configured on daemon (if non-empty)
-// 2. system_channel from config.yaml in configDir (/share/aerial-config/config.yaml)
-// 3. Fallback to "aerial-dev"
-func (d *SyncDaemon) ResolveAlertChannel() string {
-	if ch := strings.TrimSpace(d.discordChannel); ch != "" {
-		return ch
-	}
-	configDir := d.configDir
-	if configDir != "" {
-		configPath := filepath.Join(configDir, "config.yaml")
-		if data, err := os.ReadFile(configPath); err == nil {
-			var raw rawSystemConfig
-			if err := yaml.Unmarshal(data, &raw); err == nil && strings.TrimSpace(raw.SystemChannel) != "" {
-				return strings.TrimSpace(raw.SystemChannel)
-			}
-		}
-	}
-	return "aerial-dev"
-}
-
-// SendDiscordAlert dispatches an alert message to Discord with deduplication and bounded timeout.
-func (d *SyncDaemon) SendDiscordAlert(ctx context.Context, title, repoPath, faultyCommit, rolledBackTo, stage, errorMsg string) {
-	dedupeKey := fmt.Sprintf("%s:%s:%s", repoPath, faultyCommit, stage)
-	d.alertDedupeMu.Lock()
-	if d.lastAlertTimes == nil {
-		d.lastAlertTimes = make(map[string]time.Time)
-	}
-	lastSent, exists := d.lastAlertTimes[dedupeKey]
-	if exists && time.Since(lastSent) < 15*time.Minute {
-		d.alertDedupeMu.Unlock()
-		log.Printf("[Hangar:Discord] Suppressing duplicate alert for %s (sent %v ago)", dedupeKey, time.Since(lastSent).Truncate(time.Second))
-		return
-	}
-	d.lastAlertTimes[dedupeKey] = time.Now()
-	d.alertDedupeMu.Unlock()
-
-	sanitizedErr := d.SanitizeAll(strings.TrimSpace(errorMsg))
-	content := BuildDiscordAlertContent(title, repoPath, faultyCommit, rolledBackTo, stage, sanitizedErr)
-
-	client := d.alertHTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-
-	alertCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	if webhookURL := strings.TrimSpace(d.discordWebhookURL); webhookURL != "" {
-		d.sendWebhook(alertCtx, client, webhookURL, content)
-		return
-	}
-
-	token := strings.TrimSpace(d.discordToken)
-	if token == "" {
-		log.Printf("[Hangar:Discord] Notice: No DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL configured, skipping alert")
-		return
-	}
-
-	targetChannel := d.ResolveAlertChannel()
-	channelID, err := d.resolveChannelID(alertCtx, client, token, targetChannel)
-	if err != nil {
-		log.Printf("[Hangar:Discord] Warning: Failed to resolve channel %q: %s", targetChannel, d.SanitizeAll(err.Error()))
-		return
-	}
-
-	d.postChannelMessage(alertCtx, client, token, channelID, content)
-}
-
-func (d *SyncDaemon) postDiscordJSON(ctx context.Context, client *http.Client, targetURL, authHeader, content string) (*http.Response, error) {
-	payloadBytes, err := json.Marshal(map[string]string{"content": content})
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling discord payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(payloadBytes))
-	if err != nil {
-		return nil, fmt.Errorf("error creating discord request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-	}
-
-	return client.Do(req)
-}
-
-func (d *SyncDaemon) sendWebhook(ctx context.Context, client *http.Client, webhookURL, content string) {
-	resp, err := d.postDiscordJSON(ctx, client, webhookURL, "", content)
-	if err != nil {
-		log.Printf("[Hangar:Discord] %s", d.SanitizeAll(err.Error()))
-		return
-	}
-	defer closeWarn(resp.Body, "webhook response body")
-	if resp.StatusCode >= 400 {
-		log.Printf("[Hangar:Discord] Webhook returned HTTP %d", resp.StatusCode)
-	} else {
-		log.Printf("[Hangar:Discord] Successfully dispatched alert via webhook")
-	}
-}
-
-func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, token, targetChannel string) (string, error) {
-	targetChannel = strings.TrimSpace(targetChannel)
-	if isSnowflake(targetChannel) {
-		return targetChannel, nil
-	}
-
-	d.discordChannelMu.RLock()
-	cached := d.cachedChannelID
-	d.discordChannelMu.RUnlock()
-	if cached != "" {
-		return cached, nil
-	}
-
-	cleanName := strings.TrimPrefix(targetChannel, "#")
-	authHeader := "Bot " + strings.TrimPrefix(token, "Bot ")
-
-	reqGuilds, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://discord.com/api/v10/users/@me/guilds", nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create guilds request: %w", err)
-	}
-	reqGuilds.Header.Set("Authorization", authHeader)
-	respGuilds, err := client.Do(reqGuilds)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch guilds: %w", err)
-	}
-	defer closeWarn(respGuilds.Body, "guilds response body")
-
-	if respGuilds.StatusCode >= 400 {
-		return "", fmt.Errorf("failed to fetch guilds: HTTP %d", respGuilds.StatusCode)
-	}
-
-	var guilds []struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(respGuilds.Body).Decode(&guilds); err != nil {
-		return "", fmt.Errorf("failed to decode guilds: %w", err)
-	}
-
-	for _, g := range guilds {
-		url := fmt.Sprintf("https://discord.com/api/v10/guilds/%s/channels", g.ID)
-		reqChans, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			continue
-		}
-		reqChans.Header.Set("Authorization", authHeader)
-		respChans, err := client.Do(reqChans)
-		if err != nil {
-			continue
-		}
-		var channels []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-			Type int    `json:"type"`
-		}
-		decErr := json.NewDecoder(respChans.Body).Decode(&channels)
-		closeWarn(respChans.Body, "channels response body")
-		respChans.Body.Close()
-		if decErr != nil {
-			continue
-		}
-
-		for _, ch := range channels {
-			if strings.EqualFold(ch.Name, cleanName) {
-				d.discordChannelMu.Lock()
-				d.cachedChannelID = ch.ID
-				d.discordChannelMu.Unlock()
-				return ch.ID, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("channel %q not found in connected guilds", targetChannel)
-}
-
-func (d *SyncDaemon) postChannelMessage(ctx context.Context, client *http.Client, token, channelID, content string) {
-	url := fmt.Sprintf("https://discord.com/api/v10/channels/%s/messages", channelID)
-	authHeader := "Bot " + strings.TrimPrefix(token, "Bot ")
-	resp, err := d.postDiscordJSON(ctx, client, url, authHeader, content)
-	if err != nil {
-		log.Printf("[Hangar:Discord] %s", d.SanitizeAll(err.Error()))
-		return
-	}
-	defer closeWarn(resp.Body, "channel message response body")
-
-	if resp.StatusCode == http.StatusNotFound {
-		d.discordChannelMu.Lock()
-		d.cachedChannelID = ""
-		d.discordChannelMu.Unlock()
-		log.Printf("[Hangar:Discord] Channel %s returned 404, invalidated channel cache", channelID)
-	} else if resp.StatusCode >= 400 {
-		log.Printf("[Hangar:Discord] Failed to post message to channel %s: HTTP %d", channelID, resp.StatusCode)
-	} else {
-		log.Printf("[Hangar:Discord] Successfully dispatched alert to channel %s", channelID)
-	}
 }
 
 // TriggerReconcile requests reconciliation of pending Nomad jobs. If async is true, it queues
@@ -1283,14 +992,9 @@ func (d *SyncDaemon) candidateJobRepos() []string {
 	return repos
 }
 
-// IsJobDefinedInOtherRepo checks whether a Nomad job is defined in any tracked repo other than skipRepo.
-func (d *SyncDaemon) IsJobDefinedInOtherRepo(jobName string, skipRepo string) (string, bool) {
-	return FindJobDefinitionInRepos(jobName, skipRepo, d.candidateJobRepos())
-}
-
 // ReconcileNomadChanges validates and applies or stops Nomad job specifications.
 func (d *SyncDaemon) stopDeletedNomadJob(ctx context.Context, logPrefix, repoPath, jobName string) {
-	if survivingPath, found := d.IsJobDefinedInOtherRepo(jobName, repoPath); found {
+	if survivingPath, found := FindJobDefinitionInRepos(jobName, repoPath, d.candidateJobRepos()); found {
 		log.Printf("%s Notice: skipping stop for deleted job %s (deleted from %s): job is still defined in %s", logPrefix, jobName, repoPath, survivingPath)
 		return
 	}
@@ -1392,10 +1096,6 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	return nil
 }
 
-// ReconcileNomadJobs is an alias for ReconcileNomadChanges.
-func (d *SyncDaemon) ReconcileNomadJobs(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) error {
-	return d.ReconcileNomadChanges(ctx, repoPath, changes, meta...)
-}
 
 func (d *SyncDaemon) ExecuteNomadTeardowns(ctx context.Context, pending []NomadChangeEvent) {
 	if len(pending) == 0 {
@@ -1440,31 +1140,18 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 
 	seenFiles := make(map[string]struct{})
 	for _, repo := range d.candidateJobRepos() {
-		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
-			jobsDir := filepath.Join(repo, sub)
-			entries, err := os.ReadDir(jobsDir)
-			if err != nil {
-				continue
+		candidateDirs := []string{
+			filepath.Join(repo, "jobs"),
+			filepath.Join(repo, "nomad", "jobs"),
+		}
+		walkNomadJobFiles(candidateDirs, func(dir, jobPath, jobName, content string) bool {
+			if _, seen := seenFiles[jobPath]; seen {
+				return true
 			}
+			seenFiles[jobPath] = struct{}{}
 
-			for _, entry := range entries {
-				if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
-					continue
-				}
-				jobPath := filepath.Join(jobsDir, entry.Name())
-				if _, seen := seenFiles[jobPath]; seen {
-					continue
-				}
-				seenFiles[jobPath] = struct{}{}
-
-				content, readErr := os.ReadFile(jobPath)
-				if readErr != nil {
-					continue
-				}
-				jobName := ExtractJobName(string(content), entry.Name())
-				images := ExtractNomadJobImages(string(content))
-
-				for _, imgRef := range images {
+			images := ExtractNomadJobImages(content)
+			for _, imgRef := range images {
 					remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
 					if digestErr != nil || remoteDigest == "" {
 						continue
@@ -1535,8 +1222,8 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 						}
 					}
 				}
-			}
-		}
+			return true
+		})
 	}
 
 	return nil
@@ -2074,8 +1761,6 @@ var DefaultManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/victoriametrics/scrape.yml", NomadVar: "nomad/jobs/victoriametrics", VarKey: "CONFIG_YAML"},
 }
 
-// ManagedServiceConfigs provides backward compatibility for references to the default service configs.
-var ManagedServiceConfigs = DefaultManagedServiceConfigs
 
 // GetServiceConfigMappings resolves the active service config mappings for a given configDir.
 // If configDir contains services/hangar/hangar.yaml with non-empty service_configs, it dynamically parses and returns them.
@@ -2156,7 +1841,7 @@ func (d *SyncDaemon) StartPeriodicLoop(ctx context.Context) {
 				if _, syncErr := d.TriggerSync(); syncErr != nil {
 					log.Printf("[Hangar] Periodic sync notice: %v", syncErr)
 				}
-				if imgErr := d.CheckAndReconcileNewImages(ctx); imgErr != nil {
+				if imgErr := d.CheckAndReconcileNomadImages(ctx); imgErr != nil {
 					log.Printf("[Hangar] Periodic image check notice: %v", imgErr)
 				}
 			}
@@ -2182,9 +1867,9 @@ func (d *SyncDaemon) getRepoCommit(ctx context.Context, repoPath, ref string) (s
 }
 
 // GetStatus computes real-time synchronization telemetry across all configured repositories.
-func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
+func (d *SyncDaemon) GetStatus(ctx context.Context) HangarStatusResponse {
 	rec := d.GetReconciliationStatus()
-	resp := GitSyncStatusResponse{
+	resp := HangarStatusResponse{
 		Status:         "synced",
 		Repos:          make(map[string]RepoStatus),
 		Reconciliation: &rec,
@@ -2311,7 +1996,6 @@ type DaemonConfig struct {
 	BrainInternalURL       string
 	ExtraSecrets           []string
 	ComposeExecutor        ComposeExecutor
-	DockerExecutor         DockerExecutor
 	GitExecutor            GitExecutor
 	NomadExecutor          NomadExecutor
 	NomadAddr              string
@@ -2344,41 +2028,40 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 			webhooksRouterURL = "http://127.0.0.1:4020"
 		}
 	}
+	extraSecrets := append([]string(nil), cfg.ExtraSecrets...)
+	if s := strings.TrimSpace(cfg.DiscordToken); s != "" {
+		extraSecrets = append(extraSecrets, s)
+	}
+	if s := strings.TrimSpace(cfg.DiscordWebhookURL); s != "" {
+		extraSecrets = append(extraSecrets, s)
+	}
+
 	return &SyncDaemon{
-		repos:                  cfg.Repos,
-		repoUrls:               cfg.RepoURLs,
-		interval:               cfg.Interval,
-		pat:                    cfg.PAT,
-		composeDir:             cfg.ComposeDir,
-		configDir:              cfg.ConfigDir,
-		discordToken:           cfg.DiscordToken,
-		discordChannel:         cfg.DiscordChannel,
-		discordWebhookURL:      cfg.DiscordWebhookURL,
-		brainInternalURL:       cfg.BrainInternalURL,
-		extraSecrets:           cfg.ExtraSecrets,
-		composeExecutor:        cfg.ComposeExecutor,
-		dockerExecutor:         cfg.DockerExecutor,
-		gitExecutor:            cfg.GitExecutor,
-		nomadExecutor:          cfg.NomadExecutor,
-		nomadAddr:              cfg.NomadAddr,
-		nomadToken:             cfg.NomadToken,
-		nomadKnownDigests:      make(map[string]string),
-		registryClient:         cfg.RegistryClient,
-		webhooksRouterURL:      webhooksRouterURL,
-		deployDispatcher:       cfg.DeployDispatcher,
-		reconcileCh:            make(chan struct{}, 1),
-		pendingImageRollouts:   make(map[string]PendingImageRollout),
-		imageRolloutCh:         make(chan struct{}, 1),
-		imageRolloutDebounce:   3 * time.Second,
-		repoLocks:              make(map[string]*sync.Mutex),
-		reconcileStatus: ReconciliationStatus{
-			State: "idle",
-			Stage: "idle",
-		},
-		lastAlertTimes:   make(map[string]time.Time),
-		repoGitHubSlugs:  make(map[string]string),
-		lastPushedConfig: make(map[string]string),
-		serviceConfigs:   cfg.ServiceConfigs,
+		repos:                cfg.Repos,
+		repoUrls:             cfg.RepoURLs,
+		interval:             cfg.Interval,
+		pat:                  cfg.PAT,
+		composeDir:           cfg.ComposeDir,
+		configDir:            cfg.ConfigDir,
+		brainInternalURL:     cfg.BrainInternalURL,
+		extraSecrets:         extraSecrets,
+		composeExecutor:      cfg.ComposeExecutor,
+		gitExecutor:          cfg.GitExecutor,
+		nomadExecutor:        cfg.NomadExecutor,
+		nomadAddr:            cfg.NomadAddr,
+		nomadToken:           cfg.NomadToken,
+		nomadKnownDigests:    make(map[string]string),
+		registryClient:       cfg.RegistryClient,
+		webhooksRouterURL:    webhooksRouterURL,
+		deployDispatcher:     cfg.DeployDispatcher,
+		reconcileCh:          make(chan struct{}, 1),
+		pendingImageRollouts: make(map[string]PendingImageRollout),
+		imageRolloutCh:       make(chan struct{}, 1),
+		imageRolloutDebounce: 3 * time.Second,
+		repoLocks:            make(map[string]*sync.Mutex),
+		repoGitHubSlugs:      make(map[string]string),
+		lastPushedConfig:     make(map[string]string),
+		serviceConfigs:       cfg.ServiceConfigs,
 	}
 }
 
@@ -2858,19 +2541,27 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 }
 
 func (d *SyncDaemon) findAllNomadJobsByImage(imgRef string) []MatchedNomadJob {
+	var dirs []string
+	for _, repo := range d.candidateJobRepos() {
+		dirs = append(dirs, filepath.Join(repo, "jobs"), filepath.Join(repo, "nomad", "jobs"))
+	}
 	var matches []MatchedNomadJob
 	seenJobs := make(map[string]struct{})
-	for _, repo := range d.candidateJobRepos() {
-		for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
-			dir := filepath.Join(repo, sub)
-			for _, m := range FindNomadJobsByImage(dir, imgRef) {
-				if _, ok := seenJobs[m.JobName]; !ok {
-					seenJobs[m.JobName] = struct{}{}
-					matches = append(matches, m)
+	walkNomadJobFiles(dirs, func(dir, jobPath, jobName, content string) bool {
+		for _, img := range ExtractNomadJobImages(content) {
+			if ImageMatches(imgRef, img) {
+				if _, ok := seenJobs[jobName]; !ok {
+					seenJobs[jobName] = struct{}{}
+					matches = append(matches, MatchedNomadJob{
+						JobName: jobName,
+						JobPath: jobPath,
+					})
 				}
+				break
 			}
 		}
-	}
+		return true
+	})
 	return matches
 }
 
@@ -3003,10 +2694,6 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	}, http.StatusOK
 }
 
-// SetImageRolloutDebounce configures the debounce window for batching image rollouts.
-func (d *SyncDaemon) SetImageRolloutDebounce(dur time.Duration) {
-	d.imageRolloutDebounce = dur
-}
 
 // EnqueueImageReadyEvent validates an incoming image ready notification, records all matching
 // Nomad jobs into the pending rollout batch, signals the debouncer worker, and returns HTTP 202 Accepted immediately.

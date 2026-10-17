@@ -51,12 +51,12 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 		}{
 			{
 				name: "redacts secrets len >= 4 and preserves short strings",
-				daemon: &SyncDaemon{
-					pat:               "ghp_myPersonalAccessToken12345",
-					discordToken:      "my_discord_secret_token",
-					discordWebhookURL: "https://discord.com/api/webhooks/999/super_secret_webhook",
-					extraSecrets:      []string{"pg_super_secret_password", "ha_long_lived_access_token_12345", "AIzaSyTestApiKeyForGemini1234567890", "abc"},
-				},
+				daemon: NewDaemon(DaemonConfig{
+					PAT:               "ghp_myPersonalAccessToken12345",
+					DiscordToken:      "my_discord_secret_token",
+					DiscordWebhookURL: "https://discord.com/api/webhooks/999/super_secret_webhook",
+					ExtraSecrets:      []string{"pg_super_secret_password", "ha_long_lived_access_token_12345", "AIzaSyTestApiKeyForGemini1234567890", "abc"},
+				}),
 				raw:        "Connect to postgres://user:pg_super_secret_password@db:5432 with ghp_myPersonalAccessToken12345 and token my_discord_secret_token or webhook https://discord.com/api/webhooks/999/super_secret_webhook. Also ha_long_lived_access_token_12345 and key AIzaSyTestApiKeyForGemini1234567890 and normal word abc.",
 				shouldHide: []string{"pg_super_secret_password", "ghp_myPersonalAccessToken12345", "my_discord_secret_token", "super_secret_webhook", "ha_long_lived_access_token_12345", "AIzaSyTestApiKeyForGemini1234567890"},
 				shouldKeep: []string{"abc"},
@@ -111,7 +111,7 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("scrubComposeEnv", func(t *testing.T) {
+	t.Run("ScrubComposeEnv", func(t *testing.T) {
 		tests := []struct {
 			name            string
 			input, expected []string
@@ -124,7 +124,7 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				out := scrubComposeEnv(tt.input)
+				out := ScrubComposeEnv(tt.input)
 				if len(out) != len(tt.expected) {
 					t.Fatalf("expected len %d, got %d (%v)", len(tt.expected), len(out), out)
 				}
@@ -391,7 +391,7 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 					if resp.StatusCode != http.StatusOK {
 						t.Errorf("expected status 200, got %d", resp.StatusCode)
 					}
-					var jsonResp GitSyncStatusResponse
+					var jsonResp HangarStatusResponse
 					if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
 						t.Fatalf("failed to decode JSON: %v", err)
 					}
@@ -1115,218 +1115,6 @@ func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 	}
 }
 
-type urlRewritingTransport struct {
-	targetBase string
-}
-
-func (t *urlRewritingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if strings.HasPrefix(req.URL.String(), "https://discord.com") {
-		rewritten := strings.Replace(req.URL.String(), "https://discord.com", t.targetBase, 1)
-		newReq, err := http.NewRequestWithContext(req.Context(), req.Method, rewritten, req.Body)
-		if err != nil {
-			return nil, err
-		}
-		newReq.Header = req.Header
-		return http.DefaultTransport.RoundTrip(newReq)
-	}
-	return http.DefaultTransport.RoundTrip(req)
-}
-
-func TestDiscordAlertsAndWebhooks_TableDriven(t *testing.T) {
-	t.Run("SendDiscordAlert_FormattingTruncationDeduplicationAndBot", func(t *testing.T) {
-		var receivedPayloads []map[string]interface{}
-		var mu sync.Mutex
-
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-			switch {
-			case strings.Contains(r.URL.Path, "webhook") || strings.Contains(r.URL.Path, "/channels/chan_456/messages") || strings.Contains(r.URL.Path, "/channels/snowflake_789/messages"):
-				var payload map[string]interface{}
-				_ = json.NewDecoder(r.Body).Decode(&payload)
-				receivedPayloads = append(receivedPayloads, payload)
-				w.WriteHeader(http.StatusOK)
-			case strings.HasSuffix(r.URL.Path, "/guilds"):
-				_ = json.NewEncoder(w).Encode([]map[string]string{{"id": "guild_123"}})
-			case strings.HasSuffix(r.URL.Path, "/channels") && r.Method == http.MethodGet:
-				_ = json.NewEncoder(w).Encode([]map[string]interface{}{{"id": "chan_456", "name": "aerial-dev", "type": 0}})
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-		}))
-		defer srv.Close()
-
-		customClient := &http.Client{Transport: &urlRewritingTransport{targetBase: srv.URL}, Timeout: 5 * time.Second}
-		daemon := NewDaemon(DaemonConfig{DiscordWebhookURL: srv.URL + "/webhook"})
-		daemon.alertHTTPClient = customClient
-
-		longError := "sensitive token ghp_1234567890abcdef1234567890abcdef12 and secret\n" + strings.Repeat("error detail line with some context\n", 40)
-		ctx := context.Background()
-		daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
-
-		mu.Lock()
-		if len(receivedPayloads) != 1 {
-			t.Fatalf("expected 1 webhook payload, got %d", len(receivedPayloads))
-		}
-		content := receivedPayloads[0]["content"].(string)
-		mu.Unlock()
-
-		for _, wantSub := range []string{"🚨 **GitSync GitOps Alert: Test Rollback**", "[... truncated for length]", "[REDACTED_TOKEN]"} {
-			if !strings.Contains(content, wantSub) {
-				t.Errorf("expected %q in payload, got: %s", wantSub, content)
-			}
-		}
-		if strings.Contains(content, "ghp_1234567890abcdef1234567890abcdef12") {
-			t.Errorf("expected token to be scrubbed, but found in payload")
-		}
-
-		daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
-		mu.Lock()
-		if len(receivedPayloads) != 1 {
-			t.Errorf("expected alert to be deduplicated (count=1), got count=%d", len(receivedPayloads))
-		}
-		mu.Unlock()
-
-		daemonBot := NewDaemon(DaemonConfig{DiscordToken: "my-bot-token", DiscordChannel: "aerial-dev"})
-		daemonBot.alertHTTPClient = customClient
-		daemonBot.SendDiscordAlert(ctx, "Bot API Alert", "/share/aerial", "badsha789", "goodsha000", "pre-flight validation", "syntax error")
-		mu.Lock()
-		if len(receivedPayloads) != 2 {
-			t.Fatalf("expected 2 total payloads after bot alert, got %d", len(receivedPayloads))
-		}
-		botContent := receivedPayloads[1]["content"].(string)
-		mu.Unlock()
-		if !strings.Contains(botContent, "badsha789") {
-			t.Errorf("expected faulty commit in bot alert, got: %s", botContent)
-		}
-
-		daemonSnowflake := NewDaemon(DaemonConfig{DiscordToken: "my-bot-token", DiscordChannel: "123456789012345678"})
-		daemonSnowflake.alertHTTPClient = customClient
-		if !isSnowflake(daemonSnowflake.discordChannel) {
-			t.Errorf("expected 123456789012345678 to be recognized as snowflake")
-		}
-	})
-
-	t.Run("SendDiscordAlert_EdgeCases", func(t *testing.T) {
-		for _, tt := range []struct {
-			name, token, channel, repo, sha, prev string
-			rawDaemon                             bool
-			status                                int
-		}{
-			{name: "uninitialized daemon initializes lastAlertTimes", rawDaemon: true},
-			{name: "channel resolve failure gracefully handles HTTP 500", token: "mock_token", channel: "unresolvable-chan", repo: "/repo", sha: "sha", prev: "prev", status: http.StatusInternalServerError},
-		} {
-			t.Run(tt.name, func(t *testing.T) {
-				var d *SyncDaemon
-				if tt.rawDaemon {
-					d = &SyncDaemon{}
-				} else {
-					d = NewDaemon(DaemonConfig{DiscordToken: tt.token, DiscordChannel: tt.channel})
-					d.alertHTTPClient = &http.Client{
-						Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-							return &http.Response{StatusCode: tt.status, Body: ioNopCloser(strings.NewReader("server error")), Header: make(http.Header)}, nil
-						}},
-					}
-				}
-				d.SendDiscordAlert(context.Background(), "title", tt.repo, tt.sha, tt.prev, "stage", "err msg")
-				if d.lastAlertTimes == nil {
-					t.Errorf("expected lastAlertTimes to be initialized")
-				}
-			})
-		}
-	})
-
-	t.Run("ResolveAlertChannel", func(t *testing.T) {
-		for _, tt := range []struct {
-			name, discordChan, configYAML, want string
-		}{
-			{name: "explicit DiscordChannel overrides config.yaml", discordChan: "override-channel", configYAML: "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n", want: "override-channel"},
-			{name: "dynamic read from config.yaml in ConfigDir", configYAML: "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n", want: "ops-alerts"},
-			{name: "invalid YAML falls back to aerial-dev", configYAML: "invalid: [yaml\n", want: "aerial-dev"},
-			{name: "missing config.yaml falls back to aerial-dev", want: "aerial-dev"},
-		} {
-			t.Run(tt.name, func(t *testing.T) {
-				tempDir := t.TempDir()
-				if tt.configYAML != "" {
-					_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(tt.configYAML), 0644)
-				}
-				d := NewDaemon(DaemonConfig{DiscordChannel: tt.discordChan, ConfigDir: tempDir})
-				if ch := d.ResolveAlertChannel(); ch != tt.want {
-					t.Errorf("ResolveAlertChannel() = %q, want %q", ch, tt.want)
-				}
-			})
-		}
-	})
-
-	t.Run("sendWebhook", func(t *testing.T) {
-		for _, tt := range []struct {
-			name, netErr, rawURL string
-			status               int
-			timeout              time.Duration
-		}{
-			{name: "HTTP 200 OK", status: http.StatusOK},
-			{name: "HTTP 500 error", status: http.StatusInternalServerError},
-			{name: "hermetic roundTripperFunc network error", netErr: "connection refused mock", rawURL: "http://127.0.0.1:65530/webhook"},
-			{name: "invalid URL format", rawURL: "://invalid-url"},
-			{name: "timeout client error", rawURL: "http://127.0.0.1:1/invalid", timeout: 5 * time.Millisecond},
-		} {
-			t.Run(tt.name, func(t *testing.T) {
-				d := NewDaemon(DaemonConfig{})
-				client, targetURL := http.DefaultClient, tt.rawURL
-				if tt.status != 0 {
-					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						w.WriteHeader(tt.status)
-					}))
-					defer srv.Close()
-					client, targetURL = srv.Client(), srv.URL
-				} else if tt.netErr != "" {
-					client = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-						return nil, errors.New(tt.netErr)
-					}}}
-				} else if tt.timeout > 0 {
-					client = &http.Client{Timeout: tt.timeout}
-				}
-				d.sendWebhook(context.Background(), client, targetURL, "webhook test payload")
-			})
-		}
-	})
-
-	t.Run("postChannelMessage", func(t *testing.T) {
-		for _, tt := range []struct {
-			name, body, netErr, seedCache string
-			status                        int
-			timeout                       time.Duration
-			checkInvalidated              bool
-		}{
-			{name: "HTTP 200 OK", status: http.StatusOK, body: `{"id":"msg-1"}`},
-			{name: "HTTP 404 invalidates cachedChannelID", status: http.StatusNotFound, body: `{"message":"Unknown Channel"}`, seedCache: "123", checkInvalidated: true},
-			{name: "HTTP 500 server error", status: http.StatusInternalServerError, body: `{"message":"Server error"}`},
-			{name: "hermetic roundTripperFunc network error", netErr: "network drop"},
-			{name: "timeout client error", timeout: 5 * time.Millisecond},
-		} {
-			t.Run(tt.name, func(t *testing.T) {
-				d := NewDaemon(DaemonConfig{})
-				d.cachedChannelID = tt.seedCache
-				var client *http.Client
-				if tt.timeout > 0 {
-					client = &http.Client{Timeout: tt.timeout}
-				} else {
-					client = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-						if tt.netErr != "" {
-							return nil, errors.New(tt.netErr)
-						}
-						return &http.Response{StatusCode: tt.status, Body: ioNopCloser(strings.NewReader(tt.body)), Header: make(http.Header)}, nil
-					}}}
-				}
-				d.postChannelMessage(context.Background(), client, "token", "123", "hello")
-				if tt.checkInvalidated && d.cachedChannelID != "" {
-					t.Errorf("expected cached channel to be invalidated on 404")
-				}
-			})
-		}
-	})
-}
-
 type nomadConfigSyncTestEnv struct {
 	configDir string
 	daemon    *SyncDaemon
@@ -1757,56 +1545,6 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 	}
 }
 
-func TestResolveChannelID_TableDriven(t *testing.T) {
-	for _, tt := range []struct {
-		name, channelInput, cachedID, guildsBody, channelsBody, netErr, expectedID, errContains string
-		guildsStatus                                                                            int
-		timeout                                                                                 time.Duration
-		expectErr                                                                               bool
-	}{
-		{name: "snowflake direct return", channelInput: "123456789012345678", expectedID: "123456789012345678"},
-		{name: "cachedChannelID direct return", channelInput: "general", cachedID: "999888777666", expectedID: "999888777666"},
-		{name: "discord API HTTP 500 error from guilds", channelInput: "general", guildsStatus: http.StatusInternalServerError, guildsBody: "server error", expectErr: true},
-		{name: "malformed JSON from guilds", channelInput: "general", guildsStatus: http.StatusOK, guildsBody: "not json", expectErr: true},
-		{name: "successful guild and channel resolution with hash prefix", channelInput: "#aerial-alerts", guildsStatus: http.StatusOK, guildsBody: `[{"id":"guild-1"}]`, channelsBody: `[{"id":"chan-42","name":"aerial-alerts","type":0}]`, expectedID: "chan-42"},
-		{name: "channel not found across connected guilds", channelInput: "nonexistent-channel", guildsStatus: http.StatusOK, guildsBody: `[{"id":"guild-1"}]`, channelsBody: `[{"id":"chan-42","name":"aerial-alerts","type":0}]`, expectErr: true, errContains: "not found"},
-		{name: "hermetic roundTripperFunc client network error", channelInput: "test-channel", netErr: "client timeout / failure", expectErr: true},
-		{name: "client timeout error", channelInput: "test-channel", timeout: 5 * time.Millisecond, expectErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			d := NewDaemon(DaemonConfig{})
-			d.cachedChannelID = tt.cachedID
-			client := http.DefaultClient
-			if tt.timeout > 0 {
-				client = &http.Client{Timeout: tt.timeout}
-			} else if tt.netErr != "" || tt.guildsStatus != 0 {
-				client = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-					if tt.netErr != "" {
-						return nil, errors.New(tt.netErr)
-					}
-					if strings.Contains(req.URL.Path, "/guilds") && !strings.Contains(req.URL.Path, "/channels") {
-						return &http.Response{StatusCode: tt.guildsStatus, Body: ioNopCloser(strings.NewReader(tt.guildsBody)), Header: make(http.Header)}, nil
-					}
-					if strings.Contains(req.URL.Path, "/channels") && tt.channelsBody != "" {
-						return &http.Response{StatusCode: http.StatusOK, Body: ioNopCloser(strings.NewReader(tt.channelsBody)), Header: make(http.Header)}, nil
-					}
-					return &http.Response{StatusCode: http.StatusNotFound, Body: ioNopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
-				}}}
-			}
-			chID, err := d.resolveChannelID(context.Background(), client, "token", tt.channelInput)
-			if tt.expectErr {
-				if err == nil || (tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains)) {
-					t.Fatalf("expected error containing %q, got: %v", tt.errContains, err)
-				}
-				return
-			}
-			if err != nil || chID != tt.expectedID {
-				t.Fatalf("resolveChannelID() = (%q, %v), want (%q, nil)", chID, err, tt.expectedID)
-			}
-		})
-	}
-}
-
 func TestTriggerReconcile_TableDriven(t *testing.T) {
 	ctx := context.Background()
 	calledSync := false
@@ -1906,7 +1644,7 @@ func ioNopCloser(r io.Reader) io.ReadCloser {
 }
 
 func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
-	t.Run("defaultComposeExecutor and defaultDockerExecutor CLI mocking", func(t *testing.T) {
+	t.Run("defaultComposeExecutor CLI mocking", func(t *testing.T) {
 		tempDir := t.TempDir()
 		binDir := filepath.Join(tempDir, "bin")
 		if err := os.MkdirAll(binDir, 0755); err != nil {
@@ -1922,14 +1660,11 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		for _, tc := range []struct {
-			name, arg, wantOut             string
-			isCompose, cancelCtx, wantErr bool
+			name, arg, wantOut string
+			cancelCtx, wantErr bool
 		}{
-			{name: "compose executor success", isCompose: true, arg: "version", wantOut: "Docker Compose mock"},
-			{name: "compose executor cancel", isCompose: true, arg: "waitloop", cancelCtx: true, wantErr: true},
-			{name: "docker executor success", arg: "version", wantOut: "Docker mock v24.0"},
-			{name: "docker executor cancel", arg: "waitloop", cancelCtx: true, wantErr: true},
-			{name: "docker executor unknown cmd error", arg: "unknown", wantErr: true},
+			{name: "compose executor success", arg: "version", wantOut: "Docker Compose mock"},
+			{name: "compose executor cancel", arg: "waitloop", cancelCtx: true, wantErr: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				ctx := context.Background()
@@ -1938,13 +1673,7 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 					ctx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
 					defer cancel()
 				}
-				var stdout, stderr []byte
-				var err error
-				if tc.isCompose {
-					stdout, stderr, err = defaultComposeExecutor(ctx, tempDir, tc.arg)
-				} else {
-					stdout, stderr, err = defaultDockerExecutor(ctx, tc.arg)
-				}
+				stdout, stderr, err := defaultComposeExecutor(ctx, tempDir, tc.arg)
 				if (err != nil) != tc.wantErr {
 					t.Errorf("error = %v, wantErr = %v", err, tc.wantErr)
 				}
@@ -1973,18 +1702,7 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			_, _, _ = defaultExec(context.Background(), t.TempDir(), "version")
 		}
 
-		if nilDaemon.getDockerExecutor() == nil || (&SyncDaemon{}).getDockerExecutor() == nil {
-			t.Errorf("expected non-nil default docker executor")
-		}
-		customDocker := false
-		dCustomDocker := &SyncDaemon{dockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			customDocker = true
-			return nil, nil, nil
-		}}
-		_, _, _ = dCustomDocker.getDockerExecutor()(context.Background(), "")
-		if !customDocker {
-			t.Errorf("expected custom docker executor to be called")
-		}
+
 
 		if nilDaemon.getComposeExecutor() == nil || (&SyncDaemon{}).getComposeExecutor() == nil {
 			t.Errorf("expected non-nil default compose executor")
@@ -2292,71 +2010,6 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("pure edge helpers from coverage boosters", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		_ = os.WriteFile(filepath.Join(tmpDir, "git.exe"), []byte("echo"), 0755)
-		_ = resolveGitBinInternal(func(k string) string {
-			if k == "ProgramFiles" {
-				return tmpDir
-			}
-			return ""
-		}, nil, func(string) (string, error) { return "", errors.New("not found") }, "windows")
-
-		for _, tc := range []struct {
-			name, raw, wantReg, wantRepo, wantTag string
-			expectError                           bool
-		}{
-			{name: "docker.io library image", raw: "docker.io/myimage:v1", wantReg: "registry-1.docker.io", wantRepo: "library/myimage", wantTag: "v1"},
-			{name: "index.docker.io owner image", raw: "index.docker.io/owner/image:latest", wantReg: "registry-1.docker.io", wantRepo: "owner/image", wantTag: "latest"},
-			{name: "empty repository returns error", raw: "myregistry.com/:v1", expectError: true},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				reg, repo, tag, err := ParseImageReference(tc.raw)
-				if tc.expectError {
-					if err == nil {
-						t.Errorf("expected error for %s, got nil", tc.raw)
-					}
-					return
-				}
-				if err != nil || reg != tc.wantReg || repo != tc.wantRepo || tag != tc.wantTag {
-					t.Errorf("ParseImageReference(%q) = (%q, %q, %q, %v); want (%q, %q, %q, nil)", tc.raw, reg, repo, tag, err, tc.wantReg, tc.wantRepo, tc.wantTag)
-				}
-			})
-		}
-
-		if _, svc, _, pErr := ParseWwwAuthenticate("Bearer realm=\"https://example.com\",service=\"test\",trailingnoparam"); pErr != nil || svc != "test" {
-			t.Errorf("unexpected ParseWwwAuthenticate error: %v, svc=%s", pErr, svc)
-		}
-		if !ContainsDigest([]string{"repo/img@sha256:1234567890abcdef"}, "sha256:1234567890abcdef") {
-			t.Errorf("expected ContainsDigest to match")
-		}
-		if resolved := ResolveRepoPath("aerial", []string{"/mnt/data/supervisor/share/aerial"}); resolved != "/mnt/data/supervisor/share/aerial" {
-			t.Errorf("expected /mnt/data/supervisor/share/aerial, got %s", resolved)
-		}
-
-		gitDirFile := filepath.Join(tmpDir, "repo-rel")
-		_ = os.MkdirAll(gitDirFile, 0755)
-		_ = os.WriteFile(filepath.Join(gitDirFile, ".git"), []byte("gitdir: relative/git\n"), 0644)
-		if resGit, errGit := resolveGitDir(gitDirFile); errGit != nil || !strings.HasSuffix(resGit, "relative/git") {
-			t.Errorf("unexpected resolveGitDir with relative target: %s, %v", resGit, errGit)
-		}
-
-		gitDirNon := filepath.Join(tmpDir, "repo-non")
-		_ = os.MkdirAll(gitDirNon, 0755)
-		_ = os.WriteFile(filepath.Join(gitDirNon, ".git"), []byte("something else\n"), 0644)
-		if resGitNon, errGitNon := resolveGitDir(gitDirNon); errGitNon != nil || resGitNon != filepath.Join(gitDirNon, ".git") {
-			t.Errorf("unexpected resolveGitDir with non-gitdir content: %s, %v", resGitNon, errGitNon)
-		}
-
-		srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusBadGateway)
-		}))
-		defer srvErr.Close()
-
-		dHooks := &SyncDaemon{}
-		dHooks.sendWebhook(context.Background(), srvErr.Client(), srvErr.URL, "test content")
-		dHooks.postChannelMessage(context.Background(), srvErr.Client(), "secret-token", "12345", "test message")
-	})
 }
 
 func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
@@ -2991,52 +2644,18 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 func TestReconciliationStatusAndHelpers_TableDriven(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("ReconciliationStatus_nil_daemon_and_nil_fn", func(t *testing.T) {
+	t.Run("ReconciliationStatus", func(t *testing.T) {
 		var nilD *SyncDaemon
-		nilD.updateReconcileStatus(func(s *ReconciliationStatus) {})
-		if st := nilD.GetReconciliationStatus(); st.State != "idle" {
-			t.Errorf("expected idle for nil daemon, got %q", st.State)
+		if st := nilD.GetReconciliationStatus(); st.State != "idle" || st.Stage != "idle" {
+			t.Errorf("expected idle for nil daemon, got %+v", st)
 		}
-
 		d := NewDaemon(DaemonConfig{})
-		d.updateReconcileStatus(nil)
-	})
-
-	t.Run("ReconciliationStatus_TTL_reset", func(t *testing.T) {
-		d := NewDaemon(DaemonConfig{})
-		d.updateReconcileStatus(func(s *ReconciliationStatus) {
-			s.Active = false
-			s.State = "healthy"
-			s.Stage = "healthy"
-			s.TargetServices = []string{"brain"}
-			s.CompletedAt = time.Now().Add(-6 * time.Minute)
-		})
-
-		status := d.GetReconciliationStatus()
-		if status.State != "idle" || status.Stage != "idle" {
-			t.Errorf("expected TTL to reset state to idle, got %+v", status)
+		if st := d.GetReconciliationStatus(); st.State != "idle" || st.Stage != "idle" {
+			t.Errorf("expected idle for daemon, got %+v", st)
 		}
-	})
-
-	t.Run("ReconciliationStatus_exposed_in_GetStatus", func(t *testing.T) {
-		d := NewDaemon(DaemonConfig{})
-		d.updateReconcileStatus(func(s *ReconciliationStatus) {
-			s.Active = true
-			s.State = "swapping"
-			s.Stage = "swapping"
-			s.TargetServices = []string{"scheduler-mcp"}
-			s.StartedAt = time.Now().UTC()
-		})
-
 		statusResp := d.GetStatus(ctx)
-		if statusResp.Reconciliation == nil {
-			t.Fatalf("expected non-nil Reconciliation in GetStatus")
-		}
-		if statusResp.Reconciliation.State != "swapping" {
-			t.Errorf("expected state swapping, got %s", statusResp.Reconciliation.State)
-		}
-		if len(statusResp.Reconciliation.TargetServices) != 1 || statusResp.Reconciliation.TargetServices[0] != "scheduler-mcp" {
-			t.Errorf("expected target services [scheduler-mcp], got %v", statusResp.Reconciliation.TargetServices)
+		if statusResp.Reconciliation == nil || statusResp.Reconciliation.State != "idle" {
+			t.Errorf("expected state idle in GetStatus, got %+v", statusResp.Reconciliation)
 		}
 	})
 
@@ -3130,49 +2749,6 @@ func TestReconciliationStatusAndHelpers_TableDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("postChannelMessage_and_sendWebhook", func(t *testing.T) {
-		d := NewDaemon(DaemonConfig{})
-		d.cachedChannelID = "12345"
-
-		client404 := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusNotFound,
-						Body:       ioNopCloser(strings.NewReader("")),
-					}, nil
-				},
-			},
-		}
-		d.postChannelMessage(ctx, client404, "bot-tok", "12345", "hello")
-		if d.cachedChannelID != "" {
-			t.Errorf("expected cachedChannelID to be cleared on 404")
-		}
-
-		client500 := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusInternalServerError,
-						Body:       ioNopCloser(strings.NewReader("")),
-					}, nil
-				},
-			},
-		}
-		d.postChannelMessage(ctx, client500, "bot-tok", "12345", "hello")
-
-		clientErr := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return nil, errors.New("network failure")
-				},
-			},
-		}
-		d.postChannelMessage(ctx, clientErr, "bot-tok", "12345", "hello")
-
-		d.postChannelMessage(ctx, http.DefaultClient, "tok", "bad\nchan", "msg")
-		d.sendWebhook(ctx, http.DefaultClient, "http://bad\nurl", "msg")
-	})
 }
 
 func TestCheckGitHubRepoBuildInProgress_TableDriven(t *testing.T) {
@@ -4658,7 +4234,7 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 			},
 		})
 
-		d.SetImageRolloutDebounce(20 * time.Millisecond)
+		d.imageRolloutDebounce = 20 * time.Millisecond
 		d.StartImageRolloutLoop(loopCtx)
 
 		// Enqueue both images in quick succession
@@ -4753,7 +4329,7 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 			},
 		})
 
-		d.SetImageRolloutDebounce(10 * time.Millisecond)
+		d.imageRolloutDebounce = 10 * time.Millisecond
 		d.StartImageRolloutLoop(loopCtx)
 
 		// First event triggers panic in worker
@@ -4989,6 +4565,8 @@ func TestGetRemoteImageRevision_TableDriven(t *testing.T) {
 		}
 	}`, expectedSHA)
 
+	var child401Sent bool
+
 	tests := []struct {
 		name       string
 		imageRef   string
@@ -5000,6 +4578,34 @@ func TestGetRemoteImageRevision_TableDriven(t *testing.T) {
 			name:     "invalid image reference returns error",
 			imageRef: "invalid reference with spaces",
 			wantErr:  true,
+		},
+		{
+			name:     "401 with existingBearer clears token and retries",
+			imageRef: "ghcr.io/azylman/aerial-brain:latest",
+			clientOpts: mockOCIOptions{
+				ChallengeAuthHeader: `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:azylman/aerial-brain:pull"`,
+				AuthBody:            indexJSON,
+				ChildManifestMap: map[string]string{
+					childDigest: manifestJSON,
+				},
+				BlobMap: map[string]string{
+					configBlobDigest: configJSON,
+				},
+				OnRequest: func(req *http.Request) (*http.Response, error, bool) {
+					if strings.Contains(req.URL.Path, childDigest) && !child401Sent {
+						child401Sent = true
+						h := make(http.Header)
+						h.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:azylman/aerial-brain:pull"`)
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     h,
+							Body:       ioNopCloser(strings.NewReader("stale bearer")),
+						}, nil, true
+					}
+					return nil, nil, false
+				},
+			},
+			wantRev: expectedSHA,
 		},
 		{
 			name:     "Case 1: OCI Index to Child Manifest to Config Blob",
@@ -5264,150 +4870,6 @@ func TestNomadImagePoll_UsesImageRevision(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timed out waiting for deploy_started event")
-	}
-}
-
-func TestFetchRegistryWithAuth_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		targetURL      string
-		registry       string
-		repository     string
-		existingBearer string
-		pat            string
-		clientOpts     mockOCIOptions
-		wantToken      string
-		wantErrSubstr  string
-	}{
-		{
-			name:           "existing bearer returns 401 and recovers via challenge",
-			targetURL:      "https://registry-1.docker.io/v2/library/redis/manifests/latest",
-			registry:       "registry-1.docker.io",
-			repository:     "library/redis",
-			existingBearer: "stale-bearer",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/redis:pull"`,
-				TokenBody:           `{"access_token":"refreshed-token"}`,
-				ExpectedBearer:      "refreshed-token",
-				AuthStatus:          http.StatusOK,
-				AuthBody:            "ok",
-			},
-			wantToken: "refreshed-token",
-		},
-		{
-			name:          "malformed Www-Authenticate header returns error",
-			targetURL:     "https://ghcr.io/v2/foo/manifests/latest",
-			registry:      "ghcr.io",
-			repository:    "foo",
-			clientOpts:    mockOCIOptions{ChallengeAuthHeader: "Basic realm=foo"},
-			wantErrSubstr: "failed parsing Www-Authenticate header",
-		},
-		{
-			name:          "invalid realm returns error",
-			targetURL:     "https://ghcr.io/v2/repo/manifests/latest",
-			registry:      "ghcr.io",
-			repository:    "repo",
-			clientOpts:    mockOCIOptions{ChallengeAuthHeader: `Bearer realm="://invalid-realm-url"`},
-			wantErrSubstr: "failed parsing token realm",
-		},
-		{
-			name:       "token request non-200 returns error",
-			targetURL:  "https://ghcr.io/v2/foo/manifests/latest",
-			registry:   "ghcr.io",
-			repository: "foo",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
-				TokenStatus:         http.StatusForbidden,
-				TokenBody:           "forbidden",
-			},
-			wantErrSubstr: "returned HTTP 403",
-		},
-		{
-			name:       "token request malformed JSON returns error",
-			targetURL:  "https://ghcr.io/v2/foo/manifests/latest",
-			registry:   "ghcr.io",
-			repository: "foo",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
-				TokenStatus:         http.StatusOK,
-				TokenBody:           "{invalid-json",
-			},
-			wantErrSubstr: "failed decoding token",
-		},
-		{
-			name:       "token request empty token returns error",
-			targetURL:  "https://ghcr.io/v2/foo/manifests/latest",
-			registry:   "ghcr.io",
-			repository: "foo",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
-				TokenStatus:         http.StatusOK,
-				TokenBody:           `{"token":""}`,
-			},
-			wantErrSubstr: "empty bearer token returned",
-		},
-		{
-			name:       "token request empty token json object returns error",
-			targetURL:  "https://ghcr.io/v2/repo/manifests/latest",
-			registry:   "ghcr.io",
-			repository: "repo",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
-				TokenStatus:         http.StatusOK,
-				TokenBody:           `{}`,
-			},
-			wantErrSubstr: "empty bearer token returned",
-		},
-		{
-			name:       "ghcr.io token request sets Basic Auth when PAT is present",
-			targetURL:  "https://ghcr.io/v2/azylman/aerial/manifests/latest",
-			registry:   "ghcr.io",
-			repository: "azylman/aerial",
-			pat:        "my-secret-pat",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
-				ExpectedPAT:         "my-secret-pat",
-				TokenBody:           `{"token":"dummy-ghcr-token"}`,
-				ExpectedBearer:      "dummy-ghcr-token",
-				AuthStatus:          http.StatusOK,
-				AuthBody:            "ok",
-			},
-			wantToken: "dummy-ghcr-token",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			d := NewDaemon(DaemonConfig{
-				PAT:            tc.pat,
-				RegistryClient: newMockOCIRegistryClient(tc.clientOpts),
-			})
-			resp, tok, err := d.fetchRegistryWithAuth(context.Background(), tc.targetURL, tc.registry, tc.repository, "", tc.existingBearer)
-			if tc.wantErrSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantErrSubstr, err)
-				}
-				if resp != nil && resp.Body != nil {
-					_ = resp.Body.Close()
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if resp != nil && resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-			if tok != tc.wantToken {
-				t.Errorf("got token %q, want %q", tok, tc.wantToken)
-			}
-			if resp != nil && resp.StatusCode != http.StatusOK {
-				t.Errorf("status = %d, want 200", resp.StatusCode)
-			}
-		})
 	}
 }
 
@@ -5736,7 +5198,6 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 		}
 
 		// Additional pre-canceled coverage for default executors
-		_, _, _ = defaultDockerExecutor(cancelCtx, "version")
 		_, _, _ = defaultComposeExecutor(cancelCtx, "", "version")
 		_, _, _ = runGitCommand(cancelCtx, "", "", "version")
 
@@ -5913,11 +5374,6 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 }
 
 func TestNomadJobReconciliation_TableDriven(t *testing.T) {
-
-	t.Run("ReconcileNomadJobs_alias", func(t *testing.T) {
-		d := &SyncDaemon{}
-		_ = d.ReconcileNomadJobs(context.Background(), t.TempDir(), nil)
-	})
 
 	t.Run("ValidateNomadJob_hermetic", func(t *testing.T) {
 		ctx := context.Background()
