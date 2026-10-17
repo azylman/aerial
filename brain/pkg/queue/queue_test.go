@@ -3,12 +3,12 @@ package queue
 import (
 	"bytes"
 	"context"
-	"image"
-	"image/png"
 	_ "database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1747,15 +1747,15 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name               string
-		drainTimeout       time.Duration
-		blockRunnerOnCtx   bool
-		blockClassifierCtx bool
-		verifyRecovery     bool
-		runnerResponse     string
-		msg                db.Message
+		name                string
+		drainTimeout        time.Duration
+		blockRunnerOnCtx    bool
+		blockClassifierCtx  bool
+		verifyRecovery      bool
+		runnerResponse      string
+		msg                 db.Message
 		wantStatusAfterStop string
-		wantDelivered      string
+		wantDelivered       string
 	}{
 		{
 			name:             "PreservesProcessingMessageWithoutApology",
@@ -2389,18 +2389,18 @@ func TestProcessBurst_QuotaPause_Suite(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name               string
-		threadID           string
-		policyMode         string
-		useProcessBurst    bool
-		runnerStderr       string
-		messages           []db.Message
-		wantOneShotCount   int
-		wantPromptSub      []string
-		wantMinRunAtDelay  time.Duration
-		wantDeliveredSub   []string
-		wantLastMsgStatus  string
-		wantLastMsgErrSub  string
+		name              string
+		threadID          string
+		policyMode        string
+		useProcessBurst   bool
+		runnerStderr      string
+		messages          []db.Message
+		wantOneShotCount  int
+		wantPromptSub     []string
+		wantMinRunAtDelay time.Duration
+		wantDeliveredSub  []string
+		wantLastMsgStatus string
+		wantLastMsgErrSub string
 	}{
 		{
 			name:         "SchedulesOneShotAndNotifies",
@@ -3478,23 +3478,23 @@ func TestRecoverInterrupted_PoisonPillAndStrandedSuite(t *testing.T) {
 	}
 
 	tests := []struct {
-		name               string
-		messages           []db.Message
-		updatedAtAges      map[string]time.Duration
-		maxAttempts        int
-		stalenessTTL       time.Duration
-		runnerErr          error
-		runnerStderr       string
-		notifierReply      string
-		deliveryErr        error
-		setDiscordSession  bool
-		customAppCfg       bool
-		wantCompletedIDs   []string
-		wantRunnerCalls    int
-		checkRunnerCalls   bool
-		wantDeliveredText  string
-		wantDeliveredChan  string
-		msgChecks          map[string]msgCheck
+		name              string
+		messages          []db.Message
+		updatedAtAges     map[string]time.Duration
+		maxAttempts       int
+		stalenessTTL      time.Duration
+		runnerErr         error
+		runnerStderr      string
+		notifierReply     string
+		deliveryErr       error
+		setDiscordSession bool
+		customAppCfg      bool
+		wantCompletedIDs  []string
+		wantRunnerCalls   int
+		checkRunnerCalls  bool
+		wantDeliveredText string
+		wantDeliveredChan string
+		msgChecks         map[string]msgCheck
 	}{
 		{
 			name: "PreservesExecutionRetryBudget",
@@ -4021,24 +4021,26 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("New_NotifierRunnerFuncWrapped", func(t *testing.T) {
-		store := setupTestStore(t)
-		runnerCalled := false
-		pool := New(nil, WorkerPoolConfig{
-			Store: store,
-			NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				runnerCalled = true
-				return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
-			},
-		})
-		if pool.cfg.NotifierFunc == nil {
-			t.Fatal("Expected NotifierFunc to be initialized")
-		}
-		if res := pool.cfg.NotifierFunc("agy", "key", "test description"); !runnerCalled || res != "DYNAMIC FALLBACK NOTICE" {
-			t.Errorf("NotifierFunc = %q (called=%v)", res, runnerCalled)
-		}
+func TestWorkerPool_NewNotifierRunnerFuncWrapped(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
+	runnerCalled := false
+	pool := New(nil, WorkerPoolConfig{
+		Store: store,
+		NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			runnerCalled = true
+			return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
+		},
 	})
+	if pool.cfg.NotifierFunc == nil {
+		t.Fatal("Expected NotifierFunc to be initialized")
+	}
+	if res := pool.cfg.NotifierFunc("agy", "key", "test description"); !runnerCalled || res != "DYNAMIC FALLBACK NOTICE" {
+		t.Errorf("NotifierFunc = %q (called=%v)", res, runnerCalled)
+	}
 }
 
 func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
@@ -4219,863 +4221,868 @@ func (m *mockWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *
 	return nil, nil
 }
 
-func TestOnWakeHook(t *testing.T) {
-	t.Run("OverridesAndTimeoutFallbacks", func(t *testing.T) {
-		tests := []struct {
-			name              string
-			hookResp          *WakeResponse
-			hookErr           error
-			timeoutAction     string
-			classifierResp    string
-			emptyEffectiveID  bool
-			scheduleRunID     string
-			messages          []db.Message
-			expectExit        bool
-			expectWakeIdx     int
-			expectClassifier  bool
-			expectHookCall    bool
-			wantReqChannelID  string
-			wantReqMsgID      string
-			wantWakeInfoTrue  bool
-			wantBurstIDs      []string
-			wantTrailingIDs   []string
-			wantTurnCount     int
-			wantMsgStatus     string
-			wantMsgErrSub     string
-			wantScheduleRunSt string
-		}{
-			{
-				name:             "WakeOverride",
-				hookResp:         &WakeResponse{Override: "wake", Reason: "hook_priority_wake"},
-				classifierResp:   `{"confidence": 0.10, "reason": "ambient banter"}`,
-				messages:         []db.Message{{ID: "msg-wake-1", ThreadID: "chan-general", AuthorName: "user-alpha", Content: "hello world", Status: db.StatusProcessing}},
-				expectExit:       false,
-				expectWakeIdx:    0,
-				expectClassifier: false,
-				expectHookCall:   true,
-				wantReqChannelID: "chan-general",
-				wantReqMsgID:     "msg-wake-1",
-				wantWakeInfoTrue: true,
+func TestOnWakeHook_OverridesAndTimeoutFallbacks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		hookResp          *WakeResponse
+		hookErr           error
+		timeoutAction     string
+		classifierResp    string
+		emptyEffectiveID  bool
+		scheduleRunID     string
+		messages          []db.Message
+		expectExit        bool
+		expectWakeIdx     int
+		expectClassifier  bool
+		expectHookCall    bool
+		wantReqChannelID  string
+		wantReqMsgID      string
+		wantWakeInfoTrue  bool
+		wantBurstIDs      []string
+		wantTrailingIDs   []string
+		wantTurnCount     int
+		wantMsgStatus     string
+		wantMsgErrSub     string
+		wantScheduleRunSt string
+	}{
+		{
+			name:             "WakeOverride",
+			hookResp:         &WakeResponse{Override: "wake", Reason: "hook_priority_wake"},
+			classifierResp:   `{"confidence": 0.10, "reason": "ambient banter"}`,
+			messages:         []db.Message{{ID: "msg-wake-1", ThreadID: "chan-general", AuthorName: "user-alpha", Content: "hello world", Status: db.StatusProcessing}},
+			expectExit:       false,
+			expectWakeIdx:    0,
+			expectClassifier: false,
+			expectHookCall:   true,
+			wantReqChannelID: "chan-general",
+			wantReqMsgID:     "msg-wake-1",
+			wantWakeInfoTrue: true,
+		},
+		{
+			name:     "WakeOverride_MultiMessageBurstAndTurnCount",
+			hookResp: &WakeResponse{Override: "wake", Reason: "hook_wake_override"},
+			messages: []db.Message{
+				{ID: "msg-wake-multi-1", ThreadID: "chan-multi-test", AuthorName: "user-alpha", Content: "first message wakes", Status: db.StatusProcessing},
+				{ID: "msg-wake-multi-2", ThreadID: "chan-multi-test", AuthorName: "user-beta", Content: "second trailing message", Status: db.StatusProcessing},
 			},
-			{
-				name:     "WakeOverride_MultiMessageBurstAndTurnCount",
-				hookResp: &WakeResponse{Override: "wake", Reason: "hook_wake_override"},
-				messages: []db.Message{
-					{ID: "msg-wake-multi-1", ThreadID: "chan-multi-test", AuthorName: "user-alpha", Content: "first message wakes", Status: db.StatusProcessing},
-					{ID: "msg-wake-multi-2", ThreadID: "chan-multi-test", AuthorName: "user-beta", Content: "second trailing message", Status: db.StatusProcessing},
+			expectExit:       false,
+			expectWakeIdx:    0,
+			expectClassifier: false,
+			expectHookCall:   true,
+			wantBurstIDs:     []string{"msg-wake-multi-1"},
+			wantTrailingIDs:  []string{"msg-wake-multi-2"},
+			wantTurnCount:    1,
+		},
+		{
+			name:             "DropOverride",
+			hookResp:         &WakeResponse{Override: "drop", Reason: "hook_drop_override"},
+			classifierResp:   `{"confidence": 0.95, "reason": "strong intent"}`,
+			messages:         []db.Message{{ID: "msg-drop-1", ThreadID: "chan-general", AuthorName: "user-bravo", Content: "random chit-chat", Status: db.StatusProcessing}},
+			expectExit:       true,
+			expectWakeIdx:    -1,
+			expectClassifier: false,
+			expectHookCall:   true,
+			wantMsgStatus:    db.StatusCompleted,
+			wantMsgErrSub:    "[AMBIENT",
+		},
+		{
+			name:             "TimeoutFallback_Classify",
+			hookErr:          context.DeadlineExceeded,
+			timeoutAction:    "classify",
+			classifierResp:   `{"confidence": 0.92, "reason": "classified wake"}`,
+			messages:         []db.Message{{ID: "msg-timeout-1", ThreadID: "chan-general", AuthorName: "user-charlie", Content: "please help me calculate total memory usage", Status: db.StatusProcessing}},
+			expectExit:       false,
+			expectWakeIdx:    0,
+			expectClassifier: true,
+			expectHookCall:   true,
+		},
+		{
+			name:             "TimeoutFallback_Wake",
+			hookErr:          errors.New("connection refused"),
+			timeoutAction:    "wake",
+			classifierResp:   `{"confidence": 0.10, "reason": "ambient"}`,
+			messages:         []db.Message{{ID: "msg-timeout-2", ThreadID: "chan-general", AuthorName: "user-delta", Content: "query for bot", Status: db.StatusProcessing}},
+			expectExit:       false,
+			expectWakeIdx:    0,
+			expectClassifier: false,
+			expectHookCall:   true,
+		},
+		{
+			name:             "TimeoutFallback_Drop",
+			hookErr:          errors.New("timeout reached"),
+			timeoutAction:    "drop",
+			classifierResp:   `{"confidence": 0.95, "reason": "strong intent"}`,
+			messages:         []db.Message{{ID: "msg-timeout-drop", ThreadID: "chan-general", AuthorName: "user-echo", Content: "drop me on error", Status: db.StatusProcessing}},
+			expectExit:       true,
+			expectWakeIdx:    -1,
+			expectClassifier: false,
+			expectHookCall:   true,
+			wantMsgStatus:    db.StatusCompleted,
+		},
+		{
+			name:              "DropWithScheduleRunAndEmptyEffectiveID",
+			hookResp:          &WakeResponse{Override: "drop"},
+			emptyEffectiveID:  true,
+			scheduleRunID:     "sched-run-ambient",
+			messages:          []db.Message{{ID: "msg-sched-ambient", ThreadID: "chan-fallback", AuthorName: "user-sched", Content: "scheduled noise", ScheduleRunID: "sched-run-ambient", Status: db.StatusProcessing}},
+			expectExit:        true,
+			expectWakeIdx:     0,
+			expectClassifier:  false,
+			expectHookCall:    true,
+			wantReqChannelID:  "chan-fallback",
+			wantScheduleRunSt: "completed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			var classifierCalled, hookCalled bool
+			var cls *classifier.Classifier
+			if tc.classifierResp != "" {
+				cls = classifier.NewClassifier(
+					classifier.WithModel("test-flash"),
+					classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+						classifierCalled = true
+						return tc.classifierResp, nil
+					}),
+				)
+			}
+
+			var capturedReq *WakeRequest
+			mockDisp := &mockWebhookDispatcher{
+				callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
+					hookCalled = true
+					capturedReq = req
+					return tc.hookResp, tc.hookErr
 				},
-				expectExit:       false,
-				expectWakeIdx:    0,
-				expectClassifier: false,
-				expectHookCall:   true,
-				wantBurstIDs:     []string{"msg-wake-multi-1"},
-				wantTrailingIDs:  []string{"msg-wake-multi-2"},
-				wantTurnCount:    1,
-			},
-			{
-				name:             "DropOverride",
-				hookResp:         &WakeResponse{Override: "drop", Reason: "hook_drop_override"},
-				classifierResp:   `{"confidence": 0.95, "reason": "strong intent"}`,
-				messages:         []db.Message{{ID: "msg-drop-1", ThreadID: "chan-general", AuthorName: "user-bravo", Content: "random chit-chat", Status: db.StatusProcessing}},
-				expectExit:       true,
-				expectWakeIdx:    -1,
-				expectClassifier: false,
-				expectHookCall:   true,
-				wantMsgStatus:    db.StatusCompleted,
-				wantMsgErrSub:    "[AMBIENT",
-			},
-			{
-				name:             "TimeoutFallback_Classify",
-				hookErr:          context.DeadlineExceeded,
-				timeoutAction:    "classify",
-				classifierResp:   `{"confidence": 0.92, "reason": "classified wake"}`,
-				messages:         []db.Message{{ID: "msg-timeout-1", ThreadID: "chan-general", AuthorName: "user-charlie", Content: "please help me calculate total memory usage", Status: db.StatusProcessing}},
-				expectExit:       false,
-				expectWakeIdx:    0,
-				expectClassifier: true,
-				expectHookCall:   true,
-			},
-			{
-				name:             "TimeoutFallback_Wake",
-				hookErr:          errors.New("connection refused"),
-				timeoutAction:    "wake",
-				classifierResp:   `{"confidence": 0.10, "reason": "ambient"}`,
-				messages:         []db.Message{{ID: "msg-timeout-2", ThreadID: "chan-general", AuthorName: "user-delta", Content: "query for bot", Status: db.StatusProcessing}},
-				expectExit:       false,
-				expectWakeIdx:    0,
-				expectClassifier: false,
-				expectHookCall:   true,
-			},
-			{
-				name:             "TimeoutFallback_Drop",
-				hookErr:          errors.New("timeout reached"),
-				timeoutAction:    "drop",
-				classifierResp:   `{"confidence": 0.95, "reason": "strong intent"}`,
-				messages:         []db.Message{{ID: "msg-timeout-drop", ThreadID: "chan-general", AuthorName: "user-echo", Content: "drop me on error", Status: db.StatusProcessing}},
-				expectExit:       true,
-				expectWakeIdx:    -1,
-				expectClassifier: false,
-				expectHookCall:   true,
-				wantMsgStatus:    db.StatusCompleted,
-			},
-			{
-				name:              "DropWithScheduleRunAndEmptyEffectiveID",
-				hookResp:          &WakeResponse{Override: "drop"},
-				emptyEffectiveID:  true,
-				scheduleRunID:     "sched-run-ambient",
-				messages:          []db.Message{{ID: "msg-sched-ambient", ThreadID: "chan-fallback", AuthorName: "user-sched", Content: "scheduled noise", ScheduleRunID: "sched-run-ambient", Status: db.StatusProcessing}},
-				expectExit:        true,
-				expectWakeIdx:     0,
-				expectClassifier:  false,
-				expectHookCall:    true,
-				wantReqChannelID:  "chan-fallback",
-				wantScheduleRunSt: "completed",
-			},
-		}
+			}
 
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				store := setupTestStore(t)
-				var classifierCalled, hookCalled bool
-				var cls *classifier.Classifier
-				if tc.classifierResp != "" {
-					cls = classifier.NewClassifier(
-						classifier.WithModel("test-flash"),
-						classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-							classifierCalled = true
-							return tc.classifierResp, nil
-						}),
-					)
-				}
-
-				var capturedReq *WakeRequest
-				mockDisp := &mockWebhookDispatcher{
-					callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-						hookCalled = true
-						capturedReq = req
-						return tc.hookResp, tc.hookErr
-					},
-				}
-
-				pool := NewWorkerPool(WorkerPoolConfig{
-					Store:             store,
-					Classifier:        cls,
-					WebhookDispatcher: mockDisp,
-				})
-
-				now := time.Now().UTC()
-				if tc.scheduleRunID != "" {
-					_ = createScheduleRun(store, db.ScheduleRun{
-						ID: tc.scheduleRunID, ScheduleID: "sched-1", ScheduleType: "cron",
-						TargetID: tc.messages[0].ThreadID, ThreadID: tc.messages[0].ThreadID,
-						Title: "Scheduled Run", Prompt: "prompt", StartedAt: now, Status: "pending",
-					})
-				}
-
-				msgs := make([]db.Message, len(tc.messages))
-				for i, m := range tc.messages {
-					m.CreatedAt = now.Add(time.Duration(i) * time.Second)
-					msgs[i] = m
-					_ = insertMessage(store, m)
-				}
-
-				threadID := msgs[0].ThreadID
-				effID := threadID
-				if tc.emptyEffectiveID {
-					effID = ""
-				}
-				te := &turnExecution{
-					pool:        pool,
-					burst:       msgs,
-					threadID:    threadID,
-					effectiveID: effID,
-					triggerType: "message",
-					execStart:   now,
-					policy: config.ChannelPolicy{
-						Mode:                 "channel",
-						WakeMode:             "classifier",
-						AmbientWakeThreshold: ptrFloat(0.80),
-						Hooks: config.ChannelHooksConfig{
-							OnWake: &config.WebhookEndpoint{
-								URL:             "http://sidecar.local/wake",
-								TimeoutMs:       1000,
-								OnTimeoutAction: tc.timeoutAction,
-							},
-						},
-					},
-				}
-
-				if shouldExit := te.evaluateAmbientWake(); shouldExit != tc.expectExit {
-					t.Fatalf("shouldExit = %v, want %v", shouldExit, tc.expectExit)
-				}
-				if hookCalled != tc.expectHookCall {
-					t.Errorf("hookCalled = %v, want %v", hookCalled, tc.expectHookCall)
-				}
-				if classifierCalled != tc.expectClassifier {
-					t.Errorf("classifierCalled = %v, want %v", classifierCalled, tc.expectClassifier)
-				}
-				if !tc.emptyEffectiveID && te.wakeIdx != tc.expectWakeIdx {
-					t.Errorf("wakeIdx = %d, want %d", te.wakeIdx, tc.expectWakeIdx)
-				}
-				if tc.wantReqChannelID != "" {
-					if capturedReq == nil || capturedReq.ChannelID != tc.wantReqChannelID || capturedReq.ThreadID != tc.wantReqChannelID || capturedReq.Timestamp.IsZero() {
-						t.Errorf("capturedReq mismatch: %+v", capturedReq)
-					}
-				}
-				if tc.wantReqMsgID != "" && (capturedReq == nil || capturedReq.Message.ID != tc.wantReqMsgID) {
-					t.Errorf("capturedReq.Message.ID = %v, want %q", capturedReq, tc.wantReqMsgID)
-				}
-				if tc.wantWakeInfoTrue && (len(te.wakeInfos) == 0 || !te.wakeInfos[0].IsWake) {
-					t.Errorf("expected wakeInfo[0].IsWake = true")
-				}
-				if len(tc.wantBurstIDs) > 0 && (len(te.burst) != len(tc.wantBurstIDs) || te.burst[0].ID != tc.wantBurstIDs[0]) {
-					t.Errorf("burst = %+v, want %v", te.burst, tc.wantBurstIDs)
-				}
-				if len(tc.wantTrailingIDs) > 0 && (len(te.trailingMsgs) != len(tc.wantTrailingIDs) || te.trailingMsgs[0].ID != tc.wantTrailingIDs[0]) {
-					t.Errorf("trailingMsgs = %+v, want %v", te.trailingMsgs, tc.wantTrailingIDs)
-				}
-				if tc.wantTurnCount > 0 {
-					if turnCount, err := getSessionTurnCount(store, threadID); err != nil || turnCount != tc.wantTurnCount {
-						t.Errorf("turnCount = %d (err=%v), want %d", turnCount, err, tc.wantTurnCount)
-					}
-				}
-				if tc.wantMsgStatus != "" {
-					saved, err := getMessage(store, msgs[0].ID)
-					if err != nil || saved == nil || saved.Status != tc.wantMsgStatus {
-						t.Fatalf("msg status = %+v (err=%v), want %s", saved, err, tc.wantMsgStatus)
-					}
-					if tc.wantMsgErrSub != "" && !strings.Contains(saved.ErrorMessage, tc.wantMsgErrSub) {
-						t.Errorf("ErrorMessage = %q, want substring %q", saved.ErrorMessage, tc.wantMsgErrSub)
-					}
-				}
-				if tc.wantScheduleRunSt != "" {
-					if r, err := getScheduleRun(store, tc.scheduleRunID); err != nil || r == nil || r.Status != tc.wantScheduleRunSt {
-						t.Errorf("scheduleRun = %+v (err=%v), want status %q", r, err, tc.wantScheduleRunSt)
-					}
-				}
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:             store,
+				Classifier:        cls,
+				WebhookDispatcher: mockDisp,
 			})
-		}
-	})
 
-	t.Run("FullProcessBurst_WakeAndDrop", func(t *testing.T) {
-		store := setupTestStore(t)
-		var mu sync.Mutex
-		var runnerCalls, deliveryCalls int
+			now := time.Now().UTC()
+			if tc.scheduleRunID != "" {
+				_ = createScheduleRun(store, db.ScheduleRun{
+					ID: tc.scheduleRunID, ScheduleID: "sched-1", ScheduleType: "cron",
+					TargetID: tc.messages[0].ThreadID, ThreadID: tc.messages[0].ThreadID,
+					Title: "Scheduled Run", Prompt: "prompt", StartedAt: now, Status: "pending",
+				})
+			}
 
-		mockDisp := &mockWebhookDispatcher{
-			callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-				if req.Message.Content == "wake message" {
-					return &WakeResponse{Override: "wake"}, nil
-				}
-				return &WakeResponse{Override: "drop"}, nil
-			},
-		}
+			msgs := make([]db.Message, len(tc.messages))
+			for i, m := range tc.messages {
+				m.CreatedAt = now.Add(time.Duration(i) * time.Second)
+				msgs[i] = m
+				_ = insertMessage(store, m)
+			}
 
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store:             store,
-			SessionManager:    session.New(t.TempDir(), ""),
-			TimeoutMinutes:    1,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				mu.Lock()
-				runnerCalls++
-				mu.Unlock()
-				return mockJSONResponse(sessionID, "Bot response"), "", 0, nil
-			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				mu.Lock()
-				deliveryCalls++
-				mu.Unlock()
-				return nil
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
+			threadID := msgs[0].ThreadID
+			effID := threadID
+			if tc.emptyEffectiveID {
+				effID = ""
+			}
+			te := &turnExecution{
+				pool:        pool,
+				burst:       msgs,
+				threadID:    threadID,
+				effectiveID: effID,
+				triggerType: "message",
+				execStart:   now,
+				policy: config.ChannelPolicy{
 					Mode:                 "channel",
 					WakeMode:             "classifier",
 					AmbientWakeThreshold: ptrFloat(0.80),
-					Hooks:                config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake"}},
-				}
-			},
-		})
-
-		now := time.Now().UTC()
-		msgDrop := db.Message{ID: "msg-burst-drop", ThreadID: "chan-full-test", AuthorName: "user-foxtrot", Content: "drop message", Status: db.StatusPending, CreatedAt: now}
-		_ = insertMessage(store, msgDrop)
-		pool.processBurst([]db.Message{msgDrop})
-
-		savedDrop, _ := getMessage(store, "msg-burst-drop")
-		if savedDrop == nil || savedDrop.Status != db.StatusCompleted || !strings.Contains(savedDrop.ErrorMessage, "[AMBIENT") {
-			t.Errorf("expected drop message completed as ambient, got %+v", savedDrop)
-		}
-
-		msgWake := db.Message{ID: "msg-burst-wake", ThreadID: "chan-full-test", AuthorName: "user-golf", Content: "wake message", Status: db.StatusPending, CreatedAt: now.Add(time.Second)}
-		_ = insertMessage(store, msgWake)
-		pool.processBurst([]db.Message{msgWake})
-
-		mu.Lock()
-		defer mu.Unlock()
-		if runnerCalls != 1 || deliveryCalls != 1 {
-			t.Errorf("runnerCalls=%d, deliveryCalls=%d, want 1, 1", runnerCalls, deliveryCalls)
-		}
-		if savedWake, _ := getMessage(store, "msg-burst-wake"); savedWake == nil || savedWake.Status != db.StatusCompleted || savedWake.ResponseText != "Bot response" {
-			t.Errorf("expected wake message completed with response, got %+v", savedWake)
-		}
-	})
-
-	t.Run("AccessorsAndFallbacks", func(t *testing.T) {
-		var nilPool *WorkerPool
-		if nilPool.WebhookDispatcher() != nil {
-			t.Errorf("expected nil for nilPool.WebhookDispatcher")
-		}
-		nilPool.SetWebhookDispatcher(nil)
-
-		poolDef := NewWorkerPool(WorkerPoolConfig{})
-		if poolDef.WebhookDispatcher() == nil {
-			t.Errorf("expected non-nil default dispatcher")
-		}
-		mockDisp := &mockWebhookDispatcher{}
-		poolDef.SetWebhookDispatcher(mockDisp)
-		if poolDef.WebhookDispatcher() != mockDisp {
-			t.Errorf("expected mockDisp after SetWebhookDispatcher")
-		}
-		poolDef.SetWebhookDispatcher(nil)
-		if poolDef.WebhookDispatcher() == nil {
-			t.Errorf("expected non-nil default dispatcher after SetWebhookDispatcher(nil)")
-		}
-
-		teNil := &turnExecution{
-			pool:   nil,
-			burst:  []db.Message{{ID: "m-nil"}},
-			policy: config.ChannelPolicy{Mode: "channel", Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake"}}},
-		}
-		teNil.markAmbientBurst()
-	})
-}
-
-func TestPreTurnHook(t *testing.T) {
-	t.Run("HookActionsAndFallbacks", func(t *testing.T) {
-		tests := []struct {
-			name            string
-			hookResps       []*PreTurnResponse
-			hookErr         error
-			timeoutAction   string
-			initialRetry    int
-			scheduleRun     bool
-			waitAfterBurst  bool
-			expectRunner    int
-			expectHookCall  int
-			wantCheckReq    bool
-			wantPromptSub   string
-			wantMsgStatus   string
-			wantMsgRetry    int
-			checkMsgRetry   bool
-			wantMsgErrSub   string
-			wantSchedStatus string
-		}{
-			{
-				name: "Approved_WithInjectedContext",
-				hookResps: []*PreTurnResponse{{
-					Allow:           true,
-					InjectedContext: "system instructions: be concise",
-					Metadata:        map[string]any{"lease_token": "token-123"},
-				}},
-				expectRunner:   1,
-				expectHookCall: 1,
-				wantCheckReq:   true,
-				wantPromptSub:  "<COORDINATION_CONTEXT>\nsystem instructions: be concise\n</COORDINATION_CONTEXT>",
-				wantMsgStatus:  db.StatusCompleted,
-			},
-			{
-				name:           "Rejected_DropAction",
-				hookResps:      []*PreTurnResponse{{Allow: false, Action: "drop", Reason: "resource busy"}},
-				expectRunner:   0,
-				expectHookCall: 1,
-				wantMsgStatus:  db.StatusCompleted,
-				wantMsgErrSub:  "resource busy",
-			},
-			{
-				name: "Rejected_RetryAction",
-				hookResps: []*PreTurnResponse{
-					{Allow: false, Action: "retry", RetryAfterSeconds: 1, Reason: "sidecar lock wait"},
-					{Allow: true},
+					Hooks: config.ChannelHooksConfig{
+						OnWake: &config.WebhookEndpoint{
+							URL:             "http://sidecar.local/wake",
+							TimeoutMs:       1000,
+							OnTimeoutAction: tc.timeoutAction,
+						},
+					},
 				},
-				waitAfterBurst: true,
-				expectRunner:   1,
-				expectHookCall: 2,
-				wantMsgStatus:  db.StatusCompleted,
-				wantMsgRetry:   1,
-				checkMsgRetry:  true,
-			},
-			{
-				name:            "RetryExhaustion",
-				hookResps:       []*PreTurnResponse{{Allow: false, Action: "retry", RetryAfterSeconds: 1}},
-				initialRetry:    2,
-				scheduleRun:     true,
-				expectRunner:    0,
-				expectHookCall:  1,
-				wantMsgStatus:   db.StatusFailed,
-				wantMsgErrSub:   "[EXHAUSTED_PRE_TURN_RETRIES]",
-				wantSchedStatus: "failed",
-			},
-			{
-				name:           "TimeoutFallback_Drop",
-				hookErr:        context.DeadlineExceeded,
-				timeoutAction:  "drop",
-				expectRunner:   0,
-				expectHookCall: 1,
-				wantMsgStatus:  db.StatusCompleted,
-				wantMsgErrSub:  "pre_turn_timeout_drop",
-			},
-			{
-				name:           "TimeoutFallback_Proceed",
-				hookErr:        errors.New("webhook connection failed"),
-				timeoutAction:  "proceed",
-				expectRunner:   1,
-				expectHookCall: 1,
-				wantMsgStatus:  db.StatusCompleted,
-			},
-			{
-				name:           "TimeoutFallback_Retry",
-				hookErr:        errors.New("gateway timeout"),
-				timeoutAction:  "retry",
-				expectRunner:   0,
-				expectHookCall: 1,
-				wantMsgStatus:  db.StatusPending,
-				wantMsgRetry:   1,
-				checkMsgRetry:  true,
-			},
-		}
+			}
 
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				store := setupTestStore(t)
-				sessMgr := session.New(t.TempDir(), "")
-
-				var mu sync.Mutex
-				var runnerCalls, hookCalls int
-				var capturedPrompt string
-				var capturedReq *PreTurnRequest
-				completedChan := make(chan struct{})
-
-				mockDisp := &mockWebhookDispatcher{
-					callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-						mu.Lock()
-						hookCalls++
-						cnt := hookCalls
-						capturedReq = req
-						mu.Unlock()
-						if tc.hookErr != nil {
-							return nil, tc.hookErr
-						}
-						idx := cnt - 1
-						if idx >= len(tc.hookResps) {
-							idx = len(tc.hookResps) - 1
-						}
-						return tc.hookResps[idx], nil
-					},
+			if shouldExit := te.evaluateAmbientWake(); shouldExit != tc.expectExit {
+				t.Fatalf("shouldExit = %v, want %v", shouldExit, tc.expectExit)
+			}
+			if hookCalled != tc.expectHookCall {
+				t.Errorf("hookCalled = %v, want %v", hookCalled, tc.expectHookCall)
+			}
+			if classifierCalled != tc.expectClassifier {
+				t.Errorf("classifierCalled = %v, want %v", classifierCalled, tc.expectClassifier)
+			}
+			if !tc.emptyEffectiveID && te.wakeIdx != tc.expectWakeIdx {
+				t.Errorf("wakeIdx = %d, want %d", te.wakeIdx, tc.expectWakeIdx)
+			}
+			if tc.wantReqChannelID != "" {
+				if capturedReq == nil || capturedReq.ChannelID != tc.wantReqChannelID || capturedReq.ThreadID != tc.wantReqChannelID || capturedReq.Timestamp.IsZero() {
+					t.Errorf("capturedReq mismatch: %+v", capturedReq)
 				}
-
-				pool := NewWorkerPool(WorkerPoolConfig{
-					Store:              store,
-					SessionManager:     sessMgr,
-					TimeoutMinutes:     1,
-					MaxAttempts:        3,
-					RetryDelayOverride: 10 * time.Millisecond,
-					WebhookDispatcher:  mockDisp,
-					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-						mu.Lock()
-						runnerCalls++
-						capturedPrompt = prompt
-						mu.Unlock()
-						return mockJSONResponse(sessionID, "Turn proceeded"), "", 0, nil
-					},
-					DeliveryFunc: noopDelivery,
-					OnMessageCompleted: func(m db.Message, status string) {
-						if m.ID == "msg-preturn-test" {
-							select {
-							case <-completedChan:
-							default:
-								close(completedChan)
-							}
-						}
-					},
-					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-						return config.ChannelPolicy{
-							Mode:     "channel",
-							WakeMode: "all",
-							Hooks: config.ChannelHooksConfig{
-								PreTurn: &config.WebhookEndpoint{
-									URL:             "http://sidecar.local/pre-turn",
-									TimeoutMs:       1500,
-									OnTimeoutAction: tc.timeoutAction,
-								},
-							},
-						}
-					},
-				})
-
-				now := time.Now().UTC()
-				msg := db.Message{
-					ID:         "msg-preturn-test",
-					ThreadID:   "chan-preturn",
-					AuthorName: "user-alpha",
-					Content:    "test prompt for pre-turn",
-					Status:     db.StatusPending,
-					RetryCount: tc.initialRetry,
-					CreatedAt:  now,
+			}
+			if tc.wantReqMsgID != "" && (capturedReq == nil || capturedReq.Message.ID != tc.wantReqMsgID) {
+				t.Errorf("capturedReq.Message.ID = %v, want %q", capturedReq, tc.wantReqMsgID)
+			}
+			if tc.wantWakeInfoTrue && (len(te.wakeInfos) == 0 || !te.wakeInfos[0].IsWake) {
+				t.Errorf("expected wakeInfo[0].IsWake = true")
+			}
+			if len(tc.wantBurstIDs) > 0 && (len(te.burst) != len(tc.wantBurstIDs) || te.burst[0].ID != tc.wantBurstIDs[0]) {
+				t.Errorf("burst = %+v, want %v", te.burst, tc.wantBurstIDs)
+			}
+			if len(tc.wantTrailingIDs) > 0 && (len(te.trailingMsgs) != len(tc.wantTrailingIDs) || te.trailingMsgs[0].ID != tc.wantTrailingIDs[0]) {
+				t.Errorf("trailingMsgs = %+v, want %v", te.trailingMsgs, tc.wantTrailingIDs)
+			}
+			if tc.wantTurnCount > 0 {
+				if turnCount, err := getSessionTurnCount(store, threadID); err != nil || turnCount != tc.wantTurnCount {
+					t.Errorf("turnCount = %d (err=%v), want %d", turnCount, err, tc.wantTurnCount)
 				}
-				if tc.scheduleRun {
-					msg.ScheduleRunID = "run-exhaust-1"
-					_ = createScheduleRun(store, db.ScheduleRun{
-						ID: "run-exhaust-1", ScheduleID: "sched-1", ScheduleType: "cron", Status: "running", StartedAt: now,
-					})
-				}
-				_ = insertMessage(store, msg)
-				pool.processBurst([]db.Message{msg})
-
-				if tc.waitAfterBurst {
-					waitForCompletion(t, completedChan, 5*time.Second, tc.name)
-				}
-
-				mu.Lock()
-				rc, hc, cp, cr := runnerCalls, hookCalls, capturedPrompt, capturedReq
-				mu.Unlock()
-
-				if hc != tc.expectHookCall || rc != tc.expectRunner {
-					t.Errorf("hookCalls=%d (want %d), runnerCalls=%d (want %d)", hc, tc.expectHookCall, rc, tc.expectRunner)
-				}
-				if tc.wantCheckReq {
-					if cr == nil || cr.ChannelID != "chan-preturn" || cr.ThreadID != "chan-preturn" || cr.BurstCount != 1 || cr.RetryCount != 0 || cr.Timestamp.IsZero() {
-						t.Errorf("request metadata mismatch: %+v", cr)
-					}
-				}
-				if tc.wantPromptSub != "" && !strings.Contains(cp, tc.wantPromptSub) {
-					t.Errorf("prompt missing %q:\n%s", tc.wantPromptSub, cp)
-				}
-				saved, err := getMessage(store, "msg-preturn-test")
+			}
+			if tc.wantMsgStatus != "" {
+				saved, err := getMessage(store, msgs[0].ID)
 				if err != nil || saved == nil || saved.Status != tc.wantMsgStatus {
-					t.Fatalf("saved msg = %+v (err=%v), want status %s", saved, err, tc.wantMsgStatus)
-				}
-				if tc.checkMsgRetry && saved.RetryCount != tc.wantMsgRetry {
-					t.Errorf("RetryCount = %d, want %d", saved.RetryCount, tc.wantMsgRetry)
+					t.Fatalf("msg status = %+v (err=%v), want %s", saved, err, tc.wantMsgStatus)
 				}
 				if tc.wantMsgErrSub != "" && !strings.Contains(saved.ErrorMessage, tc.wantMsgErrSub) {
 					t.Errorf("ErrorMessage = %q, want substring %q", saved.ErrorMessage, tc.wantMsgErrSub)
 				}
-				if tc.wantSchedStatus != "" {
-					if r, _ := getScheduleRun(store, "run-exhaust-1"); r == nil || r.Status != tc.wantSchedStatus {
-						t.Errorf("schedule run = %+v, want status %q", r, tc.wantSchedStatus)
-					}
+			}
+			if tc.wantScheduleRunSt != "" {
+				if r, err := getScheduleRun(store, tc.scheduleRunID); err != nil || r == nil || r.Status != tc.wantScheduleRunSt {
+					t.Errorf("scheduleRun = %+v (err=%v), want status %q", r, err, tc.wantScheduleRunSt)
 				}
-			})
-		}
-	})
-
-	t.Run("HelperEdgeCases", func(t *testing.T) {
-		if reqNil := buildPreTurnRequest(nil); reqNil == nil || reqNil.Timestamp.IsZero() {
-			t.Errorf("expected valid PreTurnRequest from nil te, got %+v", reqNil)
-		}
-		msgA := db.Message{ID: "mA", RetryCount: 1, Content: "promptA"}
-		msgB := db.Message{ID: "mB", RetryCount: 3, Content: "promptB"}
-		reqEffective := buildPreTurnRequest(&turnExecution{threadID: "t-fallback", burst: []db.Message{msgA, msgB}})
-		if reqEffective.ChannelID != "t-fallback" || reqEffective.RetryCount != 3 {
-			t.Errorf("reqEffective = %+v", reqEffective)
-		}
-
-		teNoPool := &turnExecution{pool: nil, burst: []db.Message{msgA}}
-		teNoPool.rescheduleBurst(0)
-		teNoPool.abortBurst("test drop nil pool")
-
-		store := setupTestStore(t)
-		var completedStatus string
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store: store,
-			OnMessageCompleted: func(msg db.Message, status string) {
-				completedStatus = status
-			},
+			}
 		})
-		schedMsg := db.Message{ID: "msg-sched-abort", ThreadID: "chan-sched", ScheduleRunID: "run-sched-abort", Status: db.StatusPending}
-		_ = insertMessage(store, schedMsg)
-		_ = createScheduleRun(store, db.ScheduleRun{ID: "run-sched-abort", ScheduleID: "s1", ScheduleType: "cron", Status: "running", StartedAt: time.Now().UTC()})
-
-		(&turnExecution{pool: pool, burst: []db.Message{schedMsg}, threadID: "chan-sched"}).abortBurst("manual abort")
-		if completedStatus != db.StatusCompleted {
-			t.Errorf("expected completedStatus COMPLETED, got %s", completedStatus)
-		}
-		if r, _ := getScheduleRun(store, "run-sched-abort"); r == nil || r.Status != "completed" {
-			t.Errorf("expected schedule run status 'completed', got %+v", r)
-		}
-	})
+	}
 }
 
-func TestPostTurnHook(t *testing.T) {
-	t.Run("HookOutcomes", func(t *testing.T) {
-		expectedUsage := runner.TokenUsage{
-			InputTokens: 100, OutputTokens: 50, ThinkingTokens: 10, CacheReadTokens: 5, TotalTokens: 150,
-		}
-		expectedResponse := "Clean success response from runner"
+func TestOnWakeHook_FullProcessBurst(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	var mu sync.Mutex
+	var runnerCalls, deliveryCalls int
 
-		tests := []struct {
-			name         string
-			preTurnResp  *PreTurnResponse
-			runnerStderr string
-			runnerErr    error
-			runnerPanic  string
-			wantStatus   string
-			wantRespText string
-			wantUsage    runner.TokenUsage
-			wantMetaKey  string
-			wantMetaVal  any
-			wantErrSub   string
-		}{
-			{
-				name: "SuccessfulTurn",
-				preTurnResp: &PreTurnResponse{
-					Allow:    true,
-					Metadata: map[string]any{"lease_id": "lease-abc", "turn_epoch": float64(42)},
-				},
-				wantStatus:   "success",
-				wantRespText: expectedResponse,
-				wantUsage:    expectedUsage,
-				wantMetaKey:  "lease_id",
-				wantMetaVal:  "lease-abc",
-			},
-			{
-				name:         "FailedTurn_AgyError",
-				runnerStderr: "non-transient runner failed: syntax error in script",
-				runnerErr:    fmt.Errorf("exit status 1"),
-				wantStatus:   "failed",
-				wantErrSub:   "syntax error",
-			},
-			{
-				name:        "RunnerPanicRecovery",
-				runnerPanic: "simulated runner crash inside runner function",
-				wantStatus:  "failed",
-				wantErrSub:  "simulated runner crash",
-			},
-		}
+	mockDisp := &mockWebhookDispatcher{
+		callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
+			if req.Message.Content == "wake message" {
+				return &WakeResponse{Override: "wake"}, nil
+			}
+			return &WakeResponse{Override: "drop"}, nil
+		},
+	}
 
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				store := setupTestStore(t)
-				var mu sync.Mutex
-				var postCalled bool
-				var postReqReceived *PostTurnRequest
-
-				mockDisp := &mockWebhookDispatcher{
-					callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-						if tc.preTurnResp != nil {
-							return tc.preTurnResp, nil
-						}
-						return &PreTurnResponse{Allow: true}, nil
-					},
-					callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-						mu.Lock()
-						postCalled = true
-						reqCopy := *req
-						postReqReceived = &reqCopy
-						mu.Unlock()
-						return &PostTurnResponse{Acknowledged: true}, nil
-					},
-				}
-
-				pool := NewWorkerPool(WorkerPoolConfig{
-					Store:             store,
-					TimeoutMinutes:    1,
-					MaxAttempts:       1,
-					WebhookDispatcher: mockDisp,
-					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-						if tc.runnerPanic != "" {
-							panic(tc.runnerPanic)
-						}
-						if tc.runnerErr != nil {
-							return "", tc.runnerStderr, 1, tc.runnerErr
-						}
-						return mockJSONResponseWithUsage(sessionID, expectedResponse, expectedUsage), "", 0, nil
-					},
-					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-						return config.ChannelPolicy{
-							Mode:     "channel",
-							WakeMode: "all",
-							Hooks: config.ChannelHooksConfig{
-								PreTurn:  &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn"},
-								PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
-							},
-						}
-					},
-				})
-
-				msg := db.Message{
-					ID: "msg-postturn-test", ThreadID: "chan-postturn-test", AuthorName: "user-alpha",
-					Content: "run postturn test", Status: db.StatusPending, CreatedAt: time.Now().UTC(),
-				}
-				_ = insertMessage(store, msg)
-				pool.processBurst([]db.Message{msg})
-
-				mu.Lock()
-				defer mu.Unlock()
-				if !postCalled || postReqReceived == nil {
-					t.Fatalf("expected post_turn hook to be called and captured")
-				}
-				if postReqReceived.ChannelID != "chan-postturn-test" || postReqReceived.ThreadID != "chan-postturn-test" || postReqReceived.DurationMs < 0 {
-					t.Errorf("postReq metadata mismatch: %+v", postReqReceived)
-				}
-				if postReqReceived.Status != tc.wantStatus {
-					t.Errorf("Status = %q, want %q", postReqReceived.Status, tc.wantStatus)
-				}
-				if postReqReceived.ResponseText != tc.wantRespText {
-					t.Errorf("ResponseText = %q, want %q", postReqReceived.ResponseText, tc.wantRespText)
-				}
-				if postReqReceived.TokenUsage != tc.wantUsage {
-					t.Errorf("TokenUsage = %+v, want %+v", postReqReceived.TokenUsage, tc.wantUsage)
-				}
-				if tc.wantMetaKey != "" && (postReqReceived.Metadata == nil || postReqReceived.Metadata[tc.wantMetaKey] != tc.wantMetaVal) {
-					t.Errorf("Metadata = %+v, want %s=%v", postReqReceived.Metadata, tc.wantMetaKey, tc.wantMetaVal)
-				}
-				if tc.wantErrSub == "" && postReqReceived.Error != "" {
-					t.Errorf("expected empty error, got %q", postReqReceived.Error)
-				}
-				if tc.wantErrSub != "" && !strings.Contains(postReqReceived.Error, tc.wantErrSub) {
-					t.Errorf("Error = %q, want substring %q", postReqReceived.Error, tc.wantErrSub)
-				}
-			})
-		}
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:             store,
+		SessionManager:    session.New(t.TempDir(), ""),
+		TimeoutMinutes:    1,
+		WebhookDispatcher: mockDisp,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse(sessionID, "Bot response"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalls++
+			mu.Unlock()
+			return nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				WakeMode:             "classifier",
+				AmbientWakeThreshold: ptrFloat(0.80),
+				Hooks:                config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake"}},
+			}
+		},
 	})
 
-	t.Run("SerializedRelease", func(t *testing.T) {
-		store := setupTestStore(t)
-		var mu sync.Mutex
-		turn1PostStarted := make(chan struct{})
-		turn2Launched := make(chan struct{})
-		turn1PostFinished := false
-		turn2PreCalledWhileTurn1InPost := false
-		var turn2PreCalled bool
+	now := time.Now().UTC()
+	msgDrop := db.Message{ID: "msg-burst-drop", ThreadID: "chan-full-test", AuthorName: "user-foxtrot", Content: "drop message", Status: db.StatusPending, CreatedAt: now}
+	_ = insertMessage(store, msgDrop)
+	pool.processBurst([]db.Message{msgDrop})
 
-		mockDisp := &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				mu.Lock()
-				if req.ThreadID == "chan-serialized" && len(req.Messages) > 0 && req.Messages[0].ID == "msg-turn-2" {
-					turn2PreCalled = true
-					if !turn1PostFinished {
-						turn2PreCalledWhileTurn1InPost = true
-					}
-				}
-				mu.Unlock()
-				return &PreTurnResponse{Allow: true}, nil
+	savedDrop, _ := getMessage(store, "msg-burst-drop")
+	if savedDrop == nil || savedDrop.Status != db.StatusCompleted || !strings.Contains(savedDrop.ErrorMessage, "[AMBIENT") {
+		t.Errorf("expected drop message completed as ambient, got %+v", savedDrop)
+	}
+
+	msgWake := db.Message{ID: "msg-burst-wake", ThreadID: "chan-full-test", AuthorName: "user-golf", Content: "wake message", Status: db.StatusPending, CreatedAt: now.Add(time.Second)}
+	_ = insertMessage(store, msgWake)
+	pool.processBurst([]db.Message{msgWake})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if runnerCalls != 1 || deliveryCalls != 1 {
+		t.Errorf("runnerCalls=%d, deliveryCalls=%d, want 1, 1", runnerCalls, deliveryCalls)
+	}
+	if savedWake, _ := getMessage(store, "msg-burst-wake"); savedWake == nil || savedWake.Status != db.StatusCompleted || savedWake.ResponseText != "Bot response" {
+		t.Errorf("expected wake message completed with response, got %+v", savedWake)
+	}
+}
+
+func TestOnWakeHook_AccessorsAndFallbacks(t *testing.T) {
+	t.Parallel()
+	var nilPool *WorkerPool
+	if nilPool.WebhookDispatcher() != nil {
+		t.Errorf("expected nil for nilPool.WebhookDispatcher")
+	}
+	nilPool.SetWebhookDispatcher(nil)
+
+	poolDef := NewWorkerPool(WorkerPoolConfig{})
+	if poolDef.WebhookDispatcher() == nil {
+		t.Errorf("expected non-nil default dispatcher")
+	}
+	mockDisp := &mockWebhookDispatcher{}
+	poolDef.SetWebhookDispatcher(mockDisp)
+	if poolDef.WebhookDispatcher() != mockDisp {
+		t.Errorf("expected mockDisp after SetWebhookDispatcher")
+	}
+	poolDef.SetWebhookDispatcher(nil)
+	if poolDef.WebhookDispatcher() == nil {
+		t.Errorf("expected non-nil default dispatcher after SetWebhookDispatcher(nil)")
+	}
+
+	teNil := &turnExecution{
+		pool:   nil,
+		burst:  []db.Message{{ID: "m-nil"}},
+		policy: config.ChannelPolicy{Mode: "channel", Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake"}}},
+	}
+	teNil.markAmbientBurst()
+}
+
+func TestPreTurnHook_ActionsAndFallbacks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		hookResps       []*PreTurnResponse
+		hookErr         error
+		timeoutAction   string
+		initialRetry    int
+		scheduleRun     bool
+		waitAfterBurst  bool
+		expectRunner    int
+		expectHookCall  int
+		wantCheckReq    bool
+		wantPromptSub   string
+		wantMsgStatus   string
+		wantMsgRetry    int
+		checkMsgRetry   bool
+		wantMsgErrSub   string
+		wantSchedStatus string
+	}{
+		{
+			name: "Approved_WithInjectedContext",
+			hookResps: []*PreTurnResponse{{
+				Allow:           true,
+				InjectedContext: "system instructions: be concise",
+				Metadata:        map[string]any{"lease_token": "token-123"},
+			}},
+			expectRunner:   1,
+			expectHookCall: 1,
+			wantCheckReq:   true,
+			wantPromptSub:  "<COORDINATION_CONTEXT>\nsystem instructions: be concise\n</COORDINATION_CONTEXT>",
+			wantMsgStatus:  db.StatusCompleted,
+		},
+		{
+			name:           "Rejected_DropAction",
+			hookResps:      []*PreTurnResponse{{Allow: false, Action: "drop", Reason: "resource busy"}},
+			expectRunner:   0,
+			expectHookCall: 1,
+			wantMsgStatus:  db.StatusCompleted,
+			wantMsgErrSub:  "resource busy",
+		},
+		{
+			name: "Rejected_RetryAction",
+			hookResps: []*PreTurnResponse{
+				{Allow: false, Action: "retry", RetryAfterSeconds: 1, Reason: "sidecar lock wait"},
+				{Allow: true},
 			},
-			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-				if req.ThreadID == "chan-serialized" {
-					select {
-					case <-turn1PostStarted:
-					default:
-						close(turn1PostStarted)
-						<-turn2Launched
-						for i := 0; i < 64; i++ {
-							runtime.Gosched()
-						}
-						mu.Lock()
-						turn1PostFinished = true
-						mu.Unlock()
-					}
-				}
-				return &PostTurnResponse{Acknowledged: true}, nil
-			},
-		}
+			waitAfterBurst: true,
+			expectRunner:   1,
+			expectHookCall: 2,
+			wantMsgStatus:  db.StatusCompleted,
+			wantMsgRetry:   1,
+			checkMsgRetry:  true,
+		},
+		{
+			name:            "RetryExhaustion",
+			hookResps:       []*PreTurnResponse{{Allow: false, Action: "retry", RetryAfterSeconds: 1}},
+			initialRetry:    2,
+			scheduleRun:     true,
+			expectRunner:    0,
+			expectHookCall:  1,
+			wantMsgStatus:   db.StatusFailed,
+			wantMsgErrSub:   "[EXHAUSTED_PRE_TURN_RETRIES]",
+			wantSchedStatus: "failed",
+		},
+		{
+			name:           "TimeoutFallback_Drop",
+			hookErr:        context.DeadlineExceeded,
+			timeoutAction:  "drop",
+			expectRunner:   0,
+			expectHookCall: 1,
+			wantMsgStatus:  db.StatusCompleted,
+			wantMsgErrSub:  "pre_turn_timeout_drop",
+		},
+		{
+			name:           "TimeoutFallback_Proceed",
+			hookErr:        errors.New("webhook connection failed"),
+			timeoutAction:  "proceed",
+			expectRunner:   1,
+			expectHookCall: 1,
+			wantMsgStatus:  db.StatusCompleted,
+		},
+		{
+			name:           "TimeoutFallback_Retry",
+			hookErr:        errors.New("gateway timeout"),
+			timeoutAction:  "retry",
+			expectRunner:   0,
+			expectHookCall: 1,
+			wantMsgStatus:  db.StatusPending,
+			wantMsgRetry:   1,
+			checkMsgRetry:  true,
+		},
+	}
 
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store:             store,
-			TimeoutMinutes:    1,
-			MaxAttempts:       1,
-			WebhookDispatcher: mockDisp,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-				return mockJSONResponse(sessionID, "ok"), "", 0, nil
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode:     "channel",
-					WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn:  &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn"},
-						PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
-					},
-				}
-			},
-		})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			sessMgr := session.New(t.TempDir(), "")
 
-		now := time.Now().UTC()
-		msg1 := db.Message{ID: "msg-turn-1", ThreadID: "chan-serialized", AuthorName: "user-one", Content: "turn 1", Status: db.StatusPending, CreatedAt: now}
-		msg2 := db.Message{ID: "msg-turn-2", ThreadID: "chan-serialized", AuthorName: "user-two", Content: "turn 2", Status: db.StatusPending, CreatedAt: now.Add(time.Millisecond)}
-		_ = insertMessage(store, msg1)
-		_ = insertMessage(store, msg2)
+			var mu sync.Mutex
+			var runnerCalls, hookCalls int
+			var capturedPrompt string
+			var capturedReq *PreTurnRequest
+			completedChan := make(chan struct{})
 
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			pool.processBurst([]db.Message{msg1})
-		}()
-		<-turn1PostStarted
-		go func() {
-			defer wg.Done()
-			close(turn2Launched)
-			pool.processBurst([]db.Message{msg2})
-		}()
-		wg.Wait()
-
-		mu.Lock()
-		defer mu.Unlock()
-		if !turn2PreCalled || turn2PreCalledWhileTurn1InPost {
-			t.Errorf("turn2PreCalled=%v, turn2PreCalledWhileTurn1InPost=%v", turn2PreCalled, turn2PreCalledWhileTurn1InPost)
-		}
-	})
-
-	t.Run("HelperEdgeCases", func(t *testing.T) {
-		if reqNil := buildPostTurnRequest(nil); reqNil == nil || reqNil.Timestamp.IsZero() {
-			t.Errorf("expected valid PostTurnRequest from nil te, got %+v", reqNil)
-		}
-		reqFallback := buildPostTurnRequest(&turnExecution{
-			threadID: "t-fallback", turnStatus: "success", turnResponseText: "fallback response",
-			execStart: time.Now().UTC().Add(-50 * time.Millisecond), hookMetadata: map[string]any{"key": "val"},
-		})
-		if reqFallback.ChannelID != "t-fallback" || reqFallback.DurationMs <= 0 || reqFallback.Metadata["key"] != "val" {
-			t.Errorf("reqFallback = %+v", reqFallback)
-		}
-		if reqEmpty := buildPostTurnRequest(&turnExecution{threadID: "t-empty"}); reqEmpty.Status != "failed" {
-			t.Errorf("expected default status 'failed', got %s", reqEmpty.Status)
-		}
-
-		store := setupTestStore(t)
-		var postHookFired bool
-		pool := NewWorkerPool(WorkerPoolConfig{
-			Store:          store,
-			TimeoutMinutes: 1,
-			MaxAttempts:    1,
-			WebhookDispatcher: &mockWebhookDispatcher{
+			mockDisp := &mockWebhookDispatcher{
 				callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-					return &PreTurnResponse{Allow: false, Action: "drop", Reason: "denied"}, nil
+					mu.Lock()
+					hookCalls++
+					cnt := hookCalls
+					capturedReq = req
+					mu.Unlock()
+					if tc.hookErr != nil {
+						return nil, tc.hookErr
+					}
+					idx := cnt - 1
+					if idx >= len(tc.hookResps) {
+						idx = len(tc.hookResps) - 1
+					}
+					return tc.hookResps[idx], nil
+				},
+			}
+
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:              store,
+				SessionManager:     sessMgr,
+				TimeoutMinutes:     1,
+				MaxAttempts:        3,
+				RetryDelayOverride: 10 * time.Millisecond,
+				WebhookDispatcher:  mockDisp,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					mu.Lock()
+					runnerCalls++
+					capturedPrompt = prompt
+					mu.Unlock()
+					return mockJSONResponse(sessionID, "Turn proceeded"), "", 0, nil
+				},
+				DeliveryFunc: noopDelivery,
+				OnMessageCompleted: func(m db.Message, status string) {
+					if m.ID == "msg-preturn-test" {
+						select {
+						case <-completedChan:
+						default:
+							close(completedChan)
+						}
+					}
+				},
+				ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+					return config.ChannelPolicy{
+						Mode:     "channel",
+						WakeMode: "all",
+						Hooks: config.ChannelHooksConfig{
+							PreTurn: &config.WebhookEndpoint{
+								URL:             "http://sidecar.local/pre-turn",
+								TimeoutMs:       1500,
+								OnTimeoutAction: tc.timeoutAction,
+							},
+						},
+					}
+				},
+			})
+
+			now := time.Now().UTC()
+			msg := db.Message{
+				ID:         "msg-preturn-test",
+				ThreadID:   "chan-preturn",
+				AuthorName: "user-alpha",
+				Content:    "test prompt for pre-turn",
+				Status:     db.StatusPending,
+				RetryCount: tc.initialRetry,
+				CreatedAt:  now,
+			}
+			if tc.scheduleRun {
+				msg.ScheduleRunID = "run-exhaust-1"
+				_ = createScheduleRun(store, db.ScheduleRun{
+					ID: "run-exhaust-1", ScheduleID: "sched-1", ScheduleType: "cron", Status: "running", StartedAt: now,
+				})
+			}
+			_ = insertMessage(store, msg)
+			pool.processBurst([]db.Message{msg})
+
+			if tc.waitAfterBurst {
+				waitForCompletion(t, completedChan, 5*time.Second, tc.name)
+			}
+
+			mu.Lock()
+			rc, hc, cp, cr := runnerCalls, hookCalls, capturedPrompt, capturedReq
+			mu.Unlock()
+
+			if hc != tc.expectHookCall || rc != tc.expectRunner {
+				t.Errorf("hookCalls=%d (want %d), runnerCalls=%d (want %d)", hc, tc.expectHookCall, rc, tc.expectRunner)
+			}
+			if tc.wantCheckReq {
+				if cr == nil || cr.ChannelID != "chan-preturn" || cr.ThreadID != "chan-preturn" || cr.BurstCount != 1 || cr.RetryCount != 0 || cr.Timestamp.IsZero() {
+					t.Errorf("request metadata mismatch: %+v", cr)
+				}
+			}
+			if tc.wantPromptSub != "" && !strings.Contains(cp, tc.wantPromptSub) {
+				t.Errorf("prompt missing %q:\n%s", tc.wantPromptSub, cp)
+			}
+			saved, err := getMessage(store, "msg-preturn-test")
+			if err != nil || saved == nil || saved.Status != tc.wantMsgStatus {
+				t.Fatalf("saved msg = %+v (err=%v), want status %s", saved, err, tc.wantMsgStatus)
+			}
+			if tc.checkMsgRetry && saved.RetryCount != tc.wantMsgRetry {
+				t.Errorf("RetryCount = %d, want %d", saved.RetryCount, tc.wantMsgRetry)
+			}
+			if tc.wantMsgErrSub != "" && !strings.Contains(saved.ErrorMessage, tc.wantMsgErrSub) {
+				t.Errorf("ErrorMessage = %q, want substring %q", saved.ErrorMessage, tc.wantMsgErrSub)
+			}
+			if tc.wantSchedStatus != "" {
+				if r, _ := getScheduleRun(store, "run-exhaust-1"); r == nil || r.Status != tc.wantSchedStatus {
+					t.Errorf("schedule run = %+v, want status %q", r, tc.wantSchedStatus)
+				}
+			}
+		})
+	}
+}
+
+func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
+	t.Parallel()
+	if reqNil := buildPreTurnRequest(nil); reqNil == nil || reqNil.Timestamp.IsZero() {
+		t.Errorf("expected valid PreTurnRequest from nil te, got %+v", reqNil)
+	}
+	msgA := db.Message{ID: "mA", RetryCount: 1, Content: "promptA"}
+	msgB := db.Message{ID: "mB", RetryCount: 3, Content: "promptB"}
+	reqEffective := buildPreTurnRequest(&turnExecution{threadID: "t-fallback", burst: []db.Message{msgA, msgB}})
+	if reqEffective.ChannelID != "t-fallback" || reqEffective.RetryCount != 3 {
+		t.Errorf("reqEffective = %+v", reqEffective)
+	}
+
+	teNoPool := &turnExecution{pool: nil, burst: []db.Message{msgA}}
+	teNoPool.rescheduleBurst(0)
+	teNoPool.abortBurst("test drop nil pool")
+
+	store := setupTestStore(t)
+	var completedStatus string
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store: store,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			completedStatus = status
+		},
+	})
+	schedMsg := db.Message{ID: "msg-sched-abort", ThreadID: "chan-sched", ScheduleRunID: "run-sched-abort", Status: db.StatusPending}
+	_ = insertMessage(store, schedMsg)
+	_ = createScheduleRun(store, db.ScheduleRun{ID: "run-sched-abort", ScheduleID: "s1", ScheduleType: "cron", Status: "running", StartedAt: time.Now().UTC()})
+
+	(&turnExecution{pool: pool, burst: []db.Message{schedMsg}, threadID: "chan-sched"}).abortBurst("manual abort")
+	if completedStatus != db.StatusCompleted {
+		t.Errorf("expected completedStatus COMPLETED, got %s", completedStatus)
+	}
+	if r, _ := getScheduleRun(store, "run-sched-abort"); r == nil || r.Status != "completed" {
+		t.Errorf("expected schedule run status 'completed', got %+v", r)
+	}
+}
+
+func TestPostTurnHook_Outcomes(t *testing.T) {
+	t.Parallel()
+	expectedUsage := runner.TokenUsage{
+		InputTokens: 100, OutputTokens: 50, ThinkingTokens: 10, CacheReadTokens: 5, TotalTokens: 150,
+	}
+	expectedResponse := "Clean success response from runner"
+
+	tests := []struct {
+		name         string
+		preTurnResp  *PreTurnResponse
+		runnerStderr string
+		runnerErr    error
+		runnerPanic  string
+		wantStatus   string
+		wantRespText string
+		wantUsage    runner.TokenUsage
+		wantMetaKey  string
+		wantMetaVal  any
+		wantErrSub   string
+	}{
+		{
+			name: "SuccessfulTurn",
+			preTurnResp: &PreTurnResponse{
+				Allow:    true,
+				Metadata: map[string]any{"lease_id": "lease-abc", "turn_epoch": float64(42)},
+			},
+			wantStatus:   "success",
+			wantRespText: expectedResponse,
+			wantUsage:    expectedUsage,
+			wantMetaKey:  "lease_id",
+			wantMetaVal:  "lease-abc",
+		},
+		{
+			name:         "FailedTurn_AgyError",
+			runnerStderr: "non-transient runner failed: syntax error in script",
+			runnerErr:    fmt.Errorf("exit status 1"),
+			wantStatus:   "failed",
+			wantErrSub:   "syntax error",
+		},
+		{
+			name:        "RunnerPanicRecovery",
+			runnerPanic: "simulated runner crash inside runner function",
+			wantStatus:  "failed",
+			wantErrSub:  "simulated runner crash",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			var mu sync.Mutex
+			var postCalled bool
+			var postReqReceived *PostTurnRequest
+
+			mockDisp := &mockWebhookDispatcher{
+				callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
+					if tc.preTurnResp != nil {
+						return tc.preTurnResp, nil
+					}
+					return &PreTurnResponse{Allow: true}, nil
 				},
 				callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-					postHookFired = true
+					mu.Lock()
+					postCalled = true
+					reqCopy := *req
+					postReqReceived = &reqCopy
+					mu.Unlock()
 					return &PostTurnResponse{Acknowledged: true}, nil
 				},
-			},
-			ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{
-					Mode: "channel", WakeMode: "all",
-					Hooks: config.ChannelHooksConfig{
-						PreTurn:  &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn"},
-						PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
-					},
-				}
-			},
+			}
+
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:             store,
+				TimeoutMinutes:    1,
+				MaxAttempts:       1,
+				WebhookDispatcher: mockDisp,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					if tc.runnerPanic != "" {
+						panic(tc.runnerPanic)
+					}
+					if tc.runnerErr != nil {
+						return "", tc.runnerStderr, 1, tc.runnerErr
+					}
+					return mockJSONResponseWithUsage(sessionID, expectedResponse, expectedUsage), "", 0, nil
+				},
+				ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+					return config.ChannelPolicy{
+						Mode:     "channel",
+						WakeMode: "all",
+						Hooks: config.ChannelHooksConfig{
+							PreTurn:  &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn"},
+							PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
+						},
+					}
+				},
+			})
+
+			msg := db.Message{
+				ID: "msg-postturn-test", ThreadID: "chan-postturn-test", AuthorName: "user-alpha",
+				Content: "run postturn test", Status: db.StatusPending, CreatedAt: time.Now().UTC(),
+			}
+			_ = insertMessage(store, msg)
+			pool.processBurst([]db.Message{msg})
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !postCalled || postReqReceived == nil {
+				t.Fatalf("expected post_turn hook to be called and captured")
+			}
+			if postReqReceived.ChannelID != "chan-postturn-test" || postReqReceived.ThreadID != "chan-postturn-test" || postReqReceived.DurationMs < 0 {
+				t.Errorf("postReq metadata mismatch: %+v", postReqReceived)
+			}
+			if postReqReceived.Status != tc.wantStatus {
+				t.Errorf("Status = %q, want %q", postReqReceived.Status, tc.wantStatus)
+			}
+			if postReqReceived.ResponseText != tc.wantRespText {
+				t.Errorf("ResponseText = %q, want %q", postReqReceived.ResponseText, tc.wantRespText)
+			}
+			if postReqReceived.TokenUsage != tc.wantUsage {
+				t.Errorf("TokenUsage = %+v, want %+v", postReqReceived.TokenUsage, tc.wantUsage)
+			}
+			if tc.wantMetaKey != "" && (postReqReceived.Metadata == nil || postReqReceived.Metadata[tc.wantMetaKey] != tc.wantMetaVal) {
+				t.Errorf("Metadata = %+v, want %s=%v", postReqReceived.Metadata, tc.wantMetaKey, tc.wantMetaVal)
+			}
+			if tc.wantErrSub == "" && postReqReceived.Error != "" {
+				t.Errorf("expected empty error, got %q", postReqReceived.Error)
+			}
+			if tc.wantErrSub != "" && !strings.Contains(postReqReceived.Error, tc.wantErrSub) {
+				t.Errorf("Error = %q, want substring %q", postReqReceived.Error, tc.wantErrSub)
+			}
 		})
-		msgDrop := db.Message{ID: "msg-preturn-dropped", ThreadID: "chan-preturn-dropped", AuthorName: "user-drop", Content: "drop me", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-		_ = insertMessage(store, msgDrop)
-		pool.processBurst([]db.Message{msgDrop})
-		if postHookFired {
-			t.Errorf("post_turn hook must NOT fire when pre_turn rejected/dropped the turn")
-		}
+	}
+}
+
+func TestPostTurnHook_SerializedRelease(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	var mu sync.Mutex
+	turn1PostStarted := make(chan struct{})
+	turn2Launched := make(chan struct{})
+	turn1PostFinished := false
+	turn2PreCalledWhileTurn1InPost := false
+	var turn2PreCalled bool
+
+	mockDisp := &mockWebhookDispatcher{
+		callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
+			mu.Lock()
+			if req.ThreadID == "chan-serialized" && len(req.Messages) > 0 && req.Messages[0].ID == "msg-turn-2" {
+				turn2PreCalled = true
+				if !turn1PostFinished {
+					turn2PreCalledWhileTurn1InPost = true
+				}
+			}
+			mu.Unlock()
+			return &PreTurnResponse{Allow: true}, nil
+		},
+		callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
+			if req.ThreadID == "chan-serialized" {
+				select {
+				case <-turn1PostStarted:
+				default:
+					close(turn1PostStarted)
+					<-turn2Launched
+					for i := 0; i < 64; i++ {
+						runtime.Gosched()
+					}
+					mu.Lock()
+					turn1PostFinished = true
+					mu.Unlock()
+				}
+			}
+			return &PostTurnResponse{Acknowledged: true}, nil
+		},
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:             store,
+		TimeoutMinutes:    1,
+		MaxAttempts:       1,
+		WebhookDispatcher: mockDisp,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse(sessionID, "ok"), "", 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:     "channel",
+				WakeMode: "all",
+				Hooks: config.ChannelHooksConfig{
+					PreTurn:  &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn"},
+					PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
+				},
+			}
+		},
 	})
+
+	now := time.Now().UTC()
+	msg1 := db.Message{ID: "msg-turn-1", ThreadID: "chan-serialized", AuthorName: "user-one", Content: "turn 1", Status: db.StatusPending, CreatedAt: now}
+	msg2 := db.Message{ID: "msg-turn-2", ThreadID: "chan-serialized", AuthorName: "user-two", Content: "turn 2", Status: db.StatusPending, CreatedAt: now.Add(time.Millisecond)}
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		pool.processBurst([]db.Message{msg1})
+	}()
+	<-turn1PostStarted
+	go func() {
+		defer wg.Done()
+		close(turn2Launched)
+		pool.processBurst([]db.Message{msg2})
+	}()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !turn2PreCalled || turn2PreCalledWhileTurn1InPost {
+		t.Errorf("turn2PreCalled=%v, turn2PreCalledWhileTurn1InPost=%v", turn2PreCalled, turn2PreCalledWhileTurn1InPost)
+	}
+}
+
+func TestPostTurnHook_HelperEdgeCases(t *testing.T) {
+	t.Parallel()
+	if reqNil := buildPostTurnRequest(nil); reqNil == nil || reqNil.Timestamp.IsZero() {
+		t.Errorf("expected valid PostTurnRequest from nil te, got %+v", reqNil)
+	}
+	reqFallback := buildPostTurnRequest(&turnExecution{
+		threadID: "t-fallback", turnStatus: "success", turnResponseText: "fallback response",
+		execStart: time.Now().UTC().Add(-50 * time.Millisecond), hookMetadata: map[string]any{"key": "val"},
+	})
+	if reqFallback.ChannelID != "t-fallback" || reqFallback.DurationMs <= 0 || reqFallback.Metadata["key"] != "val" {
+		t.Errorf("reqFallback = %+v", reqFallback)
+	}
+	if reqEmpty := buildPostTurnRequest(&turnExecution{threadID: "t-empty"}); reqEmpty.Status != "failed" {
+		t.Errorf("expected default status 'failed', got %s", reqEmpty.Status)
+	}
+
+	store := setupTestStore(t)
+	var postHookFired bool
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		TimeoutMinutes: 1,
+		MaxAttempts:    1,
+		WebhookDispatcher: &mockWebhookDispatcher{
+			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
+				return &PreTurnResponse{Allow: false, Action: "drop", Reason: "denied"}, nil
+			},
+			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
+				postHookFired = true
+				return &PostTurnResponse{Acknowledged: true}, nil
+			},
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel", WakeMode: "all",
+				Hooks: config.ChannelHooksConfig{
+					PreTurn:  &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn"},
+					PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
+				},
+			}
+		},
+	})
+	msgDrop := db.Message{ID: "msg-preturn-dropped", ThreadID: "chan-preturn-dropped", AuthorName: "user-drop", Content: "drop me", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+	_ = insertMessage(store, msgDrop)
+	pool.processBurst([]db.Message{msgDrop})
+	if postHookFired {
+		t.Errorf("post_turn hook must NOT fire when pre_turn rejected/dropped the turn")
+	}
 }
 
 func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
@@ -5090,9 +5097,9 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 		runnerResponse    string
 	}{
 		{
-			name:   "AlwaysDeliversFinalOutputText",
-			convID: "c2222222-2222-3333-4444-555555555555",
-			msgID:  "msg-delivered-1",
+			name:     "AlwaysDeliversFinalOutputText",
+			convID:   "c2222222-2222-3333-4444-555555555555",
+			msgID:    "msg-delivered-1",
 			threadID: "thread-delivered-1",
 			transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check sync"}
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]}
@@ -5102,9 +5109,9 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 			runnerResponse: "Wait for background task task-645 to complete.",
 		},
 		{
-			name:   "TranscriptSilent_PreservesSubstantiveRunnerResponse",
-			convID: "c3333333-3333-4444-5555-666666666666",
-			msgID:  "msg-substantive-fallback-1",
+			name:     "TranscriptSilent_PreservesSubstantiveRunnerResponse",
+			convID:   "c3333333-3333-4444-5555-666666666666",
+			msgID:    "msg-substantive-fallback-1",
 			threadID: "thread-substantive-fallback-1",
 			transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check deployment"}
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]}

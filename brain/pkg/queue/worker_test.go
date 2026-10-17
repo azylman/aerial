@@ -486,19 +486,19 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                 string
-		threadID             string
-		daemonUUID           string
-		presetSessionInDB    string
-		turnResponses        []string
-		transcriptContent    string
-		foreignDiskUUID      string
-		expectedFinalStatus  string
-		wantDeliveredSubstr  string
-		wantSavedSession     string
-		checkQuotaSchedule   bool
-		checkQuotaDbError    bool
-		expectSessionReject  string
+		name                string
+		threadID            string
+		daemonUUID          string
+		presetSessionInDB   string
+		turnResponses       []string
+		transcriptContent   string
+		foreignDiskUUID     string
+		expectedFinalStatus string
+		wantDeliveredSubstr string
+		wantSavedSession    string
+		checkQuotaSchedule  bool
+		checkQuotaDbError   bool
+		expectSessionReject string
 	}{
 		{
 			name:                "ColdStart_Success",
@@ -782,134 +782,130 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	}
 }
 
-func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
+func TestTurnExecution_GetRecentThreadMessages_DiscordAPI(t *testing.T) {
 	t.Parallel()
+	now := time.Now().UTC()
+	t1 := now.Add(-10 * time.Minute)
+	t2 := now.Add(-5 * time.Minute)
 
-	t.Run("DiscordAPI", func(t *testing.T) {
-		t.Parallel()
-		now := time.Now().UTC()
-		t1 := now.Add(-10 * time.Minute)
-		t2 := now.Add(-5 * time.Minute)
-
-		mockDiscordMsgs := []*discordgo.Message{
-			nil, // dm == nil test
-			{
-				ID:        "1552732003076669002",
-				ChannelID: "1552732003076669460",
-				Content:   "Can we add the SVG icon?",
-				Timestamp: t2,
-				Author:    &discordgo.User{ID: "169260920550195200", Username: "arcane103"},
-				Mentions:  []*discordgo.User{{ID: "bot-123", Username: "Aerial"}},
-				ReferencedMessage: &discordgo.Message{
-					Author: &discordgo.User{Username: "Aerial"},
-				},
+	mockDiscordMsgs := []*discordgo.Message{
+		nil, // dm == nil test
+		{
+			ID:        "1552732003076669002",
+			ChannelID: "1552732003076669460",
+			Content:   "Can we add the SVG icon?",
+			Timestamp: t2,
+			Author:    &discordgo.User{ID: "169260920550195200", Username: "arcane103"},
+			Mentions:  []*discordgo.User{{ID: "bot-123", Username: "Aerial"}},
+			ReferencedMessage: &discordgo.Message{
+				Author: &discordgo.User{Username: "Aerial"},
 			},
-			{
-				ID:        "1552732003076669001",
-				ChannelID: "1552732003076669460",
-				Content:   "Weather widget looks good",
-				Timestamp: t1,
-				Author:    &discordgo.User{ID: "169260920550195200", Username: "arcane103"},
-			},
-			{
-				ID:        "1552732003076669000",
-				ChannelID: "1552732003076669460",
-				Content:   "Webhook notification",
-				Timestamp: time.Time{},
-				WebhookID: "hook-123",
-			},
-			{
-				ID:        "1552732003076669099",
-				ChannelID: "1552732003076669460",
-				Content:   "Current burst message to filter",
-				Timestamp: now,
-			},
-		}
+		},
+		{
+			ID:        "1552732003076669001",
+			ChannelID: "1552732003076669460",
+			Content:   "Weather widget looks good",
+			Timestamp: t1,
+			Author:    &discordgo.User{ID: "169260920550195200", Username: "arcane103"},
+		},
+		{
+			ID:        "1552732003076669000",
+			ChannelID: "1552732003076669460",
+			Content:   "Webhook notification",
+			Timestamp: time.Time{},
+			WebhookID: "hook-123",
+		},
+		{
+			ID:        "1552732003076669099",
+			ChannelID: "1552732003076669460",
+			Content:   "Current burst message to filter",
+			Timestamp: now,
+		},
+	}
 
-		dg, err := discordgo.New("Bot test-token")
-		if err != nil {
-			t.Fatalf("discordgo.New failed: %v", err)
-		}
-		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			body, _ := json.Marshal(mockDiscordMsgs)
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(bytes.NewReader(body)),
-			}, nil
-		})
-
-		pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: dg}}
-		te := &turnExecution{
-			pool:  pool,
-			burst: []db.Message{{ID: "1552732003076669099"}},
-		}
-
-		msgs, err := te.getRecentThreadMessages("1552732003076669460", 10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(msgs) != 3 {
-			t.Fatalf("expected 3 messages, got %d", len(msgs))
-		}
-		if msgs[0].ID != "1552732003076669000" || msgs[0].AuthorName != "Webhook" {
-			t.Errorf("oldest message mismatch: %+v", msgs[0])
-		}
-		if msgs[2].ID != "1552732003076669002" || msgs[2].Metadata.ReplyingToAuthor != "@Aerial" {
-			t.Errorf("newest message mismatch: %+v", msgs[2])
-		}
+	dg, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New failed: %v", err)
+	}
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := json.Marshal(mockDiscordMsgs)
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(body)),
+		}, nil
 	})
 
-	t.Run("FallbackFiltered", func(t *testing.T) {
-		t.Parallel()
-		fakeStore := db.NewFakeStore()
-		ctx := context.Background()
+	pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: dg}}
+	te := &turnExecution{
+		pool:  pool,
+		burst: []db.Message{{ID: "1552732003076669099"}},
+	}
 
-		_ = fakeStore.InsertMessage(ctx, db.Message{
-			ID:         "msg-1",
-			ThreadID:   "1552732003076669460",
-			AuthorName: "arcane103",
-			Content:    "Normal chat message",
-			CreatedAt:  time.Now().Add(-2 * time.Minute),
-		})
-		_ = fakeStore.InsertMessage(ctx, db.Message{
-			ID:            "msg-sched",
-			ThreadID:      "1552732003076669460",
-			AuthorName:    "Scheduler",
-			Content:       "Check on PR status and deployment prompt injection...",
-			ScheduleRunID: "run-123",
-			CreatedAt:     time.Now().Add(-1 * time.Minute),
-		})
+	msgs, err := te.getRecentThreadMessages("1552732003076669460", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	if msgs[0].ID != "1552732003076669000" || msgs[0].AuthorName != "Webhook" {
+		t.Errorf("oldest message mismatch: %+v", msgs[0])
+	}
+	if msgs[2].ID != "1552732003076669002" || msgs[2].Metadata.ReplyingToAuthor != "@Aerial" {
+		t.Errorf("newest message mismatch: %+v", msgs[2])
+	}
+}
 
-		dg, _ := discordgo.New("Bot test")
-		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			return nil, errors.New("discord simulated network error")
-		})
+func TestTurnExecution_GetRecentThreadMessages_FallbackFiltered(t *testing.T) {
+	t.Parallel()
+	fakeStore := db.NewFakeStore()
+	ctx := context.Background()
 
-		pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: dg, Store: fakeStore}}
-		te := &turnExecution{pool: pool}
-
-		msgs, err := te.getRecentThreadMessages("1552732003076669460", 0)
-		if err != nil || len(msgs) != 1 || msgs[0].ID != "msg-1" {
-			t.Fatalf("expected 1 message msg-1, got %d (err: %v)", len(msgs), err)
-		}
-
-		msgsClamped, err := te.getRecentThreadMessages("1552732003076669460", 200)
-		if err != nil || len(msgsClamped) != 1 {
-			t.Errorf("expected 1 clamped message, got %d", len(msgsClamped))
-		}
-
-		errStore := &mockErrRecentStore{}
-		teErr := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: errStore}}}
-		if _, err := teErr.getRecentThreadMessages("1552732003076669460", 10); err == nil {
-			t.Errorf("expected error on store failure")
-		}
-
-		teNil := &turnExecution{}
-		if msgs, err := teNil.getRecentThreadMessages("1552732003076669460", 10); msgs != nil || err != nil {
-			t.Errorf("expected nil, nil on nil store, got %v, %v", msgs, err)
-		}
+	_ = fakeStore.InsertMessage(ctx, db.Message{
+		ID:         "msg-1",
+		ThreadID:   "1552732003076669460",
+		AuthorName: "arcane103",
+		Content:    "Normal chat message",
+		CreatedAt:  time.Now().Add(-2 * time.Minute),
 	})
+	_ = fakeStore.InsertMessage(ctx, db.Message{
+		ID:            "msg-sched",
+		ThreadID:      "1552732003076669460",
+		AuthorName:    "Scheduler",
+		Content:       "Check on PR status and deployment prompt injection...",
+		ScheduleRunID: "run-123",
+		CreatedAt:     time.Now().Add(-1 * time.Minute),
+	})
+
+	dg, _ := discordgo.New("Bot test")
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("discord simulated network error")
+	})
+
+	pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: dg, Store: fakeStore}}
+	te := &turnExecution{pool: pool}
+
+	msgs, err := te.getRecentThreadMessages("1552732003076669460", 0)
+	if err != nil || len(msgs) != 1 || msgs[0].ID != "msg-1" {
+		t.Fatalf("expected 1 message msg-1, got %d (err: %v)", len(msgs), err)
+	}
+
+	msgsClamped, err := te.getRecentThreadMessages("1552732003076669460", 200)
+	if err != nil || len(msgsClamped) != 1 {
+		t.Errorf("expected 1 clamped message, got %d", len(msgsClamped))
+	}
+
+	errStore := &mockErrRecentStore{}
+	teErr := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: errStore}}}
+	if _, err := teErr.getRecentThreadMessages("1552732003076669460", 10); err == nil {
+		t.Errorf("expected error on store failure")
+	}
+
+	teNil := &turnExecution{}
+	if msgs, err := teNil.getRecentThreadMessages("1552732003076669460", 10); msgs != nil || err != nil {
+		t.Errorf("expected nil, nil on nil store, got %v, %v", msgs, err)
+	}
 }
 
 type mockErrRecentStore struct {
@@ -955,74 +951,31 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	teNull.rotateSessionID("thread-evict-3", "")
 }
 
-func TestWorker_SessionDBRotation(t *testing.T) {
+func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		channelMode       string
-		preWriteDBBytes   int64
-		preWriteWALBytes  int64
-		simulatedPhase    string // "preturn", "quota_pause", "watchdog", "transient", "post_execution"
-		triggerMaxQuota   bool
-		wantSessionIDKeep bool
+		name             string
+		channelMode      string
+		preWriteDBBytes  int64
+		preWriteWALBytes int64
 	}{
 		{
-			name:              "PreTurn_ChannelMode_DBLimit",
-			channelMode:       "channel",
-			preWriteDBBytes:   session.DefaultMaxSessionDBBytes + 1024,
-			preWriteWALBytes:  600 * 1024,
-			simulatedPhase:    "preturn",
-			wantSessionIDKeep: true,
+			name:             "ChannelMode_DBLimit",
+			channelMode:      "channel",
+			preWriteDBBytes:  session.DefaultMaxSessionDBBytes + 1024,
+			preWriteWALBytes: 600 * 1024,
 		},
 		{
-			name:              "PreTurn_ChannelMode_DBLimit_WALIgnored",
-			channelMode:       "channel",
-			preWriteDBBytes:   1000 * 1024,
-			preWriteWALBytes:  600 * 1024,
-			simulatedPhase:    "preturn",
-			wantSessionIDKeep: true,
+			name:             "ChannelMode_DBLimit_WALIgnored",
+			channelMode:      "channel",
+			preWriteDBBytes:  1000 * 1024,
+			preWriteWALBytes: 600 * 1024,
 		},
 		{
-			name:              "PreTurn_ThreadMode_DBLimit",
-			channelMode:       "thread",
-			preWriteDBBytes:   session.DefaultMaxSessionDBBytes + 1024,
-			simulatedPhase:    "preturn",
-			wantSessionIDKeep: true,
-		},
-		{
-			name:              "QuotaPause_DBAboveThreshold",
-			channelMode:       "thread",
-			preWriteDBBytes:   session.DefaultMaxQuotaPauseDBBytes + 1024,
-			simulatedPhase:    "quota_pause",
-			triggerMaxQuota:   true,
-			wantSessionIDKeep: true,
-		},
-		{
-			name:              "QuotaPause_DBBelowThreshold",
-			channelMode:       "thread",
-			preWriteDBBytes:   200 * 1024,
-			simulatedPhase:    "quota_pause",
-			triggerMaxQuota:   true,
-			wantSessionIDKeep: true,
-		},
-		{
-			name:              "WatchdogTimeout_RetryPreservesSession",
-			channelMode:       "thread",
-			simulatedPhase:    "watchdog",
-			wantSessionIDKeep: true,
-		},
-		{
-			name:              "PostExecution_HeavyDBPreserved",
-			channelMode:       "thread",
-			simulatedPhase:    "post_execution",
-			wantSessionIDKeep: true,
-		},
-		{
-			name:              "TransientRetry_BloatedDBPreserved",
-			channelMode:       "thread",
-			simulatedPhase:    "transient",
-			wantSessionIDKeep: true,
+			name:            "ThreadMode_DBLimit",
+			channelMode:     "thread",
+			preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024,
 		},
 	}
 
@@ -1045,12 +998,8 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 
 			threadID := "thread-" + tc.name
 			_ = saveSessionID(store, threadID, oldSess)
-			if tc.simulatedPhase == "preturn" {
-				_, _ = incrementSessionTurnCount(store, threadID)
-			}
+			_, _ = incrementSessionTurnCount(store, threadID)
 
-			var mu sync.Mutex
-			var attempts []string
 			doneCh := make(chan struct{}, 1)
 
 			appCfg := config.NewFromData(&config.ConfigData{
@@ -1077,53 +1026,9 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 					default:
 					}
 				},
-			}
-
-			switch tc.simulatedPhase {
-			case "preturn":
-				wpCfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					mu.Lock()
-					attempts = append(attempts, sessionID)
-					mu.Unlock()
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					return mockJSONResponse(sessionID, "OK"), "", 0, nil
-				}
-			case "quota_pause":
-				wpCfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
-				}
-			case "post_execution":
-				wpCfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0644)
-					return mockJSONResponse(oldSess, "Execution heavy DB output"), "", 0, nil
-				}
-			case "watchdog":
-				wpCfg.MaxAttempts = 2
-				wpCfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-					mu.Lock()
-					attempts = append(attempts, sessionID)
-					currentAttempt := len(attempts)
-					mu.Unlock()
-
-					if currentAttempt == 1 {
-						_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
-						return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
-					}
-					return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
-				}
-			case "transient":
-				wpCfg.MaxAttempts = 2
-				wpCfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					mu.Lock()
-					attempts = append(attempts, sessionID)
-					currentAttempt := len(attempts)
-					mu.Unlock()
-
-					if currentAttempt == 1 {
-						_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
-						return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
-					}
-					return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
-				}
+				},
 			}
 
 			pool := New(appCfg, wpCfg)
@@ -1140,24 +1045,336 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 				t.Fatal("Timeout waiting for message completion")
 			}
 
-			if tc.wantSessionIDKeep {
-				curSess, _ := getSessionID(store, threadID)
-				if curSess != oldSess {
-					t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
-				}
-			}
-
-			if len(attempts) > 1 {
-				for i, a := range attempts {
-					if a != oldSess {
-						t.Errorf("Expected attempt %d to use session %q, got: %q", i+1, oldSess, a)
-					}
-				}
+			curSess, _ := getSessionID(store, threadID)
+			if curSess != oldSess {
+				t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
 			}
 		})
 	}
 }
 
+func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		channelMode     string
+		preWriteDBBytes int64
+	}{
+		{
+			name:            "DBAboveThreshold",
+			channelMode:     "thread",
+			preWriteDBBytes: session.DefaultMaxQuotaPauseDBBytes + 1024,
+		},
+		{
+			name:            "DBBelowThreshold",
+			channelMode:     "thread",
+			preWriteDBBytes: 200 * 1024,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			tmpDir := t.TempDir()
+			sessMgr := session.New(tmpDir, tmpDir)
+
+			oldSess := "sess-" + tc.name
+			convDir := filepath.Join(tmpDir, "conversations")
+			_ = os.MkdirAll(convDir, 0755)
+			if tc.preWriteDBBytes > 0 {
+				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0644)
+			}
+
+			threadID := "thread-" + tc.name
+			_ = saveSessionID(store, threadID, oldSess)
+
+			doneCh := make(chan struct{}, 1)
+
+			appCfg := config.NewFromData(&config.ConfigData{
+				Channels: map[string]config.ChannelPolicy{
+					"default": {Mode: tc.channelMode},
+				},
+			})
+
+			wpCfg := WorkerPoolConfig{
+				SessionManager: sessMgr,
+				Store:          store,
+				TimeoutMinutes: 1,
+				BackoffBase:    5 * time.Millisecond,
+				MaxAttempts:    1,
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					return nil
+				},
+				TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+					return func() {}
+				},
+				OnMessageCompleted: func(msg db.Message, finalStatus string) {
+					select {
+					case doneCh <- struct{}{}:
+					default:
+					}
+				},
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
+				},
+			}
+
+			pool := New(appCfg, wpCfg)
+			pool.Start()
+			defer pool.Stop()
+
+			msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "test message"}
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
+
+			select {
+			case <-doneCh:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Timeout waiting for message completion")
+			}
+
+			curSess, _ := getSessionID(store, threadID)
+			if curSess != oldSess {
+				t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
+			}
+		})
+	}
+}
+
+func TestWorker_SessionDBRotation_PostExecutionPreserved(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	oldSess := "sess-post-execution"
+	convDir := filepath.Join(tmpDir, "conversations")
+	_ = os.MkdirAll(convDir, 0755)
+
+	threadID := "thread-post-execution"
+	_ = saveSessionID(store, threadID, oldSess)
+
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	wpCfg := WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    1,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0644)
+			return mockJSONResponse(oldSess, "Execution heavy DB output"), "", 0, nil
+		},
+	}
+
+	pool := New(appCfg, wpCfg)
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-post-execution", ThreadID: threadID, Content: "test message"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completion")
+	}
+
+	curSess, _ := getSessionID(store, threadID)
+	if curSess != oldSess {
+		t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
+	}
+}
+
+func TestWorker_SessionDBRotation_WatchdogRetryPreservesSession(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	oldSess := "sess-watchdog"
+	convDir := filepath.Join(tmpDir, "conversations")
+	_ = os.MkdirAll(convDir, 0755)
+
+	threadID := "thread-watchdog"
+	_ = saveSessionID(store, threadID, oldSess)
+
+	var mu sync.Mutex
+	var attempts []string
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	wpCfg := WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			mu.Lock()
+			attempts = append(attempts, sessionID)
+			currentAttempt := len(attempts)
+			mu.Unlock()
+
+			if currentAttempt == 1 {
+				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
+				return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+			}
+			return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
+		},
+	}
+
+	pool := New(appCfg, wpCfg)
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-watchdog", ThreadID: threadID, Content: "test message"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completion")
+	}
+
+	curSess, _ := getSessionID(store, threadID)
+	if curSess != oldSess {
+		t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
+	}
+
+	if len(attempts) != 2 {
+		t.Fatalf("Expected 2 attempts, got: %d", len(attempts))
+	}
+	for i, a := range attempts {
+		if a != oldSess {
+			t.Errorf("Expected attempt %d to use session %q, got: %q", i+1, oldSess, a)
+		}
+	}
+}
+
+func TestWorker_SessionDBRotation_TransientRetryPreservesSession(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	oldSess := "sess-transient"
+	convDir := filepath.Join(tmpDir, "conversations")
+	_ = os.MkdirAll(convDir, 0755)
+
+	threadID := "thread-transient"
+	_ = saveSessionID(store, threadID, oldSess)
+
+	var mu sync.Mutex
+	var attempts []string
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	wpCfg := WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			attempts = append(attempts, sessionID)
+			currentAttempt := len(attempts)
+			mu.Unlock()
+
+			if currentAttempt == 1 {
+				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
+				return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
+			}
+			return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
+		},
+	}
+
+	pool := New(appCfg, wpCfg)
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-transient", ThreadID: threadID, Content: "test message"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completion")
+	}
+
+	curSess, _ := getSessionID(store, threadID)
+	if curSess != oldSess {
+		t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
+	}
+
+	if len(attempts) != 2 {
+		t.Fatalf("Expected 2 attempts, got: %d", len(attempts))
+	}
+	for i, a := range attempts {
+		if a != oldSess {
+			t.Errorf("Expected attempt %d to use session %q, got: %q", i+1, oldSess, a)
+		}
+	}
+}
 
 func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 	t.Parallel()
@@ -1513,183 +1730,179 @@ func TestWorkerPool_ProgressiveCapacityBackoff(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("ContextCancellationDuringBackoff", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpDir := t.TempDir()
-		sessMgr := session.New(tmpDir, tmpDir)
-
-		startedCh := make(chan struct{}, 1)
-		var typingMu sync.Mutex
-		var typingActive bool
-		var typingStopped bool
-
-		appCfg := config.NewFromData(&config.ConfigData{
-			Channels: map[string]config.ChannelPolicy{
-				"default": {Mode: "thread"},
-			},
-		})
-
-		pool := New(appCfg, WorkerPoolConfig{
-			SessionManager: sessMgr,
-			Store:          store,
-			TimeoutMinutes: 1,
-			MaxAttempts:    2,
-			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-				select {
-				case startedCh <- struct{}{}:
-				default:
-				}
-				return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
-			},
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
-			},
-			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-				typingMu.Lock()
-				typingActive = true
-				typingMu.Unlock()
-				return func() {
-					typingMu.Lock()
-					typingStopped = true
-					typingMu.Unlock()
-				}
-			},
-		})
-		pool.Start()
-		defer pool.Stop()
-
-		msg := db.Message{ID: "msg-cap-prog-cancel", ThreadID: "thread-cap-prog-cancel", Content: "cancel progressive backoff"}
-		_ = insertMessage(store, msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-startedCh:
-		case <-time.After(5 * time.Second):
-			t.Fatal("Timeout waiting for attempt 1 runner invocation")
-		}
-
-		// Allow worker to enter backoff sleep (which has delay >= 30s)
-		pool.cancel()
-		waitPoolWorkersDone(t, pool, 3*time.Second)
-
-		typingMu.Lock()
-		if !typingActive {
-			t.Errorf("Expected typing to have started")
-		}
-		if !typingStopped {
-			t.Errorf("Expected te.stopTyping() to be called on context cancellation during backoff")
-		}
-		typingMu.Unlock()
-
-		dbMsg, err := store.GetMessage(context.Background(), "msg-cap-prog-cancel")
-		if err != nil || dbMsg == nil {
-			t.Fatalf("failed to query message: %v", err)
-		}
-		if dbMsg.Status != db.StatusPending {
-			t.Errorf("Expected StatusPending on context cancellation, got %s (err: %s)", dbMsg.Status, dbMsg.ErrorMessage)
-		}
-		if !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
-			t.Errorf("Expected error to contain 'interrupted by graceful deployment', got %q", dbMsg.ErrorMessage)
-		}
-		if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
-			t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
-		}
-	})
 }
 
-func TestDiscordTurnSink(t *testing.T) {
+func TestWorkerPool_ProgressiveCapacityBackoff_ContextCancellation(t *testing.T) {
 	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
 
-	t.Run("Callbacks", func(t *testing.T) {
-		t.Parallel()
-		sink := newDiscordTurnSink(nil)
-		sink.OnTurnStarted()
-		sink.OnThinking()
-		sink.OnTextDelta("some text")
-		sink.OnError(errors.New("test error"))
-		res, err := sink.Wait(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if res.Response != "some text" {
-			t.Errorf("expected recovered text 'some text', got %q", res.Response)
-		}
+	startedCh := make(chan struct{}, 1)
+	var typingMu sync.Mutex
+	var typingActive bool
+	var typingStopped bool
 
-		sinkNoDeltas := newDiscordTurnSink(nil)
-		expectedErr := errors.New("hard failure")
-		sinkNoDeltas.OnError(expectedErr)
-		_, err = sinkNoDeltas.Wait(context.Background())
-		if err == nil || !errors.Is(err, expectedErr) {
-			t.Errorf("unexpected error received: %v", err)
-		}
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
 	})
 
-	t.Run("StatusUpdaterLifecycle", func(t *testing.T) {
-		t.Parallel()
-		updater := NewStatusUpdater(nil, "thread-123", true, WithStatusMockFuncs(
-			func(channelID, text string) (string, error) { return "msg-1", nil },
-			func(channelID, messageID, text string) error { return nil },
-			func(channelID, messageID string) error { return nil },
-		))
-		defer updater.Stop()
-
-		sink := newDiscordTurnSink(updater)
-
-		tests := []struct {
-			action        string
-			tool          string
-			arg           string
-			delta         string
-			wantPhase     string
-			wantTool      string
-			wantCommand   string
-		}{
-			{action: "thinking", wantPhase: "thinking"},
-			{action: "tool_call", tool: "run_command", arg: "echo hello", wantPhase: "tool", wantTool: "run_command", wantCommand: "echo"},
-			{action: "tool_completed", tool: "run_command", wantPhase: "thinking"},
-			{action: "text_delta", delta: "Streaming response token", wantPhase: "responding"},
-			{action: "thinking", wantPhase: "thinking"},
-			{action: "whitespace_delta", delta: "   \n\t  ", wantPhase: "thinking"},
-			{action: "tool_call", tool: "get_me", wantPhase: "tool", wantTool: "get_me"},
-			{action: "tool_error", tool: "get_me", wantPhase: "thinking"},
-		}
-
-		for _, step := range tests {
-			switch step.action {
-			case "thinking":
-				sink.OnThinking()
-			case "tool_call":
-				sink.OnToolCall(step.tool, step.arg)
-			case "tool_completed":
-				sink.OnToolCompleted(step.tool, "native", 100*time.Millisecond, "ok")
-			case "tool_error":
-				sink.OnToolCompleted(step.tool, "github", 50*time.Millisecond, "error")
-			case "text_delta", "whitespace_delta":
-				sink.OnTextDelta(step.delta)
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		MaxAttempts:    2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			select {
+			case startedCh <- struct{}{}:
+			default:
 			}
-
-			updater.mu.Lock()
-			if updater.phase != step.wantPhase {
-				t.Errorf("[%s] phase = %q, want %q", step.action, updater.phase, step.wantPhase)
+			return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			typingMu.Lock()
+			typingActive = true
+			typingMu.Unlock()
+			return func() {
+				typingMu.Lock()
+				typingStopped = true
+				typingMu.Unlock()
 			}
-			if step.wantTool != "" && updater.activeTool != step.wantTool {
-				t.Errorf("[%s] activeTool = %q, want %q", step.action, updater.activeTool, step.wantTool)
-			}
-			if step.wantCommand != "" && updater.activeCommand != step.wantCommand {
-				t.Errorf("[%s] activeCommand = %q, want %q", step.action, updater.activeCommand, step.wantCommand)
-			}
-			updater.mu.Unlock()
-		}
-
-		nilSink := newDiscordTurnSink(nil)
-		nilSink.OnThinking()
-		nilSink.OnToolCall("run_command", "ls")
-		nilSink.OnToolCompleted("run_command", "native", time.Millisecond, "ok")
-		nilSink.OnTextDelta("delta")
-		nilSink.OnSkillActivated("skill", "source")
+		},
 	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-cap-prog-cancel", ThreadID: "thread-cap-prog-cancel", Content: "cancel progressive backoff"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-startedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for attempt 1 runner invocation")
+	}
+
+	// Allow worker to enter backoff sleep (which has delay >= 30s)
+	pool.cancel()
+	waitPoolWorkersDone(t, pool, 3*time.Second)
+
+	typingMu.Lock()
+	if !typingActive {
+		t.Errorf("Expected typing to have started")
+	}
+	if !typingStopped {
+		t.Errorf("Expected te.stopTyping() to be called on context cancellation during backoff")
+	}
+	typingMu.Unlock()
+
+	dbMsg, err := store.GetMessage(context.Background(), "msg-cap-prog-cancel")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("failed to query message: %v", err)
+	}
+	if dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected StatusPending on context cancellation, got %s (err: %s)", dbMsg.Status, dbMsg.ErrorMessage)
+	}
+	if !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
+		t.Errorf("Expected error to contain 'interrupted by graceful deployment', got %q", dbMsg.ErrorMessage)
+	}
+	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+	}
+}
+
+func TestDiscordTurnSink_Callbacks(t *testing.T) {
+	t.Parallel()
+	sink := newDiscordTurnSink(nil)
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnTextDelta("some text")
+	sink.OnError(errors.New("test error"))
+	res, err := sink.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Response != "some text" {
+		t.Errorf("expected recovered text 'some text', got %q", res.Response)
+	}
+
+	sinkNoDeltas := newDiscordTurnSink(nil)
+	expectedErr := errors.New("hard failure")
+	sinkNoDeltas.OnError(expectedErr)
+	_, err = sinkNoDeltas.Wait(context.Background())
+	if err == nil || !errors.Is(err, expectedErr) {
+		t.Errorf("unexpected error received: %v", err)
+	}
+}
+
+func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
+	t.Parallel()
+	updater := NewStatusUpdater(nil, "thread-123", true, WithStatusMockFuncs(
+		func(channelID, text string) (string, error) { return "msg-1", nil },
+		func(channelID, messageID, text string) error { return nil },
+		func(channelID, messageID string) error { return nil },
+	))
+	defer updater.Stop()
+
+	sink := newDiscordTurnSink(updater)
+
+	tests := []struct {
+		action      string
+		tool        string
+		arg         string
+		delta       string
+		wantPhase   string
+		wantTool    string
+		wantCommand string
+	}{
+		{action: "thinking", wantPhase: "thinking"},
+		{action: "tool_call", tool: "run_command", arg: "echo hello", wantPhase: "tool", wantTool: "run_command", wantCommand: "echo"},
+		{action: "tool_completed", tool: "run_command", wantPhase: "thinking"},
+		{action: "text_delta", delta: "Streaming response token", wantPhase: "responding"},
+		{action: "thinking", wantPhase: "thinking"},
+		{action: "whitespace_delta", delta: "   \n\t  ", wantPhase: "thinking"},
+		{action: "tool_call", tool: "get_me", wantPhase: "tool", wantTool: "get_me"},
+		{action: "tool_error", tool: "get_me", wantPhase: "thinking"},
+	}
+
+	for _, step := range tests {
+		switch step.action {
+		case "thinking":
+			sink.OnThinking()
+		case "tool_call":
+			sink.OnToolCall(step.tool, step.arg)
+		case "tool_completed":
+			sink.OnToolCompleted(step.tool, "native", 100*time.Millisecond, "ok")
+		case "tool_error":
+			sink.OnToolCompleted(step.tool, "github", 50*time.Millisecond, "error")
+		case "text_delta", "whitespace_delta":
+			sink.OnTextDelta(step.delta)
+		}
+
+		updater.mu.Lock()
+		if updater.phase != step.wantPhase {
+			t.Errorf("[%s] phase = %q, want %q", step.action, updater.phase, step.wantPhase)
+		}
+		if step.wantTool != "" && updater.activeTool != step.wantTool {
+			t.Errorf("[%s] activeTool = %q, want %q", step.action, updater.activeTool, step.wantTool)
+		}
+		if step.wantCommand != "" && updater.activeCommand != step.wantCommand {
+			t.Errorf("[%s] activeCommand = %q, want %q", step.action, updater.activeCommand, step.wantCommand)
+		}
+		updater.mu.Unlock()
+	}
+
+	nilSink := newDiscordTurnSink(nil)
+	nilSink.OnThinking()
+	nilSink.OnToolCall("run_command", "ls")
+	nilSink.OnToolCompleted("run_command", "native", time.Millisecond, "ok")
+	nilSink.OnTextDelta("delta")
+	nilSink.OnSkillActivated("skill", "source")
 }
 
 func TestWorker_DualPoolRouting(t *testing.T) {
@@ -2092,244 +2305,240 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	}
 }
 
-func TestWorker_DualPoolScenarios(t *testing.T) {
+func TestWorker_DualPool_AntiFlapping(t *testing.T) {
 	t.Parallel()
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
 
-	t.Run("AntiFlapping_ProtectsPrimarySession", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpHome := t.TempDir()
-		tempData := t.TempDir()
+	primarySessUUID := "11111111-1111-1111-1111-111111111111"
+	lowSessUUID := "22222222-2222-2222-2222-222222222222"
 
-		primarySessUUID := "11111111-1111-1111-1111-111111111111"
-		lowSessUUID := "22222222-2222-2222-2222-222222222222"
+	lowSpawner := newScriptedDaemonSpawner(lowSessUUID,
+		fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok low effort\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", lowSessUUID))
+	primarySpawner := runner.NewMockSpawner()
 
-		lowSpawner := newScriptedDaemonSpawner(lowSessUUID,
-			fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok low effort\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", lowSessUUID))
-		primarySpawner := runner.NewMockSpawner()
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
 
-		primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
-		defer primaryPool.Close()
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
 
-		lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
-		defer lowPool.Close()
-
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.DataDir = tempData
-			d.LowEffortModel = "gemini-3.8-flash-low"
-		})
-
-		doneCh := make(chan struct{}, 1)
-		pool := New(cfg, WorkerPoolConfig{
-			ProcessPool:          primaryPool,
-			LowEffortProcessPool: lowPool,
-			SessionManager:       session.New(tmpHome, tempData),
-			Store:                store,
-			TimeoutMinutes:       1,
-			OnMessageCompleted: func(msg db.Message, status string) {
-				if status == db.StatusCompleted {
-					doneCh <- struct{}{}
-				}
-			},
-		})
-		defer pool.Stop()
-
-		threadID := "thread-antiflap-1"
-		_ = store.SaveSessionID(context.Background(), threadID, primarySessUUID)
-
-		msg := db.Message{
-			ID:        "msg-antiflap-1",
-			ThreadID:  threadID,
-			Content:   "run scheduled low-effort maintenance",
-			Effort:    "low",
-			Status:    db.StatusPending,
-			CreatedAt: time.Now(),
-		}
-		_ = store.InsertMessage(context.Background(), msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-doneCh:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timeout waiting for message completion")
-		}
-
-		currentSess, err := store.GetSessionID(context.Background(), threadID)
-		if err != nil {
-			t.Fatalf("failed to get session ID: %v", err)
-		}
-		if currentSess != primarySessUUID {
-			t.Fatalf("ANTI-FLAPPING VIOLATION: expected primary session %s to be preserved, got %s", primarySessUUID, currentSess)
-		}
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+		d.LowEffortModel = "gemini-3.8-flash-low"
 	})
 
-	t.Run("ThreadWorker_ActiveTasksInLowEffortPoolPreventReap", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpHome := t.TempDir()
-		tempData := t.TempDir()
+	doneCh := make(chan struct{}, 1)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
+		},
+	})
+	defer pool.Stop()
 
-		lowSpawner := newScriptedDaemonSpawner("e1111111-2222-3333-4444-555555555555",
-			"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n")
-		primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockSpawner())
-		defer primaryPool.Close()
+	threadID := "thread-antiflap-1"
+	_ = store.SaveSessionID(context.Background(), threadID, primarySessUUID)
 
-		lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
-		defer lowPool.Close()
+	msg := db.Message{
+		ID:        "msg-antiflap-1",
+		ThreadID:  threadID,
+		Content:   "run scheduled low-effort maintenance",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
 
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.DataDir = tempData
-		})
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for message completion")
+	}
 
-		threadID := "thread-low-reap-test"
-		doneCh := make(chan struct{})
-		pool := New(cfg, WorkerPoolConfig{
-			ProcessPool:          primaryPool,
-			LowEffortProcessPool: lowPool,
-			SessionManager:       session.New(tmpHome, tempData),
-			Store:                store,
-			TimeoutMinutes:       1,
-			MaxAttempts:          1,
-			IdleTimeout:          20 * time.Millisecond,
-			OnMessageCompleted: func(msg db.Message, status string) {
+	currentSess, err := store.GetSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to get session ID: %v", err)
+	}
+	if currentSess != primarySessUUID {
+		t.Fatalf("ANTI-FLAPPING VIOLATION: expected primary session %s to be preserved, got %s", primarySessUUID, currentSess)
+	}
+}
+
+func TestWorker_DualPool_ActiveTasksInLowEffortPoolPreventReap(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	lowSpawner := newScriptedDaemonSpawner("e1111111-2222-3333-4444-555555555555",
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n")
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockSpawner())
+	defer primaryPool.Close()
+
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-low-reap-test"
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		MaxAttempts:          1,
+		IdleTimeout:          20 * time.Millisecond,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			select {
+			case <-doneCh:
+			default:
+				close(doneCh)
+			}
+		},
+	})
+	defer pool.Stop()
+
+	ctx := context.Background()
+	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID, "")
+	if err != nil {
+		t.Fatalf("failed to create daemon in low pool: %v", err)
+	}
+	daemon.TaskTracker().Add(runner.TaskMetadata{
+		TaskID:    "task-low-busy-prevent-reap",
+		StartedAt: time.Now(),
+	})
+
+	msg := db.Message{
+		ID:        "msg-low-reap-1",
+		ThreadID:  threadID,
+		Content:   "hello low reap",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	pool.mu.Lock()
+	_, workerStillActive := pool.threadChs["low_effort:"+threadID]
+	pool.mu.Unlock()
+
+	if !workerStillActive {
+		t.Errorf("expected worker to remain active because background task was running in LowEffortProcessPool")
+	}
+}
+
+func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	sessID := "f1111111-2222-3333-4444-555555555555"
+	sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+
+	var turnCount atomic.Int32
+
+	primarySpawner := newScriptedDaemonSpawner(sessID,
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"waiting for bg task\",\"usage\":{\"total_tokens\":5}}}\n",
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"all tasks done\",\"usage\":{\"total_tokens\":5}}}\n",
+	)
+	oldSpawn := primarySpawner.SpawnFn
+	primarySpawner.SpawnFn = func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+		inW, outR, errR, handle, err := oldSpawn(ctx, cfg)
+		return inW, outR, errR, handle, err
+	}
+
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
+
+	lowSpawner := newScriptedDaemonSpawner("d1111111-2222-3333-4444-555555555555")
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-yield-fallback"
+	_ = store.SaveSessionID(context.Background(), threadID, sessID)
+
+	lowSessID := "d1111111-2222-3333-4444-555555555555"
+	taskDir := filepath.Join(tempData, "brain", lowSessID, ".system_generated", "tasks")
+	_ = os.MkdirAll(taskDir, 0755)
+	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0644)
+
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				turnCount.Add(1)
 				select {
 				case <-doneCh:
 				default:
 					close(doneCh)
 				}
-			},
-		})
-		defer pool.Stop()
+			}
+		},
+	})
+	defer pool.Stop()
 
-		ctx := context.Background()
-		daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID, "")
-		if err != nil {
-			t.Fatalf("failed to create daemon in low pool: %v", err)
-		}
-		daemon.TaskTracker().Add(runner.TaskMetadata{
-			TaskID:    "task-low-busy-prevent-reap",
-			StartedAt: time.Now(),
-		})
-
-		msg := db.Message{
-			ID:        "msg-low-reap-1",
-			ThreadID:  threadID,
-			Content:   "hello low reap",
-			Effort:    "low",
-			Status:    db.StatusPending,
-			CreatedAt: time.Now(),
-		}
-		_ = store.InsertMessage(context.Background(), msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-doneCh:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for message completion")
-		}
-
-		time.Sleep(60 * time.Millisecond)
-		pool.mu.Lock()
-		_, workerStillActive := pool.threadChs["low_effort:"+threadID]
-		pool.mu.Unlock()
-
-		if !workerStillActive {
-			t.Errorf("expected worker to remain active because background task was running in LowEffortProcessPool")
-		}
+	ctx := context.Background()
+	lowDaemon, err := lowPool.GetOrCreate(ctx, threadID, "")
+	if err != nil {
+		t.Fatalf("failed to create low daemon: %v", err)
+	}
+	lowDaemon.TaskTracker().Add(runner.TaskMetadata{
+		TaskID:    "bg-task-in-low-pool",
+		StartedAt: time.Now(),
 	})
 
-	t.Run("YieldTrap_AlternatePoolFallback", func(t *testing.T) {
-		t.Parallel()
-		store := setupTestStore(t)
-		tmpHome := t.TempDir()
-		tempData := t.TempDir()
+	msg := db.Message{
+		ID:        "msg-yield-fb-1",
+		ThreadID:  threadID,
+		Content:   "run command and wait",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
 
-		sessID := "f1111111-2222-3333-4444-555555555555"
-		sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-		_ = os.MkdirAll(sessDir, 0755)
-		_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
 
-		var turnCount atomic.Int32
-
-		primarySpawner := newScriptedDaemonSpawner(sessID,
-			"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"waiting for bg task\",\"usage\":{\"total_tokens\":5}}}\n",
-			"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"all tasks done\",\"usage\":{\"total_tokens\":5}}}\n",
-		)
-		oldSpawn := primarySpawner.SpawnFn
-		primarySpawner.SpawnFn = func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			inW, outR, errR, handle, err := oldSpawn(ctx, cfg)
-			return inW, outR, errR, handle, err
-		}
-
-		primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
-		defer primaryPool.Close()
-
-		lowSpawner := newScriptedDaemonSpawner("d1111111-2222-3333-4444-555555555555")
-		lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
-		defer lowPool.Close()
-
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.DataDir = tempData
-		})
-
-		threadID := "thread-yield-fallback"
-		_ = store.SaveSessionID(context.Background(), threadID, sessID)
-
-		lowSessID := "d1111111-2222-3333-4444-555555555555"
-		taskDir := filepath.Join(tempData, "brain", lowSessID, ".system_generated", "tasks")
-		_ = os.MkdirAll(taskDir, 0755)
-		_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0644)
-
-		doneCh := make(chan struct{})
-		pool := New(cfg, WorkerPoolConfig{
-			ProcessPool:          primaryPool,
-			LowEffortProcessPool: lowPool,
-			SessionManager:       session.New(tmpHome, tempData),
-			Store:                store,
-			TimeoutMinutes:       1,
-			OnMessageCompleted: func(msg db.Message, status string) {
-				if status == db.StatusCompleted {
-					turnCount.Add(1)
-					select {
-					case <-doneCh:
-					default:
-						close(doneCh)
-					}
-				}
-			},
-		})
-		defer pool.Stop()
-
-		ctx := context.Background()
-		lowDaemon, err := lowPool.GetOrCreate(ctx, threadID, "")
-		if err != nil {
-			t.Fatalf("failed to create low daemon: %v", err)
-		}
-		lowDaemon.TaskTracker().Add(runner.TaskMetadata{
-			TaskID:    "bg-task-in-low-pool",
-			StartedAt: time.Now(),
-		})
-
-		msg := db.Message{
-			ID:        "msg-yield-fb-1",
-			ThreadID:  threadID,
-			Content:   "run command and wait",
-			Status:    db.StatusPending,
-			CreatedAt: time.Now(),
-		}
-		_ = store.InsertMessage(context.Background(), msg)
-		pool.Enqueue(msg)
-
-		select {
-		case <-doneCh:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for message completion")
-		}
-
-		if tc := int(turnCount.Load()); tc < 1 {
-			t.Errorf("expected auto-resumption from yield-trap detection in alternate pool, turnCount=%d", tc)
-		}
-	})
+	if tc := int(turnCount.Load()); tc < 1 {
+		t.Errorf("expected auto-resumption from yield-trap detection in alternate pool, turnCount=%d", tc)
+	}
 }
 
 func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
@@ -2572,90 +2781,90 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("condenseTurnActions_DirectHelpers", func(t *testing.T) {
-		t.Parallel()
-		te := &turnExecution{}
+func TestTurnExecution_CondenseTurnActions(t *testing.T) {
+	t.Parallel()
+	te := &turnExecution{}
 
-		shortActions := "<PREVIOUS_TURN_ACTIONS>\n- Action: run_command | Command/Args: ls | Status: DONE | Result: ok\n</PREVIOUS_TURN_ACTIONS>"
-		if got := te.condenseTurnActions(shortActions); got != shortActions {
-			t.Errorf("condenseTurnActions short string failed: got %q, want %q", got, shortActions)
-		}
+	shortActions := "<PREVIOUS_TURN_ACTIONS>\n- Action: run_command | Command/Args: ls | Status: DONE | Result: ok\n</PREVIOUS_TURN_ACTIONS>"
+	if got := te.condenseTurnActions(shortActions); got != shortActions {
+		t.Errorf("condenseTurnActions short string failed: got %q, want %q", got, shortActions)
+	}
 
-		longActions := "<PREVIOUS_TURN_ACTIONS>\n" + strings.Repeat("- Action: run_command | Command/Args: test_long_command | Status: DONE | Result: long_output_data\n", 30) + "</PREVIOUS_TURN_ACTIONS>"
+	longActions := "<PREVIOUS_TURN_ACTIONS>\n" + strings.Repeat("- Action: run_command | Command/Args: test_long_command | Status: DONE | Result: long_output_data\n", 30) + "</PREVIOUS_TURN_ACTIONS>"
 
-		mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
-			if !strings.Contains(prompt, "Condense the following tool actions") {
-				t.Errorf("expected summarizer prompt, got %q", prompt)
-			}
-			return "<PREVIOUS_TURN_ACTIONS>\n- Condensed summary of 30 commands\n</PREVIOUS_TURN_ACTIONS>", nil
+	mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
+		if !strings.Contains(prompt, "Condense the following tool actions") {
+			t.Errorf("expected summarizer prompt, got %q", prompt)
 		}
-		teWithLLM := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLM}}}
-		condensed := teWithLLM.condenseTurnActions(longActions)
-		if !strings.Contains(condensed, "- Condensed summary of 30 commands") {
-			t.Errorf("expected condensed output to contain summary, got %q", condensed)
-		}
+		return "<PREVIOUS_TURN_ACTIONS>\n- Condensed summary of 30 commands\n</PREVIOUS_TURN_ACTIONS>", nil
+	}
+	teWithLLM := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLM}}}
+	condensed := teWithLLM.condenseTurnActions(longActions)
+	if !strings.Contains(condensed, "- Condensed summary of 30 commands") {
+		t.Errorf("expected condensed output to contain summary, got %q", condensed)
+	}
 
-		mockLLMUntagged := func(ctx context.Context, model, prompt string) (string, error) {
-			return "- Bare summary without tags", nil
-		}
-		teUntagged := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMUntagged}}}
-		condensedUntagged := teUntagged.condenseTurnActions(longActions)
-		if !strings.Contains(condensedUntagged, "<PREVIOUS_TURN_ACTIONS>") || !strings.Contains(condensedUntagged, "- Bare summary without tags") {
-			t.Errorf("expected wrapped tags for untagged response, got %q", condensedUntagged)
-		}
+	mockLLMUntagged := func(ctx context.Context, model, prompt string) (string, error) {
+		return "- Bare summary without tags", nil
+	}
+	teUntagged := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMUntagged}}}
+	condensedUntagged := teUntagged.condenseTurnActions(longActions)
+	if !strings.Contains(condensedUntagged, "<PREVIOUS_TURN_ACTIONS>") || !strings.Contains(condensedUntagged, "- Bare summary without tags") {
+		t.Errorf("expected wrapped tags for untagged response, got %q", condensedUntagged)
+	}
 
-		mockLLMErr := func(ctx context.Context, model, prompt string) (string, error) {
-			return "", errors.New("simulated rate limit error")
-		}
-		teErr := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMErr}}}
-		if fallbackErr := teErr.condenseTurnActions(longActions); fallbackErr != longActions {
-			t.Errorf("expected fallback to rawActions on LLM error, got %q", fallbackErr)
-		}
+	mockLLMErr := func(ctx context.Context, model, prompt string) (string, error) {
+		return "", errors.New("simulated rate limit error")
+	}
+	teErr := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMErr}}}
+	if fallbackErr := teErr.condenseTurnActions(longActions); fallbackErr != longActions {
+		t.Errorf("expected fallback to rawActions on LLM error, got %q", fallbackErr)
+	}
 
-		if fallbackNoLLM := te.condenseTurnActions(longActions); fallbackNoLLM != longActions {
-			t.Errorf("expected fallback to rawActions when summarizer unavailable, got %q", fallbackNoLLM)
-		}
+	if fallbackNoLLM := te.condenseTurnActions(longActions); fallbackNoLLM != longActions {
+		t.Errorf("expected fallback to rawActions when summarizer unavailable, got %q", fallbackNoLLM)
+	}
 
-		mockLLMEmpty := func(ctx context.Context, model, prompt string) (string, error) {
-			return "   ", nil
-		}
-		teEmpty := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMEmpty}}}
-		if fallbackEmpty := teEmpty.condenseTurnActions(longActions); fallbackEmpty != longActions {
-			t.Errorf("expected fallback to rawActions on empty LLM response, got %q", fallbackEmpty)
-		}
+	mockLLMEmpty := func(ctx context.Context, model, prompt string) (string, error) {
+		return "   ", nil
+	}
+	teEmpty := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMEmpty}}}
+	if fallbackEmpty := teEmpty.condenseTurnActions(longActions); fallbackEmpty != longActions {
+		t.Errorf("expected fallback to rawActions on empty LLM response, got %q", fallbackEmpty)
+	}
 
-		mockLLMOversized := func(ctx context.Context, model, prompt string) (string, error) {
-			return "<PREVIOUS_TURN_ACTIONS>\n" + strings.Repeat("ExtremelyLongSummaryDataPoint-", 150) + "\n</PREVIOUS_TURN_ACTIONS>", nil
-		}
-		teOversized := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMOversized}}}
-		clamped := teOversized.condenseTurnActions(longActions)
-		if len(clamped) > 2000 {
-			t.Errorf("expected clamped output <= 2000 chars, got %d", len(clamped))
-		}
-	})
+	mockLLMOversized := func(ctx context.Context, model, prompt string) (string, error) {
+		return "<PREVIOUS_TURN_ACTIONS>\n" + strings.Repeat("ExtremelyLongSummaryDataPoint-", 150) + "\n</PREVIOUS_TURN_ACTIONS>", nil
+	}
+	teOversized := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{LLMFunc: mockLLMOversized}}}
+	clamped := teOversized.condenseTurnActions(longActions)
+	if len(clamped) > 2000 {
+		t.Errorf("expected clamped output <= 2000 chars, got %d", len(clamped))
+	}
+}
 
-	t.Run("preparePrompt_DirectHelpers", func(t *testing.T) {
-		t.Parallel()
-		te := &turnExecution{}
-		basePrompt := "Base user request"
+func TestTurnExecution_PreparePrompt(t *testing.T) {
+	t.Parallel()
+	te := &turnExecution{}
+	basePrompt := "Base user request"
 
-		if got := te.preparePrompt(basePrompt); got != basePrompt {
-			t.Errorf("preparePrompt with empty previousTurnActions modified prompt: got %q", got)
-		}
+	if got := te.preparePrompt(basePrompt); got != basePrompt {
+		t.Errorf("preparePrompt with empty previousTurnActions modified prompt: got %q", got)
+	}
 
-		te.previousTurnActions = "<PREVIOUS_TURN_ACTIONS>\n- Action: test\n</PREVIOUS_TURN_ACTIONS>"
-		prepared := te.preparePrompt(basePrompt)
-		expected := basePrompt + "\n\n" + te.previousTurnActions
-		if prepared != expected {
-			t.Errorf("preparePrompt failed: got %q, want %q", prepared, expected)
-		}
+	te.previousTurnActions = "<PREVIOUS_TURN_ACTIONS>\n- Action: test\n</PREVIOUS_TURN_ACTIONS>"
+	prepared := te.preparePrompt(basePrompt)
+	expected := basePrompt + "\n\n" + te.previousTurnActions
+	if prepared != expected {
+		t.Errorf("preparePrompt failed: got %q, want %q", prepared, expected)
+	}
 
-		rePrepared := te.preparePrompt(prepared)
-		if rePrepared != prepared {
-			t.Errorf("preparePrompt duplicated actions on re-preparation: got %q, want %q", rePrepared, prepared)
-		}
-	})
+	rePrepared := te.preparePrompt(prepared)
+	if rePrepared != prepared {
+		t.Errorf("preparePrompt duplicated actions on re-preparation: got %q, want %q", rePrepared, prepared)
+	}
 }
 
 func TestWorker_ColdStart_RetainsLookbackWithSummary(t *testing.T) {
@@ -2741,13 +2950,13 @@ func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
 	ambCfg := &config.AmbientContextConfig{Template: "Kitchen Temp: {{.temp}}"}
 
 	tests := []struct {
-		name                 string
-		ambCfg               *config.AmbientContextConfig
-		resolverErr          error
-		resolverText         string
-		wantResolverCalled   bool
-		wantPromptContains   []string
-		wantPromptExcludes   []string
+		name               string
+		ambCfg             *config.AmbientContextConfig
+		resolverErr        error
+		resolverText       string
+		wantResolverCalled bool
+		wantPromptContains []string
+		wantPromptExcludes []string
 	}{
 		{
 			name:               "ConfiguredChannel",
@@ -2834,7 +3043,7 @@ func (m *mockRotatorPool) GetOrCreateSession(ctx context.Context, targetKey stri
 	return nil, nil
 }
 func (m *mockRotatorPool) Initialize(ctx context.Context) error { return nil }
-func (m *mockRotatorPool) Close() error                           { return nil }
+func (m *mockRotatorPool) Close() error                         { return nil }
 
 func (m *mockRotatorPool) ShouldRotateSession(sess runner.AgentSession) (bool, string) {
 	return m.shouldRotate, m.rotReason
@@ -2859,7 +3068,7 @@ type mockRotatorSession struct {
 }
 
 func (s *mockRotatorSession) Send(prompt string, turn *runner.TurnContext) error { return nil }
-func (s *mockRotatorSession) SessionID() string                                   { return s.sessionID }
+func (s *mockRotatorSession) SessionID() string                                  { return s.sessionID }
 
 type mockRotateStore struct {
 	*db.FakeStore
@@ -2877,21 +3086,21 @@ func TestTurnExecution_CheckTurnEndRotation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                 string
-		channelMode          string
-		initialSession       string
-		newSession           string
-		initialTurns         int
-		shouldRotate         bool
-		rotReason            string
-		rotateErr            error
-		simulateDBError      bool
-		wantRotateCalled     bool
-		wantTurnCount        int
-		wantCurrentSession   string
-		wantPrevSession      string
-		wantDBSession        string
-		wantEvictedKey       string
+		name               string
+		channelMode        string
+		initialSession     string
+		newSession         string
+		initialTurns       int
+		shouldRotate       bool
+		rotReason          string
+		rotateErr          error
+		simulateDBError    bool
+		wantRotateCalled   bool
+		wantTurnCount      int
+		wantCurrentSession string
+		wantPrevSession    string
+		wantDBSession      string
+		wantEvictedKey     string
 	}{
 		{
 			name:               "NormalRotation_Thread",
@@ -3029,25 +3238,25 @@ func TestTurnExecution_CheckTurnEndRotation(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("Guards", func(t *testing.T) {
-		t.Parallel()
-		rotPool := &mockRotatorPool{shouldRotate: true}
-		execSession := &mockRotatorSession{sessionID: "s1"}
+func TestTurnExecution_CheckTurnEndRotation_Guards(t *testing.T) {
+	t.Parallel()
+	rotPool := &mockRotatorPool{shouldRotate: true}
+	execSession := &mockRotatorSession{sessionID: "s1"}
 
-		var teNil *turnExecution
-		teNil.checkTurnEndRotation(rotPool, execSession)
+	var teNil *turnExecution
+	teNil.checkTurnEndRotation(rotPool, execSession)
 
-		teNoPool := &turnExecution{threadID: "t1"}
-		teNoPool.checkTurnEndRotation(rotPool, execSession)
+	teNoPool := &turnExecution{threadID: "t1"}
+	teNoPool.checkTurnEndRotation(rotPool, execSession)
 
-		teWithPool := &turnExecution{pool: &WorkerPool{ctx: context.Background()}}
-		teWithPool.checkTurnEndRotation(nil, execSession)
-		teWithPool.checkTurnEndRotation(rotPool, nil)
+	teWithPool := &turnExecution{pool: &WorkerPool{ctx: context.Background()}}
+	teWithPool.checkTurnEndRotation(nil, execSession)
+	teWithPool.checkTurnEndRotation(rotPool, nil)
 
-		nonRotatorPool := &dummyNonRotatorPool{}
-		teWithPool.checkTurnEndRotation(nonRotatorPool, execSession)
-	})
+	nonRotatorPool := &dummyNonRotatorPool{}
+	teWithPool.checkTurnEndRotation(nonRotatorPool, execSession)
 }
 
 func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
