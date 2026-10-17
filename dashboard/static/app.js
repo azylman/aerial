@@ -2006,6 +2006,58 @@ function getBuildStatusBadgeInfo(build) {
     return { text: '⏳ QUEUED', cls: 'status-queued' };
 }
 
+function getBuildTimingInfo(build, nowMs) {
+    if (!build || typeof build !== 'object') {
+        return { startText: '--', endText: '--', durationText: '--' };
+    }
+
+    const qState = classifyBuildQueueState(build);
+    const chunks = Array.isArray(build.chunks) ? build.chunks : [];
+
+    let startMs = parseValidTimestampMs(build.started_at);
+    if (!startMs && chunks.length > 0) {
+        for (const c of chunks) {
+            const cStart = c && parseValidTimestampMs(c.started_at);
+            if (cStart && (!startMs || cStart < startMs)) {
+                startMs = cStart;
+            }
+        }
+    }
+    if (!startMs) {
+        startMs = parseValidTimestampMs(build.created_at);
+    }
+
+    let endMs = null;
+    if (qState === 'completed') {
+        endMs = parseValidTimestampMs(build.completed_at) || parseValidTimestampMs(build.ended_at) || parseValidTimestampMs(build.updated_at);
+        if (chunks.length > 0) {
+            for (const c of chunks) {
+                const cUpd = c && parseValidTimestampMs(c.updated_at);
+                if (cUpd && (!endMs || cUpd > endMs)) {
+                    endMs = cUpd;
+                }
+            }
+        }
+    }
+
+    const startText = startMs ? formatTimestamp(new Date(startMs).toISOString()) : '--';
+    const endText = endMs ? formatTimestamp(new Date(endMs).toISOString()) : '--';
+
+    let durationText = '--';
+    if (startMs) {
+        if (endMs && endMs >= startMs) {
+            durationText = formatUptime(Math.floor((endMs - startMs) / 1000));
+        } else if (qState === 'running') {
+            const refNow = (typeof nowMs === 'number' && !isNaN(nowMs)) ? nowMs : Date.now();
+            if (refNow >= startMs) {
+                durationText = formatUptime(Math.floor((refNow - startMs) / 1000));
+            }
+        }
+    }
+
+    return { startText, endText, durationText };
+}
+
 function renderBuildsPills() {
     let running = 0;
     let queued = 0;
@@ -2149,21 +2201,22 @@ function renderBuildQueueCards() {
 
         const badgeInfo = getBuildStatusBadgeInfo(b);
         const stats = computeBuildChunkStats(b);
-        const tier = typeof b.tier === 'number' ? b.tier : (b.tier || 0);
+        const timing = getBuildTimingInfo(b);
         const title = b.title || b.id || 'Untitled Build';
-        const objective = b.objective || 'No objective provided';
 
         card.innerHTML = `
             <div class="build-card-header">
                 <div class="build-badge-group">
                     <span class="build-status-badge ${badgeInfo.cls}">${badgeInfo.text}</span>
-                    <span class="build-tier-badge">TIER ${escapeHtml(String(tier))}</span>
                 </div>
-                <span class="build-id-chip">${escapeHtml(b.id || '')}</span>
+                <span class="build-duration-badge">⏱ ${escapeHtml(timing.durationText)}</span>
             </div>
             <div class="build-card-body">
                 <h3 class="build-title">${escapeHtml(title)}</h3>
-                <p class="build-objective-preview">${escapeHtml(objective)}</p>
+                <div class="build-timing-meta">
+                    <span class="build-time-item"><strong>START:</strong> ${escapeHtml(timing.startText)}</span>
+                    <span class="build-time-item"><strong>END:</strong> ${escapeHtml(timing.endText)}</span>
+                </div>
             </div>
             <div class="build-chunk-progress-wrap">
                 <div class="build-chunk-progress-header">
