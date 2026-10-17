@@ -66,23 +66,20 @@ func (m *mockWebSocketWriter) getMessages() []any {
 	return copied
 }
 
-func TestThrowawayTurnSink(t *testing.T) {
+func TestThrowawayTurnSink_ResultAndOnceDelivery(t *testing.T) {
 	t.Parallel()
 
 	testErr := errors.New("daemon execution failure")
 
 	tests := []struct {
-		name          string
-		initialSteps  bool
-		sendResult    *runner.TurnResult
-		sendError     error
-		secondResult  *runner.TurnResult
-		secondError   error
-		useCtx        bool
-		cancelCtxPre  bool
-		cancelCtxPost bool
-		wantRes       string
-		wantErr       error
+		name         string
+		initialSteps bool
+		sendResult   *runner.TurnResult
+		sendError    error
+		secondResult *runner.TurnResult
+		secondError  error
+		wantRes      string
+		wantErr      error
 	}{
 		{
 			name:         "ResultDelivery",
@@ -107,247 +104,308 @@ func TestThrowawayTurnSink(t *testing.T) {
 			secondError:  errors.New("should be ignored"),
 			wantRes:      "first",
 		},
-		{
-			name:         "ResultContext_Cancelled",
-			useCtx:       true,
-			cancelCtxPre: true,
-			wantErr:      context.Canceled,
-		},
-		{
-			name:       "ResultContext_Success",
-			useCtx:     true,
-			sendResult: &runner.TurnResult{Response: "context result ok"},
-			wantRes:    "context result ok",
-		},
-		{
-			name:          "ResultContext_CancelledWhileWaiting",
-			useCtx:        true,
-			cancelCtxPost: true,
-			wantErr:       context.Canceled,
-		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			sink := NewThrowawayTurnSink()
 
-			if tt.initialSteps {
+			if tc.initialSteps {
 				sink.OnTurnStarted()
 				sink.OnThinking()
 				sink.OnToolCall("bash", "echo hi")
 				sink.OnTextDelta("delta")
 			}
 
-			if tt.cancelCtxPre {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				res, err := sink.ResultContext(ctx)
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("expected error %v, got %v", tt.wantErr, err)
-				}
-				if res != tt.wantRes {
-					t.Fatalf("expected res %q, got %q", tt.wantRes, res)
-				}
-				return
-			}
-
-			if tt.cancelCtxPost {
-				ctx, cancel := context.WithCancel(context.Background())
-				go cancel()
-				_, err := sink.ResultContext(ctx)
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("expected context.Canceled while waiting, got %v", err)
-				}
-				return
-			}
-
 			go func() {
-				if tt.sendError != nil {
-					sink.OnError(tt.sendError)
+				if tc.sendError != nil {
+					sink.OnError(tc.sendError)
 				} else {
-					sink.OnResult(tt.sendResult)
+					sink.OnResult(tc.sendResult)
 				}
-				if tt.secondResult != nil {
-					sink.OnResult(tt.secondResult)
+				if tc.secondResult != nil {
+					sink.OnResult(tc.secondResult)
 				}
-				if tt.secondError != nil {
-					sink.OnError(tt.secondError)
+				if tc.secondError != nil {
+					sink.OnError(tc.secondError)
 				}
 			}()
 
-			var res string
-			var err error
-			if tt.useCtx {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				res, err = sink.ResultContext(ctx)
-			} else {
-				res, err = sink.Result()
-			}
-
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("expected error %v, got %v", tt.wantErr, err)
+			res, err := sink.Result()
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("expected error %v, got %v", tc.wantErr, err)
 				}
 			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if res != tt.wantRes {
-				t.Fatalf("expected res %q, got %q", tt.wantRes, res)
+			if res != tc.wantRes {
+				t.Fatalf("expected res %q, got %q", tc.wantRes, res)
 			}
 		})
 	}
 }
 
-func TestDiscordTurnSink_AllMethods(t *testing.T) {
+func TestThrowawayTurnSink_ResultContext(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		callTool      bool
-		nilEditor     bool
-		emptyBadge    bool
-		withEditErr   bool
-		withDeleteErr bool
-		triggerError  bool
-		streamDeltas  bool
-		wantEdits     int
-		wantDeletes   int
-		wantText      string
-	}{
-		{
-			name:         "LifecycleAndDeltas",
-			callTool:     true,
-			streamDeltas: true,
-			wantEdits:    1,
-			wantDeletes:  1,
-			wantText:     "Hello world!",
-		},
-		{
-			name:         "ErrorLifecycle",
-			triggerError: true,
-			wantDeletes:  1,
-		},
-		{
-			name:          "EditorErrorsLoggedWithoutPanic",
-			callTool:      true,
-			withEditErr:   true,
-			withDeleteErr: true,
-			triggerError:  true,
-			wantEdits:     1,
-			wantDeletes:   2,
-		},
-		{
-			name:        "NilEditor",
-			callTool:    true,
-			nilEditor:   true,
-			wantEdits:   0,
-			wantDeletes: 0,
-		},
-		{
-			name:        "EmptyBadge",
-			callTool:    true,
-			emptyBadge:  true,
-			wantEdits:   0,
-			wantDeletes: 0,
-		},
+	// Pre-cancelled context
+	{
+		sink := NewThrowawayTurnSink()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		res, err := sink.ResultContext(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected error %v, got %v", context.Canceled, err)
+		}
+		if res != "" {
+			t.Fatalf("expected empty res, got %q", res)
+		}
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	// Cancelled while waiting
+	{
+		sink := NewThrowawayTurnSink()
+		ctx, cancel := context.WithCancel(context.Background())
+		go cancel()
+		_, err := sink.ResultContext(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled while waiting, got %v", err)
+		}
+	}
 
-			var editor DiscordMessageEditor
-			var mockEditor *mockDiscordMessageEditor
-			if !tc.nilEditor {
-				mockEditor = &mockDiscordMessageEditor{}
-				if tc.withEditErr {
-					mockEditor.editErr = errors.New("edit network failure")
-				}
-				if tc.withDeleteErr {
-					mockEditor.deleteErr = errors.New("delete 404 not found")
-				}
-				editor = mockEditor
-			}
+	// Context success delivery
+	{
+		sink := NewThrowawayTurnSink()
+		go func() {
+			sink.OnResult(&runner.TurnResult{Response: "context result ok"})
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		res, err := sink.ResultContext(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res != "context result ok" {
+			t.Fatalf("expected res %q, got %q", "context result ok", res)
+		}
+	}
+}
 
-			badge := "msg-456"
-			if tc.emptyBadge {
-				badge = ""
-			}
+func TestDiscordTurnSink_LifecycleAndDeltas(t *testing.T) {
+	t.Parallel()
 
-			var completedRes *runner.TurnResult
-			var completedErr error
-			stoppedTyping := false
+	mockEditor := &mockDiscordMessageEditor{}
+	badge := "msg-456"
+	var completedRes *runner.TurnResult
+	var completedErr error
+	stoppedTyping := false
 
-			sink := NewDiscordTurnSink(
-				editor,
-				"chan-123",
-				badge,
-				func(res *runner.TurnResult) { completedRes = res },
-				func(err error) { completedErr = err },
-			)
-			sink.SetStopTyping(func() { stoppedTyping = true })
+	sink := NewDiscordTurnSink(
+		mockEditor,
+		"chan-123",
+		badge,
+		func(res *runner.TurnResult) { completedRes = res },
+		func(err error) { completedErr = err },
+	)
+	sink.SetStopTyping(func() { stoppedTyping = true })
 
-			sink.OnTurnStarted()
-			sink.OnThinking()
-			if tc.callTool {
-				sink.OnToolCall("web_search", "search aerial")
-			}
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnToolCall("web_search", "search aerial")
 
-			if tc.streamDeltas {
-				sink.OnTextDelta("Hello ")
-				sink.OnTextDelta("world!")
-				if sink.ResponseText() != tc.wantText {
-					t.Fatalf("expected %q, got %q", tc.wantText, sink.ResponseText())
-				}
-			}
+	sink.OnTextDelta("Hello ")
+	sink.OnTextDelta("world!")
+	if sink.ResponseText() != "Hello world!" {
+		t.Fatalf("expected %q, got %q", "Hello world!", sink.ResponseText())
+	}
 
-			expectedErr := errors.New("turn timeout")
-			if tc.triggerError {
-				sink.OnError(expectedErr)
-				if !stoppedTyping {
-					t.Fatal("expected stopTyping called on error")
-				}
-				if !errors.Is(completedErr, expectedErr) {
-					t.Fatalf("expected completedErr=%v, got %v", expectedErr, completedErr)
-				}
-			}
+	turnRes := &runner.TurnResult{Response: "Hello world!"}
+	sink.OnResult(turnRes)
+	if !stoppedTyping {
+		t.Fatal("expected stopTyping called on result")
+	}
+	if completedRes != turnRes {
+		t.Fatalf("expected completedRes=%+v, got %+v", turnRes, completedRes)
+	}
+	if completedErr != nil {
+		t.Fatalf("unexpected completedErr: %v", completedErr)
+	}
 
-			if !tc.triggerError || tc.name == "EditorErrorsLoggedWithoutPanic" || tc.nilEditor || tc.emptyBadge {
-				turnRes := &runner.TurnResult{Response: "ok"}
-				if tc.streamDeltas {
-					turnRes.Response = "Hello world!"
-				}
-				sink.OnResult(turnRes)
-				if !stoppedTyping {
-					t.Fatal("expected stopTyping called on result")
-				}
-				if !tc.triggerError && completedRes != turnRes {
-					t.Fatalf("expected completedRes=%+v, got %+v", turnRes, completedRes)
-				}
-			}
+	mockEditor.mu.Lock()
+	defer mockEditor.mu.Unlock()
+	if len(mockEditor.editCalls) != 1 || len(mockEditor.deleteCalls) != 1 {
+		t.Fatalf("edits=%d (want 1), deletes=%d (want 1)",
+			len(mockEditor.editCalls), len(mockEditor.deleteCalls))
+	}
+	if mockEditor.deleteCalls[0].channelID != "chan-123" || mockEditor.deleteCalls[0].messageID != badge {
+		t.Fatalf("unexpected delete target: %+v", mockEditor.deleteCalls)
+	}
+	if mockEditor.editCalls[0].content != "⚙️ Executing web_search..." {
+		t.Fatalf("unexpected edit call content: %s", mockEditor.editCalls[0].content)
+	}
+}
 
-			if mockEditor != nil {
-				mockEditor.mu.Lock()
-				if len(mockEditor.editCalls) != tc.wantEdits || len(mockEditor.deleteCalls) != tc.wantDeletes {
-					t.Fatalf("edits=%d (want %d), deletes=%d (want %d)",
-						len(mockEditor.editCalls), tc.wantEdits, len(mockEditor.deleteCalls), tc.wantDeletes)
-				}
-				if tc.wantDeletes > 0 && badge != "" {
-					if mockEditor.deleteCalls[0].channelID != "chan-123" || mockEditor.deleteCalls[0].messageID != badge {
-						t.Fatalf("unexpected delete target: %+v", mockEditor.deleteCalls)
-					}
-				}
-				if tc.wantEdits > 0 {
-					if mockEditor.editCalls[0].content != "⚙️ Executing web_search..." {
-						t.Fatalf("unexpected edit call content: %s", mockEditor.editCalls[0].content)
-					}
-				}
-				mockEditor.mu.Unlock()
-			}
-		})
+func TestDiscordTurnSink_ErrorLifecycle(t *testing.T) {
+	t.Parallel()
+
+	mockEditor := &mockDiscordMessageEditor{}
+	badge := "msg-456"
+	var completedRes *runner.TurnResult
+	var completedErr error
+	stoppedTyping := false
+
+	sink := NewDiscordTurnSink(
+		mockEditor,
+		"chan-123",
+		badge,
+		func(res *runner.TurnResult) { completedRes = res },
+		func(err error) { completedErr = err },
+	)
+	sink.SetStopTyping(func() { stoppedTyping = true })
+
+	sink.OnTurnStarted()
+	sink.OnThinking()
+
+	expectedErr := errors.New("turn timeout")
+	sink.OnError(expectedErr)
+	if !stoppedTyping {
+		t.Fatal("expected stopTyping called on error")
+	}
+	if !errors.Is(completedErr, expectedErr) {
+		t.Fatalf("expected completedErr=%v, got %v", expectedErr, completedErr)
+	}
+	if completedRes != nil {
+		t.Fatalf("unexpected completedRes: %+v", completedRes)
+	}
+
+	mockEditor.mu.Lock()
+	defer mockEditor.mu.Unlock()
+	if len(mockEditor.editCalls) != 0 || len(mockEditor.deleteCalls) != 1 {
+		t.Fatalf("edits=%d (want 0), deletes=%d (want 1)",
+			len(mockEditor.editCalls), len(mockEditor.deleteCalls))
+	}
+	if mockEditor.deleteCalls[0].channelID != "chan-123" || mockEditor.deleteCalls[0].messageID != badge {
+		t.Fatalf("unexpected delete target: %+v", mockEditor.deleteCalls)
+	}
+}
+
+func TestDiscordTurnSink_EditorErrorsAndGuards(t *testing.T) {
+	t.Parallel()
+
+	// Editor errors logged without panic
+	{
+		mockEditor := &mockDiscordMessageEditor{
+			editErr:   errors.New("edit network failure"),
+			deleteErr: errors.New("delete 404 not found"),
+		}
+		badge := "msg-456"
+		var completedErr error
+		stoppedTyping := false
+
+		sink := NewDiscordTurnSink(
+			mockEditor,
+			"chan-123",
+			badge,
+			func(res *runner.TurnResult) {},
+			func(err error) { completedErr = err },
+		)
+		sink.SetStopTyping(func() { stoppedTyping = true })
+
+		sink.OnTurnStarted()
+		sink.OnThinking()
+		sink.OnToolCall("web_search", "search aerial")
+
+		expectedErr := errors.New("turn timeout")
+		sink.OnError(expectedErr)
+		if !stoppedTyping {
+			t.Fatal("expected stopTyping called on error")
+		}
+		if !errors.Is(completedErr, expectedErr) {
+			t.Fatalf("expected completedErr=%v, got %v", expectedErr, completedErr)
+		}
+
+		sink.OnResult(&runner.TurnResult{Response: "ok"})
+
+		mockEditor.mu.Lock()
+		if len(mockEditor.editCalls) != 1 || len(mockEditor.deleteCalls) != 2 {
+			t.Fatalf("edits=%d (want 1), deletes=%d (want 2)",
+				len(mockEditor.editCalls), len(mockEditor.deleteCalls))
+		}
+		if mockEditor.deleteCalls[0].channelID != "chan-123" || mockEditor.deleteCalls[0].messageID != badge {
+			t.Fatalf("unexpected delete target: %+v", mockEditor.deleteCalls)
+		}
+		if mockEditor.editCalls[0].content != "⚙️ Executing web_search..." {
+			t.Fatalf("unexpected edit call content: %s", mockEditor.editCalls[0].content)
+		}
+		mockEditor.mu.Unlock()
+	}
+
+	// Nil editor guards
+	{
+		badge := "msg-456"
+		var completedRes *runner.TurnResult
+		stoppedTyping := false
+
+		sink := NewDiscordTurnSink(
+			nil,
+			"chan-123",
+			badge,
+			func(res *runner.TurnResult) { completedRes = res },
+			func(err error) {},
+		)
+		sink.SetStopTyping(func() { stoppedTyping = true })
+
+		sink.OnTurnStarted()
+		sink.OnThinking()
+		sink.OnToolCall("web_search", "search aerial")
+
+		turnRes := &runner.TurnResult{Response: "ok"}
+		sink.OnResult(turnRes)
+		if !stoppedTyping {
+			t.Fatal("expected stopTyping called on result")
+		}
+		if completedRes != turnRes {
+			t.Fatalf("expected completedRes=%+v, got %+v", turnRes, completedRes)
+		}
+	}
+
+	// Empty badge guards
+	{
+		mockEditor := &mockDiscordMessageEditor{}
+		var completedRes *runner.TurnResult
+		stoppedTyping := false
+
+		sink := NewDiscordTurnSink(
+			mockEditor,
+			"chan-123",
+			"",
+			func(res *runner.TurnResult) { completedRes = res },
+			func(err error) {},
+		)
+		sink.SetStopTyping(func() { stoppedTyping = true })
+
+		sink.OnTurnStarted()
+		sink.OnThinking()
+		sink.OnToolCall("web_search", "search aerial")
+
+		turnRes := &runner.TurnResult{Response: "ok"}
+		sink.OnResult(turnRes)
+		if !stoppedTyping {
+			t.Fatal("expected stopTyping called on result")
+		}
+		if completedRes != turnRes {
+			t.Fatalf("expected completedRes=%+v, got %+v", turnRes, completedRes)
+		}
+
+		mockEditor.mu.Lock()
+		if len(mockEditor.editCalls) != 0 || len(mockEditor.deleteCalls) != 0 {
+			t.Fatalf("edits=%d (want 0), deletes=%d (want 0)",
+				len(mockEditor.editCalls), len(mockEditor.deleteCalls))
+		}
+		mockEditor.mu.Unlock()
 	}
 }
 
@@ -672,25 +730,20 @@ func TestTurnSinks_NoopMethods(t *testing.T) {
 	voiceSink.OnSkillActivated("skill", "voice")
 }
 
-func TestNewVoiceTurnSink(t *testing.T) {
+func TestNewVoiceTurnSink_SentenceStreaming(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name                      string
 		cancelledCtx              bool
-		withDetector              bool
 		deltas                    []string
 		callResult                bool
 		resultResponse            string
-		onErrorErr                error
 		wantSentencesBeforeResult []string
 		wantSentences             []string
-		wantWaitResponse          string
-		wantWaitErrSub            string
 	}{
 		{
 			name:                      "SentenceStreamingAndResultFallback",
-			withDetector:              true,
 			deltas:                    []string{"First sentence. ", "Second incomplete"},
 			callResult:                true,
 			resultResponse:            "First sentence. Second incomplete",
@@ -699,7 +752,6 @@ func TestNewVoiceTurnSink(t *testing.T) {
 		},
 		{
 			name:           "ResultFallbackWithoutDeltas",
-			withDetector:   true,
 			callResult:     true,
 			resultResponse: "Hello there. General Kenobi.",
 			wantSentences:  []string{"Hello there.", "General Kenobi."},
@@ -707,10 +759,77 @@ func TestNewVoiceTurnSink(t *testing.T) {
 		{
 			name:          "CancellationGuards",
 			cancelledCtx:  true,
-			withDetector:  true,
 			deltas:        []string{"Should not be emitted because context is cancelled. "},
 			wantSentences: nil,
 		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			if tc.cancelledCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			var sentences []string
+			detector := NewSentenceDetector()
+			onSentence := func(s string) {
+				sentences = append(sentences, s)
+			}
+
+			sink := newVoiceTurnSink(ctx, nil, onSentence, detector)
+			sink.OnTurnStarted()
+			sink.OnThinking()
+
+			for _, d := range tc.deltas {
+				sink.OnTextDelta(d)
+			}
+
+			if len(tc.wantSentencesBeforeResult) > 0 {
+				if len(sentences) != len(tc.wantSentencesBeforeResult) || sentences[0] != tc.wantSentencesBeforeResult[0] {
+					t.Fatalf("expected %v before result, got %v", tc.wantSentencesBeforeResult, sentences)
+				}
+			}
+
+			if tc.callResult {
+				sink.OnResult(&runner.TurnResult{Response: tc.resultResponse})
+			}
+
+			if tc.wantSentences != nil {
+				if len(sentences) != len(tc.wantSentences) {
+					t.Fatalf("expected %d sentences, got %d (%v)", len(tc.wantSentences), len(sentences), sentences)
+				}
+				for i, want := range tc.wantSentences {
+					if sentences[i] != want {
+						t.Errorf("sentence[%d] = %q, want %q", i, sentences[i], want)
+					}
+				}
+			} else if tc.cancelledCtx {
+				if len(sentences) != 0 {
+					t.Fatalf("expected no sentences on cancelled context, got %d", len(sentences))
+				}
+			}
+		})
+	}
+}
+
+func TestNewVoiceTurnSink_WaitAndDeltaRecovery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		withDetector     bool
+		deltas           []string
+		callResult       bool
+		resultResponse   string
+		onErrorErr       error
+		wantWaitResponse string
+		wantWaitErrSub   string
+	}{
 		{
 			name:             "AccumulatedDeltasOnEmptyResult",
 			withDetector:     true,
@@ -738,20 +857,11 @@ func TestNewVoiceTurnSink(t *testing.T) {
 			t.Parallel()
 
 			ctx := context.Background()
-			if tc.cancelledCtx {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-
-			var sentences []string
 			var detector *SentenceDetector
 			var onSentence func(string)
 			if tc.withDetector {
 				detector = NewSentenceDetector()
-				onSentence = func(s string) {
-					sentences = append(sentences, s)
-				}
+				onSentence = func(s string) {}
 			}
 
 			sink := newVoiceTurnSink(ctx, nil, onSentence, detector)
@@ -762,12 +872,6 @@ func TestNewVoiceTurnSink(t *testing.T) {
 				sink.OnTextDelta(d)
 			}
 
-			if len(tc.wantSentencesBeforeResult) > 0 {
-				if len(sentences) != len(tc.wantSentencesBeforeResult) || sentences[0] != tc.wantSentencesBeforeResult[0] {
-					t.Fatalf("expected %v before result, got %v", tc.wantSentencesBeforeResult, sentences)
-				}
-			}
-
 			if tc.callResult {
 				sink.OnResult(&runner.TurnResult{Response: tc.resultResponse})
 			}
@@ -776,34 +880,17 @@ func TestNewVoiceTurnSink(t *testing.T) {
 				sink.OnError(tc.onErrorErr)
 			}
 
-			if tc.wantSentences != nil {
-				if len(sentences) != len(tc.wantSentences) {
-					t.Fatalf("expected %d sentences, got %d (%v)", len(tc.wantSentences), len(sentences), sentences)
+			res, err := sink.Wait(context.Background())
+			if tc.wantWaitErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantWaitErrSub) {
+					t.Fatalf("expected wait error containing %q, got: %v", tc.wantWaitErrSub, err)
 				}
-				for i, want := range tc.wantSentences {
-					if sentences[i] != want {
-						t.Errorf("sentence[%d] = %q, want %q", i, sentences[i], want)
-					}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected wait error: %v", err)
 				}
-			} else if tc.cancelledCtx {
-				if len(sentences) != 0 {
-					t.Fatalf("expected no sentences on cancelled context, got %d", len(sentences))
-				}
-			}
-
-			if tc.wantWaitResponse != "" || tc.wantWaitErrSub != "" {
-				res, err := sink.Wait(context.Background())
-				if tc.wantWaitErrSub != "" {
-					if err == nil || !strings.Contains(err.Error(), tc.wantWaitErrSub) {
-						t.Fatalf("expected wait error containing %q, got: %v", tc.wantWaitErrSub, err)
-					}
-				} else {
-					if err != nil {
-						t.Fatalf("unexpected wait error: %v", err)
-					}
-					if res == nil || res.Response != tc.wantWaitResponse {
-						t.Fatalf("expected response %q, got %+v", tc.wantWaitResponse, res)
-					}
+				if res == nil || res.Response != tc.wantWaitResponse {
+					t.Fatalf("expected response %q, got %+v", tc.wantWaitResponse, res)
 				}
 			}
 		})
