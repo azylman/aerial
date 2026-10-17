@@ -204,6 +204,15 @@ func initDB(dsn string) (*sql.DB, error) {
 	return database, nil
 }
 
+func normalizeScheduleEffort(effort string) string {
+	switch eff := strings.ToLower(strings.TrimSpace(effort)); eff {
+	case "low", "medium", "high":
+		return eff
+	default:
+		return "medium"
+	}
+}
+
 func InsertCronSchedule(ctx context.Context, database *sql.DB, c CronSchedule) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -217,11 +226,7 @@ func InsertCronSchedule(ctx context.Context, database *sql.DB, c CronSchedule) e
 	if c.Timezone == "" {
 		c.Timezone = "America/Los_Angeles"
 	}
-	if strings.ToLower(strings.TrimSpace(c.Effort)) == "high" {
-		c.Effort = "high"
-	} else {
-		c.Effort = "low"
-	}
+	c.Effort = normalizeScheduleEffort(c.Effort)
 	query := `
 	INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -241,11 +246,7 @@ func InsertOneShotSchedule(ctx context.Context, database *sql.DB, s OneShotSched
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
-	if strings.ToLower(strings.TrimSpace(s.Effort)) == "high" {
-		s.Effort = "high"
-	} else {
-		s.Effort = "low"
-	}
+	s.Effort = normalizeScheduleEffort(s.Effort)
 	query := `
 	INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort)
 	VALUES (?, ?, ?, ?, ?, ?)
@@ -263,7 +264,7 @@ func ListCronSchedules(ctx context.Context, database *sql.DB, targetID string) (
 		return nil, fmt.Errorf("database is nil")
 	}
 	query := `
-	SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low')
+	SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium')
 	FROM cron_schedules
 	WHERE enabled = TRUE
 	`
@@ -313,12 +314,8 @@ func UpdateCronSchedule(ctx context.Context, database *sql.DB, id string, effort
 	var args []interface{}
 
 	if effort != nil {
-		eff := strings.ToLower(strings.TrimSpace(*effort))
-		if eff != "low" {
-			eff = "high"
-		}
 		sets = append(sets, "effort = ?")
-		args = append(args, eff)
+		args = append(args, normalizeScheduleEffort(*effort))
 	}
 	if cronExpr != nil && strings.TrimSpace(*cronExpr) != "" {
 		sets = append(sets, "cron_expr = ?")
@@ -374,7 +371,7 @@ func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string
 		return nil, fmt.Errorf("database is nil")
 	}
 	query := `
-	SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'low')
+	SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium')
 	FROM one_shot_schedules
 	`
 	var rows *sql.Rows

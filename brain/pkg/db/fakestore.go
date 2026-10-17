@@ -2237,7 +2237,7 @@ func cloneVanadisChunk(c *VanadisChunk) VanadisChunk {
 		cp.AcceptanceCriteria = []string{}
 	}
 	if strings.TrimSpace(cp.Effort) == "" {
-		cp.Effort = "low"
+		cp.Effort = "medium"
 	}
 	return cp
 }

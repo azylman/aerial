@@ -2314,7 +2314,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 	}
 	var foundLow, foundHigh bool
 	for _, c := range dueCrons {
-		if c.ID == "cron-low-1" && c.Effort == "low" {
+		if c.ID == "cron-low-1" && c.Effort == "medium" {
 			foundLow = true
 		}
 		if c.ID == "cron-high-1" && c.Effort == "high" {

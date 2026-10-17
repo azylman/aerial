@@ -17,7 +17,7 @@ var (
 func normalizeVanadisEffort(effort string) (string, error) {
 	trimmed := strings.ToLower(strings.TrimSpace(effort))
 	if trimmed == "" {
-		return "low", nil
+		return "medium", nil
 	}
 	switch trimmed {
 	case "low", "medium", "high":
@@ -308,7 +308,7 @@ func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanadi
 			}
 		}
 		if strings.TrimSpace(c.Effort) == "" {
-			c.Effort = "low"
+			c.Effort = "medium"
 		}
 		chunks = append(chunks, c)
 	}
@@ -377,7 +377,7 @@ func (s *SQLStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanadi
 		}
 	}
 	if strings.TrimSpace(c.Effort) == "" {
-		c.Effort = "low"
+		c.Effort = "medium"
 	}
 	return &c, nil
 }
