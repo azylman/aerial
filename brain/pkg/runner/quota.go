@@ -30,7 +30,7 @@ func NewQuotaCoordinator() *QuotaCoordinator {
 // IsLocked performs a pure atomic read returning true if the current time is before
 // the quota locked until timestamp. This is suitable for high-frequency gateway ingress checks.
 func (q *QuotaCoordinator) IsLocked() bool {
-	return time.Now().Unix() < q.quotaLockedUntil.Load()
+	return time.Now().UnixNano() < q.quotaLockedUntil.Load()
 }
 
 // ResumeChannel returns the current broadcast resume channel under lock.
@@ -45,7 +45,7 @@ func (q *QuotaCoordinator) ResumeChannel() <-chan struct{} {
 // It atomically records the lockout expiry timestamp, stops any existing timer,
 // and initializes a fresh resume channel that closes when the lockout expires.
 func (q *QuotaCoordinator) SetLockout(until time.Time) {
-	q.quotaLockedUntil.Store(until.Unix())
+	q.quotaLockedUntil.Store(until.UnixNano())
 
 	q.mu.Lock()
 	defer q.mu.Unlock()

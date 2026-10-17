@@ -74,7 +74,7 @@ func (m *mockAgentPool) Close() error {
 
 var _ AgentPool = (*mockAgentPool)(nil)
 
-func TestAgentInterfaces_Satisfaction(t *testing.T) {
+func TestAgentPool_InterfacesAndMockBehavior(t *testing.T) {
 	t.Parallel()
 
 	var _ AgentPool = (*UnifiedProcessPool)(nil)
@@ -82,9 +82,59 @@ func TestAgentInterfaces_Satisfaction(t *testing.T) {
 	var _ AgentPool = (*mockAgentPool)(nil)
 	var _ AgentSession = (*mockAgentSession)(nil)
 
-	mp := newMockAgentPool()
-	_ = mp.Initialize(context.Background())
-	_ = mp.Close()
+	geminiPool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey: "fake-key",
+	})
+	if geminiPool == nil {
+		t.Fatal("expected non-nil GeminiAPIPool")
+	}
+	var _ AgentPool = geminiPool
+
+	pool := newMockAgentPool()
+	ctx := context.Background()
+
+	if err := pool.Initialize(ctx); err != nil {
+		t.Fatalf("unexpected init error: %v", err)
+	}
+	if !pool.initCalled {
+		t.Fatalf("expected initCalled to be true")
+	}
+
+	sess1, err := pool.GetOrCreateSession(ctx, "device-a", "")
+	if err != nil {
+		t.Fatalf("unexpected error getting session: %v", err)
+	}
+	if sess1.SessionID() != "sess-device-a" {
+		t.Errorf("expected session ID sess-device-a, got %q", sess1.SessionID())
+	}
+
+	sess2, err := pool.GetOrCreateSession(ctx, "device-a", "")
+	if err != nil {
+		t.Fatalf("unexpected error getting existing session: %v", err)
+	}
+	if sess1 != sess2 {
+		t.Errorf("expected same session instance returned")
+	}
+
+	var receivedPrompt string
+	mockSess := sess1.(*mockAgentSession)
+	mockSess.sendFn = func(prompt string, turn *TurnContext) error {
+		receivedPrompt = prompt
+		return nil
+	}
+	if err := sess1.Send("test prompt", nil); err != nil {
+		t.Fatalf("unexpected send error: %v", err)
+	}
+	if receivedPrompt != "test prompt" {
+		t.Errorf("expected test prompt, got %q", receivedPrompt)
+	}
+
+	if err := pool.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+	if _, err := pool.GetOrCreateSession(ctx, "device-b", ""); err == nil {
+		t.Fatalf("expected error from GetOrCreateSession on closed mock pool")
+	}
 }
 
 func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
@@ -147,67 +197,4 @@ func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
 	if closedErr == nil {
 		t.Fatalf("expected error from GetOrCreateSession on closed pool, got nil")
 	}
-}
-
-func TestMockAgentPool_Behavior(t *testing.T) {
-	t.Parallel()
-
-	pool := newMockAgentPool()
-	ctx := context.Background()
-
-	if err := pool.Initialize(ctx); err != nil {
-		t.Fatalf("unexpected init error: %v", err)
-	}
-	if !pool.initCalled {
-		t.Fatalf("expected initCalled to be true")
-	}
-
-	sess1, err := pool.GetOrCreateSession(ctx, "device-a", "")
-	if err != nil {
-		t.Fatalf("unexpected error getting session: %v", err)
-	}
-	if sess1.SessionID() != "sess-device-a" {
-		t.Errorf("expected session ID sess-device-a, got %q", sess1.SessionID())
-	}
-
-	// Calling again should return the same session
-	sess2, err := pool.GetOrCreateSession(ctx, "device-a", "")
-	if err != nil {
-		t.Fatalf("unexpected error getting existing session: %v", err)
-	}
-	if sess1 != sess2 {
-		t.Errorf("expected same session instance returned")
-	}
-
-	// Test Send
-	var receivedPrompt string
-	mockSess := sess1.(*mockAgentSession)
-	mockSess.sendFn = func(prompt string, turn *TurnContext) error {
-		receivedPrompt = prompt
-		return nil
-	}
-	if err := sess1.Send("test prompt", nil); err != nil {
-		t.Fatalf("unexpected send error: %v", err)
-	}
-	if receivedPrompt != "test prompt" {
-		t.Errorf("expected test prompt, got %q", receivedPrompt)
-	}
-
-	// Test Close and closed behavior
-	if err := pool.Close(); err != nil {
-		t.Fatalf("unexpected close error: %v", err)
-	}
-	if _, err := pool.GetOrCreateSession(ctx, "device-b", ""); err == nil {
-		t.Fatalf("expected error from GetOrCreateSession on closed mock pool")
-	}
-}
-
-func TestNewGeminiAPIPool(t *testing.T) {
-	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey: "fake-key",
-	})
-	if pool == nil {
-		t.Fatal("expected non-nil GeminiAPIPool")
-	}
-	var _ AgentPool = pool
 }
