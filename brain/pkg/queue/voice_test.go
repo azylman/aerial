@@ -145,28 +145,19 @@ func TestWorkerPool_MediumEffortModelResolution(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
+func TestWorkerPool_ExecuteVoiceTurn_CustomRunnerOptions(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		runnerType    string // "custom_options", "voice_runner", "voice_stream", "forward_prompt"
-		runnerOut     string
-		runnerErrOut  string
-		runnerCode    int
-		runnerErr     error
-		streamErr     error
-		prompt        string
-		sessionID     string
-		wantReply     string
-		wantErrSub    string
-		wantConvID    string
-		wantStatusSub string
-		wantSentence  string
+		name, runnerOut, runnerErrOut string
+		runnerCode                    int
+		runnerErr                     error
+		prompt, sessionID             string
+		wantReply, wantErrSub         string
+		wantConvID, wantStatusSub     string
 	}{
 		{
 			name:          "SuccessTurn",
-			runnerType:    "custom_options",
 			runnerOut:     `{"event":"result","result":{"status":"SUCCESS","response":"turned off fan"}}`,
 			prompt:        "turn off the fan",
 			sessionID:     "sess-custom-1",
@@ -176,7 +167,6 @@ func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 		},
 		{
 			name:         "RunnerError",
-			runnerType:   "custom_options",
 			runnerErrOut: "exec error",
 			runnerCode:   1,
 			runnerErr:    errors.New("exec failed"),
@@ -186,7 +176,6 @@ func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 		},
 		{
 			name:         "ExitCodeNonZero",
-			runnerType:   "custom_options",
 			runnerErrOut: "process died",
 			runnerCode:   42,
 			prompt:       "turn off the fan",
@@ -195,7 +184,6 @@ func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 		},
 		{
 			name:       "PlainTextFallback",
-			runnerType: "custom_options",
 			runnerOut:  "plain text response",
 			prompt:     "turn off the fan",
 			sessionID:  "sess-custom-1",
@@ -204,46 +192,10 @@ func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 		},
 		{
 			name:       "EmptyResponseField",
-			runnerType: "custom_options",
 			runnerOut:  `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
 			prompt:     "turn off the fan",
 			sessionID:  "sess-custom-1",
 			wantErrSub: "empty response",
-		},
-		{
-			name:          "VoiceRunnerHook",
-			runnerType:    "voice_runner",
-			prompt:        "hello",
-			sessionID:     "sess-hook-1",
-			wantReply:     "voice hook reply",
-			wantConvID:    "sess-hook-1",
-			wantStatusSub: "⚡ Custom hook running...",
-		},
-		{
-			name:          "VoiceStreamRunnerHook",
-			runnerType:    "voice_stream",
-			prompt:        "hello",
-			sessionID:     "sess-stream-hook-1",
-			wantReply:     "voice stream reply",
-			wantConvID:    "sess-stream-hook-1",
-			wantStatusSub: "⚡ Streaming hook running...",
-			wantSentence:  "Streaming sentence.",
-		},
-		{
-			name:       "VoiceStreamRunnerHookError",
-			runnerType: "voice_stream",
-			prompt:     "hello",
-			sessionID:  "sess-err",
-			streamErr:  errors.New("simulated stream failure"),
-			wantErrSub: "simulated stream failure",
-		},
-		{
-			name:       "ForwardCleanPrompt",
-			runnerType: "forward_prompt",
-			prompt:     "where does my daughter go to school?",
-			sessionID:  "dev-voice-1",
-			wantReply:  "Ayda is in Emeryville.",
-			wantConvID: "dev-voice-1",
 		},
 	}
 
@@ -255,47 +207,16 @@ func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 			var recordedPrompt string
 			var recordedSession string
 			var statusReceived string
-			var sentenceReceived string
 
 			cfg := WorkerPoolConfig{
 				LowEffortModel: "low-effort-fast-model",
-			}
-
-			switch tt.runnerType {
-			case "custom_options":
-				cfg.Store = db.NewFakeStore()
-				cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				Store:          db.NewFakeStore(),
+				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 					recordedModel = model
 					recordedPrompt = prompt
 					recordedSession = sessionID
 					return tt.runnerOut, tt.runnerErrOut, tt.runnerCode, tt.runnerErr
-				}
-			case "voice_runner":
-				cfg.VoiceRunnerFunc = func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-					if onStatus != nil {
-						onStatus("⚡ Custom hook running...")
-					}
-					return "voice hook reply", sessionID, nil
-				}
-			case "voice_stream":
-				cfg.VoiceStreamRunnerFunc = func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
-					if tt.streamErr != nil {
-						return "", sessionID, tt.streamErr
-					}
-					if onStatus != nil {
-						onStatus("⚡ Streaming hook running...")
-					}
-					if onSentence != nil {
-						onSentence("Streaming sentence.")
-					}
-					return "voice stream reply", sessionID, nil
-				}
-			case "forward_prompt":
-				cfg.Store = setupTestStore(t)
-				cfg.VoiceRunnerFunc = func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-					recordedPrompt = prompt
-					return "Ayda is in Emeryville.", sessionID, nil
-				}
+				},
 			}
 
 			pool := New(nil, cfg)
@@ -306,12 +227,8 @@ func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 			if tt.wantStatusSub != "" {
 				onStatus = func(s string) { statusReceived = s }
 			}
-			var onSentence func(string)
-			if tt.wantSentence != "" || tt.name == "VoiceStreamRunnerHookError" {
-				onSentence = func(s string) { sentenceReceived = s }
-			}
 
-			reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), tt.prompt, tt.sessionID, onStatus, onSentence)
+			reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), tt.prompt, tt.sessionID, onStatus, nil)
 
 			if tt.wantErrSub != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
@@ -329,29 +246,142 @@ func TestWorkerPool_ExecuteVoiceTurn_RunnersAndHooks(t *testing.T) {
 			if tt.wantConvID != "" && convID != tt.wantConvID {
 				t.Errorf("expected convID %q, got %q", tt.wantConvID, convID)
 			}
-			if tt.runnerType == "custom_options" {
-				if recordedModel != "low-effort-fast-model" {
-					t.Errorf("expected low-effort-fast-model, got %q", recordedModel)
-				}
-				if recordedPrompt != tt.prompt {
-					t.Errorf("expected prompt %q, got %q", tt.prompt, recordedPrompt)
-				}
-				if recordedSession != tt.sessionID {
-					t.Errorf("expected session %q, got %q", tt.sessionID, recordedSession)
-				}
+			if recordedModel != "low-effort-fast-model" {
+				t.Errorf("expected low-effort-fast-model, got %q", recordedModel)
 			}
-			if tt.runnerType == "forward_prompt" {
-				if recordedPrompt != tt.prompt {
-					t.Errorf("expected captured prompt %q, got %q", tt.prompt, recordedPrompt)
-				}
+			if recordedPrompt != tt.prompt {
+				t.Errorf("expected prompt %q, got %q", tt.prompt, recordedPrompt)
+			}
+			if recordedSession != tt.sessionID {
+				t.Errorf("expected session %q, got %q", tt.sessionID, recordedSession)
 			}
 			if tt.wantStatusSub != "" && !strings.Contains(statusReceived, tt.wantStatusSub) {
 				t.Errorf("expected status containing %q, got %q", tt.wantStatusSub, statusReceived)
 			}
-			if tt.wantSentence != "" && sentenceReceived != tt.wantSentence {
-				t.Errorf("expected sentence %q, got %q", tt.wantSentence, sentenceReceived)
-			}
 		})
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_VoiceRunnerHook(t *testing.T) {
+	t.Parallel()
+
+	var statusReceived string
+	cfg := WorkerPoolConfig{
+		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			if onStatus != nil {
+				onStatus("⚡ Custom hook running...")
+			}
+			return "voice hook reply", sessionID, nil
+		},
+	}
+
+	pool := New(nil, cfg)
+	pool.Start()
+	defer pool.Stop()
+
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "hello", "sess-hook-1", func(s string) {
+		statusReceived = s
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "voice hook reply" {
+		t.Errorf("expected reply %q, got %q", "voice hook reply", reply)
+	}
+	if convID != "sess-hook-1" {
+		t.Errorf("expected convID %q, got %q", "sess-hook-1", convID)
+	}
+	if !strings.Contains(statusReceived, "⚡ Custom hook running...") {
+		t.Errorf("expected status containing %q, got %q", "⚡ Custom hook running...", statusReceived)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_VoiceStreamRunnerHook(t *testing.T) {
+	t.Parallel()
+
+	var statusReceived string
+	var sentenceReceived string
+
+	cfg := WorkerPoolConfig{
+		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
+			if onStatus != nil {
+				onStatus("⚡ Streaming hook running...")
+			}
+			if onSentence != nil {
+				onSentence("Streaming sentence.")
+			}
+			return "voice stream reply", sessionID, nil
+		},
+	}
+
+	pool := New(nil, cfg)
+	pool.Start()
+	defer pool.Stop()
+
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "hello", "sess-stream-hook-1", func(s string) {
+		statusReceived = s
+	}, func(s string) {
+		sentenceReceived = s
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "voice stream reply" {
+		t.Errorf("expected reply %q, got %q", "voice stream reply", reply)
+	}
+	if convID != "sess-stream-hook-1" {
+		t.Errorf("expected convID %q, got %q", "sess-stream-hook-1", convID)
+	}
+	if !strings.Contains(statusReceived, "⚡ Streaming hook running...") {
+		t.Errorf("expected status containing %q, got %q", "⚡ Streaming hook running...", statusReceived)
+	}
+	if sentenceReceived != "Streaming sentence." {
+		t.Errorf("expected sentence %q, got %q", "Streaming sentence.", sentenceReceived)
+	}
+
+	// Stream error case
+	errPool := New(nil, WorkerPoolConfig{
+		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
+			return "", sessionID, errors.New("simulated stream failure")
+		},
+	})
+	errPool.Start()
+	defer errPool.Stop()
+
+	_, _, err = errPool.ExecuteVoiceTurn(context.Background(), "hello", "sess-err", nil, func(s string) {})
+	if err == nil || !strings.Contains(err.Error(), "simulated stream failure") {
+		t.Fatalf("expected error containing simulated stream failure, got: %v", err)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_ForwardCleanPrompt(t *testing.T) {
+	t.Parallel()
+
+	var recordedPrompt string
+	cfg := WorkerPoolConfig{
+		Store: setupTestStore(t),
+		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			recordedPrompt = prompt
+			return "Ayda is in Emeryville.", sessionID, nil
+		},
+	}
+
+	pool := New(nil, cfg)
+	pool.Start()
+	defer pool.Stop()
+
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "where does my daughter go to school?", "dev-voice-1", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "Ayda is in Emeryville." {
+		t.Errorf("expected reply %q, got %q", "Ayda is in Emeryville.", reply)
+	}
+	if convID != "dev-voice-1" {
+		t.Errorf("expected convID %q, got %q", "dev-voice-1", convID)
+	}
+	if recordedPrompt != "where does my daughter go to school?" {
+		t.Errorf("expected captured prompt %q, got %q", "where does my daughter go to school?", recordedPrompt)
 	}
 }
 
@@ -550,101 +580,194 @@ func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *runner
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_ProcessPool(t *testing.T) {
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolSuccessAndMetrics(t *testing.T) {
+	t.Parallel()
+
+	stepUpdates := []string{
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"\"}}}}",
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool\",\"tool_name\":\"\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"system-health\"}}}}",
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\"}}",
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"ERROR\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\"}}",
+	}
+
+	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
+		stepUpdates:    stepUpdates,
+		resultStatus:   "SUCCESS",
+		resultResponse: "daemon voice turn reply",
+		tokens:         runner.TokenUsage{InputTokens: 60, OutputTokens: 40, TotalTokens: 100},
+	})
+
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
+	defer procPool.Close()
+
+	pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+	pool.Start()
+	defer pool.Stop()
+
+	var statuses []string
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "kiosk", func(status string) {
+		statuses = append(statuses, status)
+	}, nil)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "daemon voice turn reply" {
+		t.Errorf("expected reply %q, got %q", "daemon voice turn reply", reply)
+	}
+	if !runner.IsValidUUID(convID) || len(statuses) < 2 {
+		t.Fatalf("unexpected success result: convID=%q statuses=%v", convID, statuses)
+	}
+
+	reply2, _, err2 := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "sess-no-status", nil, nil)
+	if err2 != nil || reply2 != "daemon voice turn reply" {
+		t.Fatalf("unexpected nil onStatus error: %v", err2)
+	}
+
+	pool.scopeLocks.Store("voice-sess-bad-lock", "not-a-mutex")
+	reply3, _, err3 := pool.ExecuteVoiceTurn(context.Background(), "test", "sess-bad-lock", nil, nil)
+	if err3 != nil || reply3 != "daemon voice turn reply" {
+		t.Fatalf("unexpected error on recovered bad lock: %v", err3)
+	}
+
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `source="voice"`) || !strings.Contains(body, `channel="voice"`) {
+		t.Errorf("expected metrics to contain source=voice and channel=voice")
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolDeviceRouting(t *testing.T) {
+	t.Parallel()
+
+	var spawnedTarget string
+	spawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			spawnedTarget = cfg.ThreadID
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			go func() {
+				defer outW.Close()
+				defer errW.Close()
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				if scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"kiosk device reply\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(8888), nil
+		},
+	}
+
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
+	defer procPool.Close()
+
+	pool := New(nil, WorkerPoolConfig{VoiceProcessPool: procPool})
+	pool.Start()
+	defer pool.Stop()
+
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "what is the weather", "kiosk", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "kiosk device reply" {
+		t.Errorf("expected reply %q, got %q", "kiosk device reply", reply)
+	}
+	if convID != "550e8400-e29b-41d4-a716-446655440000" || spawnedTarget != "kiosk" {
+		t.Fatalf("unexpected routing result: convID=%q target=%q", convID, spawnedTarget)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolTranscriptRecovery(t *testing.T) {
+	t.Parallel()
+
+	targetSess := "550e8400-e29b-41d4-a716-446655449999"
+	tempDir := t.TempDir()
+	logsDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", targetSess, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("mkdir logs failed: %v", err)
+	}
+
+	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
+		initSessionID:          targetSess,
+		resultStatus:           "ERROR",
+		resultError:            "RESOURCE_EXHAUSTED (code 429)",
+		resultResponse:         "All systems operational and nominal.",
+		writeTranscriptLogsDir: logsDir,
+	})
+
+	sessMgr := session.New(tempDir, tempDir)
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel:      "gemini-2.5-flash",
+		TranscriptRescuer: sessMgr.ExtractResponseSince,
+	}, spawner)
+	defer procPool.Close()
+
+	pool := New(nil, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		ProcessPool:    procPool,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	var sentences []string
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "What is the status?", targetSess, nil, func(s string) {
+		sentences = append(sentences, s)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "All systems operational and nominal." {
+		t.Errorf("expected reply %q, got %q", "All systems operational and nominal.", reply)
+	}
+	if convID != targetSess || len(sentences) == 0 {
+		t.Fatalf("unexpected transcript recovery: sessionID=%q sentences=%v", convID, sentences)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name                     string
 		spawnerErr               error
 		closeInRPipeImmediately  bool
-		stepUpdates              []string
+		cancelCallerWaiting      bool
+		clearPreSpawnedSessionID bool
 		resultStatus             string
 		resultError              string
 		resultExitCode           int
-		resultResponse           string
-		tokens                   runner.TokenUsage
-		clearPreSpawnedSessionID bool
-		cancelCallerWaiting      bool
-		useVoiceProcessPoolField bool
-		isDeviceRouting          bool
-		isSuccessAndMetrics      bool
-		isTranscriptRecovery     bool
-		targetSess               string
-		prompt                   string
 		wantErrSub               string
-		wantReply                string
 	}{
-		{
-			name:                "SuccessAndMetrics",
-			isSuccessAndMetrics: true,
-			stepUpdates: []string{
-				"{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"\"}}}}",
-				"{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool\",\"tool_name\":\"\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"system-health\"}}}}",
-				"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\"}}",
-				"{\"event\":\"step_update\",\"step_update\":{\"state\":\"ERROR\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\"}}",
-			},
-			resultResponse: "daemon voice turn reply",
-			tokens:         runner.TokenUsage{InputTokens: 60, OutputTokens: 40, TotalTokens: 100},
-			targetSess:     "kiosk",
-			prompt:         "turn on living room light",
-			wantReply:      "daemon voice turn reply",
-		},
-		{
-			name:                     "DeviceRouting",
-			isDeviceRouting:          true,
-			useVoiceProcessPoolField: true,
-			targetSess:               "kiosk",
-			prompt:                   "what is the weather",
-			wantReply:                "kiosk device reply",
-		},
-		{
-			name:                 "TranscriptRecoveryOnError",
-			isTranscriptRecovery: true,
-			resultStatus:         "ERROR",
-			resultError:          "RESOURCE_EXHAUSTED (code 429)",
-			resultResponse:       "All systems operational and nominal.",
-			targetSess:           "550e8400-e29b-41d4-a716-446655449999",
-			prompt:               "What is the status?",
-			wantReply:            "All systems operational and nominal.",
-		},
 		{
 			name:       "AcquisitionFailure",
 			spawnerErr: errors.New("spawner failed to start"),
-			targetSess: "sess-test",
-			prompt:     "test prompt",
 			wantErrSub: "failed to acquire voice daemon",
 		},
 		{
 			name:         "DaemonExecutionError",
 			resultStatus: "ERROR",
 			resultError:  "simulated failure in daemon",
-			targetSess:   "sess-test",
-			prompt:       "test prompt",
 			wantErrSub:   "simulated failure in daemon",
 		},
 		{
 			name:                    "SendFailureBrokenPipe",
 			closeInRPipeImmediately: true,
-			targetSess:              "sess-test",
-			prompt:                  "test prompt",
 			wantErrSub:              "failed sending turn to voice daemon",
 		},
 		{
 			name:                "ContextCanceledWaitingForResult",
 			cancelCallerWaiting: true,
-			targetSess:          "sess-test",
-			prompt:              "test prompt",
 			wantErrSub:          "context canceled",
 		},
 		{
 			name:                     "ExitCodeNonZeroAndEmptySessionFallback",
 			resultStatus:             "SUCCESS",
-			resultResponse:           "turn failed",
 			resultExitCode:           1,
 			clearPreSpawnedSessionID: true,
-			targetSess:               "sess-test",
-			prompt:                   "test prompt",
-			wantReply:                "turn failed",
+			wantErrSub:               "empty response",
 		},
 	}
 
@@ -663,79 +786,24 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPool(t *testing.T) {
 				onScan = func() { cancel() }
 			}
 
-			var spawnedTarget string
-			var spawner runner.DaemonSpawner
+			spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
+				spawnerErr:              tt.spawnerErr,
+				closeInRPipeImmediately: tt.closeInRPipeImmediately,
+				resultStatus:            tt.resultStatus,
+				resultError:             tt.resultError,
+				resultExitCode:          tt.resultExitCode,
+				cancelCallerOnScan:      onScan,
+				blockUntilDone:          blockCh,
+			})
 
-			if tt.isDeviceRouting {
-				spawner = &runner.MockDaemonSpawner{
-					SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-						spawnedTarget = cfg.ThreadID
-						inR, inW := io.Pipe()
-						outR, outW := io.Pipe()
-						errR, errW := io.Pipe()
-						go func() {
-							defer outW.Close()
-							defer errW.Close()
-							_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
-							scanner := bufio.NewScanner(inR)
-						if scanner.Scan() {
-								_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"kiosk device reply\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}}\n"))
-							}
-						}()
-						return inW, outR, errR, runner.NewMockProcessHandle(8888), nil
-					},
-				}
-			} else {
-				var logsDir string
-				var initSessID string
-				if tt.isTranscriptRecovery {
-					initSessID = tt.targetSess
-					tempDir := t.TempDir()
-					logsDir = filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", tt.targetSess, ".system_generated", "logs")
-					if err := os.MkdirAll(logsDir, 0755); err != nil {
-						t.Fatalf("mkdir logs failed: %v", err)
-					}
-				}
-
-				spawner = newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
-					spawnerErr:              tt.spawnerErr,
-					closeInRPipeImmediately: tt.closeInRPipeImmediately,
-					initSessionID:           initSessID,
-					stepUpdates:             tt.stepUpdates,
-					resultStatus:            tt.resultStatus,
-					resultResponse:          tt.resultResponse,
-					resultError:             tt.resultError,
-					resultExitCode:          tt.resultExitCode,
-					tokens:                  tt.tokens,
-					writeTranscriptLogsDir:  logsDir,
-					cancelCallerOnScan:      onScan,
-					blockUntilDone:          blockCh,
-				})
-			}
-
-			poolCfg := runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}
-			var sessMgr *session.Manager
-			if tt.isTranscriptRecovery {
-				tempDir := t.TempDir()
-				sessMgr = session.New(tempDir, tempDir)
-				poolCfg.TranscriptRescuer = sessMgr.ExtractResponseSince
-			}
-
-			procPool := runner.NewUnifiedProcessPool(poolCfg, spawner)
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
 			defer procPool.Close()
 
-			workerCfg := WorkerPoolConfig{SessionManager: sessMgr}
-			if tt.useVoiceProcessPoolField {
-				workerCfg.VoiceProcessPool = procPool
-			} else {
-				workerCfg.ProcessPool = procPool
-			}
-
-			pool := New(nil, workerCfg)
+			pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
 			pool.Start()
 			defer pool.Stop()
 
-			targetSess := tt.targetSess
+			targetSess := "sess-test"
 			if tt.clearPreSpawnedSessionID {
 				targetSess = "fallback-conv-id"
 				d, err := procPool.GetOrCreate(context.Background(), targetSess, "")
@@ -745,76 +813,12 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPool(t *testing.T) {
 				d.SetSessionID("")
 			}
 
-			var statuses []string
-			var onStatus func(string)
-			if tt.isSuccessAndMetrics {
-				onStatus = func(status string) {
-					statuses = append(statuses, status)
-				}
+			_, convID, err := pool.ExecuteVoiceTurn(ctx, "test prompt", targetSess, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErrSub, err)
 			}
-
-			var sentences []string
-			var onSentence func(string)
-			if tt.isTranscriptRecovery {
-				onSentence = func(s string) {
-					sentences = append(sentences, s)
-				}
-			}
-
-			reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, onStatus, onSentence)
-
-			if tt.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
-					t.Fatalf("expected error containing %q, got: %v", tt.wantErrSub, err)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if reply != tt.wantReply {
-				t.Errorf("expected reply %q, got %q", tt.wantReply, reply)
-			}
-
-			if tt.isDeviceRouting {
-				if convID != "550e8400-e29b-41d4-a716-446655440000" || spawnedTarget != "kiosk" {
-					t.Fatalf("unexpected routing result: convID=%q target=%q", convID, spawnedTarget)
-				}
-			}
-
 			if tt.clearPreSpawnedSessionID && convID != targetSess {
 				t.Errorf("expected fallback sessID %q, got %q", targetSess, convID)
-			}
-
-			if tt.isTranscriptRecovery {
-				if convID != tt.targetSess || len(sentences) == 0 {
-					t.Fatalf("unexpected transcript recovery: sessionID=%q sentences=%v", convID, sentences)
-				}
-			}
-
-			if tt.isSuccessAndMetrics {
-				if !runner.IsValidUUID(convID) || len(statuses) < 2 {
-					t.Fatalf("unexpected success result: convID=%q statuses=%v", convID, statuses)
-				}
-
-				reply2, _, err2 := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "sess-no-status", nil)
-				if err2 != nil || reply2 != "daemon voice turn reply" {
-					t.Fatalf("unexpected nil onStatus error: %v", err2)
-				}
-
-				pool.scopeLocks.Store("voice-sess-bad-lock", "not-a-mutex")
-				reply3, _, err3 := pool.ExecuteVoiceTurn(context.Background(), "test", "sess-bad-lock", nil)
-				if err3 != nil || reply3 != "daemon voice turn reply" {
-					t.Fatalf("unexpected error on recovered bad lock: %v", err3)
-				}
-
-				rec := httptest.NewRecorder()
-				metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-				body := rec.Body.String()
-				if !strings.Contains(body, `source="voice"`) || !strings.Contains(body, `channel="voice"`) {
-					t.Errorf("expected metrics to contain source=voice and channel=voice")
-				}
 			}
 		})
 	}
