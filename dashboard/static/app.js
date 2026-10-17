@@ -2006,9 +2006,29 @@ function getBuildStatusBadgeInfo(build) {
     return { text: '⏳ QUEUED', cls: 'status-queued' };
 }
 
+function formatBuildTimestamp(ms, includeDate) {
+    const d = new Date(ms);
+    const hours = String(d.getHours()).padStart(2, '0');
+    const mins = String(d.getMinutes()).padStart(2, '0');
+    const timeStr = `${hours}:${mins}`;
+    if (!includeDate) {
+        return timeStr;
+    }
+    return `${d.getMonth() + 1}/${d.getDate()} ${timeStr}`;
+}
+
+function isSameCalendarDay(msA, msB) {
+    if (!msA || !msB) return false;
+    const dA = new Date(msA);
+    const dB = new Date(msB);
+    return dA.getFullYear() === dB.getFullYear() &&
+        dA.getMonth() === dB.getMonth() &&
+        dA.getDate() === dB.getDate();
+}
+
 function getBuildTimingInfo(build, nowMs) {
     if (!build || typeof build !== 'object') {
-        return { startText: '--', endText: '--', durationText: '--' };
+        return { startText: '--', endText: '', durationText: '--' };
     }
 
     const qState = classifyBuildQueueState(build);
@@ -2040,8 +2060,12 @@ function getBuildTimingInfo(build, nowMs) {
         }
     }
 
-    const startText = startMs ? formatTimestamp(new Date(startMs).toISOString()) : '--';
-    const endText = endMs ? formatTimestamp(new Date(endMs).toISOString()) : '--';
+    const startText = startMs ? formatBuildTimestamp(startMs, true) : '--';
+    let endText = '';
+    if (endMs) {
+        const sameDay = isSameCalendarDay(startMs, endMs);
+        endText = formatBuildTimestamp(endMs, !sameDay);
+    }
 
     let durationText = '--';
     if (startMs) {
@@ -2203,6 +2227,9 @@ function renderBuildQueueCards() {
         const stats = computeBuildChunkStats(b);
         const timing = getBuildTimingInfo(b);
         const title = b.title || b.id || 'Untitled Build';
+        const endMetaHtml = timing.endText
+            ? `<span class="build-time-item"><strong>END:</strong> ${escapeHtml(timing.endText)}</span>`
+            : '';
 
         card.innerHTML = `
             <div class="build-card-header">
@@ -2215,7 +2242,7 @@ function renderBuildQueueCards() {
                 <h3 class="build-title">${escapeHtml(title)}</h3>
                 <div class="build-timing-meta">
                     <span class="build-time-item"><strong>START:</strong> ${escapeHtml(timing.startText)}</span>
-                    <span class="build-time-item"><strong>END:</strong> ${escapeHtml(timing.endText)}</span>
+                    ${endMetaHtml}
                 </div>
             </div>
             <div class="build-chunk-progress-wrap">
