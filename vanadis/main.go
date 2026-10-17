@@ -752,6 +752,7 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	sb.WriteString("=== Mandatory Execution Contract ===\n")
 	fmt.Fprintf(&sb, "1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n", activeRepo)
 	sb.WriteString("2. Implement ONLY this chunk following TDD, optimizing all design and implementation choices for the `Build Objective`, run package tests and `./scripts/verify.sh --staged`, and write `PR_DESCRIPTION.md`.\n")
+	sb.WriteString("   If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective` (for example, if following a mechanical step literally would fail to eliminate duplication or miss `Acceptance Criteria`), the `Build Objective` and `Acceptance Criteria` take precedence—adapt the implementation to satisfy the `Build Objective`.\n")
 	sb.WriteString("3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n")
 	if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
 		fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)

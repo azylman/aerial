@@ -792,6 +792,7 @@ func TestFormatChunkPrompt(t *testing.T) {
 		"=== Acceptance Criteria ===\n- Coverage >= 95.0%\n- Table driven tests pass\n",
 		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)",
 		"optimizing all design and implementation choices for the `Build Objective`",
+		"If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective` (for example, if following a mechanical step literally would fail to eliminate duplication or miss `Acceptance Criteria`), the `Build Objective` and `Acceptance Criteria` take precedence—adapt the implementation to satisfy the `Build Objective`.",
 		"Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.",
 		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
 		"--vanadis-chunk build-999-chunk-2",
