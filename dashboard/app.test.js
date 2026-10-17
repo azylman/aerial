@@ -74,6 +74,7 @@ const {
     buildsState,
     classifyBuildQueueState,
     computeBuildChunkStats,
+    getBuildTimingInfo,
     renderBuildQueueCards,
     renderBuildDetailContent,
     renderBuildsPills,
@@ -1105,6 +1106,54 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             });
         });
 
+        describe('getBuildTimingInfo(build, nowMs)', () => {
+            it('computes start, end, and duration for completed, running, and queued builds', () => {
+                const nullTiming = getBuildTimingInfo(null);
+                assert.equal(nullTiming.startText, '--');
+                assert.equal(nullTiming.endText, '--');
+                assert.equal(nullTiming.durationText, '--');
+
+                const completedBuild = {
+                    status: 'completed',
+                    created_at: '2026-10-17T08:00:00Z',
+                    updated_at: '2026-10-17T08:15:30Z',
+                    chunks: [
+                        { id: 'c1', status: 'merged', started_at: '2026-10-17T08:00:05Z', updated_at: '2026-10-17T08:15:35Z' }
+                    ]
+                };
+                const compTiming = getBuildTimingInfo(completedBuild);
+                assert.notEqual(compTiming.startText, '--');
+                assert.notEqual(compTiming.endText, '--');
+                assert.equal(compTiming.durationText, '15m 30s');
+
+                const runningBuild = {
+                    status: 'running',
+                    created_at: '2026-10-17T08:00:00Z',
+                    chunks: [
+                        { id: 'c1', status: 'running', started_at: '2026-10-17T08:01:00Z' },
+                        { id: 'c2', status: 'pending', started_at: '0001-01-01T00:00:00Z' }
+                    ]
+                };
+                const nowMs = new Date('2026-10-17T08:05:12Z').getTime();
+                const runTiming = getBuildTimingInfo(runningBuild, nowMs);
+                assert.notEqual(runTiming.startText, '--');
+                assert.equal(runTiming.endText, '--');
+                assert.equal(runTiming.durationText, '4m 12s');
+
+                const queuedBuild = {
+                    status: 'queued',
+                    created_at: '2026-10-17T08:00:00Z',
+                    chunks: [
+                        { id: 'c1', status: 'pending', started_at: '0001-01-01T00:00:00Z' }
+                    ]
+                };
+                const qTiming = getBuildTimingInfo(queuedBuild, nowMs);
+                assert.notEqual(qTiming.startText, '--');
+                assert.equal(qTiming.endText, '--');
+                assert.equal(qTiming.durationText, '--');
+            });
+        });
+
         describe('renderBuildQueueCards() & Filtering', () => {
             it('renders build cards and updates results count', () => {
                 const elements = {};
@@ -1141,12 +1190,13 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                         title: 'Add Status Dashboard View',
                         objective: 'Render HUD build queue',
                         status: 'running',
+                        created_at: '2026-10-17T08:00:00Z',
                         total_chunks: 4,
                         completed_chunks: 2,
                         chunks: [
-                            { id: 'c1', status: 'completed', repo: 'azylman/aerial' },
-                            { id: 'c2', status: 'completed', repo: 'azylman/aerial' },
-                            { id: 'c3', status: 'running', repo: 'azylman/aerial' },
+                            { id: 'c1', status: 'completed', repo: 'azylman/aerial', started_at: '2026-10-17T08:00:05Z', updated_at: '2026-10-17T08:05:00Z' },
+                            { id: 'c2', status: 'completed', repo: 'azylman/aerial', started_at: '2026-10-17T08:05:05Z', updated_at: '2026-10-17T08:10:00Z' },
+                            { id: 'c3', status: 'running', repo: 'azylman/aerial', started_at: '2026-10-17T08:10:05Z' },
                             { id: 'c4', status: 'pending', repo: 'azylman/aerial' }
                         ]
                     },
@@ -1156,10 +1206,12 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                         title: 'Fix nomad discovery',
                         objective: 'Repair discovery bug',
                         status: 'completed',
+                        created_at: '2026-10-17T07:00:00Z',
+                        updated_at: '2026-10-17T07:12:45Z',
                         total_chunks: 1,
                         completed_chunks: 1,
                         chunks: [
-                            { id: 'c5', status: 'completed', repo: 'azylman/aerial-sidecars' }
+                            { id: 'c5', status: 'completed', repo: 'azylman/aerial-sidecars', started_at: '2026-10-17T07:00:00Z', updated_at: '2026-10-17T07:12:45Z' }
                         ]
                     }
                 ];
@@ -1173,10 +1225,20 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
                 const card0 = elements['builds-grid'].children[0];
                 assert.ok(card0.innerHTML.includes('Add Status Dashboard View'));
-                assert.ok(card0.innerHTML.includes('TIER 2'));
+                assert.ok(!card0.innerHTML.includes('TIER 2'), 'top-level card should omit tier badge');
+                assert.ok(!card0.innerHTML.includes('build-tier-badge'), 'top-level card should omit build-tier-badge');
+                assert.ok(!card0.innerHTML.includes('build-101'), 'top-level card should omit build ID chip');
+                assert.ok(!card0.innerHTML.includes('Render HUD build queue'), 'top-level card should omit objective preview');
+                assert.ok(card0.innerHTML.includes('build-duration-badge'), 'top-level card should include duration badge');
+                assert.ok(card0.innerHTML.includes('START:'), 'top-level card should include START time');
+                assert.ok(card0.innerHTML.includes('END:'), 'top-level card should include END time');
                 assert.ok(card0.innerHTML.includes('2 / 4 CHUNKS'));
                 assert.ok(!card0.innerHTML.includes('build-repo-badge'));
+                assert.equal(card0.getAttribute('data-build-id'), 'build-101');
                 assert.ok(typeof card0.onclick === 'function');
+
+                const card1 = elements['builds-grid'].children[1];
+                assert.ok(card1.innerHTML.includes('12m 45s'), 'completed card should display computed duration');
             });
 
             it('filters build cards by queue state, search query, and chunk repo', () => {
