@@ -140,29 +140,17 @@ func cloneMessage(m *Message) *Message {
 	return &cp
 }
 
-func cloneSessionInfo(s *SessionInfo) *SessionInfo {
-	if s == nil {
+func clonePtr[T any](v *T) *T {
+	if v == nil {
 		return nil
 	}
-	cp := *s
+	cp := *v
 	return &cp
 }
 
-func cloneOneShot(s *OneShotSchedule) *OneShotSchedule {
-	if s == nil {
-		return nil
-	}
-	cp := *s
-	return &cp
-}
-
-func cloneCron(c *CronSchedule) *CronSchedule {
-	if c == nil {
-		return nil
-	}
-	cp := *c
-	return &cp
-}
+func cloneSessionInfo(s *SessionInfo) *SessionInfo     { return clonePtr(s) }
+func cloneOneShot(s *OneShotSchedule) *OneShotSchedule { return clonePtr(s) }
+func cloneCron(c *CronSchedule) *CronSchedule          { return clonePtr(c) }
 
 func cloneRun(r *ScheduleRun) *ScheduleRun {
 	if r == nil {
@@ -1911,14 +1899,6 @@ func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessio
 	return matched, nil
 }
 
-// DeleteSessionSummary removes a session summary and cascades deletion of its transcript steps.
-func (f *FakeStore) DeleteSessionSummary(sessionID string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.sessionSummaries, sessionID)
-	delete(f.transcriptSteps, sessionID)
-}
-
 func prKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s/%d", normalizeRepo(repo), prNumber)
 }
@@ -1928,80 +1908,52 @@ func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.closed {
-		return sql.ErrConnDone
-	}
-	if err, ok := f.failNext["UpsertPR"]; ok {
-		delete(f.failNext, "UpsertPR")
+	if err := f.checkClosedAndFail("UpsertPR"); err != nil {
 		return err
 	}
 
-	repo := normalizeRepo(record.Repo)
-	if repo == "" {
-		return fmt.Errorf("repo cannot be empty")
-	}
-	if record.PRNumber <= 0 {
-		return fmt.Errorf("pr_number must be greater than 0")
-	}
-	branch := strings.TrimSpace(record.Branch)
-	if branch == "" {
-		return fmt.Errorf("branch cannot be empty")
-	}
-	headSHA := strings.TrimSpace(record.HeadSHA)
-	if headSHA == "" {
-		return fmt.Errorf("head_sha cannot be empty")
-	}
-	targetID := strings.TrimSpace(record.TargetID)
-	if targetID == "" {
-		return fmt.Errorf("target_id cannot be empty")
+	norm, err := validateAndNormalizeUpsertPR(record)
+	if err != nil {
+		return err
 	}
 
-	key := prKey(repo, record.PRNumber)
+	key := prKey(norm.Repo, norm.PRNumber)
 	now := time.Now()
 
 	existing, exists := f.prRecords[key]
 	if exists {
-		existing.Branch = branch
-		existing.HeadSHA = headSHA
-		existing.TargetID = targetID
-		if record.Title != "" {
-			existing.Title = record.Title
+		existing.Branch = norm.Branch
+		existing.HeadSHA = norm.HeadSHA
+		existing.TargetID = norm.TargetID
+		if norm.Title != "" {
+			existing.Title = norm.Title
 		}
-		if record.Status != "" && existing.Status != "merged" && existing.Status != "deploying" && existing.Status != "deployed" {
-			existing.Status = record.Status
+		if norm.Status != "" && existing.Status != "merged" && existing.Status != "deploying" && existing.Status != "deployed" {
+			existing.Status = norm.Status
 		}
-		if record.StatusMessageID != "" {
-			existing.StatusMessageID = record.StatusMessageID
+		if norm.StatusMessageID != "" {
+			existing.StatusMessageID = norm.StatusMessageID
 		}
-		if record.Metadata != "" && record.Metadata != "{}" {
-			existing.Metadata = record.Metadata
+		if norm.Metadata != "" && norm.Metadata != "{}" {
+			existing.Metadata = norm.Metadata
 		}
 		existing.UpdatedAt = now
 		return nil
 	}
 
 	f.nextPRID++
-	status := strings.TrimSpace(record.Status)
-	if status == "" {
-		status = "open"
-	}
-	meta := strings.TrimSpace(record.Metadata)
-	if meta == "" {
-		meta = "{}"
-	}
-
 	rec := &PRRecord{
 		ID:              f.nextPRID,
-		Repo:            repo,
-		PRNumber:        record.PRNumber,
-		Branch:          branch,
-		HeadSHA:         headSHA,
-		MergeSHA:        record.MergeSHA,
-		TargetID:        targetID,
-		Status:          status,
-		Title:           record.Title,
-		StatusMessageID: strings.TrimSpace(record.StatusMessageID),
-		Metadata:        meta,
+		Repo:            norm.Repo,
+		PRNumber:        norm.PRNumber,
+		Branch:          norm.Branch,
+		HeadSHA:         norm.HeadSHA,
+		MergeSHA:        norm.MergeSHA,
+		TargetID:        norm.TargetID,
+		Status:          norm.Status,
+		Title:           norm.Title,
+		StatusMessageID: norm.StatusMessageID,
+		Metadata:        norm.Metadata,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -2014,12 +1966,13 @@ func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	if f.closed {
-		return nil, sql.ErrConnDone
-	}
-	if err, ok := f.failNext["GetPRByNumber"]; ok {
-		delete(f.failNext, "GetPRByNumber")
+	if err := f.checkClosedAndFail("GetPRByNumber"); err != nil {
 		return nil, err
+	}
+
+	repo = normalizeRepo(repo)
+	if repo == "" {
+		return nil, fmt.Errorf("repo cannot be empty")
 	}
 
 	key := prKey(repo, prNumber)
@@ -2031,122 +1984,18 @@ func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int
 	return &cp, nil
 }
 
-// GetPRByHeadSHA retrieves the most recent PR record matching repo and head SHA.
-func (f *FakeStore) GetPRByHeadSHA(ctx context.Context, repo string, headSHA string) (*PRRecord, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
-	if f.closed {
-		return nil, sql.ErrConnDone
-	}
-	if err, ok := f.failNext["GetPRByHeadSHA"]; ok {
-		delete(f.failNext, "GetPRByHeadSHA")
-		return nil, err
-	}
-
-	normRepo := normalizeRepo(repo)
-	var latest *PRRecord
-	for _, rec := range f.prRecords {
-		if rec.Repo == normRepo && rec.HeadSHA == headSHA {
-			if latest == nil || rec.UpdatedAt.After(latest.UpdatedAt) {
-				latest = rec
-			}
-		}
-	}
-	if latest == nil {
-		return nil, ErrPRNotFound
-	}
-	cp := *latest
-	return &cp, nil
-}
-
-// GetPRByMergeSHA retrieves the PR record matching repo and squash merge commit SHA.
-func (f *FakeStore) GetPRByMergeSHA(ctx context.Context, repo string, mergeSHA string) (*PRRecord, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
-	if f.closed {
-		return nil, sql.ErrConnDone
-	}
-	if err, ok := f.failNext["GetPRByMergeSHA"]; ok {
-		delete(f.failNext, "GetPRByMergeSHA")
-		return nil, err
-	}
-
-	normRepo := normalizeRepo(repo)
-	var latest *PRRecord
-	for _, rec := range f.prRecords {
-		if rec.Repo == normRepo && rec.MergeSHA == mergeSHA {
-			if latest == nil || rec.UpdatedAt.After(latest.UpdatedAt) {
-				latest = rec
-			}
-		}
-	}
-	if latest == nil {
-		return nil, ErrPRNotFound
-	}
-	cp := *latest
-	return &cp, nil
-}
-
-// UpdatePRMergeSHA records the squash merge commit SHA on main and marks the PR merged.
-func (f *FakeStore) UpdatePRMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.closed {
-		return sql.ErrConnDone
-	}
-	if err, ok := f.failNext["UpdatePRMergeSHA"]; ok {
-		delete(f.failNext, "UpdatePRMergeSHA")
-		return err
-	}
-
-	key := prKey(repo, prNumber)
-	rec, exists := f.prRecords[key]
-	if !exists {
-		return ErrPRNotFound
-	}
-	rec.MergeSHA = mergeSHA
-	rec.Status = "merged"
-	rec.UpdatedAt = time.Now()
-	return nil
-}
-
-// UpdatePRStatus updates the lifecycle status of a PR.
-func (f *FakeStore) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.closed {
-		return sql.ErrConnDone
-	}
-	if err, ok := f.failNext["UpdatePRStatus"]; ok {
-		delete(f.failNext, "UpdatePRStatus")
-		return err
-	}
-
-	key := prKey(repo, prNumber)
-	rec, exists := f.prRecords[key]
-	if !exists {
-		return ErrPRNotFound
-	}
-	rec.Status = status
-	rec.UpdatedAt = time.Now()
-	return nil
-}
-
 // UpdatePRStatusMessageID updates the status_message_id of a PR in FakeStore.
 func (f *FakeStore) UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.closed {
-		return sql.ErrConnDone
-	}
-	if err, ok := f.failNext["UpdatePRStatusMessageID"]; ok {
-		delete(f.failNext, "UpdatePRStatusMessageID")
+	if err := f.checkClosedAndFail("UpdatePRStatusMessageID"); err != nil {
 		return err
+	}
+
+	repo = normalizeRepo(repo)
+	if repo == "" {
+		return fmt.Errorf("repo cannot be empty")
 	}
 
 	key := prKey(repo, prNumber)
@@ -2157,66 +2006,6 @@ func (f *FakeStore) UpdatePRStatusMessageID(ctx context.Context, repo string, pr
 	rec.StatusMessageID = strings.TrimSpace(messageID)
 	rec.UpdatedAt = time.Now()
 	return nil
-}
-
-// AtomicTransitionPRStatus conditionally transitions PR status if it is not already in notStatus (CAS gate).
-func (f *FakeStore) AtomicTransitionPRStatus(ctx context.Context, repo string, prNumber int, toStatus, notStatus string) (*PRRecord, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.closed {
-		return nil, sql.ErrConnDone
-	}
-	if err, ok := f.failNext["AtomicTransitionPRStatus"]; ok {
-		delete(f.failNext, "AtomicTransitionPRStatus")
-		return nil, err
-	}
-
-	key := prKey(repo, prNumber)
-	rec, exists := f.prRecords[key]
-	if !exists {
-		return nil, nil
-	}
-	if rec.Status == notStatus {
-		return nil, nil // No transition
-	}
-	rec.Status = toStatus
-	rec.UpdatedAt = time.Now()
-	cp := *rec
-	return &cp, nil
-}
-
-// AtomicTransitionPRStatusByMergeSHA conditionally transitions PR status by merge SHA if not already in notStatus (CAS gate).
-func (f *FakeStore) AtomicTransitionPRStatusByMergeSHA(ctx context.Context, repo string, mergeSHA string, toStatus, notStatus string) (*PRRecord, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.closed {
-		return nil, sql.ErrConnDone
-	}
-	if err, ok := f.failNext["AtomicTransitionPRStatusByMergeSHA"]; ok {
-		delete(f.failNext, "AtomicTransitionPRStatusByMergeSHA")
-		return nil, err
-	}
-
-	normRepo := normalizeRepo(repo)
-	var target *PRRecord
-	for _, rec := range f.prRecords {
-		if rec.Repo == normRepo && rec.MergeSHA == mergeSHA {
-			target = rec
-			break
-		}
-	}
-	if target == nil {
-		return nil, nil
-	}
-	if target.Status == notStatus {
-		return nil, nil // No transition
-	}
-	target.Status = toStatus
-	target.UpdatedAt = time.Now()
-	cp := *target
-	return &cp, nil
 }
 
 func cloneVanadisChunk(c *VanadisChunk) VanadisChunk {
@@ -2251,115 +2040,67 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		return err
 	}
 
-	buildID := strings.TrimSpace(build.ID)
-	if buildID == "" {
-		return fmt.Errorf("build id cannot be empty")
-	}
-	threadID := strings.TrimSpace(build.ThreadID)
-	if threadID == "" {
-		return fmt.Errorf("thread_id cannot be empty")
-	}
-	objective := strings.TrimSpace(build.Objective)
-	if objective == "" {
-		return fmt.Errorf("objective cannot be empty")
-	}
-	if _, exists := f.vanadisBuilds[buildID]; exists {
-		return fmt.Errorf("vanadis build %s already exists", buildID)
+	normBuild, normChunks, err := validateAndNormalizeVanadisBuild(build, chunks)
+	if err != nil {
+		return err
 	}
 
-	seenChunkIDs := make(map[string]bool, len(chunks))
-	seenIndices := make(map[int]bool, len(chunks))
-	for i, c := range chunks {
-		cid := strings.TrimSpace(c.ID)
-		if cid == "" {
-			return fmt.Errorf("chunk[%d] id cannot be empty", i)
-		}
-		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
-			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
-		}
-		if strings.TrimSpace(c.Title) == "" {
-			return fmt.Errorf("chunk[%d] title cannot be empty", i)
-		}
-		if strings.TrimSpace(c.Instructions) == "" {
-			return fmt.Errorf("chunk[%d] instructions cannot be empty", i)
-		}
-		if _, err := normalizeVanadisEffort(c.Effort); err != nil {
-			return fmt.Errorf("chunk[%d] %w", i, err)
-		}
-		if _, exists := f.vanadisChunks[cid]; exists || seenChunkIDs[cid] {
-			return fmt.Errorf("vanadis chunk %s already exists", cid)
+	if _, exists := f.vanadisBuilds[normBuild.ID]; exists {
+		return fmt.Errorf("vanadis build %s already exists", normBuild.ID)
+	}
+
+	seenChunkIDs := make(map[string]bool, len(normChunks))
+	seenIndices := make(map[int]bool, len(normChunks))
+	for _, c := range normChunks {
+		if _, exists := f.vanadisChunks[c.ID]; exists || seenChunkIDs[c.ID] {
+			return fmt.Errorf("vanadis chunk %s already exists", c.ID)
 		}
 		if seenIndices[c.ChunkIndex] {
-			return fmt.Errorf("duplicate chunk_index %d in build %s", c.ChunkIndex, buildID)
+			return fmt.Errorf("duplicate chunk_index %d in build %s", c.ChunkIndex, normBuild.ID)
 		}
-		seenChunkIDs[cid] = true
+		seenChunkIDs[c.ID] = true
 		seenIndices[c.ChunkIndex] = true
 	}
 
 	now := time.Now()
-	tier := build.Tier
-	if tier <= 0 {
-		tier = 2
-	}
-	status := strings.TrimSpace(build.Status)
-	if status == "" {
-		status = "running"
-	}
-	buildTitle := strings.TrimSpace(build.Title)
-	if buildTitle == "" {
-		buildTitle = objective
-	}
-
-	f.vanadisBuilds[buildID] = &VanadisBuild{
-		ID:              buildID,
-		ThreadID:        threadID,
-		Tier:            tier,
-		Title:           buildTitle,
-		Objective:       objective,
-		SharedContext:   strings.TrimSpace(build.SharedContext),
-		Status:          status,
-		StatusMessageID: strings.TrimSpace(build.StatusMessageID),
+	f.vanadisBuilds[normBuild.ID] = &VanadisBuild{
+		ID:              normBuild.ID,
+		ThreadID:        normBuild.ThreadID,
+		Tier:            normBuild.Tier,
+		Title:           normBuild.Title,
+		Objective:       normBuild.Objective,
+		SharedContext:   normBuild.SharedContext,
+		Status:          normBuild.Status,
+		StatusMessageID: normBuild.StatusMessageID,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
 
-	for _, c := range chunks {
-		cid := strings.TrimSpace(c.ID)
-		chunkRepo := normalizeRepo(c.Repo)
-		if chunkRepo == "" {
-			chunkRepo = "azylman/aerial"
-		}
-		cStatus := strings.TrimSpace(c.Status)
-		if cStatus == "" {
-			cStatus = "pending"
-		}
-		files := make([]string, 0, len(c.TargetFiles))
-		files = append(files, c.TargetFiles...)
-		symbols := make([]string, 0, len(c.TargetSymbols))
-		symbols = append(symbols, c.TargetSymbols...)
-		criteria := make([]string, 0, len(c.AcceptanceCriteria))
-		criteria = append(criteria, c.AcceptanceCriteria...)
-		effort, err := normalizeVanadisEffort(c.Effort)
-		if err != nil {
-			return fmt.Errorf("chunk %s: %w", cid, err)
-		}
+	for _, c := range normChunks {
 		startedAt := c.StartedAt
-		if startedAt.IsZero() && (cStatus == "running" || cStatus == "coding") {
+		if startedAt.IsZero() && (c.Status == "running" || c.Status == "coding") {
 			startedAt = now
 		}
 
-		f.vanadisChunks[cid] = &VanadisChunk{
-			ID:                 cid,
-			BuildID:            buildID,
+		files := make([]string, len(c.TargetFiles))
+		copy(files, c.TargetFiles)
+		symbols := make([]string, len(c.TargetSymbols))
+		copy(symbols, c.TargetSymbols)
+		criteria := make([]string, len(c.AcceptanceCriteria))
+		copy(criteria, c.AcceptanceCriteria)
+
+		f.vanadisChunks[c.ID] = &VanadisChunk{
+			ID:                 c.ID,
+			BuildID:            c.BuildID,
 			ChunkIndex:         c.ChunkIndex,
-			Repo:               chunkRepo,
-			Title:              strings.TrimSpace(c.Title),
-			Instructions:       strings.TrimSpace(c.Instructions),
+			Repo:               c.Repo,
+			Title:              c.Title,
+			Instructions:       c.Instructions,
 			TargetFiles:        files,
 			TargetSymbols:      symbols,
-			Effort:             effort,
+			Effort:             c.Effort,
 			AcceptanceCriteria: criteria,
-			Status:             cStatus,
+			Status:             c.Status,
 			PRNumber:           c.PRNumber,
 			StartedAt:          startedAt,
 			CreatedAt:          now,
@@ -2371,8 +2112,8 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 
 // GetVanadisBuild retrieves a VanadisBuild and its ordered VanadisChunks by buildID.
 func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 
 	if err := f.checkClosedAndFail("GetVanadisBuild"); err != nil {
 		return nil, nil, err
@@ -2387,12 +2128,8 @@ func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanad
 	if !exists {
 		return nil, nil, ErrVanadisBuildNotFound
 	}
-	bCopy := *b
-	if strings.TrimSpace(bCopy.Title) == "" {
-		bCopy.Title = bCopy.Objective
-	}
 
-	chunks := make([]VanadisChunk, 0)
+	var chunks []VanadisChunk
 	for _, c := range f.vanadisChunks {
 		if c.BuildID == buildID {
 			chunks = append(chunks, cloneVanadisChunk(c))
@@ -2402,13 +2139,14 @@ func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanad
 		return chunks[i].ChunkIndex < chunks[j].ChunkIndex
 	})
 
-	return &bCopy, chunks, nil
+	cp := *b
+	return &cp, chunks, nil
 }
 
 // GetVanadisChunk retrieves a single VanadisChunk by chunkID.
 func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 
 	if err := f.checkClosedAndFail("GetVanadisChunk"); err != nil {
 		return nil, err
@@ -2425,36 +2163,6 @@ func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanad
 	}
 	cp := cloneVanadisChunk(c)
 	return &cp, nil
-}
-
-// UpdateVanadisChunkStatus updates the lifecycle status of a VanadisChunk.
-func (f *FakeStore) UpdateVanadisChunkStatus(ctx context.Context, chunkID, status string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if err := f.checkClosedAndFail("UpdateVanadisChunkStatus"); err != nil {
-		return err
-	}
-
-	chunkID = strings.TrimSpace(chunkID)
-	if chunkID == "" {
-		return fmt.Errorf("chunk id cannot be empty")
-	}
-	status = strings.TrimSpace(status)
-	if status == "" {
-		return fmt.Errorf("status cannot be empty")
-	}
-
-	c, exists := f.vanadisChunks[chunkID]
-	if !exists {
-		return ErrVanadisChunkNotFound
-	}
-	c.Status = status
-	if (status == "running" || status == "coding") && c.StartedAt.IsZero() {
-		c.StartedAt = time.Now()
-	}
-	c.UpdatedAt = time.Now()
-	return nil
 }
 
 // AttachVanadisChunkPR links an opened Pull Request to a VanadisChunk and marks it 'pr_opened'.
@@ -2491,33 +2199,6 @@ func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, pr
 	return nil
 }
 
-// UpdateVanadisBuildStatus updates the lifecycle status of a VanadisBuild.
-func (f *FakeStore) UpdateVanadisBuildStatus(ctx context.Context, buildID, status string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if err := f.checkClosedAndFail("UpdateVanadisBuildStatus"); err != nil {
-		return err
-	}
-
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
-		return fmt.Errorf("build id cannot be empty")
-	}
-	status = strings.TrimSpace(status)
-	if status == "" {
-		return fmt.Errorf("status cannot be empty")
-	}
-
-	b, exists := f.vanadisBuilds[buildID]
-	if !exists {
-		return ErrVanadisBuildNotFound
-	}
-	b.Status = status
-	b.UpdatedAt = time.Now()
-	return nil
-}
-
 // UpdateVanadisBuildStatusMessageID updates the status_message_id of a VanadisBuild.
 func (f *FakeStore) UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
 	f.mu.Lock()
@@ -2540,4 +2221,3 @@ func (f *FakeStore) UpdateVanadisBuildStatusMessageID(ctx context.Context, build
 	b.UpdatedAt = time.Now()
 	return nil
 }
-

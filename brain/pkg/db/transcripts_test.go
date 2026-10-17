@@ -635,17 +635,6 @@ func TestTranscriptStore_FakeStore(t *testing.T) {
 		t.Errorf("expected nil, nil on empty steps search, got %v, %v", resEmptySteps, err)
 	}
 
-	// 8. DeleteSessionSummary cascade in FakeStore
-	s.DeleteSessionSummary("fake-sess-1")
-	statesAfterDel, _ := s.GetSessionSyncStates(ctx)
-	if len(statesAfterDel) != 0 {
-		t.Errorf("expected 0 sync states after DeleteSessionSummary, got %d", len(statesAfterDel))
-	}
-	stepsAfterDel, _ := s.SearchTranscriptSteps(ctx, "", "fake-sess-1", "", 10)
-	if len(stepsAfterDel) != 0 {
-		t.Errorf("expected 0 steps after DeleteSessionSummary, got %d", len(stepsAfterDel))
-	}
-
 	// 9. FailNext verification for all 5 methods
 	simErr := errors.New("simulated error")
 	methods := []string{
