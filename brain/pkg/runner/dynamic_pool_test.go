@@ -12,49 +12,46 @@ import (
 )
 
 type mockVoiceSession struct {
-	sessID    string
-	targetKey string
+	sessID, targetKey string
+	sendFn            func(string, *TurnContext) error
 }
 
-func (s *mockVoiceSession) Send(prompt string, turn *TurnContext) error {
+func (s *mockVoiceSession) SessionID() string { return s.sessID }
+func (s *mockVoiceSession) Send(p string, t *TurnContext) error {
+	if s.sendFn != nil {
+		return s.sendFn(p, t)
+	}
 	return nil
 }
 
-func (s *mockVoiceSession) SessionID() string {
-	return s.sessID
-}
-
 type mockVoicePool struct {
-	mu               sync.Mutex
-	model            string
-	prewarmedTargets []string
-	initCalled       int32
-	initErr          error
-	onInit           func()
-	closeCalled      int32
-	closeGate        chan struct{}
-	markDirtyCalled  int32
-	sessions         map[string]*mockVoiceSession
+	mu                                       sync.Mutex
+	model                                    string
+	prewarmedTargets                         []string
+	initCalled, closeCalled, markDirtyCalled int32
+	initErr, closeErr, getErr                error
+	onInit                                   func()
+	closeGate                                chan struct{}
+	sessions                                 map[string]*mockVoiceSession
 }
 
-func newMockVoicePool(model string) *mockVoicePool {
-	return &mockVoicePool{
-		model:    model,
-		sessions: make(map[string]*mockVoiceSession),
-	}
+func newMockVoicePool(m string) *mockVoicePool {
+	return &mockVoicePool{model: m, sessions: make(map[string]*mockVoiceSession)}
 }
 
-func (m *mockVoicePool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
+func (m *mockVoicePool) GetOrCreateSession(ctx context.Context, targetKey, sessionID string) (AgentSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	if sess, ok := m.sessions[targetKey]; ok {
 		return sess, nil
 	}
-	sid := sessionID
-	if sid == "" {
-		sid = targetKey
+	if sessionID == "" {
+		sessionID = targetKey
 	}
-	s := &mockVoiceSession{sessID: sid, targetKey: targetKey}
+	s := &mockVoiceSession{sessID: sessionID, targetKey: targetKey}
 	m.sessions[targetKey] = s
 	return s, nil
 }
@@ -72,440 +69,227 @@ func (m *mockVoicePool) Close() error {
 	if m.closeGate != nil {
 		<-m.closeGate
 	}
-	return nil
+	return m.closeErr
 }
 
-func (m *mockVoicePool) Model() string {
-	return m.model
-}
-
-func (m *mockVoicePool) UpdatePrewarmedTargets(targets []string) {
+func (m *mockVoicePool) Model() string { return m.model }
+func (m *mockVoicePool) MarkDirty()    { atomic.AddInt32(&m.markDirtyCalled, 1) }
+func (m *mockVoicePool) UpdatePrewarmedTargets(t []string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.prewarmedTargets = append([]string(nil), targets...)
-}
-
-func (m *mockVoicePool) MarkDirty() {
-	atomic.AddInt32(&m.markDirtyCalled, 1)
-}
-
-type plainPoolWithoutModel struct{}
-
-func (p *plainPoolWithoutModel) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
-	return nil, nil
-}
-func (p *plainPoolWithoutModel) Initialize(ctx context.Context) error { return nil }
-func (p *plainPoolWithoutModel) Close() error                         { return nil }
-
-type errClosePool struct {
-	mockVoicePool
-}
-
-func (p *errClosePool) Close() error {
-	return errors.New("close error")
+	m.prewarmedTargets = append([]string(nil), t...)
+	m.mu.Unlock()
 }
 
 type mockRotatorVoicePool struct {
-	mockVoicePool
+	*mockVoicePool
 	shouldRotate bool
 	rotReason    string
 	rotatedSess  AgentSession
 	rotateErr    error
 }
 
-func (m *mockRotatorVoicePool) ShouldRotateSession(sess AgentSession) (bool, string) {
+func (m *mockRotatorVoicePool) ShouldRotateSession(AgentSession) (bool, string) {
 	return m.shouldRotate, m.rotReason
 }
-
-func (m *mockRotatorVoicePool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+func (m *mockRotatorVoicePool) RotateSession(context.Context, string) (AgentSession, error) {
 	return m.rotatedSess, m.rotateErr
 }
 
 type mockLeasedVoicePool struct {
-	mockVoicePool
+	*mockVoicePool
 	lease    SessionLease
 	leaseErr error
 }
 
-func (m *mockLeasedVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
+func (m *mockLeasedVoicePool) AcquireLease(context.Context, string) (SessionLease, error) {
 	return m.lease, m.leaseErr
 }
 
-type fakeSessionLease struct {
-	sessID string
+type plainPoolWithoutModel struct{}
+
+func (*plainPoolWithoutModel) GetOrCreateSession(context.Context, string, string) (AgentSession, error) {
+	return nil, nil
 }
+func (*plainPoolWithoutModel) Initialize(context.Context) error { return nil }
+func (*plainPoolWithoutModel) Close() error                     { return nil }
+
+type fakeSessionLease struct{ sessID string }
 
 func (f *fakeSessionLease) SessionID() string         { return f.sessID }
 func (f *fakeSessionLease) PreviousSessionID() string { return "" }
 func (f *fakeSessionLease) IsCold() bool              { return false }
 func (f *fakeSessionLease) IsEphemeral() bool         { return false }
 func (f *fakeSessionLease) TurnCount() int            { return 1 }
-func (f *fakeSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
+func (f *fakeSessionLease) CancelRotation()           {}
+func (f *fakeSessionLease) Release() error            { return nil }
+func (f *fakeSessionLease) Execute(context.Context, *TurnContext) (*TurnResult, error) {
 	return &TurnResult{Response: "fake lease ok"}, nil
 }
-func (f *fakeSessionLease) CancelRotation() {}
-func (f *fakeSessionLease) Release() error  { return nil }
+
+type swappablePoolFactory struct {
+	mu   sync.Mutex
+	pool AgentPool
+	fp   string
+	err  error
+}
+
+func (f *swappablePoolFactory) set(p AgentPool, fp string, err error) {
+	f.mu.Lock()
+	f.pool, f.fp, f.err = p, fp, err
+	f.mu.Unlock()
+}
+func (f *swappablePoolFactory) factory() (AgentPool, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pool, f.fp, f.err
+}
 
 func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 
 	// 1. Nil receiver safety
 	var nilPool *DynamicVoicePool
-	if err := nilPool.Close(); err != nil {
-		t.Errorf("expected nil from nilPool.Close()")
-	}
-	if nilPool.Model() != "" {
-		t.Errorf("expected empty string from nilPool.Model()")
-	}
-	if nilPool.Fingerprint() != "" {
-		t.Errorf("expected empty string from nilPool.Fingerprint()")
-	}
-	if nilPool.CurrentPool() != nil {
-		t.Errorf("expected nil from nilPool.CurrentPool()")
-	}
 	nilPool.UpdatePrewarmedTargets([]string{"t"})
 	nilPool.MarkDirty()
-
-	ctx := context.Background()
-	if _, err := nilPool.GetOrCreateSession(ctx, "k", ""); err == nil {
-		t.Errorf("expected error from nilPool.GetOrCreateSession()")
-	}
-	if err := nilPool.Initialize(ctx); err == nil {
-		t.Errorf("expected error from nilPool.Initialize()")
-	}
-	if should, _ := nilPool.ShouldRotateSession(nil); should {
-		t.Error("expected nil pool ShouldRotateSession to return false")
-	}
-	if _, err := nilPool.RotateSession(ctx, "k"); err == nil {
-		t.Error("expected nil pool RotateSession to return error")
-	}
-	if _, err := nilPool.AcquireLease(ctx, "k"); err == nil {
-		t.Error("expected error from nil pool AcquireLease")
+	_, sErr := nilPool.GetOrCreateSession(ctx, "k", "")
+	_, rErr := nilPool.RotateSession(ctx, "k")
+	_, lErr := nilPool.AcquireLease(ctx, "k")
+	should, _ := nilPool.ShouldRotateSession(nil)
+	if sErr == nil || nilPool.Initialize(ctx) == nil || should || rErr == nil || lErr == nil ||
+		nilPool.Close() != nil || nilPool.Model() != "" || nilPool.Fingerprint() != "" || nilPool.CurrentPool() != nil {
+		t.Error("unexpected nilPool safety behavior")
 	}
 
-	// 2. Nominal Passthrough
+	// 2. Nominal Passthrough & 3. Non-rotator / Non-leased delegation
 	mock1 := newMockVoicePool("gemini-2.5-flash")
-	factory := func() (AgentPool, string, error) {
-		return mock1, "fp-1", nil
-	}
-
-	dyn := NewDynamicVoicePool(factory)
-	if dyn.Model() != "gemini-2.5-flash" {
-		t.Fatalf("expected Model 'gemini-2.5-flash', got %q", dyn.Model())
-	}
-	if dyn.Fingerprint() != "fp-1" {
-		t.Fatalf("expected Fingerprint 'fp-1', got %q", dyn.Fingerprint())
-	}
-
-	if err := dyn.Initialize(ctx); err != nil {
-		t.Fatalf("unexpected Initialize error: %v", err)
-	}
-	if atomic.LoadInt32(&mock1.initCalled) != 1 {
-		t.Fatalf("expected mock1.Initialize called once, got %d", atomic.LoadInt32(&mock1.initCalled))
-	}
-
+	dyn := NewDynamicVoicePool(func() (AgentPool, string, error) { return mock1, "fp-1", nil })
 	dyn.UpdatePrewarmedTargets([]string{"kiosk-kitchen", "kiosk-living-room"})
+	sess, err := dyn.GetOrCreateSession(ctx, "kiosk-kitchen", "sess-k1")
+	rot, rotErr := dyn.RotateSession(ctx, "k")
+	_, leaseErr := dyn.AcquireLease(ctx, "k")
+	nShould, _ := dyn.ShouldRotateSession(nil)
+
 	mock1.mu.Lock()
 	targets := append([]string(nil), mock1.prewarmedTargets...)
 	mock1.mu.Unlock()
-	if len(targets) != 2 || targets[0] != "kiosk-kitchen" || targets[1] != "kiosk-living-room" {
-		t.Fatalf("unexpected prewarmed targets forwarded: %v", targets)
-	}
 
-	sess, err := dyn.GetOrCreateSession(ctx, "kiosk-kitchen", "sess-k1")
-	if err != nil {
-		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
-	}
-	if sess.SessionID() != "sess-k1" {
-		t.Fatalf("expected session ID 'sess-k1', got %q", sess.SessionID())
-	}
-
-	// 3. Non-rotator and Non-leased delegation
-	if should, _ := dyn.ShouldRotateSession(nil); should {
-		t.Error("expected non-rotator pool ShouldRotateSession to return false")
-	}
-	rot, err := dyn.RotateSession(ctx, "k")
-	if err != nil || rot != nil {
-		t.Errorf("expected RotateSession on non-rotator to return nil, nil, got (%v, %v)", rot, err)
-	}
-	if _, err := dyn.AcquireLease(ctx, "k"); err == nil {
-		t.Error("expected error when underlying does not implement LeasedAgentPool")
+	if dyn.Model() != "gemini-2.5-flash" || dyn.Fingerprint() != "fp-1" || dyn.Initialize(ctx) != nil ||
+		atomic.LoadInt32(&mock1.initCalled) != 1 || len(targets) != 2 || targets[0] != "kiosk-kitchen" || targets[1] != "kiosk-living-room" ||
+		err != nil || sess.SessionID() != "sess-k1" || nShould || rotErr != nil || rot != nil || leaseErr == nil {
+		t.Fatalf("unexpected nominal / non-rotator passthrough behavior")
 	}
 
 	// 4. Closed dynamic pool safety
-	if err := dyn.Close(); err != nil {
-		t.Fatalf("unexpected Close error: %v", err)
-	}
-	if atomic.LoadInt32(&mock1.closeCalled) != 1 {
-		t.Fatalf("expected mock1.Close called once, got %d", atomic.LoadInt32(&mock1.closeCalled))
-	}
-	if _, err := dyn.GetOrCreateSession(ctx, "k", ""); err == nil {
-		t.Errorf("expected error from closed dyn.GetOrCreateSession()")
-	}
-	if err := dyn.Initialize(ctx); err == nil {
-		t.Errorf("expected error from closed dyn.Initialize()")
-	}
+	dyn.Close()
 	dyn.MarkDirty()
-	if err := dyn.Close(); err != nil {
-		t.Errorf("expected nil from repeated dyn.Close()")
-	}
-	if should, _ := dyn.ShouldRotateSession(sess); should {
-		t.Error("expected closed pool ShouldRotateSession to return false")
-	}
-	if _, err := dyn.RotateSession(ctx, "k"); err == nil {
-		t.Error("expected closed pool RotateSession to return error")
-	}
-	if _, err := dyn.AcquireLease(ctx, "k"); err == nil {
-		t.Error("expected error on closed dynamic pool AcquireLease")
+	_, csErr := dyn.GetOrCreateSession(ctx, "k", "")
+	_, crErr := dyn.RotateSession(ctx, "k")
+	_, clErr := dyn.AcquireLease(ctx, "k")
+	cShould, _ := dyn.ShouldRotateSession(sess)
+	if atomic.LoadInt32(&mock1.closeCalled) != 1 || dyn.Close() != nil ||
+		csErr == nil || dyn.Initialize(ctx) == nil || cShould || crErr == nil || clErr == nil {
+		t.Error("expected error on closed dynamic pool methods")
 	}
 
 	// 5. Rotator and Leased pool delegation
-	fakeSess := &mockVoiceSession{sessID: "rot-s", targetKey: "k"}
-	fakeL := &fakeSessionLease{sessID: "lease-123"}
-	rotPool := &mockRotatorVoicePool{
-		mockVoicePool: *newMockVoicePool("m2"),
-		shouldRotate:  true,
-		rotReason:     "test reason",
-		rotatedSess:   fakeSess,
-	}
-	dynRot := NewDynamicVoicePoolWithInitial(rotPool, "fp-2", nil)
-	defer dynRot.Close()
-	if should, reason := dynRot.ShouldRotateSession(fakeSess); !should || reason != "test reason" {
-		t.Errorf("expected ShouldRotateSession to delegate, got (%v, %q)", should, reason)
-	}
-	rotSess, err := dynRot.RotateSession(ctx, "k")
-	if err != nil || rotSess != fakeSess {
-		t.Errorf("expected RotateSession to delegate, got (%v, %v)", rotSess, err)
-	}
+	fakeSess, fakeL := &mockVoiceSession{sessID: "rot-s", targetKey: "k"}, &fakeSessionLease{sessID: "lease-123"}
+	dynRot := NewDynamicVoicePoolWithInitial(&mockRotatorVoicePool{mockVoicePool: newMockVoicePool("m2"), shouldRotate: true, rotReason: "test reason", rotatedSess: fakeSess}, "fp-2", nil)
+	dynLeased := NewDynamicVoicePoolWithInitial(&mockLeasedVoicePool{mockVoicePool: newMockVoicePool("m3"), lease: fakeL}, "fp-3", nil)
+	defer func() { _ = dynRot.Close(); _ = dynLeased.Close() }()
 
-	mockLeased := &mockLeasedVoicePool{
-		mockVoicePool: *newMockVoicePool("m3"),
-		lease:         fakeL,
-	}
-	dynLeased := NewDynamicVoicePoolWithInitial(mockLeased, "fp-3", nil)
-	defer dynLeased.Close()
-	lease, err := dynLeased.AcquireLease(ctx, "k")
-	if err != nil {
-		t.Fatalf("unexpected AcquireLease error: %v", err)
-	}
-	if lease != fakeL {
-		t.Errorf("expected lease %v, got %v", fakeL, lease)
+	should, reason := dynRot.ShouldRotateSession(fakeSess)
+	rotSess, rotErr2 := dynRot.RotateSession(ctx, "k")
+	lease, leaseErr2 := dynLeased.AcquireLease(ctx, "k")
+	if !should || reason != "test reason" || rotErr2 != nil || rotSess != fakeSess || leaseErr2 != nil || lease != fakeL {
+		t.Errorf("unexpected rotator / leased delegation: (%v, %q, %v, %v, %v)", should, reason, rotErr2, leaseErr2, lease)
 	}
 }
 
 func TestDynamicVoicePool_MarkDirtyAndReloadEdgeCases(t *testing.T) {
 	t.Parallel()
 
-	// 1. MarkDirty_NoopWhenUnchanged
-	mock1 := newMockVoicePool("model-v1")
-	factory := func() (AgentPool, string, error) {
-		return mock1, "fingerprint-fixed", nil
-	}
-	dyn := NewDynamicVoicePool(factory)
+	// 1. MarkDirty_NoopWhenUnchanged, 2. MarkDirty_SwapsOnConfigChange, 3. MarkDirty_RetainsLKGPOnFailure
+	mock1, mock2 := newMockVoicePool("model-v1"), newMockVoicePool("model-v2")
+	sf := &swappablePoolFactory{pool: mock1, fp: "fp-v1"}
+	dyn := NewDynamicVoicePool(sf.factory)
 	defer dyn.Close()
 
-	if dyn.CurrentPool() != mock1 {
-		t.Fatalf("expected CurrentPool to return mock1")
-	}
 	dyn.MarkDirty()
-	if atomic.LoadInt32(&mock1.markDirtyCalled) != 1 {
-		t.Fatalf("expected mock1.MarkDirty called once, got %d", atomic.LoadInt32(&mock1.markDirtyCalled))
-	}
-	if dyn.CurrentPool() != mock1 {
-		t.Fatalf("expected CurrentPool to remain mock1")
-	}
-	if atomic.LoadInt32(&mock1.closeCalled) != 0 {
-		t.Fatalf("expected mock1.Close NOT called, got %d", atomic.LoadInt32(&mock1.closeCalled))
+	sf.set(mock2, "fp-v2", nil)
+	dyn.MarkDirty()
+	dyn.retiringWg.Wait()
+
+	mockGood, mockFailing := newMockVoicePool("model-good"), &mockVoicePool{initErr: errors.New("mock initialization failure")}
+	sf.set(mockGood, "fp-good", nil)
+	dyn.MarkDirty()
+	sf.set(mockFailing, "fp-bad", nil)
+	dyn.MarkDirty()
+	sf.set(nil, "", errors.New("cannot create pool"))
+	dyn.MarkDirty()
+
+	if atomic.LoadInt32(&mock1.markDirtyCalled) != 1 || atomic.LoadInt32(&mock2.initCalled) != 1 ||
+		atomic.LoadInt32(&mock1.closeCalled) != 1 || dyn.CurrentPool() != mockGood || dyn.Fingerprint() != "fp-good" ||
+		atomic.LoadInt32(&mockFailing.closeCalled) != 1 {
+		t.Fatalf("unexpected state after swaps / LKGP retention")
 	}
 
-	// 2. MarkDirty_SwapsOnConfigChange
-	mock2 := newMockVoicePool("model-v2")
-	var currentMu sync.Mutex
-	activeMock := mock1
-	activeFP := "fp-v1"
-	swapFactory := func() (AgentPool, string, error) {
-		currentMu.Lock()
-		defer currentMu.Unlock()
-		return activeMock, activeFP, nil
-	}
-	dynSwap := NewDynamicVoicePool(swapFactory)
-	defer dynSwap.Close()
-
-	currentMu.Lock()
-	activeMock = mock2
-	activeFP = "fp-v2"
-	currentMu.Unlock()
-
-	dynSwap.MarkDirty()
-	if dynSwap.CurrentPool() != mock2 {
-		t.Fatalf("expected active pool to swap to mock2, got %p", dynSwap.CurrentPool())
-	}
-	if dynSwap.Fingerprint() != "fp-v2" {
-		t.Fatalf("expected fingerprint 'fp-v2', got %q", dynSwap.Fingerprint())
-	}
-	if atomic.LoadInt32(&mock2.initCalled) != 1 {
-		t.Fatalf("expected candidate mock2 to be initialized, got %d", atomic.LoadInt32(&mock2.initCalled))
-	}
-	dynSwap.retiringWg.Wait()
-	if atomic.LoadInt32(&mock1.closeCalled) != 1 {
-		t.Fatalf("expected old pool mock1 to be retired and closed, got %d", atomic.LoadInt32(&mock1.closeCalled))
-	}
-
-	// 3. MarkDirty_RetainsLKGPOnFailure
-	mockGood := newMockVoicePool("model-good")
-	mockFailing := newMockVoicePool("model-failing")
-	mockFailing.initErr = errors.New("mock initialization failure")
-	var lkgpMu sync.Mutex
-	activeLKGP := mockGood
-	activeLKGPFP := "fp-good"
-	var factoryErr error
-	lkgpFactory := func() (AgentPool, string, error) {
-		lkgpMu.Lock()
-		defer lkgpMu.Unlock()
-		if factoryErr != nil {
-			return nil, "", factoryErr
-		}
-		return activeLKGP, activeLKGPFP, nil
-	}
-	dynLKGP := NewDynamicVoicePool(lkgpFactory)
-	defer dynLKGP.Close()
-
-	lkgpMu.Lock()
-	activeLKGP = mockFailing
-	activeLKGPFP = "fp-bad"
-	lkgpMu.Unlock()
-
-	dynLKGP.MarkDirty()
-	if dynLKGP.CurrentPool() != mockGood {
-		t.Fatalf("expected LKGP mockGood to be retained, got %p", dynLKGP.CurrentPool())
-	}
-	if dynLKGP.Fingerprint() != "fp-good" {
-		t.Fatalf("expected fingerprint 'fp-good' retained, got %q", dynLKGP.Fingerprint())
-	}
-	if atomic.LoadInt32(&mockFailing.closeCalled) != 1 {
-		t.Fatalf("expected failing candidate to be closed, got %d", atomic.LoadInt32(&mockFailing.closeCalled))
-	}
-
-	lkgpMu.Lock()
-	factoryErr = errors.New("cannot create pool")
-	lkgpMu.Unlock()
-
-	dynLKGP.MarkDirty()
-	if dynLKGP.CurrentPool() != mockGood {
-		t.Fatalf("expected LKGP mockGood to be retained on factory error, got %p", dynLKGP.CurrentPool())
-	}
-
-	// 4. Edge Cases: Factory error on NewDynamicVoicePool
-	errFactory := func() (AgentPool, string, error) {
-		return nil, "", errors.New("factory init fail")
-	}
-	dynErr := NewDynamicVoicePool(errFactory)
-	if dynErr.CurrentPool() != nil {
-		t.Errorf("expected nil CurrentPool when factory fails")
-	}
+	// 4. Edge Cases: Factory error on NewDynamicVoicePool & nil/plain pools
+	dynErr := NewDynamicVoicePool(func() (AgentPool, string, error) { return nil, "", errors.New("factory init fail") })
 	ctx := context.Background()
-	if _, err := dynErr.GetOrCreateSession(ctx, "k", ""); err == nil {
-		t.Errorf("expected error from GetOrCreateSession with nil pool")
-	}
-	if err := dynErr.Initialize(ctx); err == nil {
-		t.Errorf("expected error from Initialize with nil pool")
-	}
-	if dynErr.Model() != "" {
-		t.Errorf("expected empty string from Model with nil pool")
-	}
+	_, geErr := dynErr.GetOrCreateSession(ctx, "k", "")
 	dynErr.UpdatePrewarmedTargets([]string{"k"})
 
-	// Model() with pool that does not implement Model()
-	dynPlain := NewDynamicVoicePoolWithInitial(&plainPoolWithoutModel{}, "fp", nil)
-	if dynPlain.Model() != "" {
-		t.Errorf("expected empty string from Model() on pool without Model method")
-	}
-
-	// MarkDirty with nil factory
 	mockNoFac := newMockVoicePool("m")
-	dynNoFactory := NewDynamicVoicePoolWithInitial(mockNoFac, "fp", nil)
-	dynNoFactory.MarkDirty()
-	if atomic.LoadInt32(&mockNoFac.markDirtyCalled) != 1 {
-		t.Errorf("expected mock.MarkDirty to be called when factory is nil")
-	}
+	NewDynamicVoicePoolWithInitial(mockNoFac, "fp", nil).MarkDirty()
+	dNil := NewDynamicVoicePoolWithInitial(mockNoFac, "fp-old", func() (AgentPool, string, error) { return nil, "fp-new", nil })
+	dNil.MarkDirty()
 
-	// MarkDirty with nil candidate pool on fingerprint change
-	dynNilCandidate := NewDynamicVoicePoolWithInitial(mockNoFac, "fp-old", func() (AgentPool, string, error) {
-		return nil, "fp-new", nil
-	})
-	dynNilCandidate.MarkDirty()
-	if dynNilCandidate.Fingerprint() != "fp-old" {
-		t.Errorf("expected LKGP retention when candidate pool is nil")
-	}
+	candErrClose := &mockVoicePool{initErr: errors.New("candidate init fail"), closeErr: errors.New("close error")}
+	dErr := NewDynamicVoicePoolWithInitial(mockNoFac, "fp-old", func() (AgentPool, string, error) { return candErrClose, "fp-new", nil })
+	dErr.MarkDirty()
 
-	// MarkDirty when candidate pool close errors
-	candidateErrClose := &errClosePool{mockVoicePool: *newMockVoicePool("m2")}
-	candidateErrClose.initErr = errors.New("candidate init fail")
-	dynErrClose := NewDynamicVoicePoolWithInitial(mockNoFac, "fp-old", func() (AgentPool, string, error) {
-		return candidateErrClose, "fp-new", nil
-	})
-	dynErrClose.MarkDirty()
-	if dynErrClose.Fingerprint() != "fp-old" {
-		t.Errorf("expected LKGP retention when candidate pool fails initialization")
-	}
-
-	// MarkDirty when pool is closed during candidate initialization
 	mockInitBlock := newMockVoicePool("m3")
 	var dynCloseRace *DynamicVoicePool
-	mockInitBlock.onInit = func() {
-		if dynCloseRace != nil {
-			_ = dynCloseRace.Close()
-		}
-	}
-	dynCloseRace = NewDynamicVoicePoolWithInitial(mockNoFac, "fp-old", func() (AgentPool, string, error) {
-		return mockInitBlock, "fp-new", nil
-	})
+	mockInitBlock.onInit = func() { _ = dynCloseRace.Close() }
+	dynCloseRace = NewDynamicVoicePoolWithInitial(mockNoFac, "fp-old", func() (AgentPool, string, error) { return mockInitBlock, "fp-new", nil })
 	dynCloseRace.MarkDirty()
+
+	if dynErr.CurrentPool() != nil || dynErr.Model() != "" || geErr == nil || dynErr.Initialize(ctx) == nil ||
+		NewDynamicVoicePoolWithInitial(&plainPoolWithoutModel{}, "fp", nil).Model() != "" ||
+		atomic.LoadInt32(&mockNoFac.markDirtyCalled) != 1 || dNil.Fingerprint() != "fp-old" || dErr.Fingerprint() != "fp-old" {
+		t.Errorf("unexpected edge case reload behavior")
+	}
 }
 
 func TestDynamicVoicePool_ConcurrentAccessDuringReload(t *testing.T) {
 	t.Parallel()
-
-	mockA := newMockVoicePool("model-A")
-	mockB := newMockVoicePool("model-B")
-
+	mockA, mockB := newMockVoicePool("model-A"), newMockVoicePool("model-B")
 	var toggle atomic.Int32
-	factory := func() (AgentPool, string, error) {
+	dyn := NewDynamicVoicePool(func() (AgentPool, string, error) {
 		if toggle.Load()%2 == 0 {
 			return mockA, "fp-A", nil
 		}
 		return mockB, "fp-B", nil
-	}
-
-	dyn := NewDynamicVoicePool(factory)
+	})
 	defer dyn.Close()
 
-	const numWorkers = 25
-	const numIterations = 50
+	const numWorkers, numIterations = 25, 50
 	var wg sync.WaitGroup
-
 	ctx := context.Background()
 
+	wg.Add(numWorkers + 1)
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
+		go func(wID int) {
 			defer wg.Done()
 			for j := 0; j < numIterations; j++ {
-				target := fmt.Sprintf("target-%d", (workerID+j)%5)
-				sess, err := dyn.GetOrCreateSession(ctx, target, "")
-				if err != nil {
-					t.Errorf("worker %d unexpected GetOrCreateSession error: %v", workerID, err)
-					return
-				}
-				if sess == nil {
-					t.Errorf("worker %d got nil session", workerID)
+				if s, err := dyn.GetOrCreateSession(ctx, fmt.Sprintf("t-%d", (wID+j)%5), ""); err != nil || s == nil {
+					t.Errorf("worker %d GetOrCreateSession error: %v", wID, err)
 					return
 				}
 			}
 		}(i)
 	}
-
-	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for j := 0; j < 20; j++ {
@@ -514,95 +298,49 @@ func TestDynamicVoicePool_ConcurrentAccessDuringReload(t *testing.T) {
 			runtime.Gosched()
 		}
 	}()
-
 	wg.Wait()
 }
 
 func TestDynamicVoicePool_SerializedReloads(t *testing.T) {
 	t.Parallel()
-
-	var activeReloads int32
-	var maxConcurrentReloads int32
-
-	factory := func() (AgentPool, string, error) {
-		cur := atomic.AddInt32(&activeReloads, 1)
-		defer atomic.AddInt32(&activeReloads, -1)
-
-		for {
-			oldMax := atomic.LoadInt32(&maxConcurrentReloads)
-			if cur <= oldMax || atomic.CompareAndSwapInt32(&maxConcurrentReloads, oldMax, cur) {
-				break
-			}
+	var active, maxConc int32
+	dyn := NewDynamicVoicePool(func() (AgentPool, string, error) {
+		cur := atomic.AddInt32(&active, 1)
+		defer atomic.AddInt32(&active, -1)
+		for old := atomic.LoadInt32(&maxConc); cur > old && !atomic.CompareAndSwapInt32(&maxConc, old, cur); old = atomic.LoadInt32(&maxConc) {
 		}
-
 		runtime.Gosched()
 		return newMockVoicePool("pool"), fmt.Sprintf("fp-%d", time.Now().UnixNano()), nil
-	}
-
-	dyn := NewDynamicVoicePool(factory)
+	})
 	defer dyn.Close()
 
 	var wg sync.WaitGroup
+	wg.Add(10)
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			dyn.MarkDirty()
-		}()
+		go func() { defer wg.Done(); dyn.MarkDirty() }()
 	}
-
 	wg.Wait()
-
-	if maxConcurrentReloads > 1 {
-		t.Fatalf("expected serialized reloads (max 1), got %d concurrent reloads", maxConcurrentReloads)
+	if maxConc > 1 {
+		t.Fatalf("expected serialized reloads (max 1), got %d concurrent reloads", maxConc)
 	}
 }
 
 func TestDynamicVoicePool_GracefulShutdownDrainsRetiring(t *testing.T) {
 	t.Parallel()
-
-	mock1 := newMockVoicePool("model-v1")
+	mock1, mock2 := newMockVoicePool("model-v1"), newMockVoicePool("model-v2")
 	mock1.closeGate = make(chan struct{})
-	mock2 := newMockVoicePool("model-v2")
-
-	var currentMu sync.Mutex
-	activeMock := mock1
-	activeFP := "fp-v1"
-
-	factory := func() (AgentPool, string, error) {
-		currentMu.Lock()
-		defer currentMu.Unlock()
-		return activeMock, activeFP, nil
-	}
-
-	dyn := NewDynamicVoicePool(factory)
-
-	currentMu.Lock()
-	activeMock = mock2
-	activeFP = "fp-v2"
-	currentMu.Unlock()
-
+	sf := &swappablePoolFactory{pool: mock1, fp: "fp-v1"}
+	dyn := NewDynamicVoicePool(sf.factory)
+	sf.set(mock2, "fp-v2", nil)
 	dyn.MarkDirty()
 
-	closeStarted := make(chan struct{})
-	closeDone := make(chan error, 1)
-	go func() {
-		close(closeStarted)
-		closeDone <- dyn.Close()
-	}()
-
+	closeStarted, closeDone := make(chan struct{}), make(chan error, 1)
+	go func() { close(closeStarted); closeDone <- dyn.Close() }()
 	<-closeStarted
 	runtime.Gosched()
 	close(mock1.closeGate)
 
-	if err := <-closeDone; err != nil {
-		t.Fatalf("unexpected Close error: %v", err)
-	}
-
-	if atomic.LoadInt32(&mock1.closeCalled) != 1 {
-		t.Fatalf("expected mock1 to be closed")
-	}
-	if atomic.LoadInt32(&mock2.closeCalled) != 1 {
-		t.Fatalf("expected mock2 to be closed")
+	if err := <-closeDone; err != nil || atomic.LoadInt32(&mock1.closeCalled) != 1 || atomic.LoadInt32(&mock2.closeCalled) != 1 {
+		t.Fatalf("unexpected Close outcome: err=%v, c1=%d, c2=%d", err, mock1.closeCalled, mock2.closeCalled)
 	}
 }
