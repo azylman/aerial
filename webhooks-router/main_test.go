@@ -81,13 +81,37 @@ func (z *zeroCallTransport) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 type mockPRRegistry struct {
-	mergedCalls         []struct{ repo string; prNumber int; mergeSHA string }
-	syncCalls           []struct{ repo string; prNumber int; headSHA string }
-	closedUnmergedCalls []struct{ repo string; prNumber int }
-	ciFailedCalls       []struct{ repo string; prNumber int }
-	ciFailedBySHACalls  []struct{ repo string; headSHA string }
-	backfillCalls       []struct{ repo string; prNumber int; mergeSHA string }
-	resolveBySHACalls   []struct{ repo string; sha string }
+	mergedCalls []struct {
+		repo     string
+		prNumber int
+		mergeSHA string
+	}
+	syncCalls []struct {
+		repo     string
+		prNumber int
+		headSHA  string
+	}
+	closedUnmergedCalls []struct {
+		repo     string
+		prNumber int
+	}
+	ciFailedCalls []struct {
+		repo     string
+		prNumber int
+	}
+	ciFailedBySHACalls []struct {
+		repo    string
+		headSHA string
+	}
+	backfillCalls []struct {
+		repo     string
+		prNumber int
+		mergeSHA string
+	}
+	resolveBySHACalls []struct {
+		repo string
+		sha  string
+	}
 
 	mergedTargetID   string
 	syncTargetID     string
@@ -111,7 +135,10 @@ type mockPRRegistry struct {
 	openPRs          []RegisteredPR
 	listOpenPRsErr   error
 
-	conflictCalls    []struct{ repo string; prNumber int }
+	conflictCalls []struct {
+		repo     string
+		prNumber int
+	}
 	conflictTargetID string
 	conflictUpdated  bool
 	conflictErr      error
@@ -132,7 +159,10 @@ type mockPRRegistry struct {
 	deployedUpdated  bool
 	deployedErr      error
 
-	deployFailedCalls    []struct{ repo string; prNumber int }
+	deployFailedCalls []struct {
+		repo     string
+		prNumber int
+	}
 	deployFailedTargetID string
 	deployFailedUpdated  bool
 	deployFailedErr      error
@@ -151,17 +181,26 @@ type mockPRRegistry struct {
 	channelContextMap map[string][]ChannelMessageContext
 	channelContextErr error
 
-	advanceVanadisCalls []struct{ repo string; prNumber int }
-	advanceVanadisRes   *VanadisAdvancementResult
-	advanceVanadisErr   error
+	advanceVanadisCalls []struct {
+		repo     string
+		prNumber int
+	}
+	advanceVanadisRes *VanadisAdvancementResult
+	advanceVanadisErr error
 
-	suppressVanadisCalls []struct{ repo string; prNumber int }
-	suppressVanadisRes   bool
-	suppressVanadisErr   error
+	suppressVanadisCalls []struct {
+		repo     string
+		prNumber int
+	}
+	suppressVanadisRes bool
+	suppressVanadisErr error
 
-	failVanadisCalls []struct{ repo string; prNumber int }
-	failVanadisRes   bool
-	failVanadisErr   error
+	failVanadisCalls []struct {
+		repo     string
+		prNumber int
+	}
+	failVanadisRes bool
+	failVanadisErr error
 
 	err error
 }
@@ -197,7 +236,10 @@ func (m *mockPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo 
 	if err := m.checkErr(m.deployFailedErr); err != nil {
 		return "", false, err
 	}
-	m.deployFailedCalls = append(m.deployFailedCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	m.deployFailedCalls = append(m.deployFailedCalls, struct {
+		repo     string
+		prNumber int
+	}{repo, prNumber})
 	return m.deployFailedTargetID, m.deployFailedUpdated, nil
 }
 
@@ -238,7 +280,10 @@ func (m *mockPRRegistry) AtomicTransitionConflict(ctx context.Context, repo stri
 	if err := m.checkErr(m.conflictErr); err != nil {
 		return "", false, err
 	}
-	m.conflictCalls = append(m.conflictCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	m.conflictCalls = append(m.conflictCalls, struct {
+		repo     string
+		prNumber int
+	}{repo, prNumber})
 	return m.conflictTargetID, m.conflictUpdated, nil
 }
 
@@ -246,7 +291,11 @@ func (m *mockPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumb
 	if m.err != nil {
 		return "", m.err
 	}
-	m.mergedCalls = append(m.mergedCalls, struct{ repo string; prNumber int; mergeSHA string }{repo, prNumber, mergeSHA})
+	m.mergedCalls = append(m.mergedCalls, struct {
+		repo     string
+		prNumber int
+		mergeSHA string
+	}{repo, prNumber, mergeSHA})
 	return m.mergedTargetID, nil
 }
 
@@ -254,7 +303,11 @@ func (m *mockPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber
 	if m.err != nil {
 		return "", m.err
 	}
-	m.syncCalls = append(m.syncCalls, struct{ repo string; prNumber int; headSHA string }{repo, prNumber, headSHA})
+	m.syncCalls = append(m.syncCalls, struct {
+		repo     string
+		prNumber int
+		headSHA  string
+	}{repo, prNumber, headSHA})
 	return m.syncTargetID, nil
 }
 
@@ -262,7 +315,10 @@ func (m *mockPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string
 	if m.err != nil {
 		return "", m.err
 	}
-	m.closedUnmergedCalls = append(m.closedUnmergedCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	m.closedUnmergedCalls = append(m.closedUnmergedCalls, struct {
+		repo     string
+		prNumber int
+	}{repo, prNumber})
 	return m.closedTargetID, nil
 }
 
@@ -270,7 +326,10 @@ func (m *mockPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo stri
 	if err := m.checkErr(m.ciFailedErr); err != nil {
 		return "", false, err
 	}
-	m.ciFailedCalls = append(m.ciFailedCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	m.ciFailedCalls = append(m.ciFailedCalls, struct {
+		repo     string
+		prNumber int
+	}{repo, prNumber})
 	return m.ciFailedTargetID, m.ciFailedUpdated, nil
 }
 
@@ -278,7 +337,10 @@ func (m *mockPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, 
 	if err := m.checkErr(m.ciFailedBySHAErr); err != nil {
 		return "", 0, false, err
 	}
-	m.ciFailedBySHACalls = append(m.ciFailedBySHACalls, struct{ repo string; headSHA string }{repo, headSHA})
+	m.ciFailedBySHACalls = append(m.ciFailedBySHACalls, struct {
+		repo    string
+		headSHA string
+	}{repo, headSHA})
 	return m.ciFailedBySHATarget, m.ciFailedBySHAPRNum, m.ciFailedBySHAUpdated, nil
 }
 
@@ -286,7 +348,11 @@ func (m *mockPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, 
 	if m.err != nil {
 		return "", m.err
 	}
-	m.backfillCalls = append(m.backfillCalls, struct{ repo string; prNumber int; mergeSHA string }{repo, prNumber, mergeSHA})
+	m.backfillCalls = append(m.backfillCalls, struct {
+		repo     string
+		prNumber int
+		mergeSHA string
+	}{repo, prNumber, mergeSHA})
 	return m.backfillTargetID, nil
 }
 
@@ -294,7 +360,10 @@ func (m *mockPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha st
 	if err := m.checkErr(m.resolveErr); err != nil {
 		return 0, "", "", err
 	}
-	m.resolveBySHACalls = append(m.resolveBySHACalls, struct{ repo string; sha string }{repo, sha})
+	m.resolveBySHACalls = append(m.resolveBySHACalls, struct {
+		repo string
+		sha  string
+	}{repo, sha})
 	return m.resolvePRNum, m.resolveBranch, m.resolveTargetID, nil
 }
 
@@ -306,7 +375,10 @@ func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prN
 }
 
 func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
-	m.advanceVanadisCalls = append(m.advanceVanadisCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	m.advanceVanadisCalls = append(m.advanceVanadisCalls, struct {
+		repo     string
+		prNumber int
+	}{repo, prNumber})
 	if err := m.checkErr(m.advanceVanadisErr); err != nil {
 		return nil, err
 	}
@@ -317,7 +389,10 @@ func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo strin
 }
 
 func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
-	m.suppressVanadisCalls = append(m.suppressVanadisCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	m.suppressVanadisCalls = append(m.suppressVanadisCalls, struct {
+		repo     string
+		prNumber int
+	}{repo, prNumber})
 	if err := m.checkErr(m.suppressVanadisErr); err != nil {
 		return false, err
 	}
@@ -325,7 +400,10 @@ func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, re
 }
 
 func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
-	m.failVanadisCalls = append(m.failVanadisCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	m.failVanadisCalls = append(m.failVanadisCalls, struct {
+		repo     string
+		prNumber int
+	}{repo, prNumber})
 	if err := m.checkErr(m.failVanadisErr); err != nil {
 		return false, err
 	}
@@ -492,7 +570,6 @@ func mkDeployFailedReg(targetID string, pr int, sha, repo string, updated bool) 
 	return &mockPRRegistry{deployFailedJobTargetID: targetID, deployFailedJobPRNum: pr, deployFailedJobMergeSHA: sha, deployFailedJobRepo: repo, deployFailedJobUpdated: updated}
 }
 
-
 func getTestPostgresURL() string {
 	pgURL := os.Getenv("POSTGRES_URL")
 	if pgURL == "" {
@@ -540,14 +617,14 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		{
 			name: "primary infisical and nomad envs",
 			env: map[string]string{
-				"PORT":                  "9999",
-				"INFISICAL_URL":          "http://infisical:8085/",
+				"PORT":                    "9999",
+				"INFISICAL_URL":           "http://infisical:8085/",
 				"INFISICAL_CLIENT_ID":     "cid",
 				"INFISICAL_CLIENT_SECRET": "csec",
 				"INFISICAL_PROJECT_ID":    "pid",
-				"INFISICAL_ENVIRONMENT":  "staging",
-				"NOMAD_ADDR":             "http://nomad:4646/",
-				"NOMAD_TOKEN":            "ntok",
+				"INFISICAL_ENVIRONMENT":   "staging",
+				"NOMAD_ADDR":              "http://nomad:4646/",
+				"NOMAD_TOKEN":             "ntok",
 			},
 			wantPort:      "9999",
 			wantInfURL:    "http://infisical:8085",
@@ -757,11 +834,11 @@ brain_url: "http://brain.custom:8088"
 			wantBrainURL:  "http://brain.custom:8088",
 		},
 		{
-			name:         "zero-byte local config with existing fallback",
-			localYAML:    "",
-			fallbackYAML: "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\nnomad_addr: \"http://nomad.fallback:4646\"\n",
-			wantPort:     "4088",
-			wantInfURL:   "http://infisical.fallback:8085",
+			name:          "zero-byte local config with existing fallback",
+			localYAML:     "",
+			fallbackYAML:  "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\nnomad_addr: \"http://nomad.fallback:4646\"\n",
+			wantPort:      "4088",
+			wantInfURL:    "http://infisical.fallback:8085",
 			wantNomadAddr: "http://nomad.fallback:4646",
 		},
 		{
@@ -1532,87 +1609,164 @@ func TestSyncSecrets(t *testing.T) {
 func TestHandleGitHubWebhook(t *testing.T) {
 	t.Parallel()
 
-	t.Run("EndpointsAndValidation", func(t *testing.T) {
-		t.Parallel()
-		mockRiver := &mockRiverInserter{}
-		routes := NewRouterServer(Config{}, nil, mockRiver).Routes()
+	tests := []struct {
+		name             string
+		path             string
+		body             io.Reader
+		headers          map[string]string
+		river            *mockRiverInserter
+		wantStatus       int
+		wantInserted     int
+		wantMetricSubstr string
+	}{
+		{
+			name:       "missing X-GitHub-Event header",
+			path:       "/api/webhooks/github",
+			body:       strings.NewReader(`{}`),
+			headers:    nil,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "read error in body",
+			path:       "/api/webhooks/github",
+			body:       errReader{},
+			headers:    map[string]string{"X-GitHub-Event": "ping"},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "river client nil",
+			path:       "/api/webhooks/github",
+			body:       strings.NewReader(`{"zen":"Keep it simple"}`),
+			headers:    map[string]string{"X-GitHub-Event": "ping"},
+			river:      nil,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "river client insert error",
+			path:       "/api/webhooks/github",
+			body:       strings.NewReader(`{"zen":"Keep it simple"}`),
+			headers:    map[string]string{"X-GitHub-Event": "ping"},
+			river:      &mockRiverInserter{err: errors.New("simulated database failure")},
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:         "api path success",
+			path:         "/api/webhooks/github",
+			body:         strings.NewReader(`{"zen":"Keep it simple"}`),
+			headers:      map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"},
+			river:        &mockRiverInserter{},
+			wantStatus:   http.StatusOK,
+			wantInserted: 1,
+		},
+		{
+			name:         "legacy path success",
+			path:         "/webhooks/github",
+			body:         strings.NewReader(`{"zen":"Keep it simple"}`),
+			headers:      map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"},
+			river:        &mockRiverInserter{},
+			wantStatus:   http.StatusOK,
+			wantInserted: 1,
+		},
+		{
+			name:             "duplicate skipped",
+			path:             "/api/webhooks/github",
+			body:             strings.NewReader(`{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`),
+			headers:          map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "dup-gh-delivery-1"},
+			river:            &mockRiverInserter{skipDuplicate: true},
+			wantStatus:       http.StatusOK,
+			wantInserted:     0,
+			wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="github_webhook"}`,
+		},
+	}
 
-		// 1. Missing X-GitHub-Event header -> 400
-		if rec := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/github", strings.NewReader(`{}`), nil); rec.Code != http.StatusBadRequest {
-			t.Errorf("expected 400 for missing event header, got %d", rec.Code)
-		}
-
-		// 2. Read error in body -> 400
-		if rec := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/github", errReader{}, map[string]string{"X-GitHub-Event": "ping"}); rec.Code != http.StatusBadRequest {
-			t.Errorf("expected 400 on read error, got %d", rec.Code)
-		}
-
-		// 3. River client nil -> 500
-		srvNilRiver := NewRouterServer(Config{}, nil).Routes()
-		if rec := doHTTPRequest(srvNilRiver, http.MethodPost, "/api/webhooks/github", strings.NewReader(`{"zen":"Keep it simple"}`), map[string]string{"X-GitHub-Event": "ping"}); rec.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 when river client is nil, got %d", rec.Code)
-		}
-
-		// 4. River client insert error -> 500
-		srvErrRiver := NewRouterServer(Config{}, nil, &mockRiverInserter{err: errors.New("simulated database failure")}).Routes()
-		if rec := doHTTPRequest(srvErrRiver, http.MethodPost, "/api/webhooks/github", strings.NewReader(`{"zen":"Keep it simple"}`), map[string]string{"X-GitHub-Event": "ping"}); rec.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 when river persistence fails, got %d", rec.Code)
-		}
-
-		// 5. Successful durable persistence on both routes -> 200 OK
-		for _, path := range []string{"/api/webhooks/github", "/webhooks/github"} {
-			mockRiver.insertedJobs = nil
-			rec := doHTTPRequest(routes, http.MethodPost, path, strings.NewReader(`{"zen":"Keep it simple"}`), map[string]string{
-				"X-GitHub-Event":    "ping",
-				"X-GitHub-Delivery": "del-1234",
-			})
-			if rec.Code != http.StatusOK {
-				t.Errorf("expected 200 OK on %s, got %d", path, rec.Code)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var srv *RouterServer
+			if tc.river != nil {
+				srv = NewRouterServer(Config{}, nil, tc.river)
+			} else {
+				srv = NewRouterServer(Config{}, nil)
 			}
-			var resp map[string]interface{}
-			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("failed to parse json response: %v", err)
-			}
-			if resp["status"] != "accepted" || resp["event"] != "ping" || resp["delivery"] != "del-1234" {
-				t.Errorf("unexpected response body: %+v", resp)
-			}
-			if len(mockRiver.insertedJobs) != 1 || mockRiver.insertedJobs[0].Event != "ping" || mockRiver.insertedJobs[0].Delivery != "del-1234" {
-				t.Errorf("unexpected inserted jobs: %+v", mockRiver.insertedJobs)
-			}
-		}
-	})
+			routes := srv.Routes()
 
-	t.Run("DuplicateSkipped", func(t *testing.T) {
-		t.Parallel()
-		mockRiver := &mockRiverInserter{skipDuplicate: true}
-		routes := NewRouterServer(Config{}, nil, mockRiver).Routes()
-
-		body := `{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`
-		rec := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/github", strings.NewReader(body), map[string]string{
-			"X-GitHub-Event":    "ping",
-			"X-GitHub-Delivery": "dup-gh-delivery-1",
+			rec := doHTTPRequest(routes, http.MethodPost, tc.path, tc.body, tc.headers)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
+			}
+			if tc.wantInserted > 0 && tc.river != nil {
+				if len(tc.river.insertedJobs) != tc.wantInserted {
+					t.Fatalf("expected %d inserted jobs, got %d", tc.wantInserted, len(tc.river.insertedJobs))
+				}
+				var resp map[string]interface{}
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("failed to parse json response: %v", err)
+				}
+				if resp["status"] != "accepted" || resp["event"] != tc.headers["X-GitHub-Event"] || resp["delivery"] != tc.headers["X-GitHub-Delivery"] {
+					t.Errorf("unexpected response body: %+v", resp)
+				}
+				if tc.river.insertedJobs[0].Event != tc.headers["X-GitHub-Event"] || tc.river.insertedJobs[0].Delivery != tc.headers["X-GitHub-Delivery"] {
+					t.Errorf("unexpected inserted jobs: %+v", tc.river.insertedJobs)
+				}
+			}
+			if tc.wantMetricSubstr != "" {
+				recM := doHTTPRequest(routes, http.MethodGet, "/metrics", nil, nil)
+				if !strings.Contains(recM.Body.String(), tc.wantMetricSubstr) {
+					t.Errorf("expected /metrics to include %q, got:\n%s", tc.wantMetricSubstr, recM.Body.String())
+				}
+			}
 		})
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK on duplicate, got %d", rec.Code)
-		}
+	}
 
-		recM := doHTTPRequest(routes, http.MethodGet, "/metrics", nil, nil)
-		if !strings.Contains(recM.Body.String(), `webhooks_router_unique_skipped_total{kind="github_webhook"}`) {
-			t.Errorf("expected /metrics to include github_webhook duplicate count, got:\n%s", recM.Body.String())
-		}
-
-		opts := (GitHubWebhookArgs{Delivery: "test-delivery"}).InsertOpts()
-		if !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
-			t.Errorf("unexpected GitHubWebhookArgs InsertOpts: %+v", opts)
-		}
-	})
+	opts := (GitHubWebhookArgs{Delivery: "test-delivery"}).InsertOpts()
+	if !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
+		t.Errorf("unexpected GitHubWebhookArgs InsertOpts: %+v", opts)
+	}
 }
 
-func TestProcessGitHubEvent_TableDriven(t *testing.T) {
+type ghEventCase struct {
+	name              string
+	event             string
+	delivery          string
+	payload           string
+	reg               *mockPRRegistry
+	disp              *mockOutboundDispatcher
+	river             *mockRiverInserter
+	spyNoGitHubHit    bool
+	wantErr           bool
+	wantRepo          string
+	wantAction        string
+	wantPR            int
+	wantBranch        string
+	wantHeadSHA       string
+	wantMergeSHA      string
+	wantTargetID      string
+	wantSource        string
+	wantConclusion    string
+	wantSender        string
+	wantMergedCalls   int
+	wantClosedCalls   int
+	wantSyncCalls     int
+	wantCIFailedCalls int
+	wantCIFailedSHAs  int
+	wantBackfillCalls int
+	wantConflictCalls int
+	wantAdvanceCalls  int
+	wantFailVanadis   int
+	wantGitPushes     int
+	wantPrompts       int
+	wantDMs           int
+	wantPromptSubstr  string
+	wantDMSubstr      string
+}
+
+func TestProcessGitHubEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
+	var ghPaths sync.Map
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghPaths.Store(r.URL.Path, true)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.Contains(r.URL.Path, "/commits/commit-fallback/pulls"):
@@ -1621,501 +1775,389 @@ func TestProcessGitHubEvent_TableDriven(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"number": 888, "state": "open", "head": {"ref": "feat/wf-branch", "sha": "wf-fallback"}}]`))
 		case strings.Contains(r.URL.Path, "/commits/squash123/pulls"):
 			_, _ = w.Write([]byte(`[{"number": 999, "state": "closed", "head": {"ref": "feat/squash", "sha": "squash123"}}]`))
+		case strings.Contains(r.URL.Path, "/commits/pushsha999/pulls"):
+			_, _ = w.Write([]byte(`[{"number": 522, "state": "closed"}]`))
+		case strings.Contains(r.URL.Path, "/pulls/543"):
+			_, _ = w.Write([]byte(`{"number": 543, "mergeable": false, "mergeable_state": "dirty"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(mockServer.Close)
 
-	srv := NewRouterServer(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client())
-
-	cases := []struct {
-		name     string
-		event    string
-		delivery string
-		payload  string
-		wantErr  bool
-		check    func(t *testing.T, res *ResolvedGitHubEvent)
-	}{
+	cases := []ghEventCase{
 		{
-			name:     "ping valid",
-			event:    "ping",
-			delivery: "del-ping-1",
+			name: "ping valid", event: "ping", delivery: "del-ping-1",
 			payload:  `{"zen":"Responsive is better than fast.","hook_id":98765,"repository":{"full_name":"azylman/aerial"}}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.Event != "ping" || res.Repo != "azylman/aerial" {
-					t.Errorf("unexpected ping result: %+v", res)
-				}
-			},
+			wantRepo: "azylman/aerial",
 		},
 		{
-			name:     "ping malformed",
-			event:    "ping",
-			delivery: "del-ping-2",
-			payload:  `{invalid`,
-			wantErr:  true,
+			name: "ping malformed", event: "ping", delivery: "del-ping-2",
+			payload: `{invalid`, wantErr: true,
 		},
 		{
-			name:     "pull_request closed and merged",
-			event:    "pull_request",
-			delivery: "del-pr-1",
-			payload: `{
-				"action": "closed",
-				"number": 512,
-				"pull_request": {
-					"number": 512,
-					"title": "feat: test pr",
-					"head": {"ref": "feat/test", "sha": "headsha123"},
-					"base": {"ref": "main", "sha": "basesha456"},
-					"merged": true,
-					"merge_commit_sha": "mergesha789"
-				},
-				"repository": {"full_name": "azylman/aerial"},
-				"sender": {"login": "arcane103"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.Repo != "azylman/aerial" || res.PRNumber != 512 || res.Action != "closed" ||
-					res.HeadSHA != "headsha123" || res.MergeSHA != "mergesha789" || res.Branch != "feat/test" ||
-					res.ResolutionSource != "pull_request_payload" || res.Sender != "arcane103" {
-					t.Errorf("unexpected pull_request result: %+v", res)
-				}
-			},
+			name: "pull_request closed and merged", event: "pull_request", delivery: "del-pr-1",
+			payload:  `{"action":"closed","number":512,"pull_request":{"number":512,"title":"feat: test pr","head":{"ref":"feat/test","sha":"headsha123"},"base":{"ref":"main","sha":"basesha456"},"merged":true,"merge_commit_sha":"mergesha789"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
+			wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 512, wantBranch: "feat/test", wantHeadSHA: "headsha123", wantMergeSHA: "mergesha789", wantSource: "pull_request_payload", wantSender: "arcane103",
 		},
 		{
-			name:     "pull_request malformed",
-			event:    "pull_request",
-			delivery: "del-pr-2",
-			payload:  `{invalid`,
-			wantErr:  true,
+			name: "pull_request malformed", event: "pull_request", delivery: "del-pr-2",
+			payload: `{invalid`, wantErr: true,
 		},
 		{
-			name:     "check_run with pull_requests array",
-			event:    "check_run",
-			delivery: "del-cr-1",
-			payload: `{
-				"action": "completed",
-				"check_run": {
-					"id": 111, "name": "Unit Tests", "head_sha": "headsha111",
-					"status": "completed", "conclusion": "success",
-					"pull_requests": [{"number": 515, "head": {"ref": "feat/awesome", "sha": "headsha111"}}]
-				},
-				"repository": {"full_name": "azylman/aerial"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.PRNumber != 515 || res.Branch != "feat/awesome" || res.ResolutionSource != "check_run_payload" || res.Conclusion != "success" {
-					t.Errorf("unexpected check_run result: %+v", res)
-				}
-			},
+			name: "check_run with pull_requests array", event: "check_run", delivery: "del-cr-1",
+			payload: `{"action":"completed","check_run":{"id":111,"name":"Unit Tests","head_sha":"headsha111","status":"completed","conclusion":"success","pull_requests":[{"number":515,"head":{"ref":"feat/awesome","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			wantPR:  515, wantBranch: "feat/awesome", wantSource: "check_run_payload", wantConclusion: "success",
 		},
 		{
-			name:     "check_run fallback via commit SHA lookup",
-			event:    "check_run",
-			delivery: "del-cr-2",
-			payload: `{
-				"action": "completed",
-				"check_run": {
-					"id": 222, "name": "Integration Tests", "head_sha": "commit-fallback",
-					"status": "completed", "conclusion": "failure", "pull_requests": []
-				},
-				"repository": {"full_name": "azylman/aerial"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.PRNumber != 777 || res.Branch != "feat/fallback" || res.ResolutionSource != "commit_sha_lookup" || res.Conclusion != "failure" {
-					t.Errorf("unexpected check_run fallback result: %+v", res)
-				}
-			},
+			name: "check_run fallback via commit SHA lookup", event: "check_run", delivery: "del-cr-2",
+			payload: `{"action":"completed","check_run":{"id":222,"name":"Integration Tests","head_sha":"commit-fallback","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			wantPR:  777, wantBranch: "feat/fallback", wantSource: "commit_sha_lookup", wantConclusion: "failure",
 		},
 		{
-			name:     "check_run malformed",
-			event:    "check_run",
-			delivery: "del-cr-3",
-			payload:  `{invalid`,
-			wantErr:  true,
+			name: "check_run malformed", event: "check_run", delivery: "del-cr-3",
+			payload: `{invalid`, wantErr: true,
 		},
 		{
-			name:     "workflow_run with PR array",
-			event:    "workflow_run",
-			delivery: "del-wf-1",
-			payload: `{
-				"action": "completed",
-				"workflow_run": {
-					"id": 333, "name": "Continuous Delivery", "head_sha": "headsha333",
-					"head_branch": "feat/cd", "status": "completed", "conclusion": "success",
-					"pull_requests": [{"number": 516, "head": {"ref": "feat/cd", "sha": "headsha333"}}]
-				},
-				"repository": {"full_name": "azylman/aerial"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.PRNumber != 516 || res.Branch != "feat/cd" || res.ResolutionSource != "workflow_run_payload" {
-					t.Errorf("unexpected workflow_run result: %+v", res)
-				}
-			},
+			name: "workflow_run with PR array", event: "workflow_run", delivery: "del-wf-1",
+			payload: `{"action":"completed","workflow_run":{"id":333,"name":"Continuous Delivery","head_sha":"headsha333","head_branch":"feat/cd","status":"completed","conclusion":"success","pull_requests":[{"number":516,"head":{"ref":"feat/cd","sha":"headsha333"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			wantPR:  516, wantBranch: "feat/cd", wantSource: "workflow_run_payload",
 		},
 		{
-			name:     "workflow_run fallback to commit lookup",
-			event:    "workflow_run",
-			delivery: "del-wf-2",
-			payload: `{
-				"action": "completed",
-				"workflow_run": {
-					"id": 444, "name": "Continuous Delivery", "head_sha": "wf-fallback",
-					"status": "completed", "conclusion": "success", "pull_requests": []
-				},
-				"repository": {"full_name": "azylman/aerial"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.PRNumber != 888 || res.Branch != "feat/wf-branch" || res.ResolutionSource != "commit_sha_lookup" {
-					t.Errorf("unexpected workflow_run fallback result: %+v", res)
-				}
-			},
+			name: "workflow_run fallback to commit lookup", event: "workflow_run", delivery: "del-wf-2",
+			payload: `{"action":"completed","workflow_run":{"id":444,"name":"Continuous Delivery","head_sha":"wf-fallback","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			wantPR:  888, wantBranch: "feat/wf-branch", wantSource: "commit_sha_lookup",
 		},
 		{
-			name:     "workflow_run malformed",
-			event:    "workflow_run",
-			delivery: "del-wf-3",
-			payload:  `{invalid`,
-			wantErr:  true,
+			name: "workflow_run malformed", event: "workflow_run", delivery: "del-wf-3",
+			payload: `{invalid`, wantErr: true,
 		},
 		{
-			name:     "push to main with commit resolution",
-			event:    "push",
-			delivery: "del-push-1",
-			payload: `{
-				"ref": "refs/heads/main", "before": "prev111", "after": "squash123", "deleted": false,
-				"head_commit": {"id": "squash123", "message": "feat: merged feature (#999)"},
-				"repository": {"full_name": "azylman/aerial"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.PRNumber != 999 || res.MergeSHA != "squash123" || res.ResolutionSource != "commit_sha_lookup" {
-					t.Errorf("unexpected push result: %+v", res)
-				}
-			},
+			name: "push to main with commit resolution", event: "push", delivery: "del-push-1",
+			payload: `{"ref":"refs/heads/main","before":"prev111","after":"squash123","deleted":false,"head_commit":{"id":"squash123","message":"feat: merged feature (#999)"},"repository":{"full_name":"azylman/aerial"}}`,
+			wantPR:  999, wantMergeSHA: "squash123", wantSource: "commit_sha_lookup",
 		},
 		{
-			name:     "push branch deletion",
-			event:    "push",
-			delivery: "del-push-2",
-			payload: `{
-				"ref": "refs/heads/feat/temp", "before": "temp111",
-				"after": "0000000000000000000000000000000000000000", "deleted": true,
-				"repository": {"full_name": "azylman/aerial"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.ResolutionSource != "branch_deleted" || res.PRNumber != 0 {
-					t.Errorf("unexpected push deletion result: %+v", res)
-				}
-			},
+			name: "push branch deletion", event: "push", delivery: "del-push-2",
+			payload:    `{"ref":"refs/heads/feat/temp","before":"temp111","after":"0000000000000000000000000000000000000000","deleted":true,"repository":{"full_name":"azylman/aerial"}}`,
+			wantSource: "branch_deleted",
 		},
 		{
-			name:     "push tag non-branch ref",
-			event:    "push",
-			delivery: "del-push-3",
-			payload:  `{"ref":"refs/tags/v1.0.0","after":"tagsha111","repository":{"full_name":"azylman/aerial"}}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.ResolutionSource != "non_branch_ref" || res.PRNumber != 0 {
-					t.Errorf("unexpected push tag result: %+v", res)
-				}
-			},
+			name: "push tag non-branch ref", event: "push", delivery: "del-push-3",
+			payload:    `{"ref":"refs/tags/v1.0.0","after":"tagsha111","repository":{"full_name":"azylman/aerial"}}`,
+			wantSource: "non_branch_ref",
 		},
 		{
-			name:     "push feature branch",
-			event:    "push",
-			delivery: "del-push-feat",
-			payload: `{
-				"ref": "refs/heads/feat/new-feature", "before": "featprev", "after": "featsha222",
-				"head_commit": {"id": "featsha222", "message": "feat: new feature"},
-				"repository": {"full_name": "azylman/aerial"}
-			}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.ResolutionSource != "non_main_branch" || res.PRNumber != 0 {
-					t.Errorf("unexpected push feat result: %+v", res)
-				}
-			},
+			name: "push feature branch", event: "push", delivery: "del-push-feat",
+			payload:    `{"ref":"refs/heads/feat/new-feature","before":"featprev","after":"featsha222","head_commit":{"id":"featsha222","message":"feat: new feature"},"repository":{"full_name":"azylman/aerial"}}`,
+			wantSource: "non_main_branch",
 		},
 		{
-			name:     "push malformed",
-			event:    "push",
-			delivery: "del-push-4",
-			payload:  `{invalid`,
-			wantErr:  true,
+			name: "push malformed", event: "push", delivery: "del-push-4",
+			payload: `{invalid`, wantErr: true,
 		},
 		{
-			name:     "unhandled event",
-			event:    "star",
-			delivery: "del-star-1",
-			payload:  `{"action":"created"}`,
-			check: func(t *testing.T, res *ResolvedGitHubEvent) {
-				if res.ResolutionSource != "unhandled_event" {
-					t.Errorf("expected unhandled_event, got %s", res.ResolutionSource)
-				}
-			},
+			name: "unhandled event", event: "star", delivery: "del-star-1",
+			payload: `{"action":"created"}`, wantSource: "unhandled_event",
+		},
+		{
+			name: "pull_request closed and merged transitions registry", event: "pull_request", delivery: "del-pr-merged",
+			payload: `{"action":"closed","number":515,"pull_request":{"number":515,"head":{"ref":"feat/decouple","sha":"head111"},"merged":true,"merge_commit_sha":"merge111"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{mergedTargetID: "target-merged-1"},
+			wantPR:  515, wantMergeSHA: "merge111", wantTargetID: "target-merged-1", wantMergedCalls: 1,
+		},
+		{
+			name: "pull_request closed unmerged transitions registry", event: "pull_request", delivery: "del-pr-closed",
+			payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{closedTargetID: "target-closed-1"},
+			wantPR:  516, wantTargetID: "target-closed-1", wantClosedCalls: 1, wantFailVanadis: 1,
+		},
+		{
+			name: "pull_request synchronize transitions registry", event: "pull_request", delivery: "del-pr-sync",
+			payload: `{"action":"synchronize","number":517,"pull_request":{"number":517,"head":{"ref":"feat/update","sha":"newhead333"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{syncTargetID: "target-sync-1"},
+			wantPR:  517, wantHeadSHA: "newhead333", wantTargetID: "target-sync-1", wantSyncCalls: 1,
+		},
+		{
+			name: "check_run failure with PR in payload transitions registry", event: "check_run", delivery: "del-cr-fail",
+			payload: `{"action":"completed","check_run":{"name":"Tests","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  518, wantCIFailedCalls: 1,
+		},
+		{
+			name: "check_run timed_out with PR in payload transitions registry", event: "check_run", delivery: "del-cr-timeout",
+			payload: `{"action":"completed","check_run":{"name":"Tests","head_sha":"checkhead555","status":"completed","conclusion":"timed_out","pull_requests":[{"number":519,"head":{"ref":"feat/test","sha":"checkhead555"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  519, wantCIFailedCalls: 1,
+		},
+		{
+			name: "check_run failure without PR falls back to headSHA transition", event: "check_run", delivery: "del-cr-fallback",
+			payload:     `{"action":"completed","check_run":{"name":"Lint","head_sha":"orphansha666","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:         &mockPRRegistry{ciFailedBySHAPRNum: 520, ciFailedBySHATarget: "target-222", ciFailedBySHAUpdated: true},
+			wantHeadSHA: "orphansha666", wantCIFailedSHAs: 1,
+		},
+		{
+			name: "workflow_run failure with PR transitions registry", event: "workflow_run", delivery: "del-wf-fail",
+			payload: `{"action":"completed","workflow_run":{"name":"CI","head_sha":"wfhead777","status":"completed","conclusion":"failure","pull_requests":[{"number":521,"head":{"ref":"feat/wf","sha":"wfhead777"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  521, wantCIFailedCalls: 1,
+		},
+		{
+			name: "workflow_run timed_out without PR falls back to headSHA transition", event: "workflow_run", delivery: "del-wf-timeout",
+			payload:     `{"action":"completed","workflow_run":{"name":"Build Docker","head_sha":"wfhead888","status":"completed","conclusion":"timed_out","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:         &mockPRRegistry{ciFailedBySHAPRNum: 520, ciFailedBySHATarget: "target-222", ciFailedBySHAUpdated: true},
+			wantHeadSHA: "wfhead888", wantCIFailedSHAs: 1,
+		},
+		{
+			name: "push to main with resolved PR backfills merge SHA", event: "push", delivery: "del-push-main",
+			payload: `{"ref":"refs/heads/main","after":"pushsha999","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"pushsha999","message":"feat: merge pr"}}`,
+			reg:     &mockPRRegistry{backfillTargetID: "target-backfill"},
+			wantPR:  522, wantMergeSHA: "pushsha999", wantBackfillCalls: 1,
+		},
+		{
+			name: "feature branch push does not backfill", event: "push", delivery: "del-push-feat-reg",
+			payload:    `{"ref":"refs/heads/feat/branch-1","after":"featsha888","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"featsha888","message":"feat: wip"}}`,
+			reg:        &mockPRRegistry{},
+			wantSource: "non_main_branch",
+		},
+		{
+			name: "registry error propagation", event: "pull_request", delivery: "del-err",
+			payload: `{"action":"closed","number":515,"pull_request":{"number":515,"head":{"ref":"feat/decouple","sha":"head111"},"merged":true,"merge_commit_sha":"merge111"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{err: errors.New("simulated database failure")},
+			wantErr: true,
+		},
+		{
+			name: "check_run local PR resolution priority avoids GitHub API", event: "check_run", delivery: "del-cr-local",
+			payload:        `{"action":"completed","check_run":{"name":"Integration Tests","head_sha":"localsha123","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:            &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
+			spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantSource: "local_pr_registry",
+		},
+		{
+			name: "workflow_run local PR resolution priority avoids GitHub API", event: "workflow_run", delivery: "del-wf-local",
+			payload:        `{"action":"completed","workflow_run":{"name":"Build Pipeline","head_sha":"localsha123","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:            &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
+			spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantSource: "local_pr_registry",
+		},
+		{
+			name: "push local PR resolution priority avoids GitHub API", event: "push", delivery: "del-push-local",
+			payload:        `{"ref":"refs/heads/main","after":"localsha123","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"localsha123","message":"feat: merged commit"}}`,
+			reg:            &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
+			spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantMergeSHA: "localsha123", wantSource: "local_pr_registry", wantBackfillCalls: 1,
+		},
+		{
+			name: "push to main triggers DispatchGitPush", event: "push", delivery: "del-push-main-disp",
+			payload: `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "1555405874565091380"},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  542, wantTargetID: "1555405874565091380", wantGitPushes: 1, wantBackfillCalls: 1,
+		},
+		{
+			name: "push to feature branch does not trigger DispatchGitPush", event: "push", delivery: "del-push-feat-disp",
+			payload:       `{"ref":"refs/heads/feat/test-branch","after":"featcommit456","repository":{"full_name":"azylman/aerial"}}`,
+			reg:           &mockPRRegistry{resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "1555405874565091380"},
+			disp:          &mockOutboundDispatcher{},
+			wantGitPushes: 0,
+		},
+		{
+			name: "check_run failure with valid snowflake triggers DispatchPrompt", event: "check_run", delivery: "del-cr-fail-prompt",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Build Failed","summary":"Compilation error in brain/main.go:42"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "Service Unit Tests", wantPrompts: 1, wantPromptSubstr: "Service Unit Tests",
+		},
+		{
+			name: "check_run failure duplicate does not trigger prompt", event: "check_run", delivery: "del-cr-dup-prompt",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Build Failed","summary":"Compilation error in brain/main.go:42"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: false},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantPrompts: 0,
+		},
+		{
+			name: "pull_request closed and merged suppresses direct message", event: "pull_request", delivery: "del-pr-merge-disp",
+			payload: `{"action":"closed","number":542,"pull_request":{"number":542,"merged":true,"head":{"ref":"feat/batch1","sha":"head542"},"merge_commit_sha":"merge542"},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{mergedTargetID: "1555405874565091380"},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  542, wantAction: "closed", wantMergedCalls: 1, wantDMs: 0,
+		},
+		{
+			name: "pull_request auto_merge_disabled dispatches conflict DM and prompt", event: "pull_request", delivery: "del-amd",
+			payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"}},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:        &mockPRRegistry{conflictTargetID: "1555405874565091380", conflictUpdated: true},
+			disp:       &mockOutboundDispatcher{},
+			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 1, wantDMSubstr: "Merge conflict detected", wantPrompts: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
+		},
+		{
+			name: "push to main triggers conflict check on open PRs", event: "push", delivery: "del-push-conflict",
+			payload:           `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
+			reg:               &mockPRRegistry{openPRs: []RegisteredPR{{PRNumber: 543, Branch: "feat/conflict-check", TargetID: "1555405874565091380", HeadSHA: "head543"}}, conflictTargetID: "1555405874565091380", conflictUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 1, wantDMSubstr: "Merge conflict detected", wantPrompts: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
+		},
+		{
+			name: "merged PR on azylman/mirrormere advances Vanadis chunk", event: "pull_request", delivery: "del-pr-mirrormere",
+			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{mergedTargetID: "target-merged-m"},
+			wantPR:  210, wantMergedCalls: 1, wantAdvanceCalls: 1,
+		},
+		{
+			name: "merged PR advance error", event: "pull_request", delivery: "del-pr-mirrormere-err",
+			payload: `{"action":"closed","number":211,"pull_request":{"number":211,"head":{"ref":"feat/ui2","sha":"head211"},"merged":true,"merge_commit_sha":"merge211"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{advanceVanadisErr: errors.New("simulated advance error")},
+			wantErr: true,
+		},
+		{
+			name: "closed unmerged PR calls FailVanadisChunkByPR", event: "pull_request", delivery: "del-pr-discard",
+			payload: `{"action":"closed","number":212,"pull_request":{"number":212,"head":{"ref":"feat/discard","sha":"head212"},"merged":false},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{closedTargetID: "target-closed-m"},
+			wantPR:  212, wantClosedCalls: 1, wantFailVanadis: 1,
+		},
+		{
+			name: "push to azylman/aerial-sidecars advances Vanadis chunk", event: "push", delivery: "del-push-sidecars",
+			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars"},
+			wantPR:  310, wantMergeSHA: "sidecarsha1", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
+		},
+		{
+			name: "push advance error", event: "push", delivery: "del-push-sidecars-err",
+			payload: `{"ref":"refs/heads/main","after":"sidecarsha2","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha2","message":"feat: merged sidecar 2 (#311)"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 311, resolveBranch: "feat/sidecar2", resolveTargetID: "target-sidecars-2", advanceVanadisErr: errors.New("simulated push advance error")},
+			wantErr: true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var inserters []RiverInserter
+			if tc.river != nil {
+				inserters = append(inserters, tc.river)
+			}
+			var reg PRRegistryUpdater
+			if tc.reg != nil {
+				reg = tc.reg
+			}
+			var disp OutboundDispatcher
+			if tc.disp != nil {
+				disp = tc.disp
+			}
+			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client(), reg, disp, inserters...)
+			srv.SetConflictCheckDelay(1 * time.Millisecond)
+			srv.onProcessed = func(string, string) {}
+
 			res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && tc.check != nil {
-				tc.check(t, res)
+			if tc.wantErr {
+				return
+			}
+			if tc.spyNoGitHubHit {
+				if _, hit := ghPaths.Load("/repos/azylman/aerial/commits/localsha123/pulls"); hit {
+					t.Fatalf("expected 0 GitHub API hits for localsha123, but endpoint was called")
+				}
+			}
+			if tc.wantRepo != "" && res.Repo != tc.wantRepo {
+				t.Errorf("Repo = %q, want %q", res.Repo, tc.wantRepo)
+			}
+			if tc.wantAction != "" && res.Action != tc.wantAction {
+				t.Errorf("Action = %q, want %q", res.Action, tc.wantAction)
+			}
+			if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
+				t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
+			}
+			if tc.wantBranch != "" && res.Branch != tc.wantBranch {
+				t.Errorf("Branch = %q, want %q", res.Branch, tc.wantBranch)
+			}
+			if tc.wantHeadSHA != "" && res.HeadSHA != tc.wantHeadSHA {
+				t.Errorf("HeadSHA = %q, want %q", res.HeadSHA, tc.wantHeadSHA)
+			}
+			if tc.wantMergeSHA != "" && res.MergeSHA != tc.wantMergeSHA {
+				t.Errorf("MergeSHA = %q, want %q", res.MergeSHA, tc.wantMergeSHA)
+			}
+			if tc.wantTargetID != "" && res.TargetID != tc.wantTargetID {
+				t.Errorf("TargetID = %q, want %q", res.TargetID, tc.wantTargetID)
+			}
+			if tc.wantSource != "" && res.ResolutionSource != tc.wantSource {
+				t.Errorf("ResolutionSource = %q, want %q", res.ResolutionSource, tc.wantSource)
+			}
+			if tc.wantConclusion != "" && res.Conclusion != tc.wantConclusion {
+				t.Errorf("Conclusion = %q, want %q", res.Conclusion, tc.wantConclusion)
+			}
+			if tc.wantSender != "" && res.Sender != tc.wantSender {
+				t.Errorf("Sender = %q, want %q", res.Sender, tc.wantSender)
+			}
+			if tc.reg != nil {
+				if len(tc.reg.mergedCalls) != tc.wantMergedCalls {
+					t.Errorf("mergedCalls = %d, want %d", len(tc.reg.mergedCalls), tc.wantMergedCalls)
+				}
+				if tc.wantMergeSHA != "" && len(tc.reg.mergedCalls) > 0 && tc.reg.mergedCalls[0].mergeSHA != tc.wantMergeSHA {
+					t.Errorf("mergedCalls mergeSHA = %q, want %q", tc.reg.mergedCalls[0].mergeSHA, tc.wantMergeSHA)
+				}
+				if len(tc.reg.closedUnmergedCalls) != tc.wantClosedCalls {
+					t.Errorf("closedUnmergedCalls = %d, want %d", len(tc.reg.closedUnmergedCalls), tc.wantClosedCalls)
+				}
+				if len(tc.reg.syncCalls) != tc.wantSyncCalls {
+					t.Errorf("syncCalls = %d, want %d", len(tc.reg.syncCalls), tc.wantSyncCalls)
+				}
+				if len(tc.reg.ciFailedCalls) != tc.wantCIFailedCalls {
+					t.Errorf("ciFailedCalls = %d, want %d", len(tc.reg.ciFailedCalls), tc.wantCIFailedCalls)
+				}
+				if len(tc.reg.ciFailedBySHACalls) != tc.wantCIFailedSHAs {
+					t.Errorf("ciFailedBySHACalls = %d, want %d", len(tc.reg.ciFailedBySHACalls), tc.wantCIFailedSHAs)
+				}
+				if tc.wantHeadSHA != "" && len(tc.reg.ciFailedBySHACalls) > 0 && tc.reg.ciFailedBySHACalls[0].headSHA != tc.wantHeadSHA {
+					t.Errorf("ciFailedBySHACalls headSHA = %q, want %q", tc.reg.ciFailedBySHACalls[0].headSHA, tc.wantHeadSHA)
+				}
+				if len(tc.reg.backfillCalls) != tc.wantBackfillCalls {
+					t.Errorf("backfillCalls = %d, want %d", len(tc.reg.backfillCalls), tc.wantBackfillCalls)
+				}
+				if tc.wantMergeSHA != "" && len(tc.reg.backfillCalls) > 0 && tc.reg.backfillCalls[0].mergeSHA != tc.wantMergeSHA {
+					t.Errorf("backfillCalls mergeSHA = %q, want %q", tc.reg.backfillCalls[0].mergeSHA, tc.wantMergeSHA)
+				}
+				if len(tc.reg.conflictCalls) != tc.wantConflictCalls {
+					t.Errorf("conflictCalls = %d, want %d", len(tc.reg.conflictCalls), tc.wantConflictCalls)
+				}
+				if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
+					t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
+				}
+				if len(tc.reg.failVanadisCalls) != tc.wantFailVanadis {
+					t.Errorf("failVanadisCalls = %d, want %d", len(tc.reg.failVanadisCalls), tc.wantFailVanadis)
+				}
+			}
+			if tc.disp != nil {
+				gitPushes := tc.disp.GitPushCalls()
+				if len(gitPushes) != tc.wantGitPushes {
+					t.Errorf("gitPushes = %d, want %d", len(gitPushes), tc.wantGitPushes)
+				}
+				if tc.wantGitPushes > 0 && len(gitPushes) > 0 {
+					if tc.wantTargetID != "" && gitPushes[0].TargetID != tc.wantTargetID {
+						t.Errorf("git push TargetID = %q, want %q", gitPushes[0].TargetID, tc.wantTargetID)
+					}
+					if tc.wantPR != 0 && gitPushes[0].PRNumber != tc.wantPR {
+						t.Errorf("git push PRNumber = %d, want %d", gitPushes[0].PRNumber, tc.wantPR)
+					}
+				}
+				prompts := tc.disp.PromptCalls()
+				if len(prompts) != tc.wantPrompts {
+					t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
+				}
+				if tc.wantPromptSubstr != "" {
+					if len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Prompt, tc.wantPromptSubstr) {
+						t.Errorf("expected prompt to contain %q, got %+v", tc.wantPromptSubstr, prompts)
+					}
+				}
+				dms := tc.disp.DirectMessageCalls()
+				if len(dms) != tc.wantDMs {
+					t.Errorf("dms = %d, want %d", len(dms), tc.wantDMs)
+				}
+				if tc.wantDMSubstr != "" {
+					if len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr) {
+						t.Errorf("expected DM to contain %q, got %+v", tc.wantDMSubstr, dms)
+					}
+				}
 			}
 		})
 	}
-}
-
-func TestProcessGitHubEvent_RegistryAndDispatch(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	t.Run("RegistryTransitionsAndLocalResolution", func(t *testing.T) {
-		t.Parallel()
-		mockReg := &mockPRRegistry{
-			mergedTargetID:       "target-merged-1",
-			closedTargetID:       "target-closed-1",
-			syncTargetID:         "target-sync-1",
-			ciFailedTargetID:     "target-111",
-			ciFailedUpdated:      true,
-			ciFailedBySHAPRNum:   520,
-			ciFailedBySHATarget:  "target-222",
-			ciFailedBySHAUpdated: true,
-		}
-		srv := newTestRouter(Config{}, nil, mockReg, nil)
-
-		// 1. PullRequest closed and merged
-		payloadPRMerged := `{"action":"closed","number":515,"pull_request":{"number":515,"head":{"ref":"feat/decouple","sha":"head111"},"merged":true,"merge_commit_sha":"merge111"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`
-		resPRMerged, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", []byte(payloadPRMerged))
-		if err != nil || len(mockReg.mergedCalls) != 1 || mockReg.mergedCalls[0].prNumber != 515 || mockReg.mergedCalls[0].mergeSHA != "merge111" || resPRMerged.TargetID != "target-merged-1" {
-			t.Fatalf("pull_request merged failed: err=%v, calls=%+v, res=%+v", err, mockReg.mergedCalls, resPRMerged)
-		}
-
-		// 2. PullRequest closed unmerged
-		payloadPRClosed := `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`
-		resPRClosed, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed", []byte(payloadPRClosed))
-		if err != nil || len(mockReg.closedUnmergedCalls) != 1 || mockReg.closedUnmergedCalls[0].prNumber != 516 || resPRClosed.TargetID != "target-closed-1" {
-			t.Fatalf("pull_request closed unmerged failed: err=%v, calls=%+v, res=%+v", err, mockReg.closedUnmergedCalls, resPRClosed)
-		}
-
-		// 3. PullRequest synchronize
-		payloadPRSync := `{"action":"synchronize","number":517,"pull_request":{"number":517,"head":{"ref":"feat/update","sha":"newhead333"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`
-		resPRSync, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-sync", []byte(payloadPRSync))
-		if err != nil || len(mockReg.syncCalls) != 1 || mockReg.syncCalls[0].prNumber != 517 || mockReg.syncCalls[0].headSHA != "newhead333" || resPRSync.TargetID != "target-sync-1" {
-			t.Fatalf("pull_request synchronize failed: err=%v, calls=%+v, res=%+v", err, mockReg.syncCalls, resPRSync)
-		}
-
-		// 4 & 5. CheckRun failure & timed_out with PR in payload
-		for i, tc := range []struct {
-			del, conclusion, sha string
-			pr                   int
-		}{
-			{"del-cr-fail", "failure", "checkhead444", 518},
-			{"del-cr-timeout", "timed_out", "checkhead555", 519},
-		} {
-			payload := fmt.Sprintf(`{"action":"completed","check_run":{"name":"Tests","head_sha":%q,"status":"completed","conclusion":%q,"pull_requests":[{"number":%d,"head":{"ref":"feat/test","sha":%q}}]},"repository":{"full_name":"azylman/aerial"}}`, tc.sha, tc.conclusion, tc.pr, tc.sha)
-			if _, err := srv.ProcessGitHubEvent(ctx, "check_run", tc.del, []byte(payload)); err != nil {
-				t.Fatalf("check_run %s failed: %v", tc.conclusion, err)
-			}
-			if len(mockReg.ciFailedCalls) != i+1 || mockReg.ciFailedCalls[i].prNumber != tc.pr {
-				t.Errorf("unexpected ciFailedCalls at %d: %+v", i, mockReg.ciFailedCalls)
-			}
-		}
-
-		// 6. CheckRun failure without PR (falls back to headSHA transition)
-		payloadCRFallback := `{"action":"completed","check_run":{"name":"Lint","head_sha":"orphansha666","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`
-		if _, err := srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-fallback", []byte(payloadCRFallback)); err != nil || len(mockReg.ciFailedBySHACalls) != 1 || mockReg.ciFailedBySHACalls[0].headSHA != "orphansha666" {
-			t.Errorf("check_run fallback failed: err=%v, calls=%+v", err, mockReg.ciFailedBySHACalls)
-		}
-
-		// 7. WorkflowRun failure with PR
-		payloadWFFail := `{"action":"completed","workflow_run":{"name":"CI","head_sha":"wfhead777","status":"completed","conclusion":"failure","pull_requests":[{"number":521,"head":{"ref":"feat/wf","sha":"wfhead777"}}]},"repository":{"full_name":"azylman/aerial"}}`
-		if _, err := srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-fail", []byte(payloadWFFail)); err != nil || len(mockReg.ciFailedCalls) != 3 || mockReg.ciFailedCalls[2].prNumber != 521 {
-			t.Errorf("workflow_run failure failed: err=%v, calls=%+v", err, mockReg.ciFailedCalls)
-		}
-
-		// 8. WorkflowRun timed_out without PR
-		payloadWFTimeout := `{"action":"completed","workflow_run":{"name":"Build Docker","head_sha":"wfhead888","status":"completed","conclusion":"timed_out","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`
-		if _, err := srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-timeout", []byte(payloadWFTimeout)); err != nil || len(mockReg.ciFailedBySHACalls) != 2 || mockReg.ciFailedBySHACalls[1].headSHA != "wfhead888" {
-			t.Errorf("workflow_run timeout failed: err=%v, calls=%+v", err, mockReg.ciFailedBySHACalls)
-		}
-
-		// 9. Push to main with resolved PR vs feature branch push
-		ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{{Number: 522, State: "closed"}})
-		}))
-		defer ghMock.Close()
-
-		srvWithGH := newTestRouter(Config{GitHubAPIURL: ghMock.URL}, ghMock.Client(), mockReg, nil)
-		payloadPush := `{"ref":"refs/heads/main","after":"pushsha999","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"pushsha999","message":"feat: merge pr"}}`
-		if _, err := srvWithGH.ProcessGitHubEvent(ctx, "push", "del-push-main", []byte(payloadPush)); err != nil || len(mockReg.backfillCalls) != 1 || mockReg.backfillCalls[0].prNumber != 522 || mockReg.backfillCalls[0].mergeSHA != "pushsha999" {
-			t.Errorf("push to main backfill failed: err=%v, calls=%+v", err, mockReg.backfillCalls)
-		}
-
-		payloadFeatPush := `{"ref":"refs/heads/feat/branch-1","after":"featsha888","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"featsha888","message":"feat: wip"}}`
-		resFeatPush, err := srvWithGH.ProcessGitHubEvent(ctx, "push", "del-push-feat-reg", []byte(payloadFeatPush))
-		if err != nil || len(mockReg.backfillCalls) != 1 || resFeatPush.ResolutionSource != "non_main_branch" {
-			t.Errorf("feature push unexpected result: err=%v, calls=%d, res=%+v", err, len(mockReg.backfillCalls), resFeatPush)
-		}
-
-		// 10. Registry error propagation
-		srvErr := newTestRouter(Config{}, nil, &mockPRRegistry{err: errors.New("simulated database failure")}, nil)
-		if _, err := srvErr.ProcessGitHubEvent(ctx, "pull_request", "del-err", []byte(payloadPRMerged)); err == nil {
-			t.Errorf("expected error when registry returns failure, got nil")
-		}
-
-		// 11. Local PR resolution priority avoids hitting GitHub API
-		var ghHit bool
-		ghSpy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ghHit = true
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{{Number: 999, State: "closed"}})
-		}))
-		defer ghSpy.Close()
-
-		mockLocalReg := &mockPRRegistry{
-			resolvePRNum:    530,
-			resolveBranch:   "feat/local-resolved",
-			resolveTargetID: "thread-local-530",
-		}
-		srvLocal := newTestRouter(Config{GitHubAPIURL: ghSpy.URL}, ghSpy.Client(), mockLocalReg, nil)
-
-		for _, tc := range []struct {
-			event, del, body string
-			wantMergeSHA     string
-		}{
-			{"check_run", "del-cr-local", `{"action":"completed","check_run":{"name":"Integration Tests","head_sha":"localsha123","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`, ""},
-			{"workflow_run", "del-wf-local", `{"action":"completed","workflow_run":{"name":"Build Pipeline","head_sha":"localsha123","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`, ""},
-			{"push", "del-push-local", `{"ref":"refs/heads/main","after":"localsha123","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"localsha123","message":"feat: merged commit"}}`, "localsha123"},
-		} {
-			ghHit = false
-			res, err := srvLocal.ProcessGitHubEvent(ctx, tc.event, tc.del, []byte(tc.body))
-			if err != nil || ghHit || res.ResolutionSource != "local_pr_registry" || res.PRNumber != 530 || res.TargetID != "thread-local-530" || res.MergeSHA != tc.wantMergeSHA {
-				t.Errorf("%s local resolution failed: err=%v, ghHit=%v, res=%+v", tc.event, err, ghHit, res)
-			}
-		}
-		if len(mockLocalReg.backfillCalls) != 1 || mockLocalReg.backfillCalls[0].prNumber != 530 || mockLocalReg.backfillCalls[0].mergeSHA != "localsha123" {
-			t.Errorf("unexpected backfillCalls on local push: %+v", mockLocalReg.backfillCalls)
-		}
-	})
-
-	t.Run("OutboundDispatchAndMergedAndConflicts", func(t *testing.T) {
-		t.Parallel()
-		mockDisp := &mockOutboundDispatcher{
-			gitPushCh:       make(chan GitPushEventRequest, 5),
-			promptCh:        make(chan PromptRequest, 5),
-			directMessageCh: make(chan DirectMessageRequest, 5),
-		}
-		mockReg := &mockPRRegistry{
-			resolvePRNum:     542,
-			resolveBranch:    "main",
-			resolveTargetID:  "1555405874565091380",
-			mergedTargetID:   "1555405874565091380",
-			ciFailedTargetID: "1555405874565091380",
-			ciFailedUpdated:  true,
-			conflictTargetID: "1555405874565091380",
-			conflictUpdated:  true,
-		}
-		srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
-
-		// 1. Push to main triggers DispatchGitPush carrying TargetID and PRNumber
-		pushPayloadMain := []byte(`{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`)
-		if _, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-main", pushPayloadMain); err != nil {
-			t.Fatalf("ProcessGitHubEvent push failed: %v", err)
-		}
-		calls := mockDisp.GitPushCalls()
-		if len(calls) != 1 || calls[0].Repo != "azylman/aerial" || calls[0].Commit != "maincommit123" || calls[0].Ref != "refs/heads/main" || calls[0].TargetID != "1555405874565091380" || calls[0].PRNumber != 542 {
-			t.Errorf("unexpected git push calls: %+v", calls)
-		}
-
-		// 2. Push to feature branch does NOT trigger DispatchGitPush
-		pushPayloadFeat := []byte(`{"ref":"refs/heads/feat/test-branch","after":"featcommit456","repository":{"full_name":"azylman/aerial"}}`)
-		if _, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-feat", pushPayloadFeat); err != nil {
-			t.Fatalf("ProcessGitHubEvent push feat failed: %v", err)
-		}
-		if len(mockDisp.GitPushCalls()) != 1 {
-			t.Fatalf("expected still 1 git push dispatch, got %d", len(mockDisp.GitPushCalls()))
-		}
-
-		// 3. check_run failure with valid snowflake triggers DispatchPrompt; duplicate (ciFailedUpdated=false) does not
-		crFailurePayload := []byte(`{
-			"action": "completed",
-			"repository": {"full_name": "azylman/aerial"},
-			"check_run": {
-				"name": "Service Unit Tests", "head_sha": "headsha789",
-				"status": "completed", "conclusion": "failure",
-				"html_url": "https://github.com/azylman/aerial/actions/runs/123",
-				"output": {"title": "Build Failed", "summary": "Compilation error in brain/main.go:42"},
-				"pull_requests": [{"number": 530, "head": {"ref": "feat/test"}}]
-			}
-		}`)
-		if _, err := srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-fail", crFailurePayload); err != nil {
-			t.Fatalf("ProcessGitHubEvent check_run failure failed: %v", err)
-		}
-		pCalls := mockDisp.PromptCalls()
-		if len(pCalls) != 1 || pCalls[0].ChannelID != "1555405874565091380" ||
-			!strings.Contains(pCalls[0].Prompt, "Service Unit Tests") ||
-			!strings.Contains(pCalls[0].Prompt, "Compilation error in brain/main.go:42") ||
-			!strings.Contains(pCalls[0].Prompt, "https://github.com/azylman/aerial/actions/runs/123") ||
-			!strings.Contains(pCalls[0].Prompt, "Please investigate and fix") {
-			t.Errorf("unexpected prompt call: %+v", pCalls)
-		}
-
-		mockReg.ciFailedUpdated = false
-		if _, err := srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-dup", crFailurePayload); err != nil {
-			t.Fatalf("ProcessGitHubEvent duplicate check_run failed: %v", err)
-		}
-		if len(mockDisp.PromptCalls()) != 1 {
-			t.Fatalf("expected still 1 prompt dispatch for duplicate, got %d", len(mockDisp.PromptCalls()))
-		}
-
-		// 4. pull_request closed+merged updates widget via SyncPRWidget (suppresses direct message)
-		prMergedPayload := `{"action":"closed","number":542,"pull_request":{"number":542,"merged":true,"head":{"ref":"feat/batch1","sha":"head542"},"merge_commit_sha":"merge542"},"repository":{"full_name":"azylman/aerial"}}`
-		if res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merge", []byte(prMergedPayload)); err != nil || res.PRNumber != 542 || res.Action != "closed" {
-			t.Fatalf("PR merged event failed: err=%v, res=%+v", err, res)
-		}
-
-		// 5. pull_request auto_merge_disabled dispatches conflict DM + prompt
-		amdPayload := `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"}},"repository":{"full_name":"azylman/aerial"}}`
-		if res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-amd", []byte(amdPayload)); err != nil || res.Action != "auto_merge_disabled" || res.PRNumber != 543 {
-			t.Fatalf("auto_merge_disabled failed: err=%v, res=%+v", err, res)
-		}
-		dmCalls := mockDisp.DirectMessageCalls()
-		pCalls = mockDisp.PromptCalls()
-		if !strings.Contains(dmCalls[len(dmCalls)-1].Content, "⛔ **(PR: #543, repo: aerial)** Merge conflict detected. Following up...") ||
-			!strings.Contains(pCalls[len(pCalls)-1].Prompt, "Merge conflict detected on PR #543") {
-			t.Errorf("unexpected auto_merge_disabled dispatches: dm=%+v, prompt=%+v", dmCalls, pCalls)
-		}
-
-		// 6. Push to main triggers conflict check on open PRs
-		apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"number":543,"mergeable":false,"mergeable_state":"dirty"}`))
-		}))
-		defer apiServer.Close()
-
-		conflictDisp := &mockOutboundDispatcher{promptCh: make(chan PromptRequest, 5)}
-		conflictReg := &mockPRRegistry{
-			openPRs:          []RegisteredPR{{PRNumber: 543, Branch: "feat/conflict-check", TargetID: "1555405874565091380", HeadSHA: "head543"}},
-			conflictTargetID: "1555405874565091380",
-			conflictUpdated:  true,
-		}
-		srvConflict := newTestRouter(Config{GitHubAPIURL: apiServer.URL}, nil, conflictReg, conflictDisp)
-		srvConflict.SetConflictCheckDelay(1 * time.Millisecond)
-
-		if _, err := srvConflict.ProcessGitHubEvent(ctx, "push", "del-push-conflict", pushPayloadMain); err != nil {
-			t.Fatalf("ProcessGitHubEvent push conflict check failed: %v", err)
-		}
-		select {
-		case prompt := <-conflictDisp.promptCh:
-			if prompt.ChannelID != "1555405874565091380" || !strings.Contains(prompt.Prompt, "Merge conflict detected on PR #543") {
-				t.Errorf("unexpected conflict prompt: %+v", prompt)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for conflict check prompt on push to main")
-		}
-	})
 }
 
 // --- 4. Hangar Webhook HTTP Handler & Event Processing ---
@@ -2123,501 +2165,382 @@ func TestProcessGitHubEvent_RegistryAndDispatch(t *testing.T) {
 func TestHandleHangarWebhook(t *testing.T) {
 	t.Parallel()
 
-	t.Run("ValidationAndSyncJobDefault", func(t *testing.T) {
-		t.Parallel()
-		srv := NewRouterServer(Config{}, nil)
-		routes := srv.Routes()
+	tests := []struct {
+		name                string
+		path                string
+		body                io.Reader
+		reg                 *mockPRRegistry
+		river               *mockRiverInserter
+		wantStatus          int
+		wantJobName         string
+		wantTargetID        string
+		wantPR              int
+		wantResolveSHACalls int
+		wantRiverJobs       int
+		wantMetricSubstr    string
+	}{
+		{name: "malformed JSON api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{invalid json`), wantStatus: http.StatusBadRequest},
+		{name: "malformed JSON legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{invalid json`), wantStatus: http.StatusBadRequest},
+		{name: "read error in body", path: "/api/webhooks/hangar", body: errReader{}, wantStatus: http.StatusBadRequest},
+		{name: "missing event field", path: "/api/webhooks/hangar", body: strings.NewReader(`{"job_name":"brain"}`), wantStatus: http.StatusBadRequest},
+		{name: "missing job_name for deploy event", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started"}`), wantStatus: http.StatusBadRequest},
+		{name: "empty object payload", path: "/api/webhooks/hangar", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
+		{name: "empty job_name deploy_success", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"","repo":"azylman/aerial","status":"success"}`), wantStatus: http.StatusBadRequest},
+		{name: "sync_success empty job_name defaults to git-sync", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"sync_success","job_name":"","repo":"azylman/aerial","commit_sha":"abc1234","status":"success"}`), wantStatus: http.StatusOK, wantJobName: "git-sync"},
+		{name: "sync_failed empty job_name defaults to git-sync", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"sync_failed","job_name":"","repo":"azylman/aerial","commit_sha":"abc1234","status":"success"}`), wantStatus: http.StatusOK, wantJobName: "git-sync"},
+		{name: "valid deploy_started api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"started","details":"Nomad job evaluation placed"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
+		{name: "valid deploy_started legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"started","details":"Nomad job evaluation placed"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
+		{name: "valid deploy_success", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"success","details":"Healthy deployment completed"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
+		{name: "valid deploy_failed", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_failed","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"failed","details":"Allocation failed healthcheck"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
+		{name: "valid deploy_rollback", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_rollback","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"rollback","details":"Reverted to previous healthy release"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
+		{name: "resolve PR and TargetID by SHA", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","status":"success","details":"Deployed successfully"}`), reg: &mockPRRegistry{resolvePRNum: 789, resolveTargetID: "thread-resolved-789"}, wantStatus: http.StatusOK, wantPR: 789, wantTargetID: "thread-resolved-789", wantResolveSHACalls: 1},
+		{name: "resolve PR by SHA preserves existing target_id", path: "/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_rollback","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","target_id":"existing-target-snowflake","status":"rollback"}`), reg: &mockPRRegistry{resolvePRNum: 789, resolveTargetID: "thread-resolved-789"}, wantStatus: http.StatusOK, wantPR: 789, wantTargetID: "existing-target-snowflake", wantResolveSHACalls: 1},
+		{name: "provided PR number skips resolve PR by SHA", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started","job_name":"brain","repo":"azylman/aerial","commit_sha":"deploycommit123","pr_number":123,"status":"started"}`), reg: &mockPRRegistry{resolvePRNum: 789, resolveTargetID: "thread-resolved-789"}, wantStatus: http.StatusOK, wantPR: 123, wantResolveSHACalls: 0},
+		{name: "registry resolve error still accepts event", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","status":"success"}`), reg: &mockPRRegistry{resolveErr: errors.New("db error")}, wantStatus: http.StatusOK},
+		{name: "nil registry still accepts event", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","status":"success"}`), reg: nil, wantStatus: http.StatusOK},
+		{name: "river accepts on api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{}, wantStatus: http.StatusAccepted, wantJobName: "brain", wantRiverJobs: 1},
+		{name: "river accepts on legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{}, wantStatus: http.StatusAccepted, wantJobName: "brain", wantRiverJobs: 1},
+		{name: "river insertion error", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{err: errors.New("simulated river insert error")}, wantStatus: http.StatusInternalServerError},
+		{name: "river duplicate skipped increments metric", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","commit_sha":"abc1234"}`), river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusAccepted, wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="hangar_webhook"}`},
+	}
 
-		// Malformed JSON on both paths -> 400
-		for _, path := range []string{"/api/webhooks/hangar", "/webhooks/hangar"} {
-			rec := doHTTPRequest(routes, http.MethodPost, path, strings.NewReader(`{invalid json`), nil)
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("expected 400 for malformed json on %s, got %d", path, rec.Code)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var inserters []RiverInserter
+			if tc.river != nil {
+				inserters = append(inserters, tc.river)
 			}
-			var errResp map[string]string
-			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil || errResp["error"] != "invalid json payload" {
-				t.Errorf("unexpected error response on %s: %+v", path, errResp)
+			var reg PRRegistryUpdater
+			if tc.reg != nil {
+				reg = tc.reg
 			}
-		}
+			srv := newTestRouter(Config{}, nil, reg, nil, inserters...)
+			routes := srv.Routes()
 
-		// Read error & missing required fields -> 400
-		for _, body := range []io.Reader{
-			errReader{},
-			strings.NewReader(`{"job_name":"brain"}`),
-			strings.NewReader(`{"event":"deploy_started"}`),
-			strings.NewReader(`{}`),
-			strings.NewReader(`{"event":"deploy_success","job_name":"","repo":"azylman/aerial","status":"success"}`),
-		} {
-			if rec := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/hangar", body, nil); rec.Code != http.StatusBadRequest {
-				t.Errorf("expected 400 Bad Request, got %d", rec.Code)
+			rec := doHTTPRequest(routes, http.MethodPost, tc.path, tc.body, nil)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d (body: %s)", tc.wantStatus, rec.Code, rec.Body.String())
 			}
-		}
-
-		// sync_success and sync_failed with empty job_name default to git-sync -> 200 OK
-		for _, evt := range []string{"sync_success", "sync_failed"} {
-			body := fmt.Sprintf(`{"event":%q,"job_name":"","repo":"azylman/aerial","commit_sha":"abc1234","status":"success"}`, evt)
-			rec := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body), nil)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected 200 OK for %s with empty job_name, got %d", evt, rec.Code)
+			if rec.Code == http.StatusBadRequest && tc.body != nil {
+				var errResp map[string]string
+				_ = json.Unmarshal(rec.Body.Bytes(), &errResp)
 			}
-			var resp map[string]interface{}
-			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-			if resp["job_name"] != "git-sync" {
-				t.Errorf("expected job_name git-sync for %s, got %v", evt, resp["job_name"])
-			}
-		}
-	})
-
-	t.Run("ValidPayloads", func(t *testing.T) {
-		t.Parallel()
-		routes := NewRouterServer(Config{}, nil).Routes()
-		for _, tc := range []struct {
-			event, status, details string
-		}{
-			{"deploy_started", "started", "Nomad job evaluation placed"},
-			{"deploy_success", "success", "Healthy deployment completed"},
-			{"deploy_failed", "failed", "Allocation failed healthcheck"},
-			{"deploy_rollback", "rollback", "Reverted to previous healthy release"},
-		} {
-			for _, path := range []string{"/api/webhooks/hangar", "/webhooks/hangar"} {
-				body := fmt.Sprintf(`{"event":%q,"job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","image":"ghcr.io/azylman/aerial:latest","digest":"sha256:abc1234","status":%q,"deployment_id":"dep-uuid-1","details":%q,"timestamp":"2026-10-02T20:00:00Z"}`, tc.event, tc.status, tc.details)
-				rec := doHTTPRequest(routes, http.MethodPost, path, strings.NewReader(body), nil)
-				if rec.Code != http.StatusOK {
-					t.Fatalf("expected 200 OK for %s on %s, got %d", tc.event, path, rec.Code)
-				}
+			if rec.Code == http.StatusOK || rec.Code == http.StatusAccepted {
 				var resp map[string]interface{}
-				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-					t.Fatalf("failed to parse response json: %v", err)
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil {
+					if tc.wantJobName != "" && resp["job_name"] != tc.wantJobName {
+						t.Errorf("job_name = %v, want %s", resp["job_name"], tc.wantJobName)
+					}
+					if tc.wantTargetID != "" && resp["target_id"] != tc.wantTargetID {
+						t.Errorf("target_id = %v, want %s", resp["target_id"], tc.wantTargetID)
+					}
+					if tc.wantPR != 0 {
+						prVal, _ := resp["pr_number"].(float64)
+						if int(prVal) != tc.wantPR {
+							t.Errorf("pr_number = %v, want %d", resp["pr_number"], tc.wantPR)
+						}
+					}
 				}
-				if resp["status"] != "accepted" || resp["event"] != tc.event || resp["job_name"] != "brain" ||
-					int(resp["pr_number"].(float64)) != 420 || resp["target_id"] != "thread-999" {
-					t.Errorf("unexpected response for %s: %+v", tc.event, resp)
+			}
+			if tc.reg != nil && tc.wantResolveSHACalls > 0 {
+				if len(tc.reg.resolveBySHACalls) != tc.wantResolveSHACalls {
+					t.Errorf("resolveBySHACalls = %d, want %d", len(tc.reg.resolveBySHACalls), tc.wantResolveSHACalls)
 				}
 			}
-		}
-	})
-
-	t.Run("ResolvePRBySHA", func(t *testing.T) {
-		t.Parallel()
-		mockReg := &mockPRRegistry{resolvePRNum: 789, resolveTargetID: "thread-resolved-789"}
-		routes := newTestRouter(Config{}, nil, mockReg, nil).Routes()
-
-		// 1. CommitSHA provided without PRNumber -> resolves PR and TargetID
-		body := `{"event":"deploy_success","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","status":"success","details":"Deployed successfully"}`
-		rec := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body), nil)
-		if rec.Code != http.StatusOK || len(mockReg.resolveBySHACalls) != 1 || mockReg.resolveBySHACalls[0].sha != "deploycommit123" {
-			t.Fatalf("expected 200 OK and 1 ResolvePRBySHA call, got code=%d calls=%+v", rec.Code, mockReg.resolveBySHACalls)
-		}
-		var resp map[string]interface{}
-		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-		if int(resp["pr_number"].(float64)) != 789 || resp["target_id"] != "thread-resolved-789" {
-			t.Errorf("unexpected resolved fields: %+v", resp)
-		}
-
-		// 2. CommitSHA provided with existing TargetID -> preserves existing TargetID
-		mockReg.resolveBySHACalls = nil
-		bodyPreserve := `{"event":"deploy_rollback","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","target_id":"existing-target-snowflake","status":"rollback"}`
-		recPreserve := doHTTPRequest(routes, http.MethodPost, "/webhooks/hangar", strings.NewReader(bodyPreserve), nil)
-		_ = json.Unmarshal(recPreserve.Body.Bytes(), &resp)
-		if recPreserve.Code != http.StatusOK || int(resp["pr_number"].(float64)) != 789 || resp["target_id"] != "existing-target-snowflake" {
-			t.Errorf("expected preserved target_id, got %+v", resp)
-		}
-
-		// 3. PRNumber already provided -> does not call ResolvePRBySHA
-		mockReg.resolveBySHACalls = nil
-		bodyWithPR := `{"event":"deploy_started","job_name":"brain","repo":"azylman/aerial","commit_sha":"deploycommit123","pr_number":123,"status":"started"}`
-		if recWithPR := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(bodyWithPR), nil); recWithPR.Code != http.StatusOK || len(mockReg.resolveBySHACalls) != 0 {
-			t.Errorf("expected 200 OK and 0 ResolvePRBySHA calls, got code=%d calls=%d", recWithPR.Code, len(mockReg.resolveBySHACalls))
-		}
-
-		// 4. Registry error & nil registry -> still accepts event with 200 OK
-		srvErrRoutes := newTestRouter(Config{}, nil, &mockPRRegistry{resolveErr: errors.New("db error")}, nil).Routes()
-		if recErr := doHTTPRequest(srvErrRoutes, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body), nil); recErr.Code != http.StatusOK {
-			t.Errorf("expected 200 OK when registry resolve errors, got %d", recErr.Code)
-		}
-		srvNilRoutes := NewRouterServer(Config{}, nil).Routes()
-		if recNil := doHTTPRequest(srvNilRoutes, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body), nil); recNil.Code != http.StatusOK {
-			t.Errorf("expected 200 OK when registry is nil, got %d", recNil.Code)
-		}
-	})
-
-	t.Run("WithRiverAndDuplicates", func(t *testing.T) {
-		t.Parallel()
-		mockRiver := &mockRiverInserter{}
-		routes := NewRouterServer(Config{}, nil, mockRiver).Routes()
-		body := `{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`
-
-		for _, path := range []string{"/api/webhooks/hangar", "/webhooks/hangar"} {
-			mockRiver.insertedHangarJobs = nil
-			mockRiver.insertedOpts = nil
-			rec := doHTTPRequest(routes, http.MethodPost, path, strings.NewReader(body), nil)
-			if rec.Code != http.StatusAccepted {
-				t.Fatalf("expected 202 Accepted on %s, got %d", path, rec.Code)
+			if tc.river != nil && tc.wantRiverJobs > 0 {
+				if len(tc.river.insertedHangarJobs) != tc.wantRiverJobs {
+					t.Errorf("insertedHangarJobs = %d, want %d", len(tc.river.insertedHangarJobs), tc.wantRiverJobs)
+				}
+				if len(tc.river.insertedOpts) > 0 {
+					opts := tc.river.insertedOpts[0]
+					if opts.MaxAttempts != 5 || !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
+						t.Errorf("unexpected insert opts: %+v", opts)
+					}
+				}
 			}
-			var resp map[string]interface{}
-			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-			if resp["status"] != "accepted" || resp["event"] != "deploy_success" || resp["job_name"] != "brain" {
-				t.Errorf("unexpected response body: %+v", resp)
+			if tc.wantMetricSubstr != "" {
+				recM := doHTTPRequest(routes, http.MethodGet, "/metrics", nil, nil)
+				if !strings.Contains(recM.Body.String(), tc.wantMetricSubstr) {
+					t.Errorf("expected /metrics to include %q, got:\n%s", tc.wantMetricSubstr, recM.Body.String())
+				}
 			}
-			if len(mockRiver.insertedHangarJobs) != 1 || mockRiver.insertedHangarJobs[0].Event.Event != "deploy_success" {
-				t.Errorf("unexpected inserted hangar jobs: %+v", mockRiver.insertedHangarJobs)
-			}
-			if len(mockRiver.insertedOpts) != 1 || mockRiver.insertedOpts[0].MaxAttempts != 5 ||
-				!mockRiver.insertedOpts[0].UniqueOpts.ByArgs || mockRiver.insertedOpts[0].UniqueOpts.ByPeriod != 15*time.Minute {
-				t.Errorf("unexpected insert opts: %+v", mockRiver.insertedOpts)
-			}
-		}
-
-		// River insertion failure -> 500
-		srvErr := NewRouterServer(Config{}, nil, &mockRiverInserter{err: errors.New("simulated river insert error")}).Routes()
-		if recErr := doHTTPRequest(srvErr, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body), nil); recErr.Code != http.StatusInternalServerError {
-			t.Fatalf("expected 500 when river persistence fails, got %d", recErr.Code)
-		}
-
-		// Duplicate skipped with commit_sha increments metric and exercises deterministic idempotency key
-		srvDup := NewRouterServer(Config{}, nil, &mockRiverInserter{skipDuplicate: true}).Routes()
-		bodyDup := `{
-			"event": "deploy_success",
-			"job_name": "brain",
-			"commit_sha": "abc1234"
-		}`
-		if recDup := doHTTPRequest(srvDup, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(bodyDup), nil); recDup.Code != http.StatusAccepted {
-			t.Fatalf("expected 202 Accepted on duplicate, got %d", recDup.Code)
-		}
-		recM := doHTTPRequest(srvDup, http.MethodGet, "/metrics", nil, nil)
-		if !strings.Contains(recM.Body.String(), `webhooks_router_unique_skipped_total{kind="hangar_webhook"}`) {
-			t.Errorf("expected /metrics to include hangar_webhook duplicate count, got:\n%s", recM.Body.String())
-		}
-	})
+		})
+	}
 }
 
 func TestProcessHangarEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	t.Run("ZeroDownstreamCallsWithoutSnowflake", func(t *testing.T) {
-		t.Parallel()
-		transport := &zeroCallTransport{}
-		srv := newTestRouter(
-			Config{},
-			&http.Client{Transport: transport},
-			&mockPRRegistry{resolvePRNum: 101, resolveTargetID: "target-101"},
-			nil,
-		)
-		routes := srv.Routes()
+	tests := []struct {
+		name               string
+		evt                HangarDeployEvent
+		reg                *mockPRRegistry
+		disp               *mockOutboundDispatcher
+		wantErr            bool
+		wantPR             int
+		wantTargetID       string
+		wantDeployingCalls int
+		wantAdvanceCalls   int
+		wantDMs            int
+		wantPrompts        int
+		wantDMSubstr       string
+		wantPromptSubs     []string
+	}{
+		{
+			name: "deploy_started without snowflake does not call downstream",
+			evt:  mkHangarEvt("deploy_started", "brain", "azylman/aerial", "sha-test", 0, "", "started", ""),
+		},
+		{
+			name: "deploy_success without snowflake does not call downstream",
+			evt:  mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-test", 0, "", "success", ""),
+		},
+		{
+			name: "deploy_failed without snowflake does not call downstream",
+			evt:  mkHangarEvt("deploy_failed", "brain", "azylman/aerial", "sha-test", 0, "", "failed", ""),
+		},
+		{
+			name: "deploy_rollback without snowflake does not call downstream",
+			evt:  mkHangarEvt("deploy_rollback", "brain", "azylman/aerial", "sha-test", 0, "", "rollback", ""),
+		},
+		{
+			name:               "deploy_started transitions registry",
+			evt:                mkHangarEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
+			reg:                &mockPRRegistry{resolvePRNum: 99, resolveTargetID: "target-99"},
+			wantPR:             99,
+			wantTargetID:       "target-99",
+			wantDeployingCalls: 1,
+		},
+		{
+			name:         "deploy_started tolerates registry error",
+			evt:          mkHangarEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
+			reg:          &mockPRRegistry{resolvePRNum: 99, resolveTargetID: "target-99", deployingErr: errors.New("db error")},
+			wantPR:       99,
+			wantTargetID: "target-99",
+		},
+		{
+			name:         "deploy_success transitions state",
+			evt:          mkHangarEvt("deploy_success", "webhooks-router", "azylman/aerial", "", 99, "target-99", "success", "deployment completed"),
+			wantPR:       99,
+			wantTargetID: "target-99",
+		},
+		{
+			name:         "deploy_rollback transitions state",
+			evt:          mkHangarEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "", 99, "target-99", "rollback", "rolled back"),
+			wantPR:       99,
+			wantTargetID: "target-99",
+		},
+		{
+			name:         "deploy_failed transitions state",
+			evt:          mkHangarEvt("deploy_failed", "webhooks-router", "azylman/aerial", "", 99, "target-99", "failed", "deploy unhealthy"),
+			wantPR:       99,
+			wantTargetID: "target-99",
+		},
+		{
+			name:         "deploy_started valid snowflake",
+			evt:          mkHangarEvt("deploy_started", "brain", "azylman/aerial", "sha1234", 527, "1555405874565091380", "started", ""),
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       527,
+			wantTargetID: "1555405874565091380",
+		},
+		{
+			name:         "deploy_success valid snowflake with channel context",
+			evt:          mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
+			reg:          &mockPRRegistry{channelContextMap: map[string][]ChannelMessageContext{"1555405874565091380": {{AuthorName: "arcane103", Content: "Deploy the new router", ResponseText: "Working on it!"}}}},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       528,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job brain",
+				"[arcane103]: Deploy the new router",
+				"[Aerial]: Working on it!",
+				"Directive: Based on the recent conversation context above",
+			},
+		},
+		{
+			name:         "deploy_rollback valid snowflake",
+			evt:          mkHangarEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "shafail", 529, "1555405874565091380", "rollback", strings.Repeat("error detail line\n", 50)),
+			reg:          &mockPRRegistry{deployFailedUpdated: true},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       529,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+			wantPromptSubs: []string{
+				"Deployment failed and rolled back",
+				"Please investigate and fix",
+				"```",
+			},
+		},
+		{
+			name:         "deploy_failed valid snowflake",
+			evt:          mkHangarEvt("deploy_failed", "hangar", "azylman/aerial", "shabroken", 530, "1555405874565091380", "failed", "exit status 1"),
+			reg:          &mockPRRegistry{deployFailedUpdated: true},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       530,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+			wantPromptSubs: []string{
+				"Deployment failed for job hangar",
+				"Please investigate and fix",
+			},
+		},
+		{
+			name: "sync_success without PR number",
+			evt:  mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha999", 0, "1555405874565091380", "", ""),
+			reg:  &mockPRRegistry{},
+			disp: &mockOutboundDispatcher{},
+		},
+		{
+			name:         "sync_failed with details",
+			evt:          mkHangarEvt("sync_failed", "", "azylman/aerial-config", "sha888", 0, "1555405874565091380", "", "merge conflict in rules/persona"),
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantDMs:      1,
+			wantPrompts:  1,
+			wantDMSubstr: "⚠️ **(repo: aerial-config)** Git file sync failed. Following up...",
+			wantPromptSubs: []string{
+				"Git sync failed",
+				"merge conflict in rules/persona",
+				"Please investigate and fix",
+			},
+		},
+		{
+			name: "deploy_success invalid snowflake ignored",
+			evt:  mkHangarEvt("deploy_success", "hangar", "", "", 0, "not-a-snowflake", "", ""),
+			reg:  &mockPRRegistry{},
+			disp: &mockOutboundDispatcher{},
+		},
+		{
+			name: "deploy_started invalid snowflake ignored",
+			evt:  mkHangarEvt("deploy_started", "hangar", "", "", 0, "not-a-snowflake", "", ""),
+			reg:  &mockPRRegistry{},
+			disp: &mockOutboundDispatcher{},
+		},
+		{
+			name:             "sync_success late resolution via ResolvePRBySHA",
+			evt:              mkHangarEvt("sync_success", "", "azylman/aerial-config", "dccc646186d7bf7d17efa6cac6f730d17f66125b", 0, "", "", ""),
+			reg:              &mockPRRegistry{resolvePRNum: 241, resolveTargetID: "1555405874565091380"},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           241,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+		},
+		{
+			name:         "deploy_success on aerial-config",
+			evt:          mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "1555405874565091380", "success", ""),
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       242,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job homepage on azylman/aerial-config",
+			},
+		},
+		{
+			name:         "sync_failed with PR number",
+			evt:          mkHangarEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "1555405874565091380", "failed", "merge conflict in rules/foo.md"),
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       542,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+			wantPromptSubs: []string{
+				"Git sync failed for repo azylman/aerial",
+				"merge conflict in rules/foo.md",
+				"Please investigate and fix the git sync failure.",
+			},
+		},
+		{
+			name:    "deploy_started widget error propagation",
+			evt:     mkHangarEvt("deploy_started", "brain", "azylman/aerial", "sha_start_test", 603, "1555405874565091380", "started", ""),
+			reg:     &mockPRRegistry{resolveTargetID: "1555405874565091380"},
+			disp:    &mockOutboundDispatcher{widgetErr: errors.New("brain offline")},
+			wantErr: true,
+		},
+		{
+			name:             "sync_success advances Vanadis with valid targetID",
+			evt:              mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_1", 301, "1555405874565091380", "success", ""),
+			reg:              &mockPRRegistry{},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           301,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+		},
+		{
+			name:             "sync_success advances Vanadis with empty targetID",
+			evt:              mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_2", 302, "", "success", ""),
+			reg:              &mockPRRegistry{},
+			wantPR:           302,
+			wantAdvanceCalls: 1,
+		},
+		{
+			name:    "sync_success Vanadis advance error propagates",
+			evt:     mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_3", 303, "1555405874565091380", "success", ""),
+			reg:     &mockPRRegistry{advanceVanadisErr: errors.New("vanadis err")},
+			disp:    &mockOutboundDispatcher{},
+			wantErr: true,
+		},
+	}
 
-		for _, evt := range []string{"deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"} {
-			body := fmt.Sprintf(`{
-				"event": %q,
-				"job_name": "brain",
-				"repo": "azylman/aerial",
-				"commit_sha": "sha-test",
-				"status": "started"
-			}`, evt)
-			if rec := doHTTPRequest(routes, http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body), nil); rec.Code != http.StatusOK {
-				t.Fatalf("expected 200 OK for %s, got %d", evt, rec.Code)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := tc.reg
+			if reg == nil {
+				reg = &mockPRRegistry{}
 			}
-		}
-		if calls := transport.calls.Load(); calls != 0 {
-			t.Fatalf("expected 0 outbound calls, got %d", calls)
-		}
-	})
-
-	t.Run("DirectTransitionsAndErrorTolerance", func(t *testing.T) {
-		t.Parallel()
-		mockReg := &mockPRRegistry{
-			resolvePRNum:    99,
-			resolveTargetID: "target-99",
-		}
-		srv := newTestRouter(Config{}, nil, mockReg, nil)
-
-		evtStarted := HangarDeployEvent{
-			Event:     "deploy_started",
-			JobName:   "webhooks-router",
-			Repo:      "azylman/aerial",
-			CommitSHA: "sha111",
-			Status:    "started",
-		}
-		resStarted, err := srv.ProcessHangarEvent(ctx, evtStarted)
-		if err != nil || resStarted.PRNumber != 99 || resStarted.TargetID != "target-99" || len(mockReg.deployingCalls) != 1 || mockReg.deployingCalls[0].prNumber != 99 {
-			t.Fatalf("unexpected deploy_started result: err=%v, res=%+v, calls=%+v", err, resStarted, mockReg.deployingCalls)
-		}
-
-		mockReg.deployingErr = errors.New("db error")
-		if _, err := srv.ProcessHangarEvent(ctx, evtStarted); err != nil {
-			t.Errorf("ProcessHangarEvent should not fail when TransitionDeploying errors: %v", err)
-		}
-		mockReg.deployingErr = nil
-
-		for _, evt := range []HangarDeployEvent{
-			{
-				Event:    "deploy_success",
-				JobName:  "webhooks-router",
-				Repo:     "azylman/aerial",
-				PRNumber: 99,
-				Status:   "success",
-				TargetID: "target-99",
-				Details:  "deployment completed",
-			},
-			{
-				Event:    "deploy_rollback",
-				JobName:  "webhooks-router",
-				Repo:     "azylman/aerial",
-				PRNumber: 99,
-				Status:   "rollback",
-				Details:  "rolled back",
-			},
-			{
-				Event:    "deploy_failed",
-				JobName:  "webhooks-router",
-				Repo:     "azylman/aerial",
-				PRNumber: 99,
-				Status:   "failed",
-				Details:  "deploy unhealthy",
-			},
-		} {
-			if res, err := srv.ProcessHangarEvent(ctx, evt); err != nil || res.Event != evt.Event {
-				t.Errorf("ProcessHangarEvent(%s) failed: err=%v, res=%+v", evt.Event, err, res)
+			var disp OutboundDispatcher
+			if tc.disp != nil {
+				disp = tc.disp
 			}
-		}
-	})
-
-	t.Run("OutboundDispatchAllEventTypes", func(t *testing.T) {
-		t.Parallel()
-		mockDisp := &mockOutboundDispatcher{}
-		mockReg := &mockPRRegistry{
-			deployFailedUpdated: true,
-			channelContextMap: map[string][]ChannelMessageContext{
-				"1555405874565091380": {
-					{
-						AuthorName:   "arcane103",
-						Content:      "Deploy the new router",
-						ResponseText: "Working on it!",
-					},
-				},
-			},
-		}
-		srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
-
-		cases := []struct {
-			name        string
-			before      func()
-			evt         HangarDeployEvent
-			wantDMs     int
-			wantPrompts int
-			wantDMSub   string
-			wantPrSub   []string
-		}{
-			{
-				name: "deploy_started valid snowflake",
-				evt: HangarDeployEvent{
-					Event:     "deploy_started",
-					JobName:   "brain",
-					Repo:      "azylman/aerial",
-					PRNumber:  527,
-					CommitSHA: "sha1234",
-					TargetID:  "1555405874565091380",
-					Status:    "started",
-				},
-				wantDMs:     0,
-				wantPrompts: 0,
-			},
-			{
-				name: "deploy_success valid snowflake with channel context",
-				evt: HangarDeployEvent{
-					Event:     "deploy_success",
-					JobName:   "brain",
-					Repo:      "azylman/aerial",
-					PRNumber:  528,
-					CommitSHA: "sha3d2a",
-					TargetID:  "1555405874565091380",
-					Status:    "success",
-				},
-				wantDMs:     0,
-				wantPrompts: 1,
-				wantPrSub: []string{
-					"Continuous Delivery deployment completed for job brain",
-					"[arcane103]: Deploy the new router",
-					"[Aerial]: Working on it!",
-					"Directive: Based on the recent conversation context above",
-				},
-			},
-			{
-				name: "deploy_rollback valid snowflake",
-				evt: HangarDeployEvent{
-					Event:     "deploy_rollback",
-					JobName:   "webhooks-router",
-					Repo:      "azylman/aerial",
-					PRNumber:  529,
-					CommitSHA: "shafail",
-					TargetID:  "1555405874565091380",
-					Status:    "rollback",
-					Details:   strings.Repeat("error detail line\n", 50),
-				},
-				wantDMs:     0,
-				wantPrompts: 2,
-				wantPrSub: []string{
-					"Deployment failed and rolled back",
-					"Please investigate and fix",
-					"```",
-				},
-			},
-			{
-				name: "deploy_failed valid snowflake",
-				evt: HangarDeployEvent{
-					Event:     "deploy_failed",
-					JobName:   "hangar",
-					Repo:      "azylman/aerial",
-					PRNumber:  530,
-					CommitSHA: "shabroken",
-					TargetID:  "1555405874565091380",
-					Status:    "failed",
-					Details:   "exit status 1",
-				},
-				wantDMs:     0,
-				wantPrompts: 3,
-				wantPrSub: []string{
-					"Deployment failed for job hangar",
-					"Please investigate and fix",
-				},
-			},
-			{
-				name: "sync_success without PR number",
-				evt: HangarDeployEvent{
-					Event:     "sync_success",
-					Repo:      "azylman/aerial-config",
-					CommitSHA: "sha999",
-					TargetID:  "1555405874565091380",
-				},
-				wantDMs:     0,
-				wantPrompts: 3,
-			},
-			{
-				name: "sync_failed with details",
-				evt: HangarDeployEvent{
-					Event:     "sync_failed",
-					Repo:      "azylman/aerial-config",
-					CommitSHA: "sha888",
-					TargetID:  "1555405874565091380",
-					Details:   "merge conflict in rules/persona",
-				},
-				wantDMs:     1,
-				wantPrompts: 4,
-				wantDMSub:   "⚠️ **(repo: aerial-config)** Git file sync failed. Following up...",
-				wantPrSub: []string{
-					"Git sync failed",
-					"merge conflict in rules/persona",
-					"Please investigate and fix",
-				},
-			},
-			{
-				name: "deploy_success invalid snowflake ignored",
-				evt: HangarDeployEvent{
-					Event:    "deploy_success",
-					JobName:  "hangar",
-					TargetID: "not-a-snowflake",
-				},
-				wantDMs:     1,
-				wantPrompts: 4,
-			},
-			{
-				name: "deploy_started invalid snowflake ignored",
-				evt: HangarDeployEvent{
-					Event:    "deploy_started",
-					JobName:  "hangar",
-					TargetID: "not-a-snowflake",
-				},
-				wantDMs:     1,
-				wantPrompts: 4,
-			},
-			{
-				name: "sync_success late resolution via ResolvePRBySHA",
-				before: func() {
-					mockReg.resolvePRNum = 241
-					mockReg.resolveTargetID = "1555405874565091380"
-				},
-				evt: HangarDeployEvent{
-					Event:     "sync_success",
-					Repo:      "azylman/aerial-config",
-					CommitSHA: "dccc646186d7bf7d17efa6cac6f730d17f66125b",
-				},
-				wantDMs:     1,
-				wantPrompts: 4,
-			},
-			{
-				name: "deploy_success on aerial-config",
-				evt: HangarDeployEvent{
-					Event:     "deploy_success",
-					JobName:   "homepage",
-					Repo:      "azylman/aerial-config",
-					PRNumber:  242,
-					CommitSHA: "sha_cfg_succ",
-					TargetID:  "1555405874565091380",
-					Status:    "success",
-				},
-				wantDMs:     1,
-				wantPrompts: 5,
-				wantPrSub: []string{
-					"Continuous Delivery deployment completed for job homepage on azylman/aerial-config",
-				},
-			},
-			{
-				name: "sync_failed with PR number",
-				evt: HangarDeployEvent{
-					Event:     "sync_failed",
-					Repo:      "azylman/aerial",
-					PRNumber:  542,
-					CommitSHA: "merge542",
-					TargetID:  "1555405874565091380",
-					Status:    "failed",
-					Details:   "merge conflict in rules/foo.md",
-				},
-				wantDMs:     1,
-				wantPrompts: 6,
-				wantPrSub: []string{
-					"Git sync failed for repo azylman/aerial",
-					"merge conflict in rules/foo.md",
-					"Please investigate and fix the git sync failure.",
-				},
-			},
-		}
-
-		for _, tc := range cases {
-			if tc.before != nil {
-				tc.before()
+			srv := newTestRouter(Config{}, &http.Client{Transport: &zeroCallTransport{}}, reg, disp)
+			res, err := srv.ProcessHangarEvent(ctx, tc.evt)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ProcessHangarEvent() err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if _, err := srv.ProcessHangarEvent(ctx, tc.evt); err != nil {
-				t.Fatalf("%s: ProcessHangarEvent failed: %v", tc.name, err)
+			if tc.wantErr {
+				return
 			}
-			dms := mockDisp.DirectMessageCalls()
-			prompts := mockDisp.PromptCalls()
-			if len(dms) != tc.wantDMs || len(prompts) != tc.wantPrompts {
-				t.Fatalf("%s: expected DMs=%d Prompts=%d, got DMs=%d Prompts=%d", tc.name, tc.wantDMs, tc.wantPrompts, len(dms), len(prompts))
+			if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
+				t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
 			}
-			if tc.wantDMSub != "" && !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSub) {
-				t.Errorf("%s: expected DM to contain %q, got %q", tc.name, tc.wantDMSub, dms[len(dms)-1].Content)
+			if tc.wantTargetID != "" && res.TargetID != tc.wantTargetID {
+				t.Errorf("TargetID = %q, want %q", res.TargetID, tc.wantTargetID)
 			}
-			for _, sub := range tc.wantPrSub {
-				if !strings.Contains(prompts[len(prompts)-1].Prompt, sub) {
-					t.Errorf("%s: expected prompt to contain %q, got %q", tc.name, sub, prompts[len(prompts)-1].Prompt)
+			if tc.reg != nil {
+				if tc.wantDeployingCalls > 0 && len(tc.reg.deployingCalls) != tc.wantDeployingCalls {
+					t.Errorf("deployingCalls = %d, want %d", len(tc.reg.deployingCalls), tc.wantDeployingCalls)
+				}
+				if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
+					t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
 				}
 			}
-		}
-
-		// Error propagation when DispatchWidget fails on deploy_started
-		mockDisp.widgetErr = errors.New("brain offline")
-		_, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
-			Event:     "deploy_started",
-			Repo:      "azylman/aerial",
-			PRNumber:  603,
-			JobName:   "brain",
-			CommitSHA: "sha_start_test",
-			TargetID:  "1555405874565091380",
+			if tc.disp != nil {
+				dms := tc.disp.DirectMessageCalls()
+				if len(dms) != tc.wantDMs {
+					t.Errorf("DMs = %d, want %d", len(dms), tc.wantDMs)
+				}
+				if tc.wantDMSubstr != "" {
+					if len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr) {
+						t.Errorf("DM = %v, want substr %q", dms, tc.wantDMSubstr)
+					}
+				}
+				prompts := tc.disp.PromptCalls()
+				if len(prompts) != tc.wantPrompts {
+					t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
+				}
+				for _, sub := range tc.wantPromptSubs {
+					if len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Prompt, sub) {
+						t.Errorf("prompt = %v, want substr %q", prompts, sub)
+					}
+				}
+			}
 		})
-		if err == nil || !strings.Contains(err.Error(), "brain offline") {
-			t.Fatalf("expected 'brain offline' error from ProcessHangarEvent, got: %v", err)
-		}
-	})
+	}
 }
 
 // --- 5. Outbound Dispatcher ---
@@ -4378,7 +4301,6 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	}
 }
 
-
 func TestSyncPRWidget_Unit(t *testing.T) {
 	ctx := context.Background()
 
@@ -4498,7 +4420,7 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
+			"status":     "ok",
 			"message_id": "msg-widget-dispatch-ok",
 		})
 	}))
@@ -4507,7 +4429,7 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 	dispOK := NewDefaultOutboundDispatcher("", ts.URL, ts.Client())
 	msgID, err := dispOK.DispatchWidget(ctx, StatusWidgetRequest{
 		ChannelID: "1555405874565091380",
-		ID: "widget-1",
+		ID:        "widget-1",
 	})
 	if err != nil || msgID != "msg-widget-dispatch-ok" {
 		t.Fatalf("DispatchWidget failed: msgID=%q, err=%v", msgID, err)
