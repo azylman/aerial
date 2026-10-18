@@ -2219,12 +2219,39 @@ func TestSyncSkills_DualRuntimes(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(tmpCustom, "voice", "v-skill"), 0755)
 	_ = os.WriteFile(filepath.Join(tmpCustom, "voice", "v-skill", "SKILL.md"), []byte("# Voice"), 0644)
 
+	// Pre-create legacy directory symlinks to simulate existing runtime symlinks to primaryDir
+	primaryDir := filepath.Join(tmpHome, ".gemini", "config", "skills")
+	discordDir := filepath.Join(tmpData, "runtimes", "discord", ".gemini", "config", "skills")
+	voiceDir := filepath.Join(tmpData, "runtimes", "voice", ".gemini", "config", "skills")
+
+	_ = os.MkdirAll(primaryDir, 0755)
+	_ = os.MkdirAll(filepath.Dir(discordDir), 0755)
+	_ = os.MkdirAll(filepath.Dir(voiceDir), 0755)
+	_ = os.Symlink(primaryDir, discordDir)
+	_ = os.Symlink(primaryDir, voiceDir)
+
 	if err := p.SyncSkills(); err != nil {
 		t.Fatalf("SyncSkills failed: %v", err)
 	}
 
+	// Verify legacy directory symlinks were unlinked and replaced with real directories
+	fiDiscord, err := os.Lstat(discordDir)
+	if err != nil {
+		t.Fatalf("failed to stat discordDir: %v", err)
+	}
+	if fiDiscord.Mode()&os.ModeSymlink != 0 || !fiDiscord.IsDir() {
+		t.Errorf("expected discordDir to be a real directory, got mode: %v", fiDiscord.Mode())
+	}
+
+	fiVoice, err := os.Lstat(voiceDir)
+	if err != nil {
+		t.Fatalf("failed to stat voiceDir: %v", err)
+	}
+	if fiVoice.Mode()&os.ModeSymlink != 0 || !fiVoice.IsDir() {
+		t.Errorf("expected voiceDir to be a real directory, got mode: %v", fiVoice.Mode())
+	}
+
 	// Primary skills dir
-	primaryDir := filepath.Join(tmpHome, ".gemini", "config", "skills")
 	if _, err := os.Stat(filepath.Join(primaryDir, "c-skill", "SKILL.md")); err != nil {
 		t.Errorf("primary missing c-skill: %v", err)
 	}
@@ -2233,7 +2260,6 @@ func TestSyncSkills_DualRuntimes(t *testing.T) {
 	}
 
 	// Discord runtime
-	discordDir := filepath.Join(tmpData, "runtimes", "discord", ".gemini", "config", "skills")
 	if _, err := os.Stat(filepath.Join(discordDir, "d-skill", "SKILL.md")); err != nil {
 		t.Errorf("discord runtime missing d-skill: %v", err)
 	}
@@ -2242,7 +2268,6 @@ func TestSyncSkills_DualRuntimes(t *testing.T) {
 	}
 
 	// Voice runtime
-	voiceDir := filepath.Join(tmpData, "runtimes", "voice", ".gemini", "config", "skills")
 	if _, err := os.Stat(filepath.Join(voiceDir, "v-skill", "SKILL.md")); err != nil {
 		t.Errorf("voice runtime missing v-skill: %v", err)
 	}
@@ -2359,6 +2384,18 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 		return errors.New("simulated prune remove error")
 	}
 	_ = p.LinkTargetSkills(pruneTarget, TargetDiscord)
+	removeSkill = origRemove
+
+	// Test legacy symlink removal error branch in reconcileTargetSkills
+	symlinkTarget := filepath.Join(t.TempDir(), "symlink-target")
+	_ = os.Symlink(t.TempDir(), symlinkTarget)
+	removeSkill = func(name string) error {
+		if name == symlinkTarget {
+			return errors.New("simulated symlink remove error")
+		}
+		return origRemove(name)
+	}
+	_ = p.LinkTargetSkills(symlinkTarget, TargetDiscord)
 	removeSkill = origRemove
 
 	symlinkSkill = origSymlink
