@@ -21,120 +21,18 @@ func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
 		wantQuery  map[string]string
 		omitQuery  []string
 	}{
-		{
-			name:    "empty base URL errors",
-			baseURL: "",
-			query:   url.Values{},
-			wantErr: true,
-		},
-		{
-			name:    "control characters in base URL error",
-			baseURL: "http://brain:\x7f8080",
-			query:   url.Values{},
-			wantErr: true,
-		},
-		{
-			name:       "trailing slash normalized",
-			baseURL:    "http://brain:8080/",
-			query:      url.Values{},
-			wantLimit:  0,
-			wantOffset: 0,
-			wantErr:    false,
-			omitQuery:  []string{"limit", "offset", "category", "q"},
-		},
-		{
-			name:       "nil query handled cleanly",
-			baseURL:    "http://brain:8080",
-			query:      nil,
-			wantLimit:  0,
-			wantOffset: 0,
-			wantErr:    false,
-		},
-		{
-			name:    "positive limit and offset forwarded",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"limit":  []string{"25"},
-				"offset": []string{"10"},
-			},
-			wantLimit:  25,
-			wantOffset: 10,
-			wantErr:    false,
-			wantQuery: map[string]string{
-				"limit":  "25",
-				"offset": "10",
-			},
-		},
-		{
-			name:    "zero or negative limit and offset omitted",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"limit":  []string{"0"},
-				"offset": []string{"0"},
-			},
-			wantLimit:  0,
-			wantOffset: 0,
-			wantErr:    false,
-			omitQuery:  []string{"limit", "offset"},
-		},
-		{
-			name:    "negative or invalid limit and offset omitted",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"limit":  []string{"-5"},
-				"offset": []string{"invalid"},
-			},
-			wantLimit:  0,
-			wantOffset: 0,
-			wantErr:    false,
-			omitQuery:  []string{"limit", "offset"},
-		},
-		{
-			name:    "category and q trimmed and forwarded",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"category": []string{"  system  "},
-				"q":        []string{"  docker deploy  "},
-			},
-			wantErr: false,
-			wantQuery: map[string]string{
-				"category": "system",
-				"q":        "docker deploy",
-			},
-		},
-		{
-			name:    "empty category and q omitted",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"category": []string{"   "},
-				"q":        []string{"   "},
-			},
-			wantErr:   false,
-			omitQuery: []string{"category", "q"},
-		},
-		{
-			name:    "long ASCII q clamped to 64 runes",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"q": []string{strings.Repeat("a", 100)},
-			},
-			wantErr: false,
-			wantQuery: map[string]string{
-				"q": strings.Repeat("a", 64),
-			},
-		},
-		{
-			name:    "multibyte unicode kanji clamped to 64 runes without UTF-8 corruption",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				// 70 kanji characters (each 3 bytes in UTF-8)
-				"q": []string{strings.Repeat("電", 70)},
-			},
-			wantErr: false,
-			wantQuery: map[string]string{
-				"q": strings.Repeat("電", 64),
-			},
-		},
+		{name: "empty base URL errors", baseURL: "", query: url.Values{}, wantErr: true},
+		{name: "control characters in base URL error", baseURL: "http://brain:\x7f8080", query: url.Values{}, wantErr: true},
+		{name: "invalid url parse input error", baseURL: "http://[::1]:namedport", query: url.Values{}, wantErr: true},
+		{name: "trailing slash normalized", baseURL: "http://brain:8080/", query: url.Values{}, omitQuery: []string{"limit", "offset", "category", "q"}},
+		{name: "nil query handled cleanly", baseURL: "http://brain:8080", query: nil},
+		{name: "positive limit and offset forwarded", baseURL: "http://brain:8080", query: url.Values{"limit": {"25"}, "offset": {"10"}}, wantLimit: 25, wantOffset: 10, wantQuery: map[string]string{"limit": "25", "offset": "10"}},
+		{name: "zero or negative limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"0"}, "offset": {"0"}}, omitQuery: []string{"limit", "offset"}},
+		{name: "negative or invalid limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"-5"}, "offset": {"invalid"}}, omitQuery: []string{"limit", "offset"}},
+		{name: "category and q trimmed and forwarded", baseURL: "http://brain:8080", query: url.Values{"category": {"  system  "}, "q": {"  docker deploy  "}}, wantQuery: map[string]string{"category": "system", "q": "docker deploy"}},
+		{name: "empty category and q omitted", baseURL: "http://brain:8080", query: url.Values{"category": {"   "}, "q": {"   "}}, omitQuery: []string{"category", "q"}},
+		{name: "long ASCII q clamped to 64 runes", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("a", 100)}}, wantQuery: map[string]string{"q": strings.Repeat("a", 64)}},
+		{name: "multibyte unicode kanji clamped to 64 runes without UTF-8 corruption", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("電", 70)}}, wantQuery: map[string]string{"q": strings.Repeat("電", 64)}},
 	}
 
 	for _, tt := range tests {
@@ -188,28 +86,10 @@ func TestBuildSchedulesUpstreamURL_TableDriven(t *testing.T) {
 		wantURL string
 		wantErr bool
 	}{
-		{
-			name:    "empty base URL returns error",
-			baseURL: "",
-			wantErr: true,
-		},
-		{
-			name:    "control character returns error",
-			baseURL: "http://brain:\x7f8080",
-			wantErr: true,
-		},
-		{
-			name:    "clean base URL without trailing slash",
-			baseURL: "http://brain:8080",
-			wantURL: "http://brain:8080/schedules",
-			wantErr: false,
-		},
-		{
-			name:    "base URL with trailing slash normalized",
-			baseURL: "http://brain:8080/",
-			wantURL: "http://brain:8080/schedules",
-			wantErr: false,
-		},
+		{name: "empty base URL returns error", baseURL: "", wantErr: true},
+		{name: "control character returns error", baseURL: "http://brain:\x7f8080", wantErr: true},
+		{name: "clean base URL without trailing slash", baseURL: "http://brain:8080", wantURL: "http://brain:8080/schedules"},
+		{name: "base URL with trailing slash normalized", baseURL: "http://brain:8080/", wantURL: "http://brain:8080/schedules"},
 	}
 
 	for _, tt := range tests {
@@ -235,89 +115,13 @@ func TestBuildScheduleRunsUpstreamURL_TableDriven(t *testing.T) {
 		wantErr    bool
 		wantQuery  map[string]string
 	}{
-		{
-			name:    "empty base URL returns error",
-			baseURL: "",
-			wantErr: true,
-		},
-		{
-			name:    "control characters in URL return error",
-			baseURL: "http://brain:\x7f8080",
-			wantErr: true,
-		},
-		{
-			name:       "defaults applied when query is empty",
-			baseURL:    "http://brain:8080/",
-			query:      url.Values{},
-			wantLimit:  50,
-			wantOffset: 0,
-			wantErr:    false,
-			wantQuery: map[string]string{
-				"limit":  "50",
-				"offset": "0",
-			},
-		},
-		{
-			name:       "nil query receives defaults",
-			baseURL:    "http://brain:8080",
-			query:      nil,
-			wantLimit:  50,
-			wantOffset: 0,
-			wantErr:    false,
-			wantQuery: map[string]string{
-				"limit":  "50",
-				"offset": "0",
-			},
-		},
-		{
-			name:    "valid limit and offset within boundaries",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"limit":       []string{"100"},
-				"offset":      []string{"20"},
-				"schedule_id": []string{"  cron-test  "},
-				"status":      []string{"  success  "},
-			},
-			wantLimit:  100,
-			wantOffset: 20,
-			wantErr:    false,
-			wantQuery: map[string]string{
-				"limit":       "100",
-				"offset":      "20",
-				"schedule_id": "cron-test",
-				"status":      "success",
-			},
-		},
-		{
-			name:    "limit > 100 falls back to default 50",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"limit":  []string{"150"},
-				"offset": []string{"-5"},
-			},
-			wantLimit:  50,
-			wantOffset: 0,
-			wantErr:    false,
-			wantQuery: map[string]string{
-				"limit":  "50",
-				"offset": "0",
-			},
-		},
-		{
-			name:    "invalid non-integer limit and offset fall back to defaults",
-			baseURL: "http://brain:8080",
-			query: url.Values{
-				"limit":  []string{"abc"},
-				"offset": []string{"xyz"},
-			},
-			wantLimit:  50,
-			wantOffset: 0,
-			wantErr:    false,
-			wantQuery: map[string]string{
-				"limit":  "50",
-				"offset": "0",
-			},
-		},
+		{name: "empty base URL returns error", baseURL: "", wantErr: true},
+		{name: "control characters in URL return error", baseURL: "http://brain:\x7f8080", wantErr: true},
+		{name: "defaults applied when query is empty", baseURL: "http://brain:8080/", query: url.Values{}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
+		{name: "nil query receives defaults", baseURL: "http://brain:8080", query: nil, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
+		{name: "valid limit and offset within boundaries", baseURL: "http://brain:8080", query: url.Values{"limit": {"100"}, "offset": {"20"}, "schedule_id": {"  cron-test  "}, "status": {"  success  "}}, wantLimit: 100, wantOffset: 20, wantQuery: map[string]string{"limit": "100", "offset": "20", "schedule_id": "cron-test", "status": "success"}},
+		{name: "limit > 100 falls back to default 50", baseURL: "http://brain:8080", query: url.Values{"limit": {"150"}, "offset": {"-5"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
+		{name: "invalid non-integer limit and offset fall back to defaults", baseURL: "http://brain:8080", query: url.Values{"limit": {"abc"}, "offset": {"xyz"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
 	}
 
 	for _, tt := range tests {
@@ -363,100 +167,15 @@ func TestBuildVanadisBuildsUpstreamURL_TableDriven(t *testing.T) {
 		wantErr   bool
 		wantQuery map[string]string
 	}{
-		{
-			name:    "empty base URL returns error",
-			baseURL: "",
-			wantErr: true,
-		},
-		{
-			name:    "control characters in URL return error",
-			baseURL: "http://vanadis:\x7f8080",
-			wantErr: true,
-		},
-		{
-			name:      "defaults applied when query is empty",
-			baseURL:   "http://vanadis.aerial/",
-			query:     url.Values{},
-			wantLimit: 50,
-			wantErr:   false,
-			wantQuery: map[string]string{
-				"limit": "50",
-			},
-		},
-		{
-			name:      "nil query receives default limit 50",
-			baseURL:   "http://vanadis.aerial",
-			query:     nil,
-			wantLimit: 50,
-			wantErr:   false,
-			wantQuery: map[string]string{
-				"limit": "50",
-			},
-		},
-		{
-			name:    "valid limit and query params within boundaries",
-			baseURL: "http://vanadis.aerial",
-			query: url.Values{
-				"limit":       []string{"25"},
-				"status":      []string{"  running  "},
-				"queue_state": []string{"  running  "},
-			},
-			wantLimit: 25,
-			wantErr:   false,
-			wantQuery: map[string]string{
-				"limit":       "25",
-				"status":      "running",
-				"queue_state": "running",
-			},
-		},
-		{
-			name:    "limit > 100 clamped to 100",
-			baseURL: "http://vanadis.aerial",
-			query: url.Values{
-				"limit": []string{"200"},
-			},
-			wantLimit: 100,
-			wantErr:   false,
-			wantQuery: map[string]string{
-				"limit": "100",
-			},
-		},
-		{
-			name:    "limit < 1 clamped to 1",
-			baseURL: "http://vanadis.aerial",
-			query: url.Values{
-				"limit": []string{"0"},
-			},
-			wantLimit: 1,
-			wantErr:   false,
-			wantQuery: map[string]string{
-				"limit": "1",
-			},
-		},
-		{
-			name:    "negative limit clamped to 1",
-			baseURL: "http://vanadis.aerial",
-			query: url.Values{
-				"limit": []string{"-10"},
-			},
-			wantLimit: 1,
-			wantErr:   false,
-			wantQuery: map[string]string{
-				"limit": "1",
-			},
-		},
-		{
-			name:    "invalid non-integer limit falls back to default 50",
-			baseURL: "http://vanadis.aerial",
-			query: url.Values{
-				"limit": []string{"invalid"},
-			},
-			wantLimit: 50,
-			wantErr:   false,
-			wantQuery: map[string]string{
-				"limit": "50",
-			},
-		},
+		{name: "empty base URL returns error", baseURL: "", wantErr: true},
+		{name: "control characters in URL return error", baseURL: "http://vanadis:\x7f8080", wantErr: true},
+		{name: "defaults applied when query is empty", baseURL: "http://vanadis.aerial/", query: url.Values{}, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
+		{name: "nil query receives default limit 50", baseURL: "http://vanadis.aerial", query: nil, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
+		{name: "valid limit and query params within boundaries", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"25"}, "status": {"  running  "}, "queue_state": {"  running  "}}, wantLimit: 25, wantQuery: map[string]string{"limit": "25", "status": "running", "queue_state": "running"}},
+		{name: "limit > 100 clamped to 100", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"200"}}, wantLimit: 100, wantQuery: map[string]string{"limit": "100"}},
+		{name: "limit < 1 clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"0"}}, wantLimit: 1, wantQuery: map[string]string{"limit": "1"}},
+		{name: "negative limit clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"-10"}}, wantLimit: 1, wantQuery: map[string]string{"limit": "1"}},
+		{name: "invalid non-integer limit falls back to default 50", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"invalid"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
 	}
 
 	for _, tt := range tests {
@@ -499,70 +218,16 @@ func TestBuildVanadisBuildDetailUpstreamURL_TableDriven(t *testing.T) {
 		wantURL     string
 		wantErr     bool
 	}{
-		{
-			name:        "empty base URL returns error",
-			baseURL:     "",
-			requestPath: "/api/builds/build-123",
-			wantErr:     true,
-		},
-		{
-			name:        "control characters in URL return error",
-			baseURL:     "http://vanadis:\x7f8080",
-			requestPath: "/api/builds/build-123",
-			wantErr:     true,
-		},
-		{
-			name:        "valid /api/builds/ prefix",
-			baseURL:     "http://vanadis.aerial",
-			requestPath: "/api/builds/build-1792214230",
-			wantID:      "build-1792214230",
-			wantURL:     "http://vanadis.aerial/builds/build-1792214230",
-			wantErr:     false,
-		},
-		{
-			name:        "valid /dashboard/api/builds/ prefix with trailing slash baseURL",
-			baseURL:     "http://vanadis.aerial/",
-			requestPath: "/dashboard/api/builds/build-1792214230",
-			wantID:      "build-1792214230",
-			wantURL:     "http://vanadis.aerial/builds/build-1792214230",
-			wantErr:     false,
-		},
-		{
-			name:        "missing expected prefix returns error",
-			baseURL:     "http://vanadis.aerial",
-			requestPath: "/api/other/build-123",
-			wantErr:     true,
-		},
-		{
-			name:        "empty build ID on /api/builds/ returns error",
-			baseURL:     "http://vanadis.aerial",
-			requestPath: "/api/builds/",
-			wantErr:     true,
-		},
-		{
-			name:        "empty build ID on /dashboard/api/builds/ returns error",
-			baseURL:     "http://vanadis.aerial",
-			requestPath: "/dashboard/api/builds/",
-			wantErr:     true,
-		},
-		{
-			name:        "path traversal with .. returns error",
-			baseURL:     "http://vanadis.aerial",
-			requestPath: "/api/builds/../evil",
-			wantErr:     true,
-		},
-		{
-			name:        "path traversal with embedded slash returns error",
-			baseURL:     "http://vanadis.aerial",
-			requestPath: "/api/builds/build/subpath",
-			wantErr:     true,
-		},
-		{
-			name:        "control characters in build ID return error",
-			baseURL:     "http://vanadis.aerial",
-			requestPath: "/api/builds/build-\x00bad",
-			wantErr:     true,
-		},
+		{name: "empty base URL returns error", baseURL: "", requestPath: "/api/builds/build-123", wantErr: true},
+		{name: "control characters in URL return error", baseURL: "http://vanadis:\x7f8080", requestPath: "/api/builds/build-123", wantErr: true},
+		{name: "valid /api/builds/ prefix", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/build-1792214230", wantID: "build-1792214230", wantURL: "http://vanadis.aerial/builds/build-1792214230"},
+		{name: "valid /dashboard/api/builds/ prefix with trailing slash baseURL", baseURL: "http://vanadis.aerial/", requestPath: "/dashboard/api/builds/build-1792214230", wantID: "build-1792214230", wantURL: "http://vanadis.aerial/builds/build-1792214230"},
+		{name: "missing expected prefix returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/other/build-123", wantErr: true},
+		{name: "empty build ID on /api/builds/ returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/", wantErr: true},
+		{name: "empty build ID on /dashboard/api/builds/ returns error", baseURL: "http://vanadis.aerial", requestPath: "/dashboard/api/builds/", wantErr: true},
+		{name: "path traversal with .. returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/../evil", wantErr: true},
+		{name: "path traversal with embedded slash returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/build/subpath", wantErr: true},
+		{name: "control characters in build ID return error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/build-\x00bad", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -887,6 +552,23 @@ func TestParseMatrixJobChips_TableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "zero reference time defaults to now",
+			jobs: []GitHubJob{
+				{
+					Name:      "brain-build",
+					Status:    "in_progress",
+					StartedAt: time.Now().Add(-10 * time.Second),
+				},
+			},
+			now:     time.Time{},
+			wantLen: 1,
+			validate: func(t *testing.T, chips []MatrixJobChip) {
+				if chips[0].Name != "brain" || chips[0].Status != "active" {
+					t.Errorf("unexpected chip: %+v", chips[0])
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1005,6 +687,70 @@ func TestBuildContainerChips_TableDriven(t *testing.T) {
 			validate: func(t *testing.T, chips []MatrixJobChip) {
 				if chips[0].Duration != "0s" {
 					t.Errorf("expected Duration '0s', got %q", chips[0].Duration)
+				}
+			},
+		},
+		{
+			name: "nomad containers with alloc_id labels",
+			containers: []DockerContainerJSON{
+				{
+					ID:      "brain-nomad",
+					Names:   []string{"/brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0"},
+					Created: refTime.Add(-120 * time.Second).Unix(),
+					State:   "running",
+					Labels: map[string]string{
+						"aerial.service":               "brain",
+						"com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0",
+					},
+				},
+				{
+					ID:      "vm-nomad",
+					Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
+					Created: refTime.Add(-300 * time.Second).Unix(),
+					State:   "running",
+					Labels: map[string]string{
+						"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
+					},
+				},
+				{
+					ID:    "hassio-supervisor",
+					Names: []string{"/hassio_supervisor"},
+					State: "running",
+				},
+			},
+			now:     refTime,
+			wantLen: 2,
+			validate: func(t *testing.T, chips []MatrixJobChip) {
+				chipMap := make(map[string]MatrixJobChip)
+				for _, chip := range chips {
+					chipMap[chip.Name] = chip
+				}
+				if brainChip, ok := chipMap["brain"]; !ok {
+					t.Errorf("missing chip for brain")
+				} else if brainChip.Status != "completed" || brainChip.Conclusion != "success" {
+					t.Errorf("unexpected brain chip status/conclusion: %+v", brainChip)
+				}
+				if vmChip, ok := chipMap["victoriametrics-mcp"]; !ok {
+					t.Errorf("missing chip for victoriametrics-mcp")
+				} else if vmChip.Status != "completed" {
+					t.Errorf("unexpected victoriametrics chip status: %+v", vmChip)
+				}
+			},
+		},
+		{
+			name: "zero reference time defaults to now",
+			containers: []DockerContainerJSON{
+				{
+					Names:   []string{"/aerial-brain"},
+					Created: time.Now().Unix() - 10,
+					State:   "running",
+				},
+			},
+			now:     time.Time{},
+			wantLen: 1,
+			validate: func(t *testing.T, chips []MatrixJobChip) {
+				if chips[0].Status != "completed" || chips[0].Conclusion != "success" {
+					t.Errorf("unexpected chip status/conclusion: %+v", chips[0])
 				}
 			},
 		},
@@ -1381,6 +1127,23 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 			wantOngoing: true,
 		},
 		{
+			name: "pulling deployment returns pulling and true",
+			deployments: []DeploymentStatus{
+				{Stage: "pulling", Progress: 55},
+			},
+			wantStatus:  "pulling",
+			wantOngoing: true,
+		},
+		{
+			name: "precedence: pulling overrides building",
+			deployments: []DeploymentStatus{
+				{Stage: "building"},
+				{Stage: "pulling"},
+			},
+			wantStatus:  "pulling",
+			wantOngoing: true,
+		},
+		{
 			name: "failed deployment returns failed and false",
 			deployments: []DeploymentStatus{
 				{Stage: "failed", Progress: 0},
@@ -1435,6 +1198,9 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 			gotOngoing := IsDeployOngoing(tt.deployments)
 			if gotOngoing != tt.wantOngoing {
 				t.Errorf("IsDeployOngoing() = %v, want %v", gotOngoing, tt.wantOngoing)
+			}
+			for _, d := range tt.deployments {
+				_ = IsDeployOngoing(d.Stage)
 			}
 		})
 	}
@@ -1649,18 +1415,6 @@ func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 	}
 }
 
-func TestCalculateDeployStatus_Pulling(t *testing.T) {
-	if got := IsDeployOngoing("pulling"); !got {
-		t.Fatalf("expected IsDeployOngoing(\"pulling\") to be true, got false")
-	}
-	deps := []DeploymentStatus{
-		{Stage: "building"},
-		{Stage: "pulling"},
-	}
-	if got := CalculateDeployStatus(deps); got != "pulling" {
-		t.Fatalf("expected CalculateDeployStatus to return pulling, got %s", got)
-	}
-}
 
 func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 	t.Parallel()
@@ -2720,335 +2474,339 @@ func TestExtractAerialServiceName(t *testing.T) {
 	}
 }
 
-func TestBuildContainerChips_NomadContainers(t *testing.T) {
-	now := time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC)
-	rawContainers := []DockerContainerJSON{
-		{
-			ID:      "brain-nomad",
-			Names:   []string{"/brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0"},
-			Created: now.Add(-120 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"aerial.service":               "brain",
-				"com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0",
-			},
-		},
-		{
-			ID:      "vm-nomad",
-			Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
-			Created: now.Add(-300 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
-			},
-		},
-		{
-			ID:    "hassio-supervisor",
-			Names: []string{"/hassio_supervisor"},
-			State: "running",
-		},
-	}
-
-	chips := BuildContainerChips(rawContainers, now)
-	if len(chips) != 2 {
-		t.Fatalf("expected 2 chips for Nomad containers, got %d", len(chips))
-	}
-
-	chipMap := make(map[string]MatrixJobChip)
-	for _, chip := range chips {
-		chipMap[chip.Name] = chip
-	}
-
-	if brainChip, ok := chipMap["brain"]; !ok {
-		t.Errorf("missing chip for brain")
-	} else if brainChip.Status != "completed" || brainChip.Conclusion != "success" {
-		t.Errorf("unexpected brain chip status/conclusion: %+v", brainChip)
-	}
-
-	if vmChip, ok := chipMap["victoriametrics-mcp"]; !ok {
-		t.Errorf("missing chip for victoriametrics-mcp")
-	} else if vmChip.Status != "completed" {
-		t.Errorf("unexpected victoriametrics chip status: %+v", vmChip)
-	}
-}
 
 func TestParseNomadClusterState(t *testing.T) {
 	now := time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC)
-
-	t.Run("Healthy services with deployment", func(t *testing.T) {
-		jobs := []NomadJobItem{
-			{ID: "brain", Type: "service", Status: "running"},
-		}
-		allocs := []NomadAllocItem{
-			{
-				ID:           "alloc-brain",
-				JobID:        "brain",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-60 * time.Second).UnixNano(),
-				DeploymentStatus: &NomadDeploymentStatus{
-					Healthy: true,
-				},
-			},
-		}
-		jobsData, _ := json.Marshal(jobs)
-		allocsData, _ := json.Marshal(allocs)
-
-		services, err := ParseNomadClusterState(jobsData, allocsData, now)
+	mustJSON := func(v any) []byte {
+		b, err := json.Marshal(v)
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("failed to marshal JSON: %v", err)
 		}
-		if len(services) != 1 {
-			t.Fatalf("expected 1 service, got %d", len(services))
-		}
-		if services[0].Name != "brain" || services[0].Status != "healthy" || services[0].UptimeSeconds != 60 {
-			t.Errorf("unexpected service status: %+v", services[0])
-		}
-	})
+		return b
+	}
 
-	t.Run("Starting service with deployment healthy=false", func(t *testing.T) {
-		jobs := []NomadJobItem{
-			{ID: "hangar", Type: "service", Status: "running"},
-		}
-		allocs := []NomadAllocItem{
-			{
-				ID:           "alloc-hangar",
-				JobID:        "hangar",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-10 * time.Second).UnixNano(),
-				DeploymentStatus: &NomadDeploymentStatus{
-					Healthy: false,
-				},
-				TaskStates: map[string]NomadTaskState{
-					"task1": {State: "running"},
-				},
-			},
-		}
-		jobsData, _ := json.Marshal(jobs)
-		allocsData, _ := json.Marshal(allocs)
-
-		services, err := ParseNomadClusterState(jobsData, allocsData, now)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(services) != 1 || services[0].Status != "starting" || services[0].UptimeSeconds != 10 {
-			t.Errorf("expected starting service with 10s uptime, got: %+v", services)
-		}
-
-		// Also test pending state in task
-		allocs[0].TaskStates = map[string]NomadTaskState{
-			"task1": {State: "pending"},
-		}
-		allocsData, _ = json.Marshal(allocs)
-		services, err = ParseNomadClusterState(jobsData, allocsData, now)
-		if err != nil || len(services) != 1 || services[0].Status != "starting" {
-			t.Errorf("expected starting for pending task, got: %+v", services)
-		}
-
-		// Also test no running or pending tasks (e.g. dead)
-		allocs[0].TaskStates = map[string]NomadTaskState{
-			"task1": {State: "dead"},
-		}
-		allocsData, _ = json.Marshal(allocs)
-		services, err = ParseNomadClusterState(jobsData, allocsData, now)
-		if err != nil || len(services) != 1 || services[0].Status != "unhealthy" {
-			t.Errorf("expected unhealthy for dead task, got: %+v", services)
-		}
-	})
-
-	t.Run("Unhealthy service with failed task or no allocs", func(t *testing.T) {
-		jobs := []NomadJobItem{
-			{ID: "svc-failed", Type: "service", Status: "running"},
-			{ID: "svc-no-alloc", Type: "service", Status: "dead"},
-		}
-		allocs := []NomadAllocItem{
-			{
-				ID:           "alloc-failed",
-				JobID:        "svc-failed",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-30 * time.Second).UnixNano(),
-				TaskStates: map[string]NomadTaskState{
-					"task1": {State: "running", Failed: true},
-				},
-			},
-		}
-		jobsData, _ := json.Marshal(jobs)
-		allocsData, _ := json.Marshal(allocs)
-
-		services, err := ParseNomadClusterState(jobsData, allocsData, now)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(services) != 2 {
-			t.Fatalf("expected 2 services, got %d", len(services))
-		}
-		if services[0].Name != "svc-failed" || services[0].Status != "unhealthy" {
-			t.Errorf("unexpected svc-failed status: %+v", services[0])
-		}
-		if services[1].Name != "svc-no-alloc" || services[1].Status != "unhealthy" || services[1].UptimeSeconds != 0 {
-			t.Errorf("unexpected svc-no-alloc status: %+v", services[1])
-		}
-	})
-
-	t.Run("Nil deployment status with healthy/unhealthy tasks", func(t *testing.T) {
-		jobs := []NomadJobItem{
-			{ID: "proxy", Type: "service", Status: "running"},
-			{ID: "gateway", Type: "service", Status: "running"},
-		}
-		allocs := []NomadAllocItem{
-			{
-				ID:               "alloc-proxy",
-				JobID:            "proxy",
-				ClientStatus:     "running",
-				CreateTime:       now.Add(-100 * time.Second).UnixNano(),
-				DeploymentStatus: nil,
-				TaskStates: map[string]NomadTaskState{
-					"proxy-task": {State: "running", Failed: false},
-				},
-			},
-			{
-				ID:               "alloc-gateway",
-				JobID:            "gateway",
-				ClientStatus:     "running",
-				CreateTime:       now.Add(-100 * time.Second).UnixNano(),
-				DeploymentStatus: nil,
-				TaskStates: map[string]NomadTaskState{
-					"gateway-task": {State: "pending", Failed: false},
-				},
-			},
-		}
-		jobsData, _ := json.Marshal(jobs)
-		allocsData, _ := json.Marshal(allocs)
-
-		services, err := ParseNomadClusterState(jobsData, allocsData, now)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(services) != 2 {
-			t.Fatalf("expected 2 services, got %d", len(services))
-		}
-		// Alphabetical sort: gateway, proxy
-		if services[0].Name != "gateway" || services[0].Status != "unhealthy" {
-			t.Errorf("expected gateway unhealthy, got: %+v", services[0])
-		}
-		if services[1].Name != "proxy" || services[1].Status != "healthy" || services[1].UptimeSeconds != 100 {
-			t.Errorf("expected proxy healthy, got: %+v", services[1])
-		}
-	})
-
-	t.Run("No running alloc with pending status or starting group", func(t *testing.T) {
-		jobs := []NomadJobItem{
-			{
-				ID:     "pending-svc",
-				Type:   "service",
-				Status: "pending",
-			},
-			{
-				ID:     "starting-svc",
-				Type:   "service",
-				Status: "running",
-				JobSummary: struct {
-					Summary map[string]NomadJobSummaryGroup `json:"Summary"`
-				}{
-					Summary: map[string]NomadJobSummaryGroup{
-						"web": {Starting: 1},
+	tests := []struct {
+		name       string
+		jobsData   []byte
+		allocsData []byte
+		now        time.Time
+		wantErr    bool
+		wantCount  int
+		validate   func(t *testing.T, services []ServiceStatus)
+	}{
+		{
+			name: "healthy services with deployment",
+			jobsData: mustJSON([]NomadJobItem{
+				{ID: "brain", Type: "service", Status: "running"},
+			}),
+			allocsData: mustJSON([]NomadAllocItem{
+				{
+					ID:           "alloc-brain",
+					JobID:        "brain",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-60 * time.Second).UnixNano(),
+					DeploymentStatus: &NomadDeploymentStatus{
+						Healthy: true,
 					},
 				},
+			}),
+			now:       now,
+			wantCount: 1,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Name != "brain" || services[0].Status != "healthy" || services[0].UptimeSeconds != 60 {
+					t.Errorf("unexpected service status: %+v", services[0])
+				}
 			},
-		}
-		jobsData, _ := json.Marshal(jobs)
-		allocsData := []byte("[]")
-
-		services, err := ParseNomadClusterState(jobsData, allocsData, now)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(services) != 2 {
-			t.Fatalf("expected 2 services, got %d", len(services))
-		}
-		if services[0].Name != "pending-svc" || services[0].Status != "starting" {
-			t.Errorf("expected pending-svc starting, got: %+v", services[0])
-		}
-		if services[1].Name != "starting-svc" || services[1].Status != "starting" {
-			t.Errorf("expected starting-svc starting, got: %+v", services[1])
-		}
-	})
-
-	t.Run("Multiple running allocs selects highest CreateTime and filters batch", func(t *testing.T) {
-		jobs := []NomadJobItem{
-			{ID: "svc-multi", Type: "service", Status: "running"},
-			{ID: "batch-ignored", Type: "batch", Status: "running"},
-			{ID: "", Name: "named-only", Type: "service", Status: "running"},
-			{ID: "", Name: "", Type: "service", Status: "running"},
-		}
-		allocs := []NomadAllocItem{
-			{
-				ID:           "alloc-old",
-				JobID:        "svc-multi",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-200 * time.Second).UnixNano(),
-				DeploymentStatus: &NomadDeploymentStatus{
-					Healthy: false,
+		},
+		{
+			name: "starting service with deployment healthy=false and running task",
+			jobsData: mustJSON([]NomadJobItem{
+				{ID: "hangar", Type: "service", Status: "running"},
+			}),
+			allocsData: mustJSON([]NomadAllocItem{
+				{
+					ID:           "alloc-hangar",
+					JobID:        "hangar",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
+					DeploymentStatus: &NomadDeploymentStatus{
+						Healthy: false,
+					},
+					TaskStates: map[string]NomadTaskState{
+						"task1": {State: "running"},
+					},
 				},
+			}),
+			now:       now,
+			wantCount: 1,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Status != "starting" || services[0].UptimeSeconds != 10 {
+					t.Errorf("expected starting service with 10s uptime, got: %+v", services)
+				}
 			},
-			{
-				ID:           "alloc-new",
-				JobID:        "svc-multi",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-40 * time.Second).UnixNano(),
-				DeploymentStatus: &NomadDeploymentStatus{
-					Healthy: true,
+		},
+		{
+			name: "starting service with deployment healthy=false and pending task",
+			jobsData: mustJSON([]NomadJobItem{
+				{ID: "hangar", Type: "service", Status: "running"},
+			}),
+			allocsData: mustJSON([]NomadAllocItem{
+				{
+					ID:           "alloc-hangar",
+					JobID:        "hangar",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
+					DeploymentStatus: &NomadDeploymentStatus{
+						Healthy: false,
+					},
+					TaskStates: map[string]NomadTaskState{
+						"task1": {State: "pending"},
+					},
 				},
+			}),
+			now:       now,
+			wantCount: 1,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Status != "starting" {
+					t.Errorf("expected starting for pending task, got: %+v", services)
+				}
 			},
-			{
-				ID:           "alloc-batch",
-				JobID:        "batch-ignored",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-10 * time.Second).UnixNano(),
-			},
-			{
-				ID:           "alloc-named",
-				JobID:        "named-only",
-				ClientStatus: "running",
-				CreateTime:   now.Add(-15 * time.Second).UnixNano(),
-				DeploymentStatus: &NomadDeploymentStatus{
-					Healthy: true,
+		},
+		{
+			name: "unhealthy service with dead task",
+			jobsData: mustJSON([]NomadJobItem{
+				{ID: "hangar", Type: "service", Status: "running"},
+			}),
+			allocsData: mustJSON([]NomadAllocItem{
+				{
+					ID:           "alloc-hangar",
+					JobID:        "hangar",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
+					DeploymentStatus: &NomadDeploymentStatus{
+						Healthy: false,
+					},
+					TaskStates: map[string]NomadTaskState{
+						"task1": {State: "dead"},
+					},
 				},
+			}),
+			now:       now,
+			wantCount: 1,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Status != "unhealthy" {
+					t.Errorf("expected unhealthy for dead task, got: %+v", services)
+				}
 			},
-			{
-				ID:           "alloc-nonrunning",
-				JobID:        "svc-multi",
-				ClientStatus: "complete",
-				CreateTime:   now.Add(-5 * time.Second).UnixNano(),
+		},
+		{
+			name: "unhealthy service with failed task or no allocs",
+			jobsData: mustJSON([]NomadJobItem{
+				{ID: "svc-failed", Type: "service", Status: "running"},
+				{ID: "svc-no-alloc", Type: "service", Status: "dead"},
+			}),
+			allocsData: mustJSON([]NomadAllocItem{
+				{
+					ID:           "alloc-failed",
+					JobID:        "svc-failed",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-30 * time.Second).UnixNano(),
+					TaskStates: map[string]NomadTaskState{
+						"task1": {State: "running", Failed: true},
+					},
+				},
+			}),
+			now:       now,
+			wantCount: 2,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Name != "svc-failed" || services[0].Status != "unhealthy" {
+					t.Errorf("unexpected svc-failed status: %+v", services[0])
+				}
+				if services[1].Name != "svc-no-alloc" || services[1].Status != "unhealthy" || services[1].UptimeSeconds != 0 {
+					t.Errorf("unexpected svc-no-alloc status: %+v", services[1])
+				}
 			},
-		}
-		jobsData, _ := json.Marshal(jobs)
-		allocsData, _ := json.Marshal(allocs)
+		},
+		{
+			name: "nil deployment status with healthy and unhealthy tasks",
+			jobsData: mustJSON([]NomadJobItem{
+				{ID: "proxy", Type: "service", Status: "running"},
+				{ID: "gateway", Type: "service", Status: "running"},
+			}),
+			allocsData: mustJSON([]NomadAllocItem{
+				{
+					ID:               "alloc-proxy",
+					JobID:            "proxy",
+					ClientStatus:     "running",
+					CreateTime:       now.Add(-100 * time.Second).UnixNano(),
+					DeploymentStatus: nil,
+					TaskStates: map[string]NomadTaskState{
+						"proxy-task": {State: "running", Failed: false},
+					},
+				},
+				{
+					ID:               "alloc-gateway",
+					JobID:            "gateway",
+					ClientStatus:     "running",
+					CreateTime:       now.Add(-100 * time.Second).UnixNano(),
+					DeploymentStatus: nil,
+					TaskStates: map[string]NomadTaskState{
+						"gateway-task": {State: "pending", Failed: false},
+					},
+				},
+			}),
+			now:       now,
+			wantCount: 2,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Name != "gateway" || services[0].Status != "unhealthy" {
+					t.Errorf("expected gateway unhealthy, got: %+v", services[0])
+				}
+				if services[1].Name != "proxy" || services[1].Status != "healthy" || services[1].UptimeSeconds != 100 {
+					t.Errorf("expected proxy healthy, got: %+v", services[1])
+				}
+			},
+		},
+		{
+			name: "no running alloc with pending status or starting group",
+			jobsData: mustJSON([]NomadJobItem{
+				{
+					ID:     "pending-svc",
+					Type:   "service",
+					Status: "pending",
+				},
+				{
+					ID:     "starting-svc",
+					Type:   "service",
+					Status: "running",
+					JobSummary: struct {
+						Summary map[string]NomadJobSummaryGroup `json:"Summary"`
+					}{
+						Summary: map[string]NomadJobSummaryGroup{
+							"web": {Starting: 1},
+						},
+					},
+				},
+			}),
+			allocsData: []byte("[]"),
+			now:        now,
+			wantCount:  2,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Name != "pending-svc" || services[0].Status != "starting" {
+					t.Errorf("expected pending-svc starting, got: %+v", services[0])
+				}
+				if services[1].Name != "starting-svc" || services[1].Status != "starting" {
+					t.Errorf("expected starting-svc starting, got: %+v", services[1])
+				}
+			},
+		},
+		{
+			name: "multiple running allocs selects highest CreateTime and filters batch",
+			jobsData: mustJSON([]NomadJobItem{
+				{ID: "svc-multi", Type: "service", Status: "running"},
+				{ID: "batch-ignored", Type: "batch", Status: "running"},
+				{ID: "", Name: "named-only", Type: "service", Status: "running"},
+				{ID: "", Name: "", Type: "service", Status: "running"},
+			}),
+			allocsData: mustJSON([]NomadAllocItem{
+				{
+					ID:           "alloc-old",
+					JobID:        "svc-multi",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-200 * time.Second).UnixNano(),
+					DeploymentStatus: &NomadDeploymentStatus{
+						Healthy: false,
+					},
+				},
+				{
+					ID:           "alloc-new",
+					JobID:        "svc-multi",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-40 * time.Second).UnixNano(),
+					DeploymentStatus: &NomadDeploymentStatus{
+						Healthy: true,
+					},
+				},
+				{
+					ID:           "alloc-batch",
+					JobID:        "batch-ignored",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
+				},
+				{
+					ID:           "alloc-named",
+					JobID:        "named-only",
+					ClientStatus: "running",
+					CreateTime:   now.Add(-15 * time.Second).UnixNano(),
+					DeploymentStatus: &NomadDeploymentStatus{
+						Healthy: true,
+					},
+				},
+				{
+					ID:           "alloc-nonrunning",
+					JobID:        "svc-multi",
+					ClientStatus: "complete",
+					CreateTime:   now.Add(-5 * time.Second).UnixNano(),
+				},
+			}),
+			now:       time.Time{},
+			wantCount: 2,
+			validate: func(t *testing.T, services []ServiceStatus) {
+				if services[0].Name != "named-only" || services[0].Status != "healthy" {
+					t.Errorf("unexpected named-only: %+v", services[0])
+				}
+				if services[1].Name != "svc-multi" || services[1].Status != "healthy" {
+					t.Errorf("unexpected svc-multi: %+v", services[1])
+				}
+			},
+		},
+		{
+			name:       "malformed jobs JSON returns error",
+			jobsData:   []byte("not valid json"),
+			allocsData: []byte("[]"),
+			now:        now,
+			wantErr:    true,
+		},
+		{
+			name:       "malformed allocs JSON returns error",
+			jobsData:   []byte("[]"),
+			allocsData: []byte("not valid json"),
+			now:        now,
+			wantErr:    true,
+		},
+		{
+			name:       "empty payloads returns empty slice",
+			jobsData:   []byte("[]"),
+			allocsData: []byte("[]"),
+			now:        now,
+			wantCount:  0,
+		},
+	}
 
-		services, err := ParseNomadClusterState(jobsData, allocsData, time.Time{})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(services) != 2 {
-			t.Fatalf("expected 2 services, got %d", len(services))
-		}
-		// Alphabetical: named-only, svc-multi
-		if services[0].Name != "named-only" || services[0].Status != "healthy" {
-			t.Errorf("unexpected named-only: %+v", services[0])
-		}
-		if services[1].Name != "svc-multi" || services[1].Status != "healthy" {
-			t.Errorf("unexpected svc-multi: %+v", services[1])
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			services, err := ParseNomadClusterState(tt.jobsData, tt.allocsData, tt.now)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseNomadClusterState() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if len(services) != tt.wantCount {
+				t.Fatalf("ParseNomadClusterState() count = %d, want %d", len(services), tt.wantCount)
+			}
+			if tt.validate != nil {
+				tt.validate(t, services)
+			}
+		})
+	}
+}
 
-	t.Run("Malformed JSON handling", func(t *testing.T) {
-		validData := []byte("[]")
-		badData := []byte("not valid json")
-
-		if _, err := ParseNomadClusterState(badData, validData, now); err == nil {
-			t.Error("expected error for malformed jobsData")
-		}
-		if _, err := ParseNomadClusterState(validData, badData, now); err == nil {
-			t.Error("expected error for malformed allocsData")
-		}
-	})
+func TestBuildDeploymentSteps(t *testing.T) {
+	steps := buildDeploymentSteps("active", "pending", "failed", "completed", "active")
+	if len(steps) != 5 {
+		t.Fatalf("expected 5 steps, got %d", len(steps))
+	}
+	if steps[0].Status != "active" {
+		t.Errorf("expected step 0 status active, got %s", steps[0].Status)
+	}
 }
