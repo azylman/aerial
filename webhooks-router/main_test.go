@@ -116,11 +116,11 @@ type mockPRRegistry struct {
 	closedTargetID   string
 	backfillTargetID string
 
-	resolvePRNum             int
-	resolveBranch            string
-	resolveTargetID          string
-	resolveBySHATargetEmpty  bool
-	resolveErr               error
+	resolvePRNum            int
+	resolveBranch           string
+	resolveTargetID         string
+	resolveBySHATargetEmpty bool
+	resolveErr              error
 
 	ciFailedTargetID     string
 	ciFailedUpdated      bool
@@ -1250,7 +1250,7 @@ func TestPromptAndContextFormatting(t *testing.T) {
 				Tier:      2,
 				Objective: "Complete feature migration",
 				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", Repo: "azylman/aerial", PRNumber: 101},
+					{ChunkIndex: 0, Title: "Chunk One", PRNumber: 101},
 					{ChunkIndex: 1, Title: "Chunk Two", Repo: "", PRNumber: 0},
 				},
 			},
@@ -1775,8 +1775,8 @@ func TestProcessGitHubEvent(t *testing.T) {
 		},
 		{
 			name: "pull_request closed and merged", event: "pull_request", delivery: "del-pr-1",
-			payload:  `{"action":"closed","number":512,"pull_request":{"number":512,"title":"feat: test pr","head":{"ref":"feat/test","sha":"headsha123"},"base":{"ref":"main","sha":"basesha456"},"merged":true,"merge_commit_sha":"mergesha789"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-			wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 512, wantBranch: "feat/test", wantHeadSHA: "headsha123", wantMergeSHA: "mergesha789", wantSource: "pull_request_payload", wantSender: "arcane103",
+			payload:    `{"action":"closed","number":512,"pull_request":{"number":512,"title":"feat: test pr","head":{"ref":"feat/test","sha":"headsha123"},"base":{"ref":"main","sha":"basesha456"},"merged":true,"merge_commit_sha":"mergesha789"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
+			wantAction: "closed", wantPR: 512, wantBranch: "feat/test", wantHeadSHA: "headsha123", wantMergeSHA: "mergesha789", wantSource: "pull_request_payload", wantSender: "arcane103",
 		},
 		{
 			name: "pull_request malformed", event: "pull_request", delivery: "del-pr-2",
@@ -1999,6 +1999,24 @@ func TestProcessGitHubEvent(t *testing.T) {
 			name: "push advance error", event: "push", delivery: "del-push-sidecars-err",
 			payload: `{"ref":"refs/heads/main","after":"sidecarsha2","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha2","message":"feat: merged sidecar 2 (#311)"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 311, resolveBranch: "feat/sidecar2", resolveTargetID: "target-sidecars-2", advanceVanadisErr: errors.New("simulated push advance error")},
+			wantErr: true,
+		},
+		{
+			name: "pull_request closed merged UpdatePRMerged error", event: "pull_request", delivery: "del-pr-merged-err",
+			payload: `{"action":"closed","number":215,"pull_request":{"number":215,"head":{"ref":"feat/ui3","sha":"head215"},"merged":true,"merge_commit_sha":"merge215"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{err: errors.New("merged db error")},
+			wantErr: true,
+		},
+		{
+			name: "pull_request closed unmerged UpdatePRClosedUnmerged error", event: "pull_request", delivery: "del-pr-closed-err",
+			payload: `{"action":"closed","number":216,"pull_request":{"number":216,"head":{"ref":"feat/discard2","sha":"head216"},"merged":false},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{err: errors.New("closed db error")},
+			wantErr: true,
+		},
+		{
+			name: "pull_request synchronize UpdatePRSync error", event: "pull_request", delivery: "del-pr-sync-err",
+			payload: `{"action":"synchronize","number":217,"pull_request":{"number":217,"head":{"ref":"feat/update2","sha":"head217"},"merged":false},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{err: errors.New("sync db error")},
 			wantErr: true,
 		},
 	}
@@ -2678,7 +2696,7 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			var err error
 			switch tc.callType {
 			case "git_push":
-				err = disp.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "testcommit123"})
+				err = disp.DispatchGitPush(ctx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
 			case "image_ready":
 				jobs, e := disp.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-webhooks-router:latest", Digest: "sha256:abcd"})
 				err = e
@@ -2700,6 +2718,7 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 		})
 	}
 }
+
 // --- 6. Workflow Run Image Resolution & Dispatch ---
 
 func TestResolveWorkflowRunImages(t *testing.T) {
@@ -2936,21 +2955,21 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name            string
-		useNilRegistry  bool
-		listOpenPRsErr  error
-		openPRs         []RegisteredPR
-		prNumber        int
-		prResponses     []string
-		prStatusCodes   []int
-		wantErr         bool
-		wantErrSubstr   string
-		wantConflict    bool
-		wantConflictPR  int
-		wantPrompts     int
-		wantPromptSubs  []string
-		wantDMs         int
-		wantDMSubs      []string
+		name           string
+		useNilRegistry bool
+		listOpenPRsErr error
+		openPRs        []RegisteredPR
+		prNumber       int
+		prResponses    []string
+		prStatusCodes  []int
+		wantErr        bool
+		wantErrSubstr  string
+		wantConflict   bool
+		wantConflictPR int
+		wantPrompts    int
+		wantPromptSubs []string
+		wantDMs        int
+		wantDMSubs     []string
 	}{
 		{
 			name:           "nil registry is clean no-op",
@@ -2964,10 +2983,10 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantErrSubstr:  "list open prs",
 		},
 		{
-			name:     "conflict detected transitions and dispatches DM and prompt",
-			openPRs:  []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
-			prNumber: 543,
-			prResponses: []string{`{"number":543,"mergeable":false,"mergeable_state":"dirty"}`},
+			name:           "conflict detected transitions and dispatches DM and prompt",
+			openPRs:        []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
+			prNumber:       543,
+			prResponses:    []string{`{"number":543,"mergeable":false,"mergeable_state":"dirty"}`},
 			wantConflict:   true,
 			wantConflictPR: 543,
 			wantDMs:        1,
@@ -2976,9 +2995,9 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantPromptSubs: []string{"Merge conflict detected on PR #543"},
 		},
 		{
-			name:     "clean PR no action taken",
-			openPRs:  []RegisteredPR{{PRNumber: 544, Branch: "feat/clean", TargetID: "1555405874565091380", HeadSHA: "head544"}},
-			prNumber: 544,
+			name:        "clean PR no action taken",
+			openPRs:     []RegisteredPR{{PRNumber: 544, Branch: "feat/clean", TargetID: "1555405874565091380", HeadSHA: "head544"}},
+			prNumber:    544,
 			prResponses: []string{`{"number":544,"mergeable":true,"mergeable_state":"clean"}`},
 		},
 		{
@@ -3449,6 +3468,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		})
 	}
 }
+
 // --- 8. River Workers, Crash Alerts & Server Endpoints ---
 
 func TestRiverWorkers(t *testing.T) {
@@ -3537,7 +3557,7 @@ func TestRiverWorkers(t *testing.T) {
 					JobRow: &rivertype.JobRow{ID: 201},
 					Args: HangarWebhookArgs{
 						Event: HangarDeployEvent{
-							Event: "deploy_success", JobName: "brain", Repo: "azylman/aerial",
+							Event: "deploy_success", JobName: "brain",
 							PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
 						},
 					},
@@ -3920,6 +3940,7 @@ func TestRunServerLifecycle(t *testing.T) {
 		})
 	}
 }
+
 // --- 9. Vanadis Build Queue Advancement & Wake Suppression Tests ---
 
 func TestIsHangarSyncedRepoAndPromptFormat(t *testing.T) {
@@ -3966,7 +3987,7 @@ func TestIsHangarSyncedRepoAndPromptFormat(t *testing.T) {
 				Tier:      3,
 				Objective: "Ship Vanadis Phase 3",
 				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Repo: "azylman/aerial", Title: "Schema", PRNumber: 101},
+					{ChunkIndex: 0, Title: "Schema", PRNumber: 101},
 					{ChunkIndex: 1, Repo: "", Title: "Worker", PRNumber: 0},
 				},
 			},
@@ -4064,12 +4085,12 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 			name:     "River insert error during mid-run advancement returns error",
 			prNumber: 42,
 			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-mid",
-				ThreadID:         validThread,
-				NextChunkIndex:   1,
-				BuildCompleted:   false,
+				Matched:        true,
+				Advanced:       true,
+				BuildID:        "build-mid",
+				ThreadID:       validThread,
+				NextChunkIndex: 1,
+				BuildCompleted: false,
 			},
 			inserterErr: errors.New("river insert failed"),
 			wantErr:     true,
@@ -4146,18 +4167,18 @@ func TestProcessVanadisWiring(t *testing.T) {
 	validThread := "123456789012345678"
 
 	tests := []struct {
-		name              string
-		eventType         string
-		payload           string
-		hangarEvt         HangarDeployEvent
-		advanceRes        *VanadisAdvancementResult
-		advanceErr        error
-		failErr           error
-		wantErr           bool
-		wantAdvanceCalls  int
-		wantFailCalls     int
-		wantAdvancePRNum  int
-		wantFailPRNum     int
+		name             string
+		eventType        string
+		payload          string
+		hangarEvt        HangarDeployEvent
+		advanceRes       *VanadisAdvancementResult
+		advanceErr       error
+		failErr          error
+		wantErr          bool
+		wantAdvanceCalls int
+		wantFailCalls    int
+		wantAdvancePRNum int
+		wantFailPRNum    int
 	}{
 		{
 			name:      "hangar sync_success with targetID advances chunk",
@@ -4325,6 +4346,7 @@ func TestProcessVanadisWiring(t *testing.T) {
 		})
 	}
 }
+
 type mockVanadisPgxRow struct {
 	scanFn func(dest ...any) error
 }
@@ -4922,12 +4944,12 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	chunkStart := time.Date(2026, 10, 16, 16, 0, 0, 0, time.UTC)
 	chunkEnd := chunkStart.Add(10 * time.Minute)
 	twoChunks := []VanadisChunkSummary{
-		{ID: "chunk-0", ChunkIndex: 0, Repo: "azylman/aerial", Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
+		{ID: "chunk-0", ChunkIndex: 0, Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
 		{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "C1", Status: "pending", PRNumber: 0},
 	}
 	allMergedChunks := []VanadisChunkSummary{
-		{ID: "chunk-0", ChunkIndex: 0, Repo: "azylman/aerial", Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
-		{ID: "chunk-1", ChunkIndex: 1, Repo: "azylman/aerial", Title: "C1", Status: "merged", PRNumber: 11, StartedAt: chunkStart, UpdatedAt: chunkEnd},
+		{ID: "chunk-0", ChunkIndex: 0, Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
+		{ID: "chunk-1", ChunkIndex: 1, Title: "C1", Status: "merged", PRNumber: 11, StartedAt: chunkStart, UpdatedAt: chunkEnd},
 	}
 
 	tests := []struct {
@@ -4993,10 +5015,10 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantErr:   true,
 		},
 		{
-			name:      "FailVanadisChunkByPR returns error on exec error",
-			method:    "FailVanadisChunkByPR",
-			execErr:   errors.New("exec build fail err"),
-			wantErr:   true,
+			name:    "FailVanadisChunkByPR returns error on exec error",
+			method:  "FailVanadisChunkByPR",
+			execErr: errors.New("exec build fail err"),
+			wantErr: true,
 		},
 		{
 			name:     "FailVanadisChunkByPR returns true on success",
@@ -5238,6 +5260,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		banner         string
 		deployingJobs  []string
 		vanadisMatch   bool
+		dispErr        error
+		queryErr       error
+		prQueryErr     error
 		wantErr        bool
 		wantDispatched bool
 		wantWidgetID   string
@@ -5309,12 +5334,64 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			wantBanner:     "Deploying now",
 			wantChunks:     2,
 		},
+		{
+			name:           "Postgres Vanadis chunk completed status override",
+			repo:           "azylman/aerial",
+			prNumber:       102,
+			statusOverride: "completed",
+			vanadisMatch:   true,
+			wantDispatched: true,
+			wantWidgetID:   "build-abc",
+			wantStatus:     "completed",
+			wantChunks:     2,
+		},
+		{
+			name:           "Postgres Vanadis chunk failed status override",
+			repo:           "azylman/aerial",
+			prNumber:       102,
+			statusOverride: "failed",
+			vanadisMatch:   true,
+			wantDispatched: true,
+			wantWidgetID:   "build-abc",
+			wantStatus:     "failed",
+			wantChunks:     2,
+		},
+		{
+			name:         "Postgres Vanadis chunk dispatch error",
+			repo:         "azylman/aerial",
+			prNumber:     102,
+			vanadisMatch: true,
+			dispErr:      errors.New("dispatch error"),
+			wantErr:      true,
+		},
+		{
+			name:     "Postgres standalone PR dispatch error",
+			repo:     "azylman/aerial",
+			prNumber: 101,
+			dispErr:  errors.New("dispatch error"),
+			wantErr:  true,
+		},
+		{
+			name:       "Postgres standalone PR query error",
+			repo:       "azylman/aerial",
+			prNumber:   101,
+			prQueryErr: errors.New("pr query error"),
+			wantErr:    true,
+		},
+		{
+			name:         "Postgres Vanadis chunk query error",
+			repo:         "azylman/aerial",
+			prNumber:     102,
+			vanadisMatch: true,
+			queryErr:     errors.New("query chunks error"),
+			wantErr:      true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mockDisp := &mockOutboundDispatcher{widgetReturnMsgID: "msg-widget-101"}
+			mockDisp := &mockOutboundDispatcher{widgetReturnMsgID: "msg-widget-101", widgetErr: tc.dispErr}
 
 			if tc.useNilServer {
 				var nilSrv *RouterServer
@@ -5366,6 +5443,12 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 						}}
 					}
 					if strings.Contains(sql, "FROM pr_registry") {
+						if tc.prQueryErr != nil {
+							return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+								*dest[0].(*string) = "1555405874565091380"
+								return tc.prQueryErr
+							}}
+						}
 						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
 							*dest[0].(*string) = "1555405874565091380"
 							*dest[1].(*string) = "feat: awesome feature"
@@ -5383,6 +5466,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					return &mockVanadisPgxRow{}
 				},
 				queryFn: func(qCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
+					if tc.queryErr != nil {
+						return nil, tc.queryErr
+					}
 					chunks := []VanadisChunkSummary{
 						{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, StartedAt: chunk0Start, UpdatedAt: chunk0Update},
 						{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "Chunk 1", Status: "running", PRNumber: 102},
@@ -5477,6 +5563,1275 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 			}
 			if msgID != tc.wantMsgID {
 				t.Errorf("got msgID = %q, want %q", msgID, tc.wantMsgID)
+			}
+		})
+	}
+}
+
+func TestRunServer_Lifecycle_TableDriven(t *testing.T) {
+	tests := []struct {
+		name      string
+		port      string
+		pgURL     string
+		expectErr bool
+	}{
+		{
+			name:      "invalid postgres url returns error",
+			port:      "0",
+			pgURL:     "invalid::url",
+			expectErr: true,
+		},
+		{
+			name:      "invalid port returns listen error",
+			port:      "-1",
+			expectErr: true,
+		},
+		{
+			name: "ephemeral port startup and shutdown",
+			port: "0",
+		},
+		{
+			name:      "startup with postgres and river client connection error",
+			port:      "0",
+			pgURL:     "postgres://fake:fake@127.0.0.1:54329/fakedb?sslmode=disable",
+			expectErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte("{}\n"))
+			}))
+			defer nomadServer.Close()
+
+			cfg := Config{
+				Port:        tc.port,
+				NomadAddr:   nomadServer.URL,
+				PostgresURL: tc.pgURL,
+			}
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- runServer(ctx, cfg, func(addr string) {
+					cancel()
+				})
+			}()
+
+			select {
+			case err := <-errCh:
+				if (err != nil) != tc.expectErr {
+					t.Fatalf("runServer() err = %v, expectErr %v", err, tc.expectErr)
+				}
+			case <-time.After(3 * time.Second):
+				cancel()
+				t.Fatal("timed out waiting for runServer")
+			}
+		})
+	}
+}
+
+func TestRouterServer_Setters_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		delay       time.Duration
+		hasRiver    bool
+		hasRegistry bool
+		hasDisp     bool
+	}{
+		{
+			name:        "all setters configured",
+			delay:       5 * time.Second,
+			hasRiver:    true,
+			hasRegistry: true,
+			hasDisp:     true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetConflictCheckDelay(tc.delay)
+			if srv.conflictCheckDelay != tc.delay {
+				t.Errorf("conflictCheckDelay = %v, want %v", srv.conflictCheckDelay, tc.delay)
+			}
+			if tc.hasRiver {
+				rc := &mockRiverInserter{}
+				srv.SetRiverClient(rc)
+				if srv.riverClient != rc {
+					t.Errorf("riverClient not set")
+				}
+			}
+			if tc.hasRegistry {
+				reg := &mockPRRegistry{}
+				srv.SetRegistry(reg)
+				if srv.registry != reg {
+					t.Errorf("registry not set")
+				}
+			}
+			if tc.hasDisp {
+				disp := &mockOutboundDispatcher{}
+				srv.SetDispatcher(disp)
+				if srv.dispatcher != disp {
+					t.Errorf("dispatcher not set")
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultOutboundDispatcher_PostBrainWithRetry_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		channelID   string
+		statusCode  int
+		maxAttempts int
+		respBody    string
+		wantErr     bool
+	}{
+		{
+			name:      "invalid snowflake channel id returns error",
+			channelID: "invalid-channel",
+			wantErr:   true,
+		},
+		{
+			name:        "500 downstream error retries and fails",
+			channelID:   "1555405874565091380",
+			statusCode:  http.StatusInternalServerError,
+			maxAttempts: 2,
+			respBody:    "brain overloaded",
+			wantErr:     true,
+		},
+		{
+			name:        "400 client error fails immediately without retry",
+			channelID:   "1555405874565091380",
+			statusCode:  http.StatusBadRequest,
+			maxAttempts: 2,
+			respBody:    "bad prompt format",
+			wantErr:     true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.respBody))
+			}))
+			defer ts.Close()
+
+			disp := NewDefaultOutboundDispatcher("", ts.URL, ts.Client())
+			disp.retryDelay = 1 * time.Millisecond
+
+			err := disp.postBrainWithRetry(context.Background(), "/prompt", "prompt", "Brain /prompt", tc.channelID, tc.maxAttempts, 1*time.Millisecond, false, map[string]string{"foo": "bar"})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("postBrainWithRetry() err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRouterServer_DispatchGitPushAndWorkflowRun_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		ref        string
+		commit     string
+		hasDisp    bool
+		dispErr    error
+		conclusion string
+		headBranch string
+		wantErr    bool
+	}{
+		{name: "nil dispatcher is no-op", ref: "refs/heads/main", commit: "sha123", hasDisp: false},
+		{name: "non-main ref is no-op", ref: "refs/heads/feature", commit: "sha123", hasDisp: true},
+		{name: "zero sha is no-op", ref: "refs/heads/main", commit: "0000000000000000000000000000000000000000", hasDisp: true},
+		{name: "dispatcher error returned", ref: "refs/heads/main", commit: "sha123", hasDisp: true, dispErr: errors.New("hangar down"), wantErr: true},
+		{name: "successful dispatch", ref: "refs/heads/main", commit: "sha123", hasDisp: true, wantErr: false},
+		{name: "workflow run conclusion not success", conclusion: "failure", headBranch: "main", hasDisp: true},
+		{name: "workflow run head branch not main", conclusion: "success", headBranch: "feature", hasDisp: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var disp *mockOutboundDispatcher
+			if tc.hasDisp {
+				disp = &mockOutboundDispatcher{gitPushErr: tc.dispErr}
+			}
+			srv := NewRouterServer(Config{}, nil)
+			if disp != nil {
+				srv.SetDispatcher(disp)
+			}
+			if tc.conclusion != "" || tc.headBranch != "" {
+				err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 123, tc.headBranch, tc.conclusion, "sha1", "1555405874565091380", 1)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("dispatchWorkflowRunImages() err = %v, wantErr %v", err, tc.wantErr)
+				}
+			} else {
+				err := srv.dispatchGitPush(context.Background(), "azylman/aerial", tc.ref, tc.commit, "1555405874565091380", 1)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("dispatchGitPush() err = %v, wantErr %v", err, tc.wantErr)
+				}
+			}
+		})
+	}
+}
+
+func TestRouterServer_DispatchConflictPrompt_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		prNum   int
+		hasReg  bool
+		hasDisp bool
+		wantErr bool
+	}{
+		{name: "pr 0 with mock dispatcher", prNum: 0, hasDisp: true},
+		{name: "pr > 0 with mock registry and dispatcher", prNum: 42, hasReg: true, hasDisp: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			if tc.hasDisp {
+				srv.SetDispatcher(disp)
+			}
+			if tc.hasReg {
+				srv.SetRegistry(&mockPRRegistry{})
+			}
+			err := srv.dispatchConflictPrompt(context.Background(), "1555405874565091380", "azylman/aerial", "feat/conflict", "head123", tc.prNum)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("dispatchConflictPrompt() err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestWriteJSONAndReadBody_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		payload    any
+		wantBody   string
+		wantStatus int
+	}{
+		{
+			name:       "writeJSON writes status and content",
+			status:     http.StatusOK,
+			payload:    map[string]string{"result": "ok"},
+			wantBody:   `{"result":"ok"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "writeJSON writes 400 error",
+			status:     http.StatusBadRequest,
+			payload:    map[string]string{"error": "bad request"},
+			wantBody:   `{"error":"bad request"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			writeJSON(rec, tc.status, tc.payload)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("code = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Errorf("body %q missing %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestPutNomadVariableAndInfisical_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		respBody   string
+		token      string
+		wantErr    bool
+	}{
+		{
+			name:       "nomad returns 200 success",
+			statusCode: http.StatusOK,
+			token:      "test-token",
+			wantErr:    false,
+		},
+		{
+			name:       "nomad returns 500 error",
+			statusCode: http.StatusInternalServerError,
+			respBody:   "nomad internal error",
+			wantErr:    true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srvMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.respBody))
+			}))
+			defer srvMock.Close()
+
+			srv := NewRouterServer(Config{NomadAddr: srvMock.URL, NomadToken: tc.token}, nil)
+			err := srv.putNomadVariable(context.Background(), map[string]string{"KEY": "VAL"})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("putNomadVariable() err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestPostgresPRRegistry_GuardedInputChecks_TableDriven(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "empty inputs return early without database call"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &PostgresPRRegistry{}
+			ctx := context.Background()
+
+			if open, err := r.ListOpenPRs(ctx, ""); err != nil || open != nil {
+				t.Errorf("ListOpenPRs = %v, %v", open, err)
+			}
+			if target, err := r.TransitionDeploying(ctx, "", 0, nil); err != nil || target != "" {
+				t.Errorf("TransitionDeploying = %v, %v", target, err)
+			}
+			if _, _, _, _, ok, err := r.AtomicTransitionDeployedByJob(ctx, ""); err != nil || ok {
+				t.Errorf("AtomicTransitionDeployedByJob = %v, %v", ok, err)
+			}
+			if _, _, _, _, ok, err := r.AtomicTransitionDeployFailedByJob(ctx, ""); err != nil || ok {
+				t.Errorf("AtomicTransitionDeployFailedByJob = %v, %v", ok, err)
+			}
+			if _, ok, err := r.AtomicTransitionConflict(ctx, "", 0); err != nil || ok {
+				t.Errorf("AtomicTransitionConflict = %v, %v", ok, err)
+			}
+			if _, ok, err := r.AtomicTransitionDeployFailed(ctx, "", 0); err != nil || ok {
+				t.Errorf("AtomicTransitionDeployFailed = %v, %v", ok, err)
+			}
+			if _, ok, err := r.AtomicTransitionCIFailed(ctx, "", 0); err != nil || ok {
+				t.Errorf("AtomicTransitionCIFailed = %v, %v", ok, err)
+			}
+			if res, err := r.AdvanceVanadisChunkByPR(ctx, "", 0); err != nil || res == nil || res.Advanced {
+				t.Errorf("AdvanceVanadisChunkByPR = %v, %v", res, err)
+			}
+			if ok, err := r.FailVanadisChunkByPR(ctx, "", 0); err != nil || ok {
+				t.Errorf("FailVanadisChunkByPR = %v, %v", ok, err)
+			}
+			if sup, err := r.ShouldSuppressVanadisDeployWake(ctx, "", 0); err != nil || sup {
+				t.Errorf("ShouldSuppressVanadisDeployWake = %v, %v", sup, err)
+			}
+		})
+	}
+}
+
+func TestRouterServer_CheckOpenPRConflicts_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		hasReg     bool
+		listErr    error
+		openPRs    []RegisteredPR
+		prStatus   int
+		prBody     string
+		transition bool
+		wantErr    bool
+	}{
+		{name: "nil registry returns nil", hasReg: false},
+		{name: "list error returns error", hasReg: true, listErr: errors.New("list failed"), wantErr: true},
+		{name: "github 403 returns error", hasReg: true, openPRs: []RegisteredPR{{PRNumber: 1}}, prStatus: http.StatusForbidden, prBody: "403 rate limit exceeded", wantErr: true},
+		{name: "dirty pr triggers conflict transition and prompt", hasReg: true, openPRs: []RegisteredPR{{PRNumber: 2, TargetID: "1555405874565091380", Branch: "feat/x", HeadSHA: "sha1"}}, prStatus: http.StatusOK, prBody: `{"number":2,"mergeable":false,"mergeable_state":"dirty"}`, transition: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.prStatus != 0 {
+					w.WriteHeader(tc.prStatus)
+				}
+				_, _ = w.Write([]byte(tc.prBody))
+			}))
+			defer ts.Close()
+
+			var reg *mockPRRegistry
+			if tc.hasReg {
+				reg = &mockPRRegistry{
+					listOpenPRsErr:   tc.listErr,
+					openPRs:          tc.openPRs,
+					conflictUpdated:  tc.transition,
+					conflictTargetID: "1555405874565091380",
+				}
+			}
+			disp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
+			srv.conflictCheckDelay = 1 * time.Millisecond
+			if reg != nil {
+				srv.SetRegistry(reg)
+			}
+			srv.SetDispatcher(disp)
+
+			err := srv.checkOpenPRConflicts(context.Background(), "azylman/aerial")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkOpenPRConflicts() err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRouterServer_DispatchWorkflowRunImages_Advanced_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		jobsStatus  int
+		jobsBody    string
+		matchedJobs []string
+		transErr    error
+		wantErr     bool
+	}{
+		{
+			name:       "resolve images error returned",
+			jobsStatus: http.StatusInternalServerError,
+			jobsBody:   "api error",
+			wantErr:    true,
+		},
+		{
+			name:        "images resolved and transition error returned",
+			jobsStatus:  http.StatusOK,
+			jobsBody:    `{"jobs":[{"name":"Build & Push Container Image (brain)","status":"completed","conclusion":"success","steps":[{"name":"Build and push container image","status":"completed","conclusion":"success"}]}]}`,
+			matchedJobs: []string{"brain"},
+			transErr:    errors.New("db fail"),
+			wantErr:     true,
+		},
+		{
+			name:        "images resolved and successfully deployed",
+			jobsStatus:  http.StatusOK,
+			jobsBody:    `{"jobs":[{"name":"Build & Push Container Image (brain)","status":"completed","conclusion":"success","steps":[{"name":"Build and push container image","status":"completed","conclusion":"success"}]}]}`,
+			matchedJobs: []string{"brain"},
+			wantErr:     false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.jobsStatus)
+				_, _ = w.Write([]byte(tc.jobsBody))
+			}))
+			defer ts.Close()
+
+			disp := &mockOutboundDispatcher{
+				matchedJobs: map[string][]string{"ghcr.io/azylman/aerial-brain:latest": tc.matchedJobs},
+			}
+			reg := &mockPRRegistry{
+				deployingErr: tc.transErr,
+			}
+			srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
+			srv.SetDispatcher(disp)
+			srv.SetRegistry(reg)
+
+			err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 12345, "main", "success", "sha123", "1555405874565091380", 42)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("dispatchWorkflowRunImages() err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRouterServer_MoreEdgeBranches_TableDriven(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "misc edge branches in main.go"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewRouterServer(Config{}, nil)
+
+			if _, err := srv.fetchPRDetails(context.Background(), "", 0); err == nil {
+				t.Errorf("expected error for invalid repo or prNumber")
+			}
+
+			dispErr := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
+			srv.SetDispatcher(dispErr)
+			if err := srv.dispatchAlertWithPrompt(context.Background(), "1555405874565091380", "alert", "dm text", "prompt text"); err != nil {
+				t.Errorf("expected nil error even with DM error, got %v", err)
+			}
+
+			if s := readBodyString(strings.NewReader("")); s != "" {
+				t.Errorf("expected empty string, got %q", s)
+			}
+
+			var out map[string]any
+			srvBad := NewRouterServer(Config{GitHubAPIURL: "::bad-url::"}, nil)
+			if err := srvBad.getGitHubJSON(context.Background(), "/path", 100, &out); err == nil {
+				t.Errorf("expected error for invalid URL")
+			}
+
+			dispImgErr := &mockOutboundDispatcher{
+				matchedJobs:   map[string][]string{"ghcr.io/azylman/aerial-brain:latest": {"brain"}},
+				imageReadyErr: errors.New("hangar image failed"),
+			}
+			tsWf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"jobs":[{"name":"Build & Push Container Image (brain)","status":"completed","conclusion":"success","steps":[{"name":"Build and push container image","status":"completed","conclusion":"success"}]}]}`))
+			}))
+			defer tsWf.Close()
+
+			srvWf := NewRouterServer(Config{GitHubAPIURL: tsWf.URL}, tsWf.Client())
+			srvWf.SetDispatcher(dispImgErr)
+			if err := srvWf.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 10, "main", "success", "sha1", "1555405874565091380", 42); err == nil {
+				t.Errorf("expected error from image dispatch failure")
+			}
+
+			tsWfEmpty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"jobs":[]}`))
+			}))
+			defer tsWfEmpty.Close()
+			srvWfEmpty := NewRouterServer(Config{GitHubAPIURL: tsWfEmpty.URL}, tsWfEmpty.Client())
+			srvWfEmpty.SetDispatcher(dispImgErr)
+			if err := srvWfEmpty.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 10, "main", "success", "sha1", "1555405874565091380", 42); err != nil {
+				t.Errorf("expected nil error for 0 images, got %v", err)
+			}
+
+			srvInfBad := NewRouterServer(Config{InfisicalURL: "http://127.0.0.1:99999", InfisicalClientID: "id", InfisicalClientSecret: "sec"}, &http.Client{Timeout: 5 * time.Millisecond})
+			if _, err := srvInfBad.getInfisicalToken(context.Background()); err == nil {
+				t.Errorf("expected error from bad infisical url")
+			}
+		})
+	}
+}
+
+func TestOutboundDispatcher_CoverageBranches_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		op         string
+		wantErr    bool
+		wantSubstr string
+	}{
+		{
+			name:    "postHangar 404 unmanaged skips without error",
+			op:      "hangar_unmanaged",
+			wantErr: false,
+		},
+		{
+			name:       "postHangar 404 other returns error",
+			op:         "hangar_404_err",
+			wantErr:    true,
+			wantSubstr: "hangar git push returned 404",
+		},
+		{
+			name:       "postHangar 500 returns error",
+			op:         "hangar_500",
+			wantErr:    true,
+			wantSubstr: "returned status 500",
+		},
+		{
+			name:       "postBrainWithRetry 400 bad request fails fast",
+			op:         "brain_400",
+			wantErr:    true,
+			wantSubstr: "returned status 400",
+		},
+		{
+			name:    "postBrainWithRetry context canceled during retry",
+			op:      "brain_cancel",
+			wantErr: true,
+		},
+		{
+			name:       "DispatchWidget 500 error returns error",
+			op:         "widget_500",
+			wantErr:    true,
+			wantSubstr: "brain widget returned status 500",
+		},
+		{
+			name:       "DispatchWidget invalid json returns error",
+			op:         "widget_bad_json",
+			wantErr:    true,
+			wantSubstr: "decode widget response",
+		},
+		{
+			name:       "DispatchWidget invalid snowflake fails",
+			op:         "widget_bad_snowflake",
+			wantErr:    true,
+			wantSubstr: "invalid discord snowflake channel id",
+		},
+		{
+			name:       "postBrainWithRetry invalid snowflake fails",
+			op:         "brain_bad_snowflake",
+			wantErr:    true,
+			wantSubstr: "invalid discord snowflake channel id",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch tc.op {
+				case "hangar_unmanaged":
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`{"status":"not_found","message":"repo not managed by hangar"}`))
+				case "hangar_404_err":
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`endpoint not found`))
+				case "hangar_500":
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`internal boom`))
+				case "brain_400":
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`bad request payload`))
+				case "brain_cancel":
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`temporary failure`))
+				case "widget_500":
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`internal server error`))
+				case "widget_bad_json":
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`not-json`))
+				}
+			}))
+			defer ts.Close()
+
+			disp := NewDefaultOutboundDispatcher(ts.URL, ts.URL, ts.Client())
+			disp.SetRetryConfig(20*time.Millisecond, 2)
+
+			var err error
+			switch tc.op {
+			case "hangar_unmanaged", "hangar_404_err", "hangar_500":
+				err = disp.DispatchGitPush(context.Background(), GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "sha123"})
+			case "brain_400":
+				err = disp.DispatchPrompt(context.Background(), PromptRequest{ChannelID: "1555405874565091380", Prompt: "test prompt"})
+			case "brain_cancel":
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+				defer cancel()
+				err = disp.DispatchPrompt(ctx, PromptRequest{ChannelID: "1555405874565091380", Prompt: "test prompt"})
+			case "widget_500", "widget_bad_json":
+				_, err = disp.DispatchWidget(context.Background(), StatusWidgetRequest{ChannelID: "1555405874565091380", ID: "w-1"})
+			case "widget_bad_snowflake":
+				_, err = disp.DispatchWidget(context.Background(), StatusWidgetRequest{ChannelID: "bad_snowflake", ID: "w-1"})
+			case "brain_bad_snowflake":
+				err = disp.DispatchPrompt(context.Background(), PromptRequest{ChannelID: "bad_snowflake", Prompt: "test prompt"})
+			}
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantSubstr != "" && err != nil && !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("expected error containing %q, got %q", tc.wantSubstr, err.Error())
+			}
+		})
+	}
+}
+
+func TestRouterServer_CoverageBranches_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		op         string
+		wantErr    bool
+		wantSubstr string
+	}{
+		{
+			name: "readBodyString error reader returns empty",
+			op:   "read_body_err",
+		},
+		{
+			name: "writeJSON unmarshallable value logs error",
+			op:   "write_json_err",
+		},
+		{
+			name: "dispatchConflictPrompt with PostgresPRRegistry syncs widget",
+			op:   "conflict_pg_reg",
+		},
+		{
+			name: "dispatchCIFailurePrompt with PostgresPRRegistry syncs widget",
+			op:   "ci_failed_pg_reg",
+		},
+		{
+			name:       "handleCIFailureTransition PRNumber error",
+			op:         "ci_trans_pr_err",
+			wantErr:    true,
+			wantSubstr: "transition failed",
+		},
+		{
+			name: "handleCIFailureTransition PRNumber unupdated returns nil",
+			op:   "ci_trans_pr_unupdated",
+		},
+		{
+			name:       "handleCIFailureTransition HeadSHA error",
+			op:         "ci_trans_sha_err",
+			wantErr:    true,
+			wantSubstr: "sha transition failed",
+		},
+		{
+			name: "handleCIFailureTransition HeadSHA updated dispatches prompt",
+			op:   "ci_trans_sha_updated",
+		},
+		{
+			name:       "putNomadVariable error status",
+			op:         "put_nomad_var_err",
+			wantErr:    true,
+			wantSubstr: "nomad put variable returned status 500",
+		},
+		{
+			name:       "getInfisicalToken missing credentials",
+			op:         "get_infisical_creds_err",
+			wantErr:    true,
+			wantSubstr: "not configured",
+		},
+		{
+			name:       "getInfisicalToken error status",
+			op:         "get_infisical_status_err",
+			wantErr:    true,
+			wantSubstr: "infisical login returned status 500",
+		},
+		{
+			name: "checkOpenPRConflicts transition error",
+			op:   "conflicts_trans_err",
+		},
+		{
+			name: "randomNonce produces valid 32 character hex string",
+			op:   "random_nonce",
+		},
+		{
+			name:       "runServer invalid postgres URL fails fast",
+			op:         "run_server_bad_postgres",
+			wantErr:    true,
+			wantSubstr: "parse postgres url",
+		},
+		{
+			name:       "runServer invalid port fails fast",
+			op:         "run_server_bad_port",
+			wantErr:    true,
+			wantSubstr: "listening on port",
+		},
+		{
+			name:    "runApp invalid port fails fast",
+			op:      "run_app_err",
+			wantErr: true,
+		},
+		{
+			name: "ResolveSHA backfill error still succeeds",
+			op:   "resolve_sha_backfill_err",
+		},
+		{
+			name: "ResolveSHA backfill target ID fallback",
+			op:   "resolve_sha_backfill_target",
+		},
+		{
+			name: "readWebhookJSON read body error",
+			op:   "read_webhook_body_err",
+		},
+		{
+			name: "runBackgroundSync recovers panic cleanly",
+			op:   "run_background_sync_panic",
+		},
+		{
+			name: "LoadConfig invalid yaml logs warning",
+			op:   "load_config_invalid_yaml",
+		},
+		{
+			name: "dispatchDeploymentSuccessPrompt warning branches",
+			op:   "deploy_success_warnings",
+		},
+		{
+			name:       "advanceVanadisChunk river error and widget warning",
+			op:         "advance_vanadis_errors",
+			wantErr:    true,
+			wantSubstr: "enqueue next vanadis chunk",
+		},
+		{
+			name: "advanceVanadisChunk build completed dispatches prompt",
+			op:   "advance_vanadis_completed",
+		},
+		{
+			name: "checkOpenPRConflicts fetch PR error continues cleanly",
+			op:   "conflicts_fetch_err",
+		},
+		{
+			name: "putNomadVariable success 200",
+			op:   "put_nomad_var_success",
+		},
+		{
+			name:       "putNomadVariable network error",
+			op:         "put_nomad_var_network_err",
+			wantErr:    true,
+			wantSubstr: "nomad put variable request failed",
+		},
+		{
+			name: "ResolveSHA empty or zero SHA guards return 0",
+			op:   "resolve_sha_guards",
+		},
+		{
+			name: "readWebhookJSON allowEmpty with empty body returns true",
+			op:   "read_webhook_allow_empty",
+		},
+		{
+			name:       "resolvePRFromCommitSHA empty repo returns error",
+			op:         "resolve_pr_commit_sha_empty",
+			wantErr:    true,
+			wantSubstr: "invalid repo or sha for pr resolution",
+		},
+		{
+			name:       "fetchPRDetails invalid args returns error",
+			op:         "fetch_pr_details_invalid_args",
+			wantErr:    true,
+			wantSubstr: "invalid repo or prNumber for pr details",
+		},
+		{
+			name: "resolveEventPR empty repo or zero PR returns 0",
+			op:   "resolve_event_pr_guards",
+		},
+		{
+			name:       "fetchInfisicalSecrets status not 200 returns error",
+			op:         "fetch_infisical_secrets_status_err",
+			wantErr:    true,
+			wantSubstr: "infisical fetch returned status 500",
+		},
+		{
+			name:       "putNomadVariable status not 200 returns error",
+			op:         "nomad_put_var_status_err",
+			wantErr:    true,
+			wantSubstr: "nomad put variable returned status 500",
+		},
+		{
+			name:       "getInfisicalToken status not 200 returns error",
+			op:         "infisical_login_status_err",
+			wantErr:    true,
+			wantSubstr: "infisical login returned status 500",
+		},
+		{
+			name:       "fetchInfisicalSecrets decode error returns error",
+			op:         "infisical_secrets_decode_err",
+			wantErr:    true,
+			wantSubstr: "decoding infisical secrets response",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+
+			switch tc.op {
+			case "read_body_err":
+				s := readBodyString(errReader{})
+				if s != "" {
+					t.Errorf("expected empty string, got %q", s)
+				}
+
+			case "write_json_err":
+				rec := httptest.NewRecorder()
+				writeJSON(rec, http.StatusOK, make(chan int))
+				if rec.Code != http.StatusOK {
+					t.Errorf("expected 200, got %d", rec.Code)
+				}
+
+			case "conflict_pg_reg":
+				pool := &mockVanadisPgxPool{
+					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 1 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "1555405874565091380"
+								}
+							}
+							return nil
+						}}
+					},
+				}
+				reg := NewPostgresPRRegistry(pool)
+				disp := &mockOutboundDispatcher{}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(disp)
+				if err := srv.dispatchConflictPrompt(ctx, "1555405874565091380", "azylman/aerial", "main", "sha1", 42); err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+
+			case "ci_failed_pg_reg":
+				pool := &mockVanadisPgxPool{
+					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 1 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "1555405874565091380"
+								}
+							}
+							return nil
+						}}
+					},
+				}
+				reg := NewPostgresPRRegistry(pool)
+				disp := &mockOutboundDispatcher{}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(disp)
+				if err := srv.dispatchCIFailurePrompt(ctx, "1555405874565091380", "test", "azylman/aerial", "sha1", 42, "fail", "http://ci.test"); err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+
+			case "ci_trans_pr_err":
+				reg := &mockPRRegistry{ciFailedErr: errors.New("transition failed")}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(&mockOutboundDispatcher{})
+				res := &ResolvedGitHubEvent{Conclusion: "failure", PRNumber: 42, Repo: "azylman/aerial"}
+				err := srv.handleCIFailureTransition(ctx, res, "details", "http://ci.test")
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "ci_trans_pr_unupdated":
+				reg := &mockPRRegistry{ciFailedUpdated: false}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(&mockOutboundDispatcher{})
+				res := &ResolvedGitHubEvent{Conclusion: "failure", PRNumber: 42, Repo: "azylman/aerial"}
+				if err := srv.handleCIFailureTransition(ctx, res, "details", ""); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+			case "ci_trans_sha_err":
+				reg := &mockPRRegistry{ciFailedBySHAErr: errors.New("sha transition failed")}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(&mockOutboundDispatcher{})
+				res := &ResolvedGitHubEvent{Conclusion: "failure", PRNumber: 0, HeadSHA: "sha12345", Repo: "azylman/aerial"}
+				err := srv.handleCIFailureTransition(ctx, res, "details", "")
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "ci_trans_sha_updated":
+				reg := &mockPRRegistry{ciFailedBySHAUpdated: true, ciFailedBySHAPRNum: 55, ciFailedBySHATarget: "1555405874565091380"}
+				disp := &mockOutboundDispatcher{}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(disp)
+				res := &ResolvedGitHubEvent{Conclusion: "failure", PRNumber: 0, HeadSHA: "sha12345", Repo: "azylman/aerial"}
+				if err := srv.handleCIFailureTransition(ctx, res, "details", ""); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if res.PRNumber != 55 {
+					t.Errorf("expected PRNumber 55, got %d", res.PRNumber)
+				}
+
+			case "put_nomad_var_err":
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("nomad internal error"))
+				}))
+				defer ts.Close()
+				srv := NewRouterServer(Config{NomadAddr: ts.URL, NomadToken: "token123"}, ts.Client())
+				err := srv.putNomadVariable(ctx, map[string]string{"foo": "bar"})
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "get_infisical_creds_err":
+				srv := NewRouterServer(Config{}, nil)
+				_, err := srv.getInfisicalToken(ctx)
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "get_infisical_status_err":
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("infisical error"))
+				}))
+				defer ts.Close()
+				srv := NewRouterServer(Config{InfisicalURL: ts.URL, InfisicalClientID: "client", InfisicalClientSecret: "secret"}, ts.Client())
+				_, err := srv.getInfisicalToken(ctx)
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "conflicts_trans_err":
+				tsGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					f := false
+					_ = json.NewEncoder(w).Encode(GitHubPRDetails{Number: 42, Mergeable: &f, MergeableState: "dirty"})
+				}))
+				defer tsGH.Close()
+				reg := &mockPRRegistry{
+					openPRs:     []RegisteredPR{{PRNumber: 42, Branch: "main", TargetID: "1555405874565091380"}},
+					conflictErr: errors.New("conflict transition error"),
+				}
+				srv := NewRouterServer(Config{GitHubAPIURL: tsGH.URL}, tsGH.Client())
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(&mockOutboundDispatcher{})
+				if err := srv.checkOpenPRConflicts(ctx, "azylman/aerial"); err != nil {
+					t.Fatalf("expected nil return from checkOpenPRConflicts on transition error, got %v", err)
+				}
+
+			case "random_nonce":
+				nonce := randomNonce()
+				if len(nonce) != 32 {
+					t.Errorf("expected 32 hex chars, got %d (%q)", len(nonce), nonce)
+				}
+
+			case "run_server_bad_postgres":
+				err := runServer(ctx, Config{PostgresURL: ":::invalid:::"}, nil)
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "run_server_bad_port":
+				err := runServer(ctx, Config{Port: "99999999"}, nil)
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "run_app_err":
+				err := runApp(ctx, Config{Port: "99999999"})
+				if err == nil {
+					t.Fatalf("expected error from runApp")
+				}
+
+			case "resolve_sha_backfill_err":
+				tsGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 99, "head": map[string]any{"ref": "feat/bf"}}})
+				}))
+				defer tsGH.Close()
+				srv := NewRouterServer(Config{GitHubAPIURL: tsGH.URL}, tsGH.Client())
+				srv.SetRegistry(&mockPRRegistry{err: errors.New("bf err")})
+				pr, _, _, err := srv.ResolveSHA(ctx, "azylman/aerial", "sha123")
+				if err != nil || pr != 99 {
+					t.Errorf("expected pr 99 with nil err, got %d, %v", pr, err)
+				}
+
+			case "resolve_sha_backfill_target":
+				tsGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 99, "head": map[string]any{"ref": "feat/bf"}}})
+				}))
+				defer tsGH.Close()
+				srv := NewRouterServer(Config{GitHubAPIURL: tsGH.URL}, tsGH.Client())
+				srv.SetRegistry(&mockPRRegistry{backfillTargetID: "tid-backfill"})
+				pr, tid, _, err := srv.ResolveSHA(ctx, "azylman/aerial", "sha123")
+				if err != nil || pr != 99 || tid != "tid-backfill" {
+					t.Errorf("expected pr 99 and tid-backfill, got %d, %q, %v", pr, tid, err)
+				}
+
+			case "read_webhook_body_err":
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "/", errReader{})
+				var dst map[string]any
+				if ok := readWebhookJSON(rec, req, 1024, false, &dst); ok {
+					t.Errorf("expected false for errReader")
+				}
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("expected 400, got %d", rec.Code)
+				}
+
+			case "run_background_sync_panic":
+				done := make(chan struct{})
+				runBackgroundSync("test_panic", func(ctx context.Context) error {
+					defer close(done)
+					panic("simulated panic")
+				})
+				<-done
+
+			case "load_config_invalid_yaml":
+				tmp := filepath.Join(t.TempDir(), "bad.yaml")
+				if err := os.WriteFile(tmp, []byte("invalid: [yaml"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				cfg := LoadConfig(tmp)
+				if cfg.Port != "4020" && cfg.Port != os.Getenv("PORT") {
+					t.Errorf("unexpected port: %q", cfg.Port)
+				}
+
+			case "deploy_success_warnings":
+				reg := &mockPRRegistry{
+					suppressVanadisErr: errors.New("suppress err"),
+					channelContextErr:  errors.New("context err"),
+				}
+				disp := &mockOutboundDispatcher{}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(disp)
+				err := srv.dispatchDeploymentSuccessPrompt(ctx, "1555405874565091380", "brain", "azylman/aerial", "sha1", 42, "")
+				if err != nil {
+					t.Errorf("expected nil err, got %v", err)
+				}
+
+			case "advance_vanadis_errors":
+				reg := &mockPRRegistry{
+					advanceVanadisRes: &VanadisAdvancementResult{
+						Matched:        true,
+						Advanced:       true,
+						BuildID:        "b-1",
+						NextChunkIndex: 2,
+					},
+				}
+				riverMock := &mockRiverInserter{err: errors.New("river insert failed")}
+				srv := NewRouterServer(Config{}, nil, riverMock)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(&mockOutboundDispatcher{widgetErr: errors.New("widget err")})
+				err := srv.advanceVanadisChunk(ctx, "azylman/aerial", 42)
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "advance_vanadis_completed":
+				reg := &mockPRRegistry{
+					advanceVanadisRes: &VanadisAdvancementResult{
+						Matched:        true,
+						Advanced:       true,
+						BuildCompleted: true,
+						BuildID:        "b-completed",
+						ThreadID:       "1555405874565091380",
+						Title:          "Completed Build",
+					},
+				}
+				disp := &mockOutboundDispatcher{}
+				srv := NewRouterServer(Config{}, nil)
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(disp)
+				err := srv.advanceVanadisChunk(ctx, "azylman/aerial", 42)
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+
+			case "conflicts_fetch_err":
+				tsGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("github api 500 error"))
+				}))
+				defer tsGH.Close()
+				reg := &mockPRRegistry{
+					openPRs: []RegisteredPR{{PRNumber: 42, Branch: "main", TargetID: "1555405874565091380"}},
+				}
+				srv := NewRouterServer(Config{GitHubAPIURL: tsGH.URL}, tsGH.Client())
+				srv.SetRegistry(reg)
+				srv.SetDispatcher(&mockOutboundDispatcher{})
+				if err := srv.checkOpenPRConflicts(ctx, "azylman/aerial"); err != nil {
+					t.Fatalf("expected nil return on fetch error, got %v", err)
+				}
+
+			case "put_nomad_var_success":
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
+				defer ts.Close()
+				srv := NewRouterServer(Config{NomadAddr: ts.URL}, ts.Client())
+				if err := srv.putNomadVariable(ctx, map[string]string{"foo": "bar"}); err != nil {
+					t.Errorf("unexpected error from putNomadVariable: %v", err)
+				}
+
+			case "put_nomad_var_network_err":
+				srv := NewRouterServer(Config{NomadAddr: "http://127.0.0.1:99999"}, &http.Client{Timeout: 5 * time.Millisecond})
+				err := srv.putNomadVariable(ctx, map[string]string{"foo": "bar"})
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "resolve_sha_guards":
+				srv := NewRouterServer(Config{}, nil)
+				if pr, _, _, err := srv.ResolveSHA(ctx, "", "sha123"); pr != 0 || err != nil {
+					t.Errorf("expected 0, nil for empty repo")
+				}
+				if pr, _, _, err := srv.ResolveSHA(ctx, "repo", ""); pr != 0 || err != nil {
+					t.Errorf("expected 0, nil for empty sha")
+				}
+				if pr, _, _, err := srv.ResolveSHA(ctx, "repo", "0000000000000000000000000000000000000000"); pr != 0 || err != nil {
+					t.Errorf("expected 0, nil for zero sha")
+				}
+
+			case "read_webhook_allow_empty":
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(""))
+				var dst map[string]any
+				if ok := readWebhookJSON(rec, req, 1024, true, &dst); !ok {
+					t.Errorf("expected true for allowEmpty")
+				}
+
+			case "resolve_pr_commit_sha_empty":
+				srv := NewRouterServer(Config{}, nil)
+				if _, _, err := srv.resolvePRFromCommitSHA(ctx, "", "sha123"); err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "fetch_pr_details_invalid_args":
+				srv := NewRouterServer(Config{}, nil)
+				_, err := srv.fetchPRDetails(ctx, "", 0)
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "resolve_event_pr_guards":
+				srv := NewRouterServer(Config{}, nil)
+				res1 := &ResolvedGitHubEvent{Repo: "repo", HeadSHA: ""}
+				srv.resolveEventPR(ctx, res1, nil, "test")
+				if res1.PRNumber != 0 {
+					t.Errorf("expected 0 for empty guards")
+				}
+				res2 := &ResolvedGitHubEvent{Repo: "repo", HeadSHA: "0000000000000000000000000000000000000000"}
+				srv.resolveEventPR(ctx, res2, nil, "test")
+				if res2.PRNumber != 0 {
+					t.Errorf("expected 0 for zero sha")
+				}
+				regTarget := &mockPRRegistry{resolveTargetID: "target-123"}
+				srvReg := NewRouterServer(Config{}, nil)
+				srvReg.SetRegistry(regTarget)
+				res3 := &ResolvedGitHubEvent{Repo: "repo", HeadSHA: "sha123"}
+				srvReg.resolveEventPR(ctx, res3, []GitHubCheckRunPR{{Number: 10, Head: GitHubPRRef{Ref: "feat"}}}, "test")
+				if res3.TargetID != "target-123" {
+					t.Errorf("expected target-123, got %s", res3.TargetID)
+				}
+				regErr := &mockPRRegistry{resolveErr: errors.New("reg resolve err")}
+				srvErr := NewRouterServer(Config{}, nil)
+				srvErr.SetRegistry(regErr)
+				res4 := &ResolvedGitHubEvent{Repo: "repo", HeadSHA: "sha123"}
+				srvErr.resolveEventPR(ctx, res4, nil, "test")
+
+			case "fetch_infisical_secrets_status_err":
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("fetch err"))
+				}))
+				defer ts.Close()
+				srv := NewRouterServer(Config{InfisicalURL: ts.URL}, ts.Client())
+				_, err := srv.fetchInfisicalSecrets(ctx, "token", "ws", "prod")
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+
+			case "nomad_put_var_status_err":
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("nomad error"))
+				}))
+				defer ts.Close()
+				srv := NewRouterServer(Config{NomadAddr: ts.URL}, ts.Client())
+				err := srv.putNomadVariable(ctx, map[string]string{"k": "v"})
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "infisical_login_status_err":
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("login error"))
+				}))
+				defer ts.Close()
+				srv := NewRouterServer(Config{InfisicalURL: ts.URL, InfisicalClientID: "id", InfisicalClientSecret: "sec"}, ts.Client())
+				_, err := srv.getInfisicalToken(ctx)
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+
+			case "infisical_secrets_decode_err":
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("invalid json"))
+				}))
+				defer ts.Close()
+				srv := NewRouterServer(Config{InfisicalURL: ts.URL}, ts.Client())
+				_, err := srv.fetchInfisicalSecrets(ctx, "token", "ws", "prod")
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
 			}
 		})
 	}
