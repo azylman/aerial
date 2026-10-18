@@ -160,6 +160,12 @@ func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int 
 }
 
 func reconcileTargetSkills(targetDir string, allowedSkills map[string]string) int {
+	if fi, err := os.Lstat(targetDir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if rmErr := removeSkill(targetDir); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Printf("[Skills] Warning: failed to remove legacy symlinked skills directory %s: %v", targetDir, rmErr)
+		}
+	}
+
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		log.Printf("[Skills] Warning: failed to create target skills directory %s: %v", targetDir, err)
 		return 0
