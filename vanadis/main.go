@@ -719,23 +719,6 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	}
 	fmt.Fprintf(&sb, "Instructions:\n%s\n\n", active.Instructions)
 
-	if len(active.AcceptanceCriteria) > 0 {
-		var criteriaLines []string
-		for _, crit := range active.AcceptanceCriteria {
-			if trimmed := strings.TrimSpace(crit); trimmed != "" {
-				criteriaLines = append(criteriaLines, fmt.Sprintf("- %s", trimmed))
-			}
-		}
-		if len(criteriaLines) > 0 {
-			sb.WriteString("=== Acceptance Criteria ===\n")
-			for _, line := range criteriaLines {
-				sb.WriteString(line)
-				sb.WriteByte('\n')
-			}
-			sb.WriteByte('\n')
-		}
-	}
-
 	sb.WriteString("=== Remaining Chunks ===\n")
 	if activeIdx+1 >= total {
 		sb.WriteString("(none — this is the final chunk)\n\n")
@@ -752,13 +735,14 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	sb.WriteString("=== Mandatory Execution Contract ===\n")
 	fmt.Fprintf(&sb, "1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n", activeRepo)
 	sb.WriteString("2. Implement ONLY this chunk following TDD, optimizing all design and implementation choices for the `Build Objective`, run package tests and `./scripts/verify.sh --staged`, and write `PR_DESCRIPTION.md`.\n")
-	sb.WriteString("   If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective` (for example, if following a mechanical step literally would fail to eliminate duplication or miss `Acceptance Criteria`), the `Build Objective` and `Acceptance Criteria` take precedence—adapt the implementation to satisfy the `Build Objective`.\n")
+	sb.WriteString("   If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective`, the `Build Objective` takes precedence—adapt the implementation to satisfy the `Build Objective`.\n")
 	sb.WriteString("3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n")
 	if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
 		fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)
 	}
-	fmt.Fprintf(&sb, "4. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n", active.ID)
-	sb.WriteString("5. Terminate turn immediately after submission.\n")
+	sb.WriteString("4. Before submitting, review the full `git diff` against the `Build Objective` and `Shared Build Context`: verify that the change achieves the objective in substance and integrates cleanly and idiomatically into the existing architecture without superficial workarounds, dead scaffolding, or bolted-on catch-all blocks.\n")
+	fmt.Fprintf(&sb, "5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n", active.ID)
+	sb.WriteString("6. Terminate turn immediately after submission.\n")
 
 	return sb.String(), nil
 }
