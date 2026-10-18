@@ -688,6 +688,7 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 	if d2 == d1 {
 		t.Fatalf("expected new daemon instance after pre-flight rotation")
 	}
+	pool.WaitBackground()
 	if d1.State() != StateClosed {
 		t.Fatalf("expected old daemon to be closed, got %v", d1.State())
 	}
