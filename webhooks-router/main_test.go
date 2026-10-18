@@ -78,38 +78,23 @@ func (z *zeroCallTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return nil, errors.New("unexpected outbound HTTP call")
 }
 
+type prCall struct {
+	repo     string
+	prNumber int
+	mergeSHA string
+	headSHA  string
+	sha      string
+	jobs     []string
+}
+
 type mockPRRegistry struct {
-	mergedCalls []struct {
-		repo     string
-		prNumber int
-		mergeSHA string
-	}
-	syncCalls []struct {
-		repo     string
-		prNumber int
-		headSHA  string
-	}
-	closedUnmergedCalls []struct {
-		repo     string
-		prNumber int
-	}
-	ciFailedCalls []struct {
-		repo     string
-		prNumber int
-	}
-	ciFailedBySHACalls []struct {
-		repo    string
-		headSHA string
-	}
-	backfillCalls []struct {
-		repo     string
-		prNumber int
-		mergeSHA string
-	}
-	resolveBySHACalls []struct {
-		repo string
-		sha  string
-	}
+	mergedCalls         []prCall
+	syncCalls           []prCall
+	closedUnmergedCalls []prCall
+	ciFailedCalls       []prCall
+	ciFailedBySHACalls  []prCall
+	backfillCalls       []prCall
+	resolveBySHACalls   []prCall
 
 	mergedTargetID   string
 	syncTargetID     string
@@ -134,19 +119,12 @@ type mockPRRegistry struct {
 	openPRs          []RegisteredPR
 	listOpenPRsErr   error
 
-	conflictCalls []struct {
-		repo     string
-		prNumber int
-	}
+	conflictCalls    []prCall
 	conflictTargetID string
 	conflictUpdated  bool
 	conflictErr      error
 
-	deployingCalls []struct {
-		repo     string
-		prNumber int
-		jobs     []string
-	}
+	deployingCalls    []prCall
 	deployingTargetID string
 	deployingErr      error
 
@@ -158,10 +136,7 @@ type mockPRRegistry struct {
 	deployedUpdated  bool
 	deployedErr      error
 
-	deployFailedCalls []struct {
-		repo     string
-		prNumber int
-	}
+	deployFailedCalls    []prCall
 	deployFailedTargetID string
 	deployFailedUpdated  bool
 	deployFailedErr      error
@@ -180,26 +155,17 @@ type mockPRRegistry struct {
 	channelContextMap map[string][]ChannelMessageContext
 	channelContextErr error
 
-	advanceVanadisCalls []struct {
-		repo     string
-		prNumber int
-	}
-	advanceVanadisRes *VanadisAdvancementResult
-	advanceVanadisErr error
+	advanceVanadisCalls []prCall
+	advanceVanadisRes   *VanadisAdvancementResult
+	advanceVanadisErr   error
 
-	suppressVanadisCalls []struct {
-		repo     string
-		prNumber int
-	}
-	suppressVanadisRes bool
-	suppressVanadisErr error
+	suppressVanadisCalls []prCall
+	suppressVanadisRes   bool
+	suppressVanadisErr   error
 
-	failVanadisCalls []struct {
-		repo     string
-		prNumber int
-	}
-	failVanadisRes bool
-	failVanadisErr error
+	failVanadisCalls []prCall
+	failVanadisRes   bool
+	failVanadisErr   error
 
 	err error
 }
@@ -215,11 +181,7 @@ func (m *mockPRRegistry) TransitionDeploying(ctx context.Context, repo string, p
 	if err := m.checkErr(m.deployingErr); err != nil {
 		return "", err
 	}
-	m.deployingCalls = append(m.deployingCalls, struct {
-		repo     string
-		prNumber int
-		jobs     []string
-	}{repo, prNumber, jobs})
+	m.deployingCalls = append(m.deployingCalls, prCall{repo: repo, prNumber: prNumber, jobs: jobs})
 	return m.deployingTargetID, nil
 }
 
@@ -235,10 +197,7 @@ func (m *mockPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo 
 	if err := m.checkErr(m.deployFailedErr); err != nil {
 		return "", false, err
 	}
-	m.deployFailedCalls = append(m.deployFailedCalls, struct {
-		repo     string
-		prNumber int
-	}{repo, prNumber})
+	m.deployFailedCalls = append(m.deployFailedCalls, prCall{repo: repo, prNumber: prNumber})
 	return m.deployFailedTargetID, m.deployFailedUpdated, nil
 }
 
@@ -279,10 +238,7 @@ func (m *mockPRRegistry) AtomicTransitionConflict(ctx context.Context, repo stri
 	if err := m.checkErr(m.conflictErr); err != nil {
 		return "", false, err
 	}
-	m.conflictCalls = append(m.conflictCalls, struct {
-		repo     string
-		prNumber int
-	}{repo, prNumber})
+	m.conflictCalls = append(m.conflictCalls, prCall{repo: repo, prNumber: prNumber})
 	return m.conflictTargetID, m.conflictUpdated, nil
 }
 
@@ -290,11 +246,7 @@ func (m *mockPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumb
 	if m.err != nil {
 		return "", m.err
 	}
-	m.mergedCalls = append(m.mergedCalls, struct {
-		repo     string
-		prNumber int
-		mergeSHA string
-	}{repo, prNumber, mergeSHA})
+	m.mergedCalls = append(m.mergedCalls, prCall{repo: repo, prNumber: prNumber, mergeSHA: mergeSHA})
 	return m.mergedTargetID, nil
 }
 
@@ -302,11 +254,7 @@ func (m *mockPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber
 	if m.err != nil {
 		return "", m.err
 	}
-	m.syncCalls = append(m.syncCalls, struct {
-		repo     string
-		prNumber int
-		headSHA  string
-	}{repo, prNumber, headSHA})
+	m.syncCalls = append(m.syncCalls, prCall{repo: repo, prNumber: prNumber, headSHA: headSHA})
 	return m.syncTargetID, nil
 }
 
@@ -314,10 +262,7 @@ func (m *mockPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string
 	if m.err != nil {
 		return "", m.err
 	}
-	m.closedUnmergedCalls = append(m.closedUnmergedCalls, struct {
-		repo     string
-		prNumber int
-	}{repo, prNumber})
+	m.closedUnmergedCalls = append(m.closedUnmergedCalls, prCall{repo: repo, prNumber: prNumber})
 	return m.closedTargetID, nil
 }
 
@@ -325,10 +270,7 @@ func (m *mockPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo stri
 	if err := m.checkErr(m.ciFailedErr); err != nil {
 		return "", false, err
 	}
-	m.ciFailedCalls = append(m.ciFailedCalls, struct {
-		repo     string
-		prNumber int
-	}{repo, prNumber})
+	m.ciFailedCalls = append(m.ciFailedCalls, prCall{repo: repo, prNumber: prNumber})
 	return m.ciFailedTargetID, m.ciFailedUpdated, nil
 }
 
@@ -336,10 +278,7 @@ func (m *mockPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, 
 	if err := m.checkErr(m.ciFailedBySHAErr); err != nil {
 		return "", 0, false, err
 	}
-	m.ciFailedBySHACalls = append(m.ciFailedBySHACalls, struct {
-		repo    string
-		headSHA string
-	}{repo, headSHA})
+	m.ciFailedBySHACalls = append(m.ciFailedBySHACalls, prCall{repo: repo, headSHA: headSHA})
 	return m.ciFailedBySHATarget, m.ciFailedBySHAPRNum, m.ciFailedBySHAUpdated, nil
 }
 
@@ -347,11 +286,7 @@ func (m *mockPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, 
 	if m.err != nil {
 		return "", m.err
 	}
-	m.backfillCalls = append(m.backfillCalls, struct {
-		repo     string
-		prNumber int
-		mergeSHA string
-	}{repo, prNumber, mergeSHA})
+	m.backfillCalls = append(m.backfillCalls, prCall{repo: repo, prNumber: prNumber, mergeSHA: mergeSHA})
 	return m.backfillTargetID, nil
 }
 
@@ -359,10 +294,7 @@ func (m *mockPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha st
 	if err := m.checkErr(m.resolveErr); err != nil {
 		return 0, "", "", err
 	}
-	m.resolveBySHACalls = append(m.resolveBySHACalls, struct {
-		repo string
-		sha  string
-	}{repo, sha})
+	m.resolveBySHACalls = append(m.resolveBySHACalls, prCall{repo: repo, sha: sha})
 	targetID := m.resolveTargetID
 	if m.resolveBySHATargetEmpty {
 		targetID = ""
@@ -378,10 +310,7 @@ func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prN
 }
 
 func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
-	m.advanceVanadisCalls = append(m.advanceVanadisCalls, struct {
-		repo     string
-		prNumber int
-	}{repo, prNumber})
+	m.advanceVanadisCalls = append(m.advanceVanadisCalls, prCall{repo: repo, prNumber: prNumber})
 	if err := m.checkErr(m.advanceVanadisErr); err != nil {
 		return nil, err
 	}
@@ -392,10 +321,7 @@ func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo strin
 }
 
 func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
-	m.suppressVanadisCalls = append(m.suppressVanadisCalls, struct {
-		repo     string
-		prNumber int
-	}{repo, prNumber})
+	m.suppressVanadisCalls = append(m.suppressVanadisCalls, prCall{repo: repo, prNumber: prNumber})
 	if err := m.checkErr(m.suppressVanadisErr); err != nil {
 		return false, err
 	}
@@ -403,10 +329,7 @@ func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, re
 }
 
 func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
-	m.failVanadisCalls = append(m.failVanadisCalls, struct {
-		repo     string
-		prNumber int
-	}{repo, prNumber})
+	m.failVanadisCalls = append(m.failVanadisCalls, prCall{repo: repo, prNumber: prNumber})
 	if err := m.checkErr(m.failVanadisErr); err != nil {
 		return false, err
 	}
@@ -416,13 +339,9 @@ func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, 
 type mockOutboundDispatcher struct {
 	mu                 sync.Mutex
 	gitPushCalls       []GitPushEventRequest
-	gitPushCh          chan GitPushEventRequest
 	imageReadyCalls    []ImageReadyEventRequest
-	imageReadyCh       chan ImageReadyEventRequest
 	promptCalls        []PromptRequest
-	promptCh           chan PromptRequest
 	directMessageCalls []DirectMessageRequest
-	directMessageCh    chan DirectMessageRequest
 	gitPushErr         error
 	imageReadyErr      error
 	promptErr          error
@@ -430,67 +349,38 @@ type mockOutboundDispatcher struct {
 	widgetErr          error
 	widgetReturnMsgID  string
 	widgetCalls        []StatusWidgetRequest
-	widgetCh           chan StatusWidgetRequest
 	matchedJobs        map[string][]string
 }
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
 	m.mu.Lock()
 	m.gitPushCalls = append(m.gitPushCalls, req)
-	ch := m.gitPushCh
 	m.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- req:
-		default:
-		}
-	}
 	return m.gitPushErr
 }
 
 func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
 	m.mu.Lock()
 	m.imageReadyCalls = append(m.imageReadyCalls, req)
-	ch := m.imageReadyCh
 	var jobs []string
 	if m.matchedJobs != nil {
 		jobs = m.matchedJobs[req.Image]
 	}
 	m.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- req:
-		default:
-		}
-	}
 	return jobs, m.imageReadyErr
 }
 
 func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
 	m.mu.Lock()
 	m.promptCalls = append(m.promptCalls, req)
-	ch := m.promptCh
 	m.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- req:
-		default:
-		}
-	}
 	return m.promptErr
 }
 
 func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
 	m.mu.Lock()
 	m.directMessageCalls = append(m.directMessageCalls, req)
-	ch := m.directMessageCh
 	m.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- req:
-		default:
-		}
-	}
 	return m.directMessageErr
 }
 
@@ -521,16 +411,9 @@ func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
 func (m *mockOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
 	m.mu.Lock()
 	m.widgetCalls = append(m.widgetCalls, payload)
-	ch := m.widgetCh
 	msgID := m.widgetReturnMsgID
 	err := m.widgetErr
 	m.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- payload:
-		default:
-		}
-	}
 	return msgID, err
 }
 
@@ -547,6 +430,9 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 	}
 	if disp != nil {
 		srv.SetDispatcher(disp)
+	}
+	if len(riverInserter) > 0 && riverInserter[0] != nil {
+		srv.SetRiverClient(riverInserter[0])
 	}
 	return srv
 }
@@ -623,15 +509,10 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				"INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET": "u-csec",
 				"INFISICAL_WORKSPACE_ID":                 "w-id",
 			},
-			wantPort:      "4020",
-			wantInfURL:    "http://alternate:8085",
-			wantCID:       "u-cid",
-			wantCSec:      "u-csec",
-			wantPID:       "w-id",
-			wantEnv:       "prod",
-			wantNomadAddr: "http://127.0.0.1:4646",
-			wantGHURL:     "https://api.github.com",
-			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+			wantInfURL: "http://alternate:8085",
+			wantCID:    "u-cid",
+			wantCSec:   "u-csec",
+			wantPID:    "w-id",
 		},
 		{
 			name:          "default fallback loading with empty envs",
@@ -650,13 +531,9 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				"GITHUB_API_URL": "https://api.github.test/",
 				"POSTGRES_URL":   "postgres://custom:pass@db:5432/customdb",
 			},
-			wantPort:      "4020",
-			wantInfURL:    "http://infisical.aerial",
-			wantEnv:       "prod",
-			wantNomadAddr: "http://127.0.0.1:4646",
-			wantGHTok:     "pat123",
-			wantGHURL:     "https://api.github.test",
-			wantPGURL:     "postgres://custom:pass@db:5432/customdb",
+			wantGHTok: "pat123",
+			wantGHURL: "https://api.github.test",
+			wantPGURL: "postgres://custom:pass@db:5432/customdb",
 		},
 		{
 			name: "github token and database url fallback envs",
@@ -664,39 +541,18 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				"GITHUB_TOKEN": "tok456",
 				"DATABASE_URL": "postgres://dbuser:pass@db:5432/db",
 			},
-			wantPort:      "4020",
-			wantInfURL:    "http://infisical.aerial",
-			wantEnv:       "prod",
-			wantNomadAddr: "http://127.0.0.1:4646",
-			wantGHTok:     "tok456",
-			wantGHURL:     "https://api.github.com",
-			wantPGURL:     "postgres://dbuser:pass@db:5432/db",
+			wantGHTok: "tok456",
+			wantPGURL: "postgres://dbuser:pass@db:5432/db",
 		},
 		{
-			name: "system channel id primary env",
-			env: map[string]string{
-				"SYSTEM_CHANNEL_ID": "123456789012345678",
-			},
-			wantPort:      "4020",
-			wantInfURL:    "http://infisical.aerial",
-			wantEnv:       "prod",
-			wantNomadAddr: "http://127.0.0.1:4646",
-			wantGHURL:     "https://api.github.com",
-			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
-			wantSysChan:   "123456789012345678",
+			name:        "system channel id primary env",
+			env:         map[string]string{"SYSTEM_CHANNEL_ID": "123456789012345678"},
+			wantSysChan: "123456789012345678",
 		},
 		{
-			name: "discord channel id fallback env",
-			env: map[string]string{
-				"DISCORD_CHANNEL_ID": "987654321098765432",
-			},
-			wantPort:      "4020",
-			wantInfURL:    "http://infisical.aerial",
-			wantEnv:       "prod",
-			wantNomadAddr: "http://127.0.0.1:4646",
-			wantGHURL:     "https://api.github.com",
-			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
-			wantSysChan:   "987654321098765432",
+			name:        "discord channel id fallback env",
+			env:         map[string]string{"DISCORD_CHANNEL_ID": "987654321098765432"},
+			wantSysChan: "987654321098765432",
 		},
 	}
 
@@ -719,41 +575,23 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			cfg := LoadConfigFromEnv()
-			if tc.wantPort != "" && cfg.Port != tc.wantPort {
-				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
-			}
-			if tc.wantInfURL != "" && cfg.InfisicalURL != tc.wantInfURL {
-				t.Errorf("InfisicalURL = %q, want %q", cfg.InfisicalURL, tc.wantInfURL)
-			}
-			if tc.wantCID != "" && cfg.InfisicalClientID != tc.wantCID {
-				t.Errorf("InfisicalClientID = %q, want %q", cfg.InfisicalClientID, tc.wantCID)
-			}
-			if tc.wantCSec != "" && cfg.InfisicalClientSecret != tc.wantCSec {
-				t.Errorf("InfisicalClientSecret = %q, want %q", cfg.InfisicalClientSecret, tc.wantCSec)
-			}
-			if tc.wantPID != "" && cfg.InfisicalProjectID != tc.wantPID {
-				t.Errorf("InfisicalProjectID = %q, want %q", cfg.InfisicalProjectID, tc.wantPID)
-			}
-			if tc.wantEnv != "" && cfg.InfisicalEnvironment != tc.wantEnv {
-				t.Errorf("InfisicalEnvironment = %q, want %q", cfg.InfisicalEnvironment, tc.wantEnv)
-			}
-			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
-				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
-			}
-			if tc.wantNomadTok != "" && cfg.NomadToken != tc.wantNomadTok {
-				t.Errorf("NomadToken = %q, want %q", cfg.NomadToken, tc.wantNomadTok)
-			}
-			if tc.wantGHTok != "" && cfg.GitHubToken != tc.wantGHTok {
-				t.Errorf("GitHubToken = %q, want %q", cfg.GitHubToken, tc.wantGHTok)
-			}
-			if tc.wantGHURL != "" && cfg.GitHubAPIURL != tc.wantGHURL {
-				t.Errorf("GitHubAPIURL = %q, want %q", cfg.GitHubAPIURL, tc.wantGHURL)
-			}
-			if tc.wantPGURL != "" && cfg.PostgresURL != tc.wantPGURL {
-				t.Errorf("PostgresURL = %q, want %q", cfg.PostgresURL, tc.wantPGURL)
-			}
-			if tc.wantSysChan != "" && cfg.SystemChannelID != tc.wantSysChan {
-				t.Errorf("SystemChannelID = %q, want %q", cfg.SystemChannelID, tc.wantSysChan)
+			for _, check := range []struct{ got, want, field string }{
+				{cfg.Port, tc.wantPort, "Port"},
+				{cfg.InfisicalURL, tc.wantInfURL, "InfisicalURL"},
+				{cfg.InfisicalClientID, tc.wantCID, "InfisicalClientID"},
+				{cfg.InfisicalClientSecret, tc.wantCSec, "InfisicalClientSecret"},
+				{cfg.InfisicalProjectID, tc.wantPID, "InfisicalProjectID"},
+				{cfg.InfisicalEnvironment, tc.wantEnv, "InfisicalEnvironment"},
+				{cfg.NomadAddr, tc.wantNomadAddr, "NomadAddr"},
+				{cfg.NomadToken, tc.wantNomadTok, "NomadToken"},
+				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
+				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
+				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
+				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
+			} {
+				if check.want != "" && check.got != check.want {
+					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
+				}
 			}
 		})
 	}
@@ -843,6 +681,11 @@ brain_url: "http://brain.custom:8088"
 			localYAML:   "system_channel_id: \"112233445566778899\"\n",
 			wantSysChan: "112233445566778899",
 		},
+		{
+			name:      "invalid yaml logs warning and uses defaults",
+			localYAML: "invalid: [yaml",
+			wantPort:  "4020",
+		},
 	}
 
 	keysToClear := []string{
@@ -883,26 +726,18 @@ brain_url: "http://brain.custom:8088"
 			}
 
 			cfg := LoadConfig(targetPath)
-			if tc.wantPort != "" && cfg.Port != tc.wantPort {
-				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
-			}
-			if tc.wantInfURL != "" && cfg.InfisicalURL != tc.wantInfURL {
-				t.Errorf("InfisicalURL = %q, want %q", cfg.InfisicalURL, tc.wantInfURL)
-			}
-			if tc.wantEnv != "" && cfg.InfisicalEnvironment != tc.wantEnv {
-				t.Errorf("InfisicalEnvironment = %q, want %q", cfg.InfisicalEnvironment, tc.wantEnv)
-			}
-			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
-				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
-			}
-			if tc.wantHangarURL != "" && cfg.HangarURL != tc.wantHangarURL {
-				t.Errorf("HangarURL = %q, want %q", cfg.HangarURL, tc.wantHangarURL)
-			}
-			if tc.wantBrainURL != "" && cfg.BrainURL != tc.wantBrainURL {
-				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
-			}
-			if tc.wantSysChan != "" && cfg.SystemChannelID != tc.wantSysChan {
-				t.Errorf("SystemChannelID = %q, want %q", cfg.SystemChannelID, tc.wantSysChan)
+			for _, check := range []struct{ got, want, field string }{
+				{cfg.Port, tc.wantPort, "Port"},
+				{cfg.InfisicalURL, tc.wantInfURL, "InfisicalURL"},
+				{cfg.InfisicalEnvironment, tc.wantEnv, "InfisicalEnvironment"},
+				{cfg.NomadAddr, tc.wantNomadAddr, "NomadAddr"},
+				{cfg.HangarURL, tc.wantHangarURL, "HangarURL"},
+				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
+				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
+			} {
+				if check.want != "" && check.got != check.want {
+					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
+				}
 			}
 		})
 	}
@@ -946,11 +781,6 @@ func TestInfisicalWebhookPayload_Getters(t *testing.T) {
 func TestStringAndRepoHelpers(t *testing.T) {
 	t.Parallel()
 
-	// Touch fixture constructors introduced for subsequent chunks
-	_ = mkHangarEvt("", "", "", "", 0, "", "", "")
-	_ = mkDeployedReg("", 0, "", "", false)
-	_ = mkDeployFailedReg("", 0, "", "", false)
-
 	zeroSHATests := []struct {
 		name string
 		sha  string
@@ -973,9 +803,7 @@ func TestStringAndRepoHelpers(t *testing.T) {
 	}
 
 	normalizeTests := []struct {
-		name  string
-		input string
-		want  string
+		name, input, want string
 	}{
 		{name: "normalizeRepo empty", input: "", want: ""},
 		{name: "normalizeRepo whitespace", input: "   ", want: ""},
@@ -994,9 +822,7 @@ func TestStringAndRepoHelpers(t *testing.T) {
 	}
 
 	cleanRepoTests := []struct {
-		name  string
-		input string
-		want  string
+		name, input, want string
 	}{
 		{name: "cleanRepoName azylman prefix", input: "azylman/aerial", want: "aerial"},
 		{name: "cleanRepoName with whitespace", input: "  azylman/mirrormere  ", want: "mirrormere"},
@@ -1014,10 +840,8 @@ func TestStringAndRepoHelpers(t *testing.T) {
 	}
 
 	prefixTests := []struct {
-		name     string
-		prNumber int
-		repo     string
-		want     string
+		name, repo, want string
+		prNumber         int
 	}{
 		{name: "formatDirectMessagePrefix pr and repo", prNumber: 42, repo: "azylman/aerial", want: "**(PR: #42, repo: aerial)** "},
 		{name: "formatDirectMessagePrefix repo only", prNumber: 0, repo: "azylman/aerial", want: "**(repo: aerial)** "},
@@ -1034,9 +858,8 @@ func TestStringAndRepoHelpers(t *testing.T) {
 	}
 
 	dedupeTests := []struct {
-		name  string
-		input []string
-		want  []string
+		name        string
+		input, want []string
 	}{
 		{name: "dedupeTrimmedStrings duplicates and blanks", input: []string{"foo", "  foo  ", "bar", "", "   ", "baz", "bar"}, want: []string{"foo", "bar", "baz"}},
 		{name: "dedupeTrimmedStrings empty slice", input: []string{}, want: nil},
@@ -1057,13 +880,13 @@ func TestStringAndRepoHelpers(t *testing.T) {
 	}
 
 	hangarSyncedTests := []struct {
-		name string
-		repo string
-		want bool
+		name, repo string
+		want       bool
 	}{
 		{name: "isHangarSyncedRepo aerial bare", repo: "aerial", want: true},
 		{name: "isHangarSyncedRepo aerial qualified", repo: "azylman/aerial", want: true},
 		{name: "isHangarSyncedRepo aerial config qualified", repo: "azylman/aerial-config", want: true},
+		{name: "isHangarSyncedRepo uppercase aerial-config", repo: "AZYLMAN/AERIAL-CONFIG", want: true},
 		{name: "isHangarSyncedRepo mirrormere", repo: "mirrormere", want: false},
 		{name: "isHangarSyncedRepo other", repo: "otherorg/custom", want: false},
 		{name: "isHangarSyncedRepo empty", repo: "", want: false},
@@ -1076,36 +899,28 @@ func TestStringAndRepoHelpers(t *testing.T) {
 			}
 		})
 	}
+
+	if got := readBodyString(errReader{}); got != "" {
+		t.Errorf("readBodyString(errReader) = %q, want empty", got)
+	}
+	if got := readBodyString(strings.NewReader("")); got != "" {
+		t.Errorf("readBodyString(empty) = %q, want empty", got)
+	}
+	if n := len(randomNonce()); n != 32 {
+		t.Errorf("len(randomNonce()) = %d, want 32", n)
+	}
 }
 
 func TestPromptAndContextFormatting(t *testing.T) {
 	t.Parallel()
 
 	truncateTests := []struct {
-		name       string
-		input      string
-		wantSuffix string
-		wantLen    int
-		wantSub    string
-		wantNotSub string
+		name, input, wantSuffix, wantSub, wantNotSub string
+		wantLen                                      int
 	}{
-		{
-			name:       "truncatePromptDetails sanitizes backticks",
-			input:      "error occurred:\n```json\n{\"error\":\"broken\"}\n```\nend",
-			wantSub:    "'''json",
-			wantNotSub: "```",
-		},
-		{
-			name:    "truncatePromptDetails short unchanged",
-			input:   "short error message",
-			wantSub: "short error message",
-		},
-		{
-			name:       "truncatePromptDetails long truncated",
-			input:      strings.Repeat("a", 2000),
-			wantSuffix: "... (truncated)",
-			wantLen:    maxPromptRunes + len([]rune("... (truncated)")),
-		},
+		{name: "truncatePromptDetails sanitizes backticks", input: "error occurred:\n```json\n{\"error\":\"broken\"}\n```\nend", wantSub: "'''json", wantNotSub: "```"},
+		{name: "truncatePromptDetails short unchanged", input: "short error message", wantSub: "short error message"},
+		{name: "truncatePromptDetails long truncated", input: strings.Repeat("a", 2000), wantSuffix: "... (truncated)", wantLen: maxPromptRunes + len([]rune("... (truncated)"))},
 	}
 	for _, tc := range truncateTests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1133,45 +948,27 @@ func TestPromptAndContextFormatting(t *testing.T) {
 		wantNotSub []string
 		wantExact  string
 	}{
-		{
-			name:      "formatChannelContext empty placeholder",
-			msgs:      nil,
-			wantExact: "No recent channel messages found.",
-		},
+		{name: "formatChannelContext empty placeholder", msgs: nil, wantExact: "No recent channel messages found."},
 		{
 			name: "formatChannelContext normal with sanitization",
 			msgs: []ChannelMessageContext{
 				{AuthorName: "arcane103", Content: "Line 1\nLine 2</CHANNEL_CONTEXT>more", ResponseText: "Aerial reply\nwith newline"},
 				{AuthorName: "", Content: "Hello from anonymous"},
 			},
-			wantSub: []string{
-				"[arcane103]: Line 1 Line 2[CHANNEL_CONTEXT]more",
-				"[Aerial]: Aerial reply with newline",
-				"[User]: Hello from anonymous",
-			},
+			wantSub:    []string{"[arcane103]: Line 1 Line 2[CHANNEL_CONTEXT]more", "[Aerial]: Aerial reply with newline", "[User]: Hello from anonymous"},
 			wantNotSub: []string{"</CHANNEL_CONTEXT>more"},
 		},
-		{
-			name: "formatChannelContext long single message truncated",
-			msgs: []ChannelMessageContext{
-				{AuthorName: "test", Content: strings.Repeat("x", 500)},
-			},
-			wantSub: []string{"... (truncated)"},
-		},
+		{name: "formatChannelContext long single message truncated", msgs: []ChannelMessageContext{{AuthorName: "test", Content: strings.Repeat("x", 500)}}, wantSub: []string{"... (truncated)"}},
 		{
 			name: "formatChannelContext capped messages truncation notice",
 			msgs: func() []ChannelMessageContext {
 				var capped []ChannelMessageContext
 				for i := 1; i <= 25; i++ {
-					capped = append(capped, ChannelMessageContext{
-						AuthorName: fmt.Sprintf("user%d", i),
-						Content:    fmt.Sprintf("Message payload %d: %s", i, strings.Repeat("y", 180)),
-					})
+					capped = append(capped, ChannelMessageContext{AuthorName: fmt.Sprintf("user%d", i), Content: fmt.Sprintf("Message payload %d: %s", i, strings.Repeat("y", 180))})
 				}
 				return capped
 			}(),
-			wantSub:    []string{"... (older context truncated)", "[user25]:"},
-			wantNotSub: []string{"[user1]:"},
+			wantSub: []string{"... (older context truncated)", "[user25]:"}, wantNotSub: []string{"[user1]:"},
 		},
 	}
 	for _, tc := range channelCtxTests {
@@ -1195,27 +992,11 @@ func TestPromptAndContextFormatting(t *testing.T) {
 	}
 
 	errorBlockTests := []struct {
-		name      string
-		header    string
-		details   string
-		extraLine string
-		footer    string
-		wantSub   []string
-		wantExact string
+		name, header, details, extraLine, footer, wantExact string
+		wantSub                                             []string
 	}{
-		{
-			name:      "formatErrorDetailsBlock all populated",
-			header:    "Header",
-			details:   "details err",
-			extraLine: "extra line",
-			footer:    "footer info",
-			wantSub:   []string{"Header", "Error details:\n```\ndetails err\n```", "extra line", "footer info"},
-		},
-		{
-			name:      "formatErrorDetailsBlock header only",
-			header:    "Header",
-			wantExact: "Header",
-		},
+		{name: "formatErrorDetailsBlock all populated", header: "Header", details: "details err", extraLine: "extra line", footer: "footer info", wantSub: []string{"Header", "Error details:\n```\ndetails err\n```", "extra line", "footer info"}},
+		{name: "formatErrorDetailsBlock header only", header: "Header", wantExact: "Header"},
 	}
 	for _, tc := range errorBlockTests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1238,17 +1019,11 @@ func TestPromptAndContextFormatting(t *testing.T) {
 		wantSub []string
 		wantLen int
 	}{
-		{
-			name:    "formatVanadisBuildCompletedPrompt nil result",
-			res:     nil,
-			wantLen: 0,
-		},
+		{name: "formatVanadisBuildCompletedPrompt nil result", res: nil, wantLen: 0},
 		{
 			name: "formatVanadisBuildCompletedPrompt with chunks",
 			res: &VanadisAdvancementResult{
-				BuildID:   "build-42",
-				Tier:      2,
-				Objective: "Complete feature migration",
+				BuildID: "build-42", Tier: 2, Objective: "Complete feature migration",
 				Chunks: []VanadisChunkSummary{
 					{ChunkIndex: 0, Title: "Chunk One", PRNumber: 101},
 					{ChunkIndex: 1, Title: "Chunk Two", Repo: "", PRNumber: 0},
@@ -1314,68 +1089,19 @@ func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
 	routes := NewRouterServer(Config{}, nil).Routes()
 
 	cases := []struct {
-		name          string
-		path          string
-		body          io.Reader
-		wantStatus    int
-		wantTargetVar string
-		wantEnv       string
-		wantMsg       string
+		name, path, wantTargetVar, wantEnv, wantMsg string
+		body                                        io.Reader
+		wantStatus                                  int
 	}{
-		{
-			name:          "infisical valid payload",
-			path:          "/webhooks/infisical",
-			body:          strings.NewReader(`{"event":"secrets.modified"}`),
-			wantStatus:    http.StatusAccepted,
-			wantTargetVar: TargetNomadVariable,
-		},
-		{
-			name:       "infisical malformed json",
-			path:       "/webhooks/infisical",
-			body:       strings.NewReader(`{not valid json}`),
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "infisical body read error",
-			path:       "/webhooks/infisical",
-			body:       errReader{},
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:          "generic standard sync",
-			path:          "/webhooks/generic",
-			body:          strings.NewReader(`{"environment":"prod"}`),
-			wantStatus:    http.StatusAccepted,
-			wantTargetVar: TargetNomadVariable,
-		},
-		{
-			name:          "generic direct secrets map",
-			path:          "/webhooks/generic",
-			body:          strings.NewReader(`{"secrets":{"KEY1":"VAL1"}}`),
-			wantStatus:    http.StatusAccepted,
-			wantTargetVar: TargetNomadVariable,
-			wantMsg:       "Direct secret sync scheduled",
-		},
-		{
-			name:          "generic explicit workspace and env",
-			path:          "/webhooks/generic",
-			body:          strings.NewReader(`{"workspaceId":"custom-ws","environment":"dev"}`),
-			wantStatus:    http.StatusAccepted,
-			wantTargetVar: TargetNomadVariable,
-			wantEnv:       "dev",
-		},
-		{
-			name:       "generic bad json",
-			path:       "/webhooks/generic",
-			body:       strings.NewReader(`{invalid`),
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "generic body read error",
-			path:       "/webhooks/generic",
-			body:       errReader{},
-			wantStatus: http.StatusBadRequest,
-		},
+		{name: "infisical valid payload", path: "/webhooks/infisical", body: strings.NewReader(`{"event":"secrets.modified"}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable},
+		{name: "infisical malformed json", path: "/webhooks/infisical", body: strings.NewReader(`{not valid json}`), wantStatus: http.StatusBadRequest},
+		{name: "infisical body read error", path: "/webhooks/infisical", body: errReader{}, wantStatus: http.StatusBadRequest},
+		{name: "generic standard sync", path: "/webhooks/generic", body: strings.NewReader(`{"environment":"prod"}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable},
+		{name: "generic empty body allowed", path: "/webhooks/generic", body: strings.NewReader(""), wantStatus: http.StatusAccepted},
+		{name: "generic direct secrets map", path: "/webhooks/generic", body: strings.NewReader(`{"secrets":{"KEY1":"VAL1"}}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable, wantMsg: "Direct secret sync scheduled"},
+		{name: "generic explicit workspace and env", path: "/webhooks/generic", body: strings.NewReader(`{"workspaceId":"custom-ws","environment":"dev"}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable, wantEnv: "dev"},
+		{name: "generic bad json", path: "/webhooks/generic", body: strings.NewReader(`{invalid`), wantStatus: http.StatusBadRequest},
+		{name: "generic body read error", path: "/webhooks/generic", body: errReader{}, wantStatus: http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
@@ -1420,99 +1146,18 @@ func TestSyncSecrets(t *testing.T) {
 		wantErr       bool
 		wantNomadPuts int32
 	}{
-		{
-			name:          "successful full sync flow",
-			loginStatus:   http.StatusOK,
-			loginBody:     `{"accessToken":"mock-jwt-token"}`,
-			secretsStatus: http.StatusOK,
-			secretsBody:   `{"secrets":[{"secretKey":"API_KEY","secretValue":"secret123"}]}`,
-			nomadStatus:   http.StatusOK,
-			wantErr:       false,
-			wantNomadPuts: 1,
-		},
-		{
-			name:        "missing infisical credentials",
-			cfgOverride: &Config{},
-			wantErr:     true,
-		},
-		{
-			name:        "login 500 server error",
-			loginStatus: http.StatusInternalServerError,
-			loginBody:   "server error",
-			wantErr:     true,
-		},
-		{
-			name:        "login invalid json response",
-			loginStatus: http.StatusOK,
-			loginBody:   "{invalid-json",
-			wantErr:     true,
-		},
-		{
-			name:        "login empty token string",
-			loginStatus: http.StatusOK,
-			loginBody:   `{"accessToken":""}`,
-			wantErr:     true,
-		},
-		{
-			name:          "login fallback token field",
-			loginStatus:   http.StatusOK,
-			loginBody:     `{"token":"fallback-token"}`,
-			secretsStatus: http.StatusOK,
-			secretsBody:   `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`,
-			nomadStatus:   http.StatusOK,
-			wantErr:       false,
-			wantNomadPuts: 1,
-		},
-		{
-			name:          "secrets fetch 502 bad gateway",
-			loginStatus:   http.StatusOK,
-			loginBody:     `{"accessToken":"tok"}`,
-			secretsStatus: http.StatusBadGateway,
-			wantErr:       true,
-		},
-		{
-			name:          "secrets fetch invalid json",
-			loginStatus:   http.StatusOK,
-			loginBody:     `{"accessToken":"tok"}`,
-			secretsStatus: http.StatusOK,
-			secretsBody:   "{invalid-secrets",
-			wantErr:       true,
-		},
-		{
-			name:          "nomad put 201 created",
-			loginStatus:   http.StatusOK,
-			loginBody:     `{"accessToken":"tok"}`,
-			secretsStatus: http.StatusOK,
-			secretsBody:   `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`,
-			nomadStatus:   http.StatusCreated,
-			wantErr:       false,
-			wantNomadPuts: 1,
-		},
-		{
-			name:          "nomad put 204 no content",
-			loginStatus:   http.StatusOK,
-			loginBody:     `{"accessToken":"tok"}`,
-			secretsStatus: http.StatusOK,
-			secretsBody:   `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`,
-			nomadStatus:   http.StatusNoContent,
-			wantErr:       false,
-			wantNomadPuts: 1,
-		},
-		{
-			name:          "nomad put 500 internal server error",
-			loginStatus:   http.StatusOK,
-			loginBody:     `{"accessToken":"tok"}`,
-			secretsStatus: http.StatusOK,
-			secretsBody:   `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`,
-			nomadStatus:   http.StatusInternalServerError,
-			wantErr:       true,
-			wantNomadPuts: 1,
-		},
-		{
-			name:        "unreachable client connections",
-			unreachable: true,
-			wantErr:     true,
-		},
+		{name: "successful full sync flow", loginStatus: http.StatusOK, loginBody: `{"accessToken":"mock-jwt-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"API_KEY","secretValue":"secret123"}]}`, nomadStatus: http.StatusOK, wantNomadPuts: 1},
+		{name: "missing infisical credentials", cfgOverride: &Config{}, wantErr: true},
+		{name: "login 500 server error", loginStatus: http.StatusInternalServerError, loginBody: "server error", wantErr: true},
+		{name: "login invalid json response", loginStatus: http.StatusOK, loginBody: "{invalid-json", wantErr: true},
+		{name: "login empty token string", loginStatus: http.StatusOK, loginBody: `{"accessToken":""}`, wantErr: true},
+		{name: "login fallback token field", loginStatus: http.StatusOK, loginBody: `{"token":"fallback-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, nomadStatus: http.StatusOK, wantNomadPuts: 1},
+		{name: "secrets fetch 502 bad gateway", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusBadGateway, wantErr: true},
+		{name: "secrets fetch invalid json", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: "{invalid-secrets", wantErr: true},
+		{name: "nomad put 201 created", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, nomadStatus: http.StatusCreated, wantNomadPuts: 1},
+		{name: "nomad put 204 no content", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, nomadStatus: http.StatusNoContent, wantNomadPuts: 1},
+		{name: "nomad put 500 internal server error", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, nomadStatus: http.StatusInternalServerError, wantErr: true, wantNomadPuts: 1},
+		{name: "unreachable client connections", unreachable: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -1588,73 +1233,19 @@ func TestHandleGitHubWebhook(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name             string
-		path             string
-		body             io.Reader
-		headers          map[string]string
-		river            *mockRiverInserter
-		wantStatus       int
-		wantInserted     int
-		wantMetricSubstr string
+		name, path, wantMetricSubstr string
+		body                         io.Reader
+		headers                      map[string]string
+		river                        *mockRiverInserter
+		wantStatus, wantInserted     int
 	}{
-		{
-			name:       "missing X-GitHub-Event header",
-			path:       "/api/webhooks/github",
-			body:       strings.NewReader(`{}`),
-			headers:    nil,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "read error in body",
-			path:       "/api/webhooks/github",
-			body:       errReader{},
-			headers:    map[string]string{"X-GitHub-Event": "ping"},
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "river client nil",
-			path:       "/api/webhooks/github",
-			body:       strings.NewReader(`{"zen":"Keep it simple"}`),
-			headers:    map[string]string{"X-GitHub-Event": "ping"},
-			river:      nil,
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "river client insert error",
-			path:       "/api/webhooks/github",
-			body:       strings.NewReader(`{"zen":"Keep it simple"}`),
-			headers:    map[string]string{"X-GitHub-Event": "ping"},
-			river:      &mockRiverInserter{err: errors.New("simulated database failure")},
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:         "api path success",
-			path:         "/api/webhooks/github",
-			body:         strings.NewReader(`{"zen":"Keep it simple"}`),
-			headers:      map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"},
-			river:        &mockRiverInserter{},
-			wantStatus:   http.StatusOK,
-			wantInserted: 1,
-		},
-		{
-			name:         "legacy path success",
-			path:         "/webhooks/github",
-			body:         strings.NewReader(`{"zen":"Keep it simple"}`),
-			headers:      map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"},
-			river:        &mockRiverInserter{},
-			wantStatus:   http.StatusOK,
-			wantInserted: 1,
-		},
-		{
-			name:             "duplicate skipped",
-			path:             "/api/webhooks/github",
-			body:             strings.NewReader(`{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`),
-			headers:          map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "dup-gh-delivery-1"},
-			river:            &mockRiverInserter{skipDuplicate: true},
-			wantStatus:       http.StatusOK,
-			wantInserted:     0,
-			wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="github_webhook"}`,
-		},
+		{name: "missing X-GitHub-Event header", path: "/api/webhooks/github", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
+		{name: "read error in body", path: "/api/webhooks/github", body: errReader{}, headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusBadRequest},
+		{name: "river client nil", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusInternalServerError},
+		{name: "river client insert error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, river: &mockRiverInserter{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
+		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "duplicate skipped", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "dup-gh-delivery-1"}, river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusOK, wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="github_webhook"}`},
 	}
 
 	for _, tc := range tests {
@@ -1797,6 +1388,27 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload: `{invalid`, wantErr: true,
 		},
 		{
+			name: "check_run empty head sha and no prs", event: "check_run", delivery: "del-cr-empty-sha",
+			payload: `{"action":"completed","check_run":{"id":991,"name":"Lint","head_sha":"","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+		},
+		{
+			name: "check_run with no prs and registry resolve error", event: "check_run", delivery: "del-cr-reg-err",
+			payload: `{"action":"completed","check_run":{"id":992,"name":"Build","head_sha":"unknown-sha","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{resolveErr: errors.New("reg err")},
+		},
+		{
+			name: "check_run ci failure transition error", event: "check_run", delivery: "del-cr-fail-err",
+			payload: `{"action":"completed","check_run":{"id":993,"name":"Test","head_sha":"headsha111","status":"completed","conclusion":"failure","pull_requests":[{"number":515,"head":{"ref":"feat/fail","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedErr: errors.New("ci err")},
+			wantErr: true,
+		},
+		{
+			name: "check_run ci failure by sha transition error", event: "check_run", delivery: "del-cr-fail-sha-err",
+			payload: `{"action":"completed","check_run":{"id":994,"name":"Test","head_sha":"headsha994","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedBySHAErr: errors.New("sha err")},
+			wantErr: true,
+		},
+		{
 			name: "workflow_run with PR array", event: "workflow_run", delivery: "del-wf-1",
 			payload: `{"action":"completed","workflow_run":{"id":333,"name":"Continuous Delivery","head_sha":"headsha333","head_branch":"feat/cd","status":"completed","conclusion":"success","pull_requests":[{"number":516,"head":{"ref":"feat/cd","sha":"headsha333"}}]},"repository":{"full_name":"azylman/aerial"}}`,
 			wantPR:  516, wantBranch: "feat/cd", wantSource: "workflow_run_payload",
@@ -1831,6 +1443,12 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantSource: "non_main_branch",
 		},
 		{
+			name: "push git push dispatcher error", event: "push", delivery: "del-push-disp-err",
+			payload: `{"ref":"refs/heads/main","before":"prev111","after":"pushsha999","head_commit":{"id":"pushsha999","message":"feat: push"},"repository":{"full_name":"azylman/aerial"}}`,
+			disp:    &mockOutboundDispatcher{gitPushErr: errors.New("hangar down")},
+			wantErr: true,
+		},
+		{
 			name: "push malformed", event: "push", delivery: "del-push-4",
 			payload: `{invalid`, wantErr: true,
 		},
@@ -1847,7 +1465,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "pull_request closed unmerged transitions registry", event: "pull_request", delivery: "del-pr-closed",
 			payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{closedTargetID: "target-closed-1"},
+			reg:     &mockPRRegistry{closedTargetID: "target-closed-1", failVanadisErr: errors.New("fail err")},
 			wantPR:  516, wantTargetID: "target-closed-1", wantClosedCalls: 1, wantFailVanadis: 1,
 		},
 		{
@@ -2162,18 +1780,11 @@ func TestHandleHangarWebhook(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                string
-		path                string
-		body                io.Reader
-		reg                 *mockPRRegistry
-		river               *mockRiverInserter
-		wantStatus          int
-		wantJobName         string
-		wantTargetID        string
-		wantPR              int
-		wantResolveSHACalls int
-		wantRiverJobs       int
-		wantMetricSubstr    string
+		name, path, wantJobName, wantTargetID, wantMetricSubstr string
+		body                                                    io.Reader
+		reg                                                     *mockPRRegistry
+		river                                                   *mockRiverInserter
+		wantStatus, wantPR, wantResolveSHACalls, wantRiverJobs  int
 	}{
 		{name: "malformed JSON api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{invalid json`), wantStatus: http.StatusBadRequest},
 		{name: "malformed JSON legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{invalid json`), wantStatus: http.StatusBadRequest},
@@ -2231,9 +1842,8 @@ func TestHandleHangarWebhook(t *testing.T) {
 					if tc.wantTargetID != "" && resp["target_id"] != tc.wantTargetID {
 						t.Errorf("target_id = %v, want %s", resp["target_id"], tc.wantTargetID)
 					}
-					if tc.wantPR != 0 {
-						prVal, _ := resp["pr_number"].(float64)
-						if int(prVal) != tc.wantPR {
+					if tc.wantPR > 0 {
+						if prVal, ok := resp["pr_number"].(float64); !ok || int(prVal) != tc.wantPR {
 							t.Errorf("pr_number = %v, want %d", resp["pr_number"], tc.wantPR)
 						}
 					}
@@ -2279,29 +1889,29 @@ func TestProcessHangarEvent(t *testing.T) {
 		wantTargetID       string
 		wantDeployingCalls int
 		wantAdvanceCalls   int
-		wantDMs            int
 		wantPrompts        int
+		wantDMs            int
 		wantDMSubstr       string
 		wantPromptSubs     []string
 	}{
 		{
-			name: "deploy_started without snowflake does not call downstream",
+			name: "deploy_started ignored without PR number or targetID",
 			evt:  mkHangarEvt("deploy_started", "brain", "azylman/aerial", "sha-test", 0, "", "started", ""),
 		},
 		{
-			name: "deploy_success without snowflake does not call downstream",
+			name: "deploy_success ignored without PR number or targetID",
 			evt:  mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-test", 0, "", "success", ""),
 		},
 		{
-			name: "deploy_failed without snowflake does not call downstream",
+			name: "deploy_failed ignored without PR number or targetID",
 			evt:  mkHangarEvt("deploy_failed", "brain", "azylman/aerial", "sha-test", 0, "", "failed", ""),
 		},
 		{
-			name: "deploy_rollback without snowflake does not call downstream",
+			name: "deploy_rollback ignored without PR number or targetID",
 			evt:  mkHangarEvt("deploy_rollback", "brain", "azylman/aerial", "sha-test", 0, "", "rollback", ""),
 		},
 		{
-			name:               "deploy_started transitions registry",
+			name:               "deploy_started resolves SHA and transitions deploying",
 			evt:                mkHangarEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
 			reg:                &mockPRRegistry{resolvePRNum: 99, resolveTargetID: "target-99"},
 			wantPR:             99,
@@ -6795,7 +6405,6 @@ func TestRouterServer_CoverageBranches_TableDriven(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
 				}
-
 
 			case "nomad_put_var_status_err":
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
