@@ -10,6 +10,138 @@ import (
 	"unicode/utf8"
 )
 
+var testRefTime = time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+func mkRuns(runs ...GitHubRun) []GitHubRun {
+	return runs
+}
+
+func mkRun(id int64, repo, sha, status, conclusion, msg string, createdOff, updatedOff time.Duration) GitHubRun {
+	r := GitHubRun{
+		ID:         id,
+		Repository: repo,
+		Name:       "Continuous Delivery",
+		HeadSHA:    sha,
+		Status:     status,
+		Conclusion: conclusion,
+		CreatedAt:  testRefTime.Add(createdOff),
+		UpdatedAt:  testRefTime.Add(updatedOff),
+	}
+	if repo == "" {
+		r.HTMLURL = fmt.Sprintf("https://github.com/azylman/aerial/actions/runs/%d", id)
+	} else {
+		r.HTMLURL = fmt.Sprintf("https://github.com/%s/actions/runs/%d", repo, id)
+	}
+	if msg != "" {
+		r.HeadCommit = &struct {
+			Message   string    `json:"message"`
+			Timestamp time.Time `json:"timestamp"`
+		}{Message: msg, Timestamp: testRefTime.Add(-10 * time.Minute)}
+	}
+	return r
+}
+
+func mkPRRun(id int64, repo, sha, status, conclusion string, createdOff, updatedOff time.Duration) GitHubRun {
+	r := mkRun(id, repo, sha, status, conclusion, "", createdOff, updatedOff)
+	r.Event = "pull_request"
+	r.HeadBranch = "feat/sidecars-pr"
+	return r
+}
+
+func mkJob(id, runID int64, name, status, conclusion string, startOff, endOff time.Duration) GitHubJob {
+	j := GitHubJob{ID: id, RunID: runID, Name: name, Status: status, Conclusion: conclusion}
+	if startOff != 0 {
+		j.StartedAt = testRefTime.Add(startOff)
+	}
+	if endOff != 0 {
+		j.CompletedAt = testRefTime.Add(endOff)
+	}
+	return j
+}
+
+func mkCont(name, service, sha, state, health string, createdOff time.Duration) DockerContainerJSON {
+	c := DockerContainerJSON{
+		ID:      "c-" + name,
+		Names:   []string{"/" + strings.TrimPrefix(name, "/")},
+		State:   state,
+		Created: testRefTime.Add(createdOff).Unix(),
+	}
+	if service != "" || sha != "" {
+		c.Labels = map[string]string{"com.docker.compose.project": "aerial"}
+		if service != "" {
+			c.Labels["com.docker.compose.service"] = service
+		}
+		if sha != "" {
+			c.Labels["org.opencontainers.image.revision"] = sha
+		}
+	}
+	if health != "" {
+		c.Health = &DockerContainerHealth{Status: health}
+	}
+	return c
+}
+
+func mkLabeledCont(name, state string, labels map[string]string) DockerContainerJSON {
+	c := DockerContainerJSON{
+		ID:     "c-" + name,
+		State:  state,
+		Labels: labels,
+	}
+	if name != "" {
+		c.Names = []string{"/" + strings.TrimPrefix(name, "/")}
+	}
+	return c
+}
+
+func mkRecon(active bool, state, sha, errMsg string, targets []string, startOff time.Duration) GitSyncStatusResponse {
+	status := "synced"
+	if state == "failed" {
+		status = "error"
+	}
+	return GitSyncStatusResponse{
+		Status: status,
+		Reconciliation: &ReconciliationStatus{
+			Active:         active,
+			State:          state,
+			Stage:          state,
+			CommitSHA:      sha,
+			Error:          errMsg,
+			TargetServices: targets,
+			StartedAt:      testRefTime.Add(startOff),
+		},
+	}
+}
+
+func mkNomadJob(id, name, jobType, status, deployStatus string, starting int) NomadJobItem {
+	_ = deployStatus
+	j := NomadJobItem{ID: id, Name: name, Type: jobType, Status: status}
+	if starting > 0 {
+		j.JobSummary = struct {
+			Summary map[string]NomadJobSummaryGroup `json:"Summary"`
+		}{
+			Summary: map[string]NomadJobSummaryGroup{
+				"web": {Starting: starting},
+			},
+		}
+	}
+	return j
+}
+
+func mkNomadAlloc(id, jobID, clientStatus string, createOff time.Duration, healthy *bool, tasks map[string]NomadTaskState) NomadAllocItem {
+	a := NomadAllocItem{
+		ID:           id,
+		JobID:        jobID,
+		ClientStatus: clientStatus,
+		CreateTime:   testRefTime.Add(createOff).UnixNano(),
+		TaskStates:   tasks,
+	}
+	if healthy != nil {
+		a.DeploymentStatus = &NomadDeploymentStatus{Healthy: *healthy}
+	}
+	return a
+}
+
+
 func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -330,101 +462,19 @@ func TestIsCoreAerialContainer_TableDriven(t *testing.T) {
 		container DockerContainerJSON
 		wantCore  bool
 	}{
-		{
-			name: "core aerial service via compose label",
-			container: DockerContainerJSON{
-				Labels: map[string]string{"com.docker.compose.service": "brain"},
-			},
-			wantCore: true,
-		},
-		{
-			name: "core aerial service via container name prefix",
-			container: DockerContainerJSON{
-				Names: []string{"/aerial-dashboard"},
-			},
-			wantCore: true,
-		},
-		{
-			name: "ignored auxiliary service watchtower via compose label",
-			container: DockerContainerJSON{
-				Labels: map[string]string{"com.docker.compose.service": "watchtower"},
-			},
-			wantCore: false,
-		},
-		{
-			name: "ignored auxiliary service autoheal via name",
-			container: DockerContainerJSON{
-				Names: []string{"/aerial-autoheal"},
-			},
-			wantCore: false,
-		},
-		{
-			name: "ignored auxiliary service agentsview",
-			container: DockerContainerJSON{
-				Labels: map[string]string{"com.docker.compose.service": "agentsview"},
-			},
-			wantCore: false,
-		},
-		{
-			name: "ignored auxiliary service ollama",
-			container: DockerContainerJSON{
-				Labels: map[string]string{"com.docker.compose.service": "ollama"},
-			},
-			wantCore: false,
-		},
-		{
-			name: "image containing watchtower is excluded",
-			container: DockerContainerJSON{
-				Image: "containrrr/watchtower:latest",
-			},
-			wantCore: false,
-		},
-		{
-			name: "image containing autoheal is excluded",
-			container: DockerContainerJSON{
-				Image: "willfarrell/autoheal:latest",
-			},
-			wantCore: false,
-		},
-		{
-			name: "image containing ollama is excluded",
-			container: DockerContainerJSON{
-				Image: "ollama/ollama:latest",
-			},
-			wantCore: false,
-		},
-		{
-			name: "foreign image source excluded",
-			container: DockerContainerJSON{
-				Labels: map[string]string{
-					"com.docker.compose.service":      "custom-service",
-					"org.opencontainers.image.source": "https://github.com/someone/other-repo",
-				},
-			},
-			wantCore: false,
-		},
-		{
-			name: "valid aerial image source accepted",
-			container: DockerContainerJSON{
-				Labels: map[string]string{
-					"com.docker.compose.service":      "custom-service",
-					"org.opencontainers.image.source": "https://github.com/azylman/aerial",
-				},
-			},
-			wantCore: true,
-		},
-		{
-			name: "nil labels and names defaults to true",
-			container: DockerContainerJSON{
-				Image: "alpine:latest",
-			},
-			wantCore: true,
-		},
-		{
-			name:      "image containing agentsview is excluded",
-			container: DockerContainerJSON{Image: "ghcr.io/azylman/agentsview:latest"},
-			wantCore:  false,
-		},
+		{name: "core aerial service via compose label", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain"}), wantCore: true},
+		{name: "core aerial service via container name prefix", container: mkCont("aerial-dashboard", "", "", "", "", 0), wantCore: true},
+		{name: "ignored auxiliary service watchtower via compose label", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "watchtower"}), wantCore: false},
+		{name: "ignored auxiliary service autoheal via name", container: mkCont("aerial-autoheal", "", "", "", "", 0), wantCore: false},
+		{name: "ignored auxiliary service agentsview", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "agentsview"}), wantCore: false},
+		{name: "ignored auxiliary service ollama", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "ollama"}), wantCore: false},
+		{name: "image containing watchtower is excluded", container: DockerContainerJSON{Image: "containrrr/watchtower:latest"}, wantCore: false},
+		{name: "image containing autoheal is excluded", container: DockerContainerJSON{Image: "willfarrell/autoheal:latest"}, wantCore: false},
+		{name: "image containing ollama is excluded", container: DockerContainerJSON{Image: "ollama/ollama:latest"}, wantCore: false},
+		{name: "foreign image source excluded", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "custom-service", "org.opencontainers.image.source": "https://github.com/someone/other-repo"}), wantCore: false},
+		{name: "valid aerial image source accepted", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "custom-service", "org.opencontainers.image.source": "https://github.com/azylman/aerial"}), wantCore: true},
+		{name: "nil labels and names defaults to true", container: DockerContainerJSON{Image: "alpine:latest"}, wantCore: true},
+		{name: "image containing agentsview is excluded", container: DockerContainerJSON{Image: "ghcr.io/azylman/agentsview:latest"}, wantCore: false},
 	}
 
 	for _, tt := range tests {
@@ -476,331 +526,79 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 }
 
 func TestParseMatrixJobChips_TableDriven(t *testing.T) {
-	refTime := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
-
 	tests := []struct {
-		name     string
-		jobs     []GitHubJob
-		now      time.Time
-		wantLen  int
-		validate func(t *testing.T, chips []MatrixJobChip)
+		name      string
+		jobs      []GitHubJob
+		now       time.Time
+		wantChips []MatrixJobChip
 	}{
-		{
-			name:    "empty jobs returns empty slice",
-			jobs:    []GitHubJob{},
-			now:     refTime,
-			wantLen: 0,
-		},
-		{
-			name: "zero-time default fallback",
-			jobs: []GitHubJob{
-				{
-					Name:      "Build & Push Images (proxy)",
-					Status:    "in_progress",
-					StartedAt: time.Now().Add(-10 * time.Second),
-				},
-			},
-			now:     time.Time{},
-			wantLen: 1,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Name != "proxy" {
-					t.Errorf("expected chip name 'proxy', got %q", chips[0].Name)
-				}
-			},
-		},
-		{
-			name: "in_progress job computes active status and duration from refTime",
-			jobs: []GitHubJob{
-				{
-					Name:      "brain-build",
-					Status:    "in_progress",
-					StartedAt: refTime.Add(-45 * time.Second),
-				},
-			},
-			now:     refTime,
-			wantLen: 1,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Name != "brain" {
-					t.Errorf("expected chip name 'brain', got %q", chips[0].Name)
-				}
-				if chips[0].Status != "active" {
-					t.Errorf("expected chip status 'active', got %q", chips[0].Status)
-				}
-				if chips[0].Duration != "45s" {
-					t.Errorf("expected chip duration '45s', got %q", chips[0].Duration)
-				}
-			},
-		},
-		{
-			name: "completed success and failure with deduplication",
-			jobs: []GitHubJob{
-				{
-					Name:        "dashboard-test",
-					Status:      "completed",
-					Conclusion:  "success",
-					StartedAt:   refTime.Add(-120 * time.Second),
-					CompletedAt: refTime.Add(-60 * time.Second),
-				},
-				{
-					Name:       "dashboard-duplicate",
-					Status:     "completed",
-					Conclusion: "failure",
-				},
-				{
-					Name:       "scheduler-mcp",
-					Status:     "completed",
-					Conclusion: "failure",
-				},
-				{
-					Name:       "discord-mcp",
-					Status:     "completed",
-					Conclusion: "cancelled",
-				},
-			},
-			now:     refTime,
-			wantLen: 3, // dashboard, scheduler-mcp, discord-mcp (deduplicated dashboard)
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Name != "dashboard" || chips[0].Status != "completed" || chips[0].Duration != "60s" {
-					t.Errorf("unexpected first chip: %+v", chips[0])
-				}
-				if chips[1].Name != "scheduler-mcp" || chips[1].Status != "failed" {
-					t.Errorf("unexpected second chip: %+v", chips[1])
-				}
-				if chips[2].Name != "discord-mcp" || chips[2].Status != "pending" {
-					t.Errorf("unexpected third chip: %+v", chips[2])
-				}
-			},
-		},
-		{
-			name: "zero reference time defaults to now",
-			jobs: []GitHubJob{
-				{
-					Name:      "brain-build",
-					Status:    "in_progress",
-					StartedAt: time.Now().Add(-10 * time.Second),
-				},
-			},
-			now:     time.Time{},
-			wantLen: 1,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Name != "brain" || chips[0].Status != "active" {
-					t.Errorf("unexpected chip: %+v", chips[0])
-				}
-			},
-		},
+		{name: "empty jobs returns empty slice", jobs: []GitHubJob{}, now: testRefTime, wantChips: []MatrixJobChip{}},
+		{name: "zero-time default fallback", jobs: []GitHubJob{mkJob(1, 10, "Build & Push Images (proxy)", "in_progress", "", -10*time.Second, 0)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "proxy"}}},
+		{name: "in_progress job computes active status and duration from refTime", jobs: []GitHubJob{mkJob(1, 10, "brain-build", "in_progress", "", -45*time.Second, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Status: "active", Duration: "45s"}}},
+		{name: "completed success and failure with deduplication", jobs: []GitHubJob{mkJob(1, 10, "dashboard-test", "completed", "success", -120*time.Second, -60*time.Second), mkJob(2, 10, "dashboard-duplicate", "completed", "failure", 0, 0), mkJob(3, 10, "scheduler-mcp", "completed", "failure", 0, 0), mkJob(4, 10, "discord-mcp", "completed", "cancelled", 0, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Duration: "60s"}, {Name: "scheduler-mcp", Status: "failed"}, {Name: "discord-mcp", Status: "pending"}}},
+		{name: "zero reference time defaults to now", jobs: []GitHubJob{mkJob(1, 10, "brain-build", "in_progress", "", -10*time.Second, 0)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "brain", Status: "active"}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chips := ParseMatrixJobChips(tt.jobs, tt.now)
-			if len(chips) != tt.wantLen {
-				t.Fatalf("ParseMatrixJobChips() len = %d, want %d", len(chips), tt.wantLen)
+			if len(chips) != len(tt.wantChips) {
+				t.Fatalf("ParseMatrixJobChips() len = %d, want %d", len(chips), len(tt.wantChips))
 			}
-			if tt.validate != nil {
-				tt.validate(t, chips)
+			for i, want := range tt.wantChips {
+				if want.Name != "" && chips[i].Name != want.Name {
+					t.Errorf("chip[%d] name = %q, want %q", i, chips[i].Name, want.Name)
+				}
+				if want.Status != "" && chips[i].Status != want.Status {
+					t.Errorf("chip[%d] status = %q, want %q", i, chips[i].Status, want.Status)
+				}
+				if want.Duration != "" && chips[i].Duration != want.Duration {
+					t.Errorf("chip[%d] duration = %q, want %q", i, chips[i].Duration, want.Duration)
+				}
 			}
 		})
 	}
 }
 
 func TestBuildContainerChips_TableDriven(t *testing.T) {
-	refTime := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
-
 	tests := []struct {
 		name       string
 		containers []DockerContainerJSON
 		now        time.Time
-		wantLen    int
-		validate   func(t *testing.T, chips []MatrixJobChip)
+		wantChips  []MatrixJobChip
 	}{
-		{
-			name:       "empty containers returns empty slice",
-			containers: []DockerContainerJSON{},
-			now:        refTime,
-			wantLen:    0,
-		},
-		{
-			name: "zero-time default fallback",
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					Created: time.Now().Add(-60 * time.Second).Unix(),
-					State:   "running",
-					Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-				},
-			},
-			now:     time.Time{},
-			wantLen: 1,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Name != "brain" {
-					t.Errorf("expected chip name 'brain', got %q", chips[0].Name)
-				}
-			},
-		},
-		{
-			name: "zero or future creation time defaults to 0s duration",
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					Created: 0,
-					State:   "running",
-				},
-				{
-					Names:   []string{"/aerial-dashboard"},
-					Created: refTime.Add(10 * time.Minute).Unix(),
-					State:   "running",
-				},
-			},
-			now:     refTime,
-			wantLen: 2,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Duration != "0s" {
-					t.Errorf("expected 0s duration for Created=0, got %q", chips[0].Duration)
-				}
-				if chips[1].Duration != "0s" {
-					t.Errorf("expected 0s duration for future Created, got %q", chips[1].Duration)
-				}
-			},
-		},
-		{
-			name: "health status active for starting, failed for unhealthy or not running",
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					Created: refTime.Add(-120 * time.Second).Unix(),
-					State:   "running",
-					Health: &struct {
-						Status string `json:"Status"`
-					}{Status: "starting"},
-				},
-				{
-					Names:   []string{"/aerial-proxy"},
-					Created: refTime.Add(-300 * time.Second).Unix(),
-					State:   "exited",
-				},
-				{
-					Names:   []string{"/aerial-scheduler-mcp"},
-					Created: refTime.Add(-600 * time.Second).Unix(),
-					State:   "running",
-					Health: &struct {
-						Status string `json:"Status"`
-					}{Status: "unhealthy"},
-				},
-			},
-			now:     refTime,
-			wantLen: 3,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Status != "active" || chips[0].Duration != "2m" {
-					t.Errorf("unexpected starting chip: %+v", chips[0])
-				}
-				if chips[1].Status != "failed" || chips[1].Conclusion != "failure" {
-					t.Errorf("unexpected exited chip: %+v", chips[1])
-				}
-				if chips[2].Status != "failed" || chips[2].Conclusion != "failure" {
-					t.Errorf("unexpected unhealthy chip: %+v", chips[2])
-				}
-			},
-		},
-		{
-			name: "deduplicates running brain containers with future and current created",
-			containers: []DockerContainerJSON{
-				{
-					ID:      "c1",
-					Names:   []string{"/aerial-brain"},
-					State:   "running",
-					Created: refTime.Add(1 * time.Hour).Unix(),
-					Labels:  map[string]string{"com.docker.compose.service": "brain"},
-				},
-				{
-					ID:      "c2",
-					Names:   []string{"/aerial-brain"},
-					State:   "running",
-					Created: refTime.Unix(),
-					Labels:  map[string]string{"com.docker.compose.service": "brain"},
-				},
-			},
-			now:     refTime,
-			wantLen: 1,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Duration != "0s" {
-					t.Errorf("expected Duration '0s', got %q", chips[0].Duration)
-				}
-			},
-		},
-		{
-			name: "nomad containers with alloc_id labels",
-			containers: []DockerContainerJSON{
-				{
-					ID:      "brain-nomad",
-					Names:   []string{"/brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0"},
-					Created: refTime.Add(-120 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"aerial.service":               "brain",
-						"com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0",
-					},
-				},
-				{
-					ID:      "vm-nomad",
-					Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
-					Created: refTime.Add(-300 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
-					},
-				},
-				{
-					ID:    "hassio-supervisor",
-					Names: []string{"/hassio_supervisor"},
-					State: "running",
-				},
-			},
-			now:     refTime,
-			wantLen: 2,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				chipMap := make(map[string]MatrixJobChip)
-				for _, chip := range chips {
-					chipMap[chip.Name] = chip
-				}
-				if brainChip, ok := chipMap["brain"]; !ok {
-					t.Errorf("missing chip for brain")
-				} else if brainChip.Status != "completed" || brainChip.Conclusion != "success" {
-					t.Errorf("unexpected brain chip status/conclusion: %+v", brainChip)
-				}
-				if vmChip, ok := chipMap["victoriametrics-mcp"]; !ok {
-					t.Errorf("missing chip for victoriametrics-mcp")
-				} else if vmChip.Status != "completed" {
-					t.Errorf("unexpected victoriametrics chip status: %+v", vmChip)
-				}
-			},
-		},
-		{
-			name: "zero reference time defaults to now",
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					Created: time.Now().Unix() - 10,
-					State:   "running",
-				},
-			},
-			now:     time.Time{},
-			wantLen: 1,
-			validate: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Status != "completed" || chips[0].Conclusion != "success" {
-					t.Errorf("unexpected chip status/conclusion: %+v", chips[0])
-				}
-			},
-		},
+		{name: "empty containers returns empty slice", containers: []DockerContainerJSON{}, now: testRefTime, wantChips: []MatrixJobChip{}},
+		{name: "zero-time default fallback", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -60*time.Second)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "brain"}}},
+		{name: "zero or future creation time defaults to 0s duration", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "running", nil), mkCont("aerial-dashboard", "", "", "running", "", 10*time.Minute)}, now: testRefTime, wantChips: []MatrixJobChip{{Duration: "0s"}, {Duration: "0s"}}},
+		{name: "health status active for starting, failed for unhealthy or not running", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "starting", -120*time.Second), mkCont("aerial-proxy", "", "", "exited", "", -300*time.Second), mkCont("aerial-scheduler-mcp", "", "", "running", "unhealthy", -600*time.Second)}, now: testRefTime, wantChips: []MatrixJobChip{{Status: "active", Duration: "2m"}, {Status: "failed", Conclusion: "failure"}, {Status: "failed", Conclusion: "failure"}}},
+		{name: "deduplicates running brain containers with future and current created", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 1*time.Hour), mkCont("aerial-brain", "brain", "", "running", "", 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Duration: "0s"}}},
+		{name: "nomad containers with alloc_id labels", containers: []DockerContainerJSON{
+			mkLabeledCont("brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0", "running", map[string]string{"aerial.service": "brain", "com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0"}),
+			mkLabeledCont("victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294", "running", map[string]string{"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294"}),
+			mkLabeledCont("hassio_supervisor", "running", nil),
+		}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Status: "completed", Conclusion: "success"}, {Name: "victoriametrics-mcp", Status: "completed"}}},
+		{name: "zero reference time defaults to now", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "", -10*time.Second)}, now: time.Time{}, wantChips: []MatrixJobChip{{Status: "completed", Conclusion: "success"}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chips := BuildContainerChips(tt.containers, tt.now)
-			if len(chips) != tt.wantLen {
-				t.Fatalf("BuildContainerChips() len = %d, want %d", len(chips), tt.wantLen)
+			if len(chips) != len(tt.wantChips) {
+				t.Fatalf("BuildContainerChips() len = %d, want %d", len(chips), len(tt.wantChips))
 			}
-			if tt.validate != nil {
-				tt.validate(t, chips)
+			for i, want := range tt.wantChips {
+				if want.Name != "" && chips[i].Name != want.Name {
+					t.Errorf("chip[%d] name = %q, want %q", i, chips[i].Name, want.Name)
+				}
+				if want.Status != "" && chips[i].Status != want.Status {
+					t.Errorf("chip[%d] status = %q, want %q", i, chips[i].Status, want.Status)
+				}
+				if want.Conclusion != "" && chips[i].Conclusion != want.Conclusion {
+					t.Errorf("chip[%d] conclusion = %q, want %q", i, chips[i].Conclusion, want.Conclusion)
+				}
+				if want.Duration != "" && chips[i].Duration != want.Duration {
+					t.Errorf("chip[%d] duration = %q, want %q", i, chips[i].Duration, want.Duration)
+				}
 			}
 		})
 	}
@@ -812,144 +610,21 @@ func TestGetContainerCommit_TableDriven(t *testing.T) {
 		containers []DockerContainerJSON
 		expected   string
 	}{
-		{
-			name:       "empty containers returns empty",
-			containers: []DockerContainerJSON{},
-			expected:   "",
-		},
-		{
-			name: "ignored auxiliary container is skipped",
-			containers: []DockerContainerJSON{
-				{
-					Labels: map[string]string{
-						"com.docker.compose.service":        "watchtower",
-						"org.opencontainers.image.revision": "abcdef123456",
-					},
-				},
-			},
-			expected: "",
-		},
-		{
-			name: "org.opencontainers.image.revision prioritized and truncated to 7 chars",
-			containers: []DockerContainerJSON{
-				{
-					Labels: map[string]string{
-						"com.docker.compose.service":        "brain",
-						"org.opencontainers.image.revision": "1234567890abcdef",
-						"aerial.commit_sha":                 "fedcba0987654321",
-					},
-				},
-			},
-			expected: "1234567",
-		},
-		{
-			name: "aerial.commit_sha prioritized over vcs-ref",
-			containers: []DockerContainerJSON{
-				{
-					Labels: map[string]string{
-						"com.docker.compose.service": "brain",
-						"aerial.commit_sha":          "abcdef1",
-						"vcs-ref":                    "9999999",
-					},
-				},
-			},
-			expected: "abcdef1",
-		},
-		{
-			name: "vcs-ref used as fallback",
-			containers: []DockerContainerJSON{
-				{
-					Labels: map[string]string{
-						"com.docker.compose.service": "brain",
-						"vcs-ref":                    "short",
-					},
-				},
-			},
-			expected: "short",
-		},
-		{
-			name: "core container with nil labels returns empty",
-			containers: []DockerContainerJSON{
-				{Names: []string{"/aerial-brain"}, Labels: nil},
-			},
-			expected: "",
-		},
-		{
-			name: "short org.opencontainers.image.revision returned untruncated",
-			containers: []DockerContainerJSON{
-				{
-					Names:  []string{"/aerial-brain"},
-					Labels: map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "123456"},
-				},
-			},
-			expected: "123456",
-		},
-		{
-			name: "long aerial.commit_sha truncated to 7 chars",
-			containers: []DockerContainerJSON{
-				{
-					Names:  []string{"/aerial-brain"},
-					Labels: map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef012345"},
-				},
-			},
-			expected: "abcdef0",
-		},
-		{
-			name: "long vcs-ref truncated to 7 chars",
-			containers: []DockerContainerJSON{
-				{
-					Names:  []string{"/aerial-brain"},
-					Labels: map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "9876543210"},
-				},
-			},
-			expected: "9876543",
-		},
-		{
-			name: "auxiliary sidecars ignored before brain",
-			containers: []DockerContainerJSON{
-				{
-					ID:    "c-agentsview",
-					Names: []string{"/aerial-agentsview"},
-					Image: "ghcr.io/azylman/agentsview:latest",
-					Labels: map[string]string{
-						"com.docker.compose.project":        "aerial",
-						"com.docker.compose.service":        "agentsview",
-						"org.opencontainers.image.revision": "080b49fb7a7c1d8f206549e8ee4eaf9cf50a5c20",
-					},
-				},
-				{
-					ID:    "c-watchtower",
-					Names: []string{"/aerial-watchtower"},
-					Image: "containrrr/watchtower:latest",
-					Labels: map[string]string{
-						"com.docker.compose.project":        "aerial",
-						"com.docker.compose.service":        "watchtower",
-						"org.opencontainers.image.revision": "ace93994711edfe47036e2d2ee5f5d531df013ed",
-					},
-				},
-				{
-					ID:    "c-autoheal",
-					Names: []string{"/aerial-autoheal"},
-					Image: "willfarrell/autoheal:latest",
-					Labels: map[string]string{
-						"com.docker.compose.project":        "aerial",
-						"com.docker.compose.service":        "autoheal",
-						"org.opencontainers.image.revision": "autohealsha1234",
-					},
-				},
-				{
-					ID:    "c-brain",
-					Names: []string{"/aerial-brain"},
-					Image: "ghcr.io/azylman/aerial-brain:latest",
-					Labels: map[string]string{
-						"com.docker.compose.project": "aerial",
-						"com.docker.compose.service": "brain",
-						"aerial.commit_sha":          "e056544d32a5f9d8a4cc50915a20db5eaea7db1e",
-					},
-				},
-			},
-			expected: "e056544",
-		},
+		{name: "empty containers returns empty", containers: []DockerContainerJSON{}, expected: ""},
+		{name: "ignored auxiliary container is skipped", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "watchtower", "org.opencontainers.image.revision": "abcdef123456"})}, expected: ""},
+		{name: "org.opencontainers.image.revision prioritized and truncated to 7 chars", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain", "org.opencontainers.image.revision": "1234567890abcdef", "aerial.commit_sha": "fedcba0987654321"})}, expected: "1234567"},
+		{name: "aerial.commit_sha prioritized over vcs-ref", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain", "aerial.commit_sha": "abcdef1", "vcs-ref": "9999999"})}, expected: "abcdef1"},
+		{name: "vcs-ref used as fallback", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain", "vcs-ref": "short"})}, expected: "short"},
+		{name: "core container with nil labels returns empty", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "", "", 0)}, expected: ""},
+		{name: "short org.opencontainers.image.revision returned untruncated", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "", map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "123456"})}, expected: "123456"},
+		{name: "long aerial.commit_sha truncated to 7 chars", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "", map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef012345"})}, expected: "abcdef0"},
+		{name: "long vcs-ref truncated to 7 chars", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "", map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "9876543210"})}, expected: "9876543"},
+		{name: "auxiliary sidecars ignored before brain", containers: []DockerContainerJSON{
+			{ID: "c-agentsview", Names: []string{"/aerial-agentsview"}, Image: "ghcr.io/azylman/agentsview:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "agentsview", "org.opencontainers.image.revision": "080b49fb7a7c1d8f206549e8ee4eaf9cf50a5c20"}},
+			{ID: "c-watchtower", Names: []string{"/aerial-watchtower"}, Image: "containrrr/watchtower:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "watchtower", "org.opencontainers.image.revision": "ace93994711edfe47036e2d2ee5f5d531df013ed"}},
+			{ID: "c-autoheal", Names: []string{"/aerial-autoheal"}, Image: "willfarrell/autoheal:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "autoheal", "org.opencontainers.image.revision": "autohealsha1234"}},
+			{ID: "c-brain", Names: []string{"/aerial-brain"}, Image: "ghcr.io/azylman/aerial-brain:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "aerial.commit_sha": "e056544d32a5f9d8a4cc50915a20db5eaea7db1e"}},
+		}, expected: "e056544"},
 	}
 
 	for _, tt := range tests {
@@ -989,95 +664,27 @@ func TestMatchesETag_TableDriven(t *testing.T) {
 
 func TestGetMimeType_TableDriven(t *testing.T) {
 	tests := []struct {
-		path      string
-		validator func(t *testing.T, got string)
+		path       string
+		wantSubstr string
 	}{
-		{
-			path: "index.html",
-			validator: func(t *testing.T, got string) {
-				if !strings.HasPrefix(got, "text/html") {
-					t.Errorf("expected text/html prefix, got %q", got)
-				}
-			},
-		},
-		{
-			path: "STYLE.CSS",
-			validator: func(t *testing.T, got string) {
-				if !strings.HasPrefix(got, "text/css") {
-					t.Errorf("expected text/css prefix, got %q", got)
-				}
-			},
-		},
-		{
-			path: "app.js",
-			validator: func(t *testing.T, got string) {
-				if !strings.Contains(got, "javascript") {
-					t.Errorf("expected javascript in MIME type, got %q", got)
-				}
-			},
-		},
-		{
-			path: "DATA.JSON",
-			validator: func(t *testing.T, got string) {
-				if !strings.HasPrefix(got, "application/json") {
-					t.Errorf("expected application/json prefix, got %q", got)
-				}
-			},
-		},
-		{
-			path: "icon.svg",
-			validator: func(t *testing.T, got string) {
-				if got != "image/svg+xml" {
-					t.Errorf("expected image/svg+xml, got %q", got)
-				}
-			},
-		},
-		{
-			path: "favicon.ico",
-			validator: func(t *testing.T, got string) {
-				if got != "image/x-icon" && got != "image/vnd.microsoft.icon" {
-					t.Errorf("expected image/x-icon or image/vnd.microsoft.icon, got %q", got)
-				}
-			},
-		},
-		{
-			path: "photo.png",
-			validator: func(t *testing.T, got string) {
-				if got != "image/png" {
-					t.Errorf("expected image/png, got %q", got)
-				}
-			},
-		},
-		{
-			path: "font.woff2",
-			validator: func(t *testing.T, got string) {
-				if !strings.Contains(got, "woff2") {
-					t.Errorf("expected woff2 in MIME type, got %q", got)
-				}
-			},
-		},
-		{
-			path: "font.woff",
-			validator: func(t *testing.T, got string) {
-				if !strings.Contains(got, "woff") {
-					t.Errorf("expected woff in MIME type, got %q", got)
-				}
-			},
-		},
-		{
-			path: "unknown.xyz123",
-			validator: func(t *testing.T, got string) {
-				if got != "application/octet-stream" {
-					t.Errorf("expected application/octet-stream, got %q", got)
-				}
-			},
-		},
+		{path: "index.html", wantSubstr: "text/html"},
+		{path: "STYLE.CSS", wantSubstr: "text/css"},
+		{path: "app.js", wantSubstr: "javascript"},
+		{path: "DATA.JSON", wantSubstr: "application/json"},
+		{path: "icon.svg", wantSubstr: "image/svg+xml"},
+		{path: "favicon.ico", wantSubstr: "icon"},
+		{path: "photo.png", wantSubstr: "image/png"},
+		{path: "font.woff2", wantSubstr: "woff2"},
+		{path: "font.woff", wantSubstr: "woff"},
+		{path: "unknown.xyz123", wantSubstr: "application/octet-stream"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			got := GetMimeType(tt.path)
-			tt.validator(t, got)
+			if !strings.Contains(got, tt.wantSubstr) {
+				t.Errorf("GetMimeType(%q) = %q, want containing %q", tt.path, got, tt.wantSubstr)
+			}
 		})
 	}
 }
@@ -1244,191 +851,36 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 }
 
 func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	startedAt := now.Add(-60 * time.Second) // 1 minute ago
+	now := testRefTime
+	startedAt := now.Add(-60 * time.Second)
 
 	rawContainers := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-dashboard"},
-			Created: now.Add(-30 * time.Second).Unix(), // recently created (after startedAt)
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "dashboard",
-			},
-		},
-		{
-			Names:   []string{"/aerial-brain"},
-			Created: now.Add(-3 * 3600 * time.Second).Unix(), // 3 hours ago (stale, before startedAt)
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "brain",
-			},
-		},
-		{
-			Names:   []string{"/aerial-proxy"},
-			Created: now.Add(-10 * time.Second).Unix(),
-			State:   "running",
-			Health:  &DockerContainerHealth{Status: "starting"},
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "proxy",
-			},
-		},
-		{
-			Names:   []string{"/aerial-docs"},
-			Created: now.Add(-5 * time.Second).Unix(),
-			State:   "exited",
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "docs",
-			},
-		},
+		mkCont("aerial-dashboard", "dashboard", "", "running", "", -30*time.Second),
+		mkCont("aerial-brain", "brain", "", "running", "", -3*time.Hour),
+		mkCont("aerial-proxy", "proxy", "", "running", "starting", -10*time.Second),
+		mkCont("aerial-docs", "docs", "", "exited", "", -5*time.Second),
 	}
 
 	tests := []struct {
 		name             string
 		targets          []string
 		startedAt        time.Time
-		wantLen          int
 		customContainers []DockerContainerJSON
-		check            func(t *testing.T, chips []MatrixJobChip)
+		wantChips        []MatrixJobChip
 	}{
-		{
-			name:      "nil targets falls back to all containers",
-			targets:   nil,
-			startedAt: startedAt,
-			wantLen:   4,
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				names := make(map[string]bool)
-				for _, c := range chips {
-					names[c.Name] = true
-				}
-				if !names["dashboard"] || !names["brain"] || !names["proxy"] || !names["docs"] {
-					t.Errorf("expected all containers in fallback, got %v", names)
-				}
-			},
-		},
-		{
-			name:      "empty targets falls back to all containers",
-			targets:   []string{},
-			startedAt: startedAt,
-			wantLen:   4,
-		},
-		{
-			name:      "scoped to single recently created target",
-			targets:   []string{"dashboard"},
-			startedAt: startedAt,
-			wantLen:   1,
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				chip := chips[0]
-				if chip.Name != "dashboard" {
-					t.Errorf("expected dashboard chip, got %s", chip.Name)
-				}
-				if chip.Status != "completed" || chip.Conclusion != "success" {
-					t.Errorf("expected completed/success, got status=%s conclusion=%s", chip.Status, chip.Conclusion)
-				}
-				if chip.Duration != "30s" {
-					t.Errorf("expected 30s uptime, got %s", chip.Duration)
-				}
-			},
-		},
-		{
-			name:      "stale container reports active and pending duration",
-			targets:   []string{"brain"},
-			startedAt: startedAt,
-			wantLen:   1,
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				chip := chips[0]
-				if chip.Name != "brain" {
-					t.Errorf("expected brain chip, got %s", chip.Name)
-				}
-				if chip.Status != "active" || chip.Duration != "pending" {
-					t.Errorf("expected active/pending for stale container, got status=%s duration=%s", chip.Status, chip.Duration)
-				}
-			},
-		},
-		{
-			name:      "missing container reports active and pending duration",
-			targets:   []string{"scheduler-mcp"},
-			startedAt: startedAt,
-			wantLen:   1,
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				chip := chips[0]
-				if chip.Name != "scheduler-mcp" {
-					t.Errorf("expected scheduler-mcp chip, got %s", chip.Name)
-				}
-				if chip.Status != "active" || chip.Duration != "pending" {
-					t.Errorf("expected active/pending for missing container, got status=%s duration=%s", chip.Status, chip.Duration)
-				}
-			},
-		},
-		{
-			name:      "starting health reports active and non-empty duration",
-			targets:   []string{"proxy"},
-			startedAt: startedAt,
-			wantLen:   1,
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				chip := chips[0]
-				if chip.Status != "active" || chip.Conclusion != "" {
-					t.Errorf("expected active/empty conclusion for starting container, got status=%s", chip.Status)
-				}
-			},
-		},
-		{
-			name:      "exited container reports failed and failure conclusion",
-			targets:   []string{"docs"},
-			startedAt: startedAt,
-			wantLen:   1,
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				chip := chips[0]
-				if chip.Status != "failed" || chip.Conclusion != "failure" {
-					t.Errorf("expected failed/failure for exited container, got status=%s", chip.Status)
-				}
-			},
-		},
-		{
-			name:      "multiple targets deduplicated and trimmed",
-			targets:   []string{"dashboard", " dashboard ", "docs", ""},
-			startedAt: startedAt,
-			wantLen:   2,
-		},
-		{
-			name:             "zero reference time defaults now to time.Now().UTC()",
-			targets:          []string{"dashboard"},
-			startedAt:        startedAt,
-			wantLen:          1,
-			customContainers: rawContainers,
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Duration == "" {
-					t.Errorf("expected non-empty duration with zero time fallback")
-				}
-			},
-		},
-		{
-			name:      "container name prefix fallback and newer container wins",
-			targets:   []string{"brain"},
-			startedAt: startedAt,
-			wantLen:   1,
-			customContainers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					State:   "running",
-					Created: startedAt.Add(5 * time.Second).Unix(),
-				},
-				{
-					Names:   []string{"/aerial-brain"},
-					State:   "exited",
-					Created: startedAt.Add(-100 * time.Second).Unix(),
-				},
-			},
-			check: func(t *testing.T, chips []MatrixJobChip) {
-				if chips[0].Status != "completed" {
-					t.Errorf("expected newest running container to win, got %s", chips[0].Status)
-				}
-			},
-		},
+		{name: "nil targets falls back to all containers", targets: nil, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "brain"}, {Name: "proxy"}, {Name: "docs"}}},
+		{name: "empty targets falls back to all containers", targets: []string{}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "brain"}, {Name: "proxy"}, {Name: "docs"}}},
+		{name: "scoped to single recently created target", targets: []string{"dashboard"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Conclusion: "success", Duration: "30s"}}},
+		{name: "stale container reports active and pending duration", targets: []string{"brain"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "brain", Status: "active", Duration: "pending"}}},
+		{name: "missing container reports active and pending duration", targets: []string{"scheduler-mcp"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "scheduler-mcp", Status: "active", Duration: "pending"}}},
+		{name: "starting health reports active and non-empty duration", targets: []string{"proxy"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "proxy", Status: "active"}}},
+		{name: "exited container reports failed and failure conclusion", targets: []string{"docs"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "docs", Status: "failed", Conclusion: "failure"}}},
+		{name: "multiple targets deduplicated and trimmed", targets: []string{"dashboard", " dashboard ", "docs", ""}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "docs"}}},
+		{name: "zero reference time defaults now to time.Now().UTC()", targets: []string{"dashboard"}, startedAt: startedAt, customContainers: rawContainers, wantChips: []MatrixJobChip{{Name: "dashboard", Duration: "*"}}},
+		{name: "container name prefix fallback and newer container wins", targets: []string{"brain"}, startedAt: startedAt, customContainers: []DockerContainerJSON{
+			mkCont("aerial-brain", "", "", "running", "", -55*time.Second),
+			mkCont("aerial-brain", "", "", "exited", "", -160*time.Second),
+		}, wantChips: []MatrixJobChip{{Name: "brain", Status: "completed"}}},
 	}
 
 	for _, tt := range tests {
@@ -1442,105 +894,50 @@ func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 				refTime = time.Time{}
 			}
 			got := BuildTargetContainerChips(containers, tt.targets, tt.startedAt, refTime)
-			if len(got) != tt.wantLen {
-				t.Fatalf("BuildTargetContainerChips() returned %d chips, want %d", len(got), tt.wantLen)
+			if len(got) != len(tt.wantChips) {
+				t.Fatalf("BuildTargetContainerChips() returned %d chips, want %d", len(got), len(tt.wantChips))
 			}
-			if tt.check != nil {
-				tt.check(t, got)
+			for i, want := range tt.wantChips {
+				if want.Name != "" && got[i].Name != want.Name {
+					t.Errorf("chip[%d] name = %q, want %q", i, got[i].Name, want.Name)
+				}
+				if want.Status != "" && got[i].Status != want.Status {
+					t.Errorf("chip[%d] status = %q, want %q", i, got[i].Status, want.Status)
+				}
+				if want.Conclusion != "" && got[i].Conclusion != want.Conclusion {
+					t.Errorf("chip[%d] conclusion = %q, want %q", i, got[i].Conclusion, want.Conclusion)
+				}
+				if want.Duration == "*" {
+					if got[i].Duration == "" {
+						t.Errorf("chip[%d] expected non-empty duration", i)
+					}
+				} else if want.Duration != "" && got[i].Duration != want.Duration {
+					t.Errorf("chip[%d] duration = %q, want %q", i, got[i].Duration, want.Duration)
+				}
 			}
 		})
 	}
 }
 
-
 func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 	t.Parallel()
-	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	commitTime := refTime.Add(-10 * time.Minute)
-
-	headCommit := func(msg string, ts time.Time) *struct {
-		Message   string    `json:"message"`
-		Timestamp time.Time `json:"timestamp"`
-	} {
-		return &struct {
-			Message   string    `json:"message"`
-			Timestamp time.Time `json:"timestamp"`
-		}{Message: msg, Timestamp: ts}
-	}
+	commitTime := testRefTime.Add(-10 * time.Minute)
 
 	var cardinalityRuns []GitHubRun
 	for i := 1; i <= 8; i++ {
-		cardinalityRuns = append(cardinalityRuns, GitHubRun{
-			ID:        int64(600 + i),
-			HeadSHA:   fmt.Sprintf("%07d000000000000000000000000000000000", i),
-			Status:    "in_progress",
-			CreatedAt: refTime.Add(time.Duration(-i) * time.Minute),
-			UpdatedAt: refTime.Add(time.Duration(-i) * time.Minute),
-		})
+		cardinalityRuns = append(cardinalityRuns, mkRun(int64(600+i), "", fmt.Sprintf("%07d000000000000000000000000000000000", i), "in_progress", "", "", time.Duration(-i)*time.Minute, time.Duration(-i)*time.Minute))
 	}
 
-	sortRuns := []GitHubRun{
-		{
-			ID:         100,
-			HeadSHA:    "1111111111111111111111111111111111111111",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-10 * time.Minute),
-			UpdatedAt:  refTime.Add(-2 * time.Minute),
-		},
-		{
-			ID:        101,
-			HeadSHA:   "3333333333333333333333333333333333333333",
-			Status:    "in_progress",
-			CreatedAt: refTime.Add(-4 * time.Minute),
-			UpdatedAt: refTime.Add(-3 * time.Minute),
-		},
-		{
-			ID:         102,
-			HeadSHA:    "5555555555555555555555555555555555555555",
-			Status:     "completed",
-			Conclusion: "success",
-			CreatedAt:  refTime.Add(-10 * time.Minute),
-			UpdatedAt:  refTime.Add(-2 * time.Minute),
-		},
-		{
-			ID:        103,
-			HeadSHA:   "2222222222222222222222222222222222222222",
-			Status:    "queued",
-			CreatedAt: refTime.Add(-1 * time.Minute),
-			UpdatedAt: refTime.Add(-1 * time.Minute),
-		},
-	}
-	sortGitSync := GitSyncStatusResponse{
-		Status: "synced",
-		Reconciliation: &ReconciliationStatus{
-			Active:    true,
-			State:     "pulling",
-			CommitSHA: "4444444444444444444444444444444444444444",
-			StartedAt: refTime.Add(-30 * time.Second),
-		},
-	}
+	sortRuns := mkRuns(
+		mkRun(100, "", "1111111111111111111111111111111111111111", "completed", "success", "", -10*time.Minute, -2*time.Minute),
+		mkRun(101, "", "3333333333333333333333333333333333333333", "in_progress", "", "", -4*time.Minute, -3*time.Minute),
+		mkRun(102, "", "5555555555555555555555555555555555555555", "completed", "success", "", -10*time.Minute, -2*time.Minute),
+		mkRun(103, "", "2222222222222222222222222222222222222222", "queued", "", "", -1*time.Minute, -1*time.Minute),
+	)
+	sortGitSync := mkRecon(true, "pulling", "4444444444444444444444444444444444444444", "", nil, -30*time.Second)
 	sortContainers := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-proxy"},
-			Created: refTime.Add(-40 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "proxy",
-				"org.opencontainers.image.revision": "1111111111111111111111111111111111111111",
-			},
-		},
-		{
-			Names:   []string{"/aerial-brain"},
-			Created: refTime.Add(-300 * time.Second).Unix(),
-			State:   "running",
-			Labels: map[string]string{
-				"com.docker.compose.project":        "aerial",
-				"com.docker.compose.service":        "brain",
-				"org.opencontainers.image.revision": "6666666666666666666666666666666666666666",
-			},
-		},
+		mkCont("proxy", "proxy", "1111111111111111111111111111111111111111", "running", "", -40*time.Second),
+		mkCont("brain", "brain", "6666666666666666666666666666666666666666", "running", "", -300*time.Second),
 	}
 
 	type wantDep struct {
@@ -1568,1244 +965,186 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 		containers    []DockerContainerJSON
 		currentCommit string
 		refTime       time.Time
+		useZeroTime   bool
 		wantCount     int
 		wantList      []wantDep
-		extraCheck    func(t *testing.T, deps []DeploymentStatus)
+		wantRepeats   int
 	}{
 		// 1. Concurrent Pipelines
-		{
-			name: "ConcurrentPipelines",
-			runs: []GitHubRun{
-				{
-					ID:        201,
-					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-5 * time.Minute),
-					UpdatedAt: refTime.Add(-1 * time.Minute),
-					HTMLURL:   "https://github.com/azylman/aerial/actions/runs/201",
-					HeadCommit: headCommit("feat: build feature B", refTime.Add(-5*time.Minute)),
-				},
-			},
-			jobs: map[int64][]GitHubJob{
-				201: {
-					{
-						ID:        1,
-						RunID:     201,
-						Name:      "build (dashboard)",
-						Status:    "in_progress",
-						StartedAt: refTime.Add(-4 * time.Minute),
-					},
-				},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:         true,
-					State:          "swapping",
-					Stage:          "swapping",
-					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					TargetServices: []string{"proxy"},
-					StartedAt:      refTime.Add(-2 * time.Minute),
-				},
-			},
-			currentCommit: "aaaaaaaa",
-			refTime:       refTime,
-			wantList: []wantDep{
-				{Stage: "swapping", Commit: "aaaaaaa"},
-				{Stage: "building", Commit: "bbbbbbb"},
-			},
-		},
+		{name: "ConcurrentPipelines", runs: mkRuns(mkRun(201, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "feat: build feature B", -5*time.Minute, -1*time.Minute)), jobs: map[int64][]GitHubJob{201: {mkJob(1, 201, "build (dashboard)", "in_progress", "", -4*time.Minute, 0)}}, gitSync: mkRecon(true, "swapping", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", []string{"proxy"}, -2*time.Minute), currentCommit: "aaaaaaaa", wantList: []wantDep{{Stage: "swapping", Commit: "aaaaaaa"}, {Stage: "building", Commit: "bbbbbbb"}}},
+
 		// 2. AwaitingPullBridge
-		{
-			name: "AwaitingPullBridge",
-			runs: []GitHubRun{
-				{
-					ID:         301,
-					HeadSHA:    "cccccccccccccccccccccccccccccccccccccccc",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-10 * time.Minute),
-					UpdatedAt:  refTime.Add(-5 * time.Minute),
-					HTMLURL:    "https://github.com/azylman/aerial/actions/runs/301",
-					HeadCommit: headCommit("chore: updated docs", refTime.Add(-10*time.Minute)),
-				},
-			},
-			currentCommit: "oldcommit",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Commit: "ccccccc",
-				Stage:  "awaiting_pull",
-				StepStatusMap: map[int]string{
-					1: "completed",
-					2: "active",
-				},
-			}},
-		},
+		{name: "AwaitingPullBridge", runs: mkRuns(mkRun(301, "", "cccccccccccccccccccccccccccccccccccccccc", "completed", "success", "chore: updated docs", -10*time.Minute, -5*time.Minute)), currentCommit: "oldcommit", wantList: []wantDep{{Commit: "ccccccc", Stage: "awaiting_pull", StepStatusMap: map[int]string{1: "completed", 2: "active"}}}},
+
 		// 3. DeterministicSort
-		{
-			name:          "DeterministicSort",
-			runs:          sortRuns,
-			gitSync:       sortGitSync,
-			containers:    sortContainers,
-			currentCommit: "6666666",
-			refTime:       refTime,
-			wantCount:     5,
-			extraCheck: func(t *testing.T, _ []DeploymentStatus) {
-				expectedStages := []string{"swapping", "pulling", "building", "awaiting_pull", "queued"}
-				for i := 0; i < 10; i++ {
-					deps := MergeClusterDeploymentsWithHangar(sortRuns, nil, sortGitSync, sortContainers, "6666666", refTime)
-					if len(deps) != len(expectedStages) {
-						t.Fatalf("iteration %d: expected %d deployments, got %d", i, len(expectedStages), len(deps))
-					}
-					for idx, expStage := range expectedStages {
-						if deps[idx].Stage != expStage {
-							t.Fatalf("iteration %d at index %d: expected stage %q, got %q", i, idx, expStage, deps[idx].Stage)
-						}
-					}
-				}
-			},
-		},
+		{name: "DeterministicSort", runs: sortRuns, gitSync: sortGitSync, containers: sortContainers, currentCommit: "6666666", wantCount: 5, wantList: []wantDep{{Stage: "swapping"}, {Stage: "pulling"}, {Stage: "building"}, {Stage: "awaiting_pull"}, {Stage: "queued"}}, wantRepeats: 10},
+
 		// 4. MultiCommitContainerGrouping
-		{
-			name: "MultiCommitContainerGrouping",
-			runs: []GitHubRun{
-				{
-					ID:         1,
-					HeadSHA:    "aaaaaaa123456789",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-10 * time.Minute),
-					UpdatedAt:  refTime.Add(-5 * time.Minute),
-				},
-				{
-					ID:         2,
-					HeadSHA:    "bbbbbbb123456789",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-2 * time.Minute),
-					UpdatedAt:  refTime.Add(-1 * time.Minute),
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					Created: refTime.Add(-300 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"com.docker.compose.project":        "aerial",
-						"com.docker.compose.service":        "brain",
-						"org.opencontainers.image.revision": "aaaaaaa123456789",
-					},
-				},
-				{
-					Names:   []string{"/aerial-proxy"},
-					Created: refTime.Add(-30 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"com.docker.compose.project":        "aerial",
-						"com.docker.compose.service":        "proxy",
-						"org.opencontainers.image.revision": "bbbbbbb123456789",
-					},
-				},
-			},
-			currentCommit: "aaaaaaa",
-			refTime:       refTime,
-			wantList: []wantDep{
-				{Commit: "bbbbbbb", Stage: "swapping"},
-				{Commit: "aaaaaaa", Stage: "live"},
-			},
-		},
+		{name: "MultiCommitContainerGrouping", runs: mkRuns(mkRun(1, "", "aaaaaaa123456789", "completed", "success", "", -10*time.Minute, -5*time.Minute), mkRun(2, "", "bbbbbbb123456789", "completed", "success", "", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "aaaaaaa123456789", "running", "", -300*time.Second), mkCont("aerial-proxy", "proxy", "bbbbbbb123456789", "running", "", -30*time.Second)}, currentCommit: "aaaaaaa", wantList: []wantDep{{Commit: "bbbbbbb", Stage: "swapping"}, {Commit: "aaaaaaa", Stage: "live"}}},
+
 		// 5. ChipScoping
-		{
-			name: "ChipScoping",
-			runs: []GitHubRun{
-				{
-					ID:        401,
-					HeadSHA:   "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-2 * time.Minute),
-					UpdatedAt: refTime.Add(-1 * time.Minute),
-				},
-			},
-			jobs: map[int64][]GitHubJob{
-				401: {
-					{
-						ID:        1,
-						RunID:     401,
-						Name:      "build (brain)",
-						Status:    "in_progress",
-						StartedAt: refTime.Add(-90 * time.Second),
-					},
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					Created: refTime.Add(-30 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"com.docker.compose.project":        "aerial",
-						"com.docker.compose.service":        "brain",
-						"org.opencontainers.image.revision": "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					},
-				},
-			},
-			currentCommit: "7777777",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				HasCIChip:        true,
-				HasContainerChip: true,
-			}},
-		},
+		{name: "ChipScoping", runs: mkRuns(mkRun(401, "", "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "in_progress", "", "", -2*time.Minute, -1*time.Minute)), jobs: map[int64][]GitHubJob{401: {mkJob(1, 401, "build (brain)", "in_progress", "", -90*time.Second, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "running", "", -30*time.Second)}, currentCommit: "7777777", wantList: []wantDep{{HasCIChip: true, HasContainerChip: true}}},
+
 		// 6. SafeNilHandling
-		{
-			name: "SafeNilHandling",
-			runs: []GitHubRun{
-				{
-					ID:        501,
-					HeadSHA:   "",
-					Status:    "queued",
-					CreatedAt: refTime.Add(-10 * time.Second),
-				},
-				{
-					ID:        502,
-					HeadSHA:   "abc",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-20 * time.Second),
-				},
-				{
-					ID:         503,
-					HeadSHA:    "not-a-valid-hex-sha!@#$%^&*()",
-					Status:     "completed",
-					Conclusion: "failure",
-					CreatedAt:  refTime.Add(-30 * time.Second),
-					UpdatedAt:  refTime.Add(-25 * time.Second),
-				},
-			},
-			refTime:   refTime,
-			wantCount: 3,
-		},
+		{name: "SafeNilHandling", runs: mkRuns(mkRun(501, "", "", "queued", "", "", -10*time.Second, 0), mkRun(502, "", "abc", "in_progress", "", "", -20*time.Second, 0), mkRun(503, "", "not-a-valid-hex-sha!@#$%^&*()", "completed", "failure", "", -30*time.Second, -25*time.Second)), wantCount: 3},
+
 		// 7. CardinalityClamp
-		{
-			name:      "CardinalityClamp",
-			runs:      cardinalityRuns,
-			refTime:   refTime,
-			wantCount: 5,
-		},
+		{name: "CardinalityClamp", runs: cardinalityRuns, wantCount: 5},
+
 		// 8. PullingNotPromotedToSwapping
-		{
-			name: "PullingNotPromotedToSwapping",
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:         true,
-					State:          "pulling",
-					CommitSHA:      "7777777777777777777777777777777777777777",
-					StartedAt:      refTime.Add(-15 * time.Second),
-					TargetServices: []string{"aerial-dashboard"},
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-dashboard"},
-					Created: refTime.Add(-300 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"org.opencontainers.image.revision": "7777777777777777777777777777777777777777",
-					},
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage: "pulling",
-				StepStatusMap: map[int]string{
-					2: "active",
-					3: "pending",
-				},
-			}},
-		},
+		{name: "PullingNotPromotedToSwapping", gitSync: mkRecon(true, "pulling", "7777777777777777777777777777777777777777", "", []string{"aerial-dashboard"}, -15*time.Second), containers: []DockerContainerJSON{mkCont("aerial-dashboard", "", "7777777777777777777777777777777777777777", "running", "", -300*time.Second)}, wantList: []wantDep{{Stage: "pulling", StepStatusMap: map[int]string{2: "active", 3: "pending"}}}},
+
 		// 9. DegradedAndFailedBranches_DegradedContainer
-		{
-			name: "DegradedAndFailedBranches_DegradedContainer",
-			runs: []GitHubRun{
-				{
-					ID:         801,
-					HeadSHA:    "8888888888888888888888888888888888888888",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-5 * time.Minute),
-					UpdatedAt:  refTime.Add(-2 * time.Minute),
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-dashboard"},
-					Created: refTime.Add(-60 * time.Second).Unix(),
-					State:   "exited",
-					Labels: map[string]string{
-						"org.opencontainers.image.revision": "8888888888888888888888888888888888888888",
-					},
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage: "degraded",
-				StepStatusMap: map[int]string{
-					4: "failed",
-				},
-			}},
-		},
+		{name: "DegradedAndFailedBranches_DegradedContainer", runs: mkRuns(mkRun(801, "", "8888888888888888888888888888888888888888", "completed", "success", "", -5*time.Minute, -2*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-dashboard", "", "8888888888888888888888888888888888888888", "exited", "", -60*time.Second)}, wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{4: "failed"}}}},
+
 		// 10. DegradedAndFailedBranches_HangarFailedWithError
-		{
-			name: "DegradedAndFailedBranches_HangarFailedWithError",
-			gitSync: GitSyncStatusResponse{
-				Reconciliation: &ReconciliationStatus{
-					State:     "failed",
-					CommitSHA: "9999999999999999999999999999999999999999",
-					Error:     "failed to pull image: auth expired",
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage:           "failed",
-				CommitMsgSubstr: "auth expired",
-			}},
-		},
+		{name: "DegradedAndFailedBranches_HangarFailedWithError", gitSync: mkRecon(false, "failed", "9999999999999999999999999999999999999999", "failed to pull image: auth expired", nil, 0), wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "auth expired"}}},
+
 		// 11. DegradedAndFailedBranches_HangarFailedWithoutError
-		{
-			name: "DegradedAndFailedBranches_HangarFailedWithoutError",
-			gitSync: GitSyncStatusResponse{
-				Reconciliation: &ReconciliationStatus{
-					State:     "failed",
-					CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage: "failed",
-			}},
-		},
+		{name: "DegradedAndFailedBranches_HangarFailedWithoutError", gitSync: mkRecon(false, "failed", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", nil, 0), wantList: []wantDep{{Stage: "failed"}}},
+
 		// 12. MultiRunSameCommitAndSortTies_SameCommit
-		{
-			name: "MultiRunSameCommitAndSortTies_SameCommit",
-			runs: []GitHubRun{
-				{
-					ID:         111,
-					HeadSHA:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-10 * time.Minute),
-					UpdatedAt:  refTime.Add(-5 * time.Minute),
-				},
-				{
-					ID:        112,
-					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-1 * time.Minute),
-					UpdatedAt: refTime.Add(-30 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage: "building",
-			}},
-		},
+		{name: "MultiRunSameCommitAndSortTies_SameCommit", runs: mkRuns(mkRun(111, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "completed", "success", "", -10*time.Minute, -5*time.Minute), mkRun(112, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "", -1*time.Minute, -30*time.Second)), wantList: []wantDep{{Stage: "building"}}},
+
 		// 13. MultiRunSameCommitAndSortTies_SortTiesLexicographical
-		{
-			name: "MultiRunSameCommitAndSortTies_SortTiesLexicographical",
-			runs: []GitHubRun{
-				{
-					ID:        201,
-					HeadSHA:   "ffffffffffffffffffffffffffffffffffffffff",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-2 * time.Minute),
-					UpdatedAt: refTime.Add(-1 * time.Minute),
-				},
-				{
-					ID:        202,
-					HeadSHA:   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-2 * time.Minute),
-					UpdatedAt: refTime.Add(-1 * time.Minute),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{
-				{Commit: "eeeeeee"},
-				{Commit: "fffffff"},
-			},
-		},
+		{name: "MultiRunSameCommitAndSortTies_SortTiesLexicographical", runs: mkRuns(mkRun(201, "", "ffffffffffffffffffffffffffffffffffffffff", "in_progress", "", "", -2*time.Minute, -1*time.Minute), mkRun(202, "", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "in_progress", "", "", -2*time.Minute, -1*time.Minute)), wantList: []wantDep{{Commit: "eeeeeee"}, {Commit: "fffffff"}}},
+
 		// 14. MultiRunSameCommitAndSortTies_FailedPrecedesDegraded
-		{
-			name: "MultiRunSameCommitAndSortTies_FailedPrecedesDegraded",
-			runs: []GitHubRun{
-				{
-					ID:         301,
-					HeadSHA:    "1111111111111111111111111111111111111111",
-					Status:     "completed",
-					Conclusion: "failure",
-					CreatedAt:  refTime.Add(-5 * time.Minute),
-					UpdatedAt:  refTime.Add(-5 * time.Minute),
-				},
-				{
-					ID:         302,
-					HeadSHA:    "2222222222222222222222222222222222222222",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-5 * time.Minute),
-					UpdatedAt:  refTime.Add(-5 * time.Minute),
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-proxy"},
-					Created: refTime.Add(-5 * time.Minute).Unix(),
-					State:   "exited",
-					Labels: map[string]string{
-						"org.opencontainers.image.revision": "2222222222222222222222222222222222222222",
-					},
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{
-				{Stage: "failed"},
-				{Stage: "degraded"},
-			},
-		},
+		{name: "MultiRunSameCommitAndSortTies_FailedPrecedesDegraded", runs: mkRuns(mkRun(301, "", "1111111111111111111111111111111111111111", "completed", "failure", "", -5*time.Minute, -5*time.Minute), mkRun(302, "", "2222222222222222222222222222222222222222", "completed", "success", "", -5*time.Minute, -5*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-proxy", "", "2222222222222222222222222222222222222222", "exited", "", -5*time.Minute)}, wantList: []wantDep{{Stage: "failed"}, {Stage: "degraded"}}},
+
 		// 15. MultiRunSameCommitAndSortTies_ExpiredIgnored
-		{
-			name: "MultiRunSameCommitAndSortTies_ExpiredIgnored",
-			runs: []GitHubRun{
-				{
-					ID:         401,
-					HeadSHA:    "3333333333333333333333333333333333333333",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-40 * time.Minute),
-					UpdatedAt:  refTime.Add(-35 * time.Minute),
-				},
-			},
-			refTime:   refTime,
-			wantCount: 0,
-		},
+		{name: "MultiRunSameCommitAndSortTies_ExpiredIgnored", runs: mkRuns(mkRun(401, "", "3333333333333333333333333333333333333333", "completed", "success", "", -40*time.Minute, -35*time.Minute)), wantCount: 0},
+
 		// 16. UnparentedContainersDoNotSpawnCards
-		{
-			name: "UnparentedContainersDoNotSpawnCards",
-			containers: []DockerContainerJSON{
-				{
-					ID:      "c-postgres",
-					Names:   []string{"/aerial-postgres"},
-					Created: refTime.Add(-30 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"com.docker.compose.service": "postgres",
-					},
-				},
-				{
-					ID:      "c-vector",
-					Names:   []string{"/aerial-vector"},
-					Created: refTime.Add(-10 * time.Second).Unix(),
-					State:   "exited",
-					Labels: map[string]string{
-						"com.docker.compose.service": "vector",
-					},
-				},
-			},
-			currentCommit: "livecommit",
-			refTime:       refTime,
-			wantCount:     0,
-		},
+		{name: "UnparentedContainersDoNotSpawnCards", containers: []DockerContainerJSON{mkLabeledCont("aerial-postgres", "running", map[string]string{"com.docker.compose.service": "postgres"}), mkLabeledCont("aerial-vector", "exited", map[string]string{"com.docker.compose.service": "vector"})}, currentCommit: "livecommit", wantCount: 0},
+
 		// 17. ActiveCIRun
-		{
-			name: "ActiveCIRun",
-			runs: []GitHubRun{
-				{
-					ID:         481,
-					Name:       "Continuous Delivery",
-					HeadSHA:    "7a9f1b234567",
-					Status:     "in_progress",
-					CreatedAt:  refTime.Add(-2 * time.Minute),
-					UpdatedAt:  refTime.Add(-10 * time.Second),
-					HTMLURL:    "https://github.com/azylman/aerial/actions/runs/481",
-					HeadCommit: headCommit("feat(brain): live github actions tracking", refTime.Add(-2*time.Minute)),
-				},
-			},
-			jobs: map[int64][]GitHubJob{
-				481: {
-					{ID: 1, Name: "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)", Status: "in_progress", StartedAt: refTime.Add(-40 * time.Second)},
-					{ID: 2, Name: "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)", Status: "completed", Conclusion: "success", StartedAt: refTime.Add(-60 * time.Second), CompletedAt: refTime.Add(-10 * time.Second)},
-				},
-			},
-			currentCommit: "7a9f1b2",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:          "building",
-				Commit:         "7a9f1b2",
-				MatrixJobCount: 2,
-				HTMLURL:        "https://github.com/azylman/aerial/actions/runs/481",
-			}},
-		},
+		{name: "ActiveCIRun", runs: mkRuns(mkRun(481, "", "7a9f1b234567", "in_progress", "", "feat(brain): live github actions tracking", -2*time.Minute, -10*time.Second)), jobs: map[int64][]GitHubJob{481: {mkJob(1, 481, "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)", "in_progress", "", -40*time.Second, 0), mkJob(2, 481, "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)", "completed", "success", -60*time.Second, -10*time.Second)}}, currentCommit: "7a9f1b2", wantList: []wantDep{{Stage: "building", Commit: "7a9f1b2", MatrixJobCount: 2, HTMLURL: "https://github.com/azylman/aerial/actions/runs/481"}}},
+
 		// 18. FailedCIRun
-		{
-			name: "FailedCIRun",
-			runs: []GitHubRun{
-				{
-					ID:         482,
-					Name:       "Continuous Delivery",
-					HeadSHA:    "abc1234567",
-					Status:     "completed",
-					Conclusion: "failure",
-					CreatedAt:  refTime.Add(-5 * time.Minute),
-					UpdatedAt:  refTime.Add(-4 * time.Minute),
-					HTMLURL:    "https://github.com/azylman/aerial/actions/runs/482",
-				},
-			},
-			currentCommit: "abc1234",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage: "failed",
-				StepStatusMap: map[int]string{
-					1: "failed",
-				},
-			}},
-		},
+		{name: "FailedCIRun", runs: mkRuns(mkRun(482, "", "abc1234567", "completed", "failure", "", -5*time.Minute, -4*time.Minute)), currentCommit: "abc1234", wantList: []wantDep{{Stage: "failed", StepStatusMap: map[int]string{1: "failed"}}}},
+
 		// 19. AwaitingHangarSync
-		{
-			name: "AwaitingHangarSync",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-			},
-			runs: []GitHubRun{
-				{ID: 483, Name: "Continuous Delivery", HeadSHA: "def5678901", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-4 * time.Minute), UpdatedAt: refTime.Add(-45 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/483"},
-			},
-			jobs: map[int64][]GitHubJob{
-				483: {{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"}},
-			},
-			currentCommit: "old1234",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage: "awaiting_pull",
-				StepStatusMap: map[int]string{
-					2: "active",
-				},
-			}},
-		},
+		{name: "AwaitingHangarSync", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(483, "", "def5678901", "completed", "success", "", -4*time.Minute, -45*time.Second)), jobs: map[int64][]GitHubJob{483: {mkJob(0, 483, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull", StepStatusMap: map[int]string{2: "active"}}}},
+
 		// 20. HangarSyncTimeout
-		{
-			name: "HangarSyncTimeout",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-			},
-			runs: []GitHubRun{
-				{ID: 484, Name: "Continuous Delivery", HeadSHA: "timeout1234", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-10 * time.Minute), UpdatedAt: refTime.Add(-150 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/484"},
-			},
-			jobs: map[int64][]GitHubJob{
-				484: {{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"}},
-			},
-			currentCommit: "old1234",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:           "failed",
-				CommitMsgSubstr: "Hangar reconciliation timed out (>120s)",
-				StepStatusMap: map[int]string{
-					2: "failed",
-				},
-			}},
-		},
+		{name: "HangarSyncTimeout", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(484, "", "timeout1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{484: {mkJob(0, 484, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "Hangar reconciliation timed out (>120s)", StepStatusMap: map[int]string{2: "failed"}}}},
+
 		// 21. NoContainerBuilds_ImmediateLive
-		{
-			name: "NoContainerBuilds_ImmediateLive",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-1 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-			},
-			runs: []GitHubRun{
-				{ID: 485, Name: "Continuous Delivery", HeadSHA: "purecode1234", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-10 * time.Minute), UpdatedAt: refTime.Add(-150 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/485"},
-			},
-			jobs: map[int64][]GitHubJob{
-				485: {
-					{Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
-					{Name: "Lint Microservices & Frontend", Status: "completed", Conclusion: "success"},
-					{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "skipped"},
-				},
-			},
-			currentCommit: "old1234",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:    "live",
-				Progress: 100,
-				StepStatusMap: map[int]string{
-					2: "completed",
-				},
-			}},
-		},
+		{name: "NoContainerBuilds_ImmediateLive", runs: mkRuns(mkRun(485, "", "purecode1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{485: {mkJob(0, 485, "Run Service Unit Tests", "completed", "success", 0, 0), mkJob(0, 485, "Lint Microservices & Frontend", "completed", "success", 0, 0), mkJob(0, 485, "Build & Push Images to GHCR (brain)", "completed", "skipped", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -1*time.Hour)}, currentCommit: "old1234", wantList: []wantDep{{Stage: "live", Progress: 100, StepStatusMap: map[int]string{2: "completed"}}}},
+
 		// 22. RollingSwap
-		{
-			name: "RollingSwap",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-30 * time.Second).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "org.opencontainers.image.revision": "abc9999999"}, Health: &DockerContainerHealth{Status: "starting"}},
-				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: refTime.Add(-10 * time.Second).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}},
-			},
-			runs: []GitHubRun{
-				{ID: 101, HeadSHA: "abc9999999", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-2 * time.Minute), UpdatedAt: refTime.Add(-1 * time.Minute)},
-			},
-			currentCommit: "abc9999",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:          "swapping",
-				Commit:         "abc9999",
-				MatrixJobCount: 2,
-			}},
-		},
+		{name: "RollingSwap", runs: mkRuns(mkRun(101, "", "abc9999999", "completed", "success", "", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "abc9999999", "running", "starting", -30*time.Second), mkCont("aerial-dashboard", "dashboard", "", "running", "", -10*time.Second)}, currentCommit: "abc9999", wantList: []wantDep{{Stage: "swapping", Commit: "abc9999", MatrixJobCount: 2}}},
+
 		// 23. SyncedGrace
-		{
-			name: "SyncedGrace",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-3 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "healthy"}},
-				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: refTime.Add(-3 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}, Health: &DockerContainerHealth{Status: "healthy"}},
-			},
-			runs: []GitHubRun{
-				{ID: 102, HeadSHA: "live123", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-5 * time.Minute), UpdatedAt: refTime.Add(-4 * time.Minute)},
-			},
-			currentCommit: "live123",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:        "live",
-				Progress:     100,
-				StepStatuses: []string{"completed", "completed", "completed", "completed", "completed"},
-			}},
-		},
+		{name: "SyncedGrace", runs: mkRuns(mkRun(102, "", "live123", "completed", "success", "", -5*time.Minute, -4*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "healthy", -3*time.Minute), mkCont("aerial-dashboard", "dashboard", "", "running", "healthy", -3*time.Minute)}, currentCommit: "live123", wantList: []wantDep{{Stage: "live", Progress: 100, StepStatuses: []string{"completed", "completed", "completed", "completed", "completed"}}}},
+
 		// 24. DegradedState
-		{
-			name: "DegradedState",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-2 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "unhealthy"}},
-				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: refTime.Add(-2 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}, Health: &DockerContainerHealth{Status: "healthy"}},
-			},
-			runs: []GitHubRun{
-				{ID: 103, HeadSHA: "deg1234", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-5 * time.Minute), UpdatedAt: refTime.Add(-3 * time.Minute)},
-			},
-			currentCommit: "deg1234",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage: "degraded",
-				StepStatusMap: map[int]string{
-					4: "failed",
-				},
-			}},
-		},
+		{name: "DegradedState", runs: mkRuns(mkRun(103, "", "deg1234", "completed", "success", "", -5*time.Minute, -3*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "unhealthy", -2*time.Minute), mkCont("aerial-dashboard", "dashboard", "", "running", "healthy", -2*time.Minute)}, currentCommit: "deg1234", wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{4: "failed"}}}},
+
 		// 25. Idle
-		{
-			name: "Idle",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-2 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "healthy"}},
-			},
-			currentCommit: "idle123",
-			refTime:       refTime,
-			wantCount:     0,
-		},
+		{name: "Idle", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "healthy", -2*time.Hour)}, currentCommit: "idle123", wantCount: 0},
+
 		// 26. AdversarialNilLabelsAndNilHealth
-		{
-			name: "AdversarialNilLabelsAndNilHealth",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-30 * time.Second).Unix()},
-				{ID: "c2", Names: []string{"/aerial-dashboard"}, State: "running", Created: refTime.Add(-30 * time.Second).Unix()},
-			},
-			runs: []GitHubRun{
-				{ID: 104, HeadSHA: "test1234", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-2 * time.Minute), UpdatedAt: refTime.Add(-1 * time.Minute)},
-			},
-			currentCommit: "test1234",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:          "swapping",
-				MatrixJobCount: 2,
-			}},
-		},
+		{name: "AdversarialNilLabelsAndNilHealth", runs: mkRuns(mkRun(104, "", "test1234", "completed", "success", "", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "", -30*time.Second), mkCont("aerial-dashboard", "", "", "running", "", -30*time.Second)}, currentCommit: "test1234", wantList: []wantDep{{Stage: "swapping", MatrixJobCount: 2}}},
+
 		// 27. AdversarialClockSkewFutureTimestamp
-		{
-			name: "AdversarialClockSkewFutureTimestamp",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(2 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-			},
-			runs: []GitHubRun{
-				{ID: 999, Name: "Continuous Delivery", HeadSHA: "future1234", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(10 * time.Second), UpdatedAt: refTime.Add(15 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/999"},
-			},
-			currentCommit: "old1234",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage: "awaiting_pull",
-			}},
-		},
+		{name: "AdversarialClockSkewFutureTimestamp", runs: mkRuns(mkRun(999, "", "future1234", "completed", "success", "", 10*time.Second, 15*time.Second)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 2*time.Hour)}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull"}}},
+
 		// 28. CommitTimeAcrossAllStages_Queued
-		{
-			name: "CommitTimeAcrossAllStages_Queued",
-			runs: []GitHubRun{
-				{ID: 501, Name: "Continuous Delivery", HeadSHA: "1111aaa", Status: "queued", CreatedAt: refTime.Add(-2 * time.Minute), HeadCommit: headCommit("feat: queued", commitTime)},
-			},
-			currentCommit: "1111aaa",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				CheckCommitTime: &commitTime,
-			}},
-		},
+		{name: "CommitTimeAcrossAllStages_Queued", runs: mkRuns(mkRun(501, "", "1111aaa", "queued", "", "feat: queued", -2*time.Minute, 0)), currentCommit: "1111aaa", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+
 		// 29. CommitTimeAcrossAllStages_Building
-		{
-			name: "CommitTimeAcrossAllStages_Building",
-			runs: []GitHubRun{
-				{ID: 502, Name: "Continuous Delivery", HeadSHA: "2222bbb", Status: "in_progress", CreatedAt: refTime.Add(-1 * time.Minute), HeadCommit: headCommit("feat: building", commitTime)},
-			},
-			currentCommit: "2222bbb",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				CheckCommitTime: &commitTime,
-			}},
-		},
+		{name: "CommitTimeAcrossAllStages_Building", runs: mkRuns(mkRun(502, "", "2222bbb", "in_progress", "", "feat: building", -1*time.Minute, 0)), currentCommit: "2222bbb", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+
 		// 30. CommitTimeAcrossAllStages_Failed
-		{
-			name: "CommitTimeAcrossAllStages_Failed",
-			runs: []GitHubRun{
-				{ID: 503, Name: "Continuous Delivery", HeadSHA: "3333ccc", Status: "completed", Conclusion: "failure", CreatedAt: refTime.Add(-5 * time.Minute), UpdatedAt: refTime.Add(-4 * time.Minute), HeadCommit: headCommit("feat: failed", commitTime)},
-			},
-			currentCommit: "3333ccc",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				CheckCommitTime: &commitTime,
-			}},
-		},
+		{name: "CommitTimeAcrossAllStages_Failed", runs: mkRuns(mkRun(503, "", "3333ccc", "completed", "failure", "feat: failed", -5*time.Minute, -4*time.Minute)), currentCommit: "3333ccc", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+
 		// 31. CommitTimeAcrossAllStages_Swapping
-		{
-			name: "CommitTimeAcrossAllStages_Swapping",
-			containers: []DockerContainerJSON{
-				{ID: "c-brain", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-30 * time.Second).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "starting"}},
-			},
-			runs: []GitHubRun{
-				{ID: 504, Name: "Continuous Delivery", HeadSHA: "4444ddd", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-2 * time.Minute), UpdatedAt: refTime.Add(-1 * time.Minute), HeadCommit: headCommit("feat: success", commitTime)},
-			},
-			currentCommit: "4444ddd",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Commit:          "4444ddd",
-				CheckCommitTime: &commitTime,
-			}},
-		},
+		{name: "CommitTimeAcrossAllStages_Swapping", runs: mkRuns(mkRun(504, "", "4444ddd", "completed", "success", "feat: success", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "starting", -30*time.Second)}, currentCommit: "4444ddd", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+
 		// 32. EmptyAndFuture_Empty
-		{
-			name:          "EmptyAndFuture_Empty",
-			currentCommit: "commit123",
-			refTime:       refTime,
-			wantCount:     0,
-		},
+		{name: "EmptyAndFuture_Empty", currentCommit: "commit123", wantCount: 0},
+
 		// 33. EmptyAndFuture_FutureContainers
-		{
-			name: "EmptyAndFuture_FutureContainers",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(2 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-			},
-			runs: []GitHubRun{
-				{ID: 123, Status: "completed", Conclusion: "success", HeadSHA: "sha1234567890", CreatedAt: refTime.Add(-10 * time.Minute)},
-			},
-			refTime:   refTime,
-			wantCount: 1,
-		},
+		{name: "EmptyAndFuture_FutureContainers", runs: mkRuns(mkRun(123, "", "sha1234567890", "completed", "success", "", -10*time.Minute, 0)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 2*time.Hour)}, wantCount: 1},
+
 		// 34. HangarActiveSuppresses120sTimeout
-		{
-			name: "HangarActiveSuppresses120sTimeout",
-			runs: []GitHubRun{
-				{ID: 101, HeadSHA: "abc1234567890", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-300 * time.Second), UpdatedAt: refTime.Add(-200 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/101"},
-			},
-			jobs: map[int64][]GitHubJob{
-				101: {{Name: "Build & Push Images (dashboard)", Status: "completed", Conclusion: "success"}},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status:         "synced",
-				Reconciliation: &ReconciliationStatus{Active: true, State: "pulling", Stage: "pulling", TargetServices: []string{"dashboard"}},
-			},
-			currentCommit: "oldcommit",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				StepStatusMap: map[int]string{
-					2: "active",
-				},
-			}},
-		},
+		{name: "HangarActiveSuppresses120sTimeout", runs: mkRuns(mkRun(101, "", "abc1234567890", "completed", "success", "", -300*time.Second, -200*time.Second)), jobs: map[int64][]GitHubJob{101: {mkJob(0, 101, "Build & Push Images (dashboard)", "completed", "success", 0, 0)}}, gitSync: mkRecon(true, "pulling", "", "", []string{"dashboard"}, 0), currentCommit: "oldcommit", wantList: []wantDep{{StepStatusMap: map[int]string{2: "active"}}}},
+
 		// 35. HangarFailedFastFail
-		{
-			name: "HangarFailedFastFail",
-			runs: []GitHubRun{
-				{ID: 102, HeadSHA: "def5678901234", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-60 * time.Second), UpdatedAt: refTime.Add(-30 * time.Second), HTMLURL: "https://github.com/azylman/aerial/actions/runs/102"},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status:         "error",
-				Reconciliation: &ReconciliationStatus{Active: false, State: "failed", Stage: "failed", Error: "manifest unknown"},
-			},
-			currentCommit: "oldcommit",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:           "failed",
-				CommitMsgSubstr: "manifest unknown",
-				StepStatusMap: map[int]string{
-					2: "failed",
-				},
-			}},
-		},
+		{name: "HangarFailedFastFail", runs: mkRuns(mkRun(102, "", "def5678901234", "completed", "success", "", -60*time.Second, -30*time.Second)), gitSync: mkRecon(false, "failed", "", "manifest unknown", nil, 0), currentCommit: "oldcommit", wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "manifest unknown", StepStatusMap: map[int]string{2: "failed"}}}},
+
 		// 36. TargetServicesScoping
-		{
-			name: "TargetServicesScoping",
-			containers: []DockerContainerJSON{
-				{Names: []string{"/aerial-dashboard"}, Created: refTime.Add(-30 * time.Second).Unix(), State: "running", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"}},
-				{Names: []string{"/aerial-brain"}, Created: refTime.Add(-5 * 3600 * time.Second).Unix(), State: "running", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-				{Names: []string{"/aerial-proxy"}, Created: refTime.Add(-5 * 3600 * time.Second).Unix(), State: "running", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "proxy"}},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status:         "synced",
-				Reconciliation: &ReconciliationStatus{Active: true, State: "swapping", Stage: "swapping", TargetServices: []string{"dashboard"}, CommitSHA: "548c826", StartedAt: refTime.Add(-60 * time.Second)},
-			},
-			currentCommit: "current",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage:          "swapping",
-				Commit:         "548c826",
-				MatrixJobCount: 1,
-			}},
-		},
+		{name: "TargetServicesScoping", containers: []DockerContainerJSON{mkCont("aerial-dashboard", "dashboard", "", "running", "", -30*time.Second), mkCont("aerial-brain", "brain", "", "running", "", -5*3600*time.Second), mkCont("aerial-proxy", "proxy", "", "running", "", -5*3600*time.Second)}, gitSync: mkRecon(true, "swapping", "548c826", "", []string{"dashboard"}, -60*time.Second), currentCommit: "current", wantList: []wantDep{{Stage: "swapping", Commit: "548c826", MatrixJobCount: 1}}},
+
 		// 37. DegradedWithoutHangarFailure
-		{
-			name: "DegradedWithoutHangarFailure",
-			containers: []DockerContainerJSON{
-				{ID: "c-unhealthy", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-10 * time.Minute).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}, Health: &DockerContainerHealth{Status: "unhealthy"}},
-			},
-			runs: []GitHubRun{
-				{ID: 105, HeadSHA: "commit123", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-15 * time.Minute), UpdatedAt: refTime.Add(-12 * time.Minute)},
-			},
-			gitSync:       GitSyncStatusResponse{Status: "synced"},
-			currentCommit: "commit123",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Stage: "degraded",
-				StepStatusMap: map[int]string{
-					3: "completed",
-					4: "failed",
-				},
-			}},
-		},
+		{name: "DegradedWithoutHangarFailure", runs: mkRuns(mkRun(105, "", "commit123", "completed", "success", "", -15*time.Minute, -12*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "unhealthy", -10*time.Minute)}, gitSync: GitSyncStatusResponse{Status: "synced"}, currentCommit: "commit123", wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{3: "completed", 4: "failed"}}}},
+
 		// 38. MultiRepoActiveFanout
-		{
-			name: "MultiRepoActiveFanout",
-			runs: []GitHubRun{
-				{ID: 101, Repository: "azylman/aerial", Name: "CI", HeadSHA: "1111aaa", Status: "in_progress", CreatedAt: refTime.Add(-2 * time.Minute), HTMLURL: "https://github.com/azylman/aerial/actions/runs/101"},
-				{ID: 201, Repository: "azylman/aerial-sidecars", Name: "Build Sidecars", HeadSHA: "2222bbb", Status: "in_progress", CreatedAt: refTime.Add(-1 * time.Minute), HTMLURL: "https://github.com/azylman/aerial-sidecars/actions/runs/201"},
-			},
-			currentCommit: "0000000",
-			refTime:       refTime,
-			wantList: []wantDep{
-				{Repository: "azylman/aerial-sidecars", Service: "aerial-sidecars", Stage: "building"},
-				{Repository: "azylman/aerial", Service: "aerial-stack", Stage: "building"},
-			},
-		},
+		{name: "MultiRepoActiveFanout", runs: mkRuns(mkRun(101, "azylman/aerial", "1111aaa", "in_progress", "", "", -2*time.Minute, 0), mkRun(201, "azylman/aerial-sidecars", "2222bbb", "in_progress", "", "", -1*time.Minute, 0)), currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Service: "aerial-sidecars", Stage: "building"}, {Repository: "azylman/aerial", Service: "aerial-stack", Stage: "building"}}},
+
 		// 39. NonContainerRepoNoTimeout
-		{
-			name: "NonContainerRepoNoTimeout",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-			},
-			runs: []GitHubRun{
-				{ID: 301, Repository: "azylman/aerial-config", Name: "Config Validation", HeadSHA: "3333ccc", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-5 * time.Minute), UpdatedAt: refTime.Add(-150 * time.Second), HTMLURL: "https://github.com/azylman/aerial-config/actions/runs/301"},
-			},
-			currentCommit: "oldcorecommit",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Service: "aerial-config",
-				Stage:   "awaiting_pull",
-			}},
-		},
+		{name: "NonContainerRepoNoTimeout", runs: mkRuns(mkRun(301, "azylman/aerial-config", "3333ccc", "completed", "success", "", -5*time.Minute, -150*time.Second)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantList: []wantDep{{Service: "aerial-config", Stage: "awaiting_pull"}}},
+
 		// 40. ActivePRRunShowsBuilding
-		{
-			name: "ActivePRRunShowsBuilding",
-			runs: []GitHubRun{
-				{ID: 9001, Repository: "azylman/aerial-sidecars", Name: "Continuous Delivery", Event: "pull_request", HeadBranch: "feat/sidecars-pr", HeadSHA: "aabbccdd1122", Status: "in_progress", CreatedAt: refTime.Add(-1 * time.Minute), UpdatedAt: refTime.Add(-30 * time.Second), HTMLURL: "https://github.com/azylman/aerial-sidecars/actions/runs/9001"},
-			},
-			jobs: map[int64][]GitHubJob{
-				9001: {
-					{Name: "Run Sidecar Tests & Lint", Status: "completed", Conclusion: "success"},
-					{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "in_progress"},
-				},
-			},
-			currentCommit: "0000000",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Repository:     "azylman/aerial-sidecars",
-				Stage:          "building",
-				MatrixJobCount: 2,
-			}},
-		},
+		{name: "ActivePRRunShowsBuilding", runs: mkRuns(mkPRRun(9001, "azylman/aerial-sidecars", "aabbccdd1122", "in_progress", "", -1*time.Minute, -30*time.Second)), jobs: map[int64][]GitHubJob{9001: {mkJob(0, 9001, "Run Sidecar Tests & Lint", "completed", "success", 0, 0), mkJob(0, 9001, "Build & Push Sidecar Images to GHCR (aura-farming)", "in_progress", "", 0, 0)}}, currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Stage: "building", MatrixJobCount: 2}}},
+
 		// 41. CompletedPRRunDoesNotTimeout
-		{
-			name: "CompletedPRRunDoesNotTimeout",
-			containers: []DockerContainerJSON{
-				{ID: "c1", Names: []string{"/aerial-brain"}, State: "running", Created: refTime.Add(-10 * time.Hour).Unix(), Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}},
-			},
-			runs: []GitHubRun{
-				{ID: 9002, Repository: "azylman/aerial-sidecars", Name: "Continuous Delivery", Event: "pull_request", HeadBranch: "feat/sidecars-pr", HeadSHA: "aabbccdd1122", Status: "completed", Conclusion: "success", CreatedAt: refTime.Add(-300 * time.Second), UpdatedAt: refTime.Add(-200 * time.Second), HTMLURL: "https://github.com/azylman/aerial-sidecars/actions/runs/9002"},
-			},
-			jobs: map[int64][]GitHubJob{
-				9002: {{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "completed", Conclusion: "success"}},
-			},
-			currentCommit: "oldcorecommit",
-			refTime:       refTime,
-			wantCount:     0,
-		},
+		{name: "CompletedPRRunDoesNotTimeout", runs: mkRuns(mkPRRun(9002, "azylman/aerial-sidecars", "aabbccdd1122", "completed", "success", -300*time.Second, -200*time.Second)), jobs: map[int64][]GitHubJob{9002: {mkJob(0, 9002, "Build & Push Sidecar Images to GHCR (aura-farming)", "completed", "success", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantCount: 0},
+
 		// 42. ReconTargetServices_MatchingContainerWithoutCommitLabel
-		{
-			name: "ReconTargetServices_MatchingContainerWithoutCommitLabel",
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:         true,
-					State:          "pulling",
-					CommitSHA:      "8888888888888888888888888888888888888888",
-					TargetServices: []string{"proxy"},
-					StartedAt:      refTime.Add(-15 * time.Second),
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					ID:      "p1",
-					Names:   []string{"/aerial-proxy"},
-					State:   "running",
-					Created: refTime.Add(-10 * time.Second).Unix(),
-					Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "proxy"},
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Commit:           "8888888",
-				MatrixJobCount:   1,
-				HasContainerChip: true,
-			}},
-		},
+		{name: "ReconTargetServices_MatchingContainerWithoutCommitLabel", gitSync: mkRecon(true, "pulling", "8888888888888888888888888888888888888888", "", []string{"proxy"}, -15*time.Second), containers: []DockerContainerJSON{mkCont("aerial-proxy", "proxy", "", "running", "", -10*time.Second)}, wantList: []wantDep{{Commit: "8888888", MatrixJobCount: 1, HasContainerChip: true}}},
+
 		// 43. ReconShortSteps_FailedState
-		{
-			name: "ReconShortSteps_FailedState",
-			gitSync: GitSyncStatusResponse{
-				Status: "error",
-				Reconciliation: &ReconciliationStatus{
-					Active:    false,
-					State:     "failed",
-					Error:     "docker compose build failed",
-					CommitSHA: "9999999999999999999999999999999999999999",
-					StartedAt: refTime.Add(-2 * time.Minute),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage:           "failed",
-				Progress:        55,
-				CommitMsgSubstr: "docker compose build failed",
-				StepStatuses:    []string{"completed", "completed", "failed", "pending", "pending"},
-			}},
-		},
+		{name: "ReconShortSteps_FailedState", gitSync: mkRecon(false, "failed", "9999999999999999999999999999999999999999", "docker compose build failed", nil, -2*time.Minute), wantList: []wantDep{{Stage: "failed", Progress: 55, CommitMsgSubstr: "docker compose build failed", StepStatuses: []string{"completed", "completed", "failed", "pending", "pending"}}}},
+
 		// 44. ReconEmptyCommitSHA_FallbackToHangar
-		{
-			name: "ReconEmptyCommitSHA_FallbackToHangar",
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    true,
-					State:     "pulling",
-					CommitSHA: "",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				ID:     "dep-aerial-stack-hangar",
-				Commit: "dep-aerial-stack-hangar",
-			}},
-		},
+		{name: "ReconEmptyCommitSHA_FallbackToHangar", gitSync: mkRecon(true, "pulling", "", "", nil, -10*time.Second), wantList: []wantDep{{ID: "dep-aerial-stack-hangar", Commit: "dep-aerial-stack-hangar"}}},
+
 		// 45. ReconEmptyCommitSHA_FallbackToRuns
-		{
-			name: "ReconEmptyCommitSHA_FallbackToRuns",
-			runs: []GitHubRun{
-				{
-					ID:        701,
-					HeadSHA:   "abcdef0123456789012345678901234567890123",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-1 * time.Minute),
-				},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    true,
-					State:     "pulling",
-					CommitSHA: "",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			currentCommit: "ignored",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Commit: "abcdef0",
-			}},
-		},
+		{name: "ReconEmptyCommitSHA_FallbackToRuns", runs: mkRuns(mkRun(701, "", "abcdef0123456789012345678901234567890123", "in_progress", "", "", -1*time.Minute, 0)), gitSync: mkRecon(true, "pulling", "", "", nil, -10*time.Second), currentCommit: "ignored", wantList: []wantDep{{Commit: "abcdef0"}}},
+
 		// 46. ReconEmptyCommitSHA_FallbackToCurrentCommit
-		{
-			name: "ReconEmptyCommitSHA_FallbackToCurrentCommit",
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    true,
-					State:     "pulling",
-					CommitSHA: "",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			currentCommit: "fedcba987654321",
-			refTime:       refTime,
-			wantList: []wantDep{{
-				Commit: "fedcba9",
-			}},
-		},
+		{name: "ReconEmptyCommitSHA_FallbackToCurrentCommit", gitSync: mkRecon(true, "pulling", "", "", nil, -10*time.Second), currentCommit: "fedcba987654321", wantList: []wantDep{{Commit: "fedcba9"}}},
+
 		// 47. ReconExistingRun_SwappingState
-		{
-			name: "ReconExistingRun_SwappingState",
-			runs: []GitHubRun{
-				{
-					ID:        777,
-					HeadSHA:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-2 * time.Minute),
-				},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:         true,
-					State:          "swapping",
-					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					TargetServices: []string{"brain"},
-					StartedAt:      refTime.Add(-30 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage: "swapping",
-				StepStatusMap: map[int]string{
-					3: "active",
-					4: "active",
-				},
-			}},
-		},
+		{name: "ReconExistingRun_SwappingState", runs: mkRuns(mkRun(777, "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(true, "swapping", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", []string{"brain"}, -30*time.Second), wantList: []wantDep{{Stage: "swapping", StepStatusMap: map[int]string{3: "active", 4: "active"}}}},
+
 		// 48. ReconExistingRun_FailedState
-		{
-			name: "ReconExistingRun_FailedState",
-			runs: []GitHubRun{
-				{
-					ID:        778,
-					HeadSHA:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-2 * time.Minute),
-				},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status: "error",
-				Reconciliation: &ReconciliationStatus{
-					Active:    false,
-					State:     "failed",
-					Error:     "host crash",
-					CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage: "failed",
-				StepStatusMap: map[int]string{
-					2: "failed",
-				},
-			}},
-		},
+		{name: "ReconExistingRun_FailedState", runs: mkRuns(mkRun(778, "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(false, "failed", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "host crash", nil, -10*time.Second), wantList: []wantDep{{Stage: "failed", StepStatusMap: map[int]string{2: "failed"}}}},
+
 		// 49. ReconExistingRun_HealthyState
-		{
-			name: "ReconExistingRun_HealthyState",
-			runs: []GitHubRun{
-				{
-					ID:        779,
-					HeadSHA:   "cccccccccccccccccccccccccccccccccccccccc",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-2 * time.Minute),
-				},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    false,
-					State:     "healthy",
-					CommitSHA: "cccccccccccccccccccccccccccccccccccccccc",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage:        "building",
-				Progress:     25,
-				StepStatuses: []string{"completed", "completed", "completed", "completed", "completed"},
-			}},
-		},
+		{name: "ReconExistingRun_HealthyState", runs: mkRuns(mkRun(779, "", "cccccccccccccccccccccccccccccccccccccccc", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(false, "healthy", "cccccccccccccccccccccccccccccccccccccccc", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "building", Progress: 25, StepStatuses: []string{"completed", "completed", "completed", "completed", "completed"}}}},
+
 		// 50. ReconShortSteps_HealthyState
-		{
-			name: "ReconShortSteps_HealthyState",
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    false,
-					State:     "healthy",
-					CommitSHA: "cccccccccccccccccccccccccccccccccccccccc",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			refTime:   refTime,
-			wantCount: 0,
-		},
+		{name: "ReconShortSteps_HealthyState", gitSync: mkRecon(false, "healthy", "cccccccccccccccccccccccccccccccccccccccc", "", nil, -10*time.Second), wantCount: 0},
+
 		// 51. ReconShortSteps_PullingState
-		{
-			name: "ReconShortSteps_PullingState",
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    true,
-					State:     "pulling",
-					CommitSHA: "dddddddddddddddddddddddddddddddddddddddd",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage:        "pulling",
-				Progress:     55,
-				StepStatuses: []string{"completed", "completed", "active", "pending", "pending"},
-			}},
-		},
+		{name: "ReconShortSteps_PullingState", gitSync: mkRecon(true, "pulling", "dddddddddddddddddddddddddddddddddddddddd", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "pulling", Progress: 55, StepStatuses: []string{"completed", "completed", "active", "pending", "pending"}}}},
+
 		// 52. ReconExistingRun_PullingState
-		{
-			name: "ReconExistingRun_PullingState",
-			runs: []GitHubRun{
-				{
-					ID:        780,
-					HeadSHA:   "dddddddddddddddddddddddddddddddddddddddd",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-2 * time.Minute),
-				},
-			},
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    true,
-					State:     "pulling",
-					CommitSHA: "dddddddddddddddddddddddddddddddddddddddd",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage:    "pulling",
-				Progress: 55,
-				StepStatusMap: map[int]string{
-					1: "completed",
-					2: "active",
-				},
-			}},
-		},
+		{name: "ReconExistingRun_PullingState", runs: mkRuns(mkRun(780, "", "dddddddddddddddddddddddddddddddddddddddd", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(true, "pulling", "dddddddddddddddddddddddddddddddddddddddd", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "pulling", Progress: 55, StepStatusMap: map[int]string{1: "completed", 2: "active"}}}},
+
 		// 53. ReconShortSteps_SwappingState
-		{
-			name: "ReconShortSteps_SwappingState",
-			gitSync: GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:    true,
-					State:     "swapping",
-					CommitSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-					StartedAt: refTime.Add(-10 * time.Second),
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Stage:        "swapping",
-				Progress:     60,
-				StepStatuses: []string{"completed", "completed", "completed", "active", "active"},
-			}},
-		},
-		// 54. 40CharSHARun_MatchedBy7CharPrefixContainer
-		{
-			name: "Prefix40CharSHA_MatchedBy7CharPrefixContainer",
-			runs: []GitHubRun{
-				{
-					ID:        888,
-					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-					Status:    "in_progress",
-					CreatedAt: refTime.Add(-3 * time.Minute),
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					ID:      "c2",
-					Names:   []string{"/aerial-proxy"},
-					Created: refTime.Add(-20 * time.Second).Unix(),
-					State:   "running",
-					Labels: map[string]string{
-						"com.docker.compose.project":        "aerial",
-						"com.docker.compose.service":        "proxy",
-						"org.opencontainers.image.revision": "bbbbbbb",
-					},
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{{
-				Commit: "bbbbbbb",
-			}},
-		},
+		{name: "ReconShortSteps_SwappingState", gitSync: mkRecon(true, "swapping", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "swapping", Progress: 60, StepStatuses: []string{"completed", "completed", "completed", "active", "active"}}}},
+
+		// 54. Prefix40CharSHA_MatchedBy7CharPrefixContainer
+		{name: "Prefix40CharSHA_MatchedBy7CharPrefixContainer", runs: mkRuns(mkRun(888, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "", -3*time.Minute, 0)), containers: []DockerContainerJSON{mkCont("aerial-proxy", "proxy", "bbbbbbb", "running", "", -20*time.Second)}, wantList: []wantDep{{Commit: "bbbbbbb"}}},
+
 		// 55. SortTieBreaker_FailedPrecedesDegraded_BothPositions
-		{
-			name: "SortTieBreaker_FailedPrecedesDegraded_BothPositions",
-			runs: []GitHubRun{
-				{
-					ID:         901,
-					HeadSHA:    "1111111111111111111111111111111111111111",
-					Status:     "completed",
-					Conclusion: "failure",
-					CreatedAt:  refTime.Add(-5 * time.Minute),
-					UpdatedAt:  refTime.Add(-5 * time.Minute),
-				},
-				{
-					ID:         902,
-					HeadSHA:    "2222222222222222222222222222222222222222",
-					Status:     "completed",
-					Conclusion: "success",
-					CreatedAt:  refTime.Add(-5 * time.Minute),
-					UpdatedAt:  refTime.Add(-5 * time.Minute),
-				},
-			},
-			containers: []DockerContainerJSON{
-				{
-					Names:   []string{"/aerial-brain"},
-					Created: refTime.Add(-5 * time.Minute).Unix(),
-					State:   "exited",
-					Labels: map[string]string{
-						"org.opencontainers.image.revision": "2222222222222222222222222222222222222222",
-					},
-				},
-			},
-			refTime: refTime,
-			wantList: []wantDep{
-				{Stage: "failed", Commit: "1111111"},
-				{Stage: "degraded", Commit: "2222222"},
-			},
-		},
+		{name: "SortTieBreaker_FailedPrecedesDegraded_BothPositions", runs: mkRuns(mkRun(901, "", "1111111111111111111111111111111111111111", "completed", "failure", "", -5*time.Minute, -5*time.Minute), mkRun(902, "", "2222222222222222222222222222222222222222", "completed", "success", "", -5*time.Minute, -5*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "", "2222222222222222222222222222222222222222", "exited", "", -5*time.Minute)}, wantList: []wantDep{{Stage: "failed", Commit: "1111111"}, {Stage: "degraded", Commit: "2222222"}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			deps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, tt.refTime)
+			ref := tt.refTime
+			if ref.IsZero() && !tt.useZeroTime {
+				ref = testRefTime
+			}
+			deps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
+
 			expectedCount := tt.wantCount
 			if expectedCount == 0 && len(tt.wantList) > 0 {
 				expectedCount = len(tt.wantList)
@@ -2895,58 +1234,34 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 					}
 				}
 			}
-			if tt.extraCheck != nil {
-				tt.extraCheck(t, deps)
+			if tt.wantRepeats > 0 {
+				for iter := 0; iter < tt.wantRepeats; iter++ {
+					iterDeps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
+					if len(iterDeps) != len(tt.wantList) {
+						t.Fatalf("iteration %d: expected %d deployments, got %d", iter, len(tt.wantList), len(iterDeps))
+					}
+					for idx, want := range tt.wantList {
+						if iterDeps[idx].Stage != want.Stage {
+							t.Fatalf("iteration %d at index %d: expected stage %q, got %q", iter, idx, want.Stage, iterDeps[idx].Stage)
+						}
+					}
+				}
 			}
 		})
 	}
 }
+
 func TestExtractSingleContainerCommit_TableDriven(t *testing.T) {
 	tests := []struct {
 		name      string
 		container DockerContainerJSON
 		want      string
 	}{
-		{
-			name:      "nil_labels",
-			container: DockerContainerJSON{Labels: nil},
-			want:      "",
-		},
-		{
-			name:      "empty_labels",
-			container: DockerContainerJSON{Labels: map[string]string{}},
-			want:      "",
-		},
-		{
-			name: "opencontainers_revision_priority",
-			container: DockerContainerJSON{
-				Labels: map[string]string{
-					"org.opencontainers.image.revision": "1111111111111111111111111111111111111111",
-					"aerial.commit_sha":                 "2222222222222222222222222222222222222222",
-					"vcs-ref":                           "3333333333333333333333333333333333333333",
-				},
-			},
-			want: "1111111111111111111111111111111111111111",
-		},
-		{
-			name: "aerial_commit_sha_fallback",
-			container: DockerContainerJSON{
-				Labels: map[string]string{
-					"aerial.commit_sha": "2222222222222222222222222222222222222222",
-					"vcs-ref":           "3333333333333333333333333333333333333333",
-				},
-			},
-			want: "2222222222222222222222222222222222222222",
-		},
-		{
-			name: "vcs_ref_fallback",
-			container: DockerContainerJSON{
-				Labels: map[string]string{
-					"vcs-ref": "3333333333333333333333333333333333333333",
-				},
-			},
-			want: "3333333333333333333333333333333333333333",
-		},
+		{name: "nil_labels", container: mkLabeledCont("", "", nil), want: ""},
+		{name: "empty_labels", container: mkLabeledCont("", "", map[string]string{}), want: ""},
+		{name: "opencontainers_revision_priority", container: mkLabeledCont("", "", map[string]string{"org.opencontainers.image.revision": "1111111111111111111111111111111111111111", "aerial.commit_sha": "2222222222222222222222222222222222222222", "vcs-ref": "3333333333333333333333333333333333333333"}), want: "1111111111111111111111111111111111111111"},
+		{name: "aerial_commit_sha_fallback", container: mkLabeledCont("", "", map[string]string{"aerial.commit_sha": "2222222222222222222222222222222222222222", "vcs-ref": "3333333333333333333333333333333333333333"}), want: "2222222222222222222222222222222222222222"},
+		{name: "vcs_ref_fallback", container: mkLabeledCont("", "", map[string]string{"vcs-ref": "3333333333333333333333333333333333333333"}), want: "3333333333333333333333333333333333333333"},
 	}
 
 	for _, tt := range tests {
@@ -3008,93 +1323,14 @@ func TestExtractAerialServiceName(t *testing.T) {
 		expectedSvc string
 		expectedOk  bool
 	}{
-		{
-			name: "Docker Compose container",
-			container: DockerContainerJSON{
-				Names: []string{"/aerial-brain-1"},
-				Labels: map[string]string{
-					"com.docker.compose.project": "aerial",
-					"com.docker.compose.service": "brain",
-				},
-			},
-			expectedSvc: "brain",
-			expectedOk:  true,
-		},
-		{
-			name: "Foreign Docker Compose project container",
-			container: DockerContainerJSON{
-				Names: []string{"/homeassistant-web-1"},
-				Labels: map[string]string{
-					"com.docker.compose.project": "homeassistant",
-					"com.docker.compose.service": "web",
-				},
-			},
-			expectedSvc: "",
-			expectedOk:  false,
-		},
-		{
-			name: "Nomad container with aerial.service label",
-			container: DockerContainerJSON{
-				Names: []string{"/scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
-				Labels: map[string]string{
-					"aerial.service":               "scheduler-mcp",
-					"com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e",
-				},
-			},
-			expectedSvc: "scheduler-mcp",
-			expectedOk:  true,
-		},
-		{
-			name: "Nomad container with alloc_id in name",
-			container: DockerContainerJSON{
-				Names: []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
-				Labels: map[string]string{
-					"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
-				},
-			},
-			expectedSvc: "victoriametrics-mcp",
-			expectedOk:  true,
-		},
-		{
-			name: "Legacy container with aerial- prefix",
-			container: DockerContainerJSON{
-				Names: []string{"/aerial-proxy"},
-			},
-			expectedSvc: "proxy",
-			expectedOk:  true,
-		},
-		{
-			name: "Host supervisor container (non-Aerial)",
-			container: DockerContainerJSON{
-				Names: []string{"/hassio_supervisor"},
-				Labels: map[string]string{
-					"io.hass.type": "supervisor",
-				},
-			},
-			expectedSvc: "",
-			expectedOk:  false,
-		},
-		{
-			name: "Host addon container (non-Aerial)",
-			container: DockerContainerJSON{
-				Names: []string{"/app_core_mosquitto"},
-				Labels: map[string]string{
-					"supervisor_managed": "",
-				},
-			},
-			expectedSvc: "",
-			expectedOk:  false,
-		},
-		{
-			name: "Empty container metadata",
-			container: DockerContainerJSON{
-				Names:  nil,
-				Labels: nil,
-				State:  "running",
-			},
-			expectedSvc: "",
-			expectedOk:  false,
-		},
+		{name: "Docker Compose container", container: mkLabeledCont("aerial-brain-1", "", map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}), expectedSvc: "brain", expectedOk: true},
+		{name: "Foreign Docker Compose project container", container: mkLabeledCont("homeassistant-web-1", "", map[string]string{"com.docker.compose.project": "homeassistant", "com.docker.compose.service": "web"}), expectedSvc: "", expectedOk: false},
+		{name: "Nomad container with aerial.service label", container: mkLabeledCont("scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e", "", map[string]string{"aerial.service": "scheduler-mcp", "com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"}), expectedSvc: "scheduler-mcp", expectedOk: true},
+		{name: "Nomad container with alloc_id in name", container: mkLabeledCont("victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294", "", map[string]string{"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294"}), expectedSvc: "victoriametrics-mcp", expectedOk: true},
+		{name: "Legacy container with aerial- prefix", container: mkCont("aerial-proxy", "", "", "", "", 0), expectedSvc: "proxy", expectedOk: true},
+		{name: "Host supervisor container (non-Aerial)", container: mkLabeledCont("hassio_supervisor", "", map[string]string{"io.hass.type": "supervisor"}), expectedSvc: "", expectedOk: false},
+		{name: "Host addon container (non-Aerial)", container: mkLabeledCont("app_core_mosquitto", "", map[string]string{"supervisor_managed": ""}), expectedSvc: "", expectedOk: false},
+		{name: "Empty container metadata", container: mkLabeledCont("", "running", nil), expectedSvc: "", expectedOk: false},
 	}
 
 	for _, tc := range tests {
@@ -3110,9 +1346,9 @@ func TestExtractAerialServiceName(t *testing.T) {
 	}
 }
 
-
 func TestParseNomadClusterState(t *testing.T) {
-	now := time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC)
+	now := testRefTime
+	boolPtr := func(b bool) *bool { return &b }
 	mustJSON := func(v any) []byte {
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -3122,300 +1358,118 @@ func TestParseNomadClusterState(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		jobsData   []byte
-		allocsData []byte
-		now        time.Time
-		wantErr    bool
-		wantCount  int
-		validate   func(t *testing.T, services []ServiceStatus)
+		name         string
+		jobsData     []byte
+		allocsData   []byte
+		now          time.Time
+		wantErr      bool
+		wantCount    int
+		wantServices []ServiceStatus
 	}{
 		{
-			name: "healthy services with deployment",
-			jobsData: mustJSON([]NomadJobItem{
-				{ID: "brain", Type: "service", Status: "running"},
-			}),
-			allocsData: mustJSON([]NomadAllocItem{
-				{
-					ID:           "alloc-brain",
-					JobID:        "brain",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-60 * time.Second).UnixNano(),
-					DeploymentStatus: &NomadDeploymentStatus{
-						Healthy: true,
-					},
-				},
-			}),
-			now:       now,
-			wantCount: 1,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Name != "brain" || services[0].Status != "healthy" || services[0].UptimeSeconds != 60 {
-					t.Errorf("unexpected service status: %+v", services[0])
-				}
+			name:       "healthy services with deployment",
+			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("brain", "", "service", "running", "", 0)}),
+			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-brain", "brain", "running", -60*time.Second, boolPtr(true), nil)}),
+			now:        now,
+			wantCount:  1,
+			wantServices: []ServiceStatus{
+				{Name: "brain", Status: "healthy", UptimeSeconds: 60},
 			},
 		},
 		{
-			name: "starting service with deployment healthy=false and running task",
-			jobsData: mustJSON([]NomadJobItem{
-				{ID: "hangar", Type: "service", Status: "running"},
-			}),
-			allocsData: mustJSON([]NomadAllocItem{
-				{
-					ID:           "alloc-hangar",
-					JobID:        "hangar",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
-					DeploymentStatus: &NomadDeploymentStatus{
-						Healthy: false,
-					},
-					TaskStates: map[string]NomadTaskState{
-						"task1": {State: "running"},
-					},
-				},
-			}),
-			now:       now,
-			wantCount: 1,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Status != "starting" || services[0].UptimeSeconds != 10 {
-					t.Errorf("expected starting service with 10s uptime, got: %+v", services)
-				}
+			name:       "starting service with deployment healthy=false and running task",
+			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("hangar", "", "service", "running", "", 0)}),
+			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-hangar", "hangar", "running", -10*time.Second, boolPtr(false), map[string]NomadTaskState{"task1": {State: "running"}})}),
+			now:        now,
+			wantCount:  1,
+			wantServices: []ServiceStatus{
+				{Status: "starting", UptimeSeconds: 10},
 			},
 		},
 		{
-			name: "starting service with deployment healthy=false and pending task",
-			jobsData: mustJSON([]NomadJobItem{
-				{ID: "hangar", Type: "service", Status: "running"},
-			}),
-			allocsData: mustJSON([]NomadAllocItem{
-				{
-					ID:           "alloc-hangar",
-					JobID:        "hangar",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
-					DeploymentStatus: &NomadDeploymentStatus{
-						Healthy: false,
-					},
-					TaskStates: map[string]NomadTaskState{
-						"task1": {State: "pending"},
-					},
-				},
-			}),
-			now:       now,
-			wantCount: 1,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Status != "starting" {
-					t.Errorf("expected starting for pending task, got: %+v", services)
-				}
+			name:       "starting service with deployment healthy=false and pending task",
+			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("hangar", "", "service", "running", "", 0)}),
+			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-hangar", "hangar", "running", -10*time.Second, boolPtr(false), map[string]NomadTaskState{"task1": {State: "pending"}})}),
+			now:        now,
+			wantCount:  1,
+			wantServices: []ServiceStatus{
+				{Status: "starting"},
 			},
 		},
 		{
-			name: "unhealthy service with dead task",
-			jobsData: mustJSON([]NomadJobItem{
-				{ID: "hangar", Type: "service", Status: "running"},
-			}),
-			allocsData: mustJSON([]NomadAllocItem{
-				{
-					ID:           "alloc-hangar",
-					JobID:        "hangar",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
-					DeploymentStatus: &NomadDeploymentStatus{
-						Healthy: false,
-					},
-					TaskStates: map[string]NomadTaskState{
-						"task1": {State: "dead"},
-					},
-				},
-			}),
-			now:       now,
-			wantCount: 1,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Status != "unhealthy" {
-					t.Errorf("expected unhealthy for dead task, got: %+v", services)
-				}
+			name:       "unhealthy service with dead task",
+			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("hangar", "", "service", "running", "", 0)}),
+			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-hangar", "hangar", "running", -10*time.Second, boolPtr(false), map[string]NomadTaskState{"task1": {State: "dead"}})}),
+			now:        now,
+			wantCount:  1,
+			wantServices: []ServiceStatus{
+				{Status: "unhealthy"},
 			},
 		},
 		{
-			name: "unhealthy service with failed task or no allocs",
-			jobsData: mustJSON([]NomadJobItem{
-				{ID: "svc-failed", Type: "service", Status: "running"},
-				{ID: "svc-no-alloc", Type: "service", Status: "dead"},
-			}),
+			name:       "unhealthy service with failed task or no allocs",
+			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("svc-failed", "", "service", "running", "", 0), mkNomadJob("svc-no-alloc", "", "service", "dead", "", 0)}),
+			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-failed", "svc-failed", "running", -30*time.Second, nil, map[string]NomadTaskState{"task1": {State: "running", Failed: true}})}),
+			now:        now,
+			wantCount:  2,
+			wantServices: []ServiceStatus{
+				{Name: "svc-failed", Status: "unhealthy"},
+				{Name: "svc-no-alloc", Status: "unhealthy"},
+			},
+		},
+		{
+			name:     "nil deployment status with healthy and unhealthy tasks",
+			jobsData: mustJSON([]NomadJobItem{mkNomadJob("proxy", "", "service", "running", "", 0), mkNomadJob("gateway", "", "service", "running", "", 0)}),
 			allocsData: mustJSON([]NomadAllocItem{
-				{
-					ID:           "alloc-failed",
-					JobID:        "svc-failed",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-30 * time.Second).UnixNano(),
-					TaskStates: map[string]NomadTaskState{
-						"task1": {State: "running", Failed: true},
-					},
-				},
+				mkNomadAlloc("alloc-proxy", "proxy", "running", -100*time.Second, nil, map[string]NomadTaskState{"proxy-task": {State: "running"}}),
+				mkNomadAlloc("alloc-gateway", "gateway", "running", -100*time.Second, nil, map[string]NomadTaskState{"gateway-task": {State: "pending"}}),
 			}),
 			now:       now,
 			wantCount: 2,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Name != "svc-failed" || services[0].Status != "unhealthy" {
-					t.Errorf("unexpected svc-failed status: %+v", services[0])
-				}
-				if services[1].Name != "svc-no-alloc" || services[1].Status != "unhealthy" || services[1].UptimeSeconds != 0 {
-					t.Errorf("unexpected svc-no-alloc status: %+v", services[1])
-				}
-			},
-		},
-		{
-			name: "nil deployment status with healthy and unhealthy tasks",
-			jobsData: mustJSON([]NomadJobItem{
-				{ID: "proxy", Type: "service", Status: "running"},
-				{ID: "gateway", Type: "service", Status: "running"},
-			}),
-			allocsData: mustJSON([]NomadAllocItem{
-				{
-					ID:               "alloc-proxy",
-					JobID:            "proxy",
-					ClientStatus:     "running",
-					CreateTime:       now.Add(-100 * time.Second).UnixNano(),
-					DeploymentStatus: nil,
-					TaskStates: map[string]NomadTaskState{
-						"proxy-task": {State: "running", Failed: false},
-					},
-				},
-				{
-					ID:               "alloc-gateway",
-					JobID:            "gateway",
-					ClientStatus:     "running",
-					CreateTime:       now.Add(-100 * time.Second).UnixNano(),
-					DeploymentStatus: nil,
-					TaskStates: map[string]NomadTaskState{
-						"gateway-task": {State: "pending", Failed: false},
-					},
-				},
-			}),
-			now:       now,
-			wantCount: 2,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Name != "gateway" || services[0].Status != "unhealthy" {
-					t.Errorf("expected gateway unhealthy, got: %+v", services[0])
-				}
-				if services[1].Name != "proxy" || services[1].Status != "healthy" || services[1].UptimeSeconds != 100 {
-					t.Errorf("expected proxy healthy, got: %+v", services[1])
-				}
+			wantServices: []ServiceStatus{
+				{Name: "gateway", Status: "unhealthy"},
+				{Name: "proxy", Status: "healthy", UptimeSeconds: 100},
 			},
 		},
 		{
 			name: "no running alloc with pending status or starting group",
 			jobsData: mustJSON([]NomadJobItem{
-				{
-					ID:     "pending-svc",
-					Type:   "service",
-					Status: "pending",
-				},
-				{
-					ID:     "starting-svc",
-					Type:   "service",
-					Status: "running",
-					JobSummary: struct {
-						Summary map[string]NomadJobSummaryGroup `json:"Summary"`
-					}{
-						Summary: map[string]NomadJobSummaryGroup{
-							"web": {Starting: 1},
-						},
-					},
-				},
+				mkNomadJob("pending-svc", "", "service", "pending", "", 0),
+				mkNomadJob("starting-svc", "", "service", "running", "", 1),
 			}),
 			allocsData: []byte("[]"),
 			now:        now,
 			wantCount:  2,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Name != "pending-svc" || services[0].Status != "starting" {
-					t.Errorf("expected pending-svc starting, got: %+v", services[0])
-				}
-				if services[1].Name != "starting-svc" || services[1].Status != "starting" {
-					t.Errorf("expected starting-svc starting, got: %+v", services[1])
-				}
+			wantServices: []ServiceStatus{
+				{Name: "pending-svc", Status: "starting"},
+				{Name: "starting-svc", Status: "starting"},
 			},
 		},
 		{
 			name: "multiple running allocs selects highest CreateTime and filters batch",
 			jobsData: mustJSON([]NomadJobItem{
-				{ID: "svc-multi", Type: "service", Status: "running"},
-				{ID: "batch-ignored", Type: "batch", Status: "running"},
-				{ID: "", Name: "named-only", Type: "service", Status: "running"},
-				{ID: "", Name: "", Type: "service", Status: "running"},
+				mkNomadJob("svc-multi", "", "service", "running", "", 0),
+				mkNomadJob("batch-ignored", "", "batch", "running", "", 0),
+				mkNomadJob("", "named-only", "service", "running", "", 0),
+				mkNomadJob("", "", "service", "running", "", 0),
 			}),
 			allocsData: mustJSON([]NomadAllocItem{
-				{
-					ID:           "alloc-old",
-					JobID:        "svc-multi",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-200 * time.Second).UnixNano(),
-					DeploymentStatus: &NomadDeploymentStatus{
-						Healthy: false,
-					},
-				},
-				{
-					ID:           "alloc-new",
-					JobID:        "svc-multi",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-40 * time.Second).UnixNano(),
-					DeploymentStatus: &NomadDeploymentStatus{
-						Healthy: true,
-					},
-				},
-				{
-					ID:           "alloc-batch",
-					JobID:        "batch-ignored",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-10 * time.Second).UnixNano(),
-				},
-				{
-					ID:           "alloc-named",
-					JobID:        "named-only",
-					ClientStatus: "running",
-					CreateTime:   now.Add(-15 * time.Second).UnixNano(),
-					DeploymentStatus: &NomadDeploymentStatus{
-						Healthy: true,
-					},
-				},
-				{
-					ID:           "alloc-nonrunning",
-					JobID:        "svc-multi",
-					ClientStatus: "complete",
-					CreateTime:   now.Add(-5 * time.Second).UnixNano(),
-				},
+				mkNomadAlloc("alloc-old", "svc-multi", "running", -200*time.Second, boolPtr(false), nil),
+				mkNomadAlloc("alloc-new", "svc-multi", "running", -40*time.Second, boolPtr(true), nil),
+				mkNomadAlloc("alloc-batch", "batch-ignored", "running", -10*time.Second, nil, nil),
+				mkNomadAlloc("alloc-named", "named-only", "running", -15*time.Second, boolPtr(true), nil),
+				mkNomadAlloc("alloc-nonrunning", "svc-multi", "complete", -5*time.Second, nil, nil),
 			}),
 			now:       time.Time{},
 			wantCount: 2,
-			validate: func(t *testing.T, services []ServiceStatus) {
-				if services[0].Name != "named-only" || services[0].Status != "healthy" {
-					t.Errorf("unexpected named-only: %+v", services[0])
-				}
-				if services[1].Name != "svc-multi" || services[1].Status != "healthy" {
-					t.Errorf("unexpected svc-multi: %+v", services[1])
-				}
+			wantServices: []ServiceStatus{
+				{Name: "named-only", Status: "healthy"},
+				{Name: "svc-multi", Status: "healthy"},
 			},
 		},
-		{
-			name:       "malformed jobs JSON returns error",
-			jobsData:   []byte("not valid json"),
-			allocsData: []byte("[]"),
-			now:        now,
-			wantErr:    true,
-		},
-		{
-			name:       "malformed allocs JSON returns error",
-			jobsData:   []byte("[]"),
-			allocsData: []byte("not valid json"),
-			now:        now,
-			wantErr:    true,
-		},
-		{
-			name:       "empty payloads returns empty slice",
-			jobsData:   []byte("[]"),
-			allocsData: []byte("[]"),
-			now:        now,
-			wantCount:  0,
-		},
+		{name: "malformed jobs JSON returns error", jobsData: []byte("not valid json"), allocsData: []byte("[]"), now: now, wantErr: true},
+		{name: "malformed allocs JSON returns error", jobsData: []byte("[]"), allocsData: []byte("not valid json"), now: now, wantErr: true},
+		{name: "empty payloads returns empty slice", jobsData: []byte("[]"), allocsData: []byte("[]"), now: now, wantCount: 0},
 	}
 
 	for _, tt := range tests {
@@ -3430,8 +1484,16 @@ func TestParseNomadClusterState(t *testing.T) {
 			if len(services) != tt.wantCount {
 				t.Fatalf("ParseNomadClusterState() count = %d, want %d", len(services), tt.wantCount)
 			}
-			if tt.validate != nil {
-				tt.validate(t, services)
+			for i, want := range tt.wantServices {
+				if want.Name != "" && services[i].Name != want.Name {
+					t.Errorf("service[%d].Name = %q, want %q", i, services[i].Name, want.Name)
+				}
+				if want.Status != "" && services[i].Status != want.Status {
+					t.Errorf("service[%d].Status = %q, want %q", i, services[i].Status, want.Status)
+				}
+				if want.UptimeSeconds > 0 && services[i].UptimeSeconds != want.UptimeSeconds {
+					t.Errorf("service[%d].UptimeSeconds = %d, want %d", i, services[i].UptimeSeconds, want.UptimeSeconds)
+				}
 			}
 		})
 	}
