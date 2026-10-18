@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -560,53 +561,74 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 }
 
 func TestGetGitCommit(t *testing.T) {
-	t.Run("DefaultLookup", func(t *testing.T) {
-		commit := getGitCommit()
-		if commit == "" {
-			t.Errorf("expected non-empty git commit")
-		}
-		if len(commit) > 7 {
-			t.Errorf("expected short commit <= 7 chars, got %s", commit)
-		}
-	})
+	if c := normalizeGitCommit("abcdef"); c != "abcdef" {
+		t.Errorf("expected 'abcdef', got %q", c)
+	}
+	if c := normalizeGitCommit("abcdef0123456789"); c != "abcdef0" {
+		t.Errorf("expected 'abcdef0', got %q", c)
+	}
 
-	t.Run("NormalizeCommit", func(t *testing.T) {
-		if c := normalizeGitCommit("abcdef"); c != "abcdef" {
-			t.Errorf("expected 'abcdef', got %q", c)
-		}
-		if c := normalizeGitCommit("abcdef0123456789"); c != "abcdef0" {
-			t.Errorf("expected 'abcdef0', got %q", c)
-		}
-	})
+	tests := []struct {
+		name        string
+		headContent string
+		refRelPath  string
+		refContent  string
+		noFile      bool
+		defaultCall bool
+		want        string
+	}{
+		{
+			name:        "DefaultLookup",
+			defaultCall: true,
+		},
+		{
+			name:        "FromRefFile",
+			headContent: "ref: refs/heads/main\n",
+			refRelPath:  "refs/heads/main",
+			refContent:  "1234567890abcdef\n",
+			want:        "1234567",
+		},
+		{
+			name:        "FromDirectSHAFile",
+			headContent: "fedcba9876543210\n",
+			want:        "fedcba9",
+		},
+		{
+			name:   "FallbackToLatest",
+			noFile: true,
+			want:   "latest",
+		},
+	}
 
-	t.Run("FromRefFile", func(t *testing.T) {
-		tempDir := t.TempDir()
-		headFile := filepath.Join(tempDir, "HEAD")
-		mainRefFile := filepath.Join(tempDir, "refs", "heads", "main")
-		_ = os.MkdirAll(filepath.Dir(mainRefFile), 0755)
-		_ = os.WriteFile(headFile, []byte("ref: refs/heads/main\n"), 0644)
-		_ = os.WriteFile(mainRefFile, []byte("1234567890abcdef\n"), 0644)
-
-		if c := getGitCommit(headFile); c != "1234567" {
-			t.Errorf("expected '1234567', got %q", c)
-		}
-	})
-
-	t.Run("FromDirectSHAFile", func(t *testing.T) {
-		tempDir := t.TempDir()
-		directFile := filepath.Join(tempDir, "direct")
-		_ = os.WriteFile(directFile, []byte("fedcba9876543210\n"), 0644)
-		if c := getGitCommit(directFile); c != "fedcba9" {
-			t.Errorf("expected 'fedcba9', got %q", c)
-		}
-	})
-
-	t.Run("FallbackToLatest", func(t *testing.T) {
-		tempDir := t.TempDir()
-		if c := getGitCommit(filepath.Join(tempDir, "nonexistent")); c != "latest" {
-			t.Errorf("expected 'latest', got %q", c)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.defaultCall {
+				commit := getGitCommit()
+				if commit == "" {
+					t.Errorf("expected non-empty git commit")
+				}
+				if len(commit) > 7 {
+					t.Errorf("expected short commit <= 7 chars, got %s", commit)
+				}
+				return
+			}
+			tempDir := t.TempDir()
+			headFile := filepath.Join(tempDir, "HEAD")
+			if tc.noFile {
+				headFile = filepath.Join(tempDir, "nonexistent")
+			} else {
+				if tc.refRelPath != "" {
+					refFile := filepath.Join(tempDir, tc.refRelPath)
+					_ = os.MkdirAll(filepath.Dir(refFile), 0755)
+					_ = os.WriteFile(refFile, []byte(tc.refContent), 0644)
+				}
+				_ = os.WriteFile(headFile, []byte(tc.headContent), 0644)
+			}
+			if c := getGitCommit(headFile); c != tc.want {
+				t.Errorf("expected %q, got %q", tc.want, c)
+			}
+		})
+	}
 }
 
 func TestMergeClusterDeployments_WrapperSmoke(t *testing.T) {
@@ -1465,20 +1487,46 @@ func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
 }
 
 func TestLoadDashboardYAMLConfigs_TableDriven(t *testing.T) {
-	t.Run("QuickLaunchLinks", func(t *testing.T) {
-		defaults := DefaultQuickLaunchLinks()
-		if len(defaults) != 0 {
-			t.Fatalf("expected 0 default quick launch links, got %d", len(defaults))
-		}
+	defaults := DefaultQuickLaunchLinks()
+	if len(defaults) != 0 {
+		t.Fatalf("expected 0 default quick launch links, got %d", len(defaults))
+	}
 
-		linksEmpty := loadQuickLaunchLinks("/non/existent/path/config.yaml")
-		if len(linksEmpty) != 0 {
-			t.Errorf("expected 0 links for non-existent file, got %d", len(linksEmpty))
-		}
-
-		tempDir := t.TempDir()
-		cfgFile1 := filepath.Join(tempDir, "config1.yaml")
-		yamlContent1 := `
+	tests := []struct {
+		name           string
+		yamlData       string
+		noFile         bool
+		nonExistent    bool
+		wantLinks      []QuickLaunchLink
+		wantRepos      []string
+		wantVanadisURL string
+	}{
+		{
+			name:           "EmptyPath",
+			noFile:         true,
+			wantLinks:      []QuickLaunchLink{},
+			wantRepos:      nil,
+			wantVanadisURL: "",
+		},
+		{
+			name:           "NonExistentFile",
+			nonExistent:    true,
+			wantLinks:      []QuickLaunchLink{},
+			wantRepos:      nil,
+			wantVanadisURL: "",
+		},
+		{
+			name: "InvalidYAML",
+			yamlData: `dashboard: [invalid-yaml
+invalid: [yaml: broken
+`,
+			wantLinks:      []QuickLaunchLink{},
+			wantRepos:      nil,
+			wantVanadisURL: "",
+		},
+		{
+			name: "QuickLaunchLinks_DashboardConfig",
+			yamlData: `
 dashboard:
   quick_launch_links:
     - name: "HOME"
@@ -1489,80 +1537,38 @@ dashboard:
       url: "https://skip.com"
     - name: "NO_URL"
       url: ""
-`
-		if err := os.WriteFile(cfgFile1, []byte(yamlContent1), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		links1 := loadQuickLaunchLinks(cfgFile1)
-		if len(links1) != 1 {
-			t.Fatalf("expected 1 custom link, got %d", len(links1))
-		}
-		customLink := links1[0]
-		if customLink.Name != "HOME" || customLink.URL != "https://home.zylman.com" || customLink.Icon != "🏠" {
-			t.Errorf("unexpected custom link: %+v", customLink)
-		}
-		if customLink.Target != "_blank" || !customLink.IsCustom {
-			t.Errorf("expected target '_blank' and IsCustom=true: %+v", customLink)
-		}
-
-		cfgFile2 := filepath.Join(tempDir, "config2.yaml")
-		yamlContent2 := `
+`,
+			wantLinks: []QuickLaunchLink{
+				{
+					Name:        "HOME",
+					URL:         "https://home.zylman.com",
+					Icon:        "🏠",
+					Description: "Home Infrastructure Hub",
+					Target:      "_blank",
+					IsCustom:    true,
+				},
+			},
+		},
+		{
+			name: "QuickLaunchLinks_RootQuickLinksFallback",
+			yamlData: `
 quick_links:
   - name: "INTERNAL"
     url: "http://internal.lan"
     target: "_self"
-`
-		if err := os.WriteFile(cfgFile2, []byte(yamlContent2), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		links2 := loadQuickLaunchLinks(cfgFile2)
-		if len(links2) != 1 {
-			t.Fatalf("expected 1 custom link, got %d", len(links2))
-		}
-		if links2[0].Name != "INTERNAL" || links2[0].Target != "_self" {
-			t.Errorf("unexpected root custom link: %+v", links2[0])
-		}
-
-		cfgFile3 := filepath.Join(tempDir, "config3.yaml")
-		if err := os.WriteFile(cfgFile3, []byte("invalid: [yaml: broken"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		links3 := loadQuickLaunchLinks(cfgFile3)
-		if len(links3) != 0 {
-			t.Errorf("expected 0 links on malformed YAML, got %d", len(links3))
-		}
-	})
-
-	t.Run("DashboardRepos", func(t *testing.T) {
-		tempDir := t.TempDir()
-		tests := []struct {
-			name     string
-			yamlData string
-			noFile   bool
-			expected []string
-		}{
-			{
-				name:     "empty path returns nil",
-				yamlData: "",
-				noFile:   true,
-				expected: nil,
+`,
+			wantLinks: []QuickLaunchLink{
+				{
+					Name:     "INTERNAL",
+					URL:      "http://internal.lan",
+					Target:   "_self",
+					IsCustom: true,
+				},
 			},
-			{
-				name:     "non-existent file returns nil",
-				yamlData: "",
-				noFile:   true,
-				expected: nil,
-			},
-			{
-				name:     "invalid yaml returns nil",
-				yamlData: "dashboard: [invalid-yaml",
-				expected: nil,
-			},
-			{
-				name: "dashboard.github_repos valid list with trimming and deduplication",
-				yamlData: `
+		},
+		{
+			name: "DashboardRepos_ValidListTrimmingAndDeduplication",
+			yamlData: `
 dashboard:
   github_repos:
     - " azylman/aerial "
@@ -1571,143 +1577,114 @@ dashboard:
     - "azylman/aerial"
     - ""
 `,
-				expected: []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"},
-			},
-			{
-				name: "dashboard.repos fallback",
-				yamlData: `
+			wantRepos: []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"},
+		},
+		{
+			name: "DashboardRepos_DashboardReposFallback",
+			yamlData: `
 dashboard:
   repos:
     - "org/repo-a"
     - "org/repo-b"
 `,
-				expected: []string{"org/repo-a", "org/repo-b"},
-			},
-			{
-				name: "root github_repos fallback",
-				yamlData: `
+			wantRepos: []string{"org/repo-a", "org/repo-b"},
+		},
+		{
+			name: "DashboardRepos_RootFallback",
+			yamlData: `
 github_repos:
   - "root/repo-1"
   - "root/repo-2"
 `,
-				expected: []string{"root/repo-1", "root/repo-2"},
-			},
-			{
-				name: "empty lists return nil",
-				yamlData: `
+			wantRepos: []string{"root/repo-1", "root/repo-2"},
+		},
+		{
+			name: "DashboardRepos_EmptyListsReturnNil",
+			yamlData: `
 dashboard:
   github_repos: []
 `,
-				expected: nil,
-			},
-		}
-
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				path := ""
-				if !tt.noFile {
-					f := filepath.Join(tempDir, tt.name+".yaml")
-					if err := os.WriteFile(f, []byte(tt.yamlData), 0644); err != nil {
-						t.Fatalf("failed to write test yaml: %v", err)
-					}
-					path = f
-				} else if tt.name == "non-existent file returns nil" {
-					path = filepath.Join(tempDir, "non-existent.yaml")
-				}
-
-				got := loadDashboardRepos(path)
-				if len(got) != len(tt.expected) {
-					t.Fatalf("expected %v, got %v (length mismatch: %d vs %d)", tt.expected, got, len(tt.expected), len(got))
-				}
-				for i := range got {
-					if got[i] != tt.expected[i] {
-						t.Errorf("expected [%d]=%q, got %q", i, tt.expected[i], got[i])
-					}
-				}
-			})
-		}
-	})
-
-	t.Run("VanadisURL", func(t *testing.T) {
-		tempDir := t.TempDir()
-		tests := []struct {
-			name     string
-			yamlData string
-			noFile   bool
-			expected string
-		}{
-			{
-				name:     "empty path returns empty string",
-				yamlData: "",
-				noFile:   true,
-				expected: "",
-			},
-			{
-				name:     "non-existent file returns empty string",
-				yamlData: "",
-				noFile:   true,
-				expected: "",
-			},
-			{
-				name:     "invalid yaml returns empty string",
-				yamlData: "dashboard: [invalid-yaml",
-				expected: "",
-			},
-			{
-				name: "dashboard.vanadis_url resolution with trimming",
-				yamlData: `
+			wantRepos: nil,
+		},
+		{
+			name: "VanadisURL_DashboardResolutionWithTrimming",
+			yamlData: `
 dashboard:
   vanadis_url: "  http://vanadis.internal:8088  "
 `,
-				expected: "http://vanadis.internal:8088",
-			},
-			{
-				name: "root vanadis_url fallback",
-				yamlData: `
+			wantVanadisURL: "http://vanadis.internal:8088",
+		},
+		{
+			name: "VanadisURL_RootFallback",
+			yamlData: `
 vanadis_url: "http://vanadis-root.internal:8088"
 `,
-				expected: "http://vanadis-root.internal:8088",
-			},
-			{
-				name: "dashboard.vanadis_url takes precedence over root vanadis_url",
-				yamlData: `
+			wantVanadisURL: "http://vanadis-root.internal:8088",
+		},
+		{
+			name: "VanadisURL_DashboardPrecedenceOverRoot",
+			yamlData: `
 dashboard:
   vanadis_url: "http://vanadis-dash.internal:8088"
 vanadis_url: "http://vanadis-root.internal:8088"
 `,
-				expected: "http://vanadis-dash.internal:8088",
-			},
-			{
-				name: "empty values return empty string",
-				yamlData: `
+			wantVanadisURL: "http://vanadis-dash.internal:8088",
+		},
+		{
+			name: "VanadisURL_EmptyValuesReturnEmpty",
+			yamlData: `
 dashboard:
   vanadis_url: ""
 vanadis_url: ""
 `,
-				expected: "",
-			},
-		}
+			wantVanadisURL: "",
+		},
+	}
 
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				path := ""
-				if !tt.noFile {
-					f := filepath.Join(tempDir, tt.name+".yaml")
-					if err := os.WriteFile(f, []byte(tt.yamlData), 0644); err != nil {
-						t.Fatalf("failed to write test yaml: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := ""
+			if tc.nonExistent {
+				path = filepath.Join(t.TempDir(), "nonexistent.yaml")
+			} else if !tc.noFile {
+				path = filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte(tc.yamlData), 0644); err != nil {
+					t.Fatalf("failed to write test yaml: %v", err)
+				}
+			}
+
+			if tc.wantLinks != nil || tc.noFile || tc.nonExistent || strings.Contains(tc.yamlData, "invalid") {
+				gotLinks := loadQuickLaunchLinks(path)
+				if len(gotLinks) != len(tc.wantLinks) {
+					t.Fatalf("expected %d links, got %d", len(tc.wantLinks), len(gotLinks))
+				}
+				for i := range gotLinks {
+					if gotLinks[i] != tc.wantLinks[i] {
+						t.Errorf("link [%d] = %+v, want %+v", i, gotLinks[i], tc.wantLinks[i])
 					}
-					path = f
-				} else if tt.name == "non-existent file returns empty string" {
-					path = filepath.Join(tempDir, "non-existent.yaml")
 				}
+			}
 
-				got := loadDashboardVanadisURL(path)
-				if got != tt.expected {
-					t.Fatalf("expected %q, got %q", tt.expected, got)
+			if tc.wantRepos != nil || tc.noFile || tc.nonExistent || strings.Contains(tc.yamlData, "invalid") || strings.Contains(tc.name, "EmptyLists") {
+				gotRepos := loadDashboardRepos(path)
+				if len(gotRepos) != len(tc.wantRepos) {
+					t.Fatalf("expected %d repos, got %d: %v vs %v", len(tc.wantRepos), len(gotRepos), tc.wantRepos, gotRepos)
 				}
-			})
-		}
-	})
+				for i := range gotRepos {
+					if gotRepos[i] != tc.wantRepos[i] {
+						t.Errorf("repo [%d] = %q, want %q", i, gotRepos[i], tc.wantRepos[i])
+					}
+				}
+			}
+
+			if tc.wantVanadisURL != "" || tc.noFile || tc.nonExistent || strings.Contains(tc.yamlData, "invalid") || strings.Contains(tc.name, "EmptyValues") {
+				gotVanadis := loadDashboardVanadisURL(path)
+				if gotVanadis != tc.wantVanadisURL {
+					t.Errorf("loadDashboardVanadisURL() = %q, want %q", gotVanadis, tc.wantVanadisURL)
+				}
+			}
+		})
+	}
 }
 
 func TestFetchGitSyncStatus(t *testing.T) {
@@ -1869,194 +1846,213 @@ vanadis_url: "http://vanadis:8089"
 	}
 
 	tests := []struct {
-		name   string
-		lookup func(string) string
-		check  func(t *testing.T, cfg DashboardConfig)
+		name                 string
+		env                  map[string]string
+		nilLookup            bool
+		useEnvSmoke          bool
+		testSetupMux         bool
+		customYAML           string
+		userYAML             string
+		wantPort             string
+		wantBrainURL         string
+		wantGHRepo           string
+		wantGHToken          string
+		wantGitSyncURL       string
+		wantHangarURL        string
+		wantConfigPath       string
+		wantGitCommit        string
+		wantVanadisURL       string
+		wantNomadAddr        string
+		assertEmptyNomadAddr bool
+		wantGHRepos          []string
 	}{
 		{
-			name: "Custom_WithHangarURL",
-			lookup: func(k string) string {
-				userConfigPath := filepath.Join(tmpDir, "custom-user-config.yaml")
-				_ = os.WriteFile(userConfigPath, []byte("dashboard:\n  vanadis_url: http://vanadis-config:9090\n"), 0644)
-				m := map[string]string{
-					"PORT": "9090", "BRAIN_URL": "http://brain-custom:9090", "GITHUB_REPO": "custom/repo",
-					"GITHUB_PAT": "custom_pat", "GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
-					"HANGAR_URL": "http://hangar-custom:9090", "GITSYNC_URL": "http://gitsync-custom:9090",
-					"AERIAL_CONFIG_PATH": userConfigPath, "GIT_COMMIT": "0123456789",
-					"VANADIS_URL": "http://vanadis-env-ignored:9090",
-				}
-				return m[k]
+			name:     "Custom_WithHangarURL",
+			userYAML: "dashboard:\n  vanadis_url: http://vanadis-config:9090\n",
+			env: map[string]string{
+				"PORT": "9090", "BRAIN_URL": "http://brain-custom:9090", "GITHUB_REPO": "custom/repo",
+				"GITHUB_PAT": "custom_pat", "GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
+				"HANGAR_URL": "http://hangar-custom:9090", "GITSYNC_URL": "http://gitsync-custom:9090",
+				"GIT_COMMIT": "0123456789", "VANADIS_URL": "http://vanadis-env-ignored:9090",
 			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "9090" || cfg.BrainURL != "http://brain-custom:9090" || cfg.GHRepo != "custom/repo" || cfg.GHToken != "custom_pat" || cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" || cfg.GitCommit != "0123456" || cfg.VanadisURL != "http://vanadis-config:9090" {
-					t.Errorf("unexpected custom config: %+v", cfg)
-				}
-			},
+			wantPort:       "9090",
+			wantBrainURL:   "http://brain-custom:9090",
+			wantGHRepo:     "custom/repo",
+			wantGHToken:    "custom_pat",
+			wantGitSyncURL: "http://hangar-custom:9090",
+			wantHangarURL:  "http://hangar-custom:9090",
+			wantGitCommit:  "0123456",
+			wantVanadisURL: "http://vanadis-config:9090",
 		},
 		{
-			name: "Custom_FallbackGitSyncURL",
-			lookup: func(k string) string {
-				if k == "GITSYNC_URL" {
-					return "http://gitsync-custom:9090"
-				}
-				return ""
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.GitSyncURL != "http://gitsync-custom:9090" || cfg.HangarURL != "http://gitsync-custom:9090" {
-					t.Errorf("expected fallback to GITSYNC_URL, got %q / %q", cfg.GitSyncURL, cfg.HangarURL)
-				}
-			},
+			name:           "Custom_FallbackGitSyncURL",
+			env:            map[string]string{"GITSYNC_URL": "http://gitsync-custom:9090"},
+			wantGitSyncURL: "http://gitsync-custom:9090",
+			wantHangarURL:  "http://gitsync-custom:9090",
 		},
 		{
-			name:   "Defaults_NilLookup",
-			lookup: nil,
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "8080" || cfg.BrainURL != "http://brain:8080" || cfg.GHRepo != "azylman/aerial" || len(cfg.GHRepos) != 1 || cfg.GHRepos[0] != "azylman/aerial" || cfg.GHToken != "" || cfg.GitSyncURL != "http://hangar:8080" || cfg.HangarURL != "http://hangar:8080" || cfg.ConfigPath != "/share/aerial-config/config.yaml" || cfg.GitCommit != "latest" || cfg.VanadisURL != "http://vanadis.aerial" {
-					t.Errorf("unexpected default config: %+v", cfg)
-				}
-			},
+			name:           "Defaults_NilLookup",
+			nilLookup:      true,
+			wantPort:       "8080",
+			wantBrainURL:   "http://brain:8080",
+			wantGHRepo:     "azylman/aerial",
+			wantGHRepos:    []string{"azylman/aerial"},
+			wantGHToken:    "",
+			wantGitSyncURL: "http://hangar:8080",
+			wantHangarURL:  "http://hangar:8080",
+			wantConfigPath: "/share/aerial-config/config.yaml",
+			wantGitCommit:  "latest",
+			wantVanadisURL: "http://vanadis.aerial",
 		},
 		{
-			name: "Defaults_FallbackToken",
-			lookup: func(k string) string {
-				if k == "GITHUB_PERSONAL_ACCESS_TOKEN" {
-					return "fallback_token_123"
-				}
-				return ""
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.GHToken != "fallback_token_123" {
-					t.Errorf("expected fallback token, got %q", cfg.GHToken)
-				}
-			},
+			name:        "Defaults_FallbackToken",
+			env:         map[string]string{"GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token_123"},
+			wantGHToken: "fallback_token_123",
 		},
 		{
-			name: "YAML_LoadFromConfigPath",
-			lookup: func(k string) string {
-				if k == "CONFIG_PATH" {
-					return cfgPath
-				}
-				return ""
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "8084" || cfg.BrainURL != "http://brain:8088" || cfg.HangarURL != "http://hangar:8087" || cfg.GitSyncURL != "http://hangar:8087" || len(cfg.GHRepos) != 2 || cfg.GHRepos[1] != "azylman/aerial-config" || cfg.ConfigPath != "/custom/aerial-config/config.yaml" || cfg.VanadisURL != "http://vanadis:8089" {
-					t.Errorf("unexpected YAML config: %+v", cfg)
-				}
-			},
+			name:           "YAML_LoadFromConfigPath",
+			customYAML:     yamlContent,
+			wantPort:       "8084",
+			wantBrainURL:   "http://brain:8088",
+			wantHangarURL:  "http://hangar:8087",
+			wantGitSyncURL: "http://hangar:8087",
+			wantGHRepos:    []string{"azylman/aerial", "azylman/aerial-config"},
+			wantConfigPath: "/custom/aerial-config/config.yaml",
+			wantVanadisURL: "http://vanadis:8089",
 		},
 		{
-			name: "YAML_EnvOverridePrecedence",
-			lookup: func(k string) string {
-				switch k {
-				case "CONFIG_PATH":
-					return cfgPath
-				case "PORT":
-					return "9999"
-				default:
-					return ""
-				}
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.Port != "9999" {
-					t.Errorf("expected env override port 9999, got %s", cfg.Port)
-				}
-			},
+			name:       "YAML_EnvOverridePrecedence",
+			customYAML: yamlContent,
+			env:        map[string]string{"PORT": "9999"},
+			wantPort:   "9999",
 		},
 		{
-			name: "MultiRepo_GithubReposList",
-			lookup: func(k string) string {
-				if k == "GITHUB_REPOS" {
-					return "azylman/aerial, azylman/aerial-sidecars, azylman/aerial-config"
-				}
-				return ""
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				want := []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"}
-				if len(cfg.GHRepos) != 3 || cfg.GHRepos[0] != want[0] || cfg.GHRepos[1] != want[1] || cfg.GHRepos[2] != want[2] || cfg.GHRepo != "azylman/aerial" {
-					t.Errorf("unexpected multi-repo config: %+v", cfg)
-				}
-			},
+			name:        "MultiRepo_GithubReposList",
+			env:         map[string]string{"GITHUB_REPOS": "azylman/aerial, azylman/aerial-sidecars, azylman/aerial-config"},
+			wantGHRepos: []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"},
+			wantGHRepo:  "azylman/aerial",
 		},
 		{
-			name: "MultiRepo_SingleRepoFallback",
-			lookup: func(k string) string {
-				if k == "GITHUB_REPO" {
-					return "custom/single-repo"
-				}
-				return ""
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if len(cfg.GHRepos) != 1 || cfg.GHRepos[0] != "custom/single-repo" || cfg.GHRepo != "custom/single-repo" {
-					t.Errorf("unexpected single-repo fallback: %+v", cfg)
-				}
-			},
+			name:        "MultiRepo_SingleRepoFallback",
+			env:         map[string]string{"GITHUB_REPO": "custom/single-repo"},
+			wantGHRepos: []string{"custom/single-repo"},
+			wantGHRepo:  "custom/single-repo",
 		},
 		{
-			name: "NomadAddr_FromLookup",
-			lookup: func(k string) string {
-				if k == "NOMAD_ADDR" {
-					return "http://10.1.2.3:4646"
-				}
-				return ""
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.NomadAddr != "http://10.1.2.3:4646" {
-					t.Errorf("expected NomadAddr http://10.1.2.3:4646, got %q", cfg.NomadAddr)
-				}
-			},
+			name:          "NomadAddr_FromLookup",
+			env:           map[string]string{"NOMAD_ADDR": "http://10.1.2.3:4646"},
+			wantNomadAddr: "http://10.1.2.3:4646",
 		},
 		{
-			name: "NomadAddr_FromYAML",
-			lookup: func(k string) string {
-				if k == "CONFIG_PATH" {
-					tmpFile := filepath.Join(tmpDir, "nomad_dashboard.yaml")
-					_ = os.WriteFile(tmpFile, []byte("nomad_addr: http://10.9.8.7:4646\n"), 0644)
-					return tmpFile
-				}
-				return ""
-			},
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.NomadAddr != "http://10.9.8.7:4646" {
-					t.Errorf("expected NomadAddr http://10.9.8.7:4646 from yaml, got %q", cfg.NomadAddr)
-				}
-			},
+			name:          "NomadAddr_FromYAML",
+			customYAML:    "nomad_addr: http://10.9.8.7:4646\n",
+			wantNomadAddr: "http://10.9.8.7:4646",
 		},
 		{
-			name:   "NomadAddr_DefaultsEmptyUnderTests",
-			lookup: func(k string) string { return "" },
-			check: func(t *testing.T, cfg DashboardConfig) {
-				if cfg.NomadAddr != "" {
-					t.Errorf("expected empty NomadAddr under test, got %q", cfg.NomadAddr)
-				}
-			},
+			name:                 "NomadAddr_DefaultsEmptyUnderTests",
+			env:                  map[string]string{},
+			assertEmptyNomadAddr: true,
+		},
+		{
+			name:        "NewDashboardConfigFromEnv_Smoke",
+			useEnvSmoke: true,
+		},
+		{
+			name:          "SetupDashboardMux_PassesNomadAddr",
+			testSetupMux:  true,
+			wantPort:      "8080",
+			wantNomadAddr: "http://127.0.0.1:4646",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := NewDashboardConfigFromLookup(tt.lookup)
-			tt.check(t, cfg)
+			if tc.useEnvSmoke {
+				cfg := NewDashboardConfigFromEnv()
+				if cfg.Port == "" || cfg.BrainURL == "" || cfg.GHRepo == "" || cfg.GitSyncURL == "" || cfg.ConfigPath == "" || cfg.GitCommit == "" || cfg.VanadisURL == "" {
+					t.Errorf("expected non-empty fields in NewDashboardConfigFromEnv, got %+v", cfg)
+				}
+				return
+			}
+			if tc.testSetupMux {
+				cfg := DashboardConfig{
+					Port:      tc.wantPort,
+					NomadAddr: tc.wantNomadAddr,
+				}
+				handler := SetupDashboardMux(cfg, nil)
+				if handler == nil {
+					t.Fatal("expected non-nil mux handler")
+				}
+				return
+			}
+
+			var envFn func(string) string
+			if !tc.nilLookup {
+				envMap := make(map[string]string)
+				for k, v := range tc.env {
+					envMap[k] = v
+				}
+				if tc.userYAML != "" {
+					userPath := filepath.Join(t.TempDir(), "user-config.yaml")
+					if err := os.WriteFile(userPath, []byte(tc.userYAML), 0644); err != nil {
+						t.Fatal(err)
+					}
+					envMap["AERIAL_CONFIG_PATH"] = userPath
+				}
+				if tc.customYAML != "" {
+					customPath := filepath.Join(t.TempDir(), "dashboard.yaml")
+					if err := os.WriteFile(customPath, []byte(tc.customYAML), 0644); err != nil {
+						t.Fatal(err)
+					}
+					envMap["CONFIG_PATH"] = customPath
+				}
+				envFn = func(k string) string {
+					return envMap[k]
+				}
+			}
+
+			cfg := NewDashboardConfigFromLookup(envFn)
+			if tc.wantPort != "" && cfg.Port != tc.wantPort {
+				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
+			}
+			if tc.wantBrainURL != "" && cfg.BrainURL != tc.wantBrainURL {
+				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			}
+			if tc.wantGHRepo != "" && cfg.GHRepo != tc.wantGHRepo {
+				t.Errorf("GHRepo = %q, want %q", cfg.GHRepo, tc.wantGHRepo)
+			}
+			if tc.wantGHToken != "" && cfg.GHToken != tc.wantGHToken {
+				t.Errorf("GHToken = %q, want %q", cfg.GHToken, tc.wantGHToken)
+			}
+			if tc.wantGitSyncURL != "" && cfg.GitSyncURL != tc.wantGitSyncURL {
+				t.Errorf("GitSyncURL = %q, want %q", cfg.GitSyncURL, tc.wantGitSyncURL)
+			}
+			if tc.wantHangarURL != "" && cfg.HangarURL != tc.wantHangarURL {
+				t.Errorf("HangarURL = %q, want %q", cfg.HangarURL, tc.wantHangarURL)
+			}
+			if tc.wantConfigPath != "" && cfg.ConfigPath != tc.wantConfigPath {
+				t.Errorf("ConfigPath = %q, want %q", cfg.ConfigPath, tc.wantConfigPath)
+			}
+			if tc.wantGitCommit != "" && cfg.GitCommit != tc.wantGitCommit {
+				t.Errorf("GitCommit = %q, want %q", cfg.GitCommit, tc.wantGitCommit)
+			}
+			if tc.wantVanadisURL != "" && cfg.VanadisURL != tc.wantVanadisURL {
+				t.Errorf("VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
+			}
+			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
+				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
+			}
+			if tc.assertEmptyNomadAddr && cfg.NomadAddr != "" {
+				t.Errorf("expected empty NomadAddr under test, got %q", cfg.NomadAddr)
+			}
+			if len(tc.wantGHRepos) > 0 {
+				if !reflect.DeepEqual(cfg.GHRepos, tc.wantGHRepos) {
+					t.Errorf("GHRepos = %v, want %v", cfg.GHRepos, tc.wantGHRepos)
+				}
+			}
 		})
 	}
-
-	t.Run("NewDashboardConfigFromEnv_Smoke", func(t *testing.T) {
-		cfg := NewDashboardConfigFromEnv()
-		if cfg.Port == "" || cfg.BrainURL == "" || cfg.GHRepo == "" || cfg.GitSyncURL == "" || cfg.ConfigPath == "" || cfg.GitCommit == "" || cfg.VanadisURL == "" {
-			t.Errorf("expected non-empty fields in NewDashboardConfigFromEnv, got %+v", cfg)
-		}
-	})
-
-	t.Run("SetupDashboardMux_PassesNomadAddr", func(t *testing.T) {
-		cfg := DashboardConfig{
-			Port:      "8080",
-			NomadAddr: "http://127.0.0.1:4646",
-		}
-		handler := SetupDashboardMux(cfg, nil)
-		if handler == nil {
-			t.Fatal("expected non-nil mux handler")
-		}
-	})
 }
 
 func TestDashboardServerLifecycle(t *testing.T) {
@@ -2475,644 +2471,704 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 
 func TestGitHubPoller_PollAndDecode(t *testing.T) {
 	runID := int64(987654)
-
-	t.Run("StandardPollAndETagJobsCaching", func(t *testing.T) {
-		mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs"):
-				if r.Header.Get("If-None-Match") == "job-etag-1" {
-					w.WriteHeader(http.StatusNotModified)
-					return
+	prRunJSON := `{
+		"total_count": 1,
+		"workflow_runs": [
+			{
+				"id": 9001,
+				"name": "Continuous Delivery",
+				"head_branch": "feat/sidecars-pr",
+				"head_sha": "aabbccdd1122",
+				"event": "pull_request",
+				"status": "in_progress",
+				"conclusion": null,
+				"created_at": "2026-09-19T02:48:54Z",
+				"updated_at": "2026-09-19T02:49:34Z",
+				"html_url": "https://github.com/azylman/aerial-sidecars/actions/runs/9001",
+				"repository": {
+					"id": 1350916489,
+					"name": "aerial-sidecars",
+					"full_name": "azylman/aerial-sidecars"
 				}
-				w.Header().Set("ETag", "job-etag-1")
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
-					TotalCount: 1,
-					Jobs: []GitHubJob{
-						{
-							ID:         111,
-							RunID:      runID,
-							Name:       "build-backend (brain)",
-							Status:     "completed",
-							Conclusion: "success",
-							StartedAt:  time.Now().Add(-5 * time.Minute),
-						},
-					},
-				})
-			case strings.HasSuffix(r.URL.Path, "/actions/runs"):
-				if r.Header.Get("If-None-Match") == "runs-etag-1" {
-					w.WriteHeader(http.StatusNotModified)
-					return
-				}
-				w.Header().Set("ETag", "runs-etag-1")
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
-					TotalCount: 1,
-					WorkflowRuns: []GitHubRun{
-						{
-							ID:         runID,
-							Name:       "CI",
-							HeadBranch: "main",
-							HeadSHA:    "abcdef012345",
-							Status:     "in_progress",
-							Conclusion: "",
-							HTMLURL:    "https://github.com/azylman/aerial/actions/runs/987654",
-							CreatedAt:  time.Now().Add(-10 * time.Minute),
-							UpdatedAt:  time.Now(),
-							HeadCommit: &struct {
-								Message   string    `json:"message"`
-								Timestamp time.Time `json:"timestamp"`
-							}{
-								Message:   strings.Repeat("Very long commit message that exceeds seventy-two runes in length so it gets truncated", 2),
-								Timestamp: time.Now(),
-							},
-						},
-					},
-				})
-			default:
-				http.NotFound(w, r)
 			}
-		}))
-		defer mockGH.Close()
+		]
+	}`
 
-		poller := NewGitHubPoller("azylman/aerial", "token123")
-		poller.apiBaseURL = mockGH.URL
-
-		// Seed stale cached jobs to verify pruning
-		poller.cachedJobs[999] = []GitHubJob{{ID: 1}}
-		poller.jobsETagMap[999] = "stale-etag"
-
-		ctx := context.Background()
-
-		// 1. First poll populates runs and jobs, prunes stale job 999
-		hasActive := poller.pollOnce(ctx)
-		if !hasActive {
-			t.Errorf("expected hasActive=true for in_progress run")
-		}
-
-		runs, jobs := poller.GetSnapshot()
-		if len(runs) != 1 || runs[0].ID != runID {
-			t.Fatalf("expected 1 run with ID %d, got %+v", runID, runs)
-		}
-		if len(jobs[runID]) != 1 {
-			t.Fatalf("expected 1 job for run %d, got %+v", runID, jobs)
-		}
-
-		poller.mu.RLock()
-		if _, exists := poller.cachedJobs[999]; exists {
-			t.Errorf("expected stale cachedJobs to be pruned")
-		}
-		if _, exists := poller.jobsETagMap[999]; exists {
-			t.Errorf("expected stale jobsETagMap to be pruned")
-		}
-		poller.mu.RUnlock()
-
-		// 2. Second poll: 304 Not Modified preserves runs and cached jobs
-		hasActive2 := poller.pollOnce(ctx)
-		if !hasActive2 {
-			t.Errorf("expected hasActive=true on 304 for in_progress run")
-		}
-	})
-
-	t.Run("PullRequestRunsAndRepositoryObjectDecoding", func(t *testing.T) {
-		rawJSON := `{
-			"total_count": 1,
-			"workflow_runs": [
-				{
-					"id": 9001,
-					"name": "Continuous Delivery",
-					"head_branch": "feat/sidecars-pr",
-					"head_sha": "aabbccdd1122",
-					"event": "pull_request",
-					"status": "in_progress",
-					"conclusion": null,
-					"created_at": "2026-09-19T02:48:54Z",
-					"updated_at": "2026-09-19T02:49:34Z",
-					"html_url": "https://github.com/azylman/aerial-sidecars/actions/runs/9001",
-					"repository": {
-						"id": 1350916489,
-						"name": "aerial-sidecars",
-						"full_name": "azylman/aerial-sidecars"
+	tests := []struct {
+		name             string
+		pollerKind       string
+		repos            []string
+		runsStatus       int
+		runsBody         string
+		runsETag         string
+		jobsStatus       int
+		jobsBody         string
+		jobsETag         string
+		initialCachedJob int64
+		initialOldRepo   string
+		cancelCtx        bool
+		testSecondPoll   bool
+		testFetchJobs    bool
+		wantActive       bool
+		wantRunCount     int
+		wantRunID        int64
+		wantJobCount     int
+		wantRepoName     string
+		wantEvent        string
+	}{
+		{
+			name:       "StandardPollAndETagJobsCaching",
+			repos:      []string{"azylman/aerial"},
+			runsETag:   "runs-etag-1",
+			jobsETag:   "job-etag-1",
+			runsBody: fmt.Sprintf(`{
+				"total_count": 1,
+				"workflow_runs": [
+					{
+						"id": %d,
+						"name": "CI",
+						"head_branch": "main",
+						"head_sha": "abcdef012345",
+						"status": "in_progress",
+						"html_url": "https://github.com/azylman/aerial/actions/runs/%d",
+						"created_at": "%s",
+						"updated_at": "%s",
+						"head_commit": {
+							"message": "%s",
+							"timestamp": "%s"
+						}
 					}
-				}
-			]
-		}`
+				]
+			}`, runID, runID, time.Now().Add(-10*time.Minute).Format(time.RFC3339), time.Now().Format(time.RFC3339), strings.Repeat("Very long commit message that exceeds seventy-two runes in length so it gets truncated", 2), time.Now().Format(time.RFC3339)),
+			jobsBody: fmt.Sprintf(`{
+				"total_count": 1,
+				"jobs": [
+					{
+						"id": 111,
+						"run_id": %d,
+						"name": "build-backend (brain)",
+						"status": "completed",
+						"conclusion": "success",
+						"started_at": "%s"
+					}
+				]
+			}`, runID, time.Now().Add(-5*time.Minute).Format(time.RFC3339)),
+			initialCachedJob: 999,
+			testSecondPoll:   true,
+			wantActive:       true,
+			wantRunCount:     1,
+			wantRunID:        runID,
+			wantJobCount:     1,
+		},
+		{
+			name:         "PullRequestRunsAndRepositoryObjectDecoding",
+			pollerKind:   "multi",
+			repos:        []string{"azylman/aerial-sidecars"},
+			runsBody:     prRunJSON,
+			jobsBody:     `{"total_count": 1, "jobs": [{"id": 10, "run_id": 9001, "name": "build", "status": "in_progress"}]}`,
+			wantActive:   true,
+			wantRunCount: 1,
+			wantRunID:    9001,
+			wantJobCount: 1,
+			wantRepoName: "azylman/aerial-sidecars",
+			wantEvent:    "pull_request",
+		},
+		{
+			name:         "DecodeError",
+			pollerKind:   "multi",
+			repos:        []string{"repo1", "repo2"},
+			runsBody:     `{not valid json`,
+			wantActive:   false,
+			wantRunCount: 0,
+		},
+		{
+			name:       "RateLimit429",
+			pollerKind: "multi",
+			repos:      []string{"repo1", "repo2"},
+			runsStatus: http.StatusTooManyRequests,
+			runsBody:   `{"message": "rate limit exceeded"}`,
+			wantActive: false,
+		},
+		{
+			name:       "InternalServerError500",
+			pollerKind: "multi",
+			repos:      []string{"repo1", "repo2"},
+			runsStatus: http.StatusInternalServerError,
+			runsBody:   `{"message": "internal server error"}`,
+			wantActive: false,
+		},
+		{
+			name:          "NetworkConnectionFailure",
+			pollerKind:    "unreachable",
+			testFetchJobs: true,
+			wantActive:    false,
+		},
+		{
+			name:          "FetchJobs_EmptyRepo",
+			pollerKind:    "empty_repo",
+			testFetchJobs: true,
+		},
+		{
+			name:          "FetchJobs_304NotModified",
+			repos:         []string{"azylman/aerial"},
+			jobsETag:      "test-etag",
+			testFetchJobs: true,
+		},
+		{
+			name:          "ContextCancellationBranches",
+			repos:         []string{"azylman/aerial"},
+			cancelCtx:     true,
+			testFetchJobs: true,
+			wantActive:    false,
+		},
+		{
+			name:       "NilReceiverBranches",
+			pollerKind: "nil",
+			wantActive: false,
+		},
+		{
+			name:       "EmptyPollerBranches",
+			pollerKind: "empty",
+			wantActive: false,
+		},
+		{
+			name:           "RepoPruningBranches",
+			pollerKind:     "prune_old",
+			repos:          []string{"azylman/aerial"},
+			initialOldRepo: "old/removed",
+			runsETag:       "legacy-etag",
+			wantActive:     false,
+		},
+	}
 
-		var queriedQuery url.Values
-		mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			if strings.HasSuffix(r.URL.Path, "/actions/runs") {
-				queriedQuery = r.URL.Query()
-				_, _ = w.Write([]byte(rawJSON))
-				return
-			}
-			if strings.HasSuffix(r.URL.Path, "/jobs") {
-				_, _ = w.Write([]byte(`{"total_count": 1, "jobs": [{"id": 10, "run_id": 9001, "name": "build", "status": "in_progress"}]}`))
-				return
-			}
-			http.NotFound(w, r)
-		}))
-		defer mockGH.Close()
-
-		poller := NewMultiGitHubPoller([]string{"azylman/aerial-sidecars"}, "test-token")
-		poller.apiBaseURL = mockGH.URL
-
-		ctx := context.Background()
-		hasActive := poller.pollOnce(ctx)
-		if !hasActive {
-			t.Errorf("expected pollOnce to return true for in_progress PR run")
-		}
-
-		if queriedQuery.Get("event") != "" || queriedQuery.Get("branch") != "" {
-			t.Errorf("expected no event or branch filters in query, got: %+v", queriedQuery)
-		}
-
-		runs, jobs := poller.GetSnapshot()
-		if len(runs) != 1 || runs[0].ID != 9001 || runs[0].Event != "pull_request" {
-			t.Fatalf("unexpected runs snapshot: %+v", runs)
-		}
-		if runs[0].Repository != "azylman/aerial-sidecars" {
-			t.Errorf("expected repository azylman/aerial-sidecars, got %q", runs[0].Repository)
-		}
-		if len(jobs[9001]) != 1 {
-			t.Errorf("expected 1 job for run 9001, got %d", len(jobs[9001]))
-		}
-	})
-
-	t.Run("DecodeErrorsRateLimitsAndClientFailures", func(t *testing.T) {
-		callCount := 0
-		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			callCount++
-			switch callCount {
-			case 1:
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var queriedQuery url.Values
+			mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{not valid json`))
-			case 2:
-				w.WriteHeader(http.StatusTooManyRequests)
-				_, _ = w.Write([]byte(`{"message": "rate limit exceeded"}`))
-			default:
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"message": "internal server error"}`))
+				if strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs") {
+					if tc.jobsETag != "" && r.Header.Get("If-None-Match") == tc.jobsETag {
+						w.WriteHeader(http.StatusNotModified)
+						return
+					}
+					if tc.jobsETag != "" {
+						w.Header().Set("ETag", tc.jobsETag)
+					}
+					if tc.jobsStatus != 0 {
+						w.WriteHeader(tc.jobsStatus)
+					}
+					if tc.jobsBody != "" {
+						_, _ = w.Write([]byte(tc.jobsBody))
+					} else {
+						_ = json.NewEncoder(w).Encode(GitHubJobsResponse{Jobs: []GitHubJob{}})
+					}
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/actions/runs") {
+					queriedQuery = r.URL.Query()
+					if tc.runsETag != "" && r.Header.Get("If-None-Match") == tc.runsETag {
+						w.WriteHeader(http.StatusNotModified)
+						return
+					}
+					if tc.runsETag != "" {
+						w.Header().Set("ETag", tc.runsETag)
+					}
+					if tc.runsStatus != 0 {
+						w.WriteHeader(tc.runsStatus)
+					}
+					if tc.runsBody != "" {
+						_, _ = w.Write([]byte(tc.runsBody))
+					} else {
+						_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
+					}
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer mockGH.Close()
+
+			ctx := context.Background()
+			if tc.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
 			}
-		}))
-		defer mockServer.Close()
 
-		poller := NewMultiGitHubPoller([]string{"repo1", "repo2"}, "token")
-		poller.apiBaseURL = mockServer.URL
-		ctx := context.Background()
-
-		// 1. Decode error logs and skips
-		if poller.pollOnce(ctx) {
-			t.Errorf("expected false on decode error")
-		}
-		runs, _ := poller.GetSnapshot()
-		if len(runs) != 0 {
-			t.Errorf("expected 0 runs on decode error, got %d", len(runs))
-		}
-
-		// 2. Rate limit and HTTP 500
-		if poller.pollOnce(ctx) {
-			t.Errorf("expected false on rate limit / HTTP 500")
-		}
-
-		// 3. Network connection failure
-		badPoller := NewGitHubPoller("azylman/aerial", "")
-		badPoller.apiBaseURL = "http://127.0.0.1:54321"
-		if badPoller.pollOnce(ctx) {
-			t.Errorf("expected false on network failure")
-		}
-		badPoller.fetchJobsForRun(ctx, 123)
-	})
-
-	t.Run("FetchJobsAndContextCancellationBranches", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("If-None-Match") == "test-etag" {
-				w.WriteHeader(http.StatusNotModified)
+			var poller *GitHubPoller
+			switch tc.pollerKind {
+			case "nil":
+				var nilPoller *GitHubPoller
+				nilPoller.Start(ctx)
+				if nilPoller.pollOnce(ctx) {
+					t.Errorf("expected nil poller pollOnce to return false")
+				}
+				nilRuns, nilJobs := nilPoller.GetSnapshot()
+				if nilRuns != nil || nilJobs != nil {
+					t.Errorf("expected nil snapshot from nil poller")
+				}
 				return
+			case "empty":
+				emptyPoller := &GitHubPoller{}
+				if emptyPoller.pollOnce(ctx) {
+					t.Errorf("expected empty poller pollOnce to return false")
+				}
+				return
+			case "empty_repo":
+				emptyRepoPoller := &GitHubPoller{client: &http.Client{}}
+				emptyRepoPoller.fetchJobsForRun(ctx, 123)
+				return
+			case "unreachable":
+				badPoller := NewGitHubPoller("azylman/aerial", "")
+				badPoller.apiBaseURL = "http://127.0.0.1:54321"
+				if badPoller.pollOnce(ctx) {
+					t.Errorf("expected false on network failure")
+				}
+				badPoller.fetchJobsForRun(ctx, 123)
+				return
+			case "prune_old":
+				prunePoller := &GitHubPoller{
+					repo:             "azylman/aerial",
+					runsETag:         tc.runsETag,
+					runsETagMap:      map[string]string{tc.initialOldRepo: "etag-old"},
+					cachedRunsByRepo: map[string][]GitHubRun{tc.initialOldRepo: {{ID: 999}}},
+					client:           &http.Client{Timeout: 2 * time.Second},
+					apiBaseURL:       mockGH.URL,
+				}
+				prunePoller.pollOnce(ctx)
+				prunePoller.mu.RLock()
+				if _, exists := prunePoller.cachedRunsByRepo[tc.initialOldRepo]; exists {
+					t.Errorf("expected removed repository to be pruned from cache")
+				}
+				prunePoller.mu.RUnlock()
+				return
+			case "multi":
+				poller = NewMultiGitHubPoller(tc.repos, "test-token")
+				poller.apiBaseURL = mockGH.URL
+			default:
+				poller = NewGitHubPoller(tc.repos[0], "token123")
+				poller.apiBaseURL = mockGH.URL
 			}
-			w.Header().Set("ETag", "test-etag")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(GitHubJobsResponse{Jobs: []GitHubJob{}})
-		}))
-		defer srv.Close()
 
-		poller := &GitHubPoller{
-			client:      &http.Client{Timeout: 2 * time.Second},
-			jobsETagMap: make(map[int64]string),
-			cachedJobs:  make(map[int64][]GitHubJob),
-			apiBaseURL:  srv.URL,
-			repo:        "azylman/aerial",
-		}
-
-		// 1. Empty repo in fetchJobsForRun returns early
-		emptyRepoPoller := &GitHubPoller{client: &http.Client{}}
-		emptyRepoPoller.fetchJobsForRun(context.Background(), 123)
-
-		// 2. 304 Not Modified branch in fetchJobsForRun
-		poller.jobsETagMap[100] = "test-etag"
-		poller.fetchJobsForRun(context.Background(), 100)
-
-		// 3. Context cancelled mid-request
-		ctxCanceled, cancel := context.WithCancel(context.Background())
-		cancel()
-		poller.fetchJobsForRun(ctxCanceled, 100)
-		_ = poller.pollOnce(ctxCanceled)
-	})
-
-	t.Run("NilReceiverAndPruningBranches", func(t *testing.T) {
-		ctx := context.Background()
-
-		// 1. Nil poller receiver
-		var nilPoller *GitHubPoller
-		nilPoller.Start(ctx)
-		if nilPoller.pollOnce(ctx) {
-			t.Errorf("expected nil poller pollOnce to return false")
-		}
-		nilRuns, nilJobs := nilPoller.GetSnapshot()
-		if nilRuns != nil || nilJobs != nil {
-			t.Errorf("expected nil snapshot from nil poller")
-		}
-
-		// 2. Empty poller (0 repos)
-		emptyPoller := &GitHubPoller{}
-		if emptyPoller.pollOnce(ctx) {
-			t.Errorf("expected empty poller pollOnce to return false")
-		}
-
-		// 3. Repo pruning from cache
-		srvPrune := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("If-None-Match") != "legacy-etag" {
-				t.Errorf("expected If-None-Match: legacy-etag, got %q", r.Header.Get("If-None-Match"))
+			if tc.initialCachedJob > 0 {
+				poller.cachedJobs[tc.initialCachedJob] = []GitHubJob{{ID: 1}}
+				poller.jobsETagMap[tc.initialCachedJob] = "stale-etag"
 			}
-			w.WriteHeader(http.StatusNotModified)
-		}))
-		defer srvPrune.Close()
 
-		prunePoller := &GitHubPoller{
-			repo:             "azylman/aerial",
-			runsETag:         "legacy-etag",
-			runsETagMap:      map[string]string{"old/removed": "etag-old"},
-			cachedRunsByRepo: map[string][]GitHubRun{"old/removed": {{ID: 999}}},
-			client:           &http.Client{Timeout: 2 * time.Second},
-			apiBaseURL:       srvPrune.URL,
-		}
+			if tc.testFetchJobs {
+				if tc.jobsETag != "" {
+					poller.jobsETagMap[100] = tc.jobsETag
+				}
+				poller.fetchJobsForRun(ctx, 100)
+			}
 
-		prunePoller.pollOnce(ctx)
-		prunePoller.mu.RLock()
-		if _, exists := prunePoller.cachedRunsByRepo["old/removed"]; exists {
-			t.Errorf("expected removed repository to be pruned from cache")
-		}
-		prunePoller.mu.RUnlock()
-	})
+			hasActive := poller.pollOnce(ctx)
+			if hasActive != tc.wantActive {
+				t.Errorf("pollOnce() = %v, want %v", hasActive, tc.wantActive)
+			}
+
+			if tc.wantEvent != "" && (queriedQuery.Get("event") != "" || queriedQuery.Get("branch") != "") {
+				t.Errorf("expected no event or branch filters in query, got: %+v", queriedQuery)
+			}
+
+			runs, jobs := poller.GetSnapshot()
+			if tc.wantRunCount > 0 {
+				if len(runs) != tc.wantRunCount {
+					t.Fatalf("expected %d runs, got %d", tc.wantRunCount, len(runs))
+				}
+				if tc.wantRunID > 0 && runs[0].ID != tc.wantRunID {
+					t.Errorf("expected run ID %d, got %d", tc.wantRunID, runs[0].ID)
+				}
+				if tc.wantRepoName != "" && runs[0].Repository != tc.wantRepoName {
+					t.Errorf("expected repository %q, got %q", tc.wantRepoName, runs[0].Repository)
+				}
+				if tc.wantEvent != "" && runs[0].Event != tc.wantEvent {
+					t.Errorf("expected event %q, got %q", tc.wantEvent, runs[0].Event)
+				}
+			} else if tc.name == "DecodeError" && len(runs) != 0 {
+				t.Errorf("expected 0 runs on decode error, got %d", len(runs))
+			}
+
+			if tc.wantJobCount > 0 && tc.wantRunID > 0 {
+				if len(jobs[tc.wantRunID]) != tc.wantJobCount {
+					t.Errorf("expected %d job for run %d, got %d", tc.wantJobCount, tc.wantRunID, len(jobs[tc.wantRunID]))
+				}
+			}
+
+			if tc.initialCachedJob > 0 {
+				poller.mu.RLock()
+				if _, exists := poller.cachedJobs[tc.initialCachedJob]; exists {
+					t.Errorf("expected stale cachedJobs to be pruned")
+				}
+				if _, exists := poller.jobsETagMap[tc.initialCachedJob]; exists {
+					t.Errorf("expected stale jobsETagMap to be pruned")
+				}
+				poller.mu.RUnlock()
+			}
+
+			if tc.testSecondPoll {
+				hasActive2 := poller.pollOnce(ctx)
+				if hasActive2 != tc.wantActive {
+					t.Errorf("expected hasActive2=%v on 304, got %v", tc.wantActive, hasActive2)
+				}
+			}
+		})
+	}
 }
 
-func TestGitHubPoller_LifecycleAndDiscovery(t *testing.T) {
-	t.Run("StartStopTickerLoopAndAdaptiveTiming", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+func TestGitHubPoller_StartStopTickerLoop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		var pollCount atomic.Int32
-		secondPollCh := make(chan struct{}, 4)
+	var pollCount atomic.Int32
+	secondPollCh := make(chan struct{}, 4)
 
-		ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			count := pollCount.Add(1)
-			if count >= 2 {
-				select {
-				case secondPollCh <- struct{}{}:
-				default:
-				}
+	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		count := pollCount.Add(1)
+		if count >= 2 {
+			select {
+			case secondPollCh <- struct{}{}:
+			default:
 			}
+		}
 
-			resp := GitHubRunsResponse{
-				WorkflowRuns: []GitHubRun{
-					{
-						ID:        100,
-						Status:    "in_progress",
-						UpdatedAt: time.Now().UTC(),
-						HeadCommit: &struct {
-							Message   string    `json:"message"`
-							Timestamp time.Time `json:"timestamp"`
-						}{
-							Message: "feat: adaptive timing test",
-						},
+		resp := GitHubRunsResponse{
+			WorkflowRuns: []GitHubRun{
+				{
+					ID:        100,
+					Status:    "in_progress",
+					UpdatedAt: time.Now().UTC(),
+					HeadCommit: &struct {
+						Message   string    `json:"message"`
+						Timestamp time.Time `json:"timestamp"`
+					}{
+						Message: "feat: adaptive timing test",
 					},
 				},
-			}
-			_ = json.NewEncoder(w).Encode(resp)
-		}))
-		defer ghMock.Close()
-
-		p := NewGitHubPoller("azylman/aerial", "token")
-		p.apiBaseURL = ghMock.URL
-		p.pollInterval = time.Millisecond
-
-		// Start background loop
-		p.Start(ctx)
-
-		// Wait deterministically for the second poll request via buffered channel without arbitrary sleep
-		select {
-		case <-secondPollCh:
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for second poll tick in Start(ctx)")
+			},
 		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ghMock.Close()
 
-		close(p.stopCh)
+	p := NewGitHubPoller("azylman/aerial", "token")
+	p.apiBaseURL = ghMock.URL
+	p.pollInterval = time.Millisecond
 
-		// Empty repo poller Start returns early
-		emptyPoller := NewGitHubPoller("", "")
-		emptyPoller.Start(ctx)
-	})
+	// Start background loop
+	p.Start(ctx)
 
-	t.Run("MultiRepoFanoutAndSnapshotPrioritization", func(t *testing.T) {
-		runIDAerial := int64(1001)
-		runIDSidecars := int64(2001)
-		now := time.Now().UTC()
+	// Wait deterministically for the second poll request via buffered channel without arbitrary sleep
+	select {
+	case <-secondPollCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second poll tick in Start(ctx)")
+	}
 
-		mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch {
-			case r.URL.Path == "/repos/azylman/aerial/actions/runs":
-				if r.Header.Get("If-None-Match") == "etag-aerial-1" {
-					w.WriteHeader(http.StatusNotModified)
-					return
+	close(p.stopCh)
+
+	// Empty repo poller Start returns early
+	emptyPoller := NewGitHubPoller("", "")
+	emptyPoller.Start(ctx)
+}
+
+func TestGitHubPoller_MultiRepoAndDiscovery_TableDriven(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "MultiRepoFanoutAndSnapshotPrioritization"},
+		{name: "DynamicConfigReload"},
+		{name: "GetActiveReposEdgeCases"},
+		{name: "FetchHangarRepos"},
+		{name: "HangarDiscoveryAndLKGCRetention"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			switch tc.name {
+			case "MultiRepoFanoutAndSnapshotPrioritization":
+				runIDAerial := int64(1001)
+				runIDSidecars := int64(2001)
+				now := time.Now().UTC()
+
+				mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch {
+					case r.URL.Path == "/repos/azylman/aerial/actions/runs":
+						if r.Header.Get("If-None-Match") == "etag-aerial-1" {
+							w.WriteHeader(http.StatusNotModified)
+							return
+						}
+						w.Header().Set("ETag", "etag-aerial-1")
+						_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
+							TotalCount: 1,
+							WorkflowRuns: []GitHubRun{
+								{
+									ID:         runIDAerial,
+									Name:       "CI",
+									HeadSHA:    "1111aaa",
+									Status:     "completed",
+									Conclusion: "success",
+									CreatedAt:  now.Add(-10 * time.Minute),
+									UpdatedAt:  now.Add(-8 * time.Minute),
+									HTMLURL:    "https://github.com/azylman/aerial/actions/runs/1001",
+								},
+							},
+						})
+					case r.URL.Path == "/repos/azylman/aerial-sidecars/actions/runs":
+						if r.Header.Get("If-None-Match") == "etag-sidecars-1" {
+							w.WriteHeader(http.StatusNotModified)
+							return
+						}
+						w.Header().Set("ETag", "etag-sidecars-1")
+						_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
+							TotalCount: 1,
+							WorkflowRuns: []GitHubRun{
+								{
+									ID:         runIDSidecars,
+									Name:       "Build Sidecars",
+									HeadSHA:    "2222bbb",
+									Status:     "in_progress",
+									Conclusion: "",
+									CreatedAt:  now.Add(-2 * time.Minute),
+									UpdatedAt:  now.Add(-10 * time.Second),
+									HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/2001",
+								},
+							},
+						})
+					case r.URL.Path == fmt.Sprintf("/repos/azylman/aerial/actions/runs/%d/jobs", runIDAerial):
+						_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
+							TotalCount: 1,
+							Jobs: []GitHubJob{
+								{
+									ID:         11,
+									RunID:      runIDAerial,
+									Name:       "test (brain)",
+									Status:     "completed",
+									Conclusion: "success",
+								},
+							},
+						})
+					case r.URL.Path == fmt.Sprintf("/repos/azylman/aerial-sidecars/actions/runs/%d/jobs", runIDSidecars):
+						_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
+							TotalCount: 1,
+							Jobs: []GitHubJob{
+								{
+									ID:        22,
+									RunID:     runIDSidecars,
+									Name:      "Build & Push Images to GHCR (aura-farming)",
+									Status:    "in_progress",
+									StartedAt: now.Add(-60 * time.Second),
+								},
+							},
+						})
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer mockGH.Close()
+
+				repos := []string{"azylman/aerial", "azylman/aerial-sidecars"}
+				poller := NewMultiGitHubPoller(repos, "test-token")
+				poller.apiBaseURL = mockGH.URL
+
+				hasActive := poller.pollOnce(ctx)
+				if !hasActive {
+					t.Errorf("expected hasActive=true because aerial-sidecars is in_progress")
 				}
-				w.Header().Set("ETag", "etag-aerial-1")
-				_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
-					TotalCount: 1,
-					WorkflowRuns: []GitHubRun{
-						{
-							ID:         runIDAerial,
-							Name:       "CI",
-							HeadSHA:    "1111aaa",
-							Status:     "completed",
-							Conclusion: "success",
-							CreatedAt:  now.Add(-10 * time.Minute),
-							UpdatedAt:  now.Add(-8 * time.Minute),
-							HTMLURL:    "https://github.com/azylman/aerial/actions/runs/1001",
-						},
-					},
-				})
-			case r.URL.Path == "/repos/azylman/aerial-sidecars/actions/runs":
-				if r.Header.Get("If-None-Match") == "etag-sidecars-1" {
-					w.WriteHeader(http.StatusNotModified)
-					return
+
+				runs, jobs := poller.GetSnapshot()
+				if len(runs) != 2 {
+					t.Fatalf("expected 2 runs across both repos, got %d: %+v", len(runs), runs)
 				}
-				w.Header().Set("ETag", "etag-sidecars-1")
-				_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
-					TotalCount: 1,
-					WorkflowRuns: []GitHubRun{
-						{
-							ID:         runIDSidecars,
-							Name:       "Build Sidecars",
-							HeadSHA:    "2222bbb",
-							Status:     "in_progress",
-							Conclusion: "",
-							CreatedAt:  now.Add(-2 * time.Minute),
-							UpdatedAt:  now.Add(-10 * time.Second),
-							HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/2001",
-						},
-					},
-				})
-			case r.URL.Path == fmt.Sprintf("/repos/azylman/aerial/actions/runs/%d/jobs", runIDAerial):
-				_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
-					TotalCount: 1,
-					Jobs: []GitHubJob{
-						{
-							ID:         11,
-							RunID:      runIDAerial,
-							Name:       "test (brain)",
-							Status:     "completed",
-							Conclusion: "success",
-						},
-					},
-				})
-			case r.URL.Path == fmt.Sprintf("/repos/azylman/aerial-sidecars/actions/runs/%d/jobs", runIDSidecars):
-				_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
-					TotalCount: 1,
-					Jobs: []GitHubJob{
-						{
-							ID:        22,
-							RunID:     runIDSidecars,
-							Name:      "Build & Push Images to GHCR (aura-farming)",
-							Status:    "in_progress",
-							StartedAt: now.Add(-60 * time.Second),
-						},
-					},
-				})
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		defer mockGH.Close()
 
-		repos := []string{"azylman/aerial", "azylman/aerial-sidecars"}
-		poller := NewMultiGitHubPoller(repos, "test-token")
-		poller.apiBaseURL = mockGH.URL
+				if runs[0].ID != runIDSidecars || runs[0].Repository != "azylman/aerial-sidecars" {
+					t.Errorf("expected first run to be active sidecars run %d with repo azylman/aerial-sidecars, got %+v", runIDSidecars, runs[0])
+				}
+				if runs[1].ID != runIDAerial || runs[1].Repository != "azylman/aerial" {
+					t.Errorf("expected second run to be aerial run %d with repo azylman/aerial, got %+v", runIDAerial, runs[1])
+				}
 
-		ctx := context.Background()
-		hasActive := poller.pollOnce(ctx)
-		if !hasActive {
-			t.Errorf("expected hasActive=true because aerial-sidecars is in_progress")
-		}
+				if len(jobs[runIDAerial]) != 1 || len(jobs[runIDSidecars]) != 1 {
+					t.Errorf("expected jobs for both repos to be preserved")
+				}
 
-		runs, jobs := poller.GetSnapshot()
-		if len(runs) != 2 {
-			t.Fatalf("expected 2 runs across both repos, got %d: %+v", len(runs), runs)
-		}
+				hasActive2 := poller.pollOnce(ctx)
+				if !hasActive2 {
+					t.Errorf("expected hasActive2=true on 304 because sidecars is still in_progress")
+				}
 
-		if runs[0].ID != runIDSidecars || runs[0].Repository != "azylman/aerial-sidecars" {
-			t.Errorf("expected first run to be active sidecars run %d with repo azylman/aerial-sidecars, got %+v", runIDSidecars, runs[0])
-		}
-		if runs[1].ID != runIDAerial || runs[1].Repository != "azylman/aerial" {
-			t.Errorf("expected second run to be aerial run %d with repo azylman/aerial, got %+v", runIDAerial, runs[1])
-		}
+				runs2, jobs2 := poller.GetSnapshot()
+				if len(runs2) != 2 || len(jobs2[runIDAerial]) != 1 || len(jobs2[runIDSidecars]) != 1 {
+					t.Errorf("expected runs and jobs to persist after 304 poll")
+				}
 
-		if len(jobs[runIDAerial]) != 1 || len(jobs[runIDSidecars]) != 1 {
-			t.Errorf("expected jobs for both repos to be preserved")
-		}
+			case "DynamicConfigReload":
+				tempDir := t.TempDir()
+				cfgFile := filepath.Join(tempDir, "config.yaml")
 
-		// Second poll: 304 Not Modified
-		hasActive2 := poller.pollOnce(ctx)
-		if !hasActive2 {
-			t.Errorf("expected hasActive2=true on 304 because sidecars is still in_progress")
-		}
-
-		runs2, jobs2 := poller.GetSnapshot()
-		if len(runs2) != 2 || len(jobs2[runIDAerial]) != 1 || len(jobs2[runIDSidecars]) != 1 {
-			t.Errorf("expected runs and jobs to persist after 304 poll")
-		}
-	})
-
-	t.Run("DynamicConfigReload", func(t *testing.T) {
-		tempDir := t.TempDir()
-		cfgFile := filepath.Join(tempDir, "config.yaml")
-
-		initialYaml := `
+				initialYaml := `
 dashboard:
   github_repos:
     - "azylman/aerial"
 `
-		if err := os.WriteFile(cfgFile, []byte(initialYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
+				if err := os.WriteFile(cfgFile, []byte(initialYaml), 0644); err != nil {
+					t.Fatal(err)
+				}
 
-		callCountAerial := 0
-		callCountSidecars := 0
-		mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Path {
-			case "/repos/azylman/aerial/actions/runs":
-				callCountAerial++
-				_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
-			case "/repos/azylman/aerial-sidecars/actions/runs":
-				callCountSidecars++
-				_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		defer mockGH.Close()
+				callCountAerial := 0
+				callCountSidecars := 0
+				mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch r.URL.Path {
+					case "/repos/azylman/aerial/actions/runs":
+						callCountAerial++
+						_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
+					case "/repos/azylman/aerial-sidecars/actions/runs":
+						callCountSidecars++
+						_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer mockGH.Close()
 
-		poller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "token")
-		poller.apiBaseURL = mockGH.URL
-		poller.configPath = cfgFile
+				poller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "token")
+				poller.apiBaseURL = mockGH.URL
+				poller.configPath = cfgFile
 
-		ctx := context.Background()
+				_ = poller.pollOnce(ctx)
+				if callCountAerial != 1 || callCountSidecars != 0 {
+					t.Fatalf("expected 1 aerial call, 0 sidecars calls; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
+				}
 
-		_ = poller.pollOnce(ctx)
-		if callCountAerial != 1 || callCountSidecars != 0 {
-			t.Fatalf("expected 1 aerial call, 0 sidecars calls; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
-		}
-
-		updatedYaml := `
+				updatedYaml := `
 dashboard:
   github_repos:
     - "azylman/aerial"
     - "azylman/aerial-sidecars"
 `
-		if err := os.WriteFile(cfgFile, []byte(updatedYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
+				if err := os.WriteFile(cfgFile, []byte(updatedYaml), 0644); err != nil {
+					t.Fatal(err)
+				}
 
-		_ = poller.pollOnce(ctx)
-		if callCountAerial != 2 || callCountSidecars != 1 {
-			t.Fatalf("expected 2 aerial calls, 1 sidecars call; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
-		}
-	})
+				_ = poller.pollOnce(ctx)
+				if callCountAerial != 2 || callCountSidecars != 1 {
+					t.Fatalf("expected 2 aerial calls, 1 sidecars call; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
+				}
 
-	t.Run("HangarURLAndActiveReposDiscovery", func(t *testing.T) {
-		ctx := context.Background()
+			case "GetActiveReposEdgeCases":
+				var nilPoller *GitHubPoller
+				if got := nilPoller.getActiveRepos(); got != nil {
+					t.Errorf("expected nil for nil poller, got %v", got)
+				}
+				nilPoller.SetHangarURL("http://example.com")
 
-		// 1. getActiveRepos edge cases
-		var nilPoller *GitHubPoller
-		if got := nilPoller.getActiveRepos(); got != nil {
-			t.Errorf("expected nil for nil poller, got %v", got)
-		}
-		nilPoller.SetHangarURL("http://example.com")
+				singleRepoPoller := &GitHubPoller{repo: "azylman/aerial"}
+				if got := singleRepoPoller.getActiveRepos(); len(got) != 1 || got[0] != "azylman/aerial" {
+					t.Errorf("expected [azylman/aerial], got %v", got)
+				}
 
-		singleRepoPoller := &GitHubPoller{repo: "azylman/aerial"}
-		if got := singleRepoPoller.getActiveRepos(); len(got) != 1 || got[0] != "azylman/aerial" {
-			t.Errorf("expected [azylman/aerial], got %v", got)
-		}
+				emptyPoller := &GitHubPoller{}
+				if got := emptyPoller.getActiveRepos(); got != nil {
+					t.Errorf("expected nil for empty poller, got %v", got)
+				}
 
-		emptyPoller := &GitHubPoller{}
-		if got := emptyPoller.getActiveRepos(); got != nil {
-			t.Errorf("expected nil for empty poller, got %v", got)
-		}
+			case "FetchHangarRepos":
+				if res := fetchHangarRepos(ctx, "", nil); res != nil {
+					t.Errorf("expected nil for empty URL, got %v", res)
+				}
+				if res := fetchHangarRepos(ctx, "http://127.0.0.1:54320/unreachable", &http.Client{Timeout: 50 * time.Millisecond}); res != nil {
+					t.Errorf("expected nil for unreachable URL, got %v", res)
+				}
 
-		// 2. fetchHangarRepos table tests
-		if res := fetchHangarRepos(ctx, "", nil); res != nil {
-			t.Errorf("expected nil for empty URL, got %v", res)
-		}
-		if res := fetchHangarRepos(ctx, "http://127.0.0.1:54320/unreachable", &http.Client{Timeout: 50 * time.Millisecond}); res != nil {
-			t.Errorf("expected nil for unreachable URL, got %v", res)
-		}
+				srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+				}))
+				defer srv500.Close()
+				if res := fetchHangarRepos(ctx, srv500.URL, srv500.Client()); res != nil {
+					t.Errorf("expected nil for 500 response, got %v", res)
+				}
 
-		srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer srv500.Close()
-		if res := fetchHangarRepos(ctx, srv500.URL, srv500.Client()); res != nil {
-			t.Errorf("expected nil for 500 response, got %v", res)
-		}
+				srvBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("{invalid-json"))
+				}))
+				defer srvBadJSON.Close()
+				if res := fetchHangarRepos(ctx, srvBadJSON.URL, srvBadJSON.Client()); res != nil {
+					t.Errorf("expected nil for bad JSON, got %v", res)
+				}
 
-		srvBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("{invalid-json"))
-		}))
-		defer srvBadJSON.Close()
-		if res := fetchHangarRepos(ctx, srvBadJSON.URL, srvBadJSON.Client()); res != nil {
-			t.Errorf("expected nil for bad JSON, got %v", res)
-		}
+				srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					resp := GitSyncStatusResponse{
+						Status: "synced",
+						Repos: map[string]RepoStatus{
+							"/share/aerial":       {GitHubRepo: "azylman/aerial"},
+							"/share/mirrormere":   {GitHubRepo: "Azylman/MirrorMere"},
+							"/share/aerial-alias": {GitHubRepo: "azylman/aerial"},
+							"/share/no-github":    {GitHubRepo: ""},
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				}))
+				defer srvOK.Close()
 
-		srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			resp := GitSyncStatusResponse{
-				Status: "synced",
-				Repos: map[string]RepoStatus{
-					"/share/aerial":       {GitHubRepo: "azylman/aerial"},
-					"/share/mirrormere":   {GitHubRepo: "Azylman/MirrorMere"},
-					"/share/aerial-alias": {GitHubRepo: "azylman/aerial"},
-					"/share/no-github":    {GitHubRepo: ""},
-				},
+				res := fetchHangarRepos(ctx, srvOK.URL, srvOK.Client())
+				expected := []string{"azylman/aerial", "azylman/mirrormere"}
+				if len(res) != len(expected) {
+					t.Fatalf("expected %d repos, got %d: %v", len(expected), len(res), res)
+				}
+				for i, exp := range expected {
+					if res[i] != exp {
+						t.Errorf("res[%d] = %q, want %q", i, res[i], exp)
+					}
+				}
+
+			case "HangarDiscoveryAndLKGCRetention":
+				hangarShouldFail := false
+				srvHangar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if hangarShouldFail {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					resp := GitSyncStatusResponse{
+						Status: "synced",
+						Repos: map[string]RepoStatus{
+							"/share/mirrormere": {GitHubRepo: "azylman/mirrormere"},
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				}))
+				defer srvHangar.Close()
+
+				srvGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
+				}))
+				defer srvGH.Close()
+
+				discoveryPoller := NewGitHubPoller("azylman/aerial", "token")
+				discoveryPoller.apiBaseURL = srvGH.URL
+				discoveryPoller.SetHangarURL(srvHangar.URL)
+
+				discoveryPoller.pollOnce(ctx)
+				activeRepos := discoveryPoller.getActiveRepos()
+				if len(activeRepos) != 2 || activeRepos[0] != "azylman/aerial" || activeRepos[1] != "azylman/mirrormere" {
+					t.Fatalf("expected 2 repos discovered, got %d: %v", len(activeRepos), activeRepos)
+				}
+
+				hangarShouldFail = true
+				discoveryPoller.pollOnce(ctx)
+				retainedRepos := discoveryPoller.getActiveRepos()
+				if len(retainedRepos) != 2 {
+					t.Fatalf("expected 2 repos retained under LKGC on Hangar failure, got %d: %v", len(retainedRepos), retainedRepos)
+				}
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
-		}))
-		defer srvOK.Close()
-
-		res := fetchHangarRepos(ctx, srvOK.URL, srvOK.Client())
-		expected := []string{"azylman/aerial", "azylman/mirrormere"}
-		if len(res) != len(expected) {
-			t.Fatalf("expected %d repos, got %d: %v", len(expected), len(res), res)
-		}
-		for i, exp := range expected {
-			if res[i] != exp {
-				t.Errorf("res[%d] = %q, want %q", i, res[i], exp)
-			}
-		}
-
-		// 3. Dynamic Hangar Discovery & LKGC Retention
-		hangarShouldFail := false
-		srvHangar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if hangarShouldFail {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			resp := GitSyncStatusResponse{
-				Status: "synced",
-				Repos: map[string]RepoStatus{
-					"/share/mirrormere": {GitHubRepo: "azylman/mirrormere"},
-				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
-		}))
-		defer srvHangar.Close()
-
-		srvGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
-		}))
-		defer srvGH.Close()
-
-		discoveryPoller := NewGitHubPoller("azylman/aerial", "token")
-		discoveryPoller.apiBaseURL = srvGH.URL
-		discoveryPoller.SetHangarURL(srvHangar.URL)
-
-		discoveryPoller.pollOnce(ctx)
-		activeRepos := discoveryPoller.getActiveRepos()
-		if len(activeRepos) != 2 || activeRepos[0] != "azylman/aerial" || activeRepos[1] != "azylman/mirrormere" {
-			t.Fatalf("expected 2 repos discovered, got %d: %v", len(activeRepos), activeRepos)
-		}
-
-		hangarShouldFail = true
-		discoveryPoller.pollOnce(ctx)
-		retainedRepos := discoveryPoller.getActiveRepos()
-		if len(retainedRepos) != 2 {
-			t.Fatalf("expected 2 repos retained under LKGC on Hangar failure, got %d: %v", len(retainedRepos), retainedRepos)
-		}
-	})
+		})
+	}
 }
 
 func TestFetchNomadClusterState(t *testing.T) {
