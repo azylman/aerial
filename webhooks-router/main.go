@@ -123,22 +123,7 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 
-	pgURL := firstNonEmpty(os.Getenv("POSTGRES_URL"), os.Getenv("DATABASE_URL"))
-	if pgURL == "" {
-		hostResolves := func(host string) bool {
-			ctxLookup, cancelLookup := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancelLookup()
-			_, err := net.DefaultResolver.LookupHost(ctxLookup, host)
-			return err == nil
-		}
-		if hostResolves("aerial-postgres") {
-			pgURL = "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
-		} else if hostResolves("postgres") {
-			pgURL = "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
-		} else {
-			pgURL = "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
-		}
-	}
+	pgURL := firstNonEmpty(os.Getenv("POSTGRES_URL"), os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
 
 	return Config{
 		Port:                  firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
@@ -554,23 +539,35 @@ func NewPostgresPRRegistry(pool pgxQueryExecer) *PostgresPRRegistry {
 	return &PostgresPRRegistry{pool: pool}
 }
 
+func (r *PostgresPRRegistry) queryRowScan(ctx context.Context, opName, query string, dest []any, args ...any) (bool, error) {
+	if r == nil || r.pool == nil {
+		return false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := r.pool.QueryRow(qCtx, query, args...).Scan(dest...); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%s: %w", opName, err)
+	}
+	return true, nil
+}
+
 func (r *PostgresPRRegistry) execReturningTargetID(ctx context.Context, repo string, prNumber int, opName, query string, extraArgs ...any) (string, error) {
 	repo = normalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return "", nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	args := append([]any{repo, prNumber}, extraArgs...)
 	var targetID string
-	err := r.pool.QueryRow(qCtx, query, args...).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	found, err := r.queryRowScan(ctx, opName, query, []any{&targetID}, args...)
+	if err != nil {
+		return "", err
+	}
+	if !found {
 		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
 		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", opName, err)
 	}
 	return targetID, nil
 }
@@ -580,18 +577,12 @@ func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo stri
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return "", false, nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	var targetID string
-	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
-	}
+	found, err := r.queryRowScan(ctx, opName, query, []any{&targetID}, repo, prNumber)
 	if err != nil {
-		return "", false, fmt.Errorf("%s: %w", opName, err)
+		return "", false, err
 	}
-	return targetID, true, nil
+	return targetID, found, nil
 }
 
 func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
@@ -635,8 +626,6 @@ func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Conte
 	if repo == "" || headSHA == "" || isZeroSHA(headSHA) {
 		return "", 0, false, nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 
 	query := `
 		UPDATE pr_registry SET status = 'ci_failed', updated_at = CURRENT_TIMESTAMP
@@ -644,14 +633,11 @@ func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Conte
 		RETURNING target_id, pr_number;`
 	var targetID string
 	var prNumber int
-	err := r.pool.QueryRow(qCtx, query, repo, headSHA).Scan(&targetID, &prNumber)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", 0, false, nil
-	}
+	found, err := r.queryRowScan(ctx, "atomic transition ci_failed by head_sha", query, []any{&targetID, &prNumber}, repo, headSHA)
 	if err != nil {
-		return "", 0, false, fmt.Errorf("atomic transition ci_failed by head_sha: %w", err)
+		return "", 0, false, err
 	}
-	return targetID, prNumber, true, nil
+	return targetID, prNumber, found, nil
 }
 
 func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha string) (int, string, string, error) {
@@ -660,18 +646,16 @@ func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sh
 	if repo == "" || sha == "" || isZeroSHA(sha) {
 		return 0, "", "", nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 
 	query := `SELECT pr_number, branch, target_id FROM pr_registry WHERE repo = $1 AND (merge_sha = $2 OR head_sha = $2) ORDER BY updated_at DESC LIMIT 1;`
 	var prNum int
 	var branch, targetID string
-	err := r.pool.QueryRow(qCtx, query, repo, sha).Scan(&prNum, &branch, &targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, "", "", nil
-	}
+	found, err := r.queryRowScan(ctx, "resolve pr by sha", query, []any{&prNum, &branch, &targetID}, repo, sha)
 	if err != nil {
-		return 0, "", "", fmt.Errorf("resolve pr by sha: %w", err)
+		return 0, "", "", err
+	}
+	if !found {
+		return 0, "", "", nil
 	}
 	return prNum, branch, targetID, nil
 }
@@ -681,17 +665,15 @@ func (r *PostgresPRRegistry) ResolvePRByNumber(ctx context.Context, repo string,
 	if repo == "" || prNumber <= 0 {
 		return "", "", "", "", nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 
 	query := `SELECT target_id, branch, head_sha, COALESCE(merge_sha, '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
 	var targetID, branch, headSHA, mergeSHA string
-	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID, &branch, &headSHA, &mergeSHA)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", "", "", nil
-	}
+	found, err := r.queryRowScan(ctx, "resolve pr by number", query, []any{&targetID, &branch, &headSHA, &mergeSHA}, repo, prNumber)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("resolve pr by number: %w", err)
+		return "", "", "", "", err
+	}
+	if !found {
+		return "", "", "", "", nil
 	}
 	return targetID, branch, headSHA, mergeSHA, nil
 }
@@ -915,6 +897,37 @@ func (r *PostgresPRRegistry) GetRecentChannelContext(ctx context.Context, target
 	return results, rows.Err()
 }
 
+func queryVanadisChunks(ctx context.Context, q interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}, buildID string, forUpdate bool) ([]VanadisChunkSummary, error) {
+	query := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC`
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	rows, err := q.Query(ctx, query, buildID)
+	if err != nil {
+		return nil, fmt.Errorf("query vanadis build chunks: %w", err)
+	}
+	defer rows.Close()
+
+	var chunks []VanadisChunkSummary
+	for rows.Next() {
+		var cs VanadisChunkSummary
+		var startedAt sql.NullTime
+		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &cs.UpdatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan vanadis build chunk: %w", scanErr)
+		}
+		if startedAt.Valid {
+			cs.StartedAt = startedAt.Time
+		}
+		chunks = append(chunks, cs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate vanadis build chunks: %w", err)
+	}
+	return chunks, nil
+}
+
 func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
 	repo = normalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
@@ -974,30 +987,14 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 		return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
 	}
 
-	allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
-	rows, err := tx.Query(qCtx, allChunksQuery, buildID)
+	allChunks, err := queryVanadisChunks(qCtx, tx, buildID, true)
 	if err != nil {
-		return nil, fmt.Errorf("query vanadis build chunks: %w", err)
+		return nil, err
 	}
-	var allChunks []VanadisChunkSummary
-	for rows.Next() {
-		var cs VanadisChunkSummary
-		var startedAt sql.NullTime
-		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &cs.UpdatedAt); scanErr != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan vanadis build chunk: %w", scanErr)
+	for i := range allChunks {
+		if allChunks[i].ID == chunkID {
+			allChunks[i].Status = "merged"
 		}
-		if startedAt.Valid {
-			cs.StartedAt = startedAt.Time
-		}
-		if cs.ID == chunkID {
-			cs.Status = "merged"
-		}
-		allChunks = append(allChunks, cs)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate vanadis build chunks: %w", err)
 	}
 
 	nextChunkIdx := -1
@@ -1064,12 +1061,9 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 
 func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
 	repo = normalizeRepo(repo)
-	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+	if repo == "" || prNumber <= 0 {
 		return false, nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	query := `
 		SELECT EXISTS (
 			SELECT 1
@@ -1085,8 +1079,12 @@ func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context
 			  )
 		);`
 	var exists bool
-	if err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check vanadis deploy wake suppression: %w", err)
+	found, err := r.queryRowScan(ctx, "check vanadis deploy wake suppression", query, []any{&exists}, repo, prNumber)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
 	}
 	return exists, nil
 }
@@ -1096,9 +1094,6 @@ func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo stri
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return false, nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	query := `
 		UPDATE vanadis_chunks c
 		SET status = 'failed', updated_at = CURRENT_TIMESTAMP
@@ -1106,14 +1101,16 @@ func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo stri
 		WHERE c.build_id = b.id AND c.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
 		RETURNING c.build_id;`
 	var buildID string
-	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&buildID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	found, err := r.queryRowScan(ctx, "fail vanadis chunk by pr", query, []any{&buildID}, repo, prNumber)
+	if err != nil {
+		return false, err
+	}
+	if !found {
 		return false, nil
 	}
-	if err != nil {
-		return false, fmt.Errorf("fail vanadis chunk by pr: %w", err)
-	}
 
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	updateBuild := `UPDATE vanadis_builds SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'running';`
 	if _, err := r.pool.Exec(qCtx, updateBuild, buildID); err != nil {
 		return false, fmt.Errorf("fail vanadis build by pr: %w", err)
@@ -1402,7 +1399,6 @@ func (s *RouterServer) SetConflictCheckDelay(d time.Duration)     { s.conflictCh
 func (s *RouterServer) SetRiverClient(rc RiverInserter)            { s.riverClient = rc }
 func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)          { s.registry = reg }
 func (s *RouterServer) SetDispatcher(d OutboundDispatcher)         { s.dispatcher = d }
-func (s *RouterServer) GetDispatcher() OutboundDispatcher          { return s.dispatcher }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1737,33 +1733,23 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	)
 	if err == nil && buildID != "" {
 		// Parent Vanadis build found
-		allChunksQuery := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC`
-		rows, qErr := pgReg.pool.Query(qCtx, allChunksQuery, buildID)
+		allChunks, qErr := queryVanadisChunks(qCtx, pgReg.pool, buildID, false)
 		if qErr != nil {
 			return fmt.Errorf("sync widget query chunks: %w", qErr)
 		}
 		var wChunks []StatusWidgetChunk
-		for rows.Next() {
-			var csID, csRepo, csTitle, csStatus string
-			var csIdx, csPR int
-			var csStartedAtNull sql.NullTime
-			var csStartedAt, csUpdatedAt time.Time
-			if scanErr := rows.Scan(&csID, &csIdx, &csRepo, &csTitle, &csStatus, &csPR, &csStartedAtNull, &csUpdatedAt); scanErr != nil {
-				rows.Close()
-				return fmt.Errorf("sync widget scan chunk: %w", scanErr)
-			}
-			if csStartedAtNull.Valid {
-				csStartedAt = csStartedAtNull.Time
-			}
-			chunkRepo := csRepo
+		for _, cs := range allChunks {
+			chunkRepo := cs.Repo
 			if chunkRepo == "" {
 				chunkRepo = "azylman/aerial"
 			}
-			chunkStatus := csStatus
+			chunkStatus := cs.Status
+			csStartedAt := cs.StartedAt
+			csUpdatedAt := cs.UpdatedAt
 			var cJobs []string
-			if csPR == prNumber {
+			if cs.PRNumber == prNumber {
 				if statusOverride != "" {
-					if csStatus != statusOverride {
+					if cs.Status != statusOverride {
 						csUpdatedAt = time.Now().UTC()
 						if csStartedAt.IsZero() {
 							csStartedAt = csUpdatedAt
@@ -1776,19 +1762,15 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 				}
 			}
 			wChunks = append(wChunks, StatusWidgetChunk{
-				Index:         csIdx,
+				Index:         cs.ChunkIndex,
 				Repo:          chunkRepo,
-				Title:         csTitle,
+				Title:         cs.Title,
 				Status:        chunkStatus,
-				PRNumber:      csPR,
+				PRNumber:      cs.PRNumber,
 				DeployingJobs: cJobs,
 				StartedAt:     csStartedAt,
 				UpdatedAt:     csUpdatedAt,
 			})
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("sync widget iterate chunks: %w", err)
 		}
 
 		widgetStatus := bStatus

@@ -480,6 +480,19 @@ func doHTTPRequest(handler http.Handler, method, path string, body io.Reader, he
 	return rec
 }
 
+func mkHangarEvt(event, job, repo, sha string, pr int, targetID, status, details string) HangarDeployEvent {
+	return HangarDeployEvent{Event: event, JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status, Details: details}
+}
+
+func mkDeployedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
+	return &mockPRRegistry{deployedTargetID: targetID, deployedPRNum: pr, deployedMergeSHA: sha, deployedRepo: repo, deployedUpdated: updated}
+}
+
+func mkDeployFailedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
+	return &mockPRRegistry{deployFailedJobTargetID: targetID, deployFailedJobPRNum: pr, deployFailedJobMergeSHA: sha, deployFailedJobRepo: repo, deployFailedJobUpdated: updated}
+}
+
+
 func getTestPostgresURL() string {
 	pgURL := os.Getenv("POSTGRES_URL")
 	if pgURL == "" {
@@ -507,352 +520,736 @@ func getTestPostgresURL() string {
 
 // --- 1. Config & Pure Helpers ---
 
-func TestConfig(t *testing.T) {
-	t.Run("LoadConfigFromEnv_InfisicalAndNomad", func(t *testing.T) {
-		t.Setenv("PORT", "9999")
-		t.Setenv("INFISICAL_URL", "http://infisical:8085/")
-		t.Setenv("INFISICAL_CLIENT_ID", "cid")
-		t.Setenv("INFISICAL_CLIENT_SECRET", "csec")
-		t.Setenv("INFISICAL_PROJECT_ID", "pid")
-		t.Setenv("INFISICAL_ENVIRONMENT", "staging")
-		t.Setenv("NOMAD_ADDR", "http://nomad:4646/")
-		t.Setenv("NOMAD_TOKEN", "ntok")
+func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
+	tests := []struct {
+		name          string
+		env           map[string]string
+		wantPort      string
+		wantInfURL    string
+		wantCID       string
+		wantCSec      string
+		wantPID       string
+		wantEnv       string
+		wantNomadAddr string
+		wantNomadTok  string
+		wantGHTok     string
+		wantGHURL     string
+		wantPGURL     string
+		wantSysChan   string
+	}{
+		{
+			name: "primary infisical and nomad envs",
+			env: map[string]string{
+				"PORT":                  "9999",
+				"INFISICAL_URL":          "http://infisical:8085/",
+				"INFISICAL_CLIENT_ID":     "cid",
+				"INFISICAL_CLIENT_SECRET": "csec",
+				"INFISICAL_PROJECT_ID":    "pid",
+				"INFISICAL_ENVIRONMENT":  "staging",
+				"NOMAD_ADDR":             "http://nomad:4646/",
+				"NOMAD_TOKEN":            "ntok",
+			},
+			wantPort:      "9999",
+			wantInfURL:    "http://infisical:8085",
+			wantCID:       "cid",
+			wantCSec:      "csec",
+			wantPID:       "pid",
+			wantEnv:       "staging",
+			wantNomadAddr: "http://nomad:4646",
+			wantNomadTok:  "ntok",
+			wantGHURL:     "https://api.github.com",
+			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+		},
+		{
+			name: "alternate environment variable keys",
+			env: map[string]string{
+				"INFISICAL_HOST_URL":                     "http://alternate:8085",
+				"INFISICAL_UNIVERSAL_AUTH_CLIENT_ID":     "u-cid",
+				"INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET": "u-csec",
+				"INFISICAL_WORKSPACE_ID":                 "w-id",
+			},
+			wantPort:      "4020",
+			wantInfURL:    "http://alternate:8085",
+			wantCID:       "u-cid",
+			wantCSec:      "u-csec",
+			wantPID:       "w-id",
+			wantEnv:       "prod",
+			wantNomadAddr: "http://127.0.0.1:4646",
+			wantGHURL:     "https://api.github.com",
+			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+		},
+		{
+			name:          "default fallback loading with empty envs",
+			env:           map[string]string{},
+			wantPort:      "4020",
+			wantInfURL:    "http://infisical.aerial",
+			wantEnv:       "prod",
+			wantNomadAddr: "http://127.0.0.1:4646",
+			wantGHURL:     "https://api.github.com",
+			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+		},
+		{
+			name: "github and postgres primary envs",
+			env: map[string]string{
+				"GITHUB_PAT":     "pat123",
+				"GITHUB_API_URL": "https://api.github.test/",
+				"POSTGRES_URL":   "postgres://custom:pass@db:5432/customdb",
+			},
+			wantPort:      "4020",
+			wantInfURL:    "http://infisical.aerial",
+			wantEnv:       "prod",
+			wantNomadAddr: "http://127.0.0.1:4646",
+			wantGHTok:     "pat123",
+			wantGHURL:     "https://api.github.test",
+			wantPGURL:     "postgres://custom:pass@db:5432/customdb",
+		},
+		{
+			name: "github token and database url fallback envs",
+			env: map[string]string{
+				"GITHUB_TOKEN": "tok456",
+				"DATABASE_URL": "postgres://dbuser:pass@db:5432/db",
+			},
+			wantPort:      "4020",
+			wantInfURL:    "http://infisical.aerial",
+			wantEnv:       "prod",
+			wantNomadAddr: "http://127.0.0.1:4646",
+			wantGHTok:     "tok456",
+			wantGHURL:     "https://api.github.com",
+			wantPGURL:     "postgres://dbuser:pass@db:5432/db",
+		},
+		{
+			name: "system channel id primary env",
+			env: map[string]string{
+				"SYSTEM_CHANNEL_ID": "123456789012345678",
+			},
+			wantPort:      "4020",
+			wantInfURL:    "http://infisical.aerial",
+			wantEnv:       "prod",
+			wantNomadAddr: "http://127.0.0.1:4646",
+			wantGHURL:     "https://api.github.com",
+			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+			wantSysChan:   "123456789012345678",
+		},
+		{
+			name: "discord channel id fallback env",
+			env: map[string]string{
+				"DISCORD_CHANNEL_ID": "987654321098765432",
+			},
+			wantPort:      "4020",
+			wantInfURL:    "http://infisical.aerial",
+			wantEnv:       "prod",
+			wantNomadAddr: "http://127.0.0.1:4646",
+			wantGHURL:     "https://api.github.com",
+			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+			wantSysChan:   "987654321098765432",
+		},
+	}
 
-		cfg := LoadConfigFromEnv()
-		if cfg.Port != "9999" || cfg.InfisicalURL != "http://infisical:8085" || cfg.NomadAddr != "http://nomad:4646" {
-			t.Errorf("unexpected config loaded: %+v", cfg)
-		}
-		if cfg.InfisicalClientID != "cid" || cfg.InfisicalClientSecret != "csec" || cfg.InfisicalProjectID != "pid" {
-			t.Errorf("unexpected infisical credentials: %+v", cfg)
-		}
-		if cfg.InfisicalEnvironment != "staging" {
-			t.Errorf("unexpected env: %+v", cfg)
-		}
+	keysToClear := []string{
+		"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "INFISICAL_CLIENT_ID",
+		"INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "INFISICAL_CLIENT_SECRET",
+		"INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "INFISICAL_PROJECT_ID",
+		"INFISICAL_WORKSPACE_ID", "INFISICAL_ENVIRONMENT", "NOMAD_ADDR",
+		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_TOKEN", "GITHUB_API_URL",
+		"POSTGRES_URL", "DATABASE_URL", "HANGAR_URL", "BRAIN_INTERNAL_URL",
+		"BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID", "CONFIG_PATH",
+	}
 
-		// Alternate environment variable keys
-		t.Setenv("INFISICAL_URL", "")
-		t.Setenv("INFISICAL_HOST_URL", "http://alternate:8085")
-		t.Setenv("INFISICAL_CLIENT_ID", "")
-		t.Setenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "u-cid")
-		t.Setenv("INFISICAL_CLIENT_SECRET", "")
-		t.Setenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "u-csec")
-		t.Setenv("INFISICAL_PROJECT_ID", "")
-		t.Setenv("INFISICAL_WORKSPACE_ID", "w-id")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range keysToClear {
+				t.Setenv(k, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg := LoadConfigFromEnv()
+			if tc.wantPort != "" && cfg.Port != tc.wantPort {
+				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
+			}
+			if tc.wantInfURL != "" && cfg.InfisicalURL != tc.wantInfURL {
+				t.Errorf("InfisicalURL = %q, want %q", cfg.InfisicalURL, tc.wantInfURL)
+			}
+			if tc.wantCID != "" && cfg.InfisicalClientID != tc.wantCID {
+				t.Errorf("InfisicalClientID = %q, want %q", cfg.InfisicalClientID, tc.wantCID)
+			}
+			if tc.wantCSec != "" && cfg.InfisicalClientSecret != tc.wantCSec {
+				t.Errorf("InfisicalClientSecret = %q, want %q", cfg.InfisicalClientSecret, tc.wantCSec)
+			}
+			if tc.wantPID != "" && cfg.InfisicalProjectID != tc.wantPID {
+				t.Errorf("InfisicalProjectID = %q, want %q", cfg.InfisicalProjectID, tc.wantPID)
+			}
+			if tc.wantEnv != "" && cfg.InfisicalEnvironment != tc.wantEnv {
+				t.Errorf("InfisicalEnvironment = %q, want %q", cfg.InfisicalEnvironment, tc.wantEnv)
+			}
+			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
+				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
+			}
+			if tc.wantNomadTok != "" && cfg.NomadToken != tc.wantNomadTok {
+				t.Errorf("NomadToken = %q, want %q", cfg.NomadToken, tc.wantNomadTok)
+			}
+			if tc.wantGHTok != "" && cfg.GitHubToken != tc.wantGHTok {
+				t.Errorf("GitHubToken = %q, want %q", cfg.GitHubToken, tc.wantGHTok)
+			}
+			if tc.wantGHURL != "" && cfg.GitHubAPIURL != tc.wantGHURL {
+				t.Errorf("GitHubAPIURL = %q, want %q", cfg.GitHubAPIURL, tc.wantGHURL)
+			}
+			if tc.wantPGURL != "" && cfg.PostgresURL != tc.wantPGURL {
+				t.Errorf("PostgresURL = %q, want %q", cfg.PostgresURL, tc.wantPGURL)
+			}
+			if tc.wantSysChan != "" && cfg.SystemChannelID != tc.wantSysChan {
+				t.Errorf("SystemChannelID = %q, want %q", cfg.SystemChannelID, tc.wantSysChan)
+			}
+		})
+	}
+}
 
-		cfgAlt := LoadConfigFromEnv()
-		if cfgAlt.InfisicalURL != "http://alternate:8085" || cfgAlt.InfisicalClientID != "u-cid" ||
-			cfgAlt.InfisicalClientSecret != "u-csec" || cfgAlt.InfisicalProjectID != "w-id" {
-			t.Errorf("unexpected alternate config: %+v", cfgAlt)
-		}
-
-		// Default fallback loading
-		t.Setenv("INFISICAL_HOST_URL", "")
-		t.Setenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "")
-		t.Setenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "")
-		t.Setenv("INFISICAL_WORKSPACE_ID", "")
-		t.Setenv("PORT", "")
-		t.Setenv("NOMAD_ADDR", "")
-		t.Setenv("INFISICAL_ENVIRONMENT", "")
-		t.Setenv("POSTGRES_URL", "")
-		t.Setenv("DATABASE_URL", "")
-
-		cfgDef := LoadConfigFromEnv()
-		if cfgDef.Port != "4020" || cfgDef.InfisicalURL != "http://infisical.aerial" || cfgDef.NomadAddr != "http://127.0.0.1:4646" {
-			t.Errorf("unexpected default config: %+v", cfgDef)
-		}
-	})
-
-	t.Run("LoadConfigFromEnv_GitHubAndPostgres", func(t *testing.T) {
-		t.Setenv("GITHUB_PAT", "pat123")
-		t.Setenv("GITHUB_API_URL", "https://api.github.test/")
-		t.Setenv("POSTGRES_URL", "postgres://custom:pass@db:5432/customdb")
-
-		cfg := LoadConfigFromEnv()
-		if cfg.GitHubToken != "pat123" || cfg.GitHubAPIURL != "https://api.github.test" || cfg.PostgresURL != "postgres://custom:pass@db:5432/customdb" {
-			t.Errorf("unexpected GitHub/Postgres config: %+v", cfg)
-		}
-
-		// Fallback to GITHUB_TOKEN and DATABASE_URL
-		t.Setenv("GITHUB_PAT", "")
-		t.Setenv("POSTGRES_URL", "")
-		t.Setenv("GITHUB_TOKEN", "tok456")
-		t.Setenv("DATABASE_URL", "postgres://dbuser:pass@db:5432/db")
-
-		cfg2 := LoadConfigFromEnv()
-		if cfg2.GitHubToken != "tok456" || cfg2.PostgresURL != "postgres://dbuser:pass@db:5432/db" {
-			t.Errorf("unexpected fallback GitHub/Database config: %+v", cfg2)
-		}
-	})
-
-	t.Run("LoadConfig_YAMLAndEnvOverrides", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		cfgFile := filepath.Join(tmpDir, "webhooks-router.yaml")
-		yamlContent := `
-port: "4099"
+func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
+	tests := []struct {
+		name            string
+		localYAML       string
+		fallbackYAML    string
+		useEmptyPath    bool
+		missingFallback bool
+		env             map[string]string
+		wantPort        string
+		wantInfURL      string
+		wantEnv         string
+		wantNomadAddr   string
+		wantHangarURL   string
+		wantBrainURL    string
+		wantSysChan     string
+	}{
+		{
+			name: "yaml config without overrides",
+			localYAML: `port: "4099"
 infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
 nomad_addr: "http://nomad.custom:4646"
 hangar_url: "http://hangar.custom:8087"
 brain_url: "http://brain.custom:8088"
-`
-		if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
-			t.Fatalf("failed to write yaml: %v", err)
-		}
+`,
+			wantPort:      "4099",
+			wantInfURL:    "http://infisical.custom:8085",
+			wantEnv:       "staging",
+			wantNomadAddr: "http://nomad.custom:4646",
+			wantHangarURL: "http://hangar.custom:8087",
+			wantBrainURL:  "http://brain.custom:8088",
+		},
+		{
+			name: "env overrides yaml values",
+			localYAML: `port: "4099"
+infisical_url: "http://infisical.custom:8085"
+infisical_environment: "staging"
+nomad_addr: "http://nomad.custom:4646"
+hangar_url: "http://hangar.custom:8087"
+brain_url: "http://brain.custom:8088"
+`,
+			env: map[string]string{
+				"PORT":                  "5000",
+				"INFISICAL_ENVIRONMENT": "dev",
+			},
+			wantPort:      "5000",
+			wantInfURL:    "http://infisical.custom:8085",
+			wantEnv:       "dev",
+			wantNomadAddr: "http://nomad.custom:4646",
+			wantHangarURL: "http://hangar.custom:8087",
+			wantBrainURL:  "http://brain.custom:8088",
+		},
+		{
+			name:         "zero-byte local config with existing fallback",
+			localYAML:    "",
+			fallbackYAML: "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\nnomad_addr: \"http://nomad.fallback:4646\"\n",
+			wantPort:     "4088",
+			wantInfURL:   "http://infisical.fallback:8085",
+			wantNomadAddr: "http://nomad.fallback:4646",
+		},
+		{
+			name:            "zero-byte local config with missing fallback uses defaults",
+			localYAML:       "",
+			missingFallback: true,
+			wantPort:        "4020",
+			wantInfURL:      "http://infisical.aerial",
+		},
+		{
+			name:         "empty config path with valid fallback",
+			useEmptyPath: true,
+			fallbackYAML: "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\nnomad_addr: \"http://nomad.fallback:4646\"\n",
+			wantPort:     "4088",
+		},
+		{
+			name:         "non-empty local config takes precedence over fallback",
+			localYAML:    "port: \"4077\"\n",
+			fallbackYAML: "port: \"4088\"\n",
+			wantPort:     "4077",
+		},
+		{
+			name:        "system channel id loaded from yaml",
+			localYAML:   "system_channel_id: \"112233445566778899\"\n",
+			wantSysChan: "112233445566778899",
+		},
+	}
 
-		for _, k := range []string{"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "INFISICAL_ENVIRONMENT", "NOMAD_ADDR", "HANGAR_URL", "BRAIN_URL"} {
-			t.Setenv(k, "")
-		}
+	keysToClear := []string{
+		"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "INFISICAL_ENVIRONMENT",
+		"NOMAD_ADDR", "HANGAR_URL", "BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
+	}
 
-		cfg := LoadConfig(cfgFile)
-		if cfg.Port != "4099" || cfg.InfisicalURL != "http://infisical.custom:8085" || cfg.InfisicalEnvironment != "staging" ||
-			cfg.NomadAddr != "http://nomad.custom:4646" || cfg.HangarURL != "http://hangar.custom:8087" || cfg.BrainURL != "http://brain.custom:8088" {
-			t.Errorf("unexpected YAML config: %+v", cfg)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			var targetPath string
+			if !tc.useEmptyPath {
+				targetPath = filepath.Join(tmpDir, "local.yaml")
+				if err := os.WriteFile(targetPath, []byte(tc.localYAML), 0644); err != nil {
+					t.Fatalf("failed to write local config: %v", err)
+				}
+			}
 
-		// Env overrides YAML
-		t.Setenv("PORT", "5000")
-		t.Setenv("INFISICAL_ENVIRONMENT", "dev")
-		cfgOver := LoadConfig(cfgFile)
-		if cfgOver.Port != "5000" || cfgOver.InfisicalEnvironment != "dev" || cfgOver.NomadAddr != "http://nomad.custom:4646" {
-			t.Errorf("unexpected overridden YAML config: %+v", cfgOver)
-		}
-	})
+			if tc.fallbackYAML != "" || tc.missingFallback {
+				oldFallback := webhooksRouterFallbackConfigPath
+				if tc.missingFallback {
+					webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
+				} else {
+					fbPath := filepath.Join(tmpDir, "fallback.yaml")
+					if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0644); err != nil {
+						t.Fatalf("failed to write fallback config: %v", err)
+					}
+					webhooksRouterFallbackConfigPath = fbPath
+				}
+				t.Cleanup(func() { webhooksRouterFallbackConfigPath = oldFallback })
+			}
 
-	t.Run("LoadConfig_FallbackAndZeroByte", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		localZero := filepath.Join(tmpDir, "local_zero.yaml")
-		if err := os.WriteFile(localZero, []byte(""), 0644); err != nil {
-			t.Fatalf("failed to create zero-byte file: %v", err)
-		}
+			for _, k := range keysToClear {
+				t.Setenv(k, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
 
-		fallbackValid := filepath.Join(tmpDir, "fallback_valid.yaml")
-		fallbackContent := "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\nnomad_addr: \"http://nomad.fallback:4646\"\n"
-		if err := os.WriteFile(fallbackValid, []byte(fallbackContent), 0644); err != nil {
-			t.Fatalf("failed to create fallback config: %v", err)
-		}
-
-		oldFallback := webhooksRouterFallbackConfigPath
-		webhooksRouterFallbackConfigPath = fallbackValid
-		t.Cleanup(func() { webhooksRouterFallbackConfigPath = oldFallback })
-
-		for _, k := range []string{"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "NOMAD_ADDR"} {
-			t.Setenv(k, "")
-		}
-
-		// 1. Zero-byte local config with fallback config existing
-		cfgFallback := LoadConfig(localZero)
-		if cfgFallback.Port != "4088" || cfgFallback.InfisicalURL != "http://infisical.fallback:8085" {
-			t.Errorf("unexpected fallback config: %+v", cfgFallback)
-		}
-
-		// 2. Zero-byte local config with non-existent fallback -> uses defaults
-		webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-		cfgDefaults := LoadConfig(localZero)
-		if cfgDefaults.Port != "4020" || cfgDefaults.InfisicalURL != "http://infisical.aerial" {
-			t.Errorf("unexpected default config: %+v", cfgDefaults)
-		}
-
-		// 3. Empty configPath with valid fallback
-		webhooksRouterFallbackConfigPath = fallbackValid
-		if cfgEmptyPath := LoadConfig(""); cfgEmptyPath.Port != "4088" {
-			t.Errorf("expected port 4088 from fallback on empty configPath, got %s", cfgEmptyPath.Port)
-		}
-
-		// 4. Non-empty local config takes precedence over fallback
-		localValid := filepath.Join(tmpDir, "local_valid.yaml")
-		_ = os.WriteFile(localValid, []byte("port: \"4077\"\n"), 0644)
-		if cfgLocal := LoadConfig(localValid); cfgLocal.Port != "4077" {
-			t.Errorf("expected local port 4077, got %s", cfgLocal.Port)
-		}
-	})
-
-	t.Run("SystemChannelID", func(t *testing.T) {
-		t.Setenv("SYSTEM_CHANNEL_ID", "123456789012345678")
-		if cfg := LoadConfigFromEnv(); cfg.SystemChannelID != "123456789012345678" {
-			t.Errorf("expected 123456789012345678, got %s", cfg.SystemChannelID)
-		}
-		t.Setenv("SYSTEM_CHANNEL_ID", "")
-
-		t.Setenv("DISCORD_CHANNEL_ID", "987654321098765432")
-		if cfg2 := LoadConfigFromEnv(); cfg2.SystemChannelID != "987654321098765432" {
-			t.Errorf("expected 987654321098765432, got %s", cfg2.SystemChannelID)
-		}
-		t.Setenv("DISCORD_CHANNEL_ID", "")
-
-		tmpDir := t.TempDir()
-		yamlFile := filepath.Join(tmpDir, "config.yaml")
-		if err := os.WriteFile(yamlFile, []byte("system_channel_id: \"112233445566778899\"\n"), 0644); err != nil {
-			t.Fatalf("failed to write yaml config: %v", err)
-		}
-		if cfg3 := LoadConfig(yamlFile); cfg3.SystemChannelID != "112233445566778899" {
-			t.Errorf("expected 112233445566778899 from yaml, got %s", cfg3.SystemChannelID)
-		}
-	})
+			cfg := LoadConfig(targetPath)
+			if tc.wantPort != "" && cfg.Port != tc.wantPort {
+				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
+			}
+			if tc.wantInfURL != "" && cfg.InfisicalURL != tc.wantInfURL {
+				t.Errorf("InfisicalURL = %q, want %q", cfg.InfisicalURL, tc.wantInfURL)
+			}
+			if tc.wantEnv != "" && cfg.InfisicalEnvironment != tc.wantEnv {
+				t.Errorf("InfisicalEnvironment = %q, want %q", cfg.InfisicalEnvironment, tc.wantEnv)
+			}
+			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
+				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
+			}
+			if tc.wantHangarURL != "" && cfg.HangarURL != tc.wantHangarURL {
+				t.Errorf("HangarURL = %q, want %q", cfg.HangarURL, tc.wantHangarURL)
+			}
+			if tc.wantBrainURL != "" && cfg.BrainURL != tc.wantBrainURL {
+				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			}
+			if tc.wantSysChan != "" && cfg.SystemChannelID != tc.wantSysChan {
+				t.Errorf("SystemChannelID = %q, want %q", cfg.SystemChannelID, tc.wantSysChan)
+			}
+		})
+	}
 }
 
-func TestPayloadHelpers_TableDriven(t *testing.T) {
+func TestInfisicalWebhookPayload_Getters(t *testing.T) {
+	t.Parallel()
+	type dataStruct = struct {
+		WorkspaceID string `json:"workspaceId"`
+		ProjectID   string `json:"projectId"`
+		Environment string `json:"environment"`
+	}
+	tests := []struct {
+		name     string
+		payload  InfisicalWebhookPayload
+		fallback string
+		wantWS   string
+		wantEnv  string
+	}{
+		{name: "workspace id from payload field", payload: InfisicalWebhookPayload{WorkspaceID: "ws-1"}, fallback: "fb", wantWS: "ws-1", wantEnv: "fb"},
+		{name: "project id from payload field", payload: InfisicalWebhookPayload{ProjectID: "proj-1"}, fallback: "fb", wantWS: "proj-1", wantEnv: "fb"},
+		{name: "workspace id from nested data", payload: InfisicalWebhookPayload{Data: &dataStruct{WorkspaceID: "ws-data"}}, fallback: "fb", wantWS: "ws-data", wantEnv: "fb"},
+		{name: "project id from nested data", payload: InfisicalWebhookPayload{Data: &dataStruct{ProjectID: "proj-data"}}, fallback: "fb", wantWS: "proj-data", wantEnv: "fb"},
+		{name: "environment from payload field", payload: InfisicalWebhookPayload{Environment: "prod"}, fallback: "fb", wantWS: "fb", wantEnv: "prod"},
+		{name: "environment from nested data", payload: InfisicalWebhookPayload{Data: &dataStruct{Environment: "staging"}}, fallback: "fb", wantWS: "fb", wantEnv: "staging"},
+		{name: "fallback when fields empty", payload: InfisicalWebhookPayload{}, fallback: "fb", wantWS: "fb", wantEnv: "fb"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if gotWS := tc.payload.GetWorkspaceID(tc.fallback); gotWS != tc.wantWS {
+				t.Errorf("GetWorkspaceID() = %q, want %q", gotWS, tc.wantWS)
+			}
+			if gotEnv := tc.payload.GetEnvironment(tc.fallback); gotEnv != tc.wantEnv {
+				t.Errorf("GetEnvironment() = %q, want %q", gotEnv, tc.wantEnv)
+			}
+		})
+	}
+}
+
+func TestStringAndRepoHelpers(t *testing.T) {
 	t.Parallel()
 
-	t.Run("InfisicalPayloadHelpers", func(t *testing.T) {
-		t.Parallel()
-		type dataStruct = struct {
-			WorkspaceID string `json:"workspaceId"`
-			ProjectID   string `json:"projectId"`
-			Environment string `json:"environment"`
-		}
-		wsCases := []struct {
-			payload InfisicalWebhookPayload
-			want    string
-		}{
-			{InfisicalWebhookPayload{WorkspaceID: "ws-1"}, "ws-1"},
-			{InfisicalWebhookPayload{ProjectID: "proj-1"}, "proj-1"},
-			{InfisicalWebhookPayload{Data: &dataStruct{WorkspaceID: "ws-data"}}, "ws-data"},
-			{InfisicalWebhookPayload{Data: &dataStruct{ProjectID: "proj-data"}}, "proj-data"},
-			{InfisicalWebhookPayload{}, "fb"},
-		}
-		for _, tc := range wsCases {
-			if got := tc.payload.GetWorkspaceID("fb"); got != tc.want {
-				t.Errorf("GetWorkspaceID() = %q, want %q", got, tc.want)
-			}
-		}
+	// Touch fixture constructors introduced for subsequent chunks
+	_ = mkHangarEvt("", "", "", "", 0, "", "", "")
+	_ = mkDeployedReg("", 0, "", "", false)
+	_ = mkDeployFailedReg("", 0, "", "", false)
 
-		envCases := []struct {
-			payload InfisicalWebhookPayload
-			want    string
-		}{
-			{InfisicalWebhookPayload{Environment: "prod"}, "prod"},
-			{InfisicalWebhookPayload{Data: &dataStruct{Environment: "staging"}}, "staging"},
-			{InfisicalWebhookPayload{}, "fb"},
-		}
-		for _, tc := range envCases {
-			if got := tc.payload.GetEnvironment("fb"); got != tc.want {
-				t.Errorf("GetEnvironment() = %q, want %q", got, tc.want)
-			}
-		}
-	})
-
-	t.Run("IsZeroSHA", func(t *testing.T) {
-		t.Parallel()
-		for _, tc := range []struct {
-			sha  string
-			want bool
-		}{
-			{"", true},
-			{"0000000000000000000000000000000000000000", true},
-			{"0", true},
-			{"000", true},
-			{"0000000000000000000000000000000000000001", false},
-			{"ed197571a381920f540e7a3c55b68008a45912a0", false},
-		} {
+	zeroSHATests := []struct {
+		name string
+		sha  string
+		want bool
+	}{
+		{name: "isZeroSHA empty", sha: "", want: true},
+		{name: "isZeroSHA 40 zeroes", sha: "0000000000000000000000000000000000000000", want: true},
+		{name: "isZeroSHA single zero", sha: "0", want: true},
+		{name: "isZeroSHA three zeroes", sha: "000", want: true},
+		{name: "isZeroSHA non-zero ending with 1", sha: "0000000000000000000000000000000000000001", want: false},
+		{name: "isZeroSHA valid commit sha", sha: "ed197571a381920f540e7a3c55b68008a45912a0", want: false},
+	}
+	for _, tc := range zeroSHATests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := isZeroSHA(tc.sha); got != tc.want {
 				t.Errorf("isZeroSHA(%q) = %v, want %v", tc.sha, got, tc.want)
 			}
-		}
-	})
+		})
+	}
 
-	t.Run("NormalizeRepo", func(t *testing.T) {
-		t.Parallel()
-		for _, tt := range []struct {
-			input, expected string
-		}{
-			{"", ""},
-			{"   ", ""},
-			{"aerial", "azylman/aerial"},
-			{"azylman/aerial", "azylman/aerial"},
-			{"  mirrormere  ", "azylman/mirrormere"},
-			{"otherorg/custom", "otherorg/custom"},
-		} {
-			if got := normalizeRepo(tt.input); got != tt.expected {
-				t.Errorf("normalizeRepo(%q) = %q; expected %q", tt.input, got, tt.expected)
+	normalizeTests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "normalizeRepo empty", input: "", want: ""},
+		{name: "normalizeRepo whitespace", input: "   ", want: ""},
+		{name: "normalizeRepo aerial prefix", input: "aerial", want: "azylman/aerial"},
+		{name: "normalizeRepo fully qualified aerial", input: "azylman/aerial", want: "azylman/aerial"},
+		{name: "normalizeRepo trimmed mirrormere", input: "  mirrormere  ", want: "azylman/mirrormere"},
+		{name: "normalizeRepo other org repo", input: "otherorg/custom", want: "otherorg/custom"},
+	}
+	for _, tc := range normalizeTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeRepo(tc.input); got != tc.want {
+				t.Errorf("normalizeRepo(%q) = %q, want %q", tc.input, got, tc.want)
 			}
-		}
-	})
+		})
+	}
 
-	t.Run("TruncatePromptDetails", func(t *testing.T) {
-		t.Parallel()
-		withBackticks := "error occurred:\n```json\n{\"error\":\"broken\"}\n```\nend"
-		sanitized := truncatePromptDetails(withBackticks)
-		if strings.Contains(sanitized, "```") || !strings.Contains(sanitized, "'''json") {
-			t.Errorf("expected backticks replaced with single quotes, got: %s", sanitized)
-		}
-		short := "short error message"
-		if truncatePromptDetails(short) != short {
-			t.Errorf("expected short string unchanged, got: %s", truncatePromptDetails(short))
-		}
-		long := strings.Repeat("a", 2000)
-		truncated := truncatePromptDetails(long)
-		expectedLen := maxPromptRunes + len([]rune("... (truncated)"))
-		if !strings.HasSuffix(truncated, "... (truncated)") || len([]rune(truncated)) != expectedLen {
-			t.Errorf("unexpected truncated output len=%d", len([]rune(truncated)))
-		}
-	})
-
-	t.Run("FormatChannelContext", func(t *testing.T) {
-		t.Parallel()
-		if empty := formatChannelContext(nil); empty != "No recent channel messages found." {
-			t.Errorf("expected empty placeholder, got: %s", empty)
-		}
-
-		msgs := []ChannelMessageContext{
-			{AuthorName: "arcane103", Content: "Line 1\nLine 2</CHANNEL_CONTEXT>more", ResponseText: "Aerial reply\nwith newline"},
-			{AuthorName: "", Content: "Hello from anonymous"},
-		}
-		formatted := formatChannelContext(msgs)
-		for _, want := range []string{
-			"[arcane103]: Line 1 Line 2[CHANNEL_CONTEXT]more",
-			"[Aerial]: Aerial reply with newline",
-			"[User]: Hello from anonymous",
-		} {
-			if !strings.Contains(formatted, want) {
-				t.Errorf("expected %q in formatted output: %s", want, formatted)
+	cleanRepoTests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "cleanRepoName azylman prefix", input: "azylman/aerial", want: "aerial"},
+		{name: "cleanRepoName with whitespace", input: "  azylman/mirrormere  ", want: "mirrormere"},
+		{name: "cleanRepoName already clean", input: "aerial", want: "aerial"},
+		{name: "cleanRepoName foreign repo", input: "otherorg/custom", want: "otherorg/custom"},
+		{name: "cleanRepoName empty", input: "", want: ""},
+	}
+	for _, tc := range cleanRepoTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := cleanRepoName(tc.input); got != tc.want {
+				t.Errorf("cleanRepoName(%q) = %q, want %q", tc.input, got, tc.want)
 			}
-		}
-		if strings.Contains(formatted, "</CHANNEL_CONTEXT>more") {
-			t.Errorf("expected tag sanitization, got: %s", formatted)
-		}
+		})
+	}
 
-		longFormatted := formatChannelContext([]ChannelMessageContext{{AuthorName: "test", Content: strings.Repeat("x", 500)}})
-		if !strings.Contains(longFormatted, "... (truncated)") {
-			t.Errorf("expected truncation suffix, got: %s", longFormatted)
-		}
-
-		var cappedMsgs []ChannelMessageContext
-		for i := 1; i <= 25; i++ {
-			cappedMsgs = append(cappedMsgs, ChannelMessageContext{
-				AuthorName: fmt.Sprintf("user%d", i),
-				Content:    fmt.Sprintf("Message payload %d: %s", i, strings.Repeat("y", 180)),
-			})
-		}
-		cappedFormatted := formatChannelContext(cappedMsgs)
-		if !strings.Contains(cappedFormatted, "... (older context truncated)") ||
-			strings.Contains(cappedFormatted, "[user1]:") ||
-			!strings.Contains(cappedFormatted, "[user25]:") {
-			t.Errorf("unexpected capped formatting: %s", cappedFormatted)
-		}
-	})
-
-	t.Run("Is4xxClientError", func(t *testing.T) {
-		t.Parallel()
-		for _, tt := range []struct {
-			name     string
-			err      error
-			expected bool
-		}{
-			{"nil error", nil, false},
-			{"status 400", errors.New("brain prompt returned status 400: bad request"), true},
-			{"status 404", errors.New("brain prompt returned status 404: not found"), true},
-			{"status 422", errors.New("brain internal message returned status 422: unprocessable"), true},
-			{"status 403", errors.New("brain prompt returned status 403: forbidden"), true},
-			{"status 500", errors.New("brain prompt returned status 500: internal server error"), false},
-			{"status 502", errors.New("brain prompt returned status 502: bad gateway"), false},
-			{"network timeout", errors.New("dial tcp 127.0.0.1:8088: i/o timeout"), false},
-			{"invalid snowflake", errors.New("invalid discord snowflake channel id: \"abc\""), true},
-		} {
-			if got := is4xxClientError(tt.err); got != tt.expected {
-				t.Errorf("%s: is4xxClientError(%v) = %v, expected %v", tt.name, tt.err, got, tt.expected)
+	prefixTests := []struct {
+		name     string
+		prNumber int
+		repo     string
+		want     string
+	}{
+		{name: "formatDirectMessagePrefix pr and repo", prNumber: 42, repo: "azylman/aerial", want: "**(PR: #42, repo: aerial)** "},
+		{name: "formatDirectMessagePrefix repo only", prNumber: 0, repo: "azylman/aerial", want: "**(repo: aerial)** "},
+		{name: "formatDirectMessagePrefix pr only with empty repo", prNumber: 99, repo: "", want: "**(PR: #99)** "},
+		{name: "formatDirectMessagePrefix neither", prNumber: 0, repo: "", want: ""},
+	}
+	for _, tc := range prefixTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatDirectMessagePrefix(tc.prNumber, tc.repo); got != tc.want {
+				t.Errorf("formatDirectMessagePrefix(%d, %q) = %q, want %q", tc.prNumber, tc.repo, got, tc.want)
 			}
-		}
-	})
+		})
+	}
+
+	dedupeTests := []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{name: "dedupeTrimmedStrings duplicates and blanks", input: []string{"foo", "  foo  ", "bar", "", "   ", "baz", "bar"}, want: []string{"foo", "bar", "baz"}},
+		{name: "dedupeTrimmedStrings empty slice", input: []string{}, want: nil},
+	}
+	for _, tc := range dedupeTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := dedupeTrimmedStrings(tc.input)
+			if len(got) != len(tc.want) {
+				t.Fatalf("dedupeTrimmedStrings() len = %d, want %d", len(got), len(tc.want))
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("dedupeTrimmedStrings()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+
+	hangarSyncedTests := []struct {
+		name string
+		repo string
+		want bool
+	}{
+		{name: "isHangarSyncedRepo aerial bare", repo: "aerial", want: true},
+		{name: "isHangarSyncedRepo aerial qualified", repo: "azylman/aerial", want: true},
+		{name: "isHangarSyncedRepo aerial config qualified", repo: "azylman/aerial-config", want: true},
+		{name: "isHangarSyncedRepo mirrormere", repo: "mirrormere", want: false},
+		{name: "isHangarSyncedRepo other", repo: "otherorg/custom", want: false},
+		{name: "isHangarSyncedRepo empty", repo: "", want: false},
+	}
+	for _, tc := range hangarSyncedTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isHangarSyncedRepo(tc.repo); got != tc.want {
+				t.Errorf("isHangarSyncedRepo(%q) = %v, want %v", tc.repo, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPromptAndContextFormatting(t *testing.T) {
+	t.Parallel()
+
+	truncateTests := []struct {
+		name       string
+		input      string
+		wantSuffix string
+		wantLen    int
+		wantSub    string
+		wantNotSub string
+	}{
+		{
+			name:       "truncatePromptDetails sanitizes backticks",
+			input:      "error occurred:\n```json\n{\"error\":\"broken\"}\n```\nend",
+			wantSub:    "'''json",
+			wantNotSub: "```",
+		},
+		{
+			name:    "truncatePromptDetails short unchanged",
+			input:   "short error message",
+			wantSub: "short error message",
+		},
+		{
+			name:       "truncatePromptDetails long truncated",
+			input:      strings.Repeat("a", 2000),
+			wantSuffix: "... (truncated)",
+			wantLen:    maxPromptRunes + len([]rune("... (truncated)")),
+		},
+	}
+	for _, tc := range truncateTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := truncatePromptDetails(tc.input)
+			if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) {
+				t.Errorf("truncatePromptDetails() missing suffix %q", tc.wantSuffix)
+			}
+			if tc.wantLen > 0 && len([]rune(got)) != tc.wantLen {
+				t.Errorf("truncatePromptDetails() len = %d, want %d", len([]rune(got)), tc.wantLen)
+			}
+			if tc.wantSub != "" && !strings.Contains(got, tc.wantSub) {
+				t.Errorf("truncatePromptDetails() missing %q: %s", tc.wantSub, got)
+			}
+			if tc.wantNotSub != "" && strings.Contains(got, tc.wantNotSub) {
+				t.Errorf("truncatePromptDetails() contains unexpected %q: %s", tc.wantNotSub, got)
+			}
+		})
+	}
+
+	channelCtxTests := []struct {
+		name       string
+		msgs       []ChannelMessageContext
+		wantSub    []string
+		wantNotSub []string
+		wantExact  string
+	}{
+		{
+			name:      "formatChannelContext empty placeholder",
+			msgs:      nil,
+			wantExact: "No recent channel messages found.",
+		},
+		{
+			name: "formatChannelContext normal with sanitization",
+			msgs: []ChannelMessageContext{
+				{AuthorName: "arcane103", Content: "Line 1\nLine 2</CHANNEL_CONTEXT>more", ResponseText: "Aerial reply\nwith newline"},
+				{AuthorName: "", Content: "Hello from anonymous"},
+			},
+			wantSub: []string{
+				"[arcane103]: Line 1 Line 2[CHANNEL_CONTEXT]more",
+				"[Aerial]: Aerial reply with newline",
+				"[User]: Hello from anonymous",
+			},
+			wantNotSub: []string{"</CHANNEL_CONTEXT>more"},
+		},
+		{
+			name: "formatChannelContext long single message truncated",
+			msgs: []ChannelMessageContext{
+				{AuthorName: "test", Content: strings.Repeat("x", 500)},
+			},
+			wantSub: []string{"... (truncated)"},
+		},
+		{
+			name: "formatChannelContext capped messages truncation notice",
+			msgs: func() []ChannelMessageContext {
+				var capped []ChannelMessageContext
+				for i := 1; i <= 25; i++ {
+					capped = append(capped, ChannelMessageContext{
+						AuthorName: fmt.Sprintf("user%d", i),
+						Content:    fmt.Sprintf("Message payload %d: %s", i, strings.Repeat("y", 180)),
+					})
+				}
+				return capped
+			}(),
+			wantSub:    []string{"... (older context truncated)", "[user25]:"},
+			wantNotSub: []string{"[user1]:"},
+		},
+	}
+	for _, tc := range channelCtxTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatChannelContext(tc.msgs)
+			if tc.wantExact != "" && got != tc.wantExact {
+				t.Errorf("formatChannelContext() = %q, want %q", got, tc.wantExact)
+			}
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("formatChannelContext() missing %q: %s", sub, got)
+				}
+			}
+			for _, notSub := range tc.wantNotSub {
+				if strings.Contains(got, notSub) {
+					t.Errorf("formatChannelContext() contains unexpected %q: %s", notSub, got)
+				}
+			}
+		})
+	}
+
+	errorBlockTests := []struct {
+		name      string
+		header    string
+		details   string
+		extraLine string
+		footer    string
+		wantSub   []string
+		wantExact string
+	}{
+		{
+			name:      "formatErrorDetailsBlock all populated",
+			header:    "Header",
+			details:   "details err",
+			extraLine: "extra line",
+			footer:    "footer info",
+			wantSub:   []string{"Header", "Error details:\n```\ndetails err\n```", "extra line", "footer info"},
+		},
+		{
+			name:      "formatErrorDetailsBlock header only",
+			header:    "Header",
+			wantExact: "Header",
+		},
+	}
+	for _, tc := range errorBlockTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatErrorDetailsBlock(tc.header, tc.details, tc.extraLine, tc.footer)
+			if tc.wantExact != "" && got != tc.wantExact {
+				t.Errorf("formatErrorDetailsBlock() = %q, want %q", got, tc.wantExact)
+			}
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("formatErrorDetailsBlock() missing %q: %s", sub, got)
+				}
+			}
+		})
+	}
+
+	vanadisPromptTests := []struct {
+		name    string
+		res     *VanadisAdvancementResult
+		wantSub []string
+		wantLen int
+	}{
+		{
+			name:    "formatVanadisBuildCompletedPrompt nil result",
+			res:     nil,
+			wantLen: 0,
+		},
+		{
+			name: "formatVanadisBuildCompletedPrompt with chunks",
+			res: &VanadisAdvancementResult{
+				BuildID:   "build-42",
+				Tier:      2,
+				Objective: "Complete feature migration",
+				Chunks: []VanadisChunkSummary{
+					{ChunkIndex: 0, Title: "Chunk One", Repo: "azylman/aerial", PRNumber: 101},
+					{ChunkIndex: 1, Title: "Chunk Two", Repo: "", PRNumber: 0},
+				},
+			},
+			wantSub: []string{
+				"Vanadis build build-42 completed (Tier 2, 2 chunks merged).",
+				"Objective: Complete feature migration",
+				"Merged Chunks Ledger:",
+				"- Chunk 1/2: Chunk One (azylman/aerial, PR #101)",
+				"- Chunk 2/2: Chunk Two (azylman/aerial)",
+				"All Vanadis build chunks have merged into main.",
+			},
+		},
+	}
+	for _, tc := range vanadisPromptTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatVanadisBuildCompletedPrompt(tc.res)
+			if tc.wantLen == 0 && tc.res == nil && got != "" {
+				t.Errorf("formatVanadisBuildCompletedPrompt(nil) = %q, want empty", got)
+			}
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("formatVanadisBuildCompletedPrompt() missing %q: %s", sub, got)
+				}
+			}
+		})
+	}
+}
+
+func TestIs4xxClientError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil error", err: nil, want: false},
+		{name: "status 400", err: errors.New("brain prompt returned status 400: bad request"), want: true},
+		{name: "status 404", err: errors.New("brain prompt returned status 404: not found"), want: true},
+		{name: "status 422", err: errors.New("brain internal message returned status 422: unprocessable"), want: true},
+		{name: "status 403", err: errors.New("brain prompt returned status 403: forbidden"), want: true},
+		{name: "status 500", err: errors.New("brain prompt returned status 500: internal server error"), want: false},
+		{name: "status 502", err: errors.New("brain prompt returned status 502: bad gateway"), want: false},
+		{name: "network timeout", err: errors.New("dial tcp 127.0.0.1:8088: i/o timeout"), want: false},
+		{name: "invalid snowflake", err: errors.New("invalid discord snowflake channel id: \"abc\""), want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := is4xxClientError(tc.err); got != tc.want {
+				t.Errorf("%s: is4xxClientError(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 // --- 2. Infisical / Generic Secret Webhooks & Sync ---
@@ -862,22 +1259,20 @@ func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
 	routes := NewRouterServer(Config{}, nil).Routes()
 
 	cases := []struct {
-		name       string
-		path       string
-		body       io.Reader
-		wantStatus int
-		checkBody  func(t *testing.T, resp map[string]interface{})
+		name          string
+		path          string
+		body          io.Reader
+		wantStatus    int
+		wantTargetVar string
+		wantEnv       string
+		wantMsg       string
 	}{
 		{
-			name:       "infisical valid payload",
-			path:       "/webhooks/infisical",
-			body:       strings.NewReader(`{"event":"secrets.modified"}`),
-			wantStatus: http.StatusAccepted,
-			checkBody: func(t *testing.T, resp map[string]interface{}) {
-				if resp["targetVariable"] != TargetNomadVariable {
-					t.Errorf("expected targetVariable %q, got %v", TargetNomadVariable, resp["targetVariable"])
-				}
-			},
+			name:          "infisical valid payload",
+			path:          "/webhooks/infisical",
+			body:          strings.NewReader(`{"event":"secrets.modified"}`),
+			wantStatus:    http.StatusAccepted,
+			wantTargetVar: TargetNomadVariable,
 		},
 		{
 			name:       "infisical malformed json",
@@ -892,37 +1287,27 @@ func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "generic standard sync",
-			path:       "/webhooks/generic",
-			body:       strings.NewReader(`{"environment":"prod"}`),
-			wantStatus: http.StatusAccepted,
-			checkBody: func(t *testing.T, resp map[string]interface{}) {
-				if resp["targetVariable"] != TargetNomadVariable {
-					t.Errorf("expected targetVariable %q, got %v", TargetNomadVariable, resp["targetVariable"])
-				}
-			},
+			name:          "generic standard sync",
+			path:          "/webhooks/generic",
+			body:          strings.NewReader(`{"environment":"prod"}`),
+			wantStatus:    http.StatusAccepted,
+			wantTargetVar: TargetNomadVariable,
 		},
 		{
-			name:       "generic direct secrets map",
-			path:       "/webhooks/generic",
-			body:       strings.NewReader(`{"secrets":{"KEY1":"VAL1"}}`),
-			wantStatus: http.StatusAccepted,
-			checkBody: func(t *testing.T, resp map[string]interface{}) {
-				if resp["targetVariable"] != TargetNomadVariable || resp["message"] != "Direct secret sync scheduled" {
-					t.Errorf("unexpected direct payload handling: %+v", resp)
-				}
-			},
+			name:          "generic direct secrets map",
+			path:          "/webhooks/generic",
+			body:          strings.NewReader(`{"secrets":{"KEY1":"VAL1"}}`),
+			wantStatus:    http.StatusAccepted,
+			wantTargetVar: TargetNomadVariable,
+			wantMsg:       "Direct secret sync scheduled",
 		},
 		{
-			name:       "generic explicit workspace and env",
-			path:       "/webhooks/generic",
-			body:       strings.NewReader(`{"workspaceId":"custom-ws","environment":"dev"}`),
-			wantStatus: http.StatusAccepted,
-			checkBody: func(t *testing.T, resp map[string]interface{}) {
-				if resp["targetVariable"] != TargetNomadVariable || resp["environment"] != "dev" {
-					t.Errorf("unexpected explicit payload handling: %+v", resp)
-				}
-			},
+			name:          "generic explicit workspace and env",
+			path:          "/webhooks/generic",
+			body:          strings.NewReader(`{"workspaceId":"custom-ws","environment":"dev"}`),
+			wantStatus:    http.StatusAccepted,
+			wantTargetVar: TargetNomadVariable,
+			wantEnv:       "dev",
 		},
 		{
 			name:       "generic bad json",
@@ -945,12 +1330,20 @@ func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
 			}
-			if tc.checkBody != nil {
+			if tc.wantTargetVar != "" || tc.wantEnv != "" || tc.wantMsg != "" {
 				var resp map[string]interface{}
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 					t.Fatalf("failed to parse response: %v", err)
 				}
-				tc.checkBody(t, resp)
+				if tc.wantTargetVar != "" && resp["targetVariable"] != tc.wantTargetVar {
+					t.Errorf("expected targetVariable %q, got %v", tc.wantTargetVar, resp["targetVariable"])
+				}
+				if tc.wantEnv != "" && resp["environment"] != tc.wantEnv {
+					t.Errorf("expected environment %q, got %v", tc.wantEnv, resp["environment"])
+				}
+				if tc.wantMsg != "" && resp["message"] != tc.wantMsg {
+					t.Errorf("expected message %q, got %v", tc.wantMsg, resp["message"])
+				}
 			}
 		})
 	}
@@ -960,162 +1353,178 @@ func TestSyncSecrets(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	t.Run("FullFlowAndMissingCreds", func(t *testing.T) {
-		t.Parallel()
-		var nomadPutCount atomic.Int32
-		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch {
-			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/universal-auth/login":
-				_ = json.NewEncoder(w).Encode(UniversalAuthLoginResponse{AccessToken: "mock-jwt-token"})
-			case r.Method == http.MethodGet && r.URL.Path == "/api/v3/secrets/raw":
-				_ = json.NewEncoder(w).Encode(InfisicalSecretsResponse{
-					Secrets: []InfisicalSecretItem{{SecretKey: "API_KEY", SecretValue: "secret123"}},
-				})
-			case r.Method == http.MethodPut && r.URL.Path == "/v1/var/"+TargetNomadVariable:
-				nomadPutCount.Add(1)
-				w.WriteHeader(http.StatusOK)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		defer mockServer.Close()
+	tests := []struct {
+		name          string
+		cfgOverride   *Config
+		loginStatus   int
+		loginBody     string
+		secretsStatus int
+		secretsBody   string
+		nomadStatus   int
+		unreachable   bool
+		wantErr       bool
+		wantNomadPuts int32
+	}{
+		{
+			name:          "successful full sync flow",
+			loginStatus:   http.StatusOK,
+			loginBody:     `{"accessToken":"mock-jwt-token"}`,
+			secretsStatus: http.StatusOK,
+			secretsBody:   `{"secrets":[{"secretKey":"API_KEY","secretValue":"secret123"}]}`,
+			nomadStatus:   http.StatusOK,
+			wantErr:       false,
+			wantNomadPuts: 1,
+		},
+		{
+			name:        "missing infisical credentials",
+			cfgOverride: &Config{},
+			wantErr:     true,
+		},
+		{
+			name:        "login 500 server error",
+			loginStatus: http.StatusInternalServerError,
+			loginBody:   "server error",
+			wantErr:     true,
+		},
+		{
+			name:        "login invalid json response",
+			loginStatus: http.StatusOK,
+			loginBody:   "{invalid-json",
+			wantErr:     true,
+		},
+		{
+			name:        "login empty token string",
+			loginStatus: http.StatusOK,
+			loginBody:   `{"accessToken":""}`,
+			wantErr:     true,
+		},
+		{
+			name:          "login fallback token field",
+			loginStatus:   http.StatusOK,
+			loginBody:     `{"token":"fallback-token"}`,
+			secretsStatus: http.StatusOK,
+			secretsBody:   `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`,
+			nomadStatus:   http.StatusOK,
+			wantErr:       false,
+			wantNomadPuts: 1,
+		},
+		{
+			name:          "secrets fetch 502 bad gateway",
+			loginStatus:   http.StatusOK,
+			loginBody:     `{"accessToken":"tok"}`,
+			secretsStatus: http.StatusBadGateway,
+			wantErr:       true,
+		},
+		{
+			name:          "secrets fetch invalid json",
+			loginStatus:   http.StatusOK,
+			loginBody:     `{"accessToken":"tok"}`,
+			secretsStatus: http.StatusOK,
+			secretsBody:   "{invalid-secrets",
+			wantErr:       true,
+		},
+		{
+			name:          "nomad put 201 created",
+			loginStatus:   http.StatusOK,
+			loginBody:     `{"accessToken":"tok"}`,
+			secretsStatus: http.StatusOK,
+			secretsBody:   `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`,
+			nomadStatus:   http.StatusCreated,
+			wantErr:       false,
+			wantNomadPuts: 1,
+		},
+		{
+			name:          "nomad put 204 no content",
+			loginStatus:   http.StatusOK,
+			loginBody:     `{"accessToken":"tok"}`,
+			secretsStatus: http.StatusOK,
+			secretsBody:   `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`,
+			nomadStatus:   http.StatusNoContent,
+			wantErr:       false,
+			wantNomadPuts: 1,
+		},
+		{
+			name:          "nomad put 500 internal server error",
+			loginStatus:   http.StatusOK,
+			loginBody:     `{"accessToken":"tok"}`,
+			secretsStatus: http.StatusOK,
+			secretsBody:   `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`,
+			nomadStatus:   http.StatusInternalServerError,
+			wantErr:       true,
+			wantNomadPuts: 1,
+		},
+		{
+			name:        "unreachable client connections",
+			unreachable: true,
+			wantErr:     true,
+		},
+	}
 
-		server := NewRouterServer(Config{
-			InfisicalURL:          mockServer.URL,
-			InfisicalClientID:     "client-id",
-			InfisicalClientSecret: "client-secret",
-			InfisicalProjectID:    "proj-123",
-			InfisicalEnvironment:  "prod",
-			NomadAddr:             mockServer.URL,
-			NomadToken:            "test-nomad-token",
-		}, mockServer.Client())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.unreachable {
+				badClientServer := NewRouterServer(Config{
+					InfisicalURL:          "http://127.0.0.1:1",
+					InfisicalClientID:     "cid",
+					InfisicalClientSecret: "csec",
+					NomadAddr:             "http://127.0.0.1:1",
+				}, &http.Client{Timeout: 50 * time.Millisecond})
 
-		if err := server.SyncSecrets(ctx, "proj-123", "prod"); err != nil {
-			t.Fatalf("SyncSecrets failed: %v", err)
-		}
-		if nomadPutCount.Load() != 1 {
-			t.Errorf("expected 1 Nomad PUT, got %d", nomadPutCount.Load())
-		}
-
-		// Missing Infisical Credentials
-		serverBad := NewRouterServer(Config{}, mockServer.Client())
-		if err := serverBad.SyncSecrets(ctx, "", ""); err == nil {
-			t.Errorf("expected error with unconfigured infisical credentials")
-		}
-	})
-
-	t.Run("ErrorBranchesAndStatusCodes", func(t *testing.T) {
-		t.Parallel()
-		var mode atomic.Int32
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch mode.Load() {
-			case 1: // Login 500
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte("server error"))
-			case 2: // Login invalid JSON
-				_, _ = w.Write([]byte("{invalid-json"))
-			case 3: // Login empty token
-				_, _ = w.Write([]byte(`{"accessToken":""}`))
-			case 4: // Login fallback token field
-				_, _ = w.Write([]byte(`{"token":"fallback-token"}`))
-			case 5: // Fetch 502
-				if r.URL.Path == "/api/v1/auth/universal-auth/login" {
-					_ = json.NewEncoder(w).Encode(UniversalAuthLoginResponse{AccessToken: "tok"})
-					return
+				if err := badClientServer.SyncSecrets(ctx, "ws", "env"); err == nil {
+					t.Errorf("SyncSecrets() expected error on unreachable, got nil")
 				}
-				w.WriteHeader(http.StatusBadGateway)
-			case 6: // Fetch invalid JSON
-				_, _ = w.Write([]byte("{invalid-secrets"))
-			case 7: // Nomad PUT 201
-				w.WriteHeader(http.StatusCreated)
-			case 8: // Nomad PUT 204
-				w.WriteHeader(http.StatusNoContent)
-			case 9: // Nomad PUT 500
-				switch r.URL.Path {
-				case "/api/v1/auth/universal-auth/login":
-					_ = json.NewEncoder(w).Encode(UniversalAuthLoginResponse{AccessToken: "tok"})
-				case "/api/v3/secrets/raw":
-					_ = json.NewEncoder(w).Encode(InfisicalSecretsResponse{
-						Secrets: []InfisicalSecretItem{{SecretKey: "K", SecretValue: "V"}},
-					})
+				if _, err := badClientServer.fetchInfisicalSecrets(ctx, "tok", "ws", "env"); err == nil {
+					t.Errorf("fetchInfisicalSecrets() expected error on unreachable, got nil")
+				}
+				if err := badClientServer.putNomadVariable(ctx, map[string]string{"A": "B"}); err == nil {
+					t.Errorf("putNomadVariable() expected error on unreachable, got nil")
+				}
+				return
+			}
+
+			var nomadPutCount atomic.Int32
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/universal-auth/login":
+					w.WriteHeader(tc.loginStatus)
+					_, _ = w.Write([]byte(tc.loginBody))
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v3/secrets/raw":
+					w.WriteHeader(tc.secretsStatus)
+					_, _ = w.Write([]byte(tc.secretsBody))
+				case r.Method == http.MethodPut && r.URL.Path == "/v1/var/"+TargetNomadVariable:
+					nomadPutCount.Add(1)
+					w.WriteHeader(tc.nomadStatus)
 				default:
-					w.WriteHeader(http.StatusInternalServerError)
+					http.NotFound(w, r)
 				}
+			}))
+			defer mockServer.Close()
+
+			cfg := Config{
+				InfisicalURL:          mockServer.URL,
+				InfisicalClientID:     "client-id",
+				InfisicalClientSecret: "client-secret",
+				InfisicalProjectID:    "proj-123",
+				InfisicalEnvironment:  "prod",
+				NomadAddr:             mockServer.URL,
+				NomadToken:            "test-nomad-token",
 			}
-		}))
-		defer ts.Close()
+			if tc.cfgOverride != nil {
+				cfg = *tc.cfgOverride
+			}
 
-		srv := NewRouterServer(Config{
-			InfisicalURL:          ts.URL,
-			InfisicalClientID:     "cid",
-			InfisicalClientSecret: "csec",
-			NomadAddr:             ts.URL,
-		}, ts.Client())
-
-		mode.Store(1)
-		if err := srv.SyncSecrets(ctx, "", ""); err == nil {
-			t.Errorf("expected error on infisical login 500")
-		}
-
-		mode.Store(2)
-		if _, err := srv.getInfisicalToken(ctx); err == nil {
-			t.Errorf("expected error on invalid login json")
-		}
-
-		mode.Store(3)
-		if _, err := srv.getInfisicalToken(ctx); err == nil {
-			t.Errorf("expected error on empty login token")
-		}
-
-		mode.Store(4)
-		if tok, err := srv.getInfisicalToken(ctx); err != nil || tok != "fallback-token" {
-			t.Errorf("expected fallback token, got %q, err: %v", tok, err)
-		}
-
-		mode.Store(5)
-		if err := srv.SyncSecrets(ctx, "", ""); err == nil {
-			t.Errorf("expected error on infisical fetch 502")
-		}
-
-		mode.Store(6)
-		if _, err := srv.fetchInfisicalSecrets(ctx, "tok", "ws", "env"); err == nil {
-			t.Errorf("expected error on invalid secrets json")
-		}
-
-		mode.Store(7)
-		if err := srv.putNomadVariable(ctx, map[string]string{"A": "B"}); err != nil {
-			t.Errorf("expected success on 201 Created: %v", err)
-		}
-
-		mode.Store(8)
-		if err := srv.putNomadVariable(ctx, map[string]string{"A": "B"}); err != nil {
-			t.Errorf("expected success on 204 No Content: %v", err)
-		}
-
-		mode.Store(9)
-		if err := srv.SyncSecrets(ctx, "", ""); err == nil {
-			t.Errorf("expected error on nomad put 500")
-		}
-
-		// Connection errors on unreachable client URL
-		badClientServer := NewRouterServer(Config{
-			InfisicalURL:          "http://127.0.0.1:1",
-			InfisicalClientID:     "cid",
-			InfisicalClientSecret: "csec",
-			NomadAddr:             "http://127.0.0.1:1",
-		}, &http.Client{Timeout: 50 * time.Millisecond})
-
-		if _, err := badClientServer.getInfisicalToken(ctx); err == nil {
-			t.Errorf("expected error on bad login client URL")
-		}
-		if _, err := badClientServer.fetchInfisicalSecrets(ctx, "tok", "ws", "env"); err == nil {
-			t.Errorf("expected error on bad fetch client URL")
-		}
-		if err := badClientServer.putNomadVariable(ctx, map[string]string{"A": "B"}); err == nil {
-			t.Errorf("expected error on bad nomad put client URL")
-		}
-	})
+			srv := NewRouterServer(cfg, mockServer.Client())
+			err := srv.SyncSecrets(ctx, "proj-123", "prod")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SyncSecrets() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if gotPuts := nomadPutCount.Load(); gotPuts != tc.wantNomadPuts {
+				t.Errorf("nomad PUT count = %d, want %d", gotPuts, tc.wantNomadPuts)
+			}
+		})
+	}
 }
 
 // --- 3. GitHub Webhook HTTP Handler & Event Processing ---
