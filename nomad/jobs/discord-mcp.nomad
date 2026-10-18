@@ -34,6 +34,7 @@ job "discord-mcp" {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-discord-mcp:${var.image_tag}"
+        init         = true
         ports        = ["http"]
         healthchecks {
           disable = true
