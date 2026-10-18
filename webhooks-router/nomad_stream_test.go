@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +27,9 @@ func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 		{name: "deduplicates clean job names", metadata: map[string]interface{}{"jobs": []interface{}{"brain", "brain", "hangar"}}, expected: []string{"brain", "hangar"}},
 		{name: "deduplicates duplicate job names in jobs and job", metadata: map[string]interface{}{"jobs": []interface{}{"brain", "hangar"}, "job": "brain"}, expected: []string{"brain", "hangar"}},
 		{name: "empty jobs array", metadata: map[string]interface{}{"jobs": []interface{}{}}, expected: nil},
+		{name: "non-slice jobs", metadata: map[string]interface{}{"jobs": 123}, expected: nil},
+		{name: "typed string slice", metadata: map[string]interface{}{"jobs": []string{"job-a", "job-b"}}, expected: []string{"job-a", "job-b"}},
+		{name: "whitespace and empty jobs filtered", metadata: map[string]interface{}{"jobs": []interface{}{"", "  ", "brain"}}, expected: []string{"brain"}},
 	}
 
 	for _, tt := range tests {
@@ -195,6 +196,12 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			reg:             &mockPRRegistry{deployFailedJobUpdated: true},
 		},
 		{
+			name:            "evaluation failure ignored when job already healthy",
+			streamLines:     []string{`{"Index":2045,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"old-eval-fail","JobID":"github-mcp","Status":"failed","StatusDescription":"placement failed"}}}]}`},
+			deploymentsJSON: `[{"ID":"dep-succ-1","Status":"successful","StatusDescription":"Deployment completed successfully","JobVersion":10,"CreateIndex":22255}]`,
+			reg:             &mockPRRegistry{deployFailedJobUpdated: true},
+		},
+		{
 			name:        "evaluation blocked status ignored",
 			streamLines: []string{`{"Index":2050,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"995a3489-6ff6-c3aa-6541-0175856c6e84","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"3b3eb97e-6077-6951-6489-5dbe1dfdbb6f"}}}]}`},
 			reg:         &mockPRRegistry{deployFailedJobUpdated: true},
@@ -321,93 +328,24 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 		reg       *mockPRRegistry
 		wantErr   bool
 	}{
-		{
-			name:      "PlanResult dropped",
-			topic:     "Allocation",
-			eventType: "PlanResult",
-			payload:   `{"Allocation":{"ID":"alloc-1","JobID":"github-mcp","ClientStatus":"failed"}}`,
-		},
-		{
-			name:      "blocked evaluation returns nil",
-			topic:     "Evaluation",
-			eventType: "EvaluationUpdated",
-			payload:   `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations"}}`,
-		},
-		{
-			name:      "blocked evaluation with FailedTGAllocs returns nil",
-			topic:     "Evaluation",
-			eventType: "EvaluationUpdated",
-			payload:   `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"webhooks-router":{"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}`,
-		},
-		{
-			name:      "malformed deployment payload returns error",
-			topic:     "Deployment",
-			eventType: "DeploymentStatusUpdate",
-			payload:   `{invalid`,
-			wantErr:   true,
-		},
-		{
-			name:      "malformed allocation payload returns error",
-			topic:     "Allocation",
-			eventType: "AllocationUpdated",
-			payload:   `{invalid`,
-			wantErr:   true,
-		},
-		{
-			name:      "malformed evaluation payload returns error",
-			topic:     "Evaluation",
-			eventType: "EvaluationUpdated",
-			payload:   `{invalid`,
-			wantErr:   true,
-		},
-		{
-			name:      "unknown topic returns nil",
-			topic:     "UnknownTopic",
-			eventType: "SomethingUpdated",
-			payload:   `{}`,
-		},
-		{
-			name:      "deployment success dispatches success",
-			topic:     "Deployment",
-			eventType: "DeploymentStatusUpdate",
-			payload:   `{"Deployment":{"ID":"dep-succ-direct","JobID":"brain","Status":"successful"}}`,
-			reg:       mkDeployedReg("target-1", 100, "sha1", "repo", true),
-		},
-		{
-			name:      "deployment failed dispatches failure",
-			topic:     "Deployment",
-			eventType: "DeploymentStatusUpdate",
-			payload:   `{"Deployment":{"ID":"dep-fail-direct","JobID":"brain","Status":"failed","StatusDescription":"oom"}}`,
-			reg:       mkDeployFailedReg("target-1", 100, "sha1", "repo", true),
-		},
-		{
-			name:      "allocation running dispatches success",
-			topic:     "Allocation",
-			eventType: "AllocationUpdated",
-			payload:   `{"Allocation":{"ID":"alloc-run-direct","JobID":"brain","DesiredStatus":"run","ClientStatus":"running"}}`,
-			reg:       mkDeployedReg("target-1", 100, "sha1", "repo", true),
-		},
-		{
-			name:      "allocation failed dispatches failure",
-			topic:     "Allocation",
-			eventType: "AllocationUpdated",
-			payload:   `{"Allocation":{"ID":"alloc-fail-direct","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed"}}`,
-			reg:       mkDeployFailedReg("target-1", 100, "sha1", "repo", true),
-		},
-		{
-			name:      "evaluation complete dispatches success",
-			topic:     "Evaluation",
-			eventType: "EvaluationUpdated",
-			payload:   `{"Evaluation":{"ID":"eval-comp-direct","JobID":"brain","Status":"complete","DeploymentID":""}}`,
-			reg:       mkDeployedReg("target-1", 100, "sha1", "repo", true),
-		},
-		{
-			name:      "evaluation failed dispatches failure",
-			topic:     "Evaluation",
-			eventType: "EvaluationUpdated",
-			payload:   `{"Evaluation":{"ID":"eval-fail-direct","JobID":"brain","Status":"failed","StatusDescription":"timed out","DeploymentID":""}}`,
-			reg:       mkDeployFailedReg("target-1", 100, "sha1", "repo", true),
-		},
+		{name: "PlanResult dropped", topic: "Allocation", eventType: "PlanResult", payload: `{"Allocation":{"ID":"alloc-1","JobID":"github-mcp","ClientStatus":"failed"}}`},
+		{name: "blocked evaluation returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations"}}`},
+		{name: "blocked evaluation with FailedTGAllocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"webhooks-router":{"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}`},
+		{name: "blocked evaluation with queued failed allocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"BlockedEval":"b-1","JobID":"webhooks-router","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
+		{name: "evaluation with all failed groups queued returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"webhooks-router","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
+		{name: "evaluation with unqueued failed group and empty desc dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-fail-unqueued","JobID":"brain","StatusDescription":"","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":0}}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "evaluation with empty job ID returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"","Status":"complete"}}`},
+		{name: "evaluation with unknown status returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"job1","Status":"unknown"}}`},
+		{name: "malformed deployment payload returns error", topic: "Deployment", eventType: "DeploymentStatusUpdate", payload: `{invalid`, wantErr: true},
+		{name: "malformed allocation payload returns error", topic: "Allocation", eventType: "AllocationUpdated", payload: `{invalid`, wantErr: true},
+		{name: "malformed evaluation payload returns error", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{invalid`, wantErr: true},
+		{name: "unknown topic returns nil", topic: "UnknownTopic", eventType: "SomethingUpdated", payload: `{}`},
+		{name: "deployment success dispatches success", topic: "Deployment", eventType: "DeploymentStatusUpdate", payload: `{"Deployment":{"ID":"dep-succ-direct","JobID":"brain","Status":"successful"}}`, reg: mkDeployedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "deployment failed dispatches failure", topic: "Deployment", eventType: "DeploymentStatusUpdate", payload: `{"Deployment":{"ID":"dep-fail-direct","JobID":"brain","Status":"failed","StatusDescription":"oom"}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "allocation running dispatches success", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-run-direct","JobID":"brain","DesiredStatus":"run","ClientStatus":"running"}}`, reg: mkDeployedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "allocation failed dispatches failure", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-fail-direct","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed"}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "evaluation complete dispatches success", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-comp-direct","JobID":"brain","Status":"complete","DeploymentID":""}}`, reg: mkDeployedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "evaluation failed dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-fail-direct","JobID":"brain","Status":"failed","StatusDescription":"timed out","DeploymentID":""}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
 	}
 
 	for _, tt := range tests {
@@ -427,88 +365,80 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestNomadStreamSubscriber_IndexResetOnOutOfBounds(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var attemptCount int
-	var mu sync.Mutex
-
-	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		attemptCount++
-		attempt := attemptCount
-		mu.Unlock()
-
-		if attempt == 1 {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"index 999999 is out of bounds"}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("{}\n"))
-	}))
-	defer nomadServer.Close()
-
-	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
-	sub := NewNomadStreamSubscriber(srv)
-	sub.lastIndex = 999999
-
-	if err := sub.consumeStream(ctx); err == nil {
-		t.Fatalf("expected error on attempt 1, got nil")
-	}
-
-	sub.mu.Lock()
-	resetIndex := sub.lastIndex
-	sub.mu.Unlock()
-	if resetIndex != 0 {
-		t.Errorf("expected lastIndex to be reset to 0, got %d", resetIndex)
-	}
-
-	if err := sub.consumeStream(ctx); err != nil && !strings.Contains(err.Error(), "EOF") {
-		t.Fatalf("unexpected error on attempt 2: %v", err)
+	if allFailedTaskGroupsQueued(map[string]interface{}{"g": 1}, map[string]int{"g": 0}) {
+		t.Errorf("expected false for unqueued task group")
 	}
 }
 
 func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "/v1/job/webhooks-router/allocations") {
-			_, _ = w.Write([]byte(`[
-				{"ID":"alloc-old","JobID":"webhooks-router","DesiredStatus":"stop","ClientStatus":"complete"},
-				{"ID":"alloc-new","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}
-			]`))
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer nomadServer.Close()
-
-	mockReg := mkDeployedReg("1555405874565091380", 552, "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", "azylman/aerial", true)
-	mockReg.listDeployingPRs = []DeployingPR{
+	tests := []struct {
+		name             string
+		reg              PRRegistryUpdater
+		allocsJSON       string
+		deploysJSON      string
+		wantErr          bool
+		wantDeployedJobs []string
+	}{
 		{
-			ID:       101,
-			Repo:     "azylman/aerial",
-			PRNumber: 552,
-			MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
-			TargetID: "1555405874565091380",
-			Metadata: map[string]interface{}{"jobs": []interface{}{"webhooks-router"}},
+			name: "startup sweep success",
+			reg: func() PRRegistryUpdater {
+				r := mkDeployedReg("1555405874565091380", 552, "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", "azylman/aerial", true)
+				r.listDeployingPRs = []DeployingPR{
+					{ID: 101, Repo: "azylman/aerial", PRNumber: 552, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380", Metadata: map[string]interface{}{"jobs": []interface{}{"webhooks-router"}}},
+				}
+				return r
+			}(),
+			allocsJSON:       `[{"ID":"alloc-old","JobID":"webhooks-router","DesiredStatus":"stop","ClientStatus":"complete"},{"ID":"alloc-new","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}]`,
+			wantDeployedJobs: []string{"webhooks-router"},
+		},
+		{name: "nil registry returns nil", reg: nil},
+		{name: "registry list error returns error", reg: &mockPRRegistry{err: errors.New("db error")}, wantErr: true},
+		{name: "empty pending deployments returns nil", reg: &mockPRRegistry{listDeployingPRs: nil}},
+		{
+			name: "transition error logs warning and continues",
+			reg: &mockPRRegistry{
+				listDeployingPRs: []DeployingPR{{PRNumber: 1, Repo: "azylman/aerial", Metadata: map[string]interface{}{"job": "brain"}}},
+				deployedErr:      errors.New("transition failed"),
+			},
+			deploysJSON: `[{"ID":"dep-1","Status":"successful"}]`,
 		},
 	}
-	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
-	srv.SetRegistry(mockReg)
-	srv.SetDispatcher(&mockOutboundDispatcher{})
 
-	if err := srv.ReconcileActiveDeployments(ctx); err != nil {
-		t.Fatalf("ReconcileActiveDeployments failed: %v", err)
-	}
-	if len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "webhooks-router" {
-		t.Fatalf("expected deployedJobCalls [webhooks-router], got %v", mockReg.deployedJobCalls)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "/deployments") && tc.deploysJSON != "" {
+					_, _ = w.Write([]byte(tc.deploysJSON))
+					return
+				}
+				if strings.Contains(r.URL.Path, "/allocations") && tc.allocsJSON != "" {
+					_, _ = w.Write([]byte(tc.allocsJSON))
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer ts.Close()
+
+			srv := NewRouterServer(Config{NomadAddr: ts.URL}, nil)
+			srv.SetRegistry(tc.reg)
+			srv.SetDispatcher(&mockOutboundDispatcher{})
+
+			err := srv.ReconcileActiveDeployments(ctx)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReconcileActiveDeployments() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if len(tc.wantDeployedJobs) > 0 {
+				mockReg, ok := tc.reg.(*mockPRRegistry)
+				if !ok || !reflect.DeepEqual(mockReg.deployedJobCalls, tc.wantDeployedJobs) {
+					t.Fatalf("deployedJobCalls = %v, want %v", mockReg.deployedJobCalls, tc.wantDeployedJobs)
+				}
+			}
+		})
 	}
 }
 
@@ -552,11 +482,12 @@ func TestRouterServer_IsNomadJobHealthy_TableDriven(t *testing.T) {
 	}))
 	defer nomadServer.Close()
 
-	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL, NomadToken: "test-token"}, nil)
 
 	tests := []struct {
 		name        string
 		job         string
+		nomadAddr   string
 		deploysJSON string
 		deploys404  bool
 		allocs      string
@@ -580,6 +511,9 @@ func TestRouterServer_IsNomadJobHealthy_TableDriven(t *testing.T) {
 		{name: "stopped periodic batch job is unhealthy", job: "coverage-ingest", deploysJSON: `[]`, allocs: `[]`, jobSpec: `{"ID":"coverage-ingest","Type":"batch","Status":"dead","Stop":true,"Periodic":{"Enabled":true}}`, jobStatus: http.StatusOK, wantHealthy: false},
 		{name: "disabled periodic batch job is unhealthy", job: "coverage-ingest", deploysJSON: `[]`, allocs: `[]`, jobSpec: `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":false}}`, jobStatus: http.StatusOK, wantHealthy: false},
 		{name: "batch job spec API 500 error is unhealthy", job: "coverage-ingest", deploysJSON: `[]`, allocs: `[]`, jobStatus: http.StatusInternalServerError, wantHealthy: false},
+		{name: "deployments and allocations 404 is unhealthy", job: "brain", deploys404: true, allocs: "", wantHealthy: false},
+		{name: "deployments invalid json is unhealthy", job: "brain", deploysJSON: "not valid json", wantHealthy: false},
+		{name: "unreachable nomad address is unhealthy", job: "brain", nomadAddr: "http://127.0.0.1:0", wantHealthy: false},
 	}
 
 	for _, tt := range tests {
@@ -590,7 +524,12 @@ func TestRouterServer_IsNomadJobHealthy_TableDriven(t *testing.T) {
 			jobSpecJSON = tt.jobSpec
 			jobSpecStatus = tt.jobStatus
 
-			if got := srv.isNomadJobHealthy(ctx, tt.job); got != tt.wantHealthy {
+			testSrv := srv
+			if tt.nomadAddr != "" {
+				testSrv = NewRouterServer(Config{NomadAddr: tt.nomadAddr, NomadToken: "test-token"}, &http.Client{Timeout: 5 * time.Millisecond})
+			}
+
+			if got := testSrv.isNomadJobHealthy(ctx, tt.job); got != tt.wantHealthy {
 				t.Errorf("isNomadJobHealthy(%q) = %v, want %v", tt.job, got, tt.wantHealthy)
 			}
 		})
@@ -603,6 +542,7 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 		streamLines      []string
 		skipDuplicate    bool
 		riverErr         error
+		noRiver          bool
 		wantJobs         int
 		wantTopics       []string
 		wantSubstrs      []string
@@ -649,6 +589,20 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 			},
 			wantJobs: 0,
 		},
+		{
+			name: "handleNomadEvent direct processing error without river",
+			streamLines: []string{
+				`{"Index":2001,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":"invalid-json"}]}`,
+			},
+			noRiver: true,
+		},
+		{
+			name: "handleNomadEvent direct processing success without river",
+			streamLines: []string{
+				`{"Index":2001,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-succ","JobID":"brain","Status":"successful"}}}]}`,
+			},
+			noRiver: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -663,8 +617,13 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 			}))
 			defer nomadServer.Close()
 
-			mockRiver := &mockRiverInserter{skipDuplicate: tt.skipDuplicate, err: tt.riverErr}
-			srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil, mockRiver)
+			var riverArgs []RiverInserter
+			var mockRiver *mockRiverInserter
+			if !tt.noRiver {
+				mockRiver = &mockRiverInserter{skipDuplicate: tt.skipDuplicate, err: tt.riverErr}
+				riverArgs = append(riverArgs, mockRiver)
+			}
+			srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil, riverArgs...)
 			sub := NewNomadStreamSubscriber(srv)
 			sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
 
@@ -672,7 +631,7 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 				t.Fatalf("unexpected stream error: %v", err)
 			}
 
-			if tt.wantJobs > 0 || len(tt.wantTopics) > 0 {
+			if mockRiver != nil && (tt.wantJobs > 0 || len(tt.wantTopics) > 0) {
 				if len(mockRiver.insertedNomadJobs) != tt.wantJobs {
 					t.Fatalf("expected %d nomad jobs inserted into river, got %d: %+v", tt.wantJobs, len(mockRiver.insertedNomadJobs), mockRiver.insertedNomadJobs)
 				}
@@ -734,6 +693,13 @@ func TestIsAllocationRestarting_TableDriven(t *testing.T) {
 			name: "last event Started after Restarting",
 			taskStates: map[string]NomadTaskState{
 				"brain": {State: "running", Events: []NomadTaskEvent{{Type: "Restart Signaled"}, {Type: "Restarting"}, {Type: "Started"}}},
+			},
+			want: false,
+		},
+		{
+			name: "exhausted task with fail mode returns false",
+			taskStates: map[string]NomadTaskState{
+				"task1": {State: "dead", Events: []NomadTaskEvent{{Type: "Not Restarting", RestartReason: `Exceeded allowed attempts 5 in interval 10m0s and mode is "fail"`}}},
 			},
 			want: false,
 		},
@@ -898,6 +864,41 @@ func TestExtractAllocationErrorDetails_TableDriven(t *testing.T) {
 			},
 			wantSubstr: `task "server": Docker container exited with non-zero exit code: 1 (exited with code 1)`,
 		},
+		{
+			name:       "download error in event",
+			taskStates: map[string]NomadTaskState{"task": {Failed: true, Events: []NomadTaskEvent{{DownloadError: "download failed"}}}},
+			wantSubstr: `task "task": download failed`,
+		},
+		{
+			name:       "vault error in event",
+			taskStates: map[string]NomadTaskState{"task": {Failed: true, Events: []NomadTaskEvent{{VaultError: "vault failed"}}}},
+			wantSubstr: `task "task": vault failed`,
+		},
+		{
+			name:       "exit code 137 without message",
+			taskStates: map[string]NomadTaskState{"task": {Failed: true, Events: []NomadTaskEvent{{ExitCode: 137}}}},
+			wantSubstr: `task "task": exited with code 137`,
+		},
+		{
+			name:       "display message on failed task",
+			taskStates: map[string]NomadTaskState{"task": {Failed: true, Events: []NomadTaskEvent{{DisplayMessage: "signal: killed"}}}},
+			wantSubstr: `task "task": signal: killed`,
+		},
+		{
+			name:       "dead task state with driver error",
+			taskStates: map[string]NomadTaskState{"task": {State: "dead", Events: []NomadTaskEvent{{DriverError: "dead task driver error"}}}},
+			wantSubstr: `task "task": dead task driver error`,
+		},
+		{
+			name:       "running healthy task skipped",
+			taskStates: map[string]NomadTaskState{"healthy": {State: "running", Failed: false}},
+			wantSubstr: "allocation failed",
+		},
+		{
+			name:       "driver failure event with display message only",
+			taskStates: map[string]NomadTaskState{"task": {Failed: true, Events: []NomadTaskEvent{{Type: "Driver Failure", DisplayMessage: "driver msg"}}}},
+			wantSubstr: `task "task": driver msg`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -921,89 +922,25 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 		allocID          string
 		status           string
 		desc             string
+		dmErr            error
+		promptErr        error
 		wantCrashJobs    int
 		wantDMs          int
 		wantPrompts      int
 		wantMetricSubstr string
 		wantErr          bool
 	}{
-		{
-			name:          "HandleUnmanagedJobCrash enqueues River job",
-			jobID:         "openobserve",
-			allocID:       "alloc-1",
-			status:        "failed",
-			desc:          "OOMKilled",
-			wantCrashJobs: 1,
-		},
-		{
-			name:             "HandleUnmanagedJobCrash duplicate metric",
-			skipDuplicate:    true,
-			jobID:            "openobserve",
-			allocID:          "alloc-2",
-			status:           "failed",
-			desc:             "OOMKilled",
-			wantCrashJobs:    1,
-			wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="nomad_crash_alert"}`,
-		},
-		{
-			name:     "HandleUnmanagedJobCrash river error",
-			riverErr: errors.New("db error"),
-			jobID:    "openobserve",
-			allocID:  "alloc-err",
-			status:   "failed",
-			desc:     "crash",
-			wantErr:  true,
-		},
-		{
-			name:        "HandleUnmanagedJobCrash direct execution without River",
-			noRiver:     true,
-			jobID:       "openobserve",
-			allocID:     "alloc-3",
-			status:      "failed",
-			desc:        "signal: killed",
-			wantDMs:     1,
-			wantPrompts: 1,
-		},
-		{
-			name:    "HandleUnmanagedJobCrash empty job ID no-op",
-			noRiver: true,
-			jobID:   "",
-		},
-		{
-			name:        "HandleNomadJobFailure untracked in registry",
-			useFailure:  true,
-			noRiver:     true,
-			reg:         &mockPRRegistry{deployFailedJobUpdated: false},
-			jobID:       "openobserve",
-			allocID:     "alloc-99",
-			status:      "failed",
-			desc:        "Task OOM killed",
-			wantDMs:     1,
-			wantPrompts: 1,
-		},
-		{
-			name:        "HandleNomadJobFailure nil registry",
-			useFailure:  true,
-			noRiver:     true,
-			reg:         nil,
-			jobID:       "cadvisor",
-			allocID:     "alloc-99",
-			status:      "failed",
-			desc:        "Docker daemon died",
-			wantDMs:     1,
-			wantPrompts: 1,
-		},
-		{
-			name:       "HandleNomadJobFailure registry error",
-			useFailure: true,
-			noRiver:    true,
-			reg:        &mockPRRegistry{err: errors.New("registry failure")},
-			jobID:      "vector",
-			allocID:    "alloc-99",
-			status:     "failed",
-			desc:       "Config parse failed",
-			wantErr:    true,
-		},
+		{name: "HandleUnmanagedJobCrash enqueues River job", jobID: "openobserve", allocID: "alloc-1", status: "failed", desc: "OOMKilled", wantCrashJobs: 1},
+		{name: "HandleUnmanagedJobCrash duplicate metric", skipDuplicate: true, jobID: "openobserve", allocID: "alloc-2", status: "failed", desc: "OOMKilled", wantCrashJobs: 1, wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="nomad_crash_alert"}`},
+		{name: "HandleUnmanagedJobCrash river error", riverErr: errors.New("db error"), jobID: "openobserve", allocID: "alloc-err", status: "failed", desc: "crash", wantErr: true},
+		{name: "HandleUnmanagedJobCrash direct execution without River", noRiver: true, jobID: "openobserve", allocID: "alloc-3", status: "failed", desc: "signal: killed", wantDMs: 1, wantPrompts: 1},
+		{name: "HandleUnmanagedJobCrash direct execution dm error logs and continues", noRiver: true, jobID: "openobserve", allocID: "alloc-4", status: "failed", desc: "crash", dmErr: errors.New("dm fail"), wantDMs: 1, wantPrompts: 1},
+		{name: "HandleUnmanagedJobCrash direct execution prompt error returns error", noRiver: true, jobID: "openobserve", allocID: "alloc-5", status: "failed", desc: "crash", promptErr: errors.New("prompt fail"), wantDMs: 1, wantPrompts: 1, wantErr: true},
+		{name: "HandleUnmanagedJobCrash empty job ID no-op", noRiver: true, jobID: ""},
+		{name: "HandleNomadJobFailure untracked in registry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobUpdated: false}, jobID: "openobserve", allocID: "alloc-99", status: "failed", desc: "Task OOM killed", wantDMs: 1, wantPrompts: 1},
+		{name: "HandleNomadJobFailure nil registry", useFailure: true, noRiver: true, reg: nil, jobID: "cadvisor", allocID: "alloc-99", status: "failed", desc: "Docker daemon died", wantDMs: 1, wantPrompts: 1},
+		{name: "HandleNomadJobFailure empty job ID no-op", useFailure: true, noRiver: true, jobID: "", allocID: "alloc-1", status: "failed", desc: "oom"},
+		{name: "HandleNomadJobFailure registry error", useFailure: true, noRiver: true, reg: &mockPRRegistry{err: errors.New("registry failure")}, jobID: "vector", allocID: "alloc-99", status: "failed", desc: "Config parse failed", wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -1015,7 +952,7 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 				mockRiver = &mockRiverInserter{skipDuplicate: tc.skipDuplicate, err: tc.riverErr}
 				riverArgs = append(riverArgs, mockRiver)
 			}
-			mockDisp := &mockOutboundDispatcher{}
+			mockDisp := &mockOutboundDispatcher{directMessageErr: tc.dmErr, promptErr: tc.promptErr}
 			srv := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil, riverArgs...)
 			srv.SetRegistry(tc.reg)
 			srv.SetDispatcher(mockDisp)
@@ -1122,64 +1059,27 @@ func TestRouterServer_HandleNomadJobSuccess_TableDriven(t *testing.T) {
 	}
 }
 
-func TestRouterServer_ReconcileActiveDeployments_TableDriven(t *testing.T) {
-	tests := []struct {
-		name    string
-		reg     PRRegistryUpdater
-		wantErr bool
-	}{
-		{name: "nil registry returns nil", reg: nil, wantErr: false},
-		{name: "registry list error returns error", reg: &mockPRRegistry{err: errors.New("db error")}, wantErr: true},
-		{name: "empty pending deployments returns nil", reg: &mockPRRegistry{listDeployingPRs: nil}, wantErr: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := NewRouterServer(Config{}, nil)
-			srv.SetRegistry(tc.reg)
-			err := srv.ReconcileActiveDeployments(context.Background())
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ReconcileActiveDeployments() err = %v, wantErr %v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
 func TestNomadStreamSubscriber_ConsumeStream_Errors(t *testing.T) {
 	tests := []struct {
 		name       string
+		nomadAddr  string
 		statusCode int
 		respBody   string
 		token      string
 		lastIndex  uint64
 		wantErr    bool
+		wantSubstr string
 		wantIndex  uint64
 	}{
-		{
-			name:       "server returns 500 error",
-			statusCode: http.StatusInternalServerError,
-			respBody:   "internal error",
-			wantErr:    true,
-		},
-		{
-			name:       "out of bounds error resets lastIndex to 0",
-			statusCode: http.StatusBadRequest,
-			respBody:   "index 999999 is out of bounds",
-			lastIndex:  999999,
-			wantErr:    true,
-			wantIndex:  0,
-		},
-		{
-			name:       "payload index advances lastIndex",
-			statusCode: http.StatusOK,
-			respBody:   `{"Index":1234}` + "\n",
-			wantIndex:  1234,
-		},
-		{
-			name:       "token header passed in request",
-			statusCode: http.StatusOK,
-			respBody:   "{}\n",
-			token:      "test-secret-token",
-		},
+		{name: "server returns 500 error", statusCode: http.StatusInternalServerError, respBody: "internal error", wantErr: true},
+		{name: "server returns 403 error", statusCode: http.StatusForbidden, wantErr: true, wantSubstr: "unexpected status 403"},
+		{name: "out of bounds error resets lastIndex to 0", statusCode: http.StatusBadRequest, respBody: "index 999999 is out of bounds", lastIndex: 999999, wantErr: true, wantIndex: 0, wantSubstr: "status 400"},
+		{name: "payload index advances lastIndex", statusCode: http.StatusOK, respBody: "{\"Index\":1234}\n", wantIndex: 1234},
+		{name: "token header passed in request", statusCode: http.StatusOK, respBody: "{}\n", token: "test-secret-token"},
+		{name: "heartbeats and blank lines before EOF", statusCode: http.StatusOK, respBody: "{}\n\n   \n{}\n"},
+		{name: "malformed json stream line skipped", statusCode: http.StatusOK, respBody: "invalid json\n{}\n"},
+		{name: "stream evaluation empty job, unknown status, and unknown topic skipped", statusCode: http.StatusOK, respBody: "{\"Index\":3001,\"Events\":[{\"Topic\":\"Evaluation\",\"Type\":\"EvaluationUpdated\",\"Payload\":{\"Evaluation\":{\"JobID\":\"\",\"Status\":\"complete\"}}}]}\n{\"Index\":3002,\"Events\":[{\"Topic\":\"Evaluation\",\"Type\":\"EvaluationUpdated\",\"Payload\":{\"Evaluation\":{\"JobID\":\"job1\",\"Status\":\"unknown\"}}}]}\n{\"Index\":3003,\"Events\":[{\"Topic\":\"UnknownTopic\",\"Type\":\"CustomEvent\",\"Payload\":{}}]}\n"},
+		{name: "unreachable stream connection failed", nomadAddr: "http://127.0.0.1:0", wantErr: true, wantSubstr: "stream connection failed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1187,20 +1087,32 @@ func TestNomadStreamSubscriber_ConsumeStream_Errors(t *testing.T) {
 			defer cancel()
 
 			var capturedToken string
-			srvMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				capturedToken = r.Header.Get("X-Nomad-Token")
-				w.WriteHeader(tt.statusCode)
-				_, _ = w.Write([]byte(tt.respBody))
-			}))
-			defer srvMock.Close()
+			nomadAddr := tt.nomadAddr
+			if nomadAddr == "" {
+				srvMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					capturedToken = r.Header.Get("X-Nomad-Token")
+					status := tt.statusCode
+					if status == 0 {
+						status = http.StatusOK
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(tt.respBody))
+				}))
+				defer srvMock.Close()
+				nomadAddr = srvMock.URL
+			}
 
-			srv := NewRouterServer(Config{NomadAddr: srvMock.URL, NomadToken: tt.token}, nil)
+			client := &http.Client{Timeout: 50 * time.Millisecond}
+			srv := NewRouterServer(Config{NomadAddr: nomadAddr, NomadToken: tt.token}, client)
 			sub := NewNomadStreamSubscriber(srv)
 			sub.lastIndex = tt.lastIndex
 
 			err := sub.consumeStream(ctx)
-			if (err != nil) != tt.wantErr && !strings.Contains(fmt.Sprint(err), "EOF") {
+			if (err != nil) != tt.wantErr && !errors.Is(err, io.EOF) {
 				t.Fatalf("consumeStream() err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantSubstr)) {
+				t.Fatalf("consumeStream() err = %v, want substring %q", err, tt.wantSubstr)
 			}
 			if tt.token != "" && capturedToken != tt.token {
 				t.Errorf("capturedToken = %q, want %q", capturedToken, tt.token)
@@ -1211,346 +1123,6 @@ func TestNomadStreamSubscriber_ConsumeStream_Errors(t *testing.T) {
 				sub.mu.Unlock()
 				if idx != tt.wantIndex {
 					t.Errorf("lastIndex = %d, want %d", idx, tt.wantIndex)
-				}
-			}
-		})
-	}
-}
-
-func TestNomadStreamSubscriber_MoreBranches_TableDriven(t *testing.T) {
-	tests := []struct {
-		name  string
-		lines []string
-		token string
-	}{
-		{
-			name:  "malformed json stream line skipped",
-			lines: []string{"invalid json", "{}"},
-		},
-		{
-			name: "evaluation empty jobID and unknown status",
-			lines: []string{
-				`{"Index":3001,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"JobID":"","Status":"complete"}}}]}`,
-				`{"Index":3002,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"JobID":"job1","Status":"unknown"}}}]}`,
-				`{"Index":3003,"Events":[{"Topic":"UnknownTopic","Type":"CustomEvent","Payload":{}}]}`,
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(strings.Join(tt.lines, "\n") + "\n"))
-			}))
-			defer nomadServer.Close()
-
-			srv := NewRouterServer(Config{NomadAddr: nomadServer.URL, NomadToken: tt.token}, nil)
-			sub := NewNomadStreamSubscriber(srv)
-			_ = sub.consumeStream(ctx)
-		})
-	}
-}
-
-func TestNomadStreamSubscriber_ProcessCrashAlert_DMError(t *testing.T) {
-	tests := []struct {
-		name string
-	}{
-		{name: "dm error logs and continues"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			disp := &mockOutboundDispatcher{directMessageErr: errors.New("dm fail")}
-			srv := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil)
-			srv.SetDispatcher(disp)
-
-			err := srv.ProcessCrashAlert(context.Background(), NomadCrashAlertArgs{JobID: "openobserve", AllocID: "alloc-1", Status: "failed", StatusDesc: "OOM"})
-			if err != nil {
-				t.Fatalf("expected nil error, got %v", err)
-			}
-		})
-	}
-}
-
-func TestNomadHelpers_Branches_TableDriven(t *testing.T) {
-	tests := []struct {
-		name string
-	}{
-		{name: "helper edge branches"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			failedAllocs := map[string]interface{}{"groupA": map[string]interface{}{"OOM": 1}}
-			queuedAllocs := map[string]int{"groupA": 0}
-			if allFailedTaskGroupsQueued(failedAllocs, queuedAllocs) {
-				t.Errorf("expected false for unqueued task group")
-			}
-
-			meta := map[string]interface{}{"jobs": []interface{}{"", "  ", "brain"}}
-			jobs := extractJobsFromMetadata(meta)
-			if len(jobs) != 1 || jobs[0] != "brain" {
-				t.Errorf("expected [brain], got %v", jobs)
-			}
-
-			tsExhausted := map[string]NomadTaskState{
-				"task1": {State: "dead", Events: []NomadTaskEvent{{Type: "Not Restarting", RestartReason: `Exceeded allowed attempts 5 in interval 10m0s and mode is "fail"`}}},
-			}
-			if isAllocationRestarting(tsExhausted) {
-				t.Errorf("expected false for exhausted task")
-			}
-
-			tsDriver := map[string]NomadTaskState{
-				"task1": {Failed: true, Events: []NomadTaskEvent{{DriverError: "mount failed"}}},
-			}
-			if msg := extractAllocationErrorDetails("fail", tsDriver); msg != `task "task1": mount failed` {
-				t.Errorf("got %q, want 'task \"task1\": mount failed'", msg)
-			}
-
-			tsMsg := map[string]NomadTaskState{
-				"task2": {Failed: true, Events: []NomadTaskEvent{{DisplayMessage: "signal: killed"}}},
-			}
-			if msg := extractAllocationErrorDetails("fail", tsMsg); msg != `task "task2": signal: killed` {
-				t.Errorf("got %q, want 'task \"task2\": signal: killed'", msg)
-			}
-
-			srv := NewRouterServer(Config{}, nil)
-			if err := srv.HandleNomadJobFailure(context.Background(), "", "alloc-1", "failed", "oom"); err != nil {
-				t.Errorf("expected nil error, got %v", err)
-			}
-			if err := srv.HandleNomadJobFailure(context.Background(), "brain", "alloc-1", "failed", "oom"); err != nil {
-				t.Errorf("expected nil error on nil registry, got %v", err)
-			}
-
-			tsNomad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				if strings.Contains(r.URL.Path, "/deployments") {
-					_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-			}))
-			defer tsNomad.Close()
-
-			regMock := &mockPRRegistry{
-				listDeployingPRs: []DeployingPR{
-					{PRNumber: 1, Repo: "azylman/aerial", Metadata: map[string]interface{}{"job": "brain"}},
-				},
-				deployedErr: errors.New("transition failed"),
-			}
-			srvSweep := NewRouterServer(Config{NomadAddr: tsNomad.URL}, nil)
-			srvSweep.SetRegistry(regMock)
-			if err := srvSweep.ReconcileActiveDeployments(context.Background()); err != nil {
-				t.Errorf("expected nil error from sweep, got %v", err)
-			}
-		})
-	}
-}
-
-func TestNomadStream_CoverageBranches_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		op         string
-		wantErr    bool
-		wantSubstr string
-	}{
-		{
-			name:       "consumeStream 400 index out of bounds resets lastIndex",
-			op:         "index_out_of_bounds",
-			wantErr:    true,
-			wantSubstr: "status 400",
-		},
-		{
-			name:       "consumeStream 403 unexpected status",
-			op:         "status_403",
-			wantErr:    true,
-			wantSubstr: "unexpected status 403",
-		},
-		{
-			name: "consumeStream heartbeats and empty lines then EOF",
-			op:   "heartbeats_and_eof",
-		},
-		{
-			name: "getNomadJSON 404 returns false",
-			op:   "nomad_json_404",
-		},
-		{
-			name: "getNomadJSON invalid JSON returns false",
-			op:   "nomad_json_bad_json",
-		},
-		{
-			name: "extractAllocationErrorDetails error varieties",
-			op:   "alloc_error_varieties",
-		},
-		{
-			name: "extractJobsFromMetadata various structures",
-			op:   "metadata_jobs_structures",
-		},
-		{
-			name: "getNomadJSON network error returns false",
-			op:   "nomad_json_network_err",
-		},
-		{
-			name: "ProcessNomadEvent Evaluation blocked or queued returns nil",
-			op:   "eval_blocked_or_queued",
-		},
-		{
-			name: "handleNomadEvent direct processing error logs and completes",
-			op:   "handle_nomad_event_direct_err",
-		},
-		{
-			name:       "consumeStream stream connection failed returns error",
-			op:         "stream_connection_failed",
-			wantErr:    true,
-			wantSubstr: "stream connection failed",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-
-			switch tc.op {
-			case "index_out_of_bounds":
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusBadRequest)
-					_, _ = w.Write([]byte("Nomad index is out of bounds"))
-				}))
-				defer ts.Close()
-				srv := NewRouterServer(Config{NomadAddr: ts.URL, NomadToken: "token123"}, ts.Client())
-				sub := NewNomadStreamSubscriber(srv)
-				sub.lastIndex = 999
-				err := sub.consumeStream(ctx)
-				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-				}
-				sub.mu.Lock()
-				idx := sub.lastIndex
-				sub.mu.Unlock()
-				if idx != 0 {
-					t.Errorf("expected lastIndex to be reset to 0, got %d", idx)
-				}
-
-			case "status_403":
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusForbidden)
-				}))
-				defer ts.Close()
-				srv := NewRouterServer(Config{NomadAddr: ts.URL}, ts.Client())
-				sub := NewNomadStreamSubscriber(srv)
-				err := sub.consumeStream(ctx)
-				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-				}
-
-			case "heartbeats_and_eof":
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte("{}\n\n   \n{}\n"))
-				}))
-				defer ts.Close()
-				srv := NewRouterServer(Config{NomadAddr: ts.URL}, ts.Client())
-				sub := NewNomadStreamSubscriber(srv)
-				err := sub.consumeStream(ctx)
-				if !errors.Is(err, io.EOF) {
-					t.Errorf("expected EOF, got %v", err)
-				}
-
-			case "nomad_json_404":
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusNotFound)
-				}))
-				defer ts.Close()
-				srv := NewRouterServer(Config{NomadAddr: ts.URL, NomadToken: "tok"}, ts.Client())
-				var out any
-				if srv.getNomadJSON(ctx, "/test", &out) {
-					t.Errorf("expected false for 404")
-				}
-
-			case "nomad_json_bad_json":
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte("not valid json"))
-				}))
-				defer ts.Close()
-				srv := NewRouterServer(Config{NomadAddr: ts.URL}, ts.Client())
-				var out map[string]any
-				if srv.getNomadJSON(ctx, "/test", &out) {
-					t.Errorf("expected false for invalid JSON")
-				}
-
-			case "alloc_error_varieties":
-				tsMap := map[string]NomadTaskState{
-					"task1": {Failed: true, Events: []NomadTaskEvent{{SetupError: "setup failed"}}},
-					"task2": {Failed: true, Events: []NomadTaskEvent{{DownloadError: "download failed"}}},
-					"task3": {Failed: true, Events: []NomadTaskEvent{{ValidationError: "validation failed"}}},
-					"task4": {Failed: true, Events: []NomadTaskEvent{{VaultError: "vault failed"}}},
-					"task5": {Failed: true, Events: []NomadTaskEvent{{Details: map[string]string{"driver_error": "detail error"}}}},
-					"task6": {Failed: true, Events: []NomadTaskEvent{{Type: "Driver Failure", DisplayMessage: "driver msg"}}},
-					"task7": {Failed: true, Events: []NomadTaskEvent{{ExitCode: 137}}},
-					"task8": {Failed: true, Events: []NomadTaskEvent{{ExitCode: 1, DisplayMessage: "crash"}}},
-					"task9": {State: "dead", Failed: false, Events: []NomadTaskEvent{{DriverError: "dead task driver error"}}},
-					"taskHealthy": {State: "running", Failed: false},
-				}
-				msg := extractAllocationErrorDetails("default client desc", tsMap)
-				if !strings.Contains(msg, "setup failed") || !strings.Contains(msg, "download failed") || !strings.Contains(msg, "exited with code 137") {
-					t.Errorf("expected full error message, got %q", msg)
-				}
-
-			case "metadata_jobs_structures":
-				metaNil := extractJobsFromMetadata(nil)
-				if len(metaNil) != 0 {
-					t.Errorf("expected empty for nil, got %v", metaNil)
-				}
-				metaNonSlice := extractJobsFromMetadata(map[string]interface{}{"jobs": 123})
-				if len(metaNonSlice) != 0 {
-					t.Errorf("expected empty for non-slice, got %v", metaNonSlice)
-				}
-				metaJobStr := extractJobsFromMetadata(map[string]interface{}{"job": "single-job"})
-				if len(metaJobStr) != 1 || metaJobStr[0] != "single-job" {
-					t.Errorf("expected [single-job], got %v", metaJobStr)
-				}
-				metaSliceStr := extractJobsFromMetadata(map[string]interface{}{"jobs": []string{"job-a", "job-b"}})
-				if len(metaSliceStr) != 2 || metaSliceStr[0] != "job-a" || metaSliceStr[1] != "job-b" {
-					t.Errorf("expected [job-a, job-b], got %v", metaSliceStr)
-				}
-
-			case "nomad_json_network_err":
-				srv := NewRouterServer(Config{NomadAddr: "http://127.0.0.1:0"}, &http.Client{Timeout: 5 * time.Millisecond})
-				var out any
-				if srv.getNomadJSON(ctx, "/path", &out) {
-					t.Errorf("expected false for network error")
-				}
-
-			case "eval_blocked_or_queued":
-				srv := NewRouterServer(Config{}, nil)
-				payload := []byte(`{"Evaluation":{"BlockedEval":"b-1"}}`)
-				if err := srv.ProcessNomadEvent(ctx, "Evaluation", "EvaluationUpdated", payload); err != nil {
-					t.Errorf("expected nil error, got %v", err)
-				}
-				payload2 := []byte(`{"Evaluation":{"FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`)
-				if err := srv.ProcessNomadEvent(ctx, "Evaluation", "EvaluationUpdated", payload2); err != nil {
-					t.Errorf("expected nil error, got %v", err)
-				}
-
-			case "handle_nomad_event_direct_err":
-				srv := NewRouterServer(Config{}, nil)
-				sub := NewNomadStreamSubscriber(srv)
-				sub.handleNomadEvent(ctx, NomadEvent{
-					Topic:   "Deployment",
-					Type:    "DeploymentStatusUpdate",
-					Payload: []byte("invalid-json"),
-				})
-
-			case "stream_connection_failed":
-				srv := NewRouterServer(Config{NomadAddr: "http://127.0.0.1:0"}, &http.Client{Timeout: 5 * time.Millisecond})
-				sub := NewNomadStreamSubscriber(srv)
-				err := sub.consumeStream(ctx)
-				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
 				}
 			}
 		})
