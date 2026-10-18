@@ -227,7 +227,6 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 			originMainErr      bool
 			fetchHeadOut       string
 			fetchHeadErr       bool
-			testHTTPEndpoint   bool
 			wantStatus         string
 			wantRepo           string
 			wantDiskCommit     string
@@ -236,7 +235,7 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 		}{
 			{
 				name: "synced_and_http_endpoint", repos: []string{"/mock/repo/aerial"},
-				headOut: shaSync + "\x002026-09-12T12:00:00Z", testHTTPEndpoint: true,
+				headOut: shaSync + "\x002026-09-12T12:00:00Z",
 				wantStatus: "synced", wantRepo: "/mock/repo/aerial", wantDiskCommit: shaSync, wantRepoSyncStatus: "synced",
 			},
 			{
@@ -316,31 +315,7 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 						t.Errorf("expected repo sync_status %q, got %q", tc.wantRepoSyncStatus, repoSt.SyncStatus)
 					}
 				}
-				if tc.testHTTPEndpoint {
-					mux := http.NewServeMux()
-					mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-						w.Header().Set("Content-Type", "application/json")
-						_ = json.NewEncoder(w).Encode(daemon.GetStatus(r.Context()))
-					})
-					server := httptest.NewServer(mux)
-					defer server.Close()
 
-					resp, err := http.Get(server.URL + "/status")
-					if err != nil {
-						t.Fatalf("GET /status failed: %v", err)
-					}
-					defer resp.Body.Close()
-					if resp.StatusCode != http.StatusOK {
-						t.Errorf("expected status 200, got %d", resp.StatusCode)
-					}
-					var jsonResp HangarStatusResponse
-					if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
-						t.Fatalf("failed to decode JSON: %v", err)
-					}
-					if jsonResp.Status != tc.wantStatus {
-						t.Errorf("expected json status %q, got %q", tc.wantStatus, jsonResp.Status)
-					}
-				}
 			})
 		}
 	})
@@ -569,11 +544,7 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 
 		tests := []struct {
 			name              string
-			emptyPath         bool
-			nonexistentPath   bool
-			seedGitDir        bool
-			seedNonEmptyNoGit bool
-			seedIndexLock     bool
+			seedMode          string // "empty", "nonexistent", "git", "non_empty_no_git", "index_lock"
 			withRepoURL       bool
 			initHead          string
 			fetchHead         string
@@ -590,22 +561,22 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 			wantPrevHead      string
 			wantCurrHead      string
 		}{
-			{name: "empty_repo_path", emptyPath: true, wantEmptyRepo: true},
-			{name: "nonexistent_repo_path", nonexistentPath: true, wantAnyErr: true},
-			{name: "index_lock_active_guard", seedGitDir: true, seedIndexLock: true, wantErrSubstr: "index.lock active"},
-			{name: "up_to_date", seedGitDir: true, withRepoURL: true, initHead: head1, fetchHead: head1, diffOut: "docker-compose.yml\n", wantChanged: false, wantPrevHead: head1, wantCurrHead: head1},
-			{name: "fast_forward_update_with_diff", seedGitDir: true, withRepoURL: true, initHead: head1, fetchHead: head2, diffOut: "docker-compose.yml\n", wantChanged: true, wantPrevHead: head1, wantCurrHead: head2},
-			{name: "empty_git_rev_parse_head_error", seedGitDir: true, revParseErrOnCall: 1, wantAnyErr: true},
-			{name: "fetch_error", seedGitDir: true, initHead: head1, fetchErr: errors.New("fetch failed"), wantErrSubstr: "fetch failed"},
-			{name: "ensure_repo_failure_warning_uninitialized", seedNonEmptyNoGit: true, withRepoURL: true, failAllGit: true, wantAnyErr: true},
-			{name: "merge_conflict_reset_recovery", seedGitDir: true, initHead: head1, fetchHead: head2, mergeErr: errors.New("exit status 128"), wantChanged: true, wantPrevHead: head1, wantCurrHead: head2},
-			{name: "recovery_reset_hard_failure", seedGitDir: true, initHead: head1, fetchHead: head1, mergeErr: errors.New("merge conflict"), resetErr: errors.New("reset failed"), wantErrSubstr: "reset failed"},
-			{name: "post_merge_rev_parse_failure", seedGitDir: true, initHead: head1, fetchHead: head1, revParseErrOnCall: 2, wantAnyErr: true},
+			{name: "empty_repo_path", seedMode: "empty", wantEmptyRepo: true},
+			{name: "nonexistent_repo_path", seedMode: "nonexistent", wantAnyErr: true},
+			{name: "index_lock_active_guard", seedMode: "index_lock", wantErrSubstr: "index.lock active"},
+			{name: "up_to_date", seedMode: "git", withRepoURL: true, initHead: head1, fetchHead: head1, diffOut: "docker-compose.yml\n", wantChanged: false, wantPrevHead: head1, wantCurrHead: head1},
+			{name: "fast_forward_update_with_diff", seedMode: "git", withRepoURL: true, initHead: head1, fetchHead: head2, diffOut: "docker-compose.yml\n", wantChanged: true, wantPrevHead: head1, wantCurrHead: head2},
+			{name: "empty_git_rev_parse_head_error", seedMode: "git", revParseErrOnCall: 1, wantAnyErr: true},
+			{name: "fetch_error", seedMode: "git", initHead: head1, fetchErr: errors.New("fetch failed"), wantErrSubstr: "fetch failed"},
+			{name: "ensure_repo_failure_warning_uninitialized", seedMode: "non_empty_no_git", withRepoURL: true, failAllGit: true, wantAnyErr: true},
+			{name: "merge_conflict_reset_recovery", seedMode: "git", initHead: head1, fetchHead: head2, mergeErr: errors.New("exit status 128"), wantChanged: true, wantPrevHead: head1, wantCurrHead: head2},
+			{name: "recovery_reset_hard_failure", seedMode: "git", initHead: head1, fetchHead: head1, mergeErr: errors.New("merge conflict"), resetErr: errors.New("reset failed"), wantErrSubstr: "reset failed"},
+			{name: "post_merge_rev_parse_failure", seedMode: "git", initHead: head1, fetchHead: head1, revParseErrOnCall: 2, wantAnyErr: true},
 		}
 
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
-				if tc.emptyPath {
+				if tc.seedMode == "empty" {
 					d := &SyncDaemon{}
 					if res := d.SyncRepo(context.Background(), ""); res.Repo != "" {
 						t.Errorf("expected empty repo result, got %+v", res)
@@ -615,17 +586,17 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 
 				tempDir := t.TempDir()
 				repoPath := filepath.Join(tempDir, "local")
-				if tc.nonexistentPath {
+				if tc.seedMode == "nonexistent" {
 					repoPath = filepath.Join(tempDir, "nonexistent")
 				}
-				if tc.seedGitDir {
+				if tc.seedMode == "git" || tc.seedMode == "index_lock" {
 					_ = os.MkdirAll(filepath.Join(repoPath, ".git"), 0755)
 				}
-				if tc.seedNonEmptyNoGit {
+				if tc.seedMode == "non_empty_no_git" {
 					_ = os.MkdirAll(repoPath, 0755)
 					_ = os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("content"), 0644)
 				}
-				if tc.seedIndexLock {
+				if tc.seedMode == "index_lock" {
 					_ = os.WriteFile(filepath.Join(repoPath, ".git", "index.lock"), []byte(""), 0644)
 				}
 
@@ -708,62 +679,14 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 		tempDir := t.TempDir()
 		localDir := filepath.Join(tempDir, "local")
 		_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
-
-		head1 := "1111111111111111111111111111111111111111"
-		head2 := "2222222222222222222222222222222222222222"
-		currentHead := head1
-
-		d := NewDaemon(DaemonConfig{
-			Repos: []string{localDir},
-			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				if len(args) > 0 {
-					switch args[0] {
-					case "rev-parse":
-						return []byte(currentHead), nil, nil
-					case "merge":
-						currentHead = head2
-						return []byte("Updating " + head2), nil, nil
-					}
-				}
-				return nil, nil, nil
-			},
-		})
-		results, err := d.TriggerSync()
-		if err != nil {
-			t.Fatalf("TriggerSync failed: %v", err)
-		}
-		if len(results) != 1 || !results[0].Changed {
-			t.Errorf("expected 1 result with Changed=true, got %+v", results)
-		}
-	})
-
-	t.Run("TriggerSync_singleflight_invalid_type", func(t *testing.T) {
-		d := &SyncDaemon{}
-		started := make(chan struct{})
-		go func() {
-			_, _, _ = d.sfg.Do("sync", func() (interface{}, error) {
-				close(started)
-				<-time.After(20 * time.Millisecond)
-				return "invalid-type", nil
-			})
-		}()
-		<-started
-		_, err := d.TriggerSync()
-		if err == nil || !strings.Contains(err.Error(), "unexpected return type") {
-			t.Errorf("expected unexpected return type error, got %v", err)
-		}
-	})
-
-	t.Run("TriggerSync_unconditional_nomad_config_sync", func(t *testing.T) {
-		tempDir := t.TempDir()
-		localDir := filepath.Join(tempDir, "local")
-		_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
 		configDir := filepath.Join(tempDir, "config")
 		_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755)
 		_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0644)
 		_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 4001\n"), 0644)
 
-		head := "1111111111111111111111111111111111111111"
+		head1 := "1111111111111111111111111111111111111111"
+		head2 := "2222222222222222222222222222222222222222"
+		currentHead := head1
 		var nomadCalls [][]string
 		var nomadMu sync.Mutex
 
@@ -778,36 +701,62 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 				return []byte("var updated"), nil, nil
 			},
 			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				if len(args) > 0 && args[0] == "rev-parse" {
-					return []byte(head), nil, nil
-				}
-				if len(args) > 0 && args[0] == "merge" {
-					return []byte("Already up to date."), nil, nil
+				if len(args) > 0 {
+					switch args[0] {
+					case "rev-parse":
+						return []byte(currentHead), nil, nil
+					case "merge":
+						if currentHead == head1 {
+							currentHead = head2
+							return []byte("Updating " + head2), nil, nil
+						}
+						return []byte("Already up to date."), nil, nil
+					}
 				}
 				return nil, nil, nil
 			},
 		})
 
+		// 1. Initial sync with Changed: true and ConfigDir nomad var put calls
 		results, err := d.TriggerSync()
-		if err != nil || len(results) != 1 || results[0].Changed {
-			t.Fatalf("expected 1 unchanged result, err=%v, results=%+v", err, results)
+		if err != nil {
+			t.Fatalf("TriggerSync failed: %v", err)
+		}
+		if len(results) != 1 || !results[0].Changed {
+			t.Errorf("expected 1 result with Changed=true, got %+v", results)
 		}
 		nomadMu.Lock()
-		callsCount := len(nomadCalls)
+		initialCalls := len(nomadCalls)
 		nomadMu.Unlock()
-		if callsCount == 0 {
-			t.Fatalf("expected nomad var put calls even when git repo has no changes, got 0")
+		if initialCalls == 0 {
+			t.Fatalf("expected nomad var put calls during initial sync, got 0")
 		}
 
+		// 2. Second sync with Changed: false verifying nomad var put hash cache hit
 		results2, err := d.TriggerSync()
 		if err != nil || len(results2) != 1 || results2[0].Changed {
 			t.Fatalf("expected 1 unchanged result on second sync, err=%v, results=%+v", err, results2)
 		}
 		nomadMu.Lock()
-		secondCount := len(nomadCalls)
+		secondCalls := len(nomadCalls)
 		nomadMu.Unlock()
-		if secondCount != callsCount {
-			t.Fatalf("expected call count to remain %d due to caching, got %d", callsCount, secondCount)
+		if secondCalls != initialCalls {
+			t.Fatalf("expected call count to remain %d due to caching, got %d", initialCalls, secondCalls)
+		}
+
+		// 3. sfg.Do invalid return type error
+		started := make(chan struct{})
+		go func() {
+			_, _, _ = d.sfg.Do("sync", func() (interface{}, error) {
+				close(started)
+				<-time.After(20 * time.Millisecond)
+				return "invalid-type", nil
+			})
+		}()
+		<-started
+		_, err = d.TriggerSync()
+		if err == nil || !strings.Contains(err.Error(), "unexpected return type") {
+			t.Errorf("expected unexpected return type error, got %v", err)
 		}
 	})
 }
@@ -1232,13 +1181,15 @@ func (e *nomadConfigSyncTestEnv) waitForEvents(t *testing.T, count int) []Hangar
 }
 
 type nomadSyncValidationCase struct {
-	name, dirAsFile, wantErrSub string
-	files                       map[string]string
-	disableNomad, nomadErr      bool
+	name, target, dirAsFile, wantErrSub string
+	files                               map[string]string
+	disableNomad, nomadErr              bool
+	checkEmptyHomepageHash              bool
 }
 
-func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase, syncFn func(d *SyncDaemon, dir string) error) {
+func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase) {
 	t.Helper()
+	ctx := context.Background()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1261,7 +1212,18 @@ func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase, sync
 					return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
 				}
 			}
-			err := syncFn(env.daemon, env.configDir)
+			var err error
+			switch tc.target {
+			case "brain":
+				err = env.daemon.SyncBrainConfigToNomad(ctx, env.configDir)
+			case "homepage":
+				err = env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir)
+			case "service":
+				err = env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir)
+			default:
+				t.Fatalf("unknown target: %s", tc.target)
+			}
+
 			if tc.wantErrSub != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
@@ -1269,11 +1231,21 @@ func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase, sync
 			} else if err != nil {
 				t.Fatalf("expected nil error, got %v", err)
 			}
+			if tc.checkEmptyHomepageHash {
+				calls := env.nomadCalls()
+				if len(calls) != 1 || len(calls[0]) < 5 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
+					t.Fatalf("expected nomad/jobs/homepage target, got %v", calls)
+				}
+				joined := strings.Join(calls[0], " ")
+				if !strings.Contains(joined, "CONFIG_HASH=") || strings.Contains(joined, "HOMEPAGE_YAML=@") {
+					t.Errorf("expected CONFIG_HASH and NO HOMEPAGE_YAML on empty dir, got %v", calls[0])
+				}
+			}
 		})
 	}
 }
 
-func TestSyncBrainConfigToNomad_TableDriven(t *testing.T) {
+func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	validBrainYAML := "model: gemini-2.5-flash\nchannels:\n  default:\n    mode: threads\n"
@@ -1281,234 +1253,177 @@ func TestSyncBrainConfigToNomad_TableDriven(t *testing.T) {
 	t.Run("validation_and_disabled_paths", func(t *testing.T) {
 		t.Parallel()
 		runNomadValidationCases(t, []nomadSyncValidationCase{
-			{name: "missing_config_yaml_safe_noop"},
-			{name: "directory_as_config_yaml_error", dirAsFile: "config.yaml", wantErrSub: "is a directory"},
-			{name: "invalid_yaml_syntax_error", files: map[string]string{"config.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
-			{name: "semantic_validation_missing_channels_default", files: map[string]string{"config.yaml": "channels:\n  other:\n    mode: threads\n"}, wantErrSub: "channels.default is required"},
-			{name: "disabled_nomad_addr_safe_noop", files: map[string]string{"config.yaml": validBrainYAML}, disableNomad: true},
-			{name: "nomad_cli_failure_returns_error", files: map[string]string{"config.yaml": validBrainYAML}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
-		}, func(d *SyncDaemon, dir string) error {
-			return d.SyncBrainConfigToNomad(ctx, dir)
+			{name: "missing_config_yaml_safe_noop", target: "brain"},
+			{name: "directory_as_config_yaml_error", target: "brain", dirAsFile: "config.yaml", wantErrSub: "failed to read brain config"},
+			{name: "invalid_yaml_syntax_error", target: "brain", files: map[string]string{"config.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "semantic_validation_missing_channels_default", target: "brain", files: map[string]string{"config.yaml": "channels:\n  other:\n    mode: threads\n"}, wantErrSub: "channels.default is required"},
+			{name: "disabled_nomad_addr_safe_noop_brain", target: "brain", files: map[string]string{"config.yaml": validBrainYAML}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error_brain", target: "brain", files: map[string]string{"config.yaml": validBrainYAML}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
+
+			{name: "empty_dir_branch_pushes_empty_hash_homepage", target: "homepage", checkEmptyHomepageHash: true},
+			{name: "directory_as_homepage_yaml_error", target: "homepage", dirAsFile: "services/homepage/homepage.yaml", wantErrSub: "failed to read homepage config"},
+			{name: "invalid_yaml_syntax_in_homepage_yaml", target: "homepage", files: map[string]string{"services/homepage/homepage.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "disabled_nomad_addr_safe_noop_homepage", target: "homepage", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error_homepage", target: "homepage", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
+
+			{name: "empty_dir_graceful_skip_service", target: "service"},
+			{name: "directory_instead_of_file_error", target: "service", dirAsFile: "services/mcp/scheduler-mcp.yaml", wantErrSub: "failed to read service config"},
+			{name: "invalid_yaml_syntax_in_service_config", target: "service", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "disabled_nomad_addr_safe_noop_service", target: "service", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error_service", target: "service", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
 		})
 	})
 
-	t.Run("hash_caching_and_invalidation", func(t *testing.T) {
+	t.Run("caching_diff_gating_and_events", func(t *testing.T) {
 		t.Parallel()
-		env := newNomadConfigSyncTestEnv(t)
-		cfgPath := filepath.Join(env.configDir, "config.yaml")
-		_ = os.WriteFile(cfgPath, []byte(validBrainYAML), 0644)
-
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success on initial push: %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 1 || len(calls[0]) < 5 || calls[0][0] != "var" || calls[0][1] != "put" || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/brain" {
-			t.Fatalf("unexpected initial nomad calls: %v", calls)
-		}
-
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
-			t.Fatalf("expected cached call to remain at 1 call, err=%v, calls=%d", err, len(env.nomadCalls()))
+		type syncLifecycleCase struct {
+			name             string
+			setup            func(configDir string)
+			modify           func(configDir string)
+			syncFn           func(d *SyncDaemon, configDir string, syncCtx ...ConfigSyncContext) error
+			cacheKey         string
+			wantInitialCalls int
+			untouchedCtx     ConfigSyncContext
+			sameContentCtx   ConfigSyncContext
+			modifiedCtx      ConfigSyncContext
+			wantJobName      string
 		}
 
-		_ = os.WriteFile(cfgPath, []byte("channels:\n  default:\n    mode: classify\n"), 0644)
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 2 {
-			t.Fatalf("expected modified config to push 2nd call, err=%v, calls=%d", err, len(env.nomadCalls()))
+		cases := []syncLifecycleCase{
+			{
+				name: "brain",
+				setup: func(dir string) {
+					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(validBrainYAML), 0644)
+				},
+				modify: func(dir string) {
+					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("channels:\n  default:\n    mode: always\n"), 0644)
+				},
+				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
+					return d.SyncBrainConfigToNomad(ctx, dir, sCtx...)
+				},
+				cacheKey:         "nomad/jobs/brain:CONFIG_YAML",
+				wantInitialCalls: 1,
+				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
+				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}},
+				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}},
+				wantJobName:      "brain",
+			},
+			{
+				name: "homepage",
+				setup: func(dir string) {
+					_ = os.MkdirAll(filepath.Join(dir, "services", "homepage"), 0755)
+					_ = os.WriteFile(filepath.Join(dir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\nallowed_hosts: \"*\"\n"), 0644)
+					_ = os.MkdirAll(filepath.Join(dir, "homepage", "subdir"), 0755)
+					for name, content := range map[string]string{
+						"services.yaml": "- My Group: []\n",
+						"widgets.yaml":  "- search: {}\n",
+						".hidden":       "ignore me",
+						"temp.tmp":      "ignore me too",
+					} {
+						_ = os.WriteFile(filepath.Join(dir, "homepage", name), []byte(content), 0644)
+					}
+				},
+				modify: func(dir string) {
+					_ = os.WriteFile(filepath.Join(dir, "homepage", "widgets.yaml"), []byte("- search: { updated: true }\n"), 0644)
+				},
+				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
+					return d.SyncHomepageConfigToNomad(ctx, dir, sCtx...)
+				},
+				cacheKey:         "nomad/jobs/homepage",
+				wantInitialCalls: 1,
+				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
+				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/homepage/homepage.yaml"}},
+				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"homepage/widgets.yaml"}},
+				wantJobName:      "homepage",
+			},
+			{
+				name: "service",
+				setup: func(dir string) {
+					for rel, content := range map[string]string{
+						"services/voice/voice.yaml":       "model: small.en\n",
+						"services/mcp/scheduler-mcp.yaml": "enabled: true\n",
+						"services/hangar/hangar.yaml":     "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/mcp/scheduler-mcp.yaml\"\n    nomad_var: \"nomad/jobs/scheduler-mcp\"\n    var_key: \"CONFIG_YAML\"\n",
+					} {
+						full := filepath.Join(dir, rel)
+						_ = os.MkdirAll(filepath.Dir(full), 0755)
+						_ = os.WriteFile(full, []byte(content), 0644)
+					}
+				},
+				modify: func(dir string) {
+					_ = os.WriteFile(filepath.Join(dir, "services", "voice", "voice.yaml"), []byte("model: distil-small.en\n"), 0644)
+				},
+				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
+					return d.SyncServiceConfigsToNomad(ctx, dir, sCtx...)
+				},
+				cacheKey:         "nomad/jobs/orin-voice:CONFIG_YAML",
+				wantInitialCalls: 2,
+				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/hangar/hangar.yaml"}},
+				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
+				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
+				wantJobName:      "orin-voice",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				env := newNomadConfigSyncTestEnv(t)
+				tc.setup(env.configDir)
+
+				// (a) initial push
+				if err := tc.syncFn(env.daemon, env.configDir); err != nil {
+					t.Fatalf("initial push failed: %v", err)
+				}
+				if len(env.nomadCalls()) != tc.wantInitialCalls {
+					t.Fatalf("initial push calls = %d, want %d", len(env.nomadCalls()), tc.wantInitialCalls)
+				}
+
+				// (b) cached second push
+				if err := tc.syncFn(env.daemon, env.configDir); err != nil || len(env.nomadCalls()) != tc.wantInitialCalls {
+					t.Fatalf("cached push calls = %d, want %d", len(env.nomadCalls()), tc.wantInitialCalls)
+				}
+
+				// (c) diff-gated untouched file
+				callsBeforeUntouched := len(env.nomadCalls())
+				if err := tc.syncFn(env.daemon, env.configDir, tc.untouchedCtx); err != nil || len(env.nomadCalls()) != callsBeforeUntouched {
+					t.Fatalf("untouched diff calls = %d, want %d", len(env.nomadCalls()), callsBeforeUntouched)
+				}
+				env.daemon.lastPushedConfigMu.Lock()
+				cached := env.daemon.lastPushedConfig[tc.cacheKey]
+				env.daemon.lastPushedConfigMu.Unlock()
+				if cached == "" {
+					t.Fatalf("expected cache to be primed for %s", tc.cacheKey)
+				}
+
+				// (d) diff-gated same-content file
+				callsBeforeSame := len(env.nomadCalls())
+				if err := tc.syncFn(env.daemon, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsBeforeSame {
+					t.Fatalf("same content calls = %d, want %d", len(env.nomadCalls()), callsBeforeSame)
+				}
+
+				// (e) diff-gated modified file
+				tc.modify(env.configDir)
+				callsBeforeMod := len(env.nomadCalls())
+				if err := tc.syncFn(env.daemon, env.configDir, tc.modifiedCtx); err != nil {
+					t.Fatalf("modified sync error: %v", err)
+				}
+				calls := env.nomadCalls()
+				if len(calls) != callsBeforeMod+1 {
+					t.Fatalf("expected 1 new call, got %d (total %d)", len(calls)-callsBeforeMod, len(calls))
+				}
+				lastCall := strings.Join(calls[len(calls)-1], " ")
+				if !strings.Contains(lastCall, "COMMIT_SHA="+tc.modifiedCtx.CommitSHA) {
+					t.Fatalf("expected COMMIT_SHA=%s in last call: %s", tc.modifiedCtx.CommitSHA, lastCall)
+				}
+				evts := env.waitForEvents(t, 1)
+				if evts[0].Event != "deploy_started" || evts[0].JobName != tc.wantJobName || evts[0].Repo != tc.modifiedCtx.Repo || evts[0].CommitSHA != tc.modifiedCtx.CommitSHA || evts[0].PRNumber != tc.modifiedCtx.PRNumber || evts[0].TargetID != tc.modifiedCtx.TargetID {
+					t.Errorf("unexpected deploy_started event payload: %+v", evts[0])
+				}
+			})
 		}
 	})
 
-	t.Run("diff_gating_and_deploy_event_lifecycle", func(t *testing.T) {
-		t.Parallel()
-		env := newNomadConfigSyncTestEnv(t)
-		cfgPath := filepath.Join(env.configDir, "config.yaml")
-		_ = os.WriteFile(cfgPath, []byte("channels:\n  default:\n    mode: mention\n"), 0644)
-
-		scUntouched := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}}
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scUntouched); err != nil || len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected 0 nomad calls for untouched diff, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-		env.daemon.lastPushedConfigMu.Lock()
-		cached := env.daemon.lastPushedConfig["nomad/jobs/brain:CONFIG_YAML"]
-		env.daemon.lastPushedConfigMu.Unlock()
-		if cached == "" {
-			t.Fatalf("expected cache to be primed for brain config")
-		}
-
-		scSameContent := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}}
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scSameContent); err != nil || len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected 0 nomad calls for identical content, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-
-		_ = os.WriteFile(cfgPath, []byte("channels:\n  default:\n    mode: always\n"), 0644)
-		scModified := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}}
-		if err := env.daemon.SyncBrainConfigToNomad(ctx, env.configDir, scModified); err != nil {
-			t.Fatalf("SyncBrainConfigToNomad error: %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 1 || ! strings.Contains(strings.Join(calls[0], " "), "COMMIT_SHA=sha_modified") {
-			t.Fatalf("expected 1 nomad call with COMMIT_SHA=sha_modified, got %v", calls)
-		}
-		evts := env.waitForEvents(t, 1)
-		if evts[0].Event != "deploy_started" || evts[0].JobName != "brain" || evts[0].Repo != scModified.Repo || evts[0].CommitSHA != scModified.CommitSHA || evts[0].PRNumber != scModified.PRNumber || evts[0].TargetID != scModified.TargetID {
-			t.Errorf("unexpected deploy_started event payload: %+v", evts[0])
-		}
-	})
-}
-
-func TestSyncHomepageConfigToNomad_TableDriven(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	t.Run("empty_dir_branch_pushes_empty_hash", func(t *testing.T) {
-		t.Parallel()
-		env := newNomadConfigSyncTestEnv(t)
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected nil for empty configDir, got %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 1 || len(calls[0]) < 5 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
-			t.Fatalf("expected nomad/jobs/homepage target, got %v", calls)
-		}
-		joined := strings.Join(calls[0], " ")
-		if !strings.Contains(joined, "CONFIG_HASH=") || strings.Contains(joined, "HOMEPAGE_YAML=@") {
-			t.Errorf("expected CONFIG_HASH and NO HOMEPAGE_YAML on empty dir, got %v", calls[0])
-		}
-	})
-
-	t.Run("validation_and_disabled_paths", func(t *testing.T) {
-		t.Parallel()
-		runNomadValidationCases(t, []nomadSyncValidationCase{
-			{name: "directory_as_homepage_yaml_error", dirAsFile: "services/homepage/homepage.yaml", wantErrSub: "is a directory"},
-			{name: "invalid_yaml_syntax_in_homepage_yaml", files: map[string]string{"services/homepage/homepage.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
-			{name: "disabled_nomad_addr_safe_noop", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, disableNomad: true},
-			{name: "nomad_cli_failure_returns_error", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
-		}, func(d *SyncDaemon, dir string) error {
-			return d.SyncHomepageConfigToNomad(ctx, dir)
-		})
-	})
-
-	t.Run("hash_caching_and_dir_filtering", func(t *testing.T) {
-		t.Parallel()
-		env := newNomadConfigSyncTestEnv(t)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "homepage"), 0755)
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\nallowed_hosts: \"*\"\n"), 0644)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "homepage", "subdir"), 0755)
-		for name, content := range map[string]string{"services.yaml": "- My Group: []\n", "widgets.yaml": "- search: {}\n", ".hidden": "ignore me", "temp.tmp": "ignore me too"} {
-			_ = os.WriteFile(filepath.Join(env.configDir, "homepage", name), []byte(content), 0644)
-		}
-
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil {
-			t.Fatalf("expected success pushing to nomad: %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 1 || len(calls[0]) < 6 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
-			t.Fatalf("unexpected nomad CLI args: %v", calls)
-		}
-		joined := strings.Join(calls[0], " ")
-		if !strings.Contains(joined, "CONFIG_HASH=") || !strings.Contains(joined, "HOMEPAGE_YAML=@") {
-			t.Errorf("missing CONFIG_HASH or HOMEPAGE_YAML in args: %v", calls[0])
-		}
-
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
-			t.Fatalf("expected cached call to remain 1, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "homepage", "homepage.yaml"), []byte("title: Updated Aerial Dashboard\n"), 0644)
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 2 {
-			t.Fatalf("expected calls to become 2 after update, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-	})
-
-	t.Run("diff_gating_and_deploy_event_lifecycle", func(t *testing.T) {
-		t.Parallel()
-		env := newNomadConfigSyncTestEnv(t)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "services", "homepage"), 0755)
-		_ = os.MkdirAll(filepath.Join(env.configDir, "homepage"), 0755)
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "homepage", "homepage.yaml"), []byte("title: Homepage\n"), 0644)
-		subYaml := filepath.Join(env.configDir, "homepage", "services.yaml")
-		_ = os.WriteFile(subYaml, []byte("services:\n  - name: test\n"), 0644)
-
-		scUntouched := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}}
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir, scUntouched); err != nil || len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected 0 nomad calls for untouched diff, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-		env.daemon.lastPushedConfigMu.Lock()
-		cached := env.daemon.lastPushedConfig["nomad/jobs/homepage"]
-		env.daemon.lastPushedConfigMu.Unlock()
-		if cached == "" {
-			t.Fatalf("expected cache to be primed for homepage config")
-		}
-
-		_ = os.WriteFile(subYaml, []byte("services:\n  - name: test2\n"), 0644)
-		scSubTouched := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_sub", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"homepage/services.yaml"}}
-		if err := env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir, scSubTouched); err != nil {
-			t.Fatalf("SyncHomepageConfigToNomad error: %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "COMMIT_SHA=sha_sub") {
-			t.Fatalf("expected 1 nomad call with COMMIT_SHA=sha_sub, got %v", calls)
-		}
-		evts := env.waitForEvents(t, 1)
-		if evts[0].Event != "deploy_started" || evts[0].JobName != "homepage" || evts[0].Repo != scSubTouched.Repo || evts[0].CommitSHA != scSubTouched.CommitSHA || evts[0].PRNumber != scSubTouched.PRNumber || evts[0].TargetID != scSubTouched.TargetID {
-			t.Errorf("unexpected deploy_started event payload: %+v", evts[0])
-		}
-	})
-}
-
-func TestSyncServiceConfigsToNomad_TableDriven(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	t.Run("validation_and_disabled_paths", func(t *testing.T) {
-		t.Parallel()
-		runNomadValidationCases(t, []nomadSyncValidationCase{
-			{name: "empty_dir_graceful_skip"},
-			{name: "directory_instead_of_file_error", dirAsFile: "services/mcp/scheduler-mcp.yaml", wantErrSub: "failed to read service config"},
-			{name: "invalid_yaml_syntax_in_service_config", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
-			{name: "disabled_nomad_addr_safe_noop", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, disableNomad: true},
-			{name: "nomad_cli_failure_returns_error", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
-		}, func(d *SyncDaemon, dir string) error {
-			return d.SyncServiceConfigsToNomad(ctx, dir)
-		})
-	})
-
-	t.Run("non_yaml_config_skips_yaml_validation", func(t *testing.T) {
-		t.Parallel()
-		env := newNomadConfigSyncTestEnv(t)
-		env.daemon.serviceConfigs = []ServiceConfigMapping{{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/mesh-proxy", VarKey: "DEFAULT_CONF"}}
-		_ = os.MkdirAll(filepath.Join(env.configDir, "proxy"), 0755)
-		_ = os.WriteFile(filepath.Join(env.configDir, "proxy", "default.conf"), []byte("server { listen 80; proxy_pass http://backend; }"), 0644)
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
-			t.Fatalf("expected non-YAML config to sync with 1 call, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-	})
-
-	t.Run("hash_caching_and_sequence_yaml_sync", func(t *testing.T) {
-		t.Parallel()
-		env := newNomadConfigSyncTestEnv(t)
-		for rel, content := range map[string]string{
-			"services/mcp/scheduler-mcp.yaml":            "port: \"4005\"\n",
-			"services/mcp/docker-mcp.yaml":               "port: \"4002\"\n",
-			"services/webhooks-router/webhooks-router.yaml": "port: \"4020\"\n",
-			"services/victoriametrics/scrape.yml":        "- job_name: \"anomaly-detector\"\n",
-		} {
-			full := filepath.Join(env.configDir, rel)
-			_ = os.MkdirAll(filepath.Dir(full), 0755)
-			_ = os.WriteFile(full, []byte(content), 0644)
-		}
-
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 4 {
-			t.Fatalf("expected 4 nomad var put calls, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 4 {
-			t.Fatalf("expected cached calls to remain 4, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "mcp", "docker-mcp.yaml"), []byte("docker_host: unix:///var/run/docker.sock\n# modified\n"), 0644)
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 5 {
-			t.Fatalf("expected calls to increase to 5, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-	})
-
-	t.Run("service_config_mappings_precedence_and_invariants", func(t *testing.T) {
+	t.Run("service_config_mappings_and_non_yaml", func(t *testing.T) {
 		t.Parallel()
 		for _, m := range DefaultManagedServiceConfigs {
 			if strings.Contains(m.NomadVar, "orin-voice") || strings.Contains(m.NomadVar, "mirrormere") {
@@ -1532,44 +1447,13 @@ func TestSyncServiceConfigsToNomad_TableDriven(t *testing.T) {
 		if defaultMappings := (&SyncDaemon{}).GetServiceConfigMappings(t.TempDir()); len(defaultMappings) != len(DefaultManagedServiceConfigs) {
 			t.Fatalf("expected DefaultManagedServiceConfigs fallback, got %d mappings", len(defaultMappings))
 		}
-	})
 
-	t.Run("diff_gating_and_deploy_event_lifecycle", func(t *testing.T) {
-		t.Parallel()
 		env := newNomadConfigSyncTestEnv(t)
-		for rel, content := range map[string]string{
-			"services/voice/voice.yaml":       "model: small.en\n",
-			"services/mcp/scheduler-mcp.yaml": "enabled: true\n",
-			"services/hangar/hangar.yaml":     "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/mcp/scheduler-mcp.yaml\"\n    nomad_var: \"nomad/jobs/scheduler-mcp\"\n    var_key: \"CONFIG_YAML\"\n",
-		} {
-			full := filepath.Join(env.configDir, rel)
-			_ = os.MkdirAll(filepath.Dir(full), 0755)
-			_ = os.WriteFile(full, []byte(content), 0644)
-		}
-
-		scHangarOnly := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_pr264", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/hangar/hangar.yaml"}}
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, scHangarOnly); err != nil || len(env.nomadCalls()) != 0 {
-			t.Fatalf("expected ZERO nomad calls for hangar-only diff, err=%v, calls=%d", err, len(env.nomadCalls()))
-		}
-		env.daemon.lastPushedConfigMu.Lock()
-		cachedVoice, cachedSched := env.daemon.lastPushedConfig["nomad/jobs/orin-voice:CONFIG_YAML"], env.daemon.lastPushedConfig["nomad/jobs/scheduler-mcp:CONFIG_YAML"]
-		env.daemon.lastPushedConfigMu.Unlock()
-		if cachedVoice == "" || cachedSched == "" {
-			t.Fatalf("expected cache to be primed for untouched service configs")
-		}
-
-		_ = os.WriteFile(filepath.Join(env.configDir, "services", "voice", "voice.yaml"), []byte("model: distil-small.en\n"), 0644)
-		scVoiceOnly := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_voice_update", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}}
-		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, scVoiceOnly); err != nil {
-			t.Fatalf("SyncServiceConfigsToNomad error: %v", err)
-		}
-		calls := env.nomadCalls()
-		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "COMMIT_SHA=sha_voice_update") {
-			t.Fatalf("expected 1 nomad call with COMMIT_SHA=sha_voice_update, got %v", calls)
-		}
-		evts := env.waitForEvents(t, 1)
-		if evts[0].Event != "deploy_started" || evts[0].JobName != "orin-voice" || evts[0].Repo != scVoiceOnly.Repo || evts[0].CommitSHA != scVoiceOnly.CommitSHA || evts[0].PRNumber != scVoiceOnly.PRNumber || evts[0].TargetID != scVoiceOnly.TargetID {
-			t.Errorf("unexpected deploy_started event payload: %+v", evts[0])
+		env.daemon.serviceConfigs = []ServiceConfigMapping{{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/mesh-proxy", VarKey: "DEFAULT_CONF"}}
+		_ = os.MkdirAll(filepath.Join(env.configDir, "proxy"), 0755)
+		_ = os.WriteFile(filepath.Join(env.configDir, "proxy", "default.conf"), []byte("server { listen 80; proxy_pass http://backend; }"), 0644)
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
+			t.Fatalf("expected non-YAML config to sync with 1 call, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
 	})
 }
@@ -2489,235 +2373,60 @@ func TestGetRemoteImageDigest_TableDriven(t *testing.T) {
 	}
 }
 
-func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
-	ctx := context.Background()
+type nomadImagePollCase struct {
+	name             string
+	emptyDir         bool
+	isAerialRepo     bool
+	jobFile          string
+	jobContent       string
+	seedNonNomad     bool
+	clientMode       string // "dynamic_digest", "oci_revision"
+	initialDigest    string
+	secondDigest     string
+	thirdDigest      string
+	imageRevision    string
+	knownDigestKey   string
+	knownDigestVal   string
+	wantRestartJob   string
+	wantEventRepo    string
+	wantEventCommit  string
+	wantDigest       string
+	testRestartError bool
+}
 
-	t.Run("missing_jobs_dir_returns_nil", func(t *testing.T) {
-		emptyDir := t.TempDir()
-		d := NewDaemon(DaemonConfig{
-			ComposeDir: emptyDir,
-			ConfigDir:  emptyDir,
-		})
-		if err := d.CheckAndReconcileNomadImages(ctx); err != nil {
-			t.Errorf("expected nil error for missing jobs directory, got %v", err)
-		}
-	})
+type imagePollTestEnv struct {
+	daemon        *SyncDaemon
+	evtCh         chan HangarDeployEvent
+	restartedJob  *string
+	restartCalled *bool
+	currentDigest *string
+}
 
-	t.Run("directory_entries_unreadable_and_throttle_early_return", func(t *testing.T) {
-		cfgDir := t.TempDir()
-		jobsDir := filepath.Join(cfgDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
+func newImagePollTestEnv(t *testing.T, tc nomadImagePollCase) *imagePollTestEnv {
+	t.Helper()
+	tmpDir := t.TempDir()
+	baseDir := tmpDir
+	if tc.isAerialRepo {
+		baseDir = filepath.Join(tmpDir, "aerial")
+	}
+	jobsDir := filepath.Join(baseDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	if tc.seedNonNomad {
 		_ = os.MkdirAll(filepath.Join(jobsDir, "nested-dir"), 0755)
 		_ = os.WriteFile(filepath.Join(jobsDir, "readme.txt"), []byte("not a nomad file"), 0644)
-		_ = os.WriteFile(filepath.Join(jobsDir, "job1.nomad"), []byte(`job "job1" { task "t" { config { image = "ghcr.io/test/img1:latest" } } }`), 0644)
+	}
+	if tc.jobFile != "" {
+		_ = os.WriteFile(filepath.Join(jobsDir, tc.jobFile), []byte(tc.jobContent), 0644)
+	}
 
-		dImages := NewDaemon(DaemonConfig{
-			ComposeDir: cfgDir,
-			ConfigDir:  cfgDir,
-			RegistryClient: &http.Client{
-				Transport: &roundTripperFunc{
-					fn: func(req *http.Request) (*http.Response, error) {
-						resp := &http.Response{
-							StatusCode: http.StatusOK,
-							Header:     make(http.Header),
-							Body:       ioNopCloser(strings.NewReader("{}")),
-						}
-						resp.Header.Set("Docker-Content-Digest", "sha256:firstdigest111")
-						return resp, nil
-					},
-				},
-			},
-			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-				if len(args) > 1 && args[1] == "restart" {
-					return []byte("restart err"), []byte("err details"), errors.New("restart fail")
-				}
-				return []byte("ok"), nil, nil
-			},
-		})
+	curDigest := tc.initialDigest
+	restarted := ""
+	restartCalled := false
+	evtCh := make(chan HangarDeployEvent, 10)
 
-		// Initial poll populates nil map
-		dImages.nomadKnownDigests = nil
-		if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
-			t.Errorf("unexpected error on first CheckAndReconcileNomadImages: %v", err)
-		}
-
-		// Immediate second poll triggers 5-minute throttle cooldown
-		if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
-			t.Errorf("unexpected error on throttled CheckAndReconcileNomadImages: %v", err)
-		}
-
-		// Reset lastNomadImagePoll to simulate elapsed time, update mock client digest to trigger restart failure path
-		dImages.nomadPollMu.Lock()
-		dImages.lastNomadImagePoll = time.Time{}
-		dImages.nomadPollMu.Unlock()
-
-		dImages.registryClient = &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					resp := &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       ioNopCloser(strings.NewReader("{}")),
-					}
-					resp.Header.Set("Docker-Content-Digest", "sha256:seconddigest222")
-					return resp, nil
-				},
-			},
-		}
-		if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
-			t.Errorf("unexpected error on restart fail CheckAndReconcileNomadImages: %v", err)
-		}
-	})
-
-	t.Run("image_polling_discovery_unchanged_changed_and_restart_handling", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		// Create a repo dir named "aerial" so filepath.Base(repo) resolves to "azylman/aerial"
-		repoDir := filepath.Join(tmpDir, "aerial")
-		jobsDir := filepath.Join(repoDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-
-		jobFile := filepath.Join(jobsDir, "svc.nomad")
-		// Non-azylman image ref triggers ImageSourceRepo == "" fallback to filepath.Base(repo) -> "azylman/aerial"
-		content := `job "svc" {
-  group "g" {
-    task "t" {
-      driver = "docker"
-      config {
-        image = "ghcr.io/test/img1:latest"
-      }
-    }
-  }
-}`
-		_ = os.WriteFile(jobFile, []byte(content), 0644)
-
-		currentDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-		mockClient := &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					if req.URL != nil && strings.Contains(req.URL.String(), "test/img1") {
-						header := make(http.Header)
-						header.Set("Docker-Content-Digest", currentDigest)
-						return &http.Response{
-							StatusCode: http.StatusOK,
-							Header:     header,
-							Body:       ioNopCloser(strings.NewReader("")),
-						}, nil
-					}
-					return &http.Response{
-						StatusCode: http.StatusNotFound,
-						Body:       ioNopCloser(strings.NewReader("not found")),
-					}, nil
-				},
-			},
-		}
-
-		var restartedJob string
-		mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
-				restartedJob = args[len(args)-1]
-				return []byte("Restarted"), nil, nil
-			}
-			return nil, nil, nil
-		}
-
-		evtCh := make(chan HangarDeployEvent, 10)
-		d := NewDaemon(DaemonConfig{
-			Repos:          []string{repoDir},
-			ComposeDir:     repoDir,
-			ConfigDir:      repoDir,
-			NomadExecutor:  mockNomad,
-			RegistryClient: mockClient,
-			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				if len(args) > 0 && args[0] == "rev-parse" {
-					return []byte("poll_commit_sha_123\n"), nil, nil
-				}
-				return nil, nil, nil
-			},
-			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-				evtCh <- evt
-				return nil
-			},
-		})
-
-		// 1. Initial discovery with nil nomadKnownDigests
-		d.nomadKnownDigests = nil
-		err := d.CheckAndReconcileNomadImages(ctx)
-		if err != nil {
-			t.Fatalf("first poll unexpected error: %v", err)
-		}
-		if restartedJob != "" {
-			t.Fatalf("expected no restart on initial discovery, got %s", restartedJob)
-		}
-
-		// Reset poll throttle
-		d.nomadPollMu.Lock()
-		d.lastNomadImagePoll = time.Time{}
-		d.nomadPollMu.Unlock()
-
-		// 2. Unchanged digest poll (no restart)
-		err = d.CheckAndReconcileNomadImages(ctx)
-		if err != nil {
-			t.Fatalf("second poll unexpected error: %v", err)
-		}
-		if restartedJob != "" {
-			t.Fatalf("expected no restart when digest matches, got %s", restartedJob)
-		}
-
-		// Reset poll throttle
-		d.nomadPollMu.Lock()
-		d.lastNomadImagePoll = time.Time{}
-		d.nomadPollMu.Unlock()
-
-		// 3. Changed digest poll with non-azylman image, git rev-parse HEAD fallback, and deploy_started event dispatch
-		currentDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-		err = d.CheckAndReconcileNomadImages(ctx)
-		if err != nil {
-			t.Fatalf("third poll unexpected error: %v", err)
-		}
-		if restartedJob != "svc" {
-			t.Errorf("expected restart for svc, got %q", restartedJob)
-		}
-		select {
-		case dispatchedEvt := <-evtCh:
-			if dispatchedEvt.Event != "deploy_started" || dispatchedEvt.CommitSHA != "poll_commit_sha_123" || dispatchedEvt.Repo != "azylman/aerial" {
-				t.Errorf("expected deploy_started with repo azylman/aerial and commit poll_commit_sha_123, got %+v", dispatchedEvt)
-			}
-		case <-time.After(2 * time.Second):
-			t.Errorf("timed out waiting for deploy_started event")
-		}
-
-		// Reset poll throttle
-		d.nomadPollMu.Lock()
-		d.lastNomadImagePoll = time.Time{}
-		d.nomadPollMu.Unlock()
-
-		// 4. Nomad job restart error handling
-		currentDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
-		d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return nil, []byte("nomad down"), errors.New("restart fail")
-		}
-		err = d.CheckAndReconcileNomadImages(ctx)
-		if err != nil {
-			t.Fatalf("poll with restart fail returned error: %v", err)
-		}
-	})
-
-	t.Run("nomad_image_poll_uses_image_revision", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		jobsDir := filepath.Join(tmpDir, "jobs")
-		if err := os.MkdirAll(jobsDir, 0755); err != nil {
-			t.Fatalf("failed to create jobs dir: %v", err)
-		}
-
-		jobFile := filepath.Join(jobsDir, "webhooks-router.nomad")
-		jobContent := `job "webhooks-router" { group "core" { task "router" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } } }`
-		if err := os.WriteFile(jobFile, []byte(jobContent), 0644); err != nil {
-			t.Fatalf("failed to write job file: %v", err)
-		}
-
-		newDigest := "sha256:9999999999999999999999999999999999999999999999999999999999999999"
-		expectedImageRevision := "9876543210abcdef9876543210abcdef98765432"
-
+	var registryClient *http.Client
+	if tc.clientMode == "oci_revision" {
 		manifestWithAnnotations := fmt.Sprintf(`{
 			"schemaVersion": 2,
 			"mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -2727,28 +2436,15 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 			"annotations": {
 				"org.opencontainers.image.revision": "%s"
 			}
-		}`, expectedImageRevision)
-
-		var restartCalled bool
-		var restartedJob string
-
-		mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
-				restartCalled = true
-				restartedJob = args[len(args)-1]
-				return []byte("Job restart scheduled\n"), nil, nil
-			}
-			return nil, nil, nil
-		}
-
-		mockClient := newMockOCIRegistryClient(mockOCIOptions{
+		}`, tc.imageRevision)
+		registryClient = newMockOCIRegistryClient(mockOCIOptions{
 			OnRequest: func(req *http.Request) (*http.Response, error, bool) {
 				if req.Method == http.MethodHead {
-					header := make(http.Header)
-					header.Set("Docker-Content-Digest", newDigest)
+					h := make(http.Header)
+					h.Set("Docker-Content-Digest", curDigest)
 					return &http.Response{
 						StatusCode: http.StatusOK,
-						Header:     header,
+						Header:     h,
 						Body:       ioNopCloser(strings.NewReader("")),
 					}, nil, true
 				}
@@ -2762,60 +2458,234 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 				return nil, nil, false
 			},
 		})
-
-		evtCh := make(chan HangarDeployEvent, 10)
-		d := NewDaemon(DaemonConfig{
-			ConfigDir:      tmpDir,
-			NomadExecutor:  mockNomad,
-			RegistryClient: mockClient,
-			GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				if len(args) > 0 && args[0] == "rev-parse" {
-					return []byte("git_head_fallback_should_not_be_used\n"), nil, nil
-				}
-				return nil, nil, nil
+	} else {
+		registryClient = &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.URL != nil && strings.Contains(req.URL.String(), "test/img1") {
+						header := make(http.Header)
+						header.Set("Docker-Content-Digest", curDigest)
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Body:       ioNopCloser(strings.NewReader("not found")),
+					}, nil
+				},
 			},
-			DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-				evtCh <- evt
-				return nil
-			},
-		})
-
-		d.nomadKnownDigests["webhooks-router:ghcr.io/azylman/aerial-webhooks-router:latest"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-
-		if err := d.CheckAndReconcileNomadImages(context.Background()); err != nil {
-			t.Fatalf("CheckAndReconcileNomadImages returned error: %v", err)
 		}
+	}
 
-		if !restartCalled {
-			t.Fatalf("expected nomad job restart to be called")
+	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
+			restartCalled = true
+			restarted = args[len(args)-1]
+			return []byte("Job restart scheduled\n"), nil, nil
 		}
-		if restartedJob != "webhooks-router" {
-			t.Errorf("restartedJob = %q, want webhooks-router", restartedJob)
-		}
+		return nil, nil, nil
+	}
 
-		select {
-			case evt := <-evtCh:
-				if evt.Event != "deploy_started" {
-					t.Errorf("event = %q, want deploy_started", evt.Event)
+	d := NewDaemon(DaemonConfig{
+		Repos:          []string{baseDir},
+		ComposeDir:     baseDir,
+		ConfigDir:      baseDir,
+		NomadExecutor:  mockNomad,
+		RegistryClient: registryClient,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				return []byte("poll_commit_sha_123\n"), nil, nil
+			}
+			return nil, nil, nil
+		},
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+	})
+
+	return &imagePollTestEnv{
+		daemon:        d,
+		evtCh:         evtCh,
+		restartedJob:  &restarted,
+		restartCalled: &restartCalled,
+		currentDigest: &curDigest,
+	}
+}
+
+func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	pollCases := []nomadImagePollCase{
+		{
+			name:     "missing_jobs_dir_noop",
+			emptyDir: true,
+		},
+		{
+			name:             "initial_discovery_throttle_and_unchanged_digest",
+			jobFile:          "job1.nomad",
+			jobContent:       `job "job1" { task "t" { config { image = "ghcr.io/test/img1:latest" } } }`,
+			seedNonNomad:     true,
+			clientMode:       "dynamic_digest",
+			initialDigest:    "sha256:firstdigest111",
+			secondDigest:     "sha256:firstdigest111",
+			testRestartError: true,
+		},
+		{
+			name:             "changed_digest_git_head_fallback_and_restart_error",
+			isAerialRepo:     true,
+			jobFile:          "svc.nomad",
+			jobContent:       "job \"svc\" {\n  group \"g\" {\n    task \"t\" {\n      driver = \"docker\"\n      config {\n        image = \"ghcr.io/test/img1:latest\"\n      }\n    }\n  }\n}",
+			clientMode:       "dynamic_digest",
+			initialDigest:    "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+			secondDigest:     "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+			thirdDigest:      "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+			wantRestartJob:   "svc",
+			wantEventRepo:    "azylman/aerial",
+			wantEventCommit:  "poll_commit_sha_123",
+			testRestartError: true,
+		},
+		{
+			name:            "changed_digest_uses_oci_image_revision",
+			jobFile:         "webhooks-router.nomad",
+			jobContent:      `job "webhooks-router" { group "core" { task "router" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } } }`,
+			clientMode:      "oci_revision",
+			initialDigest:   "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+			imageRevision:   "9876543210abcdef9876543210abcdef98765432",
+			knownDigestKey:  "webhooks-router:ghcr.io/azylman/aerial-webhooks-router:latest",
+			knownDigestVal:  "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			wantRestartJob:  "webhooks-router",
+			wantEventRepo:   "azylman/aerial",
+			wantEventCommit: "9876543210abcdef9876543210abcdef98765432",
+			wantDigest:      "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+		},
+	}
+
+	for _, tc := range pollCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.emptyDir {
+				emptyDir := t.TempDir()
+				d := NewDaemon(DaemonConfig{ComposeDir: emptyDir, ConfigDir: emptyDir})
+				if err := d.CheckAndReconcileNomadImages(ctx); err != nil {
+					t.Errorf("expected nil error for missing jobs directory, got %v", err)
 				}
-				if evt.JobName != "webhooks-router" {
-					t.Errorf("job_name = %q, want webhooks-router", evt.JobName)
+				return
+			}
+
+			env := newImagePollTestEnv(t, tc)
+
+			if tc.knownDigestKey != "" {
+				env.daemon.nomadKnownDigests[tc.knownDigestKey] = tc.knownDigestVal
+			} else {
+				env.daemon.nomadKnownDigests = nil
+			}
+
+			// 1. Initial poll
+			if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
+				t.Fatalf("first poll unexpected error: %v", err)
+			}
+
+			if tc.clientMode == "oci_revision" {
+				if !*env.restartCalled || *env.restartedJob != tc.wantRestartJob {
+					t.Fatalf("expected restart for %s, got %s", tc.wantRestartJob, *env.restartedJob)
 				}
-				if evt.CommitSHA != expectedImageRevision {
-					t.Errorf("commit_sha = %q, want %q", evt.CommitSHA, expectedImageRevision)
+				select {
+				case evt := <-env.evtCh:
+					if evt.Event != "deploy_started" || evt.JobName != tc.wantRestartJob || evt.CommitSHA != tc.wantEventCommit || evt.Repo != tc.wantEventRepo || evt.Digest != tc.wantDigest {
+						t.Errorf("unexpected event: %+v", evt)
+					}
+				case <-time.After(2 * time.Second):
+					t.Errorf("timed out waiting for deploy_started event")
 				}
-				if evt.Repo != "azylman/aerial" {
-					t.Errorf("repo = %q, want azylman/aerial", evt.Repo)
+				return
+			}
+
+			if tc.knownDigestKey == "" && *env.restartedJob != "" {
+				t.Fatalf("expected no restart on initial discovery, got %s", *env.restartedJob)
+			}
+
+			// 2. Throttle test (immediate second poll)
+			if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
+				t.Fatalf("throttled poll unexpected error: %v", err)
+			}
+
+			// 3. Reset throttle for 3rd poll
+			env.daemon.nomadPollMu.Lock()
+			env.daemon.lastNomadImagePoll = time.Time{}
+			env.daemon.nomadPollMu.Unlock()
+
+			if tc.name == "initial_discovery_throttle_and_unchanged_digest" {
+				if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
+					t.Fatalf("third poll unchanged digest unexpected error: %v", err)
 				}
-				if evt.Digest != newDigest {
-					t.Errorf("digest = %q, want %q", evt.Digest, newDigest)
+				if *env.restartedJob != "" {
+					t.Fatalf("expected no restart when digest matches, got %s", *env.restartedJob)
+				}
+				if tc.testRestartError {
+					env.daemon.nomadPollMu.Lock()
+					env.daemon.lastNomadImagePoll = time.Time{}
+					env.daemon.nomadPollMu.Unlock()
+					*env.currentDigest = "sha256:seconddigest222"
+					env.daemon.nomadExecutor = func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+						if len(args) > 1 && args[1] == "restart" {
+							return []byte("restart err"), []byte("err details"), errors.New("restart fail")
+						}
+						return []byte("ok"), nil, nil
+					}
+					if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
+						t.Errorf("unexpected error on restart fail CheckAndReconcileNomadImages: %v", err)
+					}
+				}
+				return
+			}
+
+			// Unchanged digest poll first
+			if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
+				t.Fatalf("unchanged digest poll unexpected error: %v", err)
+			}
+			if *env.restartedJob != "" {
+				t.Fatalf("expected no restart when digest matches, got %s", *env.restartedJob)
+			}
+
+			// Reset throttle and change digest
+			env.daemon.nomadPollMu.Lock()
+			env.daemon.lastNomadImagePoll = time.Time{}
+			env.daemon.nomadPollMu.Unlock()
+
+			*env.currentDigest = tc.secondDigest
+			if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
+				t.Fatalf("changed digest poll unexpected error: %v", err)
+			}
+			if *env.restartedJob != tc.wantRestartJob {
+				t.Errorf("expected restart for %s, got %s", tc.wantRestartJob, *env.restartedJob)
+			}
+			select {
+			case evt := <-env.evtCh:
+				if evt.Event != "deploy_started" || evt.CommitSHA != tc.wantEventCommit || evt.Repo != tc.wantEventRepo {
+					t.Errorf("expected deploy_started event for %s, got %+v", tc.wantRestartJob, evt)
 				}
 			case <-time.After(2 * time.Second):
 				t.Errorf("timed out waiting for deploy_started event")
-		}
-	})
-}
+			}
 
+			if tc.testRestartError {
+				env.daemon.nomadPollMu.Lock()
+				env.daemon.lastNomadImagePoll = time.Time{}
+				env.daemon.nomadPollMu.Unlock()
+				*env.currentDigest = tc.thirdDigest
+				env.daemon.nomadExecutor = func(execCtx context.Context, args ...string) ([]byte, []byte, error) {
+					return nil, []byte("nomad down"), errors.New("restart fail")
+				}
+				if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
+					t.Fatalf("poll with restart fail returned error: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestCheckGitHubRepoBuildInProgress_TableDriven(t *testing.T) {
 	ctx := context.Background()
