@@ -20,205 +20,476 @@ import (
 )
 
 func TestStatusHandler(t *testing.T) {
-	req := httptest.NewRequest("GET", "/api/status", nil)
-	rr := httptest.NewRecorder()
+	t.Run("Basic_DockerFallback", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		rr := httptest.NewRecorder()
 
-	handler := statusHandler("", "", "", "")
-	handler.ServeHTTP(rr, req)
+		handler := statusHandler("", "", "", "")
+		handler.ServeHTTP(rr, req)
 
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-	}
-
-	var resp ClusterResponse
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode status response: %v", err)
-	}
-
-	if len(resp.Services) == 0 {
-		t.Errorf("expected services in response, got 0")
-	}
-
-	for _, svc := range resp.Services {
-		if svc.UptimeSeconds < 0 {
-			t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
+		if status := rr.Code; status != http.StatusOK {
+			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 		}
-	}
 
-	if resp.OngoingDeploy == "" {
-		t.Errorf("expected non-empty OngoingDeploy in status response")
-	}
-}
+		var resp ClusterResponse
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode status response: %v", err)
+		}
 
-func TestStatusHandlerOngoingDeploy(t *testing.T) {
-	tempDir := t.TempDir()
-	cfgFile := filepath.Join(tempDir, "config.yaml")
-	if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+		if len(resp.Services) == 0 {
+			t.Errorf("expected services in response, got 0")
+		}
 
-	handler := statusHandler("", "", cfgFile, "testcommit")
-	req := httptest.NewRequest("GET", "/api/status", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
+		for _, svc := range resp.Services {
+			if svc.UptimeSeconds < 0 {
+				t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
+			}
+		}
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr.Code)
-	}
+		if resp.OngoingDeploy == "" {
+			t.Errorf("expected non-empty OngoingDeploy in status response")
+		}
+	})
 
-	var resp ClusterResponse
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+	t.Run("OngoingDeploy", func(t *testing.T) {
+		tempDir := t.TempDir()
+		cfgFile := filepath.Join(tempDir, "config.yaml")
+		if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
 
-	if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
-		t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
-	}
-}
+		handler := statusHandler("", "", cfgFile, "testcommit")
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		rr := httptest.NewRecorder()
+		handler(rr, req)
 
-func TestStatusHandlerActiveTasks(t *testing.T) {
-	// 1. Successful active task aggregation
-	brainMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tasks" {
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rr.Code)
+		}
+
+		var resp ClusterResponse
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
+			t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
+		}
+	})
+
+	t.Run("ActiveTasks", func(t *testing.T) {
+		// 1. Successful active task aggregation
+		brainMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/tasks" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{
+					"status": "ok",
+					"total": 1,
+					"tasks": [
+						{
+							"id": "task-abc",
+							"thread_id": "thread-123",
+							"session_id": "session-456",
+							"author_name": "UserA",
+							"prompt": "Test execution prompt",
+							"summary": "Test execution prompt summary",
+							"status": "PROCESSING",
+							"retry_count": 0,
+							"trigger_type": "discord",
+							"created_at": "2026-08-30T12:00:00Z",
+							"updated_at": "2026-08-30T12:00:10Z"
+						}
+					]
+				}`))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer brainMock.Close()
+
+		handler := statusHandler(brainMock.URL, "", "", "")
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rr.Code)
+		}
+
+		var resp ClusterResponse
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode status response: %v", err)
+		}
+
+		if resp.ActiveTasksCount != 1 || len(resp.ActiveTasks) != 1 {
+			t.Fatalf("expected 1 active task, got %d: %+v", resp.ActiveTasksCount, resp.ActiveTasks)
+		}
+
+		if resp.ActiveTasks[0].ID != "task-abc" || resp.ActiveTasks[0].SessionID != "session-456" || resp.ActiveTasks[0].TriggerType != "discord" || resp.ActiveTasks[0].Summary != "Test execution prompt summary" {
+			t.Errorf("unexpected task contents: %+v", resp.ActiveTasks[0])
+		}
+		if resp.ActiveTasks[0].Status != "PROCESSING" || resp.ActiveTasks[0].AuthorName != "UserA" {
+			t.Errorf("unexpected task status/author: %+v", resp.ActiveTasks[0])
+		}
+
+		// 2. Graceful degradation on brain error / offline
+		degradedHandler := statusHandler("http://127.0.0.1:54321", "", "", "")
+		reqDegraded := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rrDegraded := httptest.NewRecorder()
+		degradedHandler.ServeHTTP(rrDegraded, reqDegraded)
+
+		if rrDegraded.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK on degraded status, got %d", rrDegraded.Code)
+		}
+
+		var degradedResp ClusterResponse
+		if err := json.NewDecoder(rrDegraded.Body).Decode(&degradedResp); err != nil {
+			t.Fatalf("failed to decode degraded status response: %v", err)
+		}
+
+		if degradedResp.ActiveTasksCount != 0 {
+			t.Errorf("expected 0 active tasks on degraded brain, got %d", degradedResp.ActiveTasksCount)
+		}
+		if degradedResp.ActiveTasks == nil || len(degradedResp.ActiveTasks) != 0 {
+			t.Errorf("expected non-nil empty ActiveTasks slice on degraded brain, got %+v", degradedResp.ActiveTasks)
+		}
+	})
+
+	t.Run("EnrichedFields", func(t *testing.T) {
+		tempDir := t.TempDir()
+		cfgFile := filepath.Join(tempDir, "config.yaml")
+		cfgContent := `
+dashboard:
+  quick_launch_links:
+    - name: "HOME"
+      url: "https://home.zylman.com"
+`
+		if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		gitsyncMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"status": "ok",
-				"total": 1,
-				"tasks": [
-					{
-						"id": "task-abc",
-						"thread_id": "thread-123",
-						"session_id": "session-456",
-						"author_name": "UserA",
-						"prompt": "Test execution prompt",
-						"summary": "Test execution prompt summary",
-						"status": "PROCESSING",
-						"retry_count": 0,
-						"trigger_type": "discord",
-						"created_at": "2026-08-30T12:00:00Z",
-						"updated_at": "2026-08-30T12:00:10Z"
-					}
-				]
-			}`))
-			return
+			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+				Status:        "synced",
+				MaxLagSeconds: 0,
+				LastSyncTime:  time.Now().UTC(),
+			})
+		}))
+		defer gitsyncMock.Close()
+
+		handler := statusHandler("", gitsyncMock.URL, cfgFile, "testsha")
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rr.Code)
 		}
-		http.NotFound(w, r)
-	}))
-	defer brainMock.Close()
 
-	handler := statusHandler(brainMock.URL, "", "", "")
-	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
+		var resp ClusterResponse
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr.Code)
-	}
+		if len(resp.QuickLaunchLinks) != 1 {
+			t.Fatalf("expected 1 quick launch link, got %d", len(resp.QuickLaunchLinks))
+		}
+		hasHome := false
+		for _, l := range resp.QuickLaunchLinks {
+			if l.Name == "HOME" && l.URL == "https://home.zylman.com" {
+				hasHome = true
+			}
+		}
+		if !hasHome {
+			t.Errorf("expected 'HOME' link in QuickLaunchLinks: %+v", resp.QuickLaunchLinks)
+		}
 
-	var resp ClusterResponse
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode status response: %v", err)
-	}
+		if resp.GitSync.Status != "synced" {
+			t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
+		}
+	})
 
-	if resp.ActiveTasksCount != 1 || len(resp.ActiveTasks) != 1 {
-		t.Fatalf("expected 1 active task, got %d: %+v", resp.ActiveTasksCount, resp.ActiveTasks)
-	}
+	t.Run("DegradedClusterStatus", func(t *testing.T) {
+		handler := statusHandler("", "", "", "")
+		origClient := dockerSocketClient
+		defer func() { dockerSocketClient = origClient }()
 
-	if resp.ActiveTasks[0].ID != "task-abc" || resp.ActiveTasks[0].SessionID != "session-456" || resp.ActiveTasks[0].TriggerType != "discord" || resp.ActiveTasks[0].Summary != "Test execution prompt summary" {
-		t.Errorf("unexpected task contents: %+v", resp.ActiveTasks[0])
-	}
-	if resp.ActiveTasks[0].Status != "PROCESSING" || resp.ActiveTasks[0].AuthorName != "UserA" {
-		t.Errorf("unexpected task status/author: %+v", resp.ActiveTasks[0])
-	}
+		dockerSocketClient = &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					containers := []DockerContainerJSON{
+						{
+							Names:   []string{"/aerial-brain"},
+							State:   "running",
+							Status:  "Up 10m (unhealthy)",
+							Created: time.Now().UTC().Unix(),
+						},
+					}
+					data, _ := json.Marshal(containers)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(string(data))),
+						Header:     make(http.Header),
+					}, nil
+				},
+			},
+		}
 
-	// 2. Graceful degradation on brain error / offline
-	degradedHandler := statusHandler("http://127.0.0.1:54321", "", "", "")
-	reqDegraded := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-	rrDegraded := httptest.NewRecorder()
-	degradedHandler.ServeHTTP(rrDegraded, reqDegraded)
+		reqGet := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rrGet := httptest.NewRecorder()
+		handler.ServeHTTP(rrGet, reqGet)
+		if rrGet.Code != http.StatusOK {
+			t.Fatalf("expected 200 on GET /api/status, got %d", rrGet.Code)
+		}
 
-	if rrDegraded.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on degraded status, got %d", rrDegraded.Code)
-	}
+		var resp ClusterResponse
+		_ = json.NewDecoder(rrGet.Body).Decode(&resp)
+		if resp.ClusterStatus != "degraded" {
+			t.Errorf("expected clusterStatus 'degraded', got %q", resp.ClusterStatus)
+		}
+	})
 
-	var degradedResp ClusterResponse
-	if err := json.NewDecoder(rrDegraded.Body).Decode(&degradedResp); err != nil {
-		t.Fatalf("failed to decode degraded status response: %v", err)
-	}
+	t.Run("ConcurrentPipelines", func(t *testing.T) {
+		hangarServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status" {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+					Status: "synced",
+					Reconciliation: &ReconciliationStatus{
+						Active:         true,
+						State:          "swapping",
+						CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						TargetServices: []string{"aerial-dashboard"},
+						StartedAt:      time.Now().UTC().Add(-10 * time.Second),
+					},
+				})
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer hangarServer.Close()
 
-	if degradedResp.ActiveTasksCount != 0 {
-		t.Errorf("expected 0 active tasks on degraded brain, got %d", degradedResp.ActiveTasksCount)
-	}
-	if degradedResp.ActiveTasks == nil || len(degradedResp.ActiveTasks) != 0 {
-		t.Errorf("expected non-nil empty ActiveTasks slice on degraded brain, got %+v", degradedResp.ActiveTasks)
-	}
+		oldPoller := globalGHPoller
+		defer func() { globalGHPoller = oldPoller }()
 
-	// 3. Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/api/status", nil)
-	rrPost := httptest.NewRecorder()
-	handler.ServeHTTP(rrPost, reqPost)
-	if rrPost.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
-	}
+		origDocker := dockerSocketClient
+		defer func() { dockerSocketClient = origDocker }()
+		dockerSocketClient = &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("[]")),
+						Header:     make(http.Header),
+					}, nil
+				},
+			},
+		}
+
+		poller := &GitHubPoller{
+			cachedRuns: []GitHubRun{
+				{
+					ID:        999,
+					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					Status:    "in_progress",
+					CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
+					UpdatedAt: time.Now().UTC().Add(-1 * time.Minute),
+				},
+			},
+			cachedJobs: map[int64][]GitHubJob{
+				999: {
+					{ID: 1, Name: "Build Dashboard", Status: "in_progress"},
+				},
+			},
+		}
+		globalGHPoller = poller
+
+		tempDir := t.TempDir()
+		cfgFile := filepath.Join(tempDir, "config.yaml")
+		if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		handler := statusHandler("", hangarServer.URL, cfgFile, "testcommit")
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", rr.Code)
+		}
+
+		var resp ClusterResponse
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response JSON: %v", err)
+		}
+
+		if len(resp.Deployments) != 2 {
+			t.Fatalf("expected 2 concurrent deployments, got %d", len(resp.Deployments))
+		}
+
+		stages := map[string]string{}
+		for _, d := range resp.Deployments {
+			stages[d.Commit] = d.Stage
+		}
+
+		if stages["aaaaaaa"] != "swapping" {
+			t.Errorf("expected commit aaaaaaa to be swapping, got %q", stages["aaaaaaa"])
+		}
+		if stages["bbbbbbb"] != "building" {
+			t.Errorf("expected commit bbbbbbb to be building, got %q", stages["bbbbbbb"])
+		}
+
+		if resp.OngoingDeploy != "swapping" {
+			t.Errorf("expected OngoingDeploy 'swapping', got %q", resp.OngoingDeploy)
+		}
+		if !resp.IsDeploying {
+			t.Errorf("expected IsDeploying true, got false")
+		}
+	})
+
+	t.Run("NomadPrimaryAndFallback", func(t *testing.T) {
+		t.Run("uses nomad services on success", func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/jobs":
+					w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"running"}]`))
+				case "/v1/allocations":
+					w.Write([]byte(`[
+						{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}},
+						{"ID":"a2","JobID":"nomad-proxy","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
+					]`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer ts.Close()
+
+			handler := statusHandler("", "", "", "testcommit", ts.URL)
+			req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected HTTP 200, got %d", rec.Code)
+			}
+
+			var resp ClusterResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+
+			if len(resp.Services) != 2 {
+				t.Fatalf("expected 2 services from Nomad, got %d: %+v", len(resp.Services), resp.Services)
+			}
+			if resp.Services[0].Name != "nomad-brain" || resp.Services[1].Name != "nomad-proxy" {
+				t.Errorf("unexpected services: %+v", resp.Services)
+			}
+		})
+
+		t.Run("falls back to docker when nomad fails", func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "server error", http.StatusInternalServerError)
+			}))
+			defer ts.Close()
+
+			handler := statusHandler("", "", "", "testcommit", ts.URL)
+			req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected HTTP 200, got %d", rec.Code)
+			}
+
+			var resp ClusterResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+
+			if len(resp.Services) == 0 {
+				t.Fatal("expected fallback services, got empty")
+			}
+			foundBrain := false
+			for _, s := range resp.Services {
+				if s.Name == "brain" {
+					foundBrain = true
+					break
+				}
+			}
+			if !foundBrain {
+				t.Errorf("expected fallback to include brain, got: %+v", resp.Services)
+			}
+		})
+
+		t.Run("falls back to docker when nomad returns empty services", func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`[]`))
+			}))
+			defer ts.Close()
+
+			handler := statusHandler("", "", "", "testcommit", ts.URL)
+			req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected HTTP 200, got %d", rec.Code)
+			}
+
+			var resp ClusterResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if len(resp.Services) == 0 {
+				t.Fatal("expected fallback services when nomad returns 0 services")
+			}
+		})
+	})
+
+	t.Run("MethodNotAllowed", func(t *testing.T) {
+		handler := statusHandler("", "", "", "")
+		reqPost := httptest.NewRequest(http.MethodPost, "/api/status", nil)
+		rrPost := httptest.NewRecorder()
+		handler.ServeHTTP(rrPost, reqPost)
+		if rrPost.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
+		}
+	})
 }
 
-func TestFactsHandler_Success(t *testing.T) {
-	// Mock brain upstream server
+func TestFactsHandler_TableDriven(t *testing.T) {
+	var capturedQuery url.Values
 	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/facts" {
 			http.NotFound(w, r)
 			return
 		}
-		q := r.URL.Query()
-		if q.Get("limit") != "25" || q.Get("category") != "user_preference" {
-			t.Errorf("unexpected upstream query: %s", r.URL.RawQuery)
-		}
-		resp := FactsAPIResponse{
-			Facts: []FactItem{
-				{
-					ID:         1,
-					Category:   "user_preference",
-					FactText:   "User prefers dark mode",
-					Importance: 0.9,
-					ThreadID:   "thread-123",
-					CreatedAt:  time.Now().UTC(),
+		if capturedQuery.Get("limit") == "25" && capturedQuery.Get("category") == "user_preference" {
+			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+				Facts: []FactItem{
+					{
+						ID:         1,
+						Category:   "user_preference",
+						FactText:   "User prefers dark mode",
+						Importance: 0.9,
+						ThreadID:   "thread-123",
+						CreatedAt:  time.Now().UTC(),
+					},
 				},
-			},
-			Total:  1,
-			Limit:  25,
-			Offset: 0,
+				Total:  1,
+				Limit:  25,
+				Offset: 0,
+			})
+			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer mockBrain.Close()
-
-	handler := factsHandler(mockBrain.URL)
-	req := httptest.NewRequest("GET", "/api/facts?limit=25&category=user_preference", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr.Code)
-	}
-
-	var data FactsAPIResponse
-	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if len(data.Facts) != 1 || data.Facts[0].FactText != "User prefers dark mode" {
-		t.Errorf("unexpected facts in response: %+v", data.Facts)
-	}
-}
-
-func TestFactsHandler_UnlimitedAndHighLimit(t *testing.T) {
-	var capturedLimit string
-	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedLimit = r.URL.Query().Get("limit")
-		resp := FactsAPIResponse{
+		_ = json.NewEncoder(w).Encode(FactsAPIResponse{
 			Facts: []FactItem{
 				{
 					ID:         1,
@@ -231,59 +502,164 @@ func TestFactsHandler_UnlimitedAndHighLimit(t *testing.T) {
 			Total:  1,
 			Limit:  0,
 			Offset: 0,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		})
 	}))
 	defer mockBrain.Close()
 
-	handler := factsHandler(mockBrain.URL)
+	mockNilBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+			Facts:  nil,
+			Total:  0,
+			Limit:  10,
+			Offset: 5,
+			Status: "ok",
+		})
+	}))
+	defer mockNilBrain.Close()
 
-	// 1. Unlimited request (no limit param)
-	req1 := httptest.NewRequest("GET", "/api/facts", nil)
-	rr1 := httptest.NewRecorder()
-	handler(rr1, req1)
-	if rr1.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr1.Code)
-	}
-	if capturedLimit != "" {
-		t.Errorf("expected empty limit forwarded for unlimited request, got %q", capturedLimit)
+	mockErrBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"db failure"}`))
+	}))
+	defer mockErrBrain.Close()
+
+	mockBadJSONBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not-valid-json`))
+	}))
+	defer mockBadJSONBrain.Close()
+
+	offlineURL := "http://127.0.0.1:54321"
+
+	tests := []struct {
+		name       string
+		brainURL   string
+		method     string
+		target     string
+		wantStatus int
+		check      func(t *testing.T, body io.Reader)
+	}{
+		{
+			name:       "Success_QueryFilter",
+			brainURL:   mockBrain.URL,
+			method:     http.MethodGet,
+			target:     "/api/facts?limit=25&category=user_preference",
+			wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data FactsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if len(data.Facts) != 1 || data.Facts[0].FactText != "User prefers dark mode" {
+					t.Errorf("unexpected facts: %+v", data.Facts)
+				}
+			},
+		},
+		{
+			name:       "Success_UnlimitedDefault",
+			brainURL:   mockBrain.URL,
+			method:     http.MethodGet,
+			target:     "/api/facts",
+			wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				if capturedQuery.Get("limit") != "" {
+					t.Errorf("expected empty limit forwarded, got %q", capturedQuery.Get("limit"))
+				}
+			},
+		},
+		{
+			name:       "Success_HighLimit",
+			brainURL:   mockBrain.URL,
+			method:     http.MethodGet,
+			target:     "/api/facts?limit=500",
+			wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				if capturedQuery.Get("limit") != "500" {
+					t.Errorf("expected limit=500 forwarded, got %q", capturedQuery.Get("limit"))
+				}
+			},
+		},
+		{
+			name:       "Success_AllParamsAndNilFacts",
+			brainURL:   mockNilBrain.URL,
+			method:     http.MethodGet,
+			target:     "/api/facts?limit=10&offset=5&category=user&q=" + strings.Repeat("searchterm", 10),
+			wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data FactsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Facts == nil || len(data.Facts) != 0 {
+					t.Errorf("expected non-nil empty facts, got %+v", data.Facts)
+				}
+				gotQ := capturedQuery.Get("q")
+				if len([]rune(gotQ)) > 64 {
+					t.Errorf("expected q truncated to 64 runes, got len %d: %q", len([]rune(gotQ)), gotQ)
+				}
+			},
+		},
+		{
+			name:       "DegradedFallback",
+			brainURL:   offlineURL,
+			method:     http.MethodGet,
+			target:     "/api/facts",
+			wantStatus: http.StatusServiceUnavailable,
+			check: func(t *testing.T, body io.Reader) {
+				var data FactsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode degraded response: %v", err)
+				}
+				if data.Status != "degraded" || data.Facts == nil || len(data.Facts) != 0 {
+					t.Errorf("unexpected degraded response: %+v", data)
+				}
+			},
+		},
+		{
+			name:       "Upstream500",
+			brainURL:   mockErrBrain.URL,
+			method:     http.MethodGet,
+			target:     "/api/facts",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "BadGateway_InvalidJSON",
+			brainURL:   mockBadJSONBrain.URL,
+			method:     http.MethodGet,
+			target:     "/api/facts",
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "MethodNotAllowed",
+			brainURL:   mockBrain.URL,
+			method:     http.MethodPost,
+			target:     "/api/facts",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "InvalidUpstreamURL",
+			brainURL:   "http://brain:\x7f8080",
+			method:     http.MethodGet,
+			target:     "/api/facts",
+			wantStatus: http.StatusInternalServerError,
+		},
 	}
 
-	// 2. High limit request (limit=500)
-	req2 := httptest.NewRequest("GET", "/api/facts?limit=500", nil)
-	rr2 := httptest.NewRecorder()
-	handler(rr2, req2)
-	if rr2.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr2.Code)
-	}
-	if capturedLimit != "500" {
-		t.Errorf("expected limit=500 forwarded to brain, got %q", capturedLimit)
-	}
-}
-
-func TestFactsHandler_DegradedFallback(t *testing.T) {
-	// Offline / unreachable brain upstream
-	handler := factsHandler("http://127.0.0.1:54321")
-	req := httptest.NewRequest("GET", "/api/facts", nil)
-	rr := httptest.NewRecorder()
-
-	handler(rr, req)
-
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 Service Unavailable on brain offline, got %d", rr.Code)
-	}
-
-	var data FactsAPIResponse
-	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
-		t.Fatalf("failed to decode degraded response: %v", err)
-	}
-
-	if data.Status != "degraded" {
-		t.Errorf("expected status 'degraded', got %s", data.Status)
-	}
-	if data.Facts == nil {
-		t.Errorf("expected non-nil empty facts array")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := factsHandler(tt.brainURL)
+			req := httptest.NewRequest(tt.method, tt.target, nil)
+			rr := httptest.NewRecorder()
+			h(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
+			}
+			if tt.check != nil {
+				tt.check(t, rr.Body)
+			}
+		})
 	}
 }
 
@@ -337,6 +713,41 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 	}))
 	defer mockBrain.Close()
 
+	mockNilBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/schedules":
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status:   "ok",
+				Crons:    nil,
+				OneShots: nil,
+			})
+		case "/schedules/runs":
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Status: "ok",
+				Total:  0,
+				Limit:  10,
+				Offset: 5,
+				Runs:   nil,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockNilBrain.Close()
+
+	mockErrBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"db failure"}`))
+	}))
+	defer mockErrBrain.Close()
+
+	mockBadJSONBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not-valid-json`))
+	}))
+	defer mockBadJSONBrain.Close()
+
 	offlineURL := "http://127.0.0.1:54321"
 	tests := []struct {
 		name       string
@@ -360,6 +771,21 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			},
 		},
 		{
+			name: "Schedules_SuccessParams_NilSlices", brainURL: mockNilBrain.URL, method: "GET", target: "/api/schedules?limit=5&offset=2&active=true&q=weather", wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data SchedulesAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Crons == nil || len(data.Crons) != 0 || data.OneShots == nil || len(data.OneShots) != 0 {
+					t.Errorf("expected non-nil empty slices: %+v", data)
+				}
+			},
+		},
+		{
+			name: "Schedules_ActiveFalse", brainURL: mockBrain.URL, method: "GET", target: "/api/schedules?active=false", wantStatus: http.StatusOK,
+		},
+		{
 			name: "Schedules_DegradedFallback", brainURL: offlineURL, method: "GET", target: "/api/schedules", wantStatus: http.StatusServiceUnavailable,
 			check: func(t *testing.T, body io.Reader) {
 				var data SchedulesAPIResponse
@@ -372,7 +798,16 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			},
 		},
 		{
+			name: "Schedules_Upstream500", brainURL: mockErrBrain.URL, method: "GET", target: "/api/schedules", wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name: "Schedules_BadGateway", brainURL: mockBadJSONBrain.URL, method: "GET", target: "/api/schedules", wantStatus: http.StatusBadGateway,
+		},
+		{
 			name: "Schedules_MethodNotAllowed", brainURL: offlineURL, method: "POST", target: "/api/schedules", wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name: "Schedules_InvalidUpstreamURL", brainURL: "http://brain:\x7f8080", method: "GET", target: "/api/schedules", wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name: "ScheduleRuns_Success", isRuns: true, brainURL: mockBrain.URL, method: "GET", target: "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success", wantStatus: http.StatusOK,
@@ -383,6 +818,18 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 				}
 				if data.Status != "ok" || data.Total != 42 || data.Limit != 10 || data.Offset != 5 || len(data.Runs) != 1 || data.Runs[0].ID != "cron-brief-101" || data.Runs[0].DurationMs != 1250 {
 					t.Errorf("unexpected schedule runs response: %+v", data)
+				}
+			},
+		},
+		{
+			name: "ScheduleRuns_SuccessParams_NilSlices", isRuns: true, brainURL: mockNilBrain.URL, method: "GET", target: "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42", wantStatus: http.StatusOK,
+			check: func(t *testing.T, body io.Reader) {
+				var data ScheduleRunsAPIResponse
+				if err := json.NewDecoder(body).Decode(&data); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if data.Runs == nil || len(data.Runs) != 0 {
+					t.Errorf("expected non-nil empty runs slice: %+v", data)
 				}
 			},
 		},
@@ -399,7 +846,16 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			},
 		},
 		{
+			name: "ScheduleRuns_Upstream500", isRuns: true, brainURL: mockErrBrain.URL, method: "GET", target: "/api/schedules/runs", wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name: "ScheduleRuns_BadGateway", isRuns: true, brainURL: mockBadJSONBrain.URL, method: "GET", target: "/api/schedules/runs", wantStatus: http.StatusBadGateway,
+		},
+		{
 			name: "ScheduleRuns_MethodNotAllowed", isRuns: true, brainURL: offlineURL, method: "DELETE", target: "/api/schedules/runs", wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name: "ScheduleRuns_InvalidUpstreamURL", isRuns: true, brainURL: "http://brain:\x7f8080", method: "GET", target: "/api/schedules/runs", wantStatus: http.StatusInternalServerError,
 		},
 	}
 
@@ -1240,63 +1696,6 @@ func TestFetchGitSyncStatus(t *testing.T) {
 	}
 }
 
-func TestStatusHandler_EnrichedFields(t *testing.T) {
-	tempDir := t.TempDir()
-	cfgFile := filepath.Join(tempDir, "config.yaml")
-	cfgContent := `
-dashboard:
-  quick_launch_links:
-    - name: "HOME"
-      url: "https://home.zylman.com"
-`
-	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	gitsyncMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
-			Status:        "synced",
-			MaxLagSeconds: 0,
-			LastSyncTime:  time.Now().UTC(),
-		})
-	}))
-	defer gitsyncMock.Close()
-
-	handler := statusHandler("", gitsyncMock.URL, cfgFile, "testsha")
-	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rr.Code)
-	}
-
-	var resp ClusterResponse
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	// Verify QuickLaunchLinks
-	if len(resp.QuickLaunchLinks) != 1 {
-		t.Fatalf("expected 1 quick launch link, got %d", len(resp.QuickLaunchLinks))
-	}
-	hasHome := false
-	for _, l := range resp.QuickLaunchLinks {
-		if l.Name == "HOME" && l.URL == "https://home.zylman.com" {
-			hasHome = true
-		}
-	}
-	if !hasHome {
-		t.Errorf("expected 'HOME' link in QuickLaunchLinks: %+v", resp.QuickLaunchLinks)
-	}
-
-	// Verify GitSync
-	if resp.GitSync.Status != "synced" {
-		t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
-	}
-}
-
 func TestHealthHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
@@ -1667,92 +2066,6 @@ func TestGitHubPoller_FullLifecycle(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 }
 
-func TestFactsSchedulesRuns_ErrorBranches(t *testing.T) {
-	// 1. Facts Handler - 405 Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/api/facts", nil)
-	rrPost := httptest.NewRecorder()
-	handlerFacts := factsHandler("http://127.0.0.1:54321")
-	handlerFacts(rrPost, reqPost)
-	if rrPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on POST /api/facts, got %d", rrPost.Code)
-	}
-
-	// Facts Handler - Upstream 500 error pass-through
-	mockErrBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"db failure"}`))
-	}))
-	defer mockErrBrain.Close()
-
-	rrErr := httptest.NewRecorder()
-	reqGet := httptest.NewRequest(http.MethodGet, "/api/facts", nil)
-	handlerFactsErr := factsHandler(mockErrBrain.URL)
-	handlerFactsErr(rrErr, reqGet)
-	if rrErr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on upstream 500, got %d", rrErr.Code)
-	}
-
-	// Facts Handler - Bad Gateway on invalid json
-	mockBadJSONBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`not-valid-json`))
-	}))
-	defer mockBadJSONBrain.Close()
-
-	rrBadJSON := httptest.NewRecorder()
-	handlerFactsBadJSON := factsHandler(mockBadJSONBrain.URL)
-	handlerFactsBadJSON(rrBadJSON, reqGet)
-	if rrBadJSON.Code != http.StatusBadGateway {
-		t.Errorf("expected 502 on invalid upstream JSON, got %d", rrBadJSON.Code)
-	}
-
-	// 2. Schedules Handler - 405 Method Not Allowed
-	handlerSchedules := schedulesHandler(mockErrBrain.URL)
-	rrSchedPost := httptest.NewRecorder()
-	handlerSchedules(rrSchedPost, reqPost)
-	if rrSchedPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on POST /api/schedules, got %d", rrSchedPost.Code)
-	}
-
-	// Schedules Handler - Upstream 500 error pass-through
-	rrSchedErr := httptest.NewRecorder()
-	handlerSchedules(rrSchedErr, reqGet)
-	if rrSchedErr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on schedules upstream 500, got %d", rrSchedErr.Code)
-	}
-
-	// Schedules Handler - Bad Gateway on invalid json
-	rrSchedBadJSON := httptest.NewRecorder()
-	handlerSchedBadJSON := schedulesHandler(mockBadJSONBrain.URL)
-	handlerSchedBadJSON(rrSchedBadJSON, reqGet)
-	if rrSchedBadJSON.Code != http.StatusBadGateway {
-		t.Errorf("expected 502 on schedules bad JSON, got %d", rrSchedBadJSON.Code)
-	}
-
-	// 3. Schedule Runs Handler - 405 Method Not Allowed
-	handlerRuns := scheduleRunsHandler(mockErrBrain.URL)
-	rrRunsPost := httptest.NewRecorder()
-	handlerRuns(rrRunsPost, reqPost)
-	if rrRunsPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on POST /api/schedules/runs, got %d", rrRunsPost.Code)
-	}
-
-	// Schedule Runs Handler - Upstream 500 error pass-through
-	rrRunsErr := httptest.NewRecorder()
-	handlerRuns(rrRunsErr, reqGet)
-	if rrRunsErr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on schedule runs upstream 500, got %d", rrRunsErr.Code)
-	}
-
-	// Schedule Runs Handler - Bad Gateway on invalid json
-	rrRunsBadJSON := httptest.NewRecorder()
-	handlerRunsBadJSON := scheduleRunsHandler(mockBadJSONBrain.URL)
-	handlerRunsBadJSON(rrRunsBadJSON, reqGet)
-	if rrRunsBadJSON.Code != http.StatusBadGateway {
-		t.Errorf("expected 502 on schedule runs bad JSON, got %d", rrRunsBadJSON.Code)
-	}
-}
-
 func TestDashboardServerLifecycle(t *testing.T) {
 	// RunDashboardServer with ephemeral port and cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1785,94 +2098,6 @@ func TestDashboardServerLifecycle(t *testing.T) {
 	})
 	if errBadPort == nil {
 		t.Errorf("expected error on bad port in RunDashboardServer")
-	}
-}
-
-func TestFactsSchedulesRuns_SuccessParams(t *testing.T) {
-	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/facts":
-			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
-				Facts:  nil, // tests data.Facts == nil -> []
-				Total:  0,
-				Limit:  10,
-				Offset: 5,
-				Status: "ok",
-			})
-		case "/schedules":
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
-				Crons:    nil, // tests data.Crons == nil -> []
-				OneShots: nil, // tests data.OneShots == nil -> []
-				Status:   "ok",
-			})
-		case "/schedules/runs":
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
-				Runs:   nil, // tests data.Runs == nil -> []
-				Total:  0,
-				Limit:  10,
-				Offset: 5,
-				Status: "ok",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer mockBrain.Close()
-
-	// 1. Facts with all query parameters
-	longQuery := strings.Repeat("searchterm", 10)
-	reqFacts := httptest.NewRequest(http.MethodGet, "/api/facts?limit=10&offset=5&category=user&q="+longQuery, nil)
-	rrFacts := httptest.NewRecorder()
-	handlerFacts := factsHandler(mockBrain.URL)
-	handlerFacts(rrFacts, reqFacts)
-	if rrFacts.Code != http.StatusOK {
-		t.Errorf("expected 200 OK on facts with query params, got %d", rrFacts.Code)
-	}
-
-	// 2. Schedules with active=true, active=false, search, limit, offset
-	reqSched := httptest.NewRequest(http.MethodGet, "/api/schedules?limit=5&offset=2&active=true&q=weather", nil)
-	rrSched := httptest.NewRecorder()
-	handlerSched := schedulesHandler(mockBrain.URL)
-	handlerSched(rrSched, reqSched)
-	if rrSched.Code != http.StatusOK {
-		t.Errorf("expected 200 OK on schedules active=true, got %d", rrSched.Code)
-	}
-
-	reqSchedFalse := httptest.NewRequest(http.MethodGet, "/api/schedules?active=false", nil)
-	rrSchedFalse := httptest.NewRecorder()
-	handlerSched(rrSchedFalse, reqSchedFalse)
-	if rrSchedFalse.Code != http.StatusOK {
-		t.Errorf("expected 200 OK on schedules active=false, got %d", rrSchedFalse.Code)
-	}
-
-	// 3. Schedule runs with status, schedule_id, limit, offset
-	reqRuns := httptest.NewRequest(http.MethodGet, "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42", nil)
-	rrRuns := httptest.NewRecorder()
-	handlerRuns := scheduleRunsHandler(mockBrain.URL)
-	handlerRuns(rrRuns, reqRuns)
-	if rrRuns.Code != http.StatusOK {
-		t.Errorf("expected 200 OK on runs with params, got %d", rrRuns.Code)
-	}
-
-	// 4. Offline degradation for all 3 handlers
-	offlineURL := "http://127.0.0.1:54321"
-	rrOfflineFacts := httptest.NewRecorder()
-	factsHandler(offlineURL)(rrOfflineFacts, reqFacts)
-	if rrOfflineFacts.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 on offline brain facts, got %d", rrOfflineFacts.Code)
-	}
-
-	rrOfflineSched := httptest.NewRecorder()
-	schedulesHandler(offlineURL)(rrOfflineSched, reqSched)
-	if rrOfflineSched.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 on offline brain schedules, got %d", rrOfflineSched.Code)
-	}
-
-	rrOfflineRuns := httptest.NewRecorder()
-	scheduleRunsHandler(offlineURL)(rrOfflineRuns, reqRuns)
-	if rrOfflineRuns.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 on offline brain runs, got %d", rrOfflineRuns.Code)
 	}
 }
 
@@ -2236,152 +2461,6 @@ func TestFetchActiveTasksFromBrain_Extended(t *testing.T) {
 	}
 }
 
-func TestStatusHandler_DegradedAndMethodNotAllowed(t *testing.T) {
-	handler := statusHandler("", "", "", "")
-
-	// 1. Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/api/status", nil)
-	rrPost := httptest.NewRecorder()
-	handler.ServeHTTP(rrPost, reqPost)
-	if rrPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on POST /api/status, got %d", rrPost.Code)
-	}
-
-	// 2. Degraded cluster status when container is unhealthy
-	origClient := dockerSocketClient
-	defer func() { dockerSocketClient = origClient }()
-
-	dockerSocketClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				containers := []DockerContainerJSON{
-					{
-						Names:   []string{"/aerial-brain"},
-						State:   "running",
-						Status:  "Up 10m (unhealthy)",
-						Created: time.Now().UTC().Unix(),
-					},
-				}
-				data, _ := json.Marshal(containers)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(string(data))),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-
-	reqGet := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-	rrGet := httptest.NewRecorder()
-	handler.ServeHTTP(rrGet, reqGet)
-	if rrGet.Code != http.StatusOK {
-		t.Fatalf("expected 200 on GET /api/status, got %d", rrGet.Code)
-	}
-
-	var resp ClusterResponse
-	_ = json.NewDecoder(rrGet.Body).Decode(&resp)
-	if resp.ClusterStatus != "degraded" {
-		t.Errorf("expected clusterStatus 'degraded', got %q", resp.ClusterStatus)
-	}
-}
-
-func TestFactsHandler_Extended(t *testing.T) {
-	// 1. Method not allowed
-	h := factsHandler("http://brain:8080")
-	reqPost := httptest.NewRequest(http.MethodPost, "/api/facts", nil)
-	rrPost := httptest.NewRecorder()
-	h.ServeHTTP(rrPost, reqPost)
-	if rrPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 from POST /api/facts, got %d", rrPost.Code)
-	}
-
-	// 2. Invalid upstream URL (control char)
-	hBadURL := factsHandler("http://brain:\x7f8080")
-	reqGet := httptest.NewRequest(http.MethodGet, "/api/facts", nil)
-	rrBadURL := httptest.NewRecorder()
-	hBadURL.ServeHTTP(rrBadURL, reqGet)
-	if rrBadURL.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 from invalid upstream URL, got %d", rrBadURL.Code)
-	}
-
-	// 3. Search query truncated > 64 runes
-	origClient := brainHTTPClient
-	defer func() { brainHTTPClient = origClient }()
-
-	var capturedReq *http.Request
-	brainHTTPClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				capturedReq = req
-				resp := `{"status":"ok","total":0,"limit":10,"offset":5,"facts":[]}`
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(resp)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-
-	reqSearch := httptest.NewRequest(http.MethodGet, "/api/facts?q="+strings.Repeat("a", 100)+"&limit=10&offset=5&category=user", nil)
-	rrSearch := httptest.NewRecorder()
-	h.ServeHTTP(rrSearch, reqSearch)
-
-	if rrSearch.Code != http.StatusOK {
-		t.Errorf("expected 200 OK from mocked factsHandler, got %d", rrSearch.Code)
-	}
-	if capturedReq == nil {
-		t.Fatal("expected capturedReq to not be nil")
-	}
-	gotQ := capturedReq.URL.Query().Get("q")
-	if gotQ != strings.Repeat("a", 64) {
-		t.Errorf("expected q truncated to 64 runes, got len %d: %q", len(gotQ), gotQ)
-	}
-	if capturedReq.URL.Query().Get("limit") != "10" {
-		t.Errorf("expected limit=10, got %q", capturedReq.URL.Query().Get("limit"))
-	}
-	if capturedReq.URL.Query().Get("offset") != "5" {
-		t.Errorf("expected offset=5, got %q", capturedReq.URL.Query().Get("offset"))
-	}
-	if capturedReq.URL.Query().Get("category") != "user" {
-		t.Errorf("expected category=user, got %q", capturedReq.URL.Query().Get("category"))
-	}
-}
-
-func TestSchedulesHandlers_Extended(t *testing.T) {
-	// 1. schedulesHandler: Method not allowed & invalid URL
-	hSched := schedulesHandler("http://brain:8080")
-	reqPost := httptest.NewRequest(http.MethodPost, "/api/schedules", nil)
-	rrPost := httptest.NewRecorder()
-	hSched.ServeHTTP(rrPost, reqPost)
-	if rrPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 from POST /api/schedules, got %d", rrPost.Code)
-	}
-
-	hSchedBad := schedulesHandler("http://brain:\x7f8080")
-	rrBad := httptest.NewRecorder()
-	hSchedBad.ServeHTTP(rrBad, httptest.NewRequest(http.MethodGet, "/api/schedules", nil))
-	if rrBad.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 from invalid schedules URL")
-	}
-
-	// 2. scheduleRunsHandler: Method not allowed & invalid URL
-	hRuns := scheduleRunsHandler("http://brain:8080")
-	rrRunsPost := httptest.NewRecorder()
-	hRuns.ServeHTTP(rrRunsPost, reqPost)
-	if rrRunsPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 from POST /api/schedules/runs, got %d", rrRunsPost.Code)
-	}
-
-	hRunsBad := scheduleRunsHandler("http://brain:\x7f8080")
-	rrRunsBad := httptest.NewRecorder()
-	hRunsBad.ServeHTTP(rrRunsBad, httptest.NewRequest(http.MethodGet, "/api/schedules/runs", nil))
-	if rrRunsBad.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 from invalid schedule runs URL")
-	}
-}
-
 func TestNewAssetRegistry_FallbackVersions(t *testing.T) {
 	emptyDir := t.TempDir()
 	reg, err := NewAssetRegistry(os.DirFS(emptyDir), "dev")
@@ -2552,105 +2631,6 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 
 	mockWJSONErr := newMockErrWriter(errors.New("write failure"))
 	writeJSON(mockWJSONErr, reqActive, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func TestStatusHandler_ConcurrentPipelines(t *testing.T) {
-	hangarServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/status" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:         true,
-					State:          "swapping",
-					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					TargetServices: []string{"aerial-dashboard"},
-					StartedAt:      time.Now().UTC().Add(-10 * time.Second),
-				},
-			})
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer hangarServer.Close()
-
-	oldPoller := globalGHPoller
-	defer func() { globalGHPoller = oldPoller }()
-
-	origDocker := dockerSocketClient
-	defer func() { dockerSocketClient = origDocker }()
-	dockerSocketClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader("[]")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-
-	poller := &GitHubPoller{
-		cachedRuns: []GitHubRun{
-			{
-				ID:        999,
-				HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-				Status:    "in_progress",
-				CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
-				UpdatedAt: time.Now().UTC().Add(-1 * time.Minute),
-			},
-		},
-		cachedJobs: map[int64][]GitHubJob{
-			999: {
-				{ID: 1, Name: "Build Dashboard", Status: "in_progress"},
-			},
-		},
-	}
-	globalGHPoller = poller
-
-	tempDir := t.TempDir()
-	cfgFile := filepath.Join(tempDir, "config.yaml")
-	if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	handler := statusHandler("", hangarServer.URL, cfgFile, "testcommit")
-	req := httptest.NewRequest("GET", "/api/status", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rr.Code)
-	}
-
-	var resp ClusterResponse
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response JSON: %v", err)
-	}
-
-	if len(resp.Deployments) != 2 {
-		t.Fatalf("expected 2 concurrent deployments, got %d", len(resp.Deployments))
-	}
-
-	stages := map[string]string{}
-	for _, d := range resp.Deployments {
-		stages[d.Commit] = d.Stage
-	}
-
-	if stages["aaaaaaa"] != "swapping" {
-		t.Errorf("expected commit aaaaaaa to be swapping, got %q", stages["aaaaaaa"])
-	}
-	if stages["bbbbbbb"] != "building" {
-		t.Errorf("expected commit bbbbbbb to be building, got %q", stages["bbbbbbb"])
-	}
-
-	if resp.OngoingDeploy != "swapping" {
-		t.Errorf("expected OngoingDeploy 'swapping', got %q", resp.OngoingDeploy)
-	}
-	if !resp.IsDeploying {
-		t.Errorf("expected IsDeploying true, got false")
-	}
 }
 
 func TestLoadDashboardRepos_TableDriven(t *testing.T) {
@@ -3583,108 +3563,6 @@ func TestFetchNomadClusterState(t *testing.T) {
 		_, err := fetchNomadClusterState(ctx, "http://127.0.0.1:59999")
 		if err == nil {
 			t.Fatal("expected network error")
-		}
-	})
-}
-
-func TestStatusHandler_NomadAndFallback(t *testing.T) {
-	t.Run("uses nomad services on success", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Path {
-			case "/v1/jobs":
-				w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"running"}]`))
-			case "/v1/allocations":
-				w.Write([]byte(`[
-					{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}},
-					{"ID":"a2","JobID":"nomad-proxy","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
-				]`))
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		defer ts.Close()
-
-		handler := statusHandler("", "", "", "testcommit", ts.URL)
-		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected HTTP 200, got %d", rec.Code)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-
-		if len(resp.Services) != 2 {
-			t.Fatalf("expected 2 services from Nomad, got %d: %+v", len(resp.Services), resp.Services)
-		}
-		if resp.Services[0].Name != "nomad-brain" || resp.Services[1].Name != "nomad-proxy" {
-			t.Errorf("unexpected services: %+v", resp.Services)
-		}
-	})
-
-	t.Run("falls back to docker when nomad fails", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "server error", http.StatusInternalServerError)
-		}))
-		defer ts.Close()
-
-		handler := statusHandler("", "", "", "testcommit", ts.URL)
-		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected HTTP 200, got %d", rec.Code)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-
-		// Because Docker socket is unreachable in unit test environment, fallback list is used
-		if len(resp.Services) == 0 {
-			t.Fatal("expected fallback services, got empty")
-		}
-		foundBrain := false
-		for _, s := range resp.Services {
-			if s.Name == "brain" {
-				foundBrain = true
-				break
-			}
-		}
-		if !foundBrain {
-			t.Errorf("expected fallback to include brain, got: %+v", resp.Services)
-		}
-	})
-
-	t.Run("falls back to docker when nomad returns empty services", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[]`))
-		}))
-		defer ts.Close()
-
-		handler := statusHandler("", "", "", "testcommit", ts.URL)
-		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected HTTP 200, got %d", rec.Code)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-		if len(resp.Services) == 0 {
-			t.Fatal("expected fallback services when nomad returns 0 services")
 		}
 	})
 }

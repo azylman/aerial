@@ -1190,22 +1190,31 @@ type rawUserConfig struct {
 	VanadisURL  string            `yaml:"vanadis_url"`
 }
 
-// loadDashboardVanadisURL parses the Vanadis upstream URL configured in config.yaml.
-func loadDashboardVanadisURL(configPath string) string {
+// loadRawUserConfig parses and unmarshals rawUserConfig from the given path.
+func loadRawUserConfig(configPath string) (rawUserConfig, bool) {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
-		return ""
+		return rawUserConfig{}, false
 	}
 	configPath = filepath.Clean(configPath)
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return ""
+		return rawUserConfig{}, false
 	}
 
 	var cfg rawUserConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Printf("[Dashboard] Warning: failed to parse %s for vanadis url: %v", configPath, err)
+		log.Printf("[Dashboard] Warning: failed to parse %s: %v", configPath, err)
+		return rawUserConfig{}, false
+	}
+	return cfg, true
+}
+
+// loadDashboardVanadisURL parses the Vanadis upstream URL configured in config.yaml.
+func loadDashboardVanadisURL(configPath string) string {
+	cfg, ok := loadRawUserConfig(configPath)
+	if !ok {
 		return ""
 	}
 
@@ -1218,20 +1227,8 @@ func loadDashboardVanadisURL(configPath string) string {
 
 // loadDashboardRepos parses the list of GitHub repositories configured for status dashboard monitoring.
 func loadDashboardRepos(configPath string) []string {
-	configPath = strings.TrimSpace(configPath)
-	if configPath == "" {
-		return nil
-	}
-	configPath = filepath.Clean(configPath)
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil
-	}
-
-	var cfg rawUserConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Printf("[Dashboard] Warning: failed to parse %s for dashboard repos: %v", configPath, err)
+	cfg, ok := loadRawUserConfig(configPath)
+	if !ok {
 		return nil
 	}
 
@@ -1261,20 +1258,8 @@ func loadDashboardRepos(configPath string) []string {
 func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 	links := DefaultQuickLaunchLinks()
 
-	configPath = strings.TrimSpace(configPath)
-	if configPath == "" {
-		return links
-	}
-	configPath = filepath.Clean(configPath)
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return links
-	}
-
-	var cfg rawUserConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Printf("[Dashboard] Warning: failed to parse %s for quick links: %v", configPath, err)
+	cfg, ok := loadRawUserConfig(configPath)
+	if !ok {
 		return links
 	}
 
@@ -1435,6 +1420,41 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 	}
 }
 
+// fetchUpstreamJSON executes an HTTP GET request with a 4-second timeout against targetURL,
+// decodes any non-200 JSON error into upstreamErrMsg, or unmarshals the 200 OK JSON response into dest.
+func fetchUpstreamJSON(ctx context.Context, client *http.Client, targetURL string, dest interface{}) (int, string, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	defer drainAndClose(resp.Body, "upstream response body")
+
+	if resp.StatusCode != http.StatusOK {
+		var errPayload struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errPayload); err == nil && errPayload.Error != "" {
+			return resp.StatusCode, strings.TrimSpace(errPayload.Error), fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
+		}
+		return resp.StatusCode, "", fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {
+		return http.StatusOK, "", err
+	}
+	return http.StatusOK, "", nil
+}
+
 func factsHandler(brainBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1448,50 +1468,36 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Accept", "application/json")
-
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
-		resp, err := brainHTTPClient.Do(req)
-		if err != nil {
-			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
-			writeJSON(w, r, http.StatusServiceUnavailable, FactsAPIResponse{
-				Facts:  []FactItem{},
-				Total:  0,
-				Limit:  limit,
-				Offset: offset,
-				Status: "degraded",
-				Error:  "Brain service unreachable. Retrying...",
-			})
-			return
-		}
-		defer resp.Body.Close()
-		defer drainAndClose(resp.Body, "brain facts response body")
-
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
-			writeJSON(w, r, resp.StatusCode, FactsAPIResponse{
-				Facts:  []FactItem{},
-				Total:  0,
-				Limit:  limit,
-				Offset: offset,
-				Status: "error",
-				Error:  "Upstream brain error occurred",
-			})
-			return
-		}
-
 		var data FactsAPIResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), brainHTTPClient, targetURL, &data)
+		if fetchErr != nil {
+			if statusCode == 0 {
+				log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, fetchErr)
+				writeJSON(w, r, http.StatusServiceUnavailable, FactsAPIResponse{
+					Facts:  []FactItem{},
+					Total:  0,
+					Limit:  limit,
+					Offset: offset,
+					Status: "degraded",
+					Error:  "Brain service unreachable. Retrying...",
+				})
+				return
+			}
+			if statusCode != http.StatusOK {
+				log.Printf("[Dashboard] Upstream brain returned status %d", statusCode)
+				writeJSON(w, r, statusCode, FactsAPIResponse{
+					Facts:  []FactItem{},
+					Total:  0,
+					Limit:  limit,
+					Offset: offset,
+					Status: "error",
+					Error:  "Upstream brain error occurred",
+				})
+				return
+			}
 			writeJSON(w, r, http.StatusBadGateway, FactsAPIResponse{
 				Facts:  []FactItem{},
 				Total:  0,
@@ -1525,60 +1531,46 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Accept", "application/json")
-
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
-		resp, err := brainHTTPClient.Do(req)
-		if err != nil {
-			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
-			writeJSON(w, r, http.StatusServiceUnavailable, SchedulesAPIResponse{
-				Status: "degraded",
-				Error:  "Brain service unreachable. Retrying...",
-				Summary: ScheduleSummaryMetrics{
-					TotalActive:    0,
-					CronCount:      0,
-					OneShotCount:   0,
-					TotalRuns24h:   0,
-					SuccessRate24h: 100.0,
-				},
-				Crons:    []CronSchedule{},
-				OneShots: []OneShotSchedule{},
-			})
-			return
-		}
-		defer resp.Body.Close()
-		defer drainAndClose(resp.Body, "brain schedules response body")
-
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
-			writeJSON(w, r, resp.StatusCode, SchedulesAPIResponse{
-				Status: "error",
-				Error:  "Upstream brain error occurred",
-				Summary: ScheduleSummaryMetrics{
-					TotalActive:    0,
-					CronCount:      0,
-					OneShotCount:   0,
-					TotalRuns24h:   0,
-					SuccessRate24h: 100.0,
-				},
-				Crons:    []CronSchedule{},
-				OneShots: []OneShotSchedule{},
-			})
-			return
-		}
-
 		var data SchedulesAPIResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), brainHTTPClient, targetURL, &data)
+		if fetchErr != nil {
+			if statusCode == 0 {
+				log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, fetchErr)
+				writeJSON(w, r, http.StatusServiceUnavailable, SchedulesAPIResponse{
+					Status: "degraded",
+					Error:  "Brain service unreachable. Retrying...",
+					Summary: ScheduleSummaryMetrics{
+						TotalActive:    0,
+						CronCount:      0,
+						OneShotCount:   0,
+						TotalRuns24h:   0,
+						SuccessRate24h: 100.0,
+					},
+					Crons:    []CronSchedule{},
+					OneShots: []OneShotSchedule{},
+				})
+				return
+			}
+			if statusCode != http.StatusOK {
+				log.Printf("[Dashboard] Upstream brain returned status %d", statusCode)
+				writeJSON(w, r, statusCode, SchedulesAPIResponse{
+					Status: "error",
+					Error:  "Upstream brain error occurred",
+					Summary: ScheduleSummaryMetrics{
+						TotalActive:    0,
+						CronCount:      0,
+						OneShotCount:   0,
+						TotalRuns24h:   0,
+						SuccessRate24h: 100.0,
+					},
+					Crons:    []CronSchedule{},
+					OneShots: []OneShotSchedule{},
+				})
+				return
+			}
 			writeJSON(w, r, http.StatusBadGateway, SchedulesAPIResponse{
 				Status: "error",
 				Error:  "Failed to decode upstream brain response",
@@ -1620,50 +1612,36 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Accept", "application/json")
-
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
-		resp, err := brainHTTPClient.Do(req)
-		if err != nil {
-			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
-			writeJSON(w, r, http.StatusServiceUnavailable, ScheduleRunsAPIResponse{
-				Status: "degraded",
-				Error:  "Brain service unreachable. Retrying...",
-				Total:  0,
-				Limit:  limit,
-				Offset: offset,
-				Runs:   []ScheduleRun{},
-			})
-			return
-		}
-		defer resp.Body.Close()
-		defer drainAndClose(resp.Body, "brain schedule runs response body")
-
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
-			writeJSON(w, r, resp.StatusCode, ScheduleRunsAPIResponse{
-				Status: "error",
-				Error:  "Upstream brain error occurred",
-				Total:  0,
-				Limit:  limit,
-				Offset: offset,
-				Runs:   []ScheduleRun{},
-			})
-			return
-		}
-
 		var data ScheduleRunsAPIResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), brainHTTPClient, targetURL, &data)
+		if fetchErr != nil {
+			if statusCode == 0 {
+				log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, fetchErr)
+				writeJSON(w, r, http.StatusServiceUnavailable, ScheduleRunsAPIResponse{
+					Status: "degraded",
+					Error:  "Brain service unreachable. Retrying...",
+					Total:  0,
+					Limit:  limit,
+					Offset: offset,
+					Runs:   []ScheduleRun{},
+				})
+				return
+			}
+			if statusCode != http.StatusOK {
+				log.Printf("[Dashboard] Upstream brain returned status %d", statusCode)
+				writeJSON(w, r, statusCode, ScheduleRunsAPIResponse{
+					Status: "error",
+					Error:  "Upstream brain error occurred",
+					Total:  0,
+					Limit:  limit,
+					Offset: offset,
+					Runs:   []ScheduleRun{},
+				})
+				return
+			}
 			writeJSON(w, r, http.StatusBadGateway, ScheduleRunsAPIResponse{
 				Status: "error",
 				Error:  "Failed to decode upstream brain response",
@@ -1697,46 +1675,32 @@ func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Accept", "application/json")
-
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
-		resp, err := vanadisHTTPClient.Do(req)
-		if err != nil {
-			log.Printf("[Dashboard] Upstream vanadis request failed (%s): %v", targetURL, err)
-			writeJSON(w, r, http.StatusServiceUnavailable, BuildsAPIResponse{
-				Status: "degraded",
-				Error:  "Vanadis service unreachable. Retrying...",
-				Total:  0,
-				Builds: []VanadisBuildDTO{},
-			})
-			return
-		}
-		defer resp.Body.Close()
-		defer drainAndClose(resp.Body, "vanadis builds response body")
-
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("[Dashboard] Upstream vanadis returned status %d", resp.StatusCode)
-			writeJSON(w, r, resp.StatusCode, BuildsAPIResponse{
-				Status: "error",
-				Error:  "Upstream vanadis error occurred",
-				Total:  0,
-				Builds: []VanadisBuildDTO{},
-			})
-			return
-		}
-
 		var data BuildsAPIResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), vanadisHTTPClient, targetURL, &data)
+		if fetchErr != nil {
+			if statusCode == 0 {
+				log.Printf("[Dashboard] Upstream vanadis request failed (%s): %v", targetURL, fetchErr)
+				writeJSON(w, r, http.StatusServiceUnavailable, BuildsAPIResponse{
+					Status: "degraded",
+					Error:  "Vanadis service unreachable. Retrying...",
+					Total:  0,
+					Builds: []VanadisBuildDTO{},
+				})
+				return
+			}
+			if statusCode != http.StatusOK {
+				log.Printf("[Dashboard] Upstream vanadis returned status %d", statusCode)
+				writeJSON(w, r, statusCode, BuildsAPIResponse{
+					Status: "error",
+					Error:  "Upstream vanadis error occurred",
+					Total:  0,
+					Builds: []VanadisBuildDTO{},
+				})
+				return
+			}
 			writeJSON(w, r, http.StatusBadGateway, BuildsAPIResponse{
 				Status: "error",
 				Error:  "Failed to decode upstream vanadis response",
@@ -1778,54 +1742,37 @@ func buildDetailHandler(vanadisBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-		if err != nil {
-			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Accept", "application/json")
-
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
-		resp, err := vanadisHTTPClient.Do(req)
-		if err != nil {
-			log.Printf("[Dashboard] Upstream vanadis detail request failed (%s): %v", targetURL, err)
-			writeJSON(w, r, http.StatusServiceUnavailable, BuildDetailAPIResponse{
-				Status: "degraded",
-				Error:  "Vanadis service unreachable. Retrying...",
-				Chunks: []VanadisChunkDTO{},
-			})
-			return
-		}
-		defer resp.Body.Close()
-		defer drainAndClose(resp.Body, "vanadis build detail response body")
-
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("[Dashboard] Upstream vanadis detail returned status %d", resp.StatusCode)
-			var errPayload struct {
-				Error string `json:"error"`
-			}
-			errMsg := "Upstream vanadis error occurred"
-			if resp.StatusCode == http.StatusNotFound {
-				errMsg = "Build not found"
-			}
-			if json.NewDecoder(resp.Body).Decode(&errPayload) == nil && errPayload.Error != "" {
-				errMsg = errPayload.Error
-			}
-			writeJSON(w, r, resp.StatusCode, BuildDetailAPIResponse{
-				Status: "error",
-				Error:  errMsg,
-				Chunks: []VanadisChunkDTO{},
-			})
-			return
-		}
-
 		var data BuildDetailAPIResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		statusCode, upstreamErrMsg, fetchErr := fetchUpstreamJSON(r.Context(), vanadisHTTPClient, targetURL, &data)
+		if fetchErr != nil {
+			if statusCode == 0 {
+				log.Printf("[Dashboard] Upstream vanadis detail request failed (%s): %v", targetURL, fetchErr)
+				writeJSON(w, r, http.StatusServiceUnavailable, BuildDetailAPIResponse{
+					Status: "degraded",
+					Error:  "Vanadis service unreachable. Retrying...",
+					Chunks: []VanadisChunkDTO{},
+				})
+				return
+			}
+			if statusCode != http.StatusOK {
+				log.Printf("[Dashboard] Upstream vanadis detail returned status %d", statusCode)
+				errMsg := "Upstream vanadis error occurred"
+				if statusCode == http.StatusNotFound {
+					errMsg = "Build not found"
+				}
+				if upstreamErrMsg != "" {
+					errMsg = upstreamErrMsg
+				}
+				writeJSON(w, r, statusCode, BuildDetailAPIResponse{
+					Status: "error",
+					Error:  errMsg,
+					Chunks: []VanadisChunkDTO{},
+				})
+				return
+			}
 			writeJSON(w, r, http.StatusBadGateway, BuildDetailAPIResponse{
 				Status: "error",
 				Error:  "Failed to decode upstream vanadis response",
