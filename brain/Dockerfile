@@ -59,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     python3 \
     openssh-client \
+    libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy statically linked Docker CLI (avoids heavy docker.io/containerd apt packages)
@@ -78,6 +79,12 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Install official Antigravity CLI binary
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
+
+# Install Stripe Link CLI (@stripe/link-cli v0.28.0) standalone binary
+RUN curl -fsSL https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%400.28.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
+    echo "7a253abab63eb0f14dbf5b2a88967037022f48d6608818c6427e2187d0077019  /usr/local/bin/link-cli" | sha256sum -c - && \
+    chmod 0755 /usr/local/bin/link-cli
+ENV LINK_AUTH_FILE="/data/runtimes/discord/.config/link-cli-nodejs/config.json"
 
 # Copy decoupled superpowers skills
 COPY --link --from=superpowers /opt/skills /opt/skills
