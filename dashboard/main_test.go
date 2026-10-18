@@ -22,276 +22,126 @@ import (
 )
 
 func TestStatusHandler(t *testing.T) {
-	t.Run("Basic_DockerFallback", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/status", nil)
-		rr := httptest.NewRecorder()
-
-		handler := statusHandler("", "", "", "")
-		handler.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode status response: %v", err)
-		}
-
-		if len(resp.Services) == 0 {
-			t.Errorf("expected services in response, got 0")
-		}
-
-		for _, svc := range resp.Services {
-			if svc.UptimeSeconds < 0 {
-				t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
-			}
-		}
-
-		if resp.OngoingDeploy == "" {
-			t.Errorf("expected non-empty OngoingDeploy in status response")
-		}
-	})
-
-	t.Run("OngoingDeploy", func(t *testing.T) {
-		tempDir := t.TempDir()
-		cfgFile := filepath.Join(tempDir, "config.yaml")
-		if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		handler := statusHandler("", "", cfgFile, "testcommit")
-		req := httptest.NewRequest("GET", "/api/status", nil)
-		rr := httptest.NewRecorder()
-		handler(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", rr.Code)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-
-		if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
-			t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
-		}
-	})
-
-	t.Run("ActiveTasks", func(t *testing.T) {
-		// 1. Successful active task aggregation
-		brainMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/tasks" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{
-					"status": "ok",
-					"total": 1,
-					"tasks": [
-						{
-							"id": "task-abc",
-							"thread_id": "thread-123",
-							"session_id": "session-456",
-							"author_name": "UserA",
-							"prompt": "Test execution prompt",
-							"summary": "Test execution prompt summary",
-							"status": "PROCESSING",
-							"retry_count": 0,
-							"trigger_type": "discord",
-							"created_at": "2026-08-30T12:00:00Z",
-							"updated_at": "2026-08-30T12:00:10Z"
-						}
-					]
-				}`))
-				return
-			}
-			http.NotFound(w, r)
-		}))
-		defer brainMock.Close()
-
-		handler := statusHandler(brainMock.URL, "", "", "")
-		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", rr.Code)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode status response: %v", err)
-		}
-
-		if resp.ActiveTasksCount != 1 || len(resp.ActiveTasks) != 1 {
-			t.Fatalf("expected 1 active task, got %d: %+v", resp.ActiveTasksCount, resp.ActiveTasks)
-		}
-
-		if resp.ActiveTasks[0].ID != "task-abc" || resp.ActiveTasks[0].SessionID != "session-456" || resp.ActiveTasks[0].TriggerType != "discord" || resp.ActiveTasks[0].Summary != "Test execution prompt summary" {
-			t.Errorf("unexpected task contents: %+v", resp.ActiveTasks[0])
-		}
-		if resp.ActiveTasks[0].Status != "PROCESSING" || resp.ActiveTasks[0].AuthorName != "UserA" {
-			t.Errorf("unexpected task status/author: %+v", resp.ActiveTasks[0])
-		}
-
-		// 2. Graceful degradation on brain error / offline
-		degradedHandler := statusHandler("http://127.0.0.1:54321", "", "", "")
-		reqDegraded := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-		rrDegraded := httptest.NewRecorder()
-		degradedHandler.ServeHTTP(rrDegraded, reqDegraded)
-
-		if rrDegraded.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK on degraded status, got %d", rrDegraded.Code)
-		}
-
-		var degradedResp ClusterResponse
-		if err := json.NewDecoder(rrDegraded.Body).Decode(&degradedResp); err != nil {
-			t.Fatalf("failed to decode degraded status response: %v", err)
-		}
-
-		if degradedResp.ActiveTasksCount != 0 {
-			t.Errorf("expected 0 active tasks on degraded brain, got %d", degradedResp.ActiveTasksCount)
-		}
-		if degradedResp.ActiveTasks == nil || len(degradedResp.ActiveTasks) != 0 {
-			t.Errorf("expected non-nil empty ActiveTasks slice on degraded brain, got %+v", degradedResp.ActiveTasks)
-		}
-	})
-
-	t.Run("EnrichedFields", func(t *testing.T) {
-		tempDir := t.TempDir()
-		cfgFile := filepath.Join(tempDir, "config.yaml")
-		cfgContent := `
-dashboard:
-  quick_launch_links:
-    - name: "HOME"
-      url: "https://home.zylman.com"
-`
-		if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		gitsyncMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/brain/ok/tasks"):
+			_, _ = w.Write([]byte(`{
+				"status": "ok",
+				"total": 1,
+				"tasks": [
+					{
+						"id": "task-abc",
+						"thread_id": "thread-123",
+						"session_id": "session-456",
+						"author_name": "UserA",
+						"prompt": "Test execution prompt",
+						"summary": "Test execution prompt summary",
+						"status": "PROCESSING",
+						"retry_count": 0,
+						"trigger_type": "discord",
+						"created_at": "2026-08-30T12:00:00Z",
+						"updated_at": "2026-08-30T12:00:10Z"
+					}
+				]
+			}`))
+		case strings.HasPrefix(r.URL.Path, "/hangar/synced/status"):
 			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
 				Status:        "synced",
 				MaxLagSeconds: 0,
 				LastSyncTime:  time.Now().UTC(),
 			})
-		}))
-		defer gitsyncMock.Close()
-
-		handler := statusHandler("", gitsyncMock.URL, cfgFile, "testsha")
-		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", rr.Code)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-
-		if len(resp.QuickLaunchLinks) != 1 {
-			t.Fatalf("expected 1 quick launch link, got %d", len(resp.QuickLaunchLinks))
-		}
-		hasHome := false
-		for _, l := range resp.QuickLaunchLinks {
-			if l.Name == "HOME" && l.URL == "https://home.zylman.com" {
-				hasHome = true
-			}
-		}
-		if !hasHome {
-			t.Errorf("expected 'HOME' link in QuickLaunchLinks: %+v", resp.QuickLaunchLinks)
-		}
-
-		if resp.GitSync.Status != "synced" {
-			t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
-		}
-	})
-
-	t.Run("DegradedClusterStatus", func(t *testing.T) {
-		handler := statusHandler("", "", "", "")
-		origClient := dockerSocketClient
-		defer func() { dockerSocketClient = origClient }()
-
-		dockerSocketClient = &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					containers := []DockerContainerJSON{
-						{
-							Names:   []string{"/aerial-brain"},
-							State:   "running",
-							Status:  "Up 10m (unhealthy)",
-							Created: time.Now().UTC().Unix(),
-						},
-					}
-					data, _ := json.Marshal(containers)
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(strings.NewReader(string(data))),
-						Header:     make(http.Header),
-					}, nil
+		case strings.HasPrefix(r.URL.Path, "/hangar/swapping/status"):
+			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+				Status: "synced",
+				Reconciliation: &ReconciliationStatus{
+					Active:         true,
+					State:          "swapping",
+					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					TargetServices: []string{"aerial-dashboard"},
+					StartedAt:      time.Now().UTC().Add(-10 * time.Second),
 				},
-			},
-		}
-
-		reqGet := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-		rrGet := httptest.NewRecorder()
-		handler.ServeHTTP(rrGet, reqGet)
-		if rrGet.Code != http.StatusOK {
-			t.Fatalf("expected 200 on GET /api/status, got %d", rrGet.Code)
-		}
-
-		var resp ClusterResponse
-		_ = json.NewDecoder(rrGet.Body).Decode(&resp)
-		if resp.ClusterStatus != "degraded" {
-			t.Errorf("expected clusterStatus 'degraded', got %q", resp.ClusterStatus)
-		}
-	})
-
-	t.Run("ConcurrentPipelines", func(t *testing.T) {
-		hangarServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/status" {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
-					Status: "synced",
-					Reconciliation: &ReconciliationStatus{
-						Active:         true,
-						State:          "swapping",
-						CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-						TargetServices: []string{"aerial-dashboard"},
-						StartedAt:      time.Now().UTC().Add(-10 * time.Second),
-					},
-				})
-				return
-			}
+			})
+		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/jobs"):
+			_, _ = w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"running"}]`))
+		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/allocations"):
+			_, _ = w.Write([]byte(`[
+				{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}},
+				{"ID":"a2","JobID":"nomad-proxy","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
+			]`))
+		case strings.HasPrefix(r.URL.Path, "/nomad/error500"):
+			http.Error(w, "server error", http.StatusInternalServerError)
+		case strings.HasPrefix(r.URL.Path, "/nomad/empty"):
+			_, _ = w.Write([]byte(`[]`))
+		default:
 			http.NotFound(w, r)
-		}))
-		defer hangarServer.Close()
-
-		oldPoller := globalGHPoller
-		defer func() { globalGHPoller = oldPoller }()
-
-		origDocker := dockerSocketClient
-		defer func() { dockerSocketClient = origDocker }()
-		dockerSocketClient = &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(strings.NewReader("[]")),
-						Header:     make(http.Header),
-					}, nil
-				},
-			},
 		}
+	}))
+	defer mockServer.Close()
 
-		poller := &GitHubPoller{
-			cachedRuns: []GitHubRun{
+	tests := []struct {
+		name              string
+		method            string
+		useMux            bool
+		brainMode         string
+		gitSyncMode       string
+		nomadMode         string
+		dockerJSON        string
+		pollerRuns        []GitHubRun
+		pollerJobs        map[int64][]GitHubJob
+		yamlContent       string
+		wantCode          int
+		wantClusterStatus string
+		wantOngoingDeploy string
+		wantIsDeploying   bool
+		wantTasks         int
+		wantDeploys       int
+		wantMinServices   int
+		wantServiceName   string
+		wantQuickLink     string
+	}{
+		{
+			name:              "Basic_DockerFallback",
+			wantCode:          http.StatusOK,
+			wantMinServices:   1,
+			wantOngoingDeploy: "idle",
+		},
+		{
+			name:              "OngoingDeploy",
+			yamlContent:       "dashboard: {}\n",
+			wantCode:          http.StatusOK,
+			wantOngoingDeploy: "idle",
+		},
+		{
+			name:      "ActiveTasks_Success",
+			brainMode: "ok",
+			wantCode:  http.StatusOK,
+			wantTasks: 1,
+		},
+		{
+			name:      "ActiveTasks_Degraded",
+			brainMode: "offline",
+			wantCode:  http.StatusOK,
+			wantTasks: 0,
+		},
+		{
+			name:          "EnrichedFields",
+			gitSyncMode:   "synced",
+			yamlContent:   "dashboard:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.zylman.com\"\n",
+			wantCode:      http.StatusOK,
+			wantQuickLink: "HOME",
+		},
+		{
+			name:              "DegradedClusterStatus",
+			dockerJSON:        `[{"Names":["/aerial-brain"],"State":"running","Status":"Up 10m (unhealthy)","Created":1775240000}]`,
+			wantCode:          http.StatusOK,
+			wantClusterStatus: "degraded",
+		},
+		{
+			name:        "ConcurrentPipelines",
+			gitSyncMode: "swapping",
+			dockerJSON:  "[]",
+			pollerRuns: []GitHubRun{
 				{
 					ID:        999,
 					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -300,168 +150,232 @@ dashboard:
 					UpdatedAt: time.Now().UTC().Add(-1 * time.Minute),
 				},
 			},
-			cachedJobs: map[int64][]GitHubJob{
-				999: {
-					{ID: 1, Name: "Build Dashboard", Status: "in_progress"},
-				},
+			pollerJobs: map[int64][]GitHubJob{
+				999: {{ID: 1, Name: "Build Dashboard", Status: "in_progress"}},
 			},
-		}
-		globalGHPoller = poller
+			yamlContent:       "dashboard: {}\n",
+			wantCode:          http.StatusOK,
+			wantDeploys:       2,
+			wantOngoingDeploy: "swapping",
+			wantIsDeploying:   true,
+		},
+		{
+			name:            "NomadPrimary",
+			nomadMode:       "ok",
+			wantCode:        http.StatusOK,
+			wantMinServices: 2,
+			wantServiceName: "nomad-brain",
+		},
+		{
+			name:            "NomadFallbackOnError",
+			nomadMode:       "error500",
+			wantCode:        http.StatusOK,
+			wantMinServices: 1,
+			wantServiceName: "brain",
+		},
+		{
+			name:            "NomadFallbackOnEmpty",
+			nomadMode:       "empty",
+			wantCode:        http.StatusOK,
+			wantMinServices: 1,
+		},
+		{
+			name:     "MethodNotAllowed",
+			method:   http.MethodPost,
+			wantCode: http.StatusMethodNotAllowed,
+		},
+		{
+			name:          "SetupDashboardMux_StatusWiring",
+			useMux:        true,
+			gitSyncMode:   "synced",
+			yamlContent:   "dashboard:\n  quick_launch_links:\n    - name: \"TESTLINK\"\n      url: \"https://test.zylman.com\"\n",
+			wantCode:      http.StatusOK,
+			wantQuickLink: "TESTLINK",
+		},
+	}
 
-		tempDir := t.TempDir()
-		cfgFile := filepath.Join(tempDir, "config.yaml")
-		if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		handler := statusHandler("", hangarServer.URL, cfgFile, "testcommit")
-		req := httptest.NewRequest("GET", "/api/status", nil)
-		rr := httptest.NewRecorder()
-		handler(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", rr.Code)
-		}
-
-		var resp ClusterResponse
-		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-			t.Fatalf("failed to decode response JSON: %v", err)
-		}
-
-		if len(resp.Deployments) != 2 {
-			t.Fatalf("expected 2 concurrent deployments, got %d", len(resp.Deployments))
-		}
-
-		stages := map[string]string{}
-		for _, d := range resp.Deployments {
-			stages[d.Commit] = d.Stage
-		}
-
-		if stages["aaaaaaa"] != "swapping" {
-			t.Errorf("expected commit aaaaaaa to be swapping, got %q", stages["aaaaaaa"])
-		}
-		if stages["bbbbbbb"] != "building" {
-			t.Errorf("expected commit bbbbbbb to be building, got %q", stages["bbbbbbb"])
-		}
-
-		if resp.OngoingDeploy != "swapping" {
-			t.Errorf("expected OngoingDeploy 'swapping', got %q", resp.OngoingDeploy)
-		}
-		if !resp.IsDeploying {
-			t.Errorf("expected IsDeploying true, got false")
-		}
-	})
-
-	t.Run("NomadPrimaryAndFallback", func(t *testing.T) {
-		t.Run("uses nomad services on success", func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch r.URL.Path {
-				case "/v1/jobs":
-					w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"running"}]`))
-				case "/v1/allocations":
-					w.Write([]byte(`[
-						{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}},
-						{"ID":"a2","JobID":"nomad-proxy","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
-					]`))
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			defer ts.Close()
-
-			handler := statusHandler("", "", "", "testcommit", ts.URL)
-			req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected HTTP 200, got %d", rec.Code)
-			}
-
-			var resp ClusterResponse
-			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-				t.Fatalf("failed to decode response: %v", err)
-			}
-
-			if len(resp.Services) != 2 {
-				t.Fatalf("expected 2 services from Nomad, got %d: %+v", len(resp.Services), resp.Services)
-			}
-			if resp.Services[0].Name != "nomad-brain" || resp.Services[1].Name != "nomad-proxy" {
-				t.Errorf("unexpected services: %+v", resp.Services)
-			}
-		})
-
-		t.Run("falls back to docker when nomad fails", func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "server error", http.StatusInternalServerError)
-			}))
-			defer ts.Close()
-
-			handler := statusHandler("", "", "", "testcommit", ts.URL)
-			req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected HTTP 200, got %d", rec.Code)
-			}
-
-			var resp ClusterResponse
-			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-				t.Fatalf("failed to decode response: %v", err)
-			}
-
-			if len(resp.Services) == 0 {
-				t.Fatal("expected fallback services, got empty")
-			}
-			foundBrain := false
-			for _, s := range resp.Services {
-				if s.Name == "brain" {
-					foundBrain = true
-					break
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.dockerJSON != "" {
+				origDocker := dockerSocketClient
+				defer func() { dockerSocketClient = origDocker }()
+				dockerSocketClient = &http.Client{
+					Transport: &roundTripperFunc{
+						fn: func(req *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Body:       io.NopCloser(strings.NewReader(tc.dockerJSON)),
+								Header:     make(http.Header),
+							}, nil
+						},
+					},
 				}
 			}
-			if !foundBrain {
-				t.Errorf("expected fallback to include brain, got: %+v", resp.Services)
+
+			if tc.pollerRuns != nil {
+				oldPoller := globalGHPoller
+				defer func() { globalGHPoller = oldPoller }()
+				globalGHPoller = &GitHubPoller{
+					cachedRuns: tc.pollerRuns,
+					cachedJobs: tc.pollerJobs,
+				}
 			}
-		})
 
-		t.Run("falls back to docker when nomad returns empty services", func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(`[]`))
-			}))
-			defer ts.Close()
+			cfgFile := ""
+			if tc.yamlContent != "" {
+				tempDir := t.TempDir()
+				cfgFile = filepath.Join(tempDir, "config.yaml")
+				if err := os.WriteFile(cfgFile, []byte(tc.yamlContent), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-			handler := statusHandler("", "", "", "testcommit", ts.URL)
-			req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
+			brainURL := ""
+			switch tc.brainMode {
+			case "ok":
+				brainURL = mockServer.URL + "/brain/ok"
+			case "offline":
+				brainURL = "http://127.0.0.1:54321"
+			}
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected HTTP 200, got %d", rec.Code)
+			gitSyncURL := ""
+			switch tc.gitSyncMode {
+			case "synced":
+				gitSyncURL = mockServer.URL + "/hangar/synced"
+			case "swapping":
+				gitSyncURL = mockServer.URL + "/hangar/swapping"
+			}
+
+			nomadAddr := ""
+			switch tc.nomadMode {
+			case "ok":
+				nomadAddr = mockServer.URL + "/nomad/ok"
+			case "error500":
+				nomadAddr = mockServer.URL + "/nomad/error500"
+			case "empty":
+				nomadAddr = mockServer.URL + "/nomad/empty"
+			}
+
+			var h http.Handler
+			if tc.useMux {
+				cfg := DashboardConfig{
+					Port:       "8080",
+					BrainURL:   brainURL,
+					GitSyncURL: gitSyncURL,
+					ConfigPath: cfgFile,
+					GitCommit:  "testcommit",
+					NomadAddr:  nomadAddr,
+				}
+				h = SetupDashboardMux(cfg, nil)
+			} else {
+				h = statusHandler(brainURL, gitSyncURL, cfgFile, "testcommit", nomadAddr)
+			}
+
+			method := tc.method
+			if method == "" {
+				method = http.MethodGet
+			}
+			req := httptest.NewRequest(method, "/api/status", nil)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantCode {
+				t.Fatalf("expected status %d, got %d", tc.wantCode, rr.Code)
+			}
+			if tc.wantCode != http.StatusOK {
+				return
 			}
 
 			var resp ClusterResponse
-			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 				t.Fatalf("failed to decode response: %v", err)
 			}
-			if len(resp.Services) == 0 {
-				t.Fatal("expected fallback services when nomad returns 0 services")
+
+			if tc.wantClusterStatus != "" && resp.ClusterStatus != tc.wantClusterStatus {
+				t.Errorf("expected ClusterStatus %q, got %q", tc.wantClusterStatus, resp.ClusterStatus)
+			}
+			if tc.wantOngoingDeploy != "" {
+				if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
+					t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
+				}
+				if tc.wantOngoingDeploy != "idle" && resp.OngoingDeploy != tc.wantOngoingDeploy {
+					t.Errorf("expected OngoingDeploy %q, got %q", tc.wantOngoingDeploy, resp.OngoingDeploy)
+				}
+			}
+			if tc.wantIsDeploying != resp.IsDeploying {
+				t.Errorf("expected IsDeploying %v, got %v", tc.wantIsDeploying, resp.IsDeploying)
+			}
+			if tc.brainMode == "ok" {
+				if resp.ActiveTasksCount != tc.wantTasks || len(resp.ActiveTasks) != tc.wantTasks {
+					t.Fatalf("expected %d active tasks, got %d: %+v", tc.wantTasks, resp.ActiveTasksCount, resp.ActiveTasks)
+				}
+				if len(resp.ActiveTasks) > 0 {
+					task := resp.ActiveTasks[0]
+					if task.ID != "task-abc" || task.SessionID != "session-456" || task.TriggerType != "discord" || task.Summary != "Test execution prompt summary" || task.Status != "PROCESSING" || task.AuthorName != "UserA" {
+						t.Errorf("unexpected task contents: %+v", task)
+					}
+				}
+			}
+			if tc.brainMode == "offline" {
+				if resp.ActiveTasksCount != 0 {
+					t.Errorf("expected 0 active tasks on degraded brain, got %d", resp.ActiveTasksCount)
+				}
+				if resp.ActiveTasks == nil || len(resp.ActiveTasks) != 0 {
+					t.Errorf("expected non-nil empty ActiveTasks on degraded brain, got %+v", resp.ActiveTasks)
+				}
+			}
+			if tc.wantDeploys > 0 {
+				if len(resp.Deployments) != tc.wantDeploys {
+					t.Fatalf("expected %d deployments, got %d", tc.wantDeploys, len(resp.Deployments))
+				}
+				stages := map[string]string{}
+				for _, d := range resp.Deployments {
+					stages[d.Commit] = d.Stage
+				}
+				if stages["aaaaaaa"] != "swapping" {
+					t.Errorf("expected commit aaaaaaa swapping, got %q", stages["aaaaaaa"])
+				}
+				if stages["bbbbbbb"] != "building" {
+					t.Errorf("expected commit bbbbbbb building, got %q", stages["bbbbbbb"])
+				}
+			}
+			if tc.wantMinServices > 0 && len(resp.Services) < tc.wantMinServices {
+				t.Errorf("expected at least %d services, got %d", tc.wantMinServices, len(resp.Services))
+			}
+			for _, svc := range resp.Services {
+				if svc.UptimeSeconds < 0 {
+					t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
+				}
+			}
+			if tc.wantServiceName != "" {
+				found := false
+				for _, s := range resp.Services {
+					if s.Name == tc.wantServiceName {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected service %q, got services: %+v", tc.wantServiceName, resp.Services)
+				}
+			}
+			if tc.wantQuickLink != "" {
+				found := false
+				for _, l := range resp.QuickLaunchLinks {
+					if l.Name == tc.wantQuickLink {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected quick link %q in %+v", tc.wantQuickLink, resp.QuickLaunchLinks)
+				}
+				if resp.GitSync.Status != "synced" {
+					t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
+				}
 			}
 		})
-	})
-
-	t.Run("MethodNotAllowed", func(t *testing.T) {
-		handler := statusHandler("", "", "", "")
-		reqPost := httptest.NewRequest(http.MethodPost, "/api/status", nil)
-		rrPost := httptest.NewRecorder()
-		handler.ServeHTTP(rrPost, reqPost)
-		if rrPost.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
-		}
-	})
+	}
 }
 
 func TestFactsHandler_TableDriven(t *testing.T) {
@@ -471,6 +385,26 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/facts" {
 			http.NotFound(w, r)
+			return
+		}
+		if capturedQuery.Get("category") == "error500" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"db failure"}`))
+			return
+		}
+		if capturedQuery.Get("category") == "badjson" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`not-valid-json`))
+			return
+		}
+		if capturedQuery.Get("category") == "user" {
+			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+				Facts:  nil,
+				Total:  0,
+				Limit:  10,
+				Offset: 5,
+				Status: "ok",
+			})
 			return
 		}
 		if capturedQuery.Get("limit") == "25" && capturedQuery.Get("category") == "user_preference" {
@@ -508,129 +442,71 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 	}))
 	defer mockBrain.Close()
 
-	mockNilBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedQuery = r.URL.Query()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(FactsAPIResponse{
-			Facts:  nil,
-			Total:  0,
-			Limit:  10,
-			Offset: 5,
-			Status: "ok",
-		})
-	}))
-	defer mockNilBrain.Close()
-
-	mockErrBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"db failure"}`))
-	}))
-	defer mockErrBrain.Close()
-
-	mockBadJSONBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`not-valid-json`))
-	}))
-	defer mockBadJSONBrain.Close()
-
 	offlineURL := "http://127.0.0.1:54321"
 
 	tests := []struct {
-		name       string
-		brainURL   string
-		method     string
-		target     string
-		wantStatus int
-		check      func(t *testing.T, body io.Reader)
+		name               string
+		brainURL           string
+		method             string
+		target             string
+		wantStatus         int
+		wantBodySubstr     []string
+		wantForwardedLimit string
+		wantMaxQRunes      int
 	}{
 		{
-			name:       "Success_QueryFilter",
-			brainURL:   mockBrain.URL,
-			method:     http.MethodGet,
-			target:     "/api/facts?limit=25&category=user_preference",
-			wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data FactsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if len(data.Facts) != 1 || data.Facts[0].FactText != "User prefers dark mode" {
-					t.Errorf("unexpected facts: %+v", data.Facts)
-				}
-			},
+			name:           "Success_QueryFilter",
+			brainURL:       mockBrain.URL,
+			method:         http.MethodGet,
+			target:         "/api/facts?limit=25&category=user_preference",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"User prefers dark mode"},
 		},
 		{
-			name:       "Success_UnlimitedDefault",
-			brainURL:   mockBrain.URL,
-			method:     http.MethodGet,
-			target:     "/api/facts",
-			wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				if capturedQuery.Get("limit") != "" {
-					t.Errorf("expected empty limit forwarded, got %q", capturedQuery.Get("limit"))
-				}
-			},
+			name:               "Success_UnlimitedDefault",
+			brainURL:           mockBrain.URL,
+			method:             http.MethodGet,
+			target:             "/api/facts",
+			wantStatus:         http.StatusOK,
+			wantForwardedLimit: "none",
 		},
 		{
-			name:       "Success_HighLimit",
-			brainURL:   mockBrain.URL,
-			method:     http.MethodGet,
-			target:     "/api/facts?limit=500",
-			wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				if capturedQuery.Get("limit") != "500" {
-					t.Errorf("expected limit=500 forwarded, got %q", capturedQuery.Get("limit"))
-				}
-			},
+			name:               "Success_HighLimit",
+			brainURL:           mockBrain.URL,
+			method:             http.MethodGet,
+			target:             "/api/facts?limit=500",
+			wantStatus:         http.StatusOK,
+			wantForwardedLimit: "500",
 		},
 		{
-			name:       "Success_AllParamsAndNilFacts",
-			brainURL:   mockNilBrain.URL,
-			method:     http.MethodGet,
-			target:     "/api/facts?limit=10&offset=5&category=user&q=" + strings.Repeat("searchterm", 10),
-			wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data FactsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Facts == nil || len(data.Facts) != 0 {
-					t.Errorf("expected non-nil empty facts, got %+v", data.Facts)
-				}
-				gotQ := capturedQuery.Get("q")
-				if len([]rune(gotQ)) > 64 {
-					t.Errorf("expected q truncated to 64 runes, got len %d: %q", len([]rune(gotQ)), gotQ)
-				}
-			},
+			name:           "Success_AllParamsAndNilFacts",
+			brainURL:       mockBrain.URL,
+			method:         http.MethodGet,
+			target:         "/api/facts?limit=10&offset=5&category=user&q=" + strings.Repeat("searchterm", 10),
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{`"facts":[]`},
+			wantMaxQRunes:  64,
 		},
 		{
-			name:       "DegradedFallback",
-			brainURL:   offlineURL,
-			method:     http.MethodGet,
-			target:     "/api/facts",
-			wantStatus: http.StatusServiceUnavailable,
-			check: func(t *testing.T, body io.Reader) {
-				var data FactsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode degraded response: %v", err)
-				}
-				if data.Status != "degraded" || data.Facts == nil || len(data.Facts) != 0 {
-					t.Errorf("unexpected degraded response: %+v", data)
-				}
-			},
+			name:           "DegradedFallback",
+			brainURL:       offlineURL,
+			method:         http.MethodGet,
+			target:         "/api/facts",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantBodySubstr: []string{`"status":"degraded"`, `"facts":[]`},
 		},
 		{
 			name:       "Upstream500",
-			brainURL:   mockErrBrain.URL,
+			brainURL:   mockBrain.URL,
 			method:     http.MethodGet,
-			target:     "/api/facts",
+			target:     "/api/facts?category=error500",
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "BadGateway_InvalidJSON",
-			brainURL:   mockBadJSONBrain.URL,
+			brainURL:   mockBrain.URL,
 			method:     http.MethodGet,
-			target:     "/api/facts",
+			target:     "/api/facts?category=badjson",
 			wantStatus: http.StatusBadGateway,
 		},
 		{
@@ -658,8 +534,26 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			if rr.Code != tt.wantStatus {
 				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
 			}
-			if tt.check != nil {
-				tt.check(t, rr.Body)
+			bodyStr := rr.Body.String()
+			for _, sub := range tt.wantBodySubstr {
+				if !strings.Contains(bodyStr, sub) {
+					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+				}
+			}
+			if tt.wantForwardedLimit != "" {
+				if tt.wantForwardedLimit == "none" {
+					if capturedQuery.Get("limit") != "" {
+						t.Errorf("expected empty limit forwarded, got %q", capturedQuery.Get("limit"))
+					}
+				} else if capturedQuery.Get("limit") != tt.wantForwardedLimit {
+					t.Errorf("expected limit=%s forwarded, got %q", tt.wantForwardedLimit, capturedQuery.Get("limit"))
+				}
+			}
+			if tt.wantMaxQRunes > 0 {
+				gotQ := capturedQuery.Get("q")
+				if len([]rune(gotQ)) > tt.wantMaxQRunes {
+					t.Errorf("expected q truncated to %d runes, got len %d: %q", tt.wantMaxQRunes, len([]rune(gotQ)), gotQ)
+				}
 			}
 		})
 	}
@@ -732,15 +626,28 @@ func TestMergeClusterDeployments_WrapperSmoke(t *testing.T) {
 func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/schedules":
+		switch {
+		case strings.Contains(r.URL.Path, "/error500"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"db failure"}`))
+		case strings.Contains(r.URL.Path, "/badjson"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`not-valid-json`))
+		case strings.Contains(r.URL.Path, "/nil/schedules"):
 			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
 				Status:   "ok",
-				Summary:  ScheduleSummaryMetrics{TotalActive: 3, CronCount: 2, OneShotCount: 1, TotalRuns24h: 15, SuccessRate24h: 93.3},
-				Crons:    []CronSchedule{{ID: "cron-1", ChannelID: "chan-1", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * *", CronDescription: "Every day at 9:00 AM", Prompt: "Generate morning brief", Timezone: "America/Los_Angeles", Enabled: true}},
-				OneShots: []OneShotSchedule{{ID: "oneshot-1", ThreadID: "thread-1", Prompt: "Remind about tea", RunAt: time.Now().UTC().Add(10 * time.Minute)}},
+				Crons:    nil,
+				OneShots: nil,
 			})
-		case "/schedules/runs":
+		case strings.Contains(r.URL.Path, "/nil/runs"):
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Status: "ok",
+				Total:  0,
+				Limit:  10,
+				Offset: 5,
+				Runs:   nil,
+			})
+		case strings.HasSuffix(r.URL.Path, "/schedules/runs"):
 			q := r.URL.Query()
 			if q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("schedule_id") != "cron-1" || q.Get("status") != "success" {
 				t.Errorf("unexpected upstream query params: %s", r.URL.RawQuery)
@@ -749,155 +656,146 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 				Status: "ok", Total: 42, Limit: 10, Offset: 5,
 				Runs: []ScheduleRun{{ID: "cron-brief-101", ScheduleID: "cron-1", ScheduleType: "cron", Prompt: "Daily summary", Title: "Morning Brief #101", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1250}},
 			})
+		case strings.HasSuffix(r.URL.Path, "/schedules"):
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status:   "ok",
+				Summary:  ScheduleSummaryMetrics{TotalActive: 3, CronCount: 2, OneShotCount: 1, TotalRuns24h: 15, SuccessRate24h: 93.3},
+				Crons:    []CronSchedule{{ID: "cron-1", ChannelID: "chan-1", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * *", CronDescription: "Every day at 9:00 AM", Prompt: "Generate morning brief", Timezone: "America/Los_Angeles", Enabled: true}},
+				OneShots: []OneShotSchedule{{ID: "oneshot-1", ThreadID: "thread-1", Prompt: "Remind about tea", RunAt: time.Now().UTC().Add(10 * time.Minute)}},
+			})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer mockBrain.Close()
 
-	mockNilBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/schedules":
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
-				Status:   "ok",
-				Crons:    nil,
-				OneShots: nil,
-			})
-		case "/schedules/runs":
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
-				Status: "ok",
-				Total:  0,
-				Limit:  10,
-				Offset: 5,
-				Runs:   nil,
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer mockNilBrain.Close()
-
-	mockErrBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"db failure"}`))
-	}))
-	defer mockErrBrain.Close()
-
-	mockBadJSONBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`not-valid-json`))
-	}))
-	defer mockBadJSONBrain.Close()
-
 	offlineURL := "http://127.0.0.1:54321"
 	tests := []struct {
-		name       string
-		isRuns     bool
-		brainURL   string
-		method     string
-		target     string
-		wantStatus int
-		check      func(t *testing.T, body io.Reader)
+		name           string
+		isRuns         bool
+		brainURL       string
+		method         string
+		target         string
+		wantStatus     int
+		wantBodySubstr []string
 	}{
 		{
-			name: "Schedules_Success", brainURL: mockBrain.URL, method: "GET", target: "/api/schedules", wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data SchedulesAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Status != "ok" || data.Summary.TotalActive != 3 || len(data.Crons) != 1 || data.Crons[0].TitlePrefix != "Morning Brief" || len(data.OneShots) != 1 || data.OneShots[0].Prompt != "Remind about tea" {
-					t.Errorf("unexpected schedules response: %+v", data)
-				}
-			},
+			name:           "Schedules_Success",
+			brainURL:       mockBrain.URL,
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Morning Brief", "Remind about tea", `"total_active":3`},
 		},
 		{
-			name: "Schedules_SuccessParams_NilSlices", brainURL: mockNilBrain.URL, method: "GET", target: "/api/schedules?limit=5&offset=2&active=true&q=weather", wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data SchedulesAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Crons == nil || len(data.Crons) != 0 || data.OneShots == nil || len(data.OneShots) != 0 {
-					t.Errorf("expected non-nil empty slices: %+v", data)
-				}
-			},
+			name:           "Schedules_SuccessParams_NilSlices",
+			brainURL:       mockBrain.URL + "/nil",
+			method:         "GET",
+			target:         "/api/schedules?limit=5&offset=2&active=true&q=weather",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{`"crons":[]`, `"one_shots":[]`},
 		},
 		{
-			name: "Schedules_ActiveFalse", brainURL: mockBrain.URL, method: "GET", target: "/api/schedules?active=false", wantStatus: http.StatusOK,
+			name:       "Schedules_ActiveFalse",
+			brainURL:   mockBrain.URL,
+			method:     "GET",
+			target:     "/api/schedules?active=false",
+			wantStatus: http.StatusOK,
 		},
 		{
-			name: "Schedules_DegradedFallback", brainURL: offlineURL, method: "GET", target: "/api/schedules", wantStatus: http.StatusServiceUnavailable,
-			check: func(t *testing.T, body io.Reader) {
-				var data SchedulesAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode degraded response: %v", err)
-				}
-				if data.Status != "degraded" || data.Error != "Brain service unreachable. Retrying..." || data.Summary.TotalActive != 0 || data.Summary.SuccessRate24h != 100.0 || data.Crons == nil || len(data.Crons) != 0 || data.OneShots == nil || len(data.OneShots) != 0 {
-					t.Errorf("unexpected degraded schedules response: %+v", data)
-				}
-			},
+			name:           "Schedules_DegradedFallback",
+			brainURL:       offlineURL,
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"crons":[]`, `"one_shots":[]`},
 		},
 		{
-			name: "Schedules_Upstream500", brainURL: mockErrBrain.URL, method: "GET", target: "/api/schedules", wantStatus: http.StatusInternalServerError,
+			name:       "Schedules_Upstream500",
+			brainURL:   mockBrain.URL + "/error500",
+			method:     "GET",
+			target:     "/api/schedules",
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
-			name: "Schedules_BadGateway", brainURL: mockBadJSONBrain.URL, method: "GET", target: "/api/schedules", wantStatus: http.StatusBadGateway,
+			name:       "Schedules_BadGateway",
+			brainURL:   mockBrain.URL + "/badjson",
+			method:     "GET",
+			target:     "/api/schedules",
+			wantStatus: http.StatusBadGateway,
 		},
 		{
-			name: "Schedules_MethodNotAllowed", brainURL: offlineURL, method: "POST", target: "/api/schedules", wantStatus: http.StatusMethodNotAllowed,
+			name:       "Schedules_MethodNotAllowed",
+			brainURL:   offlineURL,
+			method:     "POST",
+			target:     "/api/schedules",
+			wantStatus: http.StatusMethodNotAllowed,
 		},
 		{
-			name: "Schedules_InvalidUpstreamURL", brainURL: "http://brain:\x7f8080", method: "GET", target: "/api/schedules", wantStatus: http.StatusInternalServerError,
+			name:       "Schedules_InvalidUpstreamURL",
+			brainURL:   "http://brain:\x7f8080",
+			method:     "GET",
+			target:     "/api/schedules",
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
-			name: "ScheduleRuns_Success", isRuns: true, brainURL: mockBrain.URL, method: "GET", target: "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success", wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data ScheduleRunsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Status != "ok" || data.Total != 42 || data.Limit != 10 || data.Offset != 5 || len(data.Runs) != 1 || data.Runs[0].ID != "cron-brief-101" || data.Runs[0].DurationMs != 1250 {
-					t.Errorf("unexpected schedule runs response: %+v", data)
-				}
-			},
+			name:           "ScheduleRuns_Success",
+			isRuns:         true,
+			brainURL:       mockBrain.URL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"cron-brief-101", `"total":42`, `"duration_ms":1250`},
 		},
 		{
-			name: "ScheduleRuns_SuccessParams_NilSlices", isRuns: true, brainURL: mockNilBrain.URL, method: "GET", target: "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42", wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data ScheduleRunsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Runs == nil || len(data.Runs) != 0 {
-					t.Errorf("expected non-nil empty runs slice: %+v", data)
-				}
-			},
+			name:           "ScheduleRuns_SuccessParams_NilSlices",
+			isRuns:         true,
+			brainURL:       mockBrain.URL + "/nil/runs",
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{`"runs":[]`},
 		},
 		{
-			name: "ScheduleRuns_DegradedFallback", isRuns: true, brainURL: offlineURL, method: "GET", target: "/api/schedules/runs?limit=20&offset=10", wantStatus: http.StatusServiceUnavailable,
-			check: func(t *testing.T, body io.Reader) {
-				var data ScheduleRunsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode degraded response: %v", err)
-				}
-				if data.Status != "degraded" || data.Error != "Brain service unreachable. Retrying..." || data.Total != 0 || data.Limit != 20 || data.Offset != 10 || data.Runs == nil || len(data.Runs) != 0 {
-					t.Errorf("unexpected degraded schedule runs response: %+v", data)
-				}
-			},
+			name:           "ScheduleRuns_DegradedFallback",
+			isRuns:         true,
+			brainURL:       offlineURL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=20&offset=10",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"runs":[]`},
 		},
 		{
-			name: "ScheduleRuns_Upstream500", isRuns: true, brainURL: mockErrBrain.URL, method: "GET", target: "/api/schedules/runs", wantStatus: http.StatusInternalServerError,
+			name:       "ScheduleRuns_Upstream500",
+			isRuns:     true,
+			brainURL:   mockBrain.URL + "/error500",
+			method:     "GET",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
-			name: "ScheduleRuns_BadGateway", isRuns: true, brainURL: mockBadJSONBrain.URL, method: "GET", target: "/api/schedules/runs", wantStatus: http.StatusBadGateway,
+			name:       "ScheduleRuns_BadGateway",
+			isRuns:     true,
+			brainURL:   mockBrain.URL + "/badjson",
+			method:     "GET",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusBadGateway,
 		},
 		{
-			name: "ScheduleRuns_MethodNotAllowed", isRuns: true, brainURL: offlineURL, method: "DELETE", target: "/api/schedules/runs", wantStatus: http.StatusMethodNotAllowed,
+			name:       "ScheduleRuns_MethodNotAllowed",
+			isRuns:     true,
+			brainURL:   offlineURL,
+			method:     "DELETE",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusMethodNotAllowed,
 		},
 		{
-			name: "ScheduleRuns_InvalidUpstreamURL", isRuns: true, brainURL: "http://brain:\x7f8080", method: "GET", target: "/api/schedules/runs", wantStatus: http.StatusInternalServerError,
+			name:       "ScheduleRuns_InvalidUpstreamURL",
+			isRuns:     true,
+			brainURL:   "http://brain:\x7f8080",
+			method:     "GET",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusInternalServerError,
 		},
 	}
 
@@ -913,8 +811,11 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			if rr.Code != tt.wantStatus {
 				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
 			}
-			if tt.check != nil {
-				tt.check(t, rr.Body)
+			bodyStr := rr.Body.String()
+			for _, sub := range tt.wantBodySubstr {
+				if !strings.Contains(bodyStr, sub) {
+					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+				}
 			}
 		})
 	}
@@ -976,6 +877,9 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 						QueueState: "running",
 					},
 				})
+			case "test-build-1", "test-build-2":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(BuildDetailAPIResponse{Status: "ok", Chunks: []VanadisChunkDTO{}})
 			case "build-badjson":
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{invalid json detail`))
@@ -995,51 +899,33 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 	offlineURL := "http://127.0.0.1:54321"
 
 	tests := []struct {
-		name       string
-		isDetail   bool
-		vanadisURL string
-		method     string
-		target     string
-		wantStatus int
-		check      func(t *testing.T, body io.Reader)
+		name           string
+		isDetail       bool
+		useMux         bool
+		vanadisURL     string
+		method         string
+		target         string
+		wantStatus     int
+		wantBodySubstr []string
 	}{
 		{
-			name:       "Builds_Success_WithQuery",
-			isDetail:   false,
-			vanadisURL: mockVanadis.URL,
-			method:     http.MethodGet,
-			target:     "/api/builds?limit=25&status=running&queue_state=running",
-			wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data BuildsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Status != "ok" || data.Total != 1 || len(data.Builds) != 1 || data.Builds[0].ID != "build-101" {
-					t.Errorf("unexpected builds response: %+v", data)
-				}
-			},
+			name:           "Builds_Success_WithQuery",
+			vanadisURL:     mockVanadis.URL,
+			method:         http.MethodGet,
+			target:         "/api/builds?limit=25&status=running&queue_state=running",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"build-101", "Vanadis Feature"},
 		},
 		{
-			name:       "Builds_DegradedFallback",
-			isDetail:   false,
-			vanadisURL: offlineURL,
-			method:     http.MethodGet,
-			target:     "/api/builds",
-			wantStatus: http.StatusServiceUnavailable,
-			check: func(t *testing.T, body io.Reader) {
-				var data BuildsAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode degraded response: %v", err)
-				}
-				if data.Status != "degraded" || data.Error != "Vanadis service unreachable. Retrying..." || data.Builds == nil || len(data.Builds) != 0 {
-					t.Errorf("unexpected degraded builds response: %+v", data)
-				}
-			},
+			name:           "Builds_DegradedFallback",
+			vanadisURL:     offlineURL,
+			method:         http.MethodGet,
+			target:         "/api/builds",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantBodySubstr: []string{`"status":"degraded"`, "Vanadis service unreachable. Retrying...", `"builds":[]`},
 		},
 		{
 			name:       "Builds_MethodNotAllowed",
-			isDetail:   false,
 			vanadisURL: mockVanadis.URL,
 			method:     http.MethodPost,
 			target:     "/api/builds",
@@ -1047,7 +933,6 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		},
 		{
 			name:       "Builds_Upstream500",
-			isDetail:   false,
 			vanadisURL: mockVanadis.URL,
 			method:     http.MethodGet,
 			target:     "/api/builds?status=error500",
@@ -1055,7 +940,6 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		},
 		{
 			name:       "Builds_BadGateway_InvalidJSON",
-			isDetail:   false,
 			vanadisURL: mockVanadis.URL,
 			method:     http.MethodGet,
 			target:     "/api/builds?status=badjson",
@@ -1063,62 +947,37 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		},
 		{
 			name:       "Builds_InvalidUpstreamURL",
-			isDetail:   false,
 			vanadisURL: "http://vanadis:\x7f8080",
 			method:     http.MethodGet,
 			target:     "/api/builds",
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
-			name:       "BuildDetail_Success_APIPrefix",
-			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
-			method:     http.MethodGet,
-			target:     "/api/builds/build-101",
-			wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data BuildDetailAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Status != "ok" || data.Build == nil || data.Build.ID != "build-101" || len(data.Chunks) != 1 || data.Chunks[0].ID != "chunk-1" || data.Entry == nil {
-					t.Errorf("unexpected build detail response: %+v", data)
-				}
-			},
+			name:           "BuildDetail_Success_APIPrefix",
+			isDetail:       true,
+			vanadisURL:     mockVanadis.URL,
+			method:         http.MethodGet,
+			target:         "/api/builds/build-101",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"build-101", "chunk-1"},
 		},
 		{
-			name:       "BuildDetail_Success_DashboardPrefix",
-			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
-			method:     http.MethodGet,
-			target:     "/dashboard/api/builds/build-101",
-			wantStatus: http.StatusOK,
-			check: func(t *testing.T, body io.Reader) {
-				var data BuildDetailAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Status != "ok" || data.Build == nil || data.Build.ID != "build-101" {
-					t.Errorf("unexpected build detail response: %+v", data)
-				}
-			},
+			name:           "BuildDetail_Success_DashboardPrefix",
+			isDetail:       true,
+			vanadisURL:     mockVanadis.URL,
+			method:         http.MethodGet,
+			target:         "/dashboard/api/builds/build-101",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"build-101"},
 		},
 		{
-			name:       "BuildDetail_NotFound_404",
-			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
-			method:     http.MethodGet,
-			target:     "/api/builds/nonexistent-build",
-			wantStatus: http.StatusNotFound,
-			check: func(t *testing.T, body io.Reader) {
-				var data BuildDetailAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if data.Status != "error" || data.Error != "build not found" || data.Chunks == nil || len(data.Chunks) != 0 {
-					t.Errorf("unexpected 404 response: %+v", data)
-				}
-			},
+			name:           "BuildDetail_NotFound_404",
+			isDetail:       true,
+			vanadisURL:     mockVanadis.URL,
+			method:         http.MethodGet,
+			target:         "/api/builds/nonexistent-build",
+			wantStatus:     http.StatusNotFound,
+			wantBodySubstr: []string{`"status":"error"`, "build not found", `"chunks":[]`},
 		},
 		{
 			name:       "BuildDetail_MethodNotAllowed",
@@ -1129,21 +988,13 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			wantStatus: http.StatusMethodNotAllowed,
 		},
 		{
-			name:       "BuildDetail_DegradedFallback",
-			isDetail:   true,
-			vanadisURL: offlineURL,
-			method:     http.MethodGet,
-			target:     "/api/builds/build-101",
-			wantStatus: http.StatusServiceUnavailable,
-			check: func(t *testing.T, body io.Reader) {
-				var data BuildDetailAPIResponse
-				if err := json.NewDecoder(body).Decode(&data); err != nil {
-					t.Fatalf("failed to decode degraded response: %v", err)
-				}
-				if data.Status != "degraded" || data.Error != "Vanadis service unreachable. Retrying..." || data.Chunks == nil || len(data.Chunks) != 0 {
-					t.Errorf("unexpected degraded detail response: %+v", data)
-				}
-			},
+			name:           "BuildDetail_DegradedFallback",
+			isDetail:       true,
+			vanadisURL:     offlineURL,
+			method:         http.MethodGet,
+			target:         "/api/builds/build-101",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantBodySubstr: []string{`"status":"degraded"`, "Vanadis service unreachable. Retrying...", `"chunks":[]`},
 		},
 		{
 			name:       "BuildDetail_BadGateway_InvalidJSON",
@@ -1185,68 +1036,65 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			target:     "/api/builds/build-101",
 			wantStatus: http.StatusInternalServerError,
 		},
+		{
+			name:       "MuxWiring_BuildsRoot",
+			useMux:     true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "MuxWiring_DashboardBuildsRoot",
+			useMux:     true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/dashboard/api/builds",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "MuxWiring_BuildDetail1",
+			useMux:     true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/api/builds/test-build-1",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "MuxWiring_DashboardBuildDetail2",
+			useMux:     true,
+			vanadisURL: mockVanadis.URL,
+			method:     http.MethodGet,
+			target:     "/dashboard/api/builds/test-build-2",
+			wantStatus: http.StatusOK,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var h http.HandlerFunc
-			if tt.isDetail {
+			var h http.Handler
+			if tt.useMux {
+				h = SetupDashboardMux(DashboardConfig{VanadisURL: tt.vanadisURL}, nil)
+			} else if tt.isDetail {
 				h = buildDetailHandler(tt.vanadisURL)
 			} else {
 				h = buildsHandler(tt.vanadisURL)
 			}
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			rr := httptest.NewRecorder()
-			h(rr, req)
+			h.ServeHTTP(rr, req)
 			if rr.Code != tt.wantStatus {
 				t.Fatalf("expected status %d, got %d (body: %s)", tt.wantStatus, rr.Code, rr.Body.String())
 			}
-			if tt.check != nil {
-				tt.check(t, rr.Body)
+			bodyStr := rr.Body.String()
+			for _, sub := range tt.wantBodySubstr {
+				if !strings.Contains(bodyStr, sub) {
+					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+				}
 			}
 		})
 	}
 }
-
-func TestSetupDashboardMux_VanadisWiring(t *testing.T) {
-	mockVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/builds" {
-			_ = json.NewEncoder(w).Encode(BuildsAPIResponse{Status: "ok", Builds: []VanadisBuildDTO{}})
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/builds/") {
-			_ = json.NewEncoder(w).Encode(BuildDetailAPIResponse{Status: "ok", Chunks: []VanadisChunkDTO{}})
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer mockVanadis.Close()
-
-	cfg := DashboardConfig{
-		VanadisURL: mockVanadis.URL,
-	}
-	handler := SetupDashboardMux(cfg, nil)
-
-	routes := []string{
-		"/api/builds",
-		"/dashboard/api/builds",
-		"/api/builds/test-build-1",
-		"/dashboard/api/builds/test-build-2",
-	}
-
-	for _, rt := range routes {
-		t.Run(rt, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, rt, nil)
-			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, req)
-			if rr.Code != http.StatusOK {
-				t.Errorf("expected 200 OK for route %s, got %d (body: %s)", rt, rr.Code, rr.Body.String())
-			}
-		})
-	}
-}
-
 
 func TestEmbeddedStaticAssetsIntegrity(t *testing.T) {
 	requiredFiles := []string{
@@ -1370,208 +1218,214 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 		t.Fatalf("failed to create sub filesystem: %v", err)
 	}
 
-	reg, err := NewAssetRegistry(staticFS, "testcommit123")
+	defaultReg, err := NewAssetRegistry(staticFS, "testcommit123")
 	if err != nil {
 		t.Fatalf("failed to create AssetRegistry: %v", err)
 	}
 
-	t.Run("serves index.html on root / with ETag and no-cache", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		rec := httptest.NewRecorder()
-		reg.ServeHTTP(rec, req)
+	fallbackReg, err := NewAssetRegistry(staticFS, "")
+	if err != nil {
+		t.Fatalf("failed to create AssetRegistry with fallback: %v", err)
+	}
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", rec.Code)
-		}
-		etag := rec.Header().Get("ETag")
-		if etag == "" {
-			t.Errorf("expected ETag header to be set")
-		}
-		cc := rec.Header().Get("Cache-Control")
-		if !strings.Contains(cc, "no-cache") {
-			t.Errorf("expected Cache-Control to contain no-cache, got %q", cc)
-		}
-		body := rec.Body.String()
-		if !strings.Contains(body, "app.js?v=testcommit123") {
-			t.Errorf("expected index.html to contain injected asset version, got: %s", body)
-		}
-		if !strings.Contains(body, "style.css?v=testcommit123") {
-			t.Errorf("expected index.html to contain injected style version, got: %s", body)
-		}
-	})
+	tests := []struct {
+		name                  string
+		versionToken          string
+		method                string
+		path                  string
+		matchETagPath         string
+		weakETag              string
+		emptyFS               bool
+		wantCode              int
+		wantContentTypeSubstr string
+		wantCacheSubstr       string
+		wantBodySubstr        []string
+		wantEmptyBody         bool
+	}{
+		{
+			name:            "serves_index_html_root",
+			method:          "GET",
+			path:            "/",
+			wantCode:        http.StatusOK,
+			wantCacheSubstr: "no-cache",
+			wantBodySubstr:  []string{"app.js?v=testcommit123", "style.css?v=testcommit123"},
+		},
+		{
+			name:           "empty_version_token_fallback",
+			versionToken:   "EMPTY",
+			method:         "GET",
+			path:           "/",
+			wantCode:       http.StatusOK,
+			wantBodySubstr: []string{"app.js?v=", "style.css?v="},
+		},
+		{
+			name:          "304_not_modified_matching_etag",
+			method:        "GET",
+			path:          "/app.js",
+			matchETagPath: "/app.js",
+			wantCode:      http.StatusNotModified,
+			wantEmptyBody: true,
+		},
+		{
+			name:          "304_not_modified_weak_etag",
+			method:        "GET",
+			path:          "/style.css",
+			matchETagPath: "/style.css",
+			weakETag:      "W/",
+			wantCode:      http.StatusNotModified,
+		},
+		{
+			name:            "immutable_cache_control_version_param",
+			method:          "GET",
+			path:            "/app.js?v=testcommit123",
+			wantCode:        http.StatusOK,
+			wantCacheSubstr: "immutable",
+		},
+		{
+			name:                  "head_request_headers_empty_body",
+			method:                "HEAD",
+			path:                  "/app.js",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "javascript",
+			wantEmptyBody:         true,
+		},
+		{
+			name:     "returns_404_nonexistent_asset",
+			method:   "GET",
+			path:     "/nonexistent.js",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name:     "returns_405_post_request",
+			method:   "POST",
+			path:     "/app.js",
+			wantCode: http.StatusMethodNotAllowed,
+		},
+		{
+			name:                  "serves_favicon_ico",
+			method:                "GET",
+			path:                  "/favicon.ico",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "icon",
+		},
+		{
+			name:          "serves_favicon_ico_304",
+			method:        "GET",
+			path:          "/favicon.ico",
+			matchETagPath: "/favicon.ico",
+			wantCode:      http.StatusNotModified,
+			wantEmptyBody: true,
+		},
+		{
+			name:                  "serves_favicon_png",
+			method:                "GET",
+			path:                  "/favicon.png",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "image/png",
+		},
+		{
+			name:                  "serves_favicon_32x32_png",
+			method:                "GET",
+			path:                  "/favicon-32x32.png",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "image/png",
+		},
+		{
+			name:                  "serves_favicon_16x16_png",
+			method:                "GET",
+			path:                  "/favicon-16x16.png",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "image/png",
+		},
+		{
+			name:                  "serves_apple_touch_icon_png",
+			method:                "GET",
+			path:                  "/apple-touch-icon.png",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "image/png",
+		},
+		{
+			name:                  "serves_favicon_dashboard_prefix",
+			method:                "GET",
+			path:                  "/dashboard/favicon.ico",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "icon",
+		},
+		{
+			name:         "fallback_on_empty_dir_fs",
+			emptyFS:      true,
+			versionToken: "dev",
+			method:       "GET",
+			path:         "/",
+			wantCode:     http.StatusNotFound,
+		},
+	}
 
-	t.Run("injects independent content hashes for app.js and style.css when versionToken is empty", func(t *testing.T) {
-		regFallback, err := NewAssetRegistry(staticFS, "")
-		if err != nil {
-			t.Fatalf("failed to create AssetRegistry with fallback: %v", err)
-		}
-		req := httptest.NewRequest("GET", "/", nil)
-		rec := httptest.NewRecorder()
-		regFallback.ServeHTTP(rec, req)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := defaultReg
+			if tc.versionToken == "EMPTY" {
+				reg = fallbackReg
+			} else if tc.emptyFS {
+				emptyReg, err := NewAssetRegistry(os.DirFS(t.TempDir()), tc.versionToken)
+				if err != nil {
+					t.Fatalf("NewAssetRegistry failed on empty dir: %v", err)
+				}
+				if emptyReg == nil {
+					t.Fatalf("expected non-nil asset registry")
+				}
+				reg = emptyReg
+			}
 
-		body := rec.Body.String()
-		if !strings.Contains(body, "app.js?v=") || !strings.Contains(body, "style.css?v=") {
-			t.Errorf("expected versioned links for both app.js and style.css, got: %s", body)
-		}
-	})
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.matchETagPath != "" {
+				probeReq := httptest.NewRequest("GET", tc.matchETagPath, nil)
+				probeRec := httptest.NewRecorder()
+				reg.ServeHTTP(probeRec, probeReq)
+				etag := probeRec.Header().Get("ETag")
+				if etag == "" {
+					t.Fatalf("expected non-empty ETag for probe on %s", tc.matchETagPath)
+				}
+				if tc.weakETag != "" {
+					etag = tc.weakETag + etag
+				}
+				req.Header.Set("If-None-Match", etag)
+			}
 
-	t.Run("serves 304 Not Modified when If-None-Match matches ETag", func(t *testing.T) {
-		req1 := httptest.NewRequest("GET", "/app.js", nil)
-		rec1 := httptest.NewRecorder()
-		reg.ServeHTTP(rec1, req1)
-		etag := rec1.Header().Get("ETag")
-
-		req2 := httptest.NewRequest("GET", "/app.js", nil)
-		req2.Header.Set("If-None-Match", etag)
-		rec2 := httptest.NewRecorder()
-		reg.ServeHTTP(rec2, req2)
-
-		if rec2.Code != http.StatusNotModified {
-			t.Fatalf("expected status 304, got %d", rec2.Code)
-		}
-		if rec2.Body.Len() != 0 {
-			t.Errorf("expected empty body on 304, got %d bytes", rec2.Body.Len())
-		}
-	})
-
-	t.Run("serves 304 on weak ETag If-None-Match", func(t *testing.T) {
-		req1 := httptest.NewRequest("GET", "/style.css", nil)
-		rec1 := httptest.NewRecorder()
-		reg.ServeHTTP(rec1, req1)
-		etag := rec1.Header().Get("ETag")
-
-		req2 := httptest.NewRequest("GET", "/style.css", nil)
-		req2.Header.Set("If-None-Match", "W/"+etag)
-		rec2 := httptest.NewRecorder()
-		reg.ServeHTTP(rec2, req2)
-
-		if rec2.Code != http.StatusNotModified {
-			t.Fatalf("expected status 304 for weak ETag, got %d", rec2.Code)
-		}
-	})
-
-	t.Run("sets immutable cache-control when version query param is present", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/app.js?v=testcommit123", nil)
-		rec := httptest.NewRecorder()
-		reg.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", rec.Code)
-		}
-		cc := rec.Header().Get("Cache-Control")
-		if !strings.Contains(cc, "immutable") || !strings.Contains(cc, "public") {
-			t.Errorf("expected immutable public Cache-Control, got %q", cc)
-		}
-	})
-
-	t.Run("handles HEAD request with headers and empty body", func(t *testing.T) {
-		req := httptest.NewRequest("HEAD", "/app.js", nil)
-		rec := httptest.NewRecorder()
-		reg.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", rec.Code)
-		}
-		if rec.Header().Get("Content-Type") == "" {
-			t.Errorf("expected Content-Type to be set on HEAD")
-		}
-		if rec.Body.Len() != 0 {
-			t.Errorf("expected empty body on HEAD, got %d bytes", rec.Body.Len())
-		}
-	})
-
-	t.Run("returns 404 for nonexistent asset", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/nonexistent.js", nil)
-		rec := httptest.NewRecorder()
-		reg.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("expected status 404, got %d", rec.Code)
-		}
-	})
-
-	t.Run("returns 405 for POST request", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/app.js", nil)
-		rec := httptest.NewRecorder()
-		reg.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("expected status 405, got %d", rec.Code)
-		}
-	})
-
-	t.Run("serves favicon.ico with resilient mime type and 304 revalidation", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/favicon.ico", nil)
-		rec := httptest.NewRecorder()
-		reg.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", rec.Code)
-		}
-		ct := rec.Header().Get("Content-Type")
-		if ct != "image/x-icon" && ct != "image/vnd.microsoft.icon" {
-			t.Errorf("expected image/x-icon or image/vnd.microsoft.icon, got %q", ct)
-		}
-		etag := rec.Header().Get("ETag")
-		if etag == "" {
-			t.Errorf("expected non-empty ETag")
-		}
-		if rec.Body.Len() == 0 {
-			t.Errorf("expected non-empty favicon body")
-		}
-
-		req304 := httptest.NewRequest("GET", "/favicon.ico", nil)
-		req304.Header.Set("If-None-Match", etag)
-		rec304 := httptest.NewRecorder()
-		reg.ServeHTTP(rec304, req304)
-		if rec304.Code != http.StatusNotModified {
-			t.Fatalf("expected status 304, got %d", rec304.Code)
-		}
-		if rec304.Body.Len() != 0 {
-			t.Errorf("expected empty body on 304, got %d bytes", rec304.Body.Len())
-		}
-	})
-
-	t.Run("serves favicon png variants and apple-touch-icon", func(t *testing.T) {
-		targets := []string{"/favicon.png", "/favicon-32x32.png", "/favicon-16x16.png", "/apple-touch-icon.png"}
-		for _, target := range targets {
-			req := httptest.NewRequest("GET", target, nil)
 			rec := httptest.NewRecorder()
 			reg.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected status 200 for %s, got %d", target, rec.Code)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected status %d, got %d", tc.wantCode, rec.Code)
 			}
-			ct := rec.Header().Get("Content-Type")
-			if ct != "image/png" {
-				t.Errorf("expected image/png for %s, got %q", target, ct)
+			if tc.wantCode == http.StatusOK && tc.path == "/" {
+				if rec.Header().Get("ETag") == "" {
+					t.Errorf("expected ETag header to be set")
+				}
 			}
-			if rec.Body.Len() == 0 {
-				t.Errorf("expected non-empty body for %s", target)
+			if tc.wantCacheSubstr != "" {
+				cc := rec.Header().Get("Cache-Control")
+				if !strings.Contains(cc, tc.wantCacheSubstr) {
+					t.Errorf("expected Cache-Control to contain %q, got %q", tc.wantCacheSubstr, cc)
+				}
 			}
-		}
-	})
-
-	t.Run("serves favicon via dashboard prefix path", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/dashboard/favicon.ico", nil)
-		rec := httptest.NewRecorder()
-		reg.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected status 200 for /dashboard/favicon.ico, got %d", rec.Code)
-		}
-	})
-
-	t.Run("fallback on empty dir filesystem", func(t *testing.T) {
-		emptyDir := t.TempDir()
-		regFallback, err := NewAssetRegistry(os.DirFS(emptyDir), "dev")
-		if err != nil {
-			t.Fatalf("NewAssetRegistry failed on empty dir: %v", err)
-		}
-		if regFallback == nil {
-			t.Errorf("expected non-nil asset registry")
-		}
-	})
+			if tc.wantContentTypeSubstr != "" {
+				ct := rec.Header().Get("Content-Type")
+				if !strings.Contains(ct, tc.wantContentTypeSubstr) {
+					t.Errorf("expected Content-Type to contain %q, got %q", tc.wantContentTypeSubstr, ct)
+				}
+			}
+			if tc.wantEmptyBody && rec.Body.Len() != 0 {
+				t.Errorf("expected empty body, got %d bytes", rec.Body.Len())
+			}
+			bodyStr := rec.Body.String()
+			for _, sub := range tc.wantBodySubstr {
+				if !strings.Contains(bodyStr, sub) {
+					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+				}
+			}
+		})
+	}
 }
 
 func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
@@ -1859,26 +1713,9 @@ vanadis_url: ""
 func TestFetchGitSyncStatus(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("empty URL returns fallback", func(t *testing.T) {
-		fb := fetchGitSyncStatus(ctx, "")
-		if fb.Status != "synced" || fb.MaxLagSeconds != 0 || fb.Error != "" {
-			t.Errorf("expected default fallback for empty URL, got %+v", fb)
-		}
-	})
-
-	t.Run("invalid URL returns error", func(t *testing.T) {
-		resInvalid := fetchGitSyncStatus(ctx, "http://[::1]:namedport")
-		if resInvalid.Error == "" {
-			t.Errorf("expected error for invalid URL, got empty error")
-		}
-	})
-
-	t.Run("successful upstream response", func(t *testing.T) {
-		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/status" {
-				http.NotFound(w, r)
-				return
-			}
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
 				Status:        "lagging",
@@ -1894,48 +1731,79 @@ func TestFetchGitSyncStatus(t *testing.T) {
 					},
 				},
 			})
-		}))
-		defer mockServer.Close()
-
-		resp := fetchGitSyncStatus(ctx, mockServer.URL)
-		if resp.Status != "lagging" || resp.MaxLagSeconds != 42 {
-			t.Errorf("unexpected response from mock server: %+v", resp)
-		}
-		if len(resp.Repos) != 1 || resp.Repos["/share/aerial"].DiskCommit != "commit1" {
-			t.Errorf("unexpected repo status: %+v", resp.Repos)
-		}
-	})
-
-	t.Run("upstream 500 error returns fallback and error field", func(t *testing.T) {
-		errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		case "/error500/status":
 			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer errorServer.Close()
-
-		errResp := fetchGitSyncStatus(ctx, errorServer.URL)
-		if errResp.Status != "synced" {
-			t.Errorf("expected fallback status 'synced' on error, got %q", errResp.Status)
-		}
-		if errResp.Error != "HTTP 500" {
-			t.Errorf("expected error 'HTTP 500', got %q", errResp.Error)
-		}
-	})
-
-	t.Run("invalid JSON returns fallback and error field", func(t *testing.T) {
-		badJSONServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		case "/badjson/status":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{not-json`))
-		}))
-		defer badJSONServer.Close()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
 
-		badResp := fetchGitSyncStatus(ctx, badJSONServer.URL)
-		if badResp.Status != "synced" {
-			t.Errorf("expected fallback status 'synced' on bad JSON, got %q", badResp.Status)
-		}
-		if badResp.Error == "" {
-			t.Errorf("expected non-empty error on bad JSON")
-		}
-	})
+	tests := []struct {
+		name            string
+		url             string
+		wantStatus      string
+		wantMaxLag      int64
+		wantRepoCommit  string
+		wantErr         string
+		wantErrNonEmpty bool
+	}{
+		{
+			name:       "empty_URL_returns_fallback",
+			url:        "",
+			wantStatus: "synced",
+		},
+		{
+			name:            "invalid_URL_returns_error",
+			url:             "http://[::1]:namedport",
+			wantErrNonEmpty: true,
+		},
+		{
+			name:           "successful_upstream_response",
+			url:            mockServer.URL,
+			wantStatus:     "lagging",
+			wantMaxLag:     42,
+			wantRepoCommit: "commit1",
+		},
+		{
+			name:       "upstream_500_error_returns_fallback",
+			url:        mockServer.URL + "/error500",
+			wantStatus: "synced",
+			wantErr:    "HTTP 500",
+		},
+		{
+			name:            "invalid_JSON_returns_fallback",
+			url:             mockServer.URL + "/badjson",
+			wantStatus:      "synced",
+			wantErrNonEmpty: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fetchGitSyncStatus(ctx, tc.url)
+			if tc.wantStatus != "" && resp.Status != tc.wantStatus {
+				t.Errorf("expected status %q, got %q", tc.wantStatus, resp.Status)
+			}
+			if tc.wantMaxLag != 0 && resp.MaxLagSeconds != tc.wantMaxLag {
+				t.Errorf("expected max lag %d, got %d", tc.wantMaxLag, resp.MaxLagSeconds)
+			}
+			if tc.wantRepoCommit != "" {
+				if len(resp.Repos) != 1 || resp.Repos["/share/aerial"].DiskCommit != tc.wantRepoCommit {
+					t.Errorf("unexpected repo status: %+v", resp.Repos)
+				}
+			}
+			if tc.wantErr != "" && resp.Error != tc.wantErr {
+				t.Errorf("expected error %q, got %q", tc.wantErr, resp.Error)
+			}
+			if tc.wantErrNonEmpty && resp.Error == "" {
+				t.Errorf("expected non-empty error")
+			}
+		})
+	}
 }
 
 func TestHealthHandler(t *testing.T) {
@@ -2266,204 +2134,130 @@ func TestDashboardServerLifecycle(t *testing.T) {
 	}
 }
 
-func TestSetupDashboardMux_StatusWiring(t *testing.T) {
-	tempDir := t.TempDir()
-	cfgFile := filepath.Join(tempDir, "config.yaml")
-	cfgContent := `
-dashboard:
-  quick_launch_links:
-    - name: "TESTLINK"
-      url: "https://test.zylman.com"
-`
-	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	gitsyncMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
-			Status:        "synced",
-			MaxLagSeconds: 0,
-			LastSyncTime:  time.Now().UTC(),
-		})
-	}))
-	defer gitsyncMock.Close()
-
-	brainMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/queue/active" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"tasks": []}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer brainMock.Close()
-
-	cfg := DashboardConfig{
-		Port:       "8080",
-		BrainURL:   brainMock.URL,
-		GitSyncURL: gitsyncMock.URL,
-		ConfigPath: cfgFile,
-		GitCommit:  "wirecommit",
-	}
-
-	handler := SetupDashboardMux(cfg, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /api/status, got %d", rr.Code)
-	}
-
-	var resp ClusterResponse
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode status response: %v", err)
-	}
-
-	if resp.GitSync.Status != "synced" {
-		t.Errorf("expected GitSync.Status 'synced', got %q", resp.GitSync.Status)
-	}
-
-	foundLink := false
-	for _, l := range resp.QuickLaunchLinks {
-		if l.Name == "TESTLINK" && l.URL == "https://test.zylman.com" {
-			foundLink = true
-			break
-		}
-	}
-	if !foundLink {
-		t.Errorf("expected QuickLaunchLinks to contain TESTLINK, got %+v", resp.QuickLaunchLinks)
-	}
-}
-
 func TestFetchDockerClusterState_Extended(t *testing.T) {
 	origClient := dockerSocketClient
 	defer func() { dockerSocketClient = origClient }()
 
-	// 1. Success with various container states
-	dockerSocketClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				containers := []DockerContainerJSON{
-					{
-						Names:   []string{"/aerial-brain"},
-						State:   "running",
-						Status:  "Up 2 hours (healthy)",
-						Created: time.Now().UTC().Add(-2 * time.Hour).Unix(),
-						Labels: map[string]string{
-							"com.docker.compose.project": "aerial",
-							"com.docker.compose.service": "brain",
-						},
+	sampleContainers := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Status:  "Up 2 hours (healthy)",
+			Created: time.Now().UTC().Add(-2 * time.Hour).Unix(),
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "brain",
+			},
+		},
+		{
+			Names:   []string{"/aerial-scheduler"},
+			State:   "running",
+			Status:  "Up 10 minutes (unhealthy)",
+			Created: time.Now().UTC().Add(-10 * time.Minute).Unix(),
+		},
+		{
+			Names:   []string{"/aerial-proxy"},
+			State:   "running",
+			Status:  "Up 5 minutes (health: starting)",
+			Created: time.Now().UTC().Add(time.Hour).Unix(),
+		},
+		{
+			Names:   []string{"/aerial-db"},
+			State:   "exited",
+			Status:  "Exited (1)",
+			Created: time.Now().UTC().Add(-time.Hour).Unix(),
+		},
+		{
+			Names:   []string{"/scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
+			State:   "running",
+			Status:  "Up 30 minutes (healthy)",
+			Created: time.Now().UTC().Add(-30 * time.Minute).Unix(),
+			Labels: map[string]string{
+				"aerial.service":               "scheduler-mcp",
+				"com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e",
+			},
+		},
+		{
+			Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
+			State:   "running",
+			Status:  "Up 15 minutes (healthy)",
+			Created: time.Now().UTC().Add(-15 * time.Minute).Unix(),
+			Labels: map[string]string{
+				"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
+			},
+		},
+		{
+			Names:   []string{"/hassio_supervisor"},
+			State:   "running",
+			Status:  "Up 10 hours",
+			Created: time.Now().UTC().Add(-10 * time.Hour).Unix(),
+		},
+	}
+	sampleContainersJSON, _ := json.Marshal(sampleContainers)
+
+	tests := []struct {
+		name         string
+		statusCode   int
+		body         string
+		rtErr        error
+		wantServices int
+		wantErr      bool
+	}{
+		{
+			name:         "Success_MixedContainers",
+			statusCode:   http.StatusOK,
+			body:         string(sampleContainersJSON),
+			wantServices: 6,
+		},
+		{
+			name:       "HTTP500_Error",
+			statusCode: http.StatusInternalServerError,
+			body:       "server err",
+			wantErr:    true,
+		},
+		{
+			name:       "BadJSON_Error",
+			statusCode: http.StatusOK,
+			body:       "{invalid json",
+			wantErr:    true,
+		},
+		{
+			name:    "ClientFailure_Error",
+			rtErr:   errors.New("socket closed"),
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dockerSocketClient = &http.Client{
+				Transport: &roundTripperFunc{
+					fn: func(req *http.Request) (*http.Response, error) {
+						if tc.rtErr != nil {
+							return nil, tc.rtErr
+						}
+						return &http.Response{
+							StatusCode: tc.statusCode,
+							Body:       io.NopCloser(strings.NewReader(tc.body)),
+							Header:     make(http.Header),
+						}, nil
 					},
-					{
-						Names:   []string{"/aerial-scheduler"},
-						State:   "running",
-						Status:  "Up 10 minutes (unhealthy)",
-						Created: time.Now().UTC().Add(-10 * time.Minute).Unix(),
-					},
-					{
-						Names:   []string{"/aerial-proxy"},
-						State:   "running",
-						Status:  "Up 5 minutes (health: starting)",
-						Created: time.Now().UTC().Add(time.Hour).Unix(), // future time -> uptime 0
-					},
-					{
-						Names:   []string{"/aerial-db"},
-						State:   "exited",
-						Status:  "Exited (1)",
-						Created: time.Now().UTC().Add(-time.Hour).Unix(),
-					},
-					{
-						Names:   []string{"/scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
-						State:   "running",
-						Status:  "Up 30 minutes (healthy)",
-						Created: time.Now().UTC().Add(-30 * time.Minute).Unix(),
-						Labels: map[string]string{
-							"aerial.service":               "scheduler-mcp",
-							"com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e",
-						},
-					},
-					{
-						Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
-						State:   "running",
-						Status:  "Up 15 minutes (healthy)",
-						Created: time.Now().UTC().Add(-15 * time.Minute).Unix(),
-						Labels: map[string]string{
-							"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
-						},
-					},
-					{
-						Names:   []string{"/hassio_supervisor"},
-						State:   "running",
-						Status:  "Up 10 hours",
-						Created: time.Now().UTC().Add(-10 * time.Hour).Unix(),
-					},
+				},
+			}
+			services, _, err := fetchDockerClusterState(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
 				}
-				data, _ := json.Marshal(containers)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(string(data))),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-
-	services, _, err := fetchDockerClusterState(context.Background())
-	if err != nil {
-		t.Fatalf("fetchDockerClusterState failed: %v", err)
-	}
-	if len(services) != 6 {
-		t.Errorf("expected 6 services (including Nomad), got %d", len(services))
-	}
-
-	// 2. HTTP 500 error
-	dockerSocketClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       io.NopCloser(strings.NewReader("server err")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	_, _, err500 := fetchDockerClusterState(context.Background())
-	if err500 == nil {
-		t.Errorf("expected error on HTTP 500")
-	}
-
-	// 3. Bad JSON
-	dockerSocketClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader("{invalid json")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	_, _, errJSON := fetchDockerClusterState(context.Background())
-	if errJSON == nil {
-		t.Errorf("expected error on bad JSON")
-	}
-
-	// 4. Client error
-	dockerSocketClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return nil, errors.New("socket closed")
-			},
-		},
-	}
-	_, _, errNet := fetchDockerClusterState(context.Background())
-	if errNet == nil {
-		t.Errorf("expected error on client failure")
+				return
+			}
+			if err != nil {
+				t.Fatalf("fetchDockerClusterState failed: %v", err)
+			}
+			if len(services) != tc.wantServices {
+				t.Errorf("expected %d services (including Nomad), got %d", tc.wantServices, len(services))
+			}
+		})
 	}
 }
 
@@ -2471,62 +2265,75 @@ func TestFetchActiveTasksFromBrain_Extended(t *testing.T) {
 	origClient := brainHTTPClient
 	defer func() { brainHTTPClient = origClient }()
 
-	// 1. Empty brainURL
-	tasks, err := fetchActiveTasksFromBrain(context.Background(), "")
-	if err != nil || len(tasks) != 0 {
-		t.Errorf("expected empty tasks for empty brainURL")
-	}
-
-	// 2. HTTP 500 error
-	brainHTTPClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       io.NopCloser(strings.NewReader("error")),
-					Header:     make(http.Header),
-				}, nil
-			},
+	tests := []struct {
+		name        string
+		brainURL    string
+		statusCode  int
+		body        string
+		wantTasks   int
+		wantSummary string
+		wantErr     bool
+	}{
+		{
+			name:     "EmptyURL",
+			brainURL: "",
+		},
+		{
+			name:       "HTTP500_Error",
+			brainURL:   "http://brain",
+			statusCode: http.StatusInternalServerError,
+			body:       "error",
+			wantErr:    true,
+		},
+		{
+			name:       "BadJSON_Error",
+			brainURL:   "http://brain",
+			statusCode: http.StatusOK,
+			body:       "bad json",
+			wantErr:    true,
+		},
+		{
+			name:        "SummaryFallbackToPrompt",
+			brainURL:    "http://brain",
+			statusCode:  http.StatusOK,
+			body:        `{"status":"ok","total":1,"tasks":[{"id":"t1","status":"PENDING","prompt":"do something","summary":"","created_at":"2026-08-30T12:00:00Z"}]}`,
+			wantTasks:   1,
+			wantSummary: "do something",
 		},
 	}
-	_, err500 := fetchActiveTasksFromBrain(context.Background(), "http://brain")
-	if err500 == nil {
-		t.Errorf("expected error on HTTP 500")
-	}
 
-	// 3. Bad JSON
-	brainHTTPClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader("bad json")),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	_, errJSON := fetchActiveTasksFromBrain(context.Background(), "http://brain")
-	if errJSON == nil {
-		t.Errorf("expected error on bad JSON")
-	}
-
-	// 4. Pending task and empty summary fallback
-	brainHTTPClient = &http.Client{
-		Transport: &roundTripperFunc{
-			fn: func(req *http.Request) (*http.Response, error) {
-				resp := `{"status":"ok","total":1,"tasks":[{"id":"t1","status":"PENDING","prompt":"do something","summary":"","created_at":"2026-08-30T12:00:00Z"}]}`
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(resp)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	tasks, err = fetchActiveTasksFromBrain(context.Background(), "http://brain")
-	if err != nil || len(tasks) != 1 || tasks[0].Summary != "do something" {
-		t.Errorf("expected task summary to fallback to prompt, got %+v", tasks)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.statusCode != 0 || tc.body != "" {
+				brainHTTPClient = &http.Client{
+					Transport: &roundTripperFunc{
+						fn: func(req *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: tc.statusCode,
+								Body:       io.NopCloser(strings.NewReader(tc.body)),
+								Header:     make(http.Header),
+							}, nil
+						},
+					},
+				}
+			}
+			tasks, err := fetchActiveTasksFromBrain(context.Background(), tc.brainURL)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(tasks) != tc.wantTasks {
+				t.Errorf("expected %d tasks, got %d", tc.wantTasks, len(tasks))
+			}
+			if tc.wantSummary != "" && (len(tasks) == 0 || tasks[0].Summary != tc.wantSummary) {
+				t.Errorf("expected task summary to fallback to prompt, got %+v", tasks)
+			}
+		})
 	}
 }
 
@@ -3311,108 +3118,118 @@ dashboard:
 func TestFetchNomadClusterState(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("success", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				http.Error(w, "bad method", http.StatusMethodNotAllowed)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Path {
-			case "/v1/jobs":
-				if !strings.Contains(r.URL.RawQuery, "Type") {
-					t.Errorf("expected filter query on jobs: %s", r.URL.RawQuery)
-				}
-				w.Write([]byte(`[{"ID":"brain","Type":"service","Status":"running"}]`))
-			case "/v1/allocations":
-				if !strings.Contains(r.URL.RawQuery, "ClientStatus") {
-					t.Errorf("expected filter query on allocs: %s", r.URL.RawQuery)
-				}
-				w.Write([]byte(`[{"ID":"alloc-1","JobID":"brain","ClientStatus":"running","CreateTime":1775240000000000000,"DeploymentStatus":{"Healthy":true}}]`))
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		defer ts.Close()
-
-		services, err := fetchNomadClusterState(ctx, ts.URL)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "bad method", http.StatusMethodNotAllowed)
+			return
 		}
-		if len(services) != 1 {
-			t.Fatalf("expected 1 service, got %d", len(services))
-		}
-		if services[0].Name != "brain" || services[0].Status != "healthy" {
-			t.Errorf("unexpected service: %+v", services[0])
-		}
-	})
-
-	t.Run("empty nomad address", func(t *testing.T) {
-		_, err := fetchNomadClusterState(ctx, "   ")
-		if err == nil {
-			t.Fatal("expected error for empty address")
-		}
-	})
-
-	t.Run("invalid url", func(t *testing.T) {
-		_, err := fetchNomadClusterState(ctx, "http://")
-		if err == nil {
-			t.Fatal("expected error for invalid url")
-		}
-	})
-
-	t.Run("jobs 500 error", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/jobs500"):
 			http.Error(w, "internal server error", http.StatusInternalServerError)
-		}))
-		defer ts.Close()
-
-		_, err := fetchNomadClusterState(ctx, ts.URL)
-		if err == nil || !strings.Contains(err.Error(), "nomad jobs returned HTTP 500") {
-			t.Fatalf("expected jobs 500 error, got: %v", err)
-		}
-	})
-
-	t.Run("allocs 500 error", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/v1/jobs" {
+		case strings.HasPrefix(r.URL.Path, "/allocs500"):
+			if strings.HasSuffix(r.URL.Path, "/jobs") {
 				w.Write([]byte(`[{"ID":"brain","Type":"service"}]`))
 				return
 			}
 			http.Error(w, "allocs failure", http.StatusInternalServerError)
-		}))
-		defer ts.Close()
-
-		_, err := fetchNomadClusterState(ctx, ts.URL)
-		if err == nil || !strings.Contains(err.Error(), "nomad allocs returned HTTP 500") {
-			t.Fatalf("expected allocs 500 error, got: %v", err)
-		}
-	})
-
-	t.Run("jobs malformed json", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/v1/jobs" {
+		case strings.HasPrefix(r.URL.Path, "/jobsbadjson"):
+			if strings.HasSuffix(r.URL.Path, "/jobs") {
 				w.Write([]byte(`not json`))
 				return
 			}
 			w.Write([]byte(`[]`))
-		}))
-		defer ts.Close()
-
-		_, err := fetchNomadClusterState(ctx, ts.URL)
-		if err == nil {
-			t.Fatal("expected error on malformed jobs json")
+		case r.URL.Path == "/v1/jobs":
+			if !strings.Contains(r.URL.RawQuery, "Type") {
+				http.Error(w, "expected filter query on jobs", http.StatusBadRequest)
+				return
+			}
+			w.Write([]byte(`[{"ID":"brain","Type":"service","Status":"running"}]`))
+		case r.URL.Path == "/v1/allocations":
+			if !strings.Contains(r.URL.RawQuery, "ClientStatus") {
+				http.Error(w, "expected filter query on allocs", http.StatusBadRequest)
+				return
+			}
+			w.Write([]byte(`[{"ID":"alloc-1","JobID":"brain","ClientStatus":"running","CreateTime":1775240000000000000,"DeploymentStatus":{"Healthy":true}}]`))
+		default:
+			http.NotFound(w, r)
 		}
-	})
+	}))
+	defer ts.Close()
 
-	t.Run("network error", func(t *testing.T) {
-		_, err := fetchNomadClusterState(ctx, "http://127.0.0.1:59999")
-		if err == nil {
-			t.Fatal("expected network error")
-		}
-	})
+	tests := []struct {
+		name          string
+		addr          string
+		wantServices  int
+		wantName      string
+		wantStatus    string
+		wantErr       bool
+		wantErrSubstr string
+	}{
+		{
+			name:         "success",
+			addr:         ts.URL,
+			wantServices: 1,
+			wantName:     "brain",
+			wantStatus:   "healthy",
+		},
+		{
+			name:    "empty_nomad_address",
+			addr:    "   ",
+			wantErr: true,
+		},
+		{
+			name:    "invalid_url",
+			addr:    "http:// ",
+			wantErr: true,
+		},
+		{
+			name:          "jobs_500_error",
+			addr:          ts.URL + "/jobs500",
+			wantErr:       true,
+			wantErrSubstr: "nomad jobs returned HTTP 500",
+		},
+		{
+			name:          "allocs_500_error",
+			addr:          ts.URL + "/allocs500",
+			wantErr:       true,
+			wantErrSubstr: "nomad allocs returned HTTP 500",
+		},
+		{
+			name:    "jobs_malformed_json",
+			addr:    ts.URL + "/jobsbadjson",
+			wantErr: true,
+		},
+		{
+			name:    "network_error",
+			addr:    "http://127.0.0.1:59999",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			services, err := fetchNomadClusterState(ctx, tc.addr)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Fatalf("expected error containing %q, got: %v", tc.wantErrSubstr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(services) != tc.wantServices {
+				t.Fatalf("expected %d services, got %d", tc.wantServices, len(services))
+			}
+			if len(services) > 0 && (services[0].Name != tc.wantName || services[0].Status != tc.wantStatus) {
+				t.Errorf("unexpected service: %+v", services[0])
+			}
+		})
+	}
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {
