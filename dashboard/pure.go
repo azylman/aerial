@@ -39,15 +39,65 @@ var mimeFallbacks = map[string]string{
 	".woff":  "font/woff",
 }
 
+// parseUpstreamURL normalizes baseURL, validates control characters and empty conditions,
+// and parses the combined URL with pathSuffix.
+func parseUpstreamURL(baseURL, emptyErr, pathSuffix string) (*url.URL, error) {
+	cleanBase := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if cleanBase == "" {
+		return nil, fmt.Errorf("%s", emptyErr)
+	}
+	if strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
+		return nil, fmt.Errorf("invalid control character in base URL")
+	}
+	return url.Parse(cleanBase + pathSuffix)
+}
+
+// shortenSHA returns the first 7 characters of a commit SHA if longer.
+func shortenSHA(s string) string {
+	if len(s) > 7 {
+		return s[:7]
+	}
+	return s
+}
+
+// containerChipStatusAndDuration computes the chip status, conclusion, and uptime duration for a container.
+func containerChipStatusAndDuration(c DockerContainerJSON, now time.Time) (status, conclusion, duration string) {
+	status = "completed"
+	conclusion = "success"
+	if c.Health != nil && c.Health.Status == "starting" {
+		status = "active"
+		conclusion = ""
+	} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
+		status = "failed"
+		conclusion = "failure"
+	}
+
+	duration = "0s"
+	if c.Created > 0 {
+		createdAt := time.Unix(c.Created, 0).UTC()
+		durSec := int(now.Sub(createdAt).Seconds())
+		if durSec > 0 {
+			duration = FormatUptimeString(durSec)
+		}
+	}
+	return status, conclusion, duration
+}
+
+// buildDeploymentSteps constructs the standard 5-step Permet HUD deployment pipeline.
+func buildDeploymentSteps(s1, s2, s3, s4, s5 string) []DeploymentStep {
+	return []DeploymentStep{
+		{Name: "Commit Trigger", Icon: "📦", Status: s1},
+		{Name: "CI Build & GHCR", Icon: "⚙️", Status: s2},
+		{Name: "Hangar Sync", Icon: "⬇️", Status: s3},
+		{Name: "Container Swap", Icon: "🔄", Status: s4},
+		{Name: "Health Check", Icon: "🩺", Status: s5},
+	}
+}
+
 // BuildFactsUpstreamURL validates the base URL and constructs the target upstream
 // URL with whitelisted, normalized, and clamped query parameters.
 func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL string, limit, offset int, err error) {
-	cleanBase := strings.TrimRight(strings.TrimSpace(brainBaseURL), "/")
-	if cleanBase == "" || strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
-		return "", 0, 0, fmt.Errorf("invalid upstream URL configuration: %q", brainBaseURL)
-	}
-
-	target, err := url.Parse(cleanBase + "/facts")
+	target, err := parseUpstreamURL(brainBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", brainBaseURL), "/facts")
 	if err != nil {
 		return "", 0, 0, err
 	}
@@ -89,12 +139,7 @@ func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL s
 
 // BuildSchedulesUpstreamURL validates the base URL and constructs the upstream /schedules URL.
 func BuildSchedulesUpstreamURL(brainBaseURL string) (string, error) {
-	cleanBase := strings.TrimRight(strings.TrimSpace(brainBaseURL), "/")
-	if cleanBase == "" || strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
-		return "", fmt.Errorf("invalid upstream URL configuration: %q", brainBaseURL)
-	}
-
-	target, err := url.Parse(cleanBase + "/schedules")
+	target, err := parseUpstreamURL(brainBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", brainBaseURL), "/schedules")
 	if err != nil {
 		return "", err
 	}
@@ -104,12 +149,7 @@ func BuildSchedulesUpstreamURL(brainBaseURL string) (string, error) {
 // BuildScheduleRunsUpstreamURL validates the base URL and constructs the upstream
 // /schedules/runs URL with sanitized limit, offset, schedule_id, and status parameters.
 func BuildScheduleRunsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL string, limit, offset int, err error) {
-	cleanBase := strings.TrimRight(strings.TrimSpace(brainBaseURL), "/")
-	if cleanBase == "" || strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
-		return "", 0, 0, fmt.Errorf("invalid upstream URL configuration: %q", brainBaseURL)
-	}
-
-	target, err := url.Parse(cleanBase + "/schedules/runs")
+	target, err := parseUpstreamURL(brainBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", brainBaseURL), "/schedules/runs")
 	if err != nil {
 		return "", 0, 0, err
 	}
@@ -149,12 +189,7 @@ func BuildScheduleRunsUpstreamURL(brainBaseURL string, inQuery url.Values) (targ
 // BuildVanadisBuildsUpstreamURL validates the base URL and constructs the upstream /builds URL
 // with clamped limit (1..100, default 50), and optional status and queue_state query parameters.
 func BuildVanadisBuildsUpstreamURL(vanadisBaseURL string, inQuery url.Values) (targetURL string, limit int, err error) {
-	cleanBase := strings.TrimRight(strings.TrimSpace(vanadisBaseURL), "/")
-	if cleanBase == "" || strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
-		return "", 0, fmt.Errorf("invalid upstream URL configuration: %q", vanadisBaseURL)
-	}
-
-	target, err := url.Parse(cleanBase + "/builds")
+	target, err := parseUpstreamURL(vanadisBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", vanadisBaseURL), "/builds")
 	if err != nil {
 		return "", 0, err
 	}
@@ -192,9 +227,9 @@ func BuildVanadisBuildsUpstreamURL(vanadisBaseURL string, inQuery url.Values) (t
 // BuildVanadisBuildDetailUpstreamURL validates the base URL, extracts and validates the build ID
 // from requestPath, and constructs the upstream /builds/<id> URL.
 func BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL string, requestPath string) (targetURL string, buildID string, err error) {
-	cleanBase := strings.TrimRight(strings.TrimSpace(vanadisBaseURL), "/")
-	if cleanBase == "" || strings.ContainsAny(cleanBase, "\x7f\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\r\n") {
-		return "", "", fmt.Errorf("invalid upstream URL configuration: %q", vanadisBaseURL)
+	baseParsed, err := parseUpstreamURL(vanadisBaseURL, "vanadis base URL is empty", "")
+	if err != nil {
+		return "", "", err
 	}
 
 	var rawID string
@@ -217,7 +252,7 @@ func BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL string, requestPath strin
 		return "", "", fmt.Errorf("invalid build ID %q: control characters not allowed", buildID)
 	}
 
-	target, err := url.Parse(cleanBase + "/builds/" + url.PathEscape(buildID))
+	target, err := url.Parse(baseParsed.String() + "/builds/" + url.PathEscape(buildID))
 	if err != nil {
 		return "", "", err
 	}
@@ -445,24 +480,7 @@ func BuildContainerChips(rawContainers []DockerContainerJSON, now time.Time) []M
 		}
 		seen[svcName] = true
 
-		status := "completed"
-		conclusion := "success"
-		if c.Health != nil && c.Health.Status == "starting" {
-			status = "active"
-			conclusion = ""
-		} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
-			status = "failed"
-			conclusion = "failure"
-		}
-
-		durStr := "0s"
-		if c.Created > 0 {
-			createdAt := time.Unix(c.Created, 0).UTC()
-			durSec := int(now.Sub(createdAt).Seconds())
-			if durSec > 0 {
-				durStr = FormatUptimeString(durSec)
-			}
-		}
+		status, conclusion, durStr := containerChipStatusAndDuration(c, now)
 
 		chips = append(chips, MatrixJobChip{
 			Name:       svcName,
@@ -535,24 +553,7 @@ func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []st
 			continue
 		}
 
-		status := "completed"
-		conclusion := "success"
-		if c.Health != nil && c.Health.Status == "starting" {
-			status = "active"
-			conclusion = ""
-		} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
-			status = "failed"
-			conclusion = "failure"
-		}
-
-		durStr := "0s"
-		if c.Created > 0 {
-			createdAt := time.Unix(c.Created, 0).UTC()
-			durSec := int(now.Sub(createdAt).Seconds())
-			if durSec > 0 {
-				durStr = FormatUptimeString(durSec)
-			}
-		}
+		status, conclusion, durStr := containerChipStatusAndDuration(c, now)
 
 		chips = append(chips, MatrixJobChip{
 			Name:       svc,
@@ -569,26 +570,11 @@ func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []st
 // GetContainerCommit extracts and truncates the 7-character commit SHA from container labels.
 func GetContainerCommit(containers []DockerContainerJSON) string {
 	for _, c := range containers {
-		if !IsCoreAerialContainer(c) || c.Labels == nil {
+		if !IsCoreAerialContainer(c) {
 			continue
 		}
-		if rev, ok := c.Labels["org.opencontainers.image.revision"]; ok && rev != "" {
-			if len(rev) > 7 {
-				return rev[:7]
-			}
-			return rev
-		}
-		if rev, ok := c.Labels["aerial.commit_sha"]; ok && rev != "" {
-			if len(rev) > 7 {
-				return rev[:7]
-			}
-			return rev
-		}
-		if rev, ok := c.Labels["vcs-ref"]; ok && rev != "" {
-			if len(rev) > 7 {
-				return rev[:7]
-			}
-			return rev
+		if sha := ExtractSingleContainerCommit(c); sha != "" {
+			return shortenSHA(sha)
 		}
 	}
 	return ""
@@ -770,13 +756,6 @@ func MergeClusterDeploymentsWithHangar(
 		return strings.ToLower(trimmed)
 	}
 
-	shortenSHA := func(s string) string {
-		trimmed := strings.TrimSpace(s)
-		if len(trimmed) > 7 {
-			return trimmed[:7]
-		}
-		return trimmed
-	}
 
 	type pipelineEntry struct {
 		dep       *DeploymentStatus
@@ -1025,13 +1004,7 @@ func MergeClusterDeploymentsWithHangar(
 
 			dep.Stage = stage
 			dep.Progress = progress
-			dep.Steps = []DeploymentStep{
-				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-				{Name: "CI Build & GHCR", Icon: "⚙️", Status: ciStatus},
-				{Name: "Hangar Sync", Icon: "⬇️", Status: hangarStatus},
-				{Name: "Container Swap", Icon: "🔄", Status: step4Status},
-				{Name: "Health Check", Icon: "🩺", Status: step5Status},
-			}
+			dep.Steps = buildDeploymentSteps("completed", ciStatus, hangarStatus, step4Status, step5Status)
 			dep.MatrixJobs = ciChips
 		}
 	}
@@ -1067,13 +1040,7 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Progress = 100
 			}
 			if len(dep.Steps) < 5 {
-				dep.Steps = []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-					{Name: "Container Swap", Icon: "🔄", Status: "completed"},
-					{Name: "Health Check", Icon: "🩺", Status: "completed"},
-				}
+				dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "completed")
 			} else {
 				for i := range dep.Steps {
 					dep.Steps[i].Status = "completed"
@@ -1085,13 +1052,7 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Progress = 55
 			}
 			if len(dep.Steps) < 5 {
-				dep.Steps = []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "active"},
-					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
-					{Name: "Health Check", Icon: "🩺", Status: "pending"},
-				}
+				dep.Steps = buildDeploymentSteps("completed", "completed", "active", "pending", "pending")
 			} else {
 				dep.Steps[1].Status = "completed"
 				dep.Steps[2].Status = "active"
@@ -1102,13 +1063,7 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Progress = 60
 			}
 			if len(dep.Steps) < 5 {
-				dep.Steps = []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-					{Name: "Container Swap", Icon: "🔄", Status: "active"},
-					{Name: "Health Check", Icon: "🩺", Status: "active"},
-				}
+				dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "active", "active")
 			} else {
 				dep.Steps[1].Status = "completed"
 				dep.Steps[2].Status = "completed"
@@ -1124,13 +1079,7 @@ func MergeClusterDeploymentsWithHangar(
 			}
 			dep.CommitMsg = failMsg
 			if len(dep.Steps) < 5 {
-				dep.Steps = []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "failed"},
-					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
-					{Name: "Health Check", Icon: "🩺", Status: "pending"},
-				}
+				dep.Steps = buildDeploymentSteps("completed", "completed", "failed", "pending", "pending")
 			} else {
 				dep.Steps[2].Status = "failed"
 			}
@@ -1226,13 +1175,7 @@ func MergeClusterDeploymentsWithHangar(
 			dep.Stage = "degraded"
 			dep.Progress = 85
 			if len(dep.Steps) < 5 {
-				dep.Steps = []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-					{Name: "Container Swap", Icon: "🔄", Status: "completed"},
-					{Name: "Health Check", Icon: "🩺", Status: "failed"},
-				}
+				dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "failed")
 			} else {
 				dep.Steps[3].Status = "completed"
 				dep.Steps[4].Status = "failed"
@@ -1249,13 +1192,7 @@ func MergeClusterDeploymentsWithHangar(
 			}
 			swapStatus := "active"
 			if len(dep.Steps) < 5 {
-				dep.Steps = []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-					{Name: "Container Swap", Icon: "🔄", Status: swapStatus},
-					{Name: "Health Check", Icon: "🩺", Status: "active"},
-				}
+				dep.Steps = buildDeploymentSteps("completed", "completed", "completed", swapStatus, "active")
 			} else {
 				dep.Steps[1].Status = "completed"
 				dep.Steps[2].Status = "completed"
@@ -1269,13 +1206,7 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Progress = 55
 			}
 			if len(dep.Steps) < 5 {
-				dep.Steps = []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "active"},
-					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
-					{Name: "Health Check", Icon: "🩺", Status: "pending"},
-				}
+				dep.Steps = buildDeploymentSteps("completed", "completed", "active", "pending", "pending")
 			} else {
 				dep.Steps[1].Status = "completed"
 				dep.Steps[2].Status = "active"
@@ -1289,13 +1220,7 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Stage = "live"
 				dep.Progress = 100
 				if len(dep.Steps) < 5 {
-					dep.Steps = []DeploymentStep{
-						{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-						{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-						{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-						{Name: "Container Swap", Icon: "🔄", Status: "completed"},
-						{Name: "Health Check", Icon: "🩺", Status: "completed"},
-					}
+					dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "completed")
 				} else {
 					for i := range dep.Steps {
 						dep.Steps[i].Status = "completed"
