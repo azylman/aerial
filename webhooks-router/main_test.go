@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
 )
 
@@ -118,10 +116,11 @@ type mockPRRegistry struct {
 	closedTargetID   string
 	backfillTargetID string
 
-	resolvePRNum    int
-	resolveBranch   string
-	resolveTargetID string
-	resolveErr      error
+	resolvePRNum             int
+	resolveBranch            string
+	resolveTargetID          string
+	resolveBySHATargetEmpty  bool
+	resolveErr               error
 
 	ciFailedTargetID     string
 	ciFailedUpdated      bool
@@ -364,7 +363,11 @@ func (m *mockPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha st
 		repo string
 		sha  string
 	}{repo, sha})
-	return m.resolvePRNum, m.resolveBranch, m.resolveTargetID, nil
+	targetID := m.resolveTargetID
+	if m.resolveBySHATargetEmpty {
+		targetID = ""
+	}
+	return m.resolvePRNum, m.resolveBranch, targetID, nil
 }
 
 func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
@@ -568,31 +571,6 @@ func mkDeployedReg(targetID string, pr int, sha, repo string, updated bool) *moc
 
 func mkDeployFailedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
 	return &mockPRRegistry{deployFailedJobTargetID: targetID, deployFailedJobPRNum: pr, deployFailedJobMergeSHA: sha, deployFailedJobRepo: repo, deployFailedJobUpdated: updated}
-}
-
-func getTestPostgresURL() string {
-	pgURL := os.Getenv("POSTGRES_URL")
-	if pgURL == "" {
-		pgURL = os.Getenv("DATABASE_URL")
-	}
-	if pgURL != "" {
-		return pgURL
-	}
-	if _, err := net.LookupHost("aerial-postgres"); err == nil {
-		return "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
-	}
-	if _, err := net.LookupHost("postgres"); err == nil {
-		return "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
-	}
-	if conn, err := net.DialTimeout("tcp", "127.0.0.1:5432", 150*time.Millisecond); err == nil {
-		conn.Close()
-		return "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
-	}
-	if conn, err := net.DialTimeout("tcp", "192.168.1.14:5432", 150*time.Millisecond); err == nil {
-		conn.Close()
-		return "postgres://aerial:aerial_secure_pass@192.168.1.14:5432/aerial?sslmode=disable"
-	}
-	return "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
 }
 
 // --- 1. Config & Pure Helpers ---
@@ -2550,139 +2528,178 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 	ctx := context.Background()
 	validSnowflake := "1555405874565091380"
 
-	t.Run("AllMethodsAndRetries", func(t *testing.T) {
-		t.Parallel()
-		var receivedGitPush GitPushEventRequest
-		var receivedImageReady ImageReadyEventRequest
-		var promptAttempts, directAttempts int
-		var receivedPrompt PromptRequest
-		var receivedDirect DirectMessageRequest
+	tests := []struct {
+		name               string
+		callType           string
+		snowflake          string
+		statusCode         int
+		responseBody       string
+		responseHeaderType string
+		failCount          int
+		maxRetries         int
+		wantErr            bool
+		wantSubstr         string
+		wantMatchedJobs    int
+	}{
+		{
+			name:         "DispatchGitPush success 200",
+			callType:     "git_push",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"accepted"}`,
+		},
+		{
+			name:            "DispatchImageReady success 200",
+			callType:        "image_ready",
+			statusCode:      http.StatusOK,
+			responseBody:    `{"status":"accepted","matched_jobs":["brain"]}`,
+			wantMatchedJobs: 1,
+		},
+		{
+			name:         "DispatchImageReady invalid JSON decode warning",
+			callType:     "image_ready",
+			statusCode:   http.StatusOK,
+			responseBody: `{not json`,
+		},
+		{
+			name:         "DispatchGitPush hangar 404 unmanaged tolerated",
+			callType:     "git_push",
+			statusCode:   http.StatusNotFound,
+			responseBody: `{"status":"error","message":"repository not managed by hangar"}`,
+		},
+		{
+			name:         "DispatchImageReady hangar 404 not found tolerated",
+			callType:     "image_ready",
+			statusCode:   http.StatusNotFound,
+			responseBody: `{"status":"not_found","message":"no nomad jobs found using image"}`,
+		},
+		{
+			name:         "DispatchGitPush 500 error not tolerated",
+			callType:     "git_push",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error":"internal"}`,
+			wantErr:      true,
+		},
+		{
+			name:         "DispatchImageReady 500 error not tolerated",
+			callType:     "image_ready",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error":"internal"}`,
+			wantErr:      true,
+		},
+		{
+			name:               "DispatchGitPush HTML 404 rejected",
+			callType:           "git_push",
+			statusCode:         http.StatusNotFound,
+			responseHeaderType: "text/html",
+			responseBody:       `<html><title>404 Not Found</title><body>Proxy Error</body></html>`,
+			wantErr:            true,
+		},
+		{
+			name:               "DispatchImageReady HTML 404 rejected",
+			callType:           "image_ready",
+			statusCode:         http.StatusNotFound,
+			responseHeaderType: "text/html",
+			responseBody:       `<html><title>404 Not Found</title><body>Proxy Error</body></html>`,
+			wantErr:            true,
+		},
+		{
+			name:       "DispatchPrompt invalid snowflake",
+			callType:   "prompt",
+			snowflake:  "not-a-snowflake",
+			wantErr:    true,
+			wantSubstr: "invalid discord snowflake",
+		},
+		{
+			name:         "DispatchPrompt retry on 500 then success",
+			callType:     "prompt",
+			snowflake:    validSnowflake,
+			failCount:    1,
+			maxRetries:   4,
+			responseBody: `{"status":"queued"}`,
+		},
+		{
+			name:       "DispatchDirectMessage invalid snowflake",
+			callType:   "direct_message",
+			snowflake:  "not-a-snowflake",
+			wantErr:    true,
+			wantSubstr: "invalid discord snowflake",
+		},
+		{
+			name:         "DispatchDirectMessage retry on 500 then success",
+			callType:     "direct_message",
+			snowflake:    validSnowflake,
+			failCount:    1,
+			maxRetries:   4,
+			responseBody: `{"status":"sent"}`,
+		},
+		{
+			name:         "DispatchDirectMessage 400 client error no retry",
+			callType:     "direct_message",
+			snowflake:    validSnowflake,
+			statusCode:   http.StatusBadRequest,
+			responseBody: `{"error":"bad request"}`,
+			maxRetries:   3,
+			wantErr:      true,
+		},
+	}
 
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/events/git_push":
-				_ = json.NewDecoder(r.Body).Decode(&receivedGitPush)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"status":"accepted"}`))
-			case "/events/image_ready":
-				_ = json.NewDecoder(r.Body).Decode(&receivedImageReady)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"status":"accepted"}`))
-			case "/prompt":
-				promptAttempts++
-				if promptAttempts == 1 {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var attempts atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				att := attempts.Add(1)
+				if int(att) <= tc.failCount {
 					http.Error(w, "transient error", http.StatusInternalServerError)
 					return
 				}
-				_ = json.NewDecoder(r.Body).Decode(&receivedPrompt)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"status":"queued"}`))
-			case "/discord/message":
-				directAttempts++
-				if directAttempts == 1 {
-					http.Error(w, "transient error", http.StatusInternalServerError)
-					return
+				if tc.responseHeaderType != "" {
+					w.Header().Set("Content-Type", tc.responseHeaderType)
+				} else {
+					w.Header().Set("Content-Type", "application/json")
 				}
-				_ = json.NewDecoder(r.Body).Decode(&receivedDirect)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"status":"sent"}`))
-			default:
-				http.NotFound(w, r)
+				status := tc.statusCode
+				if status == 0 {
+					status = http.StatusOK
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(tc.responseBody))
+			}))
+			defer ts.Close()
+
+			disp := NewDefaultOutboundDispatcher(ts.URL, ts.URL, nil)
+			delay := 1 * time.Millisecond
+			retries := tc.maxRetries
+			if retries <= 0 {
+				retries = 2
 			}
-		}))
-		defer ts.Close()
+			disp.SetRetryConfig(delay, retries)
 
-		dispatcher := NewDefaultOutboundDispatcher(ts.URL, ts.URL, nil)
-		dispatcher.SetRetryConfig(1*time.Millisecond, 4)
-
-		if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "testcommit123"}); err != nil || receivedGitPush.Commit != "testcommit123" {
-			t.Fatalf("DispatchGitPush failed: err=%v, got=%+v", err, receivedGitPush)
-		}
-
-		if _, err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-webhooks-router:latest", Digest: "sha256:abcd"}); err != nil || receivedImageReady.Digest != "sha256:abcd" {
-			t.Fatalf("DispatchImageReady failed: err=%v, got=%+v", err, receivedImageReady)
-		}
-
-		if err := dispatcher.DispatchPrompt(ctx, PromptRequest{ChannelID: "not-a-snowflake", Prompt: "hello"}); err == nil {
-			t.Fatalf("expected error on invalid snowflake for prompt")
-		}
-		if err := dispatcher.DispatchPrompt(ctx, PromptRequest{ChannelID: validSnowflake, Prompt: "test prompt message"}); err != nil || promptAttempts != 2 || receivedPrompt.Prompt != "test prompt message" {
-			t.Fatalf("DispatchPrompt failed: err=%v, attempts=%d, got=%+v", err, promptAttempts, receivedPrompt)
-		}
-
-		if err := dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: "not-a-snowflake", Content: "hi"}); err == nil {
-			t.Fatalf("expected error on invalid snowflake for direct message")
-		}
-		if err := dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: validSnowflake, Content: "deployment completed"}); err != nil || directAttempts != 2 || receivedDirect.Content != "deployment completed" {
-			t.Fatalf("DispatchDirectMessage failed: err=%v, attempts=%d, got=%+v", err, directAttempts, receivedDirect)
-		}
-
-		// Client error 400 does not retry
-		clientErrServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "bad request", http.StatusBadRequest)
-		}))
-		defer clientErrServer.Close()
-		clientErrDisp := NewDefaultOutboundDispatcher("", clientErrServer.URL, nil)
-		clientErrDisp.SetRetryConfig(1*time.Millisecond, 3)
-		if err := clientErrDisp.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: validSnowflake, Content: "hi"}); err == nil {
-			t.Errorf("expected error on 400 bad request")
-		}
-	})
-
-	t.Run("NotFoundToleratedAndHTML404Rejected", func(t *testing.T) {
-		t.Parallel()
-		var statusCode atomic.Int32
-		statusCode.Store(http.StatusNotFound)
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(int(statusCode.Load()))
-			switch r.URL.Path {
-			case "/events/git_push":
-				_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "repository not managed by hangar"})
-			case "/events/image_ready":
-				_ = json.NewEncoder(w).Encode(map[string]string{"status": "not_found", "message": "no nomad jobs found using image"})
-			default:
-				http.NotFound(w, r)
+			var err error
+			switch tc.callType {
+			case "git_push":
+				err = disp.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "testcommit123"})
+			case "image_ready":
+				jobs, e := disp.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-webhooks-router:latest", Digest: "sha256:abcd"})
+				err = e
+				if tc.wantMatchedJobs > 0 && len(jobs) != tc.wantMatchedJobs {
+					t.Errorf("got %d matched jobs, want %d", len(jobs), tc.wantMatchedJobs)
+				}
+			case "prompt":
+				err = disp.DispatchPrompt(ctx, PromptRequest{ChannelID: tc.snowflake, Prompt: "test prompt message"})
+			case "direct_message":
+				err = disp.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: tc.snowflake, Content: "test content"})
 			}
-		}))
-		defer server.Close()
 
-		dispatcher := NewDefaultOutboundDispatcher(server.URL, "http://127.0.0.1:8080", nil)
-		dispatcher.retryDelay = 1 * time.Millisecond
-
-		// 1. JSON 404 from Hangar is tolerated
-		if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial-sidecars", Ref: "refs/heads/main", Commit: "abc"}); err != nil {
-			t.Fatalf("expected nil error on 404 git_push, got: %v", err)
-		}
-		if _, err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere-eink-renderer:latest"}); err != nil {
-			t.Fatalf("expected nil error on 404 image_ready, got: %v", err)
-		}
-
-		// 2. 500 error is NOT tolerated
-		statusCode.Store(http.StatusInternalServerError)
-		if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "abc"}); err == nil {
-			t.Fatal("expected error on 500 git_push, got nil")
-		}
-		if _, err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
-			t.Fatal("expected error on 500 image_ready, got nil")
-		}
-
-		// 3. HTML 404 (misconfigured proxy) is NOT tolerated
-		html404Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte("<html><title>404 Not Found</title><body>Proxy Error</body></html>"))
-		}))
-		defer html404Server.Close()
-		dispatcher.hangarURL = html404Server.URL
-		if err := dispatcher.DispatchGitPush(ctx, GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "abc"}); err == nil {
-			t.Fatal("expected error on HTML 404 git_push, got nil")
-		}
-		if _, err := dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{Image: "ghcr.io/azylman/mirrormere:latest"}); err == nil {
-			t.Fatal("expected error on HTML 404 image_ready, got nil")
-		}
-	})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Dispatch (%s) err = %v, wantErr = %v", tc.callType, err, tc.wantErr)
+			}
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			}
+		})
+	}
 }
-
 // --- 6. Workflow Run Image Resolution & Dispatch ---
 
 func TestResolveWorkflowRunImages(t *testing.T) {
@@ -2918,349 +2935,725 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	var retryAttempts atomic.Int32
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(r.URL.Path, "/pulls/543"):
-			_, _ = w.Write([]byte(`{"number":543,"mergeable":false,"mergeable_state":"dirty"}`))
-		case strings.Contains(r.URL.Path, "/pulls/544"):
-			_, _ = w.Write([]byte(`{"number":544,"mergeable":true,"mergeable_state":"clean"}`))
-		case strings.Contains(r.URL.Path, "/pulls/545"):
-			if retryAttempts.Add(1) == 1 {
-				_, _ = w.Write([]byte(`{"number":545,"mergeable":null,"mergeable_state":"unknown"}`))
-				return
+	tests := []struct {
+		name            string
+		useNilRegistry  bool
+		listOpenPRsErr  error
+		openPRs         []RegisteredPR
+		prNumber        int
+		prResponses     []string
+		prStatusCodes   []int
+		wantErr         bool
+		wantErrSubstr   string
+		wantConflict    bool
+		wantConflictPR  int
+		wantPrompts     int
+		wantPromptSubs  []string
+		wantDMs         int
+		wantDMSubs      []string
+	}{
+		{
+			name:           "nil registry is clean no-op",
+			useNilRegistry: true,
+			wantErr:        false,
+		},
+		{
+			name:           "ListOpenPRs error returns error",
+			listOpenPRsErr: errors.New("db list open prs failed"),
+			wantErr:        true,
+			wantErrSubstr:  "list open prs",
+		},
+		{
+			name:     "conflict detected transitions and dispatches DM and prompt",
+			openPRs:  []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
+			prNumber: 543,
+			prResponses: []string{`{"number":543,"mergeable":false,"mergeable_state":"dirty"}`},
+			wantConflict:   true,
+			wantConflictPR: 543,
+			wantDMs:        1,
+			wantDMSubs:     []string{"Merge conflict detected. Following up..."},
+			wantPrompts:    1,
+			wantPromptSubs: []string{"Merge conflict detected on PR #543"},
+		},
+		{
+			name:     "clean PR no action taken",
+			openPRs:  []RegisteredPR{{PRNumber: 544, Branch: "feat/clean", TargetID: "1555405874565091380", HeadSHA: "head544"}},
+			prNumber: 544,
+			prResponses: []string{`{"number":544,"mergeable":true,"mergeable_state":"clean"}`},
+		},
+		{
+			name:     "retry null or unknown mergeable state",
+			openPRs:  []RegisteredPR{{PRNumber: 545, Branch: "feat/retry", TargetID: "1555405874565091380", HeadSHA: "head545"}},
+			prNumber: 545,
+			prResponses: []string{
+				`{"number":545,"mergeable":null,"mergeable_state":"unknown"}`,
+				`{"number":545,"mergeable":false,"mergeable_state":"dirty"}`,
+			},
+			wantConflict:   true,
+			wantConflictPR: 545,
+			wantDMs:        1,
+			wantPrompts:    1,
+		},
+		{
+			name:          "403 rate-limit error return",
+			openPRs:       []RegisteredPR{{PRNumber: 546, Branch: "feat/rate-limit", TargetID: "1555405874565091380", HeadSHA: "head546"}},
+			prNumber:      546,
+			prStatusCodes: []int{http.StatusForbidden},
+			prResponses:   []string{`{"message":"API rate limit exceeded"}`},
+			wantErr:       true,
+			wantErrSubstr: "rate limit",
+		},
+		{
+			name:          "non-403 fetch error skip PR and return nil",
+			openPRs:       []RegisteredPR{{PRNumber: 547, Branch: "feat/not-found", TargetID: "1555405874565091380", HeadSHA: "head547"}},
+			prNumber:      547,
+			prStatusCodes: []int{http.StatusNotFound},
+			prResponses:   []string{`{"message":"Not Found"}`},
+			wantErr:       false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reqCount atomic.Int32
+			apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				idx := int(reqCount.Add(1)) - 1
+				code := http.StatusOK
+				if idx < len(tc.prStatusCodes) && tc.prStatusCodes[idx] != 0 {
+					code = tc.prStatusCodes[idx]
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(code)
+				body := `{"number":0}`
+				if idx < len(tc.prResponses) {
+					body = tc.prResponses[idx]
+				} else if len(tc.prResponses) > 0 {
+					body = tc.prResponses[len(tc.prResponses)-1]
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			defer apiServer.Close()
+
+			var mockReg PRRegistryUpdater
+			if !tc.useNilRegistry {
+				mockReg = &mockPRRegistry{
+					openPRs:          tc.openPRs,
+					listOpenPRsErr:   tc.listOpenPRsErr,
+					conflictTargetID: "1555405874565091380",
+					conflictUpdated:  true,
+				}
 			}
-			_, _ = w.Write([]byte(`{"number":545,"mergeable":false,"mergeable_state":"dirty"}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(apiServer.Close)
+			mockDisp := &mockOutboundDispatcher{}
+			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL}, nil, mockReg, mockDisp)
+			srv.SetConflictCheckDelay(1 * time.Millisecond)
 
-	t.Run("ConflictDetected", func(t *testing.T) {
-		t.Parallel()
-		mockReg := &mockPRRegistry{
-			openPRs:          []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
-			conflictTargetID: "1555405874565091380",
-			conflictUpdated:  true,
-		}
-		mockDisp := &mockOutboundDispatcher{}
-		srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL}, nil, mockReg, mockDisp)
-		srv.SetConflictCheckDelay(0)
-
-		if err := srv.checkOpenPRConflicts(ctx, "azylman/aerial"); err != nil {
-			t.Fatalf("checkOpenPRConflicts failed: %v", err)
-		}
-		if len(mockReg.conflictCalls) != 1 || mockReg.conflictCalls[0].prNumber != 543 {
-			t.Errorf("expected conflict call for PR 543, got %+v", mockReg.conflictCalls)
-		}
-		dms := mockDisp.DirectMessageCalls()
-		prompts := mockDisp.PromptCalls()
-		if len(dms) != 1 || !strings.Contains(dms[0].Content, "⛔ **(PR: #543, repo: aerial)** Merge conflict detected. Following up...") {
-			t.Errorf("unexpected conflict direct message: %+v", dms)
-		}
-		if len(prompts) != 1 || !strings.Contains(prompts[0].Prompt, "Merge conflict detected on PR #543") {
-			t.Errorf("unexpected conflict prompt: %+v", prompts)
-		}
-	})
-
-	t.Run("CleanPR_NoAction", func(t *testing.T) {
-		t.Parallel()
-		mockReg := &mockPRRegistry{
-			openPRs: []RegisteredPR{{PRNumber: 544, Branch: "feat/clean", TargetID: "1555405874565091380", HeadSHA: "head544"}},
-		}
-		mockDisp := &mockOutboundDispatcher{}
-		srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL}, nil, mockReg, mockDisp)
-		srv.SetConflictCheckDelay(0)
-
-		if err := srv.checkOpenPRConflicts(ctx, "azylman/aerial"); err != nil {
-			t.Fatalf("checkOpenPRConflicts failed: %v", err)
-		}
-		if len(mockReg.conflictCalls) != 0 || len(mockDisp.PromptCalls()) != 0 {
-			t.Errorf("expected 0 conflict/prompt calls for clean PR")
-		}
-	})
-
-	t.Run("RetryNullMergeable", func(t *testing.T) {
-		t.Parallel()
-		mockReg := &mockPRRegistry{
-			openPRs:          []RegisteredPR{{PRNumber: 545, Branch: "feat/retry", TargetID: "1555405874565091380", HeadSHA: "head545"}},
-			conflictTargetID: "1555405874565091380",
-			conflictUpdated:  true,
-		}
-		mockDisp := &mockOutboundDispatcher{}
-		srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL}, nil, mockReg, mockDisp)
-		srv.SetConflictCheckDelay(1 * time.Millisecond)
-
-		if err := srv.checkOpenPRConflicts(ctx, "azylman/aerial"); err != nil {
-			t.Fatalf("checkOpenPRConflicts failed: %v", err)
-		}
-		if retryAttempts.Load() < 2 || len(mockReg.conflictCalls) != 1 {
-			t.Errorf("expected >=2 attempts and 1 conflict call, got attempts=%d calls=%d", retryAttempts.Load(), len(mockReg.conflictCalls))
-		}
-	})
+			err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkOpenPRConflicts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
+				t.Errorf("err = %v, want substr %q", err, tc.wantErrSubstr)
+			}
+			if mReg, ok := mockReg.(*mockPRRegistry); ok && mReg != nil {
+				if tc.wantConflict {
+					if len(mReg.conflictCalls) != 1 || mReg.conflictCalls[0].prNumber != tc.wantConflictPR {
+						t.Errorf("conflictCalls = %+v, want PR %d", mReg.conflictCalls, tc.wantConflictPR)
+					}
+				} else if len(mReg.conflictCalls) != 0 {
+					t.Errorf("unexpected conflictCalls: %+v", mReg.conflictCalls)
+				}
+			}
+			if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
+				t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
+			}
+			for _, sub := range tc.wantDMSubs {
+				if len(mockDisp.DirectMessageCalls()) == 0 || !strings.Contains(mockDisp.DirectMessageCalls()[0].Content, sub) {
+					t.Errorf("expected DM containing %q", sub)
+				}
+			}
+			if len(mockDisp.PromptCalls()) != tc.wantPrompts {
+				t.Errorf("got %d prompts, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
+			}
+			for _, sub := range tc.wantPromptSubs {
+				if len(mockDisp.PromptCalls()) == 0 || !strings.Contains(mockDisp.PromptCalls()[0].Prompt, sub) {
+					t.Errorf("expected prompt containing %q", sub)
+				}
+			}
+		})
+	}
 }
 
-func TestPRAndSHAResolution(t *testing.T) {
+func TestResolvePRFromCommitSHA(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	t.Run("ResolvePRFromCommitSHA_ErrorHandling", func(t *testing.T) {
-		t.Parallel()
-		srv := NewRouterServer(Config{}, nil)
-		for _, tc := range []struct{ repo, sha string }{
-			{"", "sha"},
-			{"repo", ""},
-			{"repo", "0000000000000000000000000000000000000000"},
-		} {
-			if _, _, err := srv.resolvePRFromCommitSHA(ctx, tc.repo, tc.sha); err == nil {
-				t.Errorf("expected validation error for repo=%q sha=%q", tc.repo, tc.sha)
-			}
-		}
+	tests := []struct {
+		name          string
+		repo          string
+		sha           string
+		statusCode    int
+		responseBody  string
+		wantErr       bool
+		wantErrSubstr string
+		wantPRNum     int
+		wantBranch    string
+	}{
+		{
+			name:          "empty repo",
+			repo:          "",
+			sha:           "sha123",
+			wantErr:       true,
+			wantErrSubstr: "invalid repo or sha",
+		},
+		{
+			name:          "empty sha",
+			repo:          "azylman/aerial",
+			sha:           "",
+			wantErr:       true,
+			wantErrSubstr: "invalid repo or sha",
+		},
+		{
+			name:          "zero SHA",
+			repo:          "azylman/aerial",
+			sha:           "0000000000000000000000000000000000000000",
+			wantErr:       true,
+			wantErrSubstr: "invalid repo or sha",
+		},
+		{
+			name:          "403 rate limit",
+			repo:          "azylman/aerial",
+			sha:           "sha403",
+			statusCode:    http.StatusForbidden,
+			responseBody:  `{"message":"API rate limit exceeded"}`,
+			wantErr:       true,
+			wantErrSubstr: "rate limit",
+		},
+		{
+			name:          "404 not found",
+			repo:          "azylman/aerial",
+			sha:           "sha404",
+			statusCode:    http.StatusNotFound,
+			responseBody:  `{"message":"Not Found"}`,
+			wantErr:       true,
+			wantErrSubstr: "404",
+		},
+		{
+			name:         "malformed JSON",
+			repo:         "azylman/aerial",
+			sha:          "shamalformed",
+			statusCode:   http.StatusOK,
+			responseBody: `{not-an-array`,
+			wantErr:      true,
+		},
+		{
+			name:          "empty PR list",
+			repo:          "azylman/aerial",
+			sha:           "shaempty",
+			statusCode:    http.StatusOK,
+			responseBody:  `[]`,
+			wantErr:       true,
+			wantErrSubstr: "no pull requests associated",
+		},
+		{
+			name:         "closed-PR over open-PR priority",
+			repo:         "azylman/aerial",
+			sha:          "shaclosed",
+			statusCode:   http.StatusOK,
+			responseBody: `[{"number":10,"state":"open","head":{"ref":"feat/open"}},{"number":20,"state":"closed","head":{"ref":"feat/closed"}}]`,
+			wantPRNum:    20,
+			wantBranch:   "feat/closed",
+		},
+		{
+			name:         "higher-number selection priority when states match",
+			repo:         "azylman/aerial",
+			sha:          "shahigher",
+			statusCode:   http.StatusOK,
+			responseBody: `[{"number":10,"state":"closed","head":{"ref":"feat/ten"}},{"number":30,"state":"closed","head":{"ref":"feat/thirty"}},{"number":20,"state":"closed","head":{"ref":"feat/twenty"}}]`,
+			wantPRNum:    30,
+			wantBranch:   "feat/thirty",
+		},
+	}
 
-		var mode atomic.Int32
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch mode.Load() {
-			case 1: // 403 Rate Limited
-				w.Header().Set("X-RateLimit-Remaining", "0")
-				w.WriteHeader(http.StatusForbidden)
-			case 2: // 404 Not Found
-				w.WriteHeader(http.StatusNotFound)
-			case 3: // Malformed JSON
-				_, _ = w.Write([]byte(`{not-an-array`))
-			case 4: // Empty PR list
-				_, _ = w.Write([]byte(`[]`))
-			}
-		}))
-		defer ts.Close()
-
-		srvTS := NewRouterServer(Config{GitHubAPIURL: ts.URL, GitHubToken: "secret-token"}, ts.Client())
-		for m := int32(1); m <= 4; m++ {
-			mode.Store(m)
-			if _, _, err := srvTS.resolvePRFromCommitSHA(ctx, "aerial", "sha123"); err == nil {
-				t.Errorf("mode %d: expected error from resolvePRFromCommitSHA", m)
-			}
-		}
-	})
-
-	t.Run("ResolveSHA_FastPathAndFallback", func(t *testing.T) {
-		t.Parallel()
-		// 1 & 2. Fast path resolved locally
-		mockRegFast := &mockPRRegistry{resolvePRNum: 42, resolveTargetID: "1555405874565091380", resolveBranch: "feat/fast-path"}
-		srvFast := newTestRouter(Config{}, nil, mockRegFast, nil)
-		if prNum, targetID, branch, err := srvFast.ResolveSHA(ctx, "aerial", "sha-fast-1"); err != nil || prNum != 42 || targetID != "1555405874565091380" || branch != "feat/fast-path" {
-			t.Errorf("unexpected fast path result: pr=%d target=%s branch=%s err=%v", prNum, targetID, branch, err)
-		}
-
-		// 3. Fallback path: local SHA returns 0, GitHub API resolves PR and backfills
-		ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.Contains(r.URL.Path, "/commits/sha-gh-3/pulls") {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				code := tc.statusCode
+				if code == 0 {
+					code = http.StatusOK
+				}
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`[{"number":99,"state":"closed","head":{"ref":"feat/gh-fallback","sha":"sha-head-99"}}]`))
-				return
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(tc.responseBody))
+			}))
+			defer ts.Close()
+
+			srv := NewRouterServer(Config{GitHubAPIURL: ts.URL, GitHubToken: "secret"}, ts.Client())
+			prNum, branch, err := srv.resolvePRFromCommitSHA(ctx, tc.repo, tc.sha)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolvePRFromCommitSHA() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			http.NotFound(w, r)
-		}))
-		defer ghServer.Close()
-
-		mockRegGH := &mockPRRegistry{resolvePRNum: 0, resolveTargetID: "1555405874565091380", backfillTargetID: "1555405874565091380"}
-		srvGH := newTestRouter(Config{GitHubAPIURL: ghServer.URL}, nil, mockRegGH, nil)
-		prNum3, targetID3, branch3, err3 := srvGH.ResolveSHA(ctx, "azylman/aerial", "sha-gh-3")
-		if err3 != nil || prNum3 != 99 || targetID3 != "1555405874565091380" || branch3 != "feat/gh-fallback" || len(mockRegGH.backfillCalls) != 1 {
-			t.Errorf("unexpected github fallback result: pr=%d target=%s branch=%s err=%v calls=%+v", prNum3, targetID3, branch3, err3, mockRegGH.backfillCalls)
-		}
-
-		// 4. Zero / Empty SHA
-		for _, tc := range []struct{ repo, sha string }{
-			{"azylman/aerial", "0000000000000000000000000000000000000000"},
-			{"", ""},
-		} {
-			if p, tgt, b, err := srvGH.ResolveSHA(ctx, tc.repo, tc.sha); err != nil || p != 0 || tgt != "" || b != "" {
-				t.Errorf("expected zero results for %+v, got pr=%d target=%s branch=%s err=%v", tc, p, tgt, b, err)
+			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
+				t.Errorf("err = %v, want substr %q", err, tc.wantErrSubstr)
 			}
-		}
-	})
-
-	t.Run("ResolveThreadForPRAndDeploymentSuccessPrompt", func(t *testing.T) {
-		t.Parallel()
-		srvNil := NewRouterServer(Config{}, nil)
-		if tID, err := srvNil.ResolveThreadForPR(ctx, "azylman/aerial", 123); err != nil || tID != "" {
-			t.Errorf("expected empty thread for nil registry, got %q err=%v", tID, err)
-		}
-		if tID, err := srvNil.ResolveThreadForPR(ctx, "azylman/aerial", 0); err != nil || tID != "" {
-			t.Errorf("expected empty thread for prNum 0, got %q err=%v", tID, err)
-		}
-
-		mockDisp := &mockOutboundDispatcher{}
-		mockReg := &mockPRRegistry{
-			resolveTargetID: "1555405874565091380",
-			channelContextMap: map[string][]ChannelMessageContext{
-				"1555405874565091380": {{AuthorName: "arcane103", Content: "Wrap up the deployment", ResponseText: "Done!"}},
-			},
-		}
-		srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
-		if targetID, err := srv.ResolveThreadForPR(ctx, "aerial", 456); err != nil || targetID != "1555405874565091380" {
-			t.Errorf("expected targetID 1555405874565091380, got %q (err=%v)", targetID, err)
-		}
-
-		if err := srv.dispatchDeploymentSuccessPrompt(ctx, "1555405874565091380", "brain", "azylman/aerial", "sha123", 558, "alloc-1"); err != nil {
-			t.Fatalf("dispatchDeploymentSuccessPrompt failed: %v", err)
-		}
-		pCalls := mockDisp.PromptCalls()
-		if len(pCalls) != 1 || pCalls[0].ChannelID != "1555405874565091380" ||
-			!strings.Contains(pCalls[0].Prompt, "Continuous Delivery deployment completed for job brain on azylman/aerial (PR #558, commit: sha123, ref: alloc-1).") ||
-			!strings.Contains(pCalls[0].Prompt, "[arcane103]: Wrap up the deployment") ||
-			!strings.Contains(pCalls[0].Prompt, "Directive: Based on the recent conversation context above") {
-			t.Errorf("unexpected deployment success prompt: %+v", pCalls)
-		}
-
-		// Invalid snowflake is a no-op
-		if err := srv.dispatchDeploymentSuccessPrompt(ctx, "invalid", "brain", "azylman/aerial", "sha123", 558, ""); err != nil || len(mockDisp.PromptCalls()) != 1 {
-			t.Errorf("expected no-op on invalid snowflake, got err=%v calls=%d", err, len(mockDisp.PromptCalls()))
-		}
-	})
+			if prNum != tc.wantPRNum {
+				t.Errorf("got prNum = %d, want %d", prNum, tc.wantPRNum)
+			}
+			if branch != tc.wantBranch {
+				t.Errorf("got branch = %q, want %q", branch, tc.wantBranch)
+			}
+		})
+	}
 }
 
+func TestResolveSHA(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name               string
+		repo               string
+		sha                string
+		regResolvePRNum    int
+		regResolveTargetID string
+		regResolveBranch   string
+		regEmptySHAID      bool
+		byNumTargetID      string
+		ghPRNumber         int
+		ghBranch           string
+		wantPRNum          int
+		wantTargetID       string
+		wantBranch         string
+		wantBackfillCalls  int
+		wantErr            bool
+	}{
+		{
+			name:               "local fast-path with targetID",
+			repo:               "azylman/aerial",
+			sha:                "sha-fast-1",
+			regResolvePRNum:    42,
+			regResolveTargetID: "1555405874565091380",
+			regResolveBranch:   "feat/fast-path",
+			wantPRNum:          42,
+			wantTargetID:       "1555405874565091380",
+			wantBranch:         "feat/fast-path",
+		},
+		{
+			name:             "local fast-path with empty targetID resolved via ResolvePRByNumber",
+			repo:             "azylman/aerial",
+			sha:              "sha-fast-empty-tid",
+			regResolvePRNum:  43,
+			regResolveBranch: "feat/resolved-by-num",
+			regEmptySHAID:    true,
+			byNumTargetID:    "1555405874565091380",
+			wantPRNum:        43,
+			wantTargetID:     "1555405874565091380",
+			wantBranch:       "feat/resolved-by-num",
+		},
+		{
+			name:              "GitHub API fallback with BackfillPushMergeSHA",
+			repo:              "azylman/aerial",
+			sha:               "sha-gh-3",
+			ghPRNumber:        99,
+			ghBranch:          "feat/gh-fallback",
+			byNumTargetID:     "1555405874565091380",
+			wantPRNum:         99,
+			wantTargetID:      "1555405874565091380",
+			wantBranch:        "feat/gh-fallback",
+			wantBackfillCalls: 1,
+		},
+		{
+			name:      "zero SHA returns zero results",
+			repo:      "azylman/aerial",
+			sha:       "0000000000000000000000000000000000000000",
+			wantPRNum: 0,
+		},
+		{
+			name:      "empty repo and sha returns zero results",
+			repo:      "",
+			sha:       "",
+			wantPRNum: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.ghPRNumber > 0 {
+					w.Header().Set("Content-Type", "application/json")
+					item := GitHubCommitPRItem{Number: tc.ghPRNumber, State: "closed"}
+					item.Head.Ref = tc.ghBranch
+					_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{item})
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer ghServer.Close()
+
+			targetID := tc.regResolveTargetID
+			if tc.byNumTargetID != "" {
+				targetID = tc.byNumTargetID
+			}
+			mockReg := &mockPRRegistry{
+				resolvePRNum:            tc.regResolvePRNum,
+				resolveTargetID:         targetID,
+				resolveBranch:           tc.regResolveBranch,
+				resolveBySHATargetEmpty: tc.regEmptySHAID,
+				backfillTargetID:        tc.byNumTargetID,
+			}
+			srv := newTestRouter(Config{GitHubAPIURL: ghServer.URL}, ghServer.Client(), mockReg, nil)
+
+			prNum, targetID, branch, err := srv.ResolveSHA(ctx, tc.repo, tc.sha)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ResolveSHA() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if prNum != tc.wantPRNum {
+				t.Errorf("got prNum = %d, want %d", prNum, tc.wantPRNum)
+			}
+			if targetID != tc.wantTargetID {
+				t.Errorf("got targetID = %q, want %q", targetID, tc.wantTargetID)
+			}
+			if branch != tc.wantBranch {
+				t.Errorf("got branch = %q, want %q", branch, tc.wantBranch)
+			}
+			if len(mockReg.backfillCalls) != tc.wantBackfillCalls {
+				t.Errorf("got %d backfill calls, want %d", len(mockReg.backfillCalls), tc.wantBackfillCalls)
+			}
+		})
+	}
+}
+
+func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	validSnowflake := "1555405874565091380"
+
+	tests := []struct {
+		name                string
+		isDeploymentSuccess bool
+		useNilRegistry      bool
+		prNumber            int
+		targetID            string
+		suppressVanadis     bool
+		suppressVanadisErr  error
+		channelContext      []ChannelMessageContext
+		wantTargetID        string
+		wantErr             bool
+		wantPrompts         int
+		wantPromptSubs      []string
+		wantDMs             int
+	}{
+		{
+			name:           "ResolveThreadForPR nil registry returns empty",
+			useNilRegistry: true,
+			prNumber:       123,
+			wantTargetID:   "",
+		},
+		{
+			name:         "ResolveThreadForPR zero prNumber returns empty",
+			prNumber:     0,
+			wantTargetID: "",
+		},
+		{
+			name:         "ResolveThreadForPR valid prNumber returns targetID",
+			prNumber:     456,
+			targetID:     validSnowflake,
+			wantTargetID: validSnowflake,
+		},
+		{
+			name:                "dispatchDeploymentSuccessPrompt normal with channel context",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			channelContext: []ChannelMessageContext{
+				{AuthorName: "arcane103", Content: "Wrap up the deployment", ResponseText: "Done!"},
+			},
+			wantPrompts: 1,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job brain on azylman/aerial",
+				"[arcane103]: Wrap up the deployment",
+				"Directive: Based on the recent conversation context above",
+			},
+		},
+		{
+			name:                "dispatchDeploymentSuccessPrompt invalid snowflake is no-op",
+			isDeploymentSuccess: true,
+			targetID:            "invalid-snowflake",
+			wantPrompts:         0,
+		},
+		{
+			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression true",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			suppressVanadis:     true,
+			wantPrompts:         0,
+			wantDMs:             0,
+		},
+		{
+			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error fallback",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			suppressVanadisErr:  errors.New("db check err"),
+			wantPrompts:         1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mockReg PRRegistryUpdater
+			if !tc.useNilRegistry {
+				mReg := &mockPRRegistry{
+					resolveTargetID:    tc.targetID,
+					suppressVanadisRes: tc.suppressVanadis,
+					suppressVanadisErr: tc.suppressVanadisErr,
+				}
+				if len(tc.channelContext) > 0 {
+					mReg.channelContextMap = map[string][]ChannelMessageContext{
+						tc.targetID: tc.channelContext,
+					}
+				}
+				mockReg = mReg
+			}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
+
+			if !tc.isDeploymentSuccess {
+				gotTarget, err := srv.ResolveThreadForPR(ctx, "azylman/aerial", tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("ResolveThreadForPR() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTargetID {
+					t.Errorf("got targetID = %q, want %q", gotTarget, tc.wantTargetID)
+				}
+				return
+			}
+
+			err := srv.dispatchDeploymentSuccessPrompt(ctx, tc.targetID, "brain", "azylman/aerial", "sha123", 558, "alloc-1")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("dispatchDeploymentSuccessPrompt() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			pCalls := mockDisp.PromptCalls()
+			if len(pCalls) != tc.wantPrompts {
+				t.Errorf("got %d prompts, want %d", len(pCalls), tc.wantPrompts)
+			}
+			for _, sub := range tc.wantPromptSubs {
+				if len(pCalls) == 0 || !strings.Contains(pCalls[0].Prompt, sub) {
+					t.Errorf("expected prompt containing %q, got %+v", sub, pCalls)
+				}
+			}
+			if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
+				t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
+			}
+		})
+	}
+}
 // --- 8. River Workers, Crash Alerts & Server Endpoints ---
 
-func TestRiverWorkersAndUniqueOpts(t *testing.T) {
+func TestRiverWorkers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	t.Run("GitHubWebhookWorker", func(t *testing.T) {
-		t.Parallel()
-		worker := &GitHubWebhookWorker{server: NewRouterServer(Config{}, nil)}
-		jobValid := &river.Job[GitHubWebhookArgs]{
-			JobRow: &rivertype.JobRow{ID: 101},
-			Args: GitHubWebhookArgs{
-				Event:    "ping",
-				Delivery: "del-worker-1",
-				Body:     []byte(`{"zen":"Responsive is better than fast.","hook_id":123,"repository":{"full_name":"azylman/aerial"}}`),
-			},
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/deployments"):
+			_, _ = fmt.Fprint(w, `[{"ID":"dep-1","Status":"successful"}]`)
+		case strings.Contains(r.URL.Path, "/allocations"):
+			_, _ = w.Write([]byte(`[{"ID":"alloc-1","DesiredStatus":"run","ClientStatus":"running"}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		if err := worker.Work(ctx, jobValid); err != nil {
-			t.Fatalf("worker.Work failed on valid job: %v", err)
-		}
-		if err := (&GitHubWebhookWorker{server: nil}).Work(ctx, jobValid); err == nil {
-			t.Errorf("expected error when worker server is nil")
-		}
-		jobMalformed := &river.Job[GitHubWebhookArgs]{
-			JobRow: &rivertype.JobRow{ID: 102},
-			Args:   GitHubWebhookArgs{Event: "pull_request", Delivery: "del-worker-2", Body: []byte(`{malformed`)},
-		}
-		if err := worker.Work(ctx, jobMalformed); err == nil {
-			t.Errorf("expected error when event processing fails")
-		}
-	})
+	}))
+	t.Cleanup(nomadServer.Close)
 
-	t.Run("HangarWebhookWorker", func(t *testing.T) {
-		t.Parallel()
-		mockDisp := &mockOutboundDispatcher{}
-		worker := &HangarWebhookWorker{server: newTestRouter(Config{}, nil, nil, mockDisp)}
-		jobValid := &river.Job[HangarWebhookArgs]{
-			JobRow: &rivertype.JobRow{ID: 201},
-			Args: HangarWebhookArgs{
-				Event: HangarDeployEvent{
-					Event: "deploy_success", JobName: "brain", Repo: "azylman/aerial",
-					PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
-				},
-			},
-		}
-		if err := worker.Work(ctx, jobValid); err != nil || len(mockDisp.PromptCalls()) != 1 {
-			t.Fatalf("unexpected hangar worker result: err=%v, calls=%d", err, len(mockDisp.PromptCalls()))
-		}
-		if err := (&HangarWebhookWorker{server: nil}).Work(ctx, jobValid); err == nil {
-			t.Errorf("expected error when worker server is nil")
-		}
-		workerErr := &HangarWebhookWorker{server: newTestRouter(Config{}, nil, nil, &mockOutboundDispatcher{promptErr: errors.New("503")})}
-		if err := workerErr.Work(ctx, jobValid); err == nil {
-			t.Errorf("expected error when downstream dispatch fails")
-		}
-	})
+	tests := []struct {
+		name          string
+		workerType    string
+		nilServer     bool
+		downstreamErr bool
+		wantErr       bool
+	}{
+		{name: "GitHubWebhookWorker valid job", workerType: "github"},
+		{name: "GitHubWebhookWorker nil server error", workerType: "github", nilServer: true, wantErr: true},
+		{name: "GitHubWebhookWorker downstream processing error", workerType: "github", downstreamErr: true, wantErr: true},
+		{name: "HangarWebhookWorker valid job", workerType: "hangar"},
+		{name: "HangarWebhookWorker nil server error", workerType: "hangar", nilServer: true, wantErr: true},
+		{name: "HangarWebhookWorker downstream dispatch error", workerType: "hangar", downstreamErr: true, wantErr: true},
+		{name: "NomadEventWorker valid job", workerType: "nomad"},
+		{name: "NomadEventWorker nil server error", workerType: "nomad", nilServer: true, wantErr: true},
+		{name: "NomadEventWorker downstream prompt error", workerType: "nomad", downstreamErr: true, wantErr: true},
+		{name: "NomadCrashAlertWorker valid job", workerType: "crash"},
+		{name: "NomadCrashAlertWorker nil server error", workerType: "crash", nilServer: true, wantErr: true},
+		{name: "NomadCrashAlertWorker downstream prompt error", workerType: "crash", downstreamErr: true, wantErr: true},
+	}
 
-	t.Run("NomadEventWorkerAndPrematureAllocationGuard", func(t *testing.T) {
-		t.Parallel()
-		var isHealthy atomic.Bool
-		isHealthy.Store(true)
-		nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch {
-			case strings.Contains(r.URL.Path, "/deployments"):
-				status := "running"
-				if isHealthy.Load() {
-					status = "successful"
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{
+				deployedTargetID: "1555405874565091380",
+				deployedPRNum:    552,
+				deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+				deployedRepo:     "azylman/aerial",
+				deployedUpdated:  true,
+			}
+			mockDisp := &mockOutboundDispatcher{}
+			if tc.downstreamErr {
+				mockDisp.promptErr = errors.New("503 downstream failure")
+			}
+			srv := newTestRouter(Config{
+				NomadAddr:       nomadServer.URL,
+				SystemChannelID: "1555405874565091380",
+			}, nil, mockReg, mockDisp)
+
+			var err error
+			switch tc.workerType {
+			case "github":
+				w := &GitHubWebhookWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
 				}
-				_, _ = fmt.Fprintf(w, `[{"ID":"dep-1","Status":%q}]`, status)
-			case strings.Contains(r.URL.Path, "/allocations"):
-				_, _ = w.Write([]byte(`[{"ID":"alloc-1","DesiredStatus":"run","ClientStatus":"running"}]`))
-			default:
-				w.WriteHeader(http.StatusNotFound)
+				job := &river.Job[GitHubWebhookArgs]{
+					JobRow: &rivertype.JobRow{ID: 101},
+					Args: GitHubWebhookArgs{
+						Event:    "ping",
+						Delivery: "del-worker-1",
+						Body:     []byte(`{"zen":"Responsive is better than fast.","hook_id":123,"repository":{"full_name":"azylman/aerial"}}`),
+					},
+				}
+				if tc.downstreamErr {
+					job.Args.Event = "pull_request"
+					job.Args.Body = []byte(`{malformed`)
+				}
+				err = w.Work(ctx, job)
+			case "hangar":
+				w := &HangarWebhookWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[HangarWebhookArgs]{
+					JobRow: &rivertype.JobRow{ID: 201},
+					Args: HangarWebhookArgs{
+						Event: HangarDeployEvent{
+							Event: "deploy_success", JobName: "brain", Repo: "azylman/aerial",
+							PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
+						},
+					},
+				}
+				err = w.Work(ctx, job)
+			case "nomad":
+				w := &NomadEventWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[NomadEventArgs]{
+					JobRow: &rivertype.JobRow{ID: 301},
+					Args: NomadEventArgs{
+						Topic:   "Deployment",
+						Type:    "DeploymentStatusUpdate",
+						Payload: []byte(`{"Deployment":{"ID":"dep-101","JobID":"brain","Status":"successful"}}`),
+					},
+				}
+				err = w.Work(ctx, job)
+			case "crash":
+				w := &NomadCrashAlertWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[NomadCrashAlertArgs]{
+					JobRow: &rivertype.JobRow{ID: 401},
+					Args: NomadCrashAlertArgs{
+						JobID:      "openobserve",
+						AllocID:    "alloc-oom",
+						Status:     "failed",
+						StatusDesc: "OOMKilled exit code 137",
+					},
+				}
+				err = w.Work(ctx, job)
 			}
-		}))
-		defer nomadServer.Close()
 
-		mockReg := &mockPRRegistry{
-			deployedTargetID: "1555405874565091380",
-			deployedPRNum:    552,
-			deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
-			deployedRepo:     "azylman/aerial",
-			deployedUpdated:  true,
-		}
-		mockDisp := &mockOutboundDispatcher{}
-		srv := newTestRouter(Config{NomadAddr: nomadServer.URL}, nil, mockReg, mockDisp)
-		worker := &NomadEventWorker{server: srv}
-
-		// 1. Deployment event
-		jobDep := &river.Job[NomadEventArgs]{
-			JobRow: &rivertype.JobRow{ID: 301},
-			Args:   NomadEventArgs{Topic: "Deployment", Type: "DeploymentStatusUpdate", Payload: []byte(`{"Deployment":{"ID":"dep-101","JobID":"brain","Status":"successful"}}`)},
-		}
-		if err := worker.Work(ctx, jobDep); err != nil || len(mockReg.deployedJobCalls) != 1 || mockReg.deployedJobCalls[0] != "brain" || len(mockDisp.PromptCalls()) != 1 {
-			t.Fatalf("unexpected deployment worker result: err=%v, jobs=%v, prompts=%d", err, mockReg.deployedJobCalls, len(mockDisp.PromptCalls()))
-		}
-
-		// 2. Allocation event when healthy vs unhealthy (premature guard)
-		mockReg.deployedJobCalls = nil
-		mockDisp.promptCalls = nil
-		allocPayload := []byte(`{"Allocation":{"ID":"alloc-202","JobID":"brain","DesiredStatus":"run","ClientStatus":"running"}}`)
-
-		isHealthy.Store(false)
-		if err := srv.ProcessNomadEvent(ctx, "Allocation", "AllocationUpdated", allocPayload); err != nil || len(mockReg.deployedJobCalls) != 0 {
-			t.Fatalf("expected 0 deployedJobCalls when deployment unhealthy, got err=%v calls=%v", err, mockReg.deployedJobCalls)
-		}
-
-		isHealthy.Store(true)
-		jobAlloc := &river.Job[NomadEventArgs]{
-			JobRow: &rivertype.JobRow{ID: 302},
-			Args:   NomadEventArgs{Topic: "Allocation", Type: "AllocationUpdated", Payload: allocPayload},
-		}
-		if err := worker.Work(ctx, jobAlloc); err != nil || len(mockReg.deployedJobCalls) != 1 || len(mockDisp.PromptCalls()) != 1 {
-			t.Fatalf("unexpected healthy allocation worker result: err=%v, calls=%v", err, mockReg.deployedJobCalls)
-		}
-
-		// 3. Nil server & downstream error
-		if err := (&NomadEventWorker{server: nil}).Work(ctx, jobDep); err == nil {
-			t.Errorf("expected error when worker server is nil")
-		}
-		workerErr := &NomadEventWorker{server: newTestRouter(Config{}, nil, mockReg, &mockOutboundDispatcher{promptErr: errors.New("503")})}
-		if err := workerErr.Work(ctx, jobDep); err == nil {
-			t.Errorf("expected error when downstream prompt dispatch fails")
-		}
-	})
-
-	t.Run("RiverUniqueOptsByArgs", func(t *testing.T) {
-		t.Parallel()
-		for _, opts := range []river.InsertOpts{
-			(HangarWebhookArgs{}).InsertOpts(),
-			(HangarWebhookArgs{IdempotencyKey: "hangar-deploy-started-603-brain", Event: HangarDeployEvent{Event: "deploy_started", JobName: "brain", PRNumber: 603}}).InsertOpts(),
-			(NomadEventArgs{}).InsertOpts(),
-		} {
-			if !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
-				t.Errorf("expected UniqueOpts.ByArgs=true and ByPeriod=15m, got %+v", opts)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Work() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-		}
-	})
+		})
+	}
+}
+
+func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		args         river.JobArgs
+		wantKind     string
+		wantQueue    string
+		wantByArgs   bool
+		wantByPeriod time.Duration
+		wantAttempts int
+	}{
+		{
+			name:     "GitHubWebhookArgs",
+			args:     GitHubWebhookArgs{Delivery: "del-1"},
+			wantKind: "github_webhook",
+		},
+		{
+			name:         "HangarWebhookArgs",
+			args:         HangarWebhookArgs{IdempotencyKey: "key-1"},
+			wantKind:     "hangar_webhook",
+			wantByArgs:   true,
+			wantByPeriod: 15 * time.Minute,
+		},
+		{
+			name:         "NomadEventArgs",
+			args:         NomadEventArgs{Topic: "Deployment"},
+			wantKind:     "nomad_event",
+			wantByArgs:   true,
+			wantByPeriod: 15 * time.Minute,
+		},
+		{
+			name:         "NomadCrashAlertArgs",
+			args:         NomadCrashAlertArgs{JobID: "brain"},
+			wantKind:     "nomad_crash_alert",
+			wantByArgs:   true,
+			wantByPeriod: 15 * time.Minute,
+		},
+		{
+			name:         "VanadisExecuteChunkArgs",
+			args:         VanadisExecuteChunkArgs{BuildID: "build-01", ChunkIndex: 2},
+			wantKind:     "vanadis_execute_chunk",
+			wantQueue:    VanadisQueueName,
+			wantByArgs:   true,
+			wantAttempts: 3,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.args.Kind(); got != tc.wantKind {
+				t.Errorf("Kind() = %q, want %q", got, tc.wantKind)
+			}
+			optsProvider, ok := tc.args.(interface{ InsertOpts() river.InsertOpts })
+			if !ok {
+				return
+			}
+			opts := optsProvider.InsertOpts()
+			if tc.wantQueue != "" && opts.Queue != tc.wantQueue {
+				t.Errorf("Queue = %q, want %q", opts.Queue, tc.wantQueue)
+			}
+			if tc.wantByArgs && !opts.UniqueOpts.ByArgs {
+				t.Errorf("UniqueOpts.ByArgs = false, want true")
+			}
+			if tc.wantByPeriod > 0 && opts.UniqueOpts.ByPeriod != tc.wantByPeriod {
+				t.Errorf("UniqueOpts.ByPeriod = %v, want %v", opts.UniqueOpts.ByPeriod, tc.wantByPeriod)
+			}
+			if tc.wantAttempts > 0 && opts.MaxAttempts != tc.wantAttempts {
+				t.Errorf("MaxAttempts = %d, want %d", opts.MaxAttempts, tc.wantAttempts)
+			}
+		})
+	}
 }
 
 func TestCrashAlerts(t *testing.T) {
@@ -3273,532 +3666,510 @@ func TestCrashAlerts(t *testing.T) {
 		Status:     "failed",
 		StatusDesc: "OOMKilled exit code 137",
 	}
-	if args.Kind() != "nomad_crash_alert" {
-		t.Errorf("expected kind nomad_crash_alert, got %s", args.Kind())
-	}
-	if opts := args.InsertOpts(); !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
-		t.Errorf("unexpected InsertOpts: %+v", opts)
-	}
 
-	if err := (&NomadCrashAlertWorker{server: nil}).Work(ctx, &river.Job[NomadCrashAlertArgs]{JobRow: &rivertype.JobRow{ID: 101}, Args: args}); err == nil {
-		t.Errorf("expected error with nil server")
-	}
-
-	disp := &mockOutboundDispatcher{}
-	srv := newTestRouter(Config{SystemChannelID: "1555405874565091380"}, nil, nil, disp)
-	worker := &NomadCrashAlertWorker{server: srv}
-	if err := worker.Work(ctx, &river.Job[NomadCrashAlertArgs]{JobRow: &rivertype.JobRow{ID: 101}, Args: args}); err != nil {
-		t.Fatalf("unexpected error from worker: %v", err)
-	}
-	if dms := disp.DirectMessageCalls(); len(dms) != 1 || !strings.Contains(dms[0].Content, "💥 Nomad job `openobserve` crashed or failed. Following up...") {
-		t.Errorf("unexpected dm calls: %+v", dms)
-	}
-	if prompts := disp.PromptCalls(); len(prompts) != 1 || !strings.Contains(prompts[0].Prompt, "Nomad job `openobserve` failed or crashed unexpectedly") {
-		t.Errorf("unexpected prompt calls: %+v", prompts)
-	}
-
-	// Edge cases
-	for _, tc := range []struct {
-		name    string
-		channel string
-		disp    OutboundDispatcher
-		wantErr bool
+	tests := []struct {
+		name        string
+		channel     string
+		disp        *mockOutboundDispatcher
+		wantErr     bool
+		wantDMs     int
+		wantPrompts int
 	}{
-		{"invalid snowflake", "invalid-snowflake", &mockOutboundDispatcher{}, false},
-		{"nil dispatcher", "1555405874565091380", nil, false},
-		{"4xx on prompt", "1555405874565091380", &mockOutboundDispatcher{promptErr: errors.New("brain prompt returned status 404: channel not found")}, false},
-		{"4xx on DM", "1555405874565091380", &mockOutboundDispatcher{directMessageErr: errors.New("brain internal message returned status 400: bad request")}, false},
-		{"5xx on prompt", "1555405874565091380", &mockOutboundDispatcher{promptErr: errors.New("brain prompt returned status 500: internal server error")}, true},
-	} {
+		{
+			name:        "valid system channel dispatches DM and prompt",
+			channel:     "1555405874565091380",
+			disp:        &mockOutboundDispatcher{},
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+		{
+			name:    "invalid snowflake is clean no-op",
+			channel: "invalid-snowflake",
+			disp:    &mockOutboundDispatcher{},
+		},
+		{
+			name:    "nil dispatcher is clean no-op",
+			channel: "1555405874565091380",
+			disp:    nil,
+		},
+		{
+			name:        "4xx on prompt is ignored",
+			channel:     "1555405874565091380",
+			disp:        &mockOutboundDispatcher{promptErr: errors.New("brain prompt returned status 404: channel not found")},
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+		{
+			name:        "4xx on DM is ignored",
+			channel:     "1555405874565091380",
+			disp:        &mockOutboundDispatcher{directMessageErr: errors.New("brain internal message returned status 400: bad request")},
+			wantDMs:     1,
+			wantPrompts: 0,
+		},
+		{
+			name:        "5xx on prompt returns error",
+			channel:     "1555405874565091380",
+			disp:        &mockOutboundDispatcher{promptErr: errors.New("brain prompt returned status 500: internal server error")},
+			wantErr:     true,
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+	}
+
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := newTestRouter(Config{SystemChannelID: tc.channel}, nil, nil, tc.disp)
-			if err := s.ProcessCrashAlert(ctx, args); (err != nil) != tc.wantErr {
-				t.Errorf("ProcessCrashAlert() err = %v, wantErr %v", err, tc.wantErr)
+			var disp OutboundDispatcher
+			if tc.disp != nil {
+				disp = tc.disp
+			}
+			s := newTestRouter(Config{SystemChannelID: tc.channel}, nil, nil, disp)
+			err := s.ProcessCrashAlert(ctx, args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ProcessCrashAlert() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.disp != nil {
+				if len(tc.disp.DirectMessageCalls()) != tc.wantDMs {
+					t.Errorf("got %d DMs, want %d", len(tc.disp.DirectMessageCalls()), tc.wantDMs)
+				}
+				if len(tc.disp.PromptCalls()) != tc.wantPrompts {
+					t.Errorf("got %d prompts, want %d", len(tc.disp.PromptCalls()), tc.wantPrompts)
+				}
 			}
 		})
 	}
 }
 
-func TestServerEndpointsAndLifecycle(t *testing.T) {
-	t.Run("HealthzAndMetrics", func(t *testing.T) {
-		routes := NewRouterServer(Config{Port: "4020"}, nil).Routes()
-
-		recH := doHTTPRequest(routes, http.MethodGet, "/healthz", nil, nil)
-		if recH.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK from /healthz, got %d", recH.Code)
-		}
-		var resp map[string]interface{}
-		if err := json.Unmarshal(recH.Body.Bytes(), &resp); err != nil || resp["status"] != "ok" || resp["service"] != "webhooks-router" {
-			t.Errorf("unexpected healthz body: %v (err=%v)", resp, err)
-		}
-
-		RecordUniqueSkipped("")
-		RecordUniqueSkipped("test_kind_metric")
-		recM := doHTTPRequest(routes, http.MethodGet, "/metrics", nil, nil)
-		if recM.Code != http.StatusOK || !strings.Contains(recM.Body.String(), "webhooks_router_unique_skipped_total") || !strings.Contains(recM.Body.String(), `kind="test_kind_metric"`) {
-			t.Errorf("unexpected /metrics response: code=%d body=%s", recM.Code, recM.Body.String())
-		}
+func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
+	oldCountersFn := writeCountersDirFn
+	oldMetaFn := writeMetaDirFn
+	t.Cleanup(func() {
+		writeCountersDirFn = oldCountersFn
+		writeMetaDirFn = oldMetaFn
 	})
 
-	t.Run("CoverageFlushEndpoint", func(t *testing.T) {
-		routes := NewRouterServer(Config{}, nil).Routes()
-		oldFn := writeCountersDirFn
-		t.Cleanup(func() { writeCountersDirFn = oldFn })
-		oldMetaFn := writeMetaDirFn
-		t.Cleanup(func() { writeMetaDirFn = oldMetaFn })
+	RecordUniqueSkipped("")
+	RecordUniqueSkipped("test_kind_metric")
 
-		t.Setenv("GOCOVERDIR", "")
-		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusOK {
-			t.Errorf("expected 200 OK without GOCOVERDIR, got %d", rec.Code)
-		}
+	routes := NewRouterServer(Config{Port: "4020"}, nil).Routes()
 
-		called := false
-		writeCountersDirFn = func(dir string) error {
-			called = true
-			return nil
-		}
-		metaCalled := false
-		writeMetaDirFn = func(dir string) error {
-			metaCalled = true
-			return nil
-		}
-		t.Setenv("GOCOVERDIR", t.TempDir())
-		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusOK || !called || !metaCalled {
-			t.Errorf("expected 200 OK, called=true, metaCalled=true with GOCOVERDIR, got code=%d called=%v metaCalled=%v", rec.Code, called, metaCalled)
-		}
+	tests := []struct {
+		name         string
+		method       string
+		path         string
+		gocoverdir   string
+		useTempDir   bool
+		mockMetaErr  error
+		mockCountErr error
+		wantCode     int
+		wantBodySubs []string
+	}{
+		{
+			name:         "/healthz returns 200 and json",
+			method:       http.MethodGet,
+			path:         "/healthz",
+			wantCode:     http.StatusOK,
+			wantBodySubs: []string{`"status":"ok"`, `"service":"webhooks-router"`},
+		},
+		{
+			name:         "/metrics returns 200 and prometheus metrics",
+			method:       http.MethodGet,
+			path:         "/metrics",
+			wantCode:     http.StatusOK,
+			wantBodySubs: []string{"webhooks_router_unique_skipped_total", `kind="test_kind_metric"`},
+		},
+		{
+			name:       "/debug/coverage/flush with empty GOCOVERDIR returns 200",
+			method:     http.MethodGet,
+			path:       "/debug/coverage/flush",
+			gocoverdir: "",
+			wantCode:   http.StatusOK,
+		},
+		{
+			name:       "/debug/coverage/flush with valid GOCOVERDIR calls flush and returns 200",
+			method:     http.MethodGet,
+			path:       "/debug/coverage/flush",
+			useTempDir: true,
+			wantCode:   http.StatusOK,
+		},
+		{
+			name:        "/debug/coverage/flush meta error still returns 200",
+			method:      http.MethodGet,
+			path:        "/debug/coverage/flush",
+			useTempDir:  true,
+			mockMetaErr: errors.New("simulated meta flush error"),
+			wantCode:    http.StatusOK,
+		},
+		{
+			name:         "/debug/coverage/flush counters error returns 500",
+			method:       http.MethodGet,
+			path:         "/debug/coverage/flush",
+			useTempDir:   true,
+			mockCountErr: errors.New("simulated counters flush error"),
+			wantCode:     http.StatusInternalServerError,
+		},
+	}
 
-		writeMetaDirFn = func(dir string) error {
-			return errors.New("simulated meta flush error")
-		}
-		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusOK {
-			t.Errorf("expected 200 OK when meta flush errors, got %d", rec.Code)
-		}
-
-		writeCountersDirFn = func(dir string) error {
-			return errors.New("simulated flush error")
-		}
-		if rec := doHTTPRequest(routes, http.MethodGet, "/debug/coverage/flush", nil, nil); rec.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 on flush error, got %d", rec.Code)
-		}
-	})
-
-	t.Run("RunServerLifecycleAndErrors", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		ready := make(chan string, 1)
-		done := make(chan error, 1)
-
-		go func() {
-			done <- runServer(ctx, Config{Port: "0"}, func(addr string) {
-				ready <- addr
-			})
-		}()
-
-		select {
-		case addr := <-ready:
-			if addr == "" {
-				t.Errorf("expected non-empty listening address")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.useTempDir {
+				t.Setenv("GOCOVERDIR", t.TempDir())
+			} else {
+				t.Setenv("GOCOVERDIR", tc.gocoverdir)
 			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timeout waiting for server to start")
-		}
-
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("expected clean shutdown, got error: %v", err)
+			writeMetaDirFn = func(dir string) error {
+				return tc.mockMetaErr
 			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timeout waiting for server shutdown")
-		}
+			writeCountersDirFn = func(dir string) error {
+				return tc.mockCountErr
+			}
 
-		if err := runServer(context.Background(), Config{Port: "-1"}, nil); err == nil {
-			t.Errorf("expected error on invalid port -1")
-		}
-
-		ctxC, cancelC := context.WithCancel(context.Background())
-		cancelC()
-		if err := runApp(ctxC, Config{Port: "0"}); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("unexpected error from runApp: %v", err)
-		}
-
-		if err := runServer(context.Background(), Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, nil); err == nil {
-			t.Errorf("expected error on invalid postgres url")
-		}
-	})
-}
-
-// --- 9. Live PostgreSQL & River Integration Tests ---
-
-func openLivePostgresPool(t *testing.T, ctx context.Context, maxConns int32) (*pgxpool.Pool, string) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping live Postgres integration test in short mode")
-	}
-	pgURL := getTestPostgresURL()
-	poolConfig, err := pgxpool.ParseConfig(pgURL)
-	if err != nil {
-		t.Skipf("cannot parse postgres url: %v", err)
-	}
-	poolConfig.MaxConns = maxConns
-	if poolConfig.ConnConfig.RuntimeParams == nil {
-		poolConfig.ConnConfig.RuntimeParams = make(map[string]string)
-	}
-	if _, ok := poolConfig.ConnConfig.RuntimeParams["search_path"]; !ok {
-		poolConfig.ConnConfig.RuntimeParams["search_path"] = "sidecars, public"
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		t.Skipf("skipping live test, could not create pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping live test, postgres ping failed: %v", err)
-	}
-	return pool, pgURL
-}
-
-func TestRiverLiveIntegration(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	pool, pgURL := openLivePostgresPool(t, ctx, 5)
-
-	server := NewRouterServer(Config{PostgresURL: pgURL}, nil)
-	processedCh := make(chan string, 1)
-	server.onProcessed = func(event, delivery string) {
-		if delivery == "live-integration-delivery" {
-			processedCh <- event
-		}
-	}
-
-	workers := river.NewWorkers()
-	river.AddWorker(workers, &GitHubWebhookWorker{server: server})
-
-	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
-		Queues:  map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 5}},
-		Workers: workers,
-	})
-	if err != nil {
-		t.Fatalf("failed to create river client: %v", err)
-	}
-	server.SetRiverClient(riverClient)
-
-	if err := riverClient.Start(ctx); err != nil {
-		t.Fatalf("failed to start river client: %v", err)
-	}
-	defer func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer stopCancel()
-		_ = riverClient.Stop(stopCtx)
-	}()
-
-	reqBody := `{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`
-	rec := doHTTPRequest(server.Routes(), http.MethodPost, "/api/webhooks/github", strings.NewReader(reqBody), map[string]string{
-		"X-GitHub-Event":    "ping",
-		"X-GitHub-Delivery": "live-integration-delivery",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from handleGitHubWebhook, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	select {
-	case event := <-processedCh:
-		if event != "ping" {
-			t.Errorf("expected processed event ping, got %s", event)
-		}
-	case <-time.After(2 * time.Second):
-		var state string
-		queryErr := pool.QueryRow(ctx, "SELECT state FROM river_job WHERE args->>'delivery' = 'live-integration-delivery' ORDER BY id DESC LIMIT 1").Scan(&state)
-		if queryErr == nil && (state == "completed" || state == "running") {
-			t.Logf("Job was successfully processed by live cluster worker (state=%s)", state)
-			return
-		}
-		t.Fatalf("timeout waiting for River worker to process live job from postgres (db state: %s, queryErr: %v)", state, queryErr)
+			rec := doHTTPRequest(routes, tc.method, tc.path, nil, nil)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			for _, sub := range tc.wantBodySubs {
+				if !strings.Contains(rec.Body.String(), sub) {
+					t.Errorf("body missing %q: %s", sub, rec.Body.String())
+				}
+			}
+		})
 	}
 }
 
-func TestPostgresPRRegistry_Live(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	pool, _ := openLivePostgresPool(t, ctx, 3)
-
-	repo := "azylman/aerial"
-	testPRNum := 999991
-	targetID := "live-test-target-xyz"
-
-	_, _ = pool.Exec(ctx, "DELETE FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum)
-	defer func() {
-		_, _ = pool.Exec(context.Background(), "DELETE FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum)
-	}()
-
-	insertSQL := `
-		INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, status, title, created_at, updated_at)
-		VALUES ($1, $2, 'feat/live-test', 'initialsha111', $3, 'open', 'Live Test PR', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
-	`
-	if _, err := pool.Exec(ctx, insertSQL, repo, testPRNum, targetID); err != nil {
-		t.Fatalf("failed to insert initial test row: %v", err)
+func TestRunServerLifecycle(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       Config
+		preCancel    bool
+		isRunApp     bool
+		wantErr      bool
+		wantGraceful bool
+	}{
+		{
+			name:         "runServer start and graceful cancel shutdown",
+			config:       Config{Port: "0"},
+			wantGraceful: true,
+		},
+		{
+			name:    "runServer invalid port -1 returns error",
+			config:  Config{Port: "-1"},
+			wantErr: true,
+		},
+		{
+			name:      "runApp pre-canceled context returns clean or server closed",
+			config:    Config{Port: "0"},
+			preCancel: true,
+			isRunApp:  true,
+		},
+		{
+			name:    "runServer invalid postgres url returns error",
+			config:  Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"},
+			wantErr: true,
+		},
 	}
 
-	reg := NewPostgresPRRegistry(pool)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantGraceful {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				ready := make(chan string, 1)
+				done := make(chan error, 1)
 
-	assertRow := func(wantHead, wantMerge, wantStatus string) {
-		t.Helper()
-		var head, merge, status string
-		if err := pool.QueryRow(ctx, "SELECT COALESCE(head_sha,''), COALESCE(merge_sha,''), status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&head, &merge, &status); err != nil {
-			t.Fatalf("query row failed: %v", err)
-		}
-		if (wantHead != "" && head != wantHead) || (wantMerge != "" && merge != wantMerge) || (wantStatus != "" && status != wantStatus) {
-			t.Errorf("row state = (head=%s, merge=%s, status=%s), want (head=%s, merge=%s, status=%s)", head, merge, status, wantHead, wantMerge, wantStatus)
-		}
-	}
+				go func() {
+					done <- runServer(ctx, tc.config, func(addr string) {
+						ready <- addr
+					})
+				}()
 
-	// 1. UpdatePRSync
-	if target, err := reg.UpdatePRSync(ctx, repo, testPRNum, "syncsha222"); err != nil || target != targetID {
-		t.Fatalf("UpdatePRSync failed (target=%s): %v", target, err)
-	}
-	assertRow("syncsha222", "", "open")
+				select {
+				case addr := <-ready:
+					if addr == "" {
+						t.Errorf("expected non-empty listening address")
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatalf("timeout waiting for server to start")
+				}
 
-	// 2. AtomicTransitionCIFailed: 'open' -> 'ci_failed'
-	if gotTarget, updated, err := reg.AtomicTransitionCIFailed(ctx, repo, testPRNum); err != nil || !updated || gotTarget != targetID {
-		t.Fatalf("AtomicTransitionCIFailed: got updated=%v, target=%s, err=%v", updated, gotTarget, err)
-	}
-	assertRow("", "", "ci_failed")
+				cancel()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("expected clean shutdown, got error: %v", err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatalf("timeout waiting for server shutdown")
+				}
+				return
+			}
 
-	// 3. CAS gate: second AtomicTransitionCIFailed is no-op
-	if _, updated, err := reg.AtomicTransitionCIFailed(ctx, repo, testPRNum); err != nil || updated {
-		t.Errorf("second AtomicTransitionCIFailed should return updated=false, got updated=%v err=%v", updated, err)
-	}
+			if tc.isRunApp {
+				ctxC, cancelC := context.WithCancel(context.Background())
+				cancelC()
+				if err := runApp(ctxC, tc.config); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					t.Errorf("unexpected error from runApp: %v", err)
+				}
+				return
+			}
 
-	// 4. UpdatePRSync resets 'ci_failed' back to 'open'
-	if target, err := reg.UpdatePRSync(ctx, repo, testPRNum, "newhead333"); err != nil || target != targetID {
-		t.Fatalf("UpdatePRSync reset failed (target=%s): %v", target, err)
+			err := runServer(context.Background(), tc.config, nil)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("runServer() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
 	}
-	assertRow("newhead333", "", "open")
+}
+// --- 9. Vanadis Build Queue Advancement & Wake Suppression Tests ---
 
-	// 5. AtomicTransitionCIFailedByHeadSHA
-	if gotTarget, gotPR, updated, err := reg.AtomicTransitionCIFailedByHeadSHA(ctx, repo, "newhead333"); err != nil || !updated || gotPR != testPRNum || gotTarget != targetID {
-		t.Errorf("AtomicTransitionCIFailedByHeadSHA: got updated=%v, pr=%d, target=%s, err=%v", updated, gotPR, gotTarget, err)
-	}
+func TestIsHangarSyncedRepoAndPromptFormat(t *testing.T) {
+	t.Parallel()
 
-	// 6. UpdatePRMerged: transitions to 'merged'
-	if target, err := reg.UpdatePRMerged(ctx, repo, testPRNum, "mergesha444"); err != nil || target != targetID {
-		t.Fatalf("UpdatePRMerged failed (target=%s): %v", target, err)
+	tests := []struct {
+		name       string
+		repo       string
+		wantSynced bool
+	}{
+		{name: "aerial is synced", repo: "azylman/aerial", wantSynced: true},
+		{name: "short aerial is synced", repo: "aerial", wantSynced: true},
+		{name: "uppercase aerial-config is synced", repo: "AZYLMAN/AERIAL-CONFIG", wantSynced: true},
+		{name: "short aerial-config is synced", repo: "aerial-config", wantSynced: true},
+		{name: "mirrormere is not synced", repo: "azylman/mirrormere", wantSynced: false},
+		{name: "short mirrormere is not synced", repo: "mirrormere", wantSynced: false},
+		{name: "aerial-sidecars is not synced", repo: "azylman/aerial-sidecars", wantSynced: false},
+		{name: "empty repo is not synced", repo: "", wantSynced: false},
 	}
-	assertRow("", "mergesha444", "merged")
-
-	// 7. Merged PR cannot transition to ci_failed
-	if _, updated, err := reg.AtomicTransitionCIFailed(ctx, repo, testPRNum); err != nil || updated {
-		t.Errorf("AtomicTransitionCIFailed on merged PR must return updated=false, got %v (err=%v)", updated, err)
-	}
-
-	// 8. BackfillPushMergeSHA
-	if target, err := reg.BackfillPushMergeSHA(ctx, repo, testPRNum, "mergesha555"); err != nil || target != targetID {
-		t.Fatalf("BackfillPushMergeSHA failed (target=%s): %v", target, err)
-	}
-	assertRow("", "mergesha555", "")
-
-	// 9. Untracked PR & Empty/Zero SHA guards
-	if target, err := reg.UpdatePRMerged(ctx, repo, 999999, "sha"); err != nil || target != "" {
-		t.Errorf("expected nil error and empty target on untracked PR, got %v, %q", err, target)
-	}
-	if target, err := reg.UpdatePRClosedUnmerged(ctx, repo, 999999); err != nil || target != "" {
-		t.Errorf("expected nil error and empty target on untracked PR closed, got %v, %q", err, target)
-	}
-	if target, err := reg.UpdatePRSync(ctx, repo, 999999, "sha"); err != nil || target != "" {
-		t.Errorf("expected nil error and empty target on untracked PR sync, got %v, %q", err, target)
-	}
-	if _, updated, err := reg.AtomicTransitionCIFailed(ctx, repo, 999999); err != nil || updated {
-		t.Errorf("untracked AtomicTransitionCIFailed: got updated=%v, err=%v", updated, err)
-	}
-	for _, sha := range []string{"nonexistent-sha", "", "0000000000000000000000000000000000000000"} {
-		if _, _, updated, err := reg.AtomicTransitionCIFailedByHeadSHA(ctx, repo, sha); err != nil || updated {
-			t.Errorf("AtomicTransitionCIFailedByHeadSHA(%q): got updated=%v, err=%v", sha, updated, err)
-		}
-	}
-
-	// 10. ResolvePRBySHA
-	for _, sha := range []string{"newhead333", "mergesha555"} {
-		if resPR, resBranch, resTarget, err := reg.ResolvePRBySHA(ctx, repo, sha); err != nil || resPR != testPRNum || resBranch != "feat/live-test" || resTarget != targetID {
-			t.Errorf("ResolvePRBySHA(%q) = (%d, %s, %s, %v)", sha, resPR, resBranch, resTarget, err)
-		}
-	}
-	for _, sha := range []string{"untracked-sha-999", "", "0000000000000000000000000000000000000000"} {
-		if resPR, resBranch, resTarget, err := reg.ResolvePRBySHA(ctx, repo, sha); err != nil || resPR != 0 || resBranch != "" || resTarget != "" {
-			t.Errorf("ResolvePRBySHA(%q) = (%d, %s, %s, %v), want 0", sha, resPR, resBranch, resTarget, err)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isHangarSyncedRepo(tc.repo); got != tc.wantSynced {
+				t.Errorf("isHangarSyncedRepo(%q) = %v, want %v", tc.repo, got, tc.wantSynced)
+			}
+		})
 	}
 
-	// 11. AtomicTransitionDeployedByJob
-	_, _ = pool.Exec(ctx, "UPDATE pr_registry SET status = 'merged', metadata = '{\"jobs\":[\"cadvisor\",\"node-exporter\"]}'::jsonb WHERE repo = $1 AND pr_number = $2", repo, testPRNum)
-	if _, _, _, _, updated, err := reg.AtomicTransitionDeployedByJob(ctx, "cadvisor"); err != nil || updated {
-		t.Fatalf("AtomicTransitionDeployedByJob first job: updated=%v err=%v", updated, err)
+	promptTests := []struct {
+		name         string
+		res          *VanadisAdvancementResult
+		wantPrompt   string
+		wantContains []string
+	}{
+		{
+			name:       "nil result returns empty prompt",
+			res:        nil,
+			wantPrompt: "",
+		},
+		{
+			name: "completed build formats summary prompt",
+			res: &VanadisAdvancementResult{
+				BuildID:   "build-777",
+				Tier:      3,
+				Objective: "Ship Vanadis Phase 3",
+				Chunks: []VanadisChunkSummary{
+					{ChunkIndex: 0, Repo: "azylman/aerial", Title: "Schema", PRNumber: 101},
+					{ChunkIndex: 1, Repo: "", Title: "Worker", PRNumber: 0},
+				},
+			},
+			wantContains: []string{
+				"Vanadis build build-777 completed (Tier 3, 2 chunks merged).",
+				"Objective: Ship Vanadis Phase 3",
+				"- Chunk 1/2: Schema (azylman/aerial, PR #101)",
+				"- Chunk 2/2: Worker (azylman/aerial)",
+				"All Vanadis build chunks have merged into main.",
+			},
+		},
 	}
-	assertRow("", "", "deploying")
-
-	if tID, pNum, _, rOut, updated, err := reg.AtomicTransitionDeployedByJob(ctx, "node-exporter"); err != nil || !updated || pNum != testPRNum || tID != targetID || rOut != repo {
-		t.Fatalf("AtomicTransitionDeployedByJob second job: updated=%v pr=%d target=%s repo=%s err=%v", updated, pNum, tID, rOut, err)
+	for _, tc := range promptTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatVanadisBuildCompletedPrompt(tc.res)
+			if tc.wantPrompt != "" || len(tc.wantContains) == 0 {
+				if got != tc.wantPrompt {
+					t.Errorf("formatVanadisBuildCompletedPrompt() = %q, want %q", got, tc.wantPrompt)
+				}
+			}
+			for _, sub := range tc.wantContains {
+				if !strings.Contains(got, sub) {
+					t.Errorf("prompt missing %q:\n%s", sub, got)
+				}
+			}
+		})
 	}
-	assertRow("", "", "deployed")
 }
 
-// --- 10. Vanadis Build Queue Advancement & Wake Suppression Tests ---
-
-func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
+func TestAdvanceVanadisChunk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
+	validThread := "123456789012345678"
 
-	t.Run("VanadisExecuteChunkArgs_KindAndInsertOpts", func(t *testing.T) {
-		args := VanadisExecuteChunkArgs{BuildID: "build-01", ChunkIndex: 2}
-		if got := args.Kind(); got != "vanadis_execute_chunk" {
-			t.Fatalf("Kind() = %q, want vanadis_execute_chunk", got)
-		}
-		opts := args.InsertOpts()
-		if opts.Queue != VanadisQueueName || opts.MaxAttempts != 3 || !opts.UniqueOpts.ByArgs {
-			t.Fatalf("unexpected InsertOpts(): %+v", opts)
-		}
-	})
-
-	t.Run("isHangarSyncedRepo_And_formatVanadisBuildCompletedPrompt", func(t *testing.T) {
-		for _, repo := range []string{"azylman/aerial", "aerial", "AZYLMAN/AERIAL-CONFIG", "aerial-config"} {
-			if !isHangarSyncedRepo(repo) {
-				t.Errorf("expected isHangarSyncedRepo(%q) == true", repo)
-			}
-		}
-		for _, repo := range []string{"azylman/mirrormere", "mirrormere", "azylman/aerial-sidecars", ""} {
-			if isHangarSyncedRepo(repo) {
-				t.Errorf("expected isHangarSyncedRepo(%q) == false", repo)
-			}
-		}
-
-		if got := formatVanadisBuildCompletedPrompt(nil); got != "" {
-			t.Errorf("expected empty prompt for nil result, got %q", got)
-		}
-
-		prompt := formatVanadisBuildCompletedPrompt(&VanadisAdvancementResult{
-			BuildID:   "build-777",
-			Tier:      3,
-			Objective: "Ship Vanadis Phase 3",
-			Chunks: []VanadisChunkSummary{
-				{ChunkIndex: 0, Repo: "azylman/aerial", Title: "Schema", PRNumber: 101},
-				{ChunkIndex: 1, Repo: "", Title: "Worker", PRNumber: 0},
+	tests := []struct {
+		name             string
+		useNilRegistry   bool
+		prNumber         int
+		advanceRes       *VanadisAdvancementResult
+		advanceErr       error
+		inserterErr      error
+		dispDirectErr    error
+		wantErr          bool
+		wantInsertedJobs int
+		wantPrompts      int
+		wantPromptSubs   []string
+		wantDMs          int
+	}{
+		{
+			name:           "nil registry is clean no-op",
+			useNilRegistry: true,
+			prNumber:       10,
+			wantErr:        false,
+		},
+		{
+			name:     "prNumber <= 0 is clean no-op",
+			prNumber: 0,
+			wantErr:  false,
+		},
+		{
+			name:       "unmatched result returns nil",
+			prNumber:   10,
+			advanceRes: &VanadisAdvancementResult{Matched: false},
+			wantErr:    false,
+		},
+		{
+			name:       "registry error returns error",
+			prNumber:   10,
+			advanceErr: errors.New("db failure"),
+			wantErr:    true,
+		},
+		{
+			name:     "mid-run chunk advancement enqueues next chunk in River",
+			prNumber: 42,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-mid",
+				ThreadID:         validThread,
+				MergedChunkIndex: 0,
+				MergedChunkTitle: "Chunk One",
+				NextChunkIndex:   1,
+				BuildCompleted:   false,
+				Chunks: []VanadisChunkSummary{
+					{ChunkIndex: 0, Title: "Chunk One", Status: "merged"},
+					{ChunkIndex: 1, Title: "Chunk Two", Status: "pending"},
+				},
 			},
+			dispDirectErr:    errors.New("transient dm error warning"),
+			wantInsertedJobs: 1,
+			wantErr:          false,
+		},
+		{
+			name:     "River insert error during mid-run advancement returns error",
+			prNumber: 42,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-mid",
+				ThreadID:         validThread,
+				NextChunkIndex:   1,
+				BuildCompleted:   false,
+			},
+			inserterErr: errors.New("river insert failed"),
+			wantErr:     true,
+		},
+		{
+			name:     "final build completion dispatches widget sync and completion prompt",
+			prNumber: 42,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-done",
+				ThreadID:         validThread,
+				Tier:             2,
+				Objective:        "Complete all chunks",
+				MergedChunkIndex: 1,
+				MergedChunkTitle: "Chunk Two",
+				NextChunkIndex:   -1,
+				BuildCompleted:   true,
+				Chunks: []VanadisChunkSummary{
+					{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
+					{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
+				},
+			},
+			wantErr:        false,
+			wantPrompts:    1,
+			wantPromptSubs: []string{"Vanadis build build-done completed"},
+			wantDMs:        0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reg PRRegistryUpdater
+			if !tc.useNilRegistry {
+				reg = &mockPRRegistry{
+					advanceVanadisRes: tc.advanceRes,
+					advanceVanadisErr: tc.advanceErr,
+				}
+			}
+			disp := &mockOutboundDispatcher{
+				directMessageErr: tc.dispDirectErr,
+			}
+			inserter := &mockRiverInserter{
+				err: tc.inserterErr,
+			}
+			srv := newTestRouter(Config{}, nil, reg, disp, inserter)
+
+			err := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("advanceVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if len(inserter.insertedVanadisJobs) != tc.wantInsertedJobs {
+				t.Errorf("got %d inserted jobs, want %d", len(inserter.insertedVanadisJobs), tc.wantInsertedJobs)
+			}
+			if len(disp.PromptCalls()) != tc.wantPrompts {
+				t.Errorf("got %d prompts, want %d", len(disp.PromptCalls()), tc.wantPrompts)
+			}
+			for _, sub := range tc.wantPromptSubs {
+				if len(disp.PromptCalls()) == 0 || !strings.Contains(disp.PromptCalls()[0].Prompt, sub) {
+					t.Errorf("prompt missing %q: %+v", sub, disp.PromptCalls())
+				}
+			}
+			if len(disp.DirectMessageCalls()) != tc.wantDMs {
+				t.Errorf("got %d DMs, want %d", len(disp.DirectMessageCalls()), tc.wantDMs)
+			}
 		})
-		for _, sub := range []string{
-			"Vanadis build build-777 completed (Tier 3, 2 chunks merged).",
-			"Objective: Ship Vanadis Phase 3",
-			"- Chunk 1/2: Schema (azylman/aerial, PR #101)",
-			"- Chunk 2/2: Worker (azylman/aerial)",
-			"All Vanadis build chunks have merged into main.",
-		} {
-			if !strings.Contains(prompt, sub) {
-				t.Errorf("expected prompt to contain %q, got:\n%s", sub, prompt)
-			}
-		}
-	})
+	}
+}
 
-	t.Run("advanceVanadisChunk_MidRun_And_Completed_And_Errors", func(t *testing.T) {
-		validThread := "123456789012345678"
+func TestProcessVanadisWiring(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	validThread := "123456789012345678"
 
-		// 1. Nil registry or non-positive PR
-		srvNil := newTestRouter(Config{}, nil, nil, nil)
-		if err := srvNil.advanceVanadisChunk(ctx, "aerial", 10); err != nil {
-			t.Fatalf("expected nil on nil registry, got %v", err)
-		}
-
-		reg := &mockPRRegistry{}
-		disp := &mockOutboundDispatcher{}
-		inserter := &mockRiverInserter{}
-		srv := newTestRouter(Config{}, nil, reg, disp, inserter)
-
-		if err := srv.advanceVanadisChunk(ctx, "aerial", 0); err != nil {
-			t.Fatalf("expected nil on prNumber=0, got %v", err)
-		}
-
-		// 2. Unmatched or unadvanced result
-		reg.advanceVanadisRes = &VanadisAdvancementResult{Matched: false}
-		if err := srv.advanceVanadisChunk(ctx, "aerial", 10); err != nil {
-			t.Fatalf("expected nil on unmatched result, got %v", err)
-		}
-
-		// 3. Registry error
-		reg.advanceVanadisErr = errors.New("db failure")
-		if err := srv.advanceVanadisChunk(ctx, "aerial", 10); err == nil {
-			t.Fatal("expected error from AdvanceVanadisChunkByPR")
-		}
-		reg.advanceVanadisErr = nil
-
-		// 4. Mid-run chunk advancement: enqueues next chunk in River and sends DM
-		reg.advanceVanadisRes = &VanadisAdvancementResult{
-			Matched:          true,
-			Advanced:         true,
-			BuildID:          "build-mid",
-			ThreadID:         validThread,
-			MergedChunkIndex: 0,
-			MergedChunkTitle: "Chunk One",
-			NextChunkIndex:   1,
-			BuildCompleted:   false,
-			Chunks: []VanadisChunkSummary{
-				{ChunkIndex: 0, Title: "Chunk One", Status: "merged"},
-				{ChunkIndex: 1, Title: "Chunk Two", Status: "pending"},
+	tests := []struct {
+		name              string
+		eventType         string
+		payload           string
+		hangarEvt         HangarDeployEvent
+		advanceRes        *VanadisAdvancementResult
+		advanceErr        error
+		failErr           error
+		wantErr           bool
+		wantAdvanceCalls  int
+		wantFailCalls     int
+		wantAdvancePRNum  int
+		wantFailPRNum     int
+	}{
+		{
+			name:      "hangar sync_success with targetID advances chunk",
+			eventType: "hangar",
+			hangarEvt: HangarDeployEvent{
+				Event:    "sync_success",
+				JobName:  "git-sync",
+				Repo:     "azylman/aerial",
+				PRNumber: 77,
+				TargetID: validThread,
 			},
-		}
-		disp.directMessageErr = errors.New("dm transient failure") // should only log warning
-		if err := srv.advanceVanadisChunk(ctx, "aerial", 42); err != nil {
-			t.Fatalf("unexpected error on mid-run advance: %v", err)
-		}
-		disp.directMessageErr = nil
-		if len(inserter.insertedVanadisJobs) != 1 || inserter.insertedVanadisJobs[0].BuildID != "build-mid" || inserter.insertedVanadisJobs[0].ChunkIndex != 1 {
-			t.Fatalf("expected VanadisExecuteChunkArgs{build-mid, 1}, got %+v", inserter.insertedVanadisJobs)
-		}
-		// Mid-run advancement updates widget in-place (no chat DM)
-
-		// 5. River insert error during mid-run advancement
-		inserter.err = errors.New("river insert failed")
-		if err := srv.advanceVanadisChunk(ctx, "aerial", 42); err == nil {
-			t.Fatal("expected error when River insert fails")
-		}
-		inserter.err = nil
-
-		// 6. Final build completion: dispatches completion DM + prompt
-		disp.directMessageCalls = nil
-		disp.promptCalls = nil
-		reg.advanceVanadisRes = &VanadisAdvancementResult{
-			Matched:          true,
-			Advanced:         true,
-			BuildID:          "build-done",
-			ThreadID:         validThread,
-			Tier:             2,
-			Objective:        "Complete all chunks",
-			MergedChunkIndex: 1,
-			MergedChunkTitle: "Chunk Two",
-			NextChunkIndex:   -1,
-			BuildCompleted:   true,
-			Chunks: []VanadisChunkSummary{
-				{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
-				{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
-			},
-		}
-		if err := srv.advanceVanadisChunk(ctx, "aerial", 42); err != nil {
-			t.Fatalf("unexpected error on build completion: %v", err)
-		}
-		// Final build completion updates widget in-place with dmMsg: "" so only completion prompt runs
-		if len(disp.DirectMessageCalls()) != 0 {
-			t.Fatalf("expected 0 direct messages on build completion, got %+v", disp.DirectMessageCalls())
-		}
-		if len(disp.PromptCalls()) != 1 || !strings.Contains(disp.PromptCalls()[0].Prompt, "Vanadis build build-done completed") {
-			t.Fatalf("expected completion prompt, got %+v", disp.PromptCalls())
-		}
-	})
-
-	t.Run("ProcessHangarEvent_And_ProcessGitHubEvent_Wiring", func(t *testing.T) {
-		validThread := "123456789012345678"
-		reg := &mockPRRegistry{
-			mergedTargetID:   validThread,
-			closedTargetID:   validThread,
-			backfillTargetID: validThread,
-			resolvePRNum:     77,
-			resolveTargetID:  validThread,
-			advanceVanadisRes: &VanadisAdvancementResult{
+			advanceRes: &VanadisAdvancementResult{
 				Matched:          true,
 				Advanced:         true,
 				BuildID:          "build-wire",
@@ -3808,129 +4179,152 @@ func TestVanadisChunkAdvancementAndWakeSuppression(t *testing.T) {
 				NextChunkIndex:   1,
 				Chunks:           []VanadisChunkSummary{{ChunkIndex: 0}, {ChunkIndex: 1}},
 			},
-		}
-		disp := &mockOutboundDispatcher{}
-		inserter := &mockRiverInserter{}
-		srv := newTestRouter(Config{}, nil, reg, disp, inserter)
-		srv.SetConflictCheckDelay(0)
+			wantAdvanceCalls: 1,
+			wantAdvancePRNum: 77,
+		},
+		{
+			name:      "hangar sync_success without targetID still advances chunk",
+			eventType: "hangar",
+			hangarEvt: HangarDeployEvent{
+				Event:    "sync_success",
+				JobName:  "git-sync",
+				Repo:     "azylman/aerial",
+				PRNumber: 78,
+			},
+			advanceRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-wire",
+				ThreadID:         validThread,
+				MergedChunkIndex: 0,
+				MergedChunkTitle: "Chunk 1",
+				NextChunkIndex:   1,
+				Chunks:           []VanadisChunkSummary{{ChunkIndex: 0}, {ChunkIndex: 1}},
+			},
+			wantAdvanceCalls: 1,
+			wantAdvancePRNum: 78,
+		},
+		{
+			name:      "hangar sync_success advance error propagates",
+			eventType: "hangar",
+			hangarEvt: HangarDeployEvent{
+				Event:    "sync_success",
+				JobName:  "git-sync",
+				Repo:     "azylman/aerial",
+				PRNumber: 79,
+				TargetID: validThread,
+			},
+			advanceErr: errors.New("advance err"),
+			wantErr:    true,
+		},
+		{
+			name:      "github pull_request closed merged on non-hangar repo advances chunk",
+			eventType: "github_pull_request",
+			payload:   `{"action":"closed","number":88,"pull_request":{"number":88,"merged":true,"merge_commit_sha":"abc1234","head":{"ref":"feat/ui","sha":"def5678"}},"repository":{"full_name":"azylman/mirrormere"}}`,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-wire",
+				ThreadID:         validThread,
+				MergedChunkIndex: 0,
+				MergedChunkTitle: "Chunk 1",
+				NextChunkIndex:   1,
+				Chunks:           []VanadisChunkSummary{{ChunkIndex: 0}, {ChunkIndex: 1}},
+			},
+			wantAdvanceCalls: 1,
+			wantAdvancePRNum: 88,
+		},
+		{
+			name:       "github pull_request closed merged error propagates",
+			eventType:  "github_pull_request",
+			payload:    `{"action":"closed","number":88,"pull_request":{"number":88,"merged":true,"merge_commit_sha":"abc1234","head":{"ref":"feat/ui","sha":"def5678"}},"repository":{"full_name":"azylman/mirrormere"}}`,
+			advanceErr: errors.New("pr merge advance err"),
+			wantErr:    true,
+		},
+		{
+			name:          "github pull_request closed unmerged calls FailVanadisChunkByPR",
+			eventType:     "github_pull_request",
+			payload:       `{"action":"closed","number":89,"pull_request":{"number":89,"merged":false,"head":{"ref":"feat/abandoned","sha":"def5678"}},"repository":{"full_name":"azylman/aerial"}}`,
+			failErr:       errors.New("fail chunk warning"),
+			wantFailCalls: 1,
+			wantFailPRNum: 89,
+		},
+		{
+			name:      "github push to main on non-hangar repo advances chunk",
+			eventType: "github_push",
+			payload:   `{"ref":"refs/heads/main","after":"1111222233334444555566667777888899990000","repository":{"full_name":"azylman/aerial-sidecars"}}`,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-wire",
+				ThreadID:         validThread,
+				MergedChunkIndex: 0,
+				MergedChunkTitle: "Chunk 1",
+				NextChunkIndex:   1,
+				Chunks:           []VanadisChunkSummary{{ChunkIndex: 0}, {ChunkIndex: 1}},
+			},
+			wantAdvanceCalls: 1,
+			wantAdvancePRNum: 77,
+		},
+		{
+			name:       "github push advance error propagates",
+			eventType:  "github_push",
+			payload:    `{"ref":"refs/heads/main","after":"1111222233334444555566667777888899990000","repository":{"full_name":"azylman/aerial-sidecars"}}`,
+			advanceErr: errors.New("push advance err"),
+			wantErr:    true,
+		},
+	}
 
-		// 1. Hangar sync_success with valid TargetID advances Vanadis chunk
-		if _, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
-			Event:    "sync_success",
-			JobName:  "git-sync",
-			Repo:     "azylman/aerial",
-			PRNumber: 77,
-			TargetID: validThread,
-		}); err != nil {
-			t.Fatalf("ProcessHangarEvent sync_success failed: %v", err)
-		}
-		if len(reg.advanceVanadisCalls) != 1 || reg.advanceVanadisCalls[0].prNumber != 77 {
-			t.Fatalf("expected AdvanceVanadisChunkByPR call for PR 77, got %+v", reg.advanceVanadisCalls)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &mockPRRegistry{
+				mergedTargetID:    validThread,
+				closedTargetID:    validThread,
+				backfillTargetID:  validThread,
+				resolvePRNum:      77,
+				resolveTargetID:   validThread,
+				advanceVanadisRes: tc.advanceRes,
+				advanceVanadisErr: tc.advanceErr,
+				failVanadisErr:    tc.failErr,
+			}
+			disp := &mockOutboundDispatcher{}
+			inserter := &mockRiverInserter{}
+			srv := newTestRouter(Config{}, nil, reg, disp, inserter)
+			srv.SetConflictCheckDelay(0)
 
-		// 2. Hangar sync_success with empty TargetID still advances Vanadis chunk
-		reg.resolveTargetID = ""
-		if _, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
-			Event:    "sync_success",
-			JobName:  "git-sync",
-			Repo:     "azylman/aerial",
-			PRNumber: 78,
-		}); err != nil {
-			t.Fatalf("ProcessHangarEvent sync_success without target_id failed: %v", err)
-		}
-		if len(reg.advanceVanadisCalls) != 2 || reg.advanceVanadisCalls[1].prNumber != 78 {
-			t.Fatalf("expected AdvanceVanadisChunkByPR call for PR 78, got %+v", reg.advanceVanadisCalls)
-		}
-		reg.resolveTargetID = validThread
+			var err error
+			switch tc.eventType {
+			case "hangar":
+				_, err = srv.ProcessHangarEvent(ctx, tc.hangarEvt)
+			case "github_pull_request":
+				_, err = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr", []byte(tc.payload))
+			case "github_push":
+				_, err = srv.ProcessGitHubEvent(ctx, "push", "del-push", []byte(tc.payload))
+			}
 
-		// 3. Hangar sync_success error propagation
-		reg.advanceVanadisErr = errors.New("advance err")
-		if _, err := srv.ProcessHangarEvent(ctx, HangarDeployEvent{
-			Event:    "sync_success",
-			JobName:  "git-sync",
-			Repo:     "azylman/aerial",
-			PRNumber: 79,
-			TargetID: validThread,
-		}); err == nil {
-			t.Fatal("expected error from ProcessHangarEvent when advanceVanadisChunk fails")
-		}
-		reg.advanceVanadisErr = nil
-
-		// 4. GitHub pull_request closed (merged) on non-Hangar-synced repo advances Vanadis chunk
-		reg.advanceVanadisCalls = nil
-		prMergedMirrormere := `{"action":"closed","number":88,"pull_request":{"number":88,"merged":true,"merge_commit_sha":"abc1234","head":{"ref":"feat/ui","sha":"def5678"}},"repository":{"full_name":"azylman/mirrormere"}}`
-		if _, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-1", []byte(prMergedMirrormere)); err != nil {
-			t.Fatalf("ProcessGitHubEvent merged PR failed: %v", err)
-		}
-		if len(reg.advanceVanadisCalls) != 1 || reg.advanceVanadisCalls[0].prNumber != 88 {
-			t.Fatalf("expected AdvanceVanadisChunkByPR for mirrormere#88, got %+v", reg.advanceVanadisCalls)
-		}
-
-		reg.advanceVanadisErr = errors.New("pr merge advance err")
-		if _, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-1b", []byte(prMergedMirrormere)); err == nil {
-			t.Fatal("expected error when advanceVanadisChunk fails on merged PR")
-		}
-		reg.advanceVanadisErr = nil
-
-		// 5. GitHub pull_request closed (unmerged) calls FailVanadisChunkByPR
-		reg.failVanadisErr = errors.New("fail chunk warning")
-		prClosedUnmerged := `{"action":"closed","number":89,"pull_request":{"number":89,"merged":false,"head":{"ref":"feat/abandoned","sha":"def5678"}},"repository":{"full_name":"azylman/aerial"}}`
-		if _, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-2", []byte(prClosedUnmerged)); err != nil {
-			t.Fatalf("ProcessGitHubEvent unmerged PR failed: %v", err)
-		}
-		if len(reg.failVanadisCalls) != 1 || reg.failVanadisCalls[0].prNumber != 89 {
-			t.Fatalf("expected FailVanadisChunkByPR for aerial#89, got %+v", reg.failVanadisCalls)
-		}
-		reg.failVanadisErr = nil
-
-		// 6. GitHub push to main on non-Hangar-synced repo advances Vanadis chunk
-		reg.advanceVanadisCalls = nil
-		pushSidecars := `{"ref":"refs/heads/main","after":"1111222233334444555566667777888899990000","repository":{"full_name":"azylman/aerial-sidecars"}}`
-		if _, err := srv.ProcessGitHubEvent(ctx, "push", "del-3", []byte(pushSidecars)); err != nil {
-			t.Fatalf("ProcessGitHubEvent push failed: %v", err)
-		}
-		if len(reg.advanceVanadisCalls) != 1 || reg.advanceVanadisCalls[0].prNumber != 77 {
-			t.Fatalf("expected AdvanceVanadisChunkByPR on push to aerial-sidecars, got %+v", reg.advanceVanadisCalls)
-		}
-
-		reg.advanceVanadisErr = errors.New("push advance err")
-		if _, err := srv.ProcessGitHubEvent(ctx, "push", "del-3b", []byte(pushSidecars)); err == nil {
-			t.Fatal("expected error when advanceVanadisChunk fails on push")
-		}
-		reg.advanceVanadisErr = nil
-	})
-
-	t.Run("dispatchDeploymentSuccessPrompt_WakeSuppression", func(t *testing.T) {
-		validThread := "123456789012345678"
-		reg := &mockPRRegistry{suppressVanadisRes: true}
-		disp := &mockOutboundDispatcher{}
-		srv := newTestRouter(Config{}, nil, reg, disp)
-
-		// 1. Suppressed mid-run deploy sends DM only, no /prompt wake
-		if err := srv.dispatchDeploymentSuccessPrompt(ctx, validThread, "vanadis", "azylman/aerial", "abc1234", 55, "dep-1"); err != nil {
-			t.Fatalf("dispatchDeploymentSuccessPrompt failed: %v", err)
-		}
-		if len(disp.PromptCalls()) != 0 {
-			t.Fatalf("expected 0 /prompt calls when suppressed, got %d", len(disp.PromptCalls()))
-		}
-		// Mid-run deploy_success updates widget in-place (no chat DM)
-		if len(disp.DirectMessageCalls()) != 0 {
-			t.Fatalf("expected 0 direct messages on suppressed deploy, got %+v", disp.DirectMessageCalls())
-		}
-
-		// 2. Suppression check error logs warning and falls back to normal /prompt dispatch
-		reg.suppressVanadisRes = false
-		reg.suppressVanadisErr = errors.New("db check err")
-		disp.directMessageCalls = nil
-		if err := srv.dispatchDeploymentSuccessPrompt(ctx, validThread, "vanadis", "azylman/aerial", "abc1234", 55, "dep-1"); err != nil {
-			t.Fatalf("dispatchDeploymentSuccessPrompt fallback failed: %v", err)
-		}
-		if len(disp.PromptCalls()) != 1 {
-			t.Fatalf("expected 1 /prompt call on fallback, got %d", len(disp.PromptCalls()))
-		}
-	})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantAdvanceCalls > 0 {
+				if len(reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
+					t.Fatalf("advanceVanadisCalls = %d, want %d", len(reg.advanceVanadisCalls), tc.wantAdvanceCalls)
+				}
+				if reg.advanceVanadisCalls[0].prNumber != tc.wantAdvancePRNum {
+					t.Errorf("advance prNumber = %d, want %d", reg.advanceVanadisCalls[0].prNumber, tc.wantAdvancePRNum)
+				}
+			}
+			if tc.wantFailCalls > 0 {
+				if len(reg.failVanadisCalls) != tc.wantFailCalls {
+					t.Fatalf("failVanadisCalls = %d, want %d", len(reg.failVanadisCalls), tc.wantFailCalls)
+				}
+				if reg.failVanadisCalls[0].prNumber != tc.wantFailPRNum {
+					t.Errorf("fail prNumber = %d, want %d", reg.failVanadisCalls[0].prNumber, tc.wantFailPRNum)
+				}
+			}
+		})
+	}
 }
-
 type mockVanadisPgxRow struct {
 	scanFn func(dest ...any) error
 }
@@ -3944,24 +4338,34 @@ func (r mockVanadisPgxRow) Scan(dest ...any) error {
 
 type mockVanadisPgxRows struct {
 	pgx.Rows
-	items   []VanadisChunkSummary
-	idx     int
-	scanErr error
-	rowsErr error
+	items     []VanadisChunkSummary
+	idx       int
+	scanErr   error
+	rowsErr   error
+	totalRows int
+	scanRowFn func(idx int, dest ...any) error
 }
 
 func (r *mockVanadisPgxRows) Close()     {}
 func (r *mockVanadisPgxRows) Err() error { return r.rowsErr }
 func (r *mockVanadisPgxRows) Next() bool {
-	if r.idx < len(r.items) {
+	limit := len(r.items)
+	if r.totalRows > limit {
+		limit = r.totalRows
+	}
+	if r.idx < limit {
 		r.idx++
 		return true
 	}
 	return false
 }
+
 func (r *mockVanadisPgxRows) Scan(dest ...any) error {
 	if r.scanErr != nil {
 		return r.scanErr
+	}
+	if r.scanRowFn != nil {
+		return r.scanRowFn(r.idx-1, dest...)
 	}
 	it := r.items[r.idx-1]
 	*(dest[0].(*string)) = it.ID
@@ -4000,7 +4404,10 @@ func (t *mockVanadisPgxTx) Rollback(ctx context.Context) error {
 	return pgx.ErrTxClosed
 }
 func (t *mockVanadisPgxTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return t.queryRowFn(ctx, sql, args...)
+	if t.queryRowFn != nil {
+		return t.queryRowFn(ctx, sql, args...)
+	}
+	return mockVanadisPgxRow{}
 }
 func (t *mockVanadisPgxTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if t.execFn != nil {
@@ -4009,7 +4416,10 @@ func (t *mockVanadisPgxTx) Exec(ctx context.Context, sql string, args ...any) (p
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 func (t *mockVanadisPgxTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	return t.queryFn(ctx, sql, args...)
+	if t.queryFn != nil {
+		return t.queryFn(ctx, sql, args...)
+	}
+	return &mockVanadisPgxRows{}, nil
 }
 
 type mockVanadisPgxPool struct {
@@ -4020,10 +4430,16 @@ type mockVanadisPgxPool struct {
 }
 
 func (p *mockVanadisPgxPool) Begin(ctx context.Context) (pgx.Tx, error) {
-	return p.beginFn(ctx)
+	if p.beginFn != nil {
+		return p.beginFn(ctx)
+	}
+	return &mockVanadisPgxTx{}, nil
 }
 func (p *mockVanadisPgxPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return p.queryRowFn(ctx, sql, args...)
+	if p.queryRowFn != nil {
+		return p.queryRowFn(ctx, sql, args...)
+	}
+	return mockVanadisPgxRow{}
 }
 func (p *mockVanadisPgxPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if p.execFn != nil {
@@ -4032,430 +4448,1036 @@ func (p *mockVanadisPgxPool) Exec(ctx context.Context, sql string, args ...any) 
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 func (p *mockVanadisPgxPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	return p.queryFn(ctx, sql, args...)
+	if p.queryFn != nil {
+		return p.queryFn(ctx, sql, args...)
+	}
+	return &mockVanadisPgxRows{}, nil
+}
+
+func TestPostgresPRRegistry_Unit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		op             string
+		nilPool        bool
+		repo           string
+		prNumber       int
+		sha            string
+		jobName        string
+		jobs           []string
+		targetID       string
+		limit          int
+		mockSelectErr  error
+		mockScanErr    error
+		mockExecErr    error
+		mockBeginErr   error
+		mockCommitErr  error
+		mockRowsErr    error
+		rowsAffected   int64
+		targetIDReturn string
+		branchReturn   string
+		mergeSHAReturn string
+		metaJSON       string
+		totalRows      int
+		wantErr        bool
+		wantUpdated    bool
+		wantTarget     string
+		wantPRNum      int
+		wantCount      int
+	}{
+		// Single-row transitions: UpdatePRMerged
+		{name: "UpdatePRMerged success", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "UpdatePRMerged not found", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
+		{name: "UpdatePRMerged query error", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: errors.New("db error"), wantErr: true},
+		{name: "UpdatePRMerged nil pool guard", op: "UpdatePRMerged", nilPool: true, repo: "azylman/aerial", prNumber: 42, sha: "merge123"},
+		{name: "UpdatePRMerged empty repo guard", op: "UpdatePRMerged", repo: "", prNumber: 42},
+		{name: "UpdatePRMerged prNumber zero guard", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 0},
+
+		// UpdatePRClosedUnmerged
+		{name: "UpdatePRClosedUnmerged success", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "UpdatePRClosedUnmerged not found", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
+		{name: "UpdatePRClosedUnmerged db error", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// UpdatePRSync
+		{name: "UpdatePRSync success", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "UpdatePRSync not found", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
+		{name: "UpdatePRSync db error", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// BackfillPushMergeSHA
+		{name: "BackfillPushMergeSHA success", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "BackfillPushMergeSHA not found", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
+		{name: "BackfillPushMergeSHA db error", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// AtomicTransitionCIFailed
+		{name: "AtomicTransitionCIFailed success", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true},
+		{name: "AtomicTransitionCIFailed not found", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
+		{name: "AtomicTransitionCIFailed db error", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// AtomicTransitionConflict
+		{name: "AtomicTransitionConflict success", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true},
+		{name: "AtomicTransitionConflict not found", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
+		{name: "AtomicTransitionConflict db error", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// AtomicTransitionDeployFailed
+		{name: "AtomicTransitionDeployFailed success", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true},
+		{name: "AtomicTransitionDeployFailed not found", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
+		{name: "AtomicTransitionDeployFailed db error", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// AtomicTransitionCIFailedByHeadSHA
+		{name: "AtomicTransitionCIFailedByHeadSHA success", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantPRNum: 42, wantUpdated: true},
+		{name: "AtomicTransitionCIFailedByHeadSHA not found", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
+		{name: "AtomicTransitionCIFailedByHeadSHA db error", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: errors.New("db error"), wantErr: true},
+		{name: "AtomicTransitionCIFailedByHeadSHA empty sha guard", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: ""},
+		{name: "AtomicTransitionCIFailedByHeadSHA zero sha guard", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "0000000000000000000000000000000000000000"},
+
+		// ResolvePRBySHA
+		{name: "ResolvePRBySHA success", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "sha123", wantPRNum: 42, branchReturn: "feat/sha", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "ResolvePRBySHA not found", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: pgx.ErrNoRows, wantPRNum: 0},
+		{name: "ResolvePRBySHA db error", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: errors.New("db error"), wantErr: true},
+		{name: "ResolvePRBySHA zero sha guard", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "0000000000000000000000000000000000000000", wantPRNum: 0},
+
+		// ResolvePRByNumber
+		{name: "ResolvePRByNumber success", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", branchReturn: "feat/by-num", mergeSHAReturn: "merge123", wantTarget: "1555405874565091380"},
+		{name: "ResolvePRByNumber not found", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
+		{name: "ResolvePRByNumber db error", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
+		{name: "ResolvePRByNumber zero pr guard", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 0, wantTarget: ""},
+
+		// TransitionDeploying
+		{name: "TransitionDeploying empty jobs guard", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: nil, wantTarget: ""},
+		{name: "TransitionDeploying success", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain", "webhooks-router"}, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "TransitionDeploying db error", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain"}, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// ListOpenPRs
+		{name: "ListOpenPRs success", op: "ListOpenPRs", repo: "azylman/aerial", totalRows: 2, wantCount: 2},
+		{name: "ListOpenPRs query error", op: "ListOpenPRs", repo: "azylman/aerial", mockSelectErr: errors.New("query err"), wantErr: true},
+		{name: "ListOpenPRs scan error", op: "ListOpenPRs", repo: "azylman/aerial", totalRows: 1, mockScanErr: errors.New("scan err"), wantErr: true},
+
+		// ListDeployingPRs
+		{name: "ListDeployingPRs success", op: "ListDeployingPRs", totalRows: 2, metaJSON: `{"jobs":["brain"]}`, wantCount: 2},
+		{name: "ListDeployingPRs invalid metadata JSON warning still succeeds", op: "ListDeployingPRs", totalRows: 1, metaJSON: `{invalid json`, wantCount: 1},
+		{name: "ListDeployingPRs query error", op: "ListDeployingPRs", mockSelectErr: errors.New("query err"), wantErr: true},
+
+		// GetRecentChannelContext
+		{name: "GetRecentChannelContext empty targetID guard", op: "GetRecentChannelContext", targetID: "", wantCount: 0},
+		{name: "GetRecentChannelContext default limit <= 0", op: "GetRecentChannelContext", targetID: "1555405874565091380", limit: -1, totalRows: 1, wantCount: 1},
+		{name: "GetRecentChannelContext query error", op: "GetRecentChannelContext", targetID: "1555405874565091380", limit: 5, mockSelectErr: errors.New("query err"), wantErr: true},
+
+		// AtomicTransitionDeployedByJob
+		{name: "AtomicTransitionDeployedByJob empty job guard", op: "AtomicTransitionDeployedByJob", jobName: "", wantUpdated: false},
+		{name: "AtomicTransitionDeployedByJob begin tx error", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockBeginErr: errors.New("begin err"), wantErr: true},
+		{name: "AtomicTransitionDeployedByJob select ErrNoRows", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
+		{name: "AtomicTransitionDeployedByJob select error", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockSelectErr: errors.New("select err"), wantErr: true},
+		{name: "AtomicTransitionDeployedByJob remaining jobs update success", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, wantUpdated: false},
+		{name: "AtomicTransitionDeployedByJob remaining jobs update exec error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
+		{name: "AtomicTransitionDeployedByJob remaining jobs update commit error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockCommitErr: errors.New("commit err"), wantErr: true},
+		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 1", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", repo: "azylman/aerial", metaJSON: `{"jobs":["node-exporter"]}`, targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "1555405874565091380"},
+		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 0", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 0, wantUpdated: false},
+		{name: "AtomicTransitionDeployedByJob final job exec error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
+		{name: "AtomicTransitionDeployedByJob final job commit error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 1, mockCommitErr: errors.New("commit err"), wantErr: true},
+
+		// AtomicTransitionDeployFailedByJob
+		{name: "AtomicTransitionDeployFailedByJob empty job guard", op: "AtomicTransitionDeployFailedByJob", jobName: "", wantUpdated: false},
+		{name: "AtomicTransitionDeployFailedByJob select ErrNoRows", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
+		{name: "AtomicTransitionDeployFailedByJob select error", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockSelectErr: errors.New("select err"), wantErr: true},
+		{name: "AtomicTransitionDeployFailedByJob exec error", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockExecErr: errors.New("exec err"), wantErr: true},
+		{name: "AtomicTransitionDeployFailedByJob RowsAffected 0", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", rowsAffected: 0, wantUpdated: false},
+		{name: "AtomicTransitionDeployFailedByJob success", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "1555405874565091380"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var pool *mockVanadisPgxPool
+			if !tc.nilPool {
+				pool = &mockVanadisPgxPool{
+					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if tc.mockSelectErr != nil {
+								return tc.mockSelectErr
+							}
+							if tc.mockScanErr != nil {
+								return tc.mockScanErr
+							}
+							for _, d := range dest {
+								switch ptr := d.(type) {
+								case *string:
+									*ptr = tc.targetIDReturn
+								case *int:
+									*ptr = tc.wantPRNum
+								case *int64:
+									*ptr = 100
+								case *[]byte:
+									if tc.metaJSON != "" {
+										*ptr = []byte(tc.metaJSON)
+									}
+								}
+							}
+							if len(dest) >= 2 {
+								if sPtr, ok := dest[0].(*string); ok && tc.targetIDReturn != "" {
+									*sPtr = tc.targetIDReturn
+								}
+								if iPtr, ok := dest[1].(*int); ok && tc.wantPRNum != 0 {
+									*iPtr = tc.wantPRNum
+								}
+								if bPtr, ok := dest[1].(*string); ok && tc.branchReturn != "" {
+									*bPtr = tc.branchReturn
+								}
+							}
+							if len(dest) >= 3 {
+								if tPtr, ok := dest[2].(*string); ok && tc.targetIDReturn != "" {
+									*tPtr = tc.targetIDReturn
+								}
+							}
+							if len(dest) >= 4 {
+								if mPtr, ok := dest[3].(*string); ok && tc.mergeSHAReturn != "" {
+									*mPtr = tc.mergeSHAReturn
+								}
+							}
+							if len(dest) == 5 {
+								*(dest[0].(*int64)) = 100
+								*(dest[1].(*string)) = tc.targetIDReturn
+								*(dest[2].(*int)) = tc.wantPRNum
+								*(dest[3].(*string)) = tc.mergeSHAReturn
+								*(dest[4].(*string)) = tc.repo
+							}
+							return nil
+						}}
+					},
+					execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+						if tc.mockExecErr != nil {
+							return pgconn.CommandTag{}, tc.mockExecErr
+						}
+						rowsAff := tc.rowsAffected
+						if rowsAff == 0 && tc.wantUpdated {
+							rowsAff = 1
+						}
+						return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", rowsAff)), nil
+					},
+					beginFn: func(qCtx context.Context) (pgx.Tx, error) {
+						if tc.mockBeginErr != nil {
+							return nil, tc.mockBeginErr
+						}
+						return &mockVanadisPgxTx{
+							commitErr: tc.mockCommitErr,
+							execFn: func(txCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+								if tc.mockExecErr != nil {
+									return pgconn.CommandTag{}, tc.mockExecErr
+								}
+								rowsAff := tc.rowsAffected
+								if rowsAff == 0 && tc.wantUpdated {
+									rowsAff = 1
+								}
+								return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", rowsAff)), nil
+							},
+							queryRowFn: func(txCtx context.Context, sql string, args ...any) pgx.Row {
+								return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+									if tc.mockSelectErr != nil {
+										return tc.mockSelectErr
+									}
+									if len(dest) == 6 {
+										*(dest[0].(*int64)) = 101
+										*(dest[1].(*string)) = tc.targetIDReturn
+										*(dest[2].(*int)) = tc.wantPRNum
+										*(dest[3].(*string)) = tc.mergeSHAReturn
+										*(dest[4].(*string)) = tc.repo
+										if tc.metaJSON != "" {
+											*(dest[5].(*[]byte)) = []byte(tc.metaJSON)
+										} else {
+											*(dest[5].(*[]byte)) = []byte("{}")
+										}
+										return nil
+									}
+									return nil
+								}}
+							},
+						}, nil
+					},
+					queryFn: func(qCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
+						if tc.mockSelectErr != nil {
+							return nil, tc.mockSelectErr
+						}
+						rows := &mockVanadisPgxRows{
+							scanErr:   tc.mockScanErr,
+							rowsErr:   tc.mockRowsErr,
+							totalRows: tc.totalRows,
+						}
+						rows.scanRowFn = func(idx int, dest ...any) error {
+							if tc.mockScanErr != nil {
+								return tc.mockScanErr
+							}
+							if len(dest) == 4 {
+								*(dest[0].(*int)) = 100 + idx
+								*(dest[1].(*string)) = "feat/open"
+								*(dest[2].(*string)) = "1555405874565091380"
+								*(dest[3].(*string)) = "headsha"
+								return nil
+							}
+							if len(dest) == 8 {
+								*(dest[0].(*int64)) = int64(200 + idx)
+								*(dest[1].(*string)) = "azylman/aerial"
+								*(dest[2].(*int)) = 200 + idx
+								*(dest[3].(*string)) = "main"
+								*(dest[4].(*string)) = "headsha"
+								*(dest[5].(*string)) = "mergesha"
+								*(dest[6].(*string)) = "1555405874565091380"
+								if tc.metaJSON != "" {
+									*(dest[7].(*[]byte)) = []byte(tc.metaJSON)
+								}
+								return nil
+							}
+							if len(dest) == 3 {
+								*(dest[0].(*string)) = "arcane103"
+								*(dest[1].(*string)) = "wrap it up"
+								*(dest[2].(*string)) = "done"
+								return nil
+							}
+							return nil
+						}
+						return rows, nil
+					},
+				}
+			}
+
+			reg := NewPostgresPRRegistry(pool)
+			if tc.nilPool {
+				reg = NewPostgresPRRegistry((*pgxpool.Pool)(nil))
+			}
+
+			switch tc.op {
+			case "UpdatePRMerged":
+				gotTarget, err := reg.UpdatePRMerged(ctx, tc.repo, tc.prNumber, tc.sha)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("UpdatePRMerged err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "UpdatePRClosedUnmerged":
+				gotTarget, err := reg.UpdatePRClosedUnmerged(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("UpdatePRClosedUnmerged err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "UpdatePRSync":
+				gotTarget, err := reg.UpdatePRSync(ctx, tc.repo, tc.prNumber, tc.sha)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("UpdatePRSync err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "BackfillPushMergeSHA":
+				gotTarget, err := reg.BackfillPushMergeSHA(ctx, tc.repo, tc.prNumber, tc.sha)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("BackfillPushMergeSHA err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "AtomicTransitionCIFailed":
+				gotTarget, updated, err := reg.AtomicTransitionCIFailed(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AtomicTransitionCIFailed err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if updated != tc.wantUpdated {
+					t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "AtomicTransitionConflict":
+				gotTarget, updated, err := reg.AtomicTransitionConflict(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AtomicTransitionConflict err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if updated != tc.wantUpdated {
+					t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "AtomicTransitionDeployFailed":
+				gotTarget, updated, err := reg.AtomicTransitionDeployFailed(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AtomicTransitionDeployFailed err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if updated != tc.wantUpdated {
+					t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "AtomicTransitionCIFailedByHeadSHA":
+				gotTarget, gotPR, updated, err := reg.AtomicTransitionCIFailedByHeadSHA(ctx, tc.repo, tc.sha)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AtomicTransitionCIFailedByHeadSHA err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if updated != tc.wantUpdated {
+					t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+				}
+				if gotPR != tc.wantPRNum {
+					t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "ResolvePRBySHA":
+				gotPR, gotBranch, gotTarget, err := reg.ResolvePRBySHA(ctx, tc.repo, tc.sha)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("ResolvePRBySHA err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotPR != tc.wantPRNum {
+					t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
+				}
+				if gotBranch != tc.branchReturn {
+					t.Errorf("gotBranch = %q, want %q", gotBranch, tc.branchReturn)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "ResolvePRByNumber":
+				gotTarget, gotBranch, _, _, err := reg.ResolvePRByNumber(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("ResolvePRByNumber err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+				if gotBranch != tc.branchReturn {
+					t.Errorf("gotBranch = %q, want %q", gotBranch, tc.branchReturn)
+				}
+			case "TransitionDeploying":
+				gotTarget, err := reg.TransitionDeploying(ctx, tc.repo, tc.prNumber, tc.jobs)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("TransitionDeploying err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "ListOpenPRs":
+				prs, err := reg.ListOpenPRs(ctx, tc.repo)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("ListOpenPRs err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if len(prs) != tc.wantCount {
+					t.Errorf("len(prs) = %d, want %d", len(prs), tc.wantCount)
+				}
+			case "ListDeployingPRs":
+				prs, err := reg.ListDeployingPRs(ctx)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("ListDeployingPRs err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if len(prs) != tc.wantCount {
+					t.Errorf("len(prs) = %d, want %d", len(prs), tc.wantCount)
+				}
+			case "GetRecentChannelContext":
+				ctxs, err := reg.GetRecentChannelContext(ctx, tc.targetID, tc.limit)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("GetRecentChannelContext err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if len(ctxs) != tc.wantCount {
+					t.Errorf("len(ctxs) = %d, want %d", len(ctxs), tc.wantCount)
+				}
+			case "AtomicTransitionDeployedByJob":
+				gotTarget, gotPR, _, _, updated, err := reg.AtomicTransitionDeployedByJob(ctx, tc.jobName)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AtomicTransitionDeployedByJob err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if updated != tc.wantUpdated {
+					t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+				if gotPR != tc.wantPRNum {
+					t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
+				}
+			case "AtomicTransitionDeployFailedByJob":
+				gotTarget, gotPR, _, _, updated, err := reg.AtomicTransitionDeployFailedByJob(ctx, tc.jobName)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AtomicTransitionDeployFailedByJob err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if updated != tc.wantUpdated {
+					t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+				if gotPR != tc.wantPRNum {
+					t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
+				}
+			}
+		})
+	}
 }
 
 func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
-	// Typed nil pool guard
-	nilReg := NewPostgresPRRegistry((*pgxpool.Pool)(nil))
-	if res, err := nilReg.AdvanceVanadisChunkByPR(ctx, "aerial", 1); err != nil || res.Matched {
-		t.Fatalf("expected empty result on nil pool, got %+v, err=%v", res, err)
-	}
-	if sup, err := nilReg.ShouldSuppressVanadisDeployWake(ctx, "aerial", 1); err != nil || sup {
-		t.Fatalf("expected false on nil pool, got %v, err=%v", sup, err)
-	}
-	if failed, err := nilReg.FailVanadisChunkByPR(ctx, "aerial", 1); err != nil || failed {
-		t.Fatalf("expected false on nil pool, got %v, err=%v", failed, err)
-	}
-
-	mockPool := &mockVanadisPgxPool{}
-	reg := NewPostgresPRRegistry(mockPool)
-
-	// 1. ShouldSuppressVanadisDeployWake
-	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
-		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-			*(dest[0].(*bool)) = true
-			return nil
-		}}
-	}
-	if sup, err := reg.ShouldSuppressVanadisDeployWake(ctx, "aerial", 10); err != nil || !sup {
-		t.Fatalf("expected true, got %v, err=%v", sup, err)
-	}
-	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
-		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-			return errors.New("query err")
-		}}
-	}
-	if _, err := reg.ShouldSuppressVanadisDeployWake(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected error from ShouldSuppressVanadisDeployWake")
-	}
-
-	// 2. FailVanadisChunkByPR
-	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
-		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-			return pgx.ErrNoRows
-		}}
-	}
-	if failed, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err != nil || failed {
-		t.Fatalf("expected false on ErrNoRows, got %v, err=%v", failed, err)
-	}
-	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
-		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-			return errors.New("scan err")
-		}}
-	}
-	if _, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected error on scan err")
-	}
-	mockPool.queryRowFn = func(ctx context.Context, sql string, args ...any) pgx.Row {
-		return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-			*(dest[0].(*string)) = "build-fail-1"
-			return nil
-		}}
-	}
-	mockPool.execFn = func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-		return pgconn.CommandTag{}, errors.New("exec build fail err")
-	}
-	if _, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected error on exec build fail err")
-	}
-	mockPool.execFn = nil
-	if failed, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10); err != nil || !failed {
-		t.Fatalf("expected true on FailVanadisChunkByPR success, got %v, err=%v", failed, err)
-	}
-
-	// 3. AdvanceVanadisChunkByPR branches
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return nil, errors.New("begin tx err")
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected begin tx error")
-	}
-
-	populateChunkRow := func(cStatus, bStatus string, chunkIdx int) func(ctx context.Context, sql string, args ...any) pgx.Row {
-		return func(ctx context.Context, sql string, args ...any) pgx.Row {
-			return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-				*(dest[0].(*string)) = fmt.Sprintf("chunk-%d", chunkIdx)
-				*(dest[1].(*string)) = "build-100"
-				*(dest[2].(*int)) = chunkIdx
-				*(dest[3].(*string)) = fmt.Sprintf("Title %d", chunkIdx)
-				*(dest[4].(*string)) = cStatus
-				*(dest[5].(*string)) = "123456789012345678"
-				*(dest[6].(*int)) = 2
-				*(dest[7].(*string)) = "Test Build Title"
-				*(dest[8].(*string)) = "Test Objective"
-				*(dest[9].(*string)) = bStatus
-				*(dest[10].(*string)) = "msg-12345"
-				return nil
-			}}
-		}
-	}
-
-	// ErrNoRows
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			rbErr: errors.New("rb warning"),
-			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-				return mockVanadisPgxRow{scanFn: func(dest ...any) error { return pgx.ErrNoRows }}
-			},
-		}, nil
-	}
-	if res, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err != nil || res.Matched {
-		t.Fatalf("expected Matched=false on ErrNoRows, got %+v, err=%v", res, err)
-	}
-
-	// Select error
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-				return mockVanadisPgxRow{scanFn: func(dest ...any) error { return errors.New("select err") }}
-			},
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected select error")
-	}
-
-	// Cancelled build or already merged chunk
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{queryRowFn: populateChunkRow("merged", "running", 0)}, nil
-	}
-	if res, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err != nil || !res.Matched || res.Advanced {
-		t.Fatalf("expected Matched=true Advanced=false on already merged chunk, got %+v, err=%v", res, err)
-	}
-
-	// Update chunk error
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 0),
-			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-				return pgconn.CommandTag{}, errors.New("update chunk err")
-			},
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected update chunk error")
-	}
-
-	// Query all chunks error, scan error, rows.Err()
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 0),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return nil, errors.New("query chunks err")
-			},
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected query chunks error")
-	}
-
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 0),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return &mockVanadisPgxRows{items: []VanadisChunkSummary{{ID: "chunk-0"}}, scanErr: errors.New("scan chunk err")}, nil
-			},
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected scan chunk error")
-	}
-
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 0),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return &mockVanadisPgxRows{items: []VanadisChunkSummary{{ID: "chunk-0"}}, rowsErr: errors.New("rows iter err")}, nil
-			},
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected rows iter error")
-	}
-
-	// Mid-run advancement (including fallbackIdx when earlier chunk is unmerged) + commit error & success
+	chunkStart := time.Date(2026, 10, 16, 16, 0, 0, 0, time.UTC)
+	chunkEnd := chunkStart.Add(10 * time.Minute)
 	twoChunks := []VanadisChunkSummary{
-		{ID: "chunk-0", ChunkIndex: 0, Title: "Title 0", Status: "pending"},
-		{ID: "chunk-1", ChunkIndex: 1, Title: "Title 1", Status: "pr_open"},
+		{ID: "chunk-0", ChunkIndex: 0, Repo: "azylman/aerial", Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
+		{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "C1", Status: "pending", PRNumber: 0},
 	}
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 1),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return &mockVanadisPgxRows{items: twoChunks}, nil
-			},
-			commitErr: errors.New("commit mid-run err"),
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected commit mid-run error")
-	}
-
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 0),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return &mockVanadisPgxRows{items: twoChunks}, nil
-			},
-		}, nil
-	}
-	resMid, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
-	if err != nil || !resMid.Advanced || resMid.BuildCompleted || resMid.NextChunkIndex != 1 || resMid.Title != "Test Build Title" {
-		t.Fatalf("expected mid-run advance to chunk 1, got %+v, err=%v", resMid, err)
-	}
-
-	// Build completion (all chunks merged): update build error, commit error, and success
-	chunkStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
-	chunkEnd := chunkStart.Add(2 * time.Minute)
 	allMergedChunks := []VanadisChunkSummary{
-		{ID: "chunk-0", ChunkIndex: 0, Title: "Title 0", Status: "merged", PRNumber: 9, StartedAt: chunkStart, UpdatedAt: chunkEnd},
-		{ID: "chunk-1", ChunkIndex: 1, Title: "Title 1", Status: "pr_open", PRNumber: 10},
+		{ID: "chunk-0", ChunkIndex: 0, Repo: "azylman/aerial", Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
+		{ID: "chunk-1", ChunkIndex: 1, Repo: "azylman/aerial", Title: "C1", Status: "merged", PRNumber: 11, StartedAt: chunkStart, UpdatedAt: chunkEnd},
 	}
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		calls := 0
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 1),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return &mockVanadisPgxRows{items: allMergedChunks}, nil
-			},
-			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-				calls++
-				if calls == 2 {
-					return pgconn.CommandTag{}, errors.New("update build completed err")
+
+	tests := []struct {
+		name               string
+		method             string
+		useNilPool         bool
+		beginErr           error
+		selectErr          error
+		execErr            error
+		commitErr          error
+		queryErr           error
+		chunkStatus        string
+		buildStatus        string
+		chunkIdx           int
+		chunksResult       []VanadisChunkSummary
+		queryScanErr       error
+		queryRowsErr       error
+		wantErr            bool
+		wantBool           bool
+		wantMatched        bool
+		wantAdvanced       bool
+		wantBuildCompleted bool
+		wantNextChunkIdx   int
+	}{
+		{
+			name:       "AdvanceVanadisChunkByPR typed nil pool returns empty",
+			method:     "AdvanceVanadisChunkByPR",
+			useNilPool: true,
+		},
+		{
+			name:       "ShouldSuppressVanadisDeployWake typed nil pool returns false",
+			method:     "ShouldSuppressVanadisDeployWake",
+			useNilPool: true,
+			wantBool:   false,
+		},
+		{
+			name:       "FailVanadisChunkByPR typed nil pool returns false",
+			method:     "FailVanadisChunkByPR",
+			useNilPool: true,
+			wantBool:   false,
+		},
+		{
+			name:     "ShouldSuppressVanadisDeployWake returns true on match",
+			method:   "ShouldSuppressVanadisDeployWake",
+			wantBool: true,
+		},
+		{
+			name:      "ShouldSuppressVanadisDeployWake returns error on query failure",
+			method:    "ShouldSuppressVanadisDeployWake",
+			selectErr: errors.New("query err"),
+			wantErr:   true,
+		},
+		{
+			name:      "FailVanadisChunkByPR returns false on ErrNoRows",
+			method:    "FailVanadisChunkByPR",
+			selectErr: pgx.ErrNoRows,
+			wantBool:  false,
+		},
+		{
+			name:      "FailVanadisChunkByPR returns error on scan error",
+			method:    "FailVanadisChunkByPR",
+			selectErr: errors.New("scan err"),
+			wantErr:   true,
+		},
+		{
+			name:      "FailVanadisChunkByPR returns error on exec error",
+			method:    "FailVanadisChunkByPR",
+			execErr:   errors.New("exec build fail err"),
+			wantErr:   true,
+		},
+		{
+			name:     "FailVanadisChunkByPR returns true on success",
+			method:   "FailVanadisChunkByPR",
+			wantBool: true,
+		},
+		{
+			name:     "AdvanceVanadisChunkByPR begin tx error",
+			method:   "AdvanceVanadisChunkByPR",
+			beginErr: errors.New("begin tx err"),
+			wantErr:  true,
+		},
+		{
+			name:        "AdvanceVanadisChunkByPR ErrNoRows returns Matched=false",
+			method:      "AdvanceVanadisChunkByPR",
+			selectErr:   pgx.ErrNoRows,
+			wantMatched: false,
+		},
+		{
+			name:      "AdvanceVanadisChunkByPR select error returns error",
+			method:    "AdvanceVanadisChunkByPR",
+			selectErr: errors.New("select chunk for update err"),
+			wantErr:   true,
+		},
+		{
+			name:         "AdvanceVanadisChunkByPR non-matching status commits and returns unadvanced",
+			method:       "AdvanceVanadisChunkByPR",
+			chunkStatus:  "merged",
+			buildStatus:  "running",
+			wantMatched:  true,
+			wantAdvanced: false,
+		},
+		{
+			name:         "AdvanceVanadisChunkByPR mid-run query chunks scan error",
+			method:       "AdvanceVanadisChunkByPR",
+			chunkStatus:  "pr_open",
+			buildStatus:  "running",
+			chunkIdx:     0,
+			chunksResult: []VanadisChunkSummary{{ID: "chunk-0"}},
+			queryScanErr: errors.New("scan chunk err"),
+			wantErr:      true,
+		},
+		{
+			name:         "AdvanceVanadisChunkByPR mid-run query chunks rows error",
+			method:       "AdvanceVanadisChunkByPR",
+			chunkStatus:  "pr_open",
+			buildStatus:  "running",
+			chunkIdx:     0,
+			chunksResult: []VanadisChunkSummary{{ID: "chunk-0"}},
+			queryRowsErr: errors.New("rows iter err"),
+			wantErr:      true,
+		},
+		{
+			name:             "AdvanceVanadisChunkByPR mid-run advancement success",
+			method:           "AdvanceVanadisChunkByPR",
+			chunkStatus:      "pr_open",
+			buildStatus:      "running",
+			chunkIdx:         0,
+			chunksResult:     twoChunks,
+			wantMatched:      true,
+			wantAdvanced:     true,
+			wantNextChunkIdx: 1,
+		},
+		{
+			name:               "AdvanceVanadisChunkByPR build completed advancement success",
+			method:             "AdvanceVanadisChunkByPR",
+			chunkStatus:        "pr_open",
+			buildStatus:        "running",
+			chunkIdx:           1,
+			chunksResult:       allMergedChunks,
+			wantMatched:        true,
+			wantAdvanced:       true,
+			wantBuildCompleted: true,
+			wantNextChunkIdx:   -1,
+		},
+		{
+			name:         "AdvanceVanadisChunkByPR build completed commit error",
+			method:       "AdvanceVanadisChunkByPR",
+			chunkStatus:  "pr_open",
+			buildStatus:  "running",
+			chunkIdx:     1,
+			chunksResult: allMergedChunks,
+			commitErr:    errors.New("commit completed err"),
+			wantErr:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.useNilPool {
+				regNil := NewPostgresPRRegistry((*pgxpool.Pool)(nil))
+				switch tc.method {
+				case "AdvanceVanadisChunkByPR":
+					res, err := regNil.AdvanceVanadisChunkByPR(ctx, "aerial", 1)
+					if err != nil || res.Matched {
+						t.Fatalf("expected Matched=false, err=nil on nil pool, got res=%+v err=%v", res, err)
+					}
+				case "ShouldSuppressVanadisDeployWake":
+					sup, err := regNil.ShouldSuppressVanadisDeployWake(ctx, "aerial", 1)
+					if err != nil || sup != tc.wantBool {
+						t.Fatalf("got %v, err=%v", sup, err)
+					}
+				case "FailVanadisChunkByPR":
+					failed, err := regNil.FailVanadisChunkByPR(ctx, "aerial", 1)
+					if err != nil || failed != tc.wantBool {
+						t.Fatalf("got %v, err=%v", failed, err)
+					}
 				}
-				return pgconn.NewCommandTag("UPDATE 1"), nil
-			},
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected update build completed error")
-	}
+				return
+			}
 
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 1),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return &mockVanadisPgxRows{items: allMergedChunks}, nil
-			},
-			commitErr: errors.New("commit completed err"),
-		}, nil
-	}
-	if _, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10); err == nil {
-		t.Fatal("expected commit completed error")
-	}
+			pool := &mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+						if tc.selectErr != nil {
+							return tc.selectErr
+						}
+						if tc.method == "ShouldSuppressVanadisDeployWake" {
+							*(dest[0].(*bool)) = tc.wantBool
+							return nil
+						}
+						if tc.method == "FailVanadisChunkByPR" {
+							*(dest[0].(*string)) = "build-fail-1"
+							return nil
+						}
+						return nil
+					}}
+				},
+				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+					if tc.execErr != nil {
+						return pgconn.CommandTag{}, tc.execErr
+					}
+					return pgconn.NewCommandTag("UPDATE 1"), nil
+				},
+				beginFn: func(qCtx context.Context) (pgx.Tx, error) {
+					if tc.beginErr != nil {
+						return nil, tc.beginErr
+					}
+					return &mockVanadisPgxTx{
+						commitErr: tc.commitErr,
+						queryRowFn: func(txCtx context.Context, sql string, args ...any) pgx.Row {
+							return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+								if tc.selectErr != nil {
+									return tc.selectErr
+								}
+								if len(dest) >= 11 {
+									*(dest[0].(*string)) = fmt.Sprintf("chunk-%d", tc.chunkIdx)
+									*(dest[1].(*string)) = "build-100"
+									*(dest[2].(*int)) = tc.chunkIdx
+									*(dest[3].(*string)) = fmt.Sprintf("Title %d", tc.chunkIdx)
+									*(dest[4].(*string)) = tc.chunkStatus
+									*(dest[5].(*string)) = "123456789012345678"
+									*(dest[6].(*int)) = 2
+									*(dest[7].(*string)) = "Test Build Title"
+									*(dest[8].(*string)) = "Test Objective"
+									*(dest[9].(*string)) = tc.buildStatus
+									*(dest[10].(*string)) = "msg-12345"
+								}
+								return nil
+							}}
+						},
+						queryFn: func(txCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
+							if tc.queryErr != nil {
+								return nil, tc.queryErr
+							}
+							return &mockVanadisPgxRows{
+								items:   tc.chunksResult,
+								scanErr: tc.queryScanErr,
+								rowsErr: tc.queryRowsErr,
+							}, nil
+						},
+					}, nil
+				},
+			}
 
-	mockPool.beginFn = func(ctx context.Context) (pgx.Tx, error) {
-		return &mockVanadisPgxTx{
-			queryRowFn: populateChunkRow("pr_open", "running", 1),
-			queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-				return &mockVanadisPgxRows{items: allMergedChunks}, nil
-			},
-		}, nil
-	}
-	resDone, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
-	if err != nil || !resDone.Advanced || !resDone.BuildCompleted || resDone.BuildStatus != "completed" || resDone.NextChunkIndex != -1 || resDone.Title != "Test Build Title" || len(resDone.Chunks) != 2 || !resDone.Chunks[0].StartedAt.Equal(chunkStart) || !resDone.Chunks[0].UpdatedAt.Equal(chunkEnd) {
-		t.Fatalf("expected build completed with chunk timestamps, got %+v, err=%v", resDone, err)
+			reg := NewPostgresPRRegistry(pool)
+			switch tc.method {
+			case "ShouldSuppressVanadisDeployWake":
+				sup, err := reg.ShouldSuppressVanadisDeployWake(ctx, "aerial", 10)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("ShouldSuppressVanadisDeployWake() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if !tc.wantErr && sup != tc.wantBool {
+					t.Errorf("got %v, want %v", sup, tc.wantBool)
+				}
+			case "FailVanadisChunkByPR":
+				failed, err := reg.FailVanadisChunkByPR(ctx, "aerial", 10)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("FailVanadisChunkByPR() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if !tc.wantErr && failed != tc.wantBool {
+					t.Errorf("got %v, want %v", failed, tc.wantBool)
+				}
+			case "AdvanceVanadisChunkByPR":
+				res, err := reg.AdvanceVanadisChunkByPR(ctx, "aerial", 10)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AdvanceVanadisChunkByPR() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if !tc.wantErr {
+					if res.Matched != tc.wantMatched {
+						t.Errorf("Matched = %v, want %v", res.Matched, tc.wantMatched)
+					}
+					if res.Advanced != tc.wantAdvanced {
+						t.Errorf("Advanced = %v, want %v", res.Advanced, tc.wantAdvanced)
+					}
+					if tc.wantAdvanced {
+						if res.NextChunkIndex != tc.wantNextChunkIdx {
+							t.Errorf("NextChunkIndex = %d, want %d", res.NextChunkIndex, tc.wantNextChunkIdx)
+						}
+						if res.BuildCompleted != tc.wantBuildCompleted {
+							t.Errorf("BuildCompleted = %v, want %v", res.BuildCompleted, tc.wantBuildCompleted)
+						}
+					}
+				}
+			}
+		})
 	}
 }
 
 func TestSyncPRWidget_Unit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
-	// 1. Nil receiver / dispatcher / invalid params
-	var nilSrv *RouterServer
-	if err := nilSrv.SyncPRWidget(ctx, "aerial", 1, "", "", nil); err != nil {
-		t.Errorf("expected nil on nil server")
-	}
-
-	mockDisp := &mockOutboundDispatcher{
-		widgetReturnMsgID: "msg-widget-101",
-	}
-
-	// 2. Standalone PR with mock pool
 	prStart := time.Date(2026, 10, 16, 17, 30, 0, 0, time.UTC)
 	prUpdate := prStart.Add(4 * time.Minute)
-	pool := &mockVanadisPgxPool{
-		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-			if strings.Contains(sql, "FROM vanadis_chunks") {
-				return &mockVanadisPgxRow{scanFn: func(dest ...any) error { return pgx.ErrNoRows }}
-			}
-			if strings.Contains(sql, "FROM pr_registry") {
-				return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "1555405874565091380"
-					*dest[1].(*string) = "feat: awesome feature"
-					*dest[2].(*string) = "open"
-					*dest[3].(*string) = "old-msg-id"
-					if len(dest) > 4 {
-						*dest[4].(*time.Time) = prStart
-					}
-					if len(dest) > 5 {
-						*dest[5].(*time.Time) = prUpdate
-					}
-					return nil
-				}}
-			}
-			return &mockVanadisPgxRow{}
-		},
-		execFn: func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
-			return pgconn.CommandTag{}, nil
-		},
-	}
-
-	reg := NewPostgresPRRegistry(pool)
-	srv := newTestRouter(Config{}, nil, reg, mockDisp)
-
-	err := srv.SyncPRWidget(ctx, "aerial", 101, "merged", "", nil)
-	if err != nil {
-		t.Fatalf("SyncPRWidget standalone PR failed: %v", err)
-	}
-	calls := mockDisp.WidgetCalls()
-	if len(calls) == 0 {
-		t.Fatalf("expected widget call dispatched")
-	}
-	lastCall := calls[len(calls)-1]
-	if lastCall.ID != "pr-azylman/aerial-101" || lastCall.Status != "merged" || lastCall.ChannelID != "1555405874565091380" || len(lastCall.Chunks) != 1 || !lastCall.Chunks[0].StartedAt.Equal(prStart) || !lastCall.Chunks[0].UpdatedAt.After(prUpdate) {
-		t.Errorf("unexpected widget request: %+v", lastCall)
-	}
-
-	// 3. Vanadis chunk match with mock pool (testing both pre-existing StartedAt and zero StartedAt fallback on status override)
 	chunk0Start := time.Date(2026, 10, 16, 17, 0, 0, 0, time.UTC)
 	chunk0Update := chunk0Start.Add(5 * time.Minute)
-	vanadisPool := &mockVanadisPgxPool{
-		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-			if strings.Contains(sql, "FROM vanadis_chunks") {
-				return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "chunk-1"
-					*dest[1].(*string) = "build-abc"
-					*dest[2].(*string) = "1555405874565091380"
-					*dest[3].(*int) = 2
-					*dest[4].(*string) = "Vanadis Build Title"
-					*dest[5].(*string) = "Vanadis Objective"
-					*dest[6].(*string) = "running"
-					*dest[7].(*string) = "old-build-msg"
-					return nil
-				}}
-			}
-			return &mockVanadisPgxRow{}
+
+	tests := []struct {
+		name           string
+		useNilServer   bool
+		useMockReg     bool
+		mockTargetID   string
+		mockBranch     string
+		repo           string
+		prNumber       int
+		statusOverride string
+		banner         string
+		deployingJobs  []string
+		vanadisMatch   bool
+		wantErr        bool
+		wantDispatched bool
+		wantWidgetID   string
+		wantStatus     string
+		wantBanner     string
+		wantChannel    string
+		wantChunks     int
+	}{
+		{
+			name:         "nil server returns clean nil",
+			useNilServer: true,
+			repo:         "azylman/aerial",
+			prNumber:     1,
 		},
-		queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-			chunks := []VanadisChunkSummary{
-				{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, StartedAt: chunk0Start, UpdatedAt: chunk0Update},
-				{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "Chunk 1", Status: "running", PRNumber: 102},
-			}
-			return &mockVanadisPgxRows{items: chunks}, nil
+		{
+			name:     "empty repo returns clean nil",
+			repo:     "",
+			prNumber: 1,
 		},
-		execFn: func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
-			return pgconn.CommandTag{}, nil
+		{
+			name:     "prNumber <= 0 returns clean nil",
+			repo:     "azylman/aerial",
+			prNumber: 0,
+		},
+		{
+			name:           "non-Postgres registry fallback path",
+			useMockReg:     true,
+			mockTargetID:   "1555405874565091380",
+			mockBranch:     "feat/fallback",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			statusOverride: "open",
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "open",
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
+		{
+			name:           "non-Postgres registry empty targetID returns clean nil",
+			useMockReg:     true,
+			mockTargetID:   "",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			wantDispatched: false,
+		},
+		{
+			name:           "Postgres standalone PR with mock pool",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			statusOverride: "merged",
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "merged",
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
+		{
+			name:           "Postgres Vanadis chunk match with mock pool",
+			repo:           "azylman/aerial",
+			prNumber:       102,
+			statusOverride: "deployed",
+			banner:         "Deploying now",
+			deployingJobs:  []string{"job-a"},
+			vanadisMatch:   true,
+			wantDispatched: true,
+			wantWidgetID:   "build-abc",
+			wantStatus:     "running",
+			wantBanner:     "Deploying now",
+			wantChunks:     2,
 		},
 	}
 
-	srvVanadis := newTestRouter(Config{}, nil, NewPostgresPRRegistry(vanadisPool), mockDisp)
-	err = srvVanadis.SyncPRWidget(ctx, "aerial", 102, "deployed", "Deploying now", []string{"job-a"})
-	if err != nil {
-		t.Fatalf("SyncPRWidget vanadis failed: %v", err)
-	}
-	calls = mockDisp.WidgetCalls()
-	lastCall = calls[len(calls)-1]
-	if lastCall.ID != "build-abc" || lastCall.Title != "Vanadis Build Title" || lastCall.Banner != "Deploying now" || len(lastCall.Chunks) != 2 || lastCall.Chunks[1].Status != "deployed" || lastCall.Chunks[1].Repo != "azylman/aerial" || !lastCall.Chunks[0].StartedAt.Equal(chunk0Start) || lastCall.Chunks[1].StartedAt.IsZero() || lastCall.Chunks[1].UpdatedAt.IsZero() {
-		t.Errorf("unexpected vanadis widget request: %+v", lastCall)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockDisp := &mockOutboundDispatcher{widgetReturnMsgID: "msg-widget-101"}
+
+			if tc.useNilServer {
+				var nilSrv *RouterServer
+				if err := nilSrv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs); err != nil {
+					t.Fatalf("SyncPRWidget nil server err = %v", err)
+				}
+				return
+			}
+
+			if tc.useMockReg {
+				reg := &mockPRRegistry{
+					resolveTargetID: tc.mockTargetID,
+					resolveBranch:   tc.mockBranch,
+				}
+				srv := newTestRouter(Config{}, nil, reg, mockDisp)
+				err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("SyncPRWidget fallback err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.wantDispatched {
+					calls := mockDisp.WidgetCalls()
+					if len(calls) == 0 {
+						t.Fatalf("expected widget call dispatched")
+					}
+					last := calls[len(calls)-1]
+					if last.ID != tc.wantWidgetID || last.Status != tc.wantStatus || last.ChannelID != tc.wantChannel {
+						t.Errorf("unexpected widget request: %+v", last)
+					}
+				}
+				return
+			}
+
+			pool := &mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					if strings.Contains(sql, "FROM vanadis_chunks") {
+						if !tc.vanadisMatch {
+							return &mockVanadisPgxRow{scanFn: func(dest ...any) error { return pgx.ErrNoRows }}
+						}
+						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							*dest[0].(*string) = "chunk-1"
+							*dest[1].(*string) = "build-abc"
+							*dest[2].(*string) = "1555405874565091380"
+							*dest[3].(*int) = 2
+							*dest[4].(*string) = "Vanadis Build Title"
+							*dest[5].(*string) = "Vanadis Objective"
+							*dest[6].(*string) = "running"
+							*dest[7].(*string) = "old-build-msg"
+							return nil
+						}}
+					}
+					if strings.Contains(sql, "FROM pr_registry") {
+						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							*dest[0].(*string) = "1555405874565091380"
+							*dest[1].(*string) = "feat: awesome feature"
+							*dest[2].(*string) = "open"
+							*dest[3].(*string) = "old-msg-id"
+							if len(dest) > 4 {
+								*dest[4].(*time.Time) = prStart
+							}
+							if len(dest) > 5 {
+								*dest[5].(*time.Time) = prUpdate
+							}
+							return nil
+						}}
+					}
+					return &mockVanadisPgxRow{}
+				},
+				queryFn: func(qCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
+					chunks := []VanadisChunkSummary{
+						{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, StartedAt: chunk0Start, UpdatedAt: chunk0Update},
+						{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "Chunk 1", Status: "running", PRNumber: 102},
+					}
+					return &mockVanadisPgxRows{items: chunks}, nil
+				},
+			}
+
+			srv := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), mockDisp)
+			err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SyncPRWidget err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantDispatched {
+				calls := mockDisp.WidgetCalls()
+				if len(calls) == 0 {
+					t.Fatalf("expected widget call dispatched")
+				}
+				last := calls[len(calls)-1]
+				if last.ID != tc.wantWidgetID || last.Banner != tc.banner || len(last.Chunks) != tc.wantChunks {
+					t.Errorf("unexpected widget request: %+v", last)
+				}
+			}
+		})
 	}
 }
 
 func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
-	// 1. Invalid snowflake
-	disp := NewDefaultOutboundDispatcher("", "", nil)
-	if _, err := disp.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "bad"}); err == nil {
-		t.Errorf("expected error for invalid snowflake")
+	tests := []struct {
+		name       string
+		channelID  string
+		statusCode int
+		body       string
+		wantErr    bool
+		wantMsgID  string
+	}{
+		{
+			name:      "invalid snowflake returns error",
+			channelID: "bad-snowflake",
+			wantErr:   true,
+		},
+		{
+			name:       "server 200 OK returns message_id",
+			channelID:  "1555405874565091380",
+			statusCode: http.StatusOK,
+			body:       `{"status":"ok","message_id":"msg-widget-dispatch-ok"}`,
+			wantMsgID:  "msg-widget-dispatch-ok",
+		},
+		{
+			name:       "server 400 bad request returns error",
+			channelID:  "1555405874565091380",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":"bad payload"}`,
+			wantErr:    true,
+		},
+		{
+			name:       "server invalid JSON returns error",
+			channelID:  "1555405874565091380",
+			statusCode: http.StatusOK,
+			body:       `{not json`,
+			wantErr:    true,
+		},
 	}
 
-	// 2. Server 200 OK
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/discord/widget" {
-			http.NotFound(w, r)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status":     "ok",
-			"message_id": "msg-widget-dispatch-ok",
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/discord/widget" {
+					http.NotFound(w, r)
+					return
+				}
+				code := tc.statusCode
+				if code == 0 {
+					code = http.StatusOK
+				}
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			disp := NewDefaultOutboundDispatcher("", ts.URL, ts.Client())
+			msgID, err := disp.DispatchWidget(ctx, StatusWidgetRequest{
+				ChannelID: tc.channelID,
+				ID:        "widget-1",
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DispatchWidget() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if msgID != tc.wantMsgID {
+				t.Errorf("got msgID = %q, want %q", msgID, tc.wantMsgID)
+			}
 		})
-	}))
-	defer ts.Close()
-
-	dispOK := NewDefaultOutboundDispatcher("", ts.URL, ts.Client())
-	msgID, err := dispOK.DispatchWidget(ctx, StatusWidgetRequest{
-		ChannelID: "1555405874565091380",
-		ID:        "widget-1",
-	})
-	if err != nil || msgID != "msg-widget-dispatch-ok" {
-		t.Fatalf("DispatchWidget failed: msgID=%q, err=%v", msgID, err)
-	}
-
-	// 3. Server 400 Bad Request
-	ts400 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"bad payload"}`))
-	}))
-	defer ts400.Close()
-
-	disp400 := NewDefaultOutboundDispatcher("", ts400.URL, ts400.Client())
-	if _, err := disp400.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "1555405874565091380"}); err == nil {
-		t.Errorf("expected error on 400 status")
-	}
-
-	// 4. Server bad JSON response
-	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{not json`))
-	}))
-	defer tsBadJSON.Close()
-
-	dispBadJSON := NewDefaultOutboundDispatcher("", tsBadJSON.URL, tsBadJSON.Client())
-	if _, err := dispBadJSON.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "1555405874565091380"}); err == nil {
-		t.Errorf("expected error on bad JSON response")
 	}
 }
