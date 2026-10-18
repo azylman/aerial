@@ -1063,7 +1063,7 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	recCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	_, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, repo, commit, targetID, strconv.Itoa(prNumber))
+	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, false, true, repo, commit, targetID, strconv.Itoa(prNumber))
 	return err
 }
 
@@ -1602,23 +1602,38 @@ func (d *SyncDaemon) syncAllConfigsToNomad(ctx context.Context, logPrefix, confi
 	}
 }
 
+// readAndValidateYAML reads filePath and unmarshals into out if non-nil.
+// If the file does not exist, it returns (nil, nil).
+func readAndValidateYAML(filePath, label string, out any) ([]byte, error) {
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read %s at %s: %w", label, filePath, err)
+	}
+	if out != nil {
+		if err := yaml.Unmarshal(raw, out); err != nil {
+			return nil, fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
+		}
+	}
+	return raw, nil
+}
+
 // SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML).
 func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	configPath := filepath.Join(configDir, "config.yaml")
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read brain config at %s: %w", configPath, err)
-	}
-
 	var parsed struct {
 		Channels map[string]interface{} `yaml:"channels"`
 	}
-	if err := yaml.Unmarshal(raw, &parsed); err != nil {
-		return fmt.Errorf("invalid YAML syntax in %s: %w", configPath, err)
+	raw, err := readAndValidateYAML(configPath, "brain config", &parsed)
+	if err != nil {
+		return err
 	}
+	if raw == nil {
+		return nil
+	}
+
 	if parsed.Channels != nil {
 		hasDefault := false
 		for k := range parsed.Channels {
@@ -1652,16 +1667,10 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 // and writes HOMEPAGE_YAML and CONFIG_HASH to Nomad variable nomad/jobs/homepage.
 func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	homepageConfigPath := filepath.Join(configDir, "services", "homepage", "homepage.yaml")
-	raw, err := os.ReadFile(homepageConfigPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read homepage config at %s: %w", homepageConfigPath, err)
-	}
-
-	if err == nil {
-		var parsed map[string]interface{}
-		if unmarshalErr := yaml.Unmarshal(raw, &parsed); unmarshalErr != nil {
-			return fmt.Errorf("invalid YAML syntax in %s: %w", homepageConfigPath, unmarshalErr)
-		}
+	var parsed map[string]interface{}
+	raw, err := readAndValidateYAML(homepageConfigPath, "homepage config", &parsed)
+	if err != nil {
+		return err
 	}
 
 	h := sha256.New()
@@ -1736,18 +1745,15 @@ var DefaultManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/victoriametrics/scrape.yml", NomadVar: "nomad/jobs/victoriametrics", VarKey: "CONFIG_YAML"},
 }
 
-
 // GetServiceConfigMappings resolves the active service config mappings for a given configDir.
 // If configDir contains services/hangar/hangar.yaml with non-empty service_configs, it dynamically parses and returns them.
 // Otherwise, it falls back to daemon-configured serviceConfigs, or DefaultManagedServiceConfigs if none are configured.
 func (d *SyncDaemon) GetServiceConfigMappings(configDir string) []ServiceConfigMapping {
 	if configDir != "" {
 		hangarCfgPath := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
-		if raw, err := os.ReadFile(hangarCfgPath); err == nil {
-			var hCfg HangarYAMLConfig
-			if err := yaml.Unmarshal(raw, &hCfg); err == nil && len(hCfg.ServiceConfigs) > 0 {
-				return hCfg.ServiceConfigs
-			}
+		var hCfg HangarYAMLConfig
+		if _, err := readAndValidateYAML(hangarCfgPath, "hangar config", &hCfg); err == nil && len(hCfg.ServiceConfigs) > 0 {
+			return hCfg.ServiceConfigs
 		}
 	}
 	if d != nil && len(d.serviceConfigs) > 0 {
@@ -1761,20 +1767,18 @@ func (d *SyncDaemon) GetServiceConfigMappings(configDir string) []ServiceConfigM
 func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	for _, mapping := range d.GetServiceConfigMappings(configDir) {
 		filePath := filepath.Join(configDir, mapping.RelPath)
-		raw, err := os.ReadFile(filePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("failed to read service config at %s: %w", filePath, err)
-		}
-
 		ext := strings.ToLower(filepath.Ext(filePath))
+		var parsedTarget any
 		if ext == ".yaml" || ext == ".yml" {
 			var parsed any
-			if err := yaml.Unmarshal(raw, &parsed); err != nil {
-				return fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
-			}
+			parsedTarget = &parsed
+		}
+		raw, err := readAndValidateYAML(filePath, "service config", parsedTarget)
+		if err != nil {
+			return err
+		}
+		if raw == nil {
+			continue
 		}
 
 		h := sha256.Sum256(raw)
@@ -1982,27 +1986,24 @@ type DaemonConfig struct {
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
+// firstNonEmpty returns the first non-empty string in vals, or "" if all are empty.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 60 * time.Second
 	}
-	if cfg.ComposeDir == "" {
-		cfg.ComposeDir = "/share/aerial"
-	}
-	if cfg.ConfigDir == "" {
-		cfg.ConfigDir = "/share/aerial-config"
-	}
-	if cfg.BrainInternalURL == "" {
-		cfg.BrainInternalURL = "http://brain:8080/internal/reload"
-	}
-	webhooksRouterURL := cfg.WebhooksRouterURL
-	if webhooksRouterURL == "" {
-		if envVal := os.Getenv("WEBHOOKS_ROUTER_URL"); envVal != "" {
-			webhooksRouterURL = envVal
-		} else {
-			webhooksRouterURL = "http://127.0.0.1:4020"
-		}
-	}
+	cfg.ComposeDir = firstNonEmpty(cfg.ComposeDir, "/share/aerial")
+	cfg.ConfigDir = firstNonEmpty(cfg.ConfigDir, "/share/aerial-config")
+	cfg.BrainInternalURL = firstNonEmpty(cfg.BrainInternalURL, "http://brain:8080/internal/reload")
+	webhooksRouterURL := firstNonEmpty(cfg.WebhooksRouterURL, os.Getenv("WEBHOOKS_ROUTER_URL"), "http://127.0.0.1:4020")
 	extraSecrets := append([]string(nil), cfg.ExtraSecrets...)
 	if s := strings.TrimSpace(cfg.DiscordToken); s != "" {
 		extraSecrets = append(extraSecrets, s)
@@ -2244,7 +2245,7 @@ func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec s
 	return false
 }
 
-func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) ([]string, error) {
+func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, checkRepoBuilds, failOnJobErr bool, meta ...string) (applied, deferred []string, err error) {
 	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 
 	SortNomadChangesHangarLast(changes)
@@ -2257,25 +2258,27 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 	}
 
 	// Phase 2: Applications (validate, then run)
-	var applied []string
 	for _, ch := range changes {
 		if ch.Action != "delete" {
 			fullPath := filepath.Join(repoPath, ch.Path)
 			if !IsSafeJobPath(repoPath, fullPath) {
 				continue
 			}
-			if _, statErr := os.Stat(fullPath); statErr != nil {
+			content, readErr := os.ReadFile(fullPath)
+			if readErr != nil {
 				log.Printf("[Hangar:Nomad] Notice: job file %s not found on disk, skipping", fullPath)
 				continue
 			}
-			if content, readErr := os.ReadFile(fullPath); readErr == nil {
-				if d.shouldDeferNomadJob(ctx, ch.JobName, string(content), false) {
-					continue
-				}
+			if d.shouldDeferNomadJob(ctx, ch.JobName, string(content), checkRepoBuilds) {
+				deferred = append(deferred, ch.JobName)
+				continue
 			}
 			if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
 				log.Printf("[Hangar:Nomad] ERROR: Validation failed for %s: %v", ch.Path, errVal)
-				return applied, errVal
+				if failOnJobErr {
+					return applied, deferred, errVal
+				}
+				continue
 			}
 
 			baseEvt := HangarDeployEvent{
@@ -2289,13 +2292,17 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", ch.JobName, ch.Path)
 			out, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath)
 			if errRun != nil {
-				return applied, fmt.Errorf("nomad job run failed for %s: %s (%w)", ch.Path, sanitizedCombined, errRun)
+				log.Printf("[Hangar:Nomad] nomad job run failed for %s: %s (%v)", ch.JobName, sanitizedCombined, errRun)
+				if failOnJobErr {
+					return applied, deferred, fmt.Errorf("nomad job run failed for %s: %s (%w)", ch.Path, sanitizedCombined, errRun)
+				}
+				continue
 			}
 			log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", ch.JobName, SanitizeLog(strings.TrimSpace(string(out))))
 			applied = append(applied, ch.JobName)
 		}
 	}
-	return applied, nil
+	return applied, deferred, nil
 }
 
 // ExecuteGitPushEvent processes an incoming git push webhook event.
@@ -2418,8 +2425,11 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 				}
 				immediateChanges = append(immediateChanges, ch)
 			}
-			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, false, true, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			resp.AppliedJobs = applied
+			if len(deferred) > 0 {
+				resp.ContainersBuilding = true
+			}
 			if errRec != nil {
 				resp.Status = "error"
 				resp.Message = fmt.Sprintf("failed applying nomad changes: %v", errRec)
@@ -2464,55 +2474,16 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 		if len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			SortNomadChangesHangarLast(nomadChanges)
-			var appliedJobs []string
-			var deferredJobs []string
-
-				for _, ch := range nomadChanges {
-				if ch.Action == "delete" {
-					d.stopDeletedNomadJob(ctx, "[Hangar:GitPush]", repoPath, ch.JobName)
-					continue
-				}
-
-				fullPath := filepath.Join(repoPath, ch.Path)
-				if !IsSafeJobPath(repoPath, fullPath) {
-					continue
-				}
-				content, readErr := os.ReadFile(fullPath)
-				if readErr != nil {
-					continue
-				}
-
-				jobDeferred := d.shouldDeferNomadJob(ctx, ch.JobName, string(content), true)
-
-				if jobDeferred {
-					deferredJobs = append(deferredJobs, ch.JobName)
-					resp.ContainersBuilding = true
-				} else {
-					if errVal := d.ValidateNomadJob(ctx, fullPath); errVal == nil {
-						baseEvt := HangarDeployEvent{
-							JobName:   ch.JobName,
-							Repo:      req.Repo,
-							CommitSHA: req.Commit,
-							PRNumber:  req.PRNumber,
-							TargetID:  req.TargetID,
-						}
-
-						if _, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath); errRun != nil {
-							log.Printf("[Hangar:GitPush] nomad job run failed for %s: %s (%v)", ch.JobName, sanitizedCombined, errRun)
-						} else {
-							appliedJobs = append(appliedJobs, ch.JobName)
-						}
-					} else {
-						log.Printf("[Hangar:GitPush] Validation failed for %s: %v", ch.JobName, errVal)
-					}
-				}
+			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			if errRec != nil {
+				log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
 			}
-			resp.AppliedJobs = appliedJobs
-			if len(deferredJobs) > 0 {
-				resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(appliedJobs), len(deferredJobs))
+			resp.AppliedJobs = applied
+			if len(deferred) > 0 {
+				resp.ContainersBuilding = true
+				resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(applied), len(deferred))
 			} else {
-				resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(appliedJobs))
+				resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(applied))
 			}
 		} else {
 			resp.Message = "configuration synced; no nomad job changes"
@@ -3083,38 +3054,25 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		}
 	}
 
-	port := lookup("PORT")
-	if port == "" && fileCfg.Port != "" {
-		port = fileCfg.Port
-	}
-	if port == "" {
-		port = "8087"
-	}
+	port := firstNonEmpty(lookup("PORT"), fileCfg.Port, "8087")
 
-	rawRepos := lookup("SYNC_REPOS")
-	var repos []string
-	if rawRepos != "" {
-		for _, r := range strings.Split(rawRepos, ",") {
-			r = strings.TrimSpace(r)
-			if r != "" {
-				repos = append(repos, r)
-			}
-		}
+	var rawRepoList []string
+	if rawRepos := lookup("SYNC_REPOS"); rawRepos != "" {
+		rawRepoList = strings.Split(rawRepos, ",")
 	} else if len(fileCfg.SyncRepos) > 0 {
-		for _, r := range fileCfg.SyncRepos {
-			r = strings.TrimSpace(r)
-			if r != "" {
-				repos = append(repos, r)
-			}
+		rawRepoList = fileCfg.SyncRepos
+	}
+	var repos []string
+	for _, r := range rawRepoList {
+		if r = strings.TrimSpace(r); r != "" {
+			repos = append(repos, r)
 		}
-	} else {
+	}
+	if len(repos) == 0 {
 		repos = []string{"/share/aerial-config", "/share/aerial"}
 	}
 
-	intervalStr := lookup("SYNC_INTERVAL")
-	if intervalStr == "" && fileCfg.SyncInterval != "" {
-		intervalStr = fileCfg.SyncInterval
-	}
+	intervalStr := firstNonEmpty(lookup("SYNC_INTERVAL"), fileCfg.SyncInterval)
 	interval := 60 * time.Second
 	if intervalStr != "" {
 		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
@@ -3123,47 +3081,20 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	}
 
 	pat := lookup("GITHUB_PAT")
-	configRepoURL := lookup("AERIAL_CONFIG_REPO_URL")
-	if configRepoURL == "" {
-		configRepoURL = "https://github.com/azylman/aerial-config.git"
-	}
-
-	composeDir := lookup("AERIAL_INTERNAL_PROJECT_DIR")
-	if composeDir == "" {
-		composeDir = lookup("AERIAL_PROJECT_DIR")
-	}
-	if composeDir == "" {
-		composeDir = "/share/aerial"
-	}
-
-	configDir := lookup("AERIAL_INTERNAL_CONFIG_DIR")
-	if configDir == "" {
-		configDir = lookup("AERIAL_CONFIG_DIR")
-	}
-	if configDir == "" {
-		configDir = "/share/aerial-config"
-	}
+	configRepoURL := firstNonEmpty(lookup("AERIAL_CONFIG_REPO_URL"), "https://github.com/azylman/aerial-config.git")
+	composeDir := firstNonEmpty(lookup("AERIAL_INTERNAL_PROJECT_DIR"), lookup("AERIAL_PROJECT_DIR"), "/share/aerial")
+	configDir := firstNonEmpty(lookup("AERIAL_INTERNAL_CONFIG_DIR"), lookup("AERIAL_CONFIG_DIR"), "/share/aerial-config")
 
 	repoUrls := map[string]string{
 		configDir:  configRepoURL,
 		composeDir: "https://github.com/azylman/aerial.git",
 	}
 
-	discordToken := lookup("DISCORD_BOT_TOKEN")
-	if discordToken == "" {
-		discordToken = lookup("DISCORD_TOKEN")
-	}
+	discordToken := firstNonEmpty(lookup("DISCORD_BOT_TOKEN"), lookup("DISCORD_TOKEN"))
 	discordChannel := lookup("DISCORD_CHANNEL")
 	discordWebhookURL := lookup("DISCORD_WEBHOOK_URL")
 
-	brainInternalURL := lookup("BRAIN_INTERNAL_URL")
-	if brainInternalURL == "" && fileCfg.BrainInternalURL != "" {
-		brainInternalURL = fileCfg.BrainInternalURL
-	}
-	if brainInternalURL == "" {
-		brainInternalURL = "http://brain:8088/internal/reload"
-	}
-
+	brainInternalURL := firstNonEmpty(lookup("BRAIN_INTERNAL_URL"), fileCfg.BrainInternalURL, "http://brain:8088/internal/reload")
 	extraSecretCandidates := []string{
 		lookup("POSTGRES_PASSWORD"),
 		lookup("HA_TOKEN"),
@@ -3183,20 +3114,10 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		}
 	}
 
-	nomadAddr := lookup("NOMAD_ADDR")
-	if nomadAddr == "" && fileCfg.NomadAddr != "" {
-		nomadAddr = fileCfg.NomadAddr
-	}
-	if nomadAddr == "" {
-		nomadAddr = "http://host.docker.internal:4646"
-	}
+	nomadAddr := firstNonEmpty(lookup("NOMAD_ADDR"), fileCfg.NomadAddr, "http://host.docker.internal:4646")
 	nomadToken := lookup("NOMAD_TOKEN")
 
-	webhooksRouterURL := lookup("WEBHOOKS_ROUTER_URL")
-	if webhooksRouterURL == "" {
-		webhooksRouterURL = "http://127.0.0.1:4020"
-	}
-
+	webhooksRouterURL := firstNonEmpty(lookup("WEBHOOKS_ROUTER_URL"), "http://127.0.0.1:4020")
 	var serviceConfigs []ServiceConfigMapping
 	if len(fileCfg.ServiceConfigs) > 0 {
 		serviceConfigs = fileCfg.ServiceConfigs
