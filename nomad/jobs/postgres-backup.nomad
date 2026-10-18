@@ -29,6 +29,7 @@ job "postgres-backup" {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "prodrigestivill/postgres-backup-local:18"
+        init         = true
         ports        = ["health"]
         healthchecks {
           disable = true

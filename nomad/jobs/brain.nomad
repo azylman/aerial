@@ -51,6 +51,7 @@ job "brain" {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-brain:${var.image_tag}"
+        init         = true
         ports        = ["http"]
         shm_size     = 536870912
         healthchecks {
