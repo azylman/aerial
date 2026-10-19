@@ -193,32 +193,6 @@ var (
 		},
 	)
 
-	// Ollama In-Flight Inference Telemetry
-	OllamaEvalTokensTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "aerial_brain_ollama_eval_tokens_total",
-			Help: "Total number of prompt and generation tokens evaluated by Ollama during inference.",
-		},
-		[]string{"model", "type"},
-	)
-
-	OllamaEvalDurationSeconds = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "aerial_brain_ollama_eval_duration_seconds",
-			Help:    "Latency of Ollama inference phases in seconds.",
-			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0},
-		},
-		[]string{"model", "phase"},
-	)
-
-	OllamaTokensPerSecond = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "aerial_brain_ollama_tokens_per_second",
-			Help:    "Generation speed of Ollama evaluation in tokens per second.",
-			Buckets: []float64{1.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 75.0, 100.0},
-		},
-		[]string{"model"},
-	)
 
 	// Thread Title Summarization Telemetry
 	ThreadTitleDurationSeconds = prometheus.NewHistogramVec(
@@ -549,9 +523,6 @@ func init() {
 		ClassifierDurationSeconds,
 		ClassifierDecisionsTotal,
 		ClassifierConfidenceScore,
-		OllamaEvalTokensTotal,
-		OllamaEvalDurationSeconds,
-		OllamaTokensPerSecond,
 		ThreadTitleDurationSeconds,
 		DiscordEventsTotal,
 		DiscordMessagesProcessedTotal,
@@ -903,35 +874,6 @@ func RecordSessionRotation(phase, scope, reason string) {
 }
 
 
-// RecordOllamaInference records in-flight token counts, phase durations, and tokens/sec from Ollama generate responses.
-func RecordOllamaInference(model string, promptTokens, evalTokens int, promptEvalDur, evalDur, loadDur time.Duration, totalDur ...time.Duration) {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		model = "default"
-	}
-	if promptTokens > 0 {
-		OllamaEvalTokensTotal.WithLabelValues(model, "prompt").Add(float64(promptTokens))
-	}
-	if evalTokens > 0 {
-		OllamaEvalTokensTotal.WithLabelValues(model, "eval").Add(float64(evalTokens))
-	}
-	if promptEvalDur > 0 {
-		OllamaEvalDurationSeconds.WithLabelValues(model, "prompt_eval").Observe(promptEvalDur.Seconds())
-	}
-	if evalDur > 0 {
-		OllamaEvalDurationSeconds.WithLabelValues(model, "eval").Observe(evalDur.Seconds())
-		tps := float64(evalTokens) / evalDur.Seconds()
-		if tps > 0 {
-			OllamaTokensPerSecond.WithLabelValues(model).Observe(tps)
-		}
-	}
-	if loadDur > 0 {
-		OllamaEvalDurationSeconds.WithLabelValues(model, "load").Observe(loadDur.Seconds())
-	}
-	if len(totalDur) > 0 && totalDur[0] > 0 {
-		OllamaEvalDurationSeconds.WithLabelValues(model, "total").Observe(totalDur[0].Seconds())
-	}
-}
 
 // RecordDaemonAcquisition records daemon acquisition latency categorized by status (warm_hit, cold_start, error).
 func RecordDaemonAcquisition(status string, duration time.Duration) {

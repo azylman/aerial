@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -26,20 +25,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// DefaultOllamaClassifierModel is the default local model used when ClassifierURL is configured but model is omitted.
-const DefaultOllamaClassifierModel = "qwen2.5:3b"
-
 // DefaultAGYClassifierModel is the default canonical agy model used for classification.
 const DefaultAGYClassifierModel = "gemini-3.8-flash-low"
-
-var defaultOllamaHTTPClient = &http.Client{
-	Timeout: 12 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
 
 var defaultSystemOneHTTPClient = &http.Client{
 	Timeout: 4 * time.Second,
@@ -48,25 +35,6 @@ var defaultSystemOneHTTPClient = &http.Client{
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 	},
-}
-
-type ollamaGenerateRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
-	Format string `json:"format,omitempty"`
-}
-
-type ollamaGenerateResponse struct {
-	Response           string `json:"response"`
-	Done               bool   `json:"done"`
-	Error              string `json:"error,omitempty"`
-	TotalDuration      int64  `json:"total_duration,omitempty"`
-	LoadDuration       int64  `json:"load_duration,omitempty"`
-	PromptEvalCount    int    `json:"prompt_eval_count,omitempty"`
-	PromptEvalDuration int64  `json:"prompt_eval_duration,omitempty"`
-	EvalCount          int    `json:"eval_count,omitempty"`
-	EvalDuration       int64  `json:"eval_duration,omitempty"`
 }
 
 type systemOneQuestion struct {
@@ -260,13 +228,6 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 	}
 	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		cur := c.cfg.Current()
-		if cur != nil && cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
-			ollamaFn, err := NewOllamaLLMFunc(cur.ClassifierURL, nil)
-			if err != nil {
-				return "", fmt.Errorf("failed to initialize ollama client: %w", err)
-			}
-			return ollamaFn(ctx, model, prompt)
-		}
 		if c.primaryLLMFunc != nil {
 			return c.primaryLLMFunc(ctx, model, prompt)
 		}
@@ -285,21 +246,6 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 	}
 	c.TitleLLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		cur := c.cfg.Current()
-		targetURL := ""
-		if cur != nil {
-			if cur.ThreadTitleURL != "" {
-				targetURL = cur.ThreadTitleURL
-			} else if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
-				targetURL = cur.ClassifierURL
-			}
-		}
-		if targetURL != "" {
-			ollamaFn, err := NewOllamaLLMFunc(targetURL, nil)
-			if err != nil {
-				return "", fmt.Errorf("failed to initialize ollama client for thread title: %w", err)
-			}
-			return ollamaFn(ctx, model, prompt)
-		}
 		if c.primaryTitleLLMFunc != nil {
 			return c.primaryTitleLLMFunc(ctx, model, prompt)
 		}
@@ -579,124 +525,6 @@ func IsHeuristicSkip(content string) bool {
 	return false
 }
 
-// NormalizeOllamaEndpoint validates and normalizes an Ollama endpoint URL, ensuring it points to /api/generate.
-func NormalizeOllamaEndpoint(rawURL string) (string, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", errors.New("empty ollama endpoint URL")
-	}
-
-	u, err := url.Parse(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid ollama endpoint URL: %w", err)
-	}
-
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("unsupported URL scheme %q; expected http or https", u.Scheme)
-	}
-
-	if u.Host == "" {
-		return "", errors.New("missing host in ollama endpoint URL")
-	}
-
-	cleanPath := strings.TrimRight(u.Path, "/")
-	if cleanPath == "" || cleanPath == "/api" {
-		u.Path = "/api/generate"
-	} else if strings.HasSuffix(cleanPath, "/api/generate") {
-		u.Path = cleanPath
-	} else {
-		u.Path = cleanPath + "/api/generate"
-	}
-
-	return u.String(), nil
-}
-
-// NewOllamaLLMFunc constructs an LLMFunc that executes generate calls against an Ollama HTTP endpoint.
-func NewOllamaLLMFunc(endpointURL string, httpClient *http.Client) (func(ctx context.Context, model, prompt string) (string, error), error) {
-	normURL, err := NormalizeOllamaEndpoint(endpointURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to normalize ollama endpoint: %w", err)
-	}
-
-	client := httpClient
-	if client == nil {
-		client = defaultOllamaHTTPClient
-	}
-
-	return func(ctx context.Context, model, prompt string) (string, error) {
-		selectedModel := strings.TrimSpace(model)
-		if selectedModel == "" {
-			selectedModel = DefaultOllamaClassifierModel
-		}
-
-		reqBody := ollamaGenerateRequest{
-			Model:  selectedModel,
-			Prompt: prompt,
-			Stream: false,
-		}
-		if strings.Contains(strings.ToLower(prompt), "json") {
-			reqBody.Format = "json"
-		}
-
-		jsonBytes, err := json.Marshal(reqBody)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal ollama request: %w", err)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, normURL, bytes.NewReader(jsonBytes))
-		if err != nil {
-			return "", fmt.Errorf("failed to create ollama request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("ollama request failed: %w", err)
-		}
-		defer func() {
-			if _, drainErr := io.Copy(io.Discard, resp.Body); drainErr != nil {
-				_ = drainErr
-			}
-			_ = resp.Body.Close()
-		}()
-
-		limitReader := io.LimitReader(resp.Body, 1<<20) // 1MB response ceiling
-		respBytes, err := io.ReadAll(limitReader)
-		if err != nil {
-			return "", fmt.Errorf("failed to read ollama response: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			errMsg := strings.TrimSpace(string(respBytes))
-			if len(errMsg) > 200 {
-				errMsg = errMsg[:200] + "..."
-			}
-			return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, errMsg)
-		}
-
-		var ollamaResp ollamaGenerateResponse
-		if err := json.Unmarshal(respBytes, &ollamaResp); err != nil {
-			return "", fmt.Errorf("failed to parse ollama json: %w", err)
-		}
-		if ollamaResp.Error != "" {
-			return "", fmt.Errorf("ollama error: %s", ollamaResp.Error)
-		}
-
-		metrics.RecordOllamaInference(
-			selectedModel,
-			ollamaResp.PromptEvalCount,
-			ollamaResp.EvalCount,
-			time.Duration(ollamaResp.PromptEvalDuration),
-			time.Duration(ollamaResp.EvalDuration),
-			time.Duration(ollamaResp.LoadDuration),
-			time.Duration(ollamaResp.TotalDuration),
-		)
-
-		return ollamaResp.Response, nil
-	}, nil
-}
-
 // NewAgyLLMFunc constructs an LLMFunc that executes agy in stateless single-turn mode.
 // It runs under the user's subscription profile and purges any created ephemeral conversation folder
 // upon completion to prevent disk bloat.
@@ -707,7 +535,7 @@ func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agy
 		}
 
 		ephemeralID := "ambient-eval-" + uuid.New().String()
-		defer CleanupEphemeralSession(ephemeralID, searchRoots...)
+		defer session.CleanupEphemeralSession(ephemeralID, searchRoots...)
 
 		stdout, stderr, exitCode, err := runnerFn(ctx, agyBin, prompt, ephemeralID, apiKey, model, 1)
 		if err != nil || exitCode != 0 {
@@ -721,13 +549,6 @@ func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agy
 	}
 }
 
-// CleanupEphemeralSession purges throwaway classifier session directories from disk.
-// If searchRoots are provided, it deletes convID subdirectories within those roots.
-// Zero ambient environment defaults (os.UserHomeDir, os.Getenv("HOME")) are used.
-func CleanupEphemeralSession(convID string, searchRoots ...string) {
-	session.CleanupEphemeralSession(convID, searchRoots...)
-}
-
 func (c *Classifier) resolveModel() string {
 	if c.cfg != nil {
 		if cur := c.cfg.Current(); cur != nil {
@@ -738,7 +559,7 @@ func (c *Classifier) resolveModel() string {
 				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 					return c.Model
 				}
-				return DefaultOllamaClassifierModel
+				return DefaultAGYClassifierModel
 			}
 			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 				return c.Model
@@ -764,7 +585,7 @@ func (c *Classifier) resolveTitleModel() string {
 				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 					return c.Model
 				}
-				return DefaultOllamaClassifierModel
+				return DefaultAGYClassifierModel
 			}
 			if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
 				if cur.ClassifierModel != "" {
@@ -773,7 +594,7 @@ func (c *Classifier) resolveTitleModel() string {
 				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 					return c.Model
 				}
-				return DefaultOllamaClassifierModel
+				return DefaultAGYClassifierModel
 			}
 			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 				return c.Model
