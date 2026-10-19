@@ -28,7 +28,7 @@ job "homepage" {
       config {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/gethomepage/homepage:v2.4.0"
+        image        = "ghcr.io/gethomepage/homepage:v2.6.0"
         ports        = ["http"]
         healthchecks {
           disable = true

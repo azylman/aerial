@@ -28,7 +28,7 @@ job "vector" {
       config {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        image        = "timberio/vector:0.58.0-alpine"
+        image        = "timberio/vector:0.60.0-alpine"
         ports        = ["api"]
         healthchecks {
           disable = true

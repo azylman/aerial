@@ -27,7 +27,7 @@ RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 FROM alpine:3.24 AS superpowers
 
 RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
-    wget -qO- https://github.com/obra/superpowers/archive/refs/tags/v6.3.0.tar.gz | tar -xz --strip-components=1 -C /tmp/superpowers && \
+    wget -qO- https://github.com/obra/superpowers/archive/refs/tags/v7.0.0.tar.gz | tar -xz --strip-components=1 -C /tmp/superpowers && \
     for skill in \
         systematic-debugging \
         test-driven-development \
@@ -72,17 +72,17 @@ RUN mkdir -p -m 0700 /root/.ssh && \
 
 # Copy Go SDK, golangci-lint, and Node.js 22 LTS runtime from builders/images
 COPY --link --from=builder /usr/local/go /usr/local/go
-COPY --link --from=golangci/golangci-lint:v2.14.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
+COPY --link --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
 COPY --link --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
-COPY --link --from=arigaio/atlas:latest /atlas /usr/local/bin/atlas
+COPY --link --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Install official Antigravity CLI binary
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
 
-# Install Stripe Link CLI (@stripe/link-cli v0.28.0) standalone binary
-RUN curl -fsSL https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%400.28.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
-    echo "7a253abab63eb0f14dbf5b2a88967037022f48d6608818c6427e2187d0077019  /usr/local/bin/link-cli" | sha256sum -c - && \
+# Install Stripe Link CLI (@stripe/link-cli v0.29.0) standalone binary
+RUN curl -fsSL https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%400.29.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
+    echo "494782d20120140683742879221a564c6b20780f88958c6aa2c428e7fc6908ff  /usr/local/bin/link-cli" | sha256sum -c - && \
     chmod 0755 /usr/local/bin/link-cli
 ENV LINK_AUTH_FILE="/data/runtimes/discord/.config/link-cli-nodejs/config.json"
 

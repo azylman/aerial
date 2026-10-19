@@ -17,7 +17,7 @@ RUN apk add --no-cache ca-certificates git bash tzdata docker-cli && \
     ln -s /share/aerial /mnt/data/supervisor/share/aerial && \
     ln -s /share/aerial-config /mnt/data/supervisor/share/aerial-config
 
-COPY --link --from=docker/compose-bin:v2.32.4 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --link --from=docker/compose-bin:v5.6.0 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
 RUN ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 COPY --link --from=hashicorp/nomad:2.0.7 /bin/nomad /usr/local/bin/nomad
