@@ -36,6 +36,7 @@ type FactStore interface {
 	SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
+	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
 	UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error
 	FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error)

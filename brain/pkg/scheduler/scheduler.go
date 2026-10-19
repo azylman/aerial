@@ -438,7 +438,7 @@ func RunMemoryDecayWithContext(ctx context.Context, factStore db.FactStore) {
 	decayCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	decayed, pruned, err := factStore.DecayAndPruneFacts(decayCtx, 0.02, 0.10, 30)
+	decayed, pruned, err := factStore.DecayAndPruneFacts(decayCtx, 0.05, 0.15, 14)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("[Scheduler] Memory decay error: %v", err)

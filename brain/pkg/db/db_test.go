@@ -795,15 +795,36 @@ func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 	ctx := context.Background()
 
 	msg1 := Message{
-		ID:        "msg-wm-1",
-		ThreadID:  "thread-watermark",
-		Content:   "First turn",
-		Status:    StatusCompleted,
-		CreatedAt: time.Now().UTC().Add(-2 * time.Hour),
+		ID:           "msg-wm-1",
+		ThreadID:     "thread-watermark",
+		Content:      "First turn",
+		ResponseText: "First reply",
+		Status:       StatusCompleted,
+		Metadata:     MessageMetadata{IsAdmin: true},
+		CreatedAt:    time.Now().UTC().Add(-2 * time.Hour),
 	}
 	if err := store.InsertMessage(ctx, msg1); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
+	// Non-admin turn and ambient silent turn should be excluded
+	_ = store.InsertMessage(ctx, Message{
+		ID:           "msg-wm-nonadmin",
+		ThreadID:     "thread-nonadmin",
+		Content:      "Cron turn",
+		ResponseText: "Cron output",
+		Status:       StatusCompleted,
+		Metadata:     MessageMetadata{IsAdmin: false},
+		CreatedAt:    time.Now().UTC().Add(-1 * time.Hour),
+	})
+	_ = store.InsertMessage(ctx, Message{
+		ID:           "msg-wm-ambient",
+		ThreadID:     "thread-watermark",
+		Content:      "Ambient chatter",
+		ResponseText: "[AMBIENT_SILENT]",
+		Status:       StatusCompleted,
+		Metadata:     MessageMetadata{IsAdmin: true},
+		CreatedAt:    time.Now().UTC().Add(-1 * time.Hour),
+	})
 
 	maxRow1, err := store.GetMaxMessageRowID(ctx, "thread-watermark")
 	if err != nil {
@@ -813,13 +834,21 @@ func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 		t.Fatalf("Expected positive row_id sequence, got %d", maxRow1)
 	}
 
-	// Active conversations for extraction
+	// Active conversations for extraction (only thread-watermark should qualify)
 	convs, err := store.GetActiveConversationsForExtraction(ctx, 24)
 	if err != nil {
 		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
 	}
 	if len(convs) != 1 || convs[0] != "thread-watermark" {
 		t.Fatalf("Expected thread-watermark in active extractions, got %+v", convs)
+	}
+
+	turns, err := store.GetUnextractedAdminTurns(ctx, "thread-watermark")
+	if err != nil || len(turns) != 1 || turns[0].ID != "msg-wm-1" {
+		t.Fatalf("Expected 1 unextracted admin turn (msg-wm-1), got %+v (err=%v)", turns, err)
+	}
+	if emptyTurns, err := store.GetUnextractedAdminTurns(ctx, ""); err != nil || len(emptyTurns) != 0 {
+		t.Fatalf("Expected nil turns for empty threadID, got %+v (err=%v)", emptyTurns, err)
 	}
 
 	// Advance watermark

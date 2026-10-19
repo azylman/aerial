@@ -56,14 +56,14 @@ func TestFactReinforceAndDecay(t *testing.T) {
 		t.Fatalf("ReinforceFact failed: %v", err)
 	}
 
-	// Verify reinforced fact has boosted importance (floored at 0.70), updated text, and incremented reinforce_count
+	// Verify reinforced fact has boosted importance (floored at 0.70), immutable text, and incremented reinforce_count
 	factsRes, err := store.GetFactsPaginated(ctx, FactsFilter{Limit: 10})
 	if err != nil || len(factsRes.Facts) != 1 {
 		t.Fatalf("GetFactsPaginated failed: len=%d, err=%v", len(factsRes.Facts), err)
 	}
 	f := factsRes.Facts[0]
-	if f.FactText != "Postgres runs on port 5433" {
-		t.Errorf("expected updated text, got %q", f.FactText)
+	if f.FactText != "Postgres runs on port 5432" {
+		t.Errorf("expected immutable text, got %q", f.FactText)
 	}
 	if f.Importance < 0.70 {
 		t.Errorf("expected importance floored at >= 0.70, got %f", f.Importance)
@@ -390,6 +390,19 @@ func TestFacts_PostgresBranchCoverage(t *testing.T) {
 	decayed, pruned, err = (&SQLStore{db: mockDBPruneErr, isPostgres: true}).DecayAndPruneFacts(ctx, 0.02, 0.10, 30)
 	if err == nil || decayed != 3 {
 		t.Errorf("expected decayed=3 with prune error, got decayed=%d err=%v", decayed, err)
+	}
+
+	// 3. GetActiveConversationsForExtraction & GetUnextractedAdminTurns on Postgres (error branches)
+	mockQueryErr := testMockDBTX{
+		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			return nil, fmt.Errorf("postgres query error")
+		},
+	}
+	if _, err := (&SQLStore{db: mockQueryErr, isPostgres: true}).GetActiveConversationsForExtraction(ctx, 24); err == nil {
+		t.Errorf("expected error on postgres GetActiveConversationsForExtraction query failure")
+	}
+	if _, err := (&SQLStore{db: mockQueryErr, isPostgres: true}).GetUnextractedAdminTurns(ctx, "th-pg"); err == nil {
+		t.Errorf("expected error on postgres GetUnextractedAdminTurns query failure")
 	}
 }
 
