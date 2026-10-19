@@ -502,14 +502,14 @@ func (s *releaseTurnSink) OnTextDelta(delta string) {
 }
 
 func (s *releaseTurnSink) OnResult(res *TurnResult) {
-	defer s.doRelease()
+	s.doRelease()
 	if s.inner != nil {
 		s.inner.OnResult(res)
 	}
 }
 
 func (s *releaseTurnSink) OnError(err error) {
-	defer s.doRelease()
+	s.doRelease()
 	if s.inner != nil {
 		s.inner.OnError(err)
 	}
