@@ -867,6 +867,7 @@ var CoreBuildPaths = []string{
 	"sidecars/",
 	"webhooks-router/",
 	"vanadis/",
+	"roborev-runner/",
 	"Dockerfile",
 	"go.mod",
 	"go.sum",
