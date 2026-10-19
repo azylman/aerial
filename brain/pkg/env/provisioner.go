@@ -2,9 +2,7 @@ package env
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,16 +13,14 @@ import (
 
 // Provisioner manages filesystem provisioning and synchronization of ~/.gemini runtime environments.
 type Provisioner struct {
-	homeDir                 string
-	dataDir                 string
-	customSkillsDir         string
-	superpowersDir          string
-	agentsSkillsDir         string
-	agentInstructionsPaths  []string
-	systemInstructionsPaths []string
-	aerialRulesDir          string
-	configRulesDir          string
-	hooksDir                string
+	homeDir         string
+	dataDir         string
+	customSkillsDir string
+	superpowersDir  string
+	agentsSkillsDir string
+	aerialRulesDir  string
+	configRulesDir  string
+	hooksDir        string
 
 	mu sync.Mutex
 }
@@ -47,16 +43,14 @@ func New(homeDir, dataDir string) *Provisioner {
 		agentsSkillsDir = "/app/.agents/skills"
 	}
 	return &Provisioner{
-		homeDir:                 strings.TrimSpace(homeDir),
-		dataDir:                 strings.TrimSpace(dataDir),
-		customSkillsDir:         "/share/aerial-config/custom-skills",
-		superpowersDir:          skillsDir,
-		agentsSkillsDir:         agentsSkillsDir,
-		aerialRulesDir:          "/share/aerial/rules",
-		configRulesDir:          "/share/aerial-config/rules",
-		hooksDir:                "/share/aerial/scripts/hooks",
-		agentInstructionsPaths:  DefaultAgentInstructionsSearchPaths,
-		systemInstructionsPaths: DefaultSystemInstructionsSearchPaths,
+		homeDir:         strings.TrimSpace(homeDir),
+		dataDir:         strings.TrimSpace(dataDir),
+		customSkillsDir: "/share/aerial-config/custom-skills",
+		superpowersDir:  skillsDir,
+		agentsSkillsDir: agentsSkillsDir,
+		aerialRulesDir:  "/share/aerial/rules",
+		configRulesDir:  "/share/aerial-config/rules",
+		hooksDir:        "/share/aerial/scripts/hooks",
 	}
 }
 
@@ -104,18 +98,23 @@ func (p *Provisioner) SetHooksDir(dir string) {
 	p.hooksDir = dir
 }
 
-// SetAgentInstructionsSearchPaths sets the search paths for AGENTS.md instructions.
-func (p *Provisioner) SetAgentInstructionsSearchPaths(paths []string) {
-	p.agentInstructionsPaths = paths
+func (p *Provisioner) runtimeHomeDir(t RuleTarget) string {
+	return filepath.Join(p.dataDir, "runtimes", string(t))
 }
 
 // HomeDir returns the target home directory for this Provisioner.
 func (p *Provisioner) HomeDir() string {
+	if p == nil {
+		return ""
+	}
 	return p.homeDir
 }
 
 // DataDir returns the persistent data directory for this Provisioner.
 func (p *Provisioner) DataDir() string {
+	if p == nil {
+		return ""
+	}
 	return p.dataDir
 }
 
@@ -166,15 +165,11 @@ func (p *Provisioner) writeAtomic(targetPath, content string) error {
 	}
 	tmpName := f.Name()
 	defer func() {
-		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			log.Printf("[Env] Warning removing temporary file %s: %v", tmpName, rmErr)
-		}
+		ignore(os.Remove(tmpName))
 	}()
 
 	if _, err := f.WriteString(content); err != nil {
-		if closeErr := f.Close(); closeErr != nil {
-			log.Printf("[Env] Warning closing temporary file %s: %v", tmpName, closeErr)
-		}
+ignore(f.Close())
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -182,10 +177,14 @@ func (p *Provisioner) writeAtomic(targetPath, content string) error {
 	}
 
 	if err := os.Rename(tmpName, targetPath); err != nil {
-		if rmErr := os.Remove(targetPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			log.Printf("[Env] Warning removing target file %s prior to fallback rename: %v", targetPath, rmErr)
-		}
+ignore(os.Remove(targetPath))
 		return os.Rename(tmpName, targetPath)
 	}
 	return nil
+}
+
+func ignore(err error) {
+	if err != nil {
+		return
+	}
 }

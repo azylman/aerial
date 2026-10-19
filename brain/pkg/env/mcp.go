@@ -174,19 +174,16 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 	}
 
 	if p.dataDir != "" {
-		discordGemini := filepath.Join(p.dataDir, "runtimes", "discord", ".gemini")
-		if err := p.EnsureTargetMcpConfig(discordGemini, discordConfig); err != nil {
-			return fmt.Errorf("failed to sync discord runtime mcp config: %w", err)
+		configs := map[RuleTarget]json.RawMessage{
+			TargetDiscord:   discordConfig,
+			TargetVoice:     voiceConfig,
+			TargetEphemeral: ephemeralConfig,
 		}
-
-		voiceGemini := filepath.Join(p.dataDir, "runtimes", "voice", ".gemini")
-		if err := p.EnsureTargetMcpConfig(voiceGemini, voiceConfig); err != nil {
-			return fmt.Errorf("failed to sync voice runtime mcp config: %w", err)
-		}
-
-		ephemeralGemini := filepath.Join(p.dataDir, "runtimes", "ephemeral", ".gemini")
-		if err := p.EnsureTargetMcpConfig(ephemeralGemini, ephemeralConfig); err != nil {
-			return fmt.Errorf("failed to sync ephemeral runtime mcp config: %w", err)
+		for _, target := range allRuntimeTargets {
+			geminiDir := filepath.Join(p.runtimeHomeDir(target), ".gemini")
+			if err := p.EnsureTargetMcpConfig(geminiDir, configs[target]); err != nil {
+				return fmt.Errorf("failed to sync %s runtime mcp config: %w", target, err)
+			}
 		}
 	}
 

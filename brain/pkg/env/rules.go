@@ -33,49 +33,20 @@ const (
 )
 
 var (
+	allRuntimeTargets = []RuleTarget{TargetDiscord, TargetVoice, TargetEphemeral}
+
 	systemRulesMu       sync.Mutex
 	renameRulesDir      = os.Rename
 	symlinkRuntimeAsset = os.Symlink
 
 	// DefaultAerialRulesPaths specifies standard search roots for aerial system rules in priority order.
 	DefaultAerialRulesPaths = []string{
-		"/share/aerial/rules",
-		"./rules",
-		"../rules",
-		"/app/rules",
-		"../../rules",
-		"../../../rules",
+		"/share/aerial/rules", "./rules", "../rules", "/app/rules", "../../rules", "../../../rules",
 	}
 
 	// DefaultConfigRulesPaths specifies standard search roots for aerial-config user rules in priority order.
 	DefaultConfigRulesPaths = []string{
-		"/share/aerial-config/rules",
-		"./aerial-config/rules",
-		"../aerial-config/rules",
-		"../../aerial-config/rules",
-		"../../../aerial-config/rules",
-	}
-
-	// DefaultAgentInstructionsSearchPaths specifies standard locations for legacy AGENTS.md (deprecated).
-	DefaultAgentInstructionsSearchPaths = []string{
-		"/share/aerial-config/AGENTS.local.md",
-		"/share/aerial-config/AGENTS.md",
-		"/share/aerial/AGENTS.md",
-		"/app/AGENTS.md",
-		"/data/AGENTS.md",
-		"./AGENTS.local.md",
-		"./AGENTS.md",
-	}
-
-	// DefaultSystemInstructionsSearchPaths specifies standard locations for legacy GEMINI.md (deprecated).
-	DefaultSystemInstructionsSearchPaths = []string{
-		"/share/aerial-config/GEMINI.local.md",
-		"/share/aerial-config/GEMINI.md",
-		"/share/aerial/GEMINI.md",
-		"/app/GEMINI.md",
-		"/data/GEMINI.md",
-		"./GEMINI.local.md",
-		"./GEMINI.md",
+		"/share/aerial-config/rules", "./aerial-config/rules", "../aerial-config/rules", "../../aerial-config/rules", "../../../aerial-config/rules",
 	}
 )
 
@@ -219,12 +190,9 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 	}
 
 	var allRules []ruleSourceFile
-	allRules = append(allRules, aerialCommon...)
-	allRules = append(allRules, aerialPersona...)
-	allRules = append(allRules, configCommon...)
-	allRules = append(allRules, configPersona...)
-	allRules = append(allRules, aerialTarget...)
-	allRules = append(allRules, configTarget...)
+	for _, set := range [][]ruleSourceFile{aerialCommon, aerialPersona, configCommon, configPersona, aerialTarget, configTarget} {
+		allRules = append(allRules, set...)
+	}
 
 	if target == TargetDiscord && strings.TrimSpace(customPrompt) != "" {
 		allRules = append(allRules, ruleSourceFile{
@@ -249,9 +217,7 @@ func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir strin
 		return err
 	}
 	defer func() {
-		if rmErr := os.RemoveAll(stagingDir); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.Printf("[Env] Warning removing staging rules dir %s: %v", stagingDir, rmErr)
-		}
+ignore(os.RemoveAll(stagingDir))
 	}()
 
 	for _, r := range rules {
@@ -291,9 +257,7 @@ func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir strin
 	}
 
 	if hasActive {
-		if rmErr := os.RemoveAll(backupDir); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.Printf("[Env] Warning removing backup rules dir %s: %v", backupDir, rmErr)
-		}
+ignore(os.RemoveAll(backupDir))
 	}
 	return nil
 }
@@ -319,16 +283,28 @@ func (p *Provisioner) syncRulesToDir(rules []ruleSourceFile, geminiDir string) e
 	return nil
 }
 
+func (p *Provisioner) linkOrCopyAsset(src, dst string) {
+	if _, err := os.Stat(src); err == nil {
+		if rErr := os.Remove(dst); rErr != nil && !os.IsNotExist(rErr) {
+			log.Printf("[Env] Warning: failed to remove %s before link: %v", dst, rErr)
+		}
+		if sErr := symlinkRuntimeAsset(src, dst); sErr != nil {
+			data, rErr := os.ReadFile(src)
+			if rErr != nil {
+				log.Printf("[Env] Warning: failed to read %s for runtime copy: %v", src, rErr)
+			} else if wErr := p.writeAtomic(dst, string(data)); wErr != nil {
+				log.Printf("[Env] Warning: failed to copy %s to runtime: %v", src, wErr)
+			}
+		}
+	}
+}
+
 func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	runtimeGemini := filepath.Join(runtimeHome, ".gemini")
 	primaryGemini := filepath.Join(p.homeDir, ".gemini")
 
-	if err := os.MkdirAll(filepath.Join(runtimeGemini, "antigravity-cli"), 0755); err != nil {
-		log.Printf("[Env] Warning: failed to mkdir antigravity-cli: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(runtimeGemini, "config"), 0755); err != nil {
-		log.Printf("[Env] Warning: failed to mkdir config: %v", err)
-	}
+	ignore(os.MkdirAll(filepath.Join(runtimeGemini, "antigravity-cli"), 0755))
+	ignore(os.MkdirAll(filepath.Join(runtimeGemini, "config"), 0755))
 
 	primarySettings := filepath.Join(primaryGemini, "antigravity-cli", "settings.json")
 	targetSettings := filepath.Join(runtimeGemini, "antigravity-cli", "settings.json")
@@ -348,38 +324,15 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		"jetski_state.pbtxt",
 	}
 	for _, fname := range sharedCliFiles {
-		primaryFile := filepath.Join(primaryGemini, "antigravity-cli", fname)
-		targetFile := filepath.Join(runtimeGemini, "antigravity-cli", fname)
-		if _, err := os.Stat(primaryFile); err == nil {
-			if rErr := os.Remove(targetFile); rErr != nil && !os.IsNotExist(rErr) {
-				log.Printf("[Env] Warning: failed to remove existing %s in runtime before link: %v", fname, rErr)
-			}
-			if sErr := symlinkRuntimeAsset(primaryFile, targetFile); sErr != nil {
-				data, rErr := os.ReadFile(primaryFile)
-				if rErr != nil {
-					log.Printf("[Env] Warning: failed to read %s for runtime copy: %v", fname, rErr)
-				} else if wErr := p.writeAtomic(targetFile, string(data)); wErr != nil {
-					log.Printf("[Env] Warning: failed to copy %s to runtime: %v", fname, wErr)
-				}
-			}
-		}
+		p.linkOrCopyAsset(
+			filepath.Join(primaryGemini, "antigravity-cli", fname),
+			filepath.Join(runtimeGemini, "antigravity-cli", fname),
+		)
 	}
-
-	primaryMcpTokens := filepath.Join(primaryGemini, "mcp_oauth_tokens.json")
-	targetMcpTokens := filepath.Join(runtimeGemini, "mcp_oauth_tokens.json")
-	if _, err := os.Stat(primaryMcpTokens); err == nil {
-		if rErr := os.Remove(targetMcpTokens); rErr != nil && !os.IsNotExist(rErr) {
-			log.Printf("[Env] Warning: failed to remove target mcp_oauth_tokens.json before link: %v", rErr)
-		}
-		if sErr := symlinkRuntimeAsset(primaryMcpTokens, targetMcpTokens); sErr != nil {
-			data, rErr := os.ReadFile(primaryMcpTokens)
-			if rErr != nil {
-				log.Printf("[Env] Warning: failed to read primary mcp_oauth_tokens.json for runtime copy: %v", rErr)
-			} else if wErr := p.writeAtomic(targetMcpTokens, string(data)); wErr != nil {
-				log.Printf("[Env] Warning: failed to copy mcp_oauth_tokens.json to runtime: %v", wErr)
-			}
-		}
-	}
+	p.linkOrCopyAsset(
+		filepath.Join(primaryGemini, "mcp_oauth_tokens.json"),
+		filepath.Join(runtimeGemini, "mcp_oauth_tokens.json"),
+	)
 
 	// Unify brain transcripts and conversations across runtimes into shared storage
 	canonicalBrain := filepath.Join(p.dataDir, "brain")
@@ -388,12 +341,8 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		canonicalBrain = filepath.Join(primaryGemini, "antigravity-cli", "brain")
 		canonicalConversations = filepath.Join(primaryGemini, "antigravity-cli", "conversations")
 	}
-	if err := os.MkdirAll(canonicalBrain, 0755); err != nil {
-		log.Printf("[Env] Warning: failed to ensure canonical brain directory %s: %v", canonicalBrain, err)
-	}
-	if err := os.MkdirAll(canonicalConversations, 0755); err != nil {
-		log.Printf("[Env] Warning: failed to ensure canonical conversations directory %s: %v", canonicalConversations, err)
-	}
+	ignore(os.MkdirAll(canonicalBrain, 0755))
+	ignore(os.MkdirAll(canonicalConversations, 0755))
 	p.linkSharedSessionStorage(runtimeGemini, canonicalBrain, canonicalConversations)
 }
 
@@ -421,9 +370,7 @@ func (p *Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, can
 				if linkTarget, rErr := os.Readlink(targetDir); rErr == nil && filepath.Clean(linkTarget) == cleanCanonical {
 					continue
 				}
-				if rErr := os.Remove(targetDir); rErr != nil && !os.IsNotExist(rErr) {
-					log.Printf("[Env] Warning: failed to remove outdated symlink %s: %v", targetDir, rErr)
-				}
+ignore(os.Remove(targetDir))
 			} else if fi.IsDir() {
 				// Migrate any existing files or sessions to canonical directory
 				if entries, rErr := os.ReadDir(targetDir); rErr == nil {
@@ -431,26 +378,18 @@ func (p *Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, can
 						src := filepath.Join(targetDir, entry.Name())
 						dst := filepath.Join(item.canonical, entry.Name())
 						if _, dErr := os.Stat(dst); os.IsNotExist(dErr) {
-							if mErr := os.Rename(src, dst); mErr != nil {
-								log.Printf("[Env] Warning: failed to migrate %s to canonical dir %s: %v", src, dst, mErr)
-							}
+ignore(os.Rename(src, dst))
 						}
 					}
 				}
-				if rmErr := os.RemoveAll(targetDir); rmErr != nil {
-					log.Printf("[Env] Warning: failed to remove existing dir %s before symlink: %v", targetDir, rmErr)
-				}
+ignore(os.RemoveAll(targetDir))
 			} else {
-				if rmErr := os.Remove(targetDir); rmErr != nil && !os.IsNotExist(rmErr) {
-					log.Printf("[Env] Warning: failed to remove file %s before symlink: %v", targetDir, rmErr)
-				}
+ignore(os.Remove(targetDir))
 			}
 		}
 
 		// Ensure parent directory exists (e.g. targetGemini/antigravity-cli)
-		if pErr := os.MkdirAll(filepath.Dir(targetDir), 0755); pErr != nil {
-			log.Printf("[Env] Warning: failed to create parent dir for %s: %v", targetDir, pErr)
-		}
+ignore(os.MkdirAll(filepath.Dir(targetDir), 0755))
 
 		if sErr := symlinkRuntimeAsset(item.canonical, targetDir); sErr != nil {
 			log.Printf("[Env] Warning: failed to link shared storage %s -> %s: %v", targetDir, item.canonical, sErr)
@@ -496,41 +435,26 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	if p.dataDir != "" {
 		canonicalBrain := filepath.Join(p.dataDir, "brain")
 		canonicalConversations := filepath.Join(p.dataDir, "conversations")
-		if err := os.MkdirAll(canonicalBrain, 0755); err != nil {
-			log.Printf("[Env] Warning: failed to ensure canonical brain directory %s: %v", canonicalBrain, err)
-		}
-		if err := os.MkdirAll(canonicalConversations, 0755); err != nil {
-			log.Printf("[Env] Warning: failed to ensure canonical conversations directory %s: %v", canonicalConversations, err)
-		}
+		ignore(os.MkdirAll(canonicalBrain, 0755))
+		ignore(os.MkdirAll(canonicalConversations, 0755))
 		p.linkSharedSessionStorage(primaryGemini, canonicalBrain, canonicalConversations)
 	}
 
 	// 5. If dataDir is configured, provision isolated runtimes for discord, voice, and ephemeral
 	if p.dataDir != "" {
-		runtimesRoot := filepath.Join(p.dataDir, "runtimes")
-
-		discordHome := filepath.Join(runtimesRoot, string(TargetDiscord))
-		discordGemini := filepath.Join(discordHome, ".gemini")
-		if err := p.syncRulesToDir(discordRules, discordGemini); err != nil {
-			log.Printf("[Env] Warning: failed to sync rules to discord runtime: %v", err)
-		} else {
-			p.provisionRuntimeSharedAssets(discordHome)
+		compiled := map[RuleTarget][]ruleSourceFile{
+			TargetDiscord:   discordRules,
+			TargetVoice:     voiceRules,
+			TargetEphemeral: ephemeralRules,
 		}
-
-		voiceHome := filepath.Join(runtimesRoot, string(TargetVoice))
-		voiceGemini := filepath.Join(voiceHome, ".gemini")
-		if err := p.syncRulesToDir(voiceRules, voiceGemini); err != nil {
-			log.Printf("[Env] Warning: failed to sync rules to voice runtime: %v", err)
-		} else {
-			p.provisionRuntimeSharedAssets(voiceHome)
-		}
-
-		ephemeralHome := filepath.Join(runtimesRoot, string(TargetEphemeral))
-		ephemeralGemini := filepath.Join(ephemeralHome, ".gemini")
-		if err := p.syncRulesToDir(ephemeralRules, ephemeralGemini); err != nil {
-			log.Printf("[Env] Warning: failed to sync rules to ephemeral runtime: %v", err)
-		} else {
-			p.provisionRuntimeSharedAssets(ephemeralHome)
+		for _, target := range allRuntimeTargets {
+			home := p.runtimeHomeDir(target)
+			gemini := filepath.Join(home, ".gemini")
+			if err := p.syncRulesToDir(compiled[target], gemini); err != nil {
+				log.Printf("[Env] Warning: failed to sync rules to %s runtime: %v", target, err)
+			} else {
+				p.provisionRuntimeSharedAssets(home)
+			}
 		}
 	}
 
