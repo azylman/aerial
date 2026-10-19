@@ -4134,6 +4134,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		wantTarget     string
 		wantPRNum      int
 		wantCount      int
+		wantSQLSubstr  string
 	}{
 		// Single-row transitions: UpdatePRMerged
 		{name: "UpdatePRMerged success", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
@@ -4167,14 +4168,14 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "IncrementCIFailCount prNumber zero guard", op: "IncrementCIFailCount", repo: "azylman/aerial", prNumber: 0},
 
 		// AtomicTransitionCIFailed
-		{name: "AtomicTransitionCIFailed success", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true},
+		{name: "AtomicTransitionCIFailed success", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
 		{name: "AtomicTransitionCIFailed not found", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
 		{name: "AtomicTransitionCIFailed db error", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AtomicTransitionCIFailed empty repo guard", op: "AtomicTransitionCIFailed", repo: "", prNumber: 42},
 		{name: "AtomicTransitionCIFailed prNumber zero guard", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 0},
 
 		// AtomicTransitionConflict
-		{name: "AtomicTransitionConflict success", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true},
+		{name: "AtomicTransitionConflict success", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('conflict', 'merged', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
 		{name: "AtomicTransitionConflict not found", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
 		{name: "AtomicTransitionConflict db error", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AtomicTransitionConflict empty repo guard", op: "AtomicTransitionConflict", repo: "", prNumber: 42},
@@ -4188,7 +4189,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "AtomicTransitionDeployFailed prNumber zero guard", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 0},
 
 		// AtomicTransitionCIFailedByHeadSHA
-		{name: "AtomicTransitionCIFailedByHeadSHA success", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantPRNum: 42, wantUpdated: true},
+		{name: "AtomicTransitionCIFailedByHeadSHA success", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantPRNum: 42, wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
 		{name: "AtomicTransitionCIFailedByHeadSHA not found", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
 		{name: "AtomicTransitionCIFailedByHeadSHA db error", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AtomicTransitionCIFailedByHeadSHA empty sha guard", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: ""},
@@ -4214,7 +4215,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "TransitionDeploying db error", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain"}, mockSelectErr: errors.New("db error"), wantErr: true},
 
 		// ListOpenPRs
-		{name: "ListOpenPRs success", op: "ListOpenPRs", repo: "azylman/aerial", totalRows: 2, wantCount: 2},
+		{name: "ListOpenPRs success", op: "ListOpenPRs", repo: "azylman/aerial", totalRows: 2, wantCount: 2, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'closed', 'conflict', 'deploying', 'deployed', 'deploy_failed')"},
 		{name: "ListOpenPRs query error", op: "ListOpenPRs", repo: "azylman/aerial", mockSelectErr: errors.New("query err"), wantErr: true},
 		{name: "ListOpenPRs scan error", op: "ListOpenPRs", repo: "azylman/aerial", totalRows: 1, mockScanErr: errors.New("scan err"), wantErr: true},
 		{name: "ListOpenPRs empty repo guard", op: "ListOpenPRs", repo: ""},
@@ -4254,10 +4255,12 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var gotSQL string
 			var pool *mockVanadisPgxPool
 			if !tc.nilPool {
 				pool = &mockVanadisPgxPool{
 					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+						gotSQL = sql
 						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
 							if tc.mockSelectErr != nil {
 								return tc.mockSelectErr
@@ -4360,6 +4363,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 						}, nil
 					},
 					queryFn: func(qCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
+						gotSQL = sql
 						if tc.mockSelectErr != nil {
 							return nil, tc.mockSelectErr
 						}
@@ -4583,6 +4587,9 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				if gotPR != tc.wantPRNum {
 					t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
 				}
+			}
+			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) {
+				t.Errorf("gotSQL = %q, want substring %q", gotSQL, tc.wantSQLSubstr)
 			}
 		})
 	}
