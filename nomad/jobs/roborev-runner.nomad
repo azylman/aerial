@@ -29,6 +29,7 @@ job "roborev-runner" {
 
     task "runner-aerial" {
       driver = "docker"
+      user   = "0:0"
 
       kill_timeout = "30s"
 
@@ -36,7 +37,14 @@ job "roborev-runner" {
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        volumes            = ["aerial-brain-gemini:/mnt/gemini-auth:ro"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/mnt/gemini-auth"
+            source   = "aerial-brain-gemini"
+            readonly = true
+          }
+        ]
       }
 
       env {
@@ -48,12 +56,12 @@ job "roborev-runner" {
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
-{{ if .GITHUB_PAT }}{{ .GITHUB_PAT }}{{ end }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
-        destination = "secrets/github_pat"
-        perms       = "0400"
+        destination = "secrets/runner.env"
+        env         = true
         change_mode = "restart"
       }
 
@@ -66,6 +74,7 @@ EOH
 
     task "runner-aerial-config" {
       driver = "docker"
+      user   = "0:0"
 
       kill_timeout = "30s"
 
@@ -73,7 +82,14 @@ EOH
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        volumes            = ["aerial-brain-gemini:/mnt/gemini-auth:ro"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/mnt/gemini-auth"
+            source   = "aerial-brain-gemini"
+            readonly = true
+          }
+        ]
       }
 
       env {
@@ -85,12 +101,12 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
-{{ if .GITHUB_PAT }}{{ .GITHUB_PAT }}{{ end }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
-        destination = "secrets/github_pat"
-        perms       = "0400"
+        destination = "secrets/runner.env"
+        env         = true
         change_mode = "restart"
       }
 
@@ -103,6 +119,7 @@ EOH
 
     task "runner-mirrormere" {
       driver = "docker"
+      user   = "0:0"
 
       kill_timeout = "30s"
 
@@ -110,7 +127,14 @@ EOH
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        volumes            = ["aerial-brain-gemini:/mnt/gemini-auth:ro"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/mnt/gemini-auth"
+            source   = "aerial-brain-gemini"
+            readonly = true
+          }
+        ]
       }
 
       env {
@@ -122,12 +146,12 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
-{{ if .GITHUB_PAT }}{{ .GITHUB_PAT }}{{ end }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
-        destination = "secrets/github_pat"
-        perms       = "0400"
+        destination = "secrets/runner.env"
+        env         = true
         change_mode = "restart"
       }
 
@@ -140,6 +164,7 @@ EOH
 
     task "runner-aerial-sidecars" {
       driver = "docker"
+      user   = "0:0"
 
       kill_timeout = "30s"
 
@@ -147,7 +172,14 @@ EOH
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        volumes            = ["aerial-brain-gemini:/mnt/gemini-auth:ro"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/mnt/gemini-auth"
+            source   = "aerial-brain-gemini"
+            readonly = true
+          }
+        ]
       }
 
       env {
@@ -159,12 +191,12 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
-{{ if .GITHUB_PAT }}{{ .GITHUB_PAT }}{{ end }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
-        destination = "secrets/github_pat"
-        perms       = "0400"
+        destination = "secrets/runner.env"
+        env         = true
         change_mode = "restart"
       }
 
