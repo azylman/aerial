@@ -486,6 +486,7 @@ type PRRegistryUpdater interface {
 	AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
 	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
+	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
 }
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
@@ -618,6 +619,25 @@ func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
 	query := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status = 'deploying' RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition deploy_failed", query)
+}
+
+func (r *PostgresPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return 0, nil
+	}
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{ci_fail_count}', to_jsonb(COALESCE((metadata->>'ci_fail_count')::int, 0) + 1), true),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2
+		RETURNING (metadata->>'ci_fail_count')::int;`
+	var count int
+	found, err := r.queryRowScan(ctx, "increment ci_fail_count", query, []any{&count}, repo, prNumber)
+	if err != nil || !found {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
@@ -2048,6 +2068,8 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 }
 
 const maxPromptRunes = 1500
+const maxCIRemediationAttempts = 3
+const maxRoboRevCommentRunes = 4000
 
 func truncatePromptDetails(s string) string {
 	return truncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
@@ -2192,6 +2214,12 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt)
 }
 
+// GitHubIssueComment represents a comment on a GitHub issue or pull request.
+type GitHubIssueComment struct {
+	ID   int64  `json:"id"`
+	Body string `json:"body"`
+}
+
 // GitHubPRDetails encapsulates mergeability information returned by GitHub's Pull Request API.
 type GitHubPRDetails struct {
 	Number         int    `json:"number"`
@@ -2242,6 +2270,34 @@ func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber
 		return nil, err
 	}
 	return &details, nil
+}
+
+func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
+	repo = normalizeRepo(repo)
+	if s == nil || repo == "" || prNumber <= 0 {
+		return ""
+	}
+	var comments []GitHubIssueComment
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
+	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
+		log.Printf("[webhooks-router] [github] warning fetching roborev comments for %s#%d: %v", repo, prNumber, err)
+		return ""
+	}
+	shortSHA := strings.TrimSpace(headSHA)
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	for i := len(comments) - 1; i >= 0; i-- {
+		body := strings.TrimSpace(comments[i].Body)
+		if !strings.Contains(body, "## roborev:") {
+			continue
+		}
+		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
+			continue
+		}
+		return truncatePromptRunes(body, maxRoboRevCommentRunes)
+	}
+	return ""
 }
 
 func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
@@ -2634,6 +2690,35 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 	}
 }
 
+func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+	if res.PRNumber > 0 && strings.Contains(strings.ToLower(res.CheckName), "roborev") {
+		if comment := s.fetchLatestRoboRevComment(ctx, res.Repo, res.PRNumber, res.HeadSHA); comment != "" {
+			details = comment
+		}
+	}
+	if res.PRNumber > 0 {
+		failCount, fcErr := s.registry.IncrementCIFailCount(ctx, res.Repo, res.PRNumber)
+		if fcErr != nil {
+			log.Printf("[webhooks-router] [registry] warning incrementing ci_fail_count for %s#%d: %v", res.Repo, res.PRNumber, fcErr)
+		}
+		if failCount > maxCIRemediationAttempts {
+			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "failed", fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts), nil); err != nil {
+				log.Printf("[webhooks-router] [widget] sync pr widget error: %v", err)
+			}
+			if s.dispatcher != nil && IsValidDiscordSnowflake(res.TargetID) {
+				if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
+					ChannelID: res.TargetID,
+					Content:   fmt.Sprintf("🛑 %sCI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", formatDirectMessagePrefix(res.PRNumber, res.Repo), res.CheckName, failCount, maxCIRemediationAttempts, maxCIRemediationAttempts),
+				}); err != nil {
+					log.Printf("[webhooks-router] [dispatcher] error dispatching cap direct message: %v", err)
+				}
+			}
+			return nil
+		}
+	}
+	return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
+}
+
 func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
 	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") {
 		return nil
@@ -2645,7 +2730,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		if updated {
-			return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
+			return s.completeCIFailureTransition(ctx, res, details, checkURL)
 		}
 		return nil
 	}
@@ -2659,7 +2744,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 			res.PRNumber = prNum
 		}
 		if updated {
-			return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
+			return s.completeCIFailureTransition(ctx, res, details, checkURL)
 		}
 	}
 	return nil
