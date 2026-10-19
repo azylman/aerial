@@ -2569,7 +2569,7 @@ body::after {
 
 .builds-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    grid-template-columns: 1fr;
     gap: 1.25rem;
 }
 
@@ -3014,7 +3014,7 @@ body::after {
         grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     }
     .builds-grid {
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        grid-template-columns: 1fr;
     }
 }
 

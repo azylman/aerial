@@ -1455,6 +1455,16 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 sandbox.openBuildDetailDrawer('b-top');
                 assert.equal(bodyEl.scrollTop, 0, 'openBuildDetailDrawer should reset drawer-body scrollTop to 0');
             });
+
+            it('renders .builds-grid as a single-column layout across all viewports', () => {
+                const cssCode = fs.readFileSync(path.join(__dirname, 'static', 'style.css'), 'utf8');
+                const buildsGridMatches = [...cssCode.matchAll(/\.builds-grid\s*\{([^}]+)\}/g)];
+                assert.ok(buildsGridMatches.length >= 1, '.builds-grid rule must exist in style.css');
+                for (const match of buildsGridMatches) {
+                    assert.ok(match[1].includes('grid-template-columns: 1fr'), `.builds-grid must use single-column 1fr layout, got: ${match[1].trim()}`);
+                    assert.ok(!match[1].includes('repeat('), `.builds-grid must not use multi-column repeat(), got: ${match[1].trim()}`);
+                }
+            });
         });
     });
 
