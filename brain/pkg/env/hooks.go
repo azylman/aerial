@@ -8,59 +8,11 @@ import (
 )
 
 // Default canonical hooks.json payload used when external file is absent.
-const defaultCanonicalHooksJSON = `{
-  "share-guard": {
-    "PreToolUse": [
-      {
-        "matcher": "replace_file_content|write_to_file|run_command",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "hook-guard share",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  },
-  "schedule-guard": {
-    "PreToolUse": [
-      {
-        "matcher": "schedule|run_command",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "hook-guard schedule",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  },
-  "commit-guard": {
-    "PreToolUse": [
-      {
-        "matcher": "run_command",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "hook-guard commit",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
-`
+const defaultCanonicalHooksJSON = `{"share-guard":{"PreToolUse":[{"matcher":"replace_file_content|write_to_file|run_command","hooks":[{"type":"command","command":"hook-guard share","timeout":5}]}]},"schedule-guard":{"PreToolUse":[{"matcher":"schedule|run_command","hooks":[{"type":"command","command":"hook-guard schedule","timeout":5}]}]},"commit-guard":{"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"hook-guard commit","timeout":5}]}]}}`
 
 // DefaultHooksSearchPaths defines priority search roots for hook assets.
 var DefaultHooksSearchPaths = []string{
-	"/share/aerial/scripts/hooks",
-	"/app/scripts/hooks",
-	"./scripts/hooks",
-	"../scripts/hooks",
-	"../../scripts/hooks",
+	"/share/aerial/scripts/hooks", "/app/scripts/hooks", "./scripts/hooks", "../scripts/hooks", "../../scripts/hooks",
 }
 
 // SyncHooks provisions hooks.json and executable hook scripts into primary ~/.gemini and all runtime targets.
@@ -102,12 +54,9 @@ func (p *Provisioner) SyncHooks() error {
 	}
 
 	if p.dataDir != "" {
-		runtimesRoot := filepath.Join(p.dataDir, "runtimes")
-		targetRoots = append(targetRoots,
-			filepath.Join(runtimesRoot, string(TargetDiscord), ".gemini"),
-			filepath.Join(runtimesRoot, string(TargetVoice), ".gemini"),
-			filepath.Join(runtimesRoot, string(TargetEphemeral), ".gemini"),
-		)
+		for _, target := range allRuntimeTargets {
+			targetRoots = append(targetRoots, filepath.Join(p.runtimeHomeDir(target), ".gemini"))
+		}
 	}
 
 	// 3. Provision hooks into each target root
@@ -147,8 +96,8 @@ func (p *Provisioner) SyncHooks() error {
 					}
 					if wErr := p.writeAtomic(dstPath, string(scriptData)); wErr != nil {
 						log.Printf("[Env] Warning: failed to write hook script %s: %v", dstPath, wErr)
-					} else if cErr := os.Chmod(dstPath, 0755); cErr != nil {
-						log.Printf("[Env] Warning: failed to chmod hook script %s: %v", dstPath, cErr)
+					} else {
+						ignore(os.Chmod(dstPath, 0755))
 					}
 				}
 			}
