@@ -26,7 +26,7 @@ job "db-migrate" {
       driver = "docker"
 
       config {
-        image        = "arigaio/atlas:1.3.3"
+        image        = "arigaio/atlas:1.3.4"
         network_mode = "host"
         healthchecks {
           disable = true

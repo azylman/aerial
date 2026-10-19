@@ -33,7 +33,7 @@ job "edge-proxy" {
         }
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["lan", "aerial"]
-        image        = "nginx:1.27-alpine"
+        image        = "nginx:1.31-alpine"
         network_mode = "host"
         command      = "nginx"
         args         = ["-g", "daemon off;", "-c", "/local/nginx.conf"]
