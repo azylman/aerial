@@ -70,7 +70,7 @@ apk add --no-cache postgresql-client curl >/dev/null 2>&1
 COVERAGE_DIR="/share/coverage"
 SOURCE_DIR="/share/aerial"
 
-mkdir -p "$COVERAGE_DIR" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
+mkdir -p "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covcounters.*" -mtime +2 -delete 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covmeta.*" -mtime +7 -delete 2>/dev/null || true
 
@@ -89,6 +89,8 @@ for flush_url in \
   "http://discord-mcp.aerial/debug/coverage/flush" \
   "http://dashboard.aerial/debug/coverage/flush" \
   "http://brain.aerial/debug/coverage/flush" \
+  "http://mirrormere-core.aerial/debug/coverage/flush" \
+  "http://mirrormere-hass-proxy.aerial/debug/coverage/flush" \
   "http://127.0.0.1:4020/debug/coverage/flush" \
   "http://127.0.0.1:4025/debug/coverage/flush" \
   "http://127.0.0.1:8087/debug/coverage/flush" \

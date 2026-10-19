@@ -1262,6 +1262,7 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("Timeout waiting for message completed")
 			}
+			pool.Stop()
 
 			mu.Lock()
 			attempts := attemptCount

@@ -1832,13 +1832,13 @@ func (te *turnExecution) executeWithRetries() {
 					reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
 					metrics.RecordRunnerError("capacity_exhausted", currentModel)
 					metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
-					te.failBurstWithStatus("failed", reason, currentModel)
 					if te.pool != nil && te.pool.cfg.DeliveryFunc != nil {
 						pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
 						if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
 							log.Printf("[WorkerPool] Failed to deliver capacity pause notice for thread %s: %v", te.threadID, err)
 						}
 					}
+					te.failBurstWithStatus("failed", reason, currentModel)
 					return
 				}
 
