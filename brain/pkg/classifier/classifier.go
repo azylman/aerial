@@ -100,53 +100,25 @@ type Classifier struct {
 type Option func(*Classifier)
 
 // WithOnParseError sets the callback invoked when classification JSON parsing fails.
-func WithOnParseError(fn func(model, raw string, err error)) Option {
-	return func(c *Classifier) {
-		c.OnParseError = fn
-	}
-}
+func WithOnParseError(fn func(model, raw string, err error)) Option { return func(c *Classifier) { c.OnParseError = fn } }
 
 // WithOnSystemAlert sets the callback invoked when classifier endpoint fails across all retries.
-func WithOnSystemAlert(fn func(endpoint string, err error)) Option {
-	return func(c *Classifier) {
-		c.OnSystemAlert = fn
-	}
-}
+func WithOnSystemAlert(fn func(endpoint string, err error)) Option { return func(c *Classifier) { c.OnSystemAlert = fn } }
 
 // WithSystemOneHTTPClient sets the HTTP client used for System 1 requests.
-func WithSystemOneHTTPClient(client *http.Client) Option {
-	return func(c *Classifier) {
-		c.systemOneHTTPClient = client
-	}
-}
+func WithSystemOneHTTPClient(client *http.Client) Option { return func(c *Classifier) { c.systemOneHTTPClient = client } }
 
 // WithRetrySleepFunc overrides the sleep function between retry attempts for hermetic testing.
-func WithRetrySleepFunc(fn func(ctx context.Context, d time.Duration) error) Option {
-	return func(c *Classifier) {
-		c.retrySleepFunc = fn
-	}
-}
+func WithRetrySleepFunc(fn func(ctx context.Context, d time.Duration) error) Option { return func(c *Classifier) { c.retrySleepFunc = fn } }
 
 // WithRetryDelayFunc overrides the retry delay calculation for hermetic testing.
-func WithRetryDelayFunc(fn func(attempt int) time.Duration) Option {
-	return func(c *Classifier) {
-		c.retryDelayFunc = fn
-	}
-}
+func WithRetryDelayFunc(fn func(attempt int) time.Duration) Option { return func(c *Classifier) { c.retryDelayFunc = fn } }
 
 // WithPrimaryLLMFunc sets the underlying primary runner.LLMFunc used when ClassifierURL is unconfigured.
-func WithPrimaryLLMFunc(fn runner.LLMFunc) Option {
-	return func(c *Classifier) {
-		c.primaryLLMFunc = fn
-	}
-}
+func WithPrimaryLLMFunc(fn runner.LLMFunc) Option { return func(c *Classifier) { c.primaryLLMFunc = fn } }
 
 // WithPrimaryTitleLLMFunc sets the underlying primary runner.LLMFunc used for thread title summarization.
-func WithPrimaryTitleLLMFunc(fn runner.LLMFunc) Option {
-	return func(c *Classifier) {
-		c.primaryTitleLLMFunc = fn
-	}
-}
+func WithPrimaryTitleLLMFunc(fn runner.LLMFunc) Option { return func(c *Classifier) { c.primaryTitleLLMFunc = fn } }
 
 // EphemeralProcessPool abstracts process pools that can generate EphemeralLLMFuncs.
 type EphemeralProcessPool interface {
@@ -165,53 +137,25 @@ func WithProcessPool(pool EphemeralProcessPool) Option {
 }
 
 // WithLLMFunc sets the LLM invocation function.
-func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
-	return func(c *Classifier) {
-		c.LLMFunc = fn
-	}
-}
+func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option { return func(c *Classifier) { c.LLMFunc = fn } }
 
 // WithTitleLLMFunc sets the LLM invocation function for thread title summarization.
-func WithTitleLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
-	return func(c *Classifier) {
-		c.TitleLLMFunc = fn
-	}
-}
+func WithTitleLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option { return func(c *Classifier) { c.TitleLLMFunc = fn } }
 
 // WithModel sets the LLM model identifier.
-func WithModel(model string) Option {
-	return func(c *Classifier) {
-		c.Model = model
-	}
-}
+func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
 
 // WithTimeout sets the per-classification timeout duration.
-func WithTimeout(timeout time.Duration) Option {
-	return func(c *Classifier) {
-		c.Timeout = timeout
-	}
-}
+func WithTimeout(timeout time.Duration) Option { return func(c *Classifier) { c.Timeout = timeout } }
 
 // WithFailureThreshold sets consecutive failure threshold to trip circuit breaker.
-func WithFailureThreshold(threshold int) Option {
-	return func(c *Classifier) {
-		c.FailureThreshold = threshold
-	}
-}
+func WithFailureThreshold(threshold int) Option { return func(c *Classifier) { c.FailureThreshold = threshold } }
 
 // WithCooldownDuration sets the cooldown period after circuit breaker trips.
-func WithCooldownDuration(duration time.Duration) Option {
-	return func(c *Classifier) {
-		c.CooldownDuration = duration
-	}
-}
+func WithCooldownDuration(duration time.Duration) Option { return func(c *Classifier) { c.CooldownDuration = duration } }
 
 // WithClock sets a custom clock function for deterministic testing.
-func WithClock(clock func() time.Time) Option {
-	return func(c *Classifier) {
-		c.Clock = clock
-	}
-}
+func WithClock(clock func() time.Time) Option { return func(c *Classifier) { c.Clock = clock } }
 
 // New constructs a Classifier with pure *config.Config dependency injection and an optional runnerFunc.
 func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classifier {
@@ -227,22 +171,10 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 		Clock:            time.Now,
 	}
 	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
-		cur := c.cfg.Current()
 		if c.primaryLLMFunc != nil {
 			return c.primaryLLMFunc(ctx, model, prompt)
 		}
-		if runnerFn == nil {
-			return "", errors.New("no runner function configured")
-		}
-		agyBin := "agy"
-		apiKey := ""
-		if cur != nil {
-			if cur.AgyBin != "" {
-				agyBin = cur.AgyBin
-			}
-			apiKey = cur.APIKey
-		}
-		return NewAgyLLMFunc(agyBin, apiKey, runnerFn)(ctx, model, prompt)
+		return c.invokeDefaultRunner(ctx, runnerFn, model, prompt)
 	}
 	c.TitleLLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		cur := c.cfg.Current()
@@ -252,23 +184,27 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 		if c.LLMFunc != nil && (cur == nil || !strings.EqualFold(cur.ClassifierProtocol, "systemone")) {
 			return c.LLMFunc(ctx, model, prompt)
 		}
-		if runnerFn == nil {
-			return "", errors.New("no runner function configured")
-		}
-		agyBin := "agy"
-		apiKey := ""
-		if cur != nil {
-			if cur.AgyBin != "" {
-				agyBin = cur.AgyBin
-			}
-			apiKey = cur.APIKey
-		}
-		return NewAgyLLMFunc(agyBin, apiKey, runnerFn)(ctx, model, prompt)
+		return c.invokeDefaultRunner(ctx, runnerFn, model, prompt)
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
+}
+
+func (c *Classifier) invokeDefaultRunner(ctx context.Context, runnerFn runner.RunnerFunc, model, prompt string) (string, error) {
+	if runnerFn == nil {
+		return "", errors.New("no runner function configured")
+	}
+	agyBin := "agy"
+	apiKey := ""
+	if cur := c.cfg.Current(); cur != nil {
+		if cur.AgyBin != "" {
+			agyBin = cur.AgyBin
+		}
+		apiKey = cur.APIKey
+	}
+	return NewAgyLLMFunc(agyBin, apiKey, runnerFn)(ctx, model, prompt)
 }
 
 // NewClassifier constructs a Classifier with defaults (compatibility wrapper for New).
@@ -327,14 +263,10 @@ func (c *Classifier) ConsecutiveFailures() int {
 }
 
 // SanitizeContent neutralizes XML tag injection attempts in user content.
-func SanitizeContent(s string) string {
-	return sanitizer.SanitizePromptTags(s)
-}
+func SanitizeContent(s string) string { return sanitizer.SanitizePromptTags(s) }
 
 // SanitizeAuthor cleans untrusted author strings.
-func SanitizeAuthor(name string) string {
-	return sanitizer.SanitizeAuthor(name)
-}
+func SanitizeAuthor(name string) string { return sanitizer.SanitizeAuthor(name) }
 
 // ExtractReplyingToAuthor retrieves the author being replied to, checking structured metadata first,
 // then falling back to legacy prompt envelope formats.
@@ -357,10 +289,8 @@ func ExtractReplyingToAuthor(m db.Message) string {
 	return ""
 }
 
-// FormatMessage formats a single db.Message into [@AuthorName] (timestamp): Content.
-// If the message is replying to another author, it formats as [@AuthorName] (replying to @TargetAuthor) (timestamp): Content.
-func FormatMessage(m db.Message) string {
-	author := SanitizeAuthor(m.AuthorName)
+func resolveMessageParts(m db.Message) (author, replyTo, bodyText string) {
+	author = SanitizeAuthor(m.AuthorName)
 	if author == "" {
 		author = SanitizeAuthor(m.AuthorID)
 	}
@@ -368,7 +298,6 @@ func FormatMessage(m db.Message) string {
 		author = "unknown"
 	}
 
-	replyTo := ""
 	if targetAuthor := ExtractReplyingToAuthor(m); targetAuthor != "" {
 		cleanTarget := SanitizeAuthor(targetAuthor)
 		if cleanTarget != "" {
@@ -379,7 +308,7 @@ func FormatMessage(m db.Message) string {
 		}
 	}
 
-	bodyText := SanitizeContent(m.BodyText())
+	bodyText = SanitizeContent(m.BodyText())
 	if len(m.Metadata.MentionUserIDs) > 0 && len(m.Metadata.Mentions) > 0 {
 		for i, uID := range m.Metadata.MentionUserIDs {
 			if i < len(m.Metadata.Mentions) && uID != "" {
@@ -403,7 +332,13 @@ func FormatMessage(m db.Message) string {
 			}
 		}
 	}
+	return author, replyTo, bodyText
+}
 
+// FormatMessage formats a single db.Message into [@AuthorName] (timestamp): Content.
+// If the message is replying to another author, it formats as [@AuthorName] (replying to @TargetAuthor) (timestamp): Content.
+func FormatMessage(m db.Message) string {
+	author, replyTo, bodyText := resolveMessageParts(m)
 	ts := m.CreatedAt.UTC().Format(time.RFC3339)
 	return fmt.Sprintf("[@%s]%s (%s): %s", author, replyTo, ts, bodyText)
 }
@@ -412,9 +347,7 @@ func FormatMessage(m db.Message) string {
 const DefaultAmbientWakePrompt = "determine whether the target message is intended for aerial, based on the recent channel context."
 
 // BuildPrompt constructs the classification prompt for a single target message.
-func BuildPrompt(target db.Message, recentContext []db.Message) string {
-	return BuildBurstPrompt([]db.Message{target}, recentContext)
-}
+func BuildPrompt(target db.Message, recentContext []db.Message) string { return BuildBurstPrompt([]db.Message{target}, recentContext) }
 
 // BuildBurstPrompt constructs the classification prompt with trailing context and target burst.
 // It implements sandwich defense by placing security directives and evaluation rubric after the untrusted content.
@@ -701,9 +634,6 @@ const MaxSystemOneStateRunes = 800
 // preserving both the conversational opener/speaker context (head) and the final punchline/ask (tail).
 const ModernBERTTruncationIndicator = " ... [snip] ... "
 
-// ModernBERTTruncationSuffix is maintained for backwards compatibility.
-const ModernBERTTruncationSuffix = " ... [truncated]"
-
 // BuildSystemOneState formats target message(s) and recent channel context into clean dialogue
 // for non-autoregressive encoder models like ModernBERT (Laya).
 // It strips XML tags and RFC3339 timestamps to avoid degrading attention weights,
@@ -727,47 +657,7 @@ func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) s
 	}
 
 	formatMessage := func(m db.Message) string {
-		author := SanitizeAuthor(m.AuthorName)
-		if author == "" {
-			author = SanitizeAuthor(m.AuthorID)
-		}
-		if author == "" {
-			author = "unknown"
-		}
-		replyTo := ""
-		if targetAuthor := ExtractReplyingToAuthor(m); targetAuthor != "" {
-			cleanTarget := SanitizeAuthor(targetAuthor)
-			if cleanTarget != "" {
-				if !strings.HasPrefix(cleanTarget, "@") && !strings.EqualFold(cleanTarget, "unknown") {
-					cleanTarget = "@" + cleanTarget
-				}
-				replyTo = fmt.Sprintf(" (replying to %s)", cleanTarget)
-			}
-		}
-		bodyText := SanitizeContent(m.BodyText())
-		if len(m.Metadata.MentionUserIDs) > 0 && len(m.Metadata.Mentions) > 0 {
-			for i, uID := range m.Metadata.MentionUserIDs {
-				if i < len(m.Metadata.Mentions) && uID != "" {
-					name := m.Metadata.Mentions[i]
-					if name != "" {
-						bodyText = strings.ReplaceAll(bodyText, "<@"+uID+">", "@"+name)
-						bodyText = strings.ReplaceAll(bodyText, "<@!"+uID+">", "@"+name)
-					}
-				}
-			}
-		}
-		if len(m.Metadata.MentionRoleIDs) > 0 && len(m.Metadata.Mentions) > 0 {
-			userCount := len(m.Metadata.MentionUserIDs)
-			for i, rID := range m.Metadata.MentionRoleIDs {
-				roleIdx := userCount + i
-				if roleIdx < len(m.Metadata.Mentions) && rID != "" {
-					name := m.Metadata.Mentions[roleIdx]
-					if name != "" {
-						bodyText = strings.ReplaceAll(bodyText, "<@&"+rID+">", "@"+name)
-					}
-				}
-			}
-		}
+		author, replyTo, bodyText := resolveMessageParts(m)
 		return fmt.Sprintf("%s%s: %s", author, replyTo, bodyText)
 	}
 
