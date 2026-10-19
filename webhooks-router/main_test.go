@@ -167,6 +167,9 @@ type mockPRRegistry struct {
 	failVanadisRes   bool
 	failVanadisErr   error
 
+	ciFailCount    int
+	ciFailCountErr error
+
 	err error
 }
 
@@ -334,6 +337,10 @@ func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, 
 		return false, err
 	}
 	return m.failVanadisRes, nil
+}
+
+func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
+	return m.ciFailCount, m.checkErr(m.ciFailCountErr)
 }
 
 type mockOutboundDispatcher struct {
@@ -1348,6 +1355,8 @@ func TestProcessGitHubEvent(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"number": 522, "state": "closed"}]`))
 		case strings.Contains(r.URL.Path, "/pulls/543"):
 			_, _ = w.Write([]byte(`{"number": 543, "mergeable": false, "mergeable_state": "dirty"}`))
+		case strings.Contains(r.URL.Path, "/issues/525/comments"):
+			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1479,6 +1488,27 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload: `{"action":"completed","check_run":{"name":"Tests","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
 			wantPR:  518, wantCIFailedCalls: 1,
+		},
+		{
+			name: "check_run failure for roborev enriches prompt with latest comment", event: "check_run", delivery: "del-cr-roborev",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "roborev", wantPrompts: 1, wantPromptSubstr: "Found SQL injection in query",
+		},
+		{
+			name: "check_run failure with ciFailCount exceeding cap suppresses prompt and dispatches cap DM", event: "check_run", delivery: "del-cr-cap",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true, ciFailCount: 4},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "remediation cap 3/3 reached", wantPrompts: 0,
+		},
+		{
+			name: "check_run failure with ciFailCount error still dispatches prompt", event: "check_run", delivery: "del-cr-failcount-err",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true, ciFailCountErr: errors.New("db error")},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "Lint", wantPrompts: 1, wantPromptSubstr: "Lint",
 		},
 		{
 			name: "check_run timed_out with PR in payload transitions registry", event: "check_run", delivery: "del-cr-timeout",
@@ -4128,6 +4158,14 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "BackfillPushMergeSHA not found", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "BackfillPushMergeSHA db error", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: errors.New("db error"), wantErr: true},
 
+		// IncrementCIFailCount
+		{name: "IncrementCIFailCount success", op: "IncrementCIFailCount", repo: "azylman/aerial", prNumber: 42, wantPRNum: 2},
+		{name: "IncrementCIFailCount not found", op: "IncrementCIFailCount", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantPRNum: 0},
+		{name: "IncrementCIFailCount db error", op: "IncrementCIFailCount", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
+		{name: "IncrementCIFailCount nil pool guard", op: "IncrementCIFailCount", nilPool: true, repo: "azylman/aerial", prNumber: 42},
+		{name: "IncrementCIFailCount empty repo guard", op: "IncrementCIFailCount", repo: "", prNumber: 42},
+		{name: "IncrementCIFailCount prNumber zero guard", op: "IncrementCIFailCount", repo: "azylman/aerial", prNumber: 0},
+
 		// AtomicTransitionCIFailed
 		{name: "AtomicTransitionCIFailed success", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true},
 		{name: "AtomicTransitionCIFailed not found", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
@@ -4404,6 +4442,14 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				}
 				if gotTarget != tc.wantTarget {
 					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "IncrementCIFailCount":
+				gotCount, err := reg.IncrementCIFailCount(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("IncrementCIFailCount err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotCount != tc.wantPRNum {
+					t.Errorf("gotCount = %d, want %d", gotCount, tc.wantPRNum)
 				}
 			case "AtomicTransitionCIFailed":
 				gotTarget, updated, err := reg.AtomicTransitionCIFailed(ctx, tc.repo, tc.prNumber)
@@ -5190,6 +5236,59 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 			}
 			if msgID != tc.wantMsgID {
 				t.Errorf("got msgID = %q, want %q", msgID, tc.wantMsgID)
+			}
+		})
+	}
+}
+
+
+func TestFetchLatestRoboRevComment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/issues/10/comments") {
+			_, _ = w.Write([]byte(`[
+				{"id": 1, "body": "regular comment"},
+				{"id": 2, "body": "## roborev: Review Complete (` + "`sha1111`" + `)\nold report"},
+				{"id": 3, "body": "## roborev: Combined Review (` + "`sha2222`" + `)\nfound issue"},
+				{"id": 4, "body": "## roborev: Combined Review (` + "`fullsha3333333333`" + `)\nfull sha match"}
+			]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(mockServer.Close)
+
+	router := newTestRouter(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client(), &mockPRRegistry{}, &mockOutboundDispatcher{})
+
+	tests := []struct {
+		name     string
+		srv      *RouterServer
+		repo     string
+		prNumber int
+		headSHA  string
+		wantSub  string
+	}{
+		{name: "nil server guard", srv: nil, repo: "azylman/aerial", prNumber: 10, headSHA: "sha2222", wantSub: ""},
+		{name: "empty repo guard", srv: router, repo: "", prNumber: 10, headSHA: "sha2222", wantSub: ""},
+		{name: "invalid prNumber guard", srv: router, repo: "azylman/aerial", prNumber: 0, headSHA: "sha2222", wantSub: ""},
+		{name: "github api 404", srv: router, repo: "azylman/aerial", prNumber: 99, headSHA: "sha2222", wantSub: ""},
+		{name: "matching short sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "sha2222extra", wantSub: "found issue"},
+		{name: "matching full sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "fullsha3333333333", wantSub: "full sha match"},
+		{name: "no matching sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "nomatchsha", wantSub: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.srv.fetchLatestRoboRevComment(ctx, tc.repo, tc.prNumber, tc.headSHA)
+			if tc.wantSub == "" && got != "" {
+				t.Fatalf("fetchLatestRoboRevComment got %q, want empty", got)
+			}
+			if tc.wantSub != "" && !strings.Contains(got, tc.wantSub) {
+				t.Fatalf("fetchLatestRoboRevComment got %q, want substring %q", got, tc.wantSub)
 			}
 		})
 	}
