@@ -2263,6 +2263,81 @@ function renderBuildQueueCards() {
     });
 }
 
+function renderInlineMarkdown(text) {
+    if (text == null || text === '') return '';
+    const tokens = [];
+    const stash = (html) => `\u0000${tokens.push(html) - 1}\u0000`;
+    const fmt = (str) => str
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(?<![a-zA-Z0-9])__([^_]+)__(?![a-zA-Z0-9])/g, '<strong>$1</strong>')
+        .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+
+    let s = escapeHtml(String(text).replace(/\u0000/g, '').replace(/`([^`\n]+)`/g, (_, c) =>
+        stash(`<code class="md-inline-code">${escapeHtml(c)}</code>`)
+    ));
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) =>
+        /^(https?:\/\/|\/(?!\/))[^\s"']*$/i.test(url)
+            ? stash(`<a href="${url}" target="_blank" rel="noopener noreferrer" class="md-link">${fmt(label)}</a>`)
+            : fmt(label)
+    );
+    return fmt(s).replace(/\u0000(\d+)\u0000/g, (_, idx) => tokens[Number(idx)] || '');
+}
+
+function renderMarkdown(text) {
+    if (text == null || text === '') return '';
+    const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+    const out = [];
+    let inCode = false, codeLang = '', codeLines = [], listTag = '', paraLines = [];
+
+    const flushPara = () => {
+        if (paraLines.length) { out.push(`<p class="md-p">${paraLines.join('<br>')}</p>`); paraLines = []; }
+    };
+    const flushList = () => {
+        if (listTag) { out.push(`</${listTag}>`); listTag = ''; }
+    };
+    const flushCode = () => {
+        const attr = codeLang ? ` data-lang="${escapeHtml(codeLang)}"` : '';
+        out.push(`<pre class="md-code-block"><code${attr}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+        inCode = false; codeLang = ''; codeLines = [];
+    };
+
+    for (const line of lines) {
+        const fence = line.match(/^\s*```([a-zA-Z0-9_-]*)\s*$/);
+        if (fence) {
+            if (inCode) flushCode();
+            else { flushPara(); flushList(); inCode = true; codeLang = fence[1] || ''; }
+            continue;
+        }
+        if (inCode) { codeLines.push(line); continue; }
+        if (/^\s*$/.test(line)) { flushPara(); flushList(); continue; }
+        if (/^\s*(?:---|\*\*\*|___)\s*$/.test(line)) { flushPara(); flushList(); out.push('<hr class="md-hr">'); continue; }
+        const h = line.match(/^\s*(#{1,6})\s+(.+)$/);
+        if (h) { flushPara(); flushList(); out.push(`<h${h[1].length} class="md-heading md-h${h[1].length}">${renderInlineMarkdown(h[2])}</h${h[1].length}>`); continue; }
+        const bq = line.match(/^\s*>\s?(.*)$/);
+        if (bq) { flushPara(); flushList(); out.push(`<blockquote class="md-blockquote">${renderInlineMarkdown(bq[1])}</blockquote>`); continue; }
+        const ul = line.match(/^\s*[-*•]\s+(.+)$/);
+        if (ul) {
+            flushPara();
+            if (listTag !== 'ul') { flushList(); out.push('<ul class="md-list">'); listTag = 'ul'; }
+            out.push(`<li>${renderInlineMarkdown(ul[1])}</li>`);
+            continue;
+        }
+        const ol = line.match(/^\s*\d+\.\s+(.+)$/);
+        if (ol) {
+            flushPara();
+            if (listTag !== 'ol') { flushList(); out.push('<ol class="md-list md-ol">'); listTag = 'ol'; }
+            out.push(`<li>${renderInlineMarkdown(ol[1])}</li>`);
+            continue;
+        }
+        flushList();
+        paraLines.push(renderInlineMarkdown(line));
+    }
+    if (inCode) flushCode();
+    flushPara();
+    flushList();
+    return out.join('');
+}
+
 function renderBuildDetailContent(build, chunks) {
     if (!build) return '';
     const bodyEl = document.getElementById('drawer-body');
@@ -2310,15 +2385,15 @@ function renderBuildDetailContent(build, chunks) {
             const acceptanceCriteria = (Array.isArray(chunk.acceptance_criteria) && chunk.acceptance_criteria.length > 0) ? `
                 <div class="chunk-section">
                     <span class="chunk-section-label">ACCEPTANCE CRITERIA</span>
-                    <ul class="chunk-criteria-list">
-                        ${chunk.acceptance_criteria.map(c => `<li>${escapeHtml(c)}</li>`).join('')}
+                    <ul class="chunk-criteria-list markdown-body">
+                        ${chunk.acceptance_criteria.map(c => `<li>${renderInlineMarkdown(c)}</li>`).join('')}
                     </ul>
                 </div>` : '';
 
             const instructions = chunk.instructions ? `
                 <details class="chunk-section chunk-instructions-details">
                     <summary class="chunk-section-label chunk-instructions-toggle"><span class="chunk-instructions-chevron">▸</span> INSTRUCTIONS</summary>
-                    <div class="chunk-instructions-box">${escapeHtml(chunk.instructions)}</div>
+                    <div class="chunk-instructions-box markdown-body">${renderMarkdown(chunk.instructions)}</div>
                 </details>` : '';
 
             return `
@@ -2349,7 +2424,7 @@ function renderBuildDetailContent(build, chunks) {
     const sharedContextHtml = build.shared_context ? `
         <div class="build-drawer-section">
             <span class="build-drawer-section-label">SHARED BUILD CONTEXT</span>
-            <pre class="build-context-box">${escapeHtml(build.shared_context)}</pre>
+            <div class="build-context-box markdown-body">${renderMarkdown(build.shared_context)}</div>
         </div>` : '';
 
     const html = `
@@ -2362,7 +2437,7 @@ function renderBuildDetailContent(build, chunks) {
             <h3 class="build-drawer-title">${escapeHtml(build.title || build.id)}</h3>
             <div class="build-drawer-section">
                 <span class="build-drawer-section-label">OBJECTIVE</span>
-                <p class="build-objective-text">${escapeHtml(build.objective || 'No objective provided')}</p>
+                <div class="build-objective-text markdown-body">${renderMarkdown(build.objective || 'No objective provided')}</div>
             </div>
             ${sharedContextHtml}
             <div class="build-drawer-progress-bar">

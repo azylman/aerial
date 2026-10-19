@@ -1383,6 +1383,70 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.ok(!html.includes('<img src=x onerror=alert(1)>'));
                 assert.ok(!html.includes('<script>evil()</script>'));
             });
+
+            it('renders markdown in objective, shared_context, instructions, and acceptance_criteria safely', () => {
+                assert.equal(typeof sandbox.renderMarkdown, 'function', 'renderMarkdown must be exported');
+                assert.equal(typeof sandbox.renderInlineMarkdown, 'function', 'renderInlineMarkdown must be exported');
+                assert.equal(sandbox.renderMarkdown(null), '');
+                assert.equal(sandbox.renderMarkdown(''), '');
+
+                const mdSample = [
+                    '### Build Spec',
+                    'Use **strict** and *clean* `go test` with [Docs](https://github.com/azylman/aerial) and [Evil](javascript:alert(1)).',
+                    '',
+                    '- First bullet',
+                    '- Second `code` bullet',
+                    '',
+                    '1. Step one',
+                    '2. Step two',
+                    '',
+                    '> Quoted invariant',
+                    '',
+                    '```go',
+                    'func main() { fmt.Println("<ok>") }',
+                    '```'
+                ].join('\n');
+
+                const rendered = sandbox.renderMarkdown(mdSample);
+                assert.ok(rendered.includes('<h3 class="md-heading md-h3">Build Spec</h3>'));
+                assert.ok(rendered.includes('<strong>strict</strong>'));
+                assert.ok(rendered.includes('<em>clean</em>'));
+                assert.ok(rendered.includes('<code class="md-inline-code">go test</code>'));
+                assert.ok(rendered.includes('<a href="https://github.com/azylman/aerial" target="_blank" rel="noopener noreferrer" class="md-link">Docs</a>'));
+                assert.ok(!rendered.includes('href="javascript:'), 'javascript: URLs must be rejected');
+                assert.ok(rendered.includes('<ul class="md-list"><li>First bullet</li><li>Second <code class="md-inline-code">code</code> bullet</li></ul>'));
+                assert.ok(rendered.includes('<ol class="md-list md-ol"><li>Step one</li><li>Step two</li></ol>'));
+                assert.ok(rendered.includes('<blockquote class="md-blockquote">Quoted invariant</blockquote>'));
+                assert.ok(rendered.includes('<pre class="md-code-block"><code data-lang="go">func main() { fmt.Println(&quot;&lt;ok&gt;&quot;) }</code></pre>'));
+
+                const build = {
+                    id: 'build-md',
+                    tier: 2,
+                    title: 'Markdown Overlay Build',
+                    objective: 'Render **bold objective** with `inlineCode`',
+                    shared_context: '## Shared Header\n- Context item 1',
+                    status: 'running'
+                };
+                const chunks = [
+                    {
+                        chunk_index: 1,
+                        title: 'Markdown Chunk',
+                        status: 'running',
+                        acceptance_criteria: ['Verify `node --test` passes **cleanly**'],
+                        instructions: '### Step 1\nRun `scripts/verify.sh --staged`'
+                    }
+                ];
+
+                const html = renderBuildDetailContent(build, chunks);
+                assert.ok(html.includes('class="build-objective-text markdown-body"'));
+                assert.ok(html.includes('<strong>bold objective</strong>'));
+                assert.ok(html.includes('<code class="md-inline-code">inlineCode</code>'));
+                assert.ok(html.includes('class="build-context-box markdown-body"'));
+                assert.ok(html.includes('<h2 class="md-heading md-h2">Shared Header</h2>'));
+                assert.ok(html.includes('class="chunk-instructions-box markdown-body"'));
+                assert.ok(html.includes('<h3 class="md-heading md-h3">Step 1</h3>'));
+                assert.ok(html.includes('<li>Verify <code class="md-inline-code">node --test</code> passes <strong>cleanly</strong></li>'));
+            });
         });
 
         describe('updateBuildsMetrics() & renderBuildsPills()', () => {
