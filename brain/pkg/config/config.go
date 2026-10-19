@@ -3,7 +3,6 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -464,28 +463,41 @@ func cloneInterfaceMap(m map[string]interface{}) map[string]interface{} {
 	return res
 }
 
+func clonePtr[T any](src *T) *T {
+	if src == nil {
+		return nil
+	}
+	v := *src
+	return &v
+}
+
+func cloneStringSlice(src []string) []string {
+	if src == nil {
+		return nil
+	}
+	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func cloneRawMessageMap(src map[string]json.RawMessage) map[string]json.RawMessage {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]json.RawMessage, len(src))
+	for k, v := range src {
+		dst[k] = append(json.RawMessage(nil), v...)
+	}
+	return dst
+}
+
 func cloneChannelPolicy(p ChannelPolicy) ChannelPolicy {
 	cp := p
-	if p.IgnoreBots != nil {
-		b := *p.IgnoreBots
-		cp.IgnoreBots = &b
-	}
-	if p.AmbientWakeThreshold != nil {
-		f := *p.AmbientWakeThreshold
-		cp.AmbientWakeThreshold = &f
-	}
-	if p.Hooks.OnWake != nil {
-		w := *p.Hooks.OnWake
-		cp.Hooks.OnWake = &w
-	}
-	if p.Hooks.PreTurn != nil {
-		w := *p.Hooks.PreTurn
-		cp.Hooks.PreTurn = &w
-	}
-	if p.Hooks.PostTurn != nil {
-		w := *p.Hooks.PostTurn
-		cp.Hooks.PostTurn = &w
-	}
+	cp.IgnoreBots = clonePtr(p.IgnoreBots)
+	cp.AmbientWakeThreshold = clonePtr(p.AmbientWakeThreshold)
+	cp.Hooks.OnWake = clonePtr(p.Hooks.OnWake)
+	cp.Hooks.PreTurn = clonePtr(p.Hooks.PreTurn)
+	cp.Hooks.PostTurn = clonePtr(p.Hooks.PostTurn)
 	if p.AmbientContext != nil {
 		cp.AmbientContext = cloneAmbientContextConfig(p.AmbientContext)
 	}
@@ -497,56 +509,27 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 		return nil
 	}
 	dst := *src
-
-	if src.AdminUsers != nil {
-		dst.AdminUsers = make([]string, len(src.AdminUsers))
-		copy(dst.AdminUsers, src.AdminUsers)
-	}
+	dst.AdminUsers = cloneStringSlice(src.AdminUsers)
 	if src.Channels != nil {
 		dst.Channels = make(map[string]ChannelPolicy, len(src.Channels))
 		for k, v := range src.Channels {
 			dst.Channels[k] = cloneChannelPolicy(v)
 		}
 	}
-	dst.McpServers = TargetMcpConfig{}
-	if src.McpServers.Common != nil {
-		dst.McpServers.Common = make(map[string]json.RawMessage, len(src.McpServers.Common))
-		for k, v := range src.McpServers.Common {
-			dst.McpServers.Common[k] = append(json.RawMessage(nil), v...)
-		}
+	dst.McpServers = TargetMcpConfig{
+		Common:    cloneRawMessageMap(src.McpServers.Common),
+		Discord:   cloneRawMessageMap(src.McpServers.Discord),
+		Voice:     cloneRawMessageMap(src.McpServers.Voice),
+		Ephemeral: cloneRawMessageMap(src.McpServers.Ephemeral),
 	}
-	if src.McpServers.Discord != nil {
-		dst.McpServers.Discord = make(map[string]json.RawMessage, len(src.McpServers.Discord))
-		for k, v := range src.McpServers.Discord {
-			dst.McpServers.Discord[k] = append(json.RawMessage(nil), v...)
-		}
+	dst.Voice = VoiceConfig{
+		Engine:           src.Voice.Engine,
+		Model:            src.Voice.Model,
+		PrewarmedTargets: cloneStringSlice(src.Voice.PrewarmedTargets),
+		AllowedTools:     cloneStringSlice(src.Voice.AllowedTools),
 	}
-	if src.McpServers.Voice != nil {
-		dst.McpServers.Voice = make(map[string]json.RawMessage, len(src.McpServers.Voice))
-		for k, v := range src.McpServers.Voice {
-			dst.McpServers.Voice[k] = append(json.RawMessage(nil), v...)
-		}
-	}
-	if src.McpServers.Ephemeral != nil {
-		dst.McpServers.Ephemeral = make(map[string]json.RawMessage, len(src.McpServers.Ephemeral))
-		for k, v := range src.McpServers.Ephemeral {
-			dst.McpServers.Ephemeral[k] = append(json.RawMessage(nil), v...)
-		}
-	}
-	dst.Voice = VoiceConfig{}
-	dst.Voice.Engine = src.Voice.Engine
-	dst.Voice.Model = src.Voice.Model
-	if src.Voice.PrewarmedTargets != nil {
-		dst.Voice.PrewarmedTargets = make([]string, len(src.Voice.PrewarmedTargets))
-		copy(dst.Voice.PrewarmedTargets, src.Voice.PrewarmedTargets)
-	} else {
+	if dst.Voice.PrewarmedTargets == nil {
 		dst.Voice.PrewarmedTargets = []string{}
-	}
-	if src.Voice.AllowedTools != nil {
-		dst.Voice.AllowedTools = make([]string, len(src.Voice.AllowedTools))
-		copy(dst.Voice.AllowedTools, src.Voice.AllowedTools)
-	} else {
-		dst.Voice.AllowedTools = nil
 	}
 	if src.Voice.AmbientContext != nil {
 		dst.Voice.AmbientContext = cloneAmbientContextConfig(src.Voice.AmbientContext)
@@ -657,17 +640,7 @@ func (c *Config) VoiceEngine() string {
 	if c == nil {
 		return "agy"
 	}
-	cur := c.Current()
-	if cur == nil {
-		return "agy"
-	}
-	engine := strings.ToLower(strings.TrimSpace(cur.Voice.Engine))
-	switch engine {
-	case "gemini_api", "gemini", "direct_api":
-		return "gemini_api"
-	default:
-		return "agy"
-	}
+	return c.Current().VoiceEngine()
 }
 
 // VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
@@ -689,11 +662,7 @@ func (c *Config) VoiceModel() string {
 	if c == nil {
 		return ""
 	}
-	cur := c.Current()
-	if cur == nil {
-		return ""
-	}
-	return strings.TrimSpace(cur.Voice.Model)
+	return c.Current().VoiceModel()
 }
 
 // VoiceModel returns the configured voice model override, or empty string if not set.
@@ -858,6 +827,25 @@ func buildPostgresDSN(lookup func(string) string) string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
 }
 
+func overrideEnvStr(dst *string, lookup func(string) string, keys ...string) {
+	for _, k := range keys {
+		if v := getEnvFromLookup(lookup, k, ""); v != "" {
+			*dst = v
+			return
+		}
+	}
+}
+
+func overrideEnvDuration(dst *time.Duration, lookup func(string) string, key string, allowZero bool) {
+	if v := getEnvFromLookup(lookup, key, ""); v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil {
+			if allowZero || d > 0 {
+				*dst = d
+			}
+		}
+	}
+}
+
 func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	if data == nil {
 		return
@@ -865,118 +853,48 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	if lookup == nil {
 		lookup = func(string) string { return "" }
 	}
-	if p := getEnvFromLookup(lookup, "PORT", ""); p != "" {
-		data.Port = p
-	}
-	if b := getEnvFromLookup(lookup, "AGY_BIN", ""); b != "" {
-		data.AgyBin = b
-	}
-	if k := getEnvFromLookup(lookup, "AGY_GEMINI_API_KEY", getEnvFromLookup(lookup, "AGY_API_KEY", "")); k != "" {
-		data.APIKey = k
-	}
-	if hk := getEnvFromLookup(lookup, "GEMINI_HARNESS_API_KEY", getEnvFromLookup(lookup, "AERIAL_GEMINI_API_KEY", "")); hk != "" {
-		data.HarnessAPIKey = hk
-	}
-	if sp := getEnvFromLookup(lookup, "SYSTEM_PROMPT", ""); sp != "" {
-		data.SystemPrompt = sp
-	}
-	if dt := getEnvFromLookup(lookup, "DISCORD_TOKEN", getEnvFromLookup(lookup, "DISCORD_BOT_TOKEN", "")); dt != "" {
-		data.DiscordToken = dt
-	}
-	if pat := getEnvFromLookup(lookup, "GITHUB_PAT", ""); pat != "" {
-		data.GitHubPAT = pat
-	}
+	overrideEnvStr(&data.Port, lookup, "PORT")
+	overrideEnvStr(&data.AgyBin, lookup, "AGY_BIN")
+	overrideEnvStr(&data.APIKey, lookup, "AGY_GEMINI_API_KEY", "AGY_API_KEY")
+	overrideEnvStr(&data.HarnessAPIKey, lookup, "GEMINI_HARNESS_API_KEY", "AERIAL_GEMINI_API_KEY")
+	overrideEnvStr(&data.SystemPrompt, lookup, "SYSTEM_PROMPT")
+	overrideEnvStr(&data.DiscordToken, lookup, "DISCORD_TOKEN", "DISCORD_BOT_TOKEN")
+	overrideEnvStr(&data.GitHubPAT, lookup, "GITHUB_PAT")
 	if dsn := buildPostgresDSN(lookup); dsn != "" {
 		data.DatabaseURL = dsn
 	}
-	if m := getEnvFromLookup(lookup, "AGY_MODEL", ""); m != "" {
-		data.Model = m
-	}
-	if tz := getEnvFromLookup(lookup, "DEFAULT_TIMEZONE", getEnvFromLookup(lookup, "TZ", "")); tz != "" {
-		data.Timezone = tz
-	}
-	if sc := getEnvFromLookup(lookup, "SYSTEM_CHANNEL", ""); sc != "" {
-		data.SystemChannel = sc
-	}
-	if lem := getEnvFromLookup(lookup, "LOW_EFFORT_MODEL", getEnvFromLookup(lookup, "AMBIENT_CLASSIFIER_MODEL", "")); lem != "" {
-		data.LowEffortModel = lem
-	}
-	if mem := getEnvFromLookup(lookup, "MEDIUM_EFFORT_MODEL", ""); mem != "" {
-		data.MediumEffortModel = mem
-	}
-	if cu := getEnvFromLookup(lookup, "CLASSIFIER_URL", ""); cu != "" {
-		data.ClassifierURL = cu
-	}
-	if cm := getEnvFromLookup(lookup, "CLASSIFIER_MODEL", ""); cm != "" {
-		data.ClassifierModel = cm
-	}
+	overrideEnvStr(&data.Model, lookup, "AGY_MODEL")
+	overrideEnvStr(&data.Timezone, lookup, "DEFAULT_TIMEZONE", "TZ")
+	overrideEnvStr(&data.SystemChannel, lookup, "SYSTEM_CHANNEL")
+	overrideEnvStr(&data.LowEffortModel, lookup, "LOW_EFFORT_MODEL", "AMBIENT_CLASSIFIER_MODEL")
+	overrideEnvStr(&data.MediumEffortModel, lookup, "MEDIUM_EFFORT_MODEL")
+	overrideEnvStr(&data.ClassifierURL, lookup, "CLASSIFIER_URL")
+	overrideEnvStr(&data.ClassifierModel, lookup, "CLASSIFIER_MODEL")
 	if cp := getEnvFromLookup(lookup, "CLASSIFIER_PROTOCOL", ""); cp != "" {
 		data.ClassifierProtocol = strings.ToLower(strings.TrimSpace(cp))
 	}
-	if tu := getEnvFromLookup(lookup, "THREAD_TITLE_URL", ""); tu != "" {
-		data.ThreadTitleURL = tu
-	}
-	if tm := getEnvFromLookup(lookup, "THREAD_TITLE_MODEL", ""); tm != "" {
-		data.ThreadTitleModel = tm
-	}
-	if ou := getEnvFromLookup(lookup, "OLLAMA_URL", ""); ou != "" {
-		data.Ollama.BaseURL = ou
-	}
-	if om := getEnvFromLookup(lookup, "EMBEDDING_MODEL", getEnvFromLookup(lookup, "OLLAMA_EMBEDDING_MODEL", "")); om != "" {
-		data.Ollama.Model = om
-	}
-	if qp := getEnvFromLookup(lookup, "EMBEDDING_QUERY_PREFIX", ""); qp != "" {
-		data.Ollama.QueryPrefix = qp
-	}
+	overrideEnvStr(&data.ThreadTitleURL, lookup, "THREAD_TITLE_URL")
+	overrideEnvStr(&data.ThreadTitleModel, lookup, "THREAD_TITLE_MODEL")
+	overrideEnvStr(&data.Ollama.BaseURL, lookup, "OLLAMA_URL")
+	overrideEnvStr(&data.Ollama.Model, lookup, "EMBEDDING_MODEL", "OLLAMA_EMBEDDING_MODEL")
+	overrideEnvStr(&data.Ollama.QueryPrefix, lookup, "EMBEDDING_QUERY_PREFIX")
 	if ncStr := getEnvFromLookup(lookup, "OLLAMA_NUM_CTX", getEnvFromLookup(lookup, "EMBEDDING_NUM_CTX", "")); ncStr != "" {
 		if nc, err := strconv.Atoi(strings.TrimSpace(ncStr)); err == nil && nc > 0 {
 			data.Ollama.NumCtx = nc
 		}
 	}
-	if gh := getEnvFromLookup(lookup, "GEMINI_HOME", ""); gh != "" {
-		data.GeminiHomeDir = gh
-	}
-	if dd := getEnvFromLookup(lookup, "DATA_DIR", ""); dd != "" {
-		data.DataDir = dd
-	}
-	if mcp := getEnvFromLookup(lookup, "MCP_CONFIG", ""); mcp != "" {
-		data.MCPConfig = mcp
-	}
-	if oUrl := getEnvFromLookup(lookup, "OPENOBSERVE_URL", ""); oUrl != "" {
-		data.OpenObserveURL = oUrl
-	}
-	if oOrg := getEnvFromLookup(lookup, "OPENOBSERVE_ORG", ""); oOrg != "" {
-		data.OpenObserveOrg = oOrg
-	}
-	if oUser := getEnvFromLookup(lookup, "OPENOBSERVE_ROOT_USER_EMAIL", getEnvFromLookup(lookup, "OPENOBSERVE_USER", "")); oUser != "" {
-		data.OpenObserveUser = oUser
-	}
-	if oPass := getEnvFromLookup(lookup, "OPENOBSERVE_ROOT_USER_PASSWORD", getEnvFromLookup(lookup, "OPENOBSERVE_PASSWORD", "")); oPass != "" {
-		data.OpenObservePassword = oPass
-	}
+	overrideEnvStr(&data.GeminiHomeDir, lookup, "GEMINI_HOME")
+	overrideEnvStr(&data.DataDir, lookup, "DATA_DIR")
+	overrideEnvStr(&data.MCPConfig, lookup, "MCP_CONFIG")
+	overrideEnvStr(&data.OpenObserveURL, lookup, "OPENOBSERVE_URL")
+	overrideEnvStr(&data.OpenObserveOrg, lookup, "OPENOBSERVE_ORG")
+	overrideEnvStr(&data.OpenObserveUser, lookup, "OPENOBSERVE_ROOT_USER_EMAIL", "OPENOBSERVE_USER")
+	overrideEnvStr(&data.OpenObservePassword, lookup, "OPENOBSERVE_ROOT_USER_PASSWORD", "OPENOBSERVE_PASSWORD")
+	overrideEnvDuration(&data.DaemonIdleTimeout, lookup, "DAEMON_IDLE_TIMEOUT", false)
+	overrideEnvDuration(&data.MaxBackgroundTaskDuration, lookup, "MAX_BACKGROUND_TASK_DURATION", false)
 }
 
 var activeGlobalConfig = NewFromData(DefaultConfigData())
-
-func getFallbackDefaults() ConfigData {
-	data := DefaultConfigData()
-
-	// Read from active config snapshot (zero ambient reads)
-	cfg := activeGlobalConfig.Current()
-	if cfg != nil {
-		if strings.TrimSpace(cfg.Model) != "" {
-			data.Model = cfg.Model
-		}
-		if strings.TrimSpace(cfg.Timezone) != "" {
-			data.Timezone = cfg.Timezone
-		}
-		if strings.TrimSpace(cfg.SystemChannel) != "" {
-			data.SystemChannel = cfg.SystemChannel
-		}
-	}
-
-	return *data
-}
 
 // ActiveConfig returns the global active *Config instance.
 func ActiveConfig() *Config {
@@ -1118,6 +1036,38 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 	return activeGlobalConfig, nil
 }
 
+func validateChannelPolicy(name string, p *ChannelPolicy, isDefault bool, targetPath string) error {
+	prefix := fmt.Sprintf("channel %q", name)
+	if isDefault {
+		prefix = "channels.default"
+	}
+	if isDefault || p.Mode != "" {
+		m := strings.ToLower(strings.TrimSpace(p.Mode))
+		if m != "thread" && m != "threads" && m != "classifier" && m != "mention" && m != "ignore" && m != "channel" && m != "disabled" {
+			log.Printf("[Config] Validation error: %s mode must be 'threads', 'channel', 'ignore', or 'disabled' (or 'thread', 'classifier', 'mention'), got %q in %s.", prefix, p.Mode, targetPath)
+			return fmt.Errorf("%s mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", prefix, p.Mode)
+		}
+		p.Mode = m
+	}
+	if p.AmbientWakeThreshold != nil {
+		if *p.AmbientWakeThreshold < 0.0 || *p.AmbientWakeThreshold > 1.0 {
+			log.Printf("[Config] Validation error: %s ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s.", prefix, *p.AmbientWakeThreshold, targetPath)
+			return fmt.Errorf("%s ambient_wake_threshold must be between 0.0 and 1.0, got %f", prefix, *p.AmbientWakeThreshold)
+		}
+	}
+	if p.WakeMode != "" {
+		wLower := strings.ToLower(strings.TrimSpace(p.WakeMode))
+		if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
+			wLower != "classifier" && wLower != "ambient" &&
+			wLower != "all" && wLower != "always" {
+			log.Printf("[Config] Validation error: %s wake_mode must be 'mention', 'classifier', or 'all', got %q in %s.", prefix, p.WakeMode, targetPath)
+			return fmt.Errorf("%s wake_mode must be 'mention', 'classifier', or 'all', got %q", prefix, p.WakeMode)
+		}
+		p.WakeMode = p.GetWakeMode()
+	}
+	return validateHooks(name, p.Hooks, targetPath)
+}
+
 func validateChannels(parsed *ConfigData, targetPath string) error {
 	if strings.TrimSpace(parsed.Model) == "" {
 		parsed.Model = DefaultConfigData().Model
@@ -1163,65 +1113,16 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 		return fmt.Errorf("channels.default is required")
 	}
 
-	defMode := strings.ToLower(strings.TrimSpace(defPolicy.Mode))
-	if defMode != "thread" && defMode != "threads" && defMode != "classifier" && defMode != "mention" && defMode != "ignore" && defMode != "channel" && defMode != "disabled" {
-		log.Printf("[Config] Validation error: channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled' (or 'thread', 'classifier', 'mention'), got %q in %s.", defPolicy.Mode, targetPath)
-		return fmt.Errorf("channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", defPolicy.Mode)
-	}
-
-	if defPolicy.AmbientWakeThreshold != nil {
-		if *defPolicy.AmbientWakeThreshold < 0.0 || *defPolicy.AmbientWakeThreshold > 1.0 {
-			log.Printf("[Config] Validation error: channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s.", *defPolicy.AmbientWakeThreshold, targetPath)
-			return fmt.Errorf("channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f", *defPolicy.AmbientWakeThreshold)
-		}
-	}
-
-	if defPolicy.WakeMode != "" {
-		wLower := strings.ToLower(strings.TrimSpace(defPolicy.WakeMode))
-		if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
-			wLower != "classifier" && wLower != "ambient" &&
-			wLower != "all" && wLower != "always" {
-			log.Printf("[Config] Validation error: channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q in %s.", defPolicy.WakeMode, targetPath)
-			return fmt.Errorf("channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q", defPolicy.WakeMode)
-		}
-		defPolicy.WakeMode = defPolicy.GetWakeMode()
-	}
-
-	if err := validateHooks("default", defPolicy.Hooks, targetPath); err != nil {
+	if err := validateChannelPolicy("default", &defPolicy, true, targetPath); err != nil {
 		return err
 	}
-
 	parsed.Channels["default"] = defPolicy
 
 	for k, policy := range parsed.Channels {
 		if k == "default" {
 			continue
 		}
-		if policy.Mode != "" {
-			modeLower := strings.ToLower(strings.TrimSpace(policy.Mode))
-			if modeLower != "thread" && modeLower != "threads" && modeLower != "classifier" && modeLower != "mention" && modeLower != "ignore" && modeLower != "channel" && modeLower != "disabled" {
-				log.Printf("[Config] Validation error: channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled' (or 'thread', 'classifier', 'mention'), got %q in %s.", k, policy.Mode, targetPath)
-				return fmt.Errorf("channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", k, policy.Mode)
-			}
-			policy.Mode = modeLower
-		}
-		if policy.AmbientWakeThreshold != nil {
-			if *policy.AmbientWakeThreshold < 0.0 || *policy.AmbientWakeThreshold > 1.0 {
-				log.Printf("[Config] Validation error: channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s.", k, *policy.AmbientWakeThreshold, targetPath)
-				return fmt.Errorf("channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f", k, *policy.AmbientWakeThreshold)
-			}
-		}
-		if policy.WakeMode != "" {
-			wLower := strings.ToLower(strings.TrimSpace(policy.WakeMode))
-			if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
-				wLower != "classifier" && wLower != "ambient" &&
-				wLower != "all" && wLower != "always" {
-				log.Printf("[Config] Validation error: channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q in %s.", k, policy.WakeMode, targetPath)
-				return fmt.Errorf("channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q", k, policy.WakeMode)
-			}
-			policy.WakeMode = policy.GetWakeMode()
-		}
-		if err := validateHooks(k, policy.Hooks, targetPath); err != nil {
+		if err := validateChannelPolicy(k, &policy, false, targetPath); err != nil {
 			return err
 		}
 		parsed.Channels[k] = policy
@@ -1329,34 +1230,30 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	if res.WakeMode == "" && def.WakeMode != "" {
 		res.WakeMode = def.WakeMode
 	}
-	if res.IgnoreBots == nil && def.IgnoreBots != nil {
-		val := *def.IgnoreBots
-		res.IgnoreBots = &val
+	if res.IgnoreBots == nil {
+		res.IgnoreBots = clonePtr(def.IgnoreBots)
+	} else {
+		res.IgnoreBots = clonePtr(res.IgnoreBots)
 	}
-	if res.AmbientWakeThreshold == nil && def.AmbientWakeThreshold != nil {
-		val := *def.AmbientWakeThreshold
-		res.AmbientWakeThreshold = &val
+	if res.AmbientWakeThreshold == nil {
+		res.AmbientWakeThreshold = clonePtr(def.AmbientWakeThreshold)
+	} else {
+		res.AmbientWakeThreshold = clonePtr(res.AmbientWakeThreshold)
 	}
 	if res.Hooks.OnWake != nil {
-		w := *res.Hooks.OnWake
-		res.Hooks.OnWake = &w
-	} else if def.Hooks.OnWake != nil {
-		w := *def.Hooks.OnWake
-		res.Hooks.OnWake = &w
+		res.Hooks.OnWake = clonePtr(res.Hooks.OnWake)
+	} else {
+		res.Hooks.OnWake = clonePtr(def.Hooks.OnWake)
 	}
 	if res.Hooks.PreTurn != nil {
-		w := *res.Hooks.PreTurn
-		res.Hooks.PreTurn = &w
-	} else if def.Hooks.PreTurn != nil {
-		w := *def.Hooks.PreTurn
-		res.Hooks.PreTurn = &w
+		res.Hooks.PreTurn = clonePtr(res.Hooks.PreTurn)
+	} else {
+		res.Hooks.PreTurn = clonePtr(def.Hooks.PreTurn)
 	}
 	if res.Hooks.PostTurn != nil {
-		w := *res.Hooks.PostTurn
-		res.Hooks.PostTurn = &w
-	} else if def.Hooks.PostTurn != nil {
-		w := *def.Hooks.PostTurn
-		res.Hooks.PostTurn = &w
+		res.Hooks.PostTurn = clonePtr(res.Hooks.PostTurn)
+	} else {
+		res.Hooks.PostTurn = clonePtr(def.Hooks.PostTurn)
 	}
 	if res.AmbientContext != nil {
 		res.AmbientContext = cloneAmbientContextConfig(res.AmbientContext)
@@ -1407,10 +1304,6 @@ func getEnvFromLookup(lookup func(string) string, key, defaultVal string) string
 // GetEnvFromLookup returns the value of the environment variable resolved via lookup or defaultVal.
 func GetEnvFromLookup(lookup func(string) string, key, defaultVal string) string {
 	return getEnvFromLookup(lookup, key, defaultVal)
-}
-
-func getEnv(key, defaultVal string) string {
-	return getEnvFromLookup(os.Getenv, key, defaultVal)
 }
 
 // NormalizeChannelName standardizes channel names for config key and file lookups.
@@ -1509,41 +1402,5 @@ func LoadScopeInstructions(scopeName string) string {
 // Deprecated: Use LoadScopeInstructions instead.
 func LoadChannelInstructions(channelName string) string {
 	return LoadScopeInstructions(channelName)
-}
-
-func writeAtomicFile(targetPath, content string) error {
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	pattern := fmt.Sprintf(".%s.tmp.*", filepath.Base(targetPath))
-	f, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return err
-	}
-	tmpName := f.Name()
-	defer func() {
-		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			log.Printf("[Config] Warning removing temporary atomic file %s: %v", tmpName, rmErr)
-		}
-	}()
-
-	if _, err := f.WriteString(content); err != nil {
-		if closeErr := f.Close(); closeErr != nil {
-			log.Printf("[Config] Warning closing temporary atomic file %s: %v", tmpName, closeErr)
-		}
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-
-	if err := os.Rename(tmpName, targetPath); err != nil {
-		if rmErr := os.Remove(targetPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			log.Printf("[Config] Warning removing target file %s prior to fallback rename: %v", targetPath, rmErr)
-		}
-		return os.Rename(tmpName, targetPath)
-	}
-	return nil
 }
 
