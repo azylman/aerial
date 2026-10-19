@@ -1030,67 +1030,6 @@ func TestIsSafeJobPath_TableDriven(t *testing.T) {
 	}
 }
 
-func TestFindNomadJobsByImage_TableDriven(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	job1 := `job "webhooks-router" {
-		task "router" {
-			config {
-				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
-			}
-		}
-	}`
-	job2 := `job "infisical-mcp" {
-		task "mcp" {
-			config {
-				image = "ghcr.io/azylman/aerial-infisical-mcp:latest"
-			}
-		}
-	}`
-	job3 := `job "multi-task" {
-		task "first" {
-			config {
-				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
-			}
-		}
-	}`
-
-	_ = os.WriteFile(filepath.Join(tmpDir, "webhooks-router.nomad"), []byte(job1), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "infisical-mcp.nomad"), []byte(job2), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "multi-task.nomad"), []byte(job3), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("non-nomad"), 0644)
-
-	matches := FindNomadJobsByImage(tmpDir, "aerial-webhooks-router")
-	if len(matches) != 2 {
-		t.Fatalf("expected 2 matches for aerial-webhooks-router, got %d", len(matches))
-	}
-
-	foundJobNames := make(map[string]bool)
-	for _, m := range matches {
-		foundJobNames[m.JobName] = true
-	}
-	if !foundJobNames["webhooks-router"] || !foundJobNames["multi-task"] {
-		t.Errorf("expected webhooks-router and multi-task, got %v", foundJobNames)
-	}
-
-	noMatches := FindNomadJobsByImage(tmpDir, "nonexistent-image")
-	if len(noMatches) != 0 {
-		t.Errorf("expected 0 matches for nonexistent-image, got %d", len(noMatches))
-	}
-
-	emptyMatches := FindNomadJobsByImage("", "aerial-webhooks-router")
-	if len(emptyMatches) != 0 {
-		t.Errorf("expected 0 matches for empty dir, got %d", len(emptyMatches))
-	}
-
-	if res := FindNomadJobsByImage("/nonexistent/directory/path/12345", "test"); res != nil {
-		t.Errorf("expected nil for nonexistent dir, got %v", res)
-	}
-	if res := FindNomadJobsByImage(t.TempDir(), ""); res != nil {
-		t.Errorf("expected nil for empty imageRef, got %v", res)
-	}
-}
-
 func TestNormalizeGitHubSlug_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string

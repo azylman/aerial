@@ -1038,19 +1038,6 @@ func TestSinkMethods_CoverageAudit(t *testing.T) {
 	if k := pool.ScopeKey(msg); k != "t1" {
 		t.Errorf("expected ScopeKey t1, got %s", k)
 	}
-
-	ds := &DiscordTurnSink{}
-	ds.OnTurnStarted()
-	ds.OnThinking()
-	ds.OnToolCompleted("tool", "srv", time.Second, "ok")
-	ds.OnSkillActivated("skill", "src")
-
-	vs := &VoiceTurnSink{}
-	vs.OnTurnStarted()
-	vs.OnThinking()
-	vs.OnToolCall("tool", "cmd")
-	vs.OnToolCompleted("tool", "srv", time.Second, "ok")
-	vs.OnSkillActivated("skill", "src")
 	_, _ = getPreviousSessionID(nil, "")
 }
 

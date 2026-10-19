@@ -2341,14 +2341,6 @@ func (r *roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 	return r.fn(req)
 }
 
-type mockCloser struct {
-	err error
-}
-
-func (m *mockCloser) Close() error {
-	return m.err
-}
-
 type mockReadCloser struct {
 	io.Reader
 	closeErr error
@@ -2401,12 +2393,6 @@ func (m *mockErrWriter) WriteHeader(statusCode int) {
 }
 
 func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
-	// 1. closeWarn with nil, success, and error
-	closeWarn(nil, "nil closer")
-	closerOk := &mockCloser{err: nil}
-	closeWarn(closerOk, "ok closer")
-	closerErr := &mockCloser{err: errors.New("simulated close error")}
-	closeWarn(closerErr, "err closer")
 
 	// 2. drainAndClose with nil, success, copy error, and close error
 	drainAndClose(nil, "nil body")
@@ -2718,7 +2704,7 @@ func TestGitHubPoller_PollAndDecode(t *testing.T) {
 				emptyRepoPoller.fetchJobsForRun(ctx, 123)
 				return
 			case "unreachable":
-				badPoller := NewGitHubPoller("azylman/aerial", "")
+				badPoller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "")
 				badPoller.apiBaseURL = "http://127.0.0.1:54321"
 				if badPoller.pollOnce(ctx) {
 					t.Errorf("expected false on network failure")
@@ -2745,7 +2731,7 @@ func TestGitHubPoller_PollAndDecode(t *testing.T) {
 				poller = NewMultiGitHubPoller(tc.repos, "test-token")
 				poller.apiBaseURL = mockGH.URL
 			default:
-				poller = NewGitHubPoller(tc.repos[0], "token123")
+				poller = NewMultiGitHubPoller([]string{tc.repos[0]}, "token123")
 				poller.apiBaseURL = mockGH.URL
 			}
 
@@ -2851,7 +2837,7 @@ func TestGitHubPoller_StartStopTickerLoop(t *testing.T) {
 	}))
 	defer ghMock.Close()
 
-	p := NewGitHubPoller("azylman/aerial", "token")
+	p := NewMultiGitHubPoller([]string{"azylman/aerial"}, "token")
 	p.apiBaseURL = ghMock.URL
 	p.pollInterval = time.Millisecond
 
@@ -2868,7 +2854,7 @@ func TestGitHubPoller_StartStopTickerLoop(t *testing.T) {
 	close(p.stopCh)
 
 	// Empty repo poller Start returns early
-	emptyPoller := NewGitHubPoller("", "")
+	emptyPoller := NewMultiGitHubPoller([]string{}, "")
 	emptyPoller.Start(ctx)
 }
 
@@ -3063,7 +3049,6 @@ dashboard:
 				if got := nilPoller.getActiveRepos(); got != nil {
 					t.Errorf("expected nil for nil poller, got %v", got)
 				}
-				nilPoller.SetHangarURL("http://example.com")
 
 				singleRepoPoller := &GitHubPoller{repo: "azylman/aerial"}
 				if got := singleRepoPoller.getActiveRepos(); len(got) != 1 || got[0] != "azylman/aerial" {
@@ -3150,9 +3135,9 @@ dashboard:
 				}))
 				defer srvGH.Close()
 
-				discoveryPoller := NewGitHubPoller("azylman/aerial", "token")
+				discoveryPoller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "token")
 				discoveryPoller.apiBaseURL = srvGH.URL
-				discoveryPoller.SetHangarURL(srvHangar.URL)
+				discoveryPoller.hangarURL = srvHangar.URL
 
 				discoveryPoller.pollOnce(ctx)
 				activeRepos := discoveryPoller.getActiveRepos()

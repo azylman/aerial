@@ -949,28 +949,6 @@ type MatchedNomadJob struct {
 	JobPath string
 }
 
-// FindNomadJobsByImage searches a directory for Nomad job specifications referencing the target image.
-func FindNomadJobsByImage(jobsDir, imageRef string) []MatchedNomadJob {
-	if jobsDir == "" || imageRef == "" {
-		return nil
-	}
-	var matches []MatchedNomadJob
-	walkNomadJobFiles([]string{jobsDir}, func(dir, jobPath, jobName, content string) bool {
-		images := ExtractNomadJobImages(content)
-		for _, img := range images {
-			if ImageMatches(imageRef, img) {
-				matches = append(matches, MatchedNomadJob{
-					JobName: jobName,
-					JobPath: jobPath,
-				})
-				break
-			}
-		}
-		return true
-	})
-	return matches
-}
-
 // NormalizeGitHubSlug normalizes an input repository name or URL to an "owner/repo" slug.
 // Defaults to "azylman" as the owner if none is specified.
 func NormalizeGitHubSlug(input string) string {

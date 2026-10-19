@@ -484,13 +484,6 @@ func getGitCommit(customPaths ...string) string {
 	return "latest"
 }
 
-func NewGitHubPoller(repo, token string) *GitHubPoller {
-	var repos []string
-	if strings.TrimSpace(repo) != "" {
-		repos = []string{strings.TrimSpace(repo)}
-	}
-	return NewMultiGitHubPoller(repos, token)
-}
 
 func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 	var cleaned []string
@@ -527,14 +520,6 @@ func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 	}
 }
 
-func (p *GitHubPoller) SetHangarURL(url string) {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.hangarURL = url
-}
 
 // fetchHangarRepos queries Hangar's GET /status endpoint and extracts valid github_repo slugs.
 func fetchHangarRepos(ctx context.Context, hangarURL string, client *http.Client) []string {
@@ -665,13 +650,6 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 	}()
 }
 
-func closeWarn(closer io.Closer, name string) {
-	if closer != nil {
-		if err := closer.Close(); err != nil {
-			log.Printf("[Dashboard] Warning closing %s: %v", name, err)
-		}
-	}
-}
 
 func drainAndClose(body io.ReadCloser, name string) {
 	if body == nil {

@@ -230,17 +230,6 @@ func RecordSyncRequest(source, status string) {
 	SyncRequestsTotal.WithLabelValues(source, status).Inc()
 }
 
-// RecordReconciliation records Docker Compose reconciliation duration and status under both GitSync and Hangar metrics.
-func RecordReconciliation(status string, duration time.Duration) {
-	if status == "" {
-		status = "unknown"
-	}
-	ReconciliationsTotal.WithLabelValues(status).Inc()
-	ComposeDurationSeconds.WithLabelValues(status).Observe(duration.Seconds())
-	HangarReconciliationsTotal.WithLabelValues(status).Inc()
-	HangarComposeDurationSeconds.WithLabelValues(status).Observe(duration.Seconds())
-}
-
 // RecordRegistryManifest records remote registry manifest query status and latency.
 func RecordRegistryManifest(registry, status string, duration time.Duration) {
 	if registry == "" {
@@ -251,36 +240,6 @@ func RecordRegistryManifest(registry, status string, duration time.Duration) {
 	}
 	RegistryManifestRequestsTotal.WithLabelValues(registry, status).Inc()
 	RegistryManifestDurationSeconds.WithLabelValues(registry).Observe(duration.Seconds())
-}
-
-// RecordRollback records a rollback execution for a service at a given stage.
-func RecordRollback(service, stage string) {
-	if service == "" {
-		service = "unknown"
-	}
-	if stage == "" {
-		stage = "unknown"
-	}
-	RollbacksTotal.WithLabelValues(service, stage).Inc()
-}
-
-// RecordImageQuarantine records an image quarantine event for a service.
-func RecordImageQuarantine(service, reason string) {
-	if service == "" {
-		service = "unknown"
-	}
-	if reason == "" {
-		reason = "unknown"
-	}
-	ImageQuarantinesTotal.WithLabelValues(service, reason).Inc()
-}
-
-// RecordActiveQuarantines sets the gauge of active quarantined images for a service.
-func RecordActiveQuarantines(service string, count float64) {
-	if service == "" {
-		service = "unknown"
-	}
-	ActiveQuarantines.WithLabelValues(service).Set(count)
 }
 
 // RecordLastSync sets the timestamp of the last sync for a repository.

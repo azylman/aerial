@@ -14,12 +14,8 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordPull("/share/aerial-config", "error", false, 500*time.Millisecond)
 	RecordSyncRequest("periodic", "synced")
 	RecordSyncRequest("webhook", "error")
-	RecordReconciliation("success", 3500*time.Millisecond)
 	RecordLastSync("/share/aerial", time.Now())
 	RecordRegistryManifest("ghcr.io", "success", 150*time.Millisecond)
-	RecordRollback("brain", "compose_up")
-	RecordImageQuarantine("brain", "healthcheck_failed")
-	RecordActiveQuarantines("brain", 1)
 
 	handler := Handler()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -36,17 +32,10 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_gitsync_pulls_total",
 		"aerial_gitsync_pull_duration_seconds",
 		"aerial_gitsync_sync_requests_total",
-		"aerial_gitsync_reconciliations_total",
-		"aerial_gitsync_compose_duration_seconds",
 		"aerial_gitsync_last_sync_timestamp_seconds",
 		"aerial_gitsync_build_info",
 		"aerial_hangar_registry_manifest_requests_total",
 		"aerial_hangar_registry_manifest_duration_seconds",
-		"aerial_hangar_reconciliations_total",
-		"aerial_hangar_compose_duration_seconds",
-		"aerial_hangar_rollbacks_total",
-		"aerial_hangar_image_quarantines_total",
-		"aerial_hangar_active_quarantines",
 		"aerial_hangar_build_info",
 	}
 
@@ -108,10 +97,6 @@ func TestSanitizeStatus(t *testing.T) {
 func TestEmptyMetricsEdgeCases(t *testing.T) {
 	RecordPull("", "", false, 100*time.Millisecond)
 	RecordSyncRequest("", "")
-	RecordReconciliation("", 200*time.Millisecond)
 	RecordLastSync("", time.Time{})
 	RecordRegistryManifest("", "", 50*time.Millisecond)
-	RecordRollback("", "")
-	RecordImageQuarantine("", "")
-	RecordActiveQuarantines("", 0)
 }

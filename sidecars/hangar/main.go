@@ -90,18 +90,6 @@ func SanitizeLog(input string) string {
 	return out
 }
 
-// SanitizeAll scrubs pattern-matched tokens as well as known literal secret values.
-func (d *SyncDaemon) SanitizeAll(input string) string {
-	out := SanitizeLog(input)
-	secrets := append([]string{d.pat}, d.extraSecrets...)
-	for _, s := range secrets {
-		s = strings.TrimSpace(s)
-		if len(s) >= 4 {
-			out = strings.ReplaceAll(out, s, "[REDACTED_SECRET]")
-		}
-	}
-	return out
-}
 
 // RepoSyncResult holds telemetry for a single repository sync operation.
 type RepoSyncResult struct {
