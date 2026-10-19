@@ -151,6 +151,39 @@ func PlanDueCronTurn(
 	}
 }
 
+func newScheduleRun(id, schedID, schedType, msgID, targetID, threadID, title, prompt, effort string, now time.Time) db.ScheduleRun {
+	return db.ScheduleRun{
+		ID:           id,
+		ScheduleID:   schedID,
+		ScheduleType: schedType,
+		MessageID:    msgID,
+		TargetID:     targetID,
+		ThreadID:     threadID,
+		Title:        title,
+		Prompt:       prompt,
+		Status:       "enqueued",
+		StartedAt:    now,
+		Effort:       effort,
+	}
+}
+
+func newScheduledMessage(msgID, runID, threadID, prompt, summary, effort string, now time.Time) db.Message {
+	return db.Message{
+		ID:            msgID,
+		ThreadID:      threadID,
+		GuildID:       "scheduled",
+		AuthorID:      "scheduler",
+		AuthorName:    "Scheduler",
+		Content:       prompt,
+		Summary:       summary,
+		Status:        db.StatusPending,
+		ScheduleRunID: runID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		Effort:        effort,
+	}
+}
+
 // BuildCronScheduleRun constructs a db.ScheduleRun for a cron turn.
 func BuildCronScheduleRun(
 	runID, msgID, targetThreadID string,
@@ -158,19 +191,7 @@ func BuildCronScheduleRun(
 	title string,
 	now time.Time,
 ) db.ScheduleRun {
-	return db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   cron.ID,
-		ScheduleType: "cron",
-		MessageID:    msgID,
-		TargetID:     cron.TargetID,
-		ThreadID:     targetThreadID,
-		Title:        title,
-		Prompt:       cron.Prompt,
-		Status:       "enqueued",
-		StartedAt:    now,
-		Effort:       cron.Effort,
-	}
+	return newScheduleRun(runID, cron.ID, "cron", msgID, cron.TargetID, targetThreadID, title, cron.Prompt, cron.Effort, now)
 }
 
 // BuildCronMessage constructs a db.Message for an enqueued cron turn.
@@ -180,20 +201,7 @@ func BuildCronMessage(
 	summary string,
 	now time.Time,
 ) db.Message {
-	return db.Message{
-		ID:            msgID,
-		ThreadID:      targetThreadID,
-		GuildID:       "scheduled",
-		AuthorID:      "scheduler",
-		AuthorName:    "Scheduler",
-		Content:       cron.Prompt,
-		Summary:       summary,
-		Status:        db.StatusPending,
-		ScheduleRunID: runID,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		Effort:        cron.Effort,
-	}
+	return newScheduledMessage(msgID, runID, targetThreadID, cron.Prompt, summary, cron.Effort, now)
 }
 
 // BuildOneShotScheduleRun constructs a db.ScheduleRun for a one-shot reminder.
@@ -202,19 +210,7 @@ func BuildOneShotScheduleRun(
 	oneShot db.OneShotSchedule,
 	now time.Time,
 ) db.ScheduleRun {
-	return db.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   oneShot.ID,
-		ScheduleType: "one_shot",
-		MessageID:    msgID,
-		TargetID:     oneShot.ThreadID,
-		ThreadID:     oneShot.ThreadID,
-		Title:        "One-shot Reminder",
-		Prompt:       oneShot.Prompt,
-		Status:       "enqueued",
-		StartedAt:    now,
-		Effort:       oneShot.Effort,
-	}
+	return newScheduleRun(runID, oneShot.ID, "one_shot", msgID, oneShot.ThreadID, oneShot.ThreadID, "One-shot Reminder", oneShot.Prompt, oneShot.Effort, now)
 }
 
 // BuildOneShotMessage constructs a db.Message for an enqueued one-shot reminder.
@@ -224,20 +220,7 @@ func BuildOneShotMessage(
 	summary string,
 	now time.Time,
 ) db.Message {
-	return db.Message{
-		ID:            msgID,
-		ThreadID:      oneShot.ThreadID,
-		GuildID:       "scheduled",
-		AuthorID:      "scheduler",
-		AuthorName:    "Scheduler",
-		Content:       oneShot.Prompt,
-		Summary:       summary,
-		Status:        db.StatusPending,
-		ScheduleRunID: runID,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		Effort:        oneShot.Effort,
-	}
+	return newScheduledMessage(msgID, runID, oneShot.ThreadID, oneShot.Prompt, summary, oneShot.Effort, now)
 }
 
 // ShouldRunFactExtraction returns true when tickCount represents an hourly interval (every 120 ticks at 30s).

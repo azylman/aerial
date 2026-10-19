@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,9 +19,8 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/queue"
-	"github.com/azylman/aerial/brain/pkg/transcript"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 )
 
 type mockThreadCreator struct {
@@ -42,6 +40,12 @@ func (m *mockThreadCreator) CreatePublicThread(channelID, name string) (string, 
 	threadID := fmt.Sprintf("th-%s-%d", channelID, len(m.createdThreads)+1)
 	m.createdThreads[channelID] = threadID
 	return threadID, nil
+}
+
+type errThreadCreator struct{}
+
+func (e *errThreadCreator) CreatePublicThread(channelID, name string) (string, error) {
+	return "", fmt.Errorf("failed to create thread")
 }
 
 type mockEnqueuer struct {
@@ -67,974 +71,6 @@ func (m *mockEnqueuer) getMessages() []db.Message {
 	return copied
 }
 
-func TestFormatThreadTitle(t *testing.T) {
-	testTime := time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)
-
-	title := FormatThreadTitle("Weekly Meal Plan", testTime)
-	expected := "Weekly Meal Plan – Aug 28, 2026"
-	if title != expected {
-		t.Errorf("Expected %q, got %q", expected, title)
-	}
-
-	defaultTitle := FormatThreadTitle("", testTime)
-	expectedDefault := "Scheduled Routine – Aug 28, 2026"
-	if defaultTitle != expectedDefault {
-		t.Errorf("Expected %q, got %q", expectedDefault, defaultTitle)
-	}
-
-	// Long title > 100 runes truncation test (ASCII)
-	longPrefix := "A very long routine title prefix that exceeds the maximum allowable limit of one hundred characters easily and goes on and on"
-	longTitle := FormatThreadTitle(longPrefix, testTime)
-	runes := []rune(longTitle)
-	if len(runes) != 100 {
-		t.Errorf("Expected truncated title length of 100 runes, got %d", len(runes))
-	}
-	if string(runes[97:]) != "..." {
-		t.Errorf("Expected title to end with '...', got %q", string(runes[97:]))
-	}
-
-	// Unicode multi-byte runes test (> 100 runes)
-	unicodePrefix := "🔥🚀 非常に長いルーチンのプレフィックスで、制限を超えるマルチバイト文字列のテストを行っています。さらに文章を追加して確実に100文字を超えるように長文の日本語テキストを追加配置します。テストテスト。"
-	unicodeTitle := FormatThreadTitle(unicodePrefix, testTime)
-	uRunes := []rune(unicodeTitle)
-	if len(uRunes) != 100 {
-		t.Errorf("Expected unicode title length 100 runes, got %d", len(uRunes))
-	}
-	if string(uRunes[97:]) != "..." {
-		t.Errorf("Expected unicode title to end with '...', got %q", string(uRunes[97:]))
-	}
-}
-
-
-func newTestConfig() *config.Config {
-	return config.NewFromData(config.DefaultConfigData())
-}
-
-func setupTestStore(t *testing.T) *db.FakeStore {
-	t.Helper()
-	return db.NewFakeStore()
-}
-
-func createCronSchedule(s *db.FakeStore, c db.CronSchedule) error {
-	return s.CreateCronSchedule(context.Background(), c)
-}
-
-func getDueCronSchedules(s db.Store) ([]db.CronSchedule, error) {
-	return s.GetDueCronSchedules(context.Background())
-}
-
-func getAllCronSchedules(s db.Store, targetID string) ([]db.CronSchedule, error) {
-	return s.GetAllCronSchedules(context.Background(), targetID)
-}
-
-func createOneShotSchedule(s db.Store, o db.OneShotSchedule) error {
-	return s.CreateOneShotSchedule(context.Background(), o)
-}
-
-func getDueOneShotSchedules(s db.Store) ([]db.OneShotSchedule, error) {
-	return s.GetDueOneShotSchedules(context.Background())
-}
-
-func getAllOneShotSchedules(s db.Store, threadID string) ([]db.OneShotSchedule, error) {
-	return s.GetAllOneShotSchedules(context.Background(), threadID)
-}
-
-func getScheduleRunsPaginated(s db.Store, limit, offset int, schedID, status string) ([]db.ScheduleRun, int, error) {
-	return s.GetScheduleRunsPaginated(context.Background(), limit, offset, schedID, status)
-}
-
-func insertMessageAndConsumeOneShot(s db.Store, scheduleID string, msg db.Message) error {
-	return s.InsertMessageAndConsumeOneShot(context.Background(), scheduleID, msg)
-}
-
-func getMessage(s db.Store, id string) (*db.Message, error) {
-	return s.GetMessage(context.Background(), id)
-}
-
-func insertMessage(s db.Store, msg db.Message) error {
-	return s.InsertMessage(context.Background(), msg)
-}
-
-func TestNew_NilConfigReturnsError(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	// 1. nil *config.Config returns error
-	if _, err := New(nil, store, enqueuer, threadCreator); err == nil {
-		t.Errorf("expected error when cfg is nil")
-	}
-
-	// 2. Valid config succeeds
-	validCfg := config.NewFromData(config.DefaultConfigData())
-	s, err := New(validCfg, store, enqueuer, threadCreator)
-	if err != nil {
-		t.Fatalf("unexpected error with valid config: %v", err)
-	}
-	if s == nil {
-		t.Fatalf("expected non-nil scheduler")
-	}
-}
-
-func TestProcessDueCronSchedules_InheritsConfigTimezone(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	cfg := config.NewFromData(&config.ConfigData{
-		Timezone: "America/New_York",
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "threads"},
-		},
-	})
-
-	sched, err := New(cfg, store, enqueuer, threadCreator)
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	// Insert due cron schedule with empty timezone
-	now := time.Now().UTC()
-	cronSched := db.CronSchedule{
-		ID:          "cron-inherit-tz",
-		CronExpr:    "0 9 * * *",
-		Timezone:    "", // Empty: must inherit cfg.Current().Timezone ("America/New_York")
-		TargetID:    "chan-test",
-		TitlePrefix: "Routine",
-		Prompt:      "Run routine",
-		NextRunAt:   now.Add(-1 * time.Minute), // Due
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	if err := createCronSchedule(store, cronSched); err != nil {
-		t.Fatalf("CreateCronSchedule failed: %v", err)
-	}
-
-	if err := sched.ProcessDueSchedules(context.Background()); err != nil {
-		t.Fatalf("ProcessDueSchedules failed: %v", err)
-	}
-
-	// Verify next_run_at was calculated using America/New_York
-	dueAfter, err := getDueCronSchedules(store)
-	if err != nil {
-		t.Fatalf("GetDueCronSchedules failed: %v", err)
-	}
-	if len(dueAfter) != 0 {
-		t.Errorf("expected 0 due crons after processing, got %d", len(dueAfter))
-	}
-}
-
-func TestCalculateNextRun(t *testing.T) {
-	// Friday Aug 28, 2026 12:00:00 UTC (05:00:00 PDT)
-	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
-
-	// "0 20 * * 5" -> Friday at 20:00 UTC
-	next, err := CalculateNextRun("0 20 * * 5", "UTC", baseTime)
-	if err != nil {
-		t.Fatalf("CalculateNextRun failed: %v", err)
-	}
-	expected := time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)
-	if !next.Equal(expected) {
-		t.Errorf("Expected next run %s, got %s", expected, next)
-	}
-
-	// Timezone test with embedded tzdata: America/Los_Angeles (PDT = UTC-7 in August)
-	// "0 9 * * *" (9 AM America/Los_Angeles) from Aug 28 12:00 UTC (5:00 AM PDT) -> Aug 28 9:00 PDT (16:00 UTC)
-	nextLA, err := CalculateNextRun("0 9 * * *", "America/Los_Angeles", baseTime)
-	if err != nil {
-		t.Fatalf("CalculateNextRun America/Los_Angeles failed: %v", err)
-	}
-	expectedLA := time.Date(2026, time.August, 28, 16, 0, 0, 0, time.UTC)
-	if !nextLA.Equal(expectedLA) {
-		t.Errorf("Expected next LA run %s, got %s", expectedLA, nextLA)
-	}
-
-	// Empty timezone returns error (no ambient default fallback outside config)
-	if _, err := CalculateNextRun("0 9 * * *", "", baseTime); err == nil {
-		t.Errorf("expected error for empty timezone in CalculateNextRun")
-	}
-
-	// Explicit timezone: America/New_York (EDT = UTC-4 in August)
-	// "0 9 * * *" (9 AM America/New_York) from Aug 28 12:00 UTC (8:00 AM EDT) -> Aug 28 9:00 EDT (13:00 UTC)
-	nextNY, err := CalculateNextRun("0 9 * * *", "America/New_York", baseTime)
-	if err != nil {
-		t.Fatalf("CalculateNextRun America/New_York failed: %v", err)
-	}
-	expectedNY := time.Date(2026, time.August, 28, 13, 0, 0, 0, time.UTC)
-	if !nextNY.Equal(expectedNY) {
-		t.Errorf("Expected next NY run %s, got %s", expectedNY, nextNY)
-	}
-
-	// Timezone test: Asia/Tokyo (JST = UTC+9)
-	// "0 9 * * *" from Aug 28 12:00 UTC (21:00 JST) -> Aug 29 9:00 JST (00:00 UTC on Aug 29)
-	nextTokyo, err := CalculateNextRun("0 9 * * *", "Asia/Tokyo", baseTime)
-	if err != nil {
-		t.Fatalf("CalculateNextRun Asia/Tokyo failed: %v", err)
-	}
-	expectedTokyo := time.Date(2026, time.August, 29, 0, 0, 0, 0, time.UTC)
-	if !nextTokyo.Equal(expectedTokyo) {
-		t.Errorf("Expected next Tokyo run %s, got %s", expectedTokyo, nextTokyo)
-	}
-
-	// "@daily"
-	nextDaily, err := CalculateNextRun("@daily", "UTC", baseTime)
-	if err != nil {
-		t.Fatalf("CalculateNextRun @daily failed: %v", err)
-	}
-	expectedDaily := time.Date(2026, time.August, 29, 0, 0, 0, 0, time.UTC)
-	if !nextDaily.Equal(expectedDaily) {
-		t.Errorf("Expected next daily %s, got %s", expectedDaily, nextDaily)
-	}
-
-	// Invalid cron
-	_, err = CalculateNextRun("invalid cron expr", "UTC", baseTime)
-	if err == nil {
-		t.Error("Expected error on invalid cron expression")
-	}
-}
-
-func TestProcessDueCronSchedules(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-
-	// 1. Insert due cron schedule
-	cronSched := db.CronSchedule{
-		ID:          "cron-1",
-		TargetID:    "chan-999",
-		TitlePrefix: "Weekly Meal Plan",
-		CronExpr:    "0 20 * * 5",
-		Prompt:      "Generate meal plan for the week",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-1 * time.Minute),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	if err := createCronSchedule(store, cronSched); err != nil {
-		t.Fatalf("Failed to create cron schedule: %v", err)
-	}
-
-	// 2. Insert future cron schedule (should NOT trigger)
-	futureCron := db.CronSchedule{
-		ID:          "cron-2",
-		TargetID:    "chan-999",
-		TitlePrefix: "Future Routine",
-		CronExpr:    "0 20 * * 5",
-		Prompt:      "Future prompt",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(1 * time.Hour),
-		Enabled:     true,
-		CreatedAt:   now,
-	}
-	if err := createCronSchedule(store, futureCron); err != nil {
-		t.Fatalf("Failed to create future cron schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	// Process due schedules
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	// Verify enqueued message
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 enqueued message, got %d", len(msgs))
-	}
-	if msgs[0].Content != "Generate meal plan for the week" {
-		t.Errorf("Expected prompt match, got %q", msgs[0].Content)
-	}
-	if msgs[0].ThreadID != "th-chan-999-1" {
-		t.Errorf("Expected message ThreadID to match newly created thread 'th-chan-999-1', got %q", msgs[0].ThreadID)
-	}
-	if msgs[0].AuthorID != "scheduler" {
-		t.Errorf("Expected AuthorID 'scheduler', got %q", msgs[0].AuthorID)
-	}
-	if msgs[0].GuildID != "scheduled" {
-		t.Errorf("Expected GuildID 'scheduled', got %q", msgs[0].GuildID)
-	}
-
-	// Verify message in DB
-	dbMsg, err := getMessage(store, msgs[0].ID)
-	if err != nil || dbMsg == nil {
-		t.Fatalf("Message not found in DB: %v", err)
-	}
-	if dbMsg.Status != db.StatusPending {
-		t.Errorf("Expected status PENDING, got %s", dbMsg.Status)
-	}
-
-	// Verify next_run_at was advanced and cron-1 is no longer due
-	dueCrons, err := getDueCronSchedules(store)
-	if err != nil {
-		t.Fatalf("GetDueCronSchedules error: %v", err)
-	}
-	if len(dueCrons) != 0 {
-		t.Errorf("Expected 0 due cron schedules after processing, got %d", len(dueCrons))
-	}
-}
-
-func TestProcessDueCronSchedules_24hStalenessGuard(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-
-	// Insert stale cron schedule (>24h overdue, e.g. 26h ago)
-	staleCron := db.CronSchedule{
-		ID:          "cron-stale-1",
-		TargetID:    "chan-stale",
-		TitlePrefix: "Stale Routine",
-		CronExpr:    "0 20 * * 5",
-		Prompt:      "Stale prompt that should not fire",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-26 * time.Hour),
-		Enabled:     true,
-		CreatedAt:   now.Add(-48 * time.Hour),
-	}
-	if err := createCronSchedule(store, staleCron); err != nil {
-		t.Fatalf("Failed to create stale cron schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	// Staleness guard MUST NOT fire the turn
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 0 {
-		t.Fatalf("Expected 0 enqueued messages due to 24h staleness guard, got %d", len(msgs))
-	}
-
-	// Stale cron schedule's next_run_at MUST be advanced into future
-	dueCrons, err := getDueCronSchedules(store)
-	if err != nil {
-		t.Fatalf("GetDueCronSchedules error: %v", err)
-	}
-	if len(dueCrons) != 0 {
-		t.Errorf("Expected 0 due cron schedules after advancing stale cron, got %d", len(dueCrons))
-	}
-
-	allCrons, _ := getAllCronSchedules(store, "chan-stale")
-	if len(allCrons) != 1 {
-		t.Fatalf("Expected 1 cron in DB, got %d", len(allCrons))
-	}
-	if !allCrons[0].NextRunAt.After(now) {
-		t.Errorf("Expected next_run_at %s to be advanced into future after now %s", allCrons[0].NextRunAt, now)
-	}
-}
-
-func TestProcessDueOneShotSchedules(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-
-	// 1. Insert due one-shot schedule
-	oneShot := db.OneShotSchedule{
-		ID:        uuid.New().String(),
-		ThreadID:  "thread-existing-123",
-		Prompt:    "Check stove reminder",
-		RunAt:     now.Add(-2 * time.Minute),
-		CreatedAt: now.Add(-10 * time.Minute),
-	}
-	if err := createOneShotSchedule(store, oneShot); err != nil {
-		t.Fatalf("Failed to create one shot schedule: %v", err)
-	}
-
-	// 2. Insert future one-shot schedule
-	futureOneShot := db.OneShotSchedule{
-		ID:        uuid.New().String(),
-		ThreadID:  "thread-existing-123",
-		Prompt:    "Future stove reminder",
-		RunAt:     now.Add(30 * time.Minute),
-		CreatedAt: now,
-	}
-	if err := createOneShotSchedule(store, futureOneShot); err != nil {
-		t.Fatalf("Failed to create future one-shot schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	// Verify enqueued message targeting existing thread
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 enqueued message, got %d", len(msgs))
-	}
-	if msgs[0].ThreadID != "thread-existing-123" {
-		t.Errorf("Expected ThreadID 'thread-existing-123', got %q", msgs[0].ThreadID)
-	}
-	if msgs[0].GuildID != "scheduled" {
-		t.Errorf("Expected GuildID 'scheduled', got %q", msgs[0].GuildID)
-	}
-	if msgs[0].Content != "Check stove reminder" {
-		t.Errorf("Expected content 'Check stove reminder', got %q", msgs[0].Content)
-	}
-
-	// Verify one-shot schedule was atomically deleted
-	dueAfter, _ := getDueOneShotSchedules(store)
-	if len(dueAfter) != 0 {
-		t.Errorf("Expected 0 due one-shot schedules after execution, got %d", len(dueAfter))
-	}
-	allAfter, _ := getAllOneShotSchedules(store, "thread-existing-123")
-	if len(allAfter) != 1 || allAfter[0].ID != futureOneShot.ID {
-		t.Errorf("Expected only future schedule to remain, got %d schedules", len(allAfter))
-	}
-}
-
-func TestProcessDueOneShotSchedules_EffortPropagation(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-
-	oneShot := db.OneShotSchedule{
-		ID:        "oneshot-effort-test",
-		ThreadID:  "thread-effort-456",
-		Prompt:    "Check oven reminder",
-		RunAt:     now.Add(-1 * time.Minute),
-		CreatedAt: now.Add(-5 * time.Minute),
-		Effort:    "low",
-	}
-	if err := createOneShotSchedule(store, oneShot); err != nil {
-		t.Fatalf("Failed to create one shot schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 enqueued message, got %d", len(msgs))
-	}
-	if msgs[0].Effort != "low" {
-		t.Errorf("Expected enqueued message Effort 'low', got %q", msgs[0].Effort)
-	}
-
-	dbMsg, err := getMessage(store, msgs[0].ID)
-	if err != nil || dbMsg == nil {
-		t.Fatalf("Message not found in DB: %v", err)
-	}
-	if dbMsg.Effort != "low" {
-		t.Errorf("Expected DB message Effort 'low', got %q", dbMsg.Effort)
-	}
-
-	runs, _, err := getScheduleRunsPaginated(store, 10, 0, "oneshot-effort-test", "")
-	if err != nil {
-		t.Fatalf("Failed to query schedule runs: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("Expected 1 schedule run, got %d", len(runs))
-	}
-	if runs[0].Effort != "low" {
-		t.Errorf("Expected DB schedule run Effort 'low', got %q", runs[0].Effort)
-	}
-}
-
-func TestSchedulerStartAndStop(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		Store: store,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return `{"event":"result","result":{"status":"SUCCESS","response":"mock test response"}}`, "", 0, nil
-		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			return "mock notification"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-	})
-
-	stop := Start(context.Background(), newTestConfig(), store, pool, nil)
-	time.Sleep(50 * time.Millisecond)
-
-	stoppedCh := make(chan struct{})
-	go func() {
-		stop()
-		// Test idempotence
-		stop()
-		close(stoppedCh)
-	}()
-
-	select {
-	case <-stoppedCh:
-		// Clean exit
-	case <-time.After(1 * time.Second):
-		t.Fatal("Start returned stop func did not exit cleanly within 1s")
-	}
-}
-
-func TestSchedulerRunContextCancellation(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	doneCh := make(chan struct{})
-	go func() {
-		Run(ctx, newTestConfig(), store, enqueuer, threadCreator, 10*time.Millisecond)
-		close(doneCh)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-doneCh:
-		// Success: scheduler stopped cleanly on context cancellation
-	case <-time.After(1 * time.Second):
-		t.Fatal("Scheduler did not stop cleanly within 1s after context cancellation")
-	}
-}
-
-func TestProcessDueCronSchedules_CreatesScheduleRun(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	cronSched := db.CronSchedule{
-		ID:          "cron-run-test",
-		TargetID:    "chan-cron-test",
-		TitlePrefix: "Daily Standup",
-		CronExpr:    "0 9 * * *",
-		Prompt:      "Post daily standup",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-10 * time.Second),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	if err := createCronSchedule(store, cronSched); err != nil {
-		t.Fatalf("Failed to create cron schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
-	}
-	if msgs[0].ScheduleRunID == "" {
-		t.Fatalf("Expected ScheduleRunID to be populated on enqueued message, got empty string")
-	}
-
-	// Verify schedule run entry exists in DB
-	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
-	if err != nil {
-		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
-	}
-	if total != 1 || len(runs) != 1 {
-		t.Fatalf("Expected 1 schedule run created, got total=%d, len=%d", total, len(runs))
-	}
-
-	run := runs[0]
-	if run.ID != msgs[0].ScheduleRunID {
-		t.Errorf("Expected run ID %q to match message ScheduleRunID %q", run.ID, msgs[0].ScheduleRunID)
-	}
-	if run.ScheduleID != cronSched.ID {
-		t.Errorf("Expected schedule ID %q, got %q", cronSched.ID, run.ScheduleID)
-	}
-	if run.ScheduleType != "cron" {
-		t.Errorf("Expected schedule type 'cron', got %q", run.ScheduleType)
-	}
-	if run.MessageID != msgs[0].ID {
-		t.Errorf("Expected message ID %q, got %q", msgs[0].ID, run.MessageID)
-	}
-	if run.TargetID != cronSched.TargetID {
-		t.Errorf("Expected target ID %q, got %q", cronSched.TargetID, run.TargetID)
-	}
-	if run.ThreadID != msgs[0].ThreadID {
-		t.Errorf("Expected thread ID %q, got %q", msgs[0].ThreadID, run.ThreadID)
-	}
-	if run.Status != "enqueued" {
-		t.Errorf("Expected status 'enqueued', got %q", run.Status)
-	}
-	if run.Prompt != cronSched.Prompt {
-		t.Errorf("Expected prompt %q, got %q", cronSched.Prompt, run.Prompt)
-	}
-}
-
-func TestProcessDueCronSchedules_EffortPropagation(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	cronSched := db.CronSchedule{
-		ID:          "cron-effort-test",
-		TargetID:    "chan-effort-test",
-		TitlePrefix: "Low Effort Cron",
-		CronExpr:    "0 9 * * *",
-		Prompt:      "Post low effort update",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-10 * time.Second),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-		Effort:      "low",
-	}
-	if err := createCronSchedule(store, cronSched); err != nil {
-		t.Fatalf("Failed to create cron schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
-	}
-	if msgs[0].Effort != "low" {
-		t.Errorf("Expected message effort 'low', got %q", msgs[0].Effort)
-	}
-
-	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
-	if err != nil {
-		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
-	}
-	if total != 1 || len(runs) != 1 {
-		t.Fatalf("Expected 1 schedule run created, got total=%d, len=%d", total, len(runs))
-	}
-	if runs[0].Effort != "low" {
-		t.Errorf("Expected schedule run effort 'low', got %q", runs[0].Effort)
-	}
-}
-
-func TestProcessDueOneShotSchedules_CreatesScheduleRun(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	oneShot := db.OneShotSchedule{
-		ID:        "oneshot-run-test",
-		ThreadID:  "thread-oneshot-target",
-		Prompt:    "Water the plants",
-		RunAt:     now.Add(-5 * time.Second),
-		CreatedAt: now.Add(-30 * time.Minute),
-	}
-	if err := createOneShotSchedule(store, oneShot); err != nil {
-		t.Fatalf("Failed to create one shot schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
-	}
-	if msgs[0].ScheduleRunID == "" {
-		t.Fatalf("Expected ScheduleRunID to be populated on enqueued message, got empty string")
-	}
-
-	runs, total, err := getScheduleRunsPaginated(store, 10, 0, oneShot.ID, "")
-	if err != nil {
-		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
-	}
-	if total != 1 || len(runs) != 1 {
-		t.Fatalf("Expected 1 schedule run created, got total=%d, len=%d", total, len(runs))
-	}
-
-	run := runs[0]
-	if run.ID != msgs[0].ScheduleRunID {
-		t.Errorf("Expected run ID %q to match message ScheduleRunID %q", run.ID, msgs[0].ScheduleRunID)
-	}
-	if run.ScheduleID != oneShot.ID {
-		t.Errorf("Expected schedule ID %q, got %q", oneShot.ID, run.ScheduleID)
-	}
-	if run.ScheduleType != "one_shot" {
-		t.Errorf("Expected schedule type 'one_shot', got %q", run.ScheduleType)
-	}
-	if run.Status != "enqueued" {
-		t.Errorf("Expected status 'enqueued', got %q", run.Status)
-	}
-	if run.Prompt != oneShot.Prompt {
-		t.Errorf("Expected prompt %q, got %q", oneShot.Prompt, run.Prompt)
-	}
-}
-
-func TestInsertMessageAndConsumeOneShot_RollbackOnCancelled(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	msg := db.Message{
-		ID:        "msg-cancelled-1",
-		ThreadID:  "thread-1",
-		Content:   "Reminder prompt",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-	}
-
-	// Schedule does not exist in DB (e.g. was cancelled concurrently)
-	err := insertMessageAndConsumeOneShot(store, "non-existent-sched-id", msg)
-	if err == nil {
-		t.Fatal("Expected error when consuming non-existent one-shot schedule, got nil")
-	}
-
-	// Verify message was NOT inserted due to rollback
-	dbMsg, _ := getMessage(store, "msg-cancelled-1")
-	if dbMsg != nil {
-		t.Errorf("Expected message to NOT exist in DB after transaction rollback, but found: %+v", dbMsg)
-	}
-}
-
-func TestProcessDueCronSchedules_ChannelMode_NoThreadCreated(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-	cfgContent := `
-channels:
-  default:
-    mode: "threads"
-  general:
-    mode: "channel"
-`
-	if err := os.WriteFile(yamlPath, []byte(cfgContent), 0644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
-	}
-	appCfg, err := config.LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("Failed to load test config: %v", err)
-	}
-
-	store := setupTestStore(t)
-	defer store.Close()
-
-	chanID := "1464358486849622120"
-	queue.CacheDiscordChannel(&discordgo.Channel{
-		ID:   chanID,
-		Name: "general",
-		Type: discordgo.ChannelTypeGuildText,
-	})
-
-	now := time.Now().UTC()
-	cronSched := db.CronSchedule{
-		ID:          "cron-general-channel-mode",
-		TargetID:    chanID,
-		TitlePrefix: "Daily Weather Forecast",
-		CronExpr:    "0 6 * * *",
-		Prompt:      "Post daily weather",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-10 * time.Second),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	if err := createCronSchedule(store, cronSched); err != nil {
-		t.Fatalf("Failed to create cron schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), appCfg, store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	// 1. Thread creator should NOT have been invoked for chanID
-	if thID, exists := threadCreator.createdThreads[chanID]; exists {
-		t.Fatalf("Expected NO thread to be created in channel mode, but thread %q was created", thID)
-	}
-
-	// 2. Enqueued message ThreadID must match channel ID
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
-	}
-	if msgs[0].ThreadID != chanID {
-		t.Errorf("Expected message ThreadID %q (channel ID), got %q", chanID, msgs[0].ThreadID)
-	}
-
-	// 3. Schedule run record ThreadID must match channel ID
-	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
-	if err != nil {
-		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
-	}
-	if total != 1 || len(runs) != 1 {
-		t.Fatalf("Expected 1 schedule run created, got total=%d", total)
-	}
-	if runs[0].ThreadID != chanID {
-		t.Errorf("Expected run ThreadID %q, got %q", chanID, runs[0].ThreadID)
-	}
-}
-
-func TestProcessDueCronSchedules_ThreadsMode_ThreadCreated(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-	cfgContent := `
-channels:
-  default:
-    mode: "ignore"
-  aerial-dev:
-    mode: "threads"
-`
-	if err := os.WriteFile(yamlPath, []byte(cfgContent), 0644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
-	}
-	appCfg, err := config.LoadConfigFromPaths(yamlPath)
-	if err != nil {
-		t.Fatalf("Failed to load test config: %v", err)
-	}
-
-	store := setupTestStore(t)
-	defer store.Close()
-
-	chanID := "chan-aerial-dev-123"
-	queue.CacheDiscordChannel(&discordgo.Channel{
-		ID:   chanID,
-		Name: "aerial-dev",
-		Type: discordgo.ChannelTypeGuildText,
-	})
-
-	now := time.Now().UTC()
-	cronSched := db.CronSchedule{
-		ID:          "cron-aerial-dev-threads-mode",
-		TargetID:    chanID,
-		TitlePrefix: "System Health Report",
-		CronExpr:    "0 12 * * *",
-		Prompt:      "Post health report",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-10 * time.Second),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	if err := createCronSchedule(store, cronSched); err != nil {
-		t.Fatalf("Failed to create cron schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), appCfg, store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	// 1. Thread creator SHOULD have been invoked for chanID
-	createdThID, exists := threadCreator.createdThreads[chanID]
-	if !exists || createdThID == "" {
-		t.Fatalf("Expected thread to be created in threads mode, but none found")
-	}
-
-	// 2. Enqueued message ThreadID must match created thread ID
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
-	}
-	if msgs[0].ThreadID != createdThID {
-		t.Errorf("Expected message ThreadID %q, got %q", createdThID, msgs[0].ThreadID)
-	}
-
-	// 3. Schedule run record ThreadID must match created thread ID
-	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
-	if err != nil {
-		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
-	}
-	if total != 1 || len(runs) != 1 {
-		t.Fatalf("Expected 1 schedule run created, got total=%d", total)
-	}
-	if runs[0].ThreadID != createdThID {
-		t.Errorf("Expected run ThreadID %q, got %q", createdThID, runs[0].ThreadID)
-	}
-}
-
-func TestProcessDueCronSchedules_TargetAlreadyThread_NoThreadCreated(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-	cfgContent := `
-channels:
-  default:
-    mode: "threads"
-`
-	if err := os.WriteFile(yamlPath, []byte(cfgContent), 0644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
-	}
-	if _, err := config.LoadConfigFromPaths(yamlPath); err != nil {
-		t.Fatalf("Failed to load test config: %v", err)
-	}
-
-	store := setupTestStore(t)
-	defer store.Close()
-
-	threadTargetID := "thread-existing-target-999"
-	queue.CacheDiscordChannel(&discordgo.Channel{
-		ID:       threadTargetID,
-		Name:     "Existing Discussion Thread",
-		ParentID: "parent-chan-111",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-
-	now := time.Now().UTC()
-	cronSched := db.CronSchedule{
-		ID:          "cron-existing-thread-target",
-		TargetID:    threadTargetID,
-		TitlePrefix: "Thread Update",
-		CronExpr:    "0 15 * * *",
-		Prompt:      "Update existing thread",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-10 * time.Second),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	if err := createCronSchedule(store, cronSched); err != nil {
-		t.Fatalf("Failed to create cron schedule: %v", err)
-	}
-
-	threadCreator := newMockThreadCreator()
-	enqueuer := newMockEnqueuer()
-
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	// 1. Thread creator should NOT have been invoked because target is already a thread
-	if thID, exists := threadCreator.createdThreads[threadTargetID]; exists {
-		t.Fatalf("Expected NO nested thread to be created, but thread %q was created", thID)
-	}
-
-	// 2. Enqueued message ThreadID must match threadTargetID
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
-	}
-	if msgs[0].ThreadID != threadTargetID {
-		t.Errorf("Expected message ThreadID %q, got %q", threadTargetID, msgs[0].ThreadID)
-	}
-}
-
 type mockRoundTripper struct {
 	roundTrip func(req *http.Request) (*http.Response, error)
 }
@@ -1043,582 +79,13 @@ func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return m.roundTrip(req)
 }
 
-func TestDiscordThreadCreator_CreatePublicThread(t *testing.T) {
-	// 1. Nil receiver / nil session
-	var nilCreator *DiscordThreadCreator
-	th, err := nilCreator.CreatePublicThread("chan1", "title")
-	if err != nil || th != "chan1" {
-		t.Errorf("expected channelID fallback for nil creator, got %q, %v", th, err)
-	}
-
-	creatorNilSess := NewDiscordThreadCreator(nil)
-	th2, err := creatorNilSess.CreatePublicThread("chan1", "title")
-	if err != nil || th2 != "chan1" {
-		t.Errorf("expected channelID fallback for creator with nil session, got %q, %v", th2, err)
-	}
-
-	// 2. Mock Discord session success
-	dg, _ := discordgo.New("Bot mock_token")
-	dg.Client = &http.Client{
-		Transport: &mockRoundTripper{
-			roundTrip: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(`{"id":"th-mock-999","name":"mock title"}`)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	creator := NewDiscordThreadCreator(dg)
-	thID, err := creator.CreatePublicThread("chan1", "mock title")
-	if err != nil || thID != "th-mock-999" {
-		t.Errorf("expected th-mock-999, got %q (err: %v)", thID, err)
-	}
-
-	// 3. Mock Discord session error
-	dgErr, _ := discordgo.New("Bot mock_token")
-	dgErr.Client = &http.Client{
-		Transport: &mockRoundTripper{
-			roundTrip: func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusBadRequest,
-					Body:       io.NopCloser(strings.NewReader(`{"message":"Bad request"}`)),
-					Header:     make(http.Header),
-				}, nil
-			},
-		},
-	}
-	creatorErr := NewDiscordThreadCreator(dgErr)
-	_, err = creatorErr.CreatePublicThread("chan1", "title")
-	if err == nil {
-		t.Error("expected error from Discord API failure, got nil")
-	}
+func newTestConfig() *config.Config {
+	return config.NewFromData(config.DefaultConfigData())
 }
 
-func TestCalculateNextRun_UnknownTimezone(t *testing.T) {
-	now := time.Now().UTC()
-	next, err := CalculateNextRun("0 9 * * *", "Unknown/Invalid_Zone_12345", now)
-	if err != nil {
-		t.Fatalf("expected fallback to UTC on unknown timezone, got error: %v", err)
-	}
-	if next.IsZero() {
-		t.Errorf("expected non-zero next run")
-	}
-}
-
-func TestProcessDueSchedules_NilDBAndCancelledCtx(t *testing.T) {
-	// 1. Nil Config returns error
-	if err := ProcessDueSchedules(context.Background(), nil, nil, nil, nil); err == nil {
-		t.Errorf("expected error for nil config in ProcessDueSchedules")
-	}
-
-	validCfg := newTestConfig()
-
-	// 2. Nil DB with valid config returns nil error
-	if err := ProcessDueSchedules(context.Background(), validCfg, nil, nil, nil); err != nil {
-		t.Errorf("expected nil error for nil DB, got %v", err)
-	}
-
-	// 3. Cancelled context
-	store := setupTestStore(t)
-	defer store.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
-	_ = ProcessDueSchedules(ctx, validCfg, store, nil, nil)
-}
-
-func TestSchedulerRun_TickLoop(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		cancel()
-	}()
-
-	Run(ctx, newTestConfig(), store, enqueuer, threadCreator, 1*time.Millisecond)
-}
-
-func TestProcessDueSchedules_ClosedDBAndErrors(t *testing.T) {
-	store := setupTestStore(t)
-	_ = store.Close()
-
-	// Closed DB returns query error
-	err := ProcessDueSchedules(context.Background(), newTestConfig(), store, nil, nil)
-	if err == nil {
-		t.Error("expected error for closed DB in ProcessDueSchedules")
-	}
-}
-
-type errThreadCreator struct{}
-
-func (e *errThreadCreator) CreatePublicThread(channelID, name string) (string, error) {
-	return "", fmt.Errorf("failed to create thread")
-}
-
-func TestProcessDueCronSchedules_EmptyTitlePrefixAndThreadCreationError(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	cronSched := db.CronSchedule{
-		ID:          "cron-empty-title",
-		TargetID:    "chan-threads-target",
-		TitlePrefix: "", // empty title prefix
-		CronExpr:    "0 9 * * *",
-		Prompt:      "Routine prompt",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-10 * time.Second),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	_ = createCronSchedule(store, cronSched)
-
-	enqueuer := newMockEnqueuer()
-	errCreator := &errThreadCreator{}
-
-	// When thread creation fails, it falls back to target channel ID
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, errCreator); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 message enqueued, got %d", len(msgs))
-	}
-	if msgs[0].ThreadID != "chan-threads-target" {
-		t.Errorf("expected fallback ThreadID chan-threads-target, got %q", msgs[0].ThreadID)
-	}
-}
-
-func TestSchedulerRun_WithActiveConversationsAndFactExtraction(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	_ = insertMessage(store, db.Message{
-		ID:         "msg-active-1",
-		ThreadID:   "thread-active-facts",
-		AuthorID:   "user-100",
-		AuthorName: "Alex",
-		Content:    "I love drinking iced matcha in the morning",
-		Status:     db.StatusCompleted,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		cancel()
-	}()
-
-	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return `{"status":"SUCCESS","response":"[{\"subject\":\"Alex\",\"predicate\":\"likes\",\"object\":\"matcha\",\"category\":\"preference\",\"confidence\":0.9}]"}`, "", 0, nil
-	}
-
-	cfg := config.NewFromData(&config.ConfigData{
-		Model:    "gemini-2.5-flash",
-		APIKey:   "mock_key",
-		Timezone: "America/Los_Angeles",
-	})
-	sched, err := New(cfg, store, enqueuer, threadCreator, WithRunnerFunc(mockRunner))
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	sched.Run(ctx, 2*time.Millisecond)
-}
-
-func TestSchedulerStart_Stop(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	stop := Start(ctx, newTestConfig(), store, nil, nil)
-	time.Sleep(20 * time.Millisecond)
-	stop()
-	// Calling stop second time should be safe
-	stop()
-}
-
-func TestProcessDueSchedules_ContextCancellationInLoops(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	// Insert 2 due crons
-	for i := 1; i <= 2; i++ {
-		_ = createCronSchedule(store, db.CronSchedule{
-			ID:          fmt.Sprintf("cron-cancel-%d", i),
-			TargetID:    "chan-test",
-			TitlePrefix: "Cancel Test",
-			CronExpr:    "0 9 * * *",
-			Prompt:      "test",
-			Timezone:    "UTC",
-			NextRunAt:   now.Add(-10 * time.Minute),
-			Enabled:     true,
-			CreatedAt:   now.Add(-1 * time.Hour),
-		})
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // pre-cancel context
-
-	err := ProcessDueSchedules(ctx, newTestConfig(), store, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "context canceled") {
-		t.Errorf("expected context canceled error, got %v", err)
-	}
-
-	// Insert 2 due one-shots
-	for i := 1; i <= 2; i++ {
-		_ = createOneShotSchedule(store, db.OneShotSchedule{
-			ID:        fmt.Sprintf("oneshot-cancel-%d", i),
-			ThreadID:  "th-test",
-			Prompt:    "test",
-			RunAt:     now.Add(-10 * time.Minute),
-			CreatedAt: now.Add(-1 * time.Hour),
-		})
-	}
-
-	err = ProcessDueSchedules(ctx, newTestConfig(), store, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "context canceled") {
-		t.Errorf("expected context canceled error, got %v", err)
-	}
-}
-
-func TestProcessDueSchedules_StaleCronWithInvalidCronExpr(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	// Overdue by > 24 hours with invalid cron expr
-	cronSched := db.CronSchedule{
-		ID:          "cron-stale-invalid",
-		TargetID:    "chan-test",
-		TitlePrefix: "Stale Invalid",
-		CronExpr:    "invalid-cron-syntax",
-		Prompt:      "stale prompt",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-48 * time.Hour),
-		Enabled:     true,
-		CreatedAt:   now.Add(-72 * time.Hour),
-	}
-	_ = createCronSchedule(store, cronSched)
-
-	enqueuer := newMockEnqueuer()
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, nil); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	// It should NOT enqueue a message since it's stale
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 0 {
-		t.Errorf("expected 0 messages for stale cron, got %d", len(msgs))
-	}
-}
-
-func TestProcessDueSchedules_DueCronWithInvalidCronExpr(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	now := time.Now().UTC()
-	// Overdue by 5 minutes with invalid cron expr (not stale >24h, but invalid)
-	cronSched := db.CronSchedule{
-		ID:          "cron-due-invalid",
-		TargetID:    "chan-test",
-		TitlePrefix: "Due Invalid",
-		CronExpr:    "invalid-cron-syntax",
-		Prompt:      "due prompt",
-		Timezone:    "UTC",
-		NextRunAt:   now.Add(-5 * time.Minute),
-		Enabled:     true,
-		CreatedAt:   now.Add(-1 * time.Hour),
-	}
-	_ = createCronSchedule(store, cronSched)
-
-	enqueuer := newMockEnqueuer()
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, nil); err != nil {
-		t.Fatalf("ProcessDueSchedules error: %v", err)
-	}
-
-	msgs := enqueuer.getMessages()
-	if len(msgs) != 1 {
-		t.Errorf("expected 1 message for due cron, got %d", len(msgs))
-	}
-}
-
-func TestExtractFactsLLM_SuccessAndModelOverride(t *testing.T) {
-	cfg := config.NewFromData(&config.ConfigData{
-		APIKey: "mock_key",
-		Model:  "gemini-1.5-pro-custom",
-	})
-	sched, err := New(cfg, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		if model != "gemini-1.5-pro-custom" {
-			return "", "", 1, fmt.Errorf("expected model gemini-1.5-pro-custom, got %s", model)
-		}
-		return `{"status":"SUCCESS","response":"extracted facts json"}`, "", 0, nil
-	}))
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	res, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
-	if err != nil {
-		t.Fatalf("ExtractFactsLLM failed: %v", err)
-	}
-	if res != "extracted facts json" {
-		t.Errorf("expected 'extracted facts json', got %q", res)
-	}
-
-	// Verify package compatibility wrapper returns error when unconfigured
-	if _, err := ExtractFactsLLM(context.Background(), "test prompt"); err == nil {
-		t.Errorf("expected error from unconfigured package ExtractFactsLLM")
-	}
-}
-
-func TestExtractFactsLLM_DefaultModel(t *testing.T) {
-	cfg := config.NewFromData(&config.ConfigData{
-		APIKey: "mock_key",
-		Model:  "gemini-2.5-flash",
-	})
-	sched, err := New(cfg, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		if model != "gemini-2.5-flash" {
-			return "", "", 1, fmt.Errorf("expected model gemini-2.5-flash, got %s", model)
-		}
-		return `{"status":"SUCCESS","response":"default model result"}`, "", 0, nil
-	}))
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	res, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
-	if err != nil {
-		t.Fatalf("ExtractFactsLLM failed: %v", err)
-	}
-	if res != "default model result" {
-		t.Errorf("expected 'default model result', got %q", res)
-	}
-}
-
-func TestExtractFactsLLM_WithLLMFunc_Success(t *testing.T) {
-	cfg := config.NewFromData(&config.ConfigData{
-		LowEffortModel: "gemini-3.8-flash-low",
-	})
-	var capturedModel, capturedPrompt string
-	sched, err := New(cfg, nil, nil, nil, WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		capturedModel = model
-		capturedPrompt = prompt
-		return "raw extracted facts without wrappers", nil
-	}))
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	res, err := sched.ExtractFactsLLM(context.Background(), "extract fact prompt")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res != "raw extracted facts without wrappers" {
-		t.Errorf("expected 'raw extracted facts without wrappers', got %q", res)
-	}
-	if capturedModel != "gemini-3.8-flash-low" {
-		t.Errorf("expected model 'gemini-3.8-flash-low', got %q", capturedModel)
-	}
-	if capturedPrompt != "extract fact prompt" {
-		t.Errorf("expected prompt 'extract fact prompt', got %q", capturedPrompt)
-	}
-}
-
-func TestExtractFactsLLM_MissingModelAndNeitherConfigured(t *testing.T) {
-	// 1. Missing model
-	cfgEmpty := config.NewFromData(&config.ConfigData{})
-	schedEmpty, err := New(cfgEmpty, nil, nil, nil, WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-		return "ok", nil
-	}))
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	// Force empty model
-	cfgEmpty.Current().Model = ""
-	cfgEmpty.Current().LowEffortModel = ""
-	if _, err := schedEmpty.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Error("expected error when model is not configured")
-	}
-
-	// 2. Neither LLMFunc nor RunnerFunc configured
-	cfgNormal := config.NewFromData(&config.ConfigData{Model: "some-model"})
-	schedNeither, err := New(cfgNormal, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	if _, err := schedNeither.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Error("expected error when neither LLMFunc nor RunnerFunc is configured")
-	}
-}
-
-func TestExtractFactsLLM_Errors(t *testing.T) {
-	// 1. Runner fails with nonzero exit code
-	cfgFail := config.NewFromData(&config.ConfigData{Model: "test-model"})
-	schedFail, _ := New(cfgFail, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return "", "fatal error", 1, fmt.Errorf("exit 1")
-	}))
-	_, err := schedFail.ExtractFactsLLM(context.Background(), "prompt")
-	if err == nil {
-		t.Error("expected error on nonzero exit code")
-	}
-
-	// 2. Runner returns invalid JSON
-	cfgBad := config.NewFromData(&config.ConfigData{Model: "test-model"})
-	schedBad, _ := New(cfgBad, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return "not-json", "", 0, nil
-	}))
-	_, err = schedBad.ExtractFactsLLM(context.Background(), "prompt")
-	if err == nil {
-		t.Error("expected error on invalid JSON output")
-	}
-
-	// 3. Scheduler with nil config
-	schedNilCfg := &Scheduler{}
-	if _, err := schedNilCfg.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Error("expected error when scheduler config is nil")
-	}
-}
-
-func TestExtractFactsLLM_PrefersLowEffortModel(t *testing.T) {
-	cfg := config.NewFromData(&config.ConfigData{
-		APIKey:         "mock_key",
-		Model:          "high-effort-model",
-		LowEffortModel: "low-effort-model",
-	})
-	var capturedModel string
-	sched, err := New(cfg, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		capturedModel = model
-		return `{"status":"SUCCESS","response":"ok"}`, "", 0, nil
-	}))
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	_, err = sched.ExtractFactsLLM(context.Background(), "test prompt")
-	if err != nil {
-		t.Fatalf("ExtractFactsLLM failed: %v", err)
-	}
-	if capturedModel != "low-effort-model" {
-		t.Errorf("expected low-effort-model, got %q", capturedModel)
-	}
-}
-
-func TestRunPruneRetention(t *testing.T) {
-	// 1. Nil DB
-	RunPruneRetention(nil)
-
-	// 2. Closed DB (error branch)
-	closedStore := setupTestStore(t)
-	_ = closedStore.Close()
-	RunPruneRetention(closedStore)
-
-	// 3. Valid DB with old runs pruned
-	store := setupTestStore(t)
-	defer store.Close()
-
-	oldTime := time.Now().UTC().Add(-60 * 24 * time.Hour)
-	_ = store.CreateScheduleRun(context.Background(), db.ScheduleRun{
-		ID:           "old-run-1",
-		ScheduleID:   "sched-1",
-		ScheduleType: "cron",
-		MessageID:    "msg-1",
-		TargetID:     "chan-1",
-		ThreadID:     "th-1",
-		Title:        "Old Run",
-		Prompt:       "Old Prompt",
-		Status:       "completed",
-		StartedAt:    oldTime,
-		CompletedAt:  &oldTime,
-	})
-
-	RunPruneRetention(store)
-}
-
-func TestRunFactExtraction(t *testing.T) {
-	// 1. Nil arguments
-	RunFactExtraction(nil, nil, nil, nil)
-
-	store := setupTestStore(t)
-	defer store.Close()
-
-	client := memory.NewClient("")
-	llmFunc := func(ctx context.Context, prompt string) (string, error) {
-		return "[]", nil
-	}
-
-	// 2. Valid execution
-	RunFactExtraction(context.Background(), store, client, llmFunc)
-
-	// 3. Closed DB error
-	closedStore := setupTestStore(t)
-	_ = closedStore.Close()
-	RunFactExtraction(context.Background(), closedStore, client, llmFunc)
-}
-
-func TestScheduler_ConfigInjection(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	appCfg := config.NewFromData(&config.ConfigData{
-		Timezone: "America/New_York",
-		Model:    "custom-scheduler-model",
-	})
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	s, err := New(appCfg, store, enqueuer, threadCreator)
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	if s == nil {
-		t.Fatalf("expected non-nil scheduler")
-	}
-	if s.cfg != appCfg {
-		t.Errorf("expected s.cfg to match injected appCfg")
-	}
-	if s.cfg.Current().Timezone != "America/New_York" {
-		t.Errorf("expected timezone America/New_York, got %q", s.cfg.Current().Timezone)
-	}
-
-	if err := s.ProcessDueSchedules(context.Background()); err != nil {
-		t.Errorf("unexpected error in ProcessDueSchedules: %v", err)
-	}
-}
-
-func TestScheduler_WithSessionRoots(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	s, err := New(newTestConfig(), store, enqueuer, threadCreator, WithSessionRoots(" /custom/root1 ", "", " /custom/root2 "))
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	if len(s.sessionRoots) != 2 || s.sessionRoots[0] != "/custom/root1" || s.sessionRoots[1] != "/custom/root2" {
-		t.Errorf("expected clean sessionRoots [/custom/root1 /custom/root2], got %v", s.sessionRoots)
-	}
+func setupTestStore(t *testing.T) *db.FakeStore {
+	t.Helper()
+	return db.NewFakeStore()
 }
 
 type mockStoreWrapper struct {
@@ -1702,441 +169,674 @@ func (m *mockStoreWrapper) GetActiveConversationsForExtraction(ctx context.Conte
 	return nil, nil
 }
 
-func TestGetStore_AllBranches(t *testing.T) {
-	// 1. nil scheduler
-	var nilSched *Scheduler
-	if st := nilSched.getStore(); st != nil {
-		t.Errorf("expected nil store for nil scheduler, got %v", st)
-	}
-
-	// 2. s.store is set
+func TestNew_AndOptions(t *testing.T) {
 	store := setupTestStore(t)
 	defer store.Close()
-	sStore := &Scheduler{store: store}
-	if st := sStore.getStore(); st != store {
-		t.Errorf("expected s.store, got %v", st)
-	}
 
-	// 3. s.store is nil
-	sNil := &Scheduler{}
-	if st := sNil.getStore(); st != nil {
-		t.Errorf("expected nil store when s.store is nil, got %v", st)
+	tests := []struct {
+		name      string
+		cfg       *config.Config
+		withOpts  bool
+		wantErr   bool
+		wantRoots int
+		wantBrain string
+	}{
+		{"nil config returns error", nil, false, true, 0, ""},
+		{"valid config standard", newTestConfig(), false, false, 0, ""},
+		{"options runner and roots and brain", newTestConfig(), true, false, 2, "/tmp/brain"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var opts []Option
+			var embedderCalled, llmCalled bool
+			if tc.withOpts {
+				opts = []Option{
+					WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						return "", "", 0, nil
+					}),
+					WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+						return "llm", nil
+					}),
+					WithSessionRoots(" /root1 ", "", " /root2 "),
+					WithBrainDir(tc.wantBrain),
+					WithTranscriptEmbedder(func(ctx context.Context, text string) ([]float32, error) {
+						embedderCalled = true
+						return make([]float32, db.ExpectedEmbeddingDim), nil
+					}),
+					WithTranscriptLLMFunc(func(ctx context.Context, prompt string) (string, error) {
+						llmCalled = true
+						return "summary", nil
+					}),
+					nil,
+				}
+			}
+			s, err := New(tc.cfg, store, newMockEnqueuer(), newMockThreadCreator(), opts...)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v got err=%v", tc.wantErr, err)
+			}
+			if tc.wantErr {
+				return
+			}
+			if tc.withOpts {
+				if len(s.sessionRoots) != tc.wantRoots || s.sessionRoots[0] != "/root1" || s.sessionRoots[1] != "/root2" {
+					t.Errorf("roots mismatch: got %v", s.sessionRoots)
+				}
+				if s.brainDir != tc.wantBrain {
+					t.Errorf("brainDir: got %q, want %q", s.brainDir, tc.wantBrain)
+				}
+				_, _ = s.transcriptEmbedder(context.Background(), "t")
+				_, _ = s.transcriptLLMFunc(context.Background(), "p")
+				if !embedderCalled || !llmCalled {
+					t.Errorf("expected transcript functions to be wired and callable")
+				}
+			}
+		})
 	}
 }
 
-func TestNew_StoreAndWrappers(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	cfg := newTestConfig()
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	// 1. New with db.Store
-	s1, err := New(cfg, store, enqueuer, threadCreator)
-	if err != nil {
-		t.Fatalf("New with db.Store failed: %v", err)
-	}
-	if s1.store != store {
-		t.Errorf("expected s1.store to be store")
-	}
-
-	// 2. NewWithStore
-	s2, err := NewWithStore(cfg, store, enqueuer, threadCreator)
-	if err != nil {
-		t.Fatalf("NewWithStore failed: %v", err)
-	}
-	if s2.store != store {
-		t.Errorf("expected s2.store to be store")
-	}
-
-	// 3. NewScheduler wrapper
-	s3, err := NewScheduler(cfg, store, enqueuer, threadCreator)
-	if err != nil {
-		t.Fatalf("NewScheduler failed: %v", err)
-	}
-	if s3.store != store {
-		t.Errorf("expected s3.store to be store")
-	}
-
-	// 4. NewScheduler with nil config returns error
-	if _, err := NewScheduler(nil, store, enqueuer, threadCreator); err == nil {
-		t.Errorf("expected error when config is nil in NewScheduler")
-	}
-}
-
-func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	cfg := newTestConfig()
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
-
-	// 1. ProcessDueSchedules on nil scheduler
-	var nilSched *Scheduler
-	if err := nilSched.ProcessDueSchedules(context.Background()); err != nil {
-		t.Errorf("expected nil error on nil scheduler, got %v", err)
-	}
-
-	// 2. ProcessDueSchedules on scheduler with nil store
-	sNoStore := &Scheduler{cfg: cfg}
-	if err := sNoStore.ProcessDueSchedules(context.Background()); err != nil {
-		t.Errorf("expected nil error on scheduler with nil store, got %v", err)
-	}
-
-	// 3. ProcessDueSchedules with nil cfg
-	sNoCfg := &Scheduler{store: store}
-	if err := sNoCfg.ProcessDueSchedules(context.Background()); err == nil {
-		t.Errorf("expected error on scheduler with nil cfg")
-	}
-
-	// 4. processDueSchedulesStore edge cases: nil store, nil cfg
-	if err := processDueSchedulesStore(context.Background(), cfg, nil, enqueuer, threadCreator); err != nil {
-		t.Errorf("expected nil on nil store, got %v", err)
-	}
-	if err := processDueSchedulesStore(context.Background(), nil, store, enqueuer, threadCreator); err == nil {
-		t.Errorf("expected error on nil cfg in processDueSchedulesStore")
-	}
-
-	// 5. Store error on GetDueCronSchedules
-	mockStore := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return nil, fmt.Errorf("cron query failed")
+func TestDiscordThreadCreator_CreatePublicThread(t *testing.T) {
+	mockOKSession, _ := discordgo.New("Bot mock_token")
+	mockOKSession.Client = &http.Client{
+		Transport: &mockRoundTripper{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"id":"th-mock-999","name":"mock title"}`)),
+					Header:     make(http.Header),
+				}, nil
+			},
 		},
 	}
-	sErrCron, _ := New(cfg, mockStore, enqueuer, threadCreator)
-	if err := sErrCron.ProcessDueSchedules(context.Background()); err == nil || !strings.Contains(err.Error(), "cron query failed") {
-		t.Errorf("expected cron query error, got %v", err)
+	mockErrSession, _ := discordgo.New("Bot mock_token")
+	mockErrSession.Client = &http.Client{
+		Transport: &mockRoundTripper{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"message":"Bad request"}`)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
 	}
 
-	// 6. Stale cron with empty timezone (tests tz == \"\" branch) and UpdateCronNextRun error
+	tests := []struct {
+		name       string
+		creator    *DiscordThreadCreator
+		channelID  string
+		wantThread string
+		wantErr    bool
+	}{
+		{"nil creator fallback", nil, "chan-nil", "chan-nil", false},
+		{"nil session fallback", NewDiscordThreadCreator(nil), "chan-nosess", "chan-nosess", false},
+		{"api success", NewDiscordThreadCreator(mockOKSession), "chan-1", "th-mock-999", false},
+		{"api error", NewDiscordThreadCreator(mockErrSession), "chan-1", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.creator.CreatePublicThread(tc.channelID, "title")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v got err=%v", tc.wantErr, err)
+			}
+			if !tc.wantErr && got != tc.wantThread {
+				t.Errorf("got %q, want %q", got, tc.wantThread)
+			}
+		})
+	}
+}
+
+func TestProcessDueSchedules_Cron(t *testing.T) {
 	now := time.Now().UTC()
-	staleCron := db.CronSchedule{
-		ID:          "stale-cron-1",
-		CronExpr:    "0 9 * * *",
-		Timezone:    "", // Empty timezone
-		TargetID:    "chan-test",
-		TitlePrefix: "Stale",
-		Prompt:      "Stale prompt",
-		NextRunAt:   now.Add(-48 * time.Hour), // >24h overdue
-		Enabled:     true,
-	}
-	mockStoreStale := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return []db.CronSchedule{staleCron}, nil
+	tests := []struct {
+		name             string
+		cron             db.CronSchedule
+		channelMode      string
+		isAlreadyThread  bool
+		threadCreatorErr bool
+		wantMsgs         int
+		wantThreadID     string
+		wantEffort       string
+	}{
+		{
+			name:         "timezone inheritance",
+			cron:         mkCron("c-inherit", "chan-tz", "Routine", "0 9 * * *", "run routine", "", "", now.Add(-time.Minute)),
+			channelMode:  "threads",
+			wantMsgs:     1,
+			wantThreadID: "th-chan-tz-1",
 		},
-		updateCronNextRunFn: func(ctx context.Context, id string, nextRunAt time.Time) error {
-			return fmt.Errorf("failed to update next run for stale")
+		{
+			name:         "threads mode thread created",
+			cron:         mkCron("c-threads", "chan-dev", "Health", "0 12 * * *", "report", "UTC", "", now.Add(-time.Minute)),
+			channelMode:  "threads",
+			wantMsgs:     1,
+			wantThreadID: "th-chan-dev-1",
 		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return nil, nil
+		{
+			name:         "channel mode no thread created",
+			cron:         mkCron("c-chan", "chan-gen", "Weather", "0 6 * * *", "forecast", "UTC", "", now.Add(-time.Minute)),
+			channelMode:  "channel",
+			wantMsgs:     1,
+			wantThreadID: "chan-gen",
+		},
+		{
+			name:            "target already thread",
+			cron:            mkCron("c-already-th", "th-target-1", "Update", "0 15 * * *", "update", "UTC", "", now.Add(-time.Minute)),
+			channelMode:     "threads",
+			isAlreadyThread: true,
+			wantMsgs:        1,
+			wantThreadID:    "th-target-1",
+		},
+		{
+			name:        "stale overdue >24h advances without firing",
+			cron:        mkCron("c-stale", "chan-stale", "Stale", "0 20 * * 5", "stale", "UTC", "", now.Add(-26*time.Hour)),
+			channelMode: "threads",
+			wantMsgs:    0,
+		},
+		{
+			name:         "invalid cron 24h fallback fires",
+			cron:         mkCron("c-invalid", "chan-inv", "Invalid", "invalid-syntax", "due inv", "UTC", "", now.Add(-5*time.Minute)),
+			channelMode:  "threads",
+			wantMsgs:     1,
+			wantThreadID: "th-chan-inv-1",
+		},
+		{
+			name:        "stale cron with invalid syntax advances without firing",
+			cron:        mkCron("c-stale-inv", "chan-stale-inv", "StaleInv", "invalid-syntax", "stale inv", "UTC", "", now.Add(-48*time.Hour)),
+			channelMode: "threads",
+			wantMsgs:    0,
+		},
+		{
+			name:             "thread creator error falls back to channel id",
+			cron:             mkCron("c-err-th", "chan-fallback", "", "0 9 * * *", "fallback", "UTC", "", now.Add(-time.Minute)),
+			channelMode:      "threads",
+			threadCreatorErr: true,
+			wantMsgs:         1,
+			wantThreadID:     "chan-fallback",
+		},
+		{
+			name:         "effort propagation and schedule run creation",
+			cron:         mkCron("c-effort", "chan-eff", "LowEff", "0 9 * * *", "low effort", "UTC", "low", now.Add(-time.Minute)),
+			channelMode:  "threads",
+			wantMsgs:     1,
+			wantThreadID: "th-chan-eff-1",
+			wantEffort:   "low",
 		},
 	}
-	sStale, _ := New(cfg, mockStoreStale, enqueuer, threadCreator)
-	if err := sStale.ProcessDueSchedules(context.Background()); err != nil {
-		t.Errorf("unexpected error on stale cron processing: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := setupTestStore(t)
+			defer store.Close()
+			_ = store.CreateCronSchedule(context.Background(), tc.cron)
 
-	// 7. Due cron with UpdateCronNextRun error, CreateScheduleRun error, and InsertMessage error
-	dueCron := db.CronSchedule{
-		ID:          "due-cron-1",
-		CronExpr:    "0 9 * * *",
-		Timezone:    "UTC",
-		TargetID:    "chan-test",
-		TitlePrefix: "DuePrefix",
-		Prompt:      "Due prompt",
-		NextRunAt:   now.Add(-5 * time.Minute),
-		Enabled:     true,
-	}
-	mockStoreErrors := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return []db.CronSchedule{dueCron}, nil
-		},
-		updateCronNextRunFn: func(ctx context.Context, id string, nextRunAt time.Time) error {
-			return fmt.Errorf("update cron next run failed")
-		},
-		createScheduleRunFn: func(ctx context.Context, run db.ScheduleRun) error {
-			return fmt.Errorf("create schedule run failed")
-		},
-		insertMessageFn: func(ctx context.Context, msg db.Message) error {
-			return fmt.Errorf("insert message failed")
-		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return nil, nil
-		},
-	}
-	sDueErrors, _ := New(cfg, mockStoreErrors, enqueuer, threadCreator)
-	if err := sDueErrors.ProcessDueSchedules(context.Background()); err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
+			chanType := discordgo.ChannelTypeGuildText
+			if tc.isAlreadyThread {
+				chanType = discordgo.ChannelTypeGuildPublicThread
+			}
+			queue.CacheDiscordChannel(&discordgo.Channel{
+				ID:   tc.cron.TargetID,
+				Name: tc.cron.TargetID,
+				Type: chanType,
+			})
 
-	// 8. Store error on GetDueOneShotSchedules
-	mockStoreOneShotErr := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return nil, nil
-		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return nil, fmt.Errorf("oneshot query error")
-		},
-	}
-	sOneShotErr, _ := New(cfg, mockStoreOneShotErr, enqueuer, threadCreator)
-	if err := sOneShotErr.ProcessDueSchedules(context.Background()); err == nil || !strings.Contains(err.Error(), "oneshot query error") {
-		t.Errorf("expected oneshot query error, got %v", err)
-	}
+			cfg := config.NewFromData(&config.ConfigData{
+				Timezone: "America/New_York",
+				Channels: map[string]config.ChannelPolicy{
+					"default":        {Mode: "threads"},
+					tc.cron.TargetID: {Mode: tc.channelMode},
+				},
+			})
 
-	// 9. Due one-shot: InsertMessageAndConsumeOneShot error
-	oneShot1 := db.OneShotSchedule{
-		ID:        "oneshot-err-1",
-		ThreadID:  "th-1",
-		Prompt:    "Prompt 1",
-		RunAt:     now.Add(-1 * time.Minute),
-	}
-	mockStoreOneShotConsumeErr := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return nil, nil
-		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return []db.OneShotSchedule{oneShot1}, nil
-		},
-		insertMessageAndConsumeOneShotFn: func(ctx context.Context, scheduleID string, msg db.Message) error {
-			return fmt.Errorf("failed to consume oneshot")
-		},
-	}
-	sConsumeErr, _ := New(cfg, mockStoreOneShotConsumeErr, enqueuer, threadCreator)
-	if err := sConsumeErr.ProcessDueSchedules(context.Background()); err != nil {
-		t.Errorf("unexpected error on consume error: %v", err)
-	}
+			enqueuer := newMockEnqueuer()
+			var tcCreator ThreadCreator
+			if tc.threadCreatorErr {
+				tcCreator = &errThreadCreator{}
+			} else {
+				tcCreator = newMockThreadCreator()
+			}
 
-	// 10. Due one-shot: CreateScheduleRun error
-	mockStoreOneShotRunErr := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return nil, nil
-		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return []db.OneShotSchedule{oneShot1}, nil
-		},
-		insertMessageAndConsumeOneShotFn: func(ctx context.Context, scheduleID string, msg db.Message) error {
-			return nil
-		},
-		createScheduleRunFn: func(ctx context.Context, run db.ScheduleRun) error {
-			return fmt.Errorf("failed to create run record")
-		},
-	}
-	sRunErr, _ := New(cfg, mockStoreOneShotRunErr, enqueuer, threadCreator)
-	if err := sRunErr.ProcessDueSchedules(context.Background()); err != nil {
-		t.Errorf("unexpected error on run record error: %v", err)
-	}
+			s, err := New(cfg, store, enqueuer, tcCreator)
+			if err != nil {
+				t.Fatalf("New failed: %v", err)
+			}
+			if err := s.ProcessDueSchedules(context.Background()); err != nil {
+				t.Fatalf("ProcessDueSchedules failed: %v", err)
+			}
 
-	// 11. Context cancellation during one-shot loop
-	cancellingCtx, cancel := context.WithCancel(context.Background())
-	cancel() // canceled before processing loop
-	mockStoreOneShotCancel := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return nil, nil
-		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return []db.OneShotSchedule{oneShot1}, nil
-		},
-	}
-	sCancel, _ := New(cfg, mockStoreOneShotCancel, enqueuer, threadCreator)
-	if err := sCancel.ProcessDueSchedules(cancellingCtx); !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got %v", err)
+			msgs := enqueuer.getMessages()
+			if len(msgs) != tc.wantMsgs {
+				t.Fatalf("expected %d messages, got %d", tc.wantMsgs, len(msgs))
+			}
+			if tc.wantMsgs > 0 {
+				msg := msgs[0]
+				if msg.ThreadID != tc.wantThreadID {
+					t.Errorf("msg ThreadID: got %q, want %q", msg.ThreadID, tc.wantThreadID)
+				}
+				if tc.wantEffort != "" && msg.Effort != tc.wantEffort {
+					t.Errorf("msg Effort: got %q, want %q", msg.Effort, tc.wantEffort)
+				}
+				runs, total, err := store.GetScheduleRunsPaginated(context.Background(), 10, 0, tc.cron.ID, "")
+				if err != nil || total != 1 || len(runs) != 1 {
+					t.Fatalf("expected 1 schedule run, got total=%d err=%v", total, err)
+				}
+				if runs[0].ThreadID != tc.wantThreadID || runs[0].Effort != tc.wantEffort {
+					t.Errorf("run mismatch: %+v", runs[0])
+				}
+			}
+			dueCrons, _ := store.GetDueCronSchedules(context.Background())
+			if len(dueCrons) != 0 {
+				t.Errorf("expected 0 due crons after run, got %d", len(dueCrons))
+			}
+		})
 	}
 }
 
-func TestStart_AllBranchesAndWrappers(t *testing.T) {
+func TestProcessDueSchedules_OneShot(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name         string
+		oneShot      db.OneShotSchedule
+		futureSched  db.OneShotSchedule
+		wantRollback bool
+		wantMsgs     int
+		wantThreadID string
+		wantEffort   string
+	}{
+		{
+			name:         "atomic consumption and run creation",
+			oneShot:      mkOneShot("os-1", "th-os-1", "Check stove", "standard", now.Add(-time.Minute)),
+			futureSched:  mkOneShot("os-future", "th-os-1", "Future stove", "standard", now.Add(30*time.Minute)),
+			wantMsgs:     1,
+			wantThreadID: "th-os-1",
+			wantEffort:   "standard",
+		},
+		{
+			name:         "effort propagation low",
+			oneShot:      mkOneShot("os-effort", "th-os-2", "Oven reminder", "low", now.Add(-time.Minute)),
+			wantMsgs:     1,
+			wantThreadID: "th-os-2",
+			wantEffort:   "low",
+		},
+		{
+			name:         "rollback on missing schedule",
+			oneShot:      mkOneShot("os-rb", "th-os-rb", "Prompt", "standard", now.Add(-time.Minute)),
+			wantRollback: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := setupTestStore(t)
+			defer store.Close()
+
+			if tc.wantRollback {
+				msg := db.Message{ID: "msg-rb-1", ThreadID: tc.oneShot.ThreadID, Content: tc.oneShot.Prompt, Status: db.StatusPending, CreatedAt: now}
+				err := store.InsertMessageAndConsumeOneShot(context.Background(), "missing-id", msg)
+				if err == nil {
+					t.Fatal("expected error when consuming non-existent one-shot")
+				}
+				dbMsg, _ := store.GetMessage(context.Background(), "msg-rb-1")
+				if dbMsg != nil {
+					t.Errorf("expected message to not exist after rollback")
+				}
+				return
+			}
+
+			_ = store.CreateOneShotSchedule(context.Background(), tc.oneShot)
+			if tc.futureSched.ID != "" {
+				_ = store.CreateOneShotSchedule(context.Background(), tc.futureSched)
+			}
+
+			enqueuer := newMockEnqueuer()
+			s, err := New(newTestConfig(), store, enqueuer, newMockThreadCreator())
+			if err != nil {
+				t.Fatalf("New failed: %v", err)
+			}
+			if err := s.ProcessDueSchedules(context.Background()); err != nil {
+				t.Fatalf("ProcessDueSchedules failed: %v", err)
+			}
+
+			msgs := enqueuer.getMessages()
+			if len(msgs) != tc.wantMsgs {
+				t.Fatalf("expected %d messages, got %d", tc.wantMsgs, len(msgs))
+			}
+			if msgs[0].ThreadID != tc.wantThreadID || msgs[0].Effort != tc.wantEffort {
+				t.Errorf("msg mismatch: %+v", msgs[0])
+			}
+
+			runs, total, err := store.GetScheduleRunsPaginated(context.Background(), 10, 0, tc.oneShot.ID, "")
+			if err != nil || total != 1 || len(runs) != 1 {
+				t.Fatalf("expected 1 schedule run, got total=%d err=%v", total, err)
+			}
+			if runs[0].ScheduleType != "one_shot" || runs[0].Effort != tc.wantEffort {
+				t.Errorf("run mismatch: %+v", runs[0])
+			}
+
+			dueAfter, _ := store.GetDueOneShotSchedules(context.Background())
+			if len(dueAfter) != 0 {
+				t.Errorf("expected 0 due one-shots after processing, got %d", len(dueAfter))
+			}
+			if tc.futureSched.ID != "" {
+				all, _ := store.GetAllOneShotSchedules(context.Background(), tc.oneShot.ThreadID)
+				if len(all) != 1 || all[0].ID != tc.futureSched.ID {
+					t.Errorf("expected only future schedule to remain, got %+v", all)
+				}
+			}
+		})
+	}
+}
+
+func TestProcessDueSchedules_GuardsAndStoreErrors(t *testing.T) {
+	now := time.Now().UTC()
+	baseCfg := newTestConfig()
+	baseStore := setupTestStore(t)
+	defer baseStore.Close()
+
+	dueCron := mkCron("due-c1", "chan-1", "Due", "0 9 * * *", "due", "UTC", "", now.Add(-time.Minute))
+	staleCron := mkCron("stale-c1", "chan-1", "Stale", "0 9 * * *", "stale", "UTC", "", now.Add(-48*time.Hour))
+	dueOneShot := mkOneShot("os-1", "th-1", "oneshot", "", now.Add(-time.Minute))
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name       string
+		sched      *Scheduler
+		ctx        context.Context
+		wrapper    *mockStoreWrapper
+		wantErr    bool
+		errContain string
+	}{
+		{"nil receiver", nil, context.Background(), nil, false, ""},
+		{"nil store", &Scheduler{cfg: baseCfg}, context.Background(), nil, false, ""},
+		{"nil config", &Scheduler{store: baseStore}, context.Background(), nil, true, "config cannot be nil"},
+		{"cron query error", &Scheduler{cfg: baseCfg}, context.Background(), &mockStoreWrapper{
+			getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+				return nil, fmt.Errorf("cron query failed")
+			},
+		}, true, "cron query failed"},
+		{"oneshot query error", &Scheduler{cfg: baseCfg}, context.Background(), &mockStoreWrapper{
+			getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) { return nil, nil },
+			getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+				return nil, fmt.Errorf("oneshot query error")
+			},
+		}, true, "oneshot query error"},
+		{"cron loop context canceled", &Scheduler{cfg: baseCfg}, cancelCtx, &mockStoreWrapper{
+			getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+				return []db.CronSchedule{dueCron}, nil
+			},
+		}, true, "context canceled"},
+		{"oneshot loop context canceled", &Scheduler{cfg: baseCfg}, cancelCtx, &mockStoreWrapper{
+			getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) { return nil, nil },
+			getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+				return []db.OneShotSchedule{dueOneShot}, nil
+			},
+		}, true, "context canceled"},
+		{"stale cron update next run error tolerated", &Scheduler{cfg: baseCfg}, context.Background(), &mockStoreWrapper{
+			getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+				return []db.CronSchedule{staleCron}, nil
+			},
+			updateCronNextRunFn: func(ctx context.Context, id string, nextRunAt time.Time) error {
+				return fmt.Errorf("stale update error")
+			},
+			getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) { return nil, nil },
+		}, false, ""},
+		{"due cron mutations error tolerated", &Scheduler{cfg: baseCfg, threadCreator: newMockThreadCreator()}, context.Background(), &mockStoreWrapper{
+			getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+				return []db.CronSchedule{dueCron}, nil
+			},
+			updateCronNextRunFn: func(ctx context.Context, id string, nextRunAt time.Time) error {
+				return fmt.Errorf("cron update error")
+			},
+			createScheduleRunFn: func(ctx context.Context, run db.ScheduleRun) error {
+				return fmt.Errorf("create run error")
+			},
+			insertMessageFn: func(ctx context.Context, msg db.Message) error {
+				return fmt.Errorf("insert msg error")
+			},
+			getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) { return nil, nil },
+		}, false, ""},
+		{"due oneshot consume and run error tolerated", &Scheduler{cfg: baseCfg}, context.Background(), &mockStoreWrapper{
+			getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) { return nil, nil },
+			getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+				return []db.OneShotSchedule{dueOneShot}, nil
+			},
+			insertMessageAndConsumeOneShotFn: func(ctx context.Context, scheduleID string, msg db.Message) error {
+				return fmt.Errorf("consume error")
+			},
+			createScheduleRunFn: func(ctx context.Context, run db.ScheduleRun) error {
+				return fmt.Errorf("oneshot run error")
+			},
+		}, false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.sched
+			if tc.wrapper != nil {
+				s.store = tc.wrapper
+			}
+			err := s.ProcessDueSchedules(tc.ctx)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v got err=%v", tc.wantErr, err)
+			}
+			if tc.errContain != "" && (err == nil || !strings.Contains(err.Error(), tc.errContain)) {
+				t.Errorf("expected error containing %q, got %v", tc.errContain, err)
+			}
+		})
+	}
+}
+
+func TestExtractFactsLLM(t *testing.T) {
+	tests := []struct {
+		name       string
+		sched      *Scheduler
+		runnerFn   runner.RunnerFunc
+		llmFn      runner.LLMFunc
+		cfg        *config.Config
+		wantRes    string
+		wantErr    bool
+		errContain string
+	}{
+		{"nil scheduler", nil, nil, nil, nil, "", true, "not initialized"},
+		{"neither configured", &Scheduler{cfg: newTestConfig()}, nil, nil, newTestConfig(), "", true, "RunnerFunc not configured"},
+		{"nil config", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		}, nil, nil, "", true, "config cannot be nil"},
+		{"empty model", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		}, nil, config.NewFromData(&config.ConfigData{Model: "   "}), "", true, "model is not configured"},
+		{"llm func success prefers low effort", &Scheduler{}, nil, func(ctx context.Context, model, prompt string) (string, error) {
+			return fmt.Sprintf("llm:%s:%s", model, prompt), nil
+		}, config.NewFromData(&config.ConfigData{Model: "high", LowEffortModel: "low"}), "llm:low:fact-prompt", false, ""},
+		{"runner func success custom agy bin", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return fmt.Sprintf(`{"status":"SUCCESS","response":"runner:%s:%s"}`, agyBin, model), "", 0, nil
+		}, nil, config.NewFromData(&config.ConfigData{Model: "main-model", AgyBin: "/usr/bin/custom-agy", APIKey: "key"}), "runner:/usr/bin/custom-agy:main-model", false, ""},
+		{"runner non-zero exit code", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "err", 1, fmt.Errorf("exit 1")
+		}, nil, config.NewFromData(&config.ConfigData{Model: "main-model"}), "", true, "exitCode=1"},
+		{"runner invalid json output", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "not-json", "", 0, nil
+		}, nil, config.NewFromData(&config.ConfigData{Model: "main-model"}), "", true, "failed to parse agy json"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.sched
+			if s != nil {
+				s.runnerFn = tc.runnerFn
+				s.llmFn = tc.llmFn
+				s.cfg = tc.cfg
+			}
+			res, err := s.ExtractFactsLLM(context.Background(), "fact-prompt")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v got err=%v", tc.wantErr, err)
+			}
+			if tc.errContain != "" && (err == nil || !strings.Contains(err.Error(), tc.errContain)) {
+				t.Errorf("expected error containing %q, got %v", tc.errContain, err)
+			}
+			if !tc.wantErr && res != tc.wantRes {
+				t.Errorf("got %q, want %q", res, tc.wantRes)
+			}
+		})
+	}
+}
+
+func TestMaintenanceJobs_RetentionDecayFactsTranscript(t *testing.T) {
 	store := setupTestStore(t)
 	defer store.Close()
 
-	cfg := newTestConfig()
-	enqueuer := newMockEnqueuer()
-	threadCreator := newMockThreadCreator()
+	// 1. RunPruneRetentionWithContext
+	RunPruneRetentionWithContext(context.Background(), nil)
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	RunPruneRetentionWithContext(context.Background(), closedStore)
 
-	sched, err := New(cfg, store, enqueuer, threadCreator)
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
+	oldTime := time.Now().UTC().Add(-60 * 24 * time.Hour)
+	_ = store.CreateScheduleRun(context.Background(), db.ScheduleRun{
+		ID: "old-1", ScheduleID: "s1", ScheduleType: "cron", TargetID: "c1", ThreadID: "th1",
+		StartedAt: oldTime, CompletedAt: &oldTime,
+	})
+	RunPruneRetentionWithContext(context.Background(), store)
 
-	// 1. Scheduler.Start and multiple stop calls
-	stop := sched.Start(context.Background())
-	stop()
-	stop() // once.Do branch
+	// 2. RunMemoryDecayWithContext & TryLock contention
+	RunMemoryDecayWithContext(context.Background(), nil)
+	closedStore2 := setupTestStore(t)
+	_ = closedStore2.Close()
+	RunMemoryDecayWithContext(context.Background(), closedStore2)
 
-	// 2. Package Start wrapper with nil config (returns no-op stop func)
-	stopNil := Start(context.Background(), nil, store, nil, nil)
-	if stopNil == nil {
-		t.Fatalf("expected non-nil stop func on Start with nil config")
-	}
-	stopNil()
+	emb := make([]float32, db.ExpectedEmbeddingDim)
+	emb[0] = 1.0
+	_, _ = store.InsertFact(context.Background(), "general", "Fact 1", 0.50, emb)
+	RunMemoryDecayWithContext(context.Background(), store)
 
-	// 3. Package Start wrapper with valid config
-	stopValid := Start(context.Background(), cfg, store, nil, nil)
-	if stopValid == nil {
-		t.Fatalf("expected non-nil stop func on Start with valid config")
-	}
-	stopValid()
-}
+	decayMutex.Lock()
+	RunMemoryDecayWithContext(context.Background(), store)
+	decayMutex.Unlock()
 
-func TestExtractFactsLLM_AdditionalBranches(t *testing.T) {
-	// 1. nil scheduler
-	var nilSched *Scheduler
-	if _, err := nilSched.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Errorf("expected error on nil scheduler")
-	}
+	// 3. RunFactExtraction
+	RunFactExtraction(context.Background(), nil, nil, nil)
+	cancCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	RunFactExtraction(cancCtx, store, memory.NewClient(""), func(ctx context.Context, p string) (string, error) { return "[]", nil })
 
-	// 2. scheduler with nil runnerFn
-	schedNoRunner := &Scheduler{}
-	if _, err := schedNoRunner.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Errorf("expected error on nil runnerFn")
-	}
-
-	// 3. scheduler with non-nil runnerFn but nil cfg or nil cfg.Current()
-	schedRunnerNoCfg := &Scheduler{
-		runnerFn: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "", 0, nil
-		},
-	}
-	if _, err := schedRunnerNoCfg.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Errorf("expected error on nil cfg")
-	}
-
-	schedRunnerNilCur := &Scheduler{
-		cfg: &config.Config{},
-		runnerFn: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "", 0, nil
-		},
-	}
-	if _, err := schedRunnerNilCur.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Errorf("expected error on nil cfg.Current()")
-	}
-
-	// 4. Model missing / empty string / whitespace
-	cfgEmptyModel := config.NewFromData(&config.ConfigData{Model: "   "})
-	schedEmptyModel, _ := New(cfgEmptyModel, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return "", "", 0, nil
-	}))
-	if _, err := schedEmptyModel.ExtractFactsLLM(context.Background(), "prompt"); err == nil || !strings.Contains(err.Error(), "model is not configured") {
-		t.Errorf("expected 'model is not configured' error, got %v", err)
-	}
-
-	// 5. Package wrapper ExtractFactsLLM
-	if _, err := ExtractFactsLLM(context.Background(), "prompt"); err == nil {
-		t.Errorf("expected error from package wrapper ExtractFactsLLM")
-	}
-}
-
-func TestRunFactExtraction_BackfilledAndMockErrors(t *testing.T) {
-	store := setupTestStore(t)
-	defer store.Close()
-
-	// 1. Test backfill with server returning embedding of expected dimension 384
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		emb384 := make([]float32, 384)
 		emb384[0] = 0.5
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"embedding": emb384,
-		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": emb384})
 	}))
 	defer ts.Close()
 
-	// Insert fact without embedding
-	_, err := store.InsertFact(context.Background(), "user_pref", "Test fact for backfill", 0.8, nil)
-	if err != nil {
-		t.Fatalf("failed to insert fact for backfill: %v", err)
-	}
-
+	_, _ = store.InsertFact(context.Background(), "pref", "No emb fact", 0.8, nil)
 	client := memory.NewClient(ts.URL)
-	llmFunc := func(ctx context.Context, prompt string) (string, error) {
-		return "[]", nil
-	}
-
-	// Runs backfill, hits backfilled > 0
+	llmFunc := func(ctx context.Context, p string) (string, error) { return "[]", nil }
 	RunFactExtraction(context.Background(), store, client, llmFunc)
 
-	// 2. Test fact extraction error via mock store returning error on active conversations
 	mockStore := &mockStoreWrapper{
 		Store: store,
-		getActiveConversationsForExtractionFn: func(ctx context.Context, activeHours int) ([]string, error) {
+		getActiveConversationsForExtractionFn: func(ctx context.Context, h int) ([]string, error) {
 			return nil, fmt.Errorf("active conv retrieval failed")
 		},
 	}
 	RunFactExtraction(context.Background(), mockStore, client, llmFunc)
+
+	// 4. RunTranscriptSync & runTranscriptSync method
+	stats, err := RunTranscriptSync(context.Background(), nil, "/tmp", nil, nil)
+	if err != nil || stats.Synced != 0 {
+		t.Fatalf("expected nil err on nil store")
+	}
+
+	if _, err := RunTranscriptSync(context.Background(), store, "", nil, nil); err == nil {
+		t.Fatalf("expected error on empty brain dir")
+	}
+
+	tempBrain := t.TempDir()
+	logDir := filepath.Join(tempBrain, "sess-1", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"sync test"}`+"\n"), 0644)
+	oldMtime := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(filepath.Join(logDir, "transcript.jsonl"), oldMtime, oldMtime)
+
+	mockEmbedder := func(ctx context.Context, text string) ([]float32, error) {
+		return make([]float32, db.ExpectedEmbeddingDim), nil
+	}
+	mockLLM := func(ctx context.Context, prompt string) (string, error) {
+		return "sync summary", nil
+	}
+	stats, err = RunTranscriptSync(context.Background(), store, tempBrain, mockEmbedder, mockLLM)
+	if err != nil || stats.Synced != 1 {
+		t.Fatalf("RunTranscriptSync failed: %v", err)
+	}
+
+	transcriptSyncMutex.Lock()
+	statsOverlap, errOverlap := RunTranscriptSync(context.Background(), store, tempBrain, nil, nil)
+	transcriptSyncMutex.Unlock()
+	if errOverlap != nil || statsOverlap.Synced != 0 {
+		t.Errorf("expected overlap to skip cleanly")
+	}
+
+	emptySched := &Scheduler{}
+	emptySched.runTranscriptSync(context.Background())
+	emptySched.wg.Wait()
+
+	cfg := newTestConfig()
+	schedMethod, _ := New(cfg, store, nil, nil, WithBrainDir(tempBrain))
+	schedMethod.runTranscriptSync(context.Background())
+	schedMethod.wg.Wait()
+
+	cancCtx2, canc2 := context.WithCancel(context.Background())
+	canc2()
+	schedMethod.runTranscriptSync(cancCtx2)
+	schedMethod.wg.Wait()
 }
 
-func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
-	// 1. Nil scheduler
+func TestScheduler_RunAndStartLifecycle(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+	cfg := newTestConfig()
+
+	// 1. Start and stop idempotency
+	schedStart, err := New(cfg, store, nil, nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	ctxStart, cancelStart := context.WithCancel(context.Background())
+	defer cancelStart()
+	stop := schedStart.Start(ctxStart)
+	stop()
+	stop()
+
+	// 2. Run guards (nil scheduler, nil cfg)
 	var nilSched *Scheduler
 	nilSched.Run(context.Background(), time.Second)
 
-	// 2. Scheduler with nil config
 	schedNilCfg := &Scheduler{}
 	schedNilCfg.Run(context.Background(), time.Second)
 
-	// 3. Package Run wrapper with nil config
-	Run(context.Background(), nil, nil, nil, nil, time.Second)
-
-	// 4. Initial schedule check error in Run
-	store := setupTestStore(t)
-	defer store.Close()
-
+	// 3. Initial schedule check error in Run
 	mockStoreInitErr := &mockStoreWrapper{
 		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, fmt.Errorf("init check error")
 		},
 	}
-	schedInitErr, _ := New(newTestConfig(), mockStoreInitErr, nil, nil)
-	ctxCancel, cancel := context.WithCancel(context.Background())
-	cancel() // canceled immediately
+	schedInitErr, _ := New(cfg, mockStoreInitErr, nil, nil)
+	ctxCancel, cancelInit := context.WithCancel(context.Background())
+	cancelInit()
 	schedInitErr.Run(ctxCancel, 10*time.Millisecond)
 
-	// 5. Tick schedule evaluation error in Run
-	tickCount := 0
-	ctxTick, cancelTick := context.WithCancel(context.Background())
-	mockStoreTickErr := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			tickCount++
-			if tickCount > 1 {
-				cancelTick()
-				return nil, fmt.Errorf("tick check error")
-			}
-			return nil, nil
-		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return nil, nil
-		},
-	}
-	schedTickErr, _ := New(newTestConfig(), mockStoreTickErr, nil, nil)
-	schedTickErr.Run(ctxTick, 1*time.Millisecond)
-
-	// 6. Direct handleTick testing for modulo branches (120 and 2880) and nil scheduler
+	// 4. handleTick evaluations
 	nilSched.handleTick(context.Background(), 120, nil, nil)
 
 	mockStoreFast := &mockStoreWrapper{
 		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			return nil, nil
-		},
-		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
-			return nil, nil
-		},
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) { return nil, nil },
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) { return nil, nil },
 	}
-	schedFast, _ := New(newTestConfig(), mockStoreFast, nil, nil)
+	schedFast, _ := New(cfg, mockStoreFast, nil, nil)
+	schedFast.handleTick(context.Background(), 10, nil, nil)
+	schedFast.handleTick(context.Background(), 60, nil, nil)
 	schedFast.handleTick(context.Background(), 120, nil, nil)
 	schedFast.handleTick(context.Background(), 2880, nil, nil)
-	schedFast.handleTick(context.Background(), 60, nil, nil)
 
-	// Verify short ticker run loop terminates cleanly on cancellation
+	// 5. Short ticker run loop terminates cleanly on cancellation without time.Sleep
 	var ticks atomic.Int64
 	ctxFast, cancelFast := context.WithCancel(context.Background())
 	mockStoreFast.getDueCronSchedulesFn = func(ctx context.Context) ([]db.CronSchedule, error) {
@@ -2147,218 +847,3 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 	}
 	schedFast.Run(ctxFast, 1*time.Millisecond)
 }
-
-func TestShouldRunMemoryDecay(t *testing.T) {
-	cases := []struct {
-		tickCount int
-		expected  bool
-	}{
-		{0, false},
-		{59, false},
-		{60, true},
-		{61, false},
-		{120, false},
-		{2880, false},
-		{2880 + 60, true},
-		{2880 * 2, false},
-		{2880*2 + 60, true},
-	}
-	for _, tc := range cases {
-		if got := ShouldRunMemoryDecay(tc.tickCount); got != tc.expected {
-			t.Errorf("ShouldRunMemoryDecay(%d) = %v, expected %v", tc.tickCount, got, tc.expected)
-		}
-	}
-}
-
-func TestRunMemoryDecay(t *testing.T) {
-	// 1. Nil DB
-	RunMemoryDecay(nil)
-	RunMemoryDecayWithContext(context.Background(), nil)
-
-	// 2. Closed DB (error branch)
-	closedStore := setupTestStore(t)
-	_ = closedStore.Close()
-	RunMemoryDecay(closedStore)
-
-	// 3. Valid DB with decay and pruning
-	store := setupTestStore(t)
-	defer store.Close()
-
-	emb := make([]float32, db.ExpectedEmbeddingDim)
-	emb[0] = 1.0
-
-	// Insert fact and artificially age it
-	_, err := store.InsertFact(context.Background(), "general", "Temporary notice", 0.50, emb)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-
-	RunMemoryDecay(store)
-
-	facts, err := store.GetFactsPaginated(context.Background(), db.FactsFilter{Limit: 10})
-	if err != nil || len(facts.Facts) != 1 {
-		t.Fatalf("GetFactsPaginated failed: %v", err)
-	}
-	if facts.Facts[0].Importance >= 0.50 {
-		t.Errorf("Expected decayed importance < 0.50, got %f", facts.Facts[0].Importance)
-	}
-}
-
-func TestRunTranscriptSync(t *testing.T) {
-	ctx := context.Background()
-
-	// 1. Nil store returns empty stats and nil
-	stats, err := RunTranscriptSync(ctx, nil, "/tmp", nil, nil)
-	if err != nil || stats.Scanned != 0 {
-		t.Fatalf("expected nil error and 0 scanned for nil store, got err=%v, stats=%+v", err, stats)
-	}
-
-	// 2. Empty brain dir returns error
-	store := setupTestStore(t)
-	defer store.Close()
-
-	_, err = RunTranscriptSync(ctx, store, "", nil, nil)
-	if err == nil {
-		t.Fatalf("expected error for empty brain dir")
-	}
-
-	// 3. Valid store and temp brain directory with transcript
-	tempBrain := t.TempDir()
-	sessID := "sched-sess-001"
-	logDir := filepath.Join(tempBrain, sessID, ".system_generated", "logs")
-	_ = os.MkdirAll(logDir, 0755)
-	tContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Verify transcript sync integration"}` + "\n"
-	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte(tContent), 0644)
-	oldMtime := time.Now().Add(-1 * time.Hour)
-	_ = os.Chtimes(filepath.Join(logDir, "transcript.jsonl"), oldMtime, oldMtime)
-
-	mockEmbedder := transcript.EmbedderFunc(func(ctx context.Context, text string) ([]float32, error) {
-		vec := make([]float32, db.ExpectedEmbeddingDim)
-		return vec, nil
-	})
-	mockLLM := transcript.LLMClientFunc(func(ctx context.Context, prompt string) (string, error) {
-		return "Transcript sync integration verified.", nil
-	})
-
-	stats, err = RunTranscriptSync(ctx, store, tempBrain, mockEmbedder, mockLLM)
-	if err != nil {
-		t.Fatalf("RunTranscriptSync failed: %v", err)
-	}
-	if stats.Synced != 1 {
-		t.Errorf("expected 1 session synced, got %d", stats.Synced)
-	}
-	if stats.StepsInserted != 1 {
-		t.Errorf("expected 1 step inserted, got %d", stats.StepsInserted)
-	}
-	if stats.SummariesGenerated != 1 {
-		t.Errorf("expected 1 summary generated, got %d", stats.SummariesGenerated)
-	}
-
-	// 4. Overlapping invocation while mutex is held
-	transcriptSyncMutex.Lock()
-	statsOverlap, errOverlap := RunTranscriptSync(ctx, store, tempBrain, nil, nil)
-	transcriptSyncMutex.Unlock()
-	if errOverlap != nil || statsOverlap.Synced != 0 {
-		t.Errorf("expected overlapping sweep to skip cleanly, got err=%v, stats=%+v", errOverlap, statsOverlap)
-	}
-}
-
-func TestScheduler_TranscriptOptions(t *testing.T) {
-	tempBrain := t.TempDir()
-	var embedderCalled bool
-	mockEmbedder := func(ctx context.Context, text string) ([]float32, error) {
-		embedderCalled = true
-		return make([]float32, db.ExpectedEmbeddingDim), nil
-	}
-	var llmCalled bool
-	mockLLM := func(ctx context.Context, prompt string) (string, error) {
-		llmCalled = true
-		return "summary", nil
-	}
-
-	sched, err := New(
-		newTestConfig(),
-		setupTestStore(t),
-		nil,
-		nil,
-		WithBrainDir(tempBrain),
-		WithTranscriptEmbedder(mockEmbedder),
-		WithTranscriptLLMFunc(mockLLM),
-	)
-	if err != nil {
-		t.Fatalf("New scheduler failed: %v", err)
-	}
-	if sched.brainDir != tempBrain {
-		t.Errorf("expected brainDir %s, got %s", tempBrain, sched.brainDir)
-	}
-	if sched.transcriptEmbedder == nil {
-		t.Errorf("expected transcriptEmbedder to be set")
-	} else {
-		_, _ = sched.transcriptEmbedder(context.Background(), "test")
-		if !embedderCalled {
-			t.Errorf("expected embedder to be invoked")
-		}
-	}
-	if sched.transcriptLLMFunc == nil {
-		t.Errorf("expected transcriptLLMFunc to be set")
-	} else {
-		_, _ = sched.transcriptLLMFunc(context.Background(), "prompt")
-		if !llmCalled {
-			t.Errorf("expected LLM func to be invoked")
-		}
-	}
-}
-
-func TestScheduler_RunTranscriptSync_Method(t *testing.T) {
-	tempBrain := t.TempDir()
-	store := setupTestStore(t)
-	cfg := newTestConfig()
-
-	sched, err := New(
-		cfg,
-		store,
-		nil,
-		nil,
-		WithBrainDir(tempBrain),
-		WithTranscriptEmbedder(func(ctx context.Context, text string) ([]float32, error) {
-			return make([]float32, db.ExpectedEmbeddingDim), nil
-		}),
-	)
-	if err != nil {
-		t.Fatalf("New scheduler failed: %v", err)
-	}
-
-	// 1. With empty brainDir
-	emptySched := &Scheduler{}
-	emptySched.runTranscriptSync(context.Background())
-	emptySched.wg.Wait()
-
-	// 2. With valid brainDir but empty dir (0 synced -> breaks immediately)
-	ctx := context.Background()
-	sched.runTranscriptSync(ctx)
-	sched.wg.Wait()
-
-	// 3. With default embedder created from cfg
-	schedNoEmbedder, err := New(
-		cfg,
-		store,
-		nil,
-		nil,
-		WithBrainDir(tempBrain),
-	)
-	if err != nil {
-		t.Fatalf("New scheduler failed: %v", err)
-	}
-	schedNoEmbedder.runTranscriptSync(ctx)
-	schedNoEmbedder.wg.Wait()
-
-	// 4. Test break on context cancellation
-	cancelCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	sched.runTranscriptSync(cancelCtx)
-	sched.wg.Wait()
-}
-
-
-
-

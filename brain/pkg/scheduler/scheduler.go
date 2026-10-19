@@ -134,22 +134,6 @@ func New(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCre
 	return s, nil
 }
 
-func (s *Scheduler) getStore() db.Store {
-	if s == nil {
-		return nil
-	}
-	return s.store
-}
-
-func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
-	return New(cfg, store, enqueuer, threadCreator, opts...)
-}
-
-// NewScheduler is a compatibility wrapper for New.
-func NewScheduler(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
-	return New(cfg, store, enqueuer, threadCreator, opts...)
-}
-
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules.
 func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
 	if s == nil || s.store == nil {
@@ -158,30 +142,11 @@ func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
 	if s.cfg == nil || s.cfg.Current() == nil {
 		return fmt.Errorf("scheduler: config cannot be nil")
 	}
-	return processDueSchedulesStore(ctx, s.cfg, s.store, s.enqueuer, s.threadCreator)
-}
-
-// ProcessDueSchedules evaluates and processes due cron and one-shot schedules (compatibility wrapper).
-func ProcessDueSchedules(ctx context.Context, cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
-	s, err := New(cfg, store, enqueuer, threadCreator)
-	if err != nil {
-		return err
-	}
-	return s.ProcessDueSchedules(ctx)
-}
-
-func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
-	if store == nil {
-		return nil
-	}
-	if cfg == nil || cfg.Current() == nil {
-		return fmt.Errorf("scheduler: config cannot be nil")
-	}
 
 	now := time.Now().UTC()
 
 	// 1. Process Due Cron Schedules
-	dueCrons, err := store.GetDueCronSchedules(ctx)
+	dueCrons, err := s.store.GetDueCronSchedules(ctx)
 	if err != nil {
 		return fmt.Errorf("error querying due cron schedules: %w", err)
 	}
@@ -195,7 +160,7 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 
 		tz := strings.TrimSpace(c.Timezone)
 		if tz == "" {
-			tz = cfg.Current().Timezone
+			tz = s.cfg.Current().Timezone
 		}
 
 		var channelName string
@@ -207,8 +172,8 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 			}
 		}
 
-		policy := cfg.ResolveChannelPolicy(c.TargetID, channelName)
-		action := PlanDueCronTurn(c, now, isAlreadyThread, policy.Mode, threadCreator != nil, tz)
+		policy := s.cfg.ResolveChannelPolicy(c.TargetID, channelName)
+		action := PlanDueCronTurn(c, now, isAlreadyThread, policy.Mode, s.threadCreator != nil, tz)
 
 		if action.NextRunError != nil {
 			log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, action.NextRunError)
@@ -217,19 +182,19 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 		if action.IsStale {
 			log.Printf("[Scheduler] Warning: Cron %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
 				c.ID, c.CronExpr, c.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
-			if err := store.UpdateCronNextRun(ctx, c.ID, action.NextRunAt); err != nil {
+			if err := s.store.UpdateCronNextRun(ctx, c.ID, action.NextRunAt); err != nil {
 				log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
 			}
 			continue
 		}
 
-		if err := store.UpdateCronNextRun(ctx, c.ID, action.NextRunAt); err != nil {
+		if err := s.store.UpdateCronNextRun(ctx, c.ID, action.NextRunAt); err != nil {
 			log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
 		}
 
 		targetThreadID := c.TargetID
 		if action.ShouldCreateThread {
-			thID, err := threadCreator.CreatePublicThread(c.TargetID, action.Title)
+			thID, err := s.threadCreator.CreatePublicThread(c.TargetID, action.Title)
 			if err != nil {
 				log.Printf("[Scheduler] Failed to create Discord thread %q in channel %s: %v. Fallback to channel ID.", action.Title, c.TargetID, err)
 			} else if thID != "" {
@@ -242,17 +207,17 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 		msgID := uuid.New().String()
 
 		run := BuildCronScheduleRun(runID, msgID, targetThreadID, c, action.Title, now)
-		if err := store.CreateScheduleRun(ctx, run); err != nil {
+		if err := s.store.CreateScheduleRun(ctx, run); err != nil {
 			log.Printf("[Scheduler] Error creating schedule run %s for cron %s: %v", runID, c.ID, err)
 		}
 
 		msg := BuildCronMessage(msgID, runID, targetThreadID, c, action.Summary, now)
-		if err := store.InsertMessage(ctx, msg); err != nil {
+		if err := s.store.InsertMessage(ctx, msg); err != nil {
 			log.Printf("[Scheduler] Error inserting recurring message %s for cron %s: %v", msgID, c.ID, err)
 		}
 
-		if enqueuer != nil {
-			enqueuer.Enqueue(msg)
+		if s.enqueuer != nil {
+			s.enqueuer.Enqueue(msg)
 		}
 		metrics.SchedulerExecutionsTotal.WithLabelValues("cron", "enqueued").Inc()
 		log.Printf("[Scheduler] Enqueued recurring turn for cron %s (message ID: %s, target thread: %s, next_run: %s)",
@@ -260,12 +225,12 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 	}
 
 	// 2. Process Due One-Shot Schedules (Atomic)
-	dueOneShots, err := store.GetDueOneShotSchedules(ctx)
+	dueOneShots, err := s.store.GetDueOneShotSchedules(ctx)
 	if err != nil {
 		return fmt.Errorf("error querying due one-shot schedules: %w", err)
 	}
 
-	for _, s := range dueOneShots {
+	for _, osSched := range dueOneShots {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -274,26 +239,26 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 
 		runID := uuid.New().String()
 		msgID := uuid.New().String()
-		oneShotSummary := BuildOneShotMessageSummary(s.Prompt)
-		msg := BuildOneShotMessage(msgID, runID, s, oneShotSummary, now)
+		oneShotSummary := BuildOneShotMessageSummary(osSched.Prompt)
+		msg := BuildOneShotMessage(msgID, runID, osSched, oneShotSummary, now)
 
-		if err := store.InsertMessageAndConsumeOneShot(ctx, s.ID, msg); err != nil {
-			log.Printf("[Scheduler] Error atomically processing one-shot schedule %s (message %s): %v", s.ID, msgID, err)
+		if err := s.store.InsertMessageAndConsumeOneShot(ctx, osSched.ID, msg); err != nil {
+			log.Printf("[Scheduler] Error atomically processing one-shot schedule %s (message %s): %v", osSched.ID, msgID, err)
 			continue
 		}
 
-		run := BuildOneShotScheduleRun(runID, msgID, s, now)
-		if err := store.CreateScheduleRun(ctx, run); err != nil {
-			log.Printf("[Scheduler] Error creating schedule run %s for one-shot %s: %v", runID, s.ID, err)
+		run := BuildOneShotScheduleRun(runID, msgID, osSched, now)
+		if err := s.store.CreateScheduleRun(ctx, run); err != nil {
+			log.Printf("[Scheduler] Error creating schedule run %s for one-shot %s: %v", runID, osSched.ID, err)
 		}
 
-		if enqueuer != nil {
-			enqueuer.Enqueue(msg)
+		if s.enqueuer != nil {
+			s.enqueuer.Enqueue(msg)
 		}
 		metrics.SchedulerExecutionsTotal.WithLabelValues("one_shot", "enqueued").Inc()
 
 		log.Printf("[Scheduler] Enqueued one-shot reminder for schedule %s (message ID: %s, thread: %s)",
-			s.ID, msgID, s.ThreadID)
+			osSched.ID, msgID, osSched.ThreadID)
 	}
 
 	return nil
@@ -314,17 +279,6 @@ func (s *Scheduler) Start(ctx context.Context) (stop func()) {
 			<-done
 		})
 	}
-}
-
-// Start launches the background scheduler monitor daemon with a 30-second ticker (compatibility wrapper).
-func Start(ctx context.Context, cfg *config.Config, store db.Store, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
-	threadCreator := NewDiscordThreadCreator(dg)
-	s, err := New(cfg, store, pool, threadCreator)
-	if err != nil {
-		log.Printf("[Scheduler] Error: %v", err)
-		return func() {}
-	}
-	return s.Start(ctx)
 }
 
 // ExtractFactsLLM extracts facts using the primary LLM via the configured LLMFunc or runner function.
@@ -363,17 +317,6 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 		return "", fmt.Errorf("failed to parse agy json output in scheduler: %w (raw: %q)", parseErr, stdout)
 	}
 	return resp.Response, nil
-}
-
-// ExtractFactsLLM extracts facts using the primary LLM (compatibility wrapper).
-// Returns an error if no scheduler with a configured RunnerFunc is available.
-func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
-	return "", fmt.Errorf("scheduler: config cannot be nil")
-}
-
-// RunPruneRetention executes schedule run retention cleanup.
-func RunPruneRetention(store db.Store) {
-	RunPruneRetentionWithContext(context.Background(), store)
 }
 
 // RunPruneRetentionWithContext executes schedule run retention cleanup with the provided context.
@@ -418,11 +361,6 @@ func RunFactExtraction(ctx context.Context, store db.Store, client *memory.Clien
 }
 
 var decayMutex sync.Mutex
-
-// RunMemoryDecay executes fact importance decay and stale fact pruning.
-func RunMemoryDecay(factStore db.FactStore) {
-	RunMemoryDecayWithContext(context.Background(), factStore)
-}
 
 // RunMemoryDecayWithContext executes fact importance decay and pruning with the provided context.
 func RunMemoryDecayWithContext(ctx context.Context, factStore db.FactStore) {
@@ -494,34 +432,34 @@ func RunTranscriptSync(ctx context.Context, store db.Store, brainDir string, emb
 	return stats, nil
 }
 
-func (s *Scheduler) runPruneRetention(ctx context.Context) {
+func (s *Scheduler) spawnBg(fn func()) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		RunPruneRetentionWithContext(ctx, s.getStore())
+		fn()
 	}()
+}
+
+func (s *Scheduler) runPruneRetention(ctx context.Context) {
+	s.spawnBg(func() {
+		RunPruneRetentionWithContext(ctx, s.store)
+	})
 }
 
 func (s *Scheduler) runMemoryDecay(ctx context.Context) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		RunMemoryDecayWithContext(ctx, s.getStore())
-	}()
+	s.spawnBg(func() {
+		RunMemoryDecayWithContext(ctx, s.store)
+	})
 }
 
 func (s *Scheduler) runFactExtraction(ctx context.Context, ollamaClient *memory.Client, llmFunc memory.LLMClientFunc) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
-	}()
+	s.spawnBg(func() {
+		RunFactExtraction(ctx, s.store, ollamaClient, llmFunc)
+	})
 }
 
 func (s *Scheduler) runTranscriptSync(ctx context.Context) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.spawnBg(func() {
 		brainDir := s.brainDir
 		if brainDir == "" && len(s.sessionRoots) > 0 {
 			brainDir = s.sessionRoots[0]
@@ -541,7 +479,7 @@ func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 		llmFunc := s.transcriptLLMFunc
 
 		for {
-			stats, err := RunTranscriptSync(ctx, s.getStore(), brainDir, embedder, llmFunc)
+			stats, err := RunTranscriptSync(ctx, s.store, brainDir, embedder, llmFunc)
 			if err != nil {
 				if ctx.Err() == nil {
 					log.Printf("[Scheduler] Background transcript sync error: %v", err)
@@ -557,7 +495,7 @@ func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 			case <-time.After(2 * time.Second):
 			}
 		}
-	}()
+	})
 }
 
 // handleTick executes periodic evaluations for a single ticker event.
@@ -622,14 +560,4 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 			s.handleTick(ctx, tickCount, ollamaClient, llmFunc)
 		}
 	}
-}
-
-// Run executes the monitoring loop with ticker interval and context cancellation (compatibility wrapper).
-func Run(ctx context.Context, cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
-	s, err := New(cfg, store, enqueuer, threadCreator)
-	if err != nil {
-		log.Printf("[Scheduler] Error: %v", err)
-		return
-	}
-	s.Run(ctx, interval)
 }
