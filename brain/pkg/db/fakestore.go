@@ -1103,6 +1103,9 @@ func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, i
 	if err := f.checkClosedAndFail("InsertFact"); err != nil {
 		return 0, err
 	}
+	if importance <= 0 {
+		importance = 0.5
+	}
 
 	id := atomic.AddInt64(&f.nextFactID, 1)
 	now := time.Now().UTC()
@@ -1277,7 +1280,7 @@ func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, act
 	var threads []string
 	for _, id := range f.messageOrder {
 		m := f.messages[id]
-		if m != nil && m.ThreadID != "" && (m.CreatedAt.After(cutoff) || m.CreatedAt.Equal(cutoff)) {
+		if m != nil && m.ThreadID != "" && (m.CreatedAt.After(cutoff) || m.CreatedAt.Equal(cutoff)) && IsExtractableAdminTurn(*m) {
 			watermark := f.watermarks[m.ThreadID]
 			if watermark == 0 || m.RowID > watermark {
 				if !seen[m.ThreadID] {
@@ -1292,6 +1295,27 @@ func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, act
 	}
 	sort.Strings(threads)
 	return threads, nil
+}
+
+func (f *FakeStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("GetUnextractedAdminTurns"); err != nil {
+		return nil, err
+	}
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return nil, nil
+	}
+	watermark := f.watermarks[threadID]
+	var turns []Message
+	for _, id := range f.messageOrder {
+		m := f.messages[id]
+		if m != nil && m.ThreadID == threadID && (watermark == 0 || m.RowID > watermark) && IsExtractableAdminTurn(*m) {
+			turns = append(turns, *cloneMessage(m))
+		}
+	}
+	return turns, nil
 }
 
 func (f *FakeStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
@@ -1321,6 +1345,9 @@ func (f *FakeStore) FindDuplicateFact(ctx context.Context, embedding []float32, 
 	defer f.mu.RUnlock()
 	if err := f.checkClosedAndFail("FindDuplicateFact"); err != nil {
 		return nil, 0, err
+	}
+	if minSim <= 0 {
+		minSim = 0.85
 	}
 
 	var bestFact *Fact
@@ -1356,13 +1383,6 @@ func (f *FakeStore) ReinforceFact(ctx context.Context, id int64, newText string,
 	fe.Fact.Importance = math.Min(1.0, math.Max(0.70, math.Round((fe.Fact.Importance+boost)*100)/100))
 	fe.Fact.LastReinforcedAt = time.Now().UTC()
 	fe.Fact.ReinforceCount++
-	if newText != "" {
-		fe.Fact.FactText = newText
-	}
-	if len(newEmbedding) > 0 {
-		fe.Embedding = make([]float32, len(newEmbedding))
-		copy(fe.Embedding, newEmbedding)
-	}
 	return nil
 }
 
@@ -1374,10 +1394,10 @@ func (f *FakeStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, p
 	}
 
 	if decayStep <= 0 {
-		decayStep = 0.02
+		decayStep = 0.05
 	}
 	if pruneFloor <= 0 {
-		pruneFloor = 0.10
+		pruneFloor = 0.15
 	}
 
 	now := time.Now().UTC()

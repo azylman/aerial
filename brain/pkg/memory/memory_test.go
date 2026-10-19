@@ -304,16 +304,11 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	_ = store.InsertMessage(ctx, db.Message{
-		ID: "m1", ThreadID: "thread-test-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+		ID: "m1", ThreadID: "thread-test-1", Content: "I love matcha", ResponseText: "Noted!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
 	})
 
 	// Pre-insert an existing identical/similar fact with same vector
 	_, _ = store.InsertFact(ctx, "user_pref", "User likes matcha", 1.0, makeDimVector(1.0, 0.0))
-
-	// Create a dummy transcript file for thread-test-1 in a hermetic temp directory
-	logDir := filepath.Join(tmpDir, "thread-test-1", ".system_generated", "logs")
-	_ = os.MkdirAll(logDir, 0755)
-	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"User likes matcha\"}\n"), 0644)
 
 	err := processThreadFacts(ctx, store, client, llmFunc, "thread-test-1")
 	if err != nil {
@@ -356,7 +351,7 @@ func TestProcessThreadFactsGlobalDeduplicationAndReinforce(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	_ = store.InsertMessage(ctx, db.Message{
-		ID: "m-beta-1", ThreadID: "thread-beta", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+		ID: "m-beta-1", ThreadID: "thread-beta", Content: "Oat milk in matcha", ResponseText: "Got it!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
 	})
 
 	// Pre-insert fact in thread-alpha with lower importance (0.50)
@@ -364,11 +359,6 @@ func TestProcessThreadFactsGlobalDeduplicationAndReinforce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
-
-	// Create a dummy transcript file for thread-beta
-	logDir := filepath.Join(tmpDir, "thread-beta", ".system_generated", "logs")
-	_ = os.MkdirAll(logDir, 0755)
-	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"Alex prefers oat milk in matcha latte\"}\n"), 0644)
 
 	err = processThreadFacts(ctx, store, client, llmFunc, "thread-beta")
 	if err != nil {
@@ -388,8 +378,8 @@ func TestProcessThreadFactsGlobalDeduplicationAndReinforce(t *testing.T) {
 	if reinforcedFact.ID != origID {
 		t.Errorf("Expected reinforced fact ID %d, got %d", origID, reinforcedFact.ID)
 	}
-	if reinforcedFact.FactText != "Alex prefers oat milk in matcha latte" {
-		t.Errorf("Expected updated fact text, got %q", reinforcedFact.FactText)
+	if reinforcedFact.FactText != "Alex likes oat milk in matcha" {
+		t.Errorf("Expected immutable fact text, got %q", reinforcedFact.FactText)
 	}
 	if reinforcedFact.Importance < 0.70 {
 		t.Errorf("Expected importance boosted to at least 0.70, got %f", reinforcedFact.Importance)
@@ -541,13 +531,8 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	_ = store.InsertMessage(ctx, db.Message{
-		ID: "m-extract-1", ThreadID: "thread-active-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+		ID: "m-extract-1", ThreadID: "thread-active-1", Content: "I love vim keybindings", ResponseText: "Noted!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
 	})
-
-	// Create dummy transcript in hermetic temp directory
-	logDir := filepath.Join(tmpDir, "thread-active-1", ".system_generated", "logs")
-	_ = os.MkdirAll(logDir, 0755)
-	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"I love vim keybindings\"}\n"), 0644)
 
 	err := ExtractActiveConversationFacts(ctx, store, client, llmFunc, 12)
 	if err != nil {
@@ -766,7 +751,7 @@ func TestMemory_ExtractActiveConversationFacts_EdgeCases(t *testing.T) {
 	// 5. Context cancelled in loop
 	now := time.Now().UTC()
 	_ = memStore.InsertMessage(context.Background(), db.Message{
-		ID: "m-cancel-1", ThreadID: "th-cancel", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+		ID: "m-cancel-1", ThreadID: "th-cancel", Content: "hi", ResponseText: "hello", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -777,46 +762,33 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	store := db.NewFakeStore()
 	defer store.Close()
 
-	emptyTmp := t.TempDir()
-	clientNoFiles := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return nil, errors.New("connection refused")
-	}, emptyTmp)
-	now := time.Now().UTC()
-	_ = store.InsertMessage(context.Background(), db.Message{
-		ID: "m-pf-1", ThreadID: "th-pf-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
-	})
-
-	// 1. Transcript file missing
-	err := processThreadFacts(context.Background(), store, clientNoFiles, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-1")
-	if err == nil || !strings.Contains(err.Error(), "transcript unavailable") {
-		t.Errorf("expected transcript unavailable error, got %v", err)
-	}
-
-	// 2. Empty transcript file
 	tmpDir := t.TempDir()
 	client := newMockClient(func(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused")
 	}, tmpDir)
+	now := time.Now().UTC()
+	adminMeta := db.MessageMetadata{IsAdmin: true}
 
-	logDir := filepath.Join(tmpDir, "th-pf-empty", ".system_generated", "logs")
-	_ = os.MkdirAll(logDir, 0755)
-	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("   \n"), 0644)
+	// 1. GetUnextractedAdminTurns error
+	storeTurnsFail := db.NewFakeStore()
+	storeTurnsFail.FailNext("GetUnextractedAdminTurns", errors.New("turns query error"))
+	err := processThreadFacts(context.Background(), storeTurnsFail, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-1")
+	if err == nil || !strings.Contains(err.Error(), "failed to get unextracted turns") {
+		t.Errorf("expected unextracted turns error, got %v", err)
+	}
 
+	// 2. Empty extractable turns (ambient response)
 	_ = store.InsertMessage(context.Background(), db.Message{
-		ID: "m-pf-empty", ThreadID: "th-pf-empty", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+		ID: "m-pf-empty", ThreadID: "th-pf-empty", Content: "hello", ResponseText: "[AMBIENT_SILENT]", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now,
 	})
 	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-empty")
 	if err != nil {
-		t.Errorf("expected nil error for empty transcript, got %v", err)
+		t.Errorf("expected nil error for empty extractable turns, got %v", err)
 	}
 
-	// 3. Transcript exists, but LLM call fails
-	logDir2 := filepath.Join(tmpDir, "th-pf-llm-fail", ".system_generated", "logs")
-	_ = os.MkdirAll(logDir2, 0755)
-	_ = os.WriteFile(filepath.Join(logDir2, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"hello\"}\n"), 0644)
-
+	// 3. Extractable turn exists, but LLM call fails
 	_ = store.InsertMessage(context.Background(), db.Message{
-		ID: "m-pf-fail", ThreadID: "th-pf-llm-fail", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+		ID: "m-pf-fail", ThreadID: "th-pf-llm-fail", Content: "hello", ResponseText: "world", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now,
 	})
 	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("llm rate limited")
@@ -825,7 +797,7 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 		t.Errorf("expected LLM failure error, got %v", err)
 	}
 
-	// 4. Transcript exists, LLM returns invalid JSON
+	// 4. Extractable turn exists, LLM returns invalid JSON
 	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) {
 		return "invalid json output", nil
 	}, "th-pf-llm-fail")
@@ -833,7 +805,7 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 		t.Errorf("expected JSON parse error, got %v", err)
 	}
 
-	// 5. Transcript exists, LLM returns facts with empty text and embedding failure
+	// 5. Extractable turn exists, LLM returns facts with empty text and embedding failure
 	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) {
 		return `{"facts":[{"category":"user_pref","fact_text":"","importance_score":1.0},{"category":"user_pref","fact_text":"Valid fact","importance_score":1.0}]}`, nil
 	}, "th-pf-llm-fail")
@@ -849,11 +821,8 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	}
 
 	// 7. FindDuplicateFact check failure
-	logDir3 := filepath.Join(tmpDir, "th-pf-dup-fail", ".system_generated", "logs")
-	_ = os.MkdirAll(logDir3, 0755)
-	_ = os.WriteFile(filepath.Join(logDir3, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"valid content\"}\n"), 0644)
 	storeDupFail := db.NewFakeStore()
-	_ = storeDupFail.InsertMessage(context.Background(), db.Message{ID: "m-dup-fail", ThreadID: "th-pf-dup-fail", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now})
+	_ = storeDupFail.InsertMessage(context.Background(), db.Message{ID: "m-dup-fail", ThreadID: "th-pf-dup-fail", Content: "valid", ResponseText: "reply", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now})
 	storeDupFail.FailNext("FindDuplicateFact", errors.New("dup check error"))
 	cValid := newMockClient(func(req *http.Request) (*http.Response, error) {
 		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
@@ -868,7 +837,7 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	// 8. ReinforceFact error
 	storeReinfFail := db.NewFakeStore()
 	_, _ = storeReinfFail.InsertFact(context.Background(), "user_pref", "Fact 1", 1.0, makeDimVector(1.0, 0.0))
-	_ = storeReinfFail.InsertMessage(context.Background(), db.Message{ID: "m-reinf-fail", ThreadID: "th-pf-dup-fail", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now})
+	_ = storeReinfFail.InsertMessage(context.Background(), db.Message{ID: "m-reinf-fail", ThreadID: "th-pf-dup-fail", Content: "valid", ResponseText: "reply", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now})
 	storeReinfFail.FailNext("ReinforceFact", errors.New("reinforce error"))
 	err = processThreadFacts(context.Background(), storeReinfFail, cValid, func(ctx context.Context, prompt string) (string, error) {
 		return `{"facts":[{"category":"user_pref","fact_text":"Fact 1","importance_score":1.0}]}`, nil
@@ -879,7 +848,7 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 
 	// 9. InsertFact error
 	storeInsFail := db.NewFakeStore()
-	_ = storeInsFail.InsertMessage(context.Background(), db.Message{ID: "m-ins-fail", ThreadID: "th-pf-dup-fail", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now})
+	_ = storeInsFail.InsertMessage(context.Background(), db.Message{ID: "m-ins-fail", ThreadID: "th-pf-dup-fail", Content: "valid", ResponseText: "reply", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now})
 	storeInsFail.FailNext("InsertFact", errors.New("insert error"))
 	err = processThreadFacts(context.Background(), storeInsFail, cValid, func(ctx context.Context, prompt string) (string, error) {
 		return `{"facts":[{"category":"user_pref","fact_text":"Fact new","importance_score":1.0}]}`, nil
@@ -889,43 +858,25 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestMemory_LoadThreadTranscript_LongFileAndSessionLookup(t *testing.T) {
-	store := db.NewFakeStore()
-	defer store.Close()
-
-	tmpDir := t.TempDir()
-	client := NewClient("", tmpDir)
-
-	sessID := "sess-custom-guid-12345"
-	threadID := "thread-mapped-999"
-	_ = store.SaveSessionID(context.Background(), threadID, sessID)
-
-	// Create long transcript > 20000 bytes in sessID directory under transcript_full.jsonl
-	logDir := filepath.Join(tmpDir, sessID, ".system_generated", "logs")
-	_ = os.MkdirAll(logDir, 0755)
-	longContent := strings.Repeat("{\"step\":1,\"content\":\"long conversation message snippet\"}\n", 500)
-	_ = os.WriteFile(filepath.Join(logDir, "transcript_full.jsonl"), []byte(longContent), 0644)
-
-	text, err := loadThreadTranscript(store, client, threadID)
-	if err != nil {
-		t.Fatalf("loadThreadTranscript failed: %v", err)
+func TestMemory_FormatExtractableTurns_TruncationAndEmpty(t *testing.T) {
+	_ = filepath.Join(os.TempDir(), "noop")
+	if got := formatExtractableTurns(nil); got != "" {
+		t.Errorf("expected empty string for nil turns, got %q", got)
 	}
+	if got := formatExtractableTurns([]db.Message{{Content: "   ", ResponseText: "  "}}); got != "" {
+		t.Errorf("expected empty string for whitespace turn, got %q", got)
+	}
+
+	var longTurns []db.Message
+	for i := 0; i < 400; i++ {
+		longTurns = append(longTurns, db.Message{
+			Content:      "Long conversation user prompt message snippet for testing truncation boundary",
+			ResponseText: "Long conversation assistant response message snippet for testing truncation",
+		})
+	}
+	text := formatExtractableTurns(longTurns)
 	if len(text) == 0 || len(text) > 20000 {
 		t.Errorf("expected truncated transcript <= 20000 bytes, got %d", len(text))
-	}
-}
-
-func TestMemory_LoadThreadTranscript_NoRootsSafeFallback(t *testing.T) {
-	store := db.NewFakeStore()
-	defer store.Close()
-
-	client := NewClient("")
-	text, err := loadThreadTranscript(store, client, "any-thread")
-	if err != nil {
-		t.Fatalf("expected nil error on empty roots fallback, got: %v", err)
-	}
-	if text != "" {
-		t.Errorf("expected empty string transcript on empty roots fallback, got %q", text)
 	}
 }
 
@@ -1079,6 +1030,9 @@ type errInsertFactStore struct {
 
 func (e *errInsertFactStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
 	return 1, nil
+}
+func (e *errInsertFactStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]db.Message, error) {
+	return []db.Message{{ID: "m1", RowID: 5, Content: "user msg", ResponseText: "assistant reply", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}}}, nil
 }
 func (e *errInsertFactStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
 	return nil
@@ -1235,13 +1189,7 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 		t.Errorf("expected nil error for ExtractActiveConversationFacts with FactStore, got %v", err)
 	}
 
-	// 8. extractor.go loadThreadTranscript with db.SessionStore directly
-	sessStore := db.NewFakeStore()
-	tmpDir := t.TempDir()
-	cWithRoot := NewClient("", tmpDir)
-	_, _ = loadThreadTranscript(sessStore, cWithRoot, "th-sess-test")
-
-	// 9. extractor.go processThreadFacts with InsertFact error
+	// 8. extractor.go processThreadFacts with InsertFact error
 	insErrStore := &errInsertFactStore{FakeStore: db.NewFakeStore()}
 	defer insErrStore.Close()
 	_ = processThreadFacts(context.Background(), insErrStore, c, func(ctx context.Context, p string) (string, error) {
@@ -1336,7 +1284,7 @@ func (m *mockCloseErrReader) Close() error {
 }
 
 func TestMemory_SwallowedErrorsBranches(t *testing.T) {
-	// 1. extractor.go:196 UpdateConversationFactWatermark error on empty transcript
+	// 1. extractor.go UpdateConversationFactWatermark error on empty transcript
 	fakeStore := db.NewFakeStore()
 	defer fakeStore.Close()
 	errStore := &mockErrWatermarkFactStore{
@@ -1351,19 +1299,15 @@ func TestMemory_SwallowedErrorsBranches(t *testing.T) {
 		t.Errorf("expected nil error despite watermark warning, got %v", err)
 	}
 
-	// 2. extractor.go:256 & 259 UpdateConversationFactWatermark and UpdateConversationFactExtractedAt error on extracted facts
-	tmpDir := t.TempDir()
-	logsDir := filepath.Join(tmpDir, "th-warn-post", ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("failed to create logsDir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(`{"content":"Alex prefers matcha"}`), 0644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
+	// 2. extractor.go UpdateConversationFactWatermark and UpdateConversationFactExtractedAt error on extracted facts
+	now := time.Now().UTC()
+	_ = fakeStore.InsertMessage(context.Background(), db.Message{
+		ID: "m-warn-post", ThreadID: "th-warn-post", Content: "Alex prefers matcha", ResponseText: "Noted!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
+	})
 
 	clientWithRoots := newMockClient(func(req *http.Request) (*http.Response, error) {
 		return mockEmbeddingResponse(make([]float32, 384)), nil
-	}, tmpDir)
+	})
 
 	errStorePost := &mockErrWatermarkFactStore{
 		FakeStore:      fakeStore,

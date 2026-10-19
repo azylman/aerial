@@ -502,7 +502,7 @@ func TestFakeStoreFactOperations(t *testing.T) {
 		t.Fatalf("expected ErrFactNotFound on reinforce non-existent, got %v", err)
 	}
 	rechecked, _ := s.GetFactsByThreadWithEmbeddings(ctx, "th-facts")
-	if rechecked[0].Fact.FactText != "Likes iced matcha latte" || rechecked[0].Fact.Importance != 1.0 {
+	if rechecked[0].Fact.FactText != "Likes matcha latte" || rechecked[0].Fact.Importance != 1.0 {
 		t.Errorf("unexpected reinforced fact: %+v", rechecked[0])
 	}
 
@@ -525,16 +525,25 @@ func TestFakeStoreFactOperations(t *testing.T) {
 	if err := s.UpdateConversationFactExtractedAt(ctx, "th-done"); err != nil {
 		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
 	}
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-0", ThreadID: "th-done"})
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-1", ThreadID: "th-facts"})
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-2", ThreadID: "th-facts"})
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-3", ThreadID: "th-other"})
+	adminMeta := MessageMetadata{IsAdmin: true}
+	_ = s.InsertMessage(ctx, Message{ID: "m-extract-0", ThreadID: "th-done", Status: StatusCompleted, Content: "q0", ResponseText: "a0", Metadata: adminMeta})
+	_ = s.InsertMessage(ctx, Message{ID: "m-extract-1", ThreadID: "th-facts", Status: StatusCompleted, Content: "q1", ResponseText: "a1", Metadata: adminMeta})
+	_ = s.InsertMessage(ctx, Message{ID: "m-extract-2", ThreadID: "th-facts", Status: StatusCompleted, Content: "q2", ResponseText: "[AMBIENT_SILENT]", Metadata: adminMeta})
+	_ = s.InsertMessage(ctx, Message{ID: "m-extract-3", ThreadID: "th-other", Status: StatusCompleted, Content: "q3", ResponseText: "a3", Metadata: adminMeta})
 	activeThreads, err := s.GetActiveConversationsForExtraction(ctx, 24)
 	if err != nil {
 		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
 	}
 	if len(activeThreads) != 2 {
 		t.Fatalf("expected 2 active threads, got %d (%v)", len(activeThreads), activeThreads)
+	}
+	turns, err := s.GetUnextractedAdminTurns(ctx, "th-facts")
+	if err != nil || len(turns) != 1 || turns[0].ID != "m-extract-1" {
+		t.Fatalf("expected 1 unextracted admin turn in th-facts, got %+v (err=%v)", turns, err)
+	}
+	emptyTurns, err := s.GetUnextractedAdminTurns(ctx, "   ")
+	if err != nil || len(emptyTurns) != 0 {
+		t.Fatalf("expected nil turns for empty threadID, got %+v (err=%v)", emptyTurns, err)
 	}
 }
 
@@ -607,6 +616,7 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _ = s.GetFactsPaginated(ctx, FactsFilter{})
 	_, _ = s.GetFactsByThreadWithEmbeddings(ctx, "t")
 	_, _ = s.GetActiveConversationsForExtraction(ctx, 24)
+	_, _ = s.GetUnextractedAdminTurns(ctx, "t")
 	_ = s.UpdateConversationFactWatermark(ctx, "t", 1)
 	_ = s.UpdateConversationFactExtractedAt(ctx, "t")
 	_, _, _ = s.FindDuplicateFact(ctx, nil, 0.5)

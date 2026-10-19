@@ -48,7 +48,7 @@ func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, im
 		category = "general"
 	}
 	if importance <= 0 {
-		importance = 1.0
+		importance = 0.5
 	}
 	now := time.Now().UTC()
 
@@ -361,6 +361,15 @@ func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, 
 	return facts, nil
 }
 
+// IsExtractableAdminTurn returns true if the message is a completed human admin turn with a non-ambient response.
+func IsExtractableAdminTurn(m Message) bool {
+	if m.Status != StatusCompleted || !m.Metadata.IsAdmin {
+		return false
+	}
+	resp := strings.TrimSpace(m.ResponseText)
+	return resp != "" && !strings.HasPrefix(resp, "[")
+}
+
 func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
@@ -372,17 +381,25 @@ func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, acti
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	query := `
+	adminClause := `AND m.metadata LIKE '%"is_admin":true%'`
+	if s.isPostgres {
+		adminClause = `AND (m.metadata->>'is_admin')::boolean IS TRUE`
+	}
+
+	query := fmt.Sprintf(`
 	SELECT DISTINCT m.thread_id
 	FROM messages m
 	LEFT JOIN sessions s ON m.thread_id = s.thread_id
 	WHERE m.thread_id != ''
 	  AND m.created_at >= $1
 	  AND m.status = 'COMPLETED'
+	  AND COALESCE(TRIM(m.response_text), '') != ''
+	  AND TRIM(m.response_text) NOT LIKE '[%%'
 	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid)
+	  %s
 	ORDER BY m.thread_id
 	LIMIT 20
-	`
+	`, adminClause)
 	rows, err := s.db.QueryContext(queryCtx, query, cutoff)
 	if err != nil {
 		return nil, err
@@ -400,6 +417,55 @@ func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, acti
 		}
 	}
 	return tids, nil
+}
+
+func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return nil, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	adminClause := `AND m.metadata LIKE '%"is_admin":true%'`
+	if s.isPostgres {
+		adminClause = `AND (m.metadata->>'is_admin')::boolean IS TRUE`
+	}
+
+	query := fmt.Sprintf(`
+	SELECT m.id, m.row_id, m.thread_id, m.content, COALESCE(m.response_text, ''), m.status, m.metadata
+	FROM messages m
+	LEFT JOIN sessions s ON m.thread_id = s.thread_id
+	WHERE m.thread_id = $1
+	  AND m.status = 'COMPLETED'
+	  AND COALESCE(TRIM(m.response_text), '') != ''
+	  AND TRIM(m.response_text) NOT LIKE '[%%'
+	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid)
+	  %s
+	ORDER BY m.row_id ASC
+	LIMIT 50
+	`, adminClause)
+
+	rows, err := s.db.QueryContext(queryCtx, query, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var turns []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.Content, &m.ResponseText, &m.Status, &m.Metadata); err != nil {
+			return nil, err
+		}
+		if IsExtractableAdminTurn(m) {
+			turns = append(turns, m)
+		}
+	}
+	return turns, rows.Err()
 }
 
 func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
@@ -557,7 +623,7 @@ func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, m
 		return nil, 0, nil
 	}
 	if minSim <= 0 {
-		minSim = 0.88
+		minSim = 0.85
 	}
 
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
@@ -606,37 +672,14 @@ func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, 
 	defer cancel()
 
 	now := time.Now().UTC()
-	var updateText bool
-	var vecVal any
-	if strings.TrimSpace(newText) != "" && len(newEmbedding) == ExpectedEmbeddingDim {
-		updateText = true
-		vecVal = pgvector.NewVector(newEmbedding)
-	}
-
-	var query string
-	var res sql.Result
-	var err error
-	if updateText {
-		query = `
-			UPDATE facts
-			SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
-			    fact_text = $2,
-			    embedding = $3,
-			    last_reinforced_at = $4,
-			    reinforce_count = reinforce_count + 1
-			WHERE id = $5
-		`
-		res, err = s.db.ExecContext(queryCtx, query, boost, newText, vecVal, now, id)
-	} else {
-		query = `
-			UPDATE facts
-			SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
-			    last_reinforced_at = $2,
-			    reinforce_count = reinforce_count + 1
-			WHERE id = $3
-		`
-		res, err = s.db.ExecContext(queryCtx, query, boost, now, id)
-	}
+	query := `
+		UPDATE facts
+		SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
+		    last_reinforced_at = $2,
+		    reinforce_count = reinforce_count + 1
+		WHERE id = $3
+	`
+	res, err := s.db.ExecContext(queryCtx, query, boost, now, id)
 	if err != nil {
 		return fmt.Errorf("failed to reinforce fact: %w", err)
 	}
@@ -655,13 +698,13 @@ func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pr
 		return 0, 0, err
 	}
 	if decayStep <= 0 {
-		decayStep = 0.02
+		decayStep = 0.05
 	}
 	if pruneFloor <= 0 {
-		pruneFloor = 0.10
+		pruneFloor = 0.15
 	}
 	if pruneAgeDays <= 0 {
-		pruneAgeDays = 30
+		pruneAgeDays = 14
 	}
 
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)

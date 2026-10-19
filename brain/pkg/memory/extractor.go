@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +27,7 @@ type ExtractedFactsPayload struct {
 	Facts []ExtractedFactItem `json:"facts"`
 }
 
-const FactExtractionPrompt = `Analyze the following conversation transcript and extract any key atomic facts, user preferences, system configurations, recurring routines, or persistent operational states.
+const FactExtractionPrompt = `Analyze the following conversation transcript and extract any key durable atomic facts, user preferences, long-term system configurations, or recurring household routines.
 
 Requirements:
 1. Output ONLY a valid JSON object matching this exact schema:
@@ -38,12 +36,13 @@ Requirements:
     {
       "category": "user_preference|system_config|routine|general",
       "fact_text": "1-2 concise sentences stating the fact clearly",
-      "importance_score": 1.0
+      "importance_score": 0.6
     }
   ]
 }
-2. If no new important facts are present in the transcript, return {"facts": []}.
-3. Do NOT include markdown text formatting outside the JSON block.
+2. Score importance_score on a 0.1 to 1.0 scale (0.8-1.0 for permanent user preferences/identity, 0.5-0.7 for durable system architecture/routines). Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
+3. If no new important facts are present in the transcript, return {"facts": []}.
+4. Do NOT include markdown text formatting outside the JSON block.
 
 TRANSCRIPT:
 `
@@ -156,12 +155,19 @@ func processThreadFacts(ctx context.Context, store db.Store, client *Client, llm
 		return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
 	}
 
-	transcript, err := loadThreadTranscript(store, client, threadID)
+	turns, err := store.GetUnextractedAdminTurns(ctx, threadID)
 	if err != nil {
-		return fmt.Errorf("transcript unavailable for thread %s: %w", threadID, err)
+		return fmt.Errorf("failed to get unextracted turns for thread %s: %w", threadID, err)
 	}
+	for _, t := range turns {
+		if t.RowID > maxRowID {
+			maxRowID = t.RowID
+		}
+	}
+
+	transcript := formatExtractableTurns(turns)
 	if strings.TrimSpace(transcript) == "" {
-		log.Printf("[Memory] Empty transcript for thread %s, marking watermark.", threadID)
+		log.Printf("[Memory] Empty extractable turns for thread %s, marking watermark.", threadID)
 		if err := store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
 			log.Printf("[Memory] Warning updating conversation fact watermark for empty transcript (thread=%s): %v", threadID, err)
 		}
@@ -197,7 +203,7 @@ func processThreadFacts(ctx context.Context, store db.Store, client *Client, llm
 		var dupFact *db.Fact
 		var sim float64
 		if len(emb) == db.ExpectedEmbeddingDim {
-			dupFact, sim, err = store.FindDuplicateFact(ctx, emb, 0.88)
+			dupFact, sim, err = store.FindDuplicateFact(ctx, emb, 0.85)
 			if err != nil {
 				log.Printf("[Memory] Warning: FindDuplicateFact check failed: %v", err)
 			}
@@ -231,43 +237,28 @@ func processThreadFacts(ctx context.Context, store db.Store, client *Client, llm
 	return nil
 }
 
-func loadThreadTranscript(sessStore db.SessionStore, client *Client, threadID string) (string, error) {
-	var roots []string
-	if client != nil {
-		roots = client.Roots()
+func formatExtractableTurns(turns []db.Message) string {
+	var b strings.Builder
+	for _, m := range turns {
+		c := strings.TrimSpace(m.Content)
+		r := strings.TrimSpace(m.ResponseText)
+		if c == "" && r == "" {
+			continue
+		}
+		b.WriteString("User: ")
+		b.WriteString(c)
+		b.WriteString("\nAssistant: ")
+		b.WriteString(r)
+		b.WriteString("\n")
 	}
-
-	if len(roots) == 0 {
-		return "", nil
-	}
-
-	idCandidates := []string{threadID}
-	if sessStore != nil {
-		if sessID, err := sessStore.GetSessionID(context.Background(), threadID); err == nil && sessID != "" {
-			idCandidates = append([]string{sessID}, idCandidates...)
+	text := b.String()
+	if len(text) > 20000 {
+		text = text[len(text)-20000:]
+		if idx := strings.Index(text, "\n"); idx != -1 && idx < len(text)-1 {
+			text = text[idx+1:]
 		}
 	}
-
-	for _, root := range roots {
-		for _, id := range idCandidates {
-			for _, file := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
-				p := filepath.Join(root, id, ".system_generated", "logs", file)
-				data, err := os.ReadFile(p)
-				if err == nil && len(data) > 0 {
-					text := string(data)
-					if len(text) > 20000 {
-						text = text[len(text)-20000:]
-						if idx := strings.Index(text, "\n"); idx != -1 && idx < len(text)-1 {
-							text = text[idx+1:]
-						}
-					}
-					return text, nil
-				}
-			}
-		}
-	}
-
-	return "", fmt.Errorf("transcript file not found for thread %s", threadID)
+	return text
 }
 
 func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {

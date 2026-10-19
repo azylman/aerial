@@ -79,6 +79,9 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if _, err := s.GetActiveConversationsForExtraction(ctx, 10); err == nil {
 		t.Errorf("expected error on GetActiveConversationsForExtraction nil store")
 	}
+	if _, err := s.GetUnextractedAdminTurns(ctx, "t"); err == nil {
+		t.Errorf("expected error on GetUnextractedAdminTurns nil store")
+	}
 	if err := s.UpdateConversationFactWatermark(ctx, "t", 1); err == nil {
 		t.Errorf("expected error on UpdateConversationFactWatermark nil store")
 	}
