@@ -8,9 +8,16 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 )
 
+func mkCron(id, targetID, prefix, expr, prompt, tz, effort string, nextRun time.Time) db.CronSchedule {
+	return db.CronSchedule{ID: id, TargetID: targetID, TitlePrefix: prefix, CronExpr: expr, Prompt: prompt, Timezone: tz, Effort: effort, NextRunAt: nextRun, Enabled: true}
+}
+
+func mkOneShot(id, threadID, prompt, effort string, runAt time.Time) db.OneShotSchedule {
+	return db.OneShotSchedule{ID: id, ThreadID: threadID, Prompt: prompt, Effort: effort, RunAt: runAt}
+}
+
 func TestCalculateNextRun_TableDriven(t *testing.T) {
 	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
-
 	tests := []struct {
 		name      string
 		cronExpr  string
@@ -19,69 +26,15 @@ func TestCalculateNextRun_TableDriven(t *testing.T) {
 		expectErr bool
 		expected  time.Time
 	}{
-		{
-			name:      "zero from timestamp",
-			cronExpr:  "0 20 * * 5",
-			timezone:  "UTC",
-			from:      time.Time{},
-			expectErr: true,
-		},
-		{
-			name:      "empty timezone",
-			cronExpr:  "0 20 * * 5",
-			timezone:  "   ",
-			from:      baseTime,
-			expectErr: true,
-		},
-		{
-			name:      "invalid cron expression",
-			cronExpr:  "invalid-cron",
-			timezone:  "UTC",
-			from:      baseTime,
-			expectErr: true,
-		},
-		{
-			name:      "valid 5-field UTC cron",
-			cronExpr:  "0 20 * * 5",
-			timezone:  "UTC",
-			from:      baseTime,
-			expectErr: false,
-			expected:  time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC),
-		},
-		{
-			name:      "valid descriptor @daily",
-			cronExpr:  "@daily",
-			timezone:  "UTC",
-			from:      baseTime,
-			expectErr: false,
-			expected:  time.Date(2026, time.August, 29, 0, 0, 0, 0, time.UTC),
-		},
-		{
-			name:      "timezone America/Los_Angeles",
-			cronExpr:  "0 9 * * *",
-			timezone:  "America/Los_Angeles",
-			from:      baseTime,
-			expectErr: false,
-			expected:  time.Date(2026, time.August, 28, 16, 0, 0, 0, time.UTC),
-		},
-		{
-			name:      "timezone America/New_York",
-			cronExpr:  "0 9 * * *",
-			timezone:  "America/New_York",
-			from:      baseTime,
-			expectErr: false,
-			expected:  time.Date(2026, time.August, 28, 13, 0, 0, 0, time.UTC),
-		},
-		{
-			name:      "unknown timezone falls back to UTC",
-			cronExpr:  "0 20 * * *",
-			timezone:  "Invalid/Unknown_TZ",
-			from:      baseTime,
-			expectErr: false,
-			expected:  time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC),
-		},
+		{"zero from timestamp", "0 20 * * 5", "UTC", time.Time{}, true, time.Time{}},
+		{"empty timezone", "0 20 * * 5", "   ", baseTime, true, time.Time{}},
+		{"invalid cron expression", "invalid-cron", "UTC", baseTime, true, time.Time{}},
+		{"valid 5-field UTC cron", "0 20 * * 5", "UTC", baseTime, false, time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)},
+		{"valid descriptor @daily", "@daily", "UTC", baseTime, false, time.Date(2026, time.August, 29, 0, 0, 0, 0, time.UTC)},
+		{"timezone America/Los_Angeles", "0 9 * * *", "America/Los_Angeles", baseTime, false, time.Date(2026, time.August, 28, 16, 0, 0, 0, time.UTC)},
+		{"timezone America/New_York", "0 9 * * *", "America/New_York", baseTime, false, time.Date(2026, time.August, 28, 13, 0, 0, 0, time.UTC)},
+		{"unknown timezone falls back to UTC", "0 20 * * *", "Invalid/Unknown_TZ", baseTime, false, time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := CalculateNextRun(tc.cronExpr, tc.timezone, tc.from)
@@ -103,45 +56,18 @@ func TestCalculateNextRun_TableDriven(t *testing.T) {
 
 func TestFormatThreadTitle_TableDriven(t *testing.T) {
 	testTime := time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)
-
 	tests := []struct {
 		name     string
 		prefix   string
 		expected string
 		maxRunes int
 	}{
-		{
-			name:     "empty prefix",
-			prefix:   "",
-			expected: "Scheduled Routine – Aug 28, 2026",
-			maxRunes: 100,
-		},
-		{
-			name:     "whitespace prefix",
-			prefix:   "   \t\n  ",
-			expected: "Scheduled Routine – Aug 28, 2026",
-			maxRunes: 100,
-		},
-		{
-			name:     "custom prefix",
-			prefix:   "Weekly Meal Plan",
-			expected: "Weekly Meal Plan – Aug 28, 2026",
-			maxRunes: 100,
-		},
-		{
-			name:     "long ASCII prefix exceeding 100 runes",
-			prefix:   strings.Repeat("A", 120),
-			expected: strings.Repeat("A", 97) + "...",
-			maxRunes: 100,
-		},
-		{
-			name:     "multi-byte unicode prefix exceeding 100 runes",
-			prefix:   strings.Repeat("🚀", 120),
-			expected: strings.Repeat("🚀", 97) + "...",
-			maxRunes: 100,
-		},
+		{"empty prefix", "", "Scheduled Routine – Aug 28, 2026", 100},
+		{"whitespace prefix", "   \t\n  ", "Scheduled Routine – Aug 28, 2026", 100},
+		{"custom prefix", "Weekly Meal Plan", "Weekly Meal Plan – Aug 28, 2026", 100},
+		{"long ASCII prefix exceeding 100 runes", strings.Repeat("A", 120), strings.Repeat("A", 97) + "...", 100},
+		{"multi-byte unicode prefix exceeding 100 runes", strings.Repeat("🚀", 120), strings.Repeat("🚀", 97) + "...", 100},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := FormatThreadTitle(tc.prefix, testTime)
@@ -154,11 +80,8 @@ func TestFormatThreadTitle_TableDriven(t *testing.T) {
 					t.Errorf("expected %q, got %q", tc.expected, got)
 				}
 			} else {
-				if !strings.HasSuffix(got, "...") {
-					t.Errorf("expected title to end with '...', got %q", got)
-				}
-				if len(runes) != 100 {
-					t.Errorf("expected exactly 100 runes, got %d", len(runes))
+				if !strings.HasSuffix(got, "...") || len(runes) != 100 {
+					t.Errorf("expected 100 runes ending in '...', got %d: %q", len(runes), got)
 				}
 			}
 		})
@@ -167,49 +90,21 @@ func TestFormatThreadTitle_TableDriven(t *testing.T) {
 
 func TestIsScheduleDue_TableDriven(t *testing.T) {
 	now := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
-
 	tests := []struct {
 		name      string
 		nextRunAt time.Time
 		now       time.Time
 		expected  bool
 	}{
-		{
-			name:      "zero nextRunAt",
-			nextRunAt: time.Time{},
-			now:       now,
-			expected:  false,
-		},
-		{
-			name:      "zero now",
-			nextRunAt: now,
-			now:       time.Time{},
-			expected:  false,
-		},
-		{
-			name:      "future nextRunAt",
-			nextRunAt: now.Add(5 * time.Minute),
-			now:       now,
-			expected:  false,
-		},
-		{
-			name:      "exact match",
-			nextRunAt: now,
-			now:       now,
-			expected:  true,
-		},
-		{
-			name:      "past nextRunAt",
-			nextRunAt: now.Add(-5 * time.Minute),
-			now:       now,
-			expected:  true,
-		},
+		{"zero nextRunAt", time.Time{}, now, false},
+		{"zero now", now, time.Time{}, false},
+		{"future nextRunAt", now.Add(5 * time.Minute), now, false},
+		{"exact match", now, now, true},
+		{"past nextRunAt", now.Add(-5 * time.Minute), now, true},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := IsScheduleDue(tc.nextRunAt, tc.now)
-			if got != tc.expected {
+			if got := IsScheduleDue(tc.nextRunAt, tc.now); got != tc.expected {
 				t.Errorf("expected %v, got %v", tc.expected, got)
 			}
 		})
@@ -218,55 +113,22 @@ func TestIsScheduleDue_TableDriven(t *testing.T) {
 
 func TestEvaluateCronStaleness_TableDriven(t *testing.T) {
 	now := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
-
 	tests := []struct {
 		name      string
 		nextRunAt time.Time
 		now       time.Time
 		expected  bool
 	}{
-		{
-			name:      "zero nextRunAt",
-			nextRunAt: time.Time{},
-			now:       now,
-			expected:  false,
-		},
-		{
-			name:      "zero now",
-			nextRunAt: now,
-			now:       time.Time{},
-			expected:  false,
-		},
-		{
-			name:      "future nextRunAt",
-			nextRunAt: now.Add(1 * time.Hour),
-			now:       now,
-			expected:  false,
-		},
-		{
-			name:      "recent overdue (< 24h)",
-			nextRunAt: now.Add(-2 * time.Hour),
-			now:       now,
-			expected:  false,
-		},
-		{
-			name:      "exactly 24h overdue",
-			nextRunAt: now.Add(-24 * time.Hour),
-			now:       now,
-			expected:  false,
-		},
-		{
-			name:      "stale overdue (> 24h)",
-			nextRunAt: now.Add(-24*time.Hour - time.Second),
-			now:       now,
-			expected:  true,
-		},
+		{"zero nextRunAt", time.Time{}, now, false},
+		{"zero now", now, time.Time{}, false},
+		{"future nextRunAt", now.Add(1 * time.Hour), now, false},
+		{"recent overdue (< 24h)", now.Add(-2 * time.Hour), now, false},
+		{"exactly 24h overdue", now.Add(-24 * time.Hour), now, false},
+		{"stale overdue (> 24h)", now.Add(-24*time.Hour - time.Second), now, true},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := EvaluateCronStaleness(tc.nextRunAt, tc.now)
-			if got != tc.expected {
+			if got := EvaluateCronStaleness(tc.nextRunAt, tc.now); got != tc.expected {
 				t.Errorf("expected %v, got %v", tc.expected, got)
 			}
 		})
@@ -280,36 +142,14 @@ func TestResolveCronTimezone_TableDriven(t *testing.T) {
 		defaultTz  string
 		expected   string
 	}{
-		{
-			name:       "schedule timezone takes precedence",
-			scheduleTz: "America/New_York",
-			defaultTz:  "America/Los_Angeles",
-			expected:   "America/New_York",
-		},
-		{
-			name:       "schedule timezone trimmed",
-			scheduleTz: "  Asia/Tokyo  ",
-			defaultTz:  "UTC",
-			expected:   "Asia/Tokyo",
-		},
-		{
-			name:       "empty schedule tz falls back to default",
-			scheduleTz: "   ",
-			defaultTz:  "America/Los_Angeles",
-			expected:   "America/Los_Angeles",
-		},
-		{
-			name:       "both empty fall back to UTC",
-			scheduleTz: "",
-			defaultTz:  "   ",
-			expected:   "UTC",
-		},
+		{"schedule timezone takes precedence", "America/New_York", "America/Los_Angeles", "America/New_York"},
+		{"schedule timezone trimmed", "  Asia/Tokyo  ", "UTC", "Asia/Tokyo"},
+		{"empty schedule tz falls back to default", "   ", "America/Los_Angeles", "America/Los_Angeles"},
+		{"both empty fall back to UTC", "", "   ", "UTC"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ResolveCronTimezone(tc.scheduleTz, tc.defaultTz)
-			if got != tc.expected {
+			if got := ResolveCronTimezone(tc.scheduleTz, tc.defaultTz); got != tc.expected {
 				t.Errorf("expected %q, got %q", tc.expected, got)
 			}
 		})
@@ -324,54 +164,16 @@ func TestShouldCreateThread_TableDriven(t *testing.T) {
 		hasThreadCreator bool
 		expected         bool
 	}{
-		{
-			name:             "target is already a thread",
-			isAlreadyThread:  true,
-			policyMode:       "threads",
-			hasThreadCreator: true,
-			expected:         false,
-		},
-		{
-			name:             "channel policy is channel mode",
-			isAlreadyThread:  false,
-			policyMode:       "channel",
-			hasThreadCreator: true,
-			expected:         false,
-		},
-		{
-			name:             "channel policy is CHANNEL (case insensitive)",
-			isAlreadyThread:  false,
-			policyMode:       " CHANNEL ",
-			hasThreadCreator: true,
-			expected:         false,
-		},
-		{
-			name:             "thread creator is nil/false",
-			isAlreadyThread:  false,
-			policyMode:       "threads",
-			hasThreadCreator: false,
-			expected:         false,
-		},
-		{
-			name:             "valid thread mode with creator",
-			isAlreadyThread:  false,
-			policyMode:       "threads",
-			hasThreadCreator: true,
-			expected:         true,
-		},
-		{
-			name:             "default/empty policy mode with creator",
-			isAlreadyThread:  false,
-			policyMode:       "",
-			hasThreadCreator: true,
-			expected:         true,
-		},
+		{"target is already a thread", true, "threads", true, false},
+		{"channel policy is channel mode", false, "channel", true, false},
+		{"channel policy is CHANNEL (case insensitive)", false, " CHANNEL ", true, false},
+		{"thread creator is nil/false", false, "threads", false, false},
+		{"valid thread mode with creator", false, "threads", true, true},
+		{"default/empty policy mode with creator", false, "", true, true},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ShouldCreateThread(tc.isAlreadyThread, tc.policyMode, tc.hasThreadCreator)
-			if got != tc.expected {
+			if got := ShouldCreateThread(tc.isAlreadyThread, tc.policyMode, tc.hasThreadCreator); got != tc.expected {
 				t.Errorf("expected %v, got %v", tc.expected, got)
 			}
 		})
@@ -386,45 +188,17 @@ func TestBuildMessageSummaries_TableDriven(t *testing.T) {
 		expectedCron   string
 		expectedPrompt string
 	}{
-		{
-			name:           "empty prefix",
-			titlePrefix:    "",
-			prompt:         "Review morning telemetry",
-			expectedCron:   "Review morning telemetry",
-			expectedPrompt: "[Reminder] Review morning telemetry",
-		},
-		{
-			name:           "whitespace prefix",
-			titlePrefix:    "   ",
-			prompt:         "Review morning telemetry",
-			expectedCron:   "Review morning telemetry",
-			expectedPrompt: "[Reminder] Review morning telemetry",
-		},
-		{
-			name:           "custom prefix",
-			titlePrefix:    "Daily Telemetry",
-			prompt:         "Review morning telemetry",
-			expectedCron:   "[Daily Telemetry] Review morning telemetry",
-			expectedPrompt: "[Reminder] Review morning telemetry",
-		},
-		{
-			name:           "prompt with user request tags",
-			titlePrefix:    "Routine",
-			prompt:         "<USER_REQUEST>\nPrompt:\nDaily review\n</USER_REQUEST>",
-			expectedCron:   "[Routine] Daily review",
-			expectedPrompt: "[Reminder] Daily review",
-		},
+		{"empty prefix", "", "Review morning telemetry", "Review morning telemetry", "[Reminder] Review morning telemetry"},
+		{"whitespace prefix", "   ", "Review morning telemetry", "Review morning telemetry", "[Reminder] Review morning telemetry"},
+		{"custom prefix", "Daily Telemetry", "Review morning telemetry", "[Daily Telemetry] Review morning telemetry", "[Reminder] Review morning telemetry"},
+		{"prompt with user request tags", "Routine", "<USER_REQUEST>\nPrompt:\nDaily review\n</USER_REQUEST>", "[Routine] Daily review", "[Reminder] Daily review"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cronSum := BuildCronMessageSummary(tc.titlePrefix, tc.prompt)
-			if cronSum != tc.expectedCron {
+			if cronSum := BuildCronMessageSummary(tc.titlePrefix, tc.prompt); cronSum != tc.expectedCron {
 				t.Errorf("BuildCronMessageSummary: expected %q, got %q", tc.expectedCron, cronSum)
 			}
-
-			oneShotSum := BuildOneShotMessageSummary(tc.prompt)
-			if oneShotSum != tc.expectedPrompt {
+			if oneShotSum := BuildOneShotMessageSummary(tc.prompt); oneShotSum != tc.expectedPrompt {
 				t.Errorf("BuildOneShotMessageSummary: expected %q, got %q", tc.expectedPrompt, oneShotSum)
 			}
 		})
@@ -433,215 +207,147 @@ func TestBuildMessageSummaries_TableDriven(t *testing.T) {
 
 func TestPlanDueCronTurn_TableDriven(t *testing.T) {
 	now := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
-
-	t.Run("fresh due cron normal execution", func(t *testing.T) {
-		cron := db.CronSchedule{
-			ID:          "cron-1",
-			TargetID:    "chan-1",
-			TitlePrefix: "Health Check",
-			CronExpr:    "0 20 * * 5",
-			Prompt:      "Check node health",
-			Timezone:    "UTC",
-			NextRunAt:   now.Add(-5 * time.Minute),
-			Effort:      "high",
-		}
-		action := PlanDueCronTurn(cron, now, false, "threads", true, "UTC")
-		if action.IsStale {
-			t.Errorf("expected IsStale=false")
-		}
-		if !action.ShouldFire {
-			t.Errorf("expected ShouldFire=true")
-		}
-		if action.NextRunError != nil {
-			t.Errorf("unexpected NextRunError: %v", action.NextRunError)
-		}
-		expectedNext := time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)
-		if !action.NextRunAt.Equal(expectedNext) {
-			t.Errorf("expected next run %v, got %v", expectedNext, action.NextRunAt)
-		}
-		if !action.ShouldCreateThread {
-			t.Errorf("expected ShouldCreateThread=true")
-		}
-		if action.Effort != "high" {
-			t.Errorf("expected effort high, got %q", action.Effort)
-		}
-	})
-
-	t.Run("stale cron overdue > 24h", func(t *testing.T) {
-		cron := db.CronSchedule{
-			ID:        "cron-stale",
-			CronExpr:  "0 20 * * 5",
-			NextRunAt: now.Add(-25 * time.Hour),
-		}
-		action := PlanDueCronTurn(cron, now, false, "threads", true, "UTC")
-		if !action.IsStale {
-			t.Errorf("expected IsStale=true")
-		}
-		if action.ShouldFire {
-			t.Errorf("expected ShouldFire=false")
-		}
-	})
-
-	t.Run("invalid cron expression applies 24h fallback", func(t *testing.T) {
-		cron := db.CronSchedule{
-			ID:        "cron-invalid",
-			CronExpr:  "invalid-syntax",
-			NextRunAt: now.Add(-10 * time.Minute),
-		}
-		action := PlanDueCronTurn(cron, now, false, "threads", true, "UTC")
-		if action.NextRunError == nil {
-			t.Errorf("expected NextRunError to be non-nil")
-		}
-		expectedFallback := now.Add(24 * time.Hour)
-		if !action.NextRunAt.Equal(expectedFallback) {
-			t.Errorf("expected next run fallback %v, got %v", expectedFallback, action.NextRunAt)
-		}
-		if !action.ShouldFire {
-			t.Errorf("expected ShouldFire=true for non-stale invalid cron")
-		}
-	})
-
-	t.Run("zero now timestamp fallback", func(t *testing.T) {
-		cron := db.CronSchedule{
-			ID:        "cron-zero-now",
-			CronExpr:  "@daily",
-			NextRunAt: time.Now().Add(-1 * time.Minute),
-		}
-		action := PlanDueCronTurn(cron, time.Time{}, false, "threads", true, "UTC")
-		if action.NextRunAt.IsZero() {
-			t.Errorf("expected non-zero NextRunAt")
-		}
-	})
+	tests := []struct {
+		name        string
+		cron        db.CronSchedule
+		now         time.Time
+		wantStale   bool
+		wantFire    bool
+		wantErr     bool
+		wantThread  bool
+		wantEffort  string
+		wantNextRun time.Time
+	}{
+		{"fresh due cron", mkCron("cron-1", "chan-1", "Health Check", "0 20 * * 5", "Check node health", "UTC", "high", now.Add(-5*time.Minute)), now, false, true, false, true, "high", time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)},
+		{"stale overdue >24h", mkCron("cron-stale", "", "", "0 20 * * 5", "", "", "", now.Add(-25*time.Hour)), now, true, false, false, false, "", time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)},
+		{"invalid cron 24h fallback", mkCron("cron-invalid", "", "", "invalid-syntax", "", "", "", now.Add(-10*time.Minute)), now, false, true, true, false, "", now.Add(24 * time.Hour)},
+		{"zero now timestamp fallback", mkCron("cron-zero-now", "", "", "@daily", "", "", "", time.Now().Add(-time.Minute)), time.Time{}, false, true, false, false, "", time.Time{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PlanDueCronTurn(tc.cron, tc.now, false, "threads", tc.wantThread, "UTC")
+			if got.IsStale != tc.wantStale || got.ShouldFire != tc.wantFire || (got.NextRunError != nil) != tc.wantErr || got.ShouldCreateThread != tc.wantThread {
+				t.Fatalf("got %+v, want stale=%v fire=%v err=%v thread=%v", got, tc.wantStale, tc.wantFire, tc.wantErr, tc.wantThread)
+			}
+			if tc.wantEffort != "" && got.Effort != tc.wantEffort {
+				t.Errorf("effort: got %q, want %q", got.Effort, tc.wantEffort)
+			}
+			if !tc.wantNextRun.IsZero() && !got.NextRunAt.Equal(tc.wantNextRun) {
+				t.Errorf("next run: got %v, want %v", got.NextRunAt, tc.wantNextRun)
+			}
+			if tc.wantNextRun.IsZero() && got.NextRunAt.IsZero() {
+				t.Errorf("expected non-zero NextRunAt")
+			}
+		})
+	}
 }
 
 func TestStructBuilders_TableDriven(t *testing.T) {
 	now := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
-
-	t.Run("BuildCronScheduleRun and BuildCronMessage", func(t *testing.T) {
-		cron := db.CronSchedule{
-			ID:          "cron-struct-1",
-			TargetID:    "chan-main",
-			TitlePrefix: "Weekly Report",
-			CronExpr:    "0 9 * * 1",
-			Prompt:      "Compile weekly report",
-			Effort:      "medium",
-		}
-
-		run := BuildCronScheduleRun("run-1", "msg-1", "th-100", cron, "Weekly Report – Aug 28, 2026", now)
-		if run.ID != "run-1" || run.ScheduleID != "cron-struct-1" || run.ScheduleType != "cron" ||
-			run.MessageID != "msg-1" || run.TargetID != "chan-main" || run.ThreadID != "th-100" ||
-			run.Title != "Weekly Report – Aug 28, 2026" || run.Prompt != "Compile weekly report" ||
-			run.Status != "enqueued" || !run.StartedAt.Equal(now) || run.Effort != "medium" {
-			t.Errorf("BuildCronScheduleRun field mismatch: %+v", run)
-		}
-
-		msg := BuildCronMessage("msg-1", "run-1", "th-100", cron, "[Weekly Report] Compile weekly report", now)
-		if msg.ID != "msg-1" || msg.ThreadID != "th-100" || msg.GuildID != "scheduled" ||
-			msg.AuthorID != "scheduler" || msg.AuthorName != "Scheduler" || msg.Content != "Compile weekly report" ||
-			msg.Summary != "[Weekly Report] Compile weekly report" || msg.Status != db.StatusPending ||
-			msg.ScheduleRunID != "run-1" || !msg.CreatedAt.Equal(now) || !msg.UpdatedAt.Equal(now) ||
-			msg.Effort != "medium" {
-			t.Errorf("BuildCronMessage field mismatch: %+v", msg)
-		}
-	})
-
-	t.Run("BuildOneShotScheduleRun and BuildOneShotMessage", func(t *testing.T) {
-		oneShot := db.OneShotSchedule{
-			ID:       "oneshot-1",
-			ThreadID: "th-200",
-			Prompt:   "Submit timesheet",
-		}
-
-		run := BuildOneShotScheduleRun("run-2", "msg-2", oneShot, now)
-		if run.ID != "run-2" || run.ScheduleID != "oneshot-1" || run.ScheduleType != "one_shot" ||
-			run.MessageID != "msg-2" || run.TargetID != "th-200" || run.ThreadID != "th-200" ||
-			run.Title != "One-shot Reminder" || run.Prompt != "Submit timesheet" ||
-			run.Status != "enqueued" || !run.StartedAt.Equal(now) {
-			t.Errorf("BuildOneShotScheduleRun field mismatch: %+v", run)
-		}
-
-		msg := BuildOneShotMessage("msg-2", "run-2", oneShot, "[Reminder] Submit timesheet", now)
-		if msg.ID != "msg-2" || msg.ThreadID != "th-200" || msg.GuildID != "scheduled" ||
-			msg.AuthorID != "scheduler" || msg.AuthorName != "Scheduler" || msg.Content != "Submit timesheet" ||
-			msg.Summary != "[Reminder] Submit timesheet" || msg.Status != db.StatusPending ||
-			msg.ScheduleRunID != "run-2" || !msg.CreatedAt.Equal(now) || !msg.UpdatedAt.Equal(now) {
-			t.Errorf("BuildOneShotMessage field mismatch: %+v", msg)
-		}
-	})
+	tests := []struct {
+		name         string
+		cron         db.CronSchedule
+		oneShot      db.OneShotSchedule
+		title        string
+		summary      string
+		targetThread string
+		wantRunType  string
+		wantTargetID string
+		wantTitle    string
+		wantPrompt   string
+		wantEffort   string
+	}{
+		{
+			name:         "cron standard",
+			cron:         mkCron("cron-1", "chan-main", "Weekly Report", "0 9 * * 1", "Compile weekly report", "UTC", "medium", now),
+			title:        "Weekly Report – Aug 28, 2026",
+			summary:      "[Weekly Report] Compile weekly report",
+			targetThread: "th-100",
+			wantRunType:  "cron",
+			wantTargetID: "chan-main",
+			wantTitle:    "Weekly Report – Aug 28, 2026",
+			wantPrompt:   "Compile weekly report",
+			wantEffort:   "medium",
+		},
+		{
+			name:         "oneshot standard",
+			oneShot:      mkOneShot("oneshot-1", "th-200", "Submit timesheet", "standard", now),
+			title:        "One-shot Reminder",
+			summary:      "[Reminder] Submit timesheet",
+			targetThread: "th-200",
+			wantRunType:  "one_shot",
+			wantTargetID: "th-200",
+			wantTitle:    "One-shot Reminder",
+			wantPrompt:   "Submit timesheet",
+			wantEffort:   "standard",
+		},
+		{
+			name:         "oneshot low effort propagation",
+			oneShot:      mkOneShot("oneshot-2", "th-201", "Low reminder", "low", now),
+			title:        "One-shot Reminder",
+			summary:      "[Reminder] Low reminder",
+			targetThread: "th-201",
+			wantRunType:  "one_shot",
+			wantTargetID: "th-201",
+			wantTitle:    "One-shot Reminder",
+			wantPrompt:   "Low reminder",
+			wantEffort:   "low",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var run db.ScheduleRun
+			var msg db.Message
+			if tc.cron.ID != "" {
+				run = BuildCronScheduleRun("run-1", "msg-1", tc.targetThread, tc.cron, tc.title, now)
+				msg = BuildCronMessage("msg-1", "run-1", tc.targetThread, tc.cron, tc.summary, now)
+			} else {
+				run = BuildOneShotScheduleRun("run-1", "msg-1", tc.oneShot, now)
+				msg = BuildOneShotMessage("msg-1", "run-1", tc.oneShot, tc.summary, now)
+			}
+			if run.ScheduleType != tc.wantRunType || run.TargetID != tc.wantTargetID || run.Title != tc.wantTitle || run.Prompt != tc.wantPrompt || run.Effort != tc.wantEffort {
+				t.Fatalf("run mismatch: %+v", run)
+			}
+			if msg.ThreadID != tc.targetThread || msg.Summary != tc.summary || msg.Effort != tc.wantEffort || msg.Content != tc.wantPrompt {
+				t.Fatalf("msg mismatch: %+v", msg)
+			}
+		})
+	}
 }
 
 func TestPeriodicTickPredicates_TableDriven(t *testing.T) {
 	tests := []struct {
-		tickCount       int
-		expectFactExt   bool
-		expectRetention bool
+		name        string
+		tickCount   int
+		wantFactExt bool
+		wantPrune   bool
+		wantDecay   bool
+		wantSync    bool
 	}{
-		{tickCount: -1, expectFactExt: false, expectRetention: false},
-		{tickCount: 0, expectFactExt: false, expectRetention: false},
-		{tickCount: 1, expectFactExt: false, expectRetention: false},
-		{tickCount: 119, expectFactExt: false, expectRetention: false},
-		{tickCount: 120, expectFactExt: true, expectRetention: false},
-		{tickCount: 121, expectFactExt: false, expectRetention: false},
-		{tickCount: 240, expectFactExt: true, expectRetention: false},
-		{tickCount: 2879, expectFactExt: false, expectRetention: false},
-		{tickCount: 2880, expectFactExt: true, expectRetention: true},
-		{tickCount: 2881, expectFactExt: false, expectRetention: false},
-		{tickCount: 5760, expectFactExt: true, expectRetention: true},
-	}
-
-	for _, tc := range tests {
-		factGot := ShouldRunFactExtraction(tc.tickCount)
-		if factGot != tc.expectFactExt {
-			t.Errorf("tick %d: ShouldRunFactExtraction expected %v, got %v", tc.tickCount, tc.expectFactExt, factGot)
-		}
-
-		retGot := ShouldRunPruneRetention(tc.tickCount)
-		if retGot != tc.expectRetention {
-			t.Errorf("tick %d: ShouldRunPruneRetention expected %v, got %v", tc.tickCount, tc.expectRetention, retGot)
-		}
-	}
-}
-
-func TestBuildOneShot_EffortPropagation(t *testing.T) {
-	now := time.Now().UTC()
-	oneShot := db.OneShotSchedule{
-		ID:       "oneshot-1",
-		ThreadID: "thread-1",
-		Prompt:   "reminder test",
-		RunAt:    now,
-		Effort:   "low",
-	}
-
-	run := BuildOneShotScheduleRun("run-1", "msg-1", oneShot, now)
-	if run.Effort != "low" {
-		t.Fatalf("expected run.Effort == 'low', got %q", run.Effort)
-	}
-
-	msg := BuildOneShotMessage("msg-1", "run-1", oneShot, "[Reminder] reminder test", now)
-	if msg.Effort != "low" {
-		t.Fatalf("expected msg.Effort == 'low', got %q", msg.Effort)
-	}
-}
-
-func TestShouldRunTranscriptSync(t *testing.T) {
-	tests := []struct {
-		tickCount int
-		expected  bool
-	}{
-		{tickCount: -10, expected: false},
-		{tickCount: 0, expected: false},
-		{tickCount: 1, expected: false},
-		{tickCount: 9, expected: false},
-		{tickCount: 10, expected: true},
-		{tickCount: 11, expected: false},
-		{tickCount: 20, expected: true},
-		{tickCount: 120, expected: true},
-		{tickCount: 2880, expected: true},
+		{"negative tick", -10, false, false, false, false},
+		{"zero tick", 0, false, false, false, false},
+		{"regular tick 1", 1, false, false, false, false},
+		{"transcript sync tick 10", 10, false, false, false, true},
+		{"memory decay tick 60", 60, false, false, true, true},
+		{"fact extraction tick 120", 120, true, false, false, true},
+		{"staggered decay 2940", 2940, false, false, true, true},
+		{"full daily prune 2880", 2880, true, true, false, true},
+		{"double daily prune 5760", 5760, true, true, false, true},
 	}
 	for _, tc := range tests {
-		got := ShouldRunTranscriptSync(tc.tickCount)
-		if got != tc.expected {
-			t.Errorf("tick %d: ShouldRunTranscriptSync expected %v, got %v", tc.tickCount, tc.expected, got)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ShouldRunFactExtraction(tc.tickCount); got != tc.wantFactExt {
+				t.Errorf("ShouldRunFactExtraction: got %v, want %v", got, tc.wantFactExt)
+			}
+			if got := ShouldRunPruneRetention(tc.tickCount); got != tc.wantPrune {
+				t.Errorf("ShouldRunPruneRetention: got %v, want %v", got, tc.wantPrune)
+			}
+			if got := ShouldRunMemoryDecay(tc.tickCount); got != tc.wantDecay {
+				t.Errorf("ShouldRunMemoryDecay: got %v, want %v", got, tc.wantDecay)
+			}
+			if got := ShouldRunTranscriptSync(tc.tickCount); got != tc.wantSync {
+				t.Errorf("ShouldRunTranscriptSync: got %v, want %v", got, tc.wantSync)
+			}
+		})
 	}
 }
