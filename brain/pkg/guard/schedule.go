@@ -25,10 +25,7 @@ var whileSleepPattern = regexp.MustCompile(`while\s+.*?(?:do|;)\s*(?:/bin/|/usr/
 
 // CheckSchedule evaluates tool calls against scheduling and sleep invariants.
 func CheckSchedule(toolName string, args ToolArgs) *Decision {
-	normalizedName := strings.ToLower(toolName)
-	if idx := strings.LastIndex(normalizedName, ":"); idx != -1 {
-		normalizedName = normalizedName[idx+1:]
-	}
+	normalizedName := normalizeToolName(toolName)
 
 	if normalizedName == "schedule" {
 		return &Decision{

@@ -140,7 +140,8 @@ func tokenizeQuoteAware(sub string) []string {
 // CheckSearch evaluates search commands in run_command against unconstrained root, missing maxdepth,
 // and binary scanning invariants.
 func CheckSearch(toolName string, args ToolArgs) *Decision {
-	if !strings.HasSuffix(toolName, "run_command") && toolName != "grep_search" && toolName != "find_by_name" {
+	normalizedName := normalizeToolName(toolName)
+	if normalizedName != "run_command" && normalizedName != "grep_search" && normalizedName != "find_by_name" {
 		return &Decision{Decision: DecisionAllow}
 	}
 

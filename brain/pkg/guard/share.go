@@ -91,10 +91,7 @@ func IsProtectedPath(p string) bool {
 
 // CheckShare evaluates tool calls against read-only /share invariants.
 func CheckShare(toolName string, args ToolArgs) *Decision {
-	normalizedName := strings.ToLower(toolName)
-	if idx := strings.LastIndex(normalizedName, ":"); idx != -1 {
-		normalizedName = normalizedName[idx+1:]
-	}
+	normalizedName := normalizeToolName(toolName)
 
 	switch normalizedName {
 	case "replace_file_content", "write_to_file":
