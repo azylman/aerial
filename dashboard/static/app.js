@@ -2316,10 +2316,10 @@ function renderBuildDetailContent(build, chunks) {
                 </div>` : '';
 
             const instructions = chunk.instructions ? `
-                <div class="chunk-section">
-                    <span class="chunk-section-label">INSTRUCTIONS</span>
+                <details class="chunk-section chunk-instructions-details">
+                    <summary class="chunk-section-label chunk-instructions-toggle"><span class="chunk-instructions-chevron">▸</span> INSTRUCTIONS</summary>
                     <div class="chunk-instructions-box">${escapeHtml(chunk.instructions)}</div>
-                </div>` : '';
+                </details>` : '';
 
             return `
                 <div class="chunk-card" data-chunk-index="${chunkIndex}">
