@@ -961,6 +961,7 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"aerial core brain touched", "/share/aerial", []string{"brain/main.go"}, true},
 		{"aerial core webhooks-router touched", "/share/aerial", []string{"webhooks-router/main.go"}, true},
 		{"aerial core vanadis touched", "/share/aerial", []string{"vanadis/main.go"}, true},
+		{"aerial core roborev-runner touched", "/share/aerial", []string{"roborev-runner/Dockerfile"}, true},
 		{"aerial core Dockerfile touched", "/share/aerial", []string{"Dockerfile"}, true},
 		{"aerial core go.mod touched", "/share/aerial", []string{"go.mod"}, true},
 		{"aerial core non-build files (docs, nomad, rules)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "rules/discord/foo.md", "docs/spec.md"}, false},

@@ -38,6 +38,7 @@ jobs:
       hangar: ${{ steps.filter.outputs.hangar }}
       webhooks-router: ${{ steps.filter.outputs.webhooks-router }}
       vanadis: ${{ steps.filter.outputs.vanadis }}
+      roborev-runner: ${{ steps.filter.outputs.roborev-runner }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_builds: ${{ steps.set-matrix.outputs.has_builds }}
     steps:
@@ -72,6 +73,8 @@ jobs:
               - 'webhooks-router/**'
             vanadis:
               - 'vanadis/**'
+            roborev-runner:
+              - 'roborev-runner/**'
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
@@ -90,7 +93,8 @@ jobs:
               proxy: "${{ steps.filter.outputs.proxy }}",
               hangar: "${{ steps.filter.outputs.hangar }}",
               "webhooks-router": "${{ steps.filter.outputs.webhooks-router }}",
-              vanadis: "${{ steps.filter.outputs.vanadis }}"
+              vanadis: "${{ steps.filter.outputs.vanadis }}",
+              "roborev-runner": "${{ steps.filter.outputs.roborev-runner }}"
             };
 
             const catalog = [
@@ -106,7 +110,8 @@ jobs:
               { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },
               { service: "hangar", context: ".", file: "./sidecars/hangar/Dockerfile", image_name: "aerial-hangar" },
               { service: "webhooks-router", context: "./webhooks-router", file: "./webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" },
-              { service: "vanadis", context: "./vanadis", file: "./vanadis/Dockerfile", image_name: "aerial-vanadis" }
+              { service: "vanadis", context: "./vanadis", file: "./vanadis/Dockerfile", image_name: "aerial-vanadis" },
+              { service: "roborev-runner", context: ".", file: "./roborev-runner/Dockerfile", image_name: "aerial-roborev-runner" }
             ];
 
             const forceAll = "${{ inputs.force_all }}" === "true";
