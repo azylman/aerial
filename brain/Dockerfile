@@ -14,11 +14,11 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search ./cmd/transcript-search
+    CGO_ENABLED=0 go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /transcript-search ./cmd/transcript-search
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hook-guard ./cmd/hook-guard
+    CGO_ENABLED=0 go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /hook-guard ./cmd/hook-guard
 
 # Prune Go SDK test, doc, and api directories before exporting to runtime stage
 RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
