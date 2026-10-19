@@ -1190,6 +1190,8 @@ func TestSkillsProvisioning(t *testing.T) {
 				spDir := t.TempDir()
 				writeSkillFixture(t, spDir, "brainstorming/SKILL.md", "---\nname: brainstorming\n---\nSuperpower body")
 				p.SetSuperpowersDir(spDir)
+			} else {
+				p.SetSuperpowersDir("")
 			}
 
 			if tc.tornRead {
@@ -1285,7 +1287,7 @@ func TestSkillsProvisioning(t *testing.T) {
 
 			if !tc.symlinkTotalFail && !tc.targetBlocked {
 				if tc.target == TargetDiscord {
-					if !found["custom-skill"] || !found["discord-skill"] || !found["brainstorming"] || found["voice-skill"] {
+					if !found["custom-skill"] || !found["discord-skill"] || (tc.superpowers != found["brainstorming"]) || found["voice-skill"] {
 						t.Errorf("unexpected skills for discord target: %v", found)
 					}
 				} else if tc.target == TargetVoice {
