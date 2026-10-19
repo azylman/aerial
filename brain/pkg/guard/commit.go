@@ -89,33 +89,22 @@ func parsePatternPayload(data []byte) []PatternRule {
 		return rules
 	}
 
-	// Try format 1: [{"category": "...", "pattern": "..."}]
-	type entry struct {
+	// Try format 1: [{"category": "...", "pattern": "..."}] or format 2: {"patterns": [...]}
+	type rawEntry struct {
 		Category string `json:"category"`
 		Pattern  string `json:"pattern"`
 	}
-	var entries []entry
-	if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
-		for _, e := range entries {
-			if e.Pattern != "" {
-				if re, err := regexp.Compile(e.Pattern); err == nil {
-					cat := e.Category
-					if cat == "" {
-						cat = "CustomRule"
-					}
-					rules = append(rules, PatternRule{Category: cat, Regex: re})
-				}
-			}
+	var entries []rawEntry
+	if err := json.Unmarshal(data, &entries); err != nil || len(entries) == 0 {
+		var wrapper struct {
+			Patterns []rawEntry `json:"patterns"`
 		}
-		return rules
+		if err := json.Unmarshal(data, &wrapper); err == nil {
+			entries = wrapper.Patterns
+		}
 	}
-
-	// Try format 2: {"patterns": [...]}
-	var wrapper struct {
-		Patterns []entry `json:"patterns"`
-	}
-	if err := json.Unmarshal(data, &wrapper); err == nil && len(wrapper.Patterns) > 0 {
-		for _, e := range wrapper.Patterns {
+	if len(entries) > 0 {
+		for _, e := range entries {
 			if e.Pattern != "" {
 				if re, err := regexp.Compile(e.Pattern); err == nil {
 					cat := e.Category
@@ -382,65 +371,8 @@ func IsCommitCommand(cmd string) (isCommit bool, targetDir string, isSubmit bool
 	return false, "", false
 }
 
-// IsAerialConfig checks if the target repository or command targets aerial-config,
-// where commit guard enforcement is intentionally disabled per user instructions.
-func IsAerialConfig(targetDir string, cmd string) bool {
-	// 1. Direct path check
-	if strings.Contains(targetDir, "aerial-config") {
-		return true
-	}
-
-	// 2. Command line flag / string check
-	if strings.Contains(cmd, "aerial-config") {
-		return true
-	}
-
-	dir := targetDir
-	if dir == "" {
-		dir = "."
-	}
-
-	// 3. Inspect .git/config in targetDir if present
-	gitConfigFile := filepath.Join(dir, ".git", "config")
-	if data, err := os.ReadFile(gitConfigFile); err == nil {
-		if strings.Contains(string(data), "aerial-config") {
-			return true
-		}
-	}
-
-	// Handle git worktree or submodule where .git is a file
-	gitFile := filepath.Join(dir, ".git")
-	if data, err := os.ReadFile(gitFile); err == nil {
-		content := string(data)
-		if strings.Contains(content, "aerial-config") {
-			return true
-		}
-		if strings.HasPrefix(strings.TrimSpace(content), "gitdir:") {
-			gitDir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), "gitdir:"))
-			if !filepath.IsAbs(gitDir) {
-				gitDir = filepath.Join(dir, gitDir)
-			}
-			if cfgData, err := os.ReadFile(filepath.Join(gitDir, "config")); err == nil {
-				if strings.Contains(string(cfgData), "aerial-config") {
-					return true
-				}
-			}
-		}
-	}
-
-	// 4. Query git remote get-url origin
-	if out, err := gitCmdRunner(dir, "remote", "get-url", "origin"); err == nil {
-		if strings.Contains(strings.TrimSpace(out), "aerial-config") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// IsCoreAerial returns true if targetDir or cmd targets the core aerial monorepo
-// (which legitimately uses *.aerial for Nomad service discovery mesh).
-func IsCoreAerial(targetDir string, cmd string) bool {
+// hasRepoOriginMatch inspects .git/config, worktree gitdir/commondir, and git remote origin against a matcher func.
+func hasRepoOriginMatch(targetDir string, match func(string) bool) bool {
 	dir := targetDir
 	if dir == "" {
 		dir = "."
@@ -449,19 +381,16 @@ func IsCoreAerial(targetDir string, cmd string) bool {
 	// 1. Inspect .git/config in targetDir if present
 	gitConfigFile := filepath.Join(dir, ".git", "config")
 	if data, err := os.ReadFile(gitConfigFile); err == nil {
-		content := strings.ToLower(string(data))
-		if (strings.Contains(content, "/aerial.git") || strings.Contains(content, "/aerial\"") || strings.Contains(content, "azylman/aerial")) &&
-			!strings.Contains(content, "aerial-config") && !strings.Contains(content, "aerial-sidecars") {
+		if match(string(data)) {
 			return true
 		}
 	}
 
-	// Handle git worktree or submodule where .git is a file
+	// 2. Handle git worktree or submodule where .git is a file
 	gitFile := filepath.Join(dir, ".git")
 	if data, err := os.ReadFile(gitFile); err == nil {
-		content := strings.ToLower(string(data))
-		if (strings.Contains(content, "/aerial.git") || strings.Contains(content, "azylman/aerial")) &&
-			!strings.Contains(content, "aerial-config") && !strings.Contains(content, "aerial-sidecars") {
+		content := string(data)
+		if match(content) {
 			return true
 		}
 		if strings.HasPrefix(strings.TrimSpace(content), "gitdir:") {
@@ -470,10 +399,19 @@ func IsCoreAerial(targetDir string, cmd string) bool {
 				gitDir = filepath.Join(dir, gitDir)
 			}
 			if cfgData, err := os.ReadFile(filepath.Join(gitDir, "config")); err == nil {
-				cfgContent := strings.ToLower(string(cfgData))
-				if (strings.Contains(cfgContent, "/aerial.git") || strings.Contains(cfgContent, "azylman/aerial")) &&
-					!strings.Contains(cfgContent, "aerial-config") && !strings.Contains(cfgContent, "aerial-sidecars") {
+				if match(string(cfgData)) {
 					return true
+				}
+			}
+			if commonData, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+				commonDir := strings.TrimSpace(string(commonData))
+				if !filepath.IsAbs(commonDir) {
+					commonDir = filepath.Join(gitDir, commonDir)
+				}
+				if cfgData, err := os.ReadFile(filepath.Join(commonDir, "config")); err == nil {
+					if match(string(cfgData)) {
+						return true
+					}
 				}
 			}
 		}
@@ -481,13 +419,49 @@ func IsCoreAerial(targetDir string, cmd string) bool {
 
 	// 3. Query git remote get-url origin
 	if out, err := gitCmdRunner(dir, "remote", "get-url", "origin"); err == nil {
-		trimmed := strings.ToLower(strings.TrimSpace(out))
-		if (strings.HasSuffix(trimmed, "/aerial") || strings.HasSuffix(trimmed, "/aerial.git") || strings.Contains(trimmed, "azylman/aerial")) &&
-			!strings.Contains(trimmed, "aerial-config") && !strings.Contains(trimmed, "aerial-sidecars") {
+		if match(strings.TrimSpace(out)) {
 			return true
 		}
 	}
 
+	return false
+}
+
+// IsAerialConfig checks if the target repository or command targets aerial-config,
+// where commit guard enforcement is intentionally disabled per user instructions.
+func IsAerialConfig(targetDir string, cmd string) bool {
+	if strings.Contains(targetDir, "aerial-config") || strings.Contains(cmd, "aerial-config") {
+		return true
+	}
+	return hasRepoOriginMatch(targetDir, func(content string) bool {
+		return strings.Contains(content, "aerial-config")
+	})
+}
+
+// IsCoreAerial returns true if targetDir or cmd targets the core aerial monorepo
+// (which legitimately uses *.aerial for Nomad service discovery mesh).
+func IsCoreAerial(targetDir string, cmd string) bool {
+	if IsAerialConfig(targetDir, cmd) {
+		return false
+	}
+	dir := targetDir
+	if dir == "" {
+		dir = "."
+	}
+	matchAerial := func(raw string) bool {
+		content := strings.ToLower(raw)
+		return (strings.Contains(content, "/aerial.git") || strings.Contains(content, "/aerial\"") || strings.HasSuffix(content, "/aerial") || strings.Contains(content, "azylman/aerial")) &&
+			!strings.Contains(content, "aerial-config") && !strings.Contains(content, "aerial-sidecars")
+	}
+	if hasRepoOriginMatch(dir, matchAerial) {
+		return true
+	}
+	// Fallback check for core aerial repo structure
+	if _, err1 := os.Stat(filepath.Join(dir, "brain", "go.mod")); err1 == nil {
+		if _, err2 := os.Stat(filepath.Join(dir, "scripts", "aerial-pr.sh")); err2 == nil {
+			return true
+		}
+	}
 	return false
 }
 
@@ -534,10 +508,7 @@ func FormatCommitDenyReason(violations []Violation) string {
 // CheckCommit evaluates run_command tool calls against commit safety guard invariants.
 // Guaranteed fail-open: returns DecisionAllow on any unexpected error or non-commit command.
 func CheckCommit(toolName string, args ToolArgs) *Decision {
-	normalizedName := strings.ToLower(toolName)
-	if idx := strings.LastIndex(normalizedName, ":"); idx != -1 {
-		normalizedName = normalizedName[idx+1:]
-	}
+	normalizedName := normalizeToolName(toolName)
 
 	if normalizedName != "run_command" {
 		return &Decision{Decision: DecisionAllow}

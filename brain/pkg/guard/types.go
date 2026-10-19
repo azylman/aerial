@@ -2,7 +2,17 @@ package guard
 
 import (
 	"encoding/json"
+	"strings"
 )
+
+// normalizeToolName returns the lowercased tool base name without server prefix.
+func normalizeToolName(toolName string) string {
+	n := strings.ToLower(strings.TrimSpace(toolName))
+	if idx := strings.LastIndex(n, ":"); idx != -1 {
+		n = n[idx+1:]
+	}
+	return n
+}
 
 // DecisionType represents the hook authorization verdict.
 type DecisionType string

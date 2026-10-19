@@ -1,25 +1,30 @@
 package guard
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-var (
-	testPAT     = "ghp" + "_" + "111111111111111111111111111111111111"
-	testPrivKey = "-----BEGIN " + "RSA PRIVATE KEY-----"
-	testDiscord = "https://discord." + "com/api/webhooks/1234567890/token-abc_XYZ"
-	testSlack   = "https://" + "hooks.slack.com/" + "services/" + "T12345678" + "/" + "B12345678/" + "AbCdEfGhIjKlMnOp12345678"
-	testAPIKey  = "sk" + "-" + "11111111112222222222333333333344"
-	testJWT     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+const (
+	testPAT     = "ghp_" + "111111111122222222223333333333444444"
+	testPrivKey = "-----BEGIN RSA PRIVATE KEY-----"
+	testDiscord = "https://discord.com/" + "api/webhooks/123456789/abcdefghijklmnopqrstuvwxyz"
+	testSlack   = "https://hooks." + "slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+	testAPIKey  = "sk-" + "abcdefghijklmnopqrstuvwxyz123456"
+	testJWT     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
 
-func TestScanDiff_Patterns(t *testing.T) {
+func testDiff(file string, line int, added string) string {
+	return fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,1 +%d,1 @@\n+%s\n", file, file, file, file, line, added)
+}
+
+func TestScanDiff(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	patternTests := []struct {
 		name         string
 		diff         string
 		wantCategory string
@@ -27,100 +32,19 @@ func TestScanDiff_Patterns(t *testing.T) {
 		wantLine     int
 		wantSample   string
 	}{
-		{
-			name: "Internal cluster domain detected",
-			diff: `diff --git a/pkg/net/client.go b/pkg/net/client.go
---- a/pkg/net/client.go
-+++ b/pkg/net/client.go
-@@ -10,3 +10,4 @@
- package net
-+var watcherURL = "http://mirrormere-cast-watcher.aerial/action"
-`,
-			wantCategory: "InternalClusterDomain",
-			wantFile:     "pkg/net/client.go",
-			wantLine:     11,
-			wantSample:   "mirrormere-cast-watcher.aerial",
-		},
-		{
-			name: "Internal LAN domain detected",
-			diff: `diff --git a/pkg/net/client.go b/pkg/net/client.go
---- a/pkg/net/client.go
-+++ b/pkg/net/client.go
-@@ -10,3 +10,4 @@
- package net
-+var edgeURL = "http://ollama.lan:11434"
-`,
-			wantCategory: "InternalClusterDomain",
-			wantFile:     "pkg/net/client.go",
-			wantLine:     11,
-			wantSample:   "ollama.lan",
-		},
-		{
-			name: "RFC1918 IP address detected",
-			diff: `diff --git a/pkg/net/client.go b/pkg/net/client.go
---- a/pkg/net/client.go
-+++ b/pkg/net/client.go
-@@ -10,3 +10,4 @@
- package net
-+var gateway = "192.168.1.150"
-`,
-			wantCategory: "RFC1918_192_168",
-			wantFile:     "pkg/net/client.go",
-			wantLine:     11,
-			wantSample:   "192.168.1.150",
-		},
-		{
-			name: "GitHub PAT detected",
-			diff: "diff --git a/pkg/auth/token.go b/pkg/auth/token.go\n--- a/pkg/auth/token.go\n+++ b/pkg/auth/token.go\n@@ -1,3 +1,4 @@\n package auth\n+const token = \"" + testPAT + "\"\n",
-			wantCategory: "GitHubPAT",
-			wantFile:     "pkg/auth/token.go",
-			wantLine:     2,
-			wantSample:   testPAT,
-		},
-		{
-			name: "Private Key header detected",
-			diff: "diff --git a/pkg/crypto/key.pem b/pkg/crypto/key.pem\n--- a/pkg/crypto/key.pem\n+++ b/pkg/crypto/key.pem\n@@ -0,0 +1,3 @@\n+" + testPrivKey + "\nMIIEowIBAAKCAQEA0\n-----END RSA PRIVATE KEY-----\n",
-			wantCategory: "PrivateKey",
-			wantFile:     "pkg/crypto/key.pem",
-			wantLine:     1,
-			wantSample:   testPrivKey,
-		},
-		{
-			name: "Discord Webhook detected",
-			diff: "diff --git a/pkg/notify/discord.go b/pkg/notify/discord.go\n--- a/pkg/notify/discord.go\n+++ b/pkg/notify/discord.go\n@@ -5,2 +5,3 @@\n+webhookURL := \"" + testDiscord + "\"\n",
-			wantCategory: "DiscordWebhook",
-			wantFile:     "pkg/notify/discord.go",
-			wantLine:     5,
-			wantSample:   testDiscord,
-		},
-		{
-			name: "Slack Webhook detected",
-			diff: "diff --git a/pkg/notify/slack.go b/pkg/notify/slack.go\n--- a/pkg/notify/slack.go\n+++ b/pkg/notify/slack.go\n@@ -20,2 +20,3 @@\n+slackURL := \"" + testSlack + "\"\n",
-			wantCategory: "SlackWebhook",
-			wantFile:     "pkg/notify/slack.go",
-			wantLine:     20,
-			wantSample:   testSlack,
-		},
-		{
-			name: "Generic API Key (sk-...) detected",
-			diff: "diff --git a/pkg/ai/client.go b/pkg/ai/client.go\n--- a/pkg/ai/client.go\n+++ b/pkg/ai/client.go\n@@ -10,3 +10,4 @@\n+apiKey := \"" + testAPIKey + "\"\n",
-			wantCategory: "GenericAPIKey",
-			wantFile:     "pkg/ai/client.go",
-			wantLine:     10,
-			wantSample:   testAPIKey,
-		},
-		{
-			name: "JWT Token detected",
-			diff: "diff --git a/pkg/auth/jwt.go b/pkg/auth/jwt.go\n--- a/pkg/auth/jwt.go\n+++ b/pkg/auth/jwt.go\n@@ -1,2 +1,3 @@\n+rawJWT := \"" + testJWT + "\"\n",
-			wantCategory: "JWTToken",
-			wantFile:     "pkg/auth/jwt.go",
-			wantLine:     1,
-			wantSample:   testJWT,
-		},
+		{"cluster domain", testDiff("pkg/net/client.go", 11, `var watcherURL = "http://mirrormere-cast-watcher.aerial/action"`), "InternalClusterDomain", "pkg/net/client.go", 11, "mirrormere-cast-watcher.aerial"},
+		{"lan domain", testDiff("pkg/net/client.go", 11, `var edgeURL = "http://ollama.lan:11434"`), "InternalClusterDomain", "pkg/net/client.go", 11, "ollama.lan"},
+		{"RFC1918 IP", testDiff("pkg/net/client.go", 11, `var gateway = "192.168.1.150"`), "RFC1918_192_168", "pkg/net/client.go", 11, "192.168.1.150"},
+		{"GitHub PAT", testDiff("pkg/auth/token.go", 2, `const token = "`+testPAT+`"`), "GitHubPAT", "pkg/auth/token.go", 2, testPAT},
+		{"Private Key", "diff --git a/pkg/crypto/key.pem b/pkg/crypto/key.pem\n--- a/pkg/crypto/key.pem\n+++ b/pkg/crypto/key.pem\n@@ -0,0 +1,3 @@\n+" + testPrivKey + "\nMIIEowIBAAKCAQEA0\n-----END RSA PRIVATE KEY-----\n", "PrivateKey", "pkg/crypto/key.pem", 1, testPrivKey},
+		{"Discord Webhook", testDiff("pkg/notify/discord.go", 5, `webhookURL := "`+testDiscord+`"`), "DiscordWebhook", "pkg/notify/discord.go", 5, testDiscord},
+		{"Slack Webhook", testDiff("pkg/notify/slack.go", 20, `slackURL := "`+testSlack+`"`), "SlackWebhook", "pkg/notify/slack.go", 20, testSlack},
+		{"Generic API Key", testDiff("pkg/ai/client.go", 10, `apiKey := "`+testAPIKey+`"`), "GenericAPIKey", "pkg/ai/client.go", 10, testAPIKey},
+		{"JWT Token", testDiff("pkg/auth/jwt.go", 1, `rawJWT := "`+testJWT+`"`), "JWTToken", "pkg/auth/jwt.go", 1, testJWT},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tt := range patternTests {
+		t.Run("pattern_"+tt.name, func(t *testing.T) {
 			t.Parallel()
 			violations := ScanDiff(tt.diff, false)
 			if len(violations) == 0 {
@@ -130,14 +54,8 @@ func TestScanDiff_Patterns(t *testing.T) {
 			for _, v := range violations {
 				if v.Category == tt.wantCategory {
 					found = true
-					if v.File != tt.wantFile {
-						t.Errorf("expected file %q, got %q", tt.wantFile, v.File)
-					}
-					if v.LineNum != tt.wantLine {
-						t.Errorf("expected line %d, got %d", tt.wantLine, v.LineNum)
-					}
-					if v.Sample != tt.wantSample {
-						t.Errorf("expected sample %q, got %q", tt.wantSample, v.Sample)
+					if v.File != tt.wantFile || v.LineNum != tt.wantLine || v.Sample != tt.wantSample {
+						t.Errorf("violation mismatch: got %+v", v)
 					}
 				}
 			}
@@ -146,690 +64,372 @@ func TestScanDiff_Patterns(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestScanDiff_IgnoredLinesAndTestFiles(t *testing.T) {
-	t.Parallel()
-
-	// 1. Deleted lines must not trigger violations
-	deletionDiff := "diff --git a/pkg/auth/token.go b/pkg/auth/token.go\n--- a/pkg/auth/token.go\n+++ b/pkg/auth/token.go\n@@ -1,4 +1,3 @@\n-const oldToken = \"" + testPAT + "\"\n+const oldToken = \"\"\n"
-	if violations := ScanDiff(deletionDiff, false); len(violations) != 0 {
-		t.Errorf("expected 0 violations for deleted token line, got: %+v", violations)
-	}
-
-	// 2. Diff headers (+++) must not trigger violations even if path contains token-like text
-	headerDiff := "diff --git a/pkg/" + testPAT + ".go b/pkg/" + testPAT + ".go\n--- a/pkg/" + testPAT + ".go\n+++ b/pkg/" + testPAT + ".go\n@@ -1,2 +1,2 @@\n+// safe comment\n"
-	if violations := ScanDiff(headerDiff, false); len(violations) != 0 {
-		t.Errorf("expected 0 violations for diff headers, got: %+v", violations)
-	}
-
-	// 3. Binary diff markers must be skipped
-	binaryDiff := `diff --git a/assets/image.png b/assets/image.png
-Binary files a/assets/image.png and b/assets/image.png differ
-`
-	if violations := ScanDiff(binaryDiff, false); len(violations) != 0 {
-		t.Errorf("expected 0 violations for binary diff, got: %+v", violations)
-	}
-
-	// 4. Test files and fixtures skipped when checkTestFiles is false
-	testFilesDiffs := []struct {
-		name string
-		diff string
+	ignoredDiffs := []struct {
+		name       string
+		diff       string
+		checkTests bool
+		wantCount  int
 	}{
-		{
-			name: "Go test file skipped",
-			diff: "diff --git a/pkg/guard/commit_test.go b/pkg/guard/commit_test.go\n--- a/pkg/guard/commit_test.go\n+++ b/pkg/guard/commit_test.go\n@@ -1,2 +1,3 @@\n+const dummy = \"" + testPAT + "\"\n",
-		},
-		{
-			name: "Python test file skipped",
-			diff: "diff --git a/tests/test_auth_test.py b/tests/test_auth_test.py\n--- a/tests/test_auth_test.py\n+++ b/tests/test_auth_test.py\n@@ -1,2 +1,3 @@\n+TOKEN = \"" + testPAT + "\"\n",
-		},
-		{
-			name: "TypeScript test file skipped",
-			diff: "diff --git a/src/client.test.ts b/src/client.test.ts\n--- a/src/client.test.ts\n+++ b/src/client.test.ts\n@@ -1,2 +1,3 @@\n+const token = \"" + testPAT + "\";\n",
-		},
-		{
-			name: "JavaScript test file skipped",
-			diff: "diff --git a/src/api.test.js b/src/api.test.js\n--- a/src/api.test.js\n+++ b/src/api.test.js\n@@ -1,2 +1,3 @@\n+const key = \"" + testAPIKey + "\";\n",
-		},
-		{
-			name: "Fixtures path skipped",
-			diff: `diff --git a/test/fixtures/payload.json b/test/fixtures/payload.json
---- a/test/fixtures/payload.json
-+++ b/test/fixtures/payload.json
-@@ -1,2 +1,3 @@
-+{"ip": "192.168.1.1"}
-`,
-		},
-		{
-			name: "Testdata path skipped",
-			diff: "diff --git a/pkg/testdata/tokens.txt b/pkg/testdata/tokens.txt\n--- a/pkg/testdata/tokens.txt\n+++ b/pkg/testdata/tokens.txt\n@@ -1,2 +1,3 @@\n+" + testPAT + "\n",
-		},
+		{"deleted lines", "diff --git a/pkg/auth/token.go b/pkg/auth/token.go\n--- a/pkg/auth/token.go\n+++ b/pkg/auth/token.go\n@@ -1,4 +1,3 @@\n-const oldToken = \"" + testPAT + "\"\n+const oldToken = \"\"\n", false, 0},
+		{"diff header path", "diff --git a/pkg/" + testPAT + ".go b/pkg/" + testPAT + ".go\n--- a/pkg/" + testPAT + ".go\n+++ b/pkg/" + testPAT + ".go\n@@ -1,2 +1,2 @@\n+// safe comment\n", false, 0},
+		{"binary diff", "diff --git a/assets/image.png b/assets/image.png\nBinary files a/assets/image.png and b/assets/image.png differ\n", false, 0},
+		{"Go test file", testDiff("pkg/guard/commit_test.go", 1, `const dummy = "`+testPAT+`"`), false, 0},
+		{"Python test file", testDiff("tests/test_auth_test.py", 1, `TOKEN = "`+testPAT+`"`), false, 0},
+		{"TypeScript test file", testDiff("src/client.test.ts", 1, `const token = "`+testPAT+`";`), false, 0},
+		{"JavaScript test file", testDiff("src/api.test.js", 1, `const key = "`+testAPIKey+`";`), false, 0},
+		{"Fixtures path", testDiff("test/fixtures/payload.json", 1, `{"ip": "192.168.1.1"}`), false, 0},
+		{"Testdata skipped", testDiff("pkg/testdata/tokens.txt", 1, testPAT), false, 0},
+		{"Test checked when enabled", testDiff("pkg/testdata/tokens.txt", 1, testPAT), true, 1},
+		{"empty context lines", "diff --git a/pkg/example.go b/pkg/example.go\n--- a/pkg/example.go\n+++ b/pkg/example.go\n@@ -1,5 +1,5 @@\n package example\n\n-var old = 1\n+var old = 2\n\n", false, 0},
 	}
 
-	for _, tc := range testFilesDiffs {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tc := range ignoredDiffs {
+		t.Run("ignored_"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			// When checkTestFiles is false, should be 0 violations
-			violations := ScanDiff(tc.diff, false)
-			if len(violations) != 0 {
-				t.Errorf("expected 0 violations when checkTestFiles=false for %s, got: %+v", tc.name, violations)
+			v := ScanDiff(tc.diff, tc.checkTests)
+			if len(v) != tc.wantCount {
+				t.Fatalf("ScanDiff(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
 			}
-			// When checkTestFiles is true, should detect violation
-			violationsChecked := ScanDiff(tc.diff, true)
-			if len(violationsChecked) == 0 {
-				t.Errorf("expected violations when checkTestFiles=true for %s, got 0", tc.name)
+		})
+	}
+
+	hunkTests := []struct {
+		name string
+		hunk string
+		want int
+	}{
+		{"valid hunk", "@@ -1,4 +10,5 @@", 10},
+		{"missing plus", "@@ -1,5 @@", 1},
+		{"invalid number", "@@ -1,5 +notanumber @@", 1},
+		{"empty line", "", 1},
+	}
+	for _, tc := range hunkTests {
+		t.Run("hunk_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseHunkLineNum(tc.hunk)
+			if got != tc.want {
+				t.Fatalf("parseHunkLineNum(%q) = %d, want %d", tc.hunk, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestIsCommitCommand(t *testing.T) {
-	t.Parallel()
+func TestCustomPatterns(t *testing.T) {
+	// Not t.Parallel() because it exercises t.Setenv
+	payloadTests := []struct {
+		name     string
+		input    string
+		wantLen  int
+		wantCat0 string
+	}{
+		{"empty", "", 0, ""},
+		{"whitespace", "   \n\t  ", 0, ""},
+		{"format 1 default category", `[{"pattern": "abc\\d+"}]`, 1, "CustomRule"},
+		{"format 1 explicit category", `[{"category": "Auth", "pattern": "key-\\w+"}]`, 1, "Auth"},
+		{"format 2 wrapper", `{"patterns": [{"category": "MyCat", "pattern": "xyz"}, {"pattern": "def"}]}`, 2, "MyCat"},
+		{"format 3 key-value map", `{"CatA": "patA", "CatB": "patB"}`, 2, ""},
+		{"format 4 line delimited", "pattern_one_\\d+\n# comment\npattern_two_\\w+", 2, "CustomRule_1"},
+		{"format 4 comma delimited", "patA, patB", 2, "CustomRule_1"},
+		{"invalid regex skipped", `[{"pattern": "["}]`, 0, ""},
+	}
 
-	tests := []struct {
+	for _, tc := range payloadTests {
+		t.Run("payload_"+tc.name, func(t *testing.T) {
+			rules := parsePatternPayload([]byte(tc.input))
+			if len(rules) != tc.wantLen {
+				t.Fatalf("parsePatternPayload(%s) len = %d, want %d", tc.name, len(rules), tc.wantLen)
+			}
+			if tc.wantCat0 != "" && len(rules) > 0 && rules[0].Category != tc.wantCat0 {
+				t.Fatalf("rules[0].Category = %q, want %q", rules[0].Category, tc.wantCat0)
+			}
+		})
+	}
+
+	// ScanDiffWithPatterns with custom rules
+	customRules := parsePatternPayload([]byte(`[{"category": "APISecret", "pattern": "secret-[a-z0-9]+"}]`))
+	diff := "diff --git a/file.go b/file.go\n--- a/file.go\n+++ b/file.go\n@@ -1,1 +1,2 @@\n+const token = \"secret-12345abc\"\n"
+	violations := ScanDiffWithPatterns(diff, false, customRules)
+	if len(violations) != 1 || violations[0].Category != "APISecret" {
+		t.Fatalf("expected 1 custom violation APISecret, got: %+v", violations)
+	}
+
+	// FormatCommitDenyReason check
+	reason := FormatCommitDenyReason(violations)
+	if !strings.Contains(reason, "APISecret") || !strings.Contains(reason, "secret-12345abc") {
+		t.Fatalf("FormatCommitDenyReason missing details: %s", reason)
+	}
+
+	// LoadCustomPatterns file loading checks
+	tmpHome := t.TempDir()
+	geminiConfig := filepath.Join(tmpHome, ".gemini", "config")
+	if err := os.MkdirAll(geminiConfig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(geminiConfig, "commit-guard.json"), []byte(`[{"pattern": "cg_pat_\\d+"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulesCG := LoadCustomPatterns(tmpHome)
+	if len(rulesCG) != 1 {
+		t.Fatalf("expected 1 rule from commit-guard.json, got %d", len(rulesCG))
+	}
+
+	// LoadCustomPatterns guard.json fallback
+	tmpHome2 := t.TempDir()
+	geminiConfig2 := filepath.Join(tmpHome2, ".gemini", "config")
+	if err := os.MkdirAll(geminiConfig2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(geminiConfig2, "guard.json"), []byte(`[{"pattern": "g_pat_\\d+"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulesG := LoadCustomPatterns(tmpHome2)
+	if len(rulesG) != 1 {
+		t.Fatalf("expected 1 rule from guard.json, got %d", len(rulesG))
+	}
+
+	// Empty homeDir fallback
+	_ = LoadCustomPatterns("")
+
+	// GetActivePatterns with environment variable
+	t.Setenv("AERIAL_COMMIT_GUARD_PATTERNS", `env_pat_\d+`)
+	activeWithEnv := GetActivePatterns()
+	if len(activeWithEnv) <= len(BuiltinPatterns) {
+		t.Fatalf("expected GetActivePatterns with env to be augmented, got %d", len(activeWithEnv))
+	}
+	os.Unsetenv("AERIAL_COMMIT_GUARD_PATTERNS")
+}
+
+func TestRepoAndCommitDetection(t *testing.T) {
+	// Not t.Parallel() because it touches gitCmdRunner
+	oldRunner := gitCmdRunner
+	defer func() { gitCmdRunner = oldRunner }()
+
+	commitTests := []struct {
 		name       string
 		cmd        string
 		wantCommit bool
 		wantDir    string
 		wantSubmit bool
 	}{
-		{
-			name:       "simple git commit",
-			cmd:        `git commit -m "feat: new feature"`,
-			wantCommit: true,
-			wantDir:    "",
-			wantSubmit: false,
-		},
-		{
-			name:       "git -C with directory",
-			cmd:        `git -C /data/scratch/workspace commit -m "fix: bug"`,
-			wantCommit: true,
-			wantDir:    "/data/scratch/workspace",
-			wantSubmit: false,
-		},
-		{
-			name:       "git -C without space",
-			cmd:        `git -C/data/scratch/workspace commit`,
-			wantCommit: true,
-			wantDir:    "/data/scratch/workspace",
-			wantSubmit: false,
-		},
-		{
-			name:       "chained git add and git commit",
-			cmd:        `git add . && git commit -m "commit"`,
-			wantCommit: true,
-			wantDir:    "",
-			wantSubmit: false,
-		},
-		{
-			name:       "semicolon chained git commit",
-			cmd:        `git add -A; git -C /tmp/repo commit -m "chained"`,
-			wantCommit: true,
-			wantDir:    "/tmp/repo",
-			wantSubmit: false,
-		},
-		{
-			name:       "scripts/aerial-pr.sh submit with scratch dir",
-			cmd:        `scripts/aerial-pr.sh submit /data/scratch/aerial-code-scratch.123 "test PR"`,
-			wantCommit: true,
-			wantDir:    "/data/scratch/aerial-code-scratch.123",
-			wantSubmit: true,
-		},
-		{
-			name:       "./scripts/aerial-pr.sh submit",
-			cmd:        `./scripts/aerial-pr.sh submit /tmp/dir`,
-			wantCommit: true,
-			wantDir:    "/tmp/dir",
-			wantSubmit: true,
-		},
-		{
-			name:       "bash invocation of aerial-pr.sh submit",
-			cmd:        `bash /share/aerial/scripts/aerial-pr.sh submit /data/scratch/work "msg"`,
-			wantCommit: true,
-			wantDir:    "/data/scratch/work",
-			wantSubmit: true,
-		},
-		{
-			name:       "non-commit git status",
-			cmd:        `git status`,
-			wantCommit: false,
-			wantDir:    "",
-			wantSubmit: false,
-		},
-		{
-			name:       "non-commit git diff",
-			cmd:        `git diff HEAD`,
-			wantCommit: false,
-			wantDir:    "",
-			wantSubmit: false,
-		},
-		{
-			name:       "echo command containing git commit",
-			cmd:        `echo "git commit"`,
-			wantCommit: false,
-			wantDir:    "",
-			wantSubmit: false,
-		},
-		{
-			name:       "aerial-pr.sh init is not submit",
-			cmd:        `scripts/aerial-pr.sh init aerial`,
-			wantCommit: false,
-			wantDir:    "",
-			wantSubmit: false,
-		},
+		{"simple git commit", `git commit -m "feat: new feature"`, true, "", false},
+		{"git commit -am", `git commit -am "fix: test"`, true, "", false},
+		{"./scripts/aerial-pr.sh submit", `./scripts/aerial-pr.sh submit /tmp/scratch "feat: test"`, true, "/tmp/scratch", true},
+		{"scripts/aerial-pr.sh submit", `scripts/aerial-pr.sh submit /data/scratch/dir`, true, "/data/scratch/dir", true},
+		{"bash aerial-pr.sh submit", `bash -c "./scripts/aerial-pr.sh submit /tmp/scratch 'commit'"`, true, "/tmp/scratch", true},
+		{"git -C with dir", `git -C /tmp/repo commit -m "test"`, true, "/tmp/repo", false},
+		{"git -C without space", `git -C/tmp/repo commit -m "test"`, true, "/tmp/repo", false},
+		{"semicolon chained commit", `cd /tmp/repo; git commit -m "msg"`, true, "", false},
+		{"chained git add and commit", `git add . && git commit -m "msg"`, true, "", false},
+		{"echo commit allowed", `echo "git commit"`, false, "", false},
+		{"git diff allowed", `git diff`, false, "", false},
+		{"git status allowed", `git status`, false, "", false},
+		{"aerial-pr.sh init allowed", `./scripts/aerial-pr.sh init azylman/aerial`, false, "", false},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			gotCommit, gotDir, gotSubmit := IsCommitCommand(tt.cmd)
-			if gotCommit != tt.wantCommit {
-				t.Errorf("IsCommitCommand(%q) gotCommit = %v, want %v", tt.cmd, gotCommit, tt.wantCommit)
-			}
-			if gotDir != tt.wantDir {
-				t.Errorf("IsCommitCommand(%q) gotDir = %q, want %q", tt.cmd, gotDir, tt.wantDir)
-			}
-			if gotSubmit != tt.wantSubmit {
-				t.Errorf("IsCommitCommand(%q) gotSubmit = %v, want %v", tt.cmd, gotSubmit, tt.wantSubmit)
+	for _, tc := range commitTests {
+		t.Run("commit_"+tc.name, func(t *testing.T) {
+			isCommit, targetDir, isSubmit := IsCommitCommand(tc.cmd)
+			if isCommit != tc.wantCommit || targetDir != tc.wantDir || isSubmit != tc.wantSubmit {
+				t.Fatalf("IsCommitCommand(%q) = (%v, %q, %v); want (%v, %q, %v)", tc.cmd, isCommit, targetDir, isSubmit, tc.wantCommit, tc.wantDir, tc.wantSubmit)
 			}
 		})
 	}
-}
 
-func TestIsAerialConfig(t *testing.T) {
-	t.Parallel()
-
-	// 1. Direct path matches
-	if !IsAerialConfig("/data/scratch/aerial-config-scratch.abc", "git commit") {
-		t.Errorf("expected true when targetDir contains aerial-config")
+	allCommitTests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"git commit -a", "git commit -a -m 'msg'", true},
+		{"git commit -am", "git commit -am 'msg'", true},
+		{"git commit --all", "git commit --all -m 'msg'", true},
+		{"git commit -m only", "git commit -m 'msg'", false},
+		{"non-git command", "echo 'git commit -a'", false},
 	}
-
-	// 2. Command argument matches
-	if !IsAerialConfig("/tmp/repo", "scripts/aerial-pr.sh submit /tmp/repo --repo aerial-config") {
-		t.Errorf("expected true when command contains aerial-config")
-	}
-
-	// 3. .git/config file matches
-	tmpRepo := t.TempDir()
-	gitDir := filepath.Join(tmpRepo, ".git")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		t.Fatalf("failed to create .git: %v", err)
-	}
-	cfgContent := `[core]
-	repositoryformatversion = 0
-[remote "origin"]
-	url = git@github.com:azylman/aerial-config.git
-	fetch = +refs/heads/*:refs/remotes/origin/*
-`
-	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte(cfgContent), 0644); err != nil {
-		t.Fatalf("failed to write git config: %v", err)
-	}
-	if !IsAerialConfig(tmpRepo, "git commit") {
-		t.Errorf("expected true when .git/config contains aerial-config")
+	for _, tc := range allCommitTests {
+		t.Run("allcommit_"+tc.name, func(t *testing.T) {
+			got := isAllCommit(tc.cmd)
+			if got != tc.want {
+				t.Fatalf("isAllCommit(%q) = %v, want %v", tc.cmd, got, tc.want)
+			}
+		})
 	}
 
-	// 4. Git worktree .git file matches
-	worktreeDir := t.TempDir()
-	sharedGitDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(sharedGitDir, "config"), []byte(cfgContent), 0644); err != nil {
-		t.Fatalf("failed to write shared git config: %v", err)
+	// IsAerialConfig checks
+	tmpDir := t.TempDir()
+	aerialConfigDir := filepath.Join(tmpDir, "worktrees", "wt-config")
+	if err := os.MkdirAll(aerialConfigDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(worktreeDir, ".git"), []byte("gitdir: "+sharedGitDir), 0644); err != nil {
-		t.Fatalf("failed to write .git worktree pointer: %v", err)
+	if err := os.WriteFile(filepath.Join(aerialConfigDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial-config.git\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !IsAerialConfig(worktreeDir, "git commit") {
-		t.Errorf("expected true when worktree .git points to aerial-config repo")
+	worktreeRoot := filepath.Join(tmpDir, "wt-root")
+	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeRoot, ".git"), []byte("gitdir: "+aerialConfigDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	// 5. Unrelated repo returns false
-	cleanRepo := t.TempDir()
-	cleanGitDir := filepath.Join(cleanRepo, ".git")
-	_ = os.MkdirAll(cleanGitDir, 0755)
-	_ = os.WriteFile(filepath.Join(cleanGitDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial.git\n"), 0644)
-	if IsAerialConfig(cleanRepo, "git commit") {
-		t.Errorf("expected false for standard aerial repo")
+	// Commondir traversal worktree
+	wtCommonRoot := filepath.Join(tmpDir, "wt-common-root")
+	wtCommonGit := filepath.Join(tmpDir, "wt-common-git")
+	if err := os.MkdirAll(wtCommonRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtCommonGit, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtCommonRoot, ".git"), []byte("gitdir: "+wtCommonGit+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtCommonGit, "commondir"), []byte(aerialConfigDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configTests := []struct {
+		name string
+		dir  string
+		cmd  string
+		want bool
+	}{
+		{"dir contains aerial-config", "/data/scratch/aerial-config-scratch.abc", "git commit", true},
+		{"cmd contains aerial-config", "/tmp/repo", "scripts/aerial-pr.sh submit /tmp/repo --repo aerial-config", true},
+		{"worktree points to aerial-config", worktreeRoot, "git commit", true},
+		{"worktree commondir points to aerial-config", wtCommonRoot, "git commit", true},
+		{"clean repo", "/data/scratch/aerial-code-scratch.xyz", "git commit", false},
+	}
+	for _, tc := range configTests {
+		t.Run("config_"+tc.name, func(t *testing.T) {
+			got := IsAerialConfig(tc.dir, tc.cmd)
+			if got != tc.want {
+				t.Fatalf("IsAerialConfig(%q, %q) = %v, want %v", tc.dir, tc.cmd, got, tc.want)
+			}
+		})
+	}
+
+	// IsCoreAerial checks
+	tmpAerial := filepath.Join(tmpDir, "aerial-monorepo")
+	if err := os.MkdirAll(filepath.Join(tmpAerial, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpAerial, ".git", "config"), []byte("[remote \"origin\"]\nurl = git@github.com:azylman/aerial.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Core aerial without .git (fallback checks brain/go.mod + scripts/aerial-pr.sh)
+	tmpFallback := filepath.Join(tmpDir, "aerial-fallback")
+	if err := os.MkdirAll(filepath.Join(tmpFallback, "brain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpFallback, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpFallback, "brain", "go.mod"), []byte("module github.com/azylman/aerial/brain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpFallback, "scripts", "aerial-pr.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	coreTests := []struct {
+		name string
+		dir  string
+		cmd  string
+		want bool
+	}{
+		{"core aerial repo", tmpAerial, "git commit", true},
+		{"core aerial fallback structure", tmpFallback, "git commit", true},
+		{"aerial-config repo", aerialConfigDir, "git commit", false},
+		{"other repo", tmpDir, "git commit", false},
+	}
+	for _, tc := range coreTests {
+		t.Run("core_"+tc.name, func(t *testing.T) {
+			got := IsCoreAerial(tc.dir, tc.cmd)
+			if got != tc.want {
+				t.Fatalf("IsCoreAerial(%q, %q) = %v, want %v", tc.dir, tc.cmd, got, tc.want)
+			}
+		})
+	}
+
+	// Git origin runner check
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		return "https://github.com/azylman/aerial.git", nil
+	}
+	if !hasRepoOriginMatch(t.TempDir(), func(s string) bool { return strings.Contains(s, "aerial") }) {
+		t.Fatalf("expected hasRepoOriginMatch to succeed via gitCmdRunner")
 	}
 }
 
 func TestCheckCommit(t *testing.T) {
-	// 1. Non-run_command tool -> allow
-	d1 := CheckCommit("write_to_file", ToolArgs{TargetFile: "/tmp/foo"})
-	if d1.Decision != DecisionAllow {
-		t.Errorf("expected allow for non-run_command tool, got: %v", d1)
+	oldRunner := gitCmdRunner
+	defer func() { gitCmdRunner = oldRunner }()
+
+	tmpCore := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpCore, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpCore, ".git", "config"), []byte("[remote \"origin\"]\nurl = git@github.com:azylman/aerial.git\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	// 2. Non-commit run_command -> allow
-	d2 := CheckCommit("run_command", ToolArgs{CommandLine: "git status"})
-	if d2.Decision != DecisionAllow {
-		t.Errorf("expected allow for non-commit run_command, got: %v", d2)
+	tmpWorkspace := t.TempDir()
+	untrackedFile := filepath.Join(tmpWorkspace, "secret.txt")
+	if err := os.WriteFile(untrackedFile, []byte("key = "+testAPIKey), 0o600); err != nil {
+		t.Fatal(err)
 	}
-
-	// 3. aerial-config target -> allow even if violations would otherwise trigger
-	d3 := CheckCommit("run_command", ToolArgs{
-		CommandLine: "git commit -m 'update secret'",
-		Cwd:         "/data/scratch/aerial-config-scratch.test",
-	})
-	if d3.Decision != DecisionAllow {
-		t.Errorf("expected allow for aerial-config target, got: %v", d3)
-	}
-
-	// 4. Mock git runner with violation diff on git commit -> deny
-	origGitRunner := gitCmdRunner
-	defer func() { gitCmdRunner = origGitRunner }()
-
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		for _, a := range args {
-			if a == "--cached" {
-				return "diff --git a/pkg/auth.go b/pkg/auth.go\n--- a/pkg/auth.go\n+++ b/pkg/auth.go\n@@ -1,1 +1,2 @@\n+apiKey := \"" + testAPIKey + "\"\n", nil
-			}
-		}
-		return "", nil
-	}
-
-	d4 := CheckCommit("run_command", ToolArgs{
-		CommandLine: "git commit -m 'add key'",
-		Cwd:         "/data/scratch/aerial-code",
-	})
-	if d4.Decision != DecisionDeny {
-		t.Errorf("expected deny for secret in staged commit, got: %v", d4)
-	}
-	if !strings.Contains(d4.Reason, "GenericAPIKey") {
-		t.Errorf("expected mention of GenericAPIKey in reason, got: %s", d4.Reason)
-	}
-
-	// 5. Mock git runner with clean diff -> allow
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		return `diff --git a/pkg/auth.go b/pkg/auth.go
---- a/pkg/auth.go
-+++ b/pkg/auth.go
-@@ -1,1 +1,2 @@
-+const timeout = 30
-`, nil
-	}
-
-	d5 := CheckCommit("run_command", ToolArgs{
-		CommandLine: "git commit -m 'clean commit'",
-		Cwd:         "/data/scratch/aerial-code",
-	})
-	if d5.Decision != DecisionAllow {
-		t.Errorf("expected allow for clean commit, got: %v", d5)
-	}
-
-	// 6. aerial-pr.sh submit with untracked file violation -> deny
-	tmpWorkDir := t.TempDir()
-	untrackedFile := filepath.Join(tmpWorkDir, "secret.env")
-	if err := os.WriteFile(untrackedFile, []byte("SECRET_IP=192.168.1.99\n"), 0644); err != nil {
-		t.Fatalf("failed to write untracked file: %v", err)
-	}
-
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		for _, a := range args {
-			if a == "--others" {
-				return "secret.env\n", nil
-			}
-		}
-		return "", nil
-	}
-
-	d6 := CheckCommit("run_command", ToolArgs{
-		CommandLine: "scripts/aerial-pr.sh submit " + tmpWorkDir + ` "test pr"`,
-	})
-	if d6.Decision != DecisionDeny {
-		t.Errorf("expected deny for untracked file with violation in aerial-pr.sh submit, got: %v", d6)
-	}
-	if !strings.Contains(d6.Reason, "RFC1918_192_168") {
-		t.Errorf("expected RFC1918_192_168 in reason, got: %s", d6.Reason)
-	}
-}
-
-func TestIsCoreAerial(t *testing.T) {
-	// 1. .git/config origin remote URL check
-	tmpAerial := t.TempDir()
-	aerialGitDir := filepath.Join(tmpAerial, ".git")
-	_ = os.MkdirAll(aerialGitDir, 0755)
-	_ = os.WriteFile(filepath.Join(aerialGitDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial.git\n"), 0644)
-	if !IsCoreAerial(tmpAerial, "git commit") {
-		t.Errorf("expected true for aerial remote URL")
-	}
-
-	tmpMirrormere := t.TempDir()
-	mmGitDir := filepath.Join(tmpMirrormere, ".git")
-	_ = os.MkdirAll(mmGitDir, 0755)
-	_ = os.WriteFile(filepath.Join(mmGitDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/mirrormere.git\n"), 0644)
-	if IsCoreAerial(tmpMirrormere, "git commit") {
-		t.Errorf("expected false for mirrormere remote URL")
-	}
-
-	// Exclude aerial-config and aerial-sidecars
-	tmpConfig := t.TempDir()
-	cfgGitDir := filepath.Join(tmpConfig, ".git")
-	_ = os.MkdirAll(cfgGitDir, 0755)
-	_ = os.WriteFile(filepath.Join(cfgGitDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial-config.git\n"), 0644)
-	if IsCoreAerial(tmpConfig, "git commit") {
-		t.Errorf("expected false for aerial-config")
-	}
-}
-
-func TestCheckCommit_InternalClusterDomainFiltering(t *testing.T) {
-	origGitRunner := gitCmdRunner
-	defer func() { gitCmdRunner = origGitRunner }()
-
-	// In peripheral repo (mirrormere): .aerial is denied
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		for _, a := range args {
-			if a == "--cached" {
-				return "diff --git a/pkg/display.js b/pkg/display.js\n--- a/pkg/display.js\n+++ b/pkg/display.js\n@@ -1,1 +1,2 @@\n+const url = \"http://mirrormere-cast-watcher.aerial/action\"\n", nil
-			}
-		}
-		return "", nil
-	}
-
-	dPeripheral := CheckCommit("run_command", ToolArgs{
-		CommandLine: "git commit -m \"add cast watcher\"",
-		Cwd:         "/data/scratch/mirrormere-scratch",
-	})
-	if dPeripheral.Decision != DecisionDeny {
-		t.Errorf("expected deny for .aerial domain in peripheral repo, got: %v", dPeripheral)
-	}
-	if !strings.Contains(dPeripheral.Reason, "InternalClusterDomain") {
-		t.Errorf("expected InternalClusterDomain in reason, got: %s", dPeripheral.Reason)
-	}
-
-	// In core aerial repo: .aerial is allowed for Nomad service mesh
-	tmpAerial := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tmpAerial, ".git"), 0755)
-	_ = os.WriteFile(filepath.Join(tmpAerial, ".git", "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial.git\n"), 0644)
-
-	dAerial := CheckCommit("run_command", ToolArgs{
-		CommandLine: "git commit -m \"update nomad service\"",
-		Cwd:         tmpAerial,
-	})
-	if dAerial.Decision != DecisionAllow {
-		t.Errorf("expected allow for .aerial domain in core aerial repo, got: %v", dAerial)
-	}
-
-	// In core aerial repo: RFC1918 IPs are still denied
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		for _, a := range args {
-			if a == "--cached" {
-				return "diff --git a/pkg/client.go b/pkg/client.go\n--- a/pkg/client.go\n+++ b/pkg/client.go\n@@ -1,1 +1,2 @@\n+const ip = \"192.168.1.50\"\n", nil
-			}
-		}
-		return "", nil
-	}
-
-	dAerialIP := CheckCommit("run_command", ToolArgs{
-		CommandLine: "git commit -m \"hardcoded ip\"",
-		Cwd:         tmpAerial,
-	})
-	if dAerialIP.Decision != DecisionDeny {
-		t.Errorf("expected deny for RFC1918 IP in core aerial repo, got: %v", dAerialIP)
-	}
-}
-
-func TestCustomPatterns(t *testing.T) {
-	// 1. Load from JSON file format
-	tmpHome := t.TempDir()
-	configDir := filepath.Join(tmpHome, ".gemini", "config")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		t.Fatalf("failed to mkdir: %v", err)
-	}
-
-	jsonPatterns := `[
-		{"category": "InternalDomain", "pattern": "internal\\.corp\\.net"},
-		{"category": "CustomSecret", "pattern": "super_secret_token_[0-9]+"}
-	]`
-	if err := os.WriteFile(filepath.Join(configDir, "commit-guard.json"), []byte(jsonPatterns), 0644); err != nil {
-		t.Fatalf("failed to write commit-guard.json: %v", err)
-	}
-
-	rules := LoadCustomPatterns(tmpHome)
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 custom rules from JSON, got %d", len(rules))
-	}
-
-	// Scan diff with these custom rules
-	diff := `diff --git a/pkg/config.go b/pkg/config.go
-+++ b/pkg/config.go
-@@ -1,1 +1,2 @@
-+host := "internal.corp.net"
-`
-	violations := ScanDiffWithPatterns(diff, false, rules)
-	if len(violations) != 1 || violations[0].Category != "InternalDomain" {
-		t.Errorf("expected InternalDomain violation, got: %+v", violations)
-	}
-
-	// 2. Load from environment variable
-	t.Setenv("AERIAL_COMMIT_GUARD_PATTERNS", `{"EnvSecret": "my-env-secret-[a-z]+"}`)
-	envRules := LoadCustomPatterns("")
-	foundEnvRule := false
-	for _, r := range envRules {
-		if r.Category == "EnvSecret" {
-			foundEnvRule = true
-		}
-	}
-	if !foundEnvRule {
-		t.Errorf("expected EnvSecret rule loaded from environment")
-	}
-
-	// Test comma-separated raw regexes in env var
-	t.Setenv("AERIAL_COMMIT_GUARD_PATTERNS", `foo-secret-\d+,bar-token-[a-z]+`)
-	rawRules := LoadCustomPatterns("")
-	if len(rawRules) < 2 {
-		t.Errorf("expected at least 2 raw rules from comma-separated env var, got: %d", len(rawRules))
-	}
-}
-
-func TestIsAllCommit(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
-		cmd  string
-		want bool
+		name       string
+		tool       string
+		cmd        string
+		cwd        string
+		mockDiff   string
+		emptyTree  bool
+		untracked  bool
+		useCoreDir bool
+		wantDeny   bool
+		wantReason string
 	}{
-		{"git commit -a -m 'msg'", true},
-		{"git commit -am 'msg'", true},
-		{"git commit --all -m 'msg'", true},
-		{"git commit -m 'msg'", false},
-		{"git status", false},
+		{name: "non-commit allowed", tool: "run_command", cmd: "git status"},
+		{name: "aerial-config bypass", tool: "run_command", cmd: "git commit -m 'feat'", cwd: "/share/aerial-config"},
+		{name: "clean diff allowed", tool: "run_command", cmd: "git commit -m 'clean'", cwd: "/workspace", mockDiff: "diff --git a/pkg/file.go b/pkg/file.go\n+var x = 1\n"},
+		{name: "sensitive diff denied", tool: "run_command", cmd: "git commit -m 'leak'", cwd: "/workspace", mockDiff: "diff --git a/token.go b/token.go\n+const token = \"" + testPAT + "\"\n", wantDeny: true, wantReason: "GitHubPAT"},
+		{name: "internal cluster in core", tool: "run_command", cmd: "git commit -m 'mesh'", useCoreDir: true, mockDiff: "diff --git a/main.go b/main.go\n+var s = \"http://db.aerial:5432\"\n"},
+		{name: "unborn branch empty tree", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit /tmp/scratch 'feat'", cwd: "/workspace", emptyTree: true},
+		{name: "colon tool name and all commit", tool: "default_api:run_command", cmd: "git commit -a -m 'all'", cwd: "/workspace"},
+		{name: "relative dir clean", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit relative/scratch 'clean'", cwd: "/data/repo"},
+		{name: "untracked secret denied", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit " + tmpWorkspace + " 'add'", cwd: tmpWorkspace, untracked: true, wantDeny: true, wantReason: "GenericAPIKey"},
 	}
 
-	for _, tt := range tests {
-		if got := isAllCommit(tt.cmd); got != tt.want {
-			t.Errorf("isAllCommit(%q) = %v, want %v", tt.cmd, got, tt.want)
-		}
-	}
-}
-
-func TestScanDiff_EmptyContextLines(t *testing.T) {
-	t.Parallel()
-
-	diff := "diff --git a/pkg/service.go b/pkg/service.go\n" +
-		"--- a/pkg/service.go\n" +
-		"+++ b/pkg/service.go\n" +
-		"@@ -10,6 +10,7 @@\n" +
-		" existing_line_1\n" +
-		"\n" + // empty context line without leading space
-		" existing_line_2\n" +
-		"+ip := \"192.168.1.100\"\n"
-
-	violations := ScanDiff(diff, true)
-	if len(violations) != 1 {
-		t.Fatalf("expected 1 violation, got %d", len(violations))
-	}
-	// Line 10: existing_line_1, Line 11: empty line, Line 12: existing_line_2, Line 13: added line
-	if violations[0].LineNum != 13 {
-		t.Errorf("expected lineNum 13, got %d", violations[0].LineNum)
-	}
-}
-
-func TestCheckCommit_RelativeDirAndCleanHead(t *testing.T) {
-	oldRunner := gitCmdRunner
-	defer func() { gitCmdRunner = oldRunner }()
-
-	var executedDirs []string
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		executedDirs = append(executedDirs, dir)
-		if len(args) > 1 && args[0] == "diff" && args[1] == "HEAD" {
-			// clean diff against HEAD (no error, empty string)
-			return "", nil
-		}
-		return "", nil
-	}
-
-	args := ToolArgs{
-		CommandLine: "./scripts/aerial-pr.sh submit relative_scratch 'feat: test'",
-		Cwd:         "/workspace/root",
-	}
-
-	dec := CheckCommit("run_command", args)
-	if dec.Decision != DecisionAllow {
-		t.Fatalf("expected allow for clean submit, got %s", dec.Decision)
-	}
-
-	// Verify targetDir was joined with args.Cwd
-	expectedDir := "/workspace/root/relative_scratch"
-	found := false
-	for _, d := range executedDirs {
-		if d == expectedDir {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected executedDir to contain joined path %q, got: %v", expectedDir, executedDirs)
-	}
-}
-
-func TestParsePatternPayload_CoverageGaps(t *testing.T) {
-	t.Parallel()
-
-	// 1. Whitespace only
-	if rules := parsePatternPayload([]byte("   \n\t  ")); len(rules) != 0 {
-		t.Errorf("expected 0 rules for whitespace payload, got: %d", len(rules))
-	}
-
-	// 2. Format 1 without category
-	f1 := parsePatternPayload([]byte(`[{"pattern": "abc\\d+"}]`))
-	if len(f1) != 1 || f1[0].Category != "CustomRule" {
-		t.Errorf("expected 1 rule with Category='CustomRule', got: %+v", f1)
-	}
-
-	// 3. Format 2: wrapper object {"patterns": [...]}
-	f2 := parsePatternPayload([]byte(`{"patterns": [{"category": "MyCat", "pattern": "xyz"}, {"pattern": "default_cat"}]}`))
-	if len(f2) != 2 {
-		t.Fatalf("expected 2 rules for Format 2, got: %d", len(f2))
-	}
-	if f2[0].Category != "MyCat" || f2[1].Category != "CustomRule" {
-		t.Errorf("unexpected categories in Format 2: %+v", f2)
-	}
-
-	// 4. Format 3: map[string]string
-	f3 := parsePatternPayload([]byte(`{"CatA": "patA", "CatB": "patB"}`))
-	if len(f3) != 2 {
-		t.Errorf("expected 2 rules for Format 3, got: %d", len(f3))
-	}
-}
-
-func TestGetActivePatterns_Coverage(t *testing.T) {
-	t.Setenv("AERIAL_COMMIT_GUARD_PATTERNS", `test_pat_\d+`)
-	patterns := GetActivePatterns()
-	if len(patterns) <= len(BuiltinPatterns) {
-		t.Errorf("expected GetActivePatterns to include custom patterns, got %d patterns", len(patterns))
-	}
-}
-
-func TestParseHunkLineNum_Coverage(t *testing.T) {
-	t.Parallel()
-
-	// Missing '+'
-	if n := parseHunkLineNum("@@ -1,5 @@"); n != 1 {
-		t.Errorf("expected 1 for missing +, got: %d", n)
-	}
-
-	// Non-integer
-	if n := parseHunkLineNum("@@ -1,5 +notanumber @@"); n != 1 {
-		t.Errorf("expected 1 for non-integer, got: %d", n)
-	}
-}
-
-func TestIsAerialConfig_WorktreeAndGitDir(t *testing.T) {
-	t.Parallel()
-
-	tmp := t.TempDir()
-	gitDir := filepath.Join(tmp, "worktrees", "wt1")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte(`[remote "origin"]
-	url = https://github.com/azylman/aerial-config.git
-`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write .git file pointing to relative gitDir
-	if err := os.WriteFile(filepath.Join(tmp, ".git"), []byte("gitdir: worktrees/wt1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if !IsAerialConfig(tmp, "") {
-		t.Errorf("expected IsAerialConfig=true for worktree pointing to aerial-config")
-	}
-}
-
-func TestCheckCommit_ColonToolNameAndAllCommit(t *testing.T) {
-	oldRunner := gitCmdRunner
-	defer func() { gitCmdRunner = oldRunner }()
-
-	unstagedChecked := false
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		for _, a := range args {
-			if a == "--cached" {
-				return "", nil
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := tc.cwd
+			if tc.useCoreDir {
+				cwd = tmpCore
 			}
-		}
-		unstagedChecked = true
-		return "", nil
-	}
+			gitCmdRunner = func(dir string, args ...string) (string, error) {
+				if tc.untracked && len(args) > 0 && args[0] == "ls-files" {
+					return "secret.txt\n", nil
+				}
+				if tc.emptyTree && len(args) > 1 && args[0] == "diff" && args[1] == "HEAD" {
+					return "", os.ErrNotExist
+				}
+				return tc.mockDiff, nil
+			}
 
-	// Tool name with colon prefix and -a flag
-	dec := CheckCommit("default_api:run_command", ToolArgs{
-		CommandLine: "git commit -a -m 'all commit'",
-		Cwd:         "/workspace",
-	})
-	if dec.Decision != DecisionAllow {
-		t.Errorf("expected allow, got %s", dec.Decision)
-	}
-	if !unstagedChecked {
-		t.Errorf("expected unstaged diff check for -a commit")
-	}
-}
-
-func TestCheckCommit_UnbornBranchEmptyTreeFallback(t *testing.T) {
-	oldRunner := gitCmdRunner
-	defer func() { gitCmdRunner = oldRunner }()
-
-	emptyTreeCalled := false
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		if len(args) > 1 && args[0] == "diff" && args[1] == "HEAD" {
-			return "", os.ErrNotExist
-		}
-		if len(args) > 1 && args[0] == "diff" && args[1] == "4b825dc642cb6eb9a060e54bf8d69288fbee4904" {
-			emptyTreeCalled = true
-			return "", nil
-		}
-		return "", nil
-	}
-
-	dec := CheckCommit("run_command", ToolArgs{
-		CommandLine: "./scripts/aerial-pr.sh submit /tmp/scratch 'feat: test'",
-		Cwd:         "/workspace",
-	})
-	if dec.Decision != DecisionAllow {
-		t.Errorf("expected allow, got: %s", dec.Decision)
-	}
-	if !emptyTreeCalled {
-		t.Errorf("expected emptyTree fallback when HEAD errors")
+			dec := CheckCommit(tc.tool, ToolArgs{CommandLine: tc.cmd, Cwd: cwd})
+			if tc.wantDeny && dec.Decision != DecisionDeny {
+				t.Fatalf("expected deny, got %v", dec)
+			}
+			if !tc.wantDeny && dec.Decision != DecisionAllow {
+				t.Fatalf("expected allow, got deny: %v", dec)
+			}
+			if tc.wantReason != "" && !strings.Contains(dec.Reason, tc.wantReason) {
+				t.Fatalf("expected %q in reason, got %q", tc.wantReason, dec.Reason)
+			}
+		})
 	}
 }

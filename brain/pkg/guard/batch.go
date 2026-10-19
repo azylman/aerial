@@ -153,7 +153,7 @@ func isSingleInspection(cmd string) bool {
 }
 
 func categorizeInvocation(toolName string, args ToolArgs) (category, target string) {
-	switch toolName {
+	switch normalizeToolName(toolName) {
 	case "view_file":
 		return "read", args.FilePath()
 	case "replace_file_content", "write_to_file":
