@@ -17,20 +17,23 @@ import (
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
-// DefaultMinSessionTurns defines the engine-wide minimum turns before standard rotation thresholds apply.
+// DefaultMinSessionTurns defines the engine-wide minimum turns before eligible for routine session rotation.
 const DefaultMinSessionTurns = 3
 
-// DefaultEmergencyRotationMultiplier defines the threshold multiplier (3x) required to trigger early rotation before DefaultMinSessionTurns.
+// DefaultEmergencyRotationMultiplier defines the factor multiplied with DefaultMaxSessionTurns for emergency rotation.
 const DefaultEmergencyRotationMultiplier = 3
 
-// DefaultMaxSessionTurns defines the engine-wide maximum turn limit before an agy session is rotated.
+// DefaultMaxSessionTurns defines the engine-wide maximum user turns (8 turns) before session rotation.
 const DefaultMaxSessionTurns = 8
 
-// DefaultMaxSessionSteps defines the engine-wide maximum cumulative internal tool steps before session rotation.
+// DefaultMaxSessionSteps defines the engine-wide maximum internal steps (180 steps) before session rotation.
 const DefaultMaxSessionSteps = 180
 
-// DefaultMaxTranscriptBytes defines the engine-wide maximum transcript file size in bytes (1 MB) before session rotation.
+// DefaultMaxTranscriptBytes defines the engine-wide maximum transcript size (1 MB) before rotation.
 const DefaultMaxTranscriptBytes = 1024 * 1024
+
+// DefaultMaxSessionTranscriptBytes defines the engine-wide maximum transcript file size in bytes (2 MB) before session rotation.
+const DefaultMaxSessionTranscriptBytes = 2 * 1024 * 1024
 
 // DefaultMaxSessionDBBytes defines the engine-wide maximum conversation SQLite/protobuf size in bytes (4 MB) before session rotation.
 const DefaultMaxSessionDBBytes = 4 * 1024 * 1024
@@ -82,9 +85,9 @@ func New(homeDir, dataDir string) *Manager {
 	}
 }
 
-// Roots returns a defensive copy of configured session roots.
+// Roots returns a copy of the configured search roots for this Manager.
 func (m *Manager) Roots() []string {
-	if m == nil || len(m.roots) == 0 {
+	if m == nil {
 		return nil
 	}
 	return append([]string(nil), m.roots...)
@@ -106,17 +109,90 @@ func (m *Manager) DataDir() string {
 	return m.dataDir
 }
 
+func cleanSessionID(sessionID string) (string, bool) {
+	cleanID := strings.TrimSpace(sessionID)
+	if cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+		return "", false
+	}
+	return cleanID, true
+}
+
+func (m *Manager) validSessionID(sessionID string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	return cleanSessionID(sessionID)
+}
+
+func isAmbientInput(source, content string) bool {
+	return source == SourceAmbient || strings.HasPrefix(strings.TrimSpace(content), "[Chat ")
+}
+
+func findLastUserInputIdx(lines []string) int {
+	lastUserInputIdx := -1
+	for i, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		var step struct {
+			Source  string `json:"source"`
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(line), &step); err == nil {
+			if step.Type == "USER_INPUT" && !isAmbientInput(step.Source, step.Content) {
+				lastUserInputIdx = i
+			}
+		}
+	}
+	return lastUserInputIdx
+}
+
+func isStepBefore(createdAt string, since time.Time) bool {
+	if createdAt == "" || since.IsZero() {
+		return false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
+		return t.Before(since)
+	}
+	return false
+}
+
+func readTranscriptLines(dir string) ([]string, bool) {
+	logsDir := filepath.Join(dir, ".system_generated", "logs")
+	for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+		tPath := filepath.Join(logsDir, name)
+		data, err := os.ReadFile(tPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Printf("[SessionManager] error reading transcript file %s: %v", tPath, err)
+			}
+			continue
+		}
+		if len(data) == 0 {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		var nonEmpties []string
+		for _, raw := range lines {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				nonEmpties = append(nonEmpties, trimmed)
+			}
+		}
+		if len(nonEmpties) > 0 {
+			return nonEmpties, true
+		}
+	}
+	return nil, false
+}
+
 // LastActivityFromRoots returns the latest modification timestamp across all log files
 // (transcripts and background task logs) for a session ID within the provided search roots.
 // Zero ambient environment defaults are used.
 func LastActivityFromRoots(sessionID string, roots []string) (time.Time, error) {
-	trimmed := strings.TrimSpace(sessionID)
-	// Security: Prevent path traversal
-	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
-		return time.Time{}, nil
-	}
-
-	if len(roots) == 0 {
+	cleanID, ok := cleanSessionID(sessionID)
+	if !ok || len(roots) == 0 {
 		return time.Time{}, nil
 	}
 
@@ -133,19 +209,19 @@ func LastActivityFromRoots(sessionID string, roots []string) (time.Time, error) 
 		}
 		expandedRoot := root
 		if strings.Contains(expandedRoot, "%s") {
-			expandedRoot = fmt.Sprintf(expandedRoot, trimmed)
+			expandedRoot = fmt.Sprintf(expandedRoot, cleanID)
 		} else if strings.Contains(expandedRoot, "{session}") {
-			expandedRoot = strings.ReplaceAll(expandedRoot, "{session}", trimmed)
+			expandedRoot = strings.ReplaceAll(expandedRoot, "{session}", cleanID)
 		}
 
-		sessDir := filepath.Join(expandedRoot, trimmed)
+		sessDir := filepath.Join(expandedRoot, cleanID)
 		if fi, err := os.Stat(sessDir); err != nil || !fi.IsDir() {
 			// Also check if expandedRoot is directly the session directory or points to .system_generated/logs
 			if fiRoot, errRoot := os.Stat(expandedRoot); errRoot == nil && fiRoot.IsDir() {
 				cleanExpanded := filepath.Clean(expandedRoot)
-				if filepath.Base(cleanExpanded) == trimmed {
+				if filepath.Base(cleanExpanded) == cleanID {
 					sessDir = cleanExpanded
-				} else if strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(trimmed, ".system_generated", "logs"))) ||
+				} else if strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(cleanID, ".system_generated", "logs"))) ||
 					strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(".system_generated", "logs"))) {
 					sessDir = filepath.Dir(filepath.Dir(cleanExpanded))
 				} else {
@@ -386,16 +462,12 @@ func formatStepError(errVal any) string {
 
 // ExtractResponseAndError parses transcript files to extract the last response and error for a conversation.
 func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
-	if m == nil {
-		return "", ""
-	}
-	trimmedID := strings.TrimSpace(convID)
-	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+	cleanID, ok := m.validSessionID(convID)
+	if !ok {
 		return "", ""
 	}
 
-	targetDirs := m.getTargetDirs(trimmedID)
-
+	targetDirs := m.getTargetDirs(cleanID)
 	var lastResponse string
 	var lastError string
 
@@ -408,24 +480,7 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 			}
 
 			lines := strings.Split(string(data), "\n")
-			lastUserInputIdx := -1
-			for i, rawLine := range lines {
-				line := strings.TrimSpace(rawLine)
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Source  string `json:"source"`
-					Type    string `json:"type"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
-					if step.Type == "USER_INPUT" && !isAmbient {
-						lastUserInputIdx = i
-					}
-				}
-			}
+			lastUserInputIdx := findLastUserInputIdx(lines)
 
 			// Only search for responses and errors strictly AFTER the last USER_INPUT!
 			startIdx := 0
@@ -477,18 +532,15 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 // ExtractLastTurnError parses transcript files to extract any error step specifically occurring
 // during the active turn (strictly after 'since' or after the latest non-ambient USER_INPUT).
 func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since time.Time) (string, error) {
-	if m == nil {
-		return "", nil
-	}
-	trimmedID := strings.TrimSpace(convID)
-	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+	cleanID, ok := m.validSessionID(convID)
+	if !ok {
 		return "", nil
 	}
 	if ctx != nil && ctx.Err() != nil {
 		return "", ctx.Err()
 	}
 
-	targetDirs := m.getTargetDirs(trimmedID)
+	targetDirs := m.getTargetDirs(cleanID)
 
 	for _, dir := range targetDirs {
 		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
@@ -532,46 +584,12 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 				lines = lines[1:]
 			}
 
-			lastUserInputIdx := -1
-			for i, rawLine := range lines {
-				line := strings.TrimSpace(rawLine)
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Source  string `json:"source"`
-					Type    string `json:"type"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
-					if step.Type == "USER_INPUT" && !isAmbient {
-						lastUserInputIdx = i
-					}
-				}
-			}
-
+			lastUserInputIdx := findLastUserInputIdx(lines)
 			if lastUserInputIdx == -1 && offset > 0 {
 				fullData, readErr := os.ReadFile(tPath)
 				if readErr == nil {
 					lines = strings.Split(string(fullData), "\n")
-					for i, rawLine := range lines {
-						line := strings.TrimSpace(rawLine)
-						if line == "" {
-							continue
-						}
-						var step struct {
-							Source  string `json:"source"`
-							Type    string `json:"type"`
-							Content string `json:"content"`
-						}
-						if err := json.Unmarshal([]byte(line), &step); err == nil {
-							isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
-							if step.Type == "USER_INPUT" && !isAmbient {
-								lastUserInputIdx = i
-							}
-						}
-					}
+					lastUserInputIdx = findLastUserInputIdx(lines)
 				}
 			}
 
@@ -596,16 +614,8 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 					CreatedAt string          `json:"created_at"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if !since.IsZero() && step.CreatedAt != "" {
-						if t, pErr := time.Parse(time.RFC3339Nano, step.CreatedAt); pErr == nil {
-							if t.Before(since.Add(-10 * time.Second)) {
-								break
-							}
-						} else if t, pErr := time.Parse(time.RFC3339, step.CreatedAt); pErr == nil {
-							if t.Before(since.Add(-10 * time.Second)) {
-								break
-							}
-						}
+					if isStepBefore(step.CreatedAt, since.Add(-10*time.Second)) {
+						break
 					}
 
 					if step.Type == "GENERIC" || step.Type == "USER_INPUT" {
@@ -643,18 +653,12 @@ func (m *Manager) ExtractResponseSince(convID string, since time.Time) string {
 
 // ExtractResponseSinceContext parses transcript files for convID with context cancellation support.
 func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string, since time.Time) string {
-	if m == nil {
-		return ""
-	}
-	if ctx != nil && ctx.Err() != nil {
-		return ""
-	}
-	trimmedID := strings.TrimSpace(convID)
-	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+	cleanID, ok := m.validSessionID(convID)
+	if !ok || (ctx != nil && ctx.Err() != nil) {
 		return ""
 	}
 
-	targetDirs := m.getTargetDirs(trimmedID)
+	targetDirs := m.getTargetDirs(cleanID)
 
 	for _, dir := range targetDirs {
 		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
@@ -688,20 +692,8 @@ func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string
 					continue
 				}
 
-				if !since.IsZero() && step.CreatedAt != "" {
-					var stepTime time.Time
-					var parsed bool
-					if t, pErr := time.Parse(time.RFC3339Nano, step.CreatedAt); pErr == nil {
-						stepTime = t
-						parsed = true
-					} else if t, pErr := time.Parse(time.RFC3339, step.CreatedAt); pErr == nil {
-						stepTime = t
-						parsed = true
-					}
-
-					if parsed && stepTime.Before(since) {
-						break
-					}
+				if isStepBefore(step.CreatedAt, since) {
+					break
 				}
 
 				if step.Type != "PLANNER_RESPONSE" {
@@ -709,29 +701,8 @@ func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string
 				}
 
 				trimmedContent := strings.TrimSpace(step.Content)
-				if trimmedContent == "" {
+				if trimmedContent == "" || strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
 					continue
-				}
-				if strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
-					continue
-				}
-				if len(step.ToolCalls) > 0 && trimmedContent == "" {
-					continue
-				}
-
-				if !since.IsZero() && step.CreatedAt != "" {
-					var stepTime time.Time
-					var parsed bool
-					if t, pErr := time.Parse(time.RFC3339Nano, step.CreatedAt); pErr == nil {
-						stepTime = t
-						parsed = true
-					} else if t, pErr := time.Parse(time.RFC3339, step.CreatedAt); pErr == nil {
-						stepTime = t
-						parsed = true
-					}
-					if parsed && stepTime.Before(since) {
-						continue
-					}
 				}
 
 				return trimmedContent
@@ -745,184 +716,148 @@ func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string
 // ExtractTranscriptToolActions scans the transcript for the specified conversation ID
 // and extracts completed tool calls and outputs from the latest turn into a structured action block.
 func (m *Manager) ExtractTranscriptToolActions(convID string) string {
-	if m == nil {
-		return ""
-	}
-	trimmedID := strings.TrimSpace(convID)
-	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+	cleanID, ok := m.validSessionID(convID)
+	if !ok {
 		return ""
 	}
 
-	targetDirs := m.getTargetDirs(trimmedID)
+	targetDirs := m.getTargetDirs(cleanID)
 
 	for _, dir := range targetDirs {
-		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
-			tPath := filepath.Join(dir, ".system_generated", "logs", name)
-			data, err := os.ReadFile(tPath)
-			if err != nil {
-				if !os.IsNotExist(err) {
-					log.Printf("[SessionManager] error reading transcript file %s: %v", tPath, err)
-				}
-				continue
-			}
-			if len(data) == 0 {
-				continue
-			}
-
-			lines := strings.Split(string(data), "\n")
-			lastUserInputIdx := -1
-			for i, rawLine := range lines {
-				line := strings.TrimSpace(rawLine)
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Source  string `json:"source"`
-					Type    string `json:"type"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err != nil {
-					log.Printf("[SessionManager] error unmarshaling transcript line in pass 1: %v", err)
-					continue
-				}
-				isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
-				if step.Type == "USER_INPUT" && !isAmbient {
-					lastUserInputIdx = i
-				}
-			}
-
-			startIdx := 0
-			if lastUserInputIdx >= 0 {
-				startIdx = lastUserInputIdx + 1
-			}
-
-			type transcriptAction struct {
-				toolName    string
-				commandArgs string
-				status      string
-				snippet     string
-			}
-
-			var actions []*transcriptAction
-			var pendingActions []*transcriptAction
-
-			for i := startIdx; i < len(lines); i++ {
-				line := strings.TrimSpace(lines[i])
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Type      string `json:"type"`
-					Status    string `json:"status"`
-					Content   string `json:"content"`
-					Error     any    `json:"error"`
-					ToolCalls []struct {
-						Name string          `json:"name"`
-						Args json.RawMessage `json:"args"`
-					} `json:"tool_calls"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err != nil {
-					log.Printf("[SessionManager] error unmarshaling transcript line in pass 2: %v", err)
-					continue
-				}
-
-				if step.Type == "PLANNER_RESPONSE" && len(step.ToolCalls) > 0 {
-					for _, tc := range step.ToolCalls {
-						cmdArgs := extractCommandOrArgs(tc.Args)
-						cmdArgs = sanitizer.SanitizePromptTags(sanitizer.NormalizeWhitespace(cmdArgs))
-						toolName := sanitizer.SanitizePromptTags(strings.TrimSpace(tc.Name))
-						act := &transcriptAction{
-							toolName:    toolName,
-							commandArgs: cmdArgs,
-							status:      "DONE",
-						}
-						actions = append(actions, act)
-						pendingActions = append(pendingActions, act)
-					}
-				} else if step.Type == "GENERIC" || step.Type == "RUN_COMMAND" || step.Type == "MCP_TOOL" || step.Type == "CODE_ACTION" || step.Type == "WRITE_TO_FILE" {
-					if len(pendingActions) > 0 {
-						act := pendingActions[0]
-						pendingActions = pendingActions[1:]
-
-						st := strings.TrimSpace(step.Status)
-						if st != "" {
-							act.status = sanitizer.SanitizePromptTags(st)
-						} else if step.Error != nil {
-							act.status = "ERROR"
-						}
-
-						errStr := formatStepError(step.Error)
-						var rawSnippet string
-						if step.Content != "" && errStr != "" {
-							rawSnippet = step.Content + " (" + errStr + ")"
-						} else if step.Content != "" {
-							rawSnippet = step.Content
-						} else {
-							rawSnippet = errStr
-						}
-
-						rawSnippet = sanitizer.NormalizeWhitespace(rawSnippet)
-						runes := []rune(rawSnippet)
-						if len(runes) > 300 {
-							rawSnippet = string(runes[:300])
-						}
-						act.snippet = sanitizer.SanitizePromptTags(rawSnippet)
-					}
-				}
-			}
-
-			if len(actions) == 0 {
-				continue
-			}
-
-			const maxTotalChars = 2000
-			const header = "<PREVIOUS_TURN_ACTIONS>\n" +
-				"The previous attempt in this thread executed the following actions before session rotation:\n"
-			const footer = "Do NOT repeat these exact actions. Use these results to proceed with the request or synthesize the final answer.\n" +
-				"</PREVIOUS_TURN_ACTIONS>"
-
-			actionLines := make([]string, len(actions))
-			for i, act := range actions {
-				actionLines[i] = fmt.Sprintf("- Action: %s | Command/Args: %s | Status: %s | Result: %s\n",
-					act.toolName, act.commandArgs, act.status, act.snippet)
-			}
-
-			full := header + strings.Join(actionLines, "") + footer
-			if len([]rune(full)) <= maxTotalChars {
-				return full
-			}
-
-			// If oversized and only 1 action exists, clamp that single action to fit budget
-			if len(actions) == 1 {
-				budget := maxTotalChars - len([]rune(header)) - len([]rune(footer))
-				runes := []rune(actionLines[0])
-				if budget > 0 && len(runes) > budget {
-					return header + string(runes[:budget]) + footer
-				}
-				return header + footer
-			}
-
-			// Tail-biased fallback: retain the most recent actions that fit within 2,000 characters,
-			// prepending an omitted notice indicating how many earlier actions were dropped.
-			for k := 1; k < len(actions); k++ {
-				notice := fmt.Sprintf("- [... %d earlier actions omitted ...]\n", k)
-				candidate := header + notice + strings.Join(actionLines[k:], "") + footer
-				if len([]rune(candidate)) <= maxTotalChars {
-					return candidate
-				}
-			}
-
-			// Extreme fallback if even the single most recent action exceeds remaining budget:
-			k := len(actions) - 1
-			notice := fmt.Sprintf("- [... %d earlier actions omitted ...]\n", k)
-			fixedRunes := len([]rune(header)) + len([]rune(notice)) + len([]rune(footer))
-			budget := maxTotalChars - fixedRunes
-			lastRunes := []rune(actionLines[len(actions)-1])
-			if budget > 0 && len(lastRunes) > budget {
-				return header + notice + string(lastRunes[:budget]) + footer
-			}
-			return header + notice + footer
+		lines, ok := readTranscriptLines(dir)
+		if !ok {
+			continue
 		}
+
+		lastUserInputIdx := findLastUserInputIdx(lines)
+		startIdx := 0
+		if lastUserInputIdx >= 0 {
+			startIdx = lastUserInputIdx + 1
+		}
+
+		type transcriptAction struct {
+			toolName    string
+			commandArgs string
+			status      string
+			snippet     string
+		}
+
+		var actions []*transcriptAction
+		var pendingActions []*transcriptAction
+
+		for i := startIdx; i < len(lines); i++ {
+			line := lines[i]
+			var step struct {
+				Type      string `json:"type"`
+				Status    string `json:"status"`
+				Content   string `json:"content"`
+				Error     any    `json:"error"`
+				ToolCalls []struct {
+					Name string          `json:"name"`
+					Args json.RawMessage `json:"args"`
+				} `json:"tool_calls"`
+			}
+			if err := json.Unmarshal([]byte(line), &step); err != nil {
+				log.Printf("[SessionManager] error unmarshaling transcript line in pass 2: %v", err)
+				continue
+			}
+
+			if step.Type == "PLANNER_RESPONSE" && len(step.ToolCalls) > 0 {
+				for _, tc := range step.ToolCalls {
+					cmdArgs := extractCommandOrArgs(tc.Args)
+					cmdArgs = sanitizer.SanitizePromptTags(sanitizer.NormalizeWhitespace(cmdArgs))
+					toolName := sanitizer.SanitizePromptTags(strings.TrimSpace(tc.Name))
+					act := &transcriptAction{
+						toolName:    toolName,
+						commandArgs: cmdArgs,
+						status:      "DONE",
+					}
+					actions = append(actions, act)
+					pendingActions = append(pendingActions, act)
+				}
+			} else if step.Type == "GENERIC" || step.Type == "RUN_COMMAND" || step.Type == "MCP_TOOL" || step.Type == "CODE_ACTION" || step.Type == "WRITE_TO_FILE" {
+				if len(pendingActions) > 0 {
+					act := pendingActions[0]
+					pendingActions = pendingActions[1:]
+
+					st := strings.TrimSpace(step.Status)
+					if st != "" {
+						act.status = sanitizer.SanitizePromptTags(st)
+					} else if step.Error != nil {
+						act.status = "ERROR"
+					}
+
+					errStr := formatStepError(step.Error)
+					var rawSnippet string
+					if step.Content != "" && errStr != "" {
+						rawSnippet = step.Content + " (" + errStr + ")"
+					} else if step.Content != "" {
+						rawSnippet = step.Content
+					} else {
+						rawSnippet = errStr
+					}
+
+					rawSnippet = sanitizer.NormalizeWhitespace(rawSnippet)
+					runes := []rune(rawSnippet)
+					if len(runes) > 300 {
+						rawSnippet = string(runes[:300])
+					}
+					act.snippet = sanitizer.SanitizePromptTags(rawSnippet)
+				}
+			}
+		}
+
+		if len(actions) == 0 {
+			continue
+		}
+
+		const maxTotalChars = 2000
+		const header = "<PREVIOUS_TURN_ACTIONS>\n" +
+			"The previous attempt in this thread executed the following actions before session rotation:\n"
+		const footer = "Do NOT repeat these exact actions. Use these results to proceed with the request or synthesize the final answer.\n" +
+			"</PREVIOUS_TURN_ACTIONS>"
+
+		actionLines := make([]string, len(actions))
+		for i, act := range actions {
+			actionLines[i] = fmt.Sprintf("- Action: %s | Command/Args: %s | Status: %s | Result: %s\n",
+				act.toolName, act.commandArgs, act.status, act.snippet)
+		}
+
+		full := header + strings.Join(actionLines, "") + footer
+		if len([]rune(full)) <= maxTotalChars {
+			return full
+		}
+
+		// If oversized and only 1 action exists, clamp that single action to fit budget
+		if len(actions) == 1 {
+			budget := maxTotalChars - len([]rune(header)) - len([]rune(footer))
+			runes := []rune(actionLines[0])
+			if budget > 0 && len(runes) > budget {
+				return header + string(runes[:budget]) + footer
+			}
+			return header + footer
+		}
+
+		// Tail-biased fallback: retain the most recent actions that fit within 2,000 characters,
+		// prepending an omitted notice indicating how many earlier actions were dropped.
+		for k := 1; k < len(actions); k++ {
+			notice := fmt.Sprintf("- [... %d earlier actions omitted ...]\n", k)
+			candidate := header + notice + strings.Join(actionLines[k:], "") + footer
+			if len([]rune(candidate)) <= maxTotalChars {
+				return candidate
+			}
+		}
+
+		// Extreme fallback if even the single most recent action exceeds remaining budget:
+		k := len(actions) - 1
+		notice := fmt.Sprintf("- [... %d earlier actions omitted ...]\n", k)
+		fixedRunes := len([]rune(header)) + len([]rune(notice)) + len([]rune(footer))
+		budget := maxTotalChars - fixedRunes
+		lastRunes := []rune(actionLines[len(actions)-1])
+		if budget > 0 && len(lastRunes) > budget {
+			return header + notice + string(lastRunes[:budget]) + footer
+		}
+		return header + notice + footer
 	}
 
 	return ""
@@ -972,51 +907,25 @@ func (m *Manager) HasSuccessfulToolCall(convID string) bool {
 	targetDirs := m.getTargetDirs(convID)
 
 	for _, dir := range targetDirs {
-		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
-			tPath := filepath.Join(dir, ".system_generated", "logs", name)
-			data, err := os.ReadFile(tPath)
-			if err != nil {
-				continue
-			}
+		lines, ok := readTranscriptLines(dir)
+		if !ok {
+			continue
+		}
 
-			lines := strings.Split(string(data), "\n")
-			lastUserInputIdx := -1
-			for i, rawLine := range lines {
-				line := strings.TrimSpace(rawLine)
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Source  string `json:"source"`
-					Type    string `json:"type"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
-					if step.Type == "USER_INPUT" && !isAmbient {
-						lastUserInputIdx = i
-					}
-				}
-			}
+		lastUserInputIdx := findLastUserInputIdx(lines)
+		startIdx := 0
+		if lastUserInputIdx >= 0 {
+			startIdx = lastUserInputIdx + 1
+		}
 
-			startIdx := 0
-			if lastUserInputIdx >= 0 {
-				startIdx = lastUserInputIdx + 1
+		for i := startIdx; i < len(lines); i++ {
+			var step struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
 			}
-
-			for i := startIdx; i < len(lines); i++ {
-				line := strings.TrimSpace(lines[i])
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Type   string `json:"type"`
-					Status string `json:"status"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if step.Status == "DONE" && (step.Type == "MCP_TOOL" || step.Type == "RUN_COMMAND" || step.Type == "CODE_ACTION" || step.Type == "WRITE_TO_FILE") {
-						return true
-					}
+			if err := json.Unmarshal([]byte(lines[i]), &step); err == nil {
+				if step.Status == "DONE" && (step.Type == "MCP_TOOL" || step.Type == "RUN_COMMAND" || step.Type == "CODE_ACTION" || step.Type == "WRITE_TO_FILE") {
+					return true
 				}
 			}
 		}
@@ -1028,112 +937,83 @@ func (m *Manager) HasSuccessfulToolCall(convID string) bool {
 // and returns whether a background task was launched in the latest turn but never
 // completed before the turn ended.
 func (m *Manager) HasUnfinishedBackgroundTask(convID string) (bool, string, error) {
-	if m == nil {
-		return false, "", nil
-	}
-	trimmed := strings.TrimSpace(convID)
-	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
+	cleanID, ok := m.validSessionID(convID)
+	if !ok {
 		return false, "", nil
 	}
 
-	targetDirs := m.getTargetDirs(trimmed)
+	targetDirs := m.getTargetDirs(cleanID)
 	for _, dir := range targetDirs {
-		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
-			tPath := filepath.Join(dir, ".system_generated", "logs", name)
-			data, err := os.ReadFile(tPath)
-			if err != nil {
+		lines, ok := readTranscriptLines(dir)
+		if !ok {
+			continue
+		}
+
+		lastUserInputIdx := findLastUserInputIdx(lines)
+		startIdx := 0
+		if lastUserInputIdx >= 0 {
+			startIdx = lastUserInputIdx + 1
+		}
+
+		startedTasks := make(map[string]bool)
+		taskOrder := make([]string, 0)
+
+		for i := startIdx; i < len(lines); i++ {
+			rawLine := lines[i]
+			var step struct {
+				Source  string `json:"source"`
+				Type    string `json:"type"`
+				Content string `json:"content"`
+			}
+			targetText := ""
+			if err := json.Unmarshal([]byte(rawLine), &step); err == nil {
+				targetText = step.Content
+			} else if !strings.HasPrefix(rawLine, "{") {
+				targetText = rawLine
+			}
+			if targetText == "" {
 				continue
 			}
 
-			lines := strings.Split(string(data), "\n")
-			lastUserInputIdx := -1
-			for i, rawLine := range lines {
-				line := strings.TrimSpace(rawLine)
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Source  string `json:"source"`
-					Type    string `json:"type"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
-					if step.Type == "USER_INPUT" && !isAmbient {
-						lastUserInputIdx = i
-					}
+			// Check if a task was started
+			if tID := ParseBackgroundTaskStarted(targetText); tID != "" {
+				if !startedTasks[tID] {
+					startedTasks[tID] = true
+					taskOrder = append(taskOrder, tID)
 				}
 			}
 
-			startIdx := 0
-			if lastUserInputIdx >= 0 {
-				startIdx = lastUserInputIdx + 1
-			}
-
-			startedTasks := make(map[string]bool)
-			taskOrder := make([]string, 0)
-
-			for i := startIdx; i < len(lines); i++ {
-				rawLine := strings.TrimSpace(lines[i])
-				if rawLine == "" {
-					continue
-				}
-
-				var step struct {
-					Source  string `json:"source"`
-					Type    string `json:"type"`
-					Content string `json:"content"`
-				}
-				targetText := ""
-				if err := json.Unmarshal([]byte(rawLine), &step); err == nil {
-					targetText = step.Content
-				} else if !strings.HasPrefix(rawLine, "{") {
-					targetText = rawLine
-				}
-				if targetText == "" {
-					continue
-				}
-
-				// Check if a task was started
-				if tID := ParseBackgroundTaskStarted(targetText); tID != "" {
-					if !startedTasks[tID] {
-						startedTasks[tID] = true
-						taskOrder = append(taskOrder, tID)
-					}
-				}
-
-				// Check if a task was completed via sender
-				if s := ParseTaskMessageSender(targetText); s != "" {
-					for tID := range startedTasks {
-						if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
-							delete(startedTasks, tID)
-						}
-					}
-				}
-
-				// Check if a task was completed via finished result text
-				if s := ParseTaskFinishedContent(targetText); s != "" {
-					for tID := range startedTasks {
-						if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
-							delete(startedTasks, tID)
-						}
-					}
-				}
-			}
-
-			if len(startedTasks) > 0 {
-				// Return the first started task that remains unfinished
-				for _, tID := range taskOrder {
-					if startedTasks[tID] {
-						return true, tID, nil
-					}
-				}
+			// Check if a task was completed via sender
+			if s := ParseTaskMessageSender(targetText); s != "" {
 				for tID := range startedTasks {
+					if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
+						delete(startedTasks, tID)
+					}
+				}
+			}
+
+			// Check if a task was completed via finished result text
+			if s := ParseTaskFinishedContent(targetText); s != "" {
+				for tID := range startedTasks {
+					if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
+						delete(startedTasks, tID)
+					}
+				}
+			}
+		}
+
+		if len(startedTasks) > 0 {
+			// Return the first started task that remains unfinished
+			for _, tID := range taskOrder {
+				if startedTasks[tID] {
 					return true, tID, nil
 				}
 			}
-			return false, "", nil
+			for tID := range startedTasks {
+				return true, tID, nil
+			}
 		}
+		return false, "", nil
 	}
 
 	return false, "", nil
@@ -1165,18 +1045,16 @@ func (m *Manager) resolveBaseDir(sessionID string) string {
 
 // EnsureSessionDir bootstraps the session directory and transcript files if they do not exist.
 func (m *Manager) EnsureSessionDir(sessionID string) (string, error) {
-	if m == nil {
-		return "", fmt.Errorf("session manager is nil")
-	}
-	if strings.TrimSpace(sessionID) == "" {
-		return "", fmt.Errorf("sessionID cannot be empty")
+	cleanID, ok := m.validSessionID(sessionID)
+	if !ok {
+		return "", fmt.Errorf("sessionID %q is invalid", sessionID)
 	}
 
-	baseDir := m.resolveBaseDir(sessionID)
+	baseDir := m.resolveBaseDir(cleanID)
 	if baseDir == "" {
 		return "", fmt.Errorf("no session roots configured")
 	}
-	sessionDir := filepath.Join(baseDir, sessionID)
+	sessionDir := filepath.Join(baseDir, cleanID)
 	logsDir := filepath.Join(sessionDir, ".system_generated", "logs")
 
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
@@ -1417,18 +1295,15 @@ func (m *Manager) conversationCandidateDirs() []string {
 // SessionExistsOnDisk checks if the session has a valid agy conversation
 // SQLite database (.db), protobuf (.pb), or non-empty transcript on disk.
 func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
-	if m == nil {
-		return false
-	}
-	trimmed := strings.TrimSpace(sessionID)
-	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
+	cleanID, ok := m.validSessionID(sessionID)
+	if !ok {
 		return false
 	}
 
 	// 1. Check agy conversation SQLite databases (.db) and protobufs (.pb) under candidate directories
 	for _, dir := range m.conversationCandidateDirs() {
 		for _, ext := range []string{".db", ".pb"} {
-			convPath := filepath.Join(dir, trimmed+ext)
+			convPath := filepath.Join(dir, cleanID+ext)
 			if fi, err := os.Stat(convPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
 				return true
 			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1438,7 +1313,7 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 	}
 
 	// 2. Check transcript.jsonl non-empty status
-	for _, dir := range m.getTargetDirs(trimmed) {
+	for _, dir := range m.getTargetDirs(cleanID) {
 		tPath := filepath.Join(dir, ".system_generated", "logs", "transcript.jsonl")
 		if fi, err := os.Stat(tPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
 			return true
@@ -1452,8 +1327,8 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 // CleanupEphemeralSession purges throwaway session directories from disk.
 // If searchRoots are provided, it deletes convID subdirectories within those roots.
 func CleanupEphemeralSession(convID string, searchRoots ...string) {
-	cleanConvID := strings.TrimSpace(convID)
-	if cleanConvID == "" || strings.ContainsAny(cleanConvID, `/\:`) || strings.Contains(cleanConvID, "..") {
+	cleanConvID, ok := cleanSessionID(convID)
+	if !ok {
 		return
 	}
 	for _, root := range searchRoots {
@@ -1479,8 +1354,8 @@ func CleanupEphemeralSession(convID string, searchRoots ...string) {
 // for the given session ID across configured session roots.
 // Returns 0 if manager is nil, sessionID is empty/invalid, or files do not exist.
 func (m *Manager) GetTranscriptSize(sessionID string) int64 {
-	cleanID := strings.TrimSpace(sessionID)
-	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+	cleanID, ok := m.validSessionID(sessionID)
+	if !ok {
 		return 0
 	}
 
@@ -1505,8 +1380,8 @@ func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 // write buffers do not trigger premature session rotation.
 // Returns 0 if manager is nil, sessionID is empty/invalid, or files do not exist.
 func (m *Manager) GetSessionDBSize(sessionID string) int64 {
-	cleanID := strings.TrimSpace(sessionID)
-	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+	cleanID, ok := m.validSessionID(sessionID)
+	if !ok {
 		return 0
 	}
 
@@ -1526,8 +1401,9 @@ func (m *Manager) GetSessionDBSize(sessionID string) int64 {
 		// Check Protobuf file: .pb
 		pbPath := filepath.Join(dir, cleanID+".pb")
 		if fi, err := os.Stat(pbPath); err == nil && !fi.IsDir() {
-			if fi.Size() > maxSize {
-				maxSize = fi.Size()
+			candSize := fi.Size()
+			if candSize > maxSize {
+				maxSize = candSize
 			}
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("[Session] Warning statting conversation PB %s: %v", pbPath, err)
@@ -1540,8 +1416,8 @@ func (m *Manager) GetSessionDBSize(sessionID string) int64 {
 // CountTranscriptSteps returns the total internal steps for the session by inspecting
 // the monotonic step_index at the tail of the transcript file. Returns 0 if empty, invalid, or not found.
 func (m *Manager) CountTranscriptSteps(sessionID string) int {
-	cleanID := strings.TrimSpace(sessionID)
-	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+	cleanID, ok := m.validSessionID(sessionID)
+	if !ok {
 		return 0
 	}
 
@@ -1568,8 +1444,8 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 // CountTranscriptTurns returns the total number of non-ambient user turns for the session
 // by counting non-ambient USER_INPUT entries in transcript.jsonl. Returns 0 if empty, invalid, or not found.
 func (m *Manager) CountTranscriptTurns(sessionID string) int {
-	cleanID := strings.TrimSpace(sessionID)
-	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+	cleanID, ok := m.validSessionID(sessionID)
+	if !ok {
 		return 0
 	}
 
@@ -1597,8 +1473,7 @@ func (m *Manager) CountTranscriptTurns(sessionID string) int {
 					Content string `json:"content"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
-					if step.Type == "USER_INPUT" && !isAmbient {
+					if step.Type == "USER_INPUT" && !isAmbientInput(step.Source, step.Content) {
 						turns++
 					}
 				}
@@ -1619,8 +1494,8 @@ func (m *Manager) GetSessionDir(sessionID string) (string, error) {
 	if m == nil {
 		return "", errors.New("session manager is nil")
 	}
-	cleanID := strings.TrimSpace(sessionID)
-	if cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+	cleanID, ok := cleanSessionID(sessionID)
+	if !ok {
 		return "", fmt.Errorf("invalid session ID: %q", sessionID)
 	}
 	for _, dir := range m.getTargetDirs(cleanID) {

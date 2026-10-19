@@ -6,208 +6,78 @@ import (
 	"github.com/azylman/aerial/brain/pkg/session"
 )
 
-func TestParseBackgroundTaskStarted(t *testing.T) {
+func TestTaskParsers(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	startedCases := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{
-			name:     "standard output",
-			input:    "Tool is running as a background task with task id: task-123\nTask description: test",
-			expected: "task-123",
-		},
-		{
-			name:     "quoted id",
-			input:    `Tool is running as a background task with task id: "task-456"`,
-			expected: "task-456",
-		},
-		{
-			name:     "single quotes",
-			input:    "tool is running as a background task with task id: 'prefix/task-789'",
-			expected: "prefix/task-789",
-		},
-		{
-			name:     "extra punctuation and whitespace",
-			input:    "Tool is running as a background task with task id:    task-abc; trailing",
-			expected: "task-abc",
-		},
-		{
-			name:     "trailing period in sentence",
-			input:    "Tool is running as a background task with task id: task-sentence-end.",
-			expected: "task-sentence-end",
-		},
-		{
-			name:     "punctuation only token",
-			input:    "Tool is running as a background task with task id: ;;;;",
-			expected: "",
-		},
-		{
-			name:     "empty string",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "no task id",
-			input:    "Tool is running as a background task with task id:   ",
-			expected: "",
-		},
-		{
-			name:     "unrelated string",
-			input:    "Running command in foreground",
-			expected: "",
-		},
+		{"standard output", "Tool is running as a background task with task id: task-123\nTask description: test", "task-123"},
+		{"quoted id", `Tool is running as a background task with task id: "task-456"`, "task-456"},
+		{"single quotes", "tool is running as a background task with task id: 'prefix/task-789'", "prefix/task-789"},
+		{"extra punctuation and whitespace", "Tool is running as a background task with task id:    task-abc; trailing", "task-abc"},
+		{"trailing period in sentence", "Tool is running as a background task with task id: task-sentence-end.", "task-sentence-end"},
+		{"punctuation only token", "Tool is running as a background task with task id: ;;;;", ""},
+		{"empty string", "", ""},
+		{"no task id", "Tool is running as a background task with task id:   ", ""},
+		{"unrelated string", "Running command in foreground", ""},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tc := range startedCases {
+		t.Run("started_"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := session.ParseBackgroundTaskStarted(tc.input)
-			if got != tc.expected {
+			if got := session.ParseBackgroundTaskStarted(tc.input); got != tc.expected {
 				t.Errorf("ParseBackgroundTaskStarted(%q) = %q, want %q", tc.input, got, tc.expected)
 			}
 		})
 	}
-}
 
-func TestParseTaskMessageSender(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
+	senderCases := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{
-			name:     "standard message sender",
-			input:    "[Message] sender=task-sender-42 priority=HIGH content=done",
-			expected: "task-sender-42",
-		},
-		{
-			name:     "sender with quotes",
-			input:    `[Message] sender="task-sender-suffix" priority=NORMAL`,
-			expected: "task-sender-suffix",
-		},
-		{
-			name:     "sender with single quotes and path",
-			input:    "[Message] sender='prefix/task-sender-99' content=done",
-			expected: "prefix/task-sender-99",
-		},
-		{
-			name:     "uppercase SENDER",
-			input:    "[Message] SENDER=task-upper-10 content=ok",
-			expected: "task-upper-10",
-		},
-		{
-			name:     "empty or missing sender",
-			input:    "[Message] priority=HIGH content=done",
-			expected: "",
-		},
-		{
-			name:     "sender with trailing punctuation",
-			input:    "[Message] sender=task-comma, priority=HIGH",
-			expected: "task-comma",
-		},
-		{
-			name:     "sender with trailing period",
-			input:    "[Message] sender=task-period. priority=HIGH",
-			expected: "task-period",
-		},
-		{
-			name:     "sender with whitespace only",
-			input:    "[Message] sender=    ",
-			expected: "",
-		},
-		{
-			name:     "sender with punctuation only",
-			input:    "[Message] sender=;;; ",
-			expected: "",
-		},
+		{"standard message sender", "[Message] sender=task-sender-42 priority=HIGH content=done", "task-sender-42"},
+		{"sender with quotes", `[Message] sender="task-sender-suffix" priority=NORMAL`, "task-sender-suffix"},
+		{"sender with single quotes and path", "[Message] sender='prefix/task-sender-99' content=done", "prefix/task-sender-99"},
+		{"uppercase SENDER", "[Message] SENDER=task-upper-10 content=ok", "task-upper-10"},
+		{"empty or missing sender", "[Message] priority=HIGH content=done", ""},
+		{"sender with trailing punctuation", "[Message] sender=task-comma, priority=HIGH", "task-comma"},
+		{"sender with trailing period", "[Message] sender=task-period. priority=HIGH", "task-period"},
+		{"sender with whitespace only", "[Message] sender=    ", ""},
+		{"sender with punctuation only", "[Message] sender=;;; ", ""},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tc := range senderCases {
+		t.Run("sender_"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := session.ParseTaskMessageSender(tc.input)
-			if got != tc.expected {
+			if got := session.ParseTaskMessageSender(tc.input); got != tc.expected {
 				t.Errorf("ParseTaskMessageSender(%q) = %q, want %q", tc.input, got, tc.expected)
 			}
 		})
 	}
-}
 
-func TestParseTaskFinishedContent(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
+	finishedCases := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{
-			name:     "quoted id standard",
-			input:    `Task id "task-fin-99" finished with result: ok`,
-			expected: "task-fin-99",
-		},
-		{
-			name:     "path id with quotes",
-			input:    `Task id "prefix/task-fin-suffix" finished with result: ok`,
-			expected: "prefix/task-fin-suffix",
-		},
-		{
-			name:     "unquoted id",
-			input:    "Task id task-simple finished with result:\nSuccess",
-			expected: "task-simple",
-		},
-		{
-			name:     "single quotes",
-			input:    "Task id 'task-single' finished with result:",
-			expected: "task-single",
-		},
-		{
-			name:     "trailing period before finished marker",
-			input:    "Task id task-dot. finished with result:",
-			expected: "task-dot",
-		},
-		{
-			name:     "multiple task id occurrences in message preceding completion",
-			input:    "Tool is running as a background task with task id: task-multi-prev\nTask id \"task-multi-prev\" finished with result: ok",
-			expected: "task-multi-prev",
-		},
-		{
-			name:     "missing task id before finished marker",
-			input:    "Build finished with result: ok",
-			expected: "",
-		},
-		{
-			name:     "punctuation only token",
-			input:    "Task id ;;;; finished with result: ok",
-			expected: "",
-		},
-		{
-			name:     "reject multi-word false positive",
-			input:    "Task id is required for cancellation. Build finished with result: ok",
-			expected: "",
-		},
-		{
-			name:     "empty id",
-			input:    "Task id finished with result:",
-			expected: "",
-		},
-		{
-			name:     "unrelated content",
-			input:    "All tasks completed successfully",
-			expected: "",
-		},
+		{"quoted id standard", `Task id "task-fin-99" finished with result: ok`, "task-fin-99"},
+		{"path id with quotes", `Task id "prefix/task-fin-suffix" finished with result: ok`, "prefix/task-fin-suffix"},
+		{"unquoted id", "Task id task-simple finished with result:\nSuccess", "task-simple"},
+		{"single quotes", "Task id 'task-single' finished with result:", "task-single"},
+		{"trailing period before finished marker", "Task id task-dot. finished with result:", "task-dot"},
+		{"multiple task id occurrences in message preceding completion", "Tool is running as a background task with task id: task-multi-prev\nTask id \"task-multi-prev\" finished with result: ok", "task-multi-prev"},
+		{"missing task id before finished marker", "Build finished with result: ok", ""},
+		{"punctuation only token", "Task id ;;;; finished with result: ok", ""},
+		{"reject multi-word false positive", "Task id is required for cancellation. Build finished with result: ok", ""},
+		{"empty id", "Task id finished with result:", ""},
+		{"unrelated content", "All tasks completed successfully", ""},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tc := range finishedCases {
+		t.Run("finished_"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := session.ParseTaskFinishedContent(tc.input)
-			if got != tc.expected {
+			if got := session.ParseTaskFinishedContent(tc.input); got != tc.expected {
 				t.Errorf("ParseTaskFinishedContent(%q) = %q, want %q", tc.input, got, tc.expected)
 			}
 		})
@@ -217,44 +87,46 @@ func TestParseTaskFinishedContent(t *testing.T) {
 func TestIndexFoldAndLastIndexFold(t *testing.T) {
 	t.Parallel()
 
-	t.Run("IndexFold branches", func(t *testing.T) {
-		t.Parallel()
-		if got := session.IndexFoldForTest("hello", ""); got != 0 {
-			t.Errorf("expected 0 for empty substr, got %d", got)
-		}
-		if got := session.IndexFoldForTest("hi", "hello"); got != -1 {
-			t.Errorf("expected -1 when string shorter, got %d", got)
-		}
-		if got := session.IndexFoldForTest("Hello World", "WORLD"); got != 6 {
-			t.Errorf("expected 6 for uppercase match, got %d", got)
-		}
-		if got := session.IndexFoldForTest("123 ABC 456", "ABC"); got != 4 {
-			t.Errorf("expected 4, got %d", got)
-		}
-		if got := session.IndexFoldForTest("123 ABC 456", "123"); got != 0 {
-			t.Errorf("expected 0 for non-letter match, got %d", got)
-		}
-		if got := session.IndexFoldForTest("hello", "xyz"); got != -1 {
-			t.Errorf("expected -1 for not found, got %d", got)
-		}
-	})
+	indexTests := []struct {
+		name   string
+		s      string
+		substr string
+		want   int
+	}{
+		{"empty substr", "hello", "", 0},
+		{"string shorter", "hi", "hello", -1},
+		{"uppercase match", "Hello World", "WORLD", 6},
+		{"exact match", "123 ABC 456", "ABC", 4},
+		{"non-letter match", "123 ABC 456", "123", 0},
+		{"not found", "hello", "xyz", -1},
+	}
+	for _, tc := range indexTests {
+		t.Run("index_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := session.IndexFoldForTest(tc.s, tc.substr); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
 
-	t.Run("LastIndexFold branches", func(t *testing.T) {
-		t.Parallel()
-		if got := session.LastIndexFoldForTest("hello", ""); got != 5 {
-			t.Errorf("expected 5 for empty substr, got %d", got)
-		}
-		if got := session.LastIndexFoldForTest("hi", "hello"); got != -1 {
-			t.Errorf("expected -1 when string shorter, got %d", got)
-		}
-		if got := session.LastIndexFoldForTest("hello WORLD hello", "WORLD"); got != 6 {
-			t.Errorf("expected 6 for match, got %d", got)
-		}
-		if got := session.LastIndexFoldForTest("123 456 123", "123"); got != 8 {
-			t.Errorf("expected 8 for non-letter match, got %d", got)
-		}
-		if got := session.LastIndexFoldForTest("hello", "xyz"); got != -1 {
-			t.Errorf("expected -1 for not found, got %d", got)
-		}
-	})
+	lastIndexTests := []struct {
+		name   string
+		s      string
+		substr string
+		want   int
+	}{
+		{"empty substr", "hello", "", 5},
+		{"string shorter", "hi", "hello", -1},
+		{"match", "hello WORLD hello", "WORLD", 6},
+		{"non-letter match", "123 456 123", "123", 8},
+		{"not found", "hello", "xyz", -1},
+	}
+	for _, tc := range lastIndexTests {
+		t.Run("lastIndex_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := session.LastIndexFoldForTest(tc.s, tc.substr); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
 }
