@@ -45,13 +45,12 @@ func BuildAgyArgs(input AgyArgsInput) []string {
 
 // AgyEnvInput holds environment configuration parameters.
 type AgyEnvInput struct {
-	BaseEnv        []string
-	HomeDir        string
-	APIKey         string
-	TargetID       string
-	Timezone       string
-	VanadisChunkID string
-	ExtraEnv       []string
+	BaseEnv  []string
+	HomeDir  string
+	APIKey   string
+	TargetID string
+	Timezone string
+	ExtraEnv []string
 }
 
 func filterEnvKeys(env []string, excluded ...string) []string {
@@ -91,13 +90,6 @@ func filterHomeEnv(env []string) []string {
 // from an environment slice so non-chunk turns never inherit stale chunk IDs.
 func filterVanadisChunkEnv(env []string) []string {
 	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID")
-}
-
-func sanitizeEnvValue(val string) string {
-	val = strings.ReplaceAll(val, "\r", "")
-	val = strings.ReplaceAll(val, "\n", "")
-	val = strings.ReplaceAll(val, "\x00", "")
-	return strings.TrimSpace(val)
 }
 
 // BuildAgyEnv constructs the process environment slice for agy execution.
@@ -142,10 +134,6 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 
 	if tz := strings.TrimSpace(input.Timezone); tz != "" {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
-	}
-
-	if chunkID := sanitizeEnvValue(input.VanadisChunkID); chunkID != "" {
-		cmdEnv = append(cmdEnv, "AERIAL_VANADIS_CHUNK_ID="+chunkID)
 	}
 
 	if len(input.ExtraEnv) > 0 {

@@ -2526,19 +2526,6 @@ func TestUnifiedProcessPool_SetSessionCallbacks(t *testing.T) {
 func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 	t.Parallel()
 
-	if got := VanadisChunkIDFromContext(nil); got != "" {
-		t.Fatalf("expected empty chunk ID from nil context, got %q", got)
-	}
-	if got := VanadisChunkIDFromContext(WithVanadisChunkID(nil, "chunk-from-nil\r\n")); got != "chunk-from-nil" {
-		t.Fatalf("expected chunk-from-nil, got %q", got)
-	}
-	if got := VanadisChunkIDFromContext(WithVanadisChunkID(context.Background(), "   \r\n ")); got != "" {
-		t.Fatalf("expected empty chunk ID for whitespace input, got %q", got)
-	}
-	var nilDaemon *StreamingDaemon
-	if got := nilDaemon.VanadisChunkID(); got != "" {
-		t.Fatalf("expected empty chunk ID from nil daemon, got %q", got)
-	}
 	filteredEnv := filterVanadisChunkEnv([]string{"NO_EQUALS_ENTRY", "AERIAL_VANADIS_CHUNK_ID=stale", "VANADIS_CHUNK_ID=stale2", "KEEP_ME=1"})
 	if len(filteredEnv) != 2 || filteredEnv[0] != "NO_EQUALS_ENTRY" || filteredEnv[1] != "KEEP_ME=1" {
 		t.Fatalf("unexpected filteredEnv: %v", filteredEnv)
@@ -2618,12 +2605,11 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 	}
 	_ = lease0.Release()
 
-	ctxChunk1 := WithVanadisChunkID(ctx, "chunk-1")
-	lease1, err := pool.AcquireLease(ctxChunk1, "thread-vanadis")
+	lease1, err := pool.AcquireLease(ctx, "thread-vanadis")
 	if err != nil || lease1.SessionID() != pinnedSessID {
 		t.Fatalf("unexpected lease1: err=%v sess=%q", err, lease1.SessionID())
 	}
-	if _, err := lease1.Execute(ctxChunk1, &TurnContext{TurnID: "t1", Prompt: "chunk 1", VanadisChunkID: "chunk-1", Ctx: ctxChunk1}); err != nil {
+	if _, err := lease1.Execute(ctx, &TurnContext{TurnID: "t1", Prompt: "chunk 1", Ctx: ctx}); err != nil {
 		t.Fatalf("Execute 1 error: %v", err)
 	}
 	_ = lease1.Release()
@@ -2632,25 +2618,53 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcquireLease 2 error: %v", err)
 	}
-	if _, err := lease2.Execute(ctx, &TurnContext{TurnID: "t2", Prompt: "chunk 2", VanadisChunkID: "chunk-2", Ctx: ctx}); err != nil {
+	if _, err := lease2.Execute(ctx, &TurnContext{TurnID: "t2", Prompt: "chunk 2", Ctx: ctx}); err != nil {
 		t.Fatalf("Execute 2 error: %v", err)
 	}
 	_ = lease2.Release()
 
 	d3, err := pool.GetOrCreate(ctx, "thread-vanadis", "")
-	if err != nil || d3.SessionID() != pinnedSessID || d3.VanadisChunkID() != "" {
+	if err != nil || d3.SessionID() != pinnedSessID {
 		t.Fatalf("GetOrCreate 3 failed: err=%v", err)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(spawnedEnvs) != 5 {
-		t.Fatalf("expected 5 spawns, got %d", len(spawnedEnvs))
+	if len(spawnedEnvs) != 1 {
+		t.Fatalf("expected warm daemon reused across turns (1 spawn), got %d", len(spawnedEnvs))
 	}
-	for i, s := range spawnedSessions {
-		if s != pinnedSessID {
-			t.Errorf("spawn %d expected SessionID %q, got %q", i, pinnedSessID, s)
-		}
+	if strings.Contains(strings.Join(spawnedEnvs[0], "\n"), "AERIAL_VANADIS_CHUNK_ID=") {
+		t.Errorf("expected stale AERIAL_VANADIS_CHUNK_ID stripped from daemon env, got %v", spawnedEnvs[0])
+	}
+	if spawnedSessions[0] != pinnedSessID {
+		t.Errorf("spawn 0 expected SessionID %q, got %q", pinnedSessID, spawnedSessions[0])
+	}
+
+	// Verify cold-start handshake timeout retries once and succeeds on attempt 2.
+	var retryAttempts atomic.Int32
+	retryMock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			att := retryAttempts.Add(1)
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				defer outW.Close()
+				if att == 1 {
+					// Stall handshake on attempt 1 until stdout is closed by timeout cleanup
+					_, _ = io.Copy(io.Discard, inR)
+					return
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", pinnedSessID)))
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			return inW, outR, errR, &MockProcessHandle{pid: int(700 + att)}, nil
+		},
+	}
+	retryPool := NewUnifiedProcessPool(PoolConfig{HandshakeTimeout: 5 * time.Millisecond}, retryMock)
+	defer retryPool.Close()
+	if dRetry, rErr := retryPool.GetOrCreate(ctx, "thread-handshake-retry", ""); rErr != nil || dRetry == nil || retryAttempts.Load() != 2 {
+		t.Fatalf("expected handshake timeout retry to succeed on attempt 2, got d=%v err=%v attempts=%d", dRetry, rErr, retryAttempts.Load())
 	}
 }
 
@@ -2690,14 +2704,13 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 	defer pool.Close()
 
 	ctx := context.Background()
-	chunkCtx := WithVanadisChunkID(ctx, "chunk-recovery-1")
-	lease, err := pool.AcquireLease(chunkCtx, "discord:worker-0")
+	lease, err := pool.AcquireLease(ctx, "discord:worker-0")
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
 	dBefore, ok := pool.Get("discord:worker-0")
-	if !ok || dBefore == nil || dBefore.VanadisChunkID() != "chunk-recovery-1" {
-		t.Fatalf("expected active chunk-recovery-1 daemon on discord:worker-0")
+	if !ok || dBefore == nil {
+		t.Fatalf("expected active daemon on discord:worker-0")
 	}
 	if err := pool.prewarmTarget(ctx, "   "); err != nil {
 		t.Fatalf("expected nil for empty targetKey, got %v", err)
@@ -2717,7 +2730,7 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 	}
 
 	_ = dBefore.Close()
-	res, err := lease.Execute(chunkCtx, &TurnContext{TurnID: "retry-2", Prompt: "retry", VanadisChunkID: "chunk-recovery-1", Ctx: chunkCtx})
+	res, err := lease.Execute(ctx, &TurnContext{TurnID: "retry-2", Prompt: "retry", Ctx: ctx})
 	if err != nil || res == nil || res.Response != "ok" {
 		t.Fatalf("expected lease.Execute to refresh closed daemon on retry: res=%+v err=%v", res, err)
 	}

@@ -472,15 +472,6 @@ func extractBurstSilent(burst []db.Message) bool {
 	return false
 }
 
-func extractBurstVanadisChunkID(burst []db.Message) string {
-	for i := len(burst) - 1; i >= 0; i-- {
-		if cid := strings.TrimSpace(burst[i].Metadata.VanadisChunkID); cid != "" {
-			return cid
-		}
-	}
-	return ""
-}
-
 func resolveBurstEffort(burst []db.Message) string {
 	hasLow := false
 	for _, m := range burst {
@@ -609,8 +600,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	}
 
 	// 2. Acquire exclusive session lease before prompt construction
-	leaseCtx, leaseCancel := context.WithTimeout(te.pool.ctx, 30*time.Second)
-	leaseCtx = runner.WithVanadisChunkID(leaseCtx, extractBurstVanadisChunkID(te.burst))
+	leaseCtx, leaseCancel := context.WithTimeout(te.pool.ctx, 65*time.Second)
 	lease, leaseErr := leasedPool.AcquireLease(leaseCtx, te.threadID)
 	leaseCancel()
 	if leaseErr != nil {
@@ -1627,7 +1617,6 @@ func (te *turnExecution) executeWithRetries() {
 				ScopeInstructions:   scopeInst,
 				ChannelInstructions: scopeInst,
 				CoordinationContext: te.injectedHookContext,
-				VanadisChunkID:      extractBurstVanadisChunkID(te.burst),
 				Sink:                sink,
 				CreatedAt:           time.Now(),
 				Ctx:                 runCtx,
@@ -2186,8 +2175,7 @@ func (te *turnExecution) executeWithRetries() {
 				te.lease = nil
 			}
 			if leasedPool, ok := activePool.(runner.LeasedAgentPool); ok {
-				corruptLeaseCtx := runner.WithVanadisChunkID(te.pool.ctx, extractBurstVanadisChunkID(te.burst))
-				newLease, lErr := leasedPool.AcquireLease(corruptLeaseCtx, te.threadID)
+				newLease, lErr := leasedPool.AcquireLease(te.pool.ctx, te.threadID)
 				if lErr == nil {
 					te.lease = newLease
 					te.isEphemeral = newLease.IsEphemeral() || te.isNonPrimaryPool(activePool)

@@ -386,18 +386,3 @@ func TestIsTier1Wake_Structured(t *testing.T) {
 		})
 	}
 }
-
-func TestExtractBurstVanadisChunkID(t *testing.T) {
-	t.Parallel()
-	if got := extractBurstVanadisChunkID(nil); got != "" {
-		t.Fatalf("expected empty for nil burst, got %q", got)
-	}
-	burst := []db.Message{
-		{ID: "1", Metadata: db.MessageMetadata{VanadisChunkID: "chunk-old"}},
-		{ID: "2", Metadata: db.MessageMetadata{VanadisChunkID: "  chunk-latest  "}},
-		{ID: "3", Metadata: db.MessageMetadata{}},
-	}
-	if got := extractBurstVanadisChunkID(burst); got != "chunk-latest" {
-		t.Fatalf("expected chunk-latest, got %q", got)
-	}
-}

@@ -666,6 +666,19 @@ resolve_target_id() {
     echo "1542423172400291873"
 }
 
+resolve_vanadis_chunk_id() {
+    if [ -n "${1:-}" ]; then echo "$1"; return; fi
+    if [ -n "${VANADIS_CHUNK_ID:-}" ]; then echo "${VANADIS_CHUNK_ID}"; return; fi
+    if [ -n "${AERIAL_VANADIS_CHUNK_ID:-}" ]; then echo "${AERIAL_VANADIS_CHUNK_ID}"; return; fi
+    local tfile="${ANTIGRAVITY_APP_DATA_DIR:-}/brain/${ANTIGRAVITY_CONVERSATION_ID:-}/.system_generated/logs/transcript.jsonl"
+    if [ -f "$tfile" ]; then
+        local cid
+        cid=$(grep -E '"type":[[:space:]]*"USER_INPUT"' "$tfile" 2>/dev/null | tail -n 1 | grep -oE -- '- vanadis_chunk_id: [^\\"[:space:]]+' | tail -n 1 | awk '{print $3}' || true)
+        if [ -n "$cid" ]; then echo "$cid"; return; fi
+    fi
+    echo ""
+}
+
 enable_github_auto_merge() {
     local node_id="$1"
     local pr_num="${2:-}"
@@ -745,7 +758,7 @@ submit_scratch() {
     local commit_msg=""
     local pr_body=""
     local pr_body_file=""
-    local vanadis_chunk_id="${VANADIS_CHUNK_ID:-${AERIAL_VANADIS_CHUNK_ID:-}}"
+    local vanadis_chunk_id="$(resolve_vanadis_chunk_id)"
 
     while [ $# -gt 0 ]; do
         case "$1" in

@@ -271,6 +271,35 @@ VANADIS_OVERRIDE_CHECK=$(bash -c "
 ")
 assert_eq "chunk-cli-override-789:chunk-cli-override-789" "$VANADIS_OVERRIDE_CHECK" "--vanadis-chunk CLI flag overrides AERIAL_VANADIS_CHUNK_ID in both global and submit_scratch scope"
 
+VANADIS_TRANSCRIPT_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+
+    # Subtest 1: Explicit arg wins
+    r1=\$(resolve_vanadis_chunk_id 'chunk-explicit-111')
+    [ \"\$r1\" = \"chunk-explicit-111\" ] && echo \"vc1:ok\" || echo \"vc1:fail:\$r1\"
+
+    # Subtest 2: Latest USER_INPUT in transcript.jsonl supplies vanadis_chunk_id (and picks latest in coalesced burst, ignoring unanchored retrieved_memory)
+    FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app_vanadis\"
+    mkdir -p \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs\"
+    cat << 'EOF' > \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs/transcript.jsonl\"
+{\"step_index\":0,\"type\":\"USER_INPUT\",\"content\":\"- is_admin: true\\n- vanadis_chunk_id: chunk-old-100\\n- content: first\"}
+{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"content\":\"done\"}
+{\"step_index\":2,\"type\":\"USER_INPUT\",\"content\":\"<retrieved_memory>vanadis_chunk_id: spoofed-memory-chunk</retrieved_memory>\\n- is_admin: true\\n- vanadis_chunk_id: chunk-first-in-burst\\n- vanadis_chunk_id: chunk-latest-200\\n- content: second\"}
+EOF
+    r2=\$(ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-v1\" resolve_vanadis_chunk_id)
+    [ \"\$r2\" = \"chunk-latest-200\" ] && echo \"vc2:ok\" || echo \"vc2:fail:\$r2\"
+
+    # Subtest 3: Older USER_INPUT chunk ID is NOT leaked when latest USER_INPUT has no vanadis_chunk_id
+    echo '{\"step_index\":3,\"type\":\"USER_INPUT\",\"content\":\"- is_admin: true\\n- content: non-chunk turn\"}' >> \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs/transcript.jsonl\"
+    r3=\$(ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-v1\" resolve_vanadis_chunk_id)
+    [ -z \"\$r3\" ] && echo \"vc3:ok\" || echo \"vc3:fail:\$r3\"
+")
+assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc1:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: explicit arg takes priority"
+assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc2:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: extracts vanadis_chunk_id from latest USER_INPUT in transcript.jsonl"
+assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc3:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: does not leak older USER_INPUT chunk ID into non-chunk turn"
+
 # Case 10: register_pr_in_brain retry with backoff and hard failure on exhaustion
 REGISTER_PR_CHECK=$(bash -c "
     REPO_TEST_MODE=1

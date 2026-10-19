@@ -20,7 +20,6 @@ const (
 type DaemonConfig struct {
 	SessionID               string
 	ThreadID                string
-	VanadisChunkID          string
 	InitialTurnCount        int
 	Model                   string
 	AgyBin                  string
