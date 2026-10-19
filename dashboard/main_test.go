@@ -2341,14 +2341,6 @@ func (r *roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 	return r.fn(req)
 }
 
-type mockCloser struct {
-	err error
-}
-
-func (m *mockCloser) Close() error {
-	return m.err
-}
-
 type mockReadCloser struct {
 	io.Reader
 	closeErr error
