@@ -1355,6 +1355,9 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.ok(html.includes('buildsHandler'));
                 assert.ok(html.includes('unit tests pass'));
                 assert.ok(html.includes('Implement GET /api/builds'));
+                assert.ok(html.includes('<details class="chunk-section chunk-instructions-details">'));
+                assert.ok(!html.includes('<details class="chunk-section chunk-instructions-details" open'));
+                assert.ok(html.includes('<summary class="chunk-section-label chunk-instructions-toggle">'));
                 assert.ok(html.includes('1 / 2 CHUNKS COMPLETED'));
             });
 
