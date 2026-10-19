@@ -689,34 +689,6 @@ func TestGetMimeType_TableDriven(t *testing.T) {
 	}
 }
 
-func TestSanitizeEnvVars_TableDriven(t *testing.T) {
-	input := []string{
-		"NORMAL_VAR=hello",
-		"HA_TOKEN=supersecret123",
-		"DISCORD_BOT_TOKEN=token456",
-		"GITHUB_PAT=pat789",
-		"DB_PASSWORD=mypassword",
-		"API_KEY=keyvalue",
-		"SESSION_SECRET=secretvalue",
-		"INVALID_FORMAT_WITHOUT_EQUALS",
-	}
-
-	sanitized := SanitizeEnvVars(input)
-
-	if len(sanitized) != 7 {
-		t.Fatalf("expected 7 sanitized entries (skipping invalid format), got %d", len(sanitized))
-	}
-
-	for _, env := range sanitized {
-		if strings.HasPrefix(env, "NORMAL_VAR=") && env != "NORMAL_VAR=hello" {
-			t.Errorf("expected NORMAL_VAR to be preserved, got %q", env)
-		}
-		if (strings.Contains(env, "TOKEN") || strings.Contains(env, "PASSWORD") || strings.Contains(env, "KEY") || strings.Contains(env, "SECRET") || strings.Contains(env, "PAT")) && !strings.Contains(env, "[REDACTED]") {
-			t.Errorf("expected sensitive key to be redacted, got %q", env)
-		}
-	}
-}
-
 func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 	tests := []struct {
 		name        string

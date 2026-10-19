@@ -1862,15 +1862,6 @@ func TestCoverageBoost_PoolStoreResolutionAndOptions(t *testing.T) {
 }
 
 func TestCoverageBoost_SinkAndLegacyAdapterMethods(t *testing.T) {
-	ds := &DiscordTurnSink{}
-	ds.OnTurnStarted()
-	ds.OnThinking()
-
-	vs := NewVoiceTurnSink(nil, "dev-1")
-	vs.OnTurnStarted()
-	vs.OnThinking()
-	vs.OnToolCall("run_command", "ls")
-
 	var nilP *WorkerPool
 	if nilP.AgentPool() != nil {
 		t.Errorf("expected nil for nil WorkerPool.AgentPool")

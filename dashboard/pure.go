@@ -613,30 +613,6 @@ func GetMimeType(filename string) string {
 	return "application/octet-stream"
 }
 
-// SanitizeEnvVars redacts sensitive credentials from environment variable strings.
-func SanitizeEnvVars(envVars []string) []string {
-	cleaned := make([]string, 0, len(envVars))
-	for _, env := range envVars {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToUpper(parts[0])
-		isSensitive := false
-		for _, sensitive := range sensitiveKeys {
-			if strings.Contains(key, sensitive) {
-				isSensitive = true
-				break
-			}
-		}
-		if isSensitive {
-			cleaned = append(cleaned, fmt.Sprintf("%s=[REDACTED]", parts[0]))
-		} else {
-			cleaned = append(cleaned, env)
-		}
-	}
-	return cleaned
-}
 
 var stageRank = map[string]int{
 	"swapping":      6,

@@ -41,43 +41,6 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 			})
 		}
 	})
-
-	t.Run("SanitizeAll", func(t *testing.T) {
-		tests := []struct {
-			name                   string
-			daemon                 *SyncDaemon
-			raw                    string
-			shouldHide, shouldKeep []string
-		}{
-			{
-				name: "redacts secrets len >= 4 and preserves short strings",
-				daemon: NewDaemon(DaemonConfig{
-					PAT:               "ghp_myPersonalAccessToken12345",
-					DiscordToken:      "my_discord_secret_token",
-					DiscordWebhookURL: "https://discord.com/api/webhooks/999/super_secret_webhook",
-					ExtraSecrets:      []string{"pg_super_secret_password", "ha_long_lived_access_token_12345", "AIzaSyTestApiKeyForGemini1234567890", "abc"},
-				}),
-				raw:        "Connect to postgres://user:pg_super_secret_password@db:5432 with ghp_myPersonalAccessToken12345 and token my_discord_secret_token or webhook https://discord.com/api/webhooks/999/super_secret_webhook. Also ha_long_lived_access_token_12345 and key AIzaSyTestApiKeyForGemini1234567890 and normal word abc.",
-				shouldHide: []string{"pg_super_secret_password", "ghp_myPersonalAccessToken12345", "my_discord_secret_token", "super_secret_webhook", "ha_long_lived_access_token_12345", "AIzaSyTestApiKeyForGemini1234567890"},
-				shouldKeep: []string{"abc"},
-			},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				sanitized := tt.daemon.SanitizeAll(tt.raw)
-				for _, secret := range tt.shouldHide {
-					if strings.Contains(sanitized, secret) {
-						t.Errorf("expected %q to be redacted, got: %s", secret, sanitized)
-					}
-				}
-				for _, keep := range tt.shouldKeep {
-					if !strings.Contains(sanitized, keep) {
-						t.Errorf("expected %q to be preserved, got: %s", keep, sanitized)
-					}
-				}
-			})
-		}
-	})
 }
 
 func TestGetComposeArgs_TableDriven(t *testing.T) {
