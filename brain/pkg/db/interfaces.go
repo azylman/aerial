@@ -35,7 +35,6 @@ type FactStore interface {
 	InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error)
 	SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
-	GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error)
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
 	UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error
@@ -53,7 +52,6 @@ type ScheduleStore interface {
 	InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error
 	GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error)
 
-	CreateCronSchedule(ctx context.Context, c CronSchedule) error
 	GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error)
 	GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error)
 	UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error
@@ -95,7 +93,6 @@ type SessionStore interface {
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
 	GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error)
 	GetExternalConversationID(ctx context.Context, internalID string) (string, error)
-	SaveConversationMapping(ctx context.Context, externalID, internalID string) error
 	FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error)
 }
 
@@ -168,7 +165,6 @@ type PRRegistryStore interface {
 
 // VanadisStore handles persistent tracking for Vanadis multi-chunk builds and chunks.
 type VanadisStore interface {
-	CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error
 	GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
 	GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error)
 	AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int) error
@@ -184,6 +180,5 @@ type Store interface {
 	TranscriptStore
 	PRRegistryStore
 	VanadisStore
-	WithTx(ctx context.Context, fn func(txStore Store) error) error
 	Close() error
 }

@@ -115,7 +115,7 @@ func setupTestStore(t *testing.T) *db.FakeStore {
 	return db.NewFakeStore()
 }
 
-func createCronSchedule(s db.Store, c db.CronSchedule) error {
+func createCronSchedule(s *db.FakeStore, c db.CronSchedule) error {
 	return s.CreateCronSchedule(context.Background(), c)
 }
 

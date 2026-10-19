@@ -207,24 +207,6 @@ func (s *SQLStore) GetAllOneShotSchedules(ctx context.Context, threadID string) 
 	return scanOneShotRows(rows)
 }
 
-func (s *SQLStore) CreateCronSchedule(ctx context.Context, c CronSchedule) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	if c.CreatedAt.IsZero() {
-		c.CreatedAt = time.Now().UTC()
-	}
-	if c.Timezone == "" {
-		c.Timezone = "America/Los_Angeles"
-	}
-	c.Effort = normalizeScheduleEffort(c.Effort)
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err := s.db.ExecContext(queryCtx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, c.Effort)
-	return err
-}
 
 func (s *SQLStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error) {
 	if err := s.checkDB(); err != nil {

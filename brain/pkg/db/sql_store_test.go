@@ -3,63 +3,12 @@ package db
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestWithTxCommit(t *testing.T) {
-	store := NewTestStore(t)
-	ctx := context.Background()
-
-	err := store.WithTx(ctx, func(txStore Store) error {
-		_, err := txStore.InsertFact(ctx, "test", "Transactional fact", 1.0, nil)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("WithTx failed: %v", err)
-	}
-
-	facts, err := store.GetFactsPaginated(ctx, FactsFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated failed: %v", err)
-	}
-	if len(facts.Facts) != 1 {
-		t.Fatalf("Expected 1 fact committed, got %d", len(facts.Facts))
-	}
-	if facts.Facts[0].FactText != "Transactional fact" {
-		t.Errorf("Expected 'Transactional fact', got %q", facts.Facts[0].FactText)
-	}
-}
-
-func TestWithTxRollback(t *testing.T) {
-	store := NewTestStore(t)
-	ctx := context.Background()
-
-	expectedErr := errors.New("simulated transaction failure")
-	err := store.WithTx(ctx, func(txStore Store) error {
-		_, err := txStore.InsertFact(ctx, "test", "Uncommitted fact", 1.0, nil)
-		if err != nil {
-			return err
-		}
-		return expectedErr
-	})
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf("Expected %v, got %v", expectedErr, err)
-	}
-
-	facts, err := store.GetFactsPaginated(ctx, FactsFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated failed: %v", err)
-	}
-	if len(facts.Facts) != 0 {
-		t.Fatalf("Expected 0 facts after rollback, got %d", len(facts.Facts))
-	}
-}
-
-func TestNewTxStoreTypedNil(t *testing.T) {
+func TestSQLStoreIsDBTXNilAndClose(t *testing.T) {
 	// 1. Untyped nil
 	if !isDBTXNil(nil) {
 		t.Errorf("expected isDBTXNil(nil) to be true")
@@ -88,15 +37,7 @@ func TestNewTxStoreTypedNil(t *testing.T) {
 		t.Errorf("expected isDBTXNil(dummyDBTXNoDriver{}) to be false")
 	}
 
-	// 5. NewTxStore with untyped nil and typed nil
-	if store := NewTxStore(nil, false); store != nil {
-		t.Errorf("expected NewTxStore(nil, false) to be nil, got %v", store)
-	}
-	if store := NewTxStore(nilTx, false); store != nil {
-		t.Fatalf("Expected NewTxStore to return nil for typed nil *sql.Tx, got %v", store)
-	}
-
-	// 6. SQLStore.Close() branches
+	// 5. SQLStore.Close() branches
 	var nilStore *SQLStore
 	if err := nilStore.Close(); err != nil {
 		t.Errorf("expected nil error on nilStore.Close(), got %v", err)
@@ -112,36 +53,7 @@ func TestNewTxStoreTypedNil(t *testing.T) {
 		t.Errorf("expected nil error on storeNonCloser.Close(), got %v", err)
 	}
 
-	// 7. SQLStore.WithTx branches
 	ctx := context.Background()
-	if err := nilStore.WithTx(ctx, func(s Store) error { return nil }); err == nil {
-		t.Errorf("expected error on nilStore.WithTx, got nil")
-	}
-	if err := storeWithNilDB.WithTx(ctx, func(s Store) error { return nil }); err == nil {
-		t.Errorf("expected error on storeWithNilDB.WithTx, got nil")
-	}
-
-	executed := false
-	err := storeNonCloser.WithTx(ctx, func(s Store) error {
-		executed = true
-		return nil
-	})
-	if err != nil || !executed {
-		t.Errorf("expected WithTx without beginner to execute fn directly, err=%v executed=%v", err, executed)
-	}
-
-	tmpPath := filepath.Join(t.TempDir(), "closed.db")
-	db, err := initTestSQLite(tmpPath)
-	if err != nil {
-		t.Fatalf("failed to init db: %v", err)
-	}
-	closedStore := NewSQLStore(db)
-	_ = db.Close()
-
-	if err := closedStore.WithTx(ctx, func(s Store) error { return nil }); err == nil {
-		t.Errorf("expected error on closedStore.WithTx, got nil")
-	}
-
 	if _, err := nilStore.InsertFact(ctx, "cat", "text", 1.0, nil); err == nil {
 		t.Fatalf("Expected error when calling InsertFact on nil *SQLStore, got nil")
 	}
@@ -155,10 +67,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 		t.Errorf("NewSQLStore(nil) expected nil, got %v", store)
 	}
 
-	if err := s.WithTx(ctx, nil); err == nil {
-		t.Errorf("expected error calling WithTx on nil SQLStore, got nil")
-	}
-
 	if _, err := s.InsertFact(ctx, "c", "f", 1.0, nil); err == nil {
 		t.Errorf("expected error on InsertFact nil store")
 	}
@@ -167,9 +75,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	}
 	if _, err := s.GetFactsPaginated(ctx, FactsFilter{}); err == nil {
 		t.Errorf("expected error on GetFactsPaginated nil store")
-	}
-	if _, err := s.GetFactsByThreadWithEmbeddings(ctx, "t"); err == nil {
-		t.Errorf("expected error on GetFactsByThreadWithEmbeddings nil store")
 	}
 	if _, err := s.GetActiveConversationsForExtraction(ctx, 10); err == nil {
 		t.Errorf("expected error on GetActiveConversationsForExtraction nil store")
@@ -192,9 +97,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	}
 	if _, err := s.GetAllOneShotSchedules(ctx, "t"); err == nil {
 		t.Errorf("expected error on GetAllOneShotSchedules nil store")
-	}
-	if err := s.CreateCronSchedule(ctx, CronSchedule{}); err == nil {
-		t.Errorf("expected error on CreateCronSchedule nil store")
 	}
 	if _, err := s.GetDueCronSchedules(ctx); err == nil {
 		t.Errorf("expected error on GetDueCronSchedules nil store")
@@ -316,9 +218,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if _, err := s.GetExternalConversationID(ctx, "test"); err == nil {
 		t.Errorf("expected error on GetExternalConversationID nil store")
 	}
-	if err := s.SaveConversationMapping(ctx, "ext", "int"); err == nil {
-		t.Errorf("expected error on SaveConversationMapping nil store")
-	}
 	if _, err := s.FindUnrotatedSessions(ctx, 8); err == nil {
 		t.Errorf("expected error on FindUnrotatedSessions nil store")
 	}
@@ -329,9 +228,6 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	}
 	if _, err := storeWithNilDB.GetExternalConversationID(ctx, "test"); err == nil {
 		t.Errorf("expected error calling GetExternalConversationID with nil db")
-	}
-	if err := storeWithNilDB.SaveConversationMapping(ctx, "ext", "int"); err == nil {
-		t.Errorf("expected error calling SaveConversationMapping with nil db")
 	}
 	if _, err := storeWithNilDB.SearchSimilarFacts(ctx, nil, "", 10, 0.1); err == nil {
 		t.Errorf("expected error on SearchSimilarFacts storeWithNilDB")
@@ -454,8 +350,8 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Conversation mapping & lookup
-	if err := store.SaveConversationMapping(ctx, "ext-thread-99", "internal-sess-99"); err != nil {
-		t.Fatalf("SaveConversationMapping failed: %v", err)
+	if err := store.SaveSessionID(ctx, "ext-thread-99", "internal-sess-99"); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
 	}
 	extID, err := store.GetExternalConversationID(ctx, "internal-sess-99")
 	if err != nil || extID != "ext-thread-99" {
@@ -511,18 +407,5 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	_ = closedDB.Close()
 	if _, err := closedStore.GetPendingOrProcessingMessages(ctx, 10); err == nil {
 		t.Errorf("expected error from closedStore.GetPendingOrProcessingMessages, got nil")
-	}
-
-	// 4. Cron schedule creation
-	cron := CronSchedule{
-		ID:        "cs-effort-1",
-		TargetID:  "chan-1",
-		CronExpr:  "*/5 * * * *",
-		Prompt:    "Prompt",
-		NextRunAt: time.Now().Add(time.Hour),
-		Enabled:   true,
-	}
-	if err := store.CreateCronSchedule(ctx, cron); err != nil {
-		t.Fatalf("failed to create cron schedule: %v", err)
 	}
 }

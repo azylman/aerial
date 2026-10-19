@@ -1015,8 +1015,10 @@ func TestSchedulesAndRunsLifecycle(t *testing.T) {
 		Effort:    "low",
 		CreatedAt: now,
 	}
-	if err := store.CreateCronSchedule(ctx, cronSched); err != nil {
-		t.Fatalf("CreateCronSchedule failed: %v", err)
+	_, err = database.ExecContext(ctx, `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		cronSched.ID, cronSched.TargetID, cronSched.TitlePrefix, cronSched.CronExpr, cronSched.Prompt, "America/Los_Angeles", cronSched.NextRunAt, cronSched.Enabled, cronSched.CreatedAt, cronSched.Effort)
+	if err != nil {
+		t.Fatalf("failed to insert cron schedule: %v", err)
 	}
 
 	dueCron, err := store.GetDueCronSchedules(ctx)
@@ -1178,9 +1180,9 @@ func TestSessionConversationMapping(t *testing.T) {
 	store := NewSQLStore(database)
 	ctx := context.Background()
 
-	err := store.SaveConversationMapping(ctx, "ext-1", "int-1")
+	err := store.SaveSessionID(ctx, "ext-1", "int-1")
 	if err != nil {
-		t.Fatalf("SaveConversationMapping failed: %v", err)
+		t.Fatalf("SaveSessionID failed: %v", err)
 	}
 
 	intID, err := store.GetSessionID(ctx, "ext-1")
@@ -1220,13 +1222,7 @@ func TestFactEmbeddingAndThreadLookup(t *testing.T) {
 		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
 	}
 
-	facts, err := store.GetFactsByThreadWithEmbeddings(ctx, "thread-lookup-1")
-	if err != nil {
-		t.Fatalf("GetFactsByThreadWithEmbeddings failed: %v", err)
-	}
-	if len(facts) != 1 {
-		t.Fatalf("expected 1 fact for thread, got %d", len(facts))
-	}
+
 }
 
 func TestCleanTaskSummary(t *testing.T) {
@@ -1501,9 +1497,6 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	if _, err := closedStore.SearchSimilarFacts(ctx, nil, "query", 10, 0.5); err == nil {
 		t.Error("expected error on closed db in SearchSimilarFacts")
 	}
-	if _, err := closedStore.GetFactsByThreadWithEmbeddings(ctx, "th1"); err == nil {
-		t.Error("expected error on closed db in GetFactsByThreadWithEmbeddings")
-	}
 	if err := closedStore.UpdateFactEmbedding(ctx, 1, nil); err == nil {
 		t.Error("expected error on closed db in UpdateFactEmbedding")
 	}
@@ -1525,9 +1518,6 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	}
 	if _, err := closedStore.GetAllOneShotSchedules(ctx, "th1"); err == nil {
 		t.Error("expected error on closed db in GetAllOneShotSchedules")
-	}
-	if err := closedStore.CreateCronSchedule(ctx, CronSchedule{ID: "cs1", TargetID: "th1"}); err == nil {
-		t.Error("expected error on closed db in CreateCronSchedule")
 	}
 	if _, err := closedStore.GetDueCronSchedules(ctx); err == nil {
 		t.Error("expected error on closed db in GetDueCronSchedules")
@@ -1656,11 +1646,6 @@ func TestDB_Fact_InsertAndEmbedding_EdgeCases(t *testing.T) {
 		t.Error("expected error updating fact embedding with invalid dim")
 	}
 
-	// 4. GetFactsByThreadWithEmbeddings empty thread
-	facts, err := store.GetFactsByThreadWithEmbeddings(ctx, "")
-	if err != nil || len(facts) == 0 {
-		t.Errorf("expected non-empty facts for empty thread query, got %v, err: %v", facts, err)
-	}
 }
 
 func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
@@ -1681,9 +1666,15 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		Enabled:     true,
 		Effort:      "",
 	}
-	if err := store.CreateCronSchedule(ctx, cron1); err != nil {
-		t.Fatalf("CreateCronSchedule low failed: %v", err)
+	insertCron := func(c CronSchedule) {
+		t.Helper()
+		_, err := database.ExecContext(ctx, `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, "America/Los_Angeles", c.NextRunAt, c.Enabled, time.Now().UTC(), c.Effort)
+		if err != nil {
+			t.Fatalf("failed to insert cron %s: %v", c.ID, err)
+		}
 	}
+	insertCron(cron1)
 
 	// 2. Create CronSchedule with explicit "high" effort
 	cron2 := CronSchedule{
@@ -1696,9 +1687,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		Enabled:     true,
 		Effort:      "high",
 	}
-	if err := store.CreateCronSchedule(ctx, cron2); err != nil {
-		t.Fatalf("CreateCronSchedule high failed: %v", err)
-	}
+	insertCron(cron2)
 
 	// 3. Query due crons and verify effort fields
 	dueCrons, err := store.GetDueCronSchedules(ctx)

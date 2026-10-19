@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
 
 var (
@@ -27,29 +26,6 @@ func normalizeVanadisEffort(effort string) (string, error) {
 	}
 }
 
-func formatPostgresTextArray(items []string) string {
-	if len(items) == 0 {
-		return "{}"
-	}
-	var b strings.Builder
-	b.WriteByte('{')
-	for i, item := range items {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteByte('"')
-		for j := 0; j < len(item); j++ {
-			ch := item[j]
-			if ch == '\\' || ch == '"' {
-				b.WriteByte('\\')
-			}
-			b.WriteByte(ch)
-		}
-		b.WriteByte('"')
-	}
-	b.WriteByte('}')
-	return b.String()
-}
 
 func parsePostgresTextArray(raw string) []string {
 	trimmed := strings.TrimSpace(raw)
@@ -236,68 +212,6 @@ func scanVanadisChunk(scanner interface{ Scan(dest ...any) error }, isPostgres b
 	return c, nil
 }
 
-// CreateVanadisBuild inserts a VanadisBuild and all of its ordered VanadisChunks in a single transaction.
-func (s *SQLStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
-	if s == nil || isDBTXNil(s.db) {
-		return fmt.Errorf("database connection is nil")
-	}
-
-	normBuild, normChunks, err := validateAndNormalizeVanadisBuild(build, chunks)
-	if err != nil {
-		return err
-	}
-
-	return s.WithTx(ctx, func(txStore Store) error {
-		txSQL, ok := txStore.(*SQLStore)
-		if !ok {
-			return fmt.Errorf("unexpected tx store type: %T", txStore)
-		}
-		execDB := txSQL.db
-
-		buildQuery := `
-			INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
-		`
-		if _, err := execDB.ExecContext(ctx, buildQuery, normBuild.ID, normBuild.ThreadID, normBuild.Tier, normBuild.Title, normBuild.Objective, normBuild.SharedContext, normBuild.Status, normBuild.StatusMessageID); err != nil {
-			return fmt.Errorf("failed to insert vanadis build: %w", err)
-		}
-
-		chunkQuery := `
-			INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
-		`
-		for _, c := range normChunks {
-			var prNum sql.NullInt64
-			if c.PRNumber > 0 {
-				prNum = sql.NullInt64{Int64: int64(c.PRNumber), Valid: true}
-			}
-			var startedAt sql.NullTime
-			if !c.StartedAt.IsZero() {
-				startedAt = sql.NullTime{Time: c.StartedAt.UTC(), Valid: true}
-			} else if c.Status == "running" || c.Status == "coding" {
-				startedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
-			}
-
-			var targetFilesArg, targetSymbolsArg, acceptanceCriteriaArg any
-			if txSQL.isPostgres {
-				targetFilesArg = c.TargetFiles
-				targetSymbolsArg = c.TargetSymbols
-				acceptanceCriteriaArg = c.AcceptanceCriteria
-			} else {
-				targetFilesArg = formatPostgresTextArray(c.TargetFiles)
-				targetSymbolsArg = formatPostgresTextArray(c.TargetSymbols)
-				acceptanceCriteriaArg = formatPostgresTextArray(c.AcceptanceCriteria)
-			}
-
-			if _, err := execDB.ExecContext(ctx, chunkQuery,
-				c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, targetFilesArg, targetSymbolsArg, c.Effort, acceptanceCriteriaArg, c.Status, prNum, startedAt,
-			); err != nil {
-				return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
-			}
-		}
-		return nil
-	})
-}
 
 // GetVanadisBuild retrieves a VanadisBuild and its ordered VanadisChunks by buildID.
 func (s *SQLStore) GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {

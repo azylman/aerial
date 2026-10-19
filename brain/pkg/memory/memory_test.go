@@ -1083,9 +1083,6 @@ func (e *errInsertFactStore) GetMaxMessageRowID(ctx context.Context, threadID st
 func (e *errInsertFactStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
 	return nil
 }
-func (e *errInsertFactStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]db.FactWithEmbedding, error) {
-	return nil, nil
-}
 func (e *errInsertFactStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
 	return 0, fmt.Errorf("simulated insert error")
 }
