@@ -607,12 +607,12 @@ func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo stri
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	query := `UPDATE pr_registry SET status = 'ci_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('ci_failed', 'merged', 'closed') RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = 'ci_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'closed', 'deploying', 'deployed', 'deploy_failed') RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition ci_failed", query)
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	query := `UPDATE pr_registry SET status = 'conflict', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status != 'conflict' AND status NOT IN ('merged', 'closed') RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = 'conflict', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('conflict', 'merged', 'closed', 'deploying', 'deployed', 'deploy_failed') RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition conflict", query)
 }
 
@@ -649,7 +649,7 @@ func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Conte
 
 	query := `
 		UPDATE pr_registry SET status = 'ci_failed', updated_at = CURRENT_TIMESTAMP
-		WHERE id = (SELECT id FROM pr_registry WHERE repo = $1 AND head_sha = $2 AND status NOT IN ('ci_failed', 'merged', 'closed') ORDER BY updated_at DESC LIMIT 1)
+		WHERE id = (SELECT id FROM pr_registry WHERE repo = $1 AND head_sha = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'closed', 'deploying', 'deployed', 'deploy_failed') ORDER BY updated_at DESC LIMIT 1)
 		RETURNING target_id, pr_number;`
 	var targetID string
 	var prNumber int
@@ -706,7 +706,7 @@ func (r *PostgresPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]Re
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `SELECT pr_number, branch, target_id, head_sha FROM pr_registry WHERE repo = $1 AND status NOT IN ('merged', 'closed', 'conflict') ORDER BY pr_number ASC;`
+	query := `SELECT pr_number, branch, target_id, head_sha FROM pr_registry WHERE repo = $1 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'closed', 'conflict', 'deploying', 'deployed', 'deploy_failed') ORDER BY pr_number ASC;`
 	rows, err := r.pool.Query(qCtx, query, repo)
 	if err != nil {
 		return nil, fmt.Errorf("list open prs: %w", err)
