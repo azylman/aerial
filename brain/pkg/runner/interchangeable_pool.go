@@ -25,15 +25,17 @@ type InterchangeablePoolConfig struct {
 // (or context cancellation / failure), the worker is automatically rotated in the background
 // to ensure a fresh session and returned to the available pool.
 type InterchangeablePool struct {
-	underlying *UnifiedProcessPool
-	workers    []string
-	available  chan string
-	mu         sync.Mutex
-	closed     atomic.Bool
-	closeOnce  sync.Once
-	bgWg       sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
+	underlying  *UnifiedProcessPool
+	workers     []string
+	keyPrefix   string
+	overflowSeq atomic.Uint64
+	available   chan string
+	mu          sync.Mutex
+	closed      atomic.Bool
+	closeOnce   sync.Once
+	bgWg        sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 var (
@@ -71,6 +73,7 @@ func NewInterchangeablePool(underlying *UnifiedProcessPool, cfg InterchangeableP
 	return &InterchangeablePool{
 		underlying: underlying,
 		workers:    workers,
+		keyPrefix:  keyPrefix,
 		available:  available,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -91,26 +94,35 @@ func (p *InterchangeablePool) Initialize(ctx context.Context) error {
 	return p.underlying.Initialize(ctx)
 }
 
-// GetOrCreateSession leases an available worker from the pool, retrieves its StreamingDaemon,
-// and returns a leasedSession that automatically triggers rotation and worker return upon turn completion.
-func (p *InterchangeablePool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
-	if p == nil || p.closed.Load() {
-		return nil, errors.New("interchangeable pool is closed")
+func (p *InterchangeablePool) acquireWorkerSlot(ctx context.Context) (string, bool, error) {
+	if p.closed.Load() || (p.ctx != nil && p.ctx.Err() != nil) {
+		return "", false, errors.New("interchangeable pool is closed")
 	}
-
-	var workerKey string
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-p.ctx.Done():
-		return nil, errors.New("interchangeable pool is closed")
 	case key := <-p.available:
-		workerKey = key
+		return key, false, nil
+	default:
+		prefix := p.keyPrefix
+		if prefix == "" {
+			prefix = "ephemeral:worker"
+		}
+		return fmt.Sprintf("%s-ondemand-%d", prefix, p.overflowSeq.Add(1)), true, nil
+	}
+}
+
+// GetOrCreateSession leases an available worker from the pool (or spawns an on-demand overflow worker
+// when all pre-warmed workers are busy), retrieves its StreamingDaemon, and returns a leasedSession.
+func (p *InterchangeablePool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
+	if p == nil {
+		return nil, errors.New("interchangeable pool is closed")
 	}
 
-	if p.closed.Load() {
-		p.returnWorker(workerKey)
-		return nil, errors.New("interchangeable pool is closed")
+	workerKey, isOverflow, err := p.acquireWorkerSlot(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	if p.underlying == nil {
@@ -129,18 +141,23 @@ func (p *InterchangeablePool) GetOrCreateSession(ctx context.Context, targetKey 
 	}
 
 	sess := &leasedSession{
-		pool:      p,
-		workerKey: workerKey,
-		daemon:    daemon,
-		completed: make(chan struct{}),
+		pool:       p,
+		workerKey:  workerKey,
+		isOverflow: isOverflow,
+		daemon:     daemon,
+		completed:  make(chan struct{}),
 	}
 
+	var pDone <-chan struct{}
+	if p.ctx != nil {
+		pDone = p.ctx.Done()
+	}
 	go func() {
 		select {
 		case <-ctx.Done():
 			sess.release()
 		case <-sess.completed:
-		case <-p.ctx.Done():
+		case <-pDone:
 			sess.release()
 		}
 	}()
@@ -181,6 +198,25 @@ func (p *InterchangeablePool) rotateAndRelease(workerKey string) {
 		}
 
 		p.returnWorker(workerKey)
+	}()
+}
+
+func (p *InterchangeablePool) evictOverflow(workerKey string) {
+	p.mu.Lock()
+	if p.closed.Load() {
+		p.mu.Unlock()
+		return
+	}
+	p.bgWg.Add(1)
+	p.mu.Unlock()
+
+	go func() {
+		defer p.bgWg.Done()
+		if p.underlying != nil {
+			if err := p.underlying.EvictSession(workerKey); err != nil && !p.closed.Load() {
+				log.Printf("[InterchangeablePool] Warning: overflow worker eviction failed for %q: %v", workerKey, err)
+			}
+		}
 	}()
 }
 
@@ -338,6 +374,7 @@ func (p *InterchangeablePool) AvailableCount() int {
 type leasedSession struct {
 	pool        *InterchangeablePool
 	workerKey   string
+	isOverflow  bool
 	daemon      *StreamingDaemon
 	releaseOnce sync.Once
 	completed   chan struct{}
@@ -351,7 +388,11 @@ func (s *leasedSession) release() {
 			close(s.completed)
 		}
 		if s.pool != nil {
-			s.pool.rotateAndRelease(s.workerKey)
+			if s.isOverflow {
+				s.pool.evictOverflow(s.workerKey)
+			} else {
+				s.pool.rotateAndRelease(s.workerKey)
+			}
 		}
 	})
 }
@@ -474,32 +515,16 @@ func (s *releaseTurnSink) OnError(err error) {
 	}
 }
 
-// AcquireLease leases an available worker slot and delegates lease acquisition to the underlying pool.
+// AcquireLease leases an available worker slot (or mints an on-demand overflow slot)
+// and delegates lease acquisition to the underlying pool.
 func (p *InterchangeablePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
 	if p == nil {
 		return nil, errors.New("interchangeable pool is uninitialized")
 	}
-	if p.closed.Load() {
-		return nil, errors.New("interchangeable pool is closed")
-	}
 
-	var workerKey string
-	var pDone <-chan struct{}
-	if p.ctx != nil {
-		pDone = p.ctx.Done()
-	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-pDone:
-		return nil, errors.New("interchangeable pool is closed")
-	case key := <-p.available:
-		workerKey = key
-	}
-
-	if p.closed.Load() {
-		p.returnWorker(workerKey)
-		return nil, errors.New("interchangeable pool is closed")
+	workerKey, isOverflow, err := p.acquireWorkerSlot(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	if p.underlying == nil {
@@ -514,17 +539,19 @@ func (p *InterchangeablePool) AcquireLease(ctx context.Context, targetKey string
 	}
 
 	return &interchangeableSessionLease{
-		inner:     lease,
-		pool:      p,
-		workerKey: workerKey,
+		inner:      lease,
+		pool:       p,
+		workerKey:  workerKey,
+		isOverflow: isOverflow,
 	}, nil
 }
 
 type interchangeableSessionLease struct {
-	inner     SessionLease
-	pool      *InterchangeablePool
-	workerKey string
-	once      sync.Once
+	inner      SessionLease
+	pool       *InterchangeablePool
+	workerKey  string
+	isOverflow bool
+	once       sync.Once
 }
 
 var _ SessionLease = (*interchangeableSessionLease)(nil)
@@ -577,14 +604,18 @@ func (l *interchangeableSessionLease) Release() error {
 			err = l.inner.Release()
 		}
 		if l.pool != nil {
-			l.pool.rotateAndRelease(l.workerKey)
+			if l.isOverflow {
+				l.pool.evictOverflow(l.workerKey)
+			} else {
+				l.pool.rotateAndRelease(l.workerKey)
+			}
 		}
 	})
 	return err
 }
 
 func (p *InterchangeablePool) returnWorker(workerKey string) {
-	if p == nil {
+	if p == nil || strings.Contains(workerKey, "-ondemand-") {
 		return
 	}
 	select {

@@ -200,36 +200,43 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 		t.Fatalf("expected 0 available, got %d", pool.AvailableCount())
 	}
 
-	caller3Acquired, caller3Err := make(chan AgentSession, 1), make(chan error, 1)
-	go func() {
-		s3, err := pool.GetOrCreateSession(ctx, "c3", "")
-		if err != nil {
-			caller3Err <- err
-			return
-		}
-		caller3Acquired <- s3
-	}()
+	// Caller 3 immediately acquires an on-demand overflow worker without blocking on b1/b2.
+	s3, err3 := pool.GetOrCreateSession(ctx, "c3", "")
+	if err3 != nil {
+		t.Fatalf("caller 3 expected on-demand overflow session, got error: %v", err3)
+	}
+	if d3, ok := pool.Get("ephemeral:worker-ondemand-1"); !ok || d3 == nil {
+		t.Fatalf("expected on-demand worker ephemeral:worker-ondemand-1 to be active")
+	}
+	sink3 := NewThrowawayTurnSink()
+	_ = s3.Send("prompt-3", &TurnContext{TurnID: "t3", Sink: sink3, Ctx: ctx})
+	if _, err := sink3.ResultContext(ctx); err != nil {
+		t.Fatalf("caller 3 result error: %v", err)
+	}
+	pool.WaitBackground()
+	if d3After, ok := pool.Get("ephemeral:worker-ondemand-1"); ok || d3After != nil {
+		t.Fatalf("expected on-demand worker ephemeral:worker-ondemand-1 to be evicted after release")
+	}
 
-	select {
-	case <-caller3Acquired:
-		t.Fatal("caller 3 should have blocked")
-	case <-time.After(50 * time.Millisecond):
+	// Caller 4 via AcquireLease also acquires an on-demand overflow worker and evicts on Release.
+	lease4, err4 := pool.AcquireLease(ctx, "c4")
+	if err4 != nil {
+		t.Fatalf("caller 4 AcquireLease expected on-demand overflow lease, got error: %v", err4)
+	}
+	if d4, ok := pool.Get("ephemeral:worker-ondemand-2"); !ok || d4 == nil {
+		t.Fatalf("expected on-demand worker ephemeral:worker-ondemand-2 to be active")
+	}
+	if _, err := lease4.Execute(ctx, &TurnContext{TurnID: "t4", Prompt: "custom-prompt", Ctx: ctx}); err != nil {
+		t.Fatalf("caller 4 Execute error: %v", err)
+	}
+	_ = lease4.Release()
+	pool.WaitBackground()
+	if d4After, ok := pool.Get("ephemeral:worker-ondemand-2"); ok || d4After != nil {
+		t.Fatalf("expected on-demand worker ephemeral:worker-ondemand-2 to be evicted after Release")
 	}
 
 	close(b1)
 	_, _ = sink1.ResultContext(ctx)
-
-	select {
-	case s3 := <-caller3Acquired:
-		sink3 := NewThrowawayTurnSink()
-		_ = s3.Send("prompt-3", &TurnContext{TurnID: "t3", Sink: sink3, Ctx: ctx})
-		_, _ = sink3.ResultContext(ctx)
-	case err := <-caller3Err:
-		t.Fatalf("caller 3 error: %v", err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for caller 3")
-	}
-
 	close(b2)
 	_, _ = sink2.ResultContext(ctx)
 	pool.WaitBackground()
@@ -239,22 +246,12 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 }
 
 func TestInterchangeablePool_ContextCancellation(t *testing.T) {
-	// Case 1: Cancellation while waiting in line
+	// Case 1: Pre-cancelled context rejected immediately
 	pool, _ := newTestInterchangeablePool(t, 1, "", "", nil)
-	s1, err := pool.GetOrCreateSession(context.Background(), "c1", "")
-	if err != nil {
-		t.Fatalf("leasing worker 1: %v", err)
-	}
-	defer func() {
-		if closer, ok := s1.(io.Closer); ok {
-			_ = closer.Close()
-		}
-	}()
-
-	ctxTimeout, cancelTimeout := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancelTimeout()
-	if _, err2 := pool.GetOrCreateSession(ctxTimeout, "c2", ""); !errors.Is(err2, context.DeadlineExceeded) && !errors.Is(err2, context.Canceled) {
-		t.Errorf("expected deadline/canceled error, got: %v", err2)
+	ctxCancelled, cancelTimeout := context.WithCancel(context.Background())
+	cancelTimeout()
+	if _, err2 := pool.GetOrCreateSession(ctxCancelled, "c2", ""); !errors.Is(err2, context.Canceled) {
+		t.Errorf("expected canceled error, got: %v", err2)
 	}
 
 	// Case 2: Cancellation while turn is in-flight
@@ -315,6 +312,7 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	nilPool.WaitBackground()
 	nilPool.SetSessionManager(nil)
 	nilPool.SetSessionCallbacks(nil, nil)
+	nilPool.returnWorker("ephemeral:worker-0")
 	if nilPool.Close() != nil || nilPool.Workers() != nil || nilPool.AvailableCount() != 0 || nilPool.Underlying() != nil || nilPool.Model() != "" {
 		t.Error("unexpected nilPool accessor return values")
 	}
@@ -322,37 +320,26 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 		t.Error("expected errors on nilPool operations")
 	}
 
-	// Pool closed while waiting in line
+	// Pool closed while sessions (pre-warmed + overflow) are active
 	poolWaiting, _ := newTestInterchangeablePool(t, 1, "", "", nil)
 	wSess, _ := poolWaiting.GetOrCreateSession(ctx, "t1", "")
-	defer func() {
-		if closer, ok := wSess.(io.Closer); ok {
-			_ = closer.Close()
-		}
-	}()
-	errChan := make(chan error, 1)
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		_, err2 := poolWaiting.GetOrCreateSession(context.Background(), "t2", "")
-		errChan <- err2
-	}()
-	<-started
-	runtime.Gosched()
+	wOverflowSess, _ := poolWaiting.GetOrCreateSession(ctx, "t2", "")
 	_ = poolWaiting.Close()
-
-	var waitErr error
-	select {
-	case waitErr = <-errChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for caller")
+	if closer, ok := wSess.(io.Closer); ok {
+		_ = closer.Close()
 	}
+	if closer, ok := wOverflowSess.(io.Closer); ok {
+		_ = closer.Close()
+	}
+	poolWaiting.evictOverflow("ephemeral:worker-ondemand-closed")
+	runtime.Gosched()
+
 	_, wgErr := poolWaiting.GetOrCreateSession(ctx, "target", "")
 	_, weErr := poolWaiting.ExecuteEphemeral(ctx, "target", "prompt")
-	if waitErr == nil || !strings.Contains(waitErr.Error(), "closed") || poolWaiting.Close() != nil {
-		t.Errorf("expected closed error for waiting caller, got %v", waitErr)
+	if wgErr == nil || !strings.Contains(wgErr.Error(), "closed") || poolWaiting.Close() != nil {
+		t.Errorf("expected closed error on closed poolWaiting, got %v", wgErr)
 	}
-	if wgErr == nil || poolWaiting.Initialize(ctx) == nil || weErr == nil {
+	if poolWaiting.Initialize(ctx) == nil || weErr == nil {
 		t.Error("expected closed errors on subsequent poolWaiting calls")
 	}
 
