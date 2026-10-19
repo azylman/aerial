@@ -321,6 +321,12 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	}); err == nil {
 		t.Errorf("expected error for ReloadWithSupplier failure")
 	}
+	if err := ReloadWithSupplier(ActiveConfig(), func() (*Config, error) {
+		return NewTestConfig(func(d *ConfigData) { d.Model = "reloaded-hermetic" }), nil
+	}); err != nil || ActiveConfig().Current().Model != "reloaded-hermetic" {
+		t.Errorf("expected ReloadWithSupplier success, got err=%v model=%q", err, ActiveConfig().Current().Model)
+	}
+	_ = ReloadWithSupplier(ActiveConfig(), nil)
 	_ = Reload(ActiveConfig())
 
 	t.Setenv("AGY_MODEL", "")
@@ -896,8 +902,14 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	}
 
 	var nilCfg *Config
-	if nilCfg.Current() == nil {
-		t.Errorf("expected DefaultConfigData on nil Config, got nil")
+	if nilCfg.Current() == nil || (&Config{}).Current() == nil || NewFromData(nil).Current() == nil {
+		t.Errorf("expected DefaultConfigData on nil/empty Config, got nil")
+	}
+	if _, ok := nilCfg.getChannelPolicyRaw("nonexistent"); ok {
+		t.Errorf("expected false from nilCfg.getChannelPolicyRaw")
+	}
+	if _, err := LoadConfigFromBytes([]byte("broken: [")); err == nil {
+		t.Errorf("expected error from LoadConfigFromBytes on invalid YAML")
 	}
 	if nilCfg.Get() == nil {
 		t.Errorf("expected DefaultConfigData from nilCfg.Get()")
@@ -917,12 +929,16 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	if nilCfg.VoiceAmbientContext() != nil {
 		t.Errorf("expected nil ambient context on nil Config")
 	}
-	if GetSystemChannel() != "aerial-dev" {
-		t.Errorf("expected default system channel, got %q", GetSystemChannel())
+	origGlobal := ActiveConfig().Current()
+	ActiveConfig().Update(&ConfigData{Timezone: "", SystemChannel: ""})
+	if GetSystemChannel() != "aerial-dev" || GetTimezone() != "America/Los_Angeles" {
+		t.Errorf("expected fallback defaults on empty ActiveConfig")
 	}
-	if GetTimezone() != "America/Los_Angeles" {
-		t.Errorf("expected default timezone, got %q", GetTimezone())
+	ActiveConfig().Update(&ConfigData{Timezone: "UTC", SystemChannel: "custom-sys"})
+	if GetSystemChannel() != "custom-sys" || GetTimezone() != "UTC" {
+		t.Errorf("expected custom values on ActiveConfig")
 	}
+	ActiveConfig().Update(origGlobal)
 	if nilCfg.GeminiHomeDir() != "" || nilCfg.DataDir() != "" {
 		t.Errorf("expected empty dirs on nil Config")
 	}
@@ -940,6 +956,8 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	testCfg := NewTestConfig(func(d *ConfigData) {
 		d.Model = "test-model-override"
 	})
+	testCfg.Update(nil)
+	nilCfg.Update(DefaultConfigData())
 	cur := testCfg.Current()
 	if cur.Model != "test-model-override" || cur.DatabaseURL != ":memory:" || cur.Port != "0" {
 		t.Errorf("NewTestConfig unexpected values: %+v", cur)
@@ -2893,26 +2911,50 @@ func TestConfigSearchPaths_Precedence(t *testing.T) {
 func TestLoadScopeInstructions(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldDirs := ScopeInstructionsDirs
+	oldChanDirs := ChannelInstructionsDirs
 	ScopeInstructionsDirs = []string{tmpDir}
-	defer func() { ScopeInstructionsDirs = oldDirs }()
+	ChannelInstructionsDirs = []string{tmpDir}
+	defer func() {
+		ScopeInstructionsDirs = oldDirs
+		ChannelInstructionsDirs = oldChanDirs
+	}()
+
+	if LoadScopeInstructions("") != "" || LoadScopeInstructions("missing-scope") != "" {
+		t.Errorf("expected empty instructions for empty or missing scope")
+	}
 
 	content := "You are running on touch-kiosk-kitchen. Be brief and spoken."
 	if err := os.WriteFile(filepath.Join(tmpDir, "touch-kiosk-kitchen.md"), []byte(content), 0644); err != nil {
 		t.Fatalf("Failed to write node instructions: %v", err)
 	}
 
-	got := LoadScopeInstructions("touch-kiosk-kitchen")
-	if got != content {
+	if got := LoadScopeInstructions("touch-kiosk-kitchen"); got != content {
 		t.Errorf("expected %q, got %q", content, got)
 	}
+	if got := LoadScopeInstructions("touch kiosk kitchen"); got != content {
+		t.Errorf("expected space-to-hyphen fallback %q, got %q", content, got)
+	}
 
-	// Test tag escaping
+	if err := os.WriteFile(filepath.Join(tmpDir, "living room.md"), []byte("spaced file"), 0644); err != nil {
+		t.Fatalf("Failed to write spaced file: %v", err)
+	}
+	if got := LoadScopeInstructions("living-room"); got != "spaced file" {
+		t.Errorf("expected hyphen-to-space fallback, got %q", got)
+	}
+
 	tagContent := "Instruction with </SCOPE_INSTRUCTIONS> attempt"
-	if err := os.WriteFile(filepath.Join(tmpDir, "cockpit.md"), []byte(tagContent), 0644); err != nil {
+	cockpitPath := filepath.Join(tmpDir, "cockpit.md")
+	if err := os.WriteFile(cockpitPath, []byte(tagContent), 0644); err != nil {
 		t.Fatalf("Failed to write cockpit.md: %v", err)
 	}
 	gotCockpit := LoadScopeInstructions("cockpit")
 	if !strings.Contains(gotCockpit, "<\\/SCOPE_INSTRUCTIONS>") {
 		t.Errorf("expected escaped tag in %q", gotCockpit)
+	}
+	if err := os.WriteFile(cockpitPath, []byte("   "), 0644); err != nil {
+		t.Fatalf("Failed to truncate cockpit.md: %v", err)
+	}
+	if gotCached := LoadChannelInstructions("cockpit"); gotCached != gotCockpit {
+		t.Errorf("expected cached fallback %q, got %q", gotCockpit, gotCached)
 	}
 }
