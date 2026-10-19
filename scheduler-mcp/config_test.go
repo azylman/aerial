@@ -7,100 +7,70 @@ import (
 )
 
 func TestResolveConfigPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	validLocal, emptyLocal, nonExistent := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "empty.yaml"), filepath.Join(tmpDir, "missing.yaml")
+	_ = os.WriteFile(validLocal, []byte("port: '4004'\n"), 0644)
+	_ = os.WriteFile(emptyLocal, []byte{}, 0644)
+
 	fallback := "/config/config.yaml"
+	tests := []struct {
+		name      string
+		envVal    string
+		localPath string
+		want      string
+	}{
+		{"env override takes precedence", "/custom/override.yaml", validLocal, "/custom/override.yaml"},
+		{"local config non-empty exists", "", validLocal, validLocal},
+		{"local config empty falls back", "", emptyLocal, fallback},
+		{"local config missing falls back", "", nonExistent, fallback},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", tc.envVal)
+			oldLocal := localConfigPath
+			localConfigPath = tc.localPath
+			defer func() { localConfigPath = oldLocal }()
 
-	t.Run("CONFIG_PATH environment variable takes precedence", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "/custom/override/config.yaml")
-		got := ResolveConfigPath(fallback)
-		if got != "/custom/override/config.yaml" {
-			t.Errorf("expected /custom/override/config.yaml, got %s", got)
-		}
-	})
-
-	t.Run("Local config exists and has non-zero size", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "")
-		tmpDir := t.TempDir()
-		localFile := filepath.Join(tmpDir, "config.yaml")
-		if err := os.WriteFile(localFile, []byte("port: '4004'\ntimezone: 'UTC'\n"), 0644); err != nil {
-			t.Fatalf("failed to write temp local config: %v", err)
-		}
-
-		oldLocal := localConfigPath
-		localConfigPath = localFile
-		t.Cleanup(func() { localConfigPath = oldLocal })
-
-		got := ResolveConfigPath(fallback)
-		if got != localFile {
-			t.Errorf("expected %s, got %s", localFile, got)
-		}
-	})
-
-	t.Run("Local config exists but has zero size falls back", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "")
-		tmpDir := t.TempDir()
-		emptyFile := filepath.Join(tmpDir, "empty.yaml")
-		if err := os.WriteFile(emptyFile, []byte(""), 0644); err != nil {
-			t.Fatalf("failed to write empty local config: %v", err)
-		}
-
-		oldLocal := localConfigPath
-		localConfigPath = emptyFile
-		t.Cleanup(func() { localConfigPath = oldLocal })
-
-		got := ResolveConfigPath(fallback)
-		if got != fallback {
-			t.Errorf("expected fallback %s, got %s", fallback, got)
-		}
-	})
-
-	t.Run("Local config does not exist falls back", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "")
-		oldLocal := localConfigPath
-		localConfigPath = "/non/existent/config.yaml"
-		t.Cleanup(func() { localConfigPath = oldLocal })
-
-		got := ResolveConfigPath(fallback)
-		if got != fallback {
-			t.Errorf("expected fallback %s, got %s", fallback, got)
-		}
-	})
-
-	t.Run("Real /local/config.yaml path if accessible", func(t *testing.T) {
-		if fi, err := os.Stat("/local"); err == nil && fi.IsDir() {
-			realLocal := "/local/config.yaml"
-			existed := false
-			var originalContent []byte
-			if data, err := os.ReadFile(realLocal); err == nil {
-				existed = true
-				originalContent = data
+			if got := ResolveConfigPath(fallback); got != tc.want {
+				t.Errorf("ResolveConfigPath(%q) = %q, want %q", fallback, got, tc.want)
 			}
-			t.Cleanup(func() {
-				if existed {
-					_ = os.WriteFile(realLocal, originalContent, 0644)
-				} else {
-					_ = os.Remove(realLocal)
-				}
-			})
+		})
+	}
+}
 
-			// Test 0-byte file
-			if err := os.WriteFile(realLocal, []byte{}, 0644); err == nil {
-				t.Setenv("CONFIG_PATH", "")
-				oldLocal := localConfigPath
-				localConfigPath = realLocal
-				t.Cleanup(func() { localConfigPath = oldLocal })
+func TestLoadConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	validPath, noPortPath, noTZPath, malformedPath := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "no_port.yaml"), filepath.Join(tmpDir, "no_tz.yaml"), filepath.Join(tmpDir, "malformed.yaml")
+	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\n"), 0644)
+	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\n"), 0644)
+	_ = os.WriteFile(noTZPath, []byte("port: '4005'\n"), 0644)
+	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0644)
 
-				got := ResolveConfigPath(fallback)
-				if got != fallback {
-					t.Errorf("expected fallback %s for 0-byte /local/config.yaml, got %s", fallback, got)
-				}
-
-				// Test non-empty file
-				_ = os.WriteFile(realLocal, []byte("port: '4004'\n"), 0644)
-				got = ResolveConfigPath(fallback)
-				if got != realLocal {
-					t.Errorf("expected %s for non-empty /local/config.yaml, got %s", realLocal, got)
-				}
+	tests := []struct {
+		name     string
+		path     string
+		dbURL    string
+		wantErr  bool
+		wantPort string
+		wantTZ   string
+	}{
+		{"valid config", validPath, "postgres://user:pass@host:5432/db", false, "4005", "America/Chicago"},
+		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", true, "", ""},
+		{"malformed yaml", malformedPath, "postgres://localhost/db", true, "", ""},
+		{"missing port", noPortPath, "postgres://localhost/db", true, "", ""},
+		{"missing timezone", noTZPath, "postgres://localhost/db", true, "", ""},
+		{"empty dbURL", validPath, "", true, "", ""},
+		{"empty path", "", "postgres://localhost/db", true, "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfigFile(tc.path, tc.dbURL)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-		}
-	})
+			if !tc.wantErr && (cfg.Port != tc.wantPort || cfg.Timezone != tc.wantTZ || cfg.DatabaseURL != tc.dbURL) {
+				t.Fatalf("unexpected config: %+v", cfg)
+			}
+		})
+	}
 }
