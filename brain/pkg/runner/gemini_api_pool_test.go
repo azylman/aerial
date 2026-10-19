@@ -2607,3 +2607,37 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiSessionLease_IsEphemeralAndMarkDirty(t *testing.T) {
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{})
+	defer pool.Close()
+
+	lease, err := pool.AcquireLease(context.Background(), "target-1")
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	defer lease.Release()
+
+	if lease.IsEphemeral() {
+		t.Errorf("expected IsEphemeral to be false for gemini lease")
+	}
+
+	pool.mu.RLock()
+	_, exists := pool.sessions["target-1"]
+	pool.mu.RUnlock()
+	if !exists {
+		t.Fatalf("expected session to exist before MarkDirty")
+	}
+
+	lease.MarkDirty()
+
+	pool.mu.RLock()
+	_, existsAfter := pool.sessions["target-1"]
+	pool.mu.RUnlock()
+	if existsAfter {
+		t.Errorf("expected session to be removed from pool after lease.MarkDirty()")
+	}
+
+	var nilLease *geminiSessionLease
+	nilLease.MarkDirty()
+}
