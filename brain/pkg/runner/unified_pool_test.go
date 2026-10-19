@@ -2272,8 +2272,11 @@ func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 				pinnedSessID = uuid.New().String()
 			}
 
+			var spawnCount int
 			mock := &MockDaemonSpawner{
 				SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+					spawnCount++
+					currentSpawn := spawnCount
 					inR, inW := io.Pipe()
 					outR, outW := io.Pipe()
 					errR, _ := io.Pipe()
@@ -2281,7 +2284,11 @@ func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 					go func() {
 						sessID := cfg.SessionID
 						if sessID == "" {
-							sessID = pinnedSessID
+							if currentSpawn > 1 {
+								sessID = uuid.New().String()
+							} else {
+								sessID = pinnedSessID
+							}
 						}
 						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
 

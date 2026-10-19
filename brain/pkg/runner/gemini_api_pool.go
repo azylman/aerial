@@ -1409,6 +1409,17 @@ func (l *geminiSessionLease) TurnCount() int {
 	return l.turnCount
 }
 
+func (l *geminiSessionLease) MarkDirty() {
+	if l != nil && l.pool != nil {
+		l.pool.mu.Lock()
+		delete(l.pool.sessions, l.targetKey)
+		l.pool.mu.Unlock()
+	}
+	if l != nil {
+		l.session = nil
+	}
+}
+
 func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
 	if turn == nil {
 		return nil, errors.New("turn context cannot be nil")

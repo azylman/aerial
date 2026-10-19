@@ -712,6 +712,11 @@ var nonTransientKeywords = []string{
 }
 
 func isNonTransientError(s string) bool {
+	// Internal model placeholder glitches (e.g. unknown model key MODEL_PLACEHOLDER_M417: model not found)
+	// are transient daemon execution glitches and should be retried with a fresh process.
+	if strings.Contains(strings.ToUpper(s), "MODEL_PLACEHOLDER_") {
+		return false
+	}
 	lower := strings.ToLower(s)
 	for _, kw := range nonTransientKeywords {
 		if strings.Contains(lower, kw) {

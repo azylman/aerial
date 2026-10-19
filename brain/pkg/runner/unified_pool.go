@@ -966,6 +966,12 @@ func (l *unifiedSessionLease) TurnCount() int {
 	return l.turnCount
 }
 
+func (l *unifiedSessionLease) MarkDirty() {
+	if l != nil && l.daemon != nil {
+		l.daemon.MarkDirty()
+	}
+}
+
 type leaseTurnSinkWrapper struct {
 	inner TurnSink
 	buf   *BufferingTurnSink
@@ -1074,6 +1080,8 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	if err := l.daemon.Send(compiledPrompt, turn); err != nil {
 		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") {
 			l.cancelRotation = true
+		} else if l.daemon != nil {
+			l.daemon.MarkDirty()
 		}
 		return nil, err
 	}
@@ -1088,18 +1096,24 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	if waitErr != nil {
 		if IsQuotaPause(waitErr.Error(), "") || IsCapacityBlip(waitErr.Error(), "") {
 			l.cancelRotation = true
+		} else if l.daemon != nil {
+			l.daemon.MarkDirty()
 		}
 		return nil, waitErr
 	}
 	if res != nil && !IsSubstantiveResponse(res.Response) {
-		if IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "") {
-			l.cancelRotation = true
-		} else if l.pool != nil && l.pool.cfg.SessionManager != nil && l.sessionID != "" {
+		isQuota := IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "")
+		if !isQuota && l.pool != nil && l.pool.cfg.SessionManager != nil && l.sessionID != "" {
 			if tErr, err := l.pool.cfg.SessionManager.ExtractLastTurnError(ctx, l.sessionID, turn.CreatedAt); err == nil && tErr != "" {
 				if IsQuotaPause(tErr, "") || IsCapacityBlip(tErr, "") {
-					l.cancelRotation = true
+					isQuota = true
 				}
 			}
+		}
+		if isQuota {
+			l.cancelRotation = true
+		} else if l.daemon != nil {
+			l.daemon.MarkDirty()
 		}
 	}
 	l.turnCount++
@@ -1132,10 +1146,20 @@ func (l *unifiedSessionLease) Release() error {
 		if shouldRotate {
 			log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", l.targetKey, reason)
 			metrics.RecordSessionRotation("turn_end", "pool", reason)
-			newSessionID := uuid.New().String()
 			oldSessionID := l.sessionID
 
-			if l.pool.cfg.OnSessionRotated != nil {
+			newDaemon, rotErr := l.pool.RotateDaemon(context.Background(), l.targetKey, "")
+			if rotErr != nil {
+				log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", l.targetKey, rotErr)
+				if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {
+					log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", l.targetKey, evictErr)
+				}
+				releaseErr = rotErr
+				return
+			}
+
+			newSessionID := newDaemon.SessionID()
+			if l.pool.cfg.OnSessionRotated != nil && newSessionID != "" {
 				if rotErr := l.pool.cfg.OnSessionRotated(context.Background(), l.targetKey, oldSessionID, newSessionID); rotErr != nil {
 					log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", l.targetKey, rotErr)
 					if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {
@@ -1143,13 +1167,6 @@ func (l *unifiedSessionLease) Release() error {
 					}
 					releaseErr = rotErr
 					return
-				}
-			}
-
-			if _, rotErr := l.pool.RotateDaemon(context.Background(), l.targetKey, ""); rotErr != nil {
-				log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", l.targetKey, rotErr)
-				if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {
-					log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", l.targetKey, evictErr)
 				}
 			}
 		}

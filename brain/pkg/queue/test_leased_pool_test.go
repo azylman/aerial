@@ -270,6 +270,14 @@ func (l *testSessionLease) TurnCount() int {
 	return l.turnCount
 }
 
+func (l *testSessionLease) MarkDirty() {
+	if l != nil && l.pool != nil {
+		l.pool.mu.Lock()
+		delete(l.pool.sessions, l.targetKey)
+		l.pool.mu.Unlock()
+	}
+}
+
 func (l *testSessionLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
 	if turn == nil {
 		return nil, fmt.Errorf("turn context cannot be nil")

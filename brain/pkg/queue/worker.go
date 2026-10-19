@@ -2197,6 +2197,9 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		if isTransient {
+			if te.lease != nil {
+				te.lease.MarkDirty()
+			}
 			for _, m := range te.burst {
 				te.incrementMessageRetry(m.ID, errDetail)
 			}

@@ -35,6 +35,9 @@ type SessionLease interface {
 	IsEphemeral() bool
 	TurnCount() int
 
+	// Dirty Marking
+	MarkDirty()
+
 	// Execution
 	Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error)
 
