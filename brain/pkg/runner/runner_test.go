@@ -769,6 +769,11 @@ func TestErrorAndWatchdogDetailHelpers(t *testing.T) {
 	if !isNonTransientError("fork/exec /bin/sh: permission denied") {
 		t.Errorf("expected true for fork/exec permission denied")
 	}
+
+	// MODEL_PLACEHOLDER_ model errors are transient daemon glitches, not fatal non-transient errors
+	if isNonTransientError("unknown model key MODEL_PLACEHOLDER_M417: model not found") {
+		t.Errorf("expected false for MODEL_PLACEHOLDER_ model error")
+	}
 }
 
 func TestTokenizeCommandLine_EdgeCases(t *testing.T) {

@@ -2272,8 +2272,11 @@ func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 				pinnedSessID = uuid.New().String()
 			}
 
+			var spawnCount int
 			mock := &MockDaemonSpawner{
 				SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+					spawnCount++
+					currentSpawn := spawnCount
 					inR, inW := io.Pipe()
 					outR, outW := io.Pipe()
 					errR, _ := io.Pipe()
@@ -2281,7 +2284,11 @@ func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 					go func() {
 						sessID := cfg.SessionID
 						if sessID == "" {
-							sessID = pinnedSessID
+							if currentSpawn > 1 {
+								sessID = uuid.New().String()
+							} else {
+								sessID = pinnedSessID
+							}
 						}
 						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
 
@@ -2756,4 +2763,119 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 		t.Fatalf("expected evicted daemon to close once onTurnFinished fires")
 	}
 	pool.closeEvictedDaemon(nil, "discord:worker-1")
+}
+func TestUnifiedSessionLease_ExecuteFailure_MarksDirty(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", uuid.New().String())))
+				buf := make([]byte, 1024)
+				n, _ := inR.Read(buf)
+				if n > 0 {
+					_, _ = outW.Write([]byte(`{"event":"result","response":"","error":"simulated failure","status":"ERROR"}` + "\n"))
+				}
+			}()
+			return inW, outR, errR, &MockProcessHandle{pid: 401}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	lease, err := pool.AcquireLease(ctx, "target-exec-fail")
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	defer lease.Release()
+
+	_, execErr := lease.Execute(ctx, &TurnContext{TurnID: "t1", Prompt: "p", Ctx: ctx})
+	if execErr == nil {
+		t.Fatalf("expected Execute error, got nil")
+	}
+
+	uLease := lease.(*unifiedSessionLease)
+	if !uLease.daemon.IsDirty() {
+		t.Errorf("expected daemon to be marked dirty after execution failure")
+	}
+}
+
+func TestUnifiedSessionLease_DirectMarkDirty(t *testing.T) {
+	ctx := context.Background()
+	pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
+	defer pool.Close()
+
+	lease, err := pool.AcquireLease(ctx, "target-mark-dirty")
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	defer lease.Release()
+
+	uLease := lease.(*unifiedSessionLease)
+	if uLease.daemon.IsDirty() {
+		t.Fatalf("expected daemon to not be dirty initially")
+	}
+
+	lease.MarkDirty()
+	if !uLease.daemon.IsDirty() {
+		t.Errorf("expected daemon to be dirty after lease.MarkDirty()")
+	}
+
+	var nilLease *unifiedSessionLease
+	nilLease.MarkDirty()
+}
+
+func TestUnifiedSessionLease_Release_RotationFailurePaths(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. RotateDaemon fails on pool error
+	{
+		mock := &MockDaemonSpawner{}
+		pool := NewUnifiedProcessPool(PoolConfig{MaxSessionTurns: 1}, mock)
+		lease, err := pool.AcquireLease(ctx, "target-rot-fail")
+		if err != nil {
+			t.Fatalf("AcquireLease failed: %v", err)
+		}
+		uLease := lease.(*unifiedSessionLease)
+		uLease.turnCount = 2 // force rotation
+
+		// Close pool so RotateDaemon fails
+		pool.Close()
+
+		relErr := lease.Release()
+		if relErr == nil {
+			t.Errorf("expected Release error when RotateDaemon fails on closed pool")
+		}
+	}
+
+	// 2. OnSessionRotated returns error
+	{
+		mock := &MockDaemonSpawner{}
+		cbErr := errors.New("persistence failed")
+		pool := NewUnifiedProcessPool(PoolConfig{
+			MaxSessionTurns: 1,
+			OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+				return cbErr
+			},
+		}, mock)
+		defer pool.Close()
+
+		lease, err := pool.AcquireLease(ctx, "target-cb-fail")
+		if err != nil {
+			t.Fatalf("AcquireLease failed: %v", err)
+		}
+		uLease := lease.(*unifiedSessionLease)
+		uLease.turnCount = 2 // force rotation
+
+		relErr := lease.Release()
+		if !errors.Is(relErr, cbErr) {
+			t.Errorf("expected persistence error %v, got %v", cbErr, relErr)
+		}
+	}
 }

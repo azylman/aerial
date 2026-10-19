@@ -120,6 +120,7 @@ func (f *fakeSessionLease) PreviousSessionID() string { return "" }
 func (f *fakeSessionLease) IsCold() bool              { return false }
 func (f *fakeSessionLease) IsEphemeral() bool         { return false }
 func (f *fakeSessionLease) TurnCount() int            { return 1 }
+func (f *fakeSessionLease) MarkDirty()                {}
 func (f *fakeSessionLease) CancelRotation()           {}
 func (f *fakeSessionLease) Release() error            { return nil }
 func (f *fakeSessionLease) Execute(context.Context, *TurnContext) (*TurnResult, error) {

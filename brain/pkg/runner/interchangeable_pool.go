@@ -582,6 +582,12 @@ func (l *interchangeableSessionLease) TurnCount() int {
 	return l.inner.TurnCount()
 }
 
+func (l *interchangeableSessionLease) MarkDirty() {
+	if l != nil && l.inner != nil {
+		l.inner.MarkDirty()
+	}
+}
+
 func (l *interchangeableSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
 	if l == nil || l.inner == nil {
 		return nil, errors.New("interchangeable session lease is uninitialized")

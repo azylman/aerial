@@ -473,3 +473,28 @@ func TestInterchangeablePool_AcquireLease(t *testing.T) {
 		}
 	}
 }
+
+func TestInterchangeableSessionLease_MarkDirtyAndTurnCount(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := newTestInterchangeablePool(t, 1, "", "", nil)
+	_ = pool.Initialize(ctx)
+	defer pool.Close()
+
+	lease, err := pool.AcquireLease(ctx, "target-key")
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	defer lease.Release()
+
+	lease.MarkDirty()
+
+	if tc := lease.TurnCount(); tc < 0 {
+		t.Errorf("unexpected TurnCount: %d", tc)
+	}
+
+	var nilLease *interchangeableSessionLease
+	nilLease.MarkDirty()
+	if tc := nilLease.TurnCount(); tc != 0 {
+		t.Errorf("expected 0 for nil lease TurnCount, got %d", tc)
+	}
+}
