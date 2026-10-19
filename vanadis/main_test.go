@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,39 +24,39 @@ import (
 	"github.com/riverqueue/river/rivertype"
 )
 
-// --- Mock pgx implementations for hermetic unit testing of PostgresVanadisStore ---
-
 type mockRow struct {
-	scanFn func(dest ...any) error
+	b   *VanadisBuild
+	err error
+}
+
+func fillBuildDest(b VanadisBuild, dest []any) {
+	*(dest[0].(*string)), *(dest[1].(*string)), *(dest[2].(*int)), *(dest[3].(*string)), *(dest[4].(*string)), *(dest[5].(*string)), *(dest[6].(*string)), *(dest[7].(*string)), *(dest[8].(*time.Time)), *(dest[9].(*time.Time)) = b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.CreatedAt, b.UpdatedAt
 }
 
 func (r *mockRow) Scan(dest ...any) error {
-	if r.scanFn != nil {
-		return r.scanFn(dest...)
+	if r.err != nil {
+		return r.err
+	}
+	if r.b != nil && len(dest) == 10 {
+		fillBuildDest(*r.b, dest)
 	}
 	return nil
 }
 
 type mockRows struct {
 	pgx.Rows
-	items   []VanadisChunk
-	builds  []VanadisBuild
-	idx     int
-	scanErr error
-	rowsErr error
+	items            []VanadisChunk
+	builds           []VanadisBuild
+	idx              int
+	scanErr, rowsErr error
 }
 
-func (r *mockRows) Close() {}
-
+func (r *mockRows) Close()     {}
 func (r *mockRows) Err() error { return r.rowsErr }
-
 func (r *mockRows) Next() bool {
 	if len(r.builds) > 0 {
-		if r.idx < len(r.builds) {
-			r.idx++
-			return true
-		}
-		return false
+		r.idx++
+		return r.idx <= len(r.builds)
 	}
 	if r.idx < len(r.items) {
 		r.idx++
@@ -69,95 +70,54 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	if len(r.builds) > 0 || len(dest) == 10 {
-		b := r.builds[r.idx-1]
-		*(dest[0].(*string)) = b.ID
-		*(dest[1].(*string)) = b.ThreadID
-		*(dest[2].(*int)) = b.Tier
-		*(dest[3].(*string)) = b.Title
-		*(dest[4].(*string)) = b.Objective
-		*(dest[5].(*string)) = b.SharedContext
-		*(dest[6].(*string)) = b.Status
-		*(dest[7].(*string)) = b.StatusMessageID
-		*(dest[8].(*time.Time)) = b.CreatedAt
-		*(dest[9].(*time.Time)) = b.UpdatedAt
+		fillBuildDest(r.builds[r.idx-1], dest)
 		return nil
 	}
 	c := r.items[r.idx-1]
-	*(dest[0].(*string)) = c.ID
-	*(dest[1].(*string)) = c.BuildID
-	*(dest[2].(*int)) = c.ChunkIndex
-	*(dest[3].(*string)) = c.Repo
-	*(dest[4].(*string)) = c.Title
-	*(dest[5].(*string)) = c.Instructions
-	*(dest[6].(*[]string)) = c.TargetFiles
-	*(dest[7].(*[]string)) = c.TargetSymbols
-	*(dest[8].(*string)) = c.Effort
-	*(dest[9].(*[]string)) = c.AcceptanceCriteria
-	*(dest[10].(*string)) = c.Status
-	*(dest[11].(*int)) = c.PRNumber
-	if !c.StartedAt.IsZero() {
-		*(dest[12].(*sql.NullTime)) = sql.NullTime{Time: c.StartedAt, Valid: true}
-	} else {
-		*(dest[12].(*sql.NullTime)) = sql.NullTime{}
-	}
-	*(dest[13].(*time.Time)) = c.CreatedAt
-	*(dest[14].(*time.Time)) = c.UpdatedAt
+	*(dest[0].(*string)), *(dest[1].(*string)), *(dest[2].(*int)), *(dest[3].(*string)), *(dest[4].(*string)), *(dest[5].(*string)), *(dest[6].(*[]string)), *(dest[7].(*[]string)), *(dest[8].(*string)), *(dest[9].(*[]string)), *(dest[10].(*string)), *(dest[11].(*int)), *(dest[12].(*sql.NullTime)), *(dest[13].(*time.Time)), *(dest[14].(*time.Time)) = c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 	return nil
 }
 
 type mockTx struct {
 	pgx.Tx
-	execFn     func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	commitErr  error
-	rollbackFn func(ctx context.Context) error
+	execFn                 func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	commitErr, rollbackErr error
 }
 
-func (t *mockTx) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+func (t *mockTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if t.execFn != nil {
-		return t.execFn(ctx, sql, arguments...)
+		return t.execFn(ctx, sql, args...)
 	}
 	return pgconn.NewCommandTag("INSERT 0 1"), nil
 }
-
-func (t *mockTx) Commit(_ context.Context) error {
-	return t.commitErr
-}
-
-func (t *mockTx) Rollback(ctx context.Context) error {
-	if t.rollbackFn != nil {
-		return t.rollbackFn(ctx)
-	}
-	return nil
-}
+func (t *mockTx) Commit(_ context.Context) error   { return t.commitErr }
+func (t *mockTx) Rollback(_ context.Context) error { return t.rollbackErr }
 
 type mockDB struct {
-	execFn     func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
 	beginFn    func(ctx context.Context) (pgx.Tx, error)
 }
 
-func (db *mockDB) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+func (db *mockDB) Exec(ctx context.Context, s string, a ...any) (pgconn.CommandTag, error) {
 	if db.execFn != nil {
-		return db.execFn(ctx, sql, arguments...)
+		return db.execFn(ctx, s, a...)
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
-
-func (db *mockDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+func (db *mockDB) Query(ctx context.Context, s string, a ...any) (pgx.Rows, error) {
 	if db.queryFn != nil {
-		return db.queryFn(ctx, sql, args...)
+		return db.queryFn(ctx, s, a...)
 	}
 	return &mockRows{}, nil
 }
-
-func (db *mockDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+func (db *mockDB) QueryRow(ctx context.Context, s string, a ...any) pgx.Row {
 	if db.queryRowFn != nil {
-		return db.queryRowFn(ctx, sql, args...)
+		return db.queryRowFn(ctx, s, a...)
 	}
 	return &mockRow{}
 }
-
 func (db *mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 	if db.beginFn != nil {
 		return db.beginFn(ctx)
@@ -165,33 +125,21 @@ func (db *mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 	return &mockTx{}, nil
 }
 
-// --- In-memory VanadisStore & RiverInserter for HTTP and Worker tests ---
-
 type memoryVanadisStore struct {
-	builds         map[string]VanadisBuild
-	chunks         map[string][]VanadisChunk
-	createErr      error
-	getErr         error
-	listErr        error
-	updateChunkErr error
-	updateBuildErr error
+	builds                                                     map[string]VanadisBuild
+	chunks                                                     map[string][]VanadisChunk
+	createErr, getErr, listErr, updateChunkErr, updateBuildErr error
 }
 
 func newMemoryVanadisStore() *memoryVanadisStore {
-	return &memoryVanadisStore{
-		builds: make(map[string]VanadisBuild),
-		chunks: make(map[string][]VanadisChunk),
-	}
+	return &memoryVanadisStore{builds: make(map[string]VanadisBuild), chunks: make(map[string][]VanadisChunk)}
 }
 
 func (m *memoryVanadisStore) CreateBuild(_ context.Context, build VanadisBuild, chunks []VanadisChunk) error {
 	if m.createErr != nil {
 		return m.createErr
 	}
-	m.builds[build.ID] = build
-	copied := make([]VanadisChunk, len(chunks))
-	copy(copied, chunks)
-	m.chunks[build.ID] = copied
+	m.builds[build.ID], m.chunks[build.ID] = build, chunks
 	return nil
 }
 
@@ -203,9 +151,7 @@ func (m *memoryVanadisStore) GetBuild(_ context.Context, buildID string) (*Vanad
 	if !ok {
 		return nil, nil, ErrBuildNotFound
 	}
-	copied := make([]VanadisChunk, len(m.chunks[buildID]))
-	copy(copied, m.chunks[buildID])
-	return &b, copied, nil
+	return &b, m.chunks[buildID], nil
 }
 
 func (m *memoryVanadisStore) ListBuilds(_ context.Context, limit int) ([]VanadisBuildEntry, error) {
@@ -220,20 +166,14 @@ func (m *memoryVanadisStore) ListBuilds(_ context.Context, limit int) ([]Vanadis
 		bList = append(bList, b)
 	}
 	sort.Slice(bList, func(i, j int) bool {
-		if bList[i].CreatedAt.Equal(bList[j].CreatedAt) {
-			return bList[i].ID > bList[j].ID
-		}
-		return bList[i].CreatedAt.After(bList[j].CreatedAt)
+		return bList[i].CreatedAt.After(bList[j].CreatedAt) || (bList[i].CreatedAt.Equal(bList[j].CreatedAt) && bList[i].ID > bList[j].ID)
 	})
 	if len(bList) > limit {
 		bList = bList[:limit]
 	}
 	entries := make([]VanadisBuildEntry, len(bList))
 	for i, b := range bList {
-		chunks := m.chunks[b.ID]
-		copied := make([]VanadisChunk, len(chunks))
-		copy(copied, chunks)
-		entries[i] = SummarizeBuildEntry(b, copied)
+		entries[i] = SummarizeBuildEntry(b, m.chunks[b.ID])
 	}
 	return entries, nil
 }
@@ -261,51 +201,43 @@ func (m *memoryVanadisStore) UpdateChunkStatus(_ context.Context, chunkID, statu
 	return ErrChunkNotFound
 }
 
-func (m *memoryVanadisStore) UpdateBuildStatus(_ context.Context, buildID, status string) error {
+func (m *memoryVanadisStore) setBuild(id string, fn func(*VanadisBuild)) error {
 	if m.updateBuildErr != nil {
 		return m.updateBuildErr
 	}
-	b, ok := m.builds[buildID]
+	b, ok := m.builds[id]
 	if !ok {
 		return ErrBuildNotFound
 	}
-	b.Status = status
-	m.builds[buildID] = b
+	fn(&b)
+	m.builds[id] = b
 	return nil
 }
-
-func (m *memoryVanadisStore) UpdateBuildStatusMessageID(_ context.Context, buildID, messageID string) error {
-	if m.updateBuildErr != nil {
-		return m.updateBuildErr
-	}
-	b, ok := m.builds[buildID]
-	if !ok {
-		return ErrBuildNotFound
-	}
-	b.StatusMessageID = messageID
-	m.builds[buildID] = b
-	return nil
+func (m *memoryVanadisStore) UpdateBuildStatus(_ context.Context, id, status string) error {
+	return m.setBuild(id, func(b *VanadisBuild) { b.Status = status })
+}
+func (m *memoryVanadisStore) UpdateBuildStatusMessageID(_ context.Context, id, msgID string) error {
+	return m.setBuild(id, func(b *VanadisBuild) { b.StatusMessageID = msgID })
 }
 
 type mockRiverInserter struct {
-	inserted []river.JobArgs
-	opts     []*river.InsertOpts
+	inserted []ExecuteChunkArgs
 	err      error
 }
 
-func (m *mockRiverInserter) Insert(_ context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error) {
+func (m *mockRiverInserter) Insert(_ context.Context, args river.JobArgs, _ *river.InsertOpts) (*rivertype.JobInsertResult, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
-	m.inserted = append(m.inserted, args)
-	m.opts = append(m.opts, opts)
+	if a, ok := args.(ExecuteChunkArgs); ok {
+		m.inserted = append(m.inserted, a)
+	}
 	return &rivertype.JobInsertResult{}, nil
 }
 
 type mockRiverLifecycle struct {
 	mockRiverInserter
-	startErr error
-	stopErr  error
+	startErr, stopErr error
 }
 
 func (m *mockRiverLifecycle) Start(_ context.Context) error { return m.startErr }
@@ -313,500 +245,308 @@ func (m *mockRiverLifecycle) Stop(_ context.Context) error  { return m.stopErr }
 
 type errorReader struct{}
 
-func (errorReader) Read([]byte) (int, error) {
-	return 0, errors.New("simulated read error")
+func (errorReader) Read([]byte) (int, error) { return 0, errors.New("read error") }
+
+func newMockStore(db mockDB) *PostgresVanadisStore {
+	return NewPostgresVanadisStore(&db)
 }
 
-// --- Tests ---
+func mkBuild(id, threadID, title, objective, status string) VanadisBuild {
+	return VanadisBuild{ID: id, ThreadID: threadID, Title: title, Objective: objective, Status: status, Tier: 2}
+}
+
+func mkChunk(id, buildID string, idx int, title, instr, effort, status string) VanadisChunk {
+	if effort == "" {
+		effort = "medium"
+	}
+	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}}
+}
 
 func TestLoadConfigAndEnv(t *testing.T) {
-	origFallback := vanadisFallbackConfigPath
-	origLookup := lookupHostFn
+	origFallback, origLookup := vanadisFallbackConfigPath, lookupHostFn
 	defer func() {
-		vanadisFallbackConfigPath = origFallback
-		lookupHostFn = origLookup
+		vanadisFallbackConfigPath, lookupHostFn = origFallback, origLookup
 	}()
-
 	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "CONFIG_PATH"} {
 		t.Setenv(k, "")
 	}
-
 	tmpDir := t.TempDir()
 	vanadisFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-
-	t.Run("DNSFallback_AerialPostgres", func(t *testing.T) {
-		lookupHostFn = func(_ context.Context, host string) ([]string, error) {
-			if host == "aerial-postgres" {
-				return []string{"10.0.0.2"}, nil
+	for _, tc := range []struct {
+		name, lookupHost, wantHost string
+	}{
+		{"DNSFallback_AerialPostgres", "aerial-postgres", "@aerial-postgres:5432/"},
+		{"DNSFallback_Postgres", "postgres", "@postgres:5432/"},
+		{"DNSFallback_Localhost", "other", "@127.0.0.1:5432/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lookupHostFn = func(_ context.Context, host string) ([]string, error) {
+				if host == tc.lookupHost {
+					return []string{"10.0.0.2"}, nil
+				}
+				return nil, errors.New("not found")
 			}
-			return nil, errors.New("not found")
-		}
-		cfg := LoadConfig("")
-		if cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088" {
-			t.Fatalf("unexpected defaults: %+v", cfg)
-		}
-		if !strings.Contains(cfg.PostgresURL, "@aerial-postgres:5432/") {
-			t.Fatalf("expected aerial-postgres URL, got %s", cfg.PostgresURL)
-		}
-	})
-
-	t.Run("DNSFallback_Postgres", func(t *testing.T) {
-		lookupHostFn = func(_ context.Context, host string) ([]string, error) {
-			if host == "postgres" {
-				return []string{"10.0.0.3"}, nil
+			cfg := LoadConfig("")
+			if !strings.Contains(cfg.PostgresURL, tc.wantHost) {
+				t.Fatalf("expected postgres URL to contain %s, got %s", tc.wantHost, cfg.PostgresURL)
 			}
-			return nil, errors.New("not found")
-		}
-		cfg := LoadConfig("")
-		if !strings.Contains(cfg.PostgresURL, "@postgres:5432/") {
-			t.Fatalf("expected postgres URL, got %s", cfg.PostgresURL)
-		}
-	})
-
-	t.Run("DNSFallback_Localhost", func(t *testing.T) {
-		lookupHostFn = func(_ context.Context, _ string) ([]string, error) {
-			return nil, errors.New("not found")
-		}
-		cfg := LoadConfig("   ")
-		if !strings.Contains(cfg.PostgresURL, "@127.0.0.1:5432/") {
-			t.Fatalf("expected 127.0.0.1 URL, got %s", cfg.PostgresURL)
-		}
-	})
-
-	t.Run("YAMLFileAndFallbackPath", func(t *testing.T) {
-		yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
-		yamlContent := `
-port: "4099"
-postgres_url: "postgres://u:p@db:5432/vanadis"
-brain_url: "http://brain.aerial:8088/"
-`
-		if err := os.WriteFile(yamlPath, []byte(yamlContent), 0o600); err != nil {
-			t.Fatalf("write yaml: %v", err)
-		}
-		vanadisFallbackConfigPath = yamlPath
-		cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml"))
-		if cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://brain.aerial:8088" {
-			t.Fatalf("unexpected yaml config: %+v", cfg)
-		}
-
-		badPath := filepath.Join(tmpDir, "bad.yaml")
-		_ = os.WriteFile(badPath, []byte(":::invalid_yaml"), 0o600)
-		t.Setenv("CONFIG_PATH", badPath)
-		t.Setenv("PORT", "4030")
-		t.Setenv("POSTGRES_URL", "postgres://env:5432/db")
-		t.Setenv("BRAIN_INTERNAL_URL", "http://internal-brain:8088/")
-
-		envCfg := LoadConfigFromEnv()
-		if envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" {
-			t.Fatalf("unexpected env override config: %+v", envCfg)
-		}
-	})
+			if tc.name == "DNSFallback_AerialPostgres" && (cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088") {
+				t.Fatalf("unexpected defaults: %+v", cfg)
+			}
+		})
+	}
+	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
+	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\nbrain_url: \"http://brain.aerial:8088/\"\n"), 0o600)
+	vanadisFallbackConfigPath = yamlPath
+	if cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml")); cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://brain.aerial:8088" {
+		t.Fatalf("unexpected yaml config: %+v", cfg)
+	}
+	badPath := filepath.Join(tmpDir, "bad.yaml")
+	_ = os.WriteFile(badPath, []byte(":::invalid_yaml"), 0o600)
+	t.Setenv("CONFIG_PATH", badPath)
+	t.Setenv("PORT", "4030")
+	t.Setenv("POSTGRES_URL", "postgres://env:5432/db")
+	t.Setenv("BRAIN_INTERNAL_URL", "http://internal-brain:8088/")
+	if envCfg := LoadConfigFromEnv(); envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" {
+		t.Fatalf("unexpected env override config: %+v", envCfg)
+	}
 }
 
 func TestExecuteChunkArgsAndNormalizeRepo(t *testing.T) {
 	t.Parallel()
-	args := ExecuteChunkArgs{BuildID: "b-1", ChunkIndex: 2}
-	if args.Kind() != "vanadis_execute_chunk" {
-		t.Fatalf("unexpected kind: %s", args.Kind())
+	if args := (ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2}); args.Kind() != "vanadis_execute_chunk" || args.InsertOpts().Queue != VanadisQueueName || args.InsertOpts().MaxAttempts != 3 || !args.InsertOpts().UniqueOpts.ByArgs {
+		t.Fatalf("unexpected ExecuteChunkArgs metadata: %+v", args)
 	}
-	opts := args.InsertOpts()
-	if opts.Queue != VanadisQueueName || opts.MaxAttempts != 3 || !opts.UniqueOpts.ByArgs {
-		t.Fatalf("unexpected insert opts: %+v", opts)
+	repoTests := []struct {
+		name, input, want string
+	}{
+		{"empty repo", "", ""}, {"whitespace repo", "   ", ""},
+		{"already qualified", "azylman/aerial", "azylman/aerial"}, {"unqualified repo", "aerial", "azylman/aerial"},
+		{"unqualified with spaces", "  mirrormere  ", "azylman/mirrormere"},
 	}
-
-	if got := normalizeRepo(""); got != "" {
-		t.Fatalf("expected empty string, got %q", got)
-	}
-	if got := normalizeRepo("aerial"); got != "azylman/aerial" {
-		t.Fatalf("expected azylman/aerial, got %q", got)
-	}
-	if got := normalizeRepo("azylman/aerial-config"); got != "azylman/aerial-config" {
-		t.Fatalf("expected azylman/aerial-config, got %q", got)
+	for _, tc := range repoTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeRepo(tc.input); got != tc.want {
+				t.Fatalf("normalizeRepo(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }
 
 func TestPostgresVanadisStore(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
 	var nilStore *PostgresVanadisStore
-	if err := nilStore.CreateBuild(ctx, VanadisBuild{}, nil); err == nil {
-		t.Fatal("expected error on nil store CreateBuild")
+	_, _, getErr := nilStore.GetBuild(ctx, "b1")
+	_, listErr := nilStore.ListBuilds(ctx, 10)
+	_, emptyDbListErr := (&PostgresVanadisStore{}).ListBuilds(ctx, 10)
+	if nilStore.CreateBuild(ctx, VanadisBuild{}, nil) == nil || nilStore.UpdateChunkStatus(ctx, "c1", "running") == nil || nilStore.UpdateBuildStatus(ctx, "b1", "completed") == nil || getErr == nil || listErr == nil || emptyDbListErr == nil {
+		t.Fatal("expected error on nil store operations")
 	}
-	if _, _, err := nilStore.GetBuild(ctx, "b1"); err == nil {
-		t.Fatal("expected error on nil store GetBuild")
-	}
-	if err := nilStore.UpdateChunkStatus(ctx, "c1", "running"); err == nil {
-		t.Fatal("expected error on nil store UpdateChunkStatus")
-	}
-	if err := nilStore.UpdateBuildStatus(ctx, "b1", "completed"); err == nil {
-		t.Fatal("expected error on nil store UpdateBuildStatus")
-	}
-
-	validBuild := VanadisBuild{
-		ID:            "b-1",
-		ThreadID:      "12345",
-		Objective:     "Ship Vanadis",
-		SharedContext: "Shared ctx test",
-	}
-	validChunks := []VanadisChunk{
-		{
-			ID:                 "c-1",
-			ChunkIndex:         0,
-			Title:              "T1",
-			Instructions:       "I1",
-			TargetFiles:        []string{"main.go"},
-			TargetSymbols:      []string{"Foo"},
-			Effort:             "medium",
-			AcceptanceCriteria: []string{"Must pass"},
-			PRNumber:           42,
-		},
-	}
-
-	store := NewPostgresVanadisStore(&mockDB{})
-
-	// Validation error cases for CreateBuild
-	invalidCases := []struct {
+	validBuild := mkBuild("b-1", "12345", "", "Ship Vanadis", "")
+	validBuild.SharedContext = "Shared ctx test"
+	cValid := mkChunk("c-1", "", 0, "T1", "I1", "medium", "")
+	cValid.TargetFiles, cValid.TargetSymbols, cValid.AcceptanceCriteria, cValid.PRNumber = []string{"main.go"}, []string{"Foo"}, []string{"Must pass"}, 42
+	validChunks := []VanadisChunk{cValid}
+	store := newMockStore(mockDB{})
+	for _, tc := range []struct {
 		name   string
 		build  VanadisBuild
 		chunks []VanadisChunk
 	}{
-		{"empty build id", VanadisBuild{ThreadID: "1", Objective: "o"}, nil},
-		{"empty thread", VanadisBuild{ID: "b", Objective: "o"}, nil},
-		{"empty objective", VanadisBuild{ID: "b", ThreadID: "1"}, nil},
-		{"empty chunk id", validBuild, []VanadisChunk{{Title: "t", Instructions: "i"}}},
-		{"mismatched chunk build_id", validBuild, []VanadisChunk{{ID: "c", BuildID: "other", Title: "t", Instructions: "i"}}},
-		{"empty chunk title", validBuild, []VanadisChunk{{ID: "c", Instructions: "i"}}},
-		{"empty chunk instructions", validBuild, []VanadisChunk{{ID: "c", Title: "t"}}},
-		{"invalid chunk effort", validBuild, []VanadisChunk{{ID: "c", Title: "t", Instructions: "i", Effort: "ultra"}}},
-	}
-	for _, tc := range invalidCases {
+		{"empty build id", mkBuild("", "1", "", "o", ""), nil}, {"empty thread", mkBuild("b", "", "", "o", ""), nil},
+		{"empty objective", mkBuild("b", "1", "", "", ""), nil}, {"empty chunk id", validBuild, []VanadisChunk{mkChunk("", "", 0, "t", "i", "", "")}},
+		{"mismatched chunk build_id", validBuild, []VanadisChunk{mkChunk("c", "other", 0, "t", "i", "", "")}}, {"empty chunk title", validBuild, []VanadisChunk{mkChunk("c", "", 0, "", "i", "", "")}},
+		{"empty chunk instructions", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "", "", "")}}, {"invalid chunk effort", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "i", "ultra", "")}},
+	} {
 		if err := store.CreateBuild(ctx, tc.build, tc.chunks); err == nil {
 			t.Fatalf("expected error for case %s", tc.name)
 		}
 	}
-
-	// CreateBuild success (including StartedAt variants: pending/zero, explicit StartedAt, and running status)
 	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
-	createChunks := []VanadisChunk{
-		validChunks[0],
-		{ID: "c-2", ChunkIndex: 1, Title: "T2", Instructions: "I2", StartedAt: explicitStart},
-		{ID: "c-3", ChunkIndex: 2, Title: "T3", Instructions: "I3", Status: "running"},
-	}
+	cStart := mkChunk("c-2", "", 1, "T2", "I2", "", "")
+	cStart.StartedAt = explicitStart
+	createChunks := []VanadisChunk{validChunks[0], cStart, mkChunk("c-3", "", 2, "T3", "I3", "", "running")}
 	if err := store.CreateBuild(ctx, validBuild, createChunks); err != nil {
 		t.Fatalf("CreateBuild failed: %v", err)
 	}
-
-	// CreateBuild tx error paths
-	beginErrStore := NewPostgresVanadisStore(&mockDB{
-		beginFn: func(context.Context) (pgx.Tx, error) {
-			return nil, errors.New("begin error")
+	callCount := 0
+	errExecTx := &mockTx{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+		return pgconn.CommandTag{}, errors.New("err")
+	}}
+	for _, begin := range []func(context.Context) (pgx.Tx, error){
+		func(context.Context) (pgx.Tx, error) { return nil, errors.New("err") },
+		func(context.Context) (pgx.Tx, error) { return errExecTx, nil },
+		func(context.Context) (pgx.Tx, error) {
+			return &mockTx{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+				callCount++
+				if callCount == 2 {
+					return pgconn.CommandTag{}, errors.New("err")
+				}
+				return pgconn.NewCommandTag("INSERT 0 1"), nil
+			}}, nil
 		},
-	})
-	if err := beginErrStore.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected begin tx error")
-	}
-
-	buildExecErrStore := NewPostgresVanadisStore(&mockDB{
-		beginFn: func(context.Context) (pgx.Tx, error) {
-			return &mockTx{
-				execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-					return pgconn.CommandTag{}, errors.New("insert build error")
-				},
-			}, nil
+		func(context.Context) (pgx.Tx, error) {
+			return &mockTx{commitErr: errors.New("err"), rollbackErr: errors.New("rb")}, nil
 		},
-	})
-	if err := buildExecErrStore.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected build insert error")
+	} {
+		if err := newMockStore(mockDB{beginFn: begin}).CreateBuild(ctx, validBuild, validChunks); err == nil {
+			t.Fatal("expected CreateBuild error")
+		}
 	}
-
-	chunkExecCalls := 0
-	chunkExecErrStore := NewPostgresVanadisStore(&mockDB{
-		beginFn: func(context.Context) (pgx.Tx, error) {
-			return &mockTx{
-				execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-					chunkExecCalls++
-					if chunkExecCalls == 2 {
-						return pgconn.CommandTag{}, errors.New("insert chunk error")
-					}
-					return pgconn.NewCommandTag("INSERT 0 1"), nil
-				},
-			}, nil
-		},
-	})
-	if err := chunkExecErrStore.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected chunk insert error")
-	}
-
-	commitErrStore := NewPostgresVanadisStore(&mockDB{
-		beginFn: func(context.Context) (pgx.Tx, error) {
-			return &mockTx{
-				commitErr:  errors.New("commit failed"),
-				rollbackFn: func(context.Context) error { return errors.New("rollback failed") },
-			}, nil
-		},
-	})
-	if err := commitErrStore.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected commit error")
-	}
-
-	// GetBuild tests
 	if _, _, err := store.GetBuild(ctx, "   "); err == nil {
 		t.Fatal("expected empty build id error")
 	}
-
-	notFoundStore := NewPostgresVanadisStore(&mockDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &mockRow{scanFn: func(...any) error { return pgx.ErrNoRows }}
-		},
-	})
-	if _, _, err := notFoundStore.GetBuild(ctx, "b-404"); !errors.Is(err, ErrBuildNotFound) {
+	if _, _, err := newMockStore(mockDB{queryRowFn: func(context.Context, string, ...any) pgx.Row { return &mockRow{err: pgx.ErrNoRows} }}).GetBuild(ctx, "b-404"); !errors.Is(err, ErrBuildNotFound) {
 		t.Fatalf("expected ErrBuildNotFound, got %v", err)
 	}
-
-	queryRowErrStore := NewPostgresVanadisStore(&mockDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &mockRow{scanFn: func(...any) error { return errors.New("db error") }}
-		},
-	})
-	if _, _, err := queryRowErrStore.GetBuild(ctx, "b-err"); err == nil {
+	if _, _, err := newMockStore(mockDB{queryRowFn: func(context.Context, string, ...any) pgx.Row { return &mockRow{err: errors.New("err")} }}).GetBuild(ctx, "b-err"); err == nil {
 		t.Fatal("expected queryRow error")
 	}
-
-	populateBuildRow := func(dest ...any) error {
-		*(dest[0].(*string)) = "b-1"
-		*(dest[1].(*string)) = "thread-1"
-		*(dest[2].(*int)) = 2
-		*(dest[3].(*string)) = "Build Title"
-		*(dest[4].(*string)) = "Objective"
-		*(dest[5].(*string)) = "Shared Context"
-		*(dest[6].(*string)) = "running"
-		*(dest[7].(*string)) = "msg-1"
-		*(dest[8].(*time.Time)) = time.Now()
-		*(dest[9].(*time.Time)) = time.Now()
-		return nil
+	popBuild := &VanadisBuild{ID: "b-1", ThreadID: "thread-1", Tier: 2, Title: "Build Title", Objective: "Objective", SharedContext: "Shared Context", Status: "running", StatusMessageID: "msg-1", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	for _, r := range []*mockRows{nil, {items: validChunks, scanErr: errors.New("err")}, {items: validChunks, rowsErr: errors.New("err")}} {
+		if _, _, err := newMockStore(mockDB{
+			queryRowFn: func(context.Context, string, ...any) pgx.Row { return &mockRow{b: popBuild} },
+			queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+				if r == nil {
+					return nil, errors.New("err")
+				}
+				return r, nil
+			},
+		}).GetBuild(ctx, "b-1"); err == nil {
+			t.Fatal("expected GetBuild error")
+		}
 	}
-
-	queryChunksErrStore := NewPostgresVanadisStore(&mockDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &mockRow{scanFn: populateBuildRow}
-		},
+	cGet0 := mkChunk("c-1", "b-1", 0, "T1", "I1", "", "")
+	cGet0.StartedAt = explicitStart
+	okGetStore := newMockStore(mockDB{
+		queryRowFn: func(context.Context, string, ...any) pgx.Row { return &mockRow{b: popBuild} },
 		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			return nil, errors.New("chunks query error")
-		},
-	})
-	if _, _, err := queryChunksErrStore.GetBuild(ctx, "b-1"); err == nil {
-		t.Fatal("expected chunks query error")
-	}
-
-	scanErrStore := NewPostgresVanadisStore(&mockDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &mockRow{scanFn: populateBuildRow}
-		},
-		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			return &mockRows{items: validChunks, scanErr: errors.New("scan failed")}, nil
-		},
-	})
-	if _, _, err := scanErrStore.GetBuild(ctx, "b-1"); err == nil {
-		t.Fatal("expected scan error")
-	}
-
-	rowsErrStore := NewPostgresVanadisStore(&mockDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &mockRow{scanFn: populateBuildRow}
-		},
-		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			return &mockRows{items: validChunks, rowsErr: errors.New("rows iteration error")}, nil
-		},
-	})
-	if _, _, err := rowsErrStore.GetBuild(ctx, "b-1"); err == nil {
-		t.Fatal("expected rows iteration error")
-	}
-
-	okGetStore := NewPostgresVanadisStore(&mockDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &mockRow{scanFn: populateBuildRow}
-		},
-		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			return &mockRows{items: []VanadisChunk{
-				{
-					ID:           "c-1",
-					BuildID:      "b-1",
-					Title:        "T1",
-					Instructions: "I1",
-					TargetFiles:  nil,
-					Effort:       "",
-					StartedAt:    explicitStart,
-				},
-				{
-					ID:           "c-2",
-					BuildID:      "b-1",
-					Title:        "T2",
-					Instructions: "I2",
-				},
-			}}, nil
+			return &mockRows{items: []VanadisChunk{cGet0, mkChunk("c-2", "b-1", 1, "T2", "I2", "", "")}}, nil
 		},
 	})
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
-	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || gotB.SharedContext != "Shared Context" || len(gotC) != 2 || gotC[0].TargetFiles == nil || gotC[0].TargetSymbols == nil || gotC[0].AcceptanceCriteria == nil || gotC[0].Effort != "medium" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
+	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || len(gotC) != 2 || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
 	}
-
-	// UpdateChunkStatus & UpdateBuildStatus tests
-	if err := store.UpdateChunkStatus(ctx, "", "running"); err == nil {
-		t.Fatal("expected empty chunk id error")
+	for _, err := range []error{store.UpdateChunkStatus(ctx, "", "running"), store.UpdateChunkStatus(ctx, "c-1", ""), store.UpdateBuildStatus(ctx, "", "completed"), store.UpdateBuildStatus(ctx, "b-1", ""), store.UpdateBuildStatusMessageID(ctx, "", "msg-1")} {
+		if err == nil {
+			t.Fatal("expected validation error")
+		}
 	}
-	if err := store.UpdateChunkStatus(ctx, "c-1", ""); err == nil {
-		t.Fatal("expected empty status error")
+	for _, err := range []error{store.UpdateChunkStatus(ctx, "c-1", "running"), store.UpdateBuildStatus(ctx, "b-1", "completed"), store.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1")} {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := store.UpdateChunkStatus(ctx, "c-1", "running"); err != nil {
-		t.Fatalf("unexpected UpdateChunkStatus error: %v", err)
+	zeroStore := newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+		return pgconn.NewCommandTag("UPDATE 0"), nil
+	}})
+	if !errors.Is(zeroStore.UpdateChunkStatus(ctx, "c-404", "running"), ErrChunkNotFound) || !errors.Is(zeroStore.UpdateBuildStatus(ctx, "b-404", "completed"), ErrBuildNotFound) || !errors.Is(zeroStore.UpdateBuildStatusMessageID(ctx, "b-404", "msg-1"), ErrBuildNotFound) {
+		t.Fatal("expected not found errors")
 	}
-
-	if err := store.UpdateBuildStatus(ctx, "", "completed"); err == nil {
-		t.Fatal("expected empty build id error")
+	errExecStore := newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+		return pgconn.CommandTag{}, errors.New("err")
+	}})
+	if errExecStore.UpdateChunkStatus(ctx, "c-1", "running") == nil || errExecStore.UpdateBuildStatus(ctx, "b-1", "completed") == nil || errExecStore.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1") == nil {
+		t.Fatal("expected exec errors")
 	}
-	if err := store.UpdateBuildStatus(ctx, "b-1", ""); err == nil {
-		t.Fatal("expected empty status error")
+	failQueries := []struct {
+		buildRows *mockRows
+		buildErr  error
+		chunkRows *mockRows
+		chunkErr  error
+	}{
+		{nil, errors.New("err"), nil, nil},
+		{&mockRows{builds: []VanadisBuild{mkBuild("b-1", "", "", "", "")}, scanErr: errors.New("err")}, nil, nil, nil},
+		{&mockRows{builds: []VanadisBuild{mkBuild("b-1", "", "", "", "")}, rowsErr: errors.New("err")}, nil, nil, nil},
+		{&mockRows{builds: []VanadisBuild{mkBuild("b-1", "", "", "", "running")}}, nil, nil, errors.New("err")},
+		{&mockRows{builds: []VanadisBuild{mkBuild("b-1", "", "", "", "running")}}, nil, &mockRows{items: []VanadisChunk{mkChunk("c-1", "b-1", 0, "", "", "", "")}, scanErr: errors.New("err")}, nil},
+		{&mockRows{builds: []VanadisBuild{mkBuild("b-1", "", "", "", "running")}}, nil, &mockRows{items: []VanadisChunk{mkChunk("c-1", "b-1", 0, "", "", "", "")}, rowsErr: errors.New("err")}, nil},
 	}
-	if err := store.UpdateBuildStatus(ctx, "b-1", "completed"); err != nil {
-		t.Fatalf("unexpected UpdateBuildStatus error: %v", err)
+	for _, tc := range failQueries {
+		s := newMockStore(mockDB{queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+			if strings.Contains(sql, "vanadis_builds") {
+				return tc.buildRows, tc.buildErr
+			}
+			return tc.chunkRows, tc.chunkErr
+		}})
+		if _, err := s.ListBuilds(ctx, 10); err == nil {
+			t.Fatal("expected ListBuilds error")
+		}
 	}
-
-	zeroRowsStore := NewPostgresVanadisStore(&mockDB{
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			return pgconn.NewCommandTag("UPDATE 0"), nil
+	entries, err := newMockStore(mockDB{queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return &mockRows{}, nil }}).ListBuilds(ctx, 0)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("expected 0 entries on 0 builds, got %d, err=%v", len(entries), err)
+	}
+	now := time.Now().UTC()
+	b1, b2 := mkBuild("b-1", "100", "", "", "running"), mkBuild("b-2", "101", "", "", "completed")
+	b1.CreatedAt, b1.UpdatedAt, b2.CreatedAt, b2.UpdatedAt = now.Add(-time.Hour), now, now.Add(-2*time.Hour), now
+	c1, c2, c3 := mkChunk("c-1", "b-1", 0, "chunk 1", "", "", "running"), mkChunk("c-2", "b-1", 1, "chunk 2", "", "", "pending"), mkChunk("c-3", "b-2", 0, "chunk 3", "", "", "merged")
+	c1.CreatedAt, c1.UpdatedAt, c2.CreatedAt, c2.UpdatedAt, c3.CreatedAt, c3.UpdatedAt = now, now, now, now, now, now
+	var capturedLimit any
+	okStore := newMockStore(mockDB{
+		queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+			if strings.Contains(sql, "vanadis_builds") {
+				if len(args) > 0 {
+					capturedLimit = args[0]
+				}
+				return &mockRows{builds: []VanadisBuild{b1, b2}}, nil
+			}
+			return &mockRows{items: []VanadisChunk{c1, c2, c3}}, nil
 		},
 	})
-	if err := zeroRowsStore.UpdateChunkStatus(ctx, "c-404", "running"); !errors.Is(err, ErrChunkNotFound) {
-		t.Fatalf("expected ErrChunkNotFound, got %v", err)
-	}
-	if err := zeroRowsStore.UpdateBuildStatus(ctx, "b-404", "completed"); !errors.Is(err, ErrBuildNotFound) {
-		t.Fatalf("expected ErrBuildNotFound, got %v", err)
-	}
-
-	execErrStore := NewPostgresVanadisStore(&mockDB{
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			return pgconn.CommandTag{}, errors.New("exec failed")
-		},
-	})
-	if err := execErrStore.UpdateChunkStatus(ctx, "c-1", "running"); err == nil {
-		t.Fatal("expected exec error on UpdateChunkStatus")
-	}
-	if err := execErrStore.UpdateBuildStatus(ctx, "b-1", "completed"); err == nil {
-		t.Fatal("expected exec error on UpdateBuildStatus")
-	}
-
-	// UpdateBuildStatusMessageID tests
-	if err := store.UpdateBuildStatusMessageID(ctx, "", "msg-1"); err == nil {
-		t.Fatal("expected empty build id error")
-	}
-	if err := store.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1"); err != nil {
-		t.Fatalf("unexpected UpdateBuildStatusMessageID error: %v", err)
-	}
-	if err := zeroRowsStore.UpdateBuildStatusMessageID(ctx, "b-404", "msg-1"); !errors.Is(err, ErrBuildNotFound) {
-		t.Fatalf("expected ErrBuildNotFound, got %v", err)
-	}
-	if err := execErrStore.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1"); err == nil {
-		t.Fatal("expected exec error on UpdateBuildStatusMessageID")
+	gotEntries, err := okStore.ListBuilds(ctx, 25)
+	if err != nil || capturedLimit != 25 || len(gotEntries) != 2 || gotEntries[0].ID != "b-1" || gotEntries[0].TotalChunks != 2 || gotEntries[0].QueueState != "running" || gotEntries[1].ID != "b-2" || gotEntries[1].QueueState != "completed" {
+		t.Fatalf("unexpected ListBuilds result: entries=%+v limit=%v err=%v", gotEntries, capturedLimit, err)
 	}
 }
 
 func TestFormatChunkPrompt(t *testing.T) {
 	t.Parallel()
-	build := VanadisBuild{
-		ID:            "build-999",
-		ThreadID:      "1555000111",
-		Tier:          2,
-		Title:         "Build Vanadis Queue Execution Pipeline",
-		Objective:     "Build Vanadis Queue",
-		SharedContext: "Architecture: River queue backed by PostgreSQL.",
+	build := mkBuild("build-999", "1555000111", "Build Vanadis Queue Execution Pipeline", "Build Vanadis Queue", "")
+	build.SharedContext = "Architecture: River queue backed by PostgreSQL."
+	c1 := mkChunk("build-999-chunk-1", "", 0, "Task 1: Schema", "Create SQL tables", "", "merged")
+	c1.TargetFiles, c1.PRNumber = []string{"brain/schema.sql"}, 101
+	c2 := mkChunk("build-999-chunk-2", "", 1, "Task 2: Service", "Create vanadis service", "high", "running")
+	c2.TargetFiles, c2.TargetSymbols, c2.AcceptanceCriteria = []string{"vanadis/main.go", "vanadis/main_test.go"}, []string{"VanadisServer", "FormatChunkPrompt"}, []string{"Coverage >= 95.0%", "  ", "Table driven tests pass"}
+	c3 := mkChunk("build-999-chunk-3", "", 2, "Task 3: Webhook Advancement", "Advance chunks on merge", "", "pending")
+	chunks := []VanadisChunk{c1, c2, c3}
+	for _, tc := range []struct {
+		b VanadisBuild
+		c []VanadisChunk
+		i int
+	}{
+		{build, nil, 0}, {build, chunks, -1}, {build, chunks, 3},
+	} {
+		if _, err := FormatChunkPrompt(tc.b, tc.c, tc.i); err == nil {
+			t.Fatal("expected error")
+		}
 	}
-	chunks := []VanadisChunk{
-		{
-			ID:           "build-999-chunk-1",
-			ChunkIndex:   0,
-			Title:        "Task 1: Schema",
-			Instructions: "Create SQL tables",
-			TargetFiles:  []string{"brain/schema.sql"},
-			Status:       "merged",
-			PRNumber:     101,
-		},
-		{
-			ID:                 "build-999-chunk-2",
-			ChunkIndex:         1,
-			Title:              "Task 2: Service",
-			Instructions:       "Create vanadis service",
-			TargetFiles:        []string{"vanadis/main.go", "vanadis/main_test.go"},
-			TargetSymbols:      []string{"VanadisServer", "FormatChunkPrompt"},
-			Effort:             "high",
-			AcceptanceCriteria: []string{"Coverage >= 95.0%", "  ", "Table driven tests pass"},
-			Status:             "running",
-		},
-		{
-			ID:           "build-999-chunk-3",
-			ChunkIndex:   2,
-			Title:        "Task 3: Webhook Advancement",
-			Instructions: "Advance chunks on merge",
-			TargetFiles:  nil,
-			Status:       "pending",
-		},
-	}
-
-	if _, err := FormatChunkPrompt(build, nil, 0); err == nil {
-		t.Fatal("expected error for empty chunks")
-	}
-	if _, err := FormatChunkPrompt(build, chunks, -1); err == nil {
-		t.Fatal("expected error for negative activeIdx")
-	}
-	if _, err := FormatChunkPrompt(build, chunks, 3); err == nil {
-		t.Fatal("expected error for out-of-range activeIdx")
-	}
-
 	p0, err := FormatChunkPrompt(build, chunks, 0)
-	if err != nil {
-		t.Fatalf("unexpected error for chunk 0: %v", err)
+	if err != nil || !strings.Contains(p0, "(none — this is the first chunk)") || !strings.Contains(p0, "DO NOT implement these remaining chunks in this turn") || !strings.Contains(p0, "=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.") {
+		t.Fatalf("unexpected prompt for chunk 0:\n%s (err=%v)", p0, err)
 	}
-	if !strings.Contains(p0, "(none — this is the first chunk)") || !strings.Contains(p0, "DO NOT implement these remaining chunks in this turn") {
-		t.Fatalf("unexpected prompt for chunk 0:\n%s", p0)
-	}
-	if !strings.Contains(p0, "=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.") {
-		t.Fatalf("expected Shared Build Context in prompt 0:\n%s", p0)
-	}
-
 	p1, err := FormatChunkPrompt(build, chunks, 1)
 	if err != nil {
 		t.Fatalf("unexpected error for chunk 1: %v", err)
 	}
 	for _, want := range []string{
-		"[VANADIS BUILD CHUNK EXECUTION]",
-		"Build ID: build-999",
-		"Build Title: Build Vanadis Queue Execution Pipeline",
-		"=== Build Objective ===\nBuild Vanadis Queue",
-		"=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.",
-		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)",
-		"=== Active Chunk (Chunk 2 of 3) ===",
-		"Repository: azylman/aerial",
-		"Target Files: vanadis/main.go, vanadis/main_test.go",
-		"Target Symbols: VanadisServer, FormatChunkPrompt",
-		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)",
-		"optimizing all design and implementation choices for the `Build Objective`",
-		"If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective`, the `Build Objective` takes precedence—adapt the implementation to satisfy the `Build Objective`.",
-		"Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.",
+		"[VANADIS BUILD CHUNK EXECUTION]", "Build ID: build-999", "Build Title: Build Vanadis Queue Execution Pipeline",
+		"=== Build Objective ===\nBuild Vanadis Queue", "=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.",
+		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)", "=== Active Chunk (Chunk 2 of 3) ===", "Repository: azylman/aerial",
+		"Target Files: vanadis/main.go, vanadis/main_test.go", "Target Symbols: VanadisServer, FormatChunkPrompt",
+		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)", "optimizing all design and implementation choices for the `Build Objective`",
 		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
-		"Before submitting, review the full `git diff` against the `Build Objective` and `Shared Build Context`: verify that the change achieves the objective in substance and integrates cleanly and idiomatically into the existing architecture without superficial workarounds, dead scaffolding, or bolted-on catch-all blocks.",
 		"5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
-		"6. Terminate turn immediately after submission.",
 	} {
 		if !strings.Contains(p1, want) {
 			t.Fatalf("prompt for chunk 1 missing %q:\n%s", want, p1)
 		}
 	}
-	if strings.Contains(p1, "=== Acceptance Criteria ===") {
-		t.Fatalf("expected prompt for chunk 1 to omit Acceptance Criteria checklist:\n%s", p1)
-	}
-	if strings.Contains(p0, "Run after init:") {
-		t.Fatalf("expected chunk 0 without target symbols to omit grep command:\n%s", p0)
+	if strings.Contains(p1, "=== Acceptance Criteria ===") || strings.Contains(p0, "Run after init:") {
+		t.Fatalf("unexpected prompt headers: p1=%s p0=%s", p1, p0)
 	}
 	if got := formatSymbolGrepCommand([]string{"  ", "./pkg/foo.go"}, []string{" ", "Bar"}); got != `grep -n -E "Bar" "$SCRATCH_DIR/pkg/foo.go"` {
 		t.Fatalf("unexpected formatSymbolGrepCommand output: %s", got)
@@ -814,41 +554,27 @@ func TestFormatChunkPrompt(t *testing.T) {
 	if got := formatSymbolGrepCommand([]string{"   "}, []string{"Bar"}); got != "" {
 		t.Fatalf("expected empty command for blank files, got %q", got)
 	}
-
-	// Verify build with empty shared context does not render header
 	emptySharedBuild := build
 	emptySharedBuild.SharedContext = "   "
 	pEmpty, err := FormatChunkPrompt(emptySharedBuild, chunks, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil || strings.Contains(pEmpty, "=== Shared Build Context ===") {
+		t.Fatalf("unexpected Shared Build Context header when empty: err=%v prompt=%s", err, pEmpty)
 	}
-	if strings.Contains(pEmpty, "=== Shared Build Context ===") {
-		t.Fatalf("unexpected Shared Build Context header when empty:\n%s", pEmpty)
-	}
-
 	p2, err := FormatChunkPrompt(build, chunks, 2)
-	if err != nil {
-		t.Fatalf("unexpected error for chunk 2: %v", err)
-	}
-	if !strings.Contains(p2, "Target Files: (none specified)") || !strings.Contains(p2, "(none — this is the final chunk)") {
-		t.Fatalf("unexpected prompt for chunk 2:\n%s", p2)
+	if err != nil || !strings.Contains(p2, "Target Files: (none specified)") || !strings.Contains(p2, "(none — this is the final chunk)") {
+		t.Fatalf("unexpected prompt for chunk 2:\n%s (err=%v)", p2, err)
 	}
 }
 
 func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	var emptyWorker ExecuteChunkWorker
-	if err := emptyWorker.Work(ctx, &river.Job[ExecuteChunkArgs]{}); err == nil {
+	if (&ExecuteChunkWorker{}).Work(ctx, &river.Job[ExecuteChunkArgs]{}) == nil {
 		t.Fatal("expected error when worker server is nil")
 	}
-
-	srvNoStore := NewVanadisServer(Config{}, nil, nil, nil)
-	if err := srvNoStore.ProcessExecuteChunk(ctx, "b1", 0, false); err == nil {
+	if NewVanadisServer(Config{}, nil, nil, nil).ProcessExecuteChunk(ctx, "b1", 0, false) == nil {
 		t.Fatal("expected error when store is nil")
 	}
-
 	var gotPrompts []BrainPromptRequest
 	brainStatus := http.StatusAccepted
 	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -863,84 +589,47 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"queued"}`))
 	}))
 	defer brainSrv.Close()
-
 	memStore := newMemoryVanadisStore()
 	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, &mockRiverInserter{}, brainSrv.Client())
-
-	// 1. Build not found -> nil
 	if err := srv.ProcessExecuteChunk(ctx, "nonexistent", 0, false); err != nil {
 		t.Fatalf("expected nil on missing build, got %v", err)
 	}
-
-	// 2. GetBuild error -> returns error
 	memStore.getErr = errors.New("db outage")
 	if err := srv.ProcessExecuteChunk(ctx, "b1", 0, false); err == nil {
 		t.Fatal("expected error when GetBuild fails")
 	}
 	memStore.getErr = nil
-
-	// 3. Build not running -> nil
-	_ = memStore.CreateBuild(ctx, VanadisBuild{ID: "b-cancelled", Status: "cancelled"}, []VanadisChunk{{ID: "c0", ChunkIndex: 0}})
+	_ = memStore.CreateBuild(ctx, mkBuild("b-cancelled", "", "", "", "cancelled"), []VanadisChunk{mkChunk("c0", "", 0, "", "", "", "")})
 	if err := srv.ProcessExecuteChunk(ctx, "b-cancelled", 0, false); err != nil {
 		t.Fatalf("expected nil on cancelled build, got %v", err)
 	}
-
-	// 4. Active build tests
-	_ = memStore.CreateBuild(ctx, VanadisBuild{
-		ID:        "b-run",
-
-		ThreadID:  "thread-777",
-		Tier:      2,
-		Status:    "running",
-	}, []VanadisChunk{
-		{ID: "c-0", BuildID: "b-run", ChunkIndex: 0, Title: "C0", Instructions: "I0", Status: "merged", PRNumber: 10},
-		{ID: "c-1", BuildID: "b-run", ChunkIndex: 1, Title: "C1", Instructions: "I1", Effort: "high", Status: "pending"},
-	})
-
-	// Chunk index not found
-	if err := srv.ProcessExecuteChunk(ctx, "b-run", 99, false); err == nil {
-		t.Fatal("expected error for missing chunk index 99")
+	c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "", "merged")
+	c0.PRNumber = 10
+	_ = memStore.CreateBuild(ctx, mkBuild("b-run", "thread-777", "", "", "running"), []VanadisChunk{c0, mkChunk("c-1", "b-run", 1, "C1", "I1", "high", "pending")})
+	if srv.ProcessExecuteChunk(ctx, "b-run", 99, false) == nil || srv.ProcessExecuteChunk(ctx, "b-run", 0, false) != nil {
+		t.Fatal("unexpected chunk status handling")
 	}
-
-	// Chunk already merged -> idempotent nil
-	if err := srv.ProcessExecuteChunk(ctx, "b-run", 0, false); err != nil {
-		t.Fatalf("expected nil on already merged chunk, got %v", err)
-	}
-
-	// UpdateChunkStatus error
 	memStore.updateChunkErr = errors.New("update chunk failed")
 	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, false); err == nil {
 		t.Fatal("expected error when UpdateChunkStatus fails")
 	}
 	memStore.updateChunkErr = nil
-
-	// Successful execution via Worker with Effort propagation
 	worker := &ExecuteChunkWorker{server: srv}
-	job := &river.Job[ExecuteChunkArgs]{
-		JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3},
-		Args:   ExecuteChunkArgs{BuildID: "b-run", ChunkIndex: 1},
-	}
+	job := &river.Job[ExecuteChunkArgs]{JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3}, Args: ExecuteChunkArgs{BuildID: "b-run", ChunkIndex: 1}}
 	if err := worker.Work(ctx, job); err != nil {
 		t.Fatalf("unexpected worker error: %v", err)
 	}
 	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "high" || gotPrompts[0].ChannelID != "thread-777" || gotPrompts[0].VanadisChunkID != "c-1" {
 		t.Fatalf("unexpected dispatched prompts: %+v", gotPrompts)
 	}
-
-	// Non-final failure vs Final attempt failure
 	brainStatus = http.StatusBadGateway
 	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, false); err == nil {
 		t.Fatal("expected error on 502 from brain")
 	}
-	bState, _, _ := memStore.GetBuild(ctx, "b-run")
-	if bState.Status != "running" {
+	if bState, _, _ := memStore.GetBuild(ctx, "b-run"); bState.Status != "running" {
 		t.Fatalf("expected build to remain running on non-final attempt, got %s", bState.Status)
 	}
-
-	finalJob := &river.Job[ExecuteChunkArgs]{
-		JobRow: &rivertype.JobRow{Attempt: 3, MaxAttempts: 3},
-		Args:   ExecuteChunkArgs{BuildID: "b-run", ChunkIndex: 1},
-	}
+	finalJob := &river.Job[ExecuteChunkArgs]{JobRow: &rivertype.JobRow{Attempt: 3, MaxAttempts: 3}, Args: ExecuteChunkArgs{BuildID: "b-run", ChunkIndex: 1}}
 	if err := worker.Work(ctx, finalJob); err == nil {
 		t.Fatal("expected error on final attempt 502 from brain")
 	}
@@ -948,23 +637,15 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if bState.Status != "failed" || cState[1].Status != "failed" {
 		t.Fatalf("expected build and chunk marked failed on final attempt, got build=%s chunk=%s", bState.Status, cState[1].Status)
 	}
-
-	// Also cover final attempt when store updates fail during failure marking and network error on closed server
 	_ = memStore.UpdateBuildStatus(ctx, "b-run", "running")
 	_ = memStore.UpdateChunkStatus(ctx, "c-1", "pending")
-	badSrv := NewVanadisServer(Config{BrainURL: "http://[::1]:namedport"}, memStore, nil, nil)
-	_ = badSrv.ProcessExecuteChunk(ctx, "b-run", 1, true)
-
+	_ = NewVanadisServer(Config{BrainURL: "http://[::1]:namedport"}, memStore, nil, nil).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	closedSrv := httptest.NewServer(http.NotFoundHandler())
 	closedURL := closedSrv.URL
 	closedSrv.Close()
-	netErrSrv := NewVanadisServer(Config{BrainURL: closedURL}, memStore, nil, nil)
-	_ = memStore.UpdateBuildStatus(ctx, "b-run", "running")
-	_ = memStore.UpdateChunkStatus(ctx, "c-1", "pending")
 	memStore.updateBuildErr = errors.New("build fail update err")
-	_ = netErrSrv.ProcessExecuteChunk(ctx, "b-run", 1, true)
+	_ = NewVanadisServer(Config{BrainURL: closedURL}, memStore, nil, nil).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	memStore.updateBuildErr = nil
-
 	writeJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 }
 
@@ -973,105 +654,52 @@ func TestHTTPEndpoints(t *testing.T) {
 	inserter := &mockRiverInserter{}
 	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088"}, memStore, inserter, nil)
 	mux := srv.Routes()
-
 	doReq := func(method, path string, body io.Reader) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, path, body)
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
+		mux.ServeHTTP(rec, httptest.NewRequest(method, path, body))
 		return rec
 	}
-
-	// Health & Metrics
-	if rec := doReq(http.MethodGet, "/health", nil); rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on /health, got %d", rec.Code)
+	checkCode := func(method, path string, body io.Reader, want int) {
+		if rec := doReq(method, path, body); rec.Code != want {
+			t.Fatalf("%s %s got %d, want %d", method, path, rec.Code, want)
+		}
 	}
-	if rec := doReq(http.MethodGet, "/healthz", nil); rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on /healthz, got %d", rec.Code)
+	for _, p := range []string{"/health", "/healthz", "/metrics"} {
+		checkCode(http.MethodGet, p, nil, http.StatusOK)
 	}
-	if rec := doReq(http.MethodGet, "/metrics", nil); rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on /metrics, got %d", rec.Code)
-	}
-
-	// Coverage Flush
 	t.Setenv("GOCOVERDIR", t.TempDir())
 	origMeta, origCounters := writeMetaDirFn, writeCountersDirFn
-	defer func() {
-		writeMetaDirFn = origMeta
-		writeCountersDirFn = origCounters
-	}()
-	writeMetaDirFn = func(string) error { return errors.New("meta err") }
-	writeCountersDirFn = func(string) error { return nil }
-	if rec := doReq(http.MethodPost, "/debug/coverage/flush", nil); rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on coverage flush, got %d", rec.Code)
-	}
+	defer func() { writeMetaDirFn, writeCountersDirFn = origMeta, origCounters }()
+	writeMetaDirFn, writeCountersDirFn = func(string) error { return errors.New("meta err") }, func(string) error { return nil }
+	checkCode(http.MethodPost, "/debug/coverage/flush", nil, http.StatusOK)
 	writeCountersDirFn = func(string) error { return errors.New("counters err") }
-	if rec := doReq(http.MethodGet, "/debug/coverage/flush", nil); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on coverage flush error, got %d", rec.Code)
-	}
-
-	// Nil store checks
+	checkCode(http.MethodGet, "/debug/coverage/flush", nil, http.StatusInternalServerError)
 	srv.SetStore(nil)
-	if rec := doReq(http.MethodPost, "/builds", strings.NewReader(`{}`)); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when store nil on POST /builds, got %d", rec.Code)
-	}
-	if rec := doReq(http.MethodGet, "/builds/b1", nil); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when store nil on GET /builds/b1, got %d", rec.Code)
-	}
+	checkCode(http.MethodPost, "/builds", strings.NewReader(`{}`), http.StatusInternalServerError)
+	checkCode(http.MethodGet, "/builds/b1", nil, http.StatusInternalServerError)
+	checkCode(http.MethodGet, "/builds", nil, http.StatusInternalServerError)
 	srv.SetStore(memStore)
-
-	// POST /builds validation cases
-	if rec := doReq(http.MethodPost, "/builds", errorReader{}); rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 on body read error, got %d", rec.Code)
-	}
-	badPayloads := []string{
-		`{invalid`,
-		`{"repo":""}`,
-		`{"repo":"aerial","thread_id":""}`,
+	checkCode(http.MethodPost, "/builds", errorReader{}, http.StatusBadRequest)
+	for _, p := range []string{
+		`{invalid`, `{"repo":""}`, `{"repo":"aerial","thread_id":""}`,
 		`{"repo":"aerial","thread_id":"not-numeric","objective":"obj","chunks":[{"title":"t","instructions":"i"}]}`,
-		`{"repo":"aerial","thread_id":"123","objective":""}`,
-		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[]}`,
+		`{"repo":"aerial","thread_id":"123","objective":""}`, `{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[]}`,
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"","instructions":"i"}]}`,
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":""}]}`,
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":"i","effort":"unsupported"}]}`,
+	} {
+		checkCode(http.MethodPost, "/builds", strings.NewReader(p), http.StatusBadRequest)
 	}
-	for _, p := range badPayloads {
-		if rec := doReq(http.MethodPost, "/builds", strings.NewReader(p)); rec.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 for payload %s, got %d", p, rec.Code)
-		}
-	}
-
-	validPayload := `{
-		"repo": "aerial",
-		"thread_id": "1555999",
-		"title": "Implement Feature X Build Title",
-		"objective": "Implement feature X",
-		"shared_context": "Targeting Nomad cluster",
-		"chunks": [
-			{"title": "Part 1", "instructions": "Do part 1", "effort": "low"},
-			{"id": "custom-chunk-2", "title": "Part 2", "instructions": "Do part 2", "target_files": ["a.go"], "target_symbols": ["A"], "effort": "medium", "acceptance_criteria": ["All green"]}
-		]
-	}`
-
-	// Store error on CreateBuild
+	validPayload := `{"repo":"aerial","thread_id":"1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"title":"Part 1","instructions":"Do part 1","effort":"low"},{"id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"medium","acceptance_criteria":["All green"]}]}`
 	memStore.createErr = errors.New("create failed")
-	if rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload)); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on store create error, got %d", rec.Code)
-	}
+	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	memStore.createErr = nil
-
-	// River insert error (nil client and error client)
 	srv.SetRiverClient(nil)
-	if rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload)); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when river client nil, got %d", rec.Code)
-	}
+	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	inserter.err = errors.New("river insert failed")
 	srv.SetRiverClient(inserter)
-	if rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload)); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when river insert fails, got %d", rec.Code)
-	}
+	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	inserter.err = nil
-
-	// Success POST /builds
 	rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 Accepted, got %d: %s", rec.Code, rec.Body.String())
@@ -1086,97 +714,119 @@ func TestHTTPEndpoints(t *testing.T) {
 	if storedBuild.Title != "Implement Feature X Build Title" || storedBuild.SharedContext != "Targeting Nomad cluster" || len(storedChunks) != 2 || storedChunks[1].Effort != "medium" || len(storedChunks[1].TargetSymbols) != 1 || len(storedChunks[1].AcceptanceCriteria) != 1 {
 		t.Fatalf("stored build mismatch: build=%+v chunks=%+v", storedBuild, storedChunks)
 	}
-
-	// GET /builds/{id} and POST /builds/{id}/cancel
-	if rec := doReq(http.MethodGet, "/builds/", nil); rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 on empty build id, got %d", rec.Code)
-	}
-	if rec := doReq(http.MethodDelete, "/builds/"+buildID, nil); rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 on DELETE, got %d", rec.Code)
-	}
-	if rec := doReq(http.MethodGet, "/builds/unknown-id", nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 on unknown build id, got %d", rec.Code)
+	for _, tc := range []struct {
+		m, p string
+		w    int
+	}{
+		{http.MethodGet, "/builds/", http.StatusBadRequest}, {http.MethodDelete, "/builds/" + buildID, http.StatusMethodNotAllowed},
+		{http.MethodGet, "/builds/unknown-id", http.StatusNotFound}, {http.MethodGet, "/builds/" + buildID, http.StatusOK},
+		{http.MethodGet, "/builds/" + buildID + "/cancel", http.StatusMethodNotAllowed}, {http.MethodPost, "/builds/%20/cancel", http.StatusBadRequest},
+		{http.MethodPost, "/builds/unknown-id/cancel", http.StatusNotFound},
+	} {
+		checkCode(tc.m, tc.p, nil, tc.w)
 	}
 	memStore.getErr = errors.New("get error")
-	if rec := doReq(http.MethodGet, "/builds/"+buildID, nil); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on get error, got %d", rec.Code)
-	}
+	checkCode(http.MethodGet, "/builds/"+buildID, nil, http.StatusInternalServerError)
 	memStore.getErr = nil
-
-	if rec := doReq(http.MethodGet, "/builds/"+buildID, nil); rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on GET /builds/%s, got %d", buildID, rec.Code)
-	}
-
-	// Cancel routes
-	if rec := doReq(http.MethodGet, "/builds/"+buildID+"/cancel", nil); rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 on GET /cancel, got %d", rec.Code)
-	}
-	if rec := doReq(http.MethodPost, "/builds/%20/cancel", nil); rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 on blank build id cancel, got %d", rec.Code)
-	}
-	if rec := doReq(http.MethodPost, "/builds/unknown-id/cancel", nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 on unknown build cancel, got %d", rec.Code)
-	}
 	memStore.updateBuildErr = errors.New("cancel db err")
-	if rec := doReq(http.MethodPost, "/builds/"+buildID+"/cancel", nil); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on cancel db err, got %d", rec.Code)
-	}
+	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", nil, http.StatusInternalServerError)
 	memStore.updateBuildErr = nil
-
-	if rec := doReq(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil)); rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on POST /cancel, got %d", rec.Code)
-	}
+	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
 	_ = memStore.UpdateBuildStatus(context.Background(), buildID, "completed")
-	if rec := doReq(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil)); rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409 Conflict cancelling completed build, got %d", rec.Code)
+	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusConflict)
+	wPost := httptest.NewRecorder()
+	srv.handleListBuilds(wPost, httptest.NewRequest(http.MethodPost, "/builds", nil))
+	if wPost.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on handleListBuilds POST, got %d", wPost.Code)
+	}
+	now := time.Now().UTC()
+	bRunning, bCompleted, bQueued := mkBuild("b-run", "111", "", "", "running"), mkBuild("b-comp", "222", "", "", "completed"), mkBuild("b-q", "333", "", "", "running")
+	bRunning.CreatedAt, bCompleted.CreatedAt, bQueued.CreatedAt = now.Add(-time.Minute), now.Add(-5*time.Minute), now.Add(-10*time.Minute)
+	listStore := newMemoryVanadisStore()
+	_ = listStore.CreateBuild(context.Background(), bRunning, []VanadisChunk{mkChunk("c-run-1", "b-run", 0, "C1", "", "", "running")})
+	_ = listStore.CreateBuild(context.Background(), bCompleted, []VanadisChunk{mkChunk("c-comp-1", "b-comp", 0, "C2", "", "", "completed")})
+	_ = listStore.CreateBuild(context.Background(), bQueued, []VanadisChunk{mkChunk("c-q-1", "b-q", 0, "C3", "", "", "pending")})
+	srv.SetStore(listStore)
+	listStore.listErr = errors.New("simulated list failure")
+	checkCode(http.MethodGet, "/builds", nil, http.StatusInternalServerError)
+	listStore.listErr = nil
+	recList := doReq(http.MethodGet, "/builds", nil)
+	var resp struct {
+		Total          int                 `json:"total"`
+		RunningCount   int                 `json:"running_count"`
+		QueuedCount    int                 `json:"queued_count"`
+		CompletedCount int                 `json:"completed_count"`
+		Builds         []VanadisBuildEntry `json:"builds"`
+	}
+	if recList.Code != http.StatusOK || json.Unmarshal(recList.Body.Bytes(), &resp) != nil || resp.Total != 3 || resp.RunningCount != 1 || resp.CompletedCount != 1 || resp.QueuedCount != 1 {
+		t.Fatalf("unexpected list response: code=%d resp=%+v", recList.Code, resp)
+	}
+	checkCode(http.MethodGet, "/runs", nil, http.StatusOK)
+	fetchList := func(query string) (int, string) {
+		rec := doReq(http.MethodGet, query, nil)
+		var out struct {
+			Total  int                 `json:"total"`
+			Builds []VanadisBuildEntry `json:"builds"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		id := ""
+		if len(out.Builds) > 0 {
+			id = out.Builds[0].ID
+		}
+		return out.Total, id
+	}
+	for _, tc := range []struct {
+		query, wantID string
+		wantTot       int
+	}{
+		{"/builds?queue_state=running", "b-run", 1},
+		{"/builds?status=completed", "b-comp", 1},
+		{"/builds?limit=1", "", 1},
+	} {
+		tot, id := fetchList(tc.query)
+		if tot != tc.wantTot || (tc.wantID != "" && id != tc.wantID) {
+			t.Fatalf("query %s got total=%d id=%s", tc.query, tot, id)
+		}
+	}
+	recDetail := doReq(http.MethodGet, "/builds/b-run", nil)
+	var detailResp struct {
+		Entry VanadisBuildEntry `json:"entry"`
+	}
+	if err := json.Unmarshal(recDetail.Body.Bytes(), &detailResp); err != nil || detailResp.Entry.ID != "b-run" || detailResp.Entry.QueueState != "running" || detailResp.Entry.TotalChunks != 1 {
+		t.Fatalf("unexpected Entry: %+v", detailResp.Entry)
 	}
 }
-
 func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
-	origPoolFn := newPgxPoolFn
-	origRiverFn := newRiverClientFn
-	defer func() {
-		newPgxPoolFn = origPoolFn
-		newRiverClientFn = origRiverFn
-	}()
-
+	origPoolFn, origRiverFn := newPgxPoolFn, newRiverClientFn
+	defer func() { newPgxPoolFn, newRiverClientFn = origPoolFn, origRiverFn }()
 	ctx := context.Background()
 	srv := NewVanadisServer(Config{}, nil, nil, nil)
-
-	// 1. ParseConfig error
 	if _, err := initPostgresAndRiver(ctx, srv, "postgres://user:pass@invalid%xx/db"); err == nil {
 		t.Fatal("expected parse error")
 	}
-
-	// 2. newPgxPoolFn error
 	newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
 		return nil, errors.New("pool creation failed")
 	}
 	if _, err := initPostgresAndRiver(ctx, srv, "postgres://u:p@127.0.0.1:5432/db"); err == nil {
 		t.Fatal("expected pool error")
 	}
-
-	// Create a real lazy pool object (does not connect until used)
 	cfg, _ := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:5432/db")
 	newPgxPoolFn = origPoolFn
-
-	// 3. newRiverClientFn error
-	newRiverClientFn = func(*pgxpool.Pool, *river.Workers) (riverLifecycleClient, error) {
-		return nil, errors.New("river client error")
+	for _, clientErr := range []error{errors.New("client error"), nil} {
+		startErr := clientErr
+		if startErr == nil {
+			startErr = errors.New("start failed")
+		}
+		newRiverClientFn = func(*pgxpool.Pool, *river.Workers) (riverLifecycleClient, error) {
+			if clientErr != nil {
+				return nil, clientErr
+			}
+			return &mockRiverLifecycle{startErr: startErr}, nil
+		}
+		if _, err := initPostgresAndRiver(ctx, srv, cfg.ConnString()); err == nil {
+			t.Fatal("expected error from initPostgresAndRiver")
+		}
 	}
-	if _, err := initPostgresAndRiver(ctx, srv, cfg.ConnString()); err == nil {
-		t.Fatal("expected river client error")
-	}
-
-	// 4. rc.Start error
-	newRiverClientFn = func(*pgxpool.Pool, *river.Workers) (riverLifecycleClient, error) {
-		return &mockRiverLifecycle{startErr: errors.New("start failed")}, nil
-	}
-	if _, err := initPostgresAndRiver(ctx, srv, cfg.ConnString()); err == nil {
-		t.Fatal("expected river start error")
-	}
-
-	// 5. Success and cleanup
 	newRiverClientFn = func(*pgxpool.Pool, *river.Workers) (riverLifecycleClient, error) {
 		return &mockRiverLifecycle{stopErr: errors.New("stop warning")}, nil
 	}
@@ -1185,25 +835,14 @@ func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
 		t.Fatalf("expected success from initPostgresAndRiver, got err=%v", err)
 	}
 	cleanup(ctx)
-
-	// 6. runServer with mocked River + Postgres lifecycle and invalid port
-	if err := runServer(ctx, Config{Port: "-1", PostgresURL: cfg.ConnString()}, nil); err == nil {
-		t.Fatal("expected listen error on port -1")
+	if runServer(ctx, Config{Port: "-1", PostgresURL: cfg.ConnString()}, nil) == nil || runServer(ctx, Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, nil) == nil {
+		t.Fatal("expected error on invalid runServer configs")
 	}
-	if err := runServer(ctx, Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, nil); err == nil {
-		t.Fatal("expected error on invalid PostgresURL in runServer")
-	}
-
-	// 7. Full runServer + RunApp lifecycle
 	runCtx, runCancel := context.WithCancel(context.Background())
-	ready := make(chan string, 1)
-	done := make(chan error, 1)
+	ready, done := make(chan string, 1), make(chan error, 1)
 	go func() {
-		done <- runServer(runCtx, Config{Port: "0", PostgresURL: cfg.ConnString()}, func(addr string) {
-			ready <- addr
-		})
+		done <- runServer(runCtx, Config{Port: "0", PostgresURL: cfg.ConnString()}, func(addr string) { ready <- addr })
 	}()
-
 	select {
 	case addr := <-ready:
 		if addr == "" {
@@ -1216,25 +855,18 @@ func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("unexpected runServer exit error: %v", err)
 	}
-
 	appCtx, appCancel := context.WithCancel(context.Background())
 	appCancel()
 	if err := RunApp(appCtx, Config{Port: "0"}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected RunApp error: %v", err)
 	}
 }
-
 func TestSyncBuildWidget(t *testing.T) {
 	ctx := context.Background()
-
-	// 1. Nil server or client
 	var nilSrv *VanadisServer
 	nilSrv.syncBuildWidget(ctx, VanadisBuild{}, nil, "")
-
 	store := newMemoryVanadisStore()
-	store.builds["b1"] = VanadisBuild{ID: "b1", ThreadID: "1555405874565091380"}
-
-	// 2. Successful widget post and persistence of new message_id
+	store.builds["b1"] = mkBuild("b1", "1555405874565091380", "", "", "")
 	var postedReq StatusWidgetRequest
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/discord/widget" {
@@ -1248,27 +880,16 @@ func TestSyncBuildWidget(t *testing.T) {
 		})
 	}))
 	defer ts.Close()
-
 	srv := &VanadisServer{
 		cfg:        Config{BrainURL: ts.URL},
 		httpClient: ts.Client(),
 		store:      store,
 	}
-
-	build := VanadisBuild{
-		ID:        "b1",
-		ThreadID:  "1555405874565091380",
-		Title:     "Test Build Title",
-		Objective: "Test Obj",
-		Status:    "running",
-		Tier:      2,
-	}
-	startedAt := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
-	updatedAt := startedAt.Add(3 * time.Minute)
-	chunks := []VanadisChunk{
-		{ChunkIndex: 0, Title: "Chunk 0", Status: "running", Repo: "aerial", StartedAt: startedAt, UpdatedAt: updatedAt},
-	}
-
+	build := mkBuild("b1", "1555405874565091380", "Test Build Title", "Test Obj", "running")
+	startedAt, updatedAt := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC), time.Date(2026, 10, 16, 18, 3, 0, 0, time.UTC)
+	chunk := mkChunk("", "", 0, "Chunk 0", "", "", "running")
+	chunk.Repo, chunk.StartedAt, chunk.UpdatedAt = "aerial", startedAt, updatedAt
+	chunks := []VanadisChunk{chunk}
 	srv.syncBuildWidget(ctx, build, chunks, "test banner")
 	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" || len(postedReq.Chunks) != 1 || !postedReq.Chunks[0].StartedAt.Equal(startedAt) || !postedReq.Chunks[0].UpdatedAt.Equal(updatedAt) {
 		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
@@ -1276,419 +897,51 @@ func TestSyncBuildWidget(t *testing.T) {
 	if store.builds["b1"].StatusMessageID != "msg-new-widget-42" {
 		t.Errorf("Expected store status_message_id msg-new-widget-42, got %q", store.builds["b1"].StatusMessageID)
 	}
-
-	// 3. Error decoding response
 	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("{invalid-json"))
 	}))
 	defer tsBadJSON.Close()
-
-	srvBadJSON := &VanadisServer{
-		cfg:        Config{BrainURL: tsBadJSON.URL},
-		httpClient: tsBadJSON.Client(),
-		store:      store,
-	}
-	srvBadJSON.syncBuildWidget(ctx, build, chunks, "")
-
-	// 4. Persistence failure in store
+	NewVanadisServer(Config{BrainURL: tsBadJSON.URL}, store, nil, tsBadJSON.Client()).syncBuildWidget(ctx, build, chunks, "")
 	store.updateBuildErr = errors.New("simulated store failure")
 	srv.syncBuildWidget(ctx, build, chunks, "")
 }
-
-
-func TestClassifyBuildQueueState(t *testing.T) {
+func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
+	classifyTests := []struct {
 		name        string
 		buildStatus string
 		chunks      []VanadisChunk
 		expected    string
 	}{
-		{"completed status", "completed", nil, "completed"},
-		{"merged status", "merged", nil, "completed"},
-		{"failed status", "failed", nil, "completed"},
-		{"cancelled status", "cancelled", nil, "completed"},
-		{"canceled status uppercase", "CANCELED", nil, "completed"},
-		{"queued status", "queued", nil, "queued"},
-		{"pending status", "pending", nil, "queued"},
-		{"running with empty chunks", "running", []VanadisChunk{}, "running"},
-		{"running with all pending chunks", "running", []VanadisChunk{
-			{ID: "c1", Status: "pending"},
-			{ID: "c2", Status: "pending"},
-		}, "queued"},
-		{"running with mixed chunks", "running", []VanadisChunk{
-			{ID: "c1", Status: "pending"},
-			{ID: "c2", Status: "running"},
-		}, "running"},
-		{"running with completed chunk", "running", []VanadisChunk{
-			{ID: "c1", Status: "completed"},
-		}, "running"},
-		{"unknown status defaults to queued", "unknown_state", nil, "queued"},
-		{"whitespace padded status", "  completed  ", nil, "completed"},
+		{"completed status", "completed", nil, "completed"}, {"merged status", "merged", nil, "completed"},
+		{"failed status", "failed", nil, "completed"}, {"cancelled status", "cancelled", nil, "completed"},
+		{"canceled status uppercase", "CANCELED", nil, "completed"}, {"queued status", "queued", nil, "queued"},
+		{"pending status", "pending", nil, "queued"}, {"running with empty chunks", "running", []VanadisChunk{}, "running"},
+		{"running with all pending chunks", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "pending"), mkChunk("c2", "", 1, "", "", "", "pending")}, "queued"},
+		{"running with mixed chunks", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "pending"), mkChunk("c2", "", 1, "", "", "", "running")}, "running"},
+		{"running with completed chunk", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "completed")}, "running"},
+		{"unknown status defaults to queued", "unknown_state", nil, "queued"}, {"whitespace padded status", "  completed  ", nil, "completed"},
 	}
-
-	for _, tt := range tests {
+	for _, tt := range classifyTests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := ClassifyBuildQueueState(tt.buildStatus, tt.chunks)
-			if got != tt.expected {
+			if got := ClassifyBuildQueueState(tt.buildStatus, tt.chunks); got != tt.expected {
 				t.Fatalf("expected %q, got %q", tt.expected, got)
 			}
 		})
 	}
-}
-
-func TestSummarizeBuildEntry(t *testing.T) {
-	t.Parallel()
-
-	build := VanadisBuild{
-		ID:     "b-summary-1",
-		Status: "running",
-	}
-	// Case 1: nil chunks
+	build := mkBuild("b-summary-1", "", "", "", "running")
 	entryNil := SummarizeBuildEntry(build, nil)
 	if entryNil.Chunks == nil || len(entryNil.Chunks) != 0 || entryNil.TotalChunks != 0 || entryNil.QueueState != "running" {
 		t.Fatalf("unexpected entryNil: %+v", entryNil)
 	}
-
-	// Case 2: variety of chunk statuses
-	chunks := []VanadisChunk{
-		{ID: "c1", Status: "completed"},
-		{ID: "c2", Status: "merged"},
-		{ID: "c3", Status: "running"},
-		{ID: "c4", Status: "coding"},
-		{ID: "c5", Status: "pr_opened"},
-		{ID: "c6", Status: "deploying"},
-		{ID: "c7", Status: "pending"},
-		{ID: "c8", Status: "failed"},
-		{ID: "c9", Status: "unknown"},
+	chunkStatuses := []string{"completed", "merged", "running", "coding", "pr_opened", "deploying", "pending", "failed", "unknown"}
+	chunks := make([]VanadisChunk, len(chunkStatuses))
+	for i, st := range chunkStatuses {
+		chunks[i] = mkChunk(fmt.Sprintf("c%d", i+1), "", i, "", "", "", st)
 	}
-
 	entry := SummarizeBuildEntry(build, chunks)
-	if entry.TotalChunks != 9 {
-		t.Fatalf("expected TotalChunks 9, got %d", entry.TotalChunks)
-	}
-	if entry.CompletedChunks != 2 {
-		t.Fatalf("expected CompletedChunks 2, got %d", entry.CompletedChunks)
-	}
-	if entry.RunningChunks != 4 {
-		t.Fatalf("expected RunningChunks 4, got %d", entry.RunningChunks)
-	}
-	if entry.PendingChunks != 1 {
-		t.Fatalf("expected PendingChunks 1, got %d", entry.PendingChunks)
-	}
-	if entry.FailedChunks != 1 {
-		t.Fatalf("expected FailedChunks 1, got %d", entry.FailedChunks)
-	}
-	if entry.QueueState != "running" {
-		t.Fatalf("expected QueueState 'running', got %q", entry.QueueState)
-	}
-}
-
-func TestPostgresVanadisStore_ListBuilds(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	// 1. Nil store
-	var nilStore *PostgresVanadisStore
-	if _, err := nilStore.ListBuilds(ctx, 10); err == nil {
-		t.Fatal("expected error on nil store ListBuilds")
-	}
-
-	// 2. Nil db in store
-	emptyStore := &PostgresVanadisStore{}
-	if _, err := emptyStore.ListBuilds(ctx, 10); err == nil {
-		t.Fatal("expected error on store with nil db")
-	}
-
-	// 3. Query builds error
-	queryErrStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			return nil, errors.New("query builds failed")
-		},
-	})
-	if _, err := queryErrStore.ListBuilds(ctx, 10); err == nil {
-		t.Fatal("expected error on query builds failure")
-	}
-
-	// 4. Scan build error
-	scanErrStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			return &mockRows{
-				builds:  []VanadisBuild{{ID: "b-1"}},
-				scanErr: errors.New("scan build failed"),
-			}, nil
-		},
-	})
-	if _, err := scanErrStore.ListBuilds(ctx, 10); err == nil {
-		t.Fatal("expected error on scan build failure")
-	}
-
-	// 5. Builds rows.Err() error
-	rowsErrStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			return &mockRows{
-				builds:  []VanadisBuild{{ID: "b-1"}},
-				rowsErr: errors.New("iteration builds failed"),
-			}, nil
-		},
-	})
-	if _, err := rowsErrStore.ListBuilds(ctx, 10); err == nil {
-		t.Fatal("expected error on builds rows.Err() failure")
-	}
-
-	// 6. 0 builds returned
-	zeroBuildsStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			return &mockRows{}, nil
-		},
-	})
-	entries, err := zeroBuildsStore.ListBuilds(ctx, 0)
-	if err != nil {
-		t.Fatalf("unexpected error on 0 builds: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("expected 0 entries, got %d", len(entries))
-	}
-
-	// 7. Chunks query error
-	chunksQueryErrStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			if strings.Contains(sql, "vanadis_builds") {
-				return &mockRows{builds: []VanadisBuild{{ID: "b-1", Status: "running"}}}, nil
-			}
-			return nil, errors.New("query chunks failed")
-		},
-	})
-	if _, err := chunksQueryErrStore.ListBuilds(ctx, 150); err == nil {
-		t.Fatal("expected error on query chunks failure")
-	}
-
-	// 8. Chunks scan error
-	chunksScanErrStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			if strings.Contains(sql, "vanadis_builds") {
-				return &mockRows{builds: []VanadisBuild{{ID: "b-1", Status: "running"}}}, nil
-			}
-			return &mockRows{
-				items:   []VanadisChunk{{ID: "c-1", BuildID: "b-1"}},
-				scanErr: errors.New("chunk scan failed"),
-			}, nil
-		},
-	})
-	if _, err := chunksScanErrStore.ListBuilds(ctx, -5); err == nil {
-		t.Fatal("expected error on chunk scan failure")
-	}
-
-	// 9. Chunks rows.Err() error
-	chunksRowsErrStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			if strings.Contains(sql, "vanadis_builds") {
-				return &mockRows{builds: []VanadisBuild{{ID: "b-1", Status: "running"}}}, nil
-			}
-			return &mockRows{
-				items:   []VanadisChunk{{ID: "c-1", BuildID: "b-1"}},
-				rowsErr: errors.New("chunk iteration failed"),
-			}, nil
-		},
-	})
-	if _, err := chunksRowsErrStore.ListBuilds(ctx, 10); err == nil {
-		t.Fatal("expected error on chunk rows.Err failure")
-	}
-
-	// 10. Successful multi-build listing with chunks and limit clamp
-	now := time.Now().UTC()
-	b1 := VanadisBuild{ID: "b-1", ThreadID: "100", Status: "running", CreatedAt: now.Add(-time.Hour), UpdatedAt: now}
-	b2 := VanadisBuild{ID: "b-2", ThreadID: "101", Status: "completed", CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now}
-	c1 := VanadisChunk{ID: "c-1", BuildID: "b-1", ChunkIndex: 0, Title: "chunk 1", Status: "running", CreatedAt: now, UpdatedAt: now}
-	c2 := VanadisChunk{ID: "c-2", BuildID: "b-1", ChunkIndex: 1, Title: "chunk 2", Status: "pending", CreatedAt: now, UpdatedAt: now}
-	c3 := VanadisChunk{ID: "c-3", BuildID: "b-2", ChunkIndex: 0, Title: "chunk 3", Status: "merged", CreatedAt: now, UpdatedAt: now}
-
-	var capturedLimit any
-	okStore := NewPostgresVanadisStore(&mockDB{
-		queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
-			if strings.Contains(sql, "vanadis_builds") {
-				if len(args) > 0 {
-					capturedLimit = args[0]
-				}
-				return &mockRows{builds: []VanadisBuild{b1, b2}}, nil
-			}
-			return &mockRows{items: []VanadisChunk{c1, c2, c3}}, nil
-		},
-	})
-
-	gotEntries, err := okStore.ListBuilds(ctx, 25)
-	if err != nil {
-		t.Fatalf("unexpected ListBuilds error: %v", err)
-	}
-	if capturedLimit != 25 {
-		t.Fatalf("expected limit 25, got %v", capturedLimit)
-	}
-	if len(gotEntries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(gotEntries))
-	}
-	if gotEntries[0].ID != "b-1" || gotEntries[0].TotalChunks != 2 || gotEntries[0].RunningChunks != 1 || gotEntries[0].PendingChunks != 1 || gotEntries[0].QueueState != "running" {
-		t.Fatalf("unexpected entry 0: %+v", gotEntries[0])
-	}
-	if gotEntries[1].ID != "b-2" || gotEntries[1].TotalChunks != 1 || gotEntries[1].CompletedChunks != 1 || gotEntries[1].QueueState != "completed" {
-		t.Fatalf("unexpected entry 1: %+v", gotEntries[1])
-	}
-}
-
-func TestHTTPEndpoints_ListBuilds(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now().UTC()
-	bRunning := VanadisBuild{ID: "b-run", ThreadID: "111", Status: "running", CreatedAt: now.Add(-time.Minute), UpdatedAt: now}
-	bCompleted := VanadisBuild{ID: "b-comp", ThreadID: "222", Status: "completed", CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now}
-	bQueued := VanadisBuild{ID: "b-q", ThreadID: "333", Status: "running", CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now}
-
-	memStore := newMemoryVanadisStore()
-	_ = memStore.CreateBuild(context.Background(), bRunning, []VanadisChunk{
-		{ID: "c-run-1", BuildID: "b-run", ChunkIndex: 0, Title: "C1", Status: "running"},
-	})
-	_ = memStore.CreateBuild(context.Background(), bCompleted, []VanadisChunk{
-		{ID: "c-comp-1", BuildID: "b-comp", ChunkIndex: 0, Title: "C2", Status: "completed"},
-	})
-	_ = memStore.CreateBuild(context.Background(), bQueued, []VanadisChunk{
-		{ID: "c-q-1", BuildID: "b-q", ChunkIndex: 0, Title: "C3", Status: "pending"},
-	})
-
-	srv := &VanadisServer{store: memStore}
-	mux := SetupMux(srv)
-
-	// 1. Store is nil -> 500
-	srvNilStore := &VanadisServer{store: nil}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/builds", nil)
-	srvNilStore.handleListBuilds(w, r)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for nil store, got %d", w.Code)
-	}
-
-	// 2. Method not allowed (direct call with non-GET)
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodPost, "/builds", nil)
-	srv.handleListBuilds(w, r)
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 for non-GET method, got %d", w.Code)
-	}
-
-	// 3. Store error -> 500
-	errStore := newMemoryVanadisStore()
-	errStore.listErr = errors.New("simulated list failure")
-	srvErr := &VanadisServer{store: errStore}
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodGet, "/builds", nil)
-	srvErr.handleListBuilds(w, r)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on listErr, got %d", w.Code)
-	}
-
-	// 4. Successful GET /builds listing all
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodGet, "/builds", nil)
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Status         string              `json:"status"`
-		Total          int                 `json:"total"`
-		RunningCount   int                 `json:"running_count"`
-		QueuedCount    int                 `json:"queued_count"`
-		CompletedCount int                 `json:"completed_count"`
-		Builds         []VanadisBuildEntry `json:"builds"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if resp.Status != "ok" || resp.Total != 3 || resp.RunningCount != 1 || resp.CompletedCount != 1 || resp.QueuedCount != 1 {
-		t.Fatalf("unexpected counts: %+v", resp)
-	}
-
-	// 5. Successful GET /runs alias
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodGet, "/runs", nil)
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for /runs, got %d", w.Code)
-	}
-
-	// 6. Filter by ?queue_state=running
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodGet, "/builds?queue_state=running", nil)
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w.Code)
-	}
-	resp = struct {
-		Status         string              `json:"status"`
-		Total          int                 `json:"total"`
-		RunningCount   int                 `json:"running_count"`
-		QueuedCount    int                 `json:"queued_count"`
-		CompletedCount int                 `json:"completed_count"`
-		Builds         []VanadisBuildEntry `json:"builds"`
-	}{}
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Total != 1 || resp.Builds[0].ID != "b-run" {
-		t.Fatalf("expected only b-run, got total=%d", resp.Total)
-	}
-	// Counts across all builds should still be 1, 1, 1
-	if resp.RunningCount != 1 || resp.CompletedCount != 1 || resp.QueuedCount != 1 {
-		t.Fatalf("expected total counts preserved, got: %+v", resp)
-	}
-
-	// 7. Filter by ?status=completed
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodGet, "/builds?status=completed", nil)
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w.Code)
-	}
-	var respComp struct {
-		Total  int                 `json:"total"`
-		Builds []VanadisBuildEntry `json:"builds"`
-	}
-	_ = json.Unmarshal(w.Body.Bytes(), &respComp)
-	if respComp.Total != 1 || respComp.Builds[0].ID != "b-comp" {
-		t.Fatalf("expected b-comp, got total=%d", respComp.Total)
-	}
-
-	// 8. Custom ?limit=1
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodGet, "/builds?limit=1", nil)
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w.Code)
-	}
-	var respLimit struct {
-		Total  int                 `json:"total"`
-		Builds []VanadisBuildEntry `json:"builds"`
-	}
-	_ = json.Unmarshal(w.Body.Bytes(), &respLimit)
-	if respLimit.Total != 1 {
-		t.Fatalf("expected limit 1 to return 1 build, got %d", respLimit.Total)
-	}
-
-	// 9. Inspect GET /builds/{id} includes "entry"
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest(http.MethodGet, "/builds/b-run", nil)
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for /builds/b-run, got %d", w.Code)
-	}
-	var detailResp struct {
-		Build  VanadisBuild      `json:"build"`
-		Chunks []VanadisChunk    `json:"chunks"`
-		Entry  VanadisBuildEntry `json:"entry"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &detailResp); err != nil {
-		t.Fatalf("failed to decode detailResp: %v", err)
-	}
-	if detailResp.Entry.ID != "b-run" || detailResp.Entry.QueueState != "running" || detailResp.Entry.TotalChunks != 1 {
-		t.Fatalf("unexpected Entry in detailResp: %+v", detailResp.Entry)
+	if entry.TotalChunks != 9 || entry.CompletedChunks != 2 || entry.RunningChunks != 4 || entry.PendingChunks != 1 || entry.FailedChunks != 1 || entry.QueueState != "running" {
+		t.Fatalf("unexpected summarized entry: %+v", entry)
 	}
 }
