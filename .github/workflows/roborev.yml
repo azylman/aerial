@@ -1,0 +1,73 @@
+name: RoboRev Code Review
+
+on:
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: roborev-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-bootstrap:
+    name: Check RoboRev Bootstrap State
+    runs-on: ubuntu-latest
+    outputs:
+      bootstrapped: ${{ steps.check.outputs.bootstrapped }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check if .roborev.toml exists on main
+        id: check
+        run: |
+          if git cat-file -e origin/main:.roborev.toml 2>/dev/null && git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null; then
+            echo "bootstrapped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bootstrapped=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  roborev:
+    name: roborev
+    needs: check-bootstrap
+    if: >
+      needs.check-bootstrap.outputs.bootstrapped == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'azylman'
+    runs-on: [self-hosted, roborev]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Independent RoboRev Review Gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          roborev ci review \
+            --comment \
+            --agent gemini \
+            --review-types default,security,design \
+            --min-severity medium \
+            --reasoning thorough | tee /tmp/roborev-review.md
+          cat /tmp/roborev-review.md >> "$GITHUB_STEP_SUMMARY"
+          if grep -q "Synthesis unavailable" /tmp/roborev-review.md; then
+            echo "::error::RoboRev synthesis failed or fell back to raw output; failing closed."
+            exit 1
+          fi
+          if grep -Eq '^## roborev: Review Passed|^No issues found\.$|^No findings at or above [a-z]+ severity\.$|roborev: no changes to review' /tmp/roborev-review.md; then
+            echo "RoboRev gate passed."
+            exit 0
+          fi
+          echo "::error::RoboRev reported actionable findings (>= medium severity)."
+          exit 1

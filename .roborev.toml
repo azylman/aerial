@@ -1,0 +1,28 @@
+agent = "gemini"
+review_agent = "gemini"
+review_reasoning = "thorough"
+default_branch = "main"
+
+exclude_patterns = [
+  "*.sum",
+  "*.lock",
+  "package-lock.json",
+  "brain/pkg/db/migrations/*.sql"
+]
+
+review_guidelines = """
+This repository is the Aerial Core Engine Monorepo (Go 1.27 microservices, HashiCorp Nomad job specifications, and Docker images).
+Enforce the following strict engineering invariants:
+1. Security & Secrets: Zero plaintext tokens, API keys, or GitHub PATs in code, logs, or git configs. Zero raw SQL DDL (ALTER/DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, and path traversal.
+2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers. Zero arbitrary time.Sleep calls in tests or production plumbing.
+3. Architecture & Testing: Functional Core / Imperative Shell. Tests must use homogeneous table-driven loops without closure fields on table structs or catch-all Test*Coverage* names.
+4. Zero Personal Data: Never allow personal names, Discord handles, home addresses, or private entity IDs in this generic open-source engine repository.
+5. Internal Cluster Topology: Internal Nomad DNS names (*.aerial, aerial-postgres, aerial-hangar, aerial-brain, vanadis) are trusted private mesh endpoints, not public internet URLs.
+"""
+
+[ci]
+agents = ["gemini"]
+review_types = ["default", "security", "design"]
+reasoning = "thorough"
+min_severity = "medium"
+upsert_comments = true
