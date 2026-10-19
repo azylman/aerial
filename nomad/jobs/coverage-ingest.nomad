@@ -68,7 +68,6 @@ echo "📦 [coverage-ingest] Installing postgresql client and curl..."
 apk add --no-cache postgresql-client curl >/dev/null 2>&1
 
 COVERAGE_DIR="/share/coverage"
-SOURCE_DIR="/share/aerial"
 
 mkdir -p "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covcounters.*" -mtime +2 -delete 2>/dev/null || true
@@ -125,70 +124,55 @@ for svc_path in "$COVERAGE_DIR"/*; do
   fi
 
   echo "⚡ [coverage-ingest] Ingesting $count counter file(s) for service: $svc_name"
-  tmp_out="/tmp/$${svc_name}.cov"
-
-  if ! go tool covdata textfmt -i="$svc_path" -o="$tmp_out" 2>/dev/null; then
-    echo "⚠️ [coverage-ingest] Failed to convert binary covdata for $svc_name"
-    rm -f "$tmp_out"
-    continue
-  fi
-
-  src_path="$SOURCE_DIR/$svc_name"
-  if [ ! -d "$src_path" ] && [ -d "$SOURCE_DIR/sidecars/$svc_name" ]; then
-    src_path="$SOURCE_DIR/sidecars/$svc_name"
-  fi
-  if [ ! -d "$src_path" ]; then
-    if [ -d "/share/mirrormere/$svc_name" ]; then
-      src_path="/share/mirrormere/$svc_name"
-    elif [ -d "/share/mirrormere/sidecars/$svc_name" ]; then
-      src_path="/share/mirrormere/sidecars/$svc_name"
-    elif [ -d "/share/mirrormere" ]; then
-      src_path="/share/mirrormere"
-    else
-      src_path="$SOURCE_DIR"
-    fi
-  fi
-
   sql_tmp="/tmp/$${svc_name}.sql"
   echo "BEGIN;" > "$sql_tmp"
 
-  (cd "$src_path" && go tool cover -func="$tmp_out" 2>/dev/null || true) | while IFS= read -r line; do
-    case "$line" in
-      total:*|"") continue ;;
-    esac
-    
-    file_loc=$(echo "$line" | awk '{print $1}')
-    fn_name=$(echo "$line" | awk '{print $2}')
-    pct=$(echo "$line" | awk '{print $3}' | tr -d '%')
-    file_name="$${file_loc%%:*}"
+  for meta_file in $(ls -1tr "$svc_path"/covmeta.* 2>/dev/null); do
+    [ -f "$meta_file" ] || continue
+    meta_base="$(basename "$meta_file")"
+    hash="$${meta_base#covmeta.}"
+    set -- "$svc_path"/covcounters."$hash".*
+    [ -f "$1" ] || continue
 
-    # Sanitize quotes for safe SQL formatting
-    fn_name=$(echo "$fn_name" | sed "s/'/''/g")
-    file_name=$(echo "$file_name" | sed "s/'/''/g")
+    stage_dir="/tmp/stage_$${svc_name}_$${hash}"
+    rm -rf "$stage_dir" && mkdir -p "$stage_dir"
+    cp "$meta_file" "$svc_path"/covcounters."$hash".* "$stage_dir/"
 
-    if [ -n "$file_name" ] && [ -n "$fn_name" ] && [ -n "$pct" ]; then
-      cat <<EOS >> "$sql_tmp"
-INSERT INTO production_code_coverage (service, file, function_name, coverage_percent, last_executed_at, updated_at)
-VALUES ('$svc_name', '$file_name', '$fn_name', $pct, CASE WHEN $pct > 0 THEN CURRENT_TIMESTAMP ELSE NULL END, CURRENT_TIMESTAMP)
-ON CONFLICT (service, file, function_name) DO UPDATE SET
-  coverage_percent = EXCLUDED.coverage_percent,
-  last_executed_at = CASE WHEN EXCLUDED.coverage_percent > 0 THEN CURRENT_TIMESTAMP ELSE production_code_coverage.last_executed_at END,
-  updated_at = CURRENT_TIMESTAMP;
-EOS
-    fi
+    go tool covdata func -i="$stage_dir" 2>/dev/null | awk -v svc="$svc_name" '
+      /^total/ || NF < 3 { next }
+      {
+        file_name = $1; fn_name = $2; pct = $3
+        sub(/:[0-9]+:$/, "", file_name)
+        sub(/^.*\./, "", fn_name)
+        sub(/%$/, "", pct)
+        gsub(/\x27/, "\x27\x27", file_name)
+        gsub(/\x27/, "\x27\x27", fn_name)
+        if (file_name != "" && fn_name != "" && pct != "") {
+          printf "INSERT INTO production_code_coverage (service, file, function_name, coverage_percent, last_executed_at, updated_at) VALUES (\x27%s\x27, \x27%s\x27, \x27%s\x27, %s, CASE WHEN %s > 0 THEN CURRENT_TIMESTAMP ELSE NULL END, CURRENT_TIMESTAMP) ON CONFLICT (service, file, function_name) DO UPDATE SET coverage_percent = CASE WHEN EXCLUDED.coverage_percent > 0 THEN EXCLUDED.coverage_percent ELSE production_code_coverage.coverage_percent END, last_executed_at = CASE WHEN EXCLUDED.coverage_percent > 0 THEN CURRENT_TIMESTAMP ELSE production_code_coverage.last_executed_at END, updated_at = CURRENT_TIMESTAMP;\n", svc, file_name, fn_name, pct, pct
+        }
+      }
+    ' >> "$sql_tmp" || true
+
+    rm -rf "$stage_dir"
   done
+
+  if ! grep -q "^INSERT INTO" "$sql_tmp"; then
+    echo "🚨 [coverage-ingest] Zero coverage rows extracted for $svc_name; preserving counter files"
+    rm -f "$sql_tmp"
+    continue
+  fi
 
   echo "COMMIT;" >> "$sql_tmp"
 
-  if psql "$POSTGRES_URL" -f "$sql_tmp" >/dev/null 2>&1; then
+  if psql "$POSTGRES_URL" -v ON_ERROR_STOP=1 -f "$sql_tmp" >/dev/null 2>&1; then
     echo "✅ [coverage-ingest] Upserted coverage for $svc_name into production_code_coverage."
-    # Purge processed counters to prevent accumulation; preserve covmeta for subsequent textfmt runs
     rm -f "$svc_path"/covcounters.*
+    ls -1t "$svc_path"/covmeta.* 2>/dev/null | tail -n +5 | xargs -r rm -f
   else
     echo "🚨 [coverage-ingest] SQL upsert failed for $svc_name"
   fi
 
-  rm -f "$tmp_out" "$sql_tmp"
+  rm -f "$sql_tmp"
 done
 
 echo "🎉 [coverage-ingest] Ingestion sweep completed."
