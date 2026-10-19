@@ -566,101 +566,17 @@ func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
 	}
 }
 
-func TestTranscriptStore_FakeStore_WithTx(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("commit persists transcript data and cloned steps", func(t *testing.T) {
-		s := NewFakeStore()
-		sessID := "tx-clone-sess-1"
-
-		initSteps := []TranscriptStep{
-			{SessionID: sessID, StepIndex: 0, Content: "Existing step 0", CreatedAt: time.Now().UTC()},
-			{SessionID: sessID, StepIndex: 1, Content: "Existing step 1", CreatedAt: time.Now().UTC()},
-		}
-		if err := s.BatchInsertTranscriptSteps(ctx, initSteps); err != nil {
-			t.Fatalf("initial BatchInsertTranscriptSteps failed: %v", err)
-		}
-
-		err := s.WithTx(ctx, func(tx Store) error {
-			if err := tx.UpsertSessionSummary(ctx, SessionSummary{
-				SessionID: sessID,
-				Summary:   "Transactional summary",
-			}); err != nil {
-				return err
-			}
-			found, err := tx.SearchTranscriptSteps(ctx, "", sessID, "", 10)
-			if err != nil || len(found) != 2 {
-				t.Fatalf("expected 2 cloned steps inside tx, got %d, err: %v", len(found), err)
-			}
-			return tx.BatchInsertTranscriptSteps(ctx, []TranscriptStep{
-				{SessionID: sessID, StepIndex: 2, Content: "Tx step 2", CreatedAt: time.Now().UTC()},
-			})
-		})
-		if err != nil {
-			t.Fatalf("WithTx commit failed: %v", err)
-		}
-
-		states, err := s.GetSessionSyncStates(ctx)
-		if err != nil || len(states) != 1 {
-			t.Fatalf("expected 1 session committed, got %d (err: %v)", len(states), err)
-		}
-		steps, err := s.SearchTranscriptSteps(ctx, "", sessID, "", 10)
-		if err != nil || len(steps) != 3 {
-			t.Fatalf("expected 3 steps after commit, got %d (err: %v)", len(steps), err)
-		}
-	})
-
-	t.Run("rollback discards transcript data and cloned changes", func(t *testing.T) {
-		s := NewFakeStore()
-		sessID := "tx-clone-sess-2"
-
-		initSteps := []TranscriptStep{
-			{SessionID: sessID, StepIndex: 0, Content: "Existing step before rollback", CreatedAt: time.Now().UTC()},
-		}
-		if err := s.BatchInsertTranscriptSteps(ctx, initSteps); err != nil {
-			t.Fatalf("initial BatchInsertTranscriptSteps failed: %v", err)
-		}
-
-		expectedErr := errors.New("simulated tx rollback")
-		err := s.WithTx(ctx, func(tx Store) error {
-			_ = tx.UpsertSessionSummary(ctx, SessionSummary{
-				SessionID: "tx-rollback-1",
-				Summary:   "Should be discarded",
-			})
-			_ = tx.BatchInsertTranscriptSteps(ctx, []TranscriptStep{
-				{SessionID: sessID, StepIndex: 1, Content: "Should be rolled back", CreatedAt: time.Now().UTC()},
-			})
-			return expectedErr
-		})
-		if !errors.Is(err, expectedErr) {
-			t.Fatalf("expected %v, got %v", expectedErr, err)
-		}
-
-		states, _ := s.GetSessionSyncStates(ctx)
-		if len(states) != 0 {
-			t.Errorf("expected 0 sessions after rollback, got %d", len(states))
-		}
-		afterRollback, err := s.SearchTranscriptSteps(ctx, "", sessID, "", 10)
-		if err != nil || len(afterRollback) != 1 {
-			t.Fatalf("expected 1 step after rollback, got %d (err: %v)", len(afterRollback), err)
-		}
-		if afterRollback[0].Content != "Existing step before rollback" {
-			t.Errorf("unexpected content: %s", afterRollback[0].Content)
-		}
-	})
-
-	t.Run("cloneTranscriptSteps unit", func(t *testing.T) {
-		if cloneTranscriptSteps(nil) != nil {
-			t.Errorf("expected nil for cloneTranscriptSteps(nil)")
-		}
-		sample := []TranscriptStep{
-			{SessionID: "s", StepIndex: 0, Content: "c"},
-		}
-		cp := cloneTranscriptSteps(sample)
-		if len(cp) != 1 || cp[0].Content != "c" {
-			t.Errorf("unexpected clone result: %+v", cp)
-		}
-	})
+func TestCloneTranscriptSteps(t *testing.T) {
+	if cloneTranscriptSteps(nil) != nil {
+		t.Errorf("expected nil for cloneTranscriptSteps(nil)")
+	}
+	sample := []TranscriptStep{
+		{SessionID: "s", StepIndex: 0, Content: "c"},
+	}
+	cp := cloneTranscriptSteps(sample)
+	if len(cp) != 1 || cp[0].Content != "c" {
+		t.Errorf("unexpected clone result: %+v", cp)
+	}
 }
 
 func TestTranscriptStore_GetSessionSyncStatesWithContext_MockDB(t *testing.T) {

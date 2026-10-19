@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -721,9 +720,6 @@ func (f *FakeStore) GetExternalConversationID(ctx context.Context, internalID st
 	return "", nil
 }
 
-func (f *FakeStore) SaveConversationMapping(ctx context.Context, externalID, internalID string) error {
-	return f.SaveSessionID(ctx, externalID, internalID)
-}
 
 // =========================================================================
 // ScheduleStore implementation
@@ -1439,77 +1435,6 @@ func (f *FakeStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding
 	return nil
 }
 
-// =========================================================================
-// Transaction implementation (Copy-on-write staging delta with rollback)
-// =========================================================================
-
-func cloneMap[K comparable, V any](src map[K]V, cloneFn func(V) V) map[K]V {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[K]V, len(src))
-	for k, v := range src {
-		dst[k] = cloneFn(v)
-	}
-	return dst
-}
-
-func (f *FakeStore) WithTx(ctx context.Context, fn func(txStore Store) error) error {
-	f.mu.Lock()
-	if err := f.checkClosedAndFail("WithTx"); err != nil {
-		f.mu.Unlock()
-		return err
-	}
-
-	// Create an isolated snapshot copy of current state
-	txCopy := &FakeStore{
-		failNext:         make(map[string]error),
-		messages:         cloneMap(f.messages, cloneMessage),
-		messageOrder:     append([]string(nil), f.messageOrder...),
-		nextRowID:        f.nextRowID,
-		sessions:         cloneMap(f.sessions, cloneSessionInfo),
-		threadSummaries:  maps.Clone(f.threadSummaries),
-		oneShots:         cloneMap(f.oneShots, cloneOneShot),
-		crons:            cloneMap(f.crons, cloneCron),
-		runs:             cloneMap(f.runs, cloneRun),
-		facts:            cloneMap(f.facts, cloneFactWithEmbedding),
-		nextFactID:       f.nextFactID,
-		watermarks:       maps.Clone(f.watermarks),
-		extractedAt:      maps.Clone(f.extractedAt),
-		sessionSummaries: cloneMap(f.sessionSummaries, cloneSessionSummary),
-		transcriptSteps:  cloneMap(f.transcriptSteps, cloneTranscriptSteps),
-	}
-	f.mu.Unlock()
-
-	// Execute transaction function on isolated copy (no outer locks held = zero deadlocks)
-	if err := fn(txCopy); err != nil {
-		// Rollback: simply discard txCopy!
-		return err
-	}
-
-	// Commit: merge mutated snapshot back into root store under lock
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.closed {
-		return sql.ErrConnDone
-	}
-
-	f.messages = txCopy.messages
-	f.messageOrder = txCopy.messageOrder
-	f.nextRowID = txCopy.nextRowID
-	f.sessions = txCopy.sessions
-	f.threadSummaries = txCopy.threadSummaries
-	f.oneShots = txCopy.oneShots
-	f.crons = txCopy.crons
-	f.runs = txCopy.runs
-	f.facts = txCopy.facts
-	f.nextFactID = txCopy.nextFactID
-	f.watermarks = txCopy.watermarks
-	f.extractedAt = txCopy.extractedAt
-	f.sessionSummaries = txCopy.sessionSummaries
-	f.transcriptSteps = txCopy.transcriptSteps
-	return nil
-}
 
 // =========================================================================
 // TranscriptStore implementation

@@ -217,42 +217,6 @@ func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]
 	return results, rows.Err()
 }
 
-func (s *SQLStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	query := `SELECT id, category, fact_text, importance, embedding, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts ORDER BY created_at DESC`
-	rows, err := s.db.QueryContext(queryCtx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []FactWithEmbedding
-	for rows.Next() {
-		var f Fact
-		var nv NullVector
-		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &nv, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
-			return nil, err
-		}
-		f.CreatedAt = createdAt.Time
-		f.LastReinforcedAt = lastReinforced.Time
-		f.LastDecayedAt = lastDecayed.Time
-		var emb []float32
-		if nv.Valid {
-			emb = nv.Vector
-		}
-		results = append(results, FactWithEmbedding{
-			Fact:      f,
-			Embedding: emb,
-		})
-	}
-	return results, nil
-}
 
 func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
 	if err := s.checkDB(); err != nil {

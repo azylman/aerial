@@ -41,87 +41,6 @@ func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
 	if _, err := s.GetMessage(ctx, "m1"); !errors.Is(err, sql.ErrConnDone) {
 		t.Fatalf("expected sql.ErrConnDone, got %v", err)
 	}
-	if err := s.WithTx(ctx, func(tx Store) error { return nil }); !errors.Is(err, sql.ErrConnDone) {
-		t.Fatalf("expected sql.ErrConnDone on WithTx, got %v", err)
-	}
-}
-
-func TestFakeStoreWithTx(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("commit mutates parent store", func(t *testing.T) {
-		s := NewFakeStore()
-		now := time.Now().UTC()
-
-		// Seed store with all entity types to verify tx copy
-		_ = s.InsertMessage(ctx, Message{ID: "m-tx-seed", ThreadID: "th-tx"})
-		_ = s.SaveSessionID(ctx, "th-tx", "sess-tx")
-		_ = s.SaveThreadSummary(ctx, "th-tx", "Sum", "wm")
-		_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-tx", ThreadID: "th-tx", RunAt: now})
-		_ = s.CreateCronSchedule(ctx, CronSchedule{ID: "cron-tx", TargetID: "tgt-tx", Enabled: true, NextRunAt: now})
-		_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-tx", ScheduleID: "cron-tx", Status: "running", StartedAt: now})
-		_, _ = s.InsertFact(ctx, "cat", "Fact text", 0.9, []float32{1.0, 0.0})
-		_ = s.UpdateConversationFactWatermark(ctx, "th-tx", 10)
-		_ = s.UpdateConversationFactExtractedAt(ctx, "th-tx")
-
-		err := s.WithTx(ctx, func(tx Store) error {
-			if err := tx.InsertMessage(ctx, Message{ID: "msg-1", ThreadID: "th-1"}); err != nil {
-				return err
-			}
-			if err := tx.SaveSessionID(ctx, "th-1", "sess-1"); err != nil {
-				return err
-			}
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("WithTx commit failed: %v", err)
-		}
-
-		// Verify state was applied
-		msg, err := s.GetMessage(ctx, "msg-1")
-		if err != nil || msg == nil {
-			t.Fatalf("expected msg-1 in store, err: %v", err)
-		}
-		sessID, err := s.GetSessionID(ctx, "th-1")
-		if err != nil || sessID != "sess-1" {
-			t.Fatalf("expected sess-1, got %q (err: %v)", sessID, err)
-		}
-		if exists, _ := s.MessageExists(ctx, "m-tx-seed"); !exists {
-			t.Errorf("expected m-tx-seed to exist after commit")
-		}
-	})
-
-	t.Run("rollback discards changes", func(t *testing.T) {
-		s := NewFakeStore()
-		simulatedErr := errors.New("rollback please")
-		err := s.WithTx(ctx, func(tx Store) error {
-			_ = tx.InsertMessage(ctx, Message{ID: "msg-rollback", ThreadID: "th-1"})
-			_ = tx.SaveSessionID(ctx, "th-1", "sess-rollback")
-			return simulatedErr
-		})
-		if !errors.Is(err, simulatedErr) {
-			t.Fatalf("expected %v, got %v", simulatedErr, err)
-		}
-
-		// Verify changes discarded
-		if exists, _ := s.MessageExists(ctx, "msg-rollback"); exists {
-			t.Errorf("expected msg-rollback to NOT exist")
-		}
-		if sessID, _ := s.GetSessionID(ctx, "th-1"); sessID != "" {
-			t.Errorf("expected empty session ID, got %q", sessID)
-		}
-	})
-
-	t.Run("commit fails if store closed concurrently", func(t *testing.T) {
-		s := NewFakeStore()
-		err := s.WithTx(ctx, func(tx Store) error {
-			_ = s.Close()
-			return nil
-		})
-		if !errors.Is(err, sql.ErrConnDone) {
-			t.Fatalf("expected sql.ErrConnDone, got %v", err)
-		}
-	})
 }
 
 func TestFakeStoreMessageOperations(t *testing.T) {
@@ -668,7 +587,6 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _ = s.GetSessionActivityStats(ctx, "t")
 	_, _ = s.GetActiveTasks(ctx)
 	_, _ = s.GetExternalConversationID(ctx, "t")
-	_ = s.SaveConversationMapping(ctx, "ext", "int")
 	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{})
 	_, _ = s.GetDueOneShotSchedules(ctx)
 	_ = s.InsertMessageAndConsumeOneShot(ctx, "id", Message{})
@@ -696,7 +614,6 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _, _ = s.DecayAndPruneFacts(ctx, 0.1, 0.5, 30)
 	_, _ = s.GetFactsMissingEmbeddings(ctx, 10)
 	_ = s.UpdateFactEmbedding(ctx, 1, nil)
-	_ = s.WithTx(ctx, func(tx Store) error { return nil })
 }
 
 func TestFakeStoreTestHelpers(t *testing.T) {
@@ -824,9 +741,9 @@ func TestFakeStoreActiveTasksAndConversationMapping(t *testing.T) {
 		t.Errorf("expected 50 clamped tasks, got %d", len(clampedTasks))
 	}
 
-	// 3. GetExternalConversationID and SaveConversationMapping
-	if err := s.SaveConversationMapping(ctx, "ext-123", "internal-abc"); err != nil {
-		t.Fatalf("SaveConversationMapping failed: %v", err)
+	// 3. GetExternalConversationID and SaveSessionID
+	if err := s.SaveSessionID(ctx, "ext-123", "internal-abc"); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
 	}
 	extID, err := s.GetExternalConversationID(ctx, "internal-abc")
 	if err != nil || extID != "ext-123" {

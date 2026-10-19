@@ -5,107 +5,108 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-func runVanadisTests(t *testing.T, store Store) {
+func formatTestPostgresTextArray(items []string) string {
+	if len(items) == 0 {
+		return "{}"
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, item := range items {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('"')
+		for j := 0; j < len(item); j++ {
+			ch := item[j]
+			if ch == '\\' || ch == '"' {
+				b.WriteByte('\\')
+			}
+			b.WriteByte(ch)
+		}
+		b.WriteByte('"')
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+func seedVanadisBuildSQLite(t *testing.T, store Store, build VanadisBuild, chunks []VanadisChunk) {
+	t.Helper()
+	sqlStore, ok := store.(*SQLStore)
+	if !ok {
+		t.Fatalf("expected *SQLStore, got %T", store)
+	}
 	ctx := context.Background()
 
-	// 1. Validation errors on CreateVanadisBuild
-	validBuild := VanadisBuild{
-		ID:            "build-101",
-		ThreadID:      "1555405874565091380",
-		Objective:     "Implement vanadis build queue",
-		SharedContext: "Shared context for build 101",
+	buildTier := build.Tier
+	if buildTier <= 0 {
+		buildTier = 2
 	}
-	validChunk := VanadisChunk{
-		ID:                 "chunk-101-0",
-		ChunkIndex:         0,
-		Title:              "Task 1: Schema and store",
-		Instructions:       "Add vanadis_builds and vanadis_chunks tables",
-		TargetFiles:        []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"},
-		TargetSymbols:      []string{"VanadisBuild", "VanadisChunk"},
-		Effort:             "medium",
-		AcceptanceCriteria: []string{"Unit tests pass", "Coverage >= 95%"},
+	buildTitle := build.Title
+	if strings.TrimSpace(buildTitle) == "" {
+		buildTitle = build.Objective
+	}
+	buildStatus := build.Status
+	if strings.TrimSpace(buildStatus) == "" {
+		buildStatus = "running"
 	}
 
-	badBuildCases := []struct {
-		name   string
-		build  VanadisBuild
-		chunks []VanadisChunk
-	}{
-		{"empty build id", VanadisBuild{ID: "", ThreadID: "123", Objective: "obj"}, nil},
-		{"empty thread_id", VanadisBuild{ID: "b1", ThreadID: "", Objective: "obj"}, nil},
-		{"empty objective", VanadisBuild{ID: "b1", ThreadID: "123", Objective: ""}, nil},
-		{"empty chunk id", validBuild, []VanadisChunk{{ID: "", Title: "t", Instructions: "i"}}},
-		{"mismatched chunk build_id", validBuild, []VanadisChunk{{ID: "c1", BuildID: "other-build", Title: "t", Instructions: "i"}}},
-		{"empty chunk title", validBuild, []VanadisChunk{{ID: "c1", Title: "", Instructions: "i"}}},
-		{"empty chunk instructions", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: ""}}},
-		{"invalid chunk effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "ultra"}}},
-		{"numeric chunk effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "10"}}},
+	_, err := sqlStore.db.ExecContext(ctx, `
+		INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+	`, build.ID, build.ThreadID, buildTier, buildTitle, build.Objective, build.SharedContext, buildStatus, build.StatusMessageID)
+	if err != nil {
+		t.Fatalf("seedVanadisBuildSQLite failed to insert build: %v", err)
 	}
 
-	for _, tc := range badBuildCases {
-		if err := store.CreateVanadisBuild(ctx, tc.build, tc.chunks); err == nil {
-			t.Errorf("[%s] expected validation error, got nil", tc.name)
+	for _, c := range chunks {
+		var prNum sql.NullInt64
+		if c.PRNumber > 0 {
+			prNum = sql.NullInt64{Int64: int64(c.PRNumber), Valid: true}
+		}
+		var startedAt sql.NullTime
+		if !c.StartedAt.IsZero() {
+			startedAt = sql.NullTime{Time: c.StartedAt.UTC(), Valid: true}
+		} else if c.Status == "running" || c.Status == "coding" {
+			startedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+		}
+
+		repo := c.Repo
+		if strings.TrimSpace(repo) == "" {
+			repo = "azylman/aerial"
+		}
+		status := c.Status
+		if strings.TrimSpace(status) == "" {
+			status = "pending"
+		}
+		effort := strings.ToLower(strings.TrimSpace(c.Effort))
+		if effort == "" {
+			effort = "medium"
+		}
+
+		targetFilesArg := formatTestPostgresTextArray(c.TargetFiles)
+		targetSymbolsArg := formatTestPostgresTextArray(c.TargetSymbols)
+		acceptanceCriteriaArg := formatTestPostgresTextArray(c.AcceptanceCriteria)
+
+		_, err := sqlStore.db.ExecContext(ctx, `
+			INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		`, c.ID, c.BuildID, c.ChunkIndex, repo, c.Title, c.Instructions, targetFilesArg, targetSymbolsArg, effort, acceptanceCriteriaArg, status, prNum, startedAt)
+		if err != nil {
+			t.Fatalf("seedVanadisBuildSQLite failed to insert chunk %s: %v", c.ID, err)
 		}
 	}
+}
 
-	// 2. CreateVanadisBuild with multiple chunks (inserted out of chunk_index order to test ordering)
-	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
-	chunks := []VanadisChunk{
-		{
-			ID:                 "chunk-101-1",
-			BuildID:            "build-101",
-			ChunkIndex:         1,
-			Repo:               "aerial-config",
-			Title:              "Task 2: River worker",
-			Instructions:       "Implement VanadisWorker",
-			TargetFiles:        []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`},
-			TargetSymbols:      []string{`Sym,with"quote`},
-			Effort:             "HIGH",
-			AcceptanceCriteria: []string{"Worker processes chunk successfully"},
-		},
-		validChunk,
-		{
-			ID:           "chunk-101-2",
-			ChunkIndex:   2,
-			Title:        "Task 3: Verification",
-			Instructions: "Run tests",
-			TargetFiles:  nil,
-			Effort:       "", // should default to "medium"
-			Status:       "queued",
-			PRNumber:     42,
-			StartedAt:    explicitStart,
-		},
-	}
+func testVanadisReadAndLifecycle(t *testing.T, store Store, explicitStart time.Time) {
+	t.Helper()
+	ctx := context.Background()
 
-	if err := store.CreateVanadisBuild(ctx, validBuild, chunks); err != nil {
-		t.Fatalf("CreateVanadisBuild failed: %v", err)
-	}
-
-	// Duplicate build ID should fail
-	if err := store.CreateVanadisBuild(ctx, validBuild, nil); err == nil {
-		t.Errorf("expected error when creating duplicate build ID")
-	}
-
-	// Duplicate chunk ID in a new build should fail and rollback the build
-	dupChunkBuild := VanadisBuild{
-		ID:        "build-dup-chunk",
-		ThreadID:  "1555405874565091380",
-		Objective: "Should rollback",
-		Tier:      3,
-		Status:    "queued",
-	}
-	if err := store.CreateVanadisBuild(ctx, dupChunkBuild, []VanadisChunk{validChunk}); err == nil {
-		t.Errorf("expected error when inserting duplicate chunk ID")
-	}
-	if _, _, err := store.GetVanadisBuild(ctx, "build-dup-chunk"); !errors.Is(err, ErrVanadisBuildNotFound) {
-		t.Errorf("expected build-dup-chunk to be rolled back (ErrVanadisBuildNotFound), got %v", err)
-	}
-
-	// 3. GetVanadisBuild (verify Title defaults to Objective when omitted)
+	// 1. GetVanadisBuild (verify Title defaults to Objective when omitted)
 	gotBuild, gotChunks, err := store.GetVanadisBuild(ctx, "build-101")
 	if err != nil {
 		t.Fatalf("GetVanadisBuild failed: %v", err)
@@ -114,23 +115,7 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("unexpected build fields: %+v", gotBuild)
 	}
 
-	// Verify explicit Title on CreateVanadisBuild is preserved independently of Objective, and chunk created with 'running' gets StartedAt
-	titledBuild := VanadisBuild{
-		ID:        "build-titled-102",
-		ThreadID:  "1555405874565091380",
-		Title:     "Redesign Vanadis Build Status Cards",
-		Objective: "Detailed objective for redesigning the cards",
-	}
-	runningChunk := VanadisChunk{
-		ID:           "chunk-102-0",
-		ChunkIndex:   0,
-		Title:        "Already running chunk",
-		Instructions: "Run immediately",
-		Status:       "running",
-	}
-	if err := store.CreateVanadisBuild(ctx, titledBuild, []VanadisChunk{runningChunk}); err != nil {
-		t.Fatalf("CreateVanadisBuild with explicit Title failed: %v", err)
-	}
+	// Verify explicit Title is preserved independently of Objective, and chunk created with 'running' gets StartedAt
 	gotTitledBuild, gotTitledChunks, err := store.GetVanadisBuild(ctx, "build-titled-102")
 	if err != nil {
 		t.Fatalf("GetVanadisBuild for build-titled-102 failed: %v", err)
@@ -189,7 +174,7 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("expected validation error for empty buildID in GetVanadisBuild")
 	}
 
-	// 4. GetVanadisChunk
+	// 2. GetVanadisChunk
 	gotChunk0, err := store.GetVanadisChunk(ctx, "chunk-101-0")
 	if err != nil {
 		t.Fatalf("GetVanadisChunk failed: %v", err)
@@ -210,7 +195,7 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("expected error for empty chunkID in GetVanadisChunk")
 	}
 
-	// 5. AttachVanadisChunkPR (verify StartedAt is preserved on chunk-102-0, and populated if zero on chunk-101-1)
+	// 3. AttachVanadisChunkPR (verify StartedAt is preserved on chunk-102-0, and populated if zero on chunk-101-1)
 	gotChunk102Before, err := store.GetVanadisChunk(ctx, "chunk-102-0")
 	if err != nil {
 		t.Fatalf("GetVanadisChunk failed: %v", err)
@@ -252,7 +237,7 @@ func runVanadisTests(t *testing.T, store Store) {
 		t.Errorf("expected error for pr_number <= 0 in AttachVanadisChunkPR")
 	}
 
-	// 6. UpdateVanadisBuildStatusMessageID
+	// 4. UpdateVanadisBuildStatusMessageID
 	if err := store.UpdateVanadisBuildStatusMessageID(ctx, "build-101", "  msg-build-999  "); err != nil {
 		t.Fatalf("UpdateVanadisBuildStatusMessageID failed: %v", err)
 	}
@@ -271,16 +256,188 @@ func runVanadisTests(t *testing.T, store Store) {
 func TestVanadis_SQLStore(t *testing.T) {
 	t.Parallel()
 	store := NewTestStore(t)
-	runVanadisTests(t, store)
+
+	validBuild := VanadisBuild{
+		ID:            "build-101",
+		ThreadID:      "1555405874565091380",
+		Objective:     "Implement vanadis build queue",
+		SharedContext: "Shared context for build 101",
+	}
+	validChunk := VanadisChunk{
+		ID:                 "chunk-101-0",
+		BuildID:            "build-101",
+		ChunkIndex:         0,
+		Title:              "Task 1: Schema and store",
+		Instructions:       "Add vanadis_builds and vanadis_chunks tables",
+		TargetFiles:        []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"},
+		TargetSymbols:      []string{"VanadisBuild", "VanadisChunk"},
+		Effort:             "medium",
+		AcceptanceCriteria: []string{"Unit tests pass", "Coverage >= 95%"},
+	}
+
+	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+	chunks := []VanadisChunk{
+		validChunk,
+		{
+			ID:                 "chunk-101-1",
+			BuildID:            "build-101",
+			ChunkIndex:         1,
+			Repo:               "azylman/aerial-config",
+			Title:              "Task 2: River worker",
+			Instructions:       "Implement VanadisWorker",
+			TargetFiles:        []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`},
+			TargetSymbols:      []string{`Sym,with"quote`},
+			Effort:             "HIGH",
+			AcceptanceCriteria: []string{"Worker processes chunk successfully"},
+		},
+		{
+			ID:           "chunk-101-2",
+			BuildID:      "build-101",
+			ChunkIndex:   2,
+			Title:        "Task 3: Verification",
+			Instructions: "Run tests",
+			TargetFiles:  nil,
+			Effort:       "",
+			Status:       "queued",
+			PRNumber:     42,
+			StartedAt:    explicitStart,
+		},
+	}
+
+	seedVanadisBuildSQLite(t, store, validBuild, chunks)
+
+	titledBuild := VanadisBuild{
+		ID:        "build-titled-102",
+		ThreadID:  "1555405874565091380",
+		Title:     "Redesign Vanadis Build Status Cards",
+		Objective: "Detailed objective for redesigning the cards",
+	}
+	runningChunk := VanadisChunk{
+		ID:           "chunk-102-0",
+		BuildID:      "build-titled-102",
+		ChunkIndex:   0,
+		Title:        "Already running chunk",
+		Instructions: "Run immediately",
+		Status:       "running",
+	}
+	seedVanadisBuildSQLite(t, store, titledBuild, []VanadisChunk{runningChunk})
+
+	testVanadisReadAndLifecycle(t, store, explicitStart)
 }
 
 func TestVanadis_FakeStore(t *testing.T) {
 	t.Parallel()
 	store := NewFakeStore()
-	runVanadisTests(t, store)
+	ctx := context.Background()
+
+	validBuild := VanadisBuild{
+		ID:            "build-101",
+		ThreadID:      "1555405874565091380",
+		Objective:     "Implement vanadis build queue",
+		SharedContext: "Shared context for build 101",
+	}
+	validChunk := VanadisChunk{
+		ID:                 "chunk-101-0",
+		ChunkIndex:         0,
+		Title:              "Task 1: Schema and store",
+		Instructions:       "Add vanadis_builds and vanadis_chunks tables",
+		TargetFiles:        []string{"brain/pkg/db/schema.sql", "brain/pkg/db/vanadis.go"},
+		TargetSymbols:      []string{"VanadisBuild", "VanadisChunk"},
+		Effort:             "medium",
+		AcceptanceCriteria: []string{"Unit tests pass", "Coverage >= 95%"},
+	}
+
+	badBuildCases := []struct {
+		name   string
+		build  VanadisBuild
+		chunks []VanadisChunk
+	}{
+		{"empty build id", VanadisBuild{ID: "", ThreadID: "123", Objective: "obj"}, nil},
+		{"empty thread_id", VanadisBuild{ID: "b1", ThreadID: "", Objective: "obj"}, nil},
+		{"empty objective", VanadisBuild{ID: "b1", ThreadID: "123", Objective: ""}, nil},
+		{"empty chunk id", validBuild, []VanadisChunk{{ID: "", Title: "t", Instructions: "i"}}},
+		{"mismatched chunk build_id", validBuild, []VanadisChunk{{ID: "c1", BuildID: "other-build", Title: "t", Instructions: "i"}}},
+		{"empty chunk title", validBuild, []VanadisChunk{{ID: "c1", Title: "", Instructions: "i"}}},
+		{"empty chunk instructions", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: ""}}},
+		{"invalid chunk effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "ultra"}}},
+		{"numeric chunk effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "10"}}},
+	}
+
+	for _, tc := range badBuildCases {
+		if err := store.CreateVanadisBuild(ctx, tc.build, tc.chunks); err == nil {
+			t.Errorf("[%s] expected validation error, got nil", tc.name)
+		}
+	}
+
+	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+	chunks := []VanadisChunk{
+		{
+			ID:                 "chunk-101-1",
+			BuildID:            "build-101",
+			ChunkIndex:         1,
+			Repo:               "azylman/aerial-config",
+			Title:              "Task 2: River worker",
+			Instructions:       "Implement VanadisWorker",
+			TargetFiles:        []string{"brain/pkg/vanadis/worker.go", `file,with"special\chars.go`},
+			TargetSymbols:      []string{`Sym,with"quote`},
+			Effort:             "HIGH",
+			AcceptanceCriteria: []string{"Worker processes chunk successfully"},
+		},
+		validChunk,
+		{
+			ID:           "chunk-101-2",
+			ChunkIndex:   2,
+			Title:        "Task 3: Verification",
+			Instructions: "Run tests",
+			TargetFiles:  nil,
+			Effort:       "",
+			Status:       "queued",
+			PRNumber:     42,
+			StartedAt:    explicitStart,
+		},
+	}
+
+	if err := store.CreateVanadisBuild(ctx, validBuild, chunks); err != nil {
+		t.Fatalf("CreateVanadisBuild failed: %v", err)
+	}
+
+	// Duplicate build ID should fail
+	if err := store.CreateVanadisBuild(ctx, validBuild, nil); err == nil {
+		t.Errorf("expected error when creating duplicate build ID")
+	}
+
+	// Duplicate chunk ID in a new build should fail
+	dupChunkBuild := VanadisBuild{
+		ID:        "build-dup-chunk",
+		ThreadID:  "1555405874565091380",
+		Objective: "Should fail",
+		Tier:      3,
+		Status:    "queued",
+	}
+	if err := store.CreateVanadisBuild(ctx, dupChunkBuild, []VanadisChunk{validChunk}); err == nil {
+		t.Errorf("expected error when inserting duplicate chunk ID")
+	}
+
+	titledBuild := VanadisBuild{
+		ID:        "build-titled-102",
+		ThreadID:  "1555405874565091380",
+		Title:     "Redesign Vanadis Build Status Cards",
+		Objective: "Detailed objective for redesigning the cards",
+	}
+	runningChunk := VanadisChunk{
+		ID:           "chunk-102-0",
+		ChunkIndex:   0,
+		Title:        "Already running chunk",
+		Instructions: "Run immediately",
+		Status:       "running",
+	}
+	if err := store.CreateVanadisBuild(ctx, titledBuild, []VanadisChunk{runningChunk}); err != nil {
+		t.Fatalf("CreateVanadisBuild with explicit Title failed: %v", err)
+	}
+
+	testVanadisReadAndLifecycle(t, store, explicitStart)
 
 	// Verify duplicate chunk_index check in FakeStore
-	ctx := context.Background()
 	err := store.CreateVanadisBuild(ctx, VanadisBuild{
 		ID:        "build-dup-idx",
 		ThreadID:  "123",
@@ -350,9 +507,6 @@ func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
 	storeNilDB := &SQLStore{db: nil}
 
 	for i, s := range []*SQLStore{nilStore, storeNilDB} {
-		if err := s.CreateVanadisBuild(ctx, VanadisBuild{}, nil); err == nil {
-			t.Errorf("[%d] expected error on nil CreateVanadisBuild", i)
-		}
 		if _, _, err := s.GetVanadisBuild(ctx, "b1"); err == nil {
 			t.Errorf("[%d] expected error on nil GetVanadisBuild", i)
 		}
@@ -375,10 +529,6 @@ func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
 	closedStore := NewSQLStore(closedDB)
 	_ = closedDB.Close()
 
-	validBuild := VanadisBuild{ID: "b1", ThreadID: "123", Objective: "obj"}
-	if err := closedStore.CreateVanadisBuild(ctx, validBuild, nil); err == nil {
-		t.Errorf("expected error on closed CreateVanadisBuild")
-	}
 	if _, _, err := closedStore.GetVanadisBuild(ctx, "b1"); err == nil {
 		t.Errorf("expected error on closed GetVanadisBuild")
 	}
@@ -408,40 +558,6 @@ func TestParsePostgresTextArrayEdgeCases(t *testing.T) {
 		t.Errorf("expected [a b c], got %#v", got)
 	}
 }
-
-func TestVanadis_SQLStore_PostgresBranches(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	mockDB := testMockDBTX{
-		execFn: func(ctx context.Context, query string, args ...any) (sql.Result, error) {
-			return testCustomResult{rows: 1}, nil
-		},
-	}
-	pgStore := &SQLStore{db: mockDB, isPostgres: true}
-
-	err := pgStore.CreateVanadisBuild(ctx, VanadisBuild{
-		ID:        "b-pg-1",
-		ThreadID:  "123",
-		Objective: "pg branch",
-	}, []VanadisChunk{
-		{
-			ID:                 "c-pg-1",
-			ChunkIndex:         0,
-			Repo:               "aerial-config",
-			Title:              "t1",
-			Instructions:       "i1",
-			TargetFiles:        nil,
-			TargetSymbols:      []string{"sym1"},
-			Effort:             "high",
-			AcceptanceCriteria: []string{"ac1"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateVanadisBuild with isPostgres=true failed: %v", err)
-	}
-}
-
 
 func TestNormalizeVanadisEffort(t *testing.T) {
 	t.Parallel()

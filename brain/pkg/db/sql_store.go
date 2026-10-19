@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"reflect"
 	"time"
 )
@@ -50,17 +49,6 @@ func NewSQLStore(database *sql.DB) Store {
 	}
 }
 
-// NewTxStore creates a Store instance bound to an active transaction.
-func NewTxStore(tx DBTX, isPg bool) Store {
-	if isDBTXNil(tx) {
-		return nil
-	}
-	return &SQLStore{
-		db:         tx,
-		isPostgres: isPg,
-	}
-}
-
 func (s *SQLStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
@@ -69,32 +57,4 @@ func (s *SQLStore) Close() error {
 		return closer.Close()
 	}
 	return nil
-}
-
-func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-
-	type beginner interface {
-		BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
-	}
-
-	b, ok := s.db.(beginner)
-	if !ok {
-		// Already inside a transaction or DBTX does not support BeginTx; execute fn within current context.
-		return fn(s)
-	}
-
-	tx, err := b.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin tx: %w", err)
-	}
-	defer rollbackWarn(tx, "tx")
-
-	txStore := NewTxStore(tx, s.isPostgres)
-	if err := fn(txStore); err != nil {
-		return err
-	}
-	return tx.Commit()
 }

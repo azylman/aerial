@@ -379,7 +379,7 @@ func TestHandleTranscripts(t *testing.T) {
 	}
 
 	// 2. Transcript file with various errors and include_raw=true
-	_ = store.SaveConversationMapping(context.Background(), "thread-discord-100", "conv-alpha-100")
+	_ = store.SaveSessionID(context.Background(), "thread-discord-100", "conv-alpha-100")
 	brainDir := filepath.Join(tmpHome, "brain")
 	convDir := filepath.Join(brainDir, "conv-alpha-100", ".system_generated", "logs")
 	if err := os.MkdirAll(convDir, 0755); err != nil {

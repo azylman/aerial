@@ -253,10 +253,6 @@ func (s *SQLStore) GetExternalConversationID(ctx context.Context, internalID str
 	return threadID, err
 }
 
-// SaveConversationMapping associates an external conversation ID with an internal session ID.
-func (s *SQLStore) SaveConversationMapping(ctx context.Context, externalID, internalID string) error {
-	return s.SaveSessionID(ctx, externalID, internalID)
-}
 
 // SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
 func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error {
