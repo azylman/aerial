@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -964,33 +962,6 @@ func TestSummarizeThreadTitle(t *testing.T) {
 	})
 }
 
-func TestCleanupEphemeralSession(t *testing.T) {
-	// Empty convID is safe no-op
-	CleanupEphemeralSession("")
-	CleanupEphemeralSession("   ")
-
-	// Path traversal protection
-	CleanupEphemeralSession("../evil", t.TempDir())
-	CleanupEphemeralSession("foo/bar", t.TempDir())
-
-	// Cleans directory under search root
-	tmpDir := t.TempDir()
-	convID := "test-conv-12345"
-	targetDir := filepath.Join(tmpDir, convID)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		t.Fatalf("failed to create target dir: %v", err)
-	}
-	if _, err := os.Stat(targetDir); err != nil {
-		t.Fatalf("target dir does not exist before cleanup: %v", err)
-	}
-
-	CleanupEphemeralSession(convID, tmpDir)
-
-	if _, err := os.Stat(targetDir); !os.IsNotExist(err) {
-		t.Errorf("expected target dir to be removed, but it still exists")
-	}
-}
-
 func TestSummarizeThreadTitle_EdgeCases(t *testing.T) {
 	ctx := context.Background()
 
@@ -1096,303 +1067,6 @@ func TestClassifyBurst_Empty(t *testing.T) {
 	}
 }
 
-func TestNormalizeOllamaEndpoint(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		input   string
-		want    string
-		wantErr bool
-	}{
-		{"http://192.168.1.70:11434", "http://192.168.1.70:11434/api/generate", false},
-		{"http://192.168.1.70:11434/", "http://192.168.1.70:11434/api/generate", false},
-		{"http://192.168.1.70:11434/api", "http://192.168.1.70:11434/api/generate", false},
-		{"http://192.168.1.70:11434/api/generate", "http://192.168.1.70:11434/api/generate", false},
-		{"https://ollama.lan:8443/custom", "https://ollama.lan:8443/custom/api/generate", false},
-		{"", "", true},
-		{"   ", "", true},
-		{"ftp://192.168.1.70", "", true},
-		{"http://", "", true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.input, func(t *testing.T) {
-			t.Parallel()
-			got, err := NormalizeOllamaEndpoint(tc.input)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("NormalizeOllamaEndpoint(%q) err = %v, wantErr = %v", tc.input, err, tc.wantErr)
-			}
-			if !tc.wantErr && got != tc.want {
-				t.Errorf("NormalizeOllamaEndpoint(%q) = %q, want %q", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestNewOllamaLLMFunc_SuccessAndFormat(t *testing.T) {
-	t.Parallel()
-
-	var receivedReq ollamaGenerateRequest
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		receivedReq = ollamaGenerateRequest{}
-		if err := json.NewDecoder(r.Body).Decode(&receivedReq); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
-			Response: `{"confidence": 0.85, "reason": "direct question"}`,
-			Done:     true,
-		})
-	}))
-	defer ts.Close()
-
-	fn, err := NewOllamaLLMFunc(ts.URL, ts.Client())
-	if err != nil {
-		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
-	}
-
-	// 1. Prompt containing "json" sets Format: "json"
-	resp, err := fn(context.Background(), "qwen2.5:3b", "Please respond with valid JSON: is this relevant?")
-	if err != nil {
-		t.Fatalf("fn call failed: %v", err)
-	}
-	if resp != `{"confidence": 0.85, "reason": "direct question"}` {
-		t.Errorf("unexpected response: %q", resp)
-	}
-	if receivedReq.Model != "qwen2.5:3b" {
-		t.Errorf("expected model qwen2.5:3b, got %q", receivedReq.Model)
-	}
-	if receivedReq.Format != "json" {
-		t.Errorf("expected format json, got %q", receivedReq.Format)
-	}
-	if receivedReq.Stream {
-		t.Errorf("expected stream false")
-	}
-
-	// 2. Prompt without "json" does not set Format
-	_, err = fn(context.Background(), "custom-model", "Summarize in 6 words")
-	if err != nil {
-		t.Fatalf("fn call failed: %v", err)
-	}
-	if receivedReq.Format != "" {
-		t.Errorf("expected empty format, got %q", receivedReq.Format)
-	}
-	if receivedReq.Model != "custom-model" {
-		t.Errorf("expected model custom-model, got %q", receivedReq.Model)
-	}
-
-	// 3. Empty model defaults to DefaultOllamaClassifierModel
-	_, err = fn(context.Background(), "", "Summarize")
-	if err != nil {
-		t.Fatalf("fn call failed: %v", err)
-	}
-	if receivedReq.Model != DefaultOllamaClassifierModel {
-		t.Errorf("expected default model %q, got %q", DefaultOllamaClassifierModel, receivedReq.Model)
-	}
-}
-
-func TestNewOllamaLLMFunc_TelemetryRecorded(t *testing.T) {
-	t.Parallel()
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
-			Response:           `{"confidence": 0.85, "reason": "telemetry verified"}`,
-			Done:               true,
-			PromptEvalCount:    35,
-			PromptEvalDuration: 450000000,
-			EvalCount:          140,
-			EvalDuration:       2000000000,
-			LoadDuration:       60000000,
-			TotalDuration:      2510000000,
-		})
-	}))
-	defer ts.Close()
-
-	fn, err := NewOllamaLLMFunc(ts.URL, ts.Client())
-	if err != nil {
-		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
-	}
-
-	resp, err := fn(context.Background(), "telemetry-qwen", "test prompt")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(resp, "telemetry verified") {
-		t.Errorf("unexpected response: %q", resp)
-	}
-}
-
-func TestNewOllamaLLMFunc_Errors(t *testing.T) {
-	t.Parallel()
-
-	// 1. Invalid endpoint
-	_, err := NewOllamaLLMFunc("invalid-url-no-scheme", nil)
-	if err == nil {
-		t.Error("expected error for invalid URL, got nil")
-	}
-
-	// 2. HTTP 500 error
-	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-	}))
-	defer ts500.Close()
-
-	fn500, err := NewOllamaLLMFunc(ts500.URL, ts500.Client())
-	if err != nil {
-		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
-	}
-	if _, err := fn500(context.Background(), "model", "prompt"); err == nil {
-		t.Error("expected error on HTTP 500, got nil")
-	}
-
-	// 3. Ollama error payload
-	tsErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
-			Error: "model 'fake-model' not found",
-		})
-	}))
-	defer tsErr.Close()
-
-	fnErr, err := NewOllamaLLMFunc(tsErr.URL, tsErr.Client())
-	if err != nil {
-		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
-	}
-	if _, err := fnErr(context.Background(), "fake-model", "prompt"); err == nil {
-		t.Error("expected error on Ollama error payload, got nil")
-	}
-
-	// 4. Malformed JSON
-	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("not-valid-json{"))
-	}))
-	defer tsBadJSON.Close()
-
-	fnBad, err := NewOllamaLLMFunc(tsBadJSON.URL, tsBadJSON.Client())
-	if err != nil {
-		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
-	}
-	if _, err := fnBad(context.Background(), "model", "prompt"); err == nil {
-		t.Error("expected error on malformed JSON, got nil")
-	}
-}
-
-func TestClassifier_WithClassifierURL_AndFallback(t *testing.T) {
-	t.Parallel()
-
-	var receivedModel string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req ollamaGenerateRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		receivedModel = req.Model
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
-			Response: `{"confidence": 0.95, "reason": "addressed to assistant"}`,
-			Done:     true,
-		})
-	}))
-	defer ts.Close()
-
-	// Case 1: ClassifierURL set with custom ClassifierModel
-	cfgData1 := config.DefaultConfigData()
-	cfgData1.ClassifierURL = ts.URL
-	cfgData1.ClassifierModel = "qwen2.5:3b"
-	cfg1 := config.NewFromData(cfgData1)
-
-	cls1 := New(cfg1, nil)
-	msg1 := db.Message{
-		ID:         "m1",
-		AuthorName: "Alex",
-		Content:    "Hey Aerial, check system metrics",
-		CreatedAt:  time.Now(),
-	}
-	res1 := cls1.Classify(context.Background(), msg1, nil)
-	if res1.Confidence != 0.95 {
-		t.Errorf("expected confidence 0.95, got %v", res1.Confidence)
-	}
-	if receivedModel != "qwen2.5:3b" {
-		t.Errorf("expected receivedModel qwen2.5:3b, got %q", receivedModel)
-	}
-
-	// Case 2: ClassifierURL set without ClassifierModel (defaults to DefaultOllamaClassifierModel)
-	cfgData2 := config.DefaultConfigData()
-	cfgData2.ClassifierURL = ts.URL
-	cfg2 := config.NewFromData(cfgData2)
-
-	cls2 := New(cfg2, nil)
-	res2 := cls2.Classify(context.Background(), msg1, nil)
-	if res2.Confidence != 0.95 {
-		t.Errorf("expected confidence 0.95, got %v", res2.Confidence)
-	}
-	if receivedModel != DefaultOllamaClassifierModel {
-		t.Errorf("expected default model %q, got %q", DefaultOllamaClassifierModel, receivedModel)
-	}
-
-	// Case 3: ClassifierURL omitted -> falls back to runnerFn (existing logic preserved)
-	var runnerCalled bool
-	runnerFn := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		runnerCalled = true
-		return `{"response": "{\"confidence\": 0.7, \"reason\": \"runner called\"}"}`, "", 0, nil
-	}
-
-	cfgData3 := config.DefaultConfigData()
-	cfg3 := config.NewFromData(cfgData3)
-
-	cls3 := New(cfg3, runnerFn)
-	res3 := cls3.Classify(context.Background(), msg1, nil)
-	if !runnerCalled {
-		t.Error("expected runnerFn to be called when ClassifierURL is unset")
-	}
-	if res3.Confidence != 0.7 {
-		t.Errorf("expected confidence 0.7 from runnerFn, got %v", res3.Confidence)
-	}
-}
-
-func TestSummarizeThreadTitle_WithClassifierURL(t *testing.T) {
-	t.Parallel()
-
-	var receivedModel string
-	var receivedPrompt string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req ollamaGenerateRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		receivedModel = req.Model
-		receivedPrompt = req.Prompt
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
-			Response: "Orin Edge Telemetry Setup",
-			Done:     true,
-		})
-	}))
-	defer ts.Close()
-
-	cfgData := config.DefaultConfigData()
-	cfgData.ClassifierURL = ts.URL
-	cfgData.ClassifierModel = "qwen2.5:3b"
-	cfg := config.NewFromData(cfgData)
-
-	cls := New(cfg, nil)
-	title, err := cls.SummarizeThreadTitle(context.Background(), "How do we ship metrics from the Orin?")
-	if err != nil {
-		t.Fatalf("SummarizeThreadTitle failed: %v", err)
-	}
-	if title != "Orin Edge Telemetry Setup" {
-		t.Errorf("expected title 'Orin Edge Telemetry Setup', got %q", title)
-	}
-	if receivedModel != "qwen2.5:3b" {
-		t.Errorf("expected model qwen2.5:3b, got %q", receivedModel)
-	}
-	if !strings.Contains(receivedPrompt, "How do we ship metrics from the Orin?") {
-		t.Errorf("expected prompt to contain question, got %q", receivedPrompt)
-	}
-}
-
 func TestClassifier_ResolveModel(t *testing.T) {
 	t.Parallel()
 
@@ -1407,14 +1081,14 @@ func TestClassifier_ResolveModel(t *testing.T) {
 		t.Errorf("expected custom-ollama, got %q", got)
 	}
 
-	// 2. ClassifierURL configured without ClassifierModel -> DefaultOllamaClassifierModel
+	// 2. ClassifierURL configured without ClassifierModel -> DefaultAGYClassifierModel
 	c2 := &Classifier{
 		cfg: config.NewFromData(&config.ConfigData{
 			ClassifierURL: "http://localhost:11434",
 		}),
 	}
-	if got := c2.resolveModel(); got != DefaultOllamaClassifierModel {
-		t.Errorf("expected DefaultOllamaClassifierModel, got %q", got)
+	if got := c2.resolveModel(); got != DefaultAGYClassifierModel {
+		t.Errorf("expected DefaultAGYClassifierModel, got %q", got)
 	}
 
 	// 3. ClassifierURL unset with LowEffortModel in config
@@ -1437,41 +1111,14 @@ func TestClassifier_ResolveModel(t *testing.T) {
 func TestClassifier_CoverageBoost(t *testing.T) {
 	t.Parallel()
 
-	// 1. New with invalid ClassifierURL -> c.LLMFunc error
-	cfgInvalidURL := config.NewFromData(&config.ConfigData{
-		ClassifierURL: "http://",
-	})
-	c1 := New(cfgInvalidURL, nil)
-	if _, err := c1.LLMFunc(context.Background(), "model", "prompt"); err == nil {
-		t.Error("expected error for invalid ClassifierURL in LLMFunc")
-	}
-
-	// 2. New with empty ClassifierURL and nil runnerFn -> c.LLMFunc error
+	// 1. New with nil runnerFn -> c.LLMFunc and c.TitleLLMFunc error
 	cfgNoURL := config.NewFromData(&config.ConfigData{})
 	c2 := New(cfgNoURL, nil)
 	if _, err := c2.LLMFunc(context.Background(), "model", "prompt"); err == nil {
 		t.Error("expected error when runnerFn is nil")
 	}
-
-	// 3. NormalizeOllamaEndpoint invalid URL parse error
-	if _, err := NormalizeOllamaEndpoint(":\x7f"); err == nil {
-		t.Error("expected error for invalid URL parse in NormalizeOllamaEndpoint")
-	}
-
-	// 4. NewOllamaLLMFunc HTTP error with >200 byte response body (tests truncation)
-	longErrMsg := strings.Repeat("error-detail-", 25)
-	tsLongErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, longErrMsg, http.StatusInternalServerError)
-	}))
-	defer tsLongErr.Close()
-
-	fnLongErr, err := NewOllamaLLMFunc(tsLongErr.URL, tsLongErr.Client())
-	if err != nil {
-		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
-	}
-	_, err = fnLongErr(context.Background(), "model", "prompt")
-	if err == nil || !strings.Contains(err.Error(), "...") {
-		t.Errorf("expected truncated error with '...', got %v", err)
+	if _, err := c2.TitleLLMFunc(context.Background(), "model", "prompt"); err == nil {
+		t.Error("expected error when runnerFn is nil for TitleLLMFunc")
 	}
 
 	// 5. NewAgyLLMFunc with nil runnerFn
@@ -1539,62 +1186,6 @@ func TestClassifier_CoverageBoost(t *testing.T) {
 	}
 }
 
-func TestSummarizeThreadTitle_WithThreadTitleURL(t *testing.T) {
-	t.Parallel()
-
-	var receivedModel string
-	var receivedPrompt string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req ollamaGenerateRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		receivedModel = req.Model
-		receivedPrompt = req.Prompt
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
-			Response: "Weather Graph Optimization",
-			Done:     true,
-		})
-	}))
-	defer ts.Close()
-
-	var runnerCalled bool
-	var mockRunner runner.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		runnerCalled = true
-		return `{"conversation_id":"ambient-eval-123","status":"SUCCESS","response":"{\"confidence\": 0.9, \"reason\": \"wake up\"}"}`, "", 0, nil
-	}
-
-	cfgData := config.DefaultConfigData()
-	cfgData.ThreadTitleURL = ts.URL
-	cfgData.ThreadTitleModel = "qwen2.5:3b"
-	cfgData.ClassifierURL = "" // Ambient classifier remains on cloud Flash!
-	cfg := config.NewFromData(cfgData)
-
-	cls := New(cfg, mockRunner)
-
-	// 1. Thread title summarization should hit Ollama at ThreadTitleURL
-	title, err := cls.SummarizeThreadTitle(context.Background(), "How do we optimize the weather curve?")
-	if err != nil {
-		t.Fatalf("SummarizeThreadTitle failed: %v", err)
-	}
-	if title != "Weather Graph Optimization" {
-		t.Errorf("expected title 'Weather Graph Optimization', got %q", title)
-	}
-	if receivedModel != "qwen2.5:3b" {
-		t.Errorf("expected model qwen2.5:3b, got %q", receivedModel)
-	}
-	if !strings.Contains(receivedPrompt, "How do we optimize the weather curve?") {
-		t.Errorf("expected prompt to contain question, got %q", receivedPrompt)
-	}
-
-	res := cls.Classify(context.Background(), db.Message{Content: "Hey Aerial"}, nil)
-	if !runnerCalled {
-		t.Error("expected ambient classifier to call mockRunner when ClassifierURL is unset")
-	}
-	if res.Confidence != 0.9 {
-		t.Errorf("expected confidence 0.9 from runner, got %f", res.Confidence)
-	}
-}
-
 func TestSummarizeThreadTitle_WithTitleLLMFunc(t *testing.T) {
 	t.Parallel()
 
@@ -1631,14 +1222,14 @@ func TestClassifier_ResolveTitleModel(t *testing.T) {
 		t.Errorf("expected title-specific-model, got %q", got)
 	}
 
-	// 2. ThreadTitleURL configured without model -> DefaultOllamaClassifierModel
+	// 2. ThreadTitleURL configured without model -> DefaultAGYClassifierModel
 	c2 := &Classifier{
 		cfg: config.NewFromData(&config.ConfigData{
 			ThreadTitleURL: "http://localhost:11434",
 		}),
 	}
-	if got := c2.resolveTitleModel(); got != DefaultOllamaClassifierModel {
-		t.Errorf("expected DefaultOllamaClassifierModel, got %q", got)
+	if got := c2.resolveTitleModel(); got != DefaultAGYClassifierModel {
+		t.Errorf("expected DefaultAGYClassifierModel, got %q", got)
 	}
 
 	// 3. Fallback: ClassifierURL configured with ClassifierModel
@@ -1652,14 +1243,14 @@ func TestClassifier_ResolveTitleModel(t *testing.T) {
 		t.Errorf("expected classifier-fallback-model, got %q", got)
 	}
 
-	// 4. Fallback: ClassifierURL configured without model -> DefaultOllamaClassifierModel
+	// 4. Fallback: ClassifierURL configured without model -> DefaultAGYClassifierModel
 	c4 := &Classifier{
 		cfg: config.NewFromData(&config.ConfigData{
 			ClassifierURL: "http://localhost:11434",
 		}),
 	}
-	if got := c4.resolveTitleModel(); got != DefaultOllamaClassifierModel {
-		t.Errorf("expected DefaultOllamaClassifierModel, got %q", got)
+	if got := c4.resolveTitleModel(); got != DefaultAGYClassifierModel {
+		t.Errorf("expected DefaultAGYClassifierModel, got %q", got)
 	}
 
 	// 5. Cloud fallback: LowEffortModel in config
@@ -1811,48 +1402,6 @@ func TestSummarizeThreadTitle_WithPrimaryTitleLLMFunc(t *testing.T) {
 	}
 	if !called || title != "Primary Title Result" {
 		t.Fatalf("expected 'Primary Title Result', got %q (called=%v)", title, called)
-	}
-}
-
-func TestClassifier_WithPrimaryLLMFunc_OllamaPrecedence(t *testing.T) {
-	t.Parallel()
-
-	var calledPrimary bool
-	primaryFn := func(ctx context.Context, model, prompt string) (string, error) {
-		calledPrimary = true
-		return `{"confidence":0.7,"reason":"from primary"}`, nil
-	}
-
-	// 1. When ClassifierURL is configured, Ollama is invoked, NOT primary
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
-			Response: `{"confidence":0.9,"reason":"from ollama"}`,
-			Done:     true,
-		})
-	}))
-	defer ts.Close()
-
-	cfgOllama := config.NewFromData(&config.ConfigData{
-		ClassifierURL: ts.URL,
-	})
-	clsOllama := New(cfgOllama, nil, WithPrimaryLLMFunc(primaryFn))
-	resOllama := clsOllama.Classify(context.Background(), db.Message{Content: "test message"}, nil)
-	if calledPrimary {
-		t.Error("primaryLLMFunc should NOT be called when ClassifierURL is configured")
-	}
-	if resOllama.Confidence != 0.9 {
-		t.Errorf("expected 0.9 confidence from Ollama, got %f", resOllama.Confidence)
-	}
-
-	// 2. When ClassifierURL is empty, primaryLLMFunc IS invoked
-	cfgNoOllama := config.NewFromData(&config.ConfigData{})
-	clsPrimary := New(cfgNoOllama, nil, WithPrimaryLLMFunc(primaryFn))
-	resPrimary := clsPrimary.Classify(context.Background(), db.Message{Content: "test message"}, nil)
-	if !calledPrimary {
-		t.Error("expected primaryLLMFunc to be called when ClassifierURL is empty")
-	}
-	if resPrimary.Confidence != 0.7 {
-		t.Errorf("expected 0.7 confidence from primary, got %f", resPrimary.Confidence)
 	}
 }
 
@@ -2451,5 +2000,25 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 	titleRun, errRun := clsTitleRunner.TitleLLMFunc(context.Background(), "gemini", "summarize")
 	if errRun != nil || titleRun != "Generated Title" {
 		t.Errorf("expected runner-generated title, got %q, err: %v", titleRun, errRun)
+	}
+}
+
+func TestClassifier_WithPrimaryLLMFunc(t *testing.T) {
+	t.Parallel()
+
+	var calledPrimary bool
+	primaryFn := func(ctx context.Context, model, prompt string) (string, error) {
+		calledPrimary = true
+		return `{"confidence":0.7,"reason":"from primary"}`, nil
+	}
+
+	cfg := config.NewFromData(&config.ConfigData{})
+	clsPrimary := New(cfg, nil, WithPrimaryLLMFunc(primaryFn))
+	resPrimary := clsPrimary.Classify(context.Background(), db.Message{Content: "test message"}, nil)
+	if !calledPrimary {
+		t.Error("expected primaryLLMFunc to be called")
+	}
+	if resPrimary.Confidence != 0.7 {
+		t.Errorf("expected 0.7 confidence from primary, got %f", resPrimary.Confidence)
 	}
 }
