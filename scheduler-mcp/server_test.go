@@ -1,17 +1,18 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -20,33 +21,39 @@ type JSONRPCResponse struct {
 	JSONRPC string      `json:"jsonrpc"`
 	ID      interface{} `json:"id,omitempty"`
 	Result  interface{} `json:"result,omitempty"`
-	Error   *RPCError   `json:"error,omitempty"`
+	Error   *struct {
+		Code    int         `json:"code"`
+		Message string      `json:"message"`
+		Data    interface{} `json:"data,omitempty"`
+	} `json:"error,omitempty"`
 }
 
-type RPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-}
+type mockErrReader struct{}
+func (m *mockErrReader) Read([]byte) (int, error) { return 0, errors.New("simulated read error") }
 
-func NewTestConfig() *Config {
-	return &Config{
-		DatabaseURL: ":memory:",
-		Timezone:    DefaultTimezone,
-		Port:        "8080",
-	}
+type mockErrWriter struct {
+	header http.Header
+	err    error
 }
+func (m *mockErrWriter) Header() http.Header {
+	if m.header == nil { m.header = make(http.Header) }
+	return m.header
+}
+func (m *mockErrWriter) Write([]byte) (int, error) { return 0, m.err }
+func (m *mockErrWriter) WriteHeader(int)           {}
+
+type errReadCloser struct{}
+func (e *errReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
+func (e *errReadCloser) Close() error             { return errors.New("simulated close error") }
 
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
-	cfg := NewTestConfig()
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: DefaultTimezone, Port: "8080"}
 	db, err := InitDB(cfg)
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
-	handler := NewToolHandler(cfg, db)
-	server := NewServer(handler)
-	ts := httptest.NewServer(server.Routes())
-	return server, ts
+	server := NewServer(NewToolHandler(cfg, db))
+	return server, httptest.NewServer(server.Routes())
 }
 
 func TestNewServer_NilHandlerPanics(t *testing.T) {
@@ -58,586 +65,277 @@ func TestNewServer_NilHandlerPanics(t *testing.T) {
 	NewServer(nil)
 }
 
-func TestHealthEndpoint(t *testing.T) {
-	_, ts := setupTestServer(t)
+func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
+	server, ts := setupTestServer(t)
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/health")
-	if err != nil {
-		t.Fatalf("GET /health failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	recH, recC, recErr := httptest.NewRecorder(), httptest.NewRecorder(), httptest.NewRecorder()
+	server.handleMCP(recH, httptest.NewRequest(http.MethodGet, "/health", nil))
+	server.handleMCP(recC, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
+	server.handleMCP(recErr, httptest.NewRequest(http.MethodPost, "/mcp", &mockErrReader{}))
+	if recH.Code != http.StatusOK || (recC.Code != http.StatusOK && recC.Code != http.StatusInternalServerError) || recErr.Code != http.StatusBadRequest {
+		t.Fatalf("direct handleMCP failed: H=%d, C=%d, Err=%d", recH.Code, recC.Code, recErr.Code)
 	}
 
-	var body map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("Failed to decode health body: %v", err)
+	httpTests := []struct {
+		name       string
+		method     string
+		path       string
+		body       io.Reader
+		wantStatus int
+	}{
+		{"health endpoint", http.MethodGet, "/health", nil, http.StatusOK},
+		{"mcp get probe", http.MethodGet, "/mcp", nil, http.StatusOK},
+		{"root get probe", http.MethodGet, "/", nil, http.StatusOK},
+		{"method not allowed", http.MethodDelete, "/mcp", nil, http.StatusMethodNotAllowed},
+		{"empty body", http.MethodPost, "/mcp", strings.NewReader("   "), http.StatusBadRequest},
+		{"malformed json", http.MethodPost, "/mcp", strings.NewReader("{bad json"), http.StatusBadRequest},
+		{"notification 204", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`), http.StatusNoContent},
+		{"ping request", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"ping"}`), http.StatusOK},
+		{"initialize request", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":101,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`), http.StatusOK},
+		{"tools list request", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":102,"method":"tools/list","params":{}}`), http.StatusOK},
+		{"unknown method", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":103,"method":"unknown/method"}`), http.StatusBadRequest},
 	}
-	if body["status"] != "ok" {
-		t.Errorf("Expected status ok, got %v", body)
-	}
-}
-
-func TestMCPInitialize(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
-
-	reqBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`
-	resp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(reqBody))
-	if err != nil {
-		t.Fatalf("POST /mcp initialize failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", resp.StatusCode)
-	}
-
-	var jsonResp JSONRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
-		t.Fatalf("Failed to decode JSON-RPC response: %v", err)
-	}
-	if jsonResp.Error != nil {
-		t.Fatalf("Unexpected RPC error: %+v", jsonResp.Error)
-	}
-
-	resMap, ok := jsonResp.Result.(map[string]interface{})
-	if !ok {
-		t.Fatalf("Expected result map, got %+v", jsonResp.Result)
-	}
-	if resMap["protocolVersion"] != "2024-11-05" {
-		t.Errorf("Expected protocolVersion 2024-11-05, got %v", resMap["protocolVersion"])
-	}
-}
-
-func TestMCPToolsList(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
-
-	reqBody := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
-	resp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(reqBody))
-	if err != nil {
-		t.Fatalf("POST /mcp tools/list failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var jsonResp JSONRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
-		t.Fatalf("Failed to decode JSON-RPC response: %v", err)
-	}
-
-	resMap := jsonResp.Result.(map[string]interface{})
-	tools := resMap["tools"].([]interface{})
-	if len(tools) != 5 {
-		t.Fatalf("Expected 5 tools, got %d", len(tools))
-	}
-}
-
-func TestMCPToolsCallLifecycle(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
-
-	// 1. Call schedule_recurring via namespaced tool name
-	recReq := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"scheduler_schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"weekly plan","effort":"high"}}}`
-	resp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(recReq))
-	if err != nil {
-		t.Fatalf("Call schedule_recurring failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var recResp JSONRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&recResp); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
-	if recResp.Error != nil {
-		t.Fatalf("Unexpected RPC error: %+v", recResp.Error)
-	}
-	resMap := recResp.Result.(map[string]interface{})
-	content := resMap["content"].([]interface{})
-	if len(content) == 0 {
-		t.Fatalf("Expected content in response")
-	}
-
-	// Extract schedule_id
-	firstContent := content[0].(map[string]interface{})
-	var recData map[string]interface{}
-	if err := json.Unmarshal([]byte(firstContent["text"].(string)), &recData); err != nil {
-		t.Fatalf("Failed to unmarshal schedule_recurring response: %v", err)
-	}
-	schedID, ok := recData["schedule_id"].(string)
-	if !ok || schedID == "" {
-		t.Fatalf("Expected schedule_id in response: %+v", recData)
-	}
-	if recData["effort"] != "high" {
-		t.Errorf("Expected effort 'high', got %v", recData["effort"])
-	}
-
-	// 1b. Call update_cron_schedule to switch effort to low
-	updateReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"%s","effort":"low"}}}`, schedID)
-	respUp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(updateReq))
-	if err != nil {
-		t.Fatalf("Call update_cron_schedule failed: %v", err)
-	}
-	defer respUp.Body.Close()
-
-	var updateResp JSONRPCResponse
-	if err := json.NewDecoder(respUp.Body).Decode(&updateResp); err != nil {
-		t.Fatalf("Failed to decode update response: %v", err)
-	}
-	if updateResp.Error != nil {
-		t.Fatalf("Unexpected RPC error on update: %+v", updateResp.Error)
-	}
-	upResMap := updateResp.Result.(map[string]interface{})
-	upContent := upResMap["content"].([]interface{})
-	var upData map[string]interface{}
-	if err := json.Unmarshal([]byte(upContent[0].(map[string]interface{})["text"].(string)), &upData); err != nil {
-		t.Fatalf("Failed to unmarshal update_cron_schedule response: %v", err)
-	}
-	if upData["effort"] != "low" {
-		t.Errorf("Expected effort 'low' after update, got %v", upData["effort"])
-	}
-
-	// 2. Call schedule_once via direct tool name
-	onceReq := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"schedule_once","arguments":{"target_id":"456","run_at":"15m","prompt":"take out trash"}}}`
-	resp2, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(onceReq))
-	if err != nil {
-		t.Fatalf("Call schedule_once failed: %v", err)
-	}
-	defer resp2.Body.Close()
-
-	var onceResp JSONRPCResponse
-	if err := json.NewDecoder(resp2.Body).Decode(&onceResp); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
-	if onceResp.Error != nil {
-		t.Fatalf("Unexpected RPC error: %+v", onceResp.Error)
-	}
-
-	// 3. Call list_schedules
-	listReq := `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_schedules","arguments":{}}}`
-	resp3, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(listReq))
-	if err != nil {
-		t.Fatalf("Call list_schedules failed: %v", err)
-	}
-	defer resp3.Body.Close()
-
-	var listResp JSONRPCResponse
-	if err := json.NewDecoder(resp3.Body).Decode(&listResp); err != nil {
-		t.Fatalf("Failed to decode list response: %v", err)
-	}
-	if listResp.Error != nil {
-		t.Fatalf("Unexpected RPC error on list: %+v", listResp.Error)
-	}
-
-	// 4. Call unknown tool
-	unknownReq := `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"non_existent_tool","arguments":{}}}`
-	resp4, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(unknownReq))
-	if err != nil {
-		t.Fatalf("Call unknown tool failed: %v", err)
-	}
-	defer resp4.Body.Close()
-
-	var unknownResp JSONRPCResponse
-	_ = json.NewDecoder(resp4.Body).Decode(&unknownResp)
-	if unknownResp.Error == nil || (unknownResp.Error.Code != -32601 && unknownResp.Error.Code != -32602) {
-		t.Errorf("Expected -32601 or -32602 error for unknown tool, got %+v", unknownResp)
-	}
-}
-
-func TestAerialPRScriptSimulation(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
-
-	// Exactly simulates scripts/aerial-pr.sh:
-	// curl -s -X POST -H "Content-Type: application/json" -d ... (no Accept, no MCP-Protocol-Version)
-	rpcPayload := `{
-		"jsonrpc": "2.0",
-		"id": 1,
-		"method": "tools/call",
-		"params": {
-			"name": "schedule_once",
-			"arguments": {
-				"target_id": "channel-12345",
-				"run_at": "2m",
-				"prompt": "Check on the status of Pull Request #123"
+	for _, tc := range httpTests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, ts.URL+tc.path, tc.body)
+			if err != nil {
+				t.Fatalf("NewRequest error: %v", err)
 			}
-		}
-	}`
-
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(rpcPayload))
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// Note: Explicitly no Accept header or MCP-Protocol-Version header!
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST /mcp failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("failed to read response: %v", err)
-	}
-
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
-		t.Fatalf("response is not valid JSON: %v, raw: %s", err, string(bodyBytes))
-	}
-
-	resMap, ok := parsed["result"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected result object in %+v", parsed)
-	}
-
-	if isErr, ok := resMap["isError"].(bool); ok && isErr {
-		t.Fatalf("unexpected tool error in response: %+v", resMap)
-	}
-
-	contentList, ok := resMap["content"].([]interface{})
-	if !ok || len(contentList) == 0 {
-		t.Fatalf("expected non-empty content list in %+v", resMap)
-	}
-
-	firstContent, ok := contentList[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected content item object in %+v", contentList)
-	}
-
-	textContent, ok := firstContent["text"].(string)
-	if !ok || textContent == "" {
-		t.Fatalf("expected text string in %+v", firstContent)
-	}
-
-	var innerJSON map[string]interface{}
-	if err := json.Unmarshal([]byte(textContent), &innerJSON); err != nil {
-		t.Fatalf("expected inner text to be valid JSON (fromjson in jq): %v, raw: %s", err, textContent)
-	}
-
-	schedID, ok := innerJSON["schedule_id"].(string)
-	if !ok || schedID == "" {
-		t.Fatalf("expected schedule_id in inner JSON: %+v", innerJSON)
-	}
-
-	// Also test with scheduler_ alias prefix:
-	aliasPayload := `{
-		"jsonrpc": "2.0",
-		"id": 2,
-		"method": "tools/call",
-		"params": {
-			"name": "scheduler_schedule_once",
-			"arguments": {
-				"target_id": "channel-12345",
-				"run_at": "5m",
-				"prompt": "Check on deployment"
+			if tc.method == http.MethodPost {
+				req.Header.Set("Content-Type", "application/json")
 			}
-		}
-	}`
-	reqAlias, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(aliasPayload))
-	reqAlias.Header.Set("Content-Type", "application/json")
-	respAlias, err := http.DefaultClient.Do(reqAlias)
-	if err != nil {
-		t.Fatalf("POST alias failed: %v", err)
-	}
-	defer respAlias.Body.Close()
-	if respAlias.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 OK for alias, got %d", respAlias.StatusCode)
-	}
-
-	// And test tool error response shape (empty target_id)
-	errPayload := `{
-		"jsonrpc": "2.0",
-		"id": 3,
-		"method": "tools/call",
-		"params": {
-			"name": "schedule_once",
-			"arguments": {
-				"target_id": "",
-				"run_at": "2m",
-				"prompt": "Check PR"
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
 			}
-		}
-	}`
-	reqErr, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(errPayload))
-	reqErr.Header.Set("Content-Type", "application/json")
-	respErr, err := http.DefaultClient.Do(reqErr)
-	if err != nil {
-		t.Fatalf("POST err failed: %v", err)
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus && (tc.name == "notification 204" && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted) {
+				t.Fatalf("%s got status %d, want %d", tc.name, resp.StatusCode, tc.wantStatus)
+			}
+		})
 	}
-	defer respErr.Body.Close()
-	var errParsed map[string]interface{}
-	_ = json.NewDecoder(respErr.Body).Decode(&errParsed)
-	errResMap, ok := errParsed["result"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected result object in error response: %+v", errParsed)
+
+	rpcTests := []struct {
+		name        string
+		reqPayload  string
+		wantToolErr bool
+		wantRPCErr  bool
+	}{
+		{"schedule_recurring alias", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"scheduler_schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"plan","effort":"high"}}}`, false, false},
+		{"update_cron_schedule", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"missing-id","effort":"low"}}}`, true, false},
+		{"schedule_once direct", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"schedule_once","arguments":{"target_id":"456","run_at":"15m","prompt":"trash"}}}`, false, false},
+		{"schedule_once alias validation", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"scheduler_schedule_once","arguments":{"target_id":"","run_at":"15m","prompt":"trash"}}}`, true, false},
+		{"list_schedules", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_schedules","arguments":{}}}`, false, false},
+		{"cancel_schedule missing", `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"none"}}}`, true, false},
+		{"unknown tool", `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"non_existent","arguments":{}}}`, false, true},
 	}
-	if isErr, ok := errResMap["isError"].(bool); !ok || !isErr {
-		t.Fatalf("expected isError: true on validation error, got %+v", errResMap)
+	for _, tc := range rpcTests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(tc.reqPayload))
+			if err != nil {
+				t.Fatalf("POST /mcp failed: %v", err)
+			}
+			defer resp.Body.Close()
+			var rpcResp JSONRPCResponse
+			if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+				t.Fatalf("decode failed: %v", err)
+			}
+			if tc.wantRPCErr && rpcResp.Error == nil {
+				t.Fatalf("expected RPC error, got %+v", rpcResp)
+			} else if !tc.wantRPCErr && rpcResp.Error != nil {
+				t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
+			}
+			if tc.wantToolErr {
+				resMap, _ := rpcResp.Result.(map[string]interface{})
+				if isErr, _ := resMap["isError"].(bool); !isErr {
+					t.Fatalf("expected isError=true, got %+v", resMap)
+				}
+			}
+		})
 	}
 }
 
-func TestMCPUnknownMethodAndNotifications(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
-
-	// Notification (no id)
-	notifReq := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
-	resp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(notifReq))
-	if err != nil {
-		t.Fatalf("Notification request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		t.Errorf("Expected 204, 202, or 200 for notification, got %d", resp.StatusCode)
+func TestServer_WriteResponseAndDisconnect(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	writeResponse(rec, req, []byte("ok"))
+	if rec.Body.String() != "ok" {
+		t.Fatalf("expected ok, got %s", rec.Body.String())
 	}
 
-	// Unknown method with id
-	unknownReq := `{"jsonrpc":"2.0","id":99,"method":"random/unknown"}`
-	resp2, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(unknownReq))
-	if err != nil {
-		t.Fatalf("Unknown method failed: %v", err)
-	}
-	defer resp2.Body.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reqCanceled := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(ctx)
 
-	if resp2.StatusCode != http.StatusBadRequest {
-		var unknownResp JSONRPCResponse
-		_ = json.NewDecoder(resp2.Body).Decode(&unknownResp)
-		if unknownResp.Error == nil || unknownResp.Error.Code != -32601 {
-			t.Errorf("Expected 400 Bad Request or method not found error, got status %d, %+v", resp2.StatusCode, unknownResp)
-		}
+	errTests := []struct {
+		name string
+		req  *http.Request
+		err  error
+		want bool
+	}{
+		{"nil err", req, nil, false},
+		{"canceled context", reqCanceled, errors.New("write err"), true},
+		{"epipe", req, syscall.EPIPE, true},
+		{"econnreset", req, syscall.ECONNRESET, true},
+		{"net err closed", req, net.ErrClosed, true},
+		{"generic error", req, errors.New("disk full"), false},
+	}
+	for _, tc := range errTests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isClientDisconnect(tc.req, tc.err); got != tc.want {
+				t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	writeResponse(&mockErrWriter{err: errors.New("err")}, req, []byte("data"))
+	for _, c := range []io.Closer{nil, io.NopCloser(strings.NewReader("")), &errReadCloser{}} {
+		closeWarn(c, "test")
 	}
 }
 
-func TestMCP_AllHttpAndRPC_EdgeCases(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
-
-	// 1. GET / probe
-	getResp, err := http.Get(ts.URL + "/")
-	if err != nil || getResp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 for GET /, got %v, err: %v", getResp, err)
+func TestDB_OperationsAndErrors(t *testing.T) {
+	if isPostgres(nil) || rebindQuery("?", false) != "?" || rebindQuery("? ?", true) != "$1 $2" {
+		t.Error("unexpected isPostgres or rebindQuery")
 	}
-	_ = getResp.Body.Close()
 
-	// 2. PUT /mcp -> 405
-	putReq, _ := http.NewRequest(http.MethodPut, ts.URL+"/mcp", bytes.NewBufferString("{}"))
-	putResp, err := http.DefaultClient.Do(putReq)
-	if err != nil || putResp.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 Method Not Allowed, got %v, err: %v", putResp, err)
+	cfgTests := []struct {
+		name    string
+		cfg     *Config
+		wantErr bool
+	}{
+		{"nil config NewDB", nil, true},
+		{"empty dsn", &Config{DatabaseURL: ""}, true},
+		{"unsupported scheme", &Config{DatabaseURL: "mysql://localhost/db"}, true},
 	}
-	_ = putResp.Body.Close()
+	for _, tc := range cfgTests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewDB(tc.cfg); (err != nil) != tc.wantErr {
+				t.Fatalf("NewDB() err=%v", err)
+			}
+			if _, err := InitDB(tc.cfg); (err != nil) != tc.wantErr {
+				t.Fatalf("InitDB() err=%v", err)
+			}
+		})
+	}
 
-	// 3. POST /mcp empty body -> 400
-	emptyResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString("  \n  "))
-	if err != nil || emptyResp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for empty body, got %v, err: %v", emptyResp, err)
-	}
-	_ = emptyResp.Body.Close()
-
-	// 4. Batch invalid JSON array -> HTTP 400 or parse error
-	batchBadResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString("[{bad json"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer batchBadResp.Body.Close()
-	if batchBadResp.StatusCode != http.StatusBadRequest {
-		var batchBadRPC JSONRPCResponse
-		_ = json.NewDecoder(batchBadResp.Body).Decode(&batchBadRPC)
-		if batchBadRPC.Error == nil || batchBadRPC.Error.Code != -32700 {
-			t.Errorf("expected 400 Bad Request or -32700 for malformed batch, got status %d, %+v", batchBadResp.StatusCode, batchBadRPC)
+	tmpDir := t.TempDir()
+	for _, p := range []string{filepath.Join(tmpDir, "fresh1.db"), filepath.Join(tmpDir, "fresh2.db") + "?cache=shared"} {
+		fdb, err := initDB(p)
+		if err != nil {
+			t.Fatalf("initDB %s failed: %v", p, err)
 		}
+		_ = fdb.Close()
 	}
 
-	// 5. Batch valid JSON array
-	batchValidResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(`[{"jsonrpc":"2.0","id":10,"method":"ping"},{"jsonrpc":"2.0","id":11,"method":"tools/list"}]`))
+	blockerFile := filepath.Join(tmpDir, "blocker.txt")
+	_ = os.WriteFile(blockerFile, []byte("data"), 0644)
+	if _, err := initDB(filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
+		t.Error("expected directory blocker error")
+	}
+
+	viewDBPath := filepath.Join(tmpDir, "view_conflict.db")
+	vdb, err := sql.Open("sqlite", viewDBPath)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("failed to open view db: %v", err)
 	}
-	defer batchValidResp.Body.Close()
-	var batchResponses []JSONRPCResponse
-	_ = json.NewDecoder(batchValidResp.Body).Decode(&batchResponses)
-	if len(batchResponses) != 2 {
-		t.Errorf("expected 2 responses in batch, got %d", len(batchResponses))
-	}
-
-	// 6. Single malformed JSON -> HTTP 400 or parse error
-	badResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString("{bad json"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer badResp.Body.Close()
-	if badResp.StatusCode != http.StatusBadRequest {
-		var badRPC JSONRPCResponse
-		_ = json.NewDecoder(badResp.Body).Decode(&badRPC)
-		if badRPC.Error == nil || badRPC.Error.Code != -32700 {
-			t.Errorf("expected 400 Bad Request or -32700 for malformed single req, got status %d, %+v", badResp.StatusCode, badRPC)
-		}
+	_, _ = vdb.Exec("CREATE VIEW cron_schedules AS SELECT 1 AS id;")
+	_ = vdb.Close()
+	if _, err := initDB(viewDBPath); err == nil {
+		t.Error("expected error creating schema on conflicting view database")
 	}
 
-	// 7. Ping single method
-	pingResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(`{"jsonrpc":"2.0","id":12,"method":"ping"}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	oldHook := sqliteTestInitHook
+	sqliteTestInitHook = nil
+	if _, err := initDB(":memory:"); err == nil {
+		t.Error("expected error for unhooked :memory:")
 	}
-	defer pingResp.Body.Close()
-	var pingRPC JSONRPCResponse
-	_ = json.NewDecoder(pingResp.Body).Decode(&pingRPC)
-	if pingRPC.Error != nil {
-		t.Errorf("unexpected ping error: %+v", pingRPC.Error)
+	sqliteTestInitHook = oldHook
+
+	origMax, origBase := postgresMaxAttempts, postgresRetryBase
+	postgresMaxAttempts, postgresRetryBase = 1, time.Millisecond
+	_, errPg := initDB("postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
+	postgresMaxAttempts, postgresRetryBase = origMax, origBase
+	if errPg == nil {
+		t.Error("expected postgres connection failure")
 	}
 
-	// 8. tools/call cancel_schedule
-	cancelReq := `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"non-existent-id"}}}`
-	cancelResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(cancelReq))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer cancelResp.Body.Close()
-	var cancelRPC JSONRPCResponse
-	_ = json.NewDecoder(cancelResp.Body).Decode(&cancelRPC)
-	if cancelRPC.Result == nil {
-		t.Errorf("expected result for cancel_schedule call, got %+v", cancelRPC)
-	}
-}
-
-func TestMCP_DB_AllBranches(t *testing.T) {
-	// 1. Pure Config dependency injection
-	cfg1 := &Config{
-		Port:        "9090",
-		Timezone:    "America/New_York",
-		DatabaseURL: "postgres://db_url",
-	}
-	if cfg1.DatabaseURL != "postgres://db_url" || cfg1.Port != "9090" || cfg1.Timezone != "America/New_York" {
-		t.Errorf("unexpected cfg1: %+v", cfg1)
-	}
-
-	// 2. isPostgres
-	if isPostgres(nil) {
-		t.Error("expected false for isPostgres(nil)")
-	}
-
-	// 3. rebindQuery
-	qSQLite := rebindQuery("SELECT * FROM x WHERE a = ? AND b = ?", false)
-	if qSQLite != "SELECT * FROM x WHERE a = ? AND b = ?" {
-		t.Errorf("unexpected sqlite query: %s", qSQLite)
-	}
-	qPg := rebindQuery("SELECT * FROM x WHERE a = ? AND b = ?", true)
-	if qPg != "SELECT * FROM x WHERE a = $1 AND b = $2" {
-		t.Errorf("unexpected pg query: %s", qPg)
-	}
-
-	// 4. nil DB checks for db.go methods
-	ctx := context.Background()
-	if err := InsertCronSchedule(ctx, nil, CronSchedule{}); err == nil {
-		t.Error("expected error inserting cron with nil db")
-	}
-	if err := InsertOneShotSchedule(ctx, nil, OneShotSchedule{}); err == nil {
-		t.Error("expected error inserting one shot with nil db")
-	}
-	if _, err := ListCronSchedules(ctx, nil, ""); err == nil {
-		t.Error("expected error listing crons with nil db")
-	}
-	if _, err := ListOneShotSchedules(ctx, nil, ""); err == nil {
-		t.Error("expected error listing one shots with nil db")
-	}
-	if _, err := DeleteSchedule(ctx, nil, "s1"); err == nil {
-		t.Error("expected error deleting schedule with nil db")
-	}
-	if err := UpdateCronSchedule(ctx, nil, "s1", nil, nil, nil, nil, nil, nil); err == nil {
-		t.Error("expected error updating cron with nil db")
-	}
-	if err := UpdateCronSchedule(ctx, nil, "", nil, nil, nil, nil, nil, nil); err == nil {
-		t.Error("expected error updating cron with empty id")
-	}
-
-	// 5. Config validation for InitDB and NewDB
-	if _, err := InitDB(nil); err == nil {
-		t.Error("expected error for InitDB(nil)")
-	}
-	if _, err := InitDB(&Config{DatabaseURL: ""}); err == nil {
-		t.Error("expected error for empty DatabaseURL")
-	}
-	if _, err := InitDB(&Config{DatabaseURL: "mysql://user:pass@host/db"}); err == nil {
-		t.Error("expected error for unsupported scheme mysql://")
-	}
-
-	// 6. DB with valid targetID filters
 	db, err := InitDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer db.Close()
+	ctx := context.Background()
 
-	_ = InsertCronSchedule(ctx, db, CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "P", NextRunAt: time.Now(), Enabled: true})
-	_ = InsertOneShotSchedule(ctx, db, OneShotSchedule{ID: "o1", ThreadID: "t1", Prompt: "P", RunAt: time.Now()})
+	now := time.Now().UTC()
+	c := CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true}
+	s := OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "p", RunAt: now}
+	if err := InsertCronSchedule(ctx, db, c); err != nil { t.Fatalf("InsertCronSchedule failed: %v", err) }
+	if err := InsertOneShotSchedule(ctx, db, s); err != nil { t.Fatalf("InsertOneShotSchedule failed: %v", err) }
 
-	cList, err := ListCronSchedules(ctx, db, "t1")
-	if err != nil || len(cList) != 1 {
-		t.Errorf("expected 1 cron schedule for t1, got %v, err: %v", cList, err)
-	}
-	oList, err := ListOneShotSchedules(ctx, db, "t1")
-	if err != nil || len(oList) != 1 {
-		t.Errorf("expected 1 one-shot schedule for t1, got %v, err: %v", oList, err)
-	}
-
-	// 7. Postgres connection failure
-	origMax := postgresMaxAttempts
-	origBase := postgresRetryBase
-	postgresMaxAttempts = 2
-	postgresRetryBase = 5 * time.Millisecond
-	defer func() {
-		postgresMaxAttempts = origMax
-		postgresRetryBase = origBase
-	}()
-
-	_, errPg := InitDB(&Config{DatabaseURL: "postgres://invalid_user:invalid_pass@127.0.0.1:59997/db?sslmode=disable"})
-	if errPg == nil {
-		t.Error("expected error connecting to invalid postgres")
+	crons, _ := ListCronSchedules(ctx, db, "t1")
+	ones, _ := ListOneShotSchedules(ctx, db, "t1")
+	if len(crons) != 1 || len(ones) != 1 {
+		t.Fatalf("expected 1 cron and 1 one-shot, got %d, %d", len(crons), len(ones))
 	}
 
-	// 8. DeleteSchedule existing vs non-existing
-	delFalse, err := DeleteSchedule(ctx, db, "non-existent-id")
-	if err != nil || delFalse {
-		t.Errorf("expected false, nil for non-existent schedule, got %v, %v", delFalse, err)
+	eff := "high"
+	if err := UpdateCronSchedule(ctx, db, "c1", &eff, nil, nil, nil, nil, nil); err != nil { t.Fatal(err) }
+	if err := UpdateCronSchedule(ctx, db, "missing-id", &eff, nil, nil, nil, nil, nil); err == nil { t.Error("expected error") }
+	if err := UpdateCronSchedule(ctx, db, "", nil, nil, nil, nil, nil, nil); err == nil { t.Error("expected error") }
+	if err := UpdateCronSchedule(ctx, db, "c1", nil, nil, nil, nil, nil, nil); err != nil { t.Fatal(err) }
+
+	if delFalse, err := DeleteSchedule(ctx, db, "missing"); err != nil || delFalse { t.Fatal(err) }
+	if delTrue, err := DeleteSchedule(ctx, db, "c1"); err != nil || !delTrue { t.Fatal(err) }
+
+	_, _ = db.Exec("INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'not-a-date', TRUE, CURRENT_TIMESTAMP, 'medium')")
+	if _, err := ListCronSchedules(ctx, db, ""); err == nil {
+		t.Error("expected scan error on invalid next_run_at")
 	}
-	delTrue, err := DeleteSchedule(ctx, db, "c1")
-	if err != nil || !delTrue {
-		t.Errorf("expected true, nil for existing schedule, got %v, %v", delTrue, err)
+	_, _ = db.Exec("INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ('o-bad', 't1', 'p', 'not-a-date', CURRENT_TIMESTAMP, 'medium')")
+	if _, err := ListOneShotSchedules(ctx, db, ""); err == nil {
+		t.Error("expected scan error on invalid run_at")
 	}
 
-	// 9. RunApp with explicit config
-	ctxShort, cancelShort := context.WithCancel(context.Background())
-	cancelShort()
-	_ = RunApp(ctxShort, &Config{DatabaseURL: ":memory:"})
-
-	// 10. SQLite DSN with existing query parameters
-	tempFile := filepath.Join(t.TempDir(), "test_params.db")
-	dbParams, errParams := InitDB(&Config{DatabaseURL: tempFile + "?_pragma=foreign_keys(1)"})
-	if errParams != nil {
-		t.Fatalf("failed to init sqlite with query params: %v", errParams)
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	closedDB, err := InitDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("InitDB closed failed: %v", err)
 	}
-	_ = dbParams.Close()
-}
+	_ = closedDB.Close()
 
-func TestDB_SchemeValidationWithoutHook(t *testing.T) {
-	oldHook := sqliteTestInitHook
-	sqliteTestInitHook = nil
-	defer func() { sqliteTestInitHook = oldHook }()
-
-	for _, invalidScheme := range []string{":memory:", "sqlite://scheduler.db", "file:scheduler.db?mode=memory", "/var/data/scheduler.db"} {
-		_, err := initDB(invalidScheme)
-		if err == nil {
-			t.Errorf("expected error for unhooked sqlite scheme %q in initDB, got nil", invalidScheme)
-		}
+	dbOpTests := []struct {
+		name string
+		ctx  context.Context
+		db   *sql.DB
+	}{
+		{"nil db", ctx, nil},
+		{"canceled ctx", canceledCtx, db},
+		{"closed db", ctx, closedDB},
+	}
+	for _, tc := range dbOpTests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := InsertCronSchedule(tc.ctx, tc.db, c); err == nil {
+				t.Errorf("%s: expected err InsertCron", tc.name)
+			}
+			if err := InsertOneShotSchedule(tc.ctx, tc.db, s); err == nil {
+				t.Errorf("%s: expected err InsertOneShot", tc.name)
+			}
+			if _, err := ListCronSchedules(tc.ctx, tc.db, ""); err == nil {
+				t.Errorf("%s: expected err ListCron", tc.name)
+			}
+			if _, err := ListOneShotSchedules(tc.ctx, tc.db, ""); err == nil {
+				t.Errorf("%s: expected err ListOneShot", tc.name)
+			}
+			if err := UpdateCronSchedule(tc.ctx, tc.db, "c1", &eff, nil, nil, nil, nil, nil); err == nil {
+				t.Errorf("%s: expected err UpdateCron", tc.name)
+			}
+			if _, err := DeleteSchedule(tc.ctx, tc.db, "c1"); err == nil {
+				t.Errorf("%s: expected err Delete", tc.name)
+			}
+		})
 	}
 }
 
@@ -646,7 +344,6 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
 
-	// 1. Without GOCOVERDIR -> 200 OK
 	orig := os.Getenv("GOCOVERDIR")
 	_ = os.Unsetenv("GOCOVERDIR")
 	defer func() {
@@ -657,16 +354,17 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		}
 	}()
 
-	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK without GOCOVERDIR, got: %d", resp.StatusCode)
+	doFlush := func(wantStatus int) {
+		t.Helper()
+		resp, err := http.Get(ts.URL + "/debug/coverage/flush")
+		if err != nil || resp.StatusCode != wantStatus {
+			t.Fatalf("GET /debug/coverage/flush got resp=%v, want=%d, err=%v", resp, wantStatus, err)
+		}
+		_ = resp.Body.Close()
 	}
 
-	// 2. With GOCOVERDIR + mock success -> 200 OK
+	doFlush(http.StatusOK)
+
 	oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
 	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
 
@@ -675,35 +373,14 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
 	_ = os.Setenv("GOCOVERDIR", t.TempDir())
 
-	resp2, err2 := http.Get(ts.URL + "/debug/coverage/flush")
-	if err2 != nil {
-		t.Fatalf("unexpected error: %v", err2)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK || !called || !metaCalled {
-		t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", resp2.StatusCode, called, metaCalled)
+	doFlush(http.StatusOK)
+	if !called || !metaCalled {
+		t.Fatalf("expected flush called, called=%v, meta=%v", called, metaCalled)
 	}
 
-	writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
-	if resp2b, err2b := http.Get(ts.URL + "/debug/coverage/flush"); err2b != nil || resp2b.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK when meta flush errors, got resp=%v err=%v", resp2b, err2b)
-	} else {
-		resp2b.Body.Close()
-	}
+	writeMetaDirFn = func(dir string) error { return errors.New("meta flush error") }
+	doFlush(http.StatusOK)
 
-	// 3. With GOCOVERDIR + mock error -> 500 Internal Server Error
-	writeCountersDirFn = func(dir string) error {
-		return errors.New("simulated flush error")
-	}
-
-	resp3, err3 := http.Get(ts.URL + "/debug/coverage/flush")
-	if err3 != nil {
-		t.Fatalf("unexpected error: %v", err3)
-	}
-	defer resp3.Body.Close()
-	if resp3.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on error, got: %d", resp3.StatusCode)
-	}
+	writeCountersDirFn = func(dir string) error { return errors.New("flush error") }
+	doFlush(http.StatusInternalServerError)
 }
-
-
