@@ -1584,6 +1584,20 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantPR:  522, wantMergeSHA: "pushsha999", wantBackfillCalls: 1,
 		},
 		{
+			name: "push to main falls back to squash commit message when SHA lookup misses", event: "push", delivery: "del-push-msg-fallback",
+			payload: `{"ref":"refs/heads/main","after":"unindexedsha898","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha898","message":"refactor(runner): compact streaming daemon (chunk 3/5) (#898)\n\nDetailed body"}}`,
+			reg:     &mockPRRegistry{backfillTargetID: "1559768078131269684"},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  898, wantMergeSHA: "unindexedsha898", wantTargetID: "1559768078131269684", wantSource: "commit_message", wantBackfillCalls: 1, wantGitPushes: 1,
+		},
+		{
+			name: "push to main falls back to merge commit message when SHA lookup misses", event: "push", delivery: "del-push-merge-msg-fallback",
+			payload: `{"ref":"refs/heads/main","after":"unindexedsha899","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha899","message":"Merge pull request #899 from azylman/feat/test\n\nMerge body"}}`,
+			reg:     &mockPRRegistry{backfillTargetID: "1559768078131269684"},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  899, wantMergeSHA: "unindexedsha899", wantTargetID: "1559768078131269684", wantSource: "commit_message", wantBackfillCalls: 1, wantGitPushes: 1,
+		},
+		{
 			name: "feature branch push does not backfill", event: "push", delivery: "del-push-feat-reg",
 			payload:    `{"ref":"refs/heads/feat/branch-1","after":"featsha888","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"featsha888","message":"feat: wip"}}`,
 			reg:        &mockPRRegistry{},
