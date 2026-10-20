@@ -105,49 +105,34 @@ func NewWebhookDispatcherWithClient(client *http.Client) *DefaultWebhookDispatch
 	return &DefaultWebhookDispatcher{client: client}
 }
 
-// CallWakeHook dispatches the on_wake webhook event.
-func (d *DefaultWebhookDispatcher) CallWakeHook(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
+// dispatchWebhook is a generic helper that standardizes timestamp default, dispatching, and response unmarshaling.
+func dispatchWebhook[Req any, Resp any](ctx context.Context, d *DefaultWebhookDispatcher, hook string, endpoint *config.WebhookEndpoint, req *Req, getTS func(*Req) *time.Time, reqName string) (*Resp, error) {
 	if req == nil {
-		return nil, fmt.Errorf("wake request is nil")
+		return nil, fmt.Errorf("%s is nil", reqName)
 	}
-	if req.Timestamp.IsZero() {
-		req.Timestamp = time.Now().UTC()
+	if ts := getTS(req); ts != nil && ts.IsZero() {
+		*ts = time.Now().UTC()
 	}
-	var resp WakeResponse
-	if err := d.dispatch(ctx, "on_wake", endpoint, req, &resp); err != nil {
+	var resp Resp
+	if err := d.dispatch(ctx, hook, endpoint, req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// CallWakeHook dispatches the on_wake webhook event.
+func (d *DefaultWebhookDispatcher) CallWakeHook(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
+	return dispatchWebhook[WakeRequest, WakeResponse](ctx, d, "on_wake", endpoint, req, func(r *WakeRequest) *time.Time { return &r.Timestamp }, "wake request")
 }
 
 // CallPreTurnHook dispatches the pre_turn webhook event.
 func (d *DefaultWebhookDispatcher) CallPreTurnHook(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-	if req == nil {
-		return nil, fmt.Errorf("pre_turn request is nil")
-	}
-	if req.Timestamp.IsZero() {
-		req.Timestamp = time.Now().UTC()
-	}
-	var resp PreTurnResponse
-	if err := d.dispatch(ctx, "pre_turn", endpoint, req, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
+	return dispatchWebhook[PreTurnRequest, PreTurnResponse](ctx, d, "pre_turn", endpoint, req, func(r *PreTurnRequest) *time.Time { return &r.Timestamp }, "pre_turn request")
 }
 
 // CallPostTurnHook dispatches the post_turn webhook event.
 func (d *DefaultWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-	if req == nil {
-		return nil, fmt.Errorf("post_turn request is nil")
-	}
-	if req.Timestamp.IsZero() {
-		req.Timestamp = time.Now().UTC()
-	}
-	var resp PostTurnResponse
-	if err := d.dispatch(ctx, "post_turn", endpoint, req, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
+	return dispatchWebhook[PostTurnRequest, PostTurnResponse](ctx, d, "post_turn", endpoint, req, func(r *PostTurnRequest) *time.Time { return &r.Timestamp }, "post_turn request")
 }
 
 func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, endpoint *config.WebhookEndpoint, payload any, respDest any) (err error) {

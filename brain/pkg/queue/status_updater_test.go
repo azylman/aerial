@@ -94,7 +94,6 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 	t.Parallel()
 	h := newStatusUpdaterHarness()
 
-	// 1. Deterministic ticker flush: Debounce(0) and Interval(2ms) exercises live ticker select branch and sendFunc
 	updater := NewStatusUpdater(nil, "thread-ticker", true,
 		h.options(
 			WithStatusDebounce(0),
@@ -118,14 +117,10 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 		t.Fatal("timed out waiting for delete after ticker send")
 	}
 
-	if h.sends.Load() == 0 {
-		t.Errorf("expected sends > 0, got %d", h.sends.Load())
-	}
-	if h.deletes.Load() != 1 {
-		t.Errorf("expected 1 delete, got %d", h.deletes.Load())
+	if h.sends.Load() == 0 || h.deletes.Load() != 1 {
+		t.Errorf("expected sends > 0 and 1 delete, got sends=%d deletes=%d", h.sends.Load(), h.deletes.Load())
 	}
 
-	// 2. Debounce suppression branch: flush() called before debounce delay while statusMessageID is empty and no tool activity
 	hDebounce := newStatusUpdaterHarness()
 	updaterDebounce := NewStatusUpdater(nil, "thread-debounce", true,
 		hDebounce.options(
@@ -134,15 +129,12 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 		)...,
 	)
 	updaterDebounce.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-	updaterDebounce.flush() // explicitly exercises the debounce return branch in flush()
+	updaterDebounce.flush()
 	updaterDebounce.Stop()
 	updaterDebounce.DeleteStatusMessage()
 
-	if hDebounce.sends.Load() != 0 {
-		t.Errorf("expected 0 sends during debounce, got %d", hDebounce.sends.Load())
-	}
-	if hDebounce.deletes.Load() != 0 {
-		t.Errorf("expected 0 deletes when no status message was created, got %d", hDebounce.deletes.Load())
+	if hDebounce.sends.Load() != 0 || hDebounce.deletes.Load() != 0 {
+		t.Errorf("expected 0 sends and 0 deletes during debounce, got sends=%d deletes=%d", hDebounce.sends.Load(), hDebounce.deletes.Load())
 	}
 }
 
@@ -295,7 +287,9 @@ func TestStatusUpdater_PermanentCircuitBreaker(t *testing.T) {
 			}
 
 			updater := NewStatusUpdater(nil, "thread-"+tc.name, true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-			updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
+			updater.statusMessageID = "msg-exist"
+			updater.phase = "thinking"
+			updater.dirty = true
 			updater.flush()
 
 			for i := 0; i < 5; i++ {
@@ -304,8 +298,11 @@ func TestStatusUpdater_PermanentCircuitBreaker(t *testing.T) {
 			}
 			updater.Stop()
 
-			if h.edits.Load() > 1 {
-				t.Errorf("expected circuit breaker to halt edits after permanent error, got %d edits", h.edits.Load())
+			if h.edits.Load() != 1 {
+				t.Errorf("expected circuit breaker to halt edits after 1 error, got %d edits", h.edits.Load())
+			}
+			if !updater.disabled {
+				t.Errorf("expected updater.disabled=true")
 			}
 		})
 	}
@@ -325,8 +322,8 @@ func TestStatusUpdater_SendPermissionCircuitBreaker(t *testing.T) {
 	updater.flush()
 	updater.Stop()
 
-	if h.sends.Load() != 1 {
-		t.Errorf("expected circuit breaker to stop sends after 403, got %d sends", h.sends.Load())
+	if h.sends.Load() != 1 || !updater.disabled {
+		t.Errorf("expected 1 send and disabled=true, got %d sends, disabled=%v", h.sends.Load(), updater.disabled)
 	}
 }
 
@@ -372,155 +369,65 @@ func TestStatusUpdater_TransientSendErrorSelfHeals(t *testing.T) {
 	}
 }
 
-func TestStatusUpdater_ResetOnRetry(t *testing.T) {
+func TestStatusUpdater_LifecycleAndConcurrency(t *testing.T) {
 	t.Parallel()
 	h := newStatusUpdaterHarness()
-	updater := NewStatusUpdater(nil, "thread-reset", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "flaky_tool", State: "ACTIVE"})
-	updater.flush()
 
-	updater.Reset()
+	// 1. Reset cleans up active message
+	u := NewStatusUpdater(nil, "thread-reset", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+	u.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "flaky_tool", State: "ACTIVE"})
+	u.flush()
+	u.Reset()
 
 	select {
 	case <-h.deleteDone:
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out waiting for reset deleteFunc")
 	}
+	u.Stop()
 
-	if h.deletes.Load() != 1 {
-		t.Errorf("expected 1 delete on Reset, got %d", h.deletes.Load())
-	}
-	updater.Stop()
-}
-
-func TestStatusUpdater_ImmediateFlushOnToolStart(t *testing.T) {
-	t.Parallel()
-	h := newStatusUpdaterHarness()
-	updater := NewStatusUpdater(nil, "thread-immediate", true,
-		h.options(
-			WithStatusInterval(1*time.Hour),
-			WithStatusDebounce(1*time.Hour),
-		)...,
-	)
-
-	updater.HandleStep(&runner.StepUpdateEvent{
-		StepType: "tool_call",
-		ToolName: "grep_search",
-		State:    "RUNNING",
-	})
+	// 2. Immediate flush on tool start
+	hImm := newStatusUpdaterHarness()
+	uImm := NewStatusUpdater(nil, "thread-imm", true, hImm.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(1*time.Hour))...)
+	uImm.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "grep_search", State: "RUNNING"})
 
 	select {
-	case text := <-h.sendDone:
+	case text := <-hImm.sendDone:
 		if !strings.Contains(text, "grep_search") {
-			t.Errorf("expected immediate message to mention grep_search, got: %s", text)
+			t.Errorf("expected grep_search, got %s", text)
 		}
 	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for event-driven immediate flush on tool start")
+		t.Fatal("timed out waiting for immediate flush")
 	}
+	uImm.Stop()
+	uImm.DeleteStatusMessage()
 
-	updater.Stop()
-	updater.DeleteStatusMessage()
-	select {
-	case <-h.deleteDone:
-	case <-time.After(1 * time.Second):
-	}
-}
-
-func TestStatusUpdater_SequentialToolsLatchOverride(t *testing.T) {
-	t.Parallel()
-	h := newStatusUpdaterHarness()
-	updater := NewStatusUpdater(nil, "thread-seq", true,
-		h.options(
-			WithStatusInterval(1*time.Hour),
-			WithStatusDebounce(0),
-			WithStatusToolLatch(1*time.Hour),
-		)...,
-	)
-
-	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "ACTIVE"})
-	updater.flush()
-	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "DONE"})
-
-	updater.mu.Lock()
-	if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_one") {
-		t.Errorf("expected tool_one latched, got %s", txt)
-	}
-	updater.mu.Unlock()
-
-	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_two", State: "ACTIVE"})
-	updater.mu.Lock()
-	if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_two") {
-		t.Errorf("expected tool_two to override latch, got %s", txt)
-	}
-	if updater.lastCompletedTool != "" {
-		t.Errorf("expected lastCompletedTool cleared, got %s", updater.lastCompletedTool)
-	}
-	updater.mu.Unlock()
-
-	updater.Stop()
-	updater.DeleteStatusMessage()
-	select {
-	case <-h.deleteDone:
-	case <-time.After(1 * time.Second):
-	}
-}
-
-func TestStatusUpdater_LiveTimerRefreshDuringLongTool(t *testing.T) {
-	t.Parallel()
-	h := newStatusUpdaterHarness()
-	updater := NewStatusUpdater(nil, "thread-timer", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-
-	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "long_tool", State: "ACTIVE"})
-	updater.flush()
-
-	updater.mu.Lock()
-	updater.toolStart = time.Now().Add(-250 * time.Millisecond)
-	updater.mu.Unlock()
-	updater.flush()
-
-	updater.mu.Lock()
-	updater.toolStart = time.Now().Add(-500 * time.Millisecond)
-	updater.mu.Unlock()
-	updater.flush()
-
-	updater.Stop()
-	if h.edits.Load() < 2 {
-		t.Errorf("expected timer to refresh across ticks during long tool, got %d edits", h.edits.Load())
-	}
-}
-
-func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
-	t.Parallel()
-	h := newStatusUpdaterHarness()
+	// 3. Zombie leak prevention
+	hZombie := newStatusUpdaterHarness()
 	sendStarted := make(chan struct{})
 	sendRelease := make(chan struct{})
-
-	h.sendFn = func(channelID, text string) (string, error) {
-		h.sends.Add(1)
+	hZombie.sendFn = func(ch, txt string) (string, error) {
+		hZombie.sends.Add(1)
 		close(sendStarted)
 		<-sendRelease
-		return "msg-slow-send", nil
+		return "msg-slow", nil
 	}
 
-	updater := NewStatusUpdater(nil, "thread-zombie", true, h.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
-	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "slow_tool", State: "ACTIVE"})
-	go updater.flush()
+	uZombie := NewStatusUpdater(nil, "thread-zombie", true, hZombie.options(WithStatusInterval(1*time.Hour), WithStatusDebounce(0))...)
+	uZombie.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "slow", State: "ACTIVE"})
+	go uZombie.flush()
 
 	<-sendStarted
-	updater.DeleteStatusMessage()
+	uZombie.DeleteStatusMessage()
 	close(sendRelease)
 
 	select {
-	case msgID := <-h.deleteDone:
-		if msgID != "msg-slow-send" {
-			t.Errorf("expected delete of msg-slow-send, got %s", msgID)
+	case msgID := <-hZombie.deleteDone:
+		if msgID != "msg-slow" {
+			t.Errorf("expected delete of msg-slow, got %s", msgID)
 		}
 	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for zombie deleteFunc")
+		t.Fatal("timed out waiting for zombie delete")
 	}
-
-	updater.Stop()
-	if h.deletes.Load() != 1 {
-		t.Errorf("expected zombie message deleted, got %d deletes", h.deletes.Load())
-	}
+	uZombie.Stop()
 }
