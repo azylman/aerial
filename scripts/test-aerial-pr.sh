@@ -590,9 +590,11 @@ TRAILER_CHECK=$(bash -c "
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
     echo \"t1:\$(format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2')\"
     echo \"t2:\$(format_aerial_pr_trailer '' '')\"
+    echo \"t3:\$(format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2' '[\"kiosk-client\"]')\"
 ")
 assert_eq 't1:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2"} -->' "$(echo "$TRAILER_CHECK" | grep '^t1:')" "format_aerial_pr_trailer formats compact JSON trailer comment"
 assert_eq "t2:" "$(echo "$TRAILER_CHECK" | grep '^t2:')" "format_aerial_pr_trailer returns empty string when all metadata fields are empty"
+assert_eq 't3:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2","jobs":["kiosk-client"]} -->' "$(echo "$TRAILER_CHECK" | grep '^t3:')" "format_aerial_pr_trailer includes changed Nomad jobs when present"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

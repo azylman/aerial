@@ -753,11 +753,9 @@ register_pr_in_brain() {
 }
 
 format_aerial_pr_trailer() {
-    local t_id="${1:-}" v_id="${2:-}"
-    if [ -z "$t_id" ] && [ -z "$v_id" ]; then
-        return 0
-    fi
-    printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" '{target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id}')"
+    local t_id="${1:-}" v_id="${2:-}" jobs_json="${3:-[]}"
+    [ -z "$t_id" ] && [ -z "$v_id" ] && return 0
+    printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" --argjson jobs "${jobs_json:-[]}" 'if ($jobs | length) > 0 then {target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id, jobs: $jobs} else {target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id} end')"
 }
 
 rebase_staged_changes() {
@@ -1038,11 +1036,15 @@ submit_scratch() {
     local commit_sha
     commit_sha=$(git rev-parse HEAD)
 
-    local pr_trailer
-    pr_trailer=$(format_aerial_pr_trailer "$target_id" "$vanadis_chunk_id")
-    if [ -n "$pr_trailer" ]; then
-        pr_body="${pr_body}"$'\n\n'"${pr_trailer}"
+    local changed_jobs_json="[]" meta_json="{}" job_names=""
+    job_names=$( (git diff --name-only --diff-filter=d "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git show --pretty="" --name-only --diff-filter=d "$commit_sha" 2>/dev/null || true) | grep -E '(^|/)jobs/.*\.nomad$' | sed -E 's|.*/([^/]+)\.nomad$|\1|' | sort -u || true)
+    if [ -n "$job_names" ]; then
+        changed_jobs_json=$(echo "$job_names" | jq -R . | jq -s .)
+        meta_json=$(jq -n --argjson jobs "$changed_jobs_json" '{jobs: $jobs}')
     fi
+    local pr_trailer
+    pr_trailer=$(format_aerial_pr_trailer "$target_id" "$vanadis_chunk_id" "$changed_jobs_json")
+    [ -n "$pr_trailer" ] && pr_body="${pr_body}"$'\n\n'"${pr_trailer}"
 
     # 6. Push branch to remote
     echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
@@ -1119,23 +1121,6 @@ submit_scratch() {
             brain_reg_url="http://brain.aerial/internal/pr/register"
         fi
     fi
-    # Extract candidate Nomad job names from changed .nomad files
-    local changed_jobs_json="[]"
-    local changed_nomad_files
-    changed_nomad_files=$(git diff --name-only --diff-filter=d "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git show --pretty="" --name-only --diff-filter=d "$commit_sha" 2>/dev/null || true)
-    if [ -n "$changed_nomad_files" ]; then
-        local job_names
-        job_names=$(echo "$changed_nomad_files" | grep -E '(^|/)jobs/.*\.nomad$' | sed -E 's|.*/([^/]+)\.nomad$|\1|' | sort -u || true)
-        if [ -n "$job_names" ]; then
-            changed_jobs_json=$(echo "$job_names" | jq -R . | jq -s .)
-        fi
-    fi
-
-    local meta_json="{}"
-    if [ "$changed_jobs_json" != "[]" ]; then
-        meta_json=$(jq -n --argjson jobs "$changed_jobs_json" '{jobs: $jobs}')
-    fi
-
 
     local reg_payload
     reg_payload=$(jq -n \
