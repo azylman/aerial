@@ -1176,6 +1176,7 @@ type ImageReadyEventRequest struct {
 type PromptRequest struct {
 	ChannelID string `json:"channel_id"`
 	Prompt    string `json:"prompt"`
+	Silent    bool   `json:"silent,omitempty"`
 }
 
 type DirectMessageRequest struct {
@@ -1890,16 +1891,29 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	return nil
 }
 
-func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string) error {
+func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) bool {
+	if s == nil || s.registry == nil || prNum <= 0 {
+		return false
+	}
+	suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
+	if err != nil {
+		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis status for %s#%d: %v", repo, prNum, err)
+		return false
+	}
+	return suppressed
+}
+
+func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, silent ...bool) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
 	}
-	if dmMsg != "" {
+	isSilent := len(silent) > 0 && silent[0]
+	if !isSilent && dmMsg != "" {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
 	}
-	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{ChannelID: targetID, Prompt: prompt}); err != nil {
+	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{ChannelID: targetID, Prompt: prompt, Silent: isSilent}); err != nil {
 		log.Printf("[webhooks-router] [dispatcher] error dispatching %s prompt: %v", label, err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)
 	}
@@ -2052,7 +2066,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 			evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
 		)
-		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt)
+		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.isVanadisPR(ctx, evt.Repo, evt.PRNumber))
 	case "sync_success":
 		if evt.PRNumber > 0 {
 			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "merged", "", nil); err != nil {
@@ -2075,7 +2089,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			}
 		}
 		prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
-		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt)
+		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.isVanadisPR(ctx, evt.Repo, evt.PRNumber))
 	}
 	return &evt, nil
 }
@@ -2149,17 +2163,12 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		return nil
 	}
 
-	if s.registry != nil && prNum > 0 {
-		suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
-		if err != nil {
-			log.Printf("[webhooks-router] [vanadis] warning checking deploy wake suppression for %s#%d: %v", repo, prNum, err)
-		} else if suppressed {
-			log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
-			if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing suppressed deploy_success widget: %v", err)
-			}
-			return nil
+	if s.isVanadisPR(ctx, repo, prNum) {
+		log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
+		if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing suppressed deploy_success widget: %v", err)
 		}
+		return nil
 	}
 
 	var contextMsgs []ChannelMessageContext
@@ -2209,7 +2218,7 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 		details, urlLine,
 		"Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix.",
 	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt)
+	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt, s.isVanadisPR(ctx, repo, prNum))
 }
 
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
@@ -2224,7 +2233,7 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 		}
 	}
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt)
+	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt, s.isVanadisPR(ctx, repo, prNum))
 }
 
 // GitHubIssueComment represents a comment on a GitHub issue or pull request.
