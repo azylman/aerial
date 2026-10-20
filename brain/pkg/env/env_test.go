@@ -15,27 +15,26 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 )
 
+func writeTestFile(t *testing.T, path, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
 func newTestProvisioner(t *testing.T, aerialFiles, configFiles map[string]string) (*Provisioner, string, string) {
 	t.Helper()
 	aerialDir := filepath.Join(t.TempDir(), "aerial")
 	configDir := filepath.Join(t.TempDir(), "config")
-	for relPath, content := range aerialFiles {
-		fullPath := filepath.Join(aerialDir, relPath)
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			t.Fatalf("newTestProvisioner aerial mkdir: %v", err)
-		}
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-			t.Fatalf("newTestProvisioner aerial write: %v", err)
-		}
+	for rel, c := range aerialFiles {
+		writeTestFile(t, filepath.Join(aerialDir, rel), c)
 	}
-	for relPath, content := range configFiles {
-		fullPath := filepath.Join(configDir, relPath)
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			t.Fatalf("newTestProvisioner config mkdir: %v", err)
-		}
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-			t.Fatalf("newTestProvisioner config write: %v", err)
-		}
+	for rel, c := range configFiles {
+		writeTestFile(t, filepath.Join(configDir, rel), c)
 	}
 	p := New(t.TempDir(), t.TempDir())
 	p.SetAerialRulesDir(aerialDir)
@@ -44,15 +43,7 @@ func newTestProvisioner(t *testing.T, aerialFiles, configFiles map[string]string
 }
 
 func writeSkillFixture(t *testing.T, baseDir, relPath, content string) string {
-	t.Helper()
-	p := filepath.Join(baseDir, relPath)
-	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
-		t.Fatalf("writeSkillFixture mkdir: %v", err)
-	}
-	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
-		t.Fatalf("writeSkillFixture write: %v", err)
-	}
-	return p
+	return writeTestFile(t, filepath.Join(baseDir, relPath), content)
 }
 
 func TestProvisioner_InitAndGetters(t *testing.T) {
@@ -109,12 +100,7 @@ func TestProvisioner_InitAndGetters(t *testing.T) {
 
 			if tc.testNilReceiver {
 				var pNil *Provisioner
-				if pNil.HomeDir() != "" {
-					t.Errorf("expected empty HomeDir on nil receiver")
-				}
-				if pNil.DataDir() != "" {
-					t.Errorf("expected empty DataDir on nil receiver")
-				}
+
 				if err := pNil.Sync(context.Background(), nil); err != nil {
 					t.Errorf("expected nil error on Sync with nil receiver")
 				}
@@ -150,16 +136,16 @@ func TestProvisioner_InitAndGetters(t *testing.T) {
 					p.configRulesDir != "/config/rules" || p.hooksDir != "/hooks/dir" {
 					t.Fatalf("setters failed to update Provisioner fields")
 				}
-				if p.HomeDir() != "/h" || p.DataDir() != "/d" {
-					t.Fatalf("unexpected HomeDir or DataDir: %s, %s", p.HomeDir(), p.DataDir())
+				if p.homeDir != "/h" || p.dataDir != "/d" {
+					t.Fatalf("unexpected HomeDir or DataDir: %s, %s", p.homeDir, p.dataDir)
 				}
 				return
 			}
 
 			if tc.nilConfig {
 				p := NewFromConfig(nil)
-				if p.HomeDir() != "" || p.DataDir() != "" {
-					t.Fatalf("expected empty dirs from nil config, got %q, %q", p.HomeDir(), p.DataDir())
+				if p.homeDir != "" || p.dataDir != "" {
+					t.Fatalf("expected empty dirs from nil config, got %q, %q", p.homeDir, p.dataDir)
 				}
 				return
 			}
@@ -170,15 +156,15 @@ func TestProvisioner_InitAndGetters(t *testing.T) {
 					c.DataDir = "/custom/data"
 				})
 				p := NewFromConfig(cfg)
-				if p.HomeDir() != "/custom/gemini" || p.DataDir() != "/custom/data" {
-					t.Fatalf("unexpected paths from config: %q, %q", p.HomeDir(), p.DataDir())
+				if p.homeDir != "/custom/gemini" || p.dataDir != "/custom/data" {
+					t.Fatalf("unexpected paths from config: %q, %q", p.homeDir, p.dataDir)
 				}
 				return
 			}
 
 			p := New(tc.expectedHome, tc.expectedData)
-			if p.HomeDir() != tc.expectedHome || p.DataDir() != tc.expectedData {
-				t.Fatalf("unexpected paths: got home=%q, data=%q", p.HomeDir(), p.DataDir())
+			if p.homeDir != tc.expectedHome || p.dataDir != tc.expectedData {
+				t.Fatalf("unexpected paths: got home=%q, data=%q", p.homeDir, p.dataDir)
 			}
 			if tc.expectedSkillsDir != "" && p.superpowersDir != tc.expectedSkillsDir {
 				t.Fatalf("unexpected superpowersDir: got %q, want %q", p.superpowersDir, tc.expectedSkillsDir)
@@ -222,22 +208,13 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 			}, nil)
 
 			if tc.failSettings {
-				// Block .gemini/antigravity-cli with a regular file so MkdirAll fails
-				blocker := filepath.Join(p.HomeDir(), ".gemini", "antigravity-cli")
-				_ = os.MkdirAll(filepath.Dir(blocker), 0755)
-				_ = os.WriteFile(blocker, []byte("file-blocking-dir"), 0644)
+				writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "antigravity-cli"), "file-blocking-dir")
 			}
 			if tc.failRules {
-				// Block .gemini/rules with a regular file
-				blocker := filepath.Join(p.HomeDir(), ".gemini", "rules")
-				_ = os.MkdirAll(filepath.Dir(blocker), 0755)
-				_ = os.WriteFile(blocker, []byte("file-blocking-dir"), 0644)
+				writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file-blocking-dir")
 			}
 			if tc.failMCP {
-				// Block .gemini/config/mcp_config.json with a non-empty directory
-				mcpBlock := filepath.Join(p.HomeDir(), ".gemini", "config", "mcp_config.json")
-				_ = os.MkdirAll(mcpBlock, 0755)
-				_ = os.WriteFile(filepath.Join(mcpBlock, "blocker"), []byte("b"), 0644)
+				writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "config", "mcp_config.json", "blocker"), "b")
 			}
 
 			var cfg *config.Config
@@ -257,7 +234,7 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 			if !tc.wantErr && tc.withActiveCfg {
 				// Verify runtime isolation: discord, voice, ephemeral
 				for _, target := range allRuntimeTargets {
-					targetGemini := filepath.Join(p.DataDir(), "runtimes", string(target), ".gemini")
+					targetGemini := filepath.Join(p.dataDir, "runtimes", string(target), ".gemini")
 					if _, err := os.Stat(filepath.Join(targetGemini, "rules", "00_aerial_common_01_base.md")); err != nil {
 						t.Errorf("expected common rule in %s runtime: %v", target, err)
 					}
@@ -267,7 +244,7 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 				}
 
 				// Ephemeral MCP servers must be empty
-				ephemeralMCP := filepath.Join(p.DataDir(), "runtimes", "ephemeral", ".gemini", "config", "mcp_config.json")
+				ephemeralMCP := filepath.Join(p.dataDir, "runtimes", "ephemeral", ".gemini", "config", "mcp_config.json")
 				data, _ := os.ReadFile(ephemeralMCP)
 				if strings.Contains(string(data), "scheduler") {
 					t.Errorf("ephemeral runtime should not include scheduler: %s", string(data))
@@ -285,7 +262,6 @@ func TestSyncSettings(t *testing.T) {
 		model             string
 		preSeedOAuth      bool
 		corruptedInput    bool
-		helperHome        string
 		blockFile         bool
 		createTempFail    bool
 		atomicEmptyDir    bool
@@ -295,8 +271,6 @@ func TestSyncSettings(t *testing.T) {
 		{name: "api key and custom model", apiKey: "api-secret-123", model: "gemini-2.5-pro"},
 		{name: "oauth mode without api key removes apiKey and provider", apiKey: "", model: "gemini-flash", preSeedOAuth: true},
 		{name: "recovers gracefully from corrupted json file", apiKey: "rec-key", model: "rec-model", corruptedInput: true},
-		{name: "EnsureAgySettingsForHome with empty home is no-op", helperHome: ""},
-		{name: "EnsureAgySettingsForHome provisions settings", helperHome: "valid", apiKey: "helper-key", model: "helper-model"},
 		{name: "write failure returns error when parent dir blocked", blockFile: true, wantErr: true},
 		{name: "writeAtomic fails on parent directory blocker", createTempFail: true, wantErr: true},
 		{name: "writeAtomic replaces empty directory fallback", atomicEmptyDir: true},
@@ -308,10 +282,8 @@ func TestSyncSettings(t *testing.T) {
 			if tc.createTempFail {
 				tmpDir := t.TempDir()
 				p := New(tmpDir, tmpDir)
-				blocker := filepath.Join(tmpDir, "blocker")
-				_ = os.WriteFile(blocker, []byte("file"), 0644)
-				err := p.writeAtomic(filepath.Join(blocker, "sub", "test.txt"), "data")
-				if err == nil {
+				writeTestFile(t, filepath.Join(tmpDir, "blocker"), "file")
+				if err := p.writeAtomic(filepath.Join(tmpDir, "blocker", "sub", "test.txt"), "data"); err == nil {
 					t.Errorf("expected error when directory creation fails")
 				}
 				return
@@ -321,11 +293,10 @@ func TestSyncSettings(t *testing.T) {
 				tmpDir := t.TempDir()
 				p := New(tmpDir, tmpDir)
 				targetPath := filepath.Join(tmpDir, "replace_dir")
-				if err := os.Mkdir(targetPath, 0755); err != nil {
-					t.Fatalf("mkdir replace_dir: %v", err)
-				}
 				if tc.atomicNonEmptyDir {
-					_ = os.WriteFile(filepath.Join(targetPath, "child.txt"), []byte("child"), 0644)
+					writeTestFile(t, filepath.Join(targetPath, "child.txt"), "child")
+				} else if err := os.Mkdir(targetPath, 0755); err != nil {
+					t.Fatalf("mkdir: %v", err)
 				}
 				err := p.writeAtomic(targetPath, "new content")
 				if (err != nil) != tc.wantErr {
@@ -340,25 +311,6 @@ func TestSyncSettings(t *testing.T) {
 				return
 			}
 
-			if tc.helperHome != "" {
-				home := t.TempDir()
-				err := EnsureAgySettingsForHome(home, tc.apiKey, tc.model)
-				if err != nil {
-					t.Fatalf("EnsureAgySettingsForHome failed: %v", err)
-				}
-				settingsPath := filepath.Join(home, ".gemini", "antigravity-cli", "settings.json")
-				data, err := os.ReadFile(settingsPath)
-				if err != nil || !strings.Contains(string(data), tc.apiKey) {
-					t.Fatalf("expected api key in settings: %v, data: %s", err, string(data))
-				}
-				return
-			}
-			if tc.name == "EnsureAgySettingsForHome with empty home is no-op" {
-				if err := EnsureAgySettingsForHome("   ", "k", "m"); err != nil {
-					t.Fatalf("expected nil on whitespace home: %v", err)
-				}
-				return
-			}
 
 			tmpHome := t.TempDir()
 			p := New(tmpHome, "")
@@ -517,26 +469,19 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 				"discord/30_user_chat.md":    "Config discord settings",
 			})
 
-			if tc.dirIsFile {
-				// Make aerialDir/common a regular file so ReadDir fails with ENOTDIR
-				_ = os.RemoveAll(filepath.Join(aerialDir, "common"))
-				_ = os.WriteFile(filepath.Join(aerialDir, "common"), []byte("file-not-dir"), 0644)
-			}
-
-			if tc.userSubIsFile {
-				// Make configDir/discord a regular file
-				_ = os.RemoveAll(filepath.Join(configDir, "discord"))
-				_ = os.WriteFile(filepath.Join(configDir, "discord"), []byte("file-not-dir"), 0644)
-			}
-
-			if tc.aerialPersonaIsFile {
-				_ = os.RemoveAll(filepath.Join(aerialDir, "persona"))
-				_ = os.WriteFile(filepath.Join(aerialDir, "persona"), []byte("file-not-dir"), 0644)
-			}
-
-			if tc.configPersonaIsFile {
-				_ = os.RemoveAll(filepath.Join(configDir, "persona"))
-				_ = os.WriteFile(filepath.Join(configDir, "persona"), []byte("file-not-dir"), 0644)
+			for _, p := range []struct {
+				cond bool
+				path string
+			}{
+				{tc.dirIsFile, filepath.Join(aerialDir, "common")},
+				{tc.userSubIsFile, filepath.Join(configDir, "discord")},
+				{tc.aerialPersonaIsFile, filepath.Join(aerialDir, "persona")},
+				{tc.configPersonaIsFile, filepath.Join(configDir, "persona")},
+			} {
+				if p.cond {
+					_ = os.RemoveAll(p.path)
+					_ = os.WriteFile(p.path, []byte("file-not-dir"), 0644)
+				}
 			}
 
 			rules, err := p.compileTargetRules(tc.target, tc.prompt)
@@ -595,19 +540,15 @@ func TestAtomicSwapRulesDir(t *testing.T) {
 
 			tmpParent := t.TempDir()
 			targetDir := filepath.Join(tmpParent, "rules")
-			_ = os.MkdirAll(targetDir, 0755)
-			origFile := filepath.Join(targetDir, "original.md")
-			_ = os.WriteFile(origFile, []byte("active rule"), 0644)
+			origFile := writeTestFile(t, filepath.Join(targetDir, "original.md"), "active rule")
 
 			if tc.parentIsFile {
-				blocker := filepath.Join(tmpParent, "blocked_parent")
-				_ = os.WriteFile(blocker, []byte("file"), 0644)
-				targetDir = filepath.Join(blocker, "rules")
+				writeTestFile(t, filepath.Join(tmpParent, "blocked_parent"), "file")
+				targetDir = filepath.Join(tmpParent, "blocked_parent", "rules")
 			}
-
 			if tc.targetIsFile {
 				_ = os.RemoveAll(targetDir)
-				_ = os.WriteFile(targetDir, []byte("not a dir"), 0644)
+				writeTestFile(t, targetDir, "not a dir")
 			}
 
 			var rules []ruleSourceFile
@@ -716,32 +657,19 @@ func TestSyncRules(t *testing.T) {
 			}
 
 			if tc.voiceFail {
-				// Voice compilation fails if voice subfolder has a torn 0-byte file
-				_ = os.WriteFile(filepath.Join(aerialDir, "voice", "torn.md"), []byte(""), 0644)
+				writeTestFile(t, filepath.Join(aerialDir, "voice", "torn.md"), "")
 			}
-
 			if tc.ephemeralFail {
-				// Ephemeral compilation fails if ephemeral subfolder has a torn 0-byte file
-				_ = os.MkdirAll(filepath.Join(aerialDir, "ephemeral"), 0755)
-				_ = os.WriteFile(filepath.Join(aerialDir, "ephemeral", "torn.md"), []byte(""), 0644)
+				writeTestFile(t, filepath.Join(aerialDir, "ephemeral", "torn.md"), "")
 			}
-
 			if tc.primaryFail {
-				blocker := filepath.Join(p.HomeDir(), ".gemini", "rules")
-				_ = os.MkdirAll(filepath.Dir(blocker), 0755)
-				_ = os.WriteFile(blocker, []byte("file blocker"), 0644)
+				writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file blocker")
 			}
-
 			if tc.configFail {
-				blocker := filepath.Join(p.HomeDir(), ".gemini", "config", "rules")
-				_ = os.MkdirAll(filepath.Dir(blocker), 0755)
-				_ = os.WriteFile(blocker, []byte("file blocker"), 0644)
+				writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "config", "rules"), "file blocker")
 			}
-
 			if tc.runtimeFail {
-				rtBlocker := filepath.Join(p.DataDir(), "runtimes", "discord", ".gemini", "rules")
-				_ = os.MkdirAll(filepath.Dir(rtBlocker), 0755)
-				_ = os.WriteFile(rtBlocker, []byte("file blocker"), 0644)
+				writeTestFile(t, filepath.Join(p.dataDir, "runtimes", "discord", ".gemini", "rules"), "file blocker")
 			}
 
 			if tc.concurrent {
@@ -770,7 +698,7 @@ func TestSyncRules(t *testing.T) {
 			}
 
 			if !tc.wantErr {
-				rulesDir := filepath.Join(p.HomeDir(), ".gemini", "rules")
+				rulesDir := filepath.Join(p.homeDir, ".gemini", "rules")
 				entries, rErr := os.ReadDir(rulesDir)
 				if rErr != nil || len(entries) == 0 {
 					t.Fatalf("expected rules in %s: %v", rulesDir, rErr)
@@ -820,49 +748,34 @@ func TestProvisionRuntimeSharedAssetsAndStorage(t *testing.T) {
 
 			primaryGemini := filepath.Join(tmpHome, ".gemini")
 			primaryCli := filepath.Join(primaryGemini, "antigravity-cli")
-			_ = os.MkdirAll(primaryCli, 0755)
-			_ = os.WriteFile(filepath.Join(primaryCli, "settings.json"), []byte(`{"apiKey":"test"}`), 0644)
-			_ = os.WriteFile(filepath.Join(primaryCli, "antigravity-oauth-token"), []byte("tok-123"), 0644)
-			_ = os.WriteFile(filepath.Join(primaryCli, "installation_id"), []byte("inst-456"), 0644)
-			_ = os.WriteFile(filepath.Join(primaryGemini, "mcp_oauth_tokens.json"), []byte(`{"oauth":"data"}`), 0644)
+			writeTestFile(t, filepath.Join(primaryCli, "settings.json"), `{"apiKey":"test"}`)
+			writeTestFile(t, filepath.Join(primaryCli, "antigravity-oauth-token"), "tok-123")
+			writeTestFile(t, filepath.Join(primaryCli, "installation_id"), "inst-456")
+			writeTestFile(t, filepath.Join(primaryGemini, "mcp_oauth_tokens.json"), `{"oauth":"data"}`)
 
 			runtimeHome := filepath.Join(t.TempDir(), "runtime")
 			runtimeGemini := filepath.Join(runtimeHome, ".gemini")
 
 			if tc.linkAssetFail {
-				srcFile := filepath.Join(tmpHome, "src.txt")
-				_ = os.WriteFile(srcFile, []byte("src-data"), 0644)
-				// dst as non-empty directory triggers remove failure
+				srcFile := writeTestFile(t, filepath.Join(tmpHome, "src.txt"), "src-data")
 				dstDir := filepath.Join(tmpHome, "dst_dir")
-				_ = os.Mkdir(dstDir, 0755)
-				_ = os.WriteFile(filepath.Join(dstDir, "c"), []byte("c"), 0644)
+				writeTestFile(t, filepath.Join(dstDir, "c"), "c")
 				p.linkOrCopyAsset(srcFile, dstDir)
 
-				// blocked dst parent triggers writeAtomic failure on copy fallback
-				symlinkRuntimeAsset = func(oldname, newname string) error {
-					return errors.New("symlink fail")
-				}
-				blockedDst := filepath.Join(tmpHome, "file_blocker", "target.txt")
-				_ = os.WriteFile(filepath.Join(tmpHome, "file_blocker"), []byte("f"), 0644)
-				p.linkOrCopyAsset(srcFile, blockedDst)
+				symlinkRuntimeAsset = func(oldname, newname string) error { return errors.New("symlink fail") }
+				writeTestFile(t, filepath.Join(tmpHome, "file_blocker"), "f")
+				p.linkOrCopyAsset(srcFile, filepath.Join(tmpHome, "file_blocker", "target.txt"))
 				return
 			}
 
 			if tc.destinationExists && !tc.emptyDataDir {
-				canonBrain := filepath.Join(tmpData, "brain")
-				_ = os.MkdirAll(canonBrain, 0755)
-				_ = os.WriteFile(filepath.Join(canonBrain, "migrated_turn.jsonl"), []byte("canon copy"), 0644)
+				writeTestFile(t, filepath.Join(tmpData, "brain", "migrated_turn.jsonl"), "canon copy")
 			}
-
 			if tc.existingDirFiles {
-				targetBrain := filepath.Join(runtimeGemini, "brain")
-				_ = os.MkdirAll(targetBrain, 0755)
-				_ = os.WriteFile(filepath.Join(targetBrain, "migrated_turn.jsonl"), []byte("transcript content"), 0644)
+				writeTestFile(t, filepath.Join(runtimeGemini, "brain", "migrated_turn.jsonl"), "transcript content")
 			}
 			if tc.existingPlainFile {
-				targetConv := filepath.Join(runtimeGemini, "conversations")
-				_ = os.MkdirAll(filepath.Dir(targetConv), 0755)
-				_ = os.WriteFile(targetConv, []byte("plain file blocker"), 0644)
+				writeTestFile(t, filepath.Join(runtimeGemini, "conversations"), "plain file blocker")
 			}
 			if tc.existingSymlink {
 				targetCliBrain := filepath.Join(runtimeGemini, "antigravity-cli", "brain")
@@ -982,24 +895,17 @@ func TestMCPProvisioning(t *testing.T) {
 			})
 
 			if tc.withFileConf {
-				overridePath := filepath.Join(tmpData, "mcp.config.json")
-				_ = os.WriteFile(overridePath, []byte(`{"mcpServers":{"custom_override":{"serverUrl":"http://override:80"}}}`), 0644)
+				writeTestFile(t, filepath.Join(tmpData, "mcp.config.json"), `{"mcpServers":{"custom_override":{"serverUrl":"http://override:80"}}}`)
 			}
-
 			if tc.syncFail {
-				blocker := filepath.Join(tmpHome, ".gemini", "config")
-				_ = os.MkdirAll(filepath.Dir(blocker), 0755)
-				_ = os.WriteFile(blocker, []byte("blocker"), 0644)
+				writeTestFile(t, filepath.Join(tmpHome, ".gemini", "config"), "blocker")
 				if err := p.SyncMCP(context.Background(), cfg); err == nil {
 					t.Fatalf("expected error on blocked config directory in SyncMCP")
 				}
 				return
 			}
-
 			if tc.syncRuntimeFail {
-				rtBlocker := filepath.Join(tmpData, "runtimes", "discord", ".gemini", "config")
-				_ = os.MkdirAll(filepath.Dir(rtBlocker), 0755)
-				_ = os.WriteFile(rtBlocker, []byte("blocker"), 0644)
+				writeTestFile(t, filepath.Join(tmpData, "runtimes", "discord", ".gemini", "config"), "blocker")
 				if err := p.SyncMCP(context.Background(), cfg); err == nil {
 					t.Fatalf("expected error on blocked runtime config directory in SyncMCP")
 				}
@@ -1008,7 +914,7 @@ func TestMCPProvisioning(t *testing.T) {
 
 			if tc.strRaw || tc.blockDir {
 				var pNil *Provisioner
-				if err := pNil.EnsureMcpConfig(json.RawMessage(`{}`)); err != nil {
+				if err := pNil.EnsureTargetMcpConfig(tmpHome, json.RawMessage(`{}`)); err != nil {
 					t.Errorf("expected nil on nil receiver")
 				}
 				if err := p.EnsureTargetMcpConfig("", json.RawMessage(`{}`)); err != nil {
@@ -1069,16 +975,6 @@ func TestMCPProvisioning(t *testing.T) {
 				t.Errorf("expected fallback_srv from MCPConfig string")
 			}
 
-			// Verify LoadMCPConfig helper defaults to Discord target
-			defRaw := p.LoadMCPConfig(cfg)
-			if string(defRaw) != string(p.LoadTargetMCPConfig(cfg, TargetDiscord)) {
-				t.Fatalf("LoadMCPConfig did not match TargetDiscord config")
-			}
-
-			// Verify EnsureMcpConfig and SyncMCP
-			if err := p.EnsureMcpConfig(raw); err != nil {
-				t.Fatalf("EnsureMcpConfig failed: %v", err)
-			}
 			if err := p.SyncMCP(context.Background(), cfg); err != nil {
 				t.Fatalf("SyncMCP failed: %v", err)
 			}
@@ -1135,15 +1031,12 @@ func TestSkillsProvisioning(t *testing.T) {
 			if tc.orphanSymlinkSweep {
 				tmpTarget := t.TempDir()
 				validSrc := t.TempDir()
-				_ = os.WriteFile(filepath.Join(validSrc, "file.txt"), []byte("ok"), 0644)
+				writeTestFile(t, filepath.Join(validSrc, "file.txt"), "ok")
 				validLink := filepath.Join(tmpTarget, "valid")
 				_ = os.Symlink(validSrc, validLink)
-
 				brokenLink := filepath.Join(tmpTarget, "broken")
 				_ = os.Symlink(filepath.Join(t.TempDir(), "nonexistent"), brokenLink)
-
-				plainFile := filepath.Join(tmpTarget, "regular.txt")
-				_ = os.WriteFile(plainFile, []byte("keep"), 0644)
+				plainFile := writeTestFile(t, filepath.Join(tmpTarget, "regular.txt"), "keep")
 
 				// Test sweep with nonexistent directory and remove error
 				sweepOrphanedSymlinks([]string{filepath.Join(tmpTarget, "missing_dir"), tmpTarget})
@@ -1173,8 +1066,7 @@ func TestSkillsProvisioning(t *testing.T) {
 			p := New(tmpHome, tmpData)
 
 			customDir := t.TempDir()
-			// Put a regular file at customDir root to exercise non-dir scanning
-			_ = os.WriteFile(filepath.Join(customDir, "README.txt"), []byte("readme"), 0644)
+			writeTestFile(t, filepath.Join(customDir, "README.txt"), "readme")
 
 			writeSkillFixture(t, customDir, "common/custom-skill/SKILL.md", "---\nname: custom-skill\n---\nCustom skill body")
 			writeSkillFixture(t, customDir, "discord/discord-skill/SKILL.md", "---\nname: discord-skill\n---\nDiscord only body")
@@ -1201,61 +1093,39 @@ func TestSkillsProvisioning(t *testing.T) {
 			targetSkillsDir := filepath.Join(tmpHome, ".gemini", "config", "skills")
 
 			if tc.targetBlocked {
-				_ = os.MkdirAll(filepath.Dir(targetSkillsDir), 0755)
-				_ = os.WriteFile(targetSkillsDir, []byte("file blocker"), 0644)
+				writeTestFile(t, targetSkillsDir, "file blocker")
 			}
-
 			if tc.legacySymlinkDir {
 				_ = os.MkdirAll(filepath.Dir(targetSkillsDir), 0755)
 				_ = os.Symlink(t.TempDir(), targetSkillsDir)
 			}
-
 			if tc.pruneUnauthorized {
-				_ = os.MkdirAll(targetSkillsDir, 0755)
-				_ = os.WriteFile(filepath.Join(targetSkillsDir, "unauthorized-rogue-skill"), []byte("rogue"), 0644)
-				_ = os.WriteFile(filepath.Join(targetSkillsDir, "stale-skill.tmp"), []byte("tmp"), 0644)
+				writeTestFile(t, filepath.Join(targetSkillsDir, "unauthorized-rogue-skill"), "rogue")
+				writeTestFile(t, filepath.Join(targetSkillsDir, "stale-skill.tmp"), "tmp")
 			}
-
 			if tc.legacyCleanup {
-				legacySkills := filepath.Join(tmpHome, ".gemini", "skills")
-				legacyPlugins := filepath.Join(tmpHome, ".gemini", "config", "plugins", "superpowers")
-				_ = os.MkdirAll(legacySkills, 0755)
-				_ = os.MkdirAll(legacyPlugins, 0755)
+				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0755)
+				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "config", "plugins", "superpowers"), 0755)
 			}
-
 			if tc.legacyCleanupErr {
-				removeAllSkills = func(path string) error {
-					return errors.New("simulated removeAll error")
-				}
-				legacySkills := filepath.Join(tmpHome, ".gemini", "skills")
-				_ = os.MkdirAll(legacySkills, 0755)
+				removeAllSkills = func(path string) error { return errors.New("simulated removeAll error") }
+				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0755)
 			}
-
 			if tc.symlinkTmpFallback {
 				symlinkSkill = func(oldname, newname string) error {
-					if strings.HasSuffix(newname, ".tmp") {
-						return errors.New("simulated tmp symlink error")
-					}
+					if strings.HasSuffix(newname, ".tmp") { return errors.New("simulated tmp symlink error") }
 					return origSymlink(oldname, newname)
 				}
 			}
-
 			if tc.symlinkTotalFail {
-				symlinkSkill = func(oldname, newname string) error {
-					return errors.New("simulated total symlink error")
-				}
+				symlinkSkill = func(oldname, newname string) error { return errors.New("simulated total symlink error") }
 			}
-
 			if tc.renameFailFallback {
-				// Pre-create destination file to test removal prior to fallback rename
-				_ = os.MkdirAll(targetSkillsDir, 0755)
-				_ = os.WriteFile(filepath.Join(targetSkillsDir, "custom-skill"), []byte("existing"), 0644)
+				writeTestFile(t, filepath.Join(targetSkillsDir, "custom-skill"), "existing")
 				renameCalls := 0
 				renameSkill = func(oldpath, newpath string) error {
 					renameCalls++
-					if renameCalls == 1 {
-						return errors.New("simulated initial rename error")
-					}
+					if renameCalls == 1 { return errors.New("simulated initial rename error") }
 					return origRename(oldpath, newpath)
 				}
 			}
@@ -1298,6 +1168,121 @@ func TestSkillsProvisioning(t *testing.T) {
 					if !found["eph-skill"] || found["custom-skill"] || found["discord-skill"] || found["voice-skill"] || found["brainstorming"] {
 						t.Errorf("unexpected skills for ephemeral target: %v", found)
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultCanonicalHooksJSON(t *testing.T) {
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(defaultCanonicalHooksJSON), &parsed); err != nil {
+		t.Fatalf("defaultCanonicalHooksJSON is not valid JSON: %v", err)
+	}
+	for _, expected := range []string{"share-guard", "schedule-guard", "commit-guard"} {
+		if _, ok := parsed[expected]; !ok {
+			t.Errorf("expected %q in defaultCanonicalHooksJSON", expected)
+		}
+	}
+}
+
+func TestSyncHooks(t *testing.T) {
+	tests := []struct {
+		name             string
+		nilProv          bool
+		emptyHome        bool
+		withDataDir      bool
+		withCustomAssets bool
+		withCandidates   bool
+		hooksDirIsFile   bool
+		blockConfig      bool
+		blockHooksDir    bool
+	}{
+		{name: "nil provisioner", nilProv: true},
+		{name: "empty home", emptyHome: true},
+		{name: "default canonical across runtimes", withDataDir: true},
+		{name: "custom hooks and executable scripts", withCustomAssets: true},
+		{name: "candidate search with subfolder and broken symlink", withCandidates: true},
+		{name: "hooksDir points to plain file", hooksDirIsFile: true},
+		{name: "config directory blocked by file", blockConfig: true},
+		{name: "hooks scripts directory blocked by file", withCustomAssets: true, blockHooksDir: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.nilProv {
+				var pNil *Provisioner
+				if err := pNil.SyncHooks(); err != nil {
+					t.Fatalf("expected nil error on nil provisioner, got: %v", err)
+				}
+				return
+			}
+			if tc.emptyHome {
+				pEmpty := New("", "")
+				if err := pEmpty.SyncHooks(); err != nil {
+					t.Fatalf("expected nil error on empty homeDir, got: %v", err)
+				}
+				return
+			}
+
+			tmpHome := t.TempDir()
+			var tmpData string
+			if tc.withDataDir {
+				tmpData = t.TempDir()
+			}
+
+			p := New(tmpHome, tmpData)
+
+			if tc.blockConfig {
+				writeTestFile(t, filepath.Join(tmpHome, ".gemini", "config"), "file blocker")
+			}
+			if tc.blockHooksDir {
+				writeTestFile(t, filepath.Join(tmpHome, ".gemini", "config", "hooks"), "file blocker")
+			}
+			if tc.withCustomAssets {
+				sourceDir := t.TempDir()
+				writeTestFile(t, filepath.Join(sourceDir, "hooks.json"), `{"custom-guard":{"PreToolUse":[]}}`)
+				writeTestFile(t, filepath.Join(sourceDir, "custom_guard.py"), "#!/usr/bin/env python3\nprint('ok')\n")
+				p.SetHooksDir(sourceDir)
+			}
+			if tc.withCandidates {
+				sourceDir := t.TempDir()
+				origPaths := DefaultHooksSearchPaths
+				defer func() { DefaultHooksSearchPaths = origPaths }()
+				DefaultHooksSearchPaths = []string{sourceDir}
+				_ = os.MkdirAll(filepath.Join(sourceDir, "subfolder"), 0755)
+				_ = os.Symlink(filepath.Join(sourceDir, "nonexistent"), filepath.Join(sourceDir, "broken.sh"))
+				p.SetHooksDir("")
+			}
+			if tc.hooksDirIsFile {
+				p.SetHooksDir(writeTestFile(t, filepath.Join(tmpHome, "file.txt"), "not a dir"))
+			}
+
+			if err := p.SyncHooks(); err != nil {
+				t.Fatalf("SyncHooks failed: %v", err)
+			}
+
+			if tc.withDataDir {
+				for _, target := range allRuntimeTargets {
+					rtHooksJSON := filepath.Join(tmpData, "runtimes", string(target), ".gemini", "config", "hooks.json")
+					if _, err := os.Stat(rtHooksJSON); err != nil {
+						t.Errorf("expected hooks.json in runtime %s: %v", target, err)
+					}
+				}
+			}
+
+			if tc.withCustomAssets && !tc.blockHooksDir && !tc.blockConfig {
+				scriptPath := filepath.Join(tmpHome, ".gemini", "config", "hooks", "custom_guard.py")
+				fi, err := os.Stat(scriptPath)
+				if err != nil {
+					t.Fatalf("expected copied script at %s: %v", scriptPath, err)
+				}
+				if fi.Mode().Perm()&0111 == 0 {
+					t.Errorf("expected executable script permissions, got %v", fi.Mode().Perm())
+				}
+				// Verify idempotency
+				if err := p.SyncHooks(); err != nil {
+					t.Errorf("second SyncHooks call failed: %v", err)
 				}
 			}
 		})

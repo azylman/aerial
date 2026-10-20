@@ -148,11 +148,6 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	return json.RawMessage(outBytes)
 }
 
-// LoadMCPConfig constructs the merged MCP configuration (defaulting to Discord target).
-func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
-	return p.LoadTargetMCPConfig(cfg, TargetDiscord)
-}
-
 // SyncMCP loads and synchronizes target-partitioned mcp_config.json into:
 // 1. Primary ~/.gemini/config/mcp_config.json
 // 2. Discord runtime <dataDir>/runtimes/discord/.gemini/config/mcp_config.json
@@ -236,12 +231,4 @@ func (p *Provisioner) EnsureTargetMcpConfig(targetGeminiDir string, rawConfig js
 	}
 	log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
 	return nil
-}
-
-// EnsureMcpConfig writes raw JSON configuration into ~/.gemini/config/mcp_config.json.
-func (p *Provisioner) EnsureMcpConfig(rawConfig json.RawMessage) error {
-	if p == nil || p.homeDir == "" {
-		return nil
-	}
-	return p.EnsureTargetMcpConfig(filepath.Join(p.homeDir, ".gemini"), rawConfig)
 }

@@ -2,7 +2,9 @@ package env
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,20 +104,49 @@ func (p *Provisioner) runtimeHomeDir(t RuleTarget) string {
 	return filepath.Join(p.dataDir, "runtimes", string(t))
 }
 
-// HomeDir returns the target home directory for this Provisioner.
-func (p *Provisioner) HomeDir() string {
-	if p == nil {
-		return ""
+// SyncSettings writes ~/.gemini/antigravity-cli/settings.json matching the authentication mode.
+func (p *Provisioner) SyncSettings(apiKey, model string) error {
+	if p == nil || p.homeDir == "" {
+		return nil
 	}
-	return p.homeDir
-}
+	configDir := filepath.Join(p.homeDir, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
 
-// DataDir returns the persistent data directory for this Provisioner.
-func (p *Provisioner) DataDir() string {
-	if p == nil {
-		return ""
+	settingsPath := filepath.Join(configDir, "settings.json")
+	settings := make(map[string]interface{})
+
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			log.Printf("Corrupted settings.json detected at %s, recreating: %v", settingsPath, err)
+			settings = make(map[string]interface{})
+		}
 	}
-	return p.dataDir
+
+	if apiKey == "" {
+		// OAuth / ADC mode: modelProvider must NOT be set to "gemini"
+		if mp, exists := settings["modelProvider"]; exists {
+			log.Printf("Purging modelProvider=%v from %s (OAuth/ADC mode requires omitting modelProvider)", mp, settingsPath)
+			delete(settings, "modelProvider")
+		}
+		delete(settings, "apiKey")
+	} else {
+		// API Key authentication mode
+		settings["apiKey"] = apiKey
+		settings["modelProvider"] = "gemini"
+	}
+
+	if model != "" {
+		settings["model"] = model
+	}
+
+	updatedData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings.json: %w", err)
+	}
+
+	return p.writeAtomic(settingsPath, string(updatedData))
 }
 
 // Sync provisions all runtime requirements into ~/.gemini based on current configuration.

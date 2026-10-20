@@ -25,19 +25,9 @@ func (p *Provisioner) SyncHooks() error {
 	defer p.mu.Unlock()
 
 	// 1. Locate source hooks directory and read hooks.json
-	hooksDir := ""
-	if p.hooksDir != "" {
-		if fi, err := os.Stat(p.hooksDir); err == nil && fi.IsDir() {
-			hooksDir = p.hooksDir
-		}
-	}
-	if hooksDir == "" {
-		for _, candidate := range DefaultHooksSearchPaths {
-			if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
-				hooksDir = candidate
-				break
-			}
-		}
+	hooksDir := resolveDir(p.hooksDir, DefaultHooksSearchPaths)
+	if fi, err := os.Stat(hooksDir); err != nil || !fi.IsDir() {
+		hooksDir = ""
 	}
 
 	hooksJSONContent := defaultCanonicalHooksJSON

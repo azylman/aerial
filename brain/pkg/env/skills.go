@@ -90,10 +90,9 @@ func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int 
 	// Source directories in priority order:
 	// 1. Custom user skills
 	// 2. Built-in skills
-	sourceDirs := []string{
-		p.customSkillsDir,
-		"/share/aerial/.agents/skills",
-		p.agentsSkillsDir,
+	sourceDirs := []string{p.customSkillsDir, "/share/aerial/.agents/skills"}
+	if p.agentsSkillsDir != "" && p.agentsSkillsDir != "/share/aerial/.agents/skills" {
+		sourceDirs = append(sourceDirs, p.agentsSkillsDir)
 	}
 
 	targetSubdirs := []string{"common", string(target)}
