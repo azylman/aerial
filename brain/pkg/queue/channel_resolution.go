@@ -115,26 +115,22 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 	if s.State != nil {
 		if ch, err := s.State.Channel(channelID); err == nil && ch != nil {
 			CacheDiscordChannel(ch)
-			if snap, ok := GetCachedChannel(channelID); ok {
-				return snap, true
-			}
+			return GetCachedChannel(channelID)
 		}
 	}
 	if s.Token != "" && IsNumericSnowflake(channelID) {
 		res, err, _ := restSingleFlight.Do(channelID, func() (interface{}, error) {
 			return s.Channel(channelID)
 		})
-		if err == nil && res != nil {
+		if err == nil {
 			if ch, ok := res.(*discordgo.Channel); ok && ch != nil {
 				CacheDiscordChannel(ch)
 				if s.State != nil {
 					if err := s.State.ChannelAdd(ch); err != nil {
-						log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
+						log.Printf("[WARN] Failed to add channel %s to state: %v", ch.ID, err)
 					}
 				}
-				if snap, ok := GetCachedChannel(channelID); ok {
-					return snap, true
-				}
+				return GetCachedChannel(channelID)
 			}
 		}
 	}
@@ -155,15 +151,11 @@ func ResolveChannelAndThread(s *discordgo.Session, channelID string) (effectiveI
 	}
 
 	if snap.IsThread {
-		threadName = snap.Name
 		if snap.ParentID != "" {
-			parentSnap, parentOk := resolveChannelSnapshot(s, snap.ParentID)
-			if parentOk {
-				return snap.ParentID, parentSnap.Name, true, threadName
-			}
-			return snap.ParentID, "", true, threadName
+			parentSnap, _ := resolveChannelSnapshot(s, snap.ParentID)
+			return snap.ParentID, parentSnap.Name, true, snap.Name
 		}
-		return snap.ID, snap.Name, true, threadName
+		return snap.ID, snap.Name, true, snap.Name
 	}
 	return snap.ID, snap.Name, false, ""
 }
@@ -194,31 +186,24 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 	if sess == nil || sess.State == nil {
 		return nil
 	}
-
 	roleSet := make(map[string]bool)
-
-	// If guildID is specified, inspect that guild; otherwise inspect all cached guilds
 	var guilds []*discordgo.Guild
 	if guildID != "" {
 		if g, err := sess.State.Guild(guildID); err == nil && g != nil {
-			guilds = append(guilds, g)
+			guilds = []*discordgo.Guild{g}
 		}
 	} else {
 		guilds = sess.State.Guilds
 	}
-
 	botUsername := ""
 	if sess.State.User != nil {
 		botUsername = sess.State.User.Username
 	}
-
 	foundMemberInState := false
-
 	for _, g := range guilds {
 		if g == nil {
 			continue
 		}
-		// 1. Roles assigned to the bot member from state cache
 		if botUserID != "" {
 			if member, err := sess.State.Member(g.ID, botUserID); err == nil && member != nil {
 				foundMemberInState = true
@@ -229,46 +214,38 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 				}
 			}
 		}
-		// 2. Roles in guild matching bot name or username
 		for _, r := range g.Roles {
-			if r == nil {
-				continue
-			}
-			if strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") ||
-				(botUsername != "" && strings.EqualFold(r.Name, botUsername)) {
+			if r != nil && (strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") ||
+				(botUsername != "" && strings.EqualFold(r.Name, botUsername))) {
 				roleSet[r.ID] = true
 			}
 		}
 	}
 
-	// 3. Fallback: If guildID was specified and bot member wasn't in state cache, perform singleflight REST fetch
 	if botUserID != "" && guildID != "" && !foundMemberInState && sess != nil {
 		sfKey := fmt.Sprintf("bot_member:%s:%s", guildID, botUserID)
 		if !isRESTInCooldown(sfKey) {
 			res, sfErr, _ := restSingleFlight.Do(sfKey, func() (interface{}, error) {
-				fetchedMember, fetchErr := guildMemberFetcher(sess, guildID, botUserID)
-				if fetchErr != nil || fetchedMember == nil {
-					return nil, fetchErr
+				m, err := guildMemberFetcher(sess, guildID, botUserID)
+				if err != nil || m == nil {
+					return nil, err
 				}
-				if fetchedMember.GuildID == "" {
-					fetchedMember.GuildID = guildID
+				if m.GuildID == "" {
+					m.GuildID = guildID
 				}
-				if fetchedMember.User != nil {
-					if err := sess.State.MemberAdd(fetchedMember); err != nil {
-						log.Printf("[WARN] Failed to add member %s to session state: %v", botUserID, err)
+				if m.User != nil {
+					if err := sess.State.MemberAdd(m); err != nil {
+						log.Printf("[WARN] Failed to add member %s to state: %v", botUserID, err)
 					}
 				}
-				rolesCopy := append([]string(nil), fetchedMember.Roles...)
-				return rolesCopy, nil
+				return append([]string(nil), m.Roles...), nil
 			})
 			if sfErr != nil {
 				setRESTCooldown(sfKey, 30*time.Second)
-			} else if res != nil {
-				if fetchedRoles, ok := res.([]string); ok {
-					for _, rID := range fetchedRoles {
-						if rID != "" {
-							roleSet[rID] = true
-						}
+			} else if fetchedRoles, ok := res.([]string); ok {
+				for _, rID := range fetchedRoles {
+					if rID != "" {
+						roleSet[rID] = true
 					}
 				}
 			}
@@ -300,109 +277,108 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string) bool {
 		return true
 	}
 
+	aliases := []string{"aerial"}
+	var mentionIDs, candidates []string
+	var rawContent string
+
 	if !m.Metadata.IsEmpty() {
-		// 1. Direct slice lookup for User IDs
-		if botUserID != "" && slices.Contains(m.Metadata.MentionUserIDs, botUserID) {
+		mentionIDs = append(slices.Clone(m.Metadata.MentionUserIDs), m.Metadata.MentionRoleIDs...)
+		candidates = append(slices.Clone(m.Metadata.Mentions), m.Metadata.ReplyingToAuthor)
+	} else {
+		rawContent = m.Content
+		mentionIDs = append(extractHeaderTokens(m.Content, "- mention_user_ids: ["), extractHeaderTokens(m.Content, "- mention_role_ids: [")...)
+		candidates = append(extractHeaderTokens(m.Content, "- mentions: ["), extractReplyAuthor(m.Content))
+	}
+
+	if matchesWakeIdentity(rawContent, mentionIDs, botRoleIDs, botUserID, aliases) {
+		return true
+	}
+	for _, text := range candidates {
+		if matchesMentionOrAuthor(text, botUserID, botRoleIDs, aliases) {
 			return true
 		}
-		// 2. Direct slice lookup for Role IDs
-		for _, rID := range botRoleIDs {
-			if rID != "" && slices.Contains(m.Metadata.MentionRoleIDs, rID) {
-				return true
-			}
+	}
+	return false
+}
+
+func extractHeaderTokens(content, prefix string) []string {
+	idx := strings.Index(content, prefix)
+	if idx == -1 {
+		return nil
+	}
+	endIdx := strings.Index(content[idx:], "]")
+	if endIdx == -1 {
+		return nil
+	}
+	return strings.Fields(content[idx+len(prefix) : idx+endIdx])
+}
+
+func extractReplyAuthor(content string) string {
+	idx := strings.Index(content, "- replying_to:")
+	if idx == -1 {
+		return ""
+	}
+	for _, line := range strings.Split(content[idx:], "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "author:") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "author:"))
 		}
-		// 3. Mentions check (username or role name)
-		for _, mention := range m.Metadata.Mentions {
-			mentionLower := strings.ToLower(mention)
-			if strings.Contains(mentionLower, "aerial") || (botUserID != "" && strings.Contains(mentionLower, strings.ToLower(botUserID))) {
-				return true
-			}
-			for _, rID := range botRoleIDs {
-				if rID != "" && strings.Contains(mentionLower, strings.ToLower(rID)) {
-					return true
-				}
-			}
+		if trimmed != "- replying_to:" && strings.HasPrefix(trimmed, "- ") {
+			break
 		}
-		// 4. Replying to author
-		if m.Metadata.ReplyingToAuthor != "" {
-			authorLower := strings.ToLower(m.Metadata.ReplyingToAuthor)
-			if strings.Contains(authorLower, "aerial") || (botUserID != "" && strings.Contains(authorLower, strings.ToLower(botUserID))) {
-				return true
-			}
-		}
+	}
+	return ""
+}
+
+func matchesMentionOrAuthor(text, botID string, roleIDs, aliases []string) bool {
+	if text == "" {
 		return false
 	}
-
-	// 1. Structured Discord Gateway User Mentions from Prompt Envelope:
-	// - mention_user_ids: [12345 67890]
-	if idx := strings.Index(m.Content, "- mention_user_ids: ["); idx != -1 {
-		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
-			inside := m.Content[idx+len("- mention_user_ids: [") : idx+endIdx]
-			if botUserID != "" && containsToken(inside, botUserID) {
-				return true
-			}
-		}
-	}
-
-	// 2. Structured Discord Gateway Role Mentions from Prompt Envelope:
-	// - mention_role_ids: [role1 role2]
-	if idx := strings.Index(m.Content, "- mention_role_ids: ["); idx != -1 {
-		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
-			inside := m.Content[idx+len("- mention_role_ids: [") : idx+endIdx]
-			for _, rID := range botRoleIDs {
-				if rID != "" && containsToken(inside, rID) {
-					return true
-				}
-			}
-		}
-	}
-
-	// 3. Mentions list in Discord prompt envelope containing bot name, botUserID, or botRoleIDs
-	if idx := strings.Index(m.Content, "- mentions: ["); idx != -1 {
-		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
-			inside := strings.ToLower(m.Content[idx+len("- mentions: [") : idx+endIdx])
-			if strings.Contains(inside, "aerial") || (botUserID != "" && strings.Contains(inside, strings.ToLower(botUserID))) {
-				return true
-			}
-			for _, rID := range botRoleIDs {
-				if rID != "" && strings.Contains(inside, strings.ToLower(rID)) {
-					return true
-				}
-			}
-		}
-	}
-
-	// 4. Explicit reply to Aerial: check ONLY the author line under - replying_to:
-	if idx := strings.Index(m.Content, "- replying_to:"); idx != -1 {
-		lines := strings.Split(m.Content[idx:], "\n")
-		for _, line := range lines {
-			lineTrimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(lineTrimmed, "author:") {
-				authorVal := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "author:")))
-				if strings.Contains(authorVal, "aerial") || (botUserID != "" && strings.Contains(authorVal, strings.ToLower(botUserID))) {
-					return true
-				}
-				break
-			}
-			if lineTrimmed != "- replying_to:" && strings.HasPrefix(lineTrimmed, "- ") {
-				break
-			}
-		}
-	}
-
-	// 5. Fallback for un-enveloped messages (e.g. ad-hoc unit test fixtures without <USER_REQUEST>):
-	if !strings.Contains(m.Content, "<USER_REQUEST>") {
-		if botUserID != "" && (strings.Contains(m.Content, "<@"+botUserID+">") || strings.Contains(m.Content, "<@!"+botUserID+">")) {
+	lower := strings.ToLower(text)
+	for _, a := range aliases {
+		if a != "" && strings.Contains(lower, strings.ToLower(a)) {
 			return true
 		}
-		for _, rID := range botRoleIDs {
-			if rID != "" && strings.Contains(m.Content, "<@&"+rID+">") {
+	}
+	if botID != "" && strings.Contains(lower, strings.ToLower(botID)) {
+		return true
+	}
+	for _, rID := range roleIDs {
+		if rID != "" && strings.Contains(lower, strings.ToLower(rID)) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID string, aliases []string) bool {
+	if botID != "" && slices.Contains(mentionIDs, botID) {
+		return true
+	}
+	for _, rID := range roleIDs {
+		if rID != "" && (slices.Contains(mentionIDs, rID) || slices.Contains(aliases, rID)) {
+			return true
+		}
+	}
+	for _, a := range aliases {
+		if a != "" && (slices.Contains(roleIDs, a) || slices.Contains(mentionIDs, a)) {
+			return true
+		}
+	}
+	if content != "" && !strings.Contains(content, "<USER_REQUEST>") {
+		if botID != "" && (strings.Contains(content, "<@"+botID+">") || strings.Contains(content, "<@!"+botID+">")) {
+			return true
+		}
+		for _, rID := range roleIDs {
+			if rID != "" && strings.Contains(content, "<@&"+rID+">") {
 				return true
 			}
 		}
-		contentLower := strings.ToLower(m.Content)
-		if strings.Contains(contentLower, "<@aerial") || strings.Contains(contentLower, "<@!aerial") {
-			return true
+		contentLower := strings.ToLower(content)
+		for _, a := range aliases {
+			if strings.Contains(contentLower, "<@"+a) || strings.Contains(contentLower, "<@!"+a) {
+				return true
+			}
 		}
 	}
 	return false

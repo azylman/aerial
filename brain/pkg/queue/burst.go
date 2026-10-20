@@ -262,32 +262,21 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 		}
 	}
 	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", ts.Format(time.RFC3339)))
-
-	mentions := m.Metadata.Mentions
-	if mentions == nil {
-		mentions = []string{}
-	}
-	mentionUserIDs := m.Metadata.MentionUserIDs
-	if mentionUserIDs == nil {
-		mentionUserIDs = []string{}
-	}
-	mentionRoleIDs := m.Metadata.MentionRoleIDs
-	if mentionRoleIDs == nil {
-		mentionRoleIDs = []string{}
-	}
-	attachments := m.Metadata.Attachments
-	if attachments == nil {
-		attachments = []string{}
-	}
-
-	sb.WriteString(fmt.Sprintf("- mentions: %v\n", mentions))
-	sb.WriteString(fmt.Sprintf("- mention_user_ids: %v\n", mentionUserIDs))
-	sb.WriteString(fmt.Sprintf("- mention_role_ids: %v\n", mentionRoleIDs))
-	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
+	sb.WriteString(fmt.Sprintf("- mentions: %v\n", nonNilSlice(m.Metadata.Mentions)))
+	sb.WriteString(fmt.Sprintf("- mention_user_ids: %v\n", nonNilSlice(m.Metadata.MentionUserIDs)))
+	sb.WriteString(fmt.Sprintf("- mention_role_ids: %v\n", nonNilSlice(m.Metadata.MentionRoleIDs)))
+	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", nonNilSlice(m.Metadata.Attachments)))
 
 	sb.WriteString("Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n")
 	sb.WriteString("</USER_REQUEST>")
 	return sb.String()
+}
+
+func nonNilSlice(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.
@@ -394,41 +383,14 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 
 	switch hook {
 	case "wake":
-		plan := BurstPlan{
-			WakeIndex:        0,
-			WakeInfos:        make([]WakeInfo, len(input.Burst)),
-			ActiveMessage:    input.Burst[0],
-			HasActiveMessage: true,
-		}
-		for i := range input.Burst {
-			plan.WakeInfos[i] = WakeInfo{
-				IsWake:    i == 0,
-				Score:     1.0,
-				Threshold: threshold,
-				Reason:    "hook_wake_override",
-			}
-		}
-		if len(input.Burst) > 1 {
-			plan.TrailingMessages = input.Burst[1:]
-			plan.TrailingInfos = plan.WakeInfos[1:]
-		}
-		return plan
-
+		infos := fillBurstWakeInfos(len(input.Burst), 0, 1.0, threshold, "hook_wake_override", "hook_wake_trailing")
+		return buildTriggeredBurstPlan(input.Burst, 0, infos)
 	case "drop":
-		plan := BurstPlan{
+		return BurstPlan{
 			WakeIndex:    -1,
 			IsAllAmbient: true,
-			WakeInfos:    make([]WakeInfo, len(input.Burst)),
+			WakeInfos:    fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "hook_drop_override", "hook_drop_override"),
 		}
-		for i := range input.Burst {
-			plan.WakeInfos[i] = WakeInfo{
-				IsWake:    false,
-				Score:     0.0,
-				Threshold: threshold,
-				Reason:    "hook_drop_override",
-			}
-		}
-		return plan
 	}
 
 	wakeInfos := make([]WakeInfo, len(input.Burst))
@@ -464,98 +426,37 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 		for i := wakeIdx + 1; i < len(input.Burst); i++ {
 			m := input.Burst[i]
 			if isTier1Wake(m, input.BotUserID, input.BotRoleIDs) {
-				wakeInfos[i] = WakeInfo{
-					IsWake:    true,
-					Score:     1.0,
-					Threshold: threshold,
-					Reason:    "direct_address",
-				}
+				wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "direct_address"}
 			} else if wm == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
-				wakeInfos[i] = WakeInfo{
-					IsWake:    false,
-					Score:     0.0,
-					Threshold: threshold,
-					Reason:    "heuristic_skip",
-				}
+				wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "heuristic_skip"}
 			} else {
 				score, reason := classify([]db.Message{m})
-				wakeInfos[i] = WakeInfo{
-					IsWake:    score >= threshold,
-					Score:     score,
-					Threshold: threshold,
-					Reason:    reason,
-				}
+				wakeInfos[i] = WakeInfo{IsWake: score >= threshold, Score: score, Threshold: threshold, Reason: reason}
 			}
 		}
 
-		plan := BurstPlan{
-			WakeIndex:        wakeIdx,
-			WakeInfos:        wakeInfos,
-			ActiveMessage:    input.Burst[wakeIdx],
-			HasActiveMessage: true,
-		}
-		if wakeIdx > 0 {
-			plan.LeadingAmbient = input.Burst[:wakeIdx]
-		}
-		if wakeIdx+1 < len(input.Burst) {
-			plan.TrailingMessages = input.Burst[wakeIdx+1:]
-			plan.TrailingInfos = wakeInfos[wakeIdx+1:]
-		}
-		return plan
+		return buildTriggeredBurstPlan(input.Burst, wakeIdx, wakeInfos)
 	}
 
 	if wm == "mention" {
-		for i := range input.Burst {
-			wakeInfos[i] = WakeInfo{
-				IsWake:    false,
-				Score:     0.0,
-				Threshold: 0.0,
-				Reason:    "mention_mode_ambient",
-			}
-		}
 		return BurstPlan{
 			WakeIndex:    -1,
 			IsAllAmbient: true,
-			WakeInfos:    wakeInfos,
+			WakeInfos:    fillBurstWakeInfos(len(input.Burst), -1, 0.0, 0.0, "mention_mode_ambient", "mention_mode_ambient"),
 		}
 	}
 
 	if wm == "all" {
-		for i := range input.Burst {
-			wakeInfos[i] = WakeInfo{
-				IsWake:    i == 0,
-				Score:     1.0,
-				Threshold: 0.0,
-				Reason:    "all_wake",
-			}
-		}
-		plan := BurstPlan{
-			WakeIndex:        0,
-			WakeInfos:        wakeInfos,
-			ActiveMessage:    input.Burst[0],
-			HasActiveMessage: true,
-		}
-		if len(input.Burst) > 1 {
-			plan.TrailingMessages = input.Burst[1:]
-			plan.TrailingInfos = wakeInfos[1:]
-		}
-		return plan
+		infos := fillBurstWakeInfos(len(input.Burst), 0, 1.0, 0.0, "all_wake", "all_wake_trailing")
+		return buildTriggeredBurstPlan(input.Burst, 0, infos)
 	}
 
 	// wm == "classifier"
 	if threshold <= 0.0 {
-		for i := range input.Burst {
-			wakeInfos[i] = WakeInfo{
-				IsWake:    false,
-				Score:     0.0,
-				Threshold: threshold,
-				Reason:    "classifier disabled",
-			}
-		}
 		return BurstPlan{
 			WakeIndex:    -1,
 			IsAllAmbient: true,
-			WakeInfos:    wakeInfos,
+			WakeInfos:    fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "classifier disabled", "classifier disabled"),
 		}
 	}
 
@@ -567,51 +468,63 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 		}
 	}
 	if allSkip {
-		for i := range input.Burst {
-			wakeInfos[i] = WakeInfo{
-				IsWake:    false,
-				Score:     0.0,
-				Threshold: threshold,
-				Reason:    "heuristic_skip",
-			}
-		}
 		return BurstPlan{
 			WakeIndex:    -1,
 			IsAllAmbient: true,
-			WakeInfos:    wakeInfos,
+			WakeInfos:    fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "heuristic_skip", "heuristic_skip"),
 		}
 	}
 
 	score, reason := classify(input.Burst)
-	isWake := score >= threshold
-	for i := range input.Burst {
-		wakeInfos[i] = WakeInfo{
-			IsWake:    i == 0 && isWake,
-			Score:     score,
-			Threshold: threshold,
-			Reason:    reason,
-		}
-	}
-
-	if isWake {
-		plan := BurstPlan{
-			WakeIndex:        0,
-			WakeInfos:        wakeInfos,
-			ActiveMessage:    input.Burst[0],
-			HasActiveMessage: true,
-		}
-		if len(input.Burst) > 1 {
-			plan.TrailingMessages = input.Burst[1:]
-			plan.TrailingInfos = wakeInfos[1:]
-		}
-		return plan
+	if score >= threshold {
+		infos := fillBurstWakeInfos(len(input.Burst), 0, score, threshold, reason, "burst_ambient")
+		return buildTriggeredBurstPlan(input.Burst, 0, infos)
 	}
 
 	return BurstPlan{
 		WakeIndex:    -1,
 		IsAllAmbient: true,
-		WakeInfos:    wakeInfos,
+		WakeInfos:    fillBurstWakeInfos(len(input.Burst), -1, score, threshold, reason, reason),
 	}
+}
+
+func fillBurstWakeInfos(n, wakeIdx int, score, threshold float64, wakeReason, otherReason string) []WakeInfo {
+	infos := make([]WakeInfo, n)
+	for i := range infos {
+		if i == wakeIdx {
+			infos[i] = WakeInfo{
+				IsWake:    true,
+				Score:     score,
+				Threshold: threshold,
+				Reason:    wakeReason,
+			}
+		} else {
+			infos[i] = WakeInfo{
+				IsWake:    false,
+				Score:     score,
+				Threshold: threshold,
+				Reason:    otherReason,
+			}
+		}
+	}
+	return infos
+}
+
+func buildTriggeredBurstPlan(burst []db.Message, wakeIdx int, infos []WakeInfo) BurstPlan {
+	plan := BurstPlan{
+		WakeIndex:        wakeIdx,
+		WakeInfos:        infos,
+		ActiveMessage:    burst[wakeIdx],
+		HasActiveMessage: true,
+	}
+	if wakeIdx > 0 {
+		plan.LeadingAmbient = burst[:wakeIdx]
+	}
+	if wakeIdx+1 < len(burst) {
+		plan.TrailingMessages = burst[wakeIdx+1:]
+		plan.TrailingInfos = infos[wakeIdx+1:]
+	}
+	return plan
 }
 
 // TurnPromptInput collects pre-fetched context components for deterministic prompt assembly.
@@ -652,18 +565,16 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 	}
 
 	// Layer 2: Scope Instructions (if present)
-	if strings.TrimSpace(input.ScopeInstructions) != "" {
-		scopeInst := strings.TrimSpace(input.ScopeInstructions)
-		if !strings.HasPrefix(scopeInst, "<SCOPE_INSTRUCTIONS>") {
-			scopeInst = fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
+	if inst := strings.TrimSpace(input.ScopeInstructions); inst != "" {
+		if !strings.HasPrefix(inst, "<SCOPE_INSTRUCTIONS>") {
+			inst = fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", inst)
 		}
-		basePrompt = prependPromptLayer(basePrompt, scopeInst)
-	} else if strings.TrimSpace(input.ChannelInstructions) != "" {
-		chanInst := strings.TrimSpace(input.ChannelInstructions)
-		if !strings.HasPrefix(chanInst, "<CHANNEL_INSTRUCTIONS>") && !strings.HasPrefix(chanInst, "<SCOPE_INSTRUCTIONS>") {
-			chanInst = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>", chanInst)
+		basePrompt = prependPromptLayer(basePrompt, inst)
+	} else if inst := strings.TrimSpace(input.ChannelInstructions); inst != "" {
+		if !strings.HasPrefix(inst, "<CHANNEL_INSTRUCTIONS>") && !strings.HasPrefix(inst, "<SCOPE_INSTRUCTIONS>") {
+			inst = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>", inst)
 		}
-		basePrompt = prependPromptLayer(basePrompt, chanInst)
+		basePrompt = prependPromptLayer(basePrompt, inst)
 	}
 
 	// Layer 1: Coordination Context Hook (if present)
