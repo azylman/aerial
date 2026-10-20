@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,76 +34,26 @@ import (
 // setupTestStore returns a clean FakeStore for testing.
 func setupTestStore(t testing.TB) *db.FakeStore { return db.NewFakeStore() }
 
-func insertMessage(store db.Store, msg db.Message) error {
-	if store == nil { return nil }
-	return store.InsertMessage(context.Background(), msg)
-}
-
-func getMessage(store db.Store, id string) (*db.Message, error) {
-	if store == nil { return nil, nil }
-	return store.GetMessage(context.Background(), id)
-}
-
-func saveSessionID(store db.Store, threadID, sessionID string) error {
-	if store == nil { return nil }
-	return store.SaveSessionID(context.Background(), threadID, sessionID)
-}
-
-func getSessionID(store db.Store, threadID string) (string, error) {
-	if store == nil { return "", nil }
-	return store.GetSessionID(context.Background(), threadID)
-}
-
-func getPreviousSessionID(store db.Store, threadID string) (string, error) {
-	if store == nil { return "", nil }
-	return store.GetPreviousSessionID(context.Background(), threadID)
-}
-
-func createScheduleRun(store db.Store, run db.ScheduleRun) error {
-	if store == nil { return nil }
-	return store.CreateScheduleRun(context.Background(), run)
-}
-
+func insertMessage(store db.Store, msg db.Message) error { if store == nil { return nil }; return store.InsertMessage(context.Background(), msg) }
+func getMessage(store db.Store, id string) (*db.Message, error) { if store == nil { return nil, nil }; return store.GetMessage(context.Background(), id) }
+func saveSessionID(store db.Store, threadID, sessionID string) error { if store == nil { return nil }; return store.SaveSessionID(context.Background(), threadID, sessionID) }
+func getSessionID(store db.Store, threadID string) (string, error) { if store == nil { return "", nil }; return store.GetSessionID(context.Background(), threadID) }
+func getPreviousSessionID(store db.Store, threadID string) (string, error) { if store == nil { return "", nil }; return store.GetPreviousSessionID(context.Background(), threadID) }
+func createScheduleRun(store db.Store, run db.ScheduleRun) error { if store == nil { return nil }; return store.CreateScheduleRun(context.Background(), run) }
 func getScheduleRun(store db.Store, id string) (*db.ScheduleRun, error) {
 	if store == nil { return nil, nil }
 	if fake, ok := store.(*db.FakeStore); ok { return fake.GetScheduleRun(id) }
 	runs, _, err := store.GetScheduleRunsPaginated(context.Background(), 100, 0, "", "")
 	if err != nil { return nil, err }
-	for _, r := range runs {
-		if r.ID == id { return &r, nil }
-	}
+	for _, r := range runs { if r.ID == id { return &r, nil } }
 	return nil, nil
 }
-
-func getSessionTurnCount(store db.Store, sessionKey string) (int, error) {
-	if store == nil { return 0, nil }
-	return store.GetSessionTurnCount(context.Background(), sessionKey)
-}
-
-func incrementSessionTurnCount(store db.Store, sessionKey string) (int, error) {
-	if store == nil { return 0, nil }
-	return store.IncrementSessionTurnCount(context.Background(), sessionKey)
-}
-
-func getScheduleRunsPaginated(store db.Store, limit, offset int, scheduleID, status string) ([]db.ScheduleRun, int, error) {
-	if store == nil { return nil, 0, nil }
-	return store.GetScheduleRunsPaginated(context.Background(), limit, offset, scheduleID, status)
-}
-
-func getThreadSummary(store db.Store, threadID string) (string, string, error) {
-	if store == nil { return "", "", nil }
-	return store.GetThreadSummary(context.Background(), threadID)
-}
-
-func saveThreadSummary(store db.Store, threadID, summary, lastMsgID string) error {
-	if store == nil { return nil }
-	return store.SaveThreadSummary(context.Background(), threadID, summary, lastMsgID)
-}
-
-func rotateSessionID(store db.Store, sessionKey, newSessionID string) error {
-	if store == nil { return nil }
-	return store.RotateSessionID(context.Background(), sessionKey, newSessionID)
-}
+func getSessionTurnCount(store db.Store, sessionKey string) (int, error) { if store == nil { return 0, nil }; return store.GetSessionTurnCount(context.Background(), sessionKey) }
+func incrementSessionTurnCount(store db.Store, sessionKey string) (int, error) { if store == nil { return 0, nil }; return store.IncrementSessionTurnCount(context.Background(), sessionKey) }
+func getScheduleRunsPaginated(store db.Store, limit, offset int, scheduleID, status string) ([]db.ScheduleRun, int, error) { if store == nil { return nil, 0, nil }; return store.GetScheduleRunsPaginated(context.Background(), limit, offset, scheduleID, status) }
+func getThreadSummary(store db.Store, threadID string) (string, string, error) { if store == nil { return "", "", nil }; return store.GetThreadSummary(context.Background(), threadID) }
+func saveThreadSummary(store db.Store, threadID, summary, lastMsgID string) error { if store == nil { return nil }; return store.SaveThreadSummary(context.Background(), threadID, summary, lastMsgID) }
+func rotateSessionID(store db.Store, sessionKey, newSessionID string) error { if store == nil { return nil }; return store.RotateSessionID(context.Background(), sessionKey, newSessionID) }
 
 func noopDelivery(s *discordgo.Session, channelID, text string) error { return nil }
 func noopTyping(s *discordgo.Session, channelID string) func()         { return func() {} }
@@ -185,18 +136,14 @@ func execMockRunnerStep(step mockRunnerStep, tmpHome, sessionID string) (string,
 func assertContainsAll(t *testing.T, target string, subs []string, label string) {
 	t.Helper()
 	for _, s := range subs {
-		if !strings.Contains(target, s) {
-			t.Errorf("expected %s to contain %q, got: %s", label, s, target)
-		}
+		if !strings.Contains(target, s) { t.Errorf("expected %s to contain %q, got: %s", label, s, target) }
 	}
 }
 
 func assertExcludesAll(t *testing.T, target string, subs []string, label string) {
 	t.Helper()
 	for _, s := range subs {
-		if strings.Contains(target, s) {
-			t.Errorf("expected %s NOT to contain %q, got: %s", label, s, target)
-		}
+		if strings.Contains(target, s) { t.Errorf("expected %s NOT to contain %q, got: %s", label, s, target) }
 	}
 }
 
@@ -226,18 +173,15 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		return
 	}
 
-	store := setupTestStore(t)
-	var tmpHome string
+	store, tmpHome := setupTestStore(t), ""
 	var sessMgr *session.Manager
 	if tc.useSessionMgr || tc.seedTurnCount > 0 || tc.seedIdleAge > 0 || len(tc.seedTranscriptFiles) > 0 {
 		tmpHome = t.TempDir()
 		sessMgr = session.New(tmpHome, "")
 	}
 
-	var threadID string
-	if len(tc.messages) > 0 {
-		threadID = tc.messages[0].ThreadID
-	}
+	threadID := ""
+	if len(tc.messages) > 0 { threadID = tc.messages[0].ThreadID }
 	if tc.initialSessionID != "" {
 		_ = saveSessionID(store, threadID, tc.initialSessionID)
 		if sessMgr != nil && len(tc.seedTranscriptFiles) == 0 {
@@ -248,13 +192,8 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 			_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
 			if tc.seedIdleAge > 0 {
 				idleTime := time.Now().UTC().Add(-tc.seedIdleAge)
-				store.SetSessionInfo(db.SessionInfo{
-					ThreadID: threadID, InternalSessionID: tc.initialSessionID,
-					TurnCount: tc.seedTurnCount, CreatedAt: idleTime, UpdatedAt: idleTime,
-				})
-				_ = os.Chtimes(pbFile, idleTime, idleTime)
-				_ = os.Chtimes(cliPbDir, idleTime, idleTime)
-				_ = os.Chtimes(sessDir, idleTime, idleTime)
+				store.SetSessionInfo(db.SessionInfo{ThreadID: threadID, InternalSessionID: tc.initialSessionID, TurnCount: tc.seedTurnCount, CreatedAt: idleTime, UpdatedAt: idleTime})
+				_ = os.Chtimes(pbFile, idleTime, idleTime); _ = os.Chtimes(cliPbDir, idleTime, idleTime); _ = os.Chtimes(sessDir, idleTime, idleTime)
 			}
 		}
 	}
@@ -263,9 +202,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
 		_ = os.MkdirAll(sessDir, 0755)
 		_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(strings.NewReplacer(
-			"{{TS0}}", tNow.Format(time.RFC3339Nano),
-			"{{TS1}}", tNow.Add(time.Second).Format(time.RFC3339Nano),
-			"{{TS2}}", tNow.Add(2*time.Second).Format(time.RFC3339Nano),
+			"{{TS0}}", tNow.Format(time.RFC3339Nano), "{{TS1}}", tNow.Add(time.Second).Format(time.RFC3339Nano), "{{TS2}}", tNow.Add(2*time.Second).Format(time.RFC3339Nano),
 		).Replace(content)), 0600)
 	}
 
@@ -276,21 +213,16 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		_ = (&png.Encoder{CompressionLevel: tc.seedPNGLevel}).Encode(&imgBuf, tc.seedPNGImage)
 		testImgPath := filepath.Join(t.TempDir(), tc.seedPNGFilename)
 		_ = os.WriteFile(testImgPath, imgBuf.Bytes(), 0600)
-		for i := range steps {
-			steps[i].response = strings.ReplaceAll(steps[i].response, "{{IMAGE_PATH}}", testImgPath)
-		}
+		for i := range steps { steps[i].response = strings.ReplaceAll(steps[i].response, "{{IMAGE_PATH}}", testImgPath) }
 		wantDeliveredExcludes = append(wantDeliveredExcludes, testImgPath)
 	}
 
 	if tc.seedTurnCount > 0 && tc.seedIdleAge == 0 {
-		for i := 0; i < tc.seedTurnCount; i++ {
-			_, _ = incrementSessionTurnCount(store, threadID)
-		}
+		for i := 0; i < tc.seedTurnCount; i++ { _, _ = incrementSessionTurnCount(store, threadID) }
 	}
 
-	maxAttempts := tc.maxAttempts
+	maxAttempts, expectedCompletions := tc.maxAttempts, len(tc.messages)
 	if maxAttempts == 0 { maxAttempts = 1 }
-	expectedCompletions := len(tc.messages)
 	if tc.concurrentEnqueueCount > 0 { expectedCompletions = tc.concurrentEnqueueCount }
 
 	var mu sync.Mutex
@@ -306,13 +238,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		Store: store, SessionManager: sessMgr, TimeoutMinutes: 1, IdleTimeout: tc.idleTimeout,
 		BackoffBase: 5 * time.Millisecond, MaxAttempts: maxAttempts, StalenessTTL: tc.stalenessTTL,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			idx := runnerCalls
-			runnerCalls++
-			passedSessions = append(passedSessions, sessionID)
-			promptsSeen = append(promptsSeen, prompt)
-			capturedPrompt = prompt
-			mu.Unlock()
+			mu.Lock(); idx := runnerCalls; runnerCalls++; passedSessions = append(passedSessions, sessionID); promptsSeen = append(promptsSeen, prompt); capturedPrompt = prompt; mu.Unlock()
 			var step mockRunnerStep
 			if len(steps) > 0 {
 				if idx >= len(steps) { idx = len(steps) - 1 }
@@ -321,40 +247,25 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 			return execMockRunnerStep(step, tmpHome, sessionID)
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredChannels = append(deliveredChannels, channelID)
-			deliveredTexts = append(deliveredTexts, text)
-			mu.Unlock()
+			mu.Lock(); deliveredChannels = append(deliveredChannels, channelID); deliveredTexts = append(deliveredTexts, text); mu.Unlock()
 			return nil
 		},
 		TypingFunc: noopTyping,
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			if int(completedCount.Add(1)) == expectedCompletions {
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
+				select { case <-doneCh: default: close(doneCh) }
 			}
 			turnDoneCh <- struct{}{}
 		},
 	}
 	if len(tc.wantAttachments) > 0 {
 		cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
-			mu.Lock()
-			deliveredChannels = append(deliveredChannels, channelID)
-			deliveredTexts = append(deliveredTexts, text)
-			deliveredAttachments = attachments
-			mu.Unlock()
+			mu.Lock(); deliveredChannels = append(deliveredChannels, channelID); deliveredTexts = append(deliveredTexts, text); deliveredAttachments = attachments; mu.Unlock()
 			return nil
 		}
 	}
-	if tc.notifierReply != "" {
-		cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return tc.notifierReply }
-	}
-	if tc.policyMode != "" {
-		cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy { return config.ChannelPolicy{Mode: tc.policyMode} }
-	}
+	if tc.notifierReply != "" { cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return tc.notifierReply } }
+	if tc.policyMode != "" { cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy { return config.ChannelPolicy{Mode: tc.policyMode} } }
 
 	pool := NewWorkerPool(cfg)
 	if tc.concurrentEnqueueCount > 0 {
@@ -364,14 +275,8 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				m := db.Message{
-					ID: fmt.Sprintf("msg-race-%d", idx), ThreadID: "thread-evict-race",
-					GuildID: "guild-race", AuthorID: "user-race", AuthorName: "User",
-					Content: fmt.Sprintf("msg content %d", idx), Status: db.StatusPending,
-					CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-				}
-				_ = insertMessage(store, m)
-				pool.Enqueue(m)
+				m := db.Message{ID: fmt.Sprintf("msg-race-%d", idx), ThreadID: "thread-evict-race", GuildID: "guild-race", AuthorID: "user-race", AuthorName: "User", Content: fmt.Sprintf("msg content %d", idx), Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+				_ = insertMessage(store, m); pool.Enqueue(m)
 			}(i)
 		}
 		wg.Wait()
@@ -384,122 +289,67 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	for i, m := range tc.messages {
 		if m.Status == "" { m.Status = db.StatusPending }
 		if m.CreatedAt.IsZero() {
-			if tc.messageAge > 0 {
-				m.CreatedAt = time.Now().UTC().Add(-tc.messageAge)
-			} else {
-				m.CreatedAt = time.Now().UTC()
-			}
+			if tc.messageAge > 0 { m.CreatedAt = time.Now().UTC().Add(-tc.messageAge) } else { m.CreatedAt = time.Now().UTC() }
 		}
 		msgs[i] = m
-		if err := insertMessage(store, m); err != nil {
-			t.Fatalf("failed to insert message %s: %v", m.ID, err)
-		}
+		if err := insertMessage(store, m); err != nil { t.Fatalf("insert message %s: %v", m.ID, err) }
 	}
 
 	if tc.enqueueAsBurst {
-		pool.EnqueueBurst(msgs...)
-		pool.Start()
-		defer pool.Stop()
+		pool.EnqueueBurst(msgs...); pool.Start(); defer pool.Stop()
 		waitForCompletion(t, doneCh, 3*time.Second, tc.name)
 	} else if tc.sequentialTurns {
-		pool.Start()
-		defer pool.Stop()
-		for _, m := range msgs {
-			pool.Enqueue(m)
-			waitForCompletion(t, turnDoneCh, 3*time.Second, tc.name)
-		}
+		pool.Start(); defer pool.Stop()
+		for _, m := range msgs { pool.Enqueue(m); waitForCompletion(t, turnDoneCh, 3*time.Second, tc.name) }
 	} else {
-		pool.Start()
-		defer pool.Stop()
-		for _, m := range msgs {
-			pool.Enqueue(m)
-		}
+		pool.Start(); defer pool.Stop()
+		for _, m := range msgs { pool.Enqueue(m) }
 		waitForCompletion(t, doneCh, 5*time.Second, tc.name)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if tc.checkRunnerCalls && runnerCalls != tc.wantRunnerCalls {
-		t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls)
-	}
-	if len(tc.wantPassedSessions) > 0 && !reflect.DeepEqual(passedSessions, tc.wantPassedSessions) {
-		t.Errorf("passedSessions = %v, want %v", passedSessions, tc.wantPassedSessions)
-	}
-	if tc.checkDeliveryCalls && len(deliveredTexts) != tc.wantDeliveryCalls {
-		t.Errorf("deliveryCalls = %d, want %d", len(deliveredTexts), tc.wantDeliveryCalls)
-	}
-	if len(tc.wantDeliveredTexts) > 0 && !reflect.DeepEqual(deliveredTexts, tc.wantDeliveredTexts) {
-		t.Errorf("deliveredTexts = %v, want %v", deliveredTexts, tc.wantDeliveredTexts)
-	}
+	mu.Lock(); defer mu.Unlock()
+	if tc.checkRunnerCalls && runnerCalls != tc.wantRunnerCalls { t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls) }
+	if len(tc.wantPassedSessions) > 0 && !reflect.DeepEqual(passedSessions, tc.wantPassedSessions) { t.Errorf("passedSessions = %v, want %v", passedSessions, tc.wantPassedSessions) }
+	if tc.checkDeliveryCalls && len(deliveredTexts) != tc.wantDeliveryCalls { t.Errorf("deliveryCalls = %d, want %d", len(deliveredTexts), tc.wantDeliveryCalls) }
+	if len(tc.wantDeliveredTexts) > 0 && !reflect.DeepEqual(deliveredTexts, tc.wantDeliveredTexts) { t.Errorf("deliveredTexts = %v, want %v", deliveredTexts, tc.wantDeliveredTexts) }
 	joinedDelivered := strings.Join(deliveredTexts, "\n")
 	assertContainsAll(t, joinedDelivered, tc.wantDeliveredSubstrings, "delivered text")
 	assertExcludesAll(t, joinedDelivered, wantDeliveredExcludes, "delivered text")
 
 	if len(tc.wantAttachments) > 0 {
-		if len(deliveredAttachments) != len(tc.wantAttachments) {
-			t.Fatalf("deliveredAttachments len = %d, want %d", len(deliveredAttachments), len(tc.wantAttachments))
-		}
+		if len(deliveredAttachments) != len(tc.wantAttachments) { t.Fatalf("attachments len = %d, want %d", len(deliveredAttachments), len(tc.wantAttachments)) }
 		for i, wantAtt := range tc.wantAttachments {
-			if deliveredAttachments[i].Filename != wantAtt.Filename {
-				t.Errorf("attachment[%d] filename = %q, want %q", i, deliveredAttachments[i].Filename, wantAtt.Filename)
-			}
+			if deliveredAttachments[i].Filename != wantAtt.Filename { t.Errorf("attachment[%d] filename = %q, want %q", i, deliveredAttachments[i].Filename, wantAtt.Filename) }
 		}
 	}
 	for _, wantCh := range tc.wantDeliveredChannels {
-		found := false
-		for _, ch := range deliveredChannels {
-			if ch == wantCh { found = true; break }
-		}
-		if !found {
-			t.Errorf("expected delivery to channel %q, got %v", wantCh, deliveredChannels)
-		}
+		if !slices.Contains(deliveredChannels, wantCh) { t.Errorf("expected delivery to channel %q, got %v", wantCh, deliveredChannels) }
 	}
 	assertContainsAll(t, capturedPrompt, tc.wantPromptContains, "prompt")
 	assertExcludesAll(t, capturedPrompt, tc.wantPromptExcludes, "prompt")
 
 	for attemptIdx, subs := range tc.wantAttemptPromptContains {
-		if attemptIdx >= len(promptsSeen) {
-			t.Fatalf("expected attempt %d prompt, only saw %d attempts", attemptIdx, len(promptsSeen))
-		}
+		if attemptIdx >= len(promptsSeen) { t.Fatalf("expected attempt %d prompt, saw %d", attemptIdx, len(promptsSeen)) }
 		assertContainsAll(t, promptsSeen[attemptIdx], subs, fmt.Sprintf("attempt %d prompt", attemptIdx))
 	}
 	for attemptIdx, subs := range tc.wantAttemptPromptExcludes {
-		if attemptIdx >= len(promptsSeen) {
-			t.Fatalf("expected attempt %d prompt, only saw %d attempts", attemptIdx, len(promptsSeen))
-		}
+		if attemptIdx >= len(promptsSeen) { t.Fatalf("expected attempt %d prompt, saw %d", attemptIdx, len(promptsSeen)) }
 		assertExcludesAll(t, promptsSeen[attemptIdx], subs, fmt.Sprintf("attempt %d prompt", attemptIdx))
 	}
 	if tc.wantSavedSession != "" {
-		if savedSess, _ := getSessionID(store, threadID); savedSess != tc.wantSavedSession {
-			t.Errorf("savedSession = %q, want %q", savedSess, tc.wantSavedSession)
-		}
+		if s, _ := getSessionID(store, threadID); s != tc.wantSavedSession { t.Errorf("savedSession = %q, want %q", s, tc.wantSavedSession) }
 	}
 	if tc.checkTurnCount {
-		if turnCount, _ := getSessionTurnCount(store, threadID); turnCount != tc.wantTurnCount {
-			t.Errorf("turnCount = %d, want %d", turnCount, tc.wantTurnCount)
-		}
+		if c, _ := getSessionTurnCount(store, threadID); c != tc.wantTurnCount { t.Errorf("turnCount = %d, want %d", c, tc.wantTurnCount) }
 	}
 	for _, m := range msgs {
 		dbMsg, err := getMessage(store, m.ID)
-		if err != nil || dbMsg == nil {
-			t.Fatalf("failed to get message %s: %v (msg=%v)", m.ID, err, dbMsg)
-		}
-		if tc.wantStatus != "" && dbMsg.Status != tc.wantStatus {
-			t.Errorf("message %s status = %s, want %s", m.ID, dbMsg.Status, tc.wantStatus)
-		}
-		if tc.wantRetryCount > 0 && dbMsg.RetryCount != tc.wantRetryCount {
-			t.Errorf("message %s retryCount = %d, want %d", m.ID, dbMsg.RetryCount, tc.wantRetryCount)
-		}
-		if tc.wantErrorContains != "" && !strings.Contains(dbMsg.ErrorMessage, tc.wantErrorContains) {
-			t.Errorf("message %s errorMessage = %q, want substring %q", m.ID, dbMsg.ErrorMessage, tc.wantErrorContains)
-		}
-		if tc.wantDBContent != "" && dbMsg.Content != tc.wantDBContent {
-			t.Errorf("message %s content = %q, want %q", m.ID, dbMsg.Content, tc.wantDBContent)
-		}
-		if tc.wantResponseText != "" && dbMsg.ResponseText != tc.wantResponseText {
-			t.Errorf("message %s responseText = %q, want %q", m.ID, dbMsg.ResponseText, tc.wantResponseText)
-		}
+		if err != nil || dbMsg == nil { t.Fatalf("get message %s: %v", m.ID, err) }
+		if tc.wantStatus != "" && dbMsg.Status != tc.wantStatus { t.Errorf("message %s status = %s, want %s", m.ID, dbMsg.Status, tc.wantStatus) }
+		if tc.wantRetryCount > 0 && dbMsg.RetryCount != tc.wantRetryCount { t.Errorf("message %s retryCount = %d, want %d", m.ID, dbMsg.RetryCount, tc.wantRetryCount) }
+		if tc.wantErrorContains != "" && !strings.Contains(dbMsg.ErrorMessage, tc.wantErrorContains) { t.Errorf("message %s error = %q, want %q", m.ID, dbMsg.ErrorMessage, tc.wantErrorContains) }
+		if tc.wantDBContent != "" && dbMsg.Content != tc.wantDBContent { t.Errorf("message %s content = %q, want %q", m.ID, dbMsg.Content, tc.wantDBContent) }
+		if tc.wantResponseText != "" && dbMsg.ResponseText != tc.wantResponseText { t.Errorf("message %s response = %q, want %q", m.ID, dbMsg.ResponseText, tc.wantResponseText) }
 	}
 }
 
@@ -519,25 +369,19 @@ type burstTestCase struct {
 
 func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	t.Helper()
-	tmpDir := t.TempDir()
-	store := setupTestStore(t)
+	tmpDir, store := t.TempDir(), setupTestStore(t)
 	sessMgr := session.New(tmpDir, "")
 
 	if len(tc.channelInstructions) > 0 {
 		channelsDir := filepath.Join(tmpDir, "channels")
 		_ = os.MkdirAll(channelsDir, 0755)
-		for fname, content := range tc.channelInstructions {
-			_ = os.WriteFile(filepath.Join(channelsDir, fname), []byte(content), 0644)
-		}
+		for fname, content := range tc.channelInstructions { _ = os.WriteFile(filepath.Join(channelsDir, fname), []byte(content), 0644) }
 		oldDirs := config.ChannelInstructionsDirs
 		config.ChannelInstructionsDirs = []string{channelsDir}
 		defer func() { config.ChannelInstructionsDirs = oldDirs }()
 	}
-
 	for _, ch := range tc.cachedChannels {
-		CacheDiscordChannel(ch)
-		chID := ch.ID
-		defer InvalidateChannelCache(chID)
+		CacheDiscordChannel(ch); chID := ch.ID; defer InvalidateChannelCache(chID)
 	}
 
 	var initialSessionID string
@@ -560,9 +404,7 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 		past := time.Now().Add(-10 * time.Second)
 		_ = os.Chtimes(sessDir, past, past)
 	}
-	for i := 0; i < tc.seedTurnCount; i++ {
-		_, _ = incrementSessionTurnCount(store, tc.channelID)
-	}
+	for i := 0; i < tc.seedTurnCount; i++ { _, _ = incrementSessionTurnCount(store, tc.channelID) }
 
 	var mu sync.Mutex
 	var classifierCalls, runnerCalls, deliveryCalls, typingCalls int
@@ -574,10 +416,7 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	var cls *classifier.Classifier
 	if tc.classifierJSON != "" {
 		cls = classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-			mu.Lock()
-			classifierCalls++
-			capturedClassifierPrompt = prompt
-			mu.Unlock()
+			mu.Lock(); classifierCalls++; capturedClassifierPrompt = prompt; mu.Unlock()
 			return tc.classifierJSON, nil
 		}))
 	}
@@ -592,24 +431,12 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 		Store: store, SessionManager: sessMgr, DiscordSession: dg, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
 		MaxAttempts: tc.maxAttempts, Classifier: cls,
 		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, body string) error {
-			mu.Lock()
-			alertChannel = channelNameOrID; alertTitle = title; alertBody = body
-			mu.Unlock()
-			select {
-			case alertReceived <- struct{}{}:
-			default:
-			}
+			mu.Lock(); alertChannel, alertTitle, alertBody = channelNameOrID, title, body; mu.Unlock()
+			select { case alertReceived <- struct{}{}: default: }
 			return nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			idx := runnerCalls
-			runnerCalls++
-			receivedPrompt = prompt
-			capturedPrompts = append(capturedPrompts, prompt)
-			passedSessID = sessID
-			passedSessions = append(passedSessions, sessID)
-			mu.Unlock()
+			mu.Lock(); idx := runnerCalls; runnerCalls++; receivedPrompt = prompt; capturedPrompts = append(capturedPrompts, prompt); passedSessID = sessID; passedSessions = append(passedSessions, sessID); mu.Unlock()
 			if len(tc.runnerSteps) > 0 {
 				if idx >= len(tc.runnerSteps) { idx = len(tc.runnerSteps) - 1 }
 				return execMockRunnerStep(tc.runnerSteps[idx], tmpDir, sessID)
@@ -627,9 +454,7 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy { return tc.policy },
 	}
 	if tc.enableHistoryFetcher || len(tc.historyMessages) > 0 {
-		cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) {
-			return tc.historyMessages, nil
-		}
+		cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) { return tc.historyMessages, nil }
 	}
 
 	pool := NewWorkerPool(cfg)
@@ -649,127 +474,74 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 			_ = store.RotateSessionID(context.Background(), tc.channelID, "")
 		}
 		_ = insertMessage(store, m)
-		if tc.sequentialBursts {
-			pool.processBurst([]db.Message{m})
-		}
+		if tc.sequentialBursts { pool.processBurst([]db.Message{m}) }
 	}
-	if !tc.sequentialBursts {
-		pool.processBurst(burst)
-	}
+	if !tc.sequentialBursts { pool.processBurst(burst) }
 
 	if tc.wantAlertTitle != "" {
 		select {
 		case <-alertReceived:
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for system alert")
+		case <-time.After(2 * time.Second): t.Fatal("timed out waiting for system alert")
 		}
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
+	mu.Lock(); defer mu.Unlock()
 	if tc.wantAlertTitle != "" {
 		if alertTitle != tc.wantAlertTitle { t.Errorf("alertTitle = %q, want %q", alertTitle, tc.wantAlertTitle) }
 		if tc.wantAlertChannel != "" && alertChannel != tc.wantAlertChannel { t.Errorf("alertChannel = %q, want %q", alertChannel, tc.wantAlertChannel) }
 		assertContainsAll(t, alertBody, tc.wantAlertBodyContains, "alertBody")
 	}
-	if tc.checkClassifierCalls && classifierCalls != tc.wantClassifierCalls {
-		t.Errorf("classifierCalls = %d, want %d", classifierCalls, tc.wantClassifierCalls)
-	}
-	if runnerCalls != tc.wantRunnerCalls {
-		t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls)
-	}
-	if len(tc.wantPassedSessions) > 0 && !reflect.DeepEqual(passedSessions, tc.wantPassedSessions) {
-		t.Errorf("passedSessions = %v, want %v", passedSessions, tc.wantPassedSessions)
-	}
-	if tc.checkDeliveryCalls && deliveryCalls != tc.wantDeliveryCalls {
-		t.Errorf("deliveryCalls = %d, want %d", deliveryCalls, tc.wantDeliveryCalls)
-	}
-	if tc.wantDeliveredText != "" && deliveredText != tc.wantDeliveredText {
-		t.Errorf("deliveredText = %q, want %q", deliveredText, tc.wantDeliveredText)
-	}
-	if tc.wantMinTypingCalls > 0 && typingCalls < tc.wantMinTypingCalls {
-		t.Errorf("typingCalls = %d, want >= %d", typingCalls, tc.wantMinTypingCalls)
-	}
-	if tc.checkMaxTypingCalls && typingCalls > tc.wantMaxTypingCalls {
-		t.Errorf("typingCalls = %d, want <= %d", typingCalls, tc.wantMaxTypingCalls)
-	}
-	if tc.wantPassedInitialSession && passedSessID != initialSessionID {
-		t.Errorf("passedSessID = %q, want %q", passedSessID, initialSessionID)
-	}
+	if tc.checkClassifierCalls && classifierCalls != tc.wantClassifierCalls { t.Errorf("classifierCalls = %d, want %d", classifierCalls, tc.wantClassifierCalls) }
+	if runnerCalls != tc.wantRunnerCalls { t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls) }
+	if len(tc.wantPassedSessions) > 0 && !reflect.DeepEqual(passedSessions, tc.wantPassedSessions) { t.Errorf("passedSessions = %v, want %v", passedSessions, tc.wantPassedSessions) }
+	if tc.checkDeliveryCalls && deliveryCalls != tc.wantDeliveryCalls { t.Errorf("deliveryCalls = %d, want %d", deliveryCalls, tc.wantDeliveryCalls) }
+	if tc.wantDeliveredText != "" && deliveredText != tc.wantDeliveredText { t.Errorf("deliveredText = %q, want %q", deliveredText, tc.wantDeliveredText) }
+	if tc.wantMinTypingCalls > 0 && typingCalls < tc.wantMinTypingCalls { t.Errorf("typingCalls = %d, want >= %d", typingCalls, tc.wantMinTypingCalls) }
+	if tc.checkMaxTypingCalls && typingCalls > tc.wantMaxTypingCalls { t.Errorf("typingCalls = %d, want <= %d", typingCalls, tc.wantMaxTypingCalls) }
+	if tc.wantPassedInitialSession && passedSessID != initialSessionID { t.Errorf("passedSessID = %q, want %q", passedSessID, initialSessionID) }
 	if tc.wantOldTranscriptExcludes != "" {
 		oldSessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
 		dataOld, _ := os.ReadFile(filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl"))
-		if strings.Contains(string(dataOld), tc.wantOldTranscriptExcludes) {
-			t.Errorf("old transcript should NOT contain %q", tc.wantOldTranscriptExcludes)
-		}
+		if strings.Contains(string(dataOld), tc.wantOldTranscriptExcludes) { t.Errorf("old transcript should NOT contain %q", tc.wantOldTranscriptExcludes) }
 	}
-	if tc.wantPromptPrefix != "" && !strings.HasPrefix(receivedPrompt, tc.wantPromptPrefix) {
-		t.Errorf("expected prompt to start with %q, got:\n%s", tc.wantPromptPrefix, receivedPrompt)
-	}
+	if tc.wantPromptPrefix != "" && !strings.HasPrefix(receivedPrompt, tc.wantPromptPrefix) { t.Errorf("prompt prefix missing %q", tc.wantPromptPrefix) }
 	if tc.wantSingleInstructionTagPerPrompt {
 		for i, p := range capturedPrompts {
-			if c := strings.Count(p, "<CHANNEL_INSTRUCTIONS>"); c != 1 {
-				t.Errorf("attempt %d: <CHANNEL_INSTRUCTIONS> count = %d, want 1", i+1, c)
-			}
-			if c := strings.Count(p, "</CHANNEL_INSTRUCTIONS>"); c != 1 {
-				t.Errorf("attempt %d: </CHANNEL_INSTRUCTIONS> count = %d, want 1", i+1, c)
-			}
+			if c := strings.Count(p, "<CHANNEL_INSTRUCTIONS>"); c != 1 { t.Errorf("attempt %d: <CHANNEL_INSTRUCTIONS> = %d", i+1, c) }
+			if c := strings.Count(p, "</CHANNEL_INSTRUCTIONS>"); c != 1 { t.Errorf("attempt %d: </CHANNEL_INSTRUCTIONS> = %d", i+1, c) }
 		}
 	}
 	assertContainsAll(t, receivedPrompt, tc.wantPromptContains, "runner prompt")
 	assertExcludesAll(t, receivedPrompt, tc.wantPromptExcludes, "runner prompt")
 
 	for turnIdx, subs := range tc.wantTurnPromptContains {
-		if turnIdx >= len(capturedPrompts) {
-			t.Fatalf("expected turn %d prompt, only saw %d turns", turnIdx, len(capturedPrompts))
-		}
+		if turnIdx >= len(capturedPrompts) { t.Fatalf("expected turn %d prompt, saw %d turns", turnIdx, len(capturedPrompts)) }
 		assertContainsAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
 	}
 	for turnIdx, subs := range tc.wantTurnPromptExcludes {
-		if turnIdx >= len(capturedPrompts) {
-			t.Fatalf("expected turn %d prompt, only saw %d turns", turnIdx, len(capturedPrompts))
-		}
+		if turnIdx >= len(capturedPrompts) { t.Fatalf("expected turn %d prompt, saw %d turns", turnIdx, len(capturedPrompts)) }
 		assertExcludesAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
 	}
 	if tc.wantClassifierPromptContains != "" && !strings.Contains(capturedClassifierPrompt, tc.wantClassifierPromptContains) {
-		t.Errorf("expected classifier prompt to contain %q, got %s", tc.wantClassifierPromptContains, capturedClassifierPrompt)
+		t.Errorf("classifier prompt missing %q", tc.wantClassifierPromptContains)
 	}
 	if tc.checkSavedSession {
-		if savedSess, _ := getSessionID(store, tc.channelID); savedSess != tc.wantSavedSession {
-			t.Errorf("savedSession = %q, want %q", savedSess, tc.wantSavedSession)
-		}
+		if s, _ := getSessionID(store, tc.channelID); s != tc.wantSavedSession { t.Errorf("savedSession = %q, want %q", s, tc.wantSavedSession) }
 	}
 	if tc.wantNoStubDir {
-		for _, root := range []string{
-			"/data/brain/" + tc.channelID,
-			filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tc.channelID),
-			filepath.Join(tmpDir, ".gemini", "antigravity", "brain", tc.channelID),
-		} {
-			if fi, err := os.Stat(root); err == nil {
-				t.Errorf("found unexpected directory at %s (isDir=%t)", root, fi.IsDir())
-			}
+		for _, root := range []string{"/data/brain/" + tc.channelID, filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tc.channelID), filepath.Join(tmpDir, ".gemini", "antigravity", "brain", tc.channelID)} {
+			if fi, err := os.Stat(root); err == nil { t.Errorf("unexpected dir at %s (isDir=%t)", root, fi.IsDir()) }
 		}
 	}
-	if turnCount, _ := getSessionTurnCount(store, tc.channelID); turnCount != tc.wantTurnCount {
-		t.Errorf("turnCount = %d, want %d", turnCount, tc.wantTurnCount)
-	}
+	if turnCount, _ := getSessionTurnCount(store, tc.channelID); turnCount != tc.wantTurnCount { t.Errorf("turnCount = %d, want %d", turnCount, tc.wantTurnCount) }
 	wantStatus := tc.wantFinalStatus
 	if wantStatus == "" { wantStatus = db.StatusCompleted }
 	for _, m := range burst {
 		saved, err := getMessage(store, m.ID)
-		if err != nil || saved == nil {
-			t.Fatalf("failed to get message %s: %v (msg=%v)", m.ID, err, saved)
-		}
-		if saved.Status != wantStatus {
-			t.Errorf("message %s status = %s, want %s", m.ID, saved.Status, wantStatus)
-		}
-		if wantErr, ok := tc.wantMsgErrors[m.ID]; ok && !strings.Contains(saved.ErrorMessage, wantErr) {
-			t.Errorf("message %s error_message = %q, want substring %q", m.ID, saved.ErrorMessage, wantErr)
-		}
-		if wantResp, ok := tc.wantMsgResponses[m.ID]; ok && saved.ResponseText != wantResp {
-			t.Errorf("message %s response_text = %q, want %q", m.ID, saved.ResponseText, wantResp)
-		}
+		if err != nil || saved == nil { t.Fatalf("get message %s: %v", m.ID, err) }
+		if saved.Status != wantStatus { t.Errorf("message %s status = %s, want %s", m.ID, saved.Status, wantStatus) }
+		if wantErr, ok := tc.wantMsgErrors[m.ID]; ok && !strings.Contains(saved.ErrorMessage, wantErr) { t.Errorf("message %s error = %q, want %q", m.ID, saved.ErrorMessage, wantErr) }
+		if wantResp, ok := tc.wantMsgResponses[m.ID]; ok && saved.ResponseText != wantResp { t.Errorf("message %s response = %q, want %q", m.ID, saved.ResponseText, wantResp) }
 	}
 }
 
@@ -777,7 +549,7 @@ func TestWorkerPool_ScopeKeyAndPreviousSessionFallback(t *testing.T) {
 	t.Parallel()
 	pool := NewWorkerPool(WorkerPoolConfig{})
 	msg := db.Message{ID: "m1", ThreadID: "t1"}
-	if k := pool.ScopeKey(msg); k != "t1" {
+	if k := pool.resolveScopeKey(msg); k != "t1" {
 		t.Errorf("expected ScopeKey t1, got %s", k)
 	}
 	if prev, err := getPreviousSessionID(nil, ""); err != nil || prev != "" {
@@ -789,76 +561,41 @@ func TestWorkerPool_ScopeKeyAndPreviousSessionFallback(t *testing.T) {
 func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *runner.MockDaemonSpawner {
 	return &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			defer errW.Close()
-
+			inR, inW := io.Pipe(); outR, outW := io.Pipe(); _, errW := io.Pipe(); _ = errW.Close()
 			convID := conversationID
 			if convID == "" { convID = cfg.SessionID }
 			if convID == "" { convID = uuid.New().String() }
-
 			go func() {
 				defer outW.Close()
 				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", convID)
 				scanner := bufio.NewScanner(inR)
-				idx := 0
-				for scanner.Scan() {
+				for idx := 0; scanner.Scan(); idx++ {
 					if idx < len(turnResponses) {
 						_, _ = outW.Write([]byte(turnResponses[idx]))
-						idx++
 					} else {
 						_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n"))
 					}
 				}
 			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+			return inW, outR, io.NopCloser(bytes.NewReader(nil)), runner.NewMockProcessHandle(12345), nil
 		},
 	}
 }
 
-type errQueueStore struct {
-	db.Store
-}
+type errQueueStore struct{ db.Store }
+func (e *errQueueStore) UpdateMessageStatus(context.Context, string, string, string) error { return errors.New("errQueueStore: update message status error") }
+func (e *errQueueStore) UpdateScheduleRunStatus(context.Context, db.UpdateRunParams) error { return errors.New("errQueueStore: update schedule run status error") }
+func (e *errQueueStore) UpdateMessageCompleted(context.Context, string, string) error { return errors.New("errQueueStore: update message completed error") }
+func (e *errQueueStore) IncrementMessageRetry(context.Context, string, string) error { return errors.New("errQueueStore: increment message retry error") }
+func (e *errQueueStore) SaveSessionID(context.Context, string, string) error { return errors.New("errQueueStore: save session id error") }
+func (e *errQueueStore) RotateSessionID(context.Context, string, string) error { return errors.New("errQueueStore: rotate session id error") }
 
-func (e *errQueueStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
-	return errors.New("errQueueStore: update message status error")
-}
-func (e *errQueueStore) UpdateScheduleRunStatus(ctx context.Context, params db.UpdateRunParams) error {
-	return errors.New("errQueueStore: update schedule run status error")
-}
-func (e *errQueueStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
-	return errors.New("errQueueStore: update message completed error")
-}
-func (e *errQueueStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	return errors.New("errQueueStore: increment message retry error")
-}
-func (e *errQueueStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
-	return errors.New("errQueueStore: save session id error")
-}
-func (e *errQueueStore) RotateSessionID(ctx context.Context, threadID, newSessionID string) error {
-	return errors.New("errQueueStore: rotate session id error")
-}
-
-type mockDrainErrStore struct {
-	db.Store
-	messages []db.Message
-}
-
-func (m *mockDrainErrStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]db.Message, error) {
+type mockDrainErrStore struct { db.Store; messages []db.Message }
+func (m *mockDrainErrStore) GetPendingOrProcessingMessages(context.Context, int) ([]db.Message, error) {
 	if len(m.messages) > 0 { return m.messages, nil }
 	return []db.Message{{ID: "msg-proc-1", Status: db.StatusProcessing}}, nil
 }
-func (m *mockDrainErrStore) UpdateMessageStatus(ctx context.Context, id, status, errReason string) error {
-	return errors.New("mock drain update error")
-}
+func (m *mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, string) error { return errors.New("mock drain update error") }
 
-type mockClaimStore struct {
-	db.Store
-	claimErr error
-	claimed  bool
-}
-
-func (m *mockClaimStore) ClaimPendingMessage(ctx context.Context, id string) (bool, error) {
-	return m.claimed, m.claimErr
-}
+type mockClaimStore struct { db.Store; claimErr error; claimed bool }
+func (m *mockClaimStore) ClaimPendingMessage(context.Context, string) (bool, error) { return m.claimed, m.claimErr }
