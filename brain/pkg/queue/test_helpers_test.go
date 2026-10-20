@@ -459,14 +459,16 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	assertExcludesAll(t, capturedPrompt, tc.wantPromptExcludes, "prompt")
 
 	for attemptIdx, subs := range tc.wantAttemptPromptContains {
-		if attemptIdx < len(promptsSeen) {
-			assertContainsAll(t, promptsSeen[attemptIdx], subs, fmt.Sprintf("attempt %d prompt", attemptIdx))
+		if attemptIdx >= len(promptsSeen) {
+			t.Fatalf("expected attempt %d prompt, only saw %d attempts", attemptIdx, len(promptsSeen))
 		}
+		assertContainsAll(t, promptsSeen[attemptIdx], subs, fmt.Sprintf("attempt %d prompt", attemptIdx))
 	}
 	for attemptIdx, subs := range tc.wantAttemptPromptExcludes {
-		if attemptIdx < len(promptsSeen) {
-			assertExcludesAll(t, promptsSeen[attemptIdx], subs, fmt.Sprintf("attempt %d prompt", attemptIdx))
+		if attemptIdx >= len(promptsSeen) {
+			t.Fatalf("expected attempt %d prompt, only saw %d attempts", attemptIdx, len(promptsSeen))
 		}
+		assertExcludesAll(t, promptsSeen[attemptIdx], subs, fmt.Sprintf("attempt %d prompt", attemptIdx))
 	}
 	if tc.wantSavedSession != "" {
 		if savedSess, _ := getSessionID(store, threadID); savedSess != tc.wantSavedSession {
@@ -479,8 +481,10 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		}
 	}
 	for _, m := range msgs {
-		dbMsg, _ := getMessage(store, m.ID)
-		if dbMsg == nil { continue }
+		dbMsg, err := getMessage(store, m.ID)
+		if err != nil || dbMsg == nil {
+			t.Fatalf("failed to get message %s: %v (msg=%v)", m.ID, err, dbMsg)
+		}
 		if tc.wantStatus != "" && dbMsg.Status != tc.wantStatus {
 			t.Errorf("message %s status = %s, want %s", m.ID, dbMsg.Status, tc.wantStatus)
 		}
@@ -717,14 +721,16 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	assertExcludesAll(t, receivedPrompt, tc.wantPromptExcludes, "runner prompt")
 
 	for turnIdx, subs := range tc.wantTurnPromptContains {
-		if turnIdx < len(capturedPrompts) {
-			assertContainsAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
+		if turnIdx >= len(capturedPrompts) {
+			t.Fatalf("expected turn %d prompt, only saw %d turns", turnIdx, len(capturedPrompts))
 		}
+		assertContainsAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
 	}
 	for turnIdx, subs := range tc.wantTurnPromptExcludes {
-		if turnIdx < len(capturedPrompts) {
-			assertExcludesAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
+		if turnIdx >= len(capturedPrompts) {
+			t.Fatalf("expected turn %d prompt, only saw %d turns", turnIdx, len(capturedPrompts))
 		}
+		assertExcludesAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
 	}
 	if tc.wantClassifierPromptContains != "" && !strings.Contains(capturedClassifierPrompt, tc.wantClassifierPromptContains) {
 		t.Errorf("expected classifier prompt to contain %q, got %s", tc.wantClassifierPromptContains, capturedClassifierPrompt)
@@ -751,8 +757,10 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	wantStatus := tc.wantFinalStatus
 	if wantStatus == "" { wantStatus = db.StatusCompleted }
 	for _, m := range burst {
-		saved, _ := getMessage(store, m.ID)
-		if saved == nil { continue }
+		saved, err := getMessage(store, m.ID)
+		if err != nil || saved == nil {
+			t.Fatalf("failed to get message %s: %v (msg=%v)", m.ID, err, saved)
+		}
 		if saved.Status != wantStatus {
 			t.Errorf("message %s status = %s, want %s", m.ID, saved.Status, wantStatus)
 		}
@@ -765,14 +773,16 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	}
 }
 
-// TestSinkMethods_CoverageAudit audits sink.go no-ops and ScopeKey to satisfy target coverage.
-func TestSinkMethods_CoverageAudit(t *testing.T) {
+func TestWorkerPool_ScopeKeyAndPreviousSessionFallback(t *testing.T) {
+	t.Parallel()
 	pool := NewWorkerPool(WorkerPoolConfig{})
 	msg := db.Message{ID: "m1", ThreadID: "t1"}
 	if k := pool.ScopeKey(msg); k != "t1" {
 		t.Errorf("expected ScopeKey t1, got %s", k)
 	}
-	_, _ = getPreviousSessionID(nil, "")
+	if prev, err := getPreviousSessionID(nil, ""); err != nil || prev != "" {
+		t.Errorf("expected empty previous session for nil store, got %q (err=%v)", prev, err)
+	}
 }
 
 // newScriptedDaemonSpawner returns a MockDaemonSpawner that responds with pre-scripted events.

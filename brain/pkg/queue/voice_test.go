@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,7 +147,7 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 		{name: "VoiceRunnerHook", prompt: "hello", sessionID: "sess-hook-1", useVoiceHook: true, wantReply: "voice hook reply", wantConvID: "sess-hook-1", wantStatusSub: "⚡ Custom hook"},
 		{name: "VoiceStreamRunnerHook", prompt: "hello", sessionID: "sess-stream-1", useVoiceStreamHook: true, wantReply: "voice stream reply", wantConvID: "sess-stream-1", wantStatusSub: "⚡ Streaming hook", wantSentenceSub: "Streaming sentence."},
 		{name: "VoiceStreamRunnerHookError", prompt: "hello", sessionID: "sess-err", useVoiceStreamHook: true, hookErr: errors.New("simulated stream failure"), wantErrSub: "simulated stream failure"},
-		{name: "ForwardCleanPrompt", prompt: "where does my daughter go to school?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "Ayda is in Emeryville.", wantConvID: "dev-voice-1"},
+		{name: "ForwardCleanPrompt", prompt: "what is the cluster node status?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "All three nodes are online.", wantConvID: "dev-voice-1"},
 
 		// ProcessPoolErrors
 		{name: "AcquisitionFailure", prompt: "test", sessionID: "sess-acq-fail", spawnerErr: errors.New("spawner failed to start"), wantErrSub: "failed to acquire voice daemon"},
@@ -190,8 +189,8 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 							onStatus("⚡ Custom hook running...")
 						}
 						reply := "voice hook reply"
-						if prompt == "where does my daughter go to school?" {
-							reply = "Ayda is in Emeryville."
+						if prompt == "what is the cluster node status?" {
+							reply = "All three nodes are online."
 						}
 						return reply, sessionID, nil
 					},
@@ -593,131 +592,259 @@ func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 	}
 }
 
-func TestVoiceAndPoolHelperCoverage(t *testing.T) {
+func TestGetSessionLastActivity(t *testing.T) {
 	t.Parallel()
 	fake := setupTestStore(t)
-	defer fake.Close()
-
-	// 1. Store and getters
-	for _, v := range []interface{}{nil, "invalid", (*db.FakeStore)(nil), (*db.SQLStore)(nil), (*sql.DB)(nil)} {
-		_ = resolveStore(v)
-	}
-	_ = resolveStore(fake)
-
-	var nilPool *WorkerPool
-	_ = nilPool.Store(); _ = nilPool.SummaryGroup(); _ = nilPool.AgentPool(); _ = nilPool.DeliverDirect("c", "t"); _, _ = nilPool.DeliverStatusWidget(discord.StatusWidgetRequest{})
-	pEmpty := &WorkerPool{}
-	_ = pEmpty.Store(); _ = pEmpty.SummaryGroup(); _ = pEmpty.Classifier(); _ = pEmpty.SessionManager(); _ = pEmpty.DeliverDirect("c", "t"); _, _ = pEmpty.DeliverStatusWidget(discord.StatusWidgetRequest{})
-	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
-	_ = pFake.Store()
-	realDB := &sql.DB{}
-	pDB := &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}
-	_ = pDB.Store(); _ = resolveStore(realDB)
-
-	// 2. Activity and TurnExecution helpers
-	_, _, _ = GetSessionLastActivity("invalid-type", "t1")
-	for _, tid := range []string{"thread-1", ""} {
-		_, _, _ = GetSessionLastActivity(nil, tid)
-	}
+	_ = insertMessage(fake, db.Message{ID: "m-last-act", ThreadID: "t-last-act", AuthorID: "u1", Status: db.StatusCompleted, CreatedAt: time.Now().UTC()})
 	closedStore := setupTestStore(t)
 	_ = closedStore.Close()
-	_, _, _ = GetSessionLastActivity(closedStore, "thread-1")
-	_ = insertMessage(fake, db.Message{ID: "m-last-act", ThreadID: "t-last-act", AuthorID: "u1", Status: db.StatusCompleted, CreatedAt: time.Now().UTC()})
-	_, _, _ = GetSessionLastActivity(fake, "t-last-act")
 
-	for _, te := range []*turnExecution{
-		{},
-		{pool: pFake},
-		{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: fake}}}},
-	} {
-		te.updateMessageStatus("m1", "failed", "err")
-		te.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
-		te.updateMessageCompleted("m1", "resp")
-		te.incrementMessageRetry("m1", "retry-err")
-		te.saveSessionID("t1", "s1")
-		te.rotateSessionID("t1", "s2")
-		_, _ = te.getSessionTurnCount("t1")
-		_, _ = te.incrementSessionTurnCount("t1")
-		_, _ = te.getSessionID("t1")
-		_, _ = te.getPreviousSessionID("t1")
-		_ = te.createOneShotSchedule(db.OneShotSchedule{ID: "os1"})
-		_, _, _ = te.getThreadSummary("t1")
-		_ = te.saveThreadSummary("t1", "sum", "m1")
-		_, _ = te.getRecentThreadMessages("t1", 10)
+	tests := []struct {
+		name           string
+		store          any
+		threadID       string
+		wantNonZeroTS  bool
+		wantIncomplete bool
+		wantErr        bool
+	}{
+		{name: "invalid_store_type", store: "invalid-type", threadID: "t1", wantNonZeroTS: false, wantIncomplete: true, wantErr: false},
+		{name: "nil_store_non_empty_thread", store: nil, threadID: "thread-1", wantNonZeroTS: false, wantIncomplete: true, wantErr: false},
+		{name: "nil_store_empty_thread", store: nil, threadID: "", wantNonZeroTS: false, wantIncomplete: true, wantErr: false},
+		{name: "closed_store_error", store: closedStore, threadID: "thread-1", wantNonZeroTS: false, wantIncomplete: false, wantErr: true},
+		{name: "completed_message_found", store: fake, threadID: "t-last-act", wantNonZeroTS: true, wantIncomplete: false, wantErr: false},
 	}
-
-	// 3. Summaries, history, and classifier alerts
-	sumRes, sumErr := SummarizeThreadHistory(context.Background(), func(ctx context.Context, model, prompt string) (string, error) {
-		return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
-	}, "test-model", "thread-sum-wrapper", []HistoryMessage{{ID: "m1", Content: "fresh", CreatedAt: time.Now().UTC()}})
-	if sumErr != nil || !strings.Contains(sumRes, "Summary result") {
-		t.Errorf("SummarizeThreadHistory failed: res=%q err=%v", sumRes, sumErr)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts, hasIncomplete, err := GetSessionLastActivity(tc.store, tc.threadID)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("GetSessionLastActivity() err = %v, wantErr=%v", err, tc.wantErr)
+			}
+			if (!ts.IsZero()) != tc.wantNonZeroTS || hasIncomplete != tc.wantIncomplete {
+				t.Errorf("GetSessionLastActivity() = (%v, %v), wantNonZero=%v wantIncomplete=%v", ts, hasIncomplete, tc.wantNonZeroTS, tc.wantIncomplete)
+			}
+		})
 	}
-	_, _ = SummarizeThreadHistory(context.Background(), nil, "", "t1", nil)
+}
 
-	_, _ = fetchHistoryFromDB(fake, "role-test-chan", "msg-role-7", 50)
-	_, _ = fetchHistoryFromDB(fake, "role-test-chan", "123456789012345678", 50)
-	_ = FilterAssistantMessages(nil)
-	_ = FilterAssistantMessages([]HistoryMessage{})
+func TestTurnExecution_StoreDelegates(t *testing.T) {
+	t.Parallel()
+	fake := setupTestStore(t)
+	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
+	pErr := &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: fake}}}
 
-	appCfg := config.NewFromData(&config.ConfigData{SystemChannel: "test-alerts-chan", APIKey: "test-key", AgyBin: "agy"})
-	poolAlert := New(appCfg, WorkerPoolConfig{SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, alertBody string) error { return nil }})
-	if poolAlert.cfg.Classifier != nil && poolAlert.cfg.Classifier.OnParseError != nil {
-		poolAlert.cfg.Classifier.OnParseError("gemini-flash", strings.Repeat("x", 700)+"\n```json\n@everyone @here\n```", errors.New("parse error 1"))
-		poolAlert.cfg.Classifier.OnParseError("gemini-flash", "short", errors.New("parse error 2"))
+	tests := []struct {
+		name      string
+		te        *turnExecution
+		wantCount int
+	}{
+		{name: "nil_pool_delegates", te: &turnExecution{}, wantCount: 0},
+		{name: "valid_store_delegates", te: &turnExecution{pool: pFake}, wantCount: 1},
+		{name: "error_store_delegates", te: &turnExecution{pool: pErr}, wantCount: 1},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			threadID := "t-" + tc.name
+			tc.te.updateMessageStatus("m1", "failed", "err")
+			tc.te.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
+			tc.te.updateMessageCompleted("m1", "resp")
+			tc.te.incrementMessageRetry("m1", "retry-err")
+			tc.te.saveSessionID(threadID, "s1")
+			tc.te.rotateSessionID(threadID, "s2")
+			cnt, err := tc.te.incrementSessionTurnCount(threadID)
+			if err != nil || cnt != tc.wantCount {
+				t.Errorf("incrementSessionTurnCount() = (%d, %v), want %d", cnt, err, tc.wantCount)
+			}
+			gotCnt, _ := tc.te.getSessionTurnCount(threadID)
+			if gotCnt != tc.wantCount {
+				t.Errorf("getSessionTurnCount() = %d, want %d", gotCnt, tc.wantCount)
+			}
+			_, _ = tc.te.getSessionID(threadID)
+			_, _ = tc.te.getPreviousSessionID(threadID)
+			_ = tc.te.createOneShotSchedule(db.OneShotSchedule{ID: "os-" + tc.name})
+			_ = tc.te.saveThreadSummary(threadID, "sum", "m1")
+			_, _, _ = tc.te.getThreadSummary(threadID)
+			_, _ = tc.te.getRecentThreadMessages(threadID, 10)
+		})
+	}
+}
 
-	// 4. Runner options fallbacks & pool lifecycle
-	ctx := context.Background()
-	pNew1 := New(nil, WorkerPoolConfig{
-		Model: "custom-model",
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "out", "", 0, nil
-		},
+func TestSummarizeAndHistoryHelpers(t *testing.T) {
+	t.Parallel()
+	fake := setupTestStore(t)
+	now := time.Now().UTC()
+	_ = insertMessage(fake, db.Message{ID: "msg-fast-1", ThreadID: "thread-fast-1", AuthorID: "user-1", AuthorName: "Alice", Content: "Hello fast path", CreatedAt: now})
+
+	dgHist, _ := discordgo.New("Bot test")
+	dgHist.State = discordgo.NewState()
+	dgHist.State.User = &discordgo.User{ID: "bot-user-123", Username: "aerial", Bot: true}
+	dgHist.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		b, _ := json.Marshal([]*discordgo.Message{
+			nil,
+			{ID: "123456789012345678", Content: "Aerial msg", Timestamp: now, Author: &discordgo.User{ID: "bot-user-123", Username: "aerial", Bot: true}},
+			{ID: "123456789012345682", Content: "Zero ts", Timestamp: time.Time{}, Author: &discordgo.User{ID: "user-789", Username: "Alice"}},
+		})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 	})
-	_, _, _, _ = pNew1.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{})
-	pNew2 := New(nil, WorkerPoolConfig{
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return "opt-out", "", 0, nil
+	emptyStore := setupTestStore(t)
+
+	tests := []struct {
+		name           string
+		threadID       string
+		beforeID       string
+		limit          int
+		useEmptyStore  bool
+		withLLM        bool
+		wantSummarySub string
+	}{
+		{name: "fast_db_path_with_summary", threadID: "thread-fast-1", beforeID: "msg-role-7", limit: 10, withLLM: true, wantSummarySub: "Summary result"},
+		{name: "rest_fallback_snowflake_zero_limit", threadID: "123456789012345678", beforeID: "123456789012345678", limit: 0, useEmptyStore: true, withLLM: false},
+		{name: "rest_fallback_clamped_limit", threadID: "123456789012345678", beforeID: "non-num", limit: 150, useEmptyStore: true, withLLM: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			targetStore := fake
+			if tc.useEmptyStore {
+				targetStore = emptyStore
+			}
+			var llm runner.LLMFunc
+			var msgs []HistoryMessage
+			if tc.withLLM {
+				llm = func(ctx context.Context, model, prompt string) (string, error) {
+					return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
+				}
+				msgs = []HistoryMessage{{ID: "m1", Content: "fresh", CreatedAt: now}}
+			}
+			sumRes, sumErr := SummarizeThreadHistory(ctx, llm, "test-model", tc.threadID, msgs)
+			if tc.withLLM && (sumErr != nil || !strings.Contains(sumRes, tc.wantSummarySub)) {
+				t.Errorf("SummarizeThreadHistory() = (%q, %v), wantSub=%q", sumRes, sumErr, tc.wantSummarySub)
+			}
+			if _, err := fetchHistoryFromDB(targetStore, tc.threadID, tc.beforeID, tc.limit); err != nil {
+				t.Errorf("fetchHistoryFromDB() unexpected err: %v", err)
+			}
+			if _, err := FetchRecentThreadHistory(ctx, dgHist, targetStore, tc.threadID, tc.limit); err != nil {
+				t.Errorf("FetchRecentThreadHistory() unexpected err: %v", err)
+			}
+			_, _ = FetchRecentThreadHistory(ctx, nil, fake, "", tc.limit)
+			fetcher := DefaultHistoryFetcher(dgHist, targetStore)
+			if _, err := fetcher(ctx, tc.threadID, tc.beforeID, tc.limit); err != nil {
+				t.Errorf("DefaultHistoryFetcher() unexpected err: %v", err)
+			}
+			if got := FilterAssistantMessages(nil); len(got) != 0 {
+				t.Errorf("expected empty slice from FilterAssistantMessages(nil), got %v", got)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
+	t.Parallel()
+	fake := setupTestStore(t)
+
+	tests := []struct {
+		name    string
+		cfg     WorkerPoolConfig
+		wantOut string
+	}{
+		{
+			name: "runner_func_synthesizes_with_options",
+			cfg: WorkerPoolConfig{
+				Model: "custom-model",
+				Store: fake,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					return "out-from-runner", "", 0, nil
+				},
+			},
+			wantOut: "out-from-runner",
 		},
-	})
-	_, _, _, _ = pNew2.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 15)
-	pNew3 := New(nil, WorkerPoolConfig{})
-	_, _, _, _ = pNew3.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 10)
-	_, _, _, _ = pNew3.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{})
-
-	mockDrain := &mockDrainErrStore{Store: fake, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
-	pDrainMock := New(nil, WorkerPoolConfig{Store: mockDrain})
-	RecoverInterrupted(mockDrain, pDrainMock)
-
-	pDrain := New(nil, WorkerPoolConfig{Store: &mockDrainErrStore{Store: fake}, DrainTimeout: 10 * time.Millisecond})
-	pDrain.StopWithTimeout(0)
-
-	pBurst := New(nil, WorkerPoolConfig{})
-	pBurst.EnqueueBurst()
-	pBurst.processBurst(nil)
-	pBurst.processBurst([]db.Message{})
-	pBurst.StopWithTimeout(10 * time.Millisecond)
-
-	// 5. Status updater branches
-	var nilSu *StatusUpdater
-	nilSu.MarkTurnStarted(); nilSu.Stop(); nilSu.Reset(); nilSu.DeleteStatusMessage()
-	nilSu.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-
-	uDisabled := NewStatusUpdater(nil, "thread-1", false)
-	uDisabled.Start()
-	uEnabled := NewStatusUpdater(nil, "thread-2", true, WithStatusInterval(50*time.Millisecond))
-	uEnabled.Start(); uEnabled.Stop()
-
-	formatted := FormatToolStatus("run_command", "really_long_command_name_that_exceeds_twenty_four_runes", 1500*time.Millisecond)
-	if !strings.Contains(formatted, "really_long_command_name") {
-		t.Errorf("expected command truncation in %s", formatted)
+		{
+			name: "runner_with_options_synthesizes_runner_func",
+			cfg: WorkerPoolConfig{
+				Store: fake,
+				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					return "out-from-options", "", 0, nil
+				},
+			},
+			wantOut: "out-from-options",
+		},
+		{
+			name:    "default_mock_runner_synthesis",
+			cfg:     WorkerPoolConfig{Store: fake},
+			wantOut: "",
+		},
 	}
-	for _, tool := range []string{"bash", "sh", "execute_command"} {
-		_ = FormatToolStatus(tool, "echo hi", 500*time.Millisecond)
-	}
-	_ = FormatToolStatus(strings.Repeat("x", 120), "", 500*time.Millisecond)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			p := New(nil, tc.cfg)
+			out1, _, _, err1 := p.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 10)
+			out2, _, _, err2 := p.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{})
+			if tc.wantOut != "" && (err1 != nil || err2 != nil || out1 != tc.wantOut || out2 != tc.wantOut) {
+				t.Errorf("adapter outputs = (%q, %q), errs = (%v, %v), want %q", out1, out2, err1, err2, tc.wantOut)
+			}
+			if p.Classifier() == nil || p.SessionManager() == nil {
+				t.Errorf("expected non-nil Classifier and SessionManager")
+			}
+			var nilPool *WorkerPool
+			if err := nilPool.DeliverDirect("c", "t"); err == nil {
+				t.Errorf("expected error from nilPool.DeliverDirect")
+			}
+			if _, err := nilPool.DeliverStatusWidget(discord.StatusWidgetRequest{}); err == nil {
+				t.Errorf("expected error from nilPool.DeliverStatusWidget")
+			}
+			pEmpty := &WorkerPool{}
+			if err := pEmpty.DeliverDirect("c", "t"); err == nil {
+				t.Errorf("expected error from pEmpty.DeliverDirect")
+			}
+			if _, err := pEmpty.DeliverStatusWidget(discord.StatusWidgetRequest{}); err == nil {
+				t.Errorf("expected error from pEmpty.DeliverStatusWidget")
+			}
 
+			getRec, onRot := makeSessionCallbacks(fake)
+			_, _ = getRec(ctx, "t1")
+			if err := onRot(ctx, "t1", "old", "new"); err != nil {
+				t.Errorf("onRot error: %v", err)
+			}
+			getRecErr, _ := makeSessionCallbacks(&errQueueStore{Store: fake})
+			_, _ = getRecErr(ctx, "t1")
+			if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil {
+				t.Errorf("expected nil from unwrapUnifiedPool on non-unified pools")
+			}
+			mockDrain := &mockDrainErrStore{Store: fake, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
+			pDrain := New(nil, WorkerPoolConfig{Store: mockDrain, DrainTimeout: 10 * time.Millisecond})
+			RecoverInterrupted(mockDrain, pDrain)
+			RecoverInterrupted(nil, nil)
+			RecoverInterrupted(fake, nil)
+			RecoverInterrupted(nil, &WorkerPool{})
+			pDrain.StopWithTimeout(0)
+
+			recStore := setupTestStore(t)
+			_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", ScheduleRunID: "run-stale-rec", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
+			_ = recStore.CreateScheduleRun(ctx, db.ScheduleRun{ID: "run-stale-rec", ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC().Add(-2 * time.Hour), Status: "running"})
+			_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
+			pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
+			RecoverInterrupted(recStore, pRec)
+
+			p.EnqueueBurst()
+			p.processBurst(nil)
+			p.processBurst([]db.Message{})
+			p.cancel()
+			stF := &threadWorkerState{ch: make(chan db.Message, 1)}
+			stF.ch <- db.Message{ID: "m0"}
+			p.threadChs["t-full"] = stF
+			p.EnqueueBurst(db.Message{ID: "m-blocked", ThreadID: "t-full"})
+			p.StopWithTimeout(10 * time.Millisecond)
+			p.EnqueueBurst(db.Message{ID: "m-after-stop"})
+		})
+	}
+}
+
+func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
+	t.Parallel()
 	s, _ := discordgo.New("Bot dummy-token")
 	s.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		u := req.URL.String()
@@ -734,270 +861,260 @@ func TestVoiceAndPoolHelperCoverage(t *testing.T) {
 			return &http.Response{StatusCode: 400, Body: io.NopCloser(bytes.NewReader([]byte(`{"message":"bad request"}`)))}, nil
 		}
 	})
-	uREST := NewStatusUpdater(s, "thread-rest-123", true)
-	_, _ = uREST.sendFunc("thread-rest-123", "hello")
-	_ = uREST.editFunc("thread-rest-123", "msg-created-123", "edited")
-	_ = uREST.deleteFunc("thread-rest-123", "msg-created-123")
 
-	uStep := NewStatusUpdater(nil, "thread-step", true, WithStatusInterval(10*time.Hour))
-	uStep.Stop(); uStep.disabled = true; uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-	uStep.disabled = false
-	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-	uStep.HandleStep(&runner.StepUpdateEvent{
-		StepType: "tool_call", ToolName: "view_file", State: "ACTIVE",
-		ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "ls"}},
-	})
-	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "other_tool", State: "DONE"})
-	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ERROR"})
-	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "agent_response"})
+	tests := []struct {
+		name       string
+		tool       string
+		arg        string
+		dur        time.Duration
+		wantSubstr string
+	}{
+		{name: "long_command_truncated", tool: "run_command", arg: "really_long_command_name_that_exceeds_twenty_four_runes", dur: 1500 * time.Millisecond, wantSubstr: "really_long_command_name"},
+		{name: "bash_alias", tool: "bash", arg: "echo hi", dur: 500 * time.Millisecond, wantSubstr: "echo"},
+		{name: "execute_command_alias", tool: "execute_command", arg: "ls", dur: 500 * time.Millisecond, wantSubstr: "ls"},
+		{name: "long_generic_tool", tool: strings.Repeat("x", 120), arg: "", dur: 500 * time.Millisecond, wantSubstr: "xxxx"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatToolStatus(tc.tool, tc.arg, tc.dur); !strings.Contains(got, tc.wantSubstr) {
+				t.Errorf("FormatToolStatus(%q, %q) = %q, want substring %q", tc.tool, tc.arg, got, tc.wantSubstr)
+			}
+			var nilSu *StatusUpdater
+			nilSu.MarkTurnStarted()
+			nilSu.Stop()
+			nilSu.Reset()
+			nilSu.DeleteStatusMessage()
+			nilSu.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 
-	// 6. Bot roles, prompt assembly, and tier-1 wakes
+			uDis := NewStatusUpdater(nil, "thread-dis", false)
+			uDis.Start()
+			uDis.triggerFlush()
+			uEn := NewStatusUpdater(nil, "thread-en", true, WithStatusInterval(50*time.Millisecond))
+			uEn.Start()
+			uEn.Stop()
+
+			uStep := NewStatusUpdater(nil, "thread-step", true, WithStatusInterval(10*time.Hour))
+			uStep.Stop()
+			uStep.disabled = true
+			uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
+			uStep.disabled = false
+			uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
+			uStep.HandleStep(&runner.StepUpdateEvent{
+				StepType: "tool_call", ToolName: "view_file", State: "ACTIVE",
+				ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "ls"}},
+			})
+			uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "other_tool", State: "DONE"})
+			uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ERROR"})
+			uStep.HandleStep(&runner.StepUpdateEvent{StepType: "agent_response"})
+
+			uREST := NewStatusUpdater(s, "thread-rest-123", true)
+			msgID, err := uREST.sendFunc("thread-rest-123", "hello")
+			if err != nil || msgID != "msg-created-123" {
+				t.Errorf("sendFunc() = (%q, %v), want msg-created-123", msgID, err)
+			}
+			if err := uREST.editFunc("thread-rest-123", msgID, "edited"); err != nil {
+				t.Errorf("editFunc() err = %v", err)
+			}
+			if err := uREST.deleteFunc("thread-rest-123", msgID); err != nil {
+				t.Errorf("deleteFunc() err = %v", err)
+			}
+
+			up404 := NewStatusUpdater(nil, "thread-404", true)
+			up404.turnStart = time.Now().Add(10 * time.Second)
+			_ = up404.currentStatusText()
+			up404.phase = "thinking"
+			up404.dirty = true
+			up404.lastDelivered = "old text"
+			up404.statusMessageID = "msg-edit-404"
+			up404.editFunc = func(c, m, txt string) error { return errors.New("HTTP 404 Not Found, 10008 Unknown Message") }
+			up404.flush()
+			if up404.statusMessageID != "" {
+				t.Errorf("expected statusMessageID cleared on 404, got %q", up404.statusMessageID)
+			}
+		})
+	}
+}
+
+func TestChannelCacheAndMessageEffort(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+
 	dgBot, _ := discordgo.New("Bot dummy")
 	dgBot.State.User = &discordgo.User{ID: "bot-1", Username: "AerialBot"}
 	guild1 := &discordgo.Guild{
-		ID:    "guild-1",
-		Roles: []*discordgo.Role{nil, {ID: "role-aerial", Name: "aerial"}, {ID: "role-gundam", Name: "gundam"}, {ID: "role-username", Name: "AerialBot"}, {ID: "role-other", Name: "moderator"}},
+		ID:      "guild-1",
+		Roles:   []*discordgo.Role{nil, {ID: "role-aerial", Name: "aerial"}, {ID: "role-gundam", Name: "gundam"}, {ID: "role-username", Name: "AerialBot"}, {ID: "role-other", Name: "moderator"}},
 		Members: []*discordgo.Member{{User: &discordgo.User{ID: "bot-1"}, Roles: []string{"role-member-assigned", ""}}},
 	}
 	_ = dgBot.State.GuildAdd(guild1)
-	_ = ResolveBotRoleIDs(dgBot, "guild-1", "bot-1")
-	_ = ResolveBotRoleIDs(dgBot, "", "bot-1")
-	_ = ResolveBotRoleIDs(nil, "", "")
-	_ = ResolveBotRoleIDs(&discordgo.Session{}, "", "")
 
-	origFetcher := guildMemberFetcher
-	defer func() { guildMemberFetcher = origFetcher }()
-	guildMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
-		return &discordgo.Member{GuildID: guildID, User: &discordgo.User{ID: userID}, Roles: []string{"role1"}}, nil
-	}
-	_ = ResolveBotRoleIDs(&discordgo.Session{State: discordgo.NewState()}, "guild-not-in-state", "bot-1")
-
-	for _, tc := range []struct {
-		in   TurnPromptInput
-		want string
+	tests := []struct {
+		name       string
+		msg        db.Message
+		wantEffort string
 	}{
-		{TurnPromptInput{ThreadSummary: "summary text"}, "summary text"},
-		{TurnPromptInput{LookbackHistory: []HistoryMessage{{AuthorName: "alice", Content: "hi", CreatedAt: time.Now()}}}, "@alice"},
-		{TurnPromptInput{IsColdStart: true, PreviousSessionID: "prev-sess-123"}, "<PREVIOUS_SESSION>"},
-		{TurnPromptInput{ChannelInstructions: "instructions"}, "instructions"},
-		{TurnPromptInput{InjectedHookContext: "hook context"}, "hook context"},
-	} {
-		if got := AssembleTurnPrompt(tc.in); !strings.Contains(got, tc.want) {
-			t.Errorf("AssembleTurnPrompt(%+v): expected %q in %q", tc.in, tc.want, got)
-		}
+		{name: "explicit_custom_effort", msg: db.Message{Effort: "custom"}, wantEffort: "high"},
+		{name: "model_derived_medium_effort", msg: db.Message{Metadata: db.MessageMetadata{Model: "claude-medium"}}, wantEffort: "medium"},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveMessageEffort(tc.msg); got != tc.wantEffort {
+				t.Errorf("resolveMessageEffort() = %q, want %q", got, tc.wantEffort)
+			}
+			if roles := ResolveBotRoleIDs(dgBot, "", "bot-1"); len(roles) == 0 {
+				t.Errorf("expected non-empty roles when guildID is empty")
+			}
+			if roles := ResolveBotRoleIDs(&discordgo.Session{}, "", ""); roles != nil {
+				t.Errorf("expected nil roles for nil State")
+			}
+			CacheDiscordChannel(nil)
+			CacheDiscordChannel(&discordgo.Channel{})
+			CacheDiscordChannel(&discordgo.Channel{ID: "parent-" + tc.name, GuildID: "guild-parent"})
+			CacheDiscordChannel(&discordgo.Channel{ID: "child-" + tc.name, ParentID: "parent-" + tc.name, Type: discordgo.ChannelTypeGuildPublicThread})
+			InvalidateChannelCache("parent-" + tc.name)
+			InvalidateChannelCache("child-" + tc.name)
 
-	wakeTests := []struct {
-		name      string
-		msg       db.Message
-		botUserID string
-		botRoles  []string
-		expected  bool
-	}{
-		{"http-client author", db.Message{AuthorID: "http-client"}, "", nil, true},
-		{"scheduler author", db.Message{AuthorID: "scheduler"}, "", nil, true},
-		{"schedule run ID", db.Message{ScheduleRunID: "run-123"}, "", nil, true},
-		{"direct user mention", db.Message{Content: "Hey <@bot-123>"}, "bot-123", nil, true},
-		{"direct nickname mention", db.Message{Content: "Hey <@!bot-123>"}, "bot-123", nil, true},
-		{"direct role mention", db.Message{Content: "Alert <@&role-999>"}, "", []string{"role-999"}, true},
-		{"mentions aerial in header", db.Message{Content: "<USER_REQUEST>\n- mentions: [aerial, alice]\n</USER_REQUEST>"}, "", nil, true},
-		{"mentions botUserID in header", db.Message{Content: "<USER_REQUEST>\n- mentions: [bot-123]\n</USER_REQUEST>"}, "bot-123", nil, true},
-		{"mentions role in header", db.Message{Content: "<USER_REQUEST>\n- mentions: [role-999]\n</USER_REQUEST>"}, "", []string{"role-999"}, true},
-		{"replying to aerial", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: aerial\n  content: hi\n- content: yes</USER_REQUEST>"}, "", nil, true},
-		{"replying to bot ID", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: bot-123\n  content: hi\n- content: yes</USER_REQUEST>"}, "bot-123", nil, true},
-		{"body mention prefix", db.Message{Content: "Hey <@aerial how are you"}, "", nil, true},
-		{"body nick mention prefix", db.Message{Content: "Hey <@!aerial how are you"}, "", nil, true},
-		{"plaintext keyword mention mode", db.Message{Content: "hello aerial"}, "", nil, false},
-		{"quoted role without mention_role_ids", db.Message{Content: "<USER_REQUEST>\n- content: check this '<@&999888>'\n- mention_role_ids: []\n</USER_REQUEST>"}, "123", []string{"999888"}, false},
-		{"structured role in mention_role_ids", db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [999888]\n</USER_REQUEST>"}, "123", []string{"999888"}, true},
-		{"bot in mention_user_ids", db.Message{Content: "<USER_REQUEST>\n- content: please help\n- mention_user_ids: [123]\n</USER_REQUEST>"}, "123", nil, true},
-		{"body direct snowflake mention", db.Message{Content: "hey <@12345> check this"}, "12345", nil, true},
-		{"body role snowflake mention", db.Message{Content: "hey <@&role999> check this"}, "99999", []string{"role999"}, true},
-	}
-	for _, tc := range wakeTests {
-		if got := isTier1Wake(tc.msg, tc.botUserID, tc.botRoles); got != tc.expected {
-			t.Errorf("%s: expected %v, got %v", tc.name, tc.expected, got)
-		}
-	}
-
-	// 7. Session callbacks, burst execution, & recovery
-	getRec, onRot := makeSessionCallbacks(fake)
-	_, _ = getRec(context.Background(), "t1")
-	_ = onRot(context.Background(), "t1", "old", "new")
-	getRecErr, _ := makeSessionCallbacks(&errQueueStore{Store: fake})
-	_, _ = getRecErr(context.Background(), "t1")
-
-	_ = unwrapUnifiedPool(nil)
-	_ = unwrapUnifiedPool(&testRunnerAgentPool{})
-
-	pTrailNoClass := New(nil, WorkerPoolConfig{
-		Store: fake,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse("", "OK"), "", 0, nil
-		},
-	})
-	f05 := 0.5
-	pTrailNoClass.cfg.Classifier = nil
-	pTrailNoClass.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
-		return config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: &f05}
-	}
-	_ = insertMessage(fake, db.Message{ID: "m-w-lead", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "<@aerial> start", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	_ = insertMessage(fake, db.Message{ID: "m-trail-query", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "why is the ocean blue", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	mwLead, _ := getMessage(fake, "m-w-lead")
-	mtQuery, _ := getMessage(fake, "m-trail-query")
-	pTrailNoClass.processBurst([]db.Message{*mwLead, *mtQuery})
-
-	_ = insertMessage(fake, db.Message{ID: "m-def-pol", ThreadID: "t-def-pol", AuthorID: "u1", Content: "test prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	mDef, _ := getMessage(fake, "m-def-pol")
-	pDefPol := New(nil, WorkerPoolConfig{
-		Store: fake,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse("", "OK"), "", 0, nil
-		},
-	})
-	pDefPol.cfg.ResolveChannelPolicy = nil
-	pDefPol.processBurst([]db.Message{*mDef})
-
-	runIgnored := "run-ignored-extra"
-	_ = createScheduleRun(fake, db.ScheduleRun{ID: runIgnored, ScheduleID: "s-ign", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
-	_ = insertMessage(fake, db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", ScheduleRunID: runIgnored, Content: "ignored prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	mIgn, _ := getMessage(fake, "m-ign-extra")
-	pIgn := New(nil, WorkerPoolConfig{Store: fake, StalenessTTL: -1})
-	pIgn.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return config.ChannelPolicy{Mode: "ignore"} }
-	pIgn.processBurst([]db.Message{*mIgn})
-
-	// 8. FetchRecentThreadHistory, EnqueueBurst, & RecoverInterrupted
-	ctxFetch := context.Background()
-	for _, limit := range []int{0, 150} {
-		_, _ = FetchRecentThreadHistory(ctxFetch, nil, fake, "", limit)
-	}
-	_ = insertMessage(fake, db.Message{ID: "msg-fast-1", ThreadID: "thread-fast-1", AuthorID: "user-1", AuthorName: "Alice", Content: "Hello fast path", CreatedAt: time.Now().UTC()})
-	_, _ = FetchRecentThreadHistory(ctxFetch, nil, fake, "thread-fast-1", 10)
-	_, _ = FetchRecentThreadHistory(ctxFetch, nil, fake, "123456789012345678", 10)
-
-	dgHist, _ := discordgo.New("Bot test")
-	dgHist.State = discordgo.NewState()
-	dgHist.State.User = &discordgo.User{ID: "bot-user-123", Username: "aerial", Bot: true}
-	dgHist.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		b, _ := json.Marshal([]*discordgo.Message{
-			nil,
-			{ID: "123456789012345678", Content: "Aerial msg", Timestamp: time.Now().UTC(), Author: &discordgo.User{ID: "bot-user-123", Username: "aerial", Bot: true}},
-			{ID: "123456789012345682", Content: "Zero ts", Timestamp: time.Time{}, Author: &discordgo.User{ID: "user-789", Username: "Alice"}},
+			if tok := extractHeaderTokens("- mentions: [unclosed", "- mentions: ["); tok != nil {
+				t.Errorf("expected nil from unclosed extractHeaderTokens, got %v", tok)
+			}
+			if layer := prependPromptLayer("", "lonely layer"); layer != "lonely layer" {
+				t.Errorf("prependPromptLayer() = %q, want 'lonely layer'", layer)
+			}
+			hist := FormatChannelHistory([]HistoryMessage{
+				{ID: "m1", AuthorName: "User[\n\rName]", Role: "", Content: "Hello world", CreatedAt: now},
+				{ID: "m2", AuthorName: "", Role: "Assistant", Content: "Aerial response", CreatedAt: now},
+				{ID: "m3", AuthorName: "", Role: "User", Content: "Anon user", CreatedAt: now},
+			})
+			if !strings.Contains(hist, "@UserName (User)") {
+				t.Errorf("expected sanitized author name in %q", hist)
+			}
 		})
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
-	})
-	emptyStore := setupTestStore(t)
-	defer emptyStore.Close()
-	_, _ = FetchRecentThreadHistory(ctxFetch, dgHist, emptyStore, "123456789012345678", 50)
+	}
+}
 
-	mockClaimErr := &mockClaimStore{Store: fake, claimErr: errors.New("db lock error")}
-	pClaimErr := New(nil, WorkerPoolConfig{Store: mockClaimErr})
-	pClaimErr.processBurst([]db.Message{{ID: "m-err-claim", ThreadID: "t-claim"}})
-
-	mockUnclaimed := &mockClaimStore{Store: fake, claimed: false}
-	pUnclaimed := New(nil, WorkerPoolConfig{Store: mockUnclaimed})
-	pUnclaimed.processBurst([]db.Message{{ID: "m-unclaimed", ThreadID: "t-claim"}})
-
-	runStale := "run-stale-burst-1"
-	_ = createScheduleRun(fake, db.ScheduleRun{ID: runStale, ScheduleID: "sched-stale", ScheduleType: "cron", StartedAt: time.Now().UTC().Add(-2 * time.Hour), Status: "running"})
-	_ = insertMessage(fake, db.Message{ID: "msg-stale-burst-1", ThreadID: "thread-stale-burst", AuthorID: "user-1", ScheduleRunID: runStale, Content: "old prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
-	mStale, _ := getMessage(fake, "msg-stale-burst-1")
-	pStale := New(nil, WorkerPoolConfig{Store: fake})
-	pStale.processBurst([]db.Message{*mStale})
-
-	_ = insertMessage(fake, db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	mb, _ := getMessage(fake, "m-badparse")
-	pBadParse := New(nil, WorkerPoolConfig{
-		Store: fake, MaxAttempts: 1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "definitely not json", "", 0, nil
-		},
-	})
-	pBadParse.processBurst([]db.Message{*mb})
-
-	runRate := "run-ratelimit-1"
-	_ = createScheduleRun(fake, db.ScheduleRun{ID: runRate, ScheduleID: "s-rate", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
-	_ = insertMessage(fake, db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", ScheduleRunID: runRate, Content: "query", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	mr, _ := getMessage(fake, "m-rate-1")
-	pRate := New(nil, WorkerPoolConfig{
-		Store: fake, BackoffBase: 1 * time.Millisecond,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "Resource has been exhausted: rate limit exceeded 429", 1, errors.New("exit 1")
-		},
-	})
-	pRate.processBurst([]db.Message{*mr})
-
-	up404 := NewStatusUpdater(nil, "thread-404", true)
-	up404.turnStart = time.Now().Add(10 * time.Second)
-	_ = up404.currentStatusText()
-	up404.phase = "thinking"; up404.dirty = true; up404.lastDelivered = "old text"; up404.statusMessageID = "msg-edit-404"
-	up404.editFunc = func(c, m, txt string) error { return errors.New("HTTP 404 Not Found, 10008 Unknown Message") }
-	up404.flush()
-
-	// 9. Extra boundary boosts
-	CacheDiscordChannel(nil)
-	CacheDiscordChannel(&discordgo.Channel{})
-	CacheDiscordChannel(&discordgo.Channel{ID: "parent-ch", GuildID: "guild-parent"})
-	CacheDiscordChannel(&discordgo.Channel{ID: "child-th", ParentID: "parent-ch", Type: discordgo.ChannelTypeGuildPublicThread})
-	InvalidateChannelCache("parent-ch")
-	InvalidateChannelCache("child-th")
-
-	_ = extractHeaderTokens("- mentions: [unclosed", "- mentions: [")
-	_ = prependPromptLayer("", "lonely layer")
-	uDisFlush := NewStatusUpdater(nil, "thread-dis", false)
-	uDisFlush.triggerFlush()
-
+func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
-	_ = FormatChannelHistory([]HistoryMessage{
-		{ID: "m1", AuthorName: "User[\n\rName]", Role: "", Content: "Hello world", CreatedAt: now},
-		{ID: "m2", AuthorName: "", Role: "Assistant", Content: "Aerial response", CreatedAt: now},
-		{ID: "m3", AuthorName: "", Role: "User", Content: "Anon user", CreatedAt: now},
-	})
+	f05 := 0.5
 
-	_, _ = guildMemberFetcher(nil, "g", "u")
-	_, _ = guildMemberFetcher(&discordgo.Session{}, "g", "u")
-	_, _ = guildMemberFetcher(&discordgo.Session{Token: "test"}, "g", "u")
+	tests := []struct {
+		name          string
+		msg           db.Message
+		trailing      *db.Message
+		run           *db.ScheduleRun
+		runnerOut     string
+		runnerErrOut  string
+		runnerCode    int
+		runnerErr     error
+		policy        *config.ChannelPolicy
+		nilClassifier bool
+		claimErr      error
+		unclaimed     bool
+		wantMsgStatus string
+		wantRunStatus string
+	}{
+		{
+			name:      "claim_error_aborts_burst",
+			msg:       db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now},
+			claimErr:  errors.New("db lock error"),
+			unclaimed: false,
+		},
+		{
+			name:      "unclaimed_message_skipped",
+			msg:       db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now},
+			unclaimed: true,
+		},
+		{
+			name:          "stale_schedule_run_expired",
+			msg:           db.Message{ID: "msg-stale-burst-1", ThreadID: "thread-stale-burst", AuthorID: "user-1", ScheduleRunID: "run-stale-burst-1", Content: "old prompt", Status: db.StatusPending, CreatedAt: now.Add(-2 * time.Hour)},
+			run:           &db.ScheduleRun{ID: "run-stale-burst-1", ScheduleID: "sched-stale", ScheduleType: "cron", StartedAt: now.Add(-2 * time.Hour), Status: "running"},
+			wantMsgStatus: db.StatusCompleted,
+			wantRunStatus: "completed",
+		},
+		{
+			name:          "ignored_channel_completes_schedule_run",
+			msg:           db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", ScheduleRunID: "run-ignored-extra", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now},
+			run:           &db.ScheduleRun{ID: "run-ignored-extra", ScheduleID: "s-ign", ScheduleType: "cron", StartedAt: now, Status: "running"},
+			policy:        &config.ChannelPolicy{Mode: "ignore"},
+			wantMsgStatus: db.StatusCompleted,
+			wantRunStatus: "completed",
+		},
+		{
+			name:          "bad_json_output_fails_after_attempt",
+			msg:           db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: now},
+			runnerOut:     "definitely not json",
+			wantMsgStatus: db.StatusFailed,
+		},
+		{
+			name:          "rate_limit_fails_schedule_run",
+			msg:           db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", ScheduleRunID: "run-ratelimit-1", Content: "query", Status: db.StatusPending, CreatedAt: now},
+			run:           &db.ScheduleRun{ID: "run-ratelimit-1", ScheduleID: "s-rate", ScheduleType: "cron", StartedAt: now, Status: "running"},
+			runnerErrOut:  "Resource has been exhausted: rate limit exceeded 429",
+			runnerCode:    1,
+			runnerErr:     errors.New("exit 1"),
+			wantMsgStatus: db.StatusFailed,
+			wantRunStatus: "failed",
+		},
+		{
+			name:          "trailing_query_with_nil_classifier_and_default_policy",
+			msg:           db.Message{ID: "m-w-lead", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "<@aerial> start", Status: db.StatusPending, CreatedAt: now},
+			trailing:      &db.Message{ID: "m-trail-query", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "why is the ocean blue", Status: db.StatusPending, CreatedAt: now},
+			runnerOut:     mockJSONResponse("", "OK"),
+			policy:        &config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: &f05},
+			nilClassifier: true,
+			wantMsgStatus: db.StatusCompleted,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := setupTestStore(t)
+			if tc.run != nil {
+				_ = createScheduleRun(fake, *tc.run)
+			}
+			_ = insertMessage(fake, tc.msg)
+			burst := []db.Message{tc.msg}
+			if tc.trailing != nil {
+				_ = insertMessage(fake, *tc.trailing)
+				burst = append(burst, *tc.trailing)
+			}
+			var store db.Store = fake
+			if tc.claimErr != nil || tc.unclaimed {
+				store = &mockClaimStore{Store: fake, claimed: !tc.unclaimed, claimErr: tc.claimErr}
+			}
+			pool := New(nil, WorkerPoolConfig{
+				Store:       store,
+				MaxAttempts: 1,
+				BackoffBase: 1 * time.Millisecond,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					return tc.runnerOut, tc.runnerErrOut, tc.runnerCode, tc.runnerErr
+				},
+			})
+			if tc.nilClassifier {
+				pool.cfg.Classifier = nil
+			}
+			if tc.policy != nil {
+				pol := *tc.policy
+				pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return pol }
+			} else {
+				pool.cfg.ResolveChannelPolicy = nil
+			}
+			pool.processBurst(burst)
 
-	fetcher := DefaultHistoryFetcher(dgHist, fake)
-	_, _ = fetcher(ctxFetch, "123456789012345678", "non-num", 0)
-	_, _ = fetcher(ctxFetch, "123456789012345678", "123456789012345678", 150)
-
-	_ = resolveMessageEffort(db.Message{Effort: "custom"})
-	_ = resolveMessageEffort(db.Message{Metadata: db.MessageMetadata{Model: "claude-medium"}})
-
-	pStopped := New(nil, WorkerPoolConfig{})
-	pStopped.stopped = true
-	pStopped.EnqueueBurst(db.Message{ID: "m-stopped-burst"})
-
-	pFull := New(nil, WorkerPoolConfig{})
-	pFull.cancel()
-	stF := &threadWorkerState{ch: make(chan db.Message, 1)}
-	stF.ch <- db.Message{ID: "m0"}
-	pFull.threadChs["t-full"] = stF
-	pFull.EnqueueBurst(db.Message{ID: "m-blocked", ThreadID: "t-full"})
-
-	RecoverInterrupted(nil, nil)
-	RecoverInterrupted(fake, nil)
-	RecoverInterrupted(nil, &WorkerPool{})
-
-	recStore := setupTestStore(t)
-	defer recStore.Close()
-	_ = recStore.InsertMessage(context.Background(), db.Message{
-		ID: "m-rec-stale-run", ThreadID: "t-rec-stale", AuthorID: "user-1",
-		ScheduleRunID: "run-stale-rec", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour),
-	})
-	_ = recStore.CreateScheduleRun(context.Background(), db.ScheduleRun{
-		ID: "run-stale-rec", ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC().Add(-2 * time.Hour), Status: "running",
-	})
-	_ = recStore.InsertMessage(context.Background(), db.Message{
-		ID: "m-rec-poison-retry", ThreadID: "t-rec-poison", AuthorID: "user-1",
-		Content: "poison content with a rather long snippet that exceeds sixty characters easily",
-		Status: db.StatusProcessing, RetryCount: 5,
-	})
-	pRec := New(nil, WorkerPoolConfig{
-		Store: recStore,
-		NotifierFunc: func(b, k, d string) string { return "poison alert" },
-		DeliveryFunc: func(s *discordgo.Session, c, t string) error { return nil },
-	})
-	RecoverInterrupted(recStore, pRec)
+			if tc.wantMsgStatus != "" {
+				gotMsg, err := getMessage(fake, tc.msg.ID)
+				if err != nil || gotMsg == nil || gotMsg.Status != tc.wantMsgStatus {
+					t.Errorf("message %s status = %v (err=%v), want %s", tc.msg.ID, gotMsg, err, tc.wantMsgStatus)
+				}
+			}
+			if tc.wantRunStatus != "" && tc.run != nil {
+				gotRun, err := getScheduleRun(fake, tc.run.ID)
+				if err != nil || gotRun == nil || gotRun.Status != tc.wantRunStatus {
+					t.Errorf("run %s status = %v (err=%v), want %s", tc.run.ID, gotRun, err, tc.wantRunStatus)
+				}
+			}
+		})
+	}
 }

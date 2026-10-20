@@ -1123,6 +1123,13 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 	origFetcher := guildMemberFetcher
 	defer func() { guildMemberFetcher = origFetcher }()
 
+	if _, err := origFetcher(nil, "g", "u"); err == nil {
+		t.Errorf("expected error from origFetcher(nil)")
+	}
+	if _, err := origFetcher(&discordgo.Session{}, "g", "u"); err == nil {
+		t.Errorf("expected error from origFetcher(empty Session)")
+	}
+
 	tests := []struct {
 		name                string
 		guildID             string
