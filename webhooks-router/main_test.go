@@ -3362,6 +3362,23 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if err := srvAlert.dispatchAlertWithPrompt(ctx, validSnowflake, "alert", "dm text", "prompt text"); err != nil {
 		t.Errorf("dispatchAlertWithPrompt with dm err: %v", err)
 	}
+
+	// Vanadis silent auto-fix prompts suppress DM and set Silent: true
+	dispVanadis := &mockOutboundDispatcher{}
+	srvVanadis := newTestRouter(Config{}, nil, &mockPRRegistry{suppressVanadisRes: true}, dispVanadis)
+	if err := srvVanadis.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
+		t.Errorf("dispatchCIFailurePrompt(vanadis): %v", err)
+	}
+	if err := srvVanadis.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "feat/x", "sha1", 885); err != nil {
+		t.Errorf("dispatchConflictPrompt(vanadis): %v", err)
+	}
+	if len(dispVanadis.DirectMessageCalls()) != 0 {
+		t.Errorf("expected 0 DMs for Vanadis auto-fix, got %d", len(dispVanadis.DirectMessageCalls()))
+	}
+	vPrompts := dispVanadis.PromptCalls()
+	if len(vPrompts) != 2 || !vPrompts[0].Silent || !vPrompts[1].Silent {
+		t.Errorf("expected 2 silent prompts for Vanadis auto-fix, got %+v", vPrompts)
+	}
 }
 
 // --- 8. River Workers, Crash Alerts & Server Endpoints ---
