@@ -43,23 +43,27 @@ func (p *testRunnerAgentPool) getTargetLock(targetKey string) *sync.Mutex {
 	if p.locks == nil {
 		p.locks = make(map[string]*sync.Mutex)
 	}
-	l, ok := p.locks[targetKey]
-	if !ok {
-		l = &sync.Mutex{}
-		p.locks[targetKey] = l
+	if l, ok := p.locks[targetKey]; ok {
+		return l
 	}
+	l := &sync.Mutex{}
+	p.locks[targetKey] = l
 	return l
 }
 
 func (p *testRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, bool) {
-	if tp, ok := p.trackerPool.(interface{ Get(string) (*runner.StreamingDaemon, bool) }); ok {
+	if tp, ok := p.trackerPool.(interface {
+		Get(string) (*runner.StreamingDaemon, bool)
+	}); ok {
 		return tp.Get(threadID)
 	}
 	return nil, false
 }
 
-func (p *testRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string, sessionID string) (*runner.StreamingDaemon, error) {
-	if tp, ok := p.trackerPool.(interface{ GetOrCreate(context.Context, string, string) (*runner.StreamingDaemon, error) }); ok {
+func (p *testRunnerAgentPool) GetOrCreate(ctx context.Context, threadID, sessionID string) (*runner.StreamingDaemon, error) {
+	if tp, ok := p.trackerPool.(interface {
+		GetOrCreate(context.Context, string, string) (*runner.StreamingDaemon, error)
+	}); ok {
 		return tp.GetOrCreate(ctx, threadID, sessionID)
 	}
 	return nil, fmt.Errorf("no underlying process pool")
@@ -72,7 +76,7 @@ func (p *testRunnerAgentPool) Underlying() *runner.UnifiedProcessPool {
 	return nil
 }
 
-func (p *testRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
+func (p *testRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey, sessionID string) (runner.AgentSession, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	trimmed := strings.TrimSpace(sessionID)
@@ -84,11 +88,7 @@ func (p *testRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey 
 		s.mu.Unlock()
 		return s, nil
 	}
-	s := &testRunnerAgentSession{
-		pool:      p,
-		targetKey: targetKey,
-		sessionID: trimmed,
-	}
+	s := &testRunnerAgentSession{pool: p, targetKey: targetKey, sessionID: trimmed}
 	p.sessions[targetKey] = s
 	return s, nil
 }
@@ -101,10 +101,8 @@ func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string
 	if trimmedKey == "" {
 		return nil, fmt.Errorf("targetKey cannot be empty")
 	}
-
 	tl := p.getTargetLock(trimmedKey)
 	tl.Lock()
-
 	sess, err := p.GetOrCreateSession(ctx, trimmedKey, "")
 	if err != nil {
 		tl.Unlock()
@@ -115,7 +113,6 @@ func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string
 		tl.Unlock()
 		return nil, fmt.Errorf("session is not *testRunnerAgentSession")
 	}
-
 	var rec runner.SessionRecord
 	if p.cfg.Store != nil {
 		rec.ActiveSessionID, _ = p.cfg.Store.GetSessionID(ctx, trimmedKey)
@@ -126,25 +123,15 @@ func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string
 		rec.ActiveSessionID, rec.TurnCount, rec.PreviousSessionID = s.sessionID, s.turnCount, s.prevSessionID
 		s.mu.Unlock()
 	}
-
-	isCold := rec.TurnCount <= 1 || rec.ActiveSessionID == ""
-	turnCount := 0
+	isCold, turnCount := rec.TurnCount <= 1 || rec.ActiveSessionID == "", 0
 	if !isCold {
 		turnCount = rec.TurnCount
 	}
 	s.setSessionID(rec.ActiveSessionID)
-
-	lease := &testSessionLease{
-		pool:       p,
-		session:    s,
-		targetKey:  trimmedKey,
-		sessionID:  rec.ActiveSessionID,
-		prevSessID: rec.PreviousSessionID,
-		isCold:     isCold,
-		turnCount:  turnCount,
-		lock:       tl,
-	}
-	return lease, nil
+	return &testSessionLease{
+		pool: p, session: s, targetKey: trimmedKey, sessionID: rec.ActiveSessionID,
+		prevSessID: rec.PreviousSessionID, isCold: isCold, turnCount: turnCount, lock: tl,
+	}, nil
 }
 
 func (p *testRunnerAgentPool) RotateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
@@ -154,30 +141,19 @@ func (p *testRunnerAgentPool) RotateSession(ctx context.Context, targetKey strin
 	if trimmedKey == "" {
 		return nil, fmt.Errorf("targetKey cannot be empty")
 	}
-
 	oldSessID := ""
 	if existing, ok := p.sessions[trimmedKey]; ok {
 		existing.mu.Lock()
 		oldSessID = existing.sessionID
 		existing.mu.Unlock()
 	}
-
 	newSessID := ""
 	if p.cfg.Store != nil {
-		storedID, err := p.cfg.Store.GetSessionID(ctx, trimmedKey)
-		if err == nil && storedID != "" && storedID != oldSessID {
+		if storedID, err := p.cfg.Store.GetSessionID(ctx, trimmedKey); err == nil && storedID != "" && storedID != oldSessID {
 			newSessID = storedID
 		}
 	}
-
-	s := &testRunnerAgentSession{
-		pool:          p,
-		targetKey:     trimmedKey,
-		sessionID:     newSessID,
-		prevSessionID: oldSessID,
-		turnCount:     0,
-		isCold:        true,
-	}
+	s := &testRunnerAgentSession{pool: p, targetKey: trimmedKey, sessionID: newSessID, prevSessionID: oldSessID, isCold: true}
 	p.sessions[trimmedKey] = s
 	return s, nil
 }
@@ -227,12 +203,10 @@ func (l *testSessionLease) SessionID() string {
 	}
 	return l.sessionID
 }
-
 func (l *testSessionLease) PreviousSessionID() string { return l.prevSessID }
-func (l *testSessionLease) IsCold() bool             { return l.isCold }
-func (l *testSessionLease) IsEphemeral() bool        { return false }
-func (l *testSessionLease) TurnCount() int           { return l.turnCount }
-
+func (l *testSessionLease) IsCold() bool              { return l.isCold }
+func (l *testSessionLease) IsEphemeral() bool         { return false }
+func (l *testSessionLease) TurnCount() int            { return l.turnCount }
 func (l *testSessionLease) MarkDirty() {
 	if l != nil && l.pool != nil {
 		l.pool.mu.Lock()
@@ -248,7 +222,6 @@ func (l *testSessionLease) Execute(ctx context.Context, turn *runner.TurnContext
 	if turn.Ctx == nil {
 		turn.Ctx = ctx
 	}
-
 	bufSink := runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{})
 	origSink := turn.Sink
 	if origSink != nil {
@@ -256,9 +229,7 @@ func (l *testSessionLease) Execute(ctx context.Context, turn *runner.TurnContext
 	} else {
 		turn.Sink = bufSink
 	}
-	defer func() {
-		turn.Sink = origSink
-	}()
+	defer func() { turn.Sink = origSink }()
 
 	if turn.SessionID == "" {
 		l.sessionID = ""
@@ -266,44 +237,37 @@ func (l *testSessionLease) Execute(ctx context.Context, turn *runner.TurnContext
 			l.session.setSessionID("")
 		}
 	}
-
 	sendErr := l.session.Send(turn.Prompt, turn)
 	res, waitErr := bufSink.Wait(ctx)
-
 	if l.session != nil && l.session.SessionID() != "" {
 		l.sessionID = l.session.SessionID()
 	}
 	if res != nil && res.ConversationID != "" {
 		l.sessionID = res.ConversationID
 	}
-
 	if sendErr != nil {
 		return res, sendErr
 	}
 	if waitErr != nil {
 		return res, waitErr
 	}
-
 	l.turnCount++
 	l.isCold = false
 	if l.session != nil {
 		l.session.mu.Lock()
-		l.session.turnCount = l.turnCount
-		l.session.sessionID = l.sessionID
-		l.session.isCold = false
+		l.session.turnCount, l.session.sessionID, l.session.isCold = l.turnCount, l.sessionID, false
 		l.session.mu.Unlock()
 	}
 	return res, nil
 }
 
 func (l *testSessionLease) Release() error {
-	var releaseErr error
 	l.releaseOnce.Do(func() {
 		if l.lock != nil {
 			l.lock.Unlock()
 		}
 	})
-	return releaseErr
+	return nil
 }
 
 type testTurnSinkWrapper struct {
@@ -312,41 +276,59 @@ type testTurnSinkWrapper struct {
 }
 
 func (s *testTurnSinkWrapper) OnTurnStarted() {
-	if s.inner != nil { s.inner.OnTurnStarted() }
+	if s.inner != nil {
+		s.inner.OnTurnStarted()
+	}
 	s.buf.OnTurnStarted()
 }
 func (s *testTurnSinkWrapper) OnThinking() {
-	if s.inner != nil { s.inner.OnThinking() }
+	if s.inner != nil {
+		s.inner.OnThinking()
+	}
 	s.buf.OnThinking()
 }
-func (s *testTurnSinkWrapper) OnStepStarted(stepIndex int) {
+func (s *testTurnSinkWrapper) OnStepStarted(idx int) {
 	if s.inner != nil {
-		if sa, ok := s.inner.(runner.StepAwareSink); ok { sa.OnStepStarted(stepIndex) }
+		if sa, ok := s.inner.(runner.StepAwareSink); ok {
+			sa.OnStepStarted(idx)
+		}
 	}
-	s.buf.OnStepStarted(stepIndex)
+	s.buf.OnStepStarted(idx)
 }
-func (s *testTurnSinkWrapper) OnToolCall(toolName, commandName string) {
-	if s.inner != nil { s.inner.OnToolCall(toolName, commandName) }
-	s.buf.OnToolCall(toolName, commandName)
+func (s *testTurnSinkWrapper) OnToolCall(t, c string) {
+	if s.inner != nil {
+		s.inner.OnToolCall(t, c)
+	}
+	s.buf.OnToolCall(t, c)
 }
-func (s *testTurnSinkWrapper) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
-	if s.inner != nil { s.inner.OnToolCompleted(toolName, mcpServer, duration, status) }
-	s.buf.OnToolCompleted(toolName, mcpServer, duration, status)
+func (s *testTurnSinkWrapper) OnToolCompleted(t, m string, d time.Duration, st string) {
+	if s.inner != nil {
+		s.inner.OnToolCompleted(t, m, d, st)
+	}
+	s.buf.OnToolCompleted(t, m, d, st)
 }
-func (s *testTurnSinkWrapper) OnSkillActivated(skillName, source string) {
-	if s.inner != nil { s.inner.OnSkillActivated(skillName, source) }
-	s.buf.OnSkillActivated(skillName, source)
+func (s *testTurnSinkWrapper) OnSkillActivated(sk, src string) {
+	if s.inner != nil {
+		s.inner.OnSkillActivated(sk, src)
+	}
+	s.buf.OnSkillActivated(sk, src)
 }
-func (s *testTurnSinkWrapper) OnTextDelta(delta string) {
-	if s.inner != nil { s.inner.OnTextDelta(delta) }
-	s.buf.OnTextDelta(delta)
+func (s *testTurnSinkWrapper) OnTextDelta(d string) {
+	if s.inner != nil {
+		s.inner.OnTextDelta(d)
+	}
+	s.buf.OnTextDelta(d)
 }
 func (s *testTurnSinkWrapper) OnResult(res *runner.TurnResult) {
-	if s.inner != nil { s.inner.OnResult(res) }
+	if s.inner != nil {
+		s.inner.OnResult(res)
+	}
 	s.buf.OnResult(res)
 }
 func (s *testTurnSinkWrapper) OnError(err error) {
-	if s.inner != nil { s.inner.OnError(err) }
+	if s.inner != nil {
+		s.inner.OnError(err)
+	}
 	s.buf.OnError(err)
 }
 
@@ -383,11 +365,10 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 	}
 	watchdogOpts := runner.DefaultWatchdogOptions(timeout)
 	if s.pool.cfg.SessionManager != nil {
-		watchdogOpts.TranscriptDirs = s.pool.cfg.SessionManager.Roots()
-		watchdogOpts.HomeDir = s.pool.cfg.SessionManager.HomeDir()
+		watchdogOpts.TranscriptDirs, watchdogOpts.HomeDir = s.pool.cfg.SessionManager.Roots(), s.pool.cfg.SessionManager.HomeDir()
 	}
-	if strings.TrimSpace(s.targetKey) != "" {
-		watchdogOpts.TargetID = strings.TrimSpace(s.targetKey)
+	if trimmed := strings.TrimSpace(s.targetKey); trimmed != "" {
+		watchdogOpts.TargetID = trimmed
 	}
 	ctx := context.Background()
 	if turn != nil && turn.Ctx != nil {
@@ -417,13 +398,30 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 			s.setSessionID("")
 		}
 	}
-	stdout, stderr, exitCode, err := s.pool.cfg.RunnerWithOptionsFunc(
-		ctx, s.pool.cfg.AgyBin, prompt, sessID, s.pool.cfg.APIKey, model, watchdogOpts,
-	)
+	stdout, stderr, exitCode, err := s.pool.cfg.RunnerWithOptionsFunc(ctx, s.pool.cfg.AgyBin, prompt, sessID, s.pool.cfg.APIKey, model, watchdogOpts)
 	if extSess := runner.ExtractSessionID(stdout+"\n"+stderr, time.Time{}); extSess != "" {
 		s.setSessionID(extSess)
 	}
-	rescueTranscript := func() string {
+	return s.routeSendResponse(turn, stdout, stderr, exitCode, err)
+}
+
+func (s *testRunnerAgentSession) routeSendResponse(turn *runner.TurnContext, stdout, stderr string, exitCode int, err error) error {
+	reportErr := func(e error) error {
+		if turn != nil && turn.Sink != nil {
+			turn.Sink.OnError(e)
+		}
+		return e
+	}
+	if err != nil {
+		if stderr != "" && !strings.Contains(err.Error(), stderr) {
+			err = fmt.Errorf("%w: %s", err, stderr)
+		}
+		return reportErr(err)
+	}
+	if exitCode != 0 {
+		return reportErr(fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr))
+	}
+	rescue := func() string {
 		if s.pool.cfg.SessionManager == nil {
 			return ""
 		}
@@ -438,56 +436,39 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 		if turn != nil {
 			since = turn.CreatedAt
 		}
-		if rescued := s.pool.cfg.SessionManager.ExtractResponseSince(resSess, since); runner.IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
-			return strings.TrimSpace(rescued)
+		if resc := s.pool.cfg.SessionManager.ExtractResponseSince(resSess, since); runner.IsSubstantiveResponse(resc) && !strings.HasPrefix(resc, "[Tool Call Requested]:") {
+			return strings.TrimSpace(resc)
 		}
 		return ""
-	}
-
-	reportErr := func(e error) error {
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(e)
-		}
-		return e
-	}
-
-	if err != nil {
-		if stderr != "" && !strings.Contains(err.Error(), stderr) {
-			err = fmt.Errorf("%w: %s", err, stderr)
-		}
-		return reportErr(err)
-	}
-	if exitCode != 0 {
-		return reportErr(fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr))
 	}
 	respText := stdout
 	var parsedUsage runner.AgyUsage
 	if parsed, pErr := runner.ParseAgyOutput(stdout); pErr == nil {
-		respText = parsed.Response
+		respText, parsedUsage = parsed.Response, parsed.Usage
 		if parsed.ConversationID != "" {
 			s.setSessionID(parsed.ConversationID)
 		}
-		parsedUsage = parsed.Usage
 		if parsed.Error != "" {
-			if rescued := rescueTranscript(); rescued != "" {
-				respText = rescued
+			if resc := rescue(); resc != "" {
+				respText = resc
 			} else {
-				if strings.Contains(strings.ToLower(parsed.Error), "stream was interrupted") || strings.Contains(strings.ToLower(parsed.Error), "session corrupt") || strings.Contains(strings.ToLower(parsed.Error), "corrupted session") {
+				lower := strings.ToLower(parsed.Error)
+				if strings.Contains(lower, "stream was interrupted") || strings.Contains(lower, "session corrupt") || strings.Contains(lower, "corrupted session") {
 					s.setSessionID("")
 				}
 				return reportErr(errors.New(parsed.Error))
 			}
 		} else if parsed.Status != "" && strings.ToUpper(parsed.Status) != "SUCCESS" {
-			if rescued := rescueTranscript(); rescued != "" {
-				respText = rescued
+			if resc := rescue(); resc != "" {
+				respText = resc
 			} else {
 				return reportErr(fmt.Errorf("runner status: %s", parsed.Status))
 			}
 		}
 	}
 	if strings.TrimSpace(respText) == "" {
-		if rescued := rescueTranscript(); rescued != "" {
-			respText = rescued
+		if resc := rescue(); resc != "" {
+			respText = resc
 		}
 	}
 	if turn != nil && turn.Sink != nil {
@@ -495,12 +476,7 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 		if resSess == "" && turn.SessionID != "" {
 			resSess = turn.SessionID
 		}
-		turn.Sink.OnResult(&runner.TurnResult{
-			ConversationID: resSess,
-			Response:       strings.TrimSpace(respText),
-			Stderr:         stderr,
-			Usage:          parsedUsage,
-		})
+		turn.Sink.OnResult(&runner.TurnResult{ConversationID: resSess, Response: strings.TrimSpace(respText), Stderr: stderr, Usage: parsedUsage})
 	}
 	return nil
 }

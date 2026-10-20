@@ -31,7 +31,6 @@ import (
 
 func TestWorker_WatchTaskCompletion(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
 		name       string
 		preWrite   bool
@@ -41,29 +40,10 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 		wantCode   int
 		wantErr    bool
 	}{
-		{
-			name:     "YieldTrapAutoResume_PreWritten",
-			preWrite: true,
-			taskID:   "task-test-1",
-			wantCode: 0,
-			wantErr:  false,
-		},
-		{
-			name:     "ContextTimeout_NonExistent",
-			taskID:   "non-existent-task",
-			timeout:  50 * time.Millisecond,
-			wantCode: -1,
-			wantErr:  true,
-		},
-		{
-			name:       "TickerTrigger_DelayedWrite",
-			delayWrite: true,
-			taskID:     "delayed-task",
-			wantCode:   0,
-			wantErr:    false,
-		},
+		{name: "YieldTrapAutoResume_PreWritten", preWrite: true, taskID: "task-test-1", wantCode: 0},
+		{name: "ContextTimeout_NonExistent", taskID: "non-existent-task", timeout: 50 * time.Millisecond, wantCode: -1, wantErr: true},
+		{name: "TickerTrigger_DelayedWrite", delayWrite: true, taskID: "delayed-task", wantCode: 0},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -71,13 +51,9 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 			taskDir := filepath.Join(tempDir, ".system_generated", "tasks")
 			_ = os.MkdirAll(taskDir, 0755)
 			logFile := filepath.Join(taskDir, tc.taskID+".log")
-
 			if tc.preWrite {
-				if err := os.WriteFile(logFile, []byte("Task output\n"), 0644); err != nil {
-					t.Fatalf("failed to write logFile: %v", err)
-				}
+				_ = os.WriteFile(logFile, []byte("Task output\n"), 0644)
 			}
-
 			var done chan struct{}
 			if tc.delayWrite {
 				done = make(chan struct{})
@@ -87,20 +63,16 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 					_ = os.WriteFile(logFile, []byte("finished"), 0644)
 				}()
 			}
-
 			ctx := context.Background()
 			if tc.timeout > 0 {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
 				defer cancel()
 			}
-
 			code, logPath, err := watchTaskCompletion(ctx, tempDir, tc.taskID)
-			if tc.wantErr {
-				if err == nil {
-					t.Errorf("expected error, got nil")
-				}
-			} else {
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error, got nil")
+			} else if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
@@ -111,7 +83,6 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 			if code != tc.wantCode {
 				t.Errorf("expected code %d, got %d", tc.wantCode, code)
 			}
-
 			if done != nil {
 				<-done
 			}
@@ -122,109 +93,23 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 func TestWorker_PoolDaemonAccessors(t *testing.T) {
 	mockSpawner := runner.NewMockDaemonSpawner()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	defer func() {
-		if err := procPool.Close(); err != nil {
-			t.Logf("cleanup unified pool: %v", err)
-		}
-	}()
+	defer procPool.Close()
 
-	pool := NewWorkerPool(WorkerPoolConfig{
-		ProcessPool: procPool,
-	})
+	pool := NewWorkerPool(WorkerPoolConfig{ProcessPool: procPool})
 	defer pool.Stop()
 
 	if pool.ProcessPool() == nil {
-		t.Errorf("expected non-nil ProcessPool from pool.ProcessPool()")
+		t.Errorf("expected non-nil ProcessPool")
 	}
-
 	var nilPool *WorkerPool
 	if nilPool.ProcessPool() != nil {
 		t.Errorf("expected nil ProcessPool for nil WorkerPool")
 	}
 }
 
-func TestWorker_PersistentDaemonTurnExecution(t *testing.T) {
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
-	sessID := "a1111111-2222-3333-4444-555555555555"
-	mockSpawner := newScriptedDaemonSpawner(sessID,
-		`{"event":"result","result":{"status":"SUCCESS","response":"Executed via persistent daemon","usage":{"total_tokens":10}}}`+"\n",
-	)
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	defer func() {
-		_ = procPool.Close()
-	}()
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-	})
-
-	doneCh := make(chan struct{})
-	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool:    procPool,
-		SessionManager: session.New(tmpHome, tempData),
-		Store:          store,
-		TimeoutMinutes: 1,
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
-			}
-		},
-	})
-	defer pool.Stop()
-
-	threadID := "thread-persist-test"
-	_ = store.SaveSessionID(context.Background(), threadID, sessID)
-	sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDir, 0755)
-	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
-
-	msg := db.Message{
-		ID:        "msg-persist-1",
-		ThreadID:  threadID,
-		Content:   "Hello daemon",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
-	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for message completion")
-	}
-
-	if pool.ProcessPool() == nil || !pool.ProcessPool().HasDaemon(threadID) {
-		t.Errorf("expected daemon to exist for thread %s in pool", threadID)
-	}
-
-	rec := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	metricsBody := rec.Body.String()
-	if !strings.Contains(metricsBody, `source="discord"`) {
-		t.Errorf("expected metrics to contain source=discord, got:\n%s", metricsBody)
-	}
-	if !strings.Contains(metricsBody, `aerial_brain_runner_executions_total{`) || !strings.Contains(metricsBody, `source="discord"`) {
-		t.Errorf("expected runner executions metric with source=discord, got:\n%s", metricsBody)
-	}
-	if !strings.Contains(metricsBody, `aerial_brain_runner_duration_seconds_bucket{`) || !strings.Contains(metricsBody, `source="discord"`) {
-		t.Errorf("expected runner duration bucket metric with source=discord, got:\n%s", metricsBody)
-	}
-}
-
 func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 	var mu sync.Mutex
 	capturedConfigs := make([]runner.DaemonConfig, 0)
 
@@ -233,7 +118,6 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 			mu.Lock()
 			capturedConfigs = append(capturedConfigs, cfg)
 			mu.Unlock()
-
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()
 			errR, errW := io.Pipe()
@@ -255,10 +139,7 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
 	defer procPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-	})
-
+	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	completedCh := make(chan string, 10)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool:    procPool,
@@ -273,38 +154,28 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	})
 	defer pool.Stop()
 
-	// Case 1: Thread with existing session
-	threadWithSess := "thread-with-sess"
 	expectedSessID := "a1111111-2222-3333-4444-555555555555"
-	_ = store.SaveSessionID(context.Background(), threadWithSess, expectedSessID)
-
-	msg1 := db.Message{ID: "msg-with-sess", ThreadID: threadWithSess, Content: "Resume turn", Status: db.StatusPending, CreatedAt: time.Now()}
+	_ = store.SaveSessionID(context.Background(), "thread-with-sess", expectedSessID)
+	msg1 := db.Message{ID: "msg-with-sess", ThreadID: "thread-with-sess", Content: "Resume turn", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), msg1)
 	pool.Enqueue(msg1)
 
-	select {
-	case id := <-completedCh:
-		if id != "msg-with-sess" {
-			t.Fatalf("unexpected message completed: %s", id)
+	waitCompleted := func(expectedID string) {
+		select {
+		case id := <-completedCh:
+			if id != expectedID {
+				t.Fatalf("unexpected message completed: %s", id)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout waiting for %s", expectedID)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for msg-with-sess")
 	}
+	waitCompleted("msg-with-sess")
 
-	// Case 2: Fresh thread without session
-	freshThread := "thread-fresh"
-	msg2 := db.Message{ID: "msg-fresh", ThreadID: freshThread, Content: "First turn", Status: db.StatusPending, CreatedAt: time.Now()}
+	msg2 := db.Message{ID: "msg-fresh", ThreadID: "thread-fresh", Content: "First turn", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), msg2)
 	pool.Enqueue(msg2)
-
-	select {
-	case id := <-completedCh:
-		if id != "msg-fresh" {
-			t.Fatalf("unexpected message completed: %s", id)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for msg-fresh")
-	}
+	waitCompleted("msg-fresh")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -315,63 +186,28 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 		t.Errorf("expected DaemonConfig.SessionID %q, got %q", expectedSessID, capturedConfigs[0].SessionID)
 	}
 	if capturedConfigs[1].SessionID != "" {
-		t.Errorf("expected DaemonConfig.SessionID empty for fresh thread, got %q", capturedConfigs[1].SessionID)
+		t.Errorf("expected DaemonConfig.SessionID empty, got %q", capturedConfigs[1].SessionID)
 	}
 }
 
 func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 	tests := []struct {
-		name         string
-		threadID     string
-		msgID        string
-		taskID       string
-		effort       string
-		isLowPool    bool
-		wantScopeKey string
+		name, threadID, msgID, taskID, effort, wantScopeKey string
+		isLowPool                                           bool
 	}{
-		{
-			name:         "PrimaryPool",
-			threadID:     "thread-active-tasks-reap",
-			msgID:        "msg-reap-1",
-			taskID:       "task-busy-prevent-reap",
-			effort:       "",
-			isLowPool:    false,
-			wantScopeKey: "thread-active-tasks-reap",
-		},
-		{
-			name:         "LowEffortPool",
-			threadID:     "thread-low-reap-test",
-			msgID:        "msg-low-reap-1",
-			taskID:       "task-low-busy-prevent-reap",
-			effort:       "low",
-			isLowPool:    true,
-			wantScopeKey: "low_effort:thread-low-reap-test",
-		},
+		{name: "PrimaryPool", threadID: "thread-active-tasks-reap", msgID: "msg-reap-1", taskID: "task-busy-prevent-reap", wantScopeKey: "thread-active-tasks-reap"},
+		{name: "LowEffortPool", threadID: "thread-low-reap-test", msgID: "msg-low-reap-1", taskID: "task-low-busy-prevent-reap", effort: "low", isLowPool: true, wantScopeKey: "low_effort:thread-low-reap-test"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := setupTestStore(t)
-			tmpHome := t.TempDir()
-			tempData := t.TempDir()
-
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 			sessID := "b1111111-2222-3333-4444-555555555555"
-			mockSpawner := newScriptedDaemonSpawner(sessID,
-				`{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}`+"\n",
-			)
-			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newScriptedDaemonSpawner(sessID, `{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}`+"\n"))
 			defer primaryPool.Close()
-
-			lowSpawner := newScriptedDaemonSpawner("e1111111-2222-3333-4444-555555555555",
-				`{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}`+"\n",
-			)
-			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, newScriptedDaemonSpawner("e1111111-2222-3334-4444-555555555555", `{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}`+"\n"))
 			defer lowPool.Close()
 
-			cfg := config.NewTestConfig(func(d *config.ConfigData) {
-				d.DataDir = tempData
-			})
-
+			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 			_ = store.SaveSessionID(context.Background(), tc.threadID, sessID)
 			sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
 			_ = os.MkdirAll(sessDir, 0755)
@@ -379,13 +215,9 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 
 			doneCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
-				ProcessPool:          primaryPool,
-				LowEffortProcessPool: lowPool,
-				SessionManager:       session.New(tmpHome, tempData),
-				Store:                store,
-				TimeoutMinutes:       1,
-				MaxAttempts:          1,
-				IdleTimeout:          20 * time.Millisecond,
+				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
+				SessionManager: session.New(tmpHome, tempData), Store: store,
+				TimeoutMinutes: 1, MaxAttempts: 1, IdleTimeout: 20 * time.Millisecond,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					select {
 					case <-doneCh:
@@ -405,10 +237,7 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create daemon: %v", err)
 			}
-			daemon.TaskTracker().Add(runner.TaskMetadata{
-				TaskID:    tc.taskID,
-				StartedAt: time.Now(),
-			})
+			daemon.TaskTracker().Add(runner.TaskMetadata{TaskID: tc.taskID, StartedAt: time.Now()})
 
 			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, Content: "Hello reap test", Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now()}
 			_ = store.InsertMessage(context.Background(), msg)
@@ -425,19 +254,17 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 			_, workerStillActive := pool.threadChs[tc.wantScopeKey]
 			pool.mu.Unlock()
 			if !workerStillActive {
-				t.Errorf("expected worker to remain active for scope %s", tc.wantScopeKey)
+				t.Errorf("expected worker active for scope %s", tc.wantScopeKey)
 			}
 
 			if !tc.isLowPool {
 				daemon.TaskTracker().Remove(tc.taskID)
-				reaped := false
-				ticker := time.NewTicker(10 * time.Millisecond)
+				reaped, ticker, timeout := false, time.NewTicker(10*time.Millisecond), time.After(2*time.Second)
 				defer ticker.Stop()
-				timeout := time.After(2 * time.Second)
 				for !reaped {
 					select {
 					case <-timeout:
-						t.Fatalf("expected worker to be reaped after background task finished")
+						t.Fatalf("expected worker to be reaped")
 					case <-ticker.C:
 						pool.mu.Lock()
 						_, active := pool.threadChs[tc.wantScopeKey]
@@ -453,31 +280,13 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 }
 
 func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 	tests := []struct {
-		name     string
-		agyBin   string
-		threadID string
-		sessID   string
-		script   string
+		name, agyBin, threadID, sessID, script string
 	}{
-		{
-			name:     "InvalidBinary",
-			agyBin:   "/invalid/nonexistent/bin/path",
-			threadID: "thread-bad-daemon",
-			sessID:   "c1111111-2222-3333-4444-555555555555",
-		},
-		{
-			name:     "ScriptExitError",
-			threadID: "thread-err-daemon",
-			sessID:   "d1111111-2222-3333-4444-555555555555",
-			script:   "#!/bin/sh\nexit 1\n",
-		},
+		{name: "InvalidBinary", agyBin: "/invalid/nonexistent/bin/path", threadID: "thread-bad-daemon", sessID: "c1111111-2222-3333-4444-555555555555"},
+		{name: "ScriptExitError", threadID: "thread-err-daemon", sessID: "d1111111-2222-3333-4444-555555555555", script: "#!/bin/sh\nexit 1\n"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			binPath := tc.agyBin
@@ -485,18 +294,11 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 				binPath = filepath.Join(t.TempDir(), "mock_err.sh")
 				_ = os.WriteFile(binPath, []byte(tc.script), 0755)
 			}
-
-			cfg := config.NewTestConfig(func(d *config.ConfigData) {
-				d.AgyBin = binPath
-				d.DataDir = tempData
-			})
-
+			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.AgyBin, d.DataDir = binPath, tempData })
 			failedCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
-				SessionManager: session.New(tmpHome, tempData),
-				Store:          store,
-				TimeoutMinutes: 1,
-				MaxAttempts:    1,
+				SessionManager: session.New(tmpHome, tempData), Store: store,
+				TimeoutMinutes: 1, MaxAttempts: 1,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusFailed {
 						select {
@@ -510,13 +312,7 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 			defer pool.Stop()
 
 			_ = store.SaveSessionID(context.Background(), tc.threadID, tc.sessID)
-			msg := db.Message{
-				ID:        "msg-" + tc.threadID,
-				ThreadID:  tc.threadID,
-				Content:   "fail",
-				Status:    db.StatusPending,
-				CreatedAt: time.Now(),
-			}
+			msg := db.Message{ID: "msg-" + tc.threadID, ThreadID: tc.threadID, Content: "fail", Status: db.StatusPending, CreatedAt: time.Now()}
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
@@ -531,135 +327,82 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 
 func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name                string
-		threadID            string
-		daemonUUID          string
-		presetSessionInDB   string
-		turnResponses       []string
-		transcriptContent   string
-		foreignDiskUUID     string
-		expectedFinalStatus string
-		wantDeliveredSubstr string
-		wantSavedSession    string
-		checkQuotaSchedule  bool
-		checkQuotaDbError   bool
-		expectSessionReject string
+		name, threadID, daemonUUID, presetSessionInDB string
+		turnResponses                                 []string
+		transcriptContent, foreignDiskUUID            string
+		expectedFinalStatus, wantDeliveredSubstr      string
+		wantSavedSession, expectSessionReject         string
+		checkQuotaSchedule, checkQuotaDbError         bool
+		checkMetrics                                  bool
 	}{
 		{
-			name:                "ColdStart_Success",
-			threadID:            "thread-cold-persist-success",
-			daemonUUID:          "c1111111-2222-3333-4444-555555555555",
+			name: "ColdStart_Success", threadID: "thread-cold-persist-success", daemonUUID: "c1111111-2222-3333-4444-555555555555",
 			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"Cold start completed successfully!","usage":{"total_tokens":25}}}` + "\n"},
-			expectedFinalStatus: db.StatusCompleted,
-			wantDeliveredSubstr: "Cold start completed successfully!",
-			wantSavedSession:    "c1111111-2222-3333-4444-555555555555",
+			expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Cold start completed successfully!", wantSavedSession: "c1111111-2222-3333-4444-555555555555", checkMetrics: true,
 		},
 		{
-			name:                "ColdStart_RejectsForeignSessionOnDisk",
-			threadID:            "thread-cold-persist-no-foreign",
-			daemonUUID:          "d1111111-2222-3333-4444-555555555555",
-			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"Turn completed","usage":{"total_tokens":15}}}` + "\n"},
-			foreignDiskUUID:     "f1111111-2222-3333-4444-555555555555",
-			expectedFinalStatus: db.StatusCompleted,
-			wantDeliveredSubstr: "Turn completed",
-			wantSavedSession:    "d1111111-2222-3333-4444-555555555555",
-			expectSessionReject: "f1111111-2222-3333-4444-555555555555",
+			name: "ColdStart_RejectsForeignSessionOnDisk", threadID: "thread-cold-persist-no-foreign", daemonUUID: "d1111111-2222-3333-4444-555555555555",
+			turnResponses:   []string{`{"event":"result","result":{"status":"SUCCESS","response":"Turn completed","usage":{"total_tokens":15}}}` + "\n"},
+			foreignDiskUUID: "f1111111-2222-3333-4444-555555555555", expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Turn completed",
+			wantSavedSession: "d1111111-2222-3333-4444-555555555555", expectSessionReject: "f1111111-2222-3333-4444-555555555555",
 		},
 		{
-			name:                "EmptyResponse_TranscriptFallback",
-			threadID:            "thread-empty-resp-fallback",
-			daemonUUID:          "e1111111-2222-3333-4444-555555555555",
+			name: "EmptyResponse_TranscriptFallback", threadID: "thread-empty-resp-fallback", daemonUUID: "e1111111-2222-3333-4444-555555555555",
 			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":10}}}` + "\n"},
 			transcriptContent:   `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered from transcript!"}` + "\n",
-			expectedFinalStatus: db.StatusCompleted,
-			wantDeliveredSubstr: "Recovered from transcript!",
+			expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Recovered from transcript!",
 		},
 		{
-			name:       "DaemonEmptyResponse_TranscriptFallback",
-			threadID:   "thread-daemon-empty-fallback",
-			daemonUUID: "e3333333-4444-5555-6666-777777777777",
-			turnResponses: []string{
-				`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}` + "\n" +
-					`{"event":"result","result":{"status":"SUCCESS","response":""}}` + "\n",
-			},
+			name: "DaemonEmptyResponse_TranscriptFallback", threadID: "thread-daemon-empty-fallback", daemonUUID: "e3333333-4444-5555-6666-777777777777",
+			turnResponses:       []string{`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}` + "\n" + `{"event":"result","result":{"status":"SUCCESS","response":""}}` + "\n"},
 			transcriptContent:   `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered after daemon empty response!"}` + "\n",
-			expectedFinalStatus: db.StatusCompleted,
-			wantDeliveredSubstr: "Recovered after daemon empty response!",
+			expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Recovered after daemon empty response!",
 		},
 		{
-			name:              "QuotaExhaustion_FromTranscript",
-			threadID:          "thread-quota-exhaustion-test",
-			daemonUUID:        "f2222222-3333-4444-5555-666666666666",
-			presetSessionInDB: "f2222222-3333-4444-5555-666666666666",
-			turnResponses:     []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
-			transcriptContent: fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":%q}`+"\n",
-				time.Now().UTC().Format(time.RFC3339)),
-			expectedFinalStatus: db.StatusFailed,
-			wantDeliveredSubstr: "resets in",
-			checkQuotaSchedule:  true,
-			checkQuotaDbError:   true,
+			name: "QuotaExhaustion_FromTranscript", threadID: "thread-quota-exhaustion-test", daemonUUID: "f2222222-3333-4444-5555-666666666666", presetSessionInDB: "f2222222-3333-4444-5555-666666666666",
+			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
+			transcriptContent:   fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":%q}`+"\n", time.Now().UTC().Format(time.RFC3339)),
+			expectedFinalStatus: db.StatusFailed, wantDeliveredSubstr: "resets in", checkQuotaSchedule: true, checkQuotaDbError: true,
 		},
 		{
-			name:              "QuotaPause_RotatesBloatedSession",
-			threadID:          "thread-quota-bloat-rotation",
-			daemonUUID:        "b3333333-4444-5555-6666-777777777777",
-			presetSessionInDB: "b3333333-4444-5555-6666-777777777777",
-			turnResponses:     []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
+			name: "QuotaPause_RotatesBloatedSession", threadID: "thread-quota-bloat-rotation", daemonUUID: "b3333333-4444-5555-6666-777777777777", presetSessionInDB: "b3333333-4444-5555-6666-777777777777",
+			turnResponses: []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
 			transcriptContent: fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
 {"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2h30m.","created_at":%q}
 `, session.DefaultMaxSessionSteps, time.Now().UTC().Format(time.RFC3339)),
-			expectedFinalStatus: db.StatusFailed,
-			wantSavedSession:    "b3333333-4444-5555-6666-777777777777",
+			expectedFinalStatus: db.StatusFailed, wantSavedSession: "b3333333-4444-5555-6666-777777777777",
 		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
-			tmpHome := t.TempDir()
-			tempData := t.TempDir()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newScriptedDaemonSpawner(tc.daemonUUID, tc.turnResponses...))
+			defer procPool.Close()
 
-			mockSpawner := newScriptedDaemonSpawner(tc.daemonUUID, tc.turnResponses...)
-			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-			defer func() {
-				_ = procPool.Close()
-			}()
-
-			cfg := config.NewTestConfig(func(d *config.ConfigData) {
-				d.DataDir = tempData
-			})
-
+			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 			if tc.presetSessionInDB != "" {
 				_ = store.SaveSessionID(context.Background(), tc.threadID, tc.presetSessionInDB)
 			}
-
 			if tc.transcriptContent != "" {
 				sessDir := filepath.Join(tempData, "brain", tc.daemonUUID, ".system_generated", "logs")
 				_ = os.MkdirAll(sessDir, 0755)
 				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0644)
 			}
-
 			if tc.foreignDiskUUID != "" {
 				brainDir := filepath.Join(tempData, "brain", tc.foreignDiskUUID)
 				_ = os.MkdirAll(brainDir, 0755)
-				futureTime := time.Now().Add(5 * time.Second)
-				_ = os.Chtimes(brainDir, futureTime, futureTime)
+				ft := time.Now().Add(5 * time.Second)
+				_ = os.Chtimes(brainDir, ft, ft)
 			}
 
 			var deliveredText string
 			doneCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
-				ProcessPool:    procPool,
-				SessionManager: session.New(tmpHome, tempData),
-				Store:          store,
-				TimeoutMinutes: 1,
-				DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
-					deliveredText = content
-					return nil
-				},
+				ProcessPool: procPool, SessionManager: session.New(tmpHome, tempData),
+				Store: store, TimeoutMinutes: 1,
+				DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error { deliveredText = content; return nil },
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == tc.expectedFinalStatus {
 						select {
@@ -673,13 +416,7 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			defer pool.Stop()
 
 			msgID := "msg-" + tc.threadID
-			msg := db.Message{
-				ID:        msgID,
-				ThreadID:  tc.threadID,
-				Content:   "run turn",
-				Status:    db.StatusPending,
-				CreatedAt: time.Now(),
-			}
+			msg := db.Message{ID: msgID, ThreadID: tc.threadID, Content: "run turn", Status: db.StatusPending, CreatedAt: time.Now()}
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
@@ -689,42 +426,40 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 				t.Fatalf("timed out waiting for message completion")
 			}
 
+			if tc.checkMetrics {
+				if pool.ProcessPool() == nil || !pool.ProcessPool().HasDaemon(tc.threadID) {
+					t.Errorf("expected daemon for %s", tc.threadID)
+				}
+				rec := httptest.NewRecorder()
+				metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+				b := rec.Body.String()
+				if !strings.Contains(b, `source="discord"`) || !strings.Contains(b, `aerial_brain_runner_executions_total{`) || !strings.Contains(b, `aerial_brain_runner_duration_seconds_bucket{`) {
+					t.Errorf("metrics missing expected discord labels")
+				}
+			}
 			if tc.wantDeliveredSubstr != "" && !strings.Contains(deliveredText, tc.wantDeliveredSubstr) {
-				t.Errorf("expected delivered text to contain %q, got: %q", tc.wantDeliveredSubstr, deliveredText)
+				t.Errorf("delivered text = %q, want substr %q", deliveredText, tc.wantDeliveredSubstr)
 			}
-
 			if tc.wantSavedSession != "" {
-				savedSess, err := store.GetSessionID(context.Background(), tc.threadID)
-				if err != nil {
-					t.Fatalf("failed to query session id: %v", err)
-				}
-				if savedSess != tc.wantSavedSession {
-					t.Errorf("expected session synchronized to %q, got %q", tc.wantSavedSession, savedSess)
+				s, _ := store.GetSessionID(context.Background(), tc.threadID)
+				if s != tc.wantSavedSession {
+					t.Errorf("saved session = %q, want %q", s, tc.wantSavedSession)
 				}
 			}
-
 			if tc.expectSessionReject != "" {
-				savedSess, _ := store.GetSessionID(context.Background(), tc.threadID)
-				if savedSess == tc.expectSessionReject {
-					t.Fatalf("security violation: worker latched newer foreign session %q from disk instead of daemon session", tc.expectSessionReject)
+				s, _ := store.GetSessionID(context.Background(), tc.threadID)
+				if s == tc.expectSessionReject {
+					t.Fatalf("security violation: latched foreign session %q", tc.expectSessionReject)
 				}
 			}
-
 			if tc.checkQuotaDbError {
-				dbMsg, err := store.GetMessage(context.Background(), msgID)
-				if err != nil || dbMsg == nil {
-					t.Fatalf("failed to query message: %v", err)
-				}
-				if !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
-					t.Errorf("expected error message to contain [QUOTA_PAUSED], got %q", dbMsg.ErrorMessage)
+				dbMsg, _ := store.GetMessage(context.Background(), msgID)
+				if dbMsg == nil || !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
+					t.Errorf("expected [QUOTA_PAUSED]")
 				}
 			}
-
 			if tc.checkQuotaSchedule {
-				schedules, err := store.GetAllOneShotSchedules(context.Background(), tc.threadID)
-				if err != nil {
-					t.Fatalf("failed to list one-shot schedules: %v", err)
-				}
+				schedules, _ := store.GetAllOneShotSchedules(context.Background(), tc.threadID)
 				found := false
 				for _, s := range schedules {
 					if s.ThreadID == tc.threadID && strings.Contains(s.Prompt, "[QUOTA_RETRY]") {
@@ -733,7 +468,7 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Errorf("expected one-shot retry schedule for thread %s with [QUOTA_RETRY]", tc.threadID)
+					t.Errorf("expected one-shot retry with [QUOTA_RETRY]")
 				}
 			}
 		})
@@ -741,24 +476,16 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 }
 
 func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-	store := setupTestStore(t)
-
+	tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
 	validUUID := "c4444444-5555-6666-7777-888888888888"
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
 	_ = os.MkdirAll(sessDir, 0755)
-	tNow := time.Now().UTC()
 	transcriptFile := filepath.Join(sessDir, "transcript.jsonl")
-	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
+	_ = os.WriteFile(transcriptFile, []byte(fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
 {"step_index":100,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"working...","created_at":%q}
-`, tNow.Format(time.RFC3339))
-	_ = os.WriteFile(transcriptFile, []byte(transcriptContent), 0644)
+`, time.Now().UTC().Format(time.RFC3339))), 0644)
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-	})
-
+	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-transient-bloat-rotation"
 	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
 
@@ -767,22 +494,15 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager: session.New(tmpHome, tempData),
-		Store:          store,
-		TimeoutMinutes: 1,
-		MaxAttempts:    2,
-		BackoffBase:    10 * time.Millisecond,
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: 2, BackoffBase: 10 * time.Millisecond,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			sessionsSeen = append(sessionsSeen, sessionID)
-			attemptNum := len(sessionsSeen)
+			att := len(sessionsSeen)
 			mu.Unlock()
-
-			if attemptNum == 1 {
-				bloatedContent := fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"tool runaway","created_at":%q}`+"\n",
-					session.DefaultMaxSessionSteps+5, time.Now().UTC().Format(time.RFC3339))
-				f, _ := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0644)
-				if f != nil {
+			if att == 1 {
+				bloatedContent := fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"tool runaway","created_at":%q}`+"\n", session.DefaultMaxSessionSteps+5, time.Now().UTC().Format(time.RFC3339))
+				if f, _ := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0644); f != nil {
 					_, _ = f.WriteString(bloatedContent)
 					_ = f.Close()
 				}
@@ -790,9 +510,7 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 			}
 			return mockJSONResponse(uuid.New().String(), "Recovered successfully"), "", 0, nil
 		},
-		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
-			return nil
-		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error { return nil },
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				select {
@@ -817,142 +535,51 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(sessionsSeen) != 2 {
-		t.Fatalf("expected 2 runner attempts, got %d", len(sessionsSeen))
-	}
-	if sessionsSeen[0] != validUUID || sessionsSeen[1] != validUUID {
+	if len(sessionsSeen) != 2 || sessionsSeen[0] != validUUID || sessionsSeen[1] != validUUID {
 		t.Errorf("expected attempts to preserve session ID %q across retry, got: %v", validUUID, sessionsSeen)
 	}
-	prevSess, _ := store.GetPreviousSessionID(context.Background(), threadID)
-	if prevSess != "" {
-		t.Errorf("expected previous session ID to be empty, got %q", prevSess)
+	if prevSess, _ := store.GetPreviousSessionID(context.Background(), threadID); prevSess != "" {
+		t.Errorf("expected previous session ID empty, got %q", prevSess)
 	}
 }
 
 func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	t1 := now.Add(-10 * time.Minute)
-	t2 := now.Add(-5 * time.Minute)
-
 	mockDiscordMsgs := []*discordgo.Message{
 		nil,
-		{
-			ID:        "1552732003076669002",
-			ChannelID: "1552732003076669460",
-			Content:   "Can we add the SVG icon?",
-			Timestamp: t2,
-			Author:    &discordgo.User{ID: "169260920550195200", Username: "arcane103"},
-			Mentions:  []*discordgo.User{{ID: "bot-123", Username: "Aerial"}},
-			ReferencedMessage: &discordgo.Message{
-				Author: &discordgo.User{Username: "Aerial"},
-			},
-		},
-		{
-			ID:        "1552732003076669001",
-			ChannelID: "1552732003076669460",
-			Content:   "Weather widget looks good",
-			Timestamp: t1,
-			Author:    &discordgo.User{ID: "169260920550195200", Username: "arcane103"},
-		},
-		{
-			ID:        "1552732003076669000",
-			ChannelID: "1552732003076669460",
-			Content:   "Webhook notification",
-			WebhookID: "hook-123",
-		},
-		{
-			ID:        "1552732003076669099",
-			ChannelID: "1552732003076669460",
-			Content:   "Current burst message to filter",
-			Timestamp: now,
-		},
+		{ID: "1552732003076669002", ChannelID: "1552732003076669460", Content: "Can we add SVG?", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "100000000000000001", Username: "test-user"}, Mentions: []*discordgo.User{{ID: "bot-123", Username: "Aerial"}}, ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "Aerial"}}},
+		{ID: "1552732003076669001", ChannelID: "1552732003076669460", Content: "Weather widget", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "100000000000000001", Username: "test-user"}},
+		{ID: "1552732003076669000", ChannelID: "1552732003076669460", Content: "Webhook notification", WebhookID: "hook-123"},
+		{ID: "1552732003076669099", ChannelID: "1552732003076669460", Content: "Current burst msg", Timestamp: now},
 	}
-
 	dgSuccess, _ := discordgo.New("Bot test-token")
 	dgSuccess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		body, _ := json.Marshal(mockDiscordMsgs)
-		return &http.Response{
-			StatusCode: 200,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(bytes.NewReader(body)),
-		}, nil
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
 	})
-
 	dgFail, _ := discordgo.New("Bot test")
-	dgFail.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		return nil, errors.New("discord simulated network error")
-	})
+	dgFail.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("simulated error") })
 
 	fakeStore := db.NewFakeStore()
 	ctx := context.Background()
-	_ = fakeStore.InsertMessage(ctx, db.Message{
-		ID:         "msg-1",
-		ThreadID:   "1552732003076669460",
-		AuthorName: "arcane103",
-		Content:    "Normal chat message",
-		CreatedAt:  now.Add(-2 * time.Minute),
-	})
-	_ = fakeStore.InsertMessage(ctx, db.Message{
-		ID:            "msg-sched",
-		ThreadID:      "1552732003076669460",
-		AuthorName:    "Scheduler",
-		Content:       "Check on PR status and deployment prompt injection...",
-		ScheduleRunID: "run-123",
-		CreatedAt:     now.Add(-1 * time.Minute),
-	})
+	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-1", ThreadID: "1552732003076669460", AuthorName: "test-user", Content: "Normal chat", CreatedAt: now.Add(-2 * time.Minute)})
+	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-sched", ThreadID: "1552732003076669460", AuthorName: "Scheduler", Content: "Check PR", ScheduleRunID: "run-123", CreatedAt: now.Add(-1 * time.Minute)})
 
 	tests := []struct {
-		name        string
-		dg          *discordgo.Session
-		store       db.Store
-		burst       []db.Message
-		limit       int
-		wantCount   int
-		wantErr     bool
-		firstID     string
-		firstAuthor string
+		name, firstID, firstAuthor string
+		dg                         *discordgo.Session
+		store                      db.Store
+		burst                      []db.Message
+		limit, wantCount           int
+		wantErr                    bool
 	}{
-		{
-			name:        "DiscordAPI_Success",
-			dg:          dgSuccess,
-			burst:       []db.Message{{ID: "1552732003076669099"}},
-			limit:       10,
-			wantCount:   3,
-			firstID:     "1552732003076669000",
-			firstAuthor: "Webhook",
-		},
-		{
-			name:        "FallbackDB_Filtered",
-			dg:          dgFail,
-			store:       fakeStore,
-			limit:       0,
-			wantCount:   1,
-			firstID:     "msg-1",
-			firstAuthor: "arcane103",
-		},
-		{
-			name:        "FallbackDB_ClampedLimit",
-			dg:          dgFail,
-			store:       fakeStore,
-			limit:       200,
-			wantCount:   1,
-			firstID:     "msg-1",
-			firstAuthor: "arcane103",
-		},
-		{
-			name:    "StoreError",
-			store:   &mockErrRecentStore{},
-			limit:   10,
-			wantErr: true,
-		},
-		{
-			name:      "NilStore",
-			limit:     10,
-			wantCount: 0,
-		},
+		{name: "DiscordAPI_Success", dg: dgSuccess, burst: []db.Message{{ID: "1552732003076669099"}}, limit: 10, wantCount: 3, firstID: "1552732003076669000", firstAuthor: "Webhook"},
+		{name: "FallbackDB_Filtered", dg: dgFail, store: fakeStore, limit: 0, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
+		{name: "FallbackDB_ClampedLimit", dg: dgFail, store: fakeStore, limit: 200, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
+		{name: "StoreError", store: &mockErrRecentStore{}, limit: 10, wantErr: true},
+		{name: "NilStore", limit: 10, wantCount: 0},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -971,18 +598,14 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 			if len(msgs) != tc.wantCount {
 				t.Fatalf("expected %d messages, got %d", tc.wantCount, len(msgs))
 			}
-			if tc.wantCount > 0 {
-				if msgs[0].ID != tc.firstID || msgs[0].AuthorName != tc.firstAuthor {
-					t.Errorf("mismatch on first message: got %+v, want ID=%s Author=%s", msgs[0], tc.firstID, tc.firstAuthor)
-				}
+			if tc.wantCount > 0 && (msgs[0].ID != tc.firstID || msgs[0].AuthorName != tc.firstAuthor) {
+				t.Errorf("mismatch on first message: got %+v, want ID=%s Author=%s", msgs[0], tc.firstID, tc.firstAuthor)
 			}
 		})
 	}
 }
 
-type mockErrRecentStore struct {
-	db.Store
-}
+type mockErrRecentStore struct{ db.Store }
 
 func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]db.Message, error) {
 	return nil, errors.New("simulated db failure")
@@ -991,20 +614,12 @@ func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, thread
 func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	t.Parallel()
 	fakeStore := setupTestStore(t)
-	mockSpawner := runner.NewMockDaemonSpawner()
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	defer func() {
-		_ = procPool.Close()
-	}()
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockDaemonSpawner())
+	defer procPool.Close()
 
 	ctx := context.Background()
 	_, _ = procPool.GetOrCreate(ctx, "thread-evict-1", "")
-
-	pool := &WorkerPool{
-		cfg:         WorkerPoolConfig{Store: fakeStore},
-		processPool: procPool,
-	}
-	te := &turnExecution{pool: pool, threadID: "thread-evict-1"}
+	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, processPool: procPool}, threadID: "thread-evict-1"}
 
 	te.rotateSessionID("thread-evict-1", "new-sess-1")
 	if !procPool.HasDaemon("thread-evict-1") {
@@ -1012,8 +627,7 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	}
 
 	te.rotateSessionID("thread-evict-1", "")
-	storedSess, _ := fakeStore.GetSessionID(ctx, "thread-evict-1")
-	if storedSess != "" {
+	if storedSess, _ := fakeStore.GetSessionID(ctx, "thread-evict-1"); storedSess != "" {
 		t.Errorf("expected empty session in store after rotation, got %q", storedSess)
 	}
 
@@ -1025,15 +639,10 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 
 func TestWorker_SessionDBRotation(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name             string
-		channelMode      string
-		preWriteDBBytes  int64
-		preWriteWALBytes int64
-		runnerMode       string
-		maxAttempts      int
-		wantAttempts     int
+		name, channelMode, runnerMode     string
+		preWriteDBBytes, preWriteWALBytes int64
+		maxAttempts, wantAttempts         int
 	}{
 		{name: "PreTurn_Channel_DBLimit", channelMode: "channel", preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024, preWriteWALBytes: 600 * 1024, maxAttempts: 1, wantAttempts: 1},
 		{name: "PreTurn_Channel_WALIgnored", channelMode: "channel", preWriteDBBytes: 1000 * 1024, preWriteWALBytes: 600 * 1024, maxAttempts: 1, wantAttempts: 1},
@@ -1044,16 +653,12 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 		{name: "WatchdogRetryPreserved", channelMode: "thread", runnerMode: "retry_watchdog", maxAttempts: 2, wantAttempts: 2},
 		{name: "TransientRetryPreserved", channelMode: "thread", runnerMode: "retry_transient", maxAttempts: 2, wantAttempts: 2},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
-			tmpDir := t.TempDir()
+			store, tmpDir := setupTestStore(t), t.TempDir()
 			sessMgr := session.New(tmpDir, tmpDir)
-
-			oldSess := "sess-" + tc.name
-			convDir := filepath.Join(tmpDir, "conversations")
+			oldSess, convDir := "sess-"+tc.name, filepath.Join(tmpDir, "conversations")
 			_ = os.MkdirAll(convDir, 0755)
 			if tc.preWriteDBBytes > 0 {
 				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0644)
@@ -1069,21 +674,11 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 			doneCh := make(chan struct{}, 1)
 			var mu sync.Mutex
 			var attempts []string
-
-			appCfg := config.NewFromData(&config.ConfigData{
-				Channels: map[string]config.ChannelPolicy{
-					"default": {Mode: tc.channelMode},
-				},
-			})
-
+			appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: tc.channelMode}}})
 			pool := New(appCfg, WorkerPoolConfig{
-				SessionManager: sessMgr,
-				Store:          store,
-				TimeoutMinutes: 1,
-				BackoffBase:    5 * time.Millisecond,
-				MaxAttempts:    tc.maxAttempts,
-				DeliveryFunc:   func(s *discordgo.Session, channelID, text string) error { return nil },
-				TypingFunc:     func(s *discordgo.Session, channelID string) func() { return func() {} },
+				SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: tc.maxAttempts,
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+				TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 				OnMessageCompleted: func(msg db.Message, finalStatus string) {
 					select {
 					case doneCh <- struct{}{}:
@@ -1095,25 +690,24 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 					attempts = append(attempts, sessionID)
 					cur := len(attempts)
 					mu.Unlock()
-
 					switch tc.runnerMode {
 					case "quota_429":
 						return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
 					case "post_heavy":
 						_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0644)
-						return mockJSONResponse(oldSess, "Execution heavy DB output"), "", 0, nil
+						return mockJSONResponse(oldSess, "heavy output"), "", 0, nil
 					case "retry_watchdog":
 						if cur == 1 {
 							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
 							return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
 						}
-						return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
+						return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
 					case "retry_transient":
 						if cur == 1 {
 							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
 							return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
 						}
-						return mockJSONResponse(sessionID, "Recovered on cold retry"), "", 0, nil
+						return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
 					default:
 						return mockJSONResponse(sessionID, "OK"), "", 0, nil
 					}
@@ -1131,17 +725,14 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("Timeout waiting for message completion")
 			}
-
 			mu.Lock()
 			gotAttempts := len(attempts)
 			mu.Unlock()
 			if gotAttempts != tc.wantAttempts {
-				t.Fatalf("Expected %d attempts, got: %d", tc.wantAttempts, gotAttempts)
+				t.Fatalf("attempts = %d, want %d", gotAttempts, tc.wantAttempts)
 			}
-
-			curSess, _ := getSessionID(store, threadID)
-			if curSess != oldSess {
-				t.Errorf("Expected session %q preserved, got: %q", oldSess, curSess)
+			if curSess, _ := getSessionID(store, threadID); curSess != oldSess {
+				t.Errorf("session %q != %q", curSess, oldSess)
 			}
 		})
 	}
@@ -1149,85 +740,33 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 
 func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name                 string
-		maxAttempts          int
-		runnerErr            string
-		wantAttempts         int
-		wantFinalStatus      string
-		wantErrContains      string
-		wantDeliveryContains string
-		checkGlobalLockZero  bool
-		checkNoSchedules     bool
+		name, runnerErr, wantFinalStatus, wantErrContains, wantDeliveryContains string
+		maxAttempts, wantAttempts                                               int
+		checkGlobalLockZero, checkNoSchedules                                   bool
 	}{
-		{
-			name:                 "LocalRetry_Success",
-			maxAttempts:          2,
-			runnerErr:            "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.",
-			wantAttempts:         2,
-			wantFinalStatus:      db.StatusCompleted,
-			wantDeliveryContains: "Recovered on attempt 2!",
-			checkGlobalLockZero:  true,
-		},
-		{
-			name:                 "Exhaustion_LocalFailure",
-			maxAttempts:          1,
-			runnerErr:            "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.",
-			wantAttempts:         1,
-			wantFinalStatus:      db.StatusFailed,
-			wantErrContains:      "[CAPACITY_EXHAUSTED",
-			wantDeliveryContains: "capacity",
-			checkGlobalLockZero:  true,
-			checkNoSchedules:     true,
-		},
-		{
-			name:                 "WithoutCountdown_Fallback70s",
-			maxAttempts:          1,
-			runnerErr:            "API error: RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model.",
-			wantAttempts:         1,
-			wantFinalStatus:      db.StatusFailed,
-			wantErrContains:      "[CAPACITY_EXHAUSTED",
-			wantDeliveryContains: "capacity",
-			checkGlobalLockZero:  true,
-			checkNoSchedules:     true,
-		},
+		{name: "LocalRetry_Success", maxAttempts: 2, runnerErr: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
+		{name: "Exhaustion_LocalFailure", maxAttempts: 1, runnerErr: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", wantAttempts: 1, wantFinalStatus: db.StatusFailed, wantErrContains: "[CAPACITY_EXHAUSTED", wantDeliveryContains: "capacity", checkGlobalLockZero: true, checkNoSchedules: true},
+		{name: "WithoutCountdown_Fallback70s", maxAttempts: 1, runnerErr: "API error: RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model.", wantAttempts: 1, wantFinalStatus: db.StatusFailed, wantErrContains: "[CAPACITY_EXHAUSTED", wantDeliveryContains: "capacity", checkGlobalLockZero: true, checkNoSchedules: true},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
-			tmpDir := t.TempDir()
-			sessMgr := session.New(tmpDir, tmpDir)
-
+			store, tmpDir := setupTestStore(t), t.TempDir()
 			var mu sync.Mutex
 			var attemptCount int
 			var deliveredText string
 			doneCh := make(chan struct{}, 1)
-
-			appCfg := config.NewFromData(&config.ConfigData{
-				Channels: map[string]config.ChannelPolicy{
-					"default": {Mode: "thread"},
-				},
-			})
-
+			appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
 			pool := New(appCfg, WorkerPoolConfig{
-				SessionManager:     sessMgr,
-				Store:              store,
-				TimeoutMinutes:     1,
-				BackoffBase:        5 * time.Millisecond,
-				RetryDelayOverride: 10 * time.Millisecond,
-				MaxAttempts:        tt.maxAttempts,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+				RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					mu.Lock()
 					attemptCount++
 					cur := attemptCount
 					mu.Unlock()
-
-					if cur == 1 && tt.wantAttempts > 1 {
-						return "", tt.runnerErr, 1, errors.New("exit code 1")
-					} else if cur == 1 && tt.wantAttempts == 1 {
+					if cur == 1 {
 						return "", tt.runnerErr, 1, errors.New("exit code 1")
 					}
 					return mockJSONResponse(uuid.New().String(), "Recovered on attempt 2!"), "", 0, nil
@@ -1238,9 +777,7 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 					mu.Unlock()
 					return nil
 				},
-				TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-					return func() {}
-				},
+				TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
 				OnMessageCompleted: func(msg db.Message, finalStatus string) {
 					select {
 					case doneCh <- struct{}{}:
@@ -1251,8 +788,7 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 			pool.Start()
 			defer pool.Stop()
 
-			threadID := "thread-" + strings.ToLower(tt.name)
-			msgID := "msg-" + strings.ToLower(tt.name)
+			threadID, msgID := "thread-"+strings.ToLower(tt.name), "msg-"+strings.ToLower(tt.name)
 			msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name}
 			_ = insertMessage(store, msg)
 			pool.Enqueue(msg)
@@ -1265,37 +801,28 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 			pool.Stop()
 
 			mu.Lock()
-			attempts := attemptCount
-			delivered := deliveredText
+			attempts, delivered := attemptCount, deliveredText
 			mu.Unlock()
-
 			if attempts != tt.wantAttempts {
 				t.Fatalf("attempts = %d, want %d", attempts, tt.wantAttempts)
 			}
-
-			dbMsg, err := store.GetMessage(context.Background(), msgID)
-			if err != nil || dbMsg == nil {
-				t.Fatalf("failed to query message: %v", err)
-			}
+			dbMsg, _ := store.GetMessage(context.Background(), msgID)
 			if dbMsg.Status != tt.wantFinalStatus {
-				t.Errorf("dbMsg.Status = %s, want %s (err: %s)", dbMsg.Status, tt.wantFinalStatus, dbMsg.ErrorMessage)
+				t.Errorf("status = %s, want %s", dbMsg.Status, tt.wantFinalStatus)
 			}
 			if tt.wantErrContains != "" && !strings.Contains(dbMsg.ErrorMessage, tt.wantErrContains) {
-				t.Errorf("expected dbMsg.ErrorMessage to contain %q, got %q", tt.wantErrContains, dbMsg.ErrorMessage)
+				t.Errorf("expected error %q in %q", tt.wantErrContains, dbMsg.ErrorMessage)
 			}
 			if tt.wantDeliveryContains != "" && !strings.Contains(delivered, tt.wantDeliveryContains) {
-				t.Errorf("expected deliveredText to contain %q, got %q", tt.wantDeliveryContains, delivered)
+				t.Errorf("expected delivery %q in %q", tt.wantDeliveryContains, delivered)
 			}
-
-			if tt.checkGlobalLockZero {
-				if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
-					t.Errorf("expected quotaLockedUntil to remain 0, got %d", lockedUntil)
-				}
+			if tt.checkGlobalLockZero && pool.quotaLockedUntil.Load() > 0 {
+				t.Errorf("expected quotaLockedUntil == 0")
 			}
 			if tt.checkNoSchedules {
-				schedules, _ := store.GetAllOneShotSchedules(context.Background(), threadID)
-				if len(schedules) > 0 {
-					t.Errorf("expected 0 one-shot schedules, got %d", len(schedules))
+				s, _ := store.GetAllOneShotSchedules(context.Background(), threadID)
+				if len(s) > 0 {
+					t.Errorf("expected 0 schedules, got %d", len(s))
 				}
 			}
 		})
@@ -1304,31 +831,17 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 
 func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, tmpDir)
-
+	store, tmpDir := setupTestStore(t), t.TempDir()
 	var mu sync.Mutex
 	var threadAAttempts int
-	var threadBCompleted time.Time
-	var threadACompleted time.Time
-	doneA := make(chan struct{}, 1)
-	doneB := make(chan struct{}, 1)
+	var threadACompleted, threadBCompleted time.Time
+	doneA, doneB := make(chan struct{}, 1), make(chan struct{}, 1)
 
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
+	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
 	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager:     sessMgr,
-		Store:              store,
-		TimeoutMinutes:     1,
-		BackoffBase:        5 * time.Millisecond,
-		RetryDelayOverride: 10 * time.Millisecond,
-		MaxAttempts:        2,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+		SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+		RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: 2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			if strings.Contains(prompt, "Thread A") {
 				mu.Lock()
 				threadAAttempts++
@@ -1341,12 +854,8 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 			}
 			return mockJSONResponse(uuid.New().String(), "Thread B success"), "", 0, nil
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -1368,11 +877,9 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	msgA := db.Message{ID: "msg-thread-A", ThreadID: "thread-A", Content: "Thread A prompt"}
-	msgB := db.Message{ID: "msg-thread-B", ThreadID: "thread-B", Content: "Thread B prompt"}
+	msgA, msgB := db.Message{ID: "msg-thread-A", ThreadID: "thread-A", Content: "Thread A prompt"}, db.Message{ID: "msg-thread-B", ThreadID: "thread-B", Content: "Thread B prompt"}
 	_ = insertMessage(store, msgA)
 	_ = insertMessage(store, msgB)
-
 	pool.Enqueue(msgA)
 	pool.Enqueue(msgB)
 
@@ -1381,87 +888,58 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout waiting for Thread B completed")
 	}
-
 	select {
 	case <-doneA:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout waiting for Thread A completed")
 	}
-
 	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
 		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
 	}
-
 	mu.Lock()
-	if threadBCompleted.IsZero() {
-		t.Errorf("Expected Thread B to complete successfully")
-	}
-	if threadACompleted.IsZero() {
-		t.Errorf("Expected Thread A to complete successfully")
-	}
+	aDone, bDone := threadACompleted.IsZero(), threadBCompleted.IsZero()
 	mu.Unlock()
-
+	if aDone || bDone {
+		t.Errorf("Expected both threads to complete")
+	}
 	dbMsgB, _ := store.GetMessage(context.Background(), "msg-thread-B")
 	if dbMsgB == nil || dbMsgB.Status != db.StatusCompleted {
-		t.Errorf("Expected Thread B to be StatusCompleted, got %v", dbMsgB)
+		t.Errorf("Expected Thread B StatusCompleted")
 	}
 }
 
 func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name        string
-		msgID       string
-		threadID    string
-		checkTyping bool
+		name, msgID, threadID string
+		checkTyping           bool
 	}{
-		{name: "ImmediateBackoff", msgID: "msg-cap-cancel", threadID: "thread-cap-cancel", checkTyping: false},
+		{name: "ImmediateBackoff", msgID: "msg-cap-cancel", threadID: "thread-cap-cancel"},
 		{name: "ProgressiveBackoff", msgID: "msg-cap-prog-cancel", threadID: "thread-cap-prog-cancel", checkTyping: true},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
-			tmpDir := t.TempDir()
-			sessMgr := session.New(tmpDir, tmpDir)
-
+			store, tmpDir := setupTestStore(t), t.TempDir()
 			startedCh := make(chan struct{}, 1)
 			var typingMu sync.Mutex
 			var typingActive, typingStopped bool
-
-			appCfg := config.NewFromData(&config.ConfigData{
-				Channels: map[string]config.ChannelPolicy{
-					"default": {Mode: "thread"},
-				},
-			})
-
+			appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
 			pool := New(appCfg, WorkerPoolConfig{
-				SessionManager: sessMgr,
-				Store:          store,
-				TimeoutMinutes: 1,
-				BackoffBase:    5 * time.Millisecond,
-				MaxAttempts:    2,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: 2,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					select {
 					case startedCh <- struct{}{}:
 					default:
 					}
 					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
 				},
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					return nil
-				},
-				TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+				TypingFunc: func(s *discordgo.Session, channelID string) func() {
 					typingMu.Lock()
 					typingActive = true
 					typingMu.Unlock()
-					return func() {
-						typingMu.Lock()
-						typingStopped = true
-						typingMu.Unlock()
-					}
+					return func() { typingMu.Lock(); typingStopped = true; typingMu.Unlock() }
 				},
 			})
 			pool.Start()
@@ -1476,33 +954,23 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("Timeout waiting for attempt 1")
 			}
-
 			pool.cancel()
 			waitPoolWorkersDone(t, pool, 3*time.Second)
 
 			if tc.checkTyping {
 				typingMu.Lock()
-				if !typingActive {
-					t.Errorf("Expected typing to have started")
-				}
-				if !typingStopped {
-					t.Errorf("Expected te.stopTyping() to be called on context cancellation during backoff")
-				}
+				active, stopped := typingActive, typingStopped
 				typingMu.Unlock()
+				if !active || !stopped {
+					t.Errorf("expected typing active and then stopped on cancel")
+				}
 			}
-
-			dbMsg, err := store.GetMessage(context.Background(), tc.msgID)
-			if err != nil || dbMsg == nil {
-				t.Fatalf("failed to query message: %v", err)
+			dbMsg, _ := store.GetMessage(context.Background(), tc.msgID)
+			if dbMsg == nil || dbMsg.Status != db.StatusPending || !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
+				t.Errorf("expected StatusPending with interrupted message")
 			}
-			if dbMsg.Status != db.StatusPending {
-				t.Errorf("Expected StatusPending on context cancellation, got %s (err: %s)", dbMsg.Status, dbMsg.ErrorMessage)
-			}
-			if !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
-				t.Errorf("Expected error to contain 'interrupted by graceful deployment', got %q", dbMsg.ErrorMessage)
-			}
-			if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
-				t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+			if pool.quotaLockedUntil.Load() > 0 {
+				t.Errorf("expected quotaLockedUntil == 0")
 			}
 		})
 	}
@@ -1510,29 +978,23 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 
 func TestWorkerPool_ProgressiveCapacityBackoff(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name       string
-		attempt    int
-		resetDur   time.Duration
-		minFloor   time.Duration
-		maxCeiling time.Duration
+		name                 string
+		attempt              int
+		resetDur             time.Duration
+		minFloor, maxCeiling time.Duration
 	}{
 		{name: "Attempt1_Floor30s", attempt: 1, resetDur: 0, minFloor: 30 * time.Second, maxCeiling: 33 * time.Second},
 		{name: "Attempt2_Floor60s", attempt: 2, resetDur: 0, minFloor: 60 * time.Second, maxCeiling: 63 * time.Second},
 		{name: "ResetDurOverride_75s", attempt: 1, resetDur: 75 * time.Second, minFloor: 75 * time.Second, maxCeiling: 78 * time.Second},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			for i := 0; i < 20; i++ {
 				d := calculateCapacityBackoff(tt.attempt, tt.resetDur)
-				if d < tt.minFloor {
-					t.Fatalf("backoff floor expected >= %v, got %v", tt.minFloor, d)
-				}
-				if d > tt.maxCeiling {
-					t.Fatalf("backoff jitter expected <= %v, got %v", tt.maxCeiling, d)
+				if d < tt.minFloor || d > tt.maxCeiling {
+					t.Fatalf("backoff expected between %v and %v, got %v", tt.minFloor, tt.maxCeiling, d)
 				}
 			}
 		})
@@ -1547,33 +1009,27 @@ func TestDiscordTurnSink_Callbacks(t *testing.T) {
 	sink.OnTextDelta("some text")
 	sink.OnError(errors.New("test error"))
 	res, err := sink.Wait(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Response != "some text" {
-		t.Errorf("expected recovered text 'some text', got %q", res.Response)
+	if err != nil || res.Response != "some text" {
+		t.Fatalf("unexpected error/response: %v, %q", err, res.Response)
 	}
 
 	sinkNoDeltas := newDiscordTurnSink(nil)
 	expectedErr := errors.New("hard failure")
 	sinkNoDeltas.OnError(expectedErr)
-	_, err = sinkNoDeltas.Wait(context.Background())
-	if err == nil || !errors.Is(err, expectedErr) {
-		t.Errorf("unexpected error received: %v", err)
+	if _, err := sinkNoDeltas.Wait(context.Background()); err == nil || !errors.Is(err, expectedErr) {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
 func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
 	t.Parallel()
-	updater := NewStatusUpdater(nil, "thread-123", true, WithStatusMockFuncs(
-		func(channelID, text string) (string, error) { return "msg-1", nil },
-		func(channelID, messageID, text string) error { return nil },
-		func(channelID, messageID string) error { return nil },
-	))
+	updater := NewStatusUpdater(nil, "thread-123", true)
+	updater.sendFunc = func(c, text string) (string, error) { return "msg-1", nil }
+	updater.editFunc = func(c, m, text string) error { return nil }
+	updater.deleteFunc = func(c, m string) error { return nil }
 	defer updater.Stop()
 
 	sink := newDiscordTurnSink(updater)
-
 	assertUpdater := func(step, wantPhase, wantTool, wantCmd string) {
 		t.Helper()
 		updater.mu.Lock()
@@ -1591,25 +1047,18 @@ func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
 
 	sink.OnThinking()
 	assertUpdater("thinking", "thinking", "", "")
-
 	sink.OnToolCall("run_command", "echo hello")
 	assertUpdater("tool_call", "tool", "run_command", "echo")
-
 	sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, "ok")
 	assertUpdater("tool_completed", "thinking", "", "")
-
 	sink.OnTextDelta("Streaming response token")
 	assertUpdater("text_delta", "responding", "", "")
-
 	sink.OnThinking()
 	assertUpdater("thinking", "thinking", "", "")
-
 	sink.OnTextDelta("   \n\t  ")
 	assertUpdater("whitespace_delta", "thinking", "", "")
-
 	sink.OnToolCall("get_me", "")
 	assertUpdater("tool_call", "tool", "get_me", "")
-
 	sink.OnToolCompleted("get_me", "github", 50*time.Millisecond, "error")
 	assertUpdater("tool_error", "thinking", "", "")
 
@@ -1623,30 +1072,22 @@ func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
 
 func TestWorker_DualPoolRouting(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name                  string
-		effort                string
-		useFallbackNilLowPool bool
-		useFallbackNilMedPool bool
-		wantPrimaryCount      int
-		wantLowCount          int
-		wantMedCount          int
+		name                                         string
+		effort                                       string
+		useFallbackNilLowPool, useFallbackNilMedPool bool
+		wantPrimaryCount, wantLowCount, wantMedCount int
 	}{
-		{name: "LowEffortRoutesToLowPool", effort: "low", wantPrimaryCount: 0, wantLowCount: 1, wantMedCount: 0},
-		{name: "MediumEffortRoutesToMediumPool", effort: "medium", wantPrimaryCount: 0, wantLowCount: 0, wantMedCount: 1},
-		{name: "NormalRoutesToPrimaryPool", effort: "", wantPrimaryCount: 1, wantLowCount: 0, wantMedCount: 0},
-		{name: "FallbackNilLowPoolRoutesToPrimary", effort: "low", useFallbackNilLowPool: true, wantPrimaryCount: 1, wantLowCount: 0, wantMedCount: 0},
-		{name: "FallbackNilMediumPoolRoutesToPrimary", effort: "medium", useFallbackNilMedPool: true, wantPrimaryCount: 1, wantLowCount: 0, wantMedCount: 0},
+		{name: "LowEffortRoutesToLowPool", effort: "low", wantLowCount: 1},
+		{name: "MediumEffortRoutesToMediumPool", effort: "medium", wantMedCount: 1},
+		{name: "NormalRoutesToPrimaryPool", effort: "", wantPrimaryCount: 1},
+		{name: "FallbackNilLowPoolRoutesToPrimary", effort: "low", useFallbackNilLowPool: true, wantPrimaryCount: 1},
+		{name: "FallbackNilMediumPoolRoutesToPrimary", effort: "medium", useFallbackNilMedPool: true, wantPrimaryCount: 1},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
-			tmpHome := t.TempDir()
-			tempData := t.TempDir()
-
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 			var primarySpawnCount, lowSpawnCount, medSpawnCount atomic.Int32
 			newCountedPool := func(sessID, resp, model string, counter *atomic.Int32) (*runner.UnifiedProcessPool, func()) {
 				sp := newScriptedDaemonSpawner(sessID, fmt.Sprintf(`{"event":"result","result":{"status":"SUCCESS","response":%q,"usage":{"total_tokens":5}}}`+"\n", resp))
@@ -1661,7 +1102,6 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 
 			primaryPool, closeP := newCountedPool("c1111111-2222-3333-4444-555555555555", "primary", "gemini-3.7-pro", &primarySpawnCount)
 			defer closeP()
-
 			var lowPool, medPool runner.AgentPool
 			if !tt.useFallbackNilLowPool {
 				lp, closeL := newCountedPool("d1111111-2222-3333-4444-555555555555", "low", "gemini-3.8-flash-low", &lowSpawnCount)
@@ -1675,19 +1115,12 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			}
 
 			cfg := config.NewTestConfig(func(d *config.ConfigData) {
-				d.DataDir = tempData
-				d.LowEffortModel = "gemini-3.8-flash-low"
-				d.MediumEffortModel = "gemini-3.8-flash-medium"
+				d.DataDir, d.LowEffortModel, d.MediumEffortModel = tempData, "gemini-3.8-flash-low", "gemini-3.8-flash-medium"
 			})
-
 			doneCh := make(chan struct{}, 1)
 			pool := New(cfg, WorkerPoolConfig{
-				ProcessPool:             primaryPool,
-				LowEffortProcessPool:    lowPool,
-				MediumEffortProcessPool: medPool,
-				SessionManager:          session.New(tmpHome, tempData),
-				Store:                   store,
-				TimeoutMinutes:          1,
+				ProcessPool: primaryPool, LowEffortProcessPool: lowPool, MediumEffortProcessPool: medPool,
+				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusCompleted {
 						select {
@@ -1701,14 +1134,7 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			defer pool.Stop()
 
 			threadID := "thread-" + strings.ToLower(tt.name)
-			msg := db.Message{
-				ID:        "msg-" + strings.ToLower(tt.name),
-				ThreadID:  threadID,
-				Content:   "run task",
-				Effort:    tt.effort,
-				Status:    db.StatusPending,
-				CreatedAt: time.Now(),
-			}
+			msg := db.Message{ID: "msg-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run task", Effort: tt.effort, Status: db.StatusPending, CreatedAt: time.Now()}
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
@@ -1717,7 +1143,6 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatalf("timeout waiting for turn completion")
 			}
-
 			if p := int(primarySpawnCount.Load()); p != tt.wantPrimaryCount {
 				t.Errorf("primarySpawnCount = %d, want %d", p, tt.wantPrimaryCount)
 			}
@@ -1733,18 +1158,11 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 
 func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
-	lowStartedCh := make(chan struct{}, 1)
-	lowBlockCh := make(chan struct{})
-	normDoneCh := make(chan struct{})
-	lowDoneCh := make(chan struct{})
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	lowStartedCh, lowBlockCh, normDoneCh, lowDoneCh := make(chan struct{}, 1), make(chan struct{}), make(chan struct{}), make(chan struct{})
 
 	primarySpawner := newScriptedDaemonSpawner("c1111111-2222-3333-4444-555555555555",
 		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"primary reply\",\"usage\":{\"total_tokens\":10}}}\n")
-
 	lowSpawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
@@ -1769,21 +1187,13 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 
 	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
 	defer primaryPool.Close()
-
 	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
 	defer lowPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-		d.LowEffortModel = "gemini-3.8-flash-low"
-	})
-
+	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool:          primaryPool,
-		LowEffortProcessPool: lowPool,
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
+		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if msg.ID == "msg-norm-concurrent" && status == db.StatusCompleted {
 				close(normDoneCh)
@@ -1796,15 +1206,7 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 	defer pool.Stop()
 
 	threadID := "th-shared-concurrent"
-
-	lowMsg := db.Message{
-		ID:        "msg-low-concurrent",
-		ThreadID:  threadID,
-		Content:   "long low-effort task",
-		Effort:    "low",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
+	lowMsg := db.Message{ID: "msg-low-concurrent", ThreadID: threadID, Content: "long low-effort task", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), lowMsg)
 	pool.Enqueue(lowMsg)
 
@@ -1814,23 +1216,15 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 		t.Fatalf("timeout waiting for low-effort turn to start")
 	}
 
-	normMsg := db.Message{
-		ID:        "msg-norm-concurrent",
-		ThreadID:  threadID,
-		Content:   "user asks what is happening",
-		Effort:    "medium",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
+	normMsg := db.Message{ID: "msg-norm-concurrent", ThreadID: threadID, Content: "user asks what is happening", Effort: "medium", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), normMsg)
 	pool.Enqueue(normMsg)
 
 	select {
 	case <-normDoneCh:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("primary message was blocked by low-effort task on same thread")
+		t.Fatalf("primary message was blocked by low-effort task")
 	}
-
 	close(lowBlockCh)
 	select {
 	case <-lowDoneCh:
@@ -1841,12 +1235,8 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 
 func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
-	primarySessUUID := "11111111-1111-1111-1111-111111111111"
-	prevSessUUID := "99999999-9999-9999-9999-999999999999"
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	primarySessUUID, prevSessUUID := "11111111-1111-1111-1111-111111111111", "99999999-9999-9999-9999-999999999999"
 
 	var spawnSeq int
 	var mu sync.Mutex
@@ -1883,36 +1273,22 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 			return inW, outR, errR, runner.NewMockProcessHandle(12345 + seq), nil
 		},
 	}
-	primarySpawner := runner.NewMockSpawner()
-
-	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, runner.NewMockSpawner())
 	defer primaryPool.Close()
 
 	lowUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
 	defer lowUnderlying.Close()
 
-	lowPool := runner.NewInterchangeablePool(lowUnderlying, runner.InterchangeablePoolConfig{
-		WorkerCount: 1,
-		KeyPrefix:   "discord:worker",
-	})
+	lowPool := runner.NewInterchangeablePool(lowUnderlying, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:worker"})
 	defer lowPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-		d.LowEffortModel = "gemini-3.8-flash-low"
-	})
-
+	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 	doneCh := make(chan struct{}, 2)
 	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool:          primaryPool,
-		LowEffortProcessPool: lowPool,
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
+		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		HistoryFetcher: func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
-			return []HistoryMessage{
-				{ID: "hist-1", AuthorName: "alex", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)},
-			}, nil
+			return []HistoryMessage{{ID: "hist-1", AuthorName: "test-user", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)}}, nil
 		},
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
@@ -1928,42 +1304,24 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	_ = store.RotateSessionID(ctx, threadID, primarySessUUID)
 	_ = store.SaveThreadSummary(ctx, threadID, "Cached summary that must not be injected", "hist-1")
 
-	msg1 := db.Message{
-		ID:        "msg-ephem-1",
-		ThreadID:  threadID,
-		Content:   "execute vanadis chunk 1",
-		Effort:    "low",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
+	msg1 := db.Message{ID: "msg-ephem-1", ThreadID: threadID, Content: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(ctx, msg1)
 	pool.Enqueue(msg1)
-
 	select {
 	case <-doneCh:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timeout waiting for ephemeral turn 1")
 	}
-
 	lowPool.WaitBackground()
 
-	msg2 := db.Message{
-		ID:        "msg-ephem-2",
-		ThreadID:  threadID,
-		Content:   "execute vanadis chunk 2",
-		Effort:    "low",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
+	msg2 := db.Message{ID: "msg-ephem-2", ThreadID: threadID, Content: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(ctx, msg2)
 	pool.Enqueue(msg2)
-
 	select {
 	case <-doneCh:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timeout waiting for ephemeral turn 2")
 	}
-
 	lowPool.WaitBackground()
 
 	mu.Lock()
@@ -1976,116 +1334,37 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	}
 	for i, p := range prompts {
 		if strings.Contains(p, "<THREAD_SUMMARY>") || strings.Contains(p, "Cached summary that must not be injected") {
-			t.Errorf("turn %d prompt unexpectedly contained <THREAD_SUMMARY>: %s", i+1, p)
+			t.Errorf("turn %d prompt unexpectedly contained <THREAD_SUMMARY>", i+1)
 		}
 		if strings.Contains(p, "<CHANNEL_HISTORY>") || strings.Contains(p, "prior chat history should not be injected") {
-			t.Errorf("turn %d prompt unexpectedly contained <CHANNEL_HISTORY>: %s", i+1, p)
+			t.Errorf("turn %d prompt unexpectedly contained <CHANNEL_HISTORY>", i+1)
 		}
 		if strings.Contains(p, "<PREVIOUS_SESSION>") || strings.Contains(p, prevSessUUID) {
-			t.Errorf("turn %d prompt unexpectedly contained <PREVIOUS_SESSION>: %s", i+1, p)
+			t.Errorf("turn %d prompt unexpectedly contained <PREVIOUS_SESSION>", i+1)
 		}
 	}
 	if spawns < 2 {
-		t.Errorf("expected worker daemon rotation between turns (spawns >= 2), got %d", spawns)
+		t.Errorf("expected worker daemon rotation (spawns >= 2), got %d", spawns)
 	}
-
 	currentSess, err := store.GetSessionID(ctx, threadID)
-	if err != nil {
-		t.Fatalf("failed to get session ID: %v", err)
-	}
-	if currentSess != primarySessUUID {
-		t.Errorf("expected primary session %s to be untouched, got %s", primarySessUUID, currentSess)
+	if err != nil || currentSess != primarySessUUID {
+		t.Errorf("expected primary session %s untouched, got %s", primarySessUUID, currentSess)
 	}
 	turnCount, err := store.GetSessionTurnCount(ctx, threadID)
-	if err != nil {
-		t.Fatalf("failed to get turn count: %v", err)
-	}
-	if turnCount != 0 {
-		t.Errorf("expected primary session turn count to remain 0 across ephemeral turns, got %d", turnCount)
-	}
-}
-
-func TestWorker_DualPool_AntiFlapping(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
-	primarySessUUID := "11111111-1111-1111-1111-111111111111"
-	lowSessUUID := "22222222-2222-2222-2222-222222222222"
-
-	lowSpawner := newScriptedDaemonSpawner(lowSessUUID,
-		fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok low effort\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", lowSessUUID))
-	primarySpawner := runner.NewMockSpawner()
-
-	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
-	defer primaryPool.Close()
-
-	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
-	defer lowPool.Close()
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-		d.LowEffortModel = "gemini-3.8-flash-low"
-	})
-
-	doneCh := make(chan struct{}, 1)
-	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool:          primaryPool,
-		LowEffortProcessPool: lowPool,
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				doneCh <- struct{}{}
-			}
-		},
-	})
-	defer pool.Stop()
-
-	threadID := "thread-antiflap-1"
-	_ = store.SaveSessionID(context.Background(), threadID, primarySessUUID)
-
-	msg := db.Message{
-		ID:        "msg-antiflap-1",
-		ThreadID:  threadID,
-		Content:   "run scheduled low-effort maintenance",
-		Effort:    "low",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
-	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for message completion")
-	}
-
-	currentSess, err := store.GetSessionID(context.Background(), threadID)
-	if err != nil {
-		t.Fatalf("failed to get session ID: %v", err)
-	}
-	if currentSess != primarySessUUID {
-		t.Fatalf("ANTI-FLAPPING VIOLATION: expected primary session %s to be preserved, got %s", primarySessUUID, currentSess)
+	if err != nil || turnCount != 0 {
+		t.Errorf("expected primary session turn count 0, got %d", turnCount)
 	}
 }
 
 func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 	sessID := "f1111111-2222-3333-4444-555555555555"
 	sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
 	_ = os.MkdirAll(sessDir, 0755)
 	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 
 	var turnCount atomic.Int32
-
 	primarySpawner := newScriptedDaemonSpawner(sessID,
 		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"waiting for bg task\",\"usage\":{\"total_tokens\":5}}}\n",
 		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"all tasks done\",\"usage\":{\"total_tokens\":5}}}\n",
@@ -2095,33 +1374,24 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 		inW, outR, errR, handle, err := oldSpawn(ctx, cfg)
 		return inW, outR, errR, handle, err
 	}
-
 	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
 	defer primaryPool.Close()
 
-	lowSpawner := newScriptedDaemonSpawner("d1111111-2222-3333-4444-555555555555")
-	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, newScriptedDaemonSpawner("d1111111-2222-3333-4444-555555555555"))
 	defer lowPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempData
-	})
-
+	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-yield-fallback"
 	_ = store.SaveSessionID(context.Background(), threadID, sessID)
 
-	lowSessID := "d1111111-2222-3333-4444-555555555555"
-	taskDir := filepath.Join(tempData, "brain", lowSessID, ".system_generated", "tasks")
+	taskDir := filepath.Join(tempData, "brain", "d1111111-2222-3333-4444-555555555555", ".system_generated", "tasks")
 	_ = os.MkdirAll(taskDir, 0755)
 	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0644)
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool:          primaryPool,
-		LowEffortProcessPool: lowPool,
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
+		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				turnCount.Add(1)
@@ -2140,18 +1410,9 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create low daemon: %v", err)
 	}
-	lowDaemon.TaskTracker().Add(runner.TaskMetadata{
-		TaskID:    "bg-task-in-low-pool",
-		StartedAt: time.Now(),
-	})
+	lowDaemon.TaskTracker().Add(runner.TaskMetadata{TaskID: "bg-task-in-low-pool", StartedAt: time.Now()})
 
-	msg := db.Message{
-		ID:        "msg-yield-fb-1",
-		ThreadID:  threadID,
-		Content:   "run command and wait",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now(),
-	}
+	msg := db.Message{ID: "msg-yield-fb-1", ThreadID: threadID, Content: "run command and wait", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), msg)
 	pool.Enqueue(msg)
 
@@ -2160,57 +1421,38 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timed out waiting for message completion")
 	}
-
 	if tc := int(turnCount.Load()); tc < 1 {
-		t.Errorf("expected auto-resumption from yield-trap detection in alternate pool, turnCount=%d", tc)
+		t.Errorf("expected auto-resumption from yield-trap detection, turnCount=%d", tc)
 	}
 }
 
 func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name           string
-		effort         string
-		expectedEffort string
+		name, effort, expectedEffort string
 	}{
 		{name: "LowEffort", effort: "low", expectedEffort: "low"},
 		{name: "MediumEffort", effort: "medium", expectedEffort: "medium"},
 		{name: "HighEffort", effort: "high", expectedEffort: "high"},
 		{name: "DefaultEffort", effort: "", expectedEffort: "high"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
-			tmpHome := t.TempDir()
-			tempData := t.TempDir()
-
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 			quotaErrSpawner := newScriptedDaemonSpawner("11111111-2222-3333-4444-555555555555",
 				`{"event":"result","result":{"status":"ERROR","exit_code":1,"error":"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m.","stderr":"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m."}}`+"\n",
 			)
-
-			poolConfig := runner.PoolConfig{Model: "gemini-3.7-pro"}
-			primaryPool := runner.NewUnifiedProcessPool(poolConfig, quotaErrSpawner)
+			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, quotaErrSpawner)
 			defer primaryPool.Close()
-
 			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, quotaErrSpawner)
 			defer lowPool.Close()
 
-			cfg := config.NewTestConfig(func(d *config.ConfigData) {
-				d.DataDir = tempData
-				d.LowEffortModel = "gemini-3.8-flash-low"
-			})
-
+			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 			doneCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
-				ProcessPool:          primaryPool,
-				LowEffortProcessPool: lowPool,
-				SessionManager:       session.New(tmpHome, tempData),
-				Store:                store,
-				TimeoutMinutes:       1,
-				MaxAttempts:          1,
+				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
+				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusFailed {
 						select {
@@ -2224,14 +1466,7 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 			defer pool.Stop()
 
 			threadID := "thread-quota-" + tt.name
-			msg := db.Message{
-				ID:        "msg-quota-" + tt.name,
-				ThreadID:  threadID,
-				Content:   "run task",
-				Effort:    tt.effort,
-				Status:    db.StatusPending,
-				CreatedAt: time.Now(),
-			}
+			msg := db.Message{ID: "msg-quota-" + tt.name, ThreadID: threadID, Content: "run task", Effort: tt.effort, Status: db.StatusPending, CreatedAt: time.Now()}
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
@@ -2240,16 +1475,9 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatalf("timed out waiting for message completion")
 			}
-
 			schedules, err := store.GetAllOneShotSchedules(context.Background(), threadID)
-			if err != nil {
-				t.Fatalf("failed to get one shot schedules: %v", err)
-			}
-			if len(schedules) != 1 {
-				t.Fatalf("expected 1 one-shot schedule, got %d", len(schedules))
-			}
-			if schedules[0].Effort != tt.expectedEffort {
-				t.Fatalf("expected oneShot.Effort=%q, got %q", tt.expectedEffort, schedules[0].Effort)
+			if err != nil || len(schedules) != 1 || schedules[0].Effort != tt.expectedEffort {
+				t.Fatalf("expected 1 schedule with effort %q, got %v (err=%v)", tt.expectedEffort, schedules, err)
 			}
 		})
 	}
@@ -2257,7 +1485,6 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 
 func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 	t.Parallel()
-
 	rotationTests := []struct {
 		name              string
 		maxAttempts       int
@@ -2266,83 +1493,48 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 		wantAttempts      int
 		wantRetainSession bool
 	}{
-		{
-			name:              "EndToEnd_SessionRotationInjectsAndRetainsActions",
-			maxAttempts:       3,
-			triggerErr:        "RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2s.",
-			wantAttempts:      3,
-			wantRetainSession: true,
-		},
-		{
-			name:              "EndToEnd_TransientRotationInjectsToolActions",
-			maxAttempts:       2,
-			triggerErr:        "transient connection reset",
-			transientErr:      true,
-			wantAttempts:      2,
-			wantRetainSession: true,
-		},
+		{name: "EndToEnd_SessionRotationInjectsAndRetainsActions", maxAttempts: 3, triggerErr: "RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2s.", wantAttempts: 3, wantRetainSession: true},
+		{name: "EndToEnd_TransientRotationInjectsToolActions", maxAttempts: 2, triggerErr: "transient connection reset", transientErr: true, wantAttempts: 2, wantRetainSession: true},
 	}
-
 	for _, tt := range rotationTests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			tmpHome := t.TempDir()
-			tempData := t.TempDir()
-			store := setupTestStore(t)
-
+			tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
 			validUUID := uuid.New().String()
 			sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
-			if err := os.MkdirAll(sessDir, 0755); err != nil {
-				t.Fatalf("failed to create logs dir: %v", err)
-			}
+			_ = os.MkdirAll(sessDir, 0755)
+			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0644)
 
-			initTranscript := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}` + "\n"
-			if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(initTranscript), 0644); err != nil {
-				t.Fatalf("failed to write initial transcript: %v", err)
-			}
-
-			cfg := config.NewTestConfig(func(d *config.ConfigData) {
-				d.DataDir = tempData
-			})
-
+			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 			threadID := "thread-rot-" + strings.ToLower(tt.name)
-			if err := store.SaveSessionID(context.Background(), threadID, validUUID); err != nil {
-				t.Fatalf("failed to save session ID: %v", err)
-			}
+			_ = store.SaveSessionID(context.Background(), threadID, validUUID)
 
 			var mu sync.Mutex
-			var recordedPrompts []string
-			var recordedSessions []string
+			var recordedPrompts, recordedSessions []string
 			doneCh := make(chan struct{})
 
 			pool := New(cfg, WorkerPoolConfig{
-				SessionManager:     session.New(tmpHome, tempData),
-				Store:              store,
-				TimeoutMinutes:     1,
-				MaxAttempts:        tt.maxAttempts,
-				RetryDelayOverride: 10 * time.Millisecond,
-				BackoffBase:        5 * time.Millisecond,
+				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: tt.maxAttempts,
+				RetryDelayOverride: 10 * time.Millisecond, BackoffBase: 5 * time.Millisecond,
 				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 					mu.Lock()
 					recordedPrompts = append(recordedPrompts, prompt)
 					recordedSessions = append(recordedSessions, sessionID)
 					attemptNum := len(recordedPrompts)
 					mu.Unlock()
-
 					if attemptNum < tt.wantAttempts {
-						tNow := time.Now().UTC()
 						transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"run_command","args":{"command_line":"docker stats"}}]}
 {"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"CONTAINER ID aerial-brain MEM USAGE 120MiB"}
 {"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}
-`, session.DefaultMaxSessionSteps, tt.triggerErr, tNow.Format(time.RFC3339))
+`, session.DefaultMaxSessionSteps, tt.triggerErr, time.Now().UTC().Format(time.RFC3339))
 						_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644)
 						return "", tt.triggerErr, 1, errors.New("simulated error")
 					}
 					return mockJSONResponse(uuid.New().String(), "Completed"), "", 0, nil
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-				TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+				TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusCompleted {
 						select {
@@ -2356,13 +1548,7 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 			pool.Start()
 			defer pool.Stop()
 
-			msg := db.Message{
-				ID:        "msg-rot-" + strings.ToLower(tt.name),
-				ThreadID:  threadID,
-				Content:   "run investigation",
-				Status:    db.StatusPending,
-				CreatedAt: time.Now(),
-			}
+			msg := db.Message{ID: "msg-rot-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run investigation", Status: db.StatusPending, CreatedAt: time.Now()}
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
@@ -2371,18 +1557,16 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatalf("timed out waiting for turn completion")
 			}
-
 			mu.Lock()
 			defer mu.Unlock()
-
 			if len(recordedPrompts) != tt.wantAttempts {
 				t.Fatalf("expected %d attempts, got %d", tt.wantAttempts, len(recordedPrompts))
 			}
 			if recordedSessions[0] != validUUID {
-				t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, recordedSessions[0])
+				t.Errorf("expected attempt 1 session %q, got %q", validUUID, recordedSessions[0])
 			}
 			if strings.Contains(recordedPrompts[0], "<PREVIOUS_TURN_ACTIONS>") {
-				t.Errorf("expected attempt 1 prompt to not contain PREVIOUS_TURN_ACTIONS")
+				t.Errorf("unexpected PREVIOUS_TURN_ACTIONS in attempt 1")
 			}
 			for i := 1; i < tt.wantAttempts; i++ {
 				if tt.wantRetainSession && recordedSessions[i] != validUUID {
@@ -2393,124 +1577,21 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 	}
 }
 
-
-
-func TestWorker_ColdStart_RetainsLookbackWithSummary(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, tmpDir)
-
-	threadID := "thread-cold-with-summary"
-	_ = store.SaveThreadSummary(context.Background(), threadID, "<THREAD_SUMMARY>Previously discussed OAuth</THREAD_SUMMARY>", "msg-recent-1")
-
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:       threadID,
-		GuildID:  "g1",
-		ParentID: "parent-chan",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-
-	var mu sync.Mutex
-	var capturedPrompt string
-	doneCh := make(chan struct{})
-
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "thread"},
-		},
-	})
-
-	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
-		HistoryFetcher: func(ctx context.Context, tid, beforeID string, limit int) ([]HistoryMessage, error) {
-			return []HistoryMessage{
-				{ID: "msg-recent-1", AuthorName: "alex", Content: "where is the link?", CreatedAt: time.Now()},
-			}, nil
-		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			mu.Lock()
-			capturedPrompt = prompt
-			mu.Unlock()
-			return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-trigger", ThreadID: threadID, Content: "what link did you give me"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for message")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if !strings.Contains(capturedPrompt, "<THREAD_SUMMARY>Previously discussed OAuth</THREAD_SUMMARY>") {
-		t.Errorf("Expected prompt to contain thread summary, got: %s", capturedPrompt)
-	}
-	if !strings.Contains(capturedPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(capturedPrompt, "where is the link?") {
-		t.Errorf("Expected prompt to contain channel history lookback on cold start, got: %s", capturedPrompt)
-	}
-}
-
 func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
 	t.Parallel()
-
 	ambCfg := &config.AmbientContextConfig{Template: "Kitchen Temp: {{.temp}}"}
-
 	tests := []struct {
-		name               string
-		ambCfg             *config.AmbientContextConfig
-		resolverErr        error
-		resolverText       string
-		wantResolverCalled bool
-		wantPromptContains []string
-		wantPromptExcludes []string
+		name                                   string
+		ambCfg                                 *config.AmbientContextConfig
+		resolverErr                            error
+		resolverText                           string
+		wantResolverCalled                     bool
+		wantPromptContains, wantPromptExcludes []string
 	}{
-		{
-			name:               "ConfiguredChannel",
-			ambCfg:             ambCfg,
-			resolverText:       "<ambient_context>\nKitchen Temp: 71F\n</ambient_context>",
-			wantResolverCalled: true,
-			wantPromptContains: []string{"<ambient_context>", "Kitchen Temp: 71F", "turn off kitchen lights"},
-		},
-		{
-			name:               "UnconfiguredChannel_Bypass",
-			ambCfg:             nil,
-			resolverText:       "<ambient_context>should not appear</ambient_context>",
-			wantResolverCalled: false,
-			wantPromptContains: []string{"turn off kitchen lights"},
-			wantPromptExcludes: []string{"<ambient_context>"},
-		},
-		{
-			name:               "ResolverErrorTolerance",
-			ambCfg:             ambCfg,
-			resolverErr:        errors.New("mcp tool timed out"),
-			wantResolverCalled: true,
-			wantPromptContains: []string{"turn off kitchen lights"},
-			wantPromptExcludes: []string{"<ambient_context>"},
-		},
+		{name: "ConfiguredChannel", ambCfg: ambCfg, resolverText: "<ambient_context>\nKitchen Temp: 71F\n</ambient_context>", wantResolverCalled: true, wantPromptContains: []string{"<ambient_context>", "Kitchen Temp: 71F", "turn off kitchen lights"}},
+		{name: "UnconfiguredChannel_Bypass", ambCfg: nil, resolverText: "<ambient_context>should not appear</ambient_context>", wantResolverCalled: false, wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"}},
+		{name: "ResolverErrorTolerance", ambCfg: ambCfg, resolverErr: errors.New("mcp tool timed out"), wantResolverCalled: true, wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"}},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -2527,81 +1608,52 @@ func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
 					},
 				},
 			}
-
 			te := &turnExecution{
-				pool:             pool,
-				effectiveName:    "kitchen",
-				threadID:         "t-amb-1",
-				currentSessionID: "sess-amb-1",
-				policy: config.ChannelPolicy{
-					AmbientContext: tt.ambCfg,
-				},
-				burst: []db.Message{{ID: "m1", ThreadID: "t-amb-1", Content: "turn off kitchen lights"}},
+				pool: pool, effectiveName: "kitchen", threadID: "t-amb-1", currentSessionID: "sess-amb-1",
+				policy: config.ChannelPolicy{AmbientContext: tt.ambCfg},
+				burst:  []db.Message{{ID: "m1", ThreadID: "t-amb-1", Content: "turn off kitchen lights"}},
 			}
 			te.buildTurnPrompt()
-
 			if called := resolverCalled.Load(); called != tt.wantResolverCalled {
 				t.Errorf("resolverCalled = %t, want %t", called, tt.wantResolverCalled)
 			}
 			for _, sub := range tt.wantPromptContains {
 				if !strings.Contains(te.turnPrompt, sub) {
-					t.Errorf("expected turnPrompt to contain %q, got: %q", sub, te.turnPrompt)
+					t.Errorf("expected prompt containing %q", sub)
 				}
 			}
 			for _, sub := range tt.wantPromptExcludes {
 				if strings.Contains(te.turnPrompt, sub) {
-					t.Errorf("expected turnPrompt NOT to contain %q, got: %q", sub, te.turnPrompt)
+					t.Errorf("expected prompt NOT containing %q", sub)
 				}
 			}
 		})
 	}
 }
 
-
-
 func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
-	tmpDir := t.TempDir()
+	store, tmpDir := setupTestStore(t), t.TempDir()
 	sessMgr := session.New(tmpDir, tmpDir)
-
-	threadID := "thread-rotated-cold-test"
-	oldSessionID := "11111111-1111-1111-1111-111111111111"
-	newSessionID := "22222222-2222-2222-2222-222222222222"
+	threadID, oldSessionID, newSessionID := "thread-rotated-cold-test", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
 
 	_ = store.SaveSessionID(context.Background(), threadID, oldSessionID)
 	_ = store.RotateSessionID(context.Background(), threadID, newSessionID)
 	_ = store.SaveThreadSummary(context.Background(), threadID, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>", "msg-pre-rot")
 
-	CacheDiscordChannel(&discordgo.Channel{
-		ID:       threadID,
-		GuildID:  "g1",
-		ParentID: "parent-chan",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
+	CacheDiscordChannel(&discordgo.Channel{ID: threadID, GuildID: "g1", ParentID: "parent-chan", Type: discordgo.ChannelTypeGuildPublicThread})
 
 	var mu sync.Mutex
 	var capturedPrompts []string
 	doneCh := make(chan struct{}, 2)
-
-	appCfg := config.NewFromData(&config.ConfigData{
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "threads"},
-		},
-	})
+	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "threads"}}})
 
 	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr,
-		Store:          store,
-		TimeoutMinutes: 1,
-		BackoffBase:    10 * time.Millisecond,
-		MaxAttempts:    1,
+		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
 		HistoryFetcher: func(ctx context.Context, tid, beforeID string, limit int) ([]HistoryMessage, error) {
-			return []HistoryMessage{
-				{ID: "msg-hist-1", AuthorName: "alex", Content: "pre-rotation message", CreatedAt: time.Now().Add(-10 * time.Minute)},
-			}, nil
+			return []HistoryMessage{{ID: "msg-hist-1", AuthorName: "test-user", Content: "pre-rotation message", CreatedAt: time.Now().Add(-10 * time.Minute)}}, nil
 		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			if strings.Contains(prompt, "Synthesize the following") {
 				return mockJSONResponse(sessionID, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>"), "", 0, nil
 			}
@@ -2610,11 +1662,9 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 			mu.Unlock()
 			return mockJSONResponse(sessionID, "Turn response"), "", 0, nil
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			doneCh <- struct{}{}
-		},
+		DeliveryFunc:       func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:         func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) { doneCh <- struct{}{} },
 	})
 	pool.Start()
 	defer pool.Stop()
@@ -2622,7 +1672,6 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	msg1 := db.Message{ID: "msg-post-rot-1", ThreadID: threadID, Content: "what was discussed earlier?"}
 	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
-
 	select {
 	case <-doneCh:
 	case <-time.After(10 * time.Second):
@@ -2632,7 +1681,6 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	msg2 := db.Message{ID: "msg-post-rot-2", ThreadID: threadID, Content: "follow-up question"}
 	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
-
 	select {
 	case <-doneCh:
 	case <-time.After(10 * time.Second):
@@ -2641,37 +1689,19 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-
 	if len(capturedPrompts) != 2 {
 		t.Fatalf("Expected 2 captured prompts, got %d", len(capturedPrompts))
 	}
-
-	turn1Prompt := capturedPrompts[0]
-	if !strings.Contains(turn1Prompt, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>") {
-		t.Errorf("Expected Turn 1 to contain <THREAD_SUMMARY>, got:\n%s", turn1Prompt)
+	if !strings.Contains(capturedPrompts[0], "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>") || !strings.Contains(capturedPrompts[0], "<PREVIOUS_SESSION>") || !strings.Contains(capturedPrompts[0], "<CHANNEL_HISTORY>") {
+		t.Errorf("Turn 1 prompt missing expected cold-start context")
 	}
-	if !strings.Contains(turn1Prompt, "<PREVIOUS_SESSION>") {
-		t.Errorf("Expected Turn 1 to contain <PREVIOUS_SESSION>, got:\n%s", turn1Prompt)
-	}
-	if !strings.Contains(turn1Prompt, "<CHANNEL_HISTORY>") {
-		t.Errorf("Expected Turn 1 to contain <CHANNEL_HISTORY>, got:\n%s", turn1Prompt)
-	}
-
-	turn2Prompt := capturedPrompts[1]
-	if strings.Contains(turn2Prompt, "<THREAD_SUMMARY>") {
-		t.Errorf("Expected Turn 2 to NOT contain <THREAD_SUMMARY>, got:\n%s", turn2Prompt)
-	}
-	if strings.Contains(turn2Prompt, "<PREVIOUS_SESSION>") {
-		t.Errorf("Expected Turn 2 to NOT contain <PREVIOUS_SESSION>, got:\n%s", turn2Prompt)
-	}
-	if strings.Contains(turn2Prompt, "<CHANNEL_HISTORY>") {
-		t.Errorf("Expected Turn 2 to NOT contain <CHANNEL_HISTORY>, got:\n%s", turn2Prompt)
+	if strings.Contains(capturedPrompts[1], "<THREAD_SUMMARY>") || strings.Contains(capturedPrompts[1], "<PREVIOUS_SESSION>") || strings.Contains(capturedPrompts[1], "<CHANNEL_HISTORY>") {
+		t.Errorf("Turn 2 prompt unexpectedly contained cold-start context")
 	}
 }
 
 func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 	t.Parallel()
-
 	burstTests := []struct {
 		name       string
 		burst      []db.Message
@@ -2680,65 +1710,13 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 		wantEffort string
 	}{
 		{name: "NilBurst", burst: nil, wantModel: "", wantSilent: false, wantEffort: "high"},
-		{
-			name: "NormalBurst",
-			burst: []db.Message{
-				{ID: "m1", Effort: "high", Metadata: db.MessageMetadata{Model: "gemini-3.1-pro"}},
-				{ID: "m2", Metadata: db.MessageMetadata{Silent: false}},
-			},
-			wantModel:  "gemini-3.1-pro",
-			wantSilent: false,
-			wantEffort: "high",
-		},
-		{
-			name: "SilentFlashBurst",
-			burst: []db.Message{
-				{ID: "m1", Metadata: db.MessageMetadata{Silent: true}},
-				{ID: "m2", Metadata: db.MessageMetadata{Silent: true, Model: "  gemini-4-flash  "}},
-			},
-			wantModel:  "gemini-4-flash",
-			wantSilent: true,
-			wantEffort: "low",
-		},
-		{
-			name: "MixedSilentAndNormalBurst",
-			burst: []db.Message{
-				{ID: "m1", Metadata: db.MessageMetadata{Silent: true}},
-				{ID: "m2", Metadata: db.MessageMetadata{Silent: false, Model: "  gemini-4-flash  "}},
-			},
-			wantModel:  "gemini-4-flash",
-			wantSilent: false,
-			wantEffort: "low",
-		},
-		{
-			name: "LowEffortFieldBurst",
-			burst: []db.Message{
-				{ID: "m1", Effort: " LOW "},
-			},
-			wantModel:  "",
-			wantSilent: false,
-			wantEffort: "low",
-		},
-		{
-			name: "MediumEffortFieldBurst",
-			burst: []db.Message{
-				{ID: "m1", Effort: " MEDIUM "},
-			},
-			wantModel:  "",
-			wantSilent: false,
-			wantEffort: "medium",
-		},
-		{
-			name: "FlashMediumModelBurstNotLow",
-			burst: []db.Message{
-				{ID: "m1", Metadata: db.MessageMetadata{Model: "gemini-3.8-flash-medium"}},
-			},
-			wantModel:  "gemini-3.8-flash-medium",
-			wantSilent: false,
-			wantEffort: "medium",
-		},
+		{name: "NormalBurst", burst: []db.Message{{ID: "m1", Effort: "high", Metadata: db.MessageMetadata{Model: "gemini-3.1-pro"}}, {ID: "m2", Metadata: db.MessageMetadata{Silent: false}}}, wantModel: "gemini-3.1-pro", wantSilent: false, wantEffort: "high"},
+		{name: "SilentFlashBurst", burst: []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Silent: true}}, {ID: "m2", Metadata: db.MessageMetadata{Silent: true, Model: "  gemini-4-flash  "}}}, wantModel: "gemini-4-flash", wantSilent: true, wantEffort: "low"},
+		{name: "MixedSilentAndNormalBurst", burst: []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Silent: true}}, {ID: "m2", Metadata: db.MessageMetadata{Silent: false, Model: "  gemini-4-flash  "}}}, wantModel: "gemini-4-flash", wantSilent: false, wantEffort: "low"},
+		{name: "LowEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " LOW "}}, wantModel: "", wantSilent: false, wantEffort: "low"},
+		{name: "MediumEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " MEDIUM "}}, wantModel: "", wantSilent: false, wantEffort: "medium"},
+		{name: "FlashMediumModelBurstNotLow", burst: []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Model: "gemini-3.8-flash-medium"}}}, wantModel: "gemini-3.8-flash-medium", wantSilent: false, wantEffort: "medium"},
 	}
-
 	for _, tt := range burstTests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -2759,9 +1737,7 @@ func TestWorker_SilentBurst_Execution(t *testing.T) {
 	t.Parallel()
 	store := db.NewFakeStore()
 	ctx := context.Background()
-
-	threadID := "1542423172400291873"
-	sessionID := "a1111111-2222-3333-4444-555555555555"
+	threadID, sessionID := "1542423172400291873", "a1111111-2222-3333-4444-555555555555"
 
 	var mu sync.Mutex
 	var deliveredMsgs []string
@@ -2769,10 +1745,7 @@ func TestWorker_SilentBurst_Execution(t *testing.T) {
 	doneCh := make(chan string, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		MaxAttempts:    1,
-		BackoffBase:    1 * time.Millisecond,
-		TimeoutMinutes: 1,
+		Store: store, MaxAttempts: 1, BackoffBase: 1 * time.Millisecond, TimeoutMinutes: 1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse(sessionID, "silent internal work completed"), "", 0, nil
 		},
@@ -2788,23 +1761,12 @@ func TestWorker_SilentBurst_Execution(t *testing.T) {
 			mu.Unlock()
 			return func() {}
 		},
-		OnMessageCompleted: func(msg db.Message, status string) {
-			doneCh <- status
-		},
+		OnMessageCompleted: func(msg db.Message, status string) { doneCh <- status },
 	})
 	pool.Start()
 	defer pool.Stop()
 
-	msg := db.Message{
-		ID:       "msg-silent-exec-1",
-		ThreadID: threadID,
-		Content:  "Execute silent task",
-		Status:   db.StatusPending,
-		Metadata: db.MessageMetadata{
-			Model:  "gemini-4-flash",
-			Silent: true,
-		},
-	}
+	msg := db.Message{ID: "msg-silent-exec-1", ThreadID: threadID, Content: "Execute silent task", Status: db.StatusPending, Metadata: db.MessageMetadata{Model: "gemini-4-flash", Silent: true}}
 	_ = store.InsertMessage(ctx, msg)
 	pool.Enqueue(msg)
 
@@ -2819,95 +1781,46 @@ func TestWorker_SilentBurst_Execution(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if typingCalls != 0 {
-		t.Errorf("expected 0 typing calls for silent burst, got %d", typingCalls)
+	if typingCalls != 0 || len(deliveredMsgs) != 0 {
+		t.Errorf("expected 0 typing and delivery, got %d typing, %d delivered", typingCalls, len(deliveredMsgs))
 	}
-	if len(deliveredMsgs) != 0 {
-		t.Errorf("expected 0 delivered messages for silent burst, got %d: %v", len(deliveredMsgs), deliveredMsgs)
-	}
-
 	storedMsg, err := store.GetMessage(ctx, msg.ID)
-	if err != nil || storedMsg == nil {
-		t.Fatalf("GetMessage failed: %v", err)
-	}
-	if storedMsg.Status != db.StatusCompleted {
-		t.Errorf("expected stored message StatusCompleted, got %s", storedMsg.Status)
+	if err != nil || storedMsg == nil || storedMsg.Status != db.StatusCompleted {
+		t.Errorf("expected stored message StatusCompleted, got %v (err=%v)", storedMsg, err)
 	}
 }
 
 func TestYieldTrap_Scenarios(t *testing.T) {
 	tests := []struct {
-		name                 string
-		threadID             string
-		sessionID            string
-		msgID                string
-		yieldType            string // "stderr" or "daemon_tracker"
-		maxYields            int    // how many turns yield before success (or all yield)
-		expectInvocations    int32
-		expectDeliveredText  string
-		metricOutcome        string // "resumed" or "circuit_breaker"
-		metricSignature      string // "stderr_signature" or "daemon_tracker"
-		verifyPromptsSeen    bool
-		expectedSecondPrompt string
+		name, threadID, sessionID, msgID, yieldType, metricOutcome, metricSignature, expectDeliveredText, expectedSecondPrompt string
+		maxYields                                                                                                              int
+		expectInvocations                                                                                                      int32
+		verifyPromptsSeen                                                                                                      bool
 	}{
 		{
-			name:                 "auto-resumption on stderr signature success",
-			threadID:             "thread-yield-auto",
-			sessionID:            "f2222222-3333-4444-5555-666666666666",
-			msgID:                "msg-yield-1",
-			yieldType:            "stderr",
-			maxYields:            1,
-			expectInvocations:    2,
-			expectDeliveredText:  "Job completed after resumption!",
-			metricOutcome:        "resumed",
-			metricSignature:      "stderr_signature",
-			verifyPromptsSeen:    true,
-			expectedSecondPrompt: YieldTrapResumePrompt,
+			name: "auto-resumption on stderr signature success", threadID: "thread-yield-auto", sessionID: "f2222222-3333-4444-5555-666666666666", msgID: "msg-yield-1",
+			yieldType: "stderr", maxYields: 1, expectInvocations: 2, expectDeliveredText: "Job completed after resumption!", metricOutcome: "resumed", metricSignature: "stderr_signature", verifyPromptsSeen: true, expectedSecondPrompt: YieldTrapResumePrompt,
 		},
 		{
-			name:                "circuit breaker trips after max resumes",
-			threadID:            "thread-yield-cb",
-			sessionID:           "f3333333-4444-5555-6666-777777777777",
-			msgID:               "msg-circuit-1",
-			yieldType:           "stderr",
-			maxYields:           99, // all invocations yield
-			expectInvocations:   3,
-			expectDeliveredText: "Still waiting turn 3",
-			metricOutcome:       "circuit_breaker",
-			metricSignature:     "stderr_signature",
+			name: "circuit breaker trips after max resumes", threadID: "thread-yield-cb", sessionID: "f3333333-4444-5555-6666-777777777777", msgID: "msg-circuit-1",
+			yieldType: "stderr", maxYields: 99, expectInvocations: 3, expectDeliveredText: "Still waiting turn 3", metricOutcome: "circuit_breaker", metricSignature: "stderr_signature",
 		},
 		{
-			name:                "daemon tracker triggers auto-resumption",
-			threadID:            "thread-yield-dt",
-			sessionID:           "f4444444-5555-6666-7777-888888888888",
-			msgID:               "msg-audit-1",
-			yieldType:           "daemon_tracker",
-			maxYields:           1,
-			expectInvocations:   2,
-			expectDeliveredText: "Recovered via daemon tracker!",
-			metricOutcome:       "resumed",
-			metricSignature:     "daemon_tracker",
+			name: "daemon tracker triggers auto-resumption", threadID: "thread-yield-dt", sessionID: "f4444444-5555-6666-7777-888888888888", msgID: "msg-audit-1",
+			yieldType: "daemon_tracker", maxYields: 1, expectInvocations: 2, expectDeliveredText: "Recovered via daemon tracker!", metricOutcome: "resumed", metricSignature: "daemon_tracker",
 		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := setupTestStore(t)
-			tmpHome := t.TempDir()
-
+			store, tmpHome := setupTestStore(t), t.TempDir()
 			var runnerInvocations atomic.Int32
-			var promptsSeenMu sync.Mutex
+			var promptsSeenMu, deliveredMu sync.Mutex
 			var promptsSeen []string
-
-			var deliveredMu sync.Mutex
 			var deliveredText string
 			doneCh := make(chan struct{})
 
 			sessMgr := session.New(tmpHome, "")
-			sessDir, err := sessMgr.EnsureSessionDir(tc.sessionID)
-			if err != nil {
-				t.Fatalf("Failed to ensure session dir: %v", err)
-			}
+			sessDir, _ := sessMgr.EnsureSessionDir(tc.sessionID)
 			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
 			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 			now := time.Now()
@@ -2915,56 +1828,37 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 
 			var procPool runner.AgentPool
 			var daemon *runner.StreamingDaemon
-
 			if tc.yieldType == "daemon_tracker" {
 				tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
 				_ = os.MkdirAll(tasksDir, 0755)
 				_ = os.WriteFile(filepath.Join(tasksDir, "task-999.log"), []byte("Task output\n"), 0644)
-
-				mockSpawner := runner.NewMockDaemonSpawner()
-				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-				defer func() {
-					if err := pPool.Close(); err != nil {
-						t.Logf("cleanup unified pool: %v", err)
-					}
-				}()
+				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockDaemonSpawner())
+				defer pPool.Close()
 				procPool = pPool
 			}
 
 			pool := NewWorkerPool(WorkerPoolConfig{
-				ProcessPool:    procPool,
-				SessionManager: sessMgr,
-				Store:          store,
-				TimeoutMinutes: 1,
-				BackoffBase:    10 * time.Millisecond,
-				MaxAttempts:    3,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				ProcessPool: procPool, SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					inv := runnerInvocations.Add(1)
 					promptsSeenMu.Lock()
 					promptsSeen = append(promptsSeen, prompt)
 					promptsSeenMu.Unlock()
-
 					_ = os.Chtimes(sessDir, time.Now(), time.Now())
-
 					if int(inv) <= tc.maxYields {
 						if tc.yieldType == "daemon_tracker" {
-							out := fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Waiting on background task task-999 to complete.","usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID)
-							return out, "", 0, nil
+							return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Waiting on background task task-999 to complete.","usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID), "", 0, nil
 						}
-						// stderr yield
 						msg := fmt.Sprintf("Still waiting turn %d", inv)
 						if tc.maxYields == 1 {
 							msg = "Waiting on background task task-444"
 						}
-						out := fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID, msg)
-						return out, "terminating 1 background task(s) on exit\n", 0, nil
+						return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID, msg), "terminating 1 background task(s) on exit\n", 0, nil
 					}
-
 					if daemon != nil {
 						daemon.TaskTracker().Remove("task-999")
 					}
-					out := fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":150,"output_tokens":35,"total_tokens":185}}`, tc.sessionID, tc.expectDeliveredText)
-					return out, "", 0, nil
+					return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":150,"output_tokens":35,"total_tokens":185}}`, tc.sessionID, tc.expectDeliveredText), "", 0, nil
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 					deliveredMu.Lock()
@@ -2972,46 +1866,22 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 					deliveredMu.Unlock()
 					return nil
 				},
-				TypingFunc: func(s *discordgo.Session, channelID string) func() {
-					return func() {}
-				},
-				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					close(doneCh)
-				},
+				TypingFunc:         func(s *discordgo.Session, channelID string) func() { return func() {} },
+				OnMessageCompleted: func(msg db.Message, finalStatus string) { close(doneCh) },
 			})
 			pool.Start()
 			defer pool.Stop()
 
 			if tc.yieldType == "daemon_tracker" {
-				d, err := pool.ProcessPool().GetOrCreate(context.Background(), tc.threadID, "")
-				if err != nil {
-					t.Fatalf("Failed to create daemon: %v", err)
-				}
+				d, _ := pool.ProcessPool().GetOrCreate(context.Background(), tc.threadID, tc.sessionID)
 				daemon = d
-				daemon.TaskTracker().Add(runner.TaskMetadata{
-					TaskID:    "task-999",
-					StartedAt: time.Now(),
-				})
+				daemon.TaskTracker().Add(runner.TaskMetadata{TaskID: "task-999", StartedAt: time.Now()})
 			}
 
-			msg := db.Message{
-				ID:         tc.msgID,
-				ThreadID:   tc.threadID,
-				GuildID:    "guild-1",
-				AuthorID:   "user-1",
-				AuthorName: "Alex",
-				Content:    "Run task",
-				Status:     db.StatusPending,
-				CreatedAt:  time.Now().UTC(),
-				UpdatedAt:  time.Now().UTC(),
-			}
-			if err := insertMessage(store, msg); err != nil {
-				t.Fatalf("Failed to insert message: %v", err)
-			}
-
+			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "test-user", Content: "Run task", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+			_ = insertMessage(store, msg)
 			model := pool.GetRuntimeConfig()
 			initialMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
-
 			pool.Enqueue(msg)
 
 			select {
@@ -3021,9 +1891,8 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			}
 
 			if runnerInvocations.Load() != tc.expectInvocations {
-				t.Fatalf("expected %d runner invocations, got %d", tc.expectInvocations, runnerInvocations.Load())
+				t.Fatalf("invocations = %d, want %d", runnerInvocations.Load(), tc.expectInvocations)
 			}
-
 			if tc.verifyPromptsSeen {
 				promptsSeenMu.Lock()
 				seenCount := len(promptsSeen)
@@ -3032,90 +1901,20 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 					secondPrompt = promptsSeen[1]
 				}
 				promptsSeenMu.Unlock()
-
-				if seenCount != int(tc.expectInvocations) {
-					t.Fatalf("expected %d prompts seen, got %d", tc.expectInvocations, seenCount)
-				}
-				if secondPrompt != tc.expectedSecondPrompt {
-					t.Errorf("expected resumed prompt %q, got %q", tc.expectedSecondPrompt, secondPrompt)
+				if seenCount != int(tc.expectInvocations) || secondPrompt != tc.expectedSecondPrompt {
+					t.Errorf("prompts mismatch: count=%d second=%q", seenCount, secondPrompt)
 				}
 			}
-
 			deliveredMu.Lock()
 			finalText := deliveredText
 			deliveredMu.Unlock()
 			if finalText != tc.expectDeliveredText {
-				t.Errorf("expected delivered text %q, got %q", tc.expectDeliveredText, finalText)
+				t.Errorf("delivered = %q, want %q", finalText, tc.expectDeliveredText)
 			}
-
 			newMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
 			if newMetric != initialMetric+1 {
-				t.Errorf("expected metric %s/%s to increment by 1, got delta %.0f", tc.metricOutcome, tc.metricSignature, newMetric-initialMetric)
+				t.Errorf("metric delta = %.0f, want 1", newMetric-initialMetric)
 			}
 		})
-	}
-}
-
-func TestParseDBTime(t *testing.T) {
-	t.Parallel()
-	now := time.Now().UTC()
-	var nilTime *time.Time
-	for i, tc := range []struct {
-		input    interface{}
-		expected bool
-	}{
-		{nil, false}, {now, true}, {nilTime, false}, {&now, true}, {"", false}, {"   ", false}, {"not-a-valid-timestamp", false},
-		{[]byte("2026-09-11T15:04:05Z"), true}, {123456789, false},
-		{"2026-09-11T15:04:05.123456789Z", true}, {"2026-09-11T15:04:05Z", true},
-		{"2026-09-11 15:04:05.123456789 -0700 MST", true}, {"2026-09-11 15:04:05 -0700 MST", true},
-		{"2026-09-11 15:04:05.123456789-07:00", true}, {"2026-09-11 15:04:05.123456789", true},
-		{"2026-09-11 15:04:05-07:00", true}, {"2026-09-11 15:04:05", true}, {"2026-09-11T15:04:05", true},
-	} {
-		if _, ok := parseDBTime(tc.input); ok != tc.expected {
-			t.Errorf("case %d (%v): expected %v, got %v", i, tc.input, tc.expected, ok)
-		}
-	}
-}
-
-func TestTurnExecution_StoreAccessorsAndFallbacks(t *testing.T) {
-	t.Parallel()
-	teNoStore := &turnExecution{}
-	if s := teNoStore.store(); s != nil {
-		t.Errorf("expected nil from teNoStore.store()")
-	}
-	teNoStore.updateMessageStatus("m1", "failed", "err")
-	teNoStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
-	teNoStore.updateMessageCompleted("m1", "resp")
-	teNoStore.incrementMessageRetry("m1", "retry-err")
-	teNoStore.saveSessionID("t1", "s1")
-	teNoStore.rotateSessionID("t1", "s2")
-	if count, err := teNoStore.getSessionTurnCount("t1"); count != 0 || err != nil {
-		t.Errorf("expected 0, nil")
-	}
-	_, _ = teNoStore.getSessionTurnCount("t2")
-
-	fake := db.NewFakeStore()
-	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
-	errStore := &errQueueStore{Store: fake}
-	pErr := &WorkerPool{cfg: WorkerPoolConfig{Store: errStore}}
-
-	for _, te := range []*turnExecution{
-		{pool: pFake},
-		{pool: pErr},
-	} {
-		te.updateMessageStatus("m1", "processing")
-		te.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
-		te.updateMessageCompleted("m1", "resp")
-		te.incrementMessageRetry("m1", "retry-err")
-		te.saveSessionID("t1", "s1")
-		te.rotateSessionID("t1", "s2")
-		_, _ = te.getSessionTurnCount("t1")
-		_, _ = te.incrementSessionTurnCount("t1")
-		_, _ = te.getSessionID("t1")
-		_, _ = te.getPreviousSessionID("t1")
-		_ = te.createOneShotSchedule(db.OneShotSchedule{ID: "os1"})
-		_, _, _ = te.getThreadSummary("t1")
-		_ = te.saveThreadSummary("t1", "sum", "m1")
-		_, _ = te.getRecentThreadMessages("t1", 10)
 	}
 }

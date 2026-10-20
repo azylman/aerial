@@ -260,18 +260,6 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 	return res
 }
 
-func containsToken(s, token string) bool {
-	if token == "" {
-		return false
-	}
-	for _, f := range strings.Fields(s) {
-		if f == token {
-			return true
-		}
-	}
-	return false
-}
-
 func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string) bool {
 	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" {
 		return true

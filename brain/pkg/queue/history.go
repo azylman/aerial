@@ -325,12 +325,6 @@ var threadSummaryGroup singleflight.Group
 // to synthesize thread history into a <THREAD_SUMMARY> block.
 const DefaultThreadSummaryTimeout = 15 * time.Second
 
-// SummarizeThreadHistory uses the Flash model to summarize the provided thread history.
-// It is wrapped in a singleflight.Group keyed by threadID, and uses DefaultThreadSummaryTimeout.
-func SummarizeThreadHistory(ctx context.Context, llm LLMFunc, model, threadID string, msgs []HistoryMessage) (string, error) {
-	return SummarizeThreadHistoryWithGroup(ctx, &threadSummaryGroup, llm, model, threadID, msgs)
-}
-
 // SummarizeThreadHistoryWithGroup uses the provided singleflight.Group (or falls back to package-level group if nil)
 // to coordinate concurrent summarization requests for the same thread.
 func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Group, llm LLMFunc, model, threadID string, msgs []HistoryMessage) (string, error) {
