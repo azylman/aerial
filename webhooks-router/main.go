@@ -1208,7 +1208,7 @@ type DefaultOutboundDispatcher struct {
 
 func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = &http.Client{Timeout: 65 * time.Second}
 	}
 	return &DefaultOutboundDispatcher{
 		hangarURL:   strings.TrimRight(hangarURL, "/"),
