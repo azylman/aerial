@@ -244,6 +244,8 @@ func TestRepoAndCommitDetection(t *testing.T) {
 		{"git commit -a", "git commit -a -m 'msg'", true},
 		{"git commit -am", "git commit -am 'msg'", true},
 		{"git commit --all", "git commit --all -m 'msg'", true},
+		{"bash -c git commit -a", " ; bash -c 'git commit -a -m msg'", true},
+		{"bash -c git commit -m", "bash -c 'git commit -m msg'", false},
 		{"git commit -m only", "git commit -m 'msg'", false},
 		{"non-git command", "echo 'git commit -a'", false},
 	}
