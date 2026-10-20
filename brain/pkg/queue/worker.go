@@ -197,13 +197,11 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	}
 }
 
-func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify bool) {
+func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify, isResponse bool) {
 	durationMs := time.Since(te.execStart).Milliseconds()
 	now := time.Now().UTC()
 	for _, m := range msgs {
-		if msgStatus == db.StatusCompleted && runStatus == "completed" && (runErr == "" || msgOutput == "[EXPIRED_STALE]") && !strings.HasPrefix(msgOutput, "[") {
-			te.updateMessageCompleted(m.ID, msgOutput)
-		} else if msgStatus == db.StatusCompleted && msgOutput == "[EXPIRED_STALE]" {
+		if isResponse {
 			te.updateMessageCompleted(m.ID, msgOutput)
 		} else {
 			te.updateMessageStatus(m.ID, msgStatus, msgOutput)
@@ -677,7 +675,7 @@ func (te *turnExecution) claimAndFilterStale() bool {
 	dropBurstAsStale := func(reason string) {
 		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (%s). Marked [EXPIRED_STALE].", te.threadID, reason)
 		metrics.RecordTurnCompleted("stale", te.triggerType, "none", time.Since(latestMsg.CreatedAt))
-		te.finalizeBurstMessages(te.burst, db.StatusCompleted, "[EXPIRED_STALE]", "completed", "[EXPIRED_STALE]", "", true)
+		te.finalizeBurstMessages(te.burst, db.StatusCompleted, "[EXPIRED_STALE]", "completed", "[EXPIRED_STALE]", "", true, true)
 	}
 
 	var lastActivity time.Time
@@ -742,7 +740,7 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 		log.Printf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", te.threadID, te.policy.Mode, len(te.burst))
 		metrics.RecordTurnCompleted("ignored", te.triggerType, "none", time.Since(te.execStart))
 		tag := fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(te.policy.Mode)))
-		te.finalizeBurstMessages(te.burst, db.StatusCompleted, tag, "completed", "", "", true)
+		te.finalizeBurstMessages(te.burst, db.StatusCompleted, tag, "completed", "", "", true, false)
 		return false
 	}
 
@@ -982,7 +980,7 @@ func (te *turnExecution) abortBurst(reason string) {
 		metrics.RecordTurnCompleted("aborted", te.triggerType, "pre_turn", time.Since(te.execStart))
 	}
 	telemetry := fmt.Sprintf("[SKIPPED %s]", reason)
-	te.finalizeBurstMessages(te.burst, db.StatusCompleted, telemetry, "completed", telemetry, "", true)
+	te.finalizeBurstMessages(te.burst, db.StatusCompleted, telemetry, "completed", telemetry, "", true, false)
 }
 
 func (te *turnExecution) rescheduleBurst(delaySeconds int) {
@@ -997,7 +995,7 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 	for _, m := range te.burst {
 		if m.RetryCount+1 >= maxAttempts {
 			log.Printf("[WorkerPool] Message %s in thread %s exceeded max retry attempts (%d). Marking FAILED.", m.ID, te.threadID, maxAttempts)
-			te.finalizeBurstMessages([]db.Message{m}, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]", "failed", "[EXHAUSTED_PRE_TURN_RETRIES]", "", true)
+			te.finalizeBurstMessages([]db.Message{m}, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]", "failed", "[EXHAUSTED_PRE_TURN_RETRIES]", "", true, false)
 			continue
 		}
 		te.incrementMessageRetry(m.ID, "pre_turn_deferred")
@@ -1137,7 +1135,7 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 	return cfg
 }
 
-func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr string) string {
+func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr string, allowPersist bool) string {
 	te.activeSessionMu.Lock()
 	defer te.activeSessionMu.Unlock()
 
@@ -1172,12 +1170,14 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 
 	if targetSess != "" {
 		te.activeSessionID = targetSess
-		if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
-			log.Printf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)
-			te.currentSessionID = targetSess
-			te.saveSessionID(te.threadID, targetSess)
-		} else if te.isEphemeral && targetSess != te.currentSessionID {
-			log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, targetSess)
+		if allowPersist {
+			if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
+				log.Printf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)
+				te.currentSessionID = targetSess
+				te.saveSessionID(te.threadID, targetSess)
+			} else if te.isEphemeral && targetSess != te.currentSessionID {
+				log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, targetSess)
+			}
 		}
 	}
 	return targetSess
@@ -1443,7 +1443,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	te.turnResponseText = cleanText
 	te.turnTokenUsage = resp.Usage
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true)
+	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true, true)
 	log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
 	return true, ""
 }
@@ -1595,8 +1595,6 @@ func (te *turnExecution) executeWithRetries() {
 		}
 		runCancel()
 
-		targetSess := te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr)
-
 		if outcome.IsSuccess {
 			isFailure = false
 			isTransient = false
@@ -1614,6 +1612,9 @@ func (te *turnExecution) executeWithRetries() {
 				Usage:          outcome.Usage,
 			}
 			stdout = outcome.Response
+			if outcome.SessionID != "" {
+				te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr, true)
+			}
 		} else {
 			isFailure = true
 			isTransient = outcome.IsTransient
@@ -1629,6 +1630,7 @@ func (te *turnExecution) executeWithRetries() {
 
 		if isFailure {
 			promptToSend = te.turnPrompt
+			targetSess := te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr, !isSessionCorruption && te.currentSessionID == "")
 			if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
 				poolCtx := context.Background()
 				if te.pool.ctx != nil {
@@ -1816,13 +1818,17 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 			if resp != nil {
-				extSess := te.resolveAndPersistSessionID(resp.ConversationID, stdout, stderr)
+				extSess := resp.ConversationID
+				if extSess == "" {
+					extSess = runner.ExtractSessionID(stdout+"\n"+stderr, te.execStart)
+				}
 				if te.currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
 					isTransient = false
 					lastErrDetail = "failed to latch active session UUID on cold start"
 					errDetail = lastErrDetail
 					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
 				} else {
+					te.resolveAndPersistSessionID(extSess, stdout, stderr, true)
 					// Option B Background Command Yield Trap Interception:
 					isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
 					var unfinishedTaskID string
@@ -2121,13 +2127,13 @@ func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) 
 	te.turnStatus = turnStatus
 	te.turnError = sanitizedErr
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, "failed", sanitizedErr, model, true)
+	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, "failed", sanitizedErr, model, true, false)
 }
 
 func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
 	metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 	telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-	te.finalizeBurstMessages([]db.Message{m}, db.StatusCompleted, telemetry, "completed", "", "", true)
+	te.finalizeBurstMessages([]db.Message{m}, db.StatusCompleted, telemetry, "completed", "", "", true, false)
 }
 
 func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, failScheduleRun bool) {
@@ -2141,7 +2147,7 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 		runErr = "context cancelled during execution"
 	}
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	te.finalizeBurstMessages(te.burst, db.StatusPending, "interrupted by graceful deployment", runStatus, runErr, currentModel, false)
+	te.finalizeBurstMessages(te.burst, db.StatusPending, "interrupted by graceful deployment", runStatus, runErr, currentModel, false, false)
 }
 
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {

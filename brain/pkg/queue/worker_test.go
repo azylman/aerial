@@ -83,7 +83,7 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 				done = make(chan struct{})
 				go func() {
 					defer close(done)
-					time.Sleep(50 * time.Millisecond)
+					<-time.After(15 * time.Millisecond)
 					_ = os.WriteFile(logFile, []byte("finished"), 0644)
 				}()
 			}
@@ -420,7 +420,7 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 				t.Fatalf("timed out waiting for message completion")
 			}
 
-			time.Sleep(60 * time.Millisecond)
+			<-time.After(50 * time.Millisecond)
 			pool.mu.Lock()
 			_, workerStillActive := pool.threadChs[tc.wantScopeKey]
 			pool.mu.Unlock()
@@ -431,18 +431,21 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 			if !tc.isLowPool {
 				daemon.TaskTracker().Remove(tc.taskID)
 				reaped := false
-				for i := 0; i < 50; i++ {
-					time.Sleep(20 * time.Millisecond)
-					pool.mu.Lock()
-					_, active := pool.threadChs[tc.wantScopeKey]
-					pool.mu.Unlock()
-					if !active {
-						reaped = true
-						break
+				ticker := time.NewTicker(10 * time.Millisecond)
+				defer ticker.Stop()
+				timeout := time.After(2 * time.Second)
+				for !reaped {
+					select {
+					case <-timeout:
+						t.Fatalf("expected worker to be reaped after background task finished")
+					case <-ticker.C:
+						pool.mu.Lock()
+						_, active := pool.threadChs[tc.wantScopeKey]
+						pool.mu.Unlock()
+						if !active {
+							reaped = true
+						}
 					}
-				}
-				if !reaped {
-					t.Errorf("expected worker to be reaped after background task finished")
 				}
 			}
 		})
@@ -2912,15 +2915,11 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 
 			var procPool runner.AgentPool
 			var daemon *runner.StreamingDaemon
-			mockBin := ""
 
 			if tc.yieldType == "daemon_tracker" {
 				tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
 				_ = os.MkdirAll(tasksDir, 0755)
 				_ = os.WriteFile(filepath.Join(tasksDir, "task-999.log"), []byte("Task output\n"), 0644)
-
-				mockBin = filepath.Join(tmpHome, "mock_agy.sh")
-				_ = os.WriteFile(mockBin, []byte("#!/bin/sh\nwhile true; do sleep 1; done\n"), 0755)
 
 				mockSpawner := runner.NewMockDaemonSpawner()
 				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
@@ -2936,7 +2935,6 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 				ProcessPool:    procPool,
 				SessionManager: sessMgr,
 				Store:          store,
-				AgyBin:         mockBin,
 				TimeoutMinutes: 1,
 				BackoffBase:    10 * time.Millisecond,
 				MaxAttempts:    3,
@@ -3058,7 +3056,7 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 	}
 }
 
-func TestWorker_DBErrorAndHelperCoverage(t *testing.T) {
+func TestParseDBTime(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	var nilTime *time.Time
@@ -3077,7 +3075,10 @@ func TestWorker_DBErrorAndHelperCoverage(t *testing.T) {
 			t.Errorf("case %d (%v): expected %v, got %v", i, tc.input, tc.expected, ok)
 		}
 	}
+}
 
+func TestTurnExecution_StoreAccessorsAndFallbacks(t *testing.T) {
+	t.Parallel()
 	teNoStore := &turnExecution{}
 	if s := teNoStore.store(); s != nil {
 		t.Errorf("expected nil from teNoStore.store()")
