@@ -43,7 +43,10 @@ func selectContext[T any](ctx context.Context, resCh <-chan T, errCh <-chan erro
 	case <-ctx.Done():
 		return empty, ctx.Err()
 	case res := <-resCh:
-		return res, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return empty, err
+		}
+		return res, nil
 	case err := <-errCh:
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return empty, ctxErr

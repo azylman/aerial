@@ -460,17 +460,13 @@ func DefaultWatchdogOptions(timeoutMinutes int) WatchdogOptions {
 
 type RunnerFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
 
+// ExtractSessionID extracts a session UUID from agy output.
+// Strict NDJSON lines are unmarshaled directly via json.Unmarshal; log-prefixed lines fall through to extractUUIDByRegex.
 func ExtractSessionID(output string, _ time.Time) string {
 	for _, rawLine := range strings.Split(output, "\n") {
 		line := strings.TrimSpace(rawLine)
-		if line == "" {
-			continue
-		}
 		var probe sessionProbe
-		if line[0] == '{' && json.Unmarshal([]byte(line), &probe) == nil && probe.extractUUID() != "" {
-			return probe.extractUUID()
-		}
-		if idx := strings.IndexByte(line, '{'); idx >= 0 && json.NewDecoder(strings.NewReader(line[idx:])).Decode(&probe) == nil && (probe.Event == "init" || probe.Type == "init") && probe.extractUUID() != "" {
+		if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &probe) == nil && probe.extractUUID() != "" {
 			return probe.extractUUID()
 		}
 	}

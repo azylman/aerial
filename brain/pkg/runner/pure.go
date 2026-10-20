@@ -98,6 +98,8 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 }
 
 // ParseInitEvent extracts conversation ID from an NDJSON line containing {"event":"init"}.
+// Note: agy --output-format stream-json emits strict NDJSON lines on stdout (diagnostics go to stderr),
+// so ParseInitEvent intentionally uses direct json.Unmarshal without manual '{' prefix-scanning.
 func ParseInitEvent(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -211,6 +213,7 @@ func injectRetrievedContext(ctx context.Context, prompt string, amb AmbientConte
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	payloadPrompt := prompt
 	fetch := func(tag, name string, to time.Duration, run func(context.Context) (string, error)) {
 		if run == nil || strings.Contains(prompt, tag) {
 			return
@@ -220,7 +223,7 @@ func injectRetrievedContext(ctx context.Context, prompt string, amb AmbientConte
 		if block, err := run(c); err != nil {
 			log.Printf("%s Warning: %s failed: %v", logPrefix, name, err)
 		} else if b := strings.TrimSpace(block); b != "" {
-			prompt = b + "\n\n" + prompt
+			payloadPrompt = b + "\n\n" + payloadPrompt
 		}
 	}
 	if amb != nil {
@@ -229,5 +232,5 @@ func injectRetrievedContext(ctx context.Context, prompt string, amb AmbientConte
 	if mem != nil {
 		fetch("<retrieved_memory>", "MemoryRetriever", memTimeout, func(c context.Context) (string, error) { return mem(c, prompt) })
 	}
-	return prompt
+	return payloadPrompt
 }

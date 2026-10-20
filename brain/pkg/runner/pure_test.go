@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -173,5 +174,16 @@ func TestExtractSkillFromTarget(t *testing.T) {
 		if got, ok := ExtractSkillFromTarget(tc.target); got != tc.want || ok != tc.wantOk {
 			t.Errorf("ExtractSkillFromTarget(%q) = (%q, %v), want (%q, %v)", tc.target, got, ok, tc.want, tc.wantOk)
 		}
+	}
+
+	var gotMemQuery string
+	injected := injectRetrievedContext(nil, "raw query", func(context.Context) (string, error) {
+		return "<ambient_context>amb</ambient_context>", nil
+	}, time.Second, func(_ context.Context, q string) (string, error) {
+		gotMemQuery = q
+		return "<retrieved_memory>mem</retrieved_memory>", nil
+	}, time.Second, "[Test]")
+	if gotMemQuery != "raw query" || !strings.HasPrefix(injected, "<retrieved_memory>mem</retrieved_memory>\n\n<ambient_context>amb</ambient_context>\n\nraw query") {
+		t.Errorf("injectRetrievedContext query=%q, out=%q", gotMemQuery, injected)
 	}
 }

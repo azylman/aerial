@@ -26,12 +26,6 @@ type ProcessKillFunc func(p *os.Process) error
 
 func killProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc, killFunc ProcessKillFunc) {
 	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
-		if signalFunc == nil {
-			signalFunc = syscall.Kill
-		}
-		if killFunc == nil {
-			killFunc = func(p *os.Process) error { return p.Kill() }
-		}
 		if err := signalFunc(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !isIgnorableKillError(err) {
 			log.Printf("[WARN] Failed to kill process group %d: %v", cmd.Process.Pid, err)
 		}
@@ -41,13 +35,10 @@ func killProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc, killFunc Pr
 	}
 }
 
-func killProcessGroup(cmd *exec.Cmd) { killProcessGroupWith(cmd, syscall.Kill, nil) }
+func killProcessGroup(cmd *exec.Cmd) { killProcessGroupWith(cmd, syscall.Kill, (*os.Process).Kill) }
 
 func terminateProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc) {
 	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
-		if signalFunc == nil {
-			signalFunc = syscall.Kill
-		}
 		if err := signalFunc(-cmd.Process.Pid, syscall.SIGTERM); err != nil && !isIgnorableKillError(err) {
 			log.Printf("[WARN] Failed to send SIGTERM to process group %d: %v", cmd.Process.Pid, err)
 		}
@@ -56,12 +47,11 @@ func terminateProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc) {
 
 func terminateProcessGroup(cmd *exec.Cmd) { terminateProcessGroupWith(cmd, syscall.Kill) }
 
+func isWaitStatusSignaled(sys any) bool {
+	status, ok := sys.(syscall.WaitStatus)
+	return ok && status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
+}
+
 func isProcessTerminatedBySignal(exitErr *exec.ExitError) bool {
-	if exitErr == nil {
-		return false
-	}
-	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-		return status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
-	}
-	return false
+	return exitErr != nil && exitErr.ProcessState != nil && isWaitStatusSignaled(exitErr.Sys())
 }
