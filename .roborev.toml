@@ -11,13 +11,10 @@ exclude_patterns = [
 ]
 
 review_guidelines = """
-This repository is the Aerial Core Engine Monorepo (Go 1.27 microservices, HashiCorp Nomad job specifications, and Docker images).
-Enforce the following strict engineering invariants:
-1. Security & Secrets: Zero plaintext tokens, API keys, or GitHub PATs in code, logs, or git configs. Zero raw SQL DDL (ALTER/DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, and path traversal.
-2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers. Zero arbitrary time.Sleep calls in tests or production plumbing.
-3. Architecture & Testing: Functional Core / Imperative Shell. Tests must use homogeneous table-driven loops without closure fields on table structs or catch-all Test*Coverage* names.
-4. Zero Personal Data: Never allow personal names, Discord handles, home addresses, or private entity IDs in this generic open-source engine repository.
-5. Internal Cluster & Runtime Coverage Topology: Services run exclusively inside a private HashiCorp Nomad cluster (*.aerial, aerial-postgres, aerial-hangar, aerial-brain, vanadis) behind authenticated path-scoped gateways that never expose /debug/*. Outbound internal Nomad DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir(dir), which is an os.Stat no-op in Go's stdlib when covmeta.<hash> exists and self-heals after 7-day covmeta.* pruning, followed by coverage.WriteCountersDir(dir) when GOCOVERDIR is set) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings.
+Repository Scope: azylman/aerial (Aerial Core Engine Monorepo — Go 1.27 microservices, HashiCorp Nomad job specifications, and Docker images).
+Repo-Specific Invariants (appended to global Aerial cluster guidelines in ~/.roborev/config.toml):
+1. Zero Personal Data & Sensitive Identifiers: Never allow personal names, Discord handles, home addresses, or private entity IDs in this generic open-source engine repository.
+2. Hermetic Storage & Runner Tests: Unit tests must never write to shared host paths (/data, /share) or execute live agy/shell subprocesses or raw POSIX signal broadcasts.
 """
 
 [ci]
