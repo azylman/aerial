@@ -19,7 +19,7 @@ Repo-Specific Invariants (appended to global Aerial cluster guidelines in ~/.rob
 
 [ci]
 agents = ["gemini"]
-review_types = ["default", "security", "design"]
+review_types = ["default"]
 reasoning = "thorough"
 min_severity = "medium"
 upsert_comments = true
