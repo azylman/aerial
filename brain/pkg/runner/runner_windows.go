@@ -10,9 +10,7 @@ import (
 	"time"
 )
 
-func configureSysProcAttr(cmd *exec.Cmd) {
-	cmd.WaitDelay = 3 * time.Second
-}
+func configureSysProcAttr(cmd *exec.Cmd) { cmd.WaitDelay = 3 * time.Second }
 
 func killProcessGroupWith(cmd *exec.Cmd, killFunc func(*os.Process) error) {
 	if cmd != nil && cmd.Process != nil {
@@ -25,18 +23,7 @@ func killProcessGroupWith(cmd *exec.Cmd, killFunc func(*os.Process) error) {
 	}
 }
 
-func killProcessGroup(cmd *exec.Cmd) {
-	killProcessGroupWith(cmd, nil)
-}
-
-func terminateProcessGroupWith(cmd *exec.Cmd, killFunc func(*os.Process) error) {
-	killProcessGroupWith(cmd, killFunc)
-}
-
-func terminateProcessGroup(cmd *exec.Cmd) {
-	killProcessGroup(cmd)
-}
-
-func isProcessTerminatedBySignal(exitErr *exec.ExitError) bool {
-	return exitErr != nil
-}
+func killProcessGroup(cmd *exec.Cmd)                                            { killProcessGroupWith(cmd, nil) }
+func terminateProcessGroupWith(cmd *exec.Cmd, killFunc func(*os.Process) error) { killProcessGroupWith(cmd, killFunc) }
+func terminateProcessGroup(cmd *exec.Cmd)                                       { killProcessGroup(cmd) }
+func isProcessTerminatedBySignal(exitErr *exec.ExitError) bool                   { return exitErr != nil }

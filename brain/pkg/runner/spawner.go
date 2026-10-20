@@ -30,22 +30,26 @@ func closeQuietly(c io.Closer) {
 	}
 }
 
+func closeQuietlyAll(closers ...io.Closer) {
+	for _, c := range closers {
+		closeQuietly(c)
+	}
+}
+
 // ConfigureProcessGroup sets up platform-specific process group options on cmd.
 func ConfigureProcessGroup(cmd *exec.Cmd) {
-	if cmd == nil {
-		return
+	if cmd != nil {
+		configureSysProcAttr(cmd)
 	}
-	configureSysProcAttr(cmd)
 }
 
 var killProcessGroupFunc = killProcessGroup
 
 // KillProcessGroup terminates the process group associated with cmd.
 func KillProcessGroup(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
+	if cmd != nil && cmd.Process != nil {
+		killProcessGroupFunc(cmd)
 	}
-	killProcessGroupFunc(cmd)
 	return nil
 }
 
@@ -55,24 +59,24 @@ type OSProcessHandle struct {
 }
 
 func (h *OSProcessHandle) Pid() int {
-	if h == nil || h.cmd == nil || h.cmd.Process == nil {
-		return 0
+	if h != nil && h.cmd != nil && h.cmd.Process != nil {
+		return h.cmd.Process.Pid
 	}
-	return h.cmd.Process.Pid
+	return 0
 }
 
 func (h *OSProcessHandle) Kill() error {
-	if h == nil || h.cmd == nil || h.cmd.Process == nil {
-		return nil
+	if h != nil && h.cmd != nil && h.cmd.Process != nil {
+		return KillProcessGroup(h.cmd)
 	}
-	return KillProcessGroup(h.cmd)
+	return nil
 }
 
 func (h *OSProcessHandle) Wait() error {
-	if h == nil || h.cmd == nil {
-		return nil
+	if h != nil && h.cmd != nil {
+		return h.cmd.Wait()
 	}
-	return h.cmd.Wait()
+	return nil
 }
 
 // DefaultDaemonSpawner launches an agy OS subprocess.
@@ -82,14 +86,13 @@ func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if cfg.AgyBin == "" {
-		cfg.AgyBin = "agy"
+	bin := cfg.AgyBin
+	if bin == "" {
+		bin = "agy"
 	}
-	args := BuildDaemonArgs(cfg)
-	cmd := exec.CommandContext(ctx, cfg.AgyBin, args...)
+	cmd := exec.CommandContext(ctx, bin, BuildDaemonArgs(cfg)...)
 	ConfigureProcessGroup(cmd)
-	cmd.Dir = cfg.Cwd
-	cmd.Env = cfg.Env
+	cmd.Dir, cmd.Env = cfg.Cwd, cfg.Env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -102,18 +105,13 @@ func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		closeQuietly(stdin)
-		closeQuietly(stdout)
+		closeQuietlyAll(stdin, stdout)
 		return nil, nil, nil, nil, fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
-
 	if err := cmd.Start(); err != nil {
-		closeQuietly(stdin)
-		closeQuietly(stdout)
-		closeQuietly(stderr)
+		closeQuietlyAll(stdin, stdout, stderr)
 		return nil, nil, nil, nil, fmt.Errorf("failed to start daemon process: %w", err)
 	}
-
 	return stdin, stdout, stderr, &OSProcessHandle{cmd: cmd}, nil
 }
 
@@ -127,9 +125,7 @@ type MockProcessHandle struct {
 	waited  bool
 }
 
-func (m *MockProcessHandle) Pid() int {
-	return m.pid
-}
+func (m *MockProcessHandle) Pid() int { return m.pid }
 
 func (m *MockProcessHandle) Kill() error {
 	m.mu.Lock()
@@ -145,17 +141,13 @@ func (m *MockProcessHandle) Wait() error {
 	return m.waitErr
 }
 
-// SetKillErr configures the error returned by Kill().
 func (m *MockProcessHandle) SetKillErr(err error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.killErr = err
+	m.mu.Unlock()
 }
 
-// NewMockProcessHandle creates a MockProcessHandle with the specified PID.
-func NewMockProcessHandle(pid int) *MockProcessHandle {
-	return &MockProcessHandle{pid: pid}
-}
+func NewMockProcessHandle(pid int) *MockProcessHandle { return &MockProcessHandle{pid: pid} }
 
 // MockDaemonSpawner enables hermetic testing of streaming daemons.
 type MockDaemonSpawner struct {
@@ -167,16 +159,12 @@ func spawnDefaultMockPipes(cfg DaemonConfig, closeOutW bool, logPrefix string) (
 	outR, outW := io.Pipe()
 	errR, errW := io.Pipe()
 
-	go func() {
+	discardIn := func() {
 		if _, err := io.Copy(io.Discard, inR); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
 			log.Printf("%s Warning: failed to discard stdin: %v", logPrefix, err)
 		}
-	}()
+	}
 	go func() {
-		defer closeQuietly(errW)
-		if closeOutW {
-			defer closeQuietly(outW)
-		}
 		sessID := cfg.SessionID
 		if sessID == "" || !IsValidUUID(sessID) {
 			sessID = "550e8400-e29b-41d4-a716-446655440000"
@@ -184,25 +172,27 @@ func spawnDefaultMockPipes(cfg DaemonConfig, closeOutW bool, logPrefix string) (
 		if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
 			log.Printf("%s Warning: failed to write init event: %v", logPrefix, err)
 		}
+		closeQuietly(errW)
+		if closeOutW {
+			var buf [4096]byte
+			if _, err := inR.Read(buf[:]); err == nil {
+				go discardIn()
+			}
+			closeQuietly(outW)
+			return
+		}
+		discardIn()
 	}()
-
-	handle := &MockProcessHandle{pid: 12345}
-	return inW, outR, errR, handle, nil
+	return inW, outR, errR, &MockProcessHandle{pid: 12345}, nil
 }
 
-func NewMockDaemonSpawner() *MockDaemonSpawner {
-	return &MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-			return spawnDefaultMockPipes(cfg, false, "[DaemonSpawner]")
-		},
-	}
-}
+func NewMockDaemonSpawner() *MockDaemonSpawner { return &MockDaemonSpawner{} }
 
 func (m *MockDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 	if m != nil && m.SpawnFn != nil {
 		return m.SpawnFn(ctx, cfg)
 	}
-	return NewMockDaemonSpawner().Spawn(ctx, cfg)
+	return spawnDefaultMockPipes(cfg, false, "[DaemonSpawner]")
 }
 
 // MockSpawner records spawned configs and simulates running daemons for testing.
@@ -213,28 +203,20 @@ type MockSpawner struct {
 	SpawnFn      func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
 }
 
-// NewMockSpawner creates a new MockSpawner with default pipe behavior.
-func NewMockSpawner() *MockSpawner {
-	m := &MockSpawner{}
-	m.SpawnFn = func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		return spawnDefaultMockPipes(cfg, true, "[MockSpawner]")
-	}
-	return m
-}
+func NewMockSpawner() *MockSpawner { return &MockSpawner{} }
 
 func (m *MockSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 	if m == nil {
-		return NewMockSpawner().Spawn(ctx, cfg)
+		return spawnDefaultMockPipes(cfg, true, "[MockSpawner]")
 	}
 	m.mu.Lock()
-	m.lastSpawnCfg = cfg
-	m.spawnCount++
+	m.lastSpawnCfg, m.spawnCount = cfg, m.spawnCount+1
+	fn := m.SpawnFn
 	m.mu.Unlock()
-
-	if m.SpawnFn != nil {
-		return m.SpawnFn(ctx, cfg)
+	if fn != nil {
+		return fn(ctx, cfg)
 	}
-	return NewMockSpawner().Spawn(ctx, cfg)
+	return spawnDefaultMockPipes(cfg, true, "[MockSpawner]")
 }
 
 func (m *MockSpawner) LastSpawnCfg() DaemonConfig {
@@ -245,4 +227,3 @@ func (m *MockSpawner) LastSpawnCfg() DaemonConfig {
 	defer m.mu.Unlock()
 	return m.lastSpawnCfg
 }
-

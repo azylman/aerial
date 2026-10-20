@@ -54,9 +54,8 @@ func TestIsSubstantiveResponse(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"", false}, {"   \t\n  ", false}, {"[Tool Call Requested]: ha_call_service", false},
-		{"   [Tool Call Requested]: bash   ", false}, {"<turn>unclosed content", false},
-		{"<turn>content</turn>", true}, {"Hello, I am Aerial.", true}, {"```go\nfmt.Println(1)\n```", true},
+		{"", false}, {"   \t\n  ", false}, {"[Tool Call Requested]: ha_call_service", false}, {"   [Tool Call Requested]: bash   ", false},
+		{"<turn>unclosed content", false}, {"<turn>content</turn>", true}, {"Hello, I am Aerial.", true}, {"```go\nfmt.Println(1)\n```", true},
 	} {
 		if got := IsSubstantiveResponse(tc.in); got != tc.want {
 			t.Errorf("IsSubstantiveResponse(%q) = %v, want %v", tc.in, got, tc.want)
@@ -78,7 +77,6 @@ func TestBufferingTurnSink_LifecycleAndHooks(t *testing.T) {
 		OnSkillActivated: func(sk, src string) { skill, source = sk, src },
 		OnComplete:       func(res *TurnResult) { completedRes = res },
 	})
-
 	sink.OnTurnStarted()
 	sink.OnThinking()
 	sink.OnToolCall("bash", "echo test")
@@ -114,13 +112,9 @@ func TestBufferingTurnSink_OnResultPrecedence(t *testing.T) {
 		incoming *TurnResult
 		wantResp string
 	}{
-		{[]string{"Clean terminal output."}, &TurnResult{Response: "Concatenated multi-step noise"}, "Clean terminal output."},
-		{nil, &TurnResult{Response: "Non-streaming fallback response"}, "Non-streaming fallback response"},
-		{[]string{"   \n\t  "}, &TurnResult{Response: "Fallback for whitespace buffer"}, "Fallback for whitespace buffer"},
-		{[]string{"Delta text"}, nil, "Delta text"},
-		{nil, &TurnResult{Response: ""}, ""},
-		{[]string{"Streamed delta message."}, &TurnResult{Response: ""}, "Streamed delta message."},
-		{[]string{"Streamed delta for nil result."}, nil, "Streamed delta for nil result."},
+		{[]string{"Clean terminal output."}, &TurnResult{Response: "Concatenated multi-step noise"}, "Clean terminal output."}, {nil, &TurnResult{Response: "Non-streaming fallback response"}, "Non-streaming fallback response"},
+		{[]string{"   \n\t  "}, &TurnResult{Response: "Fallback for whitespace buffer"}, "Fallback for whitespace buffer"}, {[]string{"Delta text"}, nil, "Delta text"},
+		{nil, &TurnResult{Response: ""}, ""}, {[]string{"Streamed delta message."}, &TurnResult{Response: ""}, "Streamed delta message."}, {[]string{"Streamed delta for nil result."}, nil, "Streamed delta for nil result."},
 	} {
 		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 		for _, d := range tc.deltas {
@@ -141,27 +135,25 @@ func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
 		call, done     bool
 		res, want      string
 	}{
-		{[]string{"Pre-tool commentary."}, nil, nil, true, false, "Pre-tool commentary.", ""},
-		{[]string{"Stray delta."}, nil, nil, false, true, "", ""},
-		{[]string{"Let me run tests..."}, []string{"chunk..."}, []string{"All tests passed! ", "Ready."}, true, true, "Noise. All tests passed! Ready.", "All tests passed! Ready."},
-		{nil, nil, nil, true, true, "Completed task output.", "Completed task output."},
+		{pre: []string{"Pre-tool commentary."}, call: true, res: "Pre-tool commentary.", want: ""}, {pre: []string{"Stray delta."}, done: true, res: "", want: ""},
+		{pre: []string{"Let me run tests..."}, mid: []string{"chunk..."}, post: []string{"All tests passed! ", "Ready."}, call: true, done: true, res: "Noise. All tests passed! Ready.", want: "All tests passed! Ready."},
+		{call: true, done: true, res: "Completed task output.", want: "Completed task output."},
 	} {
 		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		for _, d := range tc.pre {
-			sink.OnTextDelta(d)
+		feed := func(deltas []string) {
+			for _, d := range deltas {
+				sink.OnTextDelta(d)
+			}
 		}
+		feed(tc.pre)
 		if tc.call {
 			sink.OnToolCall("run_command", "bash")
 		}
-		for _, d := range tc.mid {
-			sink.OnTextDelta(d)
-		}
+		feed(tc.mid)
 		if tc.done {
 			sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, "DONE")
 		}
-		for _, d := range tc.post {
-			sink.OnTextDelta(d)
-		}
+		feed(tc.post)
 		if tc.res != "" {
 			sink.OnResult(&TurnResult{Response: tc.res})
 			if res, err := sink.Wait(context.Background()); err != nil || res.Response != tc.want {
@@ -182,8 +174,7 @@ func TestBufferingTurnSink_StepResetPurgesBuffer(t *testing.T) {
 		wantHooks     []int
 	}{
 		{[][]string{{"wait..."}, {"check..."}, {"Clean! ", "Ready."}}, []int{348, 349, 352}, "wait... check... Clean! Ready.", "Clean! Ready.", []int{348, 349, 352}},
-		{[][]string{{"Waiting commentary."}, nil}, []int{1, 2}, "Waiting commentary.", "", nil},
-		{[][]string{{"Clean direct response."}}, []int{1}, "Clean direct response.", "Clean direct response.", nil},
+		{[][]string{{"Waiting commentary."}, nil}, []int{1, 2}, "Waiting commentary.", "", nil}, {[][]string{{"Clean direct response."}}, []int{1}, "Clean direct response.", "Clean direct response.", nil},
 	} {
 		var hooks []int
 		cfg := BufferingTurnSinkConfig{}
@@ -208,9 +199,7 @@ func TestBufferingTurnSink_StepResetPurgesBuffer(t *testing.T) {
 }
 
 func TestBufferingTurnSink_ErrorAndDeltaRescue(t *testing.T) {
-	errRes := errors.New("API error: 429 RESOURCE_EXHAUSTED")
-	errHard, errAbort := errors.New("hard failure"), errors.New("aborted before response")
-
+	errRes, errHard, errAbort := errors.New("API error: 429 RESOURCE_EXHAUSTED"), errors.New("hard failure"), errors.New("aborted before response")
 	for _, tc := range []struct {
 		disableRescue bool
 		delta         string
@@ -218,9 +207,7 @@ func TestBufferingTurnSink_ErrorAndDeltaRescue(t *testing.T) {
 		wantResp      string
 		wantErr       error
 	}{
-		{false, "Recoverable substantive text before daemon crash.", errRes, "Recoverable substantive text before daemon crash.", nil},
-		{true, "Some text", errHard, "", errHard},
-		{false, "[Tool Call Requested]: uncompleted tool", errAbort, "", errAbort},
+		{false, "Recoverable substantive text before daemon crash.", errRes, "Recoverable substantive text before daemon crash.", nil}, {true, "Some text", errHard, "", errHard}, {false, "[Tool Call Requested]: uncompleted tool", errAbort, "", errAbort},
 	} {
 		var hookErr error
 		var completedRes *TurnResult
@@ -231,7 +218,6 @@ func TestBufferingTurnSink_ErrorAndDeltaRescue(t *testing.T) {
 		})
 		sink.OnTextDelta(tc.delta)
 		sink.OnError(tc.inErr)
-
 		res, err := sink.Wait(context.Background())
 		if tc.wantErr != nil {
 			if res != nil || !errors.Is(err, tc.wantErr) || (tc.disableRescue && !errors.Is(hookErr, tc.wantErr)) {

@@ -20,75 +20,55 @@ var (
 	reUUIDInText     = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 	reUpdateStream   = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
 	reGeneralSession = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
+	reQuotaResetIn   = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
+	reWhitespace     = regexp.MustCompile(`\s+`)
+	reFatalError     = regexp.MustCompile(`(?i)(?:fatal|panic|traceback|terminated due to error|error:\s+[^\n\r]+)`)
+	safeCmdRegex     = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+	reTerminatingBackgroundTasks = regexp.MustCompile(`(?i)terminating\s+([1-9]\d*)\s+background\s+task\(s\)`)
+
+	quotaUnitReplacer = strings.NewReplacer(
+		"minutes", "m", "minute", "m", "mins", "m", "min", "m",
+		"hours", "h", "hour", "h", "hrs", "h", "hr", "h",
+		"seconds", "s", "second", "s", "secs", "s", "sec", "s",
+	)
 )
 
-// IsValidUUID validates that a string strictly matches RFC 4122 UUID format.
-func IsValidUUID(s string) bool {
-	return reStrictUUID.MatchString(s)
-}
+var (
+	ErrInactivityTimeout = errors.New("watchdog: inactivity timeout exceeded")
+	ErrMaxDuration       = errors.New("watchdog: max duration exceeded")
+)
+
+func IsValidUUID(s string) bool { return reStrictUUID.MatchString(s) }
 
 func extractUUIDByRegex(text string) string {
-	if match := reUpdateStream.FindStringSubmatch(text); len(match) > 1 {
-		candidate := strings.TrimSpace(match[1])
-		if IsValidUUID(candidate) {
-			return candidate
+	for _, re := range []*regexp.Regexp{reUpdateStream, reGeneralSession} {
+		if match := re.FindStringSubmatch(text); len(match) > 1 && IsValidUUID(strings.TrimSpace(match[1])) {
+			return strings.TrimSpace(match[1])
 		}
 	}
-	if match := reGeneralSession.FindStringSubmatch(text); len(match) > 1 {
-		candidate := strings.TrimSpace(match[1])
-		if IsValidUUID(candidate) {
-			return candidate
-		}
-	}
-	if match := reUUIDInText.FindString(text); match != "" {
-		candidate := strings.TrimSpace(match)
-		if IsValidUUID(candidate) {
-			return candidate
-		}
+	if match := reUUIDInText.FindString(text); match != "" && IsValidUUID(strings.TrimSpace(match)) {
+		return strings.TrimSpace(match)
 	}
 	return ""
 }
 
-var corruptionKeywords = []string{
-	"session corrupt",
-	"corrupted session",
-	"invalid session",
-	"session not found",
-	"failed to load conversation",
-	"corrupted transcript",
-	"failed to parse session",
-	"stream was interrupted",
-	"the stream was interrupted",
-}
+var (
+	corruptionKeywords    = []string{"session corrupt", "corrupted session", "invalid session", "session not found", "failed to load conversation", "corrupted transcript", "failed to parse session", "stream was interrupted", "the stream was interrupted"}
+	contextWindowKeywords = []string{"context window", "context length", "maximum context length", "token limit exceeded", "prompt is too long", "request too large"}
+)
 
-var contextWindowKeywords = []string{
-	"context window",
-	"context length",
-	"maximum context length",
-	"token limit exceeded",
-	"prompt is too long",
-	"request too large",
-}
-
-func hasContextWindowKeyword(lower string) bool {
-	for _, kw := range contextWindowKeywords {
-		if strings.Contains(lower, kw) {
+func hasKeyword(s string, keywords []string) bool {
+	for _, kw := range keywords {
+		if strings.Contains(s, kw) {
 			return true
 		}
 	}
 	return false
 }
 
-func hasCorruptionKeyword(lower string) bool {
-	for _, kw := range corruptionKeywords {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
-}
+func hasContextWindowKeyword(lower string) bool { return hasKeyword(lower, contextWindowKeywords) }
+func hasCorruptionKeyword(lower string) bool    { return hasKeyword(lower, corruptionKeywords) }
 
-// sessionProbe provides structured JSON unmarshaling for discovering conversation / session UUIDs.
 type sessionProbe struct {
 	Event          string          `json:"event,omitempty"`
 	Type           string          `json:"type,omitempty"`
@@ -102,40 +82,30 @@ type sessionProbe struct {
 
 func (p *sessionProbe) extractUUID() string {
 	for _, candidate := range []string{p.ConversationID, p.SessionID, p.AltConvID, p.AltSessID} {
-		candidate = strings.TrimSpace(candidate)
-		if IsValidUUID(candidate) {
+		if candidate = strings.TrimSpace(candidate); IsValidUUID(candidate) {
 			return candidate
 		}
 	}
-	if len(p.Data) > 0 {
-		var sub sessionProbe
-		if err := json.Unmarshal(p.Data, &sub); err == nil {
-			if id := sub.extractUUID(); id != "" {
-				return id
-			}
-		}
-	}
-	if len(p.Result) > 0 {
-		var sub sessionProbe
-		if err := json.Unmarshal(p.Result, &sub); err == nil {
-			if id := sub.extractUUID(); id != "" {
-				return id
+	for _, raw := range [][]byte{p.Data, p.Result} {
+		if len(raw) > 0 {
+			var sub sessionProbe
+			if err := json.Unmarshal(raw, &sub); err == nil {
+				if id := sub.extractUUID(); id != "" {
+					return id
+				}
 			}
 		}
 	}
 	return ""
 }
 
-// ActivityWriter is a thread-safe buffer that tracks write activity timestamps
-// and sniffs conversation UUIDs from stderr streams.
 type ActivityWriter struct {
 	mu           sync.Mutex
 	buf          bytes.Buffer
-	lastActivity atomic.Int64 // UnixNano
+	lastActivity atomic.Int64
 	sessionID    atomic.Pointer[string]
 }
 
-// NewActivityWriter initializes an ActivityWriter with an optional initial session ID.
 func NewActivityWriter(initialSessionID string) *ActivityWriter {
 	w := &ActivityWriter{}
 	w.lastActivity.Store(time.Now().UnixNano())
@@ -145,28 +115,23 @@ func NewActivityWriter(initialSessionID string) *ActivityWriter {
 	return w
 }
 
-// Write appends bytes to the internal buffer, updates the activity timestamp,
-// and extracts the conversation session ID if not already discovered.
 func (w *ActivityWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
 	w.lastActivity.Store(time.Now().UnixNano())
-
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n, err := w.buf.Write(p)
 	if w.sessionID.Load() == nil {
-		bufBytes := w.buf.Bytes()
-		window := bufBytes
+		window := w.buf.Bytes()
 		if len(window) > 512 {
 			window = window[len(window)-512:]
 		}
-		if firstBrace := bytes.IndexByte(window, '{'); firstBrace >= 0 {
-			if lastBrace := bytes.LastIndexByte(window, '}'); lastBrace > firstBrace {
+		if first := bytes.IndexByte(window, '{'); first >= 0 {
+			if last := bytes.LastIndexByte(window, '}'); last > first {
 				var probe sessionProbe
-				dec := json.NewDecoder(bytes.NewReader(window[firstBrace : lastBrace+1]))
-				if err := dec.Decode(&probe); err == nil {
+				if err := json.NewDecoder(bytes.NewReader(window[first : last+1])).Decode(&probe); err == nil {
 					if id := probe.extractUUID(); id != "" {
 						w.sessionID.Store(&id)
 					}
@@ -179,58 +144,44 @@ func (w *ActivityWriter) Write(p []byte) (int, error) {
 			}
 		}
 	}
-
 	return n, err
 }
 
-// String returns the accumulated buffered output under mutex protection.
 func (w *ActivityWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.buf.String()
 }
 
-// ResetBuffer thread-safely clears the internal buffer while retaining session discovery and timestamps.
 func (w *ActivityWriter) ResetBuffer() {
-	if w == nil {
-		return
+	if w != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.buf.Reset()
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.buf.Reset()
 }
 
-// LastActivity returns the timestamp of the most recent write.
-func (w *ActivityWriter) LastActivity() time.Time {
-	return time.Unix(0, w.lastActivity.Load())
-}
+func (w *ActivityWriter) LastActivity() time.Time { return time.Unix(0, w.lastActivity.Load()) }
 
-// SessionID returns the dynamically extracted or initial session UUID.
 func (w *ActivityWriter) SessionID() string {
-	ptr := w.sessionID.Load()
-	if ptr == nil {
-		return ""
+	if ptr := w.sessionID.Load(); ptr != nil {
+		return *ptr
 	}
-	return *ptr
+	return ""
 }
 
-// SetSessionID atomically latches the session UUID if not already set.
 func (w *ActivityWriter) SetSessionID(id string) {
 	if !IsValidUUID(id) {
 		return
 	}
 	for {
 		current := w.sessionID.Load()
-		if current != nil && *current != "" {
-			return
-		}
-		if w.sessionID.CompareAndSwap(current, &id) {
+		if (current != nil && *current != "") || w.sessionID.CompareAndSwap(current, &id) {
 			return
 		}
 	}
 }
 
-// AgyResponse models the top-level structured output of agy --output-format json.
 type AgyResponse struct {
 	ConversationID  string   `json:"conversation_id"`
 	Status          string   `json:"status"`
@@ -241,7 +192,6 @@ type AgyResponse struct {
 	Error           string   `json:"error,omitempty"`
 }
 
-// AgyUsage models token usage telemetry in AgyResponse.
 type AgyUsage struct {
 	InputTokens     int `json:"input_tokens"`
 	OutputTokens    int `json:"output_tokens"`
@@ -250,67 +200,48 @@ type AgyUsage struct {
 	TotalTokens     int `json:"total_tokens"`
 }
 
-// TokenUsage is an alias for AgyUsage representing LLM token telemetry.
 type TokenUsage = AgyUsage
 
-// ParseAgyOutput unmarshals raw stdout into an AgyResponse struct.
-// It supports both legacy single-line JSON and stream-json NDJSON streams.
 func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 	trimmed := strings.TrimSpace(stdout)
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty output")
 	}
 
-	// Fast path: attempt direct unmarshaling as legacy single-line JSON.
 	var legacyResp AgyResponse
 	if err := json.Unmarshal([]byte(trimmed), &legacyResp); err == nil && (legacyResp.Status != "" || legacyResp.Response != "" || legacyResp.ConversationID != "") {
 		return &legacyResp, nil
 	}
 
-	// Stream-json NDJSON path: process line by line.
-	// Uses strings.Split to avoid bufio.Scanner's default 64KB token limit on large tool responses.
 	var initConvID string
 	var resultResp *AgyResponse
-
-	lines := strings.Split(trimmed, "\n")
-	for _, rawLine := range lines {
+	for _, rawLine := range strings.Split(trimmed, "\n") {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
 			continue
 		}
-
 		var probe sessionProbe
 		if err := json.Unmarshal([]byte(line), &probe); err != nil {
 			continue
 		}
-
-		if id := probe.extractUUID(); id != "" {
-			if initConvID == "" {
-				initConvID = id
-			}
-		}
-
-		switch probe.Event {
-		case "init":
+		if probe.Event == "init" {
 			if id := probe.extractUUID(); id != "" {
 				initConvID = id
 			}
-		case "result":
+		} else if probe.Event == "result" {
 			var res AgyResponse
+			raw := []byte(line)
 			if len(probe.Result) > 0 {
-				if err := json.Unmarshal(probe.Result, &res); err == nil {
-					resultResp = &res
-				}
-			} else {
-				if err := json.Unmarshal([]byte(line), &res); err == nil {
-					resultResp = &res
-				}
+				raw = probe.Result
+			}
+			if json.Unmarshal(raw, &res) == nil {
+				resultResp = &res
 			}
 			if resultResp != nil && resultResp.ConversationID == "" {
-				if id := probe.extractUUID(); id != "" {
-					resultResp.ConversationID = id
-				}
+				resultResp.ConversationID = probe.extractUUID()
 			}
+		} else if id := probe.extractUUID(); id != "" && initConvID == "" {
+			initConvID = id
 		}
 	}
 
@@ -320,28 +251,17 @@ func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 		}
 		return nil, fmt.Errorf("failed to parse agy output: stream-json missing result event")
 	}
-
 	if resultResp.ConversationID == "" && initConvID != "" {
 		resultResp.ConversationID = initConvID
 	}
-
 	return resultResp, nil
 }
 
-var (
-	ErrInactivityTimeout = errors.New("watchdog: inactivity timeout exceeded")
-	ErrMaxDuration       = errors.New("watchdog: max duration exceeded")
-)
-
-var safeCmdRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
-
-// StepToolInfo captures lightweight tool metadata without unbounded payload allocations.
 type StepToolInfo struct {
 	Name       string             `json:"name,omitempty"`
 	Parameters StepToolParameters `json:"parameters,omitempty"`
 }
 
-// StepToolParameters captures common execution parameters needed for status display.
 type StepToolParameters struct {
 	CommandLine      string `json:"CommandLine,omitempty"`
 	CommandLineSnake string `json:"command_line,omitempty"`
@@ -349,14 +269,13 @@ type StepToolParameters struct {
 	Cmd              string `json:"cmd,omitempty"`
 }
 
-// StepUpdateEvent models intermediate execution updates emitted during stream-json mode.
 type StepUpdateEvent struct {
 	Event          string        `json:"event,omitempty"`
 	Type           string        `json:"type,omitempty"`
 	StepType       string        `json:"step_type,omitempty"`
 	Name           string        `json:"name,omitempty"`
 	ToolName       string        `json:"tool_name,omitempty"`
-	State          string        `json:"state,omitempty"` // "ACTIVE", "DONE", "ERROR"
+	State          string        `json:"state,omitempty"`
 	Status         string        `json:"status,omitempty"`
 	ConversationID string        `json:"conversation_id,omitempty"`
 	StepIndex      int           `json:"step_index,omitempty"`
@@ -366,190 +285,128 @@ type StepUpdateEvent struct {
 	Content        string        `json:"content,omitempty"`
 }
 
-// ResolvedTextDelta returns the accumulated or streamed text chunk if present.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (e *StepUpdateEvent) ResolvedTextDelta() string {
 	if e == nil {
 		return ""
 	}
-	if e.TextDelta != "" {
-		return e.TextDelta
+	if d := firstNonEmpty(e.TextDelta, e.Delta); d != "" {
+		return d
 	}
-	if e.Delta != "" {
-		return e.Delta
-	}
-	if e.ResolvedType() == "agent_response" && e.Content != "" {
+	if e.ResolvedType() == "agent_response" {
 		return e.Content
 	}
 	return ""
 }
 
-// ResolvedType returns the normalized event type across both AGY NDJSON variants.
 func (e *StepUpdateEvent) ResolvedType() string {
 	if e == nil {
 		return ""
 	}
-	if e.StepType != "" {
-		return strings.ToLower(strings.TrimSpace(e.StepType))
-	}
-	return strings.ToLower(strings.TrimSpace(e.Type))
+	return strings.ToLower(strings.TrimSpace(firstNonEmpty(e.StepType, e.Type)))
 }
 
-// ResolvedToolName returns the normalized tool name across both AGY NDJSON variants.
 func (e *StepUpdateEvent) ResolvedToolName() string {
 	if e == nil {
 		return ""
 	}
-	if e.ToolName != "" {
-		return strings.TrimSpace(e.ToolName)
-	}
-	return strings.TrimSpace(e.Name)
+	return strings.TrimSpace(firstNonEmpty(e.ToolName, e.Name))
 }
 
-// ResolvedCommandName returns the extracted base command name if available.
-func (e *StepUpdateEvent) ResolvedCommandName() string {
+func (e *StepUpdateEvent) ResolvedCommandLine() string {
 	if e == nil || e.ToolInfo == nil {
 		return ""
 	}
-	cmdLine := e.ToolInfo.Parameters.CommandLine
-	if cmdLine == "" {
-		cmdLine = e.ToolInfo.Parameters.CommandLineSnake
-	}
-	if cmdLine == "" {
-		cmdLine = e.ToolInfo.Parameters.Command
-	}
-	if cmdLine == "" {
-		cmdLine = e.ToolInfo.Parameters.Cmd
-	}
-	if cmdLine == "" {
-		return ""
-	}
-	return ExtractCommandName(cmdLine)
+	p := e.ToolInfo.Parameters
+	return firstNonEmpty(p.CommandLine, p.CommandLineSnake, p.Command, p.Cmd)
 }
 
-// ExtractCommandName extracts strictly the executable base name from a command line string.
-// It fails closed and returns "" if anything looks ambiguous, malformed, or sensitive.
-func ExtractCommandName(cmdLine string) string {
-	trimmed := strings.TrimSpace(cmdLine)
-	if trimmed == "" {
-		return ""
-	}
+func (e *StepUpdateEvent) ResolvedCommandName() string { return ExtractCommandName(e.ResolvedCommandLine()) }
 
-	tokens, ok := tokenizeCommandLine(trimmed)
+func ExtractCommandName(cmdLine string) string {
+	tokens, ok := tokenizeCommandLine(strings.TrimSpace(cmdLine))
 	if !ok || len(tokens) == 0 {
 		return ""
 	}
 
 	i := 0
 	for i < len(tokens) {
-		token := tokens[i]
-
-		// Hard stop on shell control operators - never traverse command chains
-		if token == "&&" || token == "||" || token == ";" || token == "|" || token == "&" {
+		tok := tokens[i]
+		if tok == "&&" || tok == "||" || tok == ";" || tok == "|" || tok == "&" {
 			return ""
 		}
-
-		// Skip leading environment variable assignments: KEY=val
-		if eq := strings.IndexByte(token, '='); eq > 0 {
-			key := token[:eq]
-			if isPOSIXIdentifier(key) {
-				i++
-				continue
-			}
-		}
-
-		// Skip known shell wrapper utilities
-		if token == "sudo" || token == "nohup" || token == "time" || token == "exec" {
+		if eq := strings.IndexByte(tok, '='); eq > 0 && isPOSIXIdentifier(tok[:eq]) {
 			i++
 			continue
 		}
-
-		// Handle env wrapper invocations: skip env and simple flags like -i
-		if token == "env" {
+		if tok == "sudo" || tok == "nohup" || tok == "time" || tok == "exec" {
 			i++
-			for i < len(tokens) && strings.HasPrefix(tokens[i], "-") {
-				if tokens[i] == "-i" || tokens[i] == "--ignore-environment" {
-					i++
-				} else {
-					return "env" // Complex flag with args; stop at env
+			continue
+		}
+		if tok == "env" {
+			for i++; i < len(tokens) && strings.HasPrefix(tokens[i], "-"); i++ {
+				if tokens[i] != "-i" && tokens[i] != "--ignore-environment" {
+					return "env"
 				}
 			}
 			continue
 		}
-
 		break
 	}
 
 	if i >= len(tokens) {
 		return ""
 	}
-
-	candidate := tokens[i]
-
-	// Robust OS-agnostic path stripping: normalize backslashes before path.Base
-	candidate = strings.ReplaceAll(candidate, "\\", "/")
-	candidate = path.Base(candidate)
-
-	// Reject dot paths, empty names, or lengths > 24
-	if candidate == "." || candidate == ".." || len(candidate) == 0 || len(candidate) > 24 {
+	candidate := path.Base(strings.ReplaceAll(tokens[i], "\\", "/"))
+	if candidate == "." || candidate == ".." || len(candidate) == 0 || len(candidate) > 24 || !safeCmdRegex.MatchString(candidate) {
 		return ""
 	}
-
-	// Strict ASCII validation gate (Fail closed, no mutation)
-	if !safeCmdRegex.MatchString(candidate) {
-		return ""
-	}
-
 	return candidate
 }
 
 func tokenizeCommandLine(s string) ([]string, bool) {
 	var tokens []string
 	var cur strings.Builder
-	inSingle := false
-	inDouble := false
-
+	inSingle, inDouble := false, false
 	runes := []rune(s)
 	n := len(runes)
+
 	for i := 0; i < n; i++ {
 		r := runes[i]
-
 		if r == '\\' && !inSingle {
 			if i+1 < n {
 				next := runes[i+1]
-				// Inside double quotes, backslash only escapes $, `, ", \, and newline
-				if inDouble {
-					if next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n' {
-						cur.WriteRune(next)
-						i++
-						continue
-					}
-					cur.WriteRune(r)
-					continue
-				}
-				// Outside quotes, backslash escapes whitespace, quotes, and backslash
-				if next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '"' || next == '\'' || next == '\\' {
+				if inDouble && (next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n') {
 					cur.WriteRune(next)
 					i++
 					continue
 				}
-				// Retain literal backslash for path separators (e.g. C:\Users or .\scripts)
+				if !inDouble && strings.ContainsRune(" \t\n\r\"'\\", next) {
+					cur.WriteRune(next)
+					i++
+					continue
+				}
 				cur.WriteRune(r)
 				continue
 			}
-			// Trailing backslash at EOF is invalid
 			return nil, false
 		}
-
 		if r == '\'' && !inDouble {
 			inSingle = !inSingle
 			continue
 		}
-
 		if r == '"' && !inSingle {
 			inDouble = !inDouble
 			continue
 		}
-
 		if !inSingle && !inDouble && (r == ' ' || r == '\t' || r == '\n' || r == '\r') {
 			if cur.Len() > 0 {
 				tokens = append(tokens, cur.String())
@@ -557,18 +414,14 @@ func tokenizeCommandLine(s string) ([]string, bool) {
 			}
 			continue
 		}
-
 		cur.WriteRune(r)
 	}
-
 	if inSingle || inDouble {
 		return nil, false
 	}
-
 	if cur.Len() > 0 {
 		tokens = append(tokens, cur.String())
 	}
-
 	return tokens, true
 }
 
@@ -577,21 +430,15 @@ func isPOSIXIdentifier(s string) bool {
 		return false
 	}
 	for i, r := range s {
-		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			continue
+		if r != '_' && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (i == 0 || r < '0' || r > '9') {
+			return false
 		}
-		if i > 0 && (r >= '0' && r <= '9') {
-			continue
-		}
-		return false
 	}
 	return true
 }
 
-// StepUpdateHandler is an explicit callback for intermediate stream-json updates.
 type StepUpdateHandler func(ev *StepUpdateEvent)
 
-// WatchdogOptions configures execution timeouts and activity options for test runners.
 type WatchdogOptions struct {
 	HomeDir           string
 	InactivityTimeout time.Duration
@@ -603,7 +450,6 @@ type WatchdogOptions struct {
 	ExtraEnv          []string
 }
 
-// DefaultWatchdogOptions returns standard default options for test runners.
 func DefaultWatchdogOptions(timeoutMinutes int) WatchdogOptions {
 	return WatchdogOptions{
 		InactivityTimeout: 5 * time.Minute,
@@ -612,77 +458,36 @@ func DefaultWatchdogOptions(timeoutMinutes int) WatchdogOptions {
 	}
 }
 
-// RunnerFunc defines the signature for invoking an agent runner test double.
 type RunnerFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
 
-// ExtractSessionID searches output (stdout or stderr) for an active session/conversation UUID.
+// ExtractSessionID extracts a session UUID from agy output.
+// Strict NDJSON lines are unmarshaled directly via json.Unmarshal; log-prefixed lines fall through to extractUUIDByRegex.
 func ExtractSessionID(output string, _ time.Time) string {
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		for _, rawLine := range lines {
-			line := strings.TrimSpace(rawLine)
-			if line == "" {
-				continue
-			}
-			if line[0] == '{' {
-				var probe sessionProbe
-				if err := json.Unmarshal([]byte(line), &probe); err == nil {
-					if id := probe.extractUUID(); id != "" {
-						return id
-					}
-				}
-			} else {
-				// Embedded JSON fallback for lines with logging prefixes
-				for i := 0; i < len(line); i++ {
-					if line[i] == '{' {
-						var embedded sessionProbe
-						dec := json.NewDecoder(strings.NewReader(line[i:]))
-						if err := dec.Decode(&embedded); err == nil {
-							if (embedded.Event == "init" || embedded.Type == "init") && embedded.extractUUID() != "" {
-								return embedded.extractUUID()
-							}
-						}
-						break
-					}
-				}
-			}
-		}
-
-		if id := extractUUIDByRegex(output); id != "" {
-			return id
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(rawLine)
+		var probe sessionProbe
+		if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &probe) == nil && probe.extractUUID() != "" {
+			return probe.extractUUID()
 		}
 	}
-
-	return ""
+	return extractUUIDByRegex(output)
 }
 
-// IsInactivityTimeout checks if the error message or stderr indicates an inactivity watchdog timeout.
+func isWatchdogMatch(s, key string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, key+" exceeded") || (strings.Contains(lower, "[watchdog]") && strings.Contains(lower, key))
+}
+
 func IsInactivityTimeout(errDetail, stderr string) bool {
-	combined := strings.ToLower(errDetail + "\n" + stderr)
-	if strings.Contains(combined, "inactivity timeout exceeded") {
-		return true
-	}
-	if strings.Contains(combined, "[watchdog]") && strings.Contains(combined, "inactivity") {
-		return true
-	}
-	return false
+	c := errDetail + "\n" + stderr
+	return isWatchdogMatch(c, "inactivity timeout") || isWatchdogMatch(c, "inactivity")
 }
 
-func isWatchdogInactivity(s string) bool {
-	lower := strings.ToLower(s)
-	return strings.Contains(lower, "inactivity timeout exceeded") ||
-		(strings.Contains(lower, "[watchdog]") && strings.Contains(lower, "inactivity"))
-}
+func isWatchdogInactivity(s string) bool { return isWatchdogMatch(s, "inactivity") }
+func isWatchdogMaxDuration(s string) bool { return isWatchdogMatch(s, "max duration") }
 
-func isWatchdogMaxDuration(s string) bool {
-	lower := strings.ToLower(s)
-	return strings.Contains(lower, "max duration exceeded") ||
-		(strings.Contains(lower, "[watchdog]") && strings.Contains(lower, "max duration"))
-}
-
-func extractWatchdogDetail(source string, fallbackKeyword string) string {
-	lines := strings.Split(source, "\n")
-	for _, l := range lines {
+func extractWatchdogDetail(source, fallbackKeyword string) string {
+	for _, l := range strings.Split(source, "\n") {
 		trimmed := strings.TrimSpace(l)
 		if strings.Contains(trimmed, "[watchdog]") || strings.Contains(strings.ToLower(trimmed), fallbackKeyword) {
 			if len(trimmed) > 200 {
@@ -695,48 +500,45 @@ func extractWatchdogDetail(source string, fallbackKeyword string) string {
 }
 
 var nonTransientKeywords = []string{
-	"invalid api key",
-	"invalid_api_key",
-	"authentication failed",
-	"unauthorized",
-	"permission_denied",
-	"permissiondenied",
-	"unknown flag",
-	"flag provided but not defined",
-	"unknown command",
-	"executable file not found",
-	"command not found",
-	"is not recognized as an internal or external command",
-	"model not found",
-	"panic:",
+	"invalid api key", "invalid_api_key", "authentication failed", "unauthorized", "permission_denied", "permissiondenied",
+	"unknown flag", "flag provided but not defined", "unknown command", "executable file not found", "command not found",
+	"is not recognized as an internal or external command", "model not found", "panic:",
 }
 
 func isNonTransientError(s string) bool {
-	// Internal model placeholder glitches (e.g. unknown model key MODEL_PLACEHOLDER_M417: model not found)
-	// are transient daemon execution glitches and should be retried with a fresh process.
 	if strings.Contains(strings.ToUpper(s), "MODEL_PLACEHOLDER_") {
 		return false
 	}
 	lower := strings.ToLower(s)
-	for _, kw := range nonTransientKeywords {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	// Anchored process execution errors
-	if strings.Contains(lower, "fork/exec") && (strings.Contains(lower, "no such file or directory") || strings.Contains(lower, "permission denied")) {
-		return true
-	}
-	return false
+	return hasKeyword(lower, nonTransientKeywords) || (strings.Contains(lower, "fork/exec") && (strings.Contains(lower, "no such file or directory") || strings.Contains(lower, "permission denied")))
 }
 
-// ClassifyError categorizes execution results into failure, transient, and session corruption states.
-func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTransient bool, isSessionCorruption bool, errDetail string) {
-	trimmedStdout := strings.TrimSpace(stdout)
-	trimmedStderr := strings.TrimSpace(stderr)
+func isMCPSessionError(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "failed to connect (session id") || strings.Contains(lower, "calling \"initialize\"") || strings.Contains(lower, "server name") || strings.Contains(lower, "mcp server")
+}
 
-	// 1. Intercept watchdog timeout diagnoses FIRST on non-zero exit codes (watchdog kills with SIGKILL / exit code -1)
-	// Watchdog diagnostic markers are strictly emitted to stderr by the runner harness and must NEVER inspect stdout.
+func checkCorruption(s string) bool {
+	if hasContextWindowKeyword(s) {
+		return true
+	}
+	if isMCPSessionError(s) {
+		return false
+	}
+	return hasCorruptionKeyword(s)
+}
+
+func classifyErrorTarget(target string) (isCorrupt, isTransient bool) {
+	lower := strings.ToLower(target)
+	if checkCorruption(lower) || (!isMCPSessionError(lower) && strings.Contains(lower, "conversation not found")) {
+		return true, false
+	}
+	return false, !isNonTransientError(lower)
+}
+
+func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTransient bool, isSessionCorruption bool, errDetail string) {
+	trimmedStdout, trimmedStderr := strings.TrimSpace(stdout), strings.TrimSpace(stderr)
+
 	if exitCode != 0 {
 		if isWatchdogInactivity(trimmedStderr) {
 			return true, false, false, extractWatchdogDetail(trimmedStderr, "inactivity timeout exceeded")
@@ -746,35 +548,13 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		}
 	}
 
-	isMCPSessionError := func(s string) bool {
-		lower := strings.ToLower(s)
-		return strings.Contains(lower, "failed to connect (session id") ||
-			strings.Contains(lower, "calling \"initialize\"") ||
-			strings.Contains(lower, "server name") ||
-			strings.Contains(lower, "mcp server")
-	}
-
-	checkCorruption := func(s string) bool {
-		lower := strings.ToLower(s)
-		if hasContextWindowKeyword(lower) {
-			return true
-		}
-		if isMCPSessionError(lower) {
-			return false
-		}
-		return hasCorruptionKeyword(lower)
-	}
-
 	if exitCode == 0 {
 		if trimmedStdout == "" {
-			errDetail := extractErrorDetail(trimmedStderr, exitCode)
-			if errDetail == fmt.Sprintf("execution failed with exit code %d", exitCode) || trimmedStderr == "" {
-				errDetail = "process produced empty stdout"
+			detail := extractErrorDetail(trimmedStderr, exitCode)
+			if strings.HasPrefix(detail, "execution failed with exit code") || trimmedStderr == "" {
+				detail = "process produced empty stdout"
 			}
-			if containsFatalStderrError(trimmedStderr) || isNonTransientError(trimmedStderr) {
-				return true, false, false, errDetail
-			}
-			return true, true, false, errDetail // Transient by default
+			return true, !containsFatalStderrError(trimmedStderr) && !isNonTransientError(trimmedStderr), false, detail
 		}
 
 		resp, parseErr := ParseAgyOutput(stdout)
@@ -783,272 +563,135 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			if len(trimmedStdout) < 300 {
 				errTarget += " " + trimmedStdout
 			}
-			errTargetLower := strings.ToLower(errTarget)
-			if hasContextWindowKeyword(errTargetLower) {
+			lower := strings.ToLower(errTarget)
+			if hasContextWindowKeyword(lower) {
 				return true, false, true, "context window exceeded"
 			}
-			if checkCorruption(errTargetLower) {
+			if checkCorruption(lower) {
 				return true, false, true, extractErrorDetail(trimmedStderr, exitCode)
 			}
-			if containsFatalStderrError(trimmedStderr) || isNonTransientError(errTargetLower) {
+			if containsFatalStderrError(trimmedStderr) || isNonTransientError(lower) {
 				return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
 			}
-			// Unparseable JSON on exit 0 defaults to transient (e.g. truncated proxy stream or partial write)
 			return true, true, false, fmt.Sprintf("invalid json response from runner: %v", parseErr)
 		}
 
-		// Parsed JSON successfully: Status error
-		if resp.Status != "" && strings.ToUpper(resp.Status) != "SUCCESS" {
-			isFailure = true
-			errTarget := resp.Status + " " + resp.Error + " " + trimmedStderr
-			errTargetLower := strings.ToLower(errTarget)
-			if checkCorruption(errTargetLower) {
-				isSessionCorruption = true
+		if (resp.Status != "" && strings.ToUpper(resp.Status) != "SUCCESS") || resp.Error != "" {
+			detail := resp.Error
+			if detail == "" {
+				detail = fmt.Sprintf("runner status: %s", resp.Status)
 			}
-			if isNonTransientError(errTargetLower) {
-				isTransient = false
-			} else {
-				isTransient = !isSessionCorruption // Transient by default
-			}
-			errDetail = resp.Error
-			if errDetail == "" {
-				errDetail = fmt.Sprintf("runner status: %s", resp.Status)
-			}
-			return isFailure, isTransient, isSessionCorruption, errDetail
+			isCorrupt, isTrans := classifyErrorTarget(resp.Status + " " + resp.Error + " " + trimmedStderr)
+			return true, isTrans, isCorrupt, detail
 		}
 
-		// Parsed JSON successfully: Error field populated
-		if resp.Error != "" {
-			isFailure = true
-			errTarget := resp.Error + " " + trimmedStderr
-			errTargetLower := strings.ToLower(errTarget)
-			if checkCorruption(errTargetLower) {
-				isSessionCorruption = true
-			}
-			if isNonTransientError(errTargetLower) {
-				isTransient = false
-			} else {
-				isTransient = !isSessionCorruption // Transient by default
-			}
-			return isFailure, isTransient, isSessionCorruption, resp.Error
+		if trimmedStderr != "" && containsFatalStderrError(trimmedStderr) {
+			return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
 		}
 
-		if trimmedStderr != "" {
-			if containsFatalStderrError(trimmedStderr) {
-				return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
-			}
-		}
-
-		// CRITICAL ADVERSARIAL GUARD: If resp.Status == "SUCCESS" (or empty) and resp.Error == ""
-		// with non-empty resp.Response, return clean success. Under no circumstances inspect
-		// resp.Response for corruption or non-transient keywords.
 		if strings.TrimSpace(resp.Response) != "" {
 			return false, false, false, ""
 		}
 		return true, false, false, "process produced empty response"
 	}
 
-	// Non-zero exit code
-	isFailure = true
-
-	// Build error target from stderr and any structured error from stdout
 	errorTarget := trimmedStderr
-	if resp, err := ParseAgyOutput(stdout); err == nil && resp.Error != "" {
+	if resp, err := ParseAgyOutput(stdout); err == nil && resp != nil && resp.Error != "" {
 		errorTarget = resp.Status + " " + resp.Error + " " + trimmedStderr
+		errDetail = resp.Error
 	} else if errorTarget == "" && len(trimmedStdout) < 300 {
 		errorTarget = trimmedStdout
 	}
-	errorTargetLower := strings.ToLower(errorTarget)
 
-	if checkCorruption(errorTargetLower) || (!isMCPSessionError(errorTargetLower) && strings.Contains(errorTargetLower, "conversation not found")) {
-		isSessionCorruption = true
-	}
-
-	if !isSessionCorruption {
-		if isNonTransientError(errorTargetLower) {
-			isTransient = false
-		} else {
-			isTransient = true // Transient by default
-		}
-	}
-
-	errDetail = extractErrorDetail(stderr, exitCode)
-	if (errDetail == "" || errDetail == fmt.Sprintf("execution failed with exit code %d", exitCode)) && trimmedStdout != "" {
-		if resp, err := ParseAgyOutput(stdout); err == nil && resp.Error != "" {
-			errDetail = resp.Error
-		} else if len(trimmedStdout) < 300 {
+	if errDetail == "" {
+		errDetail = extractErrorDetail(stderr, exitCode)
+		if (errDetail == "" || strings.HasPrefix(errDetail, "execution failed with exit code")) && len(trimmedStdout) < 300 && trimmedStdout != "" {
 			errDetail = trimmedStdout
 		}
 	}
-	if errDetail == "" {
-		errDetail = fmt.Sprintf("execution failed with exit code %d", exitCode)
-	}
 
-	return isFailure, isTransient, isSessionCorruption, errDetail
+	isSessionCorruption, isTransient = classifyErrorTarget(errorTarget)
+	return true, isTransient, isSessionCorruption, errDetail
 }
 
-var (
-	reFatalError = regexp.MustCompile(`(?i)(?:fatal|panic|traceback|terminated due to error|error:\s+[^\n\r]+)`)
-)
-
-func containsFatalStderrError(stderr string) bool {
-	if stderr == "" {
-		return false
-	}
-	return reFatalError.MatchString(stderr)
-}
+func containsFatalStderrError(stderr string) bool { return stderr != "" && reFatalError.MatchString(stderr) }
 
 func extractErrorDetail(stderr string, exitCode int) string {
+	fallback := fmt.Sprintf("execution failed with exit code %d", exitCode)
 	if stderr == "" {
-		return fmt.Sprintf("execution failed with exit code %d", exitCode)
+		return fallback
 	}
-
-	lines := strings.Split(stderr, "\n")
-	var significantLines []string
-	for _, l := range lines {
+	var lastLine string
+	for _, l := range strings.Split(stderr, "\n") {
 		trimmed := strings.TrimSpace(l)
-		if trimmed == "" {
-			continue
+		if trimmed != "" && !strings.Contains(trimmed, "Starting conversation update stream") && !strings.HasPrefix(trimmed, "DEBUG") && !strings.HasPrefix(trimmed, "INFO") {
+			lastLine = trimmed
 		}
-		if strings.Contains(trimmed, "Starting conversation update stream") {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "DEBUG") || strings.HasPrefix(trimmed, "INFO") {
-			continue
-		}
-		significantLines = append(significantLines, trimmed)
 	}
-
-	if len(significantLines) > 0 {
-		lastLine := significantLines[len(significantLines)-1]
-		if len(lastLine) > 200 {
-			return lastLine[:197] + "..."
-		}
-		return lastLine
+	if lastLine == "" {
+		return fallback
 	}
-
-	return fmt.Sprintf("execution failed with exit code %d", exitCode)
+	if len(lastLine) > 200 {
+		return lastLine[:197] + "..."
+	}
+	return lastLine
 }
 
-var (
-	reQuotaResetIn = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
-	reWhitespace   = regexp.MustCompile(`\s+`)
-)
-
-// IsQuotaPause detects Google subscription and resource exhaustion quota lockouts.
 func IsQuotaPause(errDetail, stderr string) bool {
 	combined := strings.ToLower(errDetail + "\n" + stderr)
-
-	// Direct subscription quota markers
 	if strings.Contains(combined, "individual quota reached") ||
 		strings.Contains(combined, "please upgrade your subscription") ||
 		strings.Contains(combined, "exhausted your capacity on this model") ||
 		strings.Contains(combined, "brain bucket resets in") {
 		return true
 	}
-
-	// Quota / resource exhausted markers paired with a reset countdown or quota keywords
 	hasQuotaWord := strings.Contains(combined, "quota") ||
 		strings.Contains(combined, "resource_exhausted") ||
 		strings.Contains(combined, "resource has been exhausted")
 	hasResetTimer := strings.Contains(combined, "resets in") || strings.Contains(combined, "reset after")
-	hasUpgradePrompt := strings.Contains(combined, "upgrade your subscription")
-
-	if hasQuotaWord && (hasResetTimer || hasUpgradePrompt) {
-		return true
-	}
-
-	return false
+	return hasQuotaWord && (hasResetTimer || strings.Contains(combined, "upgrade your subscription"))
 }
 
-// hasCapacityPhrases returns true if the error text explicitly mentions model capacity or rate limit exhaustion.
 func hasCapacityPhrases(combined string) bool {
-	if strings.Contains(combined, "individual quota reached") ||
-		strings.Contains(combined, "please upgrade your subscription") ||
-		strings.Contains(combined, "upgrade your subscription") ||
-		strings.Contains(combined, "exceeded your current quota") {
+	if strings.Contains(combined, "individual quota reached") || strings.Contains(combined, "upgrade your subscription") || strings.Contains(combined, "exceeded your current quota") {
 		return false
 	}
-	return strings.Contains(combined, "exhausted your capacity on this model") ||
-		strings.Contains(combined, "capacity on this model") ||
-		strings.Contains(combined, "rate limit reached") ||
-		strings.Contains(combined, "rate limit exceeded")
+	return strings.Contains(combined, "capacity on this model") || strings.Contains(combined, "exhausted your capacity") || strings.Contains(combined, "rate limit reached") || strings.Contains(combined, "rate limit exceeded")
 }
 
-// IsCapacityBlip detects transient model capacity throttles (e.g. 0s-5s capacity exhaustions,
-// rate limit spikes) distinct from true account subscription exhaustion.
 func IsCapacityBlip(errDetail, stderr string) bool {
 	combined := strings.ToLower(errDetail + "\n" + stderr)
-
 	if hasCapacityPhrases(combined) {
 		return true
 	}
-
-	// True account subscription exhaustion markers take precedence and are NOT capacity blips
-	if strings.Contains(combined, "individual quota reached") ||
-		strings.Contains(combined, "please upgrade your subscription") ||
-		strings.Contains(combined, "upgrade your subscription") ||
-		strings.Contains(combined, "exceeded your current quota") {
+	if strings.Contains(combined, "individual quota reached") || strings.Contains(combined, "upgrade your subscription") || strings.Contains(combined, "exceeded your current quota") {
 		return false
 	}
-
-	// Short reset duration (<= 5s) indicates a transient capacity throttle
-	if dur, exact := ExtractQuotaResetDuration(errDetail, stderr); exact && dur <= 5*time.Second {
-		return true
-	}
-
-	return false
+	dur, exact := ExtractQuotaResetDuration(errDetail, stderr)
+	return exact && dur <= 5*time.Second
 }
 
-// ExtractQuotaResetDuration parses compound reset countdowns (e.g. "16m58s", "16m 58s", "1h 15m", "45s", "15 minutes", "0s").
-// Normalizes unit words and strips internal whitespace. Clamps between 0s and 24h.
-// Falls back to (70 * time.Second, false) for model capacity blips when countdown is missing from data
-// (Google 60s TPM/RPM bucket rollover + 10s buffer), or (20 * time.Minute, false) for subscription quotas.
 func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 	combined := strings.ToLower(errDetail + "\n" + stderr)
 	match := reQuotaResetIn.FindStringSubmatch(errDetail + "\n" + stderr)
 	if len(match) > 1 {
-		raw := strings.TrimSpace(match[1])
-		raw = strings.ToLower(raw)
-		// Normalize unit words to standard Go duration units
-		raw = strings.ReplaceAll(raw, "minutes", "m")
-		raw = strings.ReplaceAll(raw, "minute", "m")
-		raw = strings.ReplaceAll(raw, "mins", "m")
-		raw = strings.ReplaceAll(raw, "min", "m")
-		raw = strings.ReplaceAll(raw, "hours", "h")
-		raw = strings.ReplaceAll(raw, "hour", "h")
-		raw = strings.ReplaceAll(raw, "hrs", "h")
-		raw = strings.ReplaceAll(raw, "hr", "h")
-		raw = strings.ReplaceAll(raw, "seconds", "s")
-		raw = strings.ReplaceAll(raw, "second", "s")
-		raw = strings.ReplaceAll(raw, "secs", "s")
-		raw = strings.ReplaceAll(raw, "sec", "s")
-		raw = reWhitespace.ReplaceAllString(raw, "")
-		raw = strings.Trim(raw, ".\"')[] ")
-
-		if d, err := time.ParseDuration(raw); err == nil {
+		raw := reWhitespace.ReplaceAllString(quotaUnitReplacer.Replace(strings.ToLower(strings.TrimSpace(match[1]))), "")
+		if d, err := time.ParseDuration(strings.Trim(raw, ".\"')[] ")); err == nil {
 			if d < 0 {
-				d = 0
-			} else if d > 24*time.Hour {
-				d = 24 * time.Hour
+				return 0, true
+			}
+			if d > 24*time.Hour {
+				return 24 * time.Hour, true
 			}
 			return d, true
 		}
 	}
-	// Fallback when no duration is specified in data:
-	// For model capacity / rate limit throttles, default to 70s (Google 60s TPM/RPM bucket + 10s buffer).
-	// For account subscription quota exhaustion, default to 20m.
 	if hasCapacityPhrases(combined) {
 		return 70 * time.Second, false
 	}
 	return 20 * time.Minute, false
 }
 
-var reTerminatingBackgroundTasks = regexp.MustCompile(`(?i)terminating\s+([1-9]\d*)\s+background\s+task\(s\)`)
-
-// IsYieldTrap returns true if an execution with exitCode 0 prematurely terminated
-// running background tasks on process exit (e.g. print-mode idle drain).
-// It returns whether a yield trap was detected and the number of terminated background tasks.
 func IsYieldTrap(exitCode int, stdout, stderr string) (bool, int) {
 	if exitCode != 0 {
 		return false, 0
@@ -1056,10 +699,10 @@ func IsYieldTrap(exitCode int, stdout, stderr string) (bool, int) {
 	for _, output := range []string{stderr, stdout} {
 		if match := reTerminatingBackgroundTasks.FindStringSubmatch(output); len(match) > 1 {
 			count := 1
-		if c, err := strconv.Atoi(match[1]); err == nil && c > 0 {
-			count = c
-		}
-		return true, count
+			if c, err := strconv.Atoi(match[1]); err == nil && c > 0 {
+				count = c
+			}
+			return true, count
 		}
 	}
 	return false, 0

@@ -3,9 +3,6 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"log"
 	"strings"
 	"time"
@@ -21,25 +18,21 @@ type AgyArgsInput struct {
 
 // BuildAgyArgs constructs command-line arguments for executing the agy binary.
 func BuildAgyArgs(input AgyArgsInput) []string {
-	outputFmt := strings.TrimSpace(input.OutputFormat)
-	if outputFmt == "" {
-		outputFmt = "stream-json"
+	outFmt := strings.TrimSpace(input.OutputFormat)
+	if outFmt == "" {
+		outFmt = "stream-json"
 	}
-
 	args := []string{"--dangerously-skip-permissions"}
 	if input.WorkerMode {
 		args = append(args, "--input-format", "stream-json")
 	}
-	args = append(args, "--output-format", outputFmt)
-
-	if sessionID := strings.TrimSpace(input.SessionID); sessionID != "" {
-		args = append(args, "--conversation", sessionID)
+	args = append(args, "--output-format", outFmt)
+	if s := strings.TrimSpace(input.SessionID); s != "" {
+		args = append(args, "--conversation", s)
 	}
-
-	if model := strings.TrimSpace(input.Model); model != "" {
-		args = append(args, "--model", model)
+	if m := strings.TrimSpace(input.Model); m != "" {
+		args = append(args, "--model", m)
 	}
-
 	return args
 }
 
@@ -60,37 +53,19 @@ func filterEnvKeys(env []string, excluded ...string) []string {
 	}
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
-		key, _, ok := strings.Cut(e, "=")
-		if !ok {
-			filtered = append(filtered, e)
-			continue
-		}
-		upper := strings.ToUpper(strings.TrimSpace(key))
-		if _, skip := excludeMap[upper]; skip {
-			continue
+		if k, _, ok := strings.Cut(e, "="); ok {
+			if _, skip := excludeMap[strings.ToUpper(strings.TrimSpace(k))]; skip {
+				continue
+			}
 		}
 		filtered = append(filtered, e)
 	}
 	return filtered
 }
 
-// FilterAgyBaseEnv removes ambient GEMINI_API_KEY, ANTIGRAVITY_API_KEY, and GOOGLE_GENAI_API_KEY
-// from an environment slice unless they are explicitly desired.
-func FilterAgyBaseEnv(env []string) []string {
-	return filterEnvKeys(env, "GEMINI_API_KEY", "ANTIGRAVITY_API_KEY", "GOOGLE_GENAI_API_KEY")
-}
-
-// filterHomeEnv removes existing HOME, USERPROFILE, and GEMINI_CLI_HOME
-// from an environment slice to prevent duplicate variables.
-func filterHomeEnv(env []string) []string {
-	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME")
-}
-
-// filterVanadisChunkEnv removes any pre-existing AERIAL_VANADIS_CHUNK_ID or VANADIS_CHUNK_ID
-// from an environment slice so non-chunk turns never inherit stale chunk IDs.
-func filterVanadisChunkEnv(env []string) []string {
-	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID")
-}
+func FilterAgyBaseEnv(env []string) []string         { return filterEnvKeys(env, "GEMINI_API_KEY", "ANTIGRAVITY_API_KEY", "GOOGLE_GENAI_API_KEY") }
+func filterHomeEnv(env []string) []string         { return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME") }
+func filterVanadisChunkEnv(env []string) []string { return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID") }
 
 // BuildAgyEnv constructs the process environment slice for agy execution.
 func BuildAgyEnv(input AgyEnvInput) []string {
@@ -106,153 +81,35 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 		cmdEnv = append(cmdEnv, base...)
 	}
 
-	cmdEnv = append(cmdEnv,
-		"GIT_TERMINAL_PROMPT=0",
-		"AGY_LOG_LEVEL=debug",
-		"ANTIGRAVITY_LOG_LEVEL=debug",
-	)
-
-	if home := strings.TrimSpace(input.HomeDir); home != "" {
-		cmdEnv = append(cmdEnv,
-			"HOME="+home,
-			"USERPROFILE="+home,
-			"GEMINI_CLI_HOME="+home,
-		)
+	cmdEnv = append(cmdEnv, "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug")
+	if h := strings.TrimSpace(input.HomeDir); h != "" {
+		cmdEnv = append(cmdEnv, "HOME="+h, "USERPROFILE="+h, "GEMINI_CLI_HOME="+h)
 	}
-
-	if apiKey := strings.TrimSpace(input.APIKey); apiKey != "" {
-		cmdEnv = append(cmdEnv,
-			"GEMINI_API_KEY="+apiKey,
-			"ANTIGRAVITY_API_KEY="+apiKey,
-			"GOOGLE_GENAI_API_KEY="+apiKey,
-		)
+	if k := strings.TrimSpace(input.APIKey); k != "" {
+		cmdEnv = append(cmdEnv, "GEMINI_API_KEY="+k, "ANTIGRAVITY_API_KEY="+k, "GOOGLE_GENAI_API_KEY="+k)
 	}
-
-	if target := strings.TrimSpace(input.TargetID); target != "" {
-		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+target)
+	if t := strings.TrimSpace(input.TargetID); t != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+t)
 	}
-
 	if tz := strings.TrimSpace(input.Timezone); tz != "" {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
 	}
-
-	if len(input.ExtraEnv) > 0 {
-		cmdEnv = append(cmdEnv, input.ExtraEnv...)
-	}
-
-	return cmdEnv
-}
-
-
-// ShouldRotateWorker evaluates whether a persistent worker should be rotated.
-func ShouldRotateWorker(turnsUsed, turnBudget int, rssBytes, maxRSSBytes uint64, isDead bool) (bool, string) {
-	if isDead {
-		return true, "worker is dead"
-	}
-	if maxRSSBytes > 0 && rssBytes > maxRSSBytes {
-		return true, fmt.Sprintf("rss limit exceeded (%d > %d bytes)", rssBytes, maxRSSBytes)
-	}
-	if turnBudget > 0 && turnsUsed >= turnBudget {
-		return true, fmt.Sprintf("turn budget reached (%d >= %d)", turnsUsed, turnBudget)
-	}
-	return false, ""
+	return append(cmdEnv, input.ExtraEnv...)
 }
 
 // ParseInitEvent extracts conversation ID from an NDJSON line containing {"event":"init"}.
+// Note: agy --output-format stream-json emits strict NDJSON lines on stdout (diagnostics go to stderr),
+// so ParseInitEvent intentionally uses direct json.Unmarshal without manual '{' prefix-scanning.
 func ParseInitEvent(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return "", false
 	}
-
 	var probe sessionProbe
-	if err := json.Unmarshal([]byte(trimmed), &probe); err == nil {
-		if (probe.Event == "init" || probe.Type == "init") && probe.extractUUID() != "" {
-			return probe.extractUUID(), true
-		}
+	if json.Unmarshal([]byte(trimmed), &probe) == nil && (probe.Event == "init" || probe.Type == "init") && probe.extractUUID() != "" {
+		return probe.extractUUID(), true
 	}
-
-	// Embedded JSON fallback for lines with logging prefixes
-	for i := 0; i < len(trimmed); i++ {
-		if trimmed[i] == '{' {
-			var embedded sessionProbe
-			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
-			if err := dec.Decode(&embedded); err == nil {
-				if (embedded.Event == "init" || embedded.Type == "init") && embedded.extractUUID() != "" {
-					return embedded.extractUUID(), true
-				}
-			}
-		}
-	}
-
 	return "", false
-}
-
-// IsResultEvent checks if an output line represents a stream-json result event.
-func IsResultEvent(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || !strings.Contains(trimmed, "result") {
-		return false
-	}
-
-	var ev struct {
-		Event string `json:"event"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &ev); err == nil {
-		return ev.Event == "result"
-	}
-
-	// Embedded JSON fallback for lines with logging prefixes
-	for i := 0; i < len(trimmed); i++ {
-		if trimmed[i] == '{' {
-			var embedded struct {
-				Event string `json:"event"`
-			}
-			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
-			if err := dec.Decode(&embedded); err == nil && embedded.Event != "" {
-				return embedded.Event == "result"
-			}
-			break
-		}
-	}
-
-	return false
-}
-
-// ErrWorkerDead is returned when writing to an uninitialized or dead worker.
-var ErrWorkerDead = errors.New("utility worker is dead")
-
-type streamUserMessage struct {
-	Event   string                `json:"event"`
-	Message streamUserMessageBody `json:"message"`
-}
-
-type streamUserMessageBody struct {
-	Content string `json:"content"`
-}
-
-// WriteWorkerTurn serializes and writes a prompt turn to the given io.Writer.
-func WriteWorkerTurn(w io.Writer, prompt string) error {
-	if w == nil {
-		return fmt.Errorf("worker writer is nil: %w", ErrWorkerDead)
-	}
-
-	req := streamUserMessage{
-		Event: "user",
-		Message: streamUserMessageBody{
-			Content: prompt,
-		},
-	}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("failed to marshal prompt request: %w", err)
-	}
-	payload = append(payload, '\n')
-
-	if _, err := w.Write(payload); err != nil {
-		return fmt.Errorf("failed to write prompt to worker stdin: %w", err)
-	}
-	return nil
 }
 
 // CleanUnescapedString strips surrounding quotes and whitespace from an unmarshaled string.
@@ -269,12 +126,10 @@ func CleanUnescapedString(s string) string {
 }
 
 // ExtractMCPToolInfo extracts the canonical tool name and MCP server namespace.
-func ExtractMCPToolInfo(toolName string, params map[string]any) (canonicalTool, mcpServer string) {
-	toolName = strings.TrimSpace(toolName)
-	if toolName == "" {
+func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string) {
+	if toolName = strings.TrimSpace(toolName); toolName == "" {
 		return "unknown", "native"
 	}
-
 	if toolName == "call_mcp_tool" {
 		if params != nil {
 			var sName, tName string
@@ -294,7 +149,6 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (canonicalTool, 
 		}
 		return "call_mcp_tool", "unknown"
 	}
-
 	if strings.HasPrefix(toolName, "mcp_") {
 		parts := strings.SplitN(toolName[4:], "_", 2)
 		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
@@ -304,41 +158,35 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (canonicalTool, 
 			return parts[0], "unknown"
 		}
 	}
-
 	return toolName, "native"
 }
 
 // ExtractSkillFromTarget extracts a skill name from a file path or command string referencing SKILL.md.
-func ExtractSkillFromTarget(target string) (skillName string, ok bool) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", false
-	}
-
-	idx := strings.Index(target, "SKILL.md")
+func ExtractSkillFromTarget(target string) (string, bool) {
+	trimmed := strings.TrimSpace(target)
+	idx := strings.Index(trimmed, "SKILL.md")
 	if idx == -1 {
 		return "", false
 	}
-
-	// Examine prefix up to "SKILL.md"
-	prefix := strings.TrimRight(target[:idx], "/\\ \t\"'`")
+	prefix := strings.TrimRight(trimmed[:idx], "/\\ \t\"'`")
 	if prefix == "" {
 		return "", false
 	}
-
-	lastSlash := strings.LastIndexAny(prefix, "/\\")
-	var skill string
-	if lastSlash != -1 {
+	skill := prefix
+	if lastSlash := strings.LastIndexAny(prefix, "/\\"); lastSlash != -1 {
 		skill = prefix[lastSlash+1:]
-	} else {
-		skill = prefix
 	}
-	skill = strings.Trim(skill, "\"'` ")
-	if skill != "" && skill != "skills" && skill != "custom-skills" {
+	if skill = strings.Trim(skill, "\"'` "); skill != "" && skill != "skills" && skill != "custom-skills" {
 		return skill, true
 	}
-
 	return "", false
+}
+
+func appendSection(p, tag, content string) string {
+	if c := strings.TrimSpace(content); c != "" && !strings.Contains(p, "<"+tag+">") {
+		return "<" + tag + ">\n" + c + "\n</" + tag + ">\n\n" + p
+	}
+	return p
 }
 
 // compileLeasePrompt compiles cold-start guidelines, session info, and coordination context into the turn prompt.
@@ -346,30 +194,18 @@ func compileLeasePrompt(turn *TurnContext, isCold bool, prevSessID string) strin
 	if turn == nil {
 		return ""
 	}
-	compiledPrompt := turn.Prompt
+	p := turn.Prompt
 	if isCold {
-		scopeInst := strings.TrimSpace(turn.ScopeInstructions)
-		if scopeInst == "" {
-			scopeInst = strings.TrimSpace(turn.ChannelInstructions)
+		scope := strings.TrimSpace(firstNonEmpty(turn.ScopeInstructions, turn.ChannelInstructions))
+		if scope != "" && !strings.Contains(p, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(p, "<CHANNEL_INSTRUCTIONS>") {
+			p = "<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n" + scope + "\n</SCOPE_INSTRUCTIONS>\n\n" + p
 		}
-		if scopeInst != "" && !strings.Contains(compiledPrompt, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(compiledPrompt, "<CHANNEL_INSTRUCTIONS>") {
-			scopeBlock := fmt.Sprintf("<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n%s\n</SCOPE_INSTRUCTIONS>", scopeInst)
-			compiledPrompt = scopeBlock + "\n\n" + compiledPrompt
+		if prevSessID != "" {
+			p = appendSection(p, "PREVIOUS_SESSION", "Previous Session ID: "+prevSessID)
 		}
-		if prevSessID != "" && !strings.Contains(compiledPrompt, "<PREVIOUS_SESSION>") {
-			prevBlock := fmt.Sprintf("<PREVIOUS_SESSION>\nPrevious Session ID: %s\n</PREVIOUS_SESSION>", prevSessID)
-			compiledPrompt = prevBlock + "\n\n" + compiledPrompt
-		}
-		if strings.TrimSpace(turn.ThreadSummary) != "" && !strings.Contains(compiledPrompt, "<THREAD_SUMMARY>") {
-			sumBlock := fmt.Sprintf("<THREAD_SUMMARY>\n%s\n</THREAD_SUMMARY>", strings.TrimSpace(turn.ThreadSummary))
-			compiledPrompt = sumBlock + "\n\n" + compiledPrompt
-		}
+		p = appendSection(p, "THREAD_SUMMARY", turn.ThreadSummary)
 	}
-	if strings.TrimSpace(turn.CoordinationContext) != "" && !strings.Contains(compiledPrompt, "<COORDINATION_CONTEXT>") {
-		coordBlock := fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(turn.CoordinationContext))
-		compiledPrompt = coordBlock + "\n\n" + compiledPrompt
-	}
-	return compiledPrompt
+	return appendSection(p, "COORDINATION_CONTEXT", turn.CoordinationContext)
 }
 
 // injectRetrievedContext retrieves ambient context and memory within specified timeouts and prepends them to prompt.
@@ -378,25 +214,23 @@ func injectRetrievedContext(ctx context.Context, prompt string, amb AmbientConte
 		ctx = context.Background()
 	}
 	payloadPrompt := prompt
-	if amb != nil && !strings.Contains(prompt, "<ambient_context>") {
-		ambCtx, cancel := context.WithTimeout(ctx, ambTimeout)
-		ambBlock, aErr := amb(ambCtx)
-		cancel()
-		if aErr != nil {
-			log.Printf("%s Warning: AmbientContextRetriever failed: %v", logPrefix, aErr)
-		} else if strings.TrimSpace(ambBlock) != "" {
-			payloadPrompt = strings.TrimSpace(ambBlock) + "\n\n" + payloadPrompt
+	fetch := func(tag, name string, to time.Duration, run func(context.Context) (string, error)) {
+		if run == nil || strings.Contains(prompt, tag) {
+			return
+		}
+		c, cancel := context.WithTimeout(ctx, to)
+		defer cancel()
+		if block, err := run(c); err != nil {
+			log.Printf("%s Warning: %s failed: %v", logPrefix, name, err)
+		} else if b := strings.TrimSpace(block); b != "" {
+			payloadPrompt = b + "\n\n" + payloadPrompt
 		}
 	}
-	if mem != nil && !strings.Contains(prompt, "<retrieved_memory>") {
-		memCtx, cancel := context.WithTimeout(ctx, memTimeout)
-		memBlock, mErr := mem(memCtx, prompt)
-		cancel()
-		if mErr != nil {
-			log.Printf("%s Warning: MemoryRetriever failed: %v", logPrefix, mErr)
-		} else if strings.TrimSpace(memBlock) != "" {
-			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + payloadPrompt
-		}
+	if amb != nil {
+		fetch("<ambient_context>", "AmbientContextRetriever", ambTimeout, amb)
+	}
+	if mem != nil {
+		fetch("<retrieved_memory>", "MemoryRetriever", memTimeout, func(c context.Context) (string, error) { return mem(c, prompt) })
 	}
 	return payloadPrompt
 }
