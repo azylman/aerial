@@ -1161,6 +1161,189 @@ EOF
     return 0
 }
 
+override_roborev() {
+    local pr_num=""
+    local rebuttal=""
+    local reason_file=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo|-r)
+                [ $# -ge 2 ] || { echo "ERROR: $1 requires a repository argument." >&2; exit 1; }
+                REPO_NAME="$(normalize_repo "$2")"
+                REPO_NAME_EXPLICIT=1
+                shift 2
+                ;;
+            --repo=*)
+                REPO_NAME="$(normalize_repo "${1#*=}")"
+                REPO_NAME_EXPLICIT=1
+                shift 1
+                ;;
+            -m|--reason)
+                [ $# -ge 2 ] || { echo "ERROR: $1 requires a rebuttal argument." >&2; exit 1; }
+                rebuttal="$2"
+                shift 2
+                ;;
+            --reason=*)
+                rebuttal="${1#*=}"
+                shift 1
+                ;;
+            -f|--reason-file)
+                [ $# -ge 2 ] || { echo "ERROR: $1 requires a file path argument." >&2; exit 1; }
+                reason_file="$2"
+                shift 2
+                ;;
+            --reason-file=*)
+                reason_file="${1#*=}"
+                shift 1
+                ;;
+            *)
+                if [ -z "$pr_num" ]; then
+                    pr_num="$1"
+                elif [ -z "$rebuttal" ] && [ -z "$reason_file" ]; then
+                    rebuttal="$1"
+                else
+                    echo "ERROR: Unexpected argument: $1" >&2
+                    exit 1
+                fi
+                shift 1
+                ;;
+        esac
+    done
+
+    if [ -z "$pr_num" ] || ! [[ "$pr_num" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Valid numeric pr_num required for roborev override." >&2
+        exit 1
+    fi
+
+    if [ -n "$reason_file" ]; then
+        [ -f "$reason_file" ] || { echo "ERROR: Rebuttal file not found: $reason_file" >&2; exit 1; }
+        rebuttal="$(cat "$reason_file")"
+    fi
+
+    if [ -z "${rebuttal//[[:space:]]/}" ]; then
+        echo "ERROR: Technical rebuttal cannot be empty." >&2
+        exit 1
+    fi
+
+    if [ -z "${GITHUB_PAT:-}" ]; then
+        echo "ERROR: GITHUB_PAT environment variable must be set." >&2
+        exit 1
+    fi
+
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+    extract_remote_repo "$remote_url"
+    if [ -n "${PARSED_REPO:-}" ]; then
+        REPO_OWNER="${PARSED_OWNER:-$REPO_OWNER}"
+        if [ "$REPO_NAME_EXPLICIT" -eq 0 ]; then
+            REPO_NAME="$(normalize_repo "$PARSED_REPO")"
+        fi
+    fi
+
+    gh_api_call() {
+        curl -s --connect-timeout 3 -m 15 --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" \
+            -H "Authorization: token ${GITHUB_PAT}" \
+            -H "Accept: application/vnd.github.v3+json" "$@"
+    }
+
+    # 1. Fetch Pull Request details
+    local pr_raw pr_code pr_resp
+    pr_raw=$(gh_api_call -X GET "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
+    pr_code=$(echo "$pr_raw" | tail -n1)
+    pr_resp=$(echo "$pr_raw" | sed '$d')
+
+    if [ -z "$pr_code" ] || [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ]; then
+        echo "ERROR: Failed to query PR #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (HTTP ${pr_code}): ${pr_resp}" >&2
+        exit 1
+    fi
+
+    local pr_state
+    pr_state=$(echo "$pr_resp" | jq -r '.state // empty')
+    if [ "$pr_state" = "closed" ]; then
+        echo "ERROR: Pull Request #${pr_num} is closed. Cannot override RoboRev on closed PR." >&2
+        exit 1
+    fi
+
+    local head_sha short_sha pr_url
+    head_sha=$(echo "$pr_resp" | jq -r '.head.sha // empty')
+    short_sha="${head_sha:0:7}"
+    pr_url=$(echo "$pr_resp" | jq -r '.html_url // empty')
+
+    if [ -z "$head_sha" ]; then
+        echo "ERROR: Could not resolve head commit SHA for PR #${pr_num}." >&2
+        exit 1
+    fi
+
+    # 2. Post override comment on PR issue
+    local comment_body comment_payload comment_raw comment_code
+    comment_body=$(cat <<EOF
+## roborev-override (\`${short_sha}\`)
+
+**Commit:** \`${head_sha}\`
+**Technical Rebuttal:**
+${rebuttal}
+EOF
+)
+    comment_payload=$(jq -n --arg b "$comment_body" '{body: $b}')
+    comment_raw=$(gh_api_call -H "Content-Type: application/json" -X POST -d "$comment_payload" \
+        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments")
+    comment_code=$(echo "$comment_raw" | tail -n1)
+
+    if [ -z "$comment_code" ] || [ "$comment_code" -lt 200 ] || [ "$comment_code" -ge 300 ]; then
+        local comment_resp
+        comment_resp=$(echo "$comment_raw" | sed '$d')
+        echo "ERROR: Failed to post override comment on PR #${pr_num} (HTTP ${comment_code}): ${comment_resp}" >&2
+        exit 1
+    fi
+
+    # 3. Locate single latest RoboRev workflow run for head_sha
+    local runs_raw runs_code runs_resp run_id
+    runs_raw=$(gh_api_call -X GET "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${head_sha}")
+    runs_code=$(echo "$runs_raw" | tail -n1)
+    runs_resp=$(echo "$runs_raw" | sed '$d')
+
+    if [ -z "$runs_code" ] || [ "$runs_code" -lt 200 ] || [ "$runs_code" -ge 300 ]; then
+        echo "ERROR: Failed to query workflow runs for commit ${short_sha} (HTTP ${runs_code}): ${runs_resp}" >&2
+        exit 1
+    fi
+
+    run_id=$(echo "$runs_resp" | jq -r '[.workflow_runs[]? | select(.name == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml"))) | .id] | first // empty')
+    if [ -z "$run_id" ]; then
+        echo "ERROR: No RoboRev workflow run found for commit ${short_sha} on PR #${pr_num}." >&2
+        exit 1
+    fi
+
+    # 4. Trigger workflow re-run (rerun-failed-jobs falling back to rerun)
+    local rerun_raw rerun_code
+    rerun_raw=$(gh_api_call -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun-failed-jobs")
+    rerun_code=$(echo "$rerun_raw" | tail -n1)
+
+    if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
+        echo "⚠️ rerun-failed-jobs returned HTTP ${rerun_code}; attempting fallback to full workflow rerun..." >&2
+        rerun_raw=$(gh_api_call -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun")
+        rerun_code=$(echo "$rerun_raw" | tail -n1)
+        if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
+            local rerun_resp
+            rerun_resp=$(echo "$rerun_raw" | sed '$d')
+            echo "ERROR: Failed to rerun RoboRev workflow run ${run_id} (both rerun-failed-jobs and rerun failed, HTTP ${rerun_code}): ${rerun_resp}" >&2
+            exit 1
+        fi
+    fi
+
+    # 5. Output JSON deliverable
+    local msg="RoboRev gate overridden for PR #${pr_num} (${short_sha}) on ${REPO_OWNER}/${REPO_NAME}. Re-run triggered."
+    jq -n \
+        --arg pr_url "$pr_url" \
+        --argjson pr_number "$pr_num" \
+        --arg commit_sha "$head_sha" \
+        --argjson run_id "$run_id" \
+        --arg repo "$REPO_NAME" \
+        --arg message "$msg" \
+        '{status: "overridden", pr_url: $pr_url, pr_number: $pr_number, commit_sha: $commit_sha, run_id: $run_id, repo: $repo, turn_action: "end_turn", message: $message}'
+    return 0
+}
+
 # Testing hook: allow unit tests to source all functions without executing command dispatch
 if [ "${REPO_TEST_MODE:-0}" = "1" ] || [ "${cmd:-}" = "--source-only" ]; then
     return 0 2>/dev/null || exit 0
@@ -1179,8 +1362,11 @@ case "$cmd" in
     deploy-status|deployment-status|deployment)
         get_deploy_status "$@"
         ;;
+    override-roborev|dispute-roborev)
+        override_roborev "$@"
+        ;;
     *)
-        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|check <pr_num>|deploy-status <pr_num|commit_sha>}" >&2
+        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|check <pr_num>|deploy-status <pr_num|commit_sha>|override-roborev [-m <rebuttal>|--reason <rebuttal>|-f <path>|--reason-file <path>] <pr_num> [rebuttal]}" >&2
         exit 1
         ;;
 esac

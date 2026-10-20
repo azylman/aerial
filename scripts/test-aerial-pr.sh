@@ -393,6 +393,197 @@ REBASE_STAGED_CHECK=$(bash -c "
 assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_clean:ok' && echo true || echo false)" "rebase_staged_changes rebases onto advanced upstream and keeps changes staged"
 assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_conflict:aborted_cleanly' && echo true || echo false)" "rebase_staged_changes fails closed on merge conflict, restores staged changes, and preserves workspace"
 
+# Case 12: override_roborev validation, mock execution, comment verification, rerun fallback, and output formatting
+ROBOREV_OVERRIDE_CHECK=$(
+    REPO_TEST_MODE=1
+    source "${AERIAL_PR}" --source-only 2>/dev/null || true
+
+    # Subtest 1: Missing or non-numeric PR number validation
+    err1=$(override_roborev 2>&1) || true
+    echo "$err1" | grep -q "Valid numeric pr_num required" && echo "val1:ok" || echo "val1:fail"
+
+    err1b=$(override_roborev not-a-number "valid rebuttal" 2>&1) || true
+    echo "$err1b" | grep -q "Valid numeric pr_num required" && echo "val1b:ok" || echo "val1b:fail"
+
+    # Subtest 2: Missing or blank rebuttal validation
+    err2=$(override_roborev 42 2>&1) || true
+    echo "$err2" | grep -q "Technical rebuttal cannot be empty" && echo "val2:ok" || echo "val2:fail"
+
+    err2b=$(override_roborev 42 "   " 2>&1) || true
+    echo "$err2b" | grep -q "Technical rebuttal cannot be empty" && echo "val2b:ok" || echo "val2b:fail"
+
+    # Subtest 3: Missing reason file validation
+    err3=$(override_roborev -f /nonexistent/rebuttal.txt 42 2>&1) || true
+    echo "$err3" | grep -q "Rebuttal file not found" && echo "val3:ok" || echo "val3:fail"
+
+    # Subtest 4: Missing GITHUB_PAT validation
+    err4=$(unset GITHUB_PAT; override_roborev 42 "rebuttal" 2>&1) || true
+    echo "$err4" | grep -q "GITHUB_PAT environment variable must be set" && echo "val4:ok" || echo "val4:fail"
+
+    # Subtest 5: Closed PR rejection
+    export GITHUB_PAT="mock_pat"
+    curl() {
+        if [[ "$*" =~ /pulls/ ]]; then
+            echo '{"state":"closed","head":{"sha":"abc123"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        fi
+    }
+    err5=$(override_roborev 42 "valid rebuttal" 2>&1) || true
+    echo "$err5" | grep -q "Pull Request #42 is closed" && echo "closed:ok" || echo "closed:fail"
+
+    # Subtest 6: Missing workflow run fails closed
+    curl() {
+        if [[ "$*" =~ /pulls/ ]]; then
+            echo '{"state":"open","head":{"sha":"0123456789abcdef0123456789abcdef01234567"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        elif [[ "$*" =~ /issues/42/comments ]]; then
+            echo '{"id":101}'
+            echo '201'
+        elif [[ "$*" =~ /actions/runs ]]; then
+            echo '{"workflow_runs":[]}'
+            echo '200'
+        fi
+    }
+    err6=$(override_roborev 42 "valid rebuttal" 2>&1) || true
+    echo "$err6" | grep -q "No RoboRev workflow run found" && echo "missing_run:ok" || echo "missing_run:fail"
+
+    # Subtest 7: Happy path with primary rerun (rerun-failed-jobs)
+    COMMENT_FILE="$(mktemp /tmp/roborev-comment-test.XXXXXX)"
+    RERUN_FILE="$(mktemp /tmp/roborev-rerun-test.XXXXXX)"
+    curl() {
+        local url=""
+        local method="GET"
+        local data=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -X) method="$2"; shift 2 ;;
+                -d) data="$2"; shift 2 ;;
+                https://*) url="$1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ "$url" =~ /pulls/42 ]]; then
+            echo '{"state":"open","head":{"sha":"fedcba9876543210fedcba9876543210fedcba98"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        elif [[ "$url" =~ /issues/42/comments ]]; then
+            echo "$data" > "$COMMENT_FILE"
+            echo '{"id":202}'
+            echo '201'
+        elif [[ "$url" =~ /actions/runs\? ]]; then
+            echo '{"workflow_runs":[{"id":778899,"name":"RoboRev Code Review","path":".github/workflows/roborev.yml"}]}'
+            echo '200'
+        elif [[ "$url" =~ /actions/runs/778899/rerun-failed-jobs ]]; then
+            echo "rerun-failed-jobs-called" > "$RERUN_FILE"
+            echo '{"status":"queued"}'
+            echo '201'
+        fi
+    }
+    out7=$(override_roborev --repo aerial 42 "Independent evaluation confirms this is a false positive.")
+    comment_body=$(jq -r '.body' "$COMMENT_FILE" 2>/dev/null || echo "")
+    rm -f "$COMMENT_FILE" "$RERUN_FILE"
+    if echo "$out7" | jq -e '.status == "overridden" and .run_id == 778899 and .turn_action == "end_turn" and .commit_sha == "fedcba9876543210fedcba9876543210fedcba98"' >/dev/null 2>&1 && \
+       echo "$comment_body" | grep -F -q '## roborev-override (`fedcba9`)' && \
+       echo "$comment_body" | grep -q "Independent evaluation confirms this is a false positive."; then
+        echo "happy_path:ok"
+    else
+        echo "happy_path:fail:$out7"
+    fi
+
+    # Subtest 8: Fallback from rerun-failed-jobs (422) to full workflow rerun (201)
+    FALLBACK_FILE="$(mktemp /tmp/roborev-fallback-test.XXXXXX)"
+    curl() {
+        local url=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                https://*) url="$1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ "$url" =~ /pulls/42 ]]; then
+            echo '{"state":"open","head":{"sha":"aabbccddeeff00112233445566778899aabbccdd"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        elif [[ "$url" =~ /issues/42/comments ]]; then
+            echo '{"id":303}'
+            echo '201'
+        elif [[ "$url" =~ /actions/runs\? ]]; then
+            echo '{"workflow_runs":[{"id":889900,"name":"RoboRev Code Review","path":".github/workflows/roborev.yml"}]}'
+            echo '200'
+        elif [[ "$url" =~ /actions/runs/889900/rerun-failed-jobs ]]; then
+            echo '{"message":"no failed jobs to rerun"}'
+            echo '422'
+        elif [[ "$url" =~ /actions/runs/889900/rerun ]]; then
+            echo "fallback-rerun-called" > "$FALLBACK_FILE"
+            echo '{"status":"queued"}'
+            echo '201'
+        fi
+    }
+    out8=$(override_roborev --repo aerial 42 "Fallback test rebuttal")
+    fallback_recorded=$(cat "$FALLBACK_FILE" 2>/dev/null || echo "")
+    rm -f "$FALLBACK_FILE"
+    if echo "$out8" | jq -e '.status == "overridden" and .run_id == 889900' >/dev/null 2>&1 && \
+       [ "$fallback_recorded" = "fallback-rerun-called" ]; then
+        echo "fallback_rerun:ok"
+    else
+        echo "fallback_rerun:fail:$out8"
+    fi
+
+    # Subtest 9: Reason file flag (-f) and reason string flag (-m)
+    REASON_FILE="$(mktemp /tmp/roborev-reason-file-test.XXXXXX)"
+    echo "Reason from file content" > "$REASON_FILE"
+    curl() {
+        local url=""
+        local data=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -d) data="$2"; shift 2 ;;
+                https://*) url="$1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ "$url" =~ /pulls/42 ]]; then
+            echo '{"state":"open","head":{"sha":"11223344556677889900aabbccddeeff11223344"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        elif [[ "$url" =~ /issues/42/comments ]]; then
+            echo '{"id":404}'
+            echo '201'
+        elif [[ "$url" =~ /actions/runs\? ]]; then
+            echo '{"workflow_runs":[{"id":990011,"name":"RoboRev Code Review"}]}'
+            echo '200'
+        elif [[ "$url" =~ /actions/runs/990011/rerun-failed-jobs ]]; then
+            echo '{"status":"queued"}'
+            echo '201'
+        fi
+    }
+    out9=$(override_roborev -f "$REASON_FILE" 42)
+    rm -f "$REASON_FILE"
+    if echo "$out9" | jq -e '.status == "overridden"' >/dev/null 2>&1; then
+        echo "flags_test:ok"
+    else
+        echo "flags_test:fail:$out9"
+    fi
+)
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1:ok' && echo true || echo false)" "override_roborev validates missing PR number"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1b:ok' && echo true || echo false)" "override_roborev validates non-numeric PR number"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val2:ok' && echo true || echo false)" "override_roborev validates missing rebuttal"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val2b:ok' && echo true || echo false)" "override_roborev validates blank rebuttal"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val3:ok' && echo true || echo false)" "override_roborev validates non-existent reason file"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val4:ok' && echo true || echo false)" "override_roborev validates missing GITHUB_PAT"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'closed:ok' && echo true || echo false)" "override_roborev rejects closed PR"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'missing_run:ok' && echo true || echo false)" "override_roborev fails closed when workflow run missing"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'happy_path:ok' && echo true || echo false)" "override_roborev posts comment, triggers rerun-failed-jobs, and outputs json"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'fallback_rerun:ok' && echo true || echo false)" "override_roborev falls back to full workflow rerun when rerun-failed-jobs returns 4xx"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'flags_test:ok' && echo true || echo false)" "override_roborev supports -f reason file"
+
+CLI_DISPATCH_CHECK=$(bash -c "
+    \"${AERIAL_PR}\" override-roborev 2>&1 || true
+")
+assert_eq "true" "$(echo "$CLI_DISPATCH_CHECK" | grep -q 'Valid numeric pr_num required for roborev override' && echo true || echo false)" "CLI dispatch: override-roborev dispatches to override_roborev"
+
+CLI_DISPUTE_CHECK=$(bash -c "
+    \"${AERIAL_PR}\" dispute-roborev 2>&1 || true
+")
+assert_eq "true" "$(echo "$CLI_DISPUTE_CHECK" | grep -q 'Valid numeric pr_num required for roborev override' && echo true || echo false)" "CLI dispatch: dispute-roborev dispatches to override_roborev"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then
