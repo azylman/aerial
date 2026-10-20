@@ -38,7 +38,6 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 		log.Printf("[Startup Recovery] Error querying pending/processing messages: %v", err)
 		return
 	}
-
 	if len(messages) == 0 {
 		log.Printf("[Startup Recovery] No interrupted messages found. System clean.")
 		return
@@ -48,7 +47,6 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
-
 	stalenessTTL := pool.cfg.StalenessTTL
 	if stalenessTTL <= 0 {
 		stalenessTTL = 30 * time.Minute
@@ -64,30 +62,15 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 				reason = "poison pill: exceeded retry limit during crash recovery"
 			}
 			log.Printf("[Startup Recovery] Poison pill detected for message %s (restart_count=%d, retry_count=%d): %s. Dropping message.", m.ID, m.RestartCount, m.RetryCount, reason)
-			cleanSnippet := sanitizeErrorText(m.Content)
-			cleanSnippet = strings.ReplaceAll(cleanSnippet, "\n", " ")
-			cleanSnippet = strings.ReplaceAll(cleanSnippet, "\r", "")
-			cleanSnippet = strings.TrimSpace(cleanSnippet)
-			if len([]rune(cleanSnippet)) > 60 {
-				cleanSnippet = string([]rune(cleanSnippet)[:57]) + "..."
-			}
-			snippet := cleanSnippet
-			agyBin := pool.cfg.AgyBin
-			apiKey := pool.cfg.APIKey
-			if pool.appCfg != nil {
-				if cur := pool.appCfg.Current(); cur != nil {
-					if cur.AgyBin != "" {
-						agyBin = cur.AgyBin
-					}
-					if cur.APIKey != "" {
-						apiKey = cur.APIKey
-					}
-				}
+			cleanSnippet := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(sanitizeErrorText(m.Content), "\r", ""), "\n", " "))
+			if runes := []rune(cleanSnippet); len(runes) > 60 {
+				cleanSnippet = string(runes[:57]) + "..."
 			}
 			desc := "a message caused repeated crashes and had to be dropped"
-			if strings.TrimSpace(snippet) != "" {
-				desc = fmt.Sprintf("a message caused repeated crashes and had to be dropped (message snippet: %q)", snippet)
+			if cleanSnippet != "" {
+				desc = fmt.Sprintf("a message caused repeated crashes and had to be dropped (message snippet: %q)", cleanSnippet)
 			}
+			agyBin, apiKey := pool.runnerCredentials()
 			notif := pool.cfg.NotifierFunc(agyBin, apiKey, desc)
 			if m.AuthorID != "http-client" && pool.cfg.DeliveryFunc != nil {
 				if err := pool.cfg.DeliveryFunc(pool.getDiscordSession(), m.ThreadID, notif); err != nil {
@@ -130,7 +113,7 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 					DurationMs:  0,
 					Error:       "[EXPIRED_STALE]",
 				}); err != nil {
-					log.Printf("[Startup Recovery] Failed to update schedule run %s status: %v", m.ScheduleRunID, err)
+					log.Printf("[Startup Recovery] Failed to update schedule run status: %v", err)
 				}
 			}
 			continue

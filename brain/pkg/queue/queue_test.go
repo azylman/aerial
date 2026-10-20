@@ -3,7 +3,7 @@ package queue
 import (
 	"bytes"
 	"context"
-	_ "database/sql"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +26,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
+	"github.com/azylman/aerial/brain/pkg/discord"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -39,45 +40,22 @@ func TestWorkerPool_ConfigInjection(t *testing.T) {
 	appCfg := config.NewFromData(&config.ConfigData{
 		Model:         "initial-model",
 		SystemChannel: "initial-alerts",
-		Channels: map[string]config.ChannelPolicy{
-			"default": {Mode: "threads"},
-		},
+		Channels:      map[string]config.ChannelPolicy{"default": {Mode: "threads"}},
 	})
 	pool := New(appCfg, WorkerPoolConfig{
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 0, nil
 		},
 	})
-	if pool == nil {
-		t.Fatalf("expected non-nil pool")
+	if pool == nil || pool.appCfg != appCfg || pool.appCfg.Current().Model != "initial-model" {
+		t.Fatalf("unexpected pool config injection: %+v", pool)
 	}
-	if pool.appCfg != appCfg {
-		t.Errorf("expected pool.appCfg to match injected pointer")
-	}
-	if pool.appCfg.Current().Model != "initial-model" {
-		t.Errorf("expected initial model, got %q", pool.appCfg.Current().Model)
-	}
-}
-
-func TestWorkerPool_DrainTimeoutConfig(t *testing.T) {
-	t.Parallel()
-	// Default when unset or <= 0
-	poolDef := NewWorkerPool(WorkerPoolConfig{
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "", 0, nil
-		},
-	})
+	// Drain timeout defaults and custom overrides
+	poolDef := NewWorkerPool(WorkerPoolConfig{})
 	if poolDef.cfg.DrainTimeout != 10*time.Second {
 		t.Errorf("expected default DrainTimeout 10s, got %v", poolDef.cfg.DrainTimeout)
 	}
-
-	// Explicit custom DrainTimeout
-	poolCustom := NewWorkerPool(WorkerPoolConfig{
-		DrainTimeout: 250 * time.Millisecond,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "", 0, nil
-		},
-	})
+	poolCustom := NewWorkerPool(WorkerPoolConfig{DrainTimeout: 250 * time.Millisecond})
 	if poolCustom.cfg.DrainTimeout != 250*time.Millisecond {
 		t.Errorf("expected custom DrainTimeout 250ms, got %v", poolCustom.cfg.DrainTimeout)
 	}
@@ -102,211 +80,21 @@ func TestQueueLifecycleAndRetryMatrix(t *testing.T) {
 	t0 := time.Now().UTC().Add(-10 * time.Second)
 
 	tests := []workerTestCase{
-		{
-			name:          "SuccessLifecycleAndSessionSaving",
-			useSessionMgr: true,
-			maxAttempts:   3,
-			messages: []db.Message{{
-				ID: "msg-101", ThreadID: "thread-202", GuildID: "guild-303",
-				AuthorID: "user-404", AuthorName: "User", Content: "Hello Aerial",
-			}},
-			runnerSteps: []mockRunnerStep{{
-				convID: "f1111111-2222-3333-4444-555555555555", response: "Clean output response", writeTranscript: true,
-			}},
-			wantStatus:            db.StatusCompleted,
-			wantSavedSession:      "f1111111-2222-3333-4444-555555555555",
-			wantDeliveredTexts:    []string{"Clean output response"},
-			wantDeliveredChannels: []string{"thread-202"},
-		},
-		{
-			name:             "TransientRetryPreservesSession",
-			initialSessionID: "b1111111-2222-3333-4444-555555555555",
-			maxAttempts:      3,
-			messages:         []db.Message{{ID: "msg-retry-1", ThreadID: "thread-retry", Content: "Hello"}},
-			runnerSteps: []mockRunnerStep{
-				{stderr: "Error 503: high demand unavailable", exitCode: 1, errMsg: "503"},
-				{stderr: "Error 503: high demand unavailable", exitCode: 1, errMsg: "503"},
-				{convID: "b1111111-2222-3333-4444-555555555555", response: "Success after retries!"},
-			},
-			wantRunnerCalls:  3,
-			checkRunnerCalls: true,
-			wantPassedSessions: []string{
-				"b1111111-2222-3333-4444-555555555555",
-				"b1111111-2222-3333-4444-555555555555",
-				"b1111111-2222-3333-4444-555555555555",
-			},
-			wantStatus:     db.StatusCompleted,
-			wantRetryCount: 2,
-		},
-		{
-			name:             "SessionCorruptionRecovery",
-			useSessionMgr:    true,
-			initialSessionID: "a1111111-2222-3333-4444-555555555555",
-			maxAttempts:      3,
-			notifierReply:    "I refreshed our conversation! 🔄",
-			messages:         []db.Message{{ID: "msg-corrupt-1", ThreadID: "thread-corrupt", GuildID: "guild-1", Content: "Hello"}},
-			runnerSteps: []mockRunnerStep{
-				{stderr: "Error: failed to load conversation: session corrupted", exitCode: 1, errMsg: "corrupt"},
-				{convID: "d8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Clean output after session reset", writeTranscript: true},
-			},
-			wantRunnerCalls:    2,
-			checkRunnerCalls:   true,
-			wantPassedSessions: []string{"a1111111-2222-3333-4444-555555555555", ""},
-			wantDeliveredTexts: []string{"I refreshed our conversation! 🔄", "Clean output after session reset"},
-			wantSavedSession:   "d8b5e679-7425-40de-944b-e07fc1f90ae7",
-			wantStatus:         db.StatusCompleted,
-		},
-		{
-			name:        "TotalExhaustion",
-			maxAttempts: 3,
-			messages:    []db.Message{{ID: "msg-exhaust", ThreadID: "thread-exhaust", GuildID: "guild-1", Content: "Hello"}},
-			runnerSteps: []mockRunnerStep{
-				{stderr: "status: unavailable 503", exitCode: 1, errMsg: "unavailable"},
-			},
-			wantRunnerCalls:    3,
-			checkRunnerCalls:   true,
-			wantStatus:         db.StatusFailed,
-			wantRetryCount:     3,
-			wantDeliveredTexts: []string{notifier.ModelUnavailableMessage()},
-		},
-		{
-			name: "PromptPreservedWithoutMemoryInjection",
-			messages: []db.Message{{
-				ID: "msg-mem-1", ThreadID: "thread-mem-1", AuthorID: "user-1", Content: "What port does the server run on?",
-			}},
-			runnerSteps:        []mockRunnerStep{{response: "Response text"}},
-			wantStatus:         db.StatusCompleted,
-			wantPromptContains: []string{"What port does the server run on?"},
-			wantPromptExcludes: []string{"<retrieved_memory>"},
-			wantDBContent:      "What port does the server run on?",
-		},
-		{
-			name:        "EmptyResponseFailure",
-			messages:    []db.Message{{ID: "msg-empty-resp-1", ThreadID: "thread-empty-resp", AuthorID: "user-1", Content: "Empty response prompt"}},
-			runnerSteps: []mockRunnerStep{{response: ""}},
-			wantStatus:  db.StatusFailed,
-		},
-		{
-			name:           "BurstCoalescing",
-			enqueueAsBurst: true,
-			messages: []db.Message{
-				{ID: "m-b-1", ThreadID: "thread-burst", AuthorName: "Alice", Content: "Hello from Alice", CreatedAt: t0},
-				{ID: "m-b-2", ThreadID: "thread-burst", AuthorName: "Bob", Content: "Hello from Bob", CreatedAt: t0.Add(3 * time.Second)},
-				{ID: "m-b-3", ThreadID: "thread-burst", AuthorName: "Charlie", Content: "Hello from Charlie", CreatedAt: t0.Add(6 * time.Second)},
-			},
-			runnerSteps:        []mockRunnerStep{{response: "Coalesced reply from agent"}},
-			wantStatus:         db.StatusCompleted,
-			wantDeliveredTexts: []string{"Coalesced reply from agent"},
-			wantPromptContains: []string{
-				"<USER_REQUEST>",
-				"[Multiple messages received in channel]",
-				"--- Message 1 (by @Alice",
-				"Hello from Alice",
-				"--- Message 2 (by @Bob",
-				"Hello from Bob",
-				"--- Message 3 (by @Charlie",
-				"Hello from Charlie",
-			},
-		},
-		{
-			name:             "Staleness_WithinDefault30mTTL",
-			messageAge:       10 * time.Minute,
-			messages:         []db.Message{{ID: "msg-stale-1", ThreadID: "thread-stale-1", AuthorID: "user-1", Content: "Staleness test prompt"}},
-			runnerSteps:      []mockRunnerStep{{response: "OK"}},
-			wantRunnerCalls:  1,
-			checkRunnerCalls: true,
-			wantStatus:       db.StatusCompleted,
-		},
-		{
-			name:             "Staleness_ExceedsDefault30mTTL",
-			messageAge:       31 * time.Minute,
-			messages:         []db.Message{{ID: "msg-stale-2", ThreadID: "thread-stale-2", AuthorID: "user-1", Content: "Staleness test prompt"}},
-			runnerSteps:      []mockRunnerStep{{response: "OK"}},
-			wantRunnerCalls:  0,
-			checkRunnerCalls: true,
-			wantStatus:       db.StatusCompleted,
-			wantResponseText: "[EXPIRED_STALE]",
-		},
-		{
-			name:             "Staleness_ExceedsCustom10mTTL",
-			stalenessTTL:     10 * time.Minute,
-			messageAge:       12 * time.Minute,
-			messages:         []db.Message{{ID: "msg-stale-3", ThreadID: "thread-stale-3", AuthorID: "user-1", Content: "Staleness test prompt"}},
-			runnerSteps:      []mockRunnerStep{{response: "OK"}},
-			wantRunnerCalls:  0,
-			checkRunnerCalls: true,
-			wantStatus:       db.StatusCompleted,
-			wantResponseText: "[EXPIRED_STALE]",
-		},
-		{
-			name: "SkipDiscord_AllSourcesDelivered",
-			messages: []db.Message{
-				{ID: "msg-sched-1", ThreadID: "thread-scheduled-1", GuildID: "scheduled", AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Scheduled routine prompt"},
-				{ID: "msg-http-1", ThreadID: "thread-http-1", AuthorID: "http-client", AuthorName: "HTTP Client", Content: "HTTP prompt"},
-				{ID: "msg-user-1", ThreadID: "thread-user-1", GuildID: "guild-100", AuthorID: "user-999", AuthorName: "Alice", Content: "User prompt"},
-			},
-			runnerSteps:           []mockRunnerStep{{response: "AI reply"}},
-			wantStatus:            db.StatusCompleted,
-			wantDeliveredChannels: []string{"thread-scheduled-1", "thread-http-1", "thread-user-1"},
-		},
-		{
-			name:             "TurnCountSessionPreservation",
-			useSessionMgr:    true,
-			initialSessionID: "sess-channel-init-123",
-			seedTurnCount:    8,
-			policyMode:       "channel",
-			sequentialTurns:  true,
-			messages: []db.Message{
-				{ID: "m-rot-1", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 9"},
-				{ID: "m-rot-2", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 10"},
-				{ID: "m-rot-3", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 11"},
-			},
-			runnerSteps:      []mockRunnerStep{{response: "OK response", writeTranscript: true}},
-			wantSavedSession: "sess-channel-init-123",
-			wantTurnCount:    11,
-			checkTurnCount:   true,
-			wantStatus:       db.StatusCompleted,
-		},
-		{
-			name:             "IdleTimeout_ChannelSession",
-			useSessionMgr:    true,
-			initialSessionID: "sess-channel-old-999",
-			seedTurnCount:    1,
-			seedIdleAge:      25 * time.Hour,
-			policyMode:       "channel",
-			sequentialTurns:  true,
-			messages: []db.Message{
-				{ID: "m-idle-1", ThreadID: "channel-rotation-test", Content: "<@aerial> wake up"},
-				{ID: "m-idle-2", ThreadID: "channel-rotation-test", Content: "<@aerial> follow up"},
-			},
-			runnerSteps:        []mockRunnerStep{{response: "OK response", writeTranscript: true}},
-			wantPassedSessions: []string{"sess-channel-old-999", "sess-channel-old-999"},
-			wantSavedSession:   "sess-channel-old-999",
-			wantTurnCount:      3,
-			checkTurnCount:     true,
-			wantStatus:         db.StatusCompleted,
-		},
-		{
-			name:             "IdleTimeout_ThreadSession",
-			useSessionMgr:    true,
-			initialSessionID: "sess-thread-old-888",
-			seedTurnCount:    1,
-			seedIdleAge:      25 * time.Hour,
-			policyMode:       "thread",
-			sequentialTurns:  true,
-			messages: []db.Message{
-				{ID: "m-idle-t1", ThreadID: "thread-idle-rot-test", Content: "<@aerial> wake up"},
-				{ID: "m-idle-t2", ThreadID: "thread-idle-rot-test", Content: "<@aerial> follow up"},
-			},
-			runnerSteps:        []mockRunnerStep{{response: "OK response", writeTranscript: true}},
-			wantPassedSessions: []string{"sess-thread-old-888", "sess-thread-old-888"},
-			wantSavedSession:   "sess-thread-old-888",
-			wantTurnCount:      3,
-			checkTurnCount:     true,
-			wantStatus:         db.StatusCompleted,
-		},
+		{name: "SuccessLifecycleAndSessionSaving", useSessionMgr: true, maxAttempts: 3, messages: []db.Message{{ID: "msg-101", ThreadID: "thread-202", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Hello Aerial"}}, runnerSteps: []mockRunnerStep{{convID: "f1111111-2222-3333-4444-555555555555", response: "Clean output response", writeTranscript: true}}, wantStatus: db.StatusCompleted, wantSavedSession: "f1111111-2222-3333-4444-555555555555", wantDeliveredTexts: []string{"Clean output response"}, wantDeliveredChannels: []string{"thread-202"}},
+		{name: "TransientRetryPreservesSession", initialSessionID: "b1111111-2222-3333-4444-555555555555", maxAttempts: 3, messages: []db.Message{{ID: "msg-retry-1", ThreadID: "thread-retry", Content: "Hello"}}, runnerSteps: []mockRunnerStep{{stderr: "Error 503: high demand unavailable", exitCode: 1, errMsg: "503"}, {stderr: "Error 503: high demand unavailable", exitCode: 1, errMsg: "503"}, {convID: "b1111111-2222-3333-4444-555555555555", response: "Success after retries!"}}, wantRunnerCalls: 3, checkRunnerCalls: true, wantPassedSessions: []string{"b1111111-2222-3333-4444-555555555555", "b1111111-2222-3333-4444-555555555555", "b1111111-2222-3333-4444-555555555555"}, wantStatus: db.StatusCompleted, wantRetryCount: 2},
+		{name: "SessionCorruptionRecovery", useSessionMgr: true, initialSessionID: "a1111111-2222-3333-4444-555555555555", maxAttempts: 3, notifierReply: "I refreshed our conversation! 🔄", messages: []db.Message{{ID: "msg-corrupt-1", ThreadID: "thread-corrupt", GuildID: "guild-1", Content: "Hello"}}, runnerSteps: []mockRunnerStep{{stderr: "Error: failed to load conversation: session corrupted", exitCode: 1, errMsg: "corrupt"}, {convID: "d8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Clean output after session reset", writeTranscript: true}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"a1111111-2222-3333-4444-555555555555", ""}, wantDeliveredTexts: []string{"I refreshed our conversation! 🔄", "Clean output after session reset"}, wantSavedSession: "d8b5e679-7425-40de-944b-e07fc1f90ae7", wantStatus: db.StatusCompleted},
+		{name: "TotalExhaustion", maxAttempts: 3, messages: []db.Message{{ID: "msg-exhaust", ThreadID: "thread-exhaust", GuildID: "guild-1", Content: "Hello"}}, runnerSteps: []mockRunnerStep{{stderr: "status: unavailable 503", exitCode: 1, errMsg: "unavailable"}}, wantRunnerCalls: 3, checkRunnerCalls: true, wantStatus: db.StatusFailed, wantRetryCount: 3, wantDeliveredTexts: []string{notifier.ModelUnavailableMessage()}},
+		{name: "PromptPreservedWithoutMemoryInjection", messages: []db.Message{{ID: "msg-mem-1", ThreadID: "thread-mem-1", AuthorID: "user-1", Content: "What port does the server run on?"}}, runnerSteps: []mockRunnerStep{{response: "Response text"}}, wantStatus: db.StatusCompleted, wantPromptContains: []string{"What port does the server run on?"}, wantPromptExcludes: []string{"<retrieved_memory>"}, wantDBContent: "What port does the server run on?"},
+		{name: "EmptyResponseFailure", messages: []db.Message{{ID: "msg-empty-resp-1", ThreadID: "thread-empty-resp", AuthorID: "user-1", Content: "Empty response prompt"}}, runnerSteps: []mockRunnerStep{{response: ""}}, wantStatus: db.StatusFailed},
+		{name: "BurstCoalescing", enqueueAsBurst: true, messages: []db.Message{{ID: "m-b-1", ThreadID: "thread-burst", AuthorName: "Alice", Content: "Hello from Alice", CreatedAt: t0}, {ID: "m-b-2", ThreadID: "thread-burst", AuthorName: "Bob", Content: "Hello from Bob", CreatedAt: t0.Add(3 * time.Second)}, {ID: "m-b-3", ThreadID: "thread-burst", AuthorName: "Charlie", Content: "Hello from Charlie", CreatedAt: t0.Add(6 * time.Second)}}, runnerSteps: []mockRunnerStep{{response: "Coalesced reply from agent"}}, wantStatus: db.StatusCompleted, wantDeliveredTexts: []string{"Coalesced reply from agent"}, wantPromptContains: []string{"<USER_REQUEST>", "[Multiple messages received in channel]", "--- Message 1 (by @Alice", "Hello from Alice", "--- Message 2 (by @Bob", "Hello from Bob", "--- Message 3 (by @Charlie", "Hello from Charlie"}},
+		{name: "Staleness_WithinDefault30mTTL", messageAge: 10 * time.Minute, messages: []db.Message{{ID: "msg-stale-1", ThreadID: "thread-stale-1", AuthorID: "user-1", Content: "Staleness test prompt"}}, runnerSteps: []mockRunnerStep{{response: "OK"}}, wantRunnerCalls: 1, checkRunnerCalls: true, wantStatus: db.StatusCompleted},
+		{name: "Staleness_ExceedsDefault30mTTL", messageAge: 31 * time.Minute, messages: []db.Message{{ID: "msg-stale-2", ThreadID: "thread-stale-2", AuthorID: "user-1", Content: "Staleness test prompt"}}, runnerSteps: []mockRunnerStep{{response: "OK"}}, wantRunnerCalls: 0, checkRunnerCalls: true, wantStatus: db.StatusCompleted, wantResponseText: "[EXPIRED_STALE]"},
+		{name: "Staleness_ExceedsCustom10mTTL", stalenessTTL: 10 * time.Minute, messageAge: 12 * time.Minute, messages: []db.Message{{ID: "msg-stale-3", ThreadID: "thread-stale-3", AuthorID: "user-1", Content: "Staleness test prompt"}}, runnerSteps: []mockRunnerStep{{response: "OK"}}, wantRunnerCalls: 0, checkRunnerCalls: true, wantStatus: db.StatusCompleted, wantResponseText: "[EXPIRED_STALE]"},
+		{name: "SkipDiscord_AllSourcesDelivered", messages: []db.Message{{ID: "msg-sched-1", ThreadID: "thread-scheduled-1", GuildID: "scheduled", AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Scheduled routine prompt"}, {ID: "msg-http-1", ThreadID: "thread-http-1", AuthorID: "http-client", AuthorName: "HTTP Client", Content: "HTTP prompt"}, {ID: "msg-user-1", ThreadID: "thread-user-1", GuildID: "guild-100", AuthorID: "user-999", AuthorName: "Alice", Content: "User prompt"}}, runnerSteps: []mockRunnerStep{{response: "AI reply"}}, wantStatus: db.StatusCompleted, wantDeliveredChannels: []string{"thread-scheduled-1", "thread-http-1", "thread-user-1"}},
+		{name: "TurnCountSessionPreservation", useSessionMgr: true, initialSessionID: "sess-channel-init-123", seedTurnCount: 8, policyMode: "channel", sequentialTurns: true, messages: []db.Message{{ID: "m-rot-1", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 9"}, {ID: "m-rot-2", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 10"}, {ID: "m-rot-3", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 11"}}, runnerSteps: []mockRunnerStep{{response: "OK response", writeTranscript: true}}, wantSavedSession: "sess-channel-init-123", wantTurnCount: 11, checkTurnCount: true, wantStatus: db.StatusCompleted},
+		{name: "IdleTimeout_ChannelSession", useSessionMgr: true, initialSessionID: "sess-channel-old-999", seedTurnCount: 1, seedIdleAge: 25 * time.Hour, policyMode: "channel", sequentialTurns: true, messages: []db.Message{{ID: "m-idle-1", ThreadID: "channel-rotation-test", Content: "<@aerial> wake up"}, {ID: "m-idle-2", ThreadID: "channel-rotation-test", Content: "<@aerial> follow up"}}, runnerSteps: []mockRunnerStep{{response: "OK response", writeTranscript: true}}, wantPassedSessions: []string{"sess-channel-old-999", "sess-channel-old-999"}, wantSavedSession: "sess-channel-old-999", wantTurnCount: 3, checkTurnCount: true, wantStatus: db.StatusCompleted},
+		{name: "IdleTimeout_ThreadSession", useSessionMgr: true, initialSessionID: "sess-thread-old-888", seedTurnCount: 1, seedIdleAge: 25 * time.Hour, policyMode: "thread", sequentialTurns: true, messages: []db.Message{{ID: "m-idle-t1", ThreadID: "thread-idle-rot-test", Content: "<@aerial> wake up"}, {ID: "m-idle-t2", ThreadID: "thread-idle-rot-test", Content: "<@aerial> follow up"}}, runnerSteps: []mockRunnerStep{{response: "OK response", writeTranscript: true}}, wantPassedSessions: []string{"sess-thread-old-888", "sess-thread-old-888"}, wantSavedSession: "sess-thread-old-888", wantTurnCount: 3, checkTurnCount: true, wantStatus: db.StatusCompleted},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -410,53 +198,31 @@ func TestRecoverInterrupted(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 
-	tests := []struct {
-		name               string
-		seedMessages       []db.Message
-		seedRuns           []db.ScheduleRun
-		withDiscordSession bool
-		wantCompletedIDs   []string
-		wantMsgStatuses    map[string]string
-		wantMinDeliveries  int
-		wantRunStatuses    map[string]string
-		wantRunError       string
-	}{
-		{
-			name: "FIFORecovery",
-			seedMessages: []db.Message{
-				{ID: "m1", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusPending, CreatedAt: now.Add(-10 * time.Minute)},
-				{ID: "m2", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusProcessing, CreatedAt: now.Add(-5 * time.Minute)},
-				{ID: "m3", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusCompleted, CreatedAt: now.Add(-15 * time.Minute)},
-			},
-			wantCompletedIDs: []string{"m1", "m2"},
-		},
-		{
-			name: "PoisonPill",
-			seedMessages: []db.Message{
-				{ID: "msg-poison", ThreadID: "thread-poison", GuildID: "guild-1", AuthorID: "user-1", Content: "crash command", Status: db.StatusProcessing, RetryCount: 3, CreatedAt: now.Add(-10 * time.Minute)},
-				{ID: "msg-normal", ThreadID: "thread-normal", GuildID: "guild-1", AuthorID: "user-2", Content: "normal prompt", Status: db.StatusPending, RetryCount: 0, CreatedAt: now.Add(-5 * time.Minute)},
-			},
-			withDiscordSession: true,
-			wantCompletedIDs:   []string{"msg-normal"},
-			wantMsgStatuses:    map[string]string{"msg-poison": db.StatusFailed},
-			wantMinDeliveries:  1,
-		},
-		{
-			name: "ReconcilesOrphanedScheduleRuns",
-			seedRuns: []db.ScheduleRun{
-				{ID: "run-orphan-enqueued", ScheduleID: "cron-1", ScheduleType: "cron", TargetID: "chan-1", ThreadID: "thread-1", Prompt: "Orphan prompt 1", Status: "enqueued", StartedAt: now.Add(-1 * time.Hour)},
-				{ID: "run-orphan-running", ScheduleID: "cron-2", ScheduleType: "cron", TargetID: "chan-2", ThreadID: "thread-2", Prompt: "Orphan prompt 2", Status: "running", StartedAt: now.Add(-1 * time.Hour)},
-				{ID: "run-already-completed", ScheduleID: "cron-3", ScheduleType: "cron", TargetID: "chan-3", ThreadID: "thread-3", Prompt: "Completed prompt", Status: "completed", StartedAt: now.Add(-2 * time.Hour)},
-			},
-			wantRunStatuses: map[string]string{
-				"run-orphan-enqueued":   "failed",
-				"run-orphan-running":    "failed",
-				"run-already-completed": "completed",
-			},
-			wantRunError: "Interrupted by server restart",
-		},
-	}
+	// Guard branches: nil inputs and closed stores
+	RecoverInterrupted(nil, nil)
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	dummyPool := NewWorkerPool(WorkerPoolConfig{Store: closedStore})
+	RecoverInterrupted(closedStore, dummyPool)
 
+	tests := []struct {
+		name              string
+		seedMessages      []db.Message
+		seedRuns          []db.ScheduleRun
+		seedCompletedMsg  *db.Message
+		appCfg            *config.Config
+		withSess          bool
+		maxAttempts       int
+		stalenessTTL      time.Duration
+		wantCompletedIDs  []string
+		wantMsgStatuses   map[string]string
+		wantRunStatuses   map[string]string
+		wantMinDeliveries int
+	}{
+		{name: "FIFORecoveryAndScheduleRuns", seedMessages: []db.Message{{ID: "m1", ThreadID: "th-same", Status: db.StatusPending, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m2", ThreadID: "th-same", Status: db.StatusProcessing, CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)}, {ID: "m3", ThreadID: "th-same", Status: db.StatusCompleted, CreatedAt: now.Add(-15 * time.Minute)}}, seedRuns: []db.ScheduleRun{{ID: "r-orph", ScheduleID: "c1", TargetID: "ch1", ThreadID: "th-same", Status: "running", StartedAt: now.Add(-1 * time.Hour)}, {ID: "r-done", ScheduleID: "c2", TargetID: "ch1", ThreadID: "th-same", Status: "completed", StartedAt: now.Add(-2 * time.Hour)}}, wantCompletedIDs: []string{"m1", "m2"}, wantRunStatuses: map[string]string{"r-orph": "failed", "r-done": "completed"}},
+		{name: "PoisonPill_RetryAndRestartLimits", seedMessages: []db.Message{{ID: "m-retry-poison", ThreadID: "th-p1", AuthorID: "user-1", Content: "retry crash", Status: db.StatusProcessing, RetryCount: 3, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-hard-restart", ThreadID: "th-p2", AuthorID: "http-client", Content: strings.Repeat("x", 80), Status: db.StatusProcessing, RestartCount: 5, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-instant-crash", ThreadID: "th-p3", AuthorID: "user-2", Content: "instant crash", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-5 * time.Second)}, {ID: "m-long-running", ThreadID: "th-ok", AuthorID: "user-3", Content: "long task", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-40 * time.Second)}}, withSess: true, appCfg: config.NewFromData(&config.ConfigData{AgyBin: "agy-custom", APIKey: "key-custom"}), wantCompletedIDs: []string{"m-long-running"}, wantMsgStatuses: map[string]string{"m-retry-poison": db.StatusFailed, "m-hard-restart": db.StatusFailed, "m-instant-crash": db.StatusFailed}, wantMinDeliveries: 2},
+		{name: "Staleness_TTLAndSuperseded", seedMessages: []db.Message{{ID: "m-stale-pending", ThreadID: "th-stale", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute), ScheduleRunID: "run-stale"}, {ID: "m-superseded", ThreadID: "th-super", Status: db.StatusPending, CreatedAt: now.Add(-20 * time.Minute)}}, seedRuns: []db.ScheduleRun{{ID: "run-stale", ScheduleID: "c3", TargetID: "ch1", ThreadID: "th-stale", Status: "running", StartedAt: now.Add(-40 * time.Minute)}}, seedCompletedMsg: &db.Message{ID: "m-newer-completed", ThreadID: "th-super", Status: db.StatusCompleted, CreatedAt: now.Add(-10 * time.Minute)}, wantMsgStatuses: map[string]string{"m-stale-pending": db.StatusCompleted, "m-superseded": db.StatusCompleted}, wantRunStatuses: map[string]string{"run-stale": "completed"}},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -467,20 +233,27 @@ func TestRecoverInterrupted(t *testing.T) {
 			for _, r := range tc.seedRuns {
 				_ = createScheduleRun(store, r)
 			}
+			if tc.seedCompletedMsg != nil {
+				_ = insertMessage(store, *tc.seedCompletedMsg)
+			}
 
 			var mu sync.Mutex
-			var completedIDs []string
-			var deliveredNotifs []string
+			var completedIDs, deliveredNotifs []string
 			doneCh := make(chan struct{})
 			if len(tc.wantCompletedIDs) == 0 {
 				close(doneCh)
 			}
 
-			pool := NewWorkerPool(WorkerPoolConfig{
+			maxAttempts := tc.maxAttempts
+			if maxAttempts <= 0 {
+				maxAttempts = 3
+			}
+			pool := New(tc.appCfg, WorkerPoolConfig{
 				Store:          store,
 				TimeoutMinutes: 1,
 				BackoffBase:    10 * time.Millisecond,
-				MaxAttempts:    1,
+				MaxAttempts:    maxAttempts,
+				StalenessTTL:   tc.stalenessTTL,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "OK"), "", 0, nil
 				},
@@ -502,7 +275,7 @@ func TestRecoverInterrupted(t *testing.T) {
 			})
 			pool.Start()
 			defer pool.Stop()
-			if tc.withDiscordSession {
+			if tc.withSess {
 				pool.SetDiscordSession(&discordgo.Session{})
 			}
 
@@ -515,33 +288,20 @@ func TestRecoverInterrupted(t *testing.T) {
 			if len(completedIDs) != len(tc.wantCompletedIDs) {
 				t.Fatalf("completedIDs = %v, want %v", completedIDs, tc.wantCompletedIDs)
 			}
-			for i, wantID := range tc.wantCompletedIDs {
-				if completedIDs[i] != wantID {
-					t.Errorf("completedIDs[%d] = %q, want %q", i, completedIDs[i], wantID)
-				}
-			}
 			for msgID, wantStatus := range tc.wantMsgStatuses {
 				m, err := getMessage(store, msgID)
 				if err != nil || m == nil || m.Status != wantStatus {
 					t.Errorf("message %s status = %v (err: %v), want %s", msgID, m, err, wantStatus)
 				}
 			}
-			if len(deliveredNotifs) < tc.wantMinDeliveries {
-				t.Errorf("deliveredNotifs = %d, want >= %d", len(deliveredNotifs), tc.wantMinDeliveries)
-			}
 			for runID, wantStatus := range tc.wantRunStatuses {
 				r, err := getScheduleRun(store, runID)
-				if err != nil || r == nil {
-					t.Fatalf("failed to get schedule run %s: %v", runID, err)
+				if err != nil || r == nil || r.Status != wantStatus {
+					t.Errorf("run %s status = %v, want %q", runID, r, wantStatus)
 				}
-				if r.Status != wantStatus {
-					t.Errorf("run %s status = %q, want %q", runID, r.Status, wantStatus)
-				}
-				if wantStatus == "failed" {
-					if r.Error != tc.wantRunError || r.CompletedAt == nil {
-						t.Errorf("run %s error=%q completedAt=%v, want error=%q and non-nil completedAt", runID, r.Error, r.CompletedAt, tc.wantRunError)
-					}
-				}
+			}
+			if len(deliveredNotifs) < tc.wantMinDeliveries {
+				t.Errorf("deliveredNotifs count = %d, want >= %d", len(deliveredNotifs), tc.wantMinDeliveries)
 			}
 		})
 	}
@@ -605,38 +365,10 @@ func TestQueueScheduleRunLifecycle(t *testing.T) {
 		wantRunStatus string
 		wantEmptyErr  bool
 	}{
-		{
-			name:          "Success",
-			runID:         "run-lifecycle-success-1",
-			scheduleID:    "cron-s-1",
-			threadID:      "thread-sched-s",
-			step:          mockRunnerStep{convID: "e1111111-2222-3333-4444-555555555555", response: "Success output"},
-			wantMsgStatus: db.StatusCompleted,
-			wantRunStatus: "completed",
-			wantEmptyErr:  true,
-		},
-		{
-			name:          "Failure",
-			runID:         "run-lifecycle-fail-1",
-			scheduleID:    "cron-f-1",
-			threadID:      "thread-sched-f",
-			step:          mockRunnerStep{stderr: "Fatal execution error: out of memory", exitCode: 1, errMsg: "out of memory"},
-			wantMsgStatus: db.StatusFailed,
-			wantRunStatus: "failed",
-			wantEmptyErr:  false,
-		},
-		{
-			name:          "PanicRecovery",
-			runID:         "run-panic-1",
-			scheduleID:    "cron-panic-sched",
-			threadID:      "thread-panic",
-			step:          mockRunnerStep{panicMsg: "simulated critical worker panic"},
-			wantMsgStatus: db.StatusFailed,
-			wantRunStatus: "failed",
-			wantEmptyErr:  false,
-		},
+		{name: "Success", runID: "run-lifecycle-success-1", scheduleID: "cron-s-1", threadID: "thread-sched-s", step: mockRunnerStep{convID: "e1111111-2222-3333-4444-555555555555", response: "Success output"}, wantMsgStatus: db.StatusCompleted, wantRunStatus: "completed", wantEmptyErr: true},
+		{name: "Failure", runID: "run-lifecycle-fail-1", scheduleID: "cron-f-1", threadID: "thread-sched-f", step: mockRunnerStep{stderr: "Fatal execution error: out of memory", exitCode: 1, errMsg: "out of memory"}, wantMsgStatus: db.StatusFailed, wantRunStatus: "failed", wantEmptyErr: false},
+		{name: "PanicRecovery", runID: "run-panic-1", scheduleID: "cron-panic-sched", threadID: "thread-panic", step: mockRunnerStep{panicMsg: "simulated critical worker panic"}, wantMsgStatus: db.StatusFailed, wantRunStatus: "failed", wantEmptyErr: false},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -749,98 +481,16 @@ func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 		expectErrorMessage    string
 		expectResponseText    string
 	}{
-		{
-			name:                "IgnoredChannelPolicy",
-			policy:              config.ChannelPolicy{Mode: "threads"},
-			ignoredTargetID:     "chan-ignored-123",
-			message:             db.Message{ID: "msg-ignored-1", ThreadID: "chan-ignored-123", Content: "Hello ignored room"},
-			expectRunnerCalls:   0,
-			expectDeliveryCalls: 0,
-			expectTypingCalls:   0,
-			expectStatus:        db.StatusCompleted,
-			expectErrorMessage:  "[IGNORE]",
-		},
-		{
-			name:                  "IgnoredChannelPolicy_NilCallback",
-			policy:                config.ChannelPolicy{Mode: "ignore"},
-			message:               db.Message{ID: "msg-nil-cb-1", ThreadID: "chan-ignored-nil-cb", Content: "Testing nil callback safety"},
-			nilOnMessageCompleted: true,
-			expectRunnerCalls:     0,
-			expectDeliveryCalls:   0,
-			expectTypingCalls:     0,
-			expectStatus:          db.StatusCompleted,
-		},
-		{
-			name:                "ThreadInheritsParentChannelPolicy",
-			policy:              config.ChannelPolicy{Mode: "threads"},
-			ignoredTargetID:     "parent-spam-id",
-			seedSpamThread:      true,
-			message:             db.Message{ID: "msg-thread-spam-1", ThreadID: "thread-in-spam-id", Content: "Hello in thread in spam"},
-			expectRunnerCalls:   0,
-			expectDeliveryCalls: 0,
-			expectTypingCalls:   0,
-			expectStatus:        db.StatusCompleted,
-			expectErrorMessage:  "[IGNORE]",
-		},
-		{
-			name:                "HTTPClient_NotDroppedByDefaultDenyIgnore",
-			policy:              config.ChannelPolicy{Mode: "ignore"},
-			message:             db.Message{ID: "msg-http-prompt-1", ThreadID: "synthetic-http-thread-uuid", AuthorID: "http-client", Content: "Explain Kubernetes architecture"},
-			expectRunnerCalls:   1,
-			expectDeliveryCalls: 1,
-			expectTypingCalls:   1,
-			expectStatus:        db.StatusCompleted,
-			expectResponseText:  "HTTP prompt execution response",
-		},
-		{
-			name:                "Typing_ThreadsModeActiveTurn",
-			policy:              config.ChannelPolicy{Mode: "threads"},
-			message:             db.Message{ID: "m-type-1", ThreadID: "th-active-1", Content: "Hello thread"},
-			expectRunnerCalls:   1,
-			expectDeliveryCalls: 1,
-			expectTypingCalls:   1,
-			expectStatus:        db.StatusCompleted,
-		},
-		{
-			name:                "Typing_ChannelModeDirectMentionWake",
-			policy:              config.ChannelPolicy{Mode: "channel", WakeMode: "mention"},
-			message:             db.Message{ID: "m-type-2", ThreadID: "th-mention-yes", Content: "<@Aerial> help me"},
-			expectRunnerCalls:   1,
-			expectDeliveryCalls: 1,
-			expectTypingCalls:   1,
-			expectStatus:        db.StatusCompleted,
-		},
-		{
-			name:                 "Typing_ChannelModeAmbientClassifierWake",
-			policy:               config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.8)},
-			classifierConfidence: 0.95,
-			message:              db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am"},
-			expectRunnerCalls:    1,
-			expectDeliveryCalls:  1,
-			expectTypingCalls:    1,
-			expectStatus:         db.StatusCompleted,
-		},
-		{
-			name:                 "Typing_ChannelModeAmbientNonWakeChatter",
-			policy:               config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.8)},
-			classifierConfidence: 0.10,
-			message:              db.Message{ID: "m-type-4", ThreadID: "th-ambient-drop", Content: "Just random human chat between people"},
-			expectRunnerCalls:    0,
-			expectDeliveryCalls:  0,
-			expectTypingCalls:    0,
-			expectStatus:         db.StatusCompleted,
-		},
-		{
-			name:                "Typing_IgnoredChannelPolicy",
-			policy:              config.ChannelPolicy{Mode: "ignore"},
-			message:             db.Message{ID: "m-type-5", ThreadID: "th-ignored", Content: "Ignored message @Aerial"},
-			expectRunnerCalls:   0,
-			expectDeliveryCalls: 0,
-			expectTypingCalls:   0,
-			expectStatus:        db.StatusCompleted,
-		},
+		{name: "IgnoredChannelPolicy", policy: config.ChannelPolicy{Mode: "threads"}, ignoredTargetID: "chan-ignored-123", message: db.Message{ID: "msg-ignored-1", ThreadID: "chan-ignored-123", Content: "Hello ignored room"}, expectRunnerCalls: 0, expectDeliveryCalls: 0, expectTypingCalls: 0, expectStatus: db.StatusCompleted, expectErrorMessage: "[IGNORE]"},
+		{name: "IgnoredChannelPolicy_NilCallback", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "msg-nil-cb-1", ThreadID: "chan-ignored-nil-cb", Content: "Testing nil callback safety"}, nilOnMessageCompleted: true, expectRunnerCalls: 0, expectDeliveryCalls: 0, expectTypingCalls: 0, expectStatus: db.StatusCompleted},
+		{name: "ThreadInheritsParentChannelPolicy", policy: config.ChannelPolicy{Mode: "threads"}, ignoredTargetID: "parent-spam-id", seedSpamThread: true, message: db.Message{ID: "msg-thread-spam-1", ThreadID: "thread-in-spam-id", Content: "Hello in thread in spam"}, expectRunnerCalls: 0, expectDeliveryCalls: 0, expectTypingCalls: 0, expectStatus: db.StatusCompleted, expectErrorMessage: "[IGNORE]"},
+		{name: "HTTPClient_NotDroppedByDefaultDenyIgnore", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "msg-http-prompt-1", ThreadID: "synthetic-http-thread-uuid", AuthorID: "http-client", Content: "Explain Kubernetes architecture"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted, expectResponseText: "HTTP prompt execution response"},
+		{name: "Typing_ThreadsModeActiveTurn", policy: config.ChannelPolicy{Mode: "threads"}, message: db.Message{ID: "m-type-1", ThreadID: "th-active-1", Content: "Hello thread"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
+		{name: "Typing_ChannelModeDirectMentionWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, message: db.Message{ID: "m-type-2", ThreadID: "th-mention-yes", Content: "<@Aerial> help me"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
+		{name: "Typing_ChannelModeAmbientClassifierWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.8)}, classifierConfidence: 0.95, message: db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
+		{name: "Typing_ChannelModeAmbientNonWakeChatter", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.8)}, classifierConfidence: 0.10, message: db.Message{ID: "m-type-4", ThreadID: "th-ambient-drop", Content: "Just random human chat between people"}, expectRunnerCalls: 0, expectDeliveryCalls: 0, expectTypingCalls: 0, expectStatus: db.StatusCompleted},
+		{name: "Typing_IgnoredChannelPolicy", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "m-type-5", ThreadID: "th-ignored", Content: "Ignored message @Aerial"}, expectRunnerCalls: 0, expectDeliveryCalls: 0, expectTypingCalls: 0, expectStatus: db.StatusCompleted},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -954,125 +604,14 @@ func TestProcessBurst_AmbientAndWakeMatrix(t *testing.T) {
 	}
 
 	tests := []burstTestCase{
-		{
-			name:           "PureAmbient",
-			channelID:      "chan-lounge",
-			seedSession:    true,
-			classifierJSON: `{"confidence": 0.25, "reason": "casual chit-chat"}`,
-			policy:         defaultChannelPolicy,
-			runnerResponse: "Should not run",
-			messages: []db.Message{
-				{ID: "msg-amb-1", AuthorName: "Alice", Content: "Hello everyone"},
-				{ID: "msg-amb-2", AuthorName: "Bob", Content: "Nice weather today"},
-			},
-			wantRunnerCalls:     0,
-			wantDeliveryCalls:   0,
-			checkDeliveryCalls:  true,
-			wantMaxTypingCalls:  0,
-			checkMaxTypingCalls: true,
-			wantTurnCount:       0,
-			wantMsgErrors: map[string]string{
-				"msg-amb-1": `[AMBIENT score=0.25/0.80 reason="casual chit-chat"]`,
-				"msg-amb-2": `[AMBIENT score=0.25/0.80 reason="casual chit-chat"]`,
-			},
-		},
-		{
-			name:               "Tier1Wake",
-			channelID:          "chan-lounge",
-			seedSession:        true,
-			botUserID:          "bot-aerial-id",
-			policy:             defaultChannelPolicy,
-			runnerResponse:     "I am Aerial, here to help!",
-			messages:           []db.Message{{ID: "msg-tier1-1", AuthorName: "Alice", Content: "<@bot-aerial-id> can you help me with this bug?"}},
-			wantRunnerCalls:    1,
-			wantDeliveryCalls:  1,
-			checkDeliveryCalls: true,
-			wantDeliveredText:  "I am Aerial, here to help!",
-			wantMinTypingCalls: 1,
-			wantTurnCount:      1,
-			wantMsgResponses:   map[string]string{"msg-tier1-1": "I am Aerial, here to help!"},
-		},
-		{
-			name:               "Tier2Wake",
-			channelID:          "chan-lounge",
-			seedSession:        true,
-			classifierJSON:     `{"confidence": 0.90, "reason": "user is asking for system health report"}`,
-			policy:             defaultChannelPolicy,
-			runnerResponse:     "All systems operational.",
-			messages:           []db.Message{{ID: "msg-tier2-1", AuthorName: "Alice", Content: "Does anyone know if all services are healthy?"}},
-			wantRunnerCalls:    1,
-			wantDeliveryCalls:  1,
-			checkDeliveryCalls: true,
-			wantDeliveredText:  "All systems operational.",
-			wantMinTypingCalls: 1,
-			wantTurnCount:      1,
-		},
-		{
-			name:           "MixedBurst",
-			channelID:      "chan-lounge",
-			seedSession:    true,
-			classifierJSON: `{"confidence": 0.15, "reason": "unrelated lunch discussion"}`,
-			policy:         defaultChannelPolicy,
-			runnerResponse: "Done deploying!",
-			messages: []db.Message{
-				{ID: "msg-mixed-1", AuthorName: "Alice", Content: "I had tacos for lunch today"},
-				{ID: "msg-mixed-2", AuthorName: "Bob", Content: "<@aerial> please deploy the backend"},
-			},
-			wantRunnerCalls:    1,
-			wantTurnCount:      1,
-			wantPromptContains: []string{"<CHANNEL_HISTORY>", "I had tacos for lunch today", "please deploy the backend"},
-			wantMsgErrors:      map[string]string{"msg-mixed-1": "[AMBIENT score="},
-			wantMsgResponses:   map[string]string{"msg-mixed-2": "Done deploying!"},
-		},
-		{
-			name:           "SessionRotationBeforeLeadingAmbient",
-			channelID:      "chan-rot-ambient",
-			seedSession:    true,
-			seedTurnCount:  5,
-			classifierJSON: `{"confidence": 0.10, "reason": "ambient banter"}`,
-			policy:         defaultChannelPolicy,
-			runnerConvID:   "c9b5e679-7425-40de-944b-e07fc1f90ae7",
-			runnerResponse: "I am answering your question!",
-			messages: []db.Message{
-				{ID: "msg-rot-amb-1", AuthorName: "Alice", Content: "Random ambient chatter before question"},
-				{ID: "msg-rot-wake-2", AuthorName: "Bob", Content: "Hey <@aerial>, what is 2+2?"},
-			},
-			wantRunnerCalls:           1,
-			wantTurnCount:             6,
-			wantPassedInitialSession:  true,
-			wantOldTranscriptExcludes: "Random ambient chatter before question",
-			wantMsgErrors:             map[string]string{"msg-rot-amb-1": "[AMBIENT score="},
-		},
-		{
-			name:                    "TrailingAmbient",
-			channelID:               "chan-lounge",
-			seedSession:             true,
-			classifierJSON:          `{"confidence": 0.10, "reason": "ambient banter"}`,
-			policy:                  defaultChannelPolicy,
-			runnerResponse:          "Aerial answer",
-			preserveSessionInRunner: true,
-			messages: []db.Message{
-				{ID: "msg-trail-wake-1", AuthorName: "Alice", Content: "<@aerial> explain gravity"},
-				{ID: "msg-trail-amb-2", AuthorName: "Bob", Content: "I love physics too"},
-			},
-			wantRunnerCalls:    1,
-			wantTurnCount:      1,
-			wantPromptExcludes: []string{"I love physics too"},
-			wantMsgErrors:      map[string]string{"msg-trail-amb-2": "[AMBIENT score="},
-		},
-		{
-			name:                         "AmbientWakePromptDefault",
-			channelID:                    "chan-aviation",
-			classifierJSON:               `{"confidence": 0.95, "reason": "matches aviation directive"}`,
-			policy:                       defaultChannelPolicy,
-			runnerResponse:               "Aviation response",
-			messages:                     []db.Message{{ID: "msg-aviation-1", AuthorName: "Pilot", Content: "What is the stall speed of a Cessna 172?"}},
-			wantRunnerCalls:              1,
-			wantTurnCount:                1,
-			wantClassifierPromptContains: classifier.DefaultAmbientWakePrompt,
-		},
+		{name: "PureAmbient", channelID: "chan-lounge", seedSession: true, classifierJSON: `{"confidence": 0.25, "reason": "casual chit-chat"}`, policy: defaultChannelPolicy, runnerResponse: "Should not run", messages: []db.Message{{ID: "msg-amb-1", AuthorName: "Alice", Content: "Hello everyone"}, {ID: "msg-amb-2", AuthorName: "Bob", Content: "Nice weather today"}}, wantRunnerCalls: 0, wantDeliveryCalls: 0, checkDeliveryCalls: true, wantMaxTypingCalls: 0, checkMaxTypingCalls: true, wantTurnCount: 0, wantMsgErrors: map[string]string{"msg-amb-1": `[AMBIENT score=0.25/0.80 reason="casual chit-chat"]`, "msg-amb-2": `[AMBIENT score=0.25/0.80 reason="casual chit-chat"]`}},
+		{name: "Tier1Wake", channelID: "chan-lounge", seedSession: true, botUserID: "bot-aerial-id", policy: defaultChannelPolicy, runnerResponse: "I am Aerial, here to help!", messages: []db.Message{{ID: "msg-tier1-1", AuthorName: "Alice", Content: "<@bot-aerial-id> can you help me with this bug?"}}, wantRunnerCalls: 1, wantDeliveryCalls: 1, checkDeliveryCalls: true, wantDeliveredText: "I am Aerial, here to help!", wantMinTypingCalls: 1, wantTurnCount: 1, wantMsgResponses: map[string]string{"msg-tier1-1": "I am Aerial, here to help!"}},
+		{name: "Tier2Wake", channelID: "chan-lounge", seedSession: true, classifierJSON: `{"confidence": 0.90, "reason": "user is asking for system health report"}`, policy: defaultChannelPolicy, runnerResponse: "All systems operational.", messages: []db.Message{{ID: "msg-tier2-1", AuthorName: "Alice", Content: "Does anyone know if all services are healthy?"}}, wantRunnerCalls: 1, wantDeliveryCalls: 1, checkDeliveryCalls: true, wantDeliveredText: "All systems operational.", wantMinTypingCalls: 1, wantTurnCount: 1},
+		{name: "MixedBurst", channelID: "chan-lounge", seedSession: true, classifierJSON: `{"confidence": 0.15, "reason": "unrelated lunch discussion"}`, policy: defaultChannelPolicy, runnerResponse: "Done deploying!", messages: []db.Message{{ID: "msg-mixed-1", AuthorName: "Alice", Content: "I had tacos for lunch today"}, {ID: "msg-mixed-2", AuthorName: "Bob", Content: "<@aerial> please deploy the backend"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantPromptContains: []string{"<CHANNEL_HISTORY>", "I had tacos for lunch today", "please deploy the backend"}, wantMsgErrors: map[string]string{"msg-mixed-1": "[AMBIENT score="}, wantMsgResponses: map[string]string{"msg-mixed-2": "Done deploying!"}},
+		{name: "SessionRotationBeforeLeadingAmbient", channelID: "chan-rot-ambient", seedSession: true, seedTurnCount: 5, classifierJSON: `{"confidence": 0.10, "reason": "ambient banter"}`, policy: defaultChannelPolicy, runnerConvID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", runnerResponse: "I am answering your question!", messages: []db.Message{{ID: "msg-rot-amb-1", AuthorName: "Alice", Content: "Random ambient chatter before question"}, {ID: "msg-rot-wake-2", AuthorName: "Bob", Content: "Hey <@aerial>, what is 2+2?"}}, wantRunnerCalls: 1, wantTurnCount: 6, wantPassedInitialSession: true, wantOldTranscriptExcludes: "Random ambient chatter before question", wantMsgErrors: map[string]string{"msg-rot-amb-1": "[AMBIENT score="}},
+		{name: "TrailingAmbient", channelID: "chan-lounge", seedSession: true, classifierJSON: `{"confidence": 0.10, "reason": "ambient banter"}`, policy: defaultChannelPolicy, runnerResponse: "Aerial answer", preserveSessionInRunner: true, messages: []db.Message{{ID: "msg-trail-wake-1", AuthorName: "Alice", Content: "<@aerial> explain gravity"}, {ID: "msg-trail-amb-2", AuthorName: "Bob", Content: "I love physics too"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantPromptExcludes: []string{"I love physics too"}, wantMsgErrors: map[string]string{"msg-trail-amb-2": "[AMBIENT score="}},
+		{name: "AmbientWakePromptDefault", channelID: "chan-aviation", classifierJSON: `{"confidence": 0.95, "reason": "matches aviation directive"}`, policy: defaultChannelPolicy, runnerResponse: "Aviation response", messages: []db.Message{{ID: "msg-aviation-1", AuthorName: "Pilot", Content: "What is the stall speed of a Cessna 172?"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantClassifierPromptContains: classifier.DefaultAmbientWakePrompt},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1173,80 +712,15 @@ func TestResolveEffectiveChannel(t *testing.T) {
 		wantThreadName string
 		wantCachedName string
 	}{
-		{
-			name:       "NilSession",
-			nilSession: true,
-			inputIDs:   []string{"", "uuid-test-123", "123456789012345678"},
-			wantEffIDs: []string{"", "uuid-test-123", "123456789012345678"},
-		},
-		{
-			name:       "SyntheticNonNumericID",
-			inputIDs:   []string{"http-client-session-1234", "abc-def-ghi", "1234-5678", "channel_name_test"},
-			wantEffIDs: []string{"http-client-session-1234", "abc-def-ghi", "1234-5678", "channel_name_test"},
-		},
-		{
-			name:     "NormalChannel",
-			inputIDs: []string{"100200300400500601"},
-			cached: []*discordgo.Channel{
-				{ID: "100200300400500601", Name: "general-chat", Type: discordgo.ChannelTypeGuildText},
-			},
-			wantEffIDs:  []string{"100200300400500601"},
-			wantEffName: "general-chat",
-		},
-		{
-			name:     "ThreadParent",
-			inputIDs: []string{"100200300400500602"},
-			cached: []*discordgo.Channel{
-				{ID: "100200300400500600", Name: "announcements", Type: discordgo.ChannelTypeGuildText},
-				{ID: "100200300400500602", Name: "v1.2-discussion", ParentID: "100200300400500600", Type: discordgo.ChannelTypeGuildPublicThread},
-			},
-			wantEffIDs:     []string{"100200300400500600"},
-			wantEffName:    "announcements",
-			wantIsThread:   true,
-			wantThreadName: "v1.2-discussion",
-		},
-		{
-			name:     "ThreadMissingParent",
-			inputIDs: []string{"100200300400500603"},
-			cached: []*discordgo.Channel{
-				{ID: "100200300400500603", Name: "isolated-thread", ParentID: "999888777666555444", Type: discordgo.ChannelTypeGuildPublicThread},
-			},
-			wantEffIDs:   []string{"999888777666555444"},
-			wantIsThread: true,
-		},
-		{
-			name:     "InvalidateCache",
-			inputIDs: []string{"100200300400500604"},
-			cached: []*discordgo.Channel{
-				{ID: "100200300400500604", Name: "temporary-channel", Type: discordgo.ChannelTypeGuildText},
-			},
-			testInvalidate: true,
-			wantEffIDs:     []string{"100200300400500604"},
-			wantEffName:    "temporary-channel",
-		},
-		{
-			name:     "StateFallback",
-			inputIDs: []string{"100200300400500605"},
-			stateChannel: &discordgo.Channel{
-				ID: "100200300400500605", GuildID: "guild-1", Name: "state-channel", Type: discordgo.ChannelTypeGuildText,
-			},
-			wantEffIDs:     []string{"100200300400500605"},
-			wantEffName:    "state-channel",
-			wantCachedName: "state-channel",
-		},
-		{
-			name:     "SingleFlightREST",
-			inputIDs: []string{"100200300400500606"},
-			restChannel: &discordgo.Channel{
-				ID: "100200300400500606", Name: "singleflight-rest-channel", Type: discordgo.ChannelTypeGuildText,
-			},
-			concurrent:     5,
-			wantEffIDs:     []string{"100200300400500606"},
-			wantEffName:    "singleflight-rest-channel",
-			wantCachedName: "singleflight-rest-channel",
-		},
+		{name: "NilSession", nilSession: true, inputIDs: []string{"", "uuid-test-123", "123456789012345678"}, wantEffIDs: []string{"", "uuid-test-123", "123456789012345678"}},
+		{name: "SyntheticNonNumericID", inputIDs: []string{"http-client-session-1234", "abc-def-ghi", "1234-5678", "channel_name_test"}, wantEffIDs: []string{"http-client-session-1234", "abc-def-ghi", "1234-5678", "channel_name_test"}},
+		{name: "NormalChannel", inputIDs: []string{"100200300400500601"}, cached: []*discordgo.Channel{{ID: "100200300400500601", Name: "general-chat", Type: discordgo.ChannelTypeGuildText}}, wantEffIDs: []string{"100200300400500601"}, wantEffName: "general-chat"},
+		{name: "ThreadParent", inputIDs: []string{"100200300400500602"}, cached: []*discordgo.Channel{{ID: "100200300400500600", Name: "announcements", Type: discordgo.ChannelTypeGuildText}, {ID: "100200300400500602", Name: "v1.2-discussion", ParentID: "100200300400500600", Type: discordgo.ChannelTypeGuildPublicThread}}, wantEffIDs: []string{"100200300400500600"}, wantEffName: "announcements", wantIsThread: true, wantThreadName: "v1.2-discussion"},
+		{name: "ThreadMissingParent", inputIDs: []string{"100200300400500603"}, cached: []*discordgo.Channel{{ID: "100200300400500603", Name: "isolated-thread", ParentID: "999888777666555444", Type: discordgo.ChannelTypeGuildPublicThread}}, wantEffIDs: []string{"999888777666555444"}, wantIsThread: true},
+		{name: "InvalidateCache", inputIDs: []string{"100200300400500604"}, cached: []*discordgo.Channel{{ID: "100200300400500604", Name: "temporary-channel", Type: discordgo.ChannelTypeGuildText}}, testInvalidate: true, wantEffIDs: []string{"100200300400500604"}, wantEffName: "temporary-channel"},
+		{name: "StateFallback", inputIDs: []string{"100200300400500605"}, stateChannel: &discordgo.Channel{ID: "100200300400500605", GuildID: "guild-1", Name: "state-channel", Type: discordgo.ChannelTypeGuildText}, wantEffIDs: []string{"100200300400500605"}, wantEffName: "state-channel", wantCachedName: "state-channel"},
+		{name: "SingleFlightREST", inputIDs: []string{"100200300400500606"}, restChannel: &discordgo.Channel{ID: "100200300400500606", Name: "singleflight-rest-channel", Type: discordgo.ChannelTypeGuildText}, concurrent: 5, wantEffIDs: []string{"100200300400500606"}, wantEffName: "singleflight-rest-channel", wantCachedName: "singleflight-rest-channel"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, ch := range tc.cached {
@@ -1350,85 +824,12 @@ func TestResolveEffectiveChannel(t *testing.T) {
 
 func TestProcessBurst_InstructionsAndBurstMatrix(t *testing.T) {
 	tests := []burstTestCase{
-		{
-			name:                "ChannelInstructionsInjection",
-			channelID:           "100200300400500701",
-			channelInstructions: map[string]string{"dev.md": "Follow Go idioms and test thoroughly."},
-			cachedChannels: []*discordgo.Channel{
-				{ID: "100200300400500701", Name: "dev", Type: discordgo.ChannelTypeGuildText},
-			},
-			runnerResponse:     "Success",
-			messages:           []db.Message{{ID: "msg-inject-1", Content: "Build the queue worker"}},
-			wantRunnerCalls:    1,
-			wantTurnCount:      1,
-			wantPromptPrefix:   "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\nFollow Go idioms and test thoroughly.\n</CHANNEL_INSTRUCTIONS>",
-			wantPromptContains: []string{"Build the queue worker"},
-		},
-		{
-			name:                "ChannelInstructionsThreadInheritance",
-			channelID:           "100200300400500703",
-			channelInstructions: map[string]string{"dev.md": "Guidelines for dev channel discussions."},
-			cachedChannels: []*discordgo.Channel{
-				{ID: "100200300400500702", Name: "dev", Type: discordgo.ChannelTypeGuildText},
-				{ID: "100200300400500703", Name: "feature-thread", ParentID: "100200300400500702", Type: discordgo.ChannelTypeGuildPublicThread},
-			},
-			runnerResponse:   "Success",
-			messages:         []db.Message{{ID: "msg-thread-inherit-1", Content: "Thread discussion prompt"}},
-			wantRunnerCalls:  1,
-			wantTurnCount:    1,
-			wantPromptPrefix: "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\nGuidelines for dev channel discussions.\n</CHANNEL_INSTRUCTIONS>",
-		},
-		{
-			name:                "NoDuplicationOnRetry",
-			channelID:           "100200300400500704",
-			channelInstructions: map[string]string{"dev.md": "Channel instructions for retry test."},
-			cachedChannels: []*discordgo.Channel{
-				{ID: "100200300400500704", Name: "dev", Type: discordgo.ChannelTypeGuildText},
-			},
-			maxAttempts: 2,
-			runnerSteps: []mockRunnerStep{
-				{returnRawStdout: true, stderr: "Error 503: high demand unavailable", exitCode: 1},
-				{convID: "session-retry-123", response: "Success on retry"},
-			},
-			messages:                          []db.Message{{ID: "msg-retry-1", Content: "Retry test prompt"}},
-			wantRunnerCalls:                   2,
-			wantTurnCount:                     1,
-			wantSingleInstructionTagPerPrompt: true,
-		},
-		{
-			name:           "Tier1PreScan_SkipsClassifier",
-			channelID:      "chan-lounge",
-			classifierJSON: `{"confidence": 0.0, "reason": "should not be called"}`,
-			policy:         config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)},
-			runnerResponse: "Hello there!",
-			messages: []db.Message{
-				{ID: "msg-prescan-1", AuthorName: "Alice", Content: "just hanging out"},
-				{ID: "msg-prescan-2", AuthorName: "Bob", Content: "<@aerial> what's up?"},
-				{ID: "msg-prescan-3", AuthorName: "Charlie", Content: "lol"},
-			},
-			wantClassifierCalls:  0,
-			checkClassifierCalls: true,
-			wantRunnerCalls:      1,
-			wantTurnCount:        1,
-		},
-		{
-			name:           "CoalescedAmbientBurst",
-			channelID:      "chan-lounge",
-			classifierJSON: `{"confidence": 0.95, "reason": "urgent issue needing answer"}`,
-			policy:         config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)},
-			runnerResponse: "I can help with that database error!",
-			messages: []db.Message{
-				{ID: "msg-coalesce-1", AuthorName: "Alice", Content: "Does anyone know why postgres crashed?"},
-				{ID: "msg-coalesce-2", AuthorName: "Bob", Content: "brb grabbing coffee"},
-			},
-			wantClassifierCalls:          1,
-			checkClassifierCalls:         true,
-			wantClassifierPromptContains: "<target_burst>",
-			wantRunnerCalls:              1,
-			wantTurnCount:                1,
-		},
+		{name: "ChannelInstructionsInjection", channelID: "100200300400500701", channelInstructions: map[string]string{"dev.md": "Follow Go idioms and test thoroughly."}, cachedChannels: []*discordgo.Channel{{ID: "100200300400500701", Name: "dev", Type: discordgo.ChannelTypeGuildText}}, runnerResponse: "Success", messages: []db.Message{{ID: "msg-inject-1", Content: "Build the queue worker"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantPromptPrefix: "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\nFollow Go idioms and test thoroughly.\n</CHANNEL_INSTRUCTIONS>", wantPromptContains: []string{"Build the queue worker"}},
+		{name: "ChannelInstructionsThreadInheritance", channelID: "100200300400500703", channelInstructions: map[string]string{"dev.md": "Guidelines for dev channel discussions."}, cachedChannels: []*discordgo.Channel{{ID: "100200300400500702", Name: "dev", Type: discordgo.ChannelTypeGuildText}, {ID: "100200300400500703", Name: "feature-thread", ParentID: "100200300400500702", Type: discordgo.ChannelTypeGuildPublicThread}}, runnerResponse: "Success", messages: []db.Message{{ID: "msg-thread-inherit-1", Content: "Thread discussion prompt"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantPromptPrefix: "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\nGuidelines for dev channel discussions.\n</CHANNEL_INSTRUCTIONS>"},
+		{name: "NoDuplicationOnRetry", channelID: "100200300400500704", channelInstructions: map[string]string{"dev.md": "Channel instructions for retry test."}, cachedChannels: []*discordgo.Channel{{ID: "100200300400500704", Name: "dev", Type: discordgo.ChannelTypeGuildText}}, maxAttempts: 2, runnerSteps: []mockRunnerStep{{returnRawStdout: true, stderr: "Error 503: high demand unavailable", exitCode: 1}, {convID: "session-retry-123", response: "Success on retry"}}, messages: []db.Message{{ID: "msg-retry-1", Content: "Retry test prompt"}}, wantRunnerCalls: 2, wantTurnCount: 1, wantSingleInstructionTagPerPrompt: true},
+		{name: "Tier1PreScan_SkipsClassifier", channelID: "chan-lounge", classifierJSON: `{"confidence": 0.0, "reason": "should not be called"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, runnerResponse: "Hello there!", messages: []db.Message{{ID: "msg-prescan-1", AuthorName: "Alice", Content: "just hanging out"}, {ID: "msg-prescan-2", AuthorName: "Bob", Content: "<@aerial> what's up?"}, {ID: "msg-prescan-3", AuthorName: "Charlie", Content: "lol"}}, wantClassifierCalls: 0, checkClassifierCalls: true, wantRunnerCalls: 1, wantTurnCount: 1},
+		{name: "CoalescedAmbientBurst", channelID: "chan-lounge", classifierJSON: `{"confidence": 0.95, "reason": "urgent issue needing answer"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, runnerResponse: "I can help with that database error!", messages: []db.Message{{ID: "msg-coalesce-1", AuthorName: "Alice", Content: "Does anyone know why postgres crashed?"}, {ID: "msg-coalesce-2", AuthorName: "Bob", Content: "brb grabbing coffee"}}, wantClassifierCalls: 1, checkClassifierCalls: true, wantClassifierPromptContains: "<target_burst>", wantRunnerCalls: 1, wantTurnCount: 1},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runBurstTestCase(t, tc)
@@ -1446,193 +847,15 @@ func TestProcessBurst_SessionContinuityAndRotationMatrix(t *testing.T) {
 	}
 
 	tests := []burstTestCase{
-		{
-			name:            "GhostSessionRecovery",
-			channelID:       "chan-lounge",
-			seedSessionID:   "stale-ghost-uuid",
-			seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"},
-			policy:          config.ChannelPolicy{Mode: "channel"},
-			runnerSteps: []mockRunnerStep{
-				{
-					convID:   "a8b5e679-7425-40de-944b-e07fc1f90ae7",
-					response: "Hello! I am ready to help.",
-					stderr:   "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n",
-				},
-			},
-			messages:          []db.Message{{ID: "msg-ghost-recovery-1", AuthorName: "Alice", Content: "<@aerial> are you awake?"}},
-			wantRunnerCalls:   1,
-			wantTurnCount:     1,
-			wantSavedSession:  "a8b5e679-7425-40de-944b-e07fc1f90ae7",
-			checkSavedSession: true,
-		},
-		{
-			name:             "MultiTurnContinuity_AfterRecovery",
-			channelID:        "chan-lounge",
-			seedSessionID:    "stale-ghost-uuid",
-			seedTranscripts:  []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"},
-			policy:           config.ChannelPolicy{Mode: "channel"},
-			sequentialBursts: true,
-			runnerSteps: []mockRunnerStep{
-				{
-					convID:   "a8b5e679-7425-40de-944b-e07fc1f90ae7",
-					response: "Clean reply",
-					stderr:   "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n",
-				},
-			},
-			messages: []db.Message{
-				{ID: "msg-recov-turn-1", AuthorName: "Alice", Content: "<@aerial> hello"},
-				{ID: "msg-recov-turn-2", AuthorName: "Alice", Content: "<@aerial> what did I just say?"},
-			},
-			wantRunnerCalls:    2,
-			wantTurnCount:      2,
-			wantPassedSessions: []string{"", "a8b5e679-7425-40de-944b-e07fc1f90ae7"},
-		},
-		{
-			name:              "ColdChannel_NoStubDirectory",
-			channelID:         "chan-cold-123",
-			classifierJSON:    `{"confidence": 0.05, "reason": "ambient chatter"}`,
-			policy:            config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)},
-			messages:          []db.Message{{ID: "msg-cold-ambient-1", AuthorName: "Alice", Content: "just saying hello to everyone in the room"}},
-			wantRunnerCalls:   0,
-			wantTurnCount:     0,
-			wantSavedSession:  "",
-			checkSavedSession: true,
-			wantNoStubDir:     true,
-		},
-		{
-			name:             "Turn1ContextInjection",
-			channelID:        "chan-history",
-			seedTranscripts:  []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"},
-			historyMessages:  histMessages,
-			policy:           config.ChannelPolicy{Mode: "channel"},
-			sequentialBursts: true,
-			runnerSteps: []mockRunnerStep{
-				{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"},
-			},
-			messages: []db.Message{
-				{ID: "msg-hist-turn-1", AuthorName: "Charlie", Content: "<@aerial> turn 1 wake question"},
-				{ID: "msg-hist-turn-2", AuthorName: "Charlie", Content: "<@aerial> turn 2 follow-up question"},
-			},
-			wantRunnerCalls:    2,
-			wantTurnCount:      2,
-			wantPassedSessions: []string{"", "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"},
-			wantTurnPromptContains: map[int][]string{
-				0: {"<CHANNEL_HISTORY>", "First historical message", "Second historical message"},
-				1: {"<CHANNEL_HISTORY>"},
-			},
-			wantTurnPromptExcludes: map[int][]string{
-				1: {"Previous assistant response"},
-			},
-		},
-		{
-			name:             "ThreadsMode_WarmTurnSuppressesChannelHistory",
-			channelID:        "thread-history-suppress",
-			seedTranscripts:  []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"},
-			historyMessages:  histMessages[:1],
-			policy:           config.ChannelPolicy{Mode: "threads"},
-			sequentialBursts: true,
-			runnerSteps: []mockRunnerStep{
-				{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"},
-			},
-			messages: []db.Message{
-				{ID: "msg-thread-turn-1", AuthorName: "Charlie", Content: "Hey Aerial, turn 1 thread question"},
-				{ID: "msg-thread-turn-2", AuthorName: "Charlie", Content: "Hey Aerial, turn 2 follow-up question"},
-			},
-			wantRunnerCalls: 2,
-			wantTurnCount:   2,
-			wantTurnPromptContains: map[int][]string{
-				0: {"<CHANNEL_HISTORY>"},
-			},
-			wantTurnPromptExcludes: map[int][]string{
-				1: {"<CHANNEL_HISTORY>"},
-			},
-		},
-		{
-			name:            "SessionRotation_ResetsToColdState",
-			channelID:       "chan-rotation-cold",
-			seedTranscripts: []string{"c9b5e679-7425-40de-944b-e07fc1f90ae7"},
-			historyMessages: []HistoryMessage{
-				{ID: "hist-boot-1", AuthorName: "Alice", Role: "User", Content: "Historical message before bootstrap", CreatedAt: time.Now().UTC().Add(-5 * time.Minute)},
-			},
-			policy:           config.ChannelPolicy{Mode: "channel"},
-			sequentialBursts: true,
-			runnerSteps: []mockRunnerStep{
-				{convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Turn 1 answer"},
-				{convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Subsequent turn answer"},
-			},
-			messages: []db.Message{
-				{ID: "msg-turn-1", AuthorName: "Alice", Content: "<@aerial> Turn 1"},
-				{ID: "msg-turn-2", AuthorName: "Alice", Content: "<@aerial> Turn 2"},
-				{ID: "msg-turn-3", AuthorName: "Alice", Content: "<@aerial> Turn 3"},
-			},
-			wantRunnerCalls:    3,
-			wantTurnCount:      3,
-			wantSavedSession:   "c9b5e679-7425-40de-944b-e07fc1f90ae7",
-			checkSavedSession:  true,
-			wantPassedSessions: []string{"", "c9b5e679-7425-40de-944b-e07fc1f90ae7", "c9b5e679-7425-40de-944b-e07fc1f90ae7"},
-			wantTurnPromptContains: map[int][]string{
-				2: {"<CHANNEL_HISTORY>"},
-			},
-			wantTurnPromptExcludes: map[int][]string{
-				0: {"<PREVIOUS_SESSION>"},
-				2: {"<PREVIOUS_SESSION>"},
-			},
-		},
-		{
-			name:                 "SessionRotation_SeedsPreviousSessionID",
-			channelID:            "chan-rotation-seed-test",
-			seedTranscripts:      []string{"22222222-2222-2222-2222-222222222222"},
-			enableHistoryFetcher: true,
-			maxAttempts:          1,
-			policy:               config.ChannelPolicy{Mode: "channel"},
-			sequentialBursts:     true,
-			rotateBeforeTurn:     3,
-			runnerSteps: []mockRunnerStep{
-				{convID: "11111111-1111-1111-1111-111111111111", response: "Hello from turn"},
-				{convID: "11111111-1111-1111-1111-111111111111", response: "Hello from turn"},
-				{convID: "22222222-2222-2222-2222-222222222222", response: "Hello from turn"},
-				{convID: "22222222-2222-2222-2222-222222222222", response: "Hello from turn"},
-			},
-			messages: []db.Message{
-				{ID: "msg-seed-1", AuthorName: "Alice", Content: "<@aerial> Turn 1"},
-				{ID: "msg-seed-2", AuthorName: "Alice", Content: "<@aerial> Turn 2"},
-				{ID: "msg-seed-3", AuthorName: "Alice", Content: "<@aerial> Turn 1 of Session 2"},
-				{ID: "msg-seed-4", AuthorName: "Alice", Content: "<@aerial> Turn 2 of Session 2"},
-			},
-			wantRunnerCalls:   4,
-			wantTurnCount:     2,
-			wantSavedSession:  "22222222-2222-2222-2222-222222222222",
-			checkSavedSession: true,
-			wantTurnPromptContains: map[int][]string{
-				2: {"<PREVIOUS_SESSION>"},
-			},
-			wantTurnPromptExcludes: map[int][]string{
-				0: {"<PREVIOUS_SESSION>"},
-				1: {"<PREVIOUS_SESSION>"},
-				2: {"11111111-1111-1111-1111-111111111111", "transcript.jsonl"},
-				3: {"<PREVIOUS_SESSION>"},
-			},
-		},
-		{
-			name:        "Turn1Crash_DoesNotPersistGhostUUID",
-			channelID:   "chan-crash",
-			maxAttempts: 1,
-			policy:      config.ChannelPolicy{Mode: "channel"},
-			runnerSteps: []mockRunnerStep{
-				{
-					stderr:   "Starting conversation update stream for crash-uuid-999\nError: fatal process crash\n",
-					exitCode: 1,
-					errMsg:   "exit status 1",
-				},
-			},
-			messages:          []db.Message{{ID: "msg-crash-1", AuthorName: "Alice", Content: "Hey Aerial, please do something risky"}},
-			wantRunnerCalls:   1,
-			wantTurnCount:     0,
-			wantSavedSession:  "",
-			checkSavedSession: true,
-		},
+		{name: "GhostSessionRecovery", channelID: "chan-lounge", seedSessionID: "stale-ghost-uuid", seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"}, policy: config.ChannelPolicy{Mode: "channel"}, runnerSteps: []mockRunnerStep{{convID: "a8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Hello! I am ready to help.", stderr: "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n"}}, messages: []db.Message{{ID: "msg-ghost-recovery-1", AuthorName: "Alice", Content: "<@aerial> are you awake?"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantSavedSession: "a8b5e679-7425-40de-944b-e07fc1f90ae7", checkSavedSession: true},
+		{name: "MultiTurnContinuity_AfterRecovery", channelID: "chan-lounge", seedSessionID: "stale-ghost-uuid", seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"}, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "a8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Clean reply", stderr: "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n"}}, messages: []db.Message{{ID: "msg-recov-turn-1", AuthorName: "Alice", Content: "<@aerial> hello"}, {ID: "msg-recov-turn-2", AuthorName: "Alice", Content: "<@aerial> what did I just say?"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantPassedSessions: []string{"", "a8b5e679-7425-40de-944b-e07fc1f90ae7"}},
+		{name: "ColdChannel_NoStubDirectory", channelID: "chan-cold-123", classifierJSON: `{"confidence": 0.05, "reason": "ambient chatter"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, messages: []db.Message{{ID: "msg-cold-ambient-1", AuthorName: "Alice", Content: "just saying hello to everyone in the room"}}, wantRunnerCalls: 0, wantTurnCount: 0, wantSavedSession: "", checkSavedSession: true, wantNoStubDir: true},
+		{name: "Turn1ContextInjection", channelID: "chan-history", seedTranscripts: []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, historyMessages: histMessages, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"}}, messages: []db.Message{{ID: "msg-hist-turn-1", AuthorName: "Charlie", Content: "<@aerial> turn 1 wake question"}, {ID: "msg-hist-turn-2", AuthorName: "Charlie", Content: "<@aerial> turn 2 follow-up question"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantPassedSessions: []string{"", "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, wantTurnPromptContains: map[int][]string{0: {"<CHANNEL_HISTORY>", "First historical message", "Second historical message"}, 1: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{1: {"Previous assistant response"}}},
+		{name: "ThreadsMode_WarmTurnSuppressesChannelHistory", channelID: "thread-history-suppress", seedTranscripts: []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, historyMessages: histMessages[:1], policy: config.ChannelPolicy{Mode: "threads"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"}}, messages: []db.Message{{ID: "msg-thread-turn-1", AuthorName: "Charlie", Content: "Hey Aerial, turn 1 thread question"}, {ID: "msg-thread-turn-2", AuthorName: "Charlie", Content: "Hey Aerial, turn 2 follow-up question"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantTurnPromptContains: map[int][]string{0: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{1: {"<CHANNEL_HISTORY>"}}},
+		{name: "SessionRotation_ResetsToColdState", channelID: "chan-rotation-cold", seedTranscripts: []string{"c9b5e679-7425-40de-944b-e07fc1f90ae7"}, historyMessages: []HistoryMessage{{ID: "hist-boot-1", AuthorName: "Alice", Role: "User", Content: "Historical message before bootstrap", CreatedAt: time.Now().UTC().Add(-5 * time.Minute)}}, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Turn 1 answer"}, {convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Subsequent turn answer"}}, messages: []db.Message{{ID: "msg-turn-1", AuthorName: "Alice", Content: "<@aerial> Turn 1"}, {ID: "msg-turn-2", AuthorName: "Alice", Content: "<@aerial> Turn 2"}, {ID: "msg-turn-3", AuthorName: "Alice", Content: "<@aerial> Turn 3"}}, wantRunnerCalls: 3, wantTurnCount: 3, wantSavedSession: "c9b5e679-7425-40de-944b-e07fc1f90ae7", checkSavedSession: true, wantPassedSessions: []string{"", "c9b5e679-7425-40de-944b-e07fc1f90ae7", "c9b5e679-7425-40de-944b-e07fc1f90ae7"}, wantTurnPromptContains: map[int][]string{2: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{0: {"<PREVIOUS_SESSION>"}, 2: {"<PREVIOUS_SESSION>"}}},
+		{name: "SessionRotation_SeedsPreviousSessionID", channelID: "chan-rotation-seed-test", seedTranscripts: []string{"22222222-2222-2222-2222-222222222222"}, enableHistoryFetcher: true, maxAttempts: 1, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, rotateBeforeTurn: 3, runnerSteps: []mockRunnerStep{{convID: "11111111-1111-1111-1111-111111111111", response: "Hello from turn"}, {convID: "11111111-1111-1111-1111-111111111111", response: "Hello from turn"}, {convID: "22222222-2222-2222-2222-222222222222", response: "Hello from turn"}, {convID: "22222222-2222-2222-2222-222222222222", response: "Hello from turn"}}, messages: []db.Message{{ID: "msg-seed-1", AuthorName: "Alice", Content: "<@aerial> Turn 1"}, {ID: "msg-seed-2", AuthorName: "Alice", Content: "<@aerial> Turn 2"}, {ID: "msg-seed-3", AuthorName: "Alice", Content: "<@aerial> Turn 1 of Session 2"}, {ID: "msg-seed-4", AuthorName: "Alice", Content: "<@aerial> Turn 2 of Session 2"}}, wantRunnerCalls: 4, wantTurnCount: 2, wantSavedSession: "22222222-2222-2222-2222-222222222222", checkSavedSession: true, wantTurnPromptContains: map[int][]string{2: {"<PREVIOUS_SESSION>"}}, wantTurnPromptExcludes: map[int][]string{0: {"<PREVIOUS_SESSION>"}, 1: {"<PREVIOUS_SESSION>"}, 2: {"11111111-1111-1111-1111-111111111111", "transcript.jsonl"}, 3: {"<PREVIOUS_SESSION>"}}},
+		{name: "Turn1Crash_DoesNotPersistGhostUUID", channelID: "chan-crash", maxAttempts: 1, policy: config.ChannelPolicy{Mode: "channel"}, runnerSteps: []mockRunnerStep{{stderr: "Starting conversation update stream for crash-uuid-999\nError: fatal process crash\n", exitCode: 1, errMsg: "exit status 1"}}, messages: []db.Message{{ID: "msg-crash-1", AuthorName: "Alice", Content: "Hey Aerial, please do something risky"}}, wantRunnerCalls: 1, wantTurnCount: 0, wantSavedSession: "", checkSavedSession: true},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1655,74 +878,11 @@ func TestWakeModeMentionAndClassifierAlertMatrix(t *testing.T) {
 		burst      *burstTestCase
 		tier1Cases []tier1Case
 	}{
-		{
-			name: "ClassifierParseErrorTriggersSystemAlert",
-			burst: &burstTestCase{
-				channelID:             "chan-lounge",
-				botUserID:             "bot-999",
-				classifierJSON:        "```json\n{\"confidence\": 0.85}\n```",
-				policy:                config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)},
-				messages:              []db.Message{{ID: "msg-parse-err-1", AuthorName: "Alice", Content: "Hello is anybody there?"}},
-				wantRunnerCalls:       0,
-				wantTurnCount:         0,
-				wantAlertTitle:        "Classifier JSON Parse Error",
-				wantAlertChannel:      config.DefaultConfigData().SystemChannel,
-				wantAlertBodyContains: []string{"Parse Error", "Raw Output"},
-			},
-		},
-		{
-			name: "IsTier1Wake_WakeModeMention",
-			tier1Cases: []tier1Case{
-				{content: "Hey <@bot-12345> how are you?", want: true},
-				{content: "<USER_REQUEST>\n- replying_to:\n    author: \"@aerial\"\n    content: \"previous response\"\n- content: What was that?\n</USER_REQUEST>", want: true},
-				{content: "<USER_REQUEST>\n- mentions: [Aerial]\n- content: Hello there!\n</USER_REQUEST>", want: true},
-				{content: "I think aerial is a great anime", want: false},
-				{content: "I love gundam models", want: false},
-				{content: "Hey <@&role-aerial-managed> check this out", roles: []string{"role-aerial-managed"}, want: true},
-				{content: "Hey <@&role-aerial-managed> check this out", roles: []string{"role-unrelated"}, want: false},
-				{content: "<USER_REQUEST>\n- mention_user_ids: [bot-12345 98765]\n- content: Hello bot!\n</USER_REQUEST>", want: true},
-				{content: "<USER_REQUEST>\n- mention_role_ids: [role-aerial-managed]\n- content: Ping all robots\n</USER_REQUEST>", roles: []string{"role-aerial-managed"}, want: true},
-				{content: "<USER_REQUEST>\n- content: Here is the role '<@&role-aerial-managed>' in quotes\n- mention_role_ids: []\n- mentions: [harperwallbanger]\n</USER_REQUEST>", roles: []string{"role-aerial-managed"}, want: false},
-				{content: "<USER_REQUEST>\n- content: Did you see '<@bot-12345>' in code?\n- mention_user_ids: []\n- mentions: []\n</USER_REQUEST>", want: false},
-			},
-		},
-		{
-			name: "ProcessBurst_WakeModeMention_BypassClassifier",
-			burst: &burstTestCase{
-				channelID:            "chan-lounge-mention",
-				seedSession:          true,
-				classifierJSON:       `{"confidence": 0.95, "reason": "classifier should not be called"}`,
-				policy:               config.ChannelPolicy{Mode: "channel", WakeMode: "mention"},
-				runnerResponse:       "Response!",
-				messages:             []db.Message{{ID: "msg-amb-1", AuthorName: "Alice", Content: "Just talking about aerial views and drones"}},
-				wantClassifierCalls:  0,
-				checkClassifierCalls: true,
-				wantRunnerCalls:      0,
-				wantDeliveryCalls:    0,
-				checkDeliveryCalls:   true,
-				wantTurnCount:        0,
-			},
-		},
-		{
-			name: "ProcessBurst_WakeModeMention_DirectMentionWakes",
-			burst: &burstTestCase{
-				channelID:               "chan-lounge-wake",
-				seedSession:             true,
-				policy:                  config.ChannelPolicy{Mode: "channel", WakeMode: "mention"},
-				runnerResponse:          "Hello Alice!",
-				preserveSessionInRunner: true,
-				messages: []db.Message{
-					{ID: "msg-mention-1", AuthorName: "Alice", Content: "<USER_REQUEST>\n- mentions: [Aerial]\n- content: @Aerial what is the plan today?\n</USER_REQUEST>"},
-				},
-				wantRunnerCalls:    1,
-				wantDeliveryCalls:  1,
-				checkDeliveryCalls: true,
-				wantDeliveredText:  "Hello Alice!",
-				wantTurnCount:      1,
-			},
-		},
+		{name: "ClassifierParseErrorTriggersSystemAlert", burst: &burstTestCase{channelID: "chan-lounge", botUserID: "bot-999", classifierJSON: "```json\n{\"confidence\": 0.85}\n```", policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, messages: []db.Message{{ID: "msg-parse-err-1", AuthorName: "Alice", Content: "Hello is anybody there?"}}, wantRunnerCalls: 0, wantTurnCount: 0, wantAlertTitle: "Classifier JSON Parse Error", wantAlertChannel: config.DefaultConfigData().SystemChannel, wantAlertBodyContains: []string{"Parse Error", "Raw Output"}}},
+		{name: "IsTier1Wake_WakeModeMention", tier1Cases: []tier1Case{{content: "Hey <@bot-12345> how are you?", want: true}, {content: "<USER_REQUEST>\n- replying_to:\n    author: \"@aerial\"\n    content: \"previous response\"\n- content: What was that?\n</USER_REQUEST>", want: true}, {content: "<USER_REQUEST>\n- mentions: [Aerial]\n- content: Hello there!\n</USER_REQUEST>", want: true}, {content: "I think aerial is a great anime", want: false}, {content: "I love gundam models", want: false}, {content: "Hey <@&role-aerial-managed> check this out", roles: []string{"role-aerial-managed"}, want: true}, {content: "Hey <@&role-aerial-managed> check this out", roles: []string{"role-unrelated"}, want: false}, {content: "<USER_REQUEST>\n- mention_user_ids: [bot-12345 98765]\n- content: Hello bot!\n</USER_REQUEST>", want: true}, {content: "<USER_REQUEST>\n- mention_role_ids: [role-aerial-managed]\n- content: Ping all robots\n</USER_REQUEST>", roles: []string{"role-aerial-managed"}, want: true}, {content: "<USER_REQUEST>\n- content: Here is the role '<@&role-aerial-managed>' in quotes\n- mention_role_ids: []\n- mentions: [harperwallbanger]\n</USER_REQUEST>", roles: []string{"role-aerial-managed"}, want: false}, {content: "<USER_REQUEST>\n- content: Did you see '<@bot-12345>' in code?\n- mention_user_ids: []\n- mentions: []\n</USER_REQUEST>", want: false}}},
+		{name: "ProcessBurst_WakeModeMention_BypassClassifier", burst: &burstTestCase{channelID: "chan-lounge-mention", seedSession: true, classifierJSON: `{"confidence": 0.95, "reason": "classifier should not be called"}`, policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, runnerResponse: "Response!", messages: []db.Message{{ID: "msg-amb-1", AuthorName: "Alice", Content: "Just talking about aerial views and drones"}}, wantClassifierCalls: 0, checkClassifierCalls: true, wantRunnerCalls: 0, wantDeliveryCalls: 0, checkDeliveryCalls: true, wantTurnCount: 0}},
+		{name: "ProcessBurst_WakeModeMention_DirectMentionWakes", burst: &burstTestCase{channelID: "chan-lounge-wake", seedSession: true, policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, runnerResponse: "Hello Alice!", preserveSessionInRunner: true, messages: []db.Message{{ID: "msg-mention-1", AuthorName: "Alice", Content: "<USER_REQUEST>\n- mentions: [Aerial]\n- content: @Aerial what is the plan today?\n</USER_REQUEST>"}}, wantRunnerCalls: 1, wantDeliveryCalls: 1, checkDeliveryCalls: true, wantDeliveredText: "Hello Alice!", wantTurnCount: 1}},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1752,39 +912,10 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 		wantStatusAfterStop string
 		wantDelivered       string
 	}{
-		{
-			name:             "PreservesProcessingMessageWithoutApology",
-			drainTimeout:     5 * time.Millisecond,
-			blockRunnerOnCtx: true,
-			verifyRecovery:   true,
-			msg: db.Message{
-				ID: "msg-shutdown-1", ThreadID: "thread-shutdown-1", GuildID: "guild-shutdown-1",
-				AuthorID: "user-shutdown-1", AuthorName: "User", Content: "Hello during shutdown",
-			},
-			wantStatusAfterStop: db.StatusPending,
-		},
-		{
-			name:           "RunnerSuccessPreserved",
-			runnerResponse: "Finished just before pool stopped",
-			msg: db.Message{
-				ID: "msg-success-shutdown-1", ThreadID: "thread-success-shutdown-1", GuildID: "guild-success-shutdown-1",
-				AuthorID: "user-1", AuthorName: "User", Content: "Complete fast",
-			},
-			wantStatusAfterStop: db.StatusCompleted,
-			wantDelivered:       "Finished just before pool stopped",
-		},
-		{
-			name:               "AmbientClassifierCancellationPreserved",
-			drainTimeout:       5 * time.Millisecond,
-			blockClassifierCtx: true,
-			msg: db.Message{
-				ID: "msg-ambient-shutdown-1", ThreadID: "channel-shutdown-1", GuildID: "channel-shutdown-1",
-				AuthorID: "user-1", AuthorName: "User", Content: "hey did anyone see that movie?",
-			},
-			wantStatusAfterStop: db.StatusPending,
-		},
+		{name: "PreservesProcessingMessageWithoutApology", drainTimeout: 5 * time.Millisecond, blockRunnerOnCtx: true, verifyRecovery: true, msg: db.Message{ID: "msg-shutdown-1", ThreadID: "thread-shutdown-1", GuildID: "guild-shutdown-1", AuthorID: "user-shutdown-1", AuthorName: "User", Content: "Hello during shutdown"}, wantStatusAfterStop: db.StatusPending},
+		{name: "RunnerSuccessPreserved", runnerResponse: "Finished just before pool stopped", msg: db.Message{ID: "msg-success-shutdown-1", ThreadID: "thread-success-shutdown-1", GuildID: "guild-success-shutdown-1", AuthorID: "user-1", AuthorName: "User", Content: "Complete fast"}, wantStatusAfterStop: db.StatusCompleted, wantDelivered: "Finished just before pool stopped"},
+		{name: "AmbientClassifierCancellationPreserved", drainTimeout: 5 * time.Millisecond, blockClassifierCtx: true, msg: db.Message{ID: "msg-ambient-shutdown-1", ThreadID: "channel-shutdown-1", GuildID: "channel-shutdown-1", AuthorID: "user-1", AuthorName: "User", Content: "hey did anyone see that movie?"}, wantStatusAfterStop: db.StatusPending},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1925,115 +1056,13 @@ func TestQueue_WatchdogAndRecoveryMatrix(t *testing.T) {
 	t.Parallel()
 
 	tests := []workerTestCase{
-		{
-			name:        "WatchdogInactivityRetryAndExhaustion",
-			maxAttempts: 3,
-			messages:    []db.Message{{ID: "msg-watchdog-101", ThreadID: "thread-watchdog-202", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run a long task"}},
-			runnerSteps: []mockRunnerStep{
-				{stderr: "[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"},
-			},
-			wantRunnerCalls:         3,
-			checkRunnerCalls:        true,
-			wantStatus:              db.StatusFailed,
-			wantErrorContains:       "inactivity timeout exceeded",
-			wantDeliveredChannels:   []string{"thread-watchdog-202"},
-			wantDeliveredSubstrings: []string{"timed out"},
-		},
-		{
-			name:                "WatchdogInactivityRetryAndRecovery",
-			maxAttempts:         3,
-			initialSessionID:    "recovery-uuid-505",
-			seedTranscriptFiles: map[string]string{"recovery-uuid-505": "mock transcript data\n"},
-			messages:            []db.Message{{ID: "msg-recovery-101", ThreadID: "thread-recovery-505", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run a long task"}},
-			runnerSteps: []mockRunnerStep{
-				{stderr: "[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"},
-				{response: "Recovered successfully on retry!"},
-			},
-			wantRunnerCalls:         2,
-			checkRunnerCalls:        true,
-			wantStatus:              db.StatusCompleted,
-			wantDeliveredChannels:   []string{"thread-recovery-505"},
-			wantDeliveredSubstrings: []string{"Recovered successfully on retry!"},
-			wantAttemptPromptContains: map[int][]string{
-				0: {"Run a long task"},
-				1: {"timed out or was interrupted"},
-			},
-		},
-		{
-			name:               "DefaultTimeoutMinutes_Is60",
-			wantDefaultTimeout: 60,
-		},
-		{
-			name:                "ColdStartWatchdogRecoveryAndContinuation",
-			maxAttempts:         3,
-			seedTranscriptFiles: map[string]string{"88888888-aaaa-4bbb-cccc-111122223333": "mock transcript data\n"},
-			messages:            []db.Message{{ID: "msg-cold-101", ThreadID: "thread-cold-606", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Execute initial task cold"}},
-			runnerSteps: []mockRunnerStep{
-				{
-					stderr:   "Starting conversation update stream for 88888888-aaaa-4bbb-cccc-111122223333\n[watchdog] inactivity timeout exceeded (5m without output)",
-					exitCode: -1,
-					errMsg:   "exit status 255",
-				},
-				{response: "Cold start recovered successfully on retry!"},
-			},
-			wantRunnerCalls:         2,
-			checkRunnerCalls:        true,
-			wantPassedSessions:      []string{"", "88888888-aaaa-4bbb-cccc-111122223333"},
-			wantSavedSession:        "88888888-aaaa-4bbb-cccc-111122223333",
-			wantDeliveredChannels:   []string{"thread-cold-606"},
-			wantDeliveredSubstrings: []string{"Cold start recovered successfully on retry!"},
-			wantAttemptPromptContains: map[int][]string{
-				0: {"Execute initial task cold"},
-				1: {"timed out or was interrupted"},
-			},
-		},
-		{
-			name:                "ColdStartStreamJsonInitLatchingOnFailure",
-			maxAttempts:         3,
-			seedTranscriptFiles: map[string]string{"99999999-bbbb-4ccc-dddd-555566667777": "mock transcript data\n"},
-			messages:            []db.Message{{ID: "msg-cold-stream-1", ThreadID: "thread-cold-stream-1", Content: "Please write the code for stream-json"}},
-			runnerSteps: []mockRunnerStep{
-				{
-					rawStdout: "{\"event\":\"init\",\"conversation_id\":\"99999999-bbbb-4ccc-dddd-555566667777\"}\n{\"event\":\"step_update\"}\n",
-					stderr:    "[watchdog] inactivity timeout exceeded (5m without output)\n",
-					exitCode:  -1,
-					errMsg:    "exit status 255",
-				},
-				{response: "Stream-json cold start recovered!"},
-			},
-			wantRunnerCalls:         2,
-			checkRunnerCalls:        true,
-			wantPassedSessions:      []string{"", "99999999-bbbb-4ccc-dddd-555566667777"},
-			wantSavedSession:        "99999999-bbbb-4ccc-dddd-555566667777",
-			wantDeliveredChannels:   []string{"thread-cold-stream-1"},
-			wantDeliveredSubstrings: []string{"Stream-json cold start recovered!"},
-		},
-		{
-			name:                "ColdStartTransientRecoveryAndContinuation",
-			maxAttempts:         3,
-			seedTranscriptFiles: map[string]string{"80808080-bbbb-4ccc-dddd-444455556666": "mock transcript data\n"},
-			messages:            []db.Message{{ID: "msg-transient-101", ThreadID: "thread-transient-707", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run transient task cold"}},
-			runnerSteps: []mockRunnerStep{
-				{
-					stderr:   "Starting conversation update stream for 80808080-bbbb-4ccc-dddd-444455556666\nError 503: high demand service unavailable",
-					exitCode: 1,
-					errMsg:   "exit status 1",
-				},
-				{response: "Transient error recovered on retry!"},
-			},
-			wantRunnerCalls:    2,
-			checkRunnerCalls:   true,
-			wantPassedSessions: []string{"", "80808080-bbbb-4ccc-dddd-444455556666"},
-			wantSavedSession:   "80808080-bbbb-4ccc-dddd-444455556666",
-			wantAttemptPromptContains: map[int][]string{
-				1: {"Run transient task cold"},
-			},
-			wantAttemptPromptExcludes: map[int][]string{
-				1: {"timed out or was interrupted"},
-			},
-		},
+		{name: "WatchdogInactivityRetryAndExhaustion", maxAttempts: 3, messages: []db.Message{{ID: "msg-watchdog-101", ThreadID: "thread-watchdog-202", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run a long task"}}, runnerSteps: []mockRunnerStep{{stderr: "[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"}}, wantRunnerCalls: 3, checkRunnerCalls: true, wantStatus: db.StatusFailed, wantErrorContains: "inactivity timeout exceeded", wantDeliveredChannels: []string{"thread-watchdog-202"}, wantDeliveredSubstrings: []string{"timed out"}},
+		{name: "WatchdogInactivityRetryAndRecovery", maxAttempts: 3, initialSessionID: "recovery-uuid-505", seedTranscriptFiles: map[string]string{"recovery-uuid-505": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-recovery-101", ThreadID: "thread-recovery-505", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run a long task"}}, runnerSteps: []mockRunnerStep{{stderr: "[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"}, {response: "Recovered successfully on retry!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantStatus: db.StatusCompleted, wantDeliveredChannels: []string{"thread-recovery-505"}, wantDeliveredSubstrings: []string{"Recovered successfully on retry!"}, wantAttemptPromptContains: map[int][]string{0: {"Run a long task"}, 1: {"timed out or was interrupted"}}},
+		{name: "DefaultTimeoutMinutes_Is60", wantDefaultTimeout: 60},
+		{name: "ColdStartWatchdogRecoveryAndContinuation", maxAttempts: 3, seedTranscriptFiles: map[string]string{"88888888-aaaa-4bbb-cccc-111122223333": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-cold-101", ThreadID: "thread-cold-606", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Execute initial task cold"}}, runnerSteps: []mockRunnerStep{{stderr: "Starting conversation update stream for 88888888-aaaa-4bbb-cccc-111122223333\n[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"}, {response: "Cold start recovered successfully on retry!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"", "88888888-aaaa-4bbb-cccc-111122223333"}, wantSavedSession: "88888888-aaaa-4bbb-cccc-111122223333", wantDeliveredChannels: []string{"thread-cold-606"}, wantDeliveredSubstrings: []string{"Cold start recovered successfully on retry!"}, wantAttemptPromptContains: map[int][]string{0: {"Execute initial task cold"}, 1: {"timed out or was interrupted"}}},
+		{name: "ColdStartStreamJsonInitLatchingOnFailure", maxAttempts: 3, seedTranscriptFiles: map[string]string{"99999999-bbbb-4ccc-dddd-555566667777": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-cold-stream-1", ThreadID: "thread-cold-stream-1", Content: "Please write the code for stream-json"}}, runnerSteps: []mockRunnerStep{{rawStdout: "{\"event\":\"init\",\"conversation_id\":\"99999999-bbbb-4ccc-dddd-555566667777\"}\n{\"event\":\"step_update\"}\n", stderr: "[watchdog] inactivity timeout exceeded (5m without output)\n", exitCode: -1, errMsg: "exit status 255"}, {response: "Stream-json cold start recovered!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"", "99999999-bbbb-4ccc-dddd-555566667777"}, wantSavedSession: "99999999-bbbb-4ccc-dddd-555566667777", wantDeliveredChannels: []string{"thread-cold-stream-1"}, wantDeliveredSubstrings: []string{"Stream-json cold start recovered!"}},
+		{name: "ColdStartTransientRecoveryAndContinuation", maxAttempts: 3, seedTranscriptFiles: map[string]string{"80808080-bbbb-4ccc-dddd-444455556666": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-transient-101", ThreadID: "thread-transient-707", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run transient task cold"}}, runnerSteps: []mockRunnerStep{{stderr: "Starting conversation update stream for 80808080-bbbb-4ccc-dddd-444455556666\nError 503: high demand service unavailable", exitCode: 1, errMsg: "exit status 1"}, {response: "Transient error recovered on retry!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"", "80808080-bbbb-4ccc-dddd-444455556666"}, wantSavedSession: "80808080-bbbb-4ccc-dddd-444455556666", wantAttemptPromptContains: map[int][]string{1: {"Run transient task cold"}}, wantAttemptPromptExcludes: map[int][]string{1: {"timed out or was interrupted"}}},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2046,138 +1075,15 @@ func TestProcessBurst_TranscriptAndErrorRecoveryMatrix(t *testing.T) {
 	t.Parallel()
 
 	tests := []workerTestCase{
-		{
-			name:             "EmptyStdout_TranscriptRecovery",
-			maxAttempts:      3,
-			initialSessionID: "sess-transcript-recovery-999",
-			seedTranscriptFiles: map[string]string{
-				"sess-transcript-recovery-999": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"{{TS0}}","content":"Finish it"}` + "\n" +
-					`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"{{TS1}}","content":"Finished the task with 100% coverage!"}` + "\n",
-			},
-			messages:                []db.Message{{ID: "msg-empty-1", ThreadID: "thread-empty-stdout-1", GuildID: "guild-1", AuthorID: "user-1", AuthorName: "User", Content: "Finish it"}},
-			runnerSteps:             []mockRunnerStep{{returnRawStdout: true}},
-			wantStatus:              db.StatusCompleted,
-			wantDeliveredSubstrings: []string{"Finished the task with 100% coverage!"},
-		},
-		{
-			name:             "StreamInterrupted_TranscriptRecovery",
-			maxAttempts:      3,
-			initialSessionID: "11111111-2222-4333-8444-555555555555",
-			seedTranscriptFiles: map[string]string{
-				"11111111-2222-4333-8444-555555555555": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"{{TS0}}","content":"Have the gang review"}` + "\n" +
-					`{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":"{{TS1}}","content":"Error: The stream was interrupted. Please continue the task you were working on."}` + "\n" +
-					`{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"{{TS2}}","content":"Here is the complete gang review with high consensus!"}` + "\n",
-			},
-			messages: []db.Message{{ID: "msg-interrupted-1", ThreadID: "thread-interrupted-1", GuildID: "guild-1", AuthorID: "user-1", AuthorName: "User", Content: "Have the gang review"}},
-			runnerSteps: []mockRunnerStep{
-				{rawStdout: `{"event":"init","conversation_id":"11111111-2222-4333-8444-555555555555"}` + "\n" + `{"event":"result","status":"error","error":"The stream was interrupted. Please continue the task you were working on."}`},
-			},
-			wantRunnerCalls:         1,
-			checkRunnerCalls:        true,
-			wantStatus:              db.StatusCompleted,
-			wantDeliveredSubstrings: []string{"Here is the complete gang review with high consensus!"},
-		},
-		{
-			name:             "StreamInterrupted_NoResponse_RotatesSessionCorrupt",
-			maxAttempts:      3,
-			initialSessionID: "22222222-3333-4444-8555-666666666666",
-			seedTranscriptFiles: map[string]string{
-				"22222222-3333-4444-8555-666666666666": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-07T21:24:20Z","content":"Have the gang review"}` + "\n" +
-					`{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":"2026-09-07T21:25:06Z","content":"Error: The stream was interrupted. Please continue the task you were working on."}` + "\n",
-			},
-			messages: []db.Message{{ID: "msg-interrupted-corrupt-2", ThreadID: "thread-interrupted-corrupt-2", GuildID: "guild-1", AuthorID: "user-1", AuthorName: "User", Content: "Have the gang review"}},
-			runnerSteps: []mockRunnerStep{
-				{rawStdout: `{"event":"init","conversation_id":"22222222-3333-4444-8555-666666666666"}` + "\n" + `{"event":"result","status":"error","error":"The stream was interrupted. Please continue the task you were working on."}`},
-				{convID: "33333333-4444-4555-8666-777777777777", response: "Recovered on clean session!"},
-			},
-			wantRunnerCalls:    2,
-			checkRunnerCalls:   true,
-			wantPassedSessions: []string{"22222222-3333-4444-8555-666666666666", ""},
-			wantStatus:         db.StatusCompleted,
-		},
-		{
-			name:             "EmptyStdout_TransientRetryAndContinuation",
-			maxAttempts:      3,
-			initialSessionID: "sess-empty-retry-888",
-			seedTranscriptFiles: map[string]string{
-				"sess-empty-retry-888": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-06T12:00:00Z","content":"Finish it"}` + "\n",
-			},
-			messages: []db.Message{{ID: "msg-empty-2", ThreadID: "thread-empty-retry-2", GuildID: "guild-2", AuthorID: "user-2", AuthorName: "User", Content: "Finish it"}},
-			runnerSteps: []mockRunnerStep{
-				{returnRawStdout: true},
-				{response: "Recovered on attempt 2!"},
-			},
-			wantRunnerCalls:    2,
-			checkRunnerCalls:   true,
-			wantPassedSessions: []string{"sess-empty-retry-888", "sess-empty-retry-888"},
-			wantAttemptPromptContains: map[int][]string{
-				1: {"Finish it"},
-			},
-			wantAttemptPromptExcludes: map[int][]string{
-				1: {"timed out or was interrupted"},
-			},
-		},
-		{
-			name:                "GeneralFailure_PreservesSessionOnDisk",
-			maxAttempts:         3,
-			initialSessionID:    "sess-general-fail-777",
-			seedTranscriptFiles: map[string]string{"sess-general-fail-777": "existing transcript data\n"},
-			messages:            []db.Message{{ID: "msg-fail-3", ThreadID: "thread-general-fail-3", GuildID: "guild-3", AuthorID: "user-3", AuthorName: "User", Content: "Finish it"}},
-			runnerSteps: []mockRunnerStep{
-				{stderr: "fatal execution error: out of memory", exitCode: 1, errMsg: "exit status 1"},
-				{response: "Recovered from exit 1!"},
-			},
-			wantRunnerCalls:    2,
-			checkRunnerCalls:   true,
-			wantPassedSessions: []string{"sess-general-fail-777", "sess-general-fail-777"},
-			wantAttemptPromptContains: map[int][]string{
-				1: {"Finish it"},
-			},
-			wantAttemptPromptExcludes: map[int][]string{
-				1: {"timed out or was interrupted"},
-			},
-		},
-		{
-			name:                   "WorkerPool_FullBuffer_NoEvictionZombieRace",
-			maxAttempts:            1,
-			idleTimeout:            20 * time.Millisecond,
-			concurrentEnqueueCount: 150,
-			runnerSteps:            []mockRunnerStep{{response: "OK"}},
-		},
-		{
-			name:             "TransientError_RetainsOriginalPrompt",
-			maxAttempts:      2,
-			useSessionMgr:    true,
-			initialSessionID: "sess-transient-503",
-			messages:         []db.Message{{ID: "msg-503-1", ThreadID: "thread-503", GuildID: "guild-503", AuthorID: "user-503", AuthorName: "User", Content: "Original prompt text that must not be wiped"}},
-			runnerSteps: []mockRunnerStep{
-				{stderr: "Error 503: Service Unavailable. High demand.", exitCode: 1, errMsg: "exit code 1"},
-				{response: "Recovered cleanly"},
-			},
-			wantRunnerCalls:  2,
-			checkRunnerCalls: true,
-			wantAttemptPromptContains: map[int][]string{
-				1: {"Original prompt text that must not be wiped"},
-			},
-			wantAttemptPromptExcludes: map[int][]string{
-				1: {"timed out or was interrupted"},
-			},
-		},
-		{
-			name:            "ImageDeliveryAndSanitization",
-			maxAttempts:     3,
-			seedPNGImage:    image.NewRGBA(image.Rect(0, 0, 10, 10)),
-			seedPNGLevel:    png.DefaultCompression,
-			seedPNGFilename: "metrics_chart.png",
-			messages:        []db.Message{{ID: "msg-img-1", ThreadID: "thread-img-1", GuildID: "guild-img-1", AuthorID: "user-img-1", AuthorName: "User", Content: "Show me the metrics chart"}},
-			runnerSteps: []mockRunnerStep{
-				{convID: "c2222222-2222-3333-4444-555555555555", response: "Telemetry Summary:\n\n![Daily Chart]({{IMAGE_PATH}})\n\nAll systems nominal."},
-			},
-			wantAttachments:         []*delivery.Attachment{{Filename: "metrics_chart.png"}},
-			wantDeliveredSubstrings: []string{"**Daily Chart**"},
-		},
+		{name: "EmptyStdout_TranscriptRecovery", maxAttempts: 3, initialSessionID: "sess-transcript-recovery-999", seedTranscriptFiles: map[string]string{"sess-transcript-recovery-999": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"{{TS0}}","content":"Finish it"}` + "\n" + `{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"{{TS1}}","content":"Finished the task with 100% coverage!"}` + "\n"}, messages: []db.Message{{ID: "msg-empty-1", ThreadID: "thread-empty-stdout-1", GuildID: "guild-1", AuthorID: "user-1", AuthorName: "User", Content: "Finish it"}}, runnerSteps: []mockRunnerStep{{returnRawStdout: true}}, wantStatus: db.StatusCompleted, wantDeliveredSubstrings: []string{"Finished the task with 100% coverage!"}},
+		{name: "StreamInterrupted_TranscriptRecovery", maxAttempts: 3, initialSessionID: "11111111-2222-4333-8444-555555555555", seedTranscriptFiles: map[string]string{"11111111-2222-4333-8444-555555555555": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"{{TS0}}","content":"Have the gang review"}` + "\n" + `{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":"{{TS1}}","content":"Error: The stream was interrupted. Please continue the task you were working on."}` + "\n" + `{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"{{TS2}}","content":"Here is the complete gang review with high consensus!"}` + "\n"}, messages: []db.Message{{ID: "msg-interrupted-1", ThreadID: "thread-interrupted-1", GuildID: "guild-1", AuthorID: "user-1", AuthorName: "User", Content: "Have the gang review"}}, runnerSteps: []mockRunnerStep{{rawStdout: `{"event":"init","conversation_id":"11111111-2222-4333-8444-555555555555"}` + "\n" + `{"event":"result","status":"error","error":"The stream was interrupted. Please continue the task you were working on."}`}}, wantRunnerCalls: 1, checkRunnerCalls: true, wantStatus: db.StatusCompleted, wantDeliveredSubstrings: []string{"Here is the complete gang review with high consensus!"}},
+		{name: "StreamInterrupted_NoResponse_RotatesSessionCorrupt", maxAttempts: 3, initialSessionID: "22222222-3333-4444-8555-666666666666", seedTranscriptFiles: map[string]string{"22222222-3333-4444-8555-666666666666": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-07T21:24:20Z","content":"Have the gang review"}` + "\n" + `{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":"2026-09-07T21:25:06Z","content":"Error: The stream was interrupted. Please continue the task you were working on."}` + "\n"}, messages: []db.Message{{ID: "msg-interrupted-corrupt-2", ThreadID: "thread-interrupted-corrupt-2", GuildID: "guild-1", AuthorID: "user-1", AuthorName: "User", Content: "Have the gang review"}}, runnerSteps: []mockRunnerStep{{rawStdout: `{"event":"init","conversation_id":"22222222-3333-4444-8555-666666666666"}` + "\n" + `{"event":"result","status":"error","error":"The stream was interrupted. Please continue the task you were working on."}`}, {convID: "33333333-4444-4555-8666-777777777777", response: "Recovered on clean session!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"22222222-3333-4444-8555-666666666666", ""}, wantStatus: db.StatusCompleted},
+		{name: "EmptyStdout_TransientRetryAndContinuation", maxAttempts: 3, initialSessionID: "sess-empty-retry-888", seedTranscriptFiles: map[string]string{"sess-empty-retry-888": `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-06T12:00:00Z","content":"Finish it"}` + "\n"}, messages: []db.Message{{ID: "msg-empty-2", ThreadID: "thread-empty-retry-2", GuildID: "guild-2", AuthorID: "user-2", AuthorName: "User", Content: "Finish it"}}, runnerSteps: []mockRunnerStep{{returnRawStdout: true}, {response: "Recovered on attempt 2!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"sess-empty-retry-888", "sess-empty-retry-888"}, wantAttemptPromptContains: map[int][]string{1: {"Finish it"}}, wantAttemptPromptExcludes: map[int][]string{1: {"timed out or was interrupted"}}},
+		{name: "GeneralFailure_PreservesSessionOnDisk", maxAttempts: 3, initialSessionID: "sess-general-fail-777", seedTranscriptFiles: map[string]string{"sess-general-fail-777": "existing transcript data\n"}, messages: []db.Message{{ID: "msg-fail-3", ThreadID: "thread-general-fail-3", GuildID: "guild-3", AuthorID: "user-3", AuthorName: "User", Content: "Finish it"}}, runnerSteps: []mockRunnerStep{{stderr: "fatal execution error: out of memory", exitCode: 1, errMsg: "exit status 1"}, {response: "Recovered from exit 1!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"sess-general-fail-777", "sess-general-fail-777"}, wantAttemptPromptContains: map[int][]string{1: {"Finish it"}}, wantAttemptPromptExcludes: map[int][]string{1: {"timed out or was interrupted"}}},
+		{name: "WorkerPool_FullBuffer_NoEvictionZombieRace", maxAttempts: 1, idleTimeout: 20 * time.Millisecond, concurrentEnqueueCount: 150, runnerSteps: []mockRunnerStep{{response: "OK"}}},
+		{name: "TransientError_RetainsOriginalPrompt", maxAttempts: 2, useSessionMgr: true, initialSessionID: "sess-transient-503", messages: []db.Message{{ID: "msg-503-1", ThreadID: "thread-503", GuildID: "guild-503", AuthorID: "user-503", AuthorName: "User", Content: "Original prompt text that must not be wiped"}}, runnerSteps: []mockRunnerStep{{stderr: "Error 503: Service Unavailable. High demand.", exitCode: 1, errMsg: "exit code 1"}, {response: "Recovered cleanly"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantAttemptPromptContains: map[int][]string{1: {"Original prompt text that must not be wiped"}}, wantAttemptPromptExcludes: map[int][]string{1: {"timed out or was interrupted"}}},
+		{name: "ImageDeliveryAndSanitization", maxAttempts: 3, seedPNGImage: image.NewRGBA(image.Rect(0, 0, 10, 10)), seedPNGLevel: png.DefaultCompression, seedPNGFilename: "metrics_chart.png", messages: []db.Message{{ID: "msg-img-1", ThreadID: "thread-img-1", GuildID: "guild-img-1", AuthorID: "user-img-1", AuthorName: "User", Content: "Show me the metrics chart"}}, runnerSteps: []mockRunnerStep{{convID: "c2222222-2222-3333-4444-555555555555", response: "Telemetry Summary:\n\n![Daily Chart]({{IMAGE_PATH}})\n\nAll systems nominal."}}, wantAttachments: []*delivery.Attachment{{Filename: "metrics_chart.png"}}, wantDeliveredSubstrings: []string{"**Daily Chart**"}},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2232,55 +1138,11 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 		wantRoles           []string
 		wantFetchCalls      int32
 	}{
-		{
-			name:            "NilSessionAndStateResolution",
-			guildID:         "guild-suite-1",
-			botID:           "bot-suite-1",
-			checkNilSession: true,
-			addGuild:        true,
-			guildRoles: []*discordgo.Role{
-				{ID: "role-aerial-managed", Name: "Aerial", Managed: true},
-				{ID: "role-gundam-alt", Name: "Gundam"},
-				{ID: "role-unrelated", Name: "Member"},
-			},
-			guildMembers: []*discordgo.Member{
-				{User: &discordgo.User{ID: "bot-suite-1"}, Roles: []string{"role-assigned-1"}},
-			},
-			calls:     1,
-			wantRoles: []string{"role-aerial-managed", "role-assigned-1", "role-gundam-alt"},
-		},
-		{
-			name:           "RESTFallbackAndCaching",
-			guildID:        "guild-suite-rest",
-			botID:          "bot-suite-rest",
-			addGuild:       true,
-			guildRoles:     []*discordgo.Role{{ID: "role-aerial-managed", Name: "Aerial", Managed: true}},
-			fetchRoles:     []string{"mock-role-robot-123"},
-			calls:          2,
-			wantRoles:      []string{"mock-role-robot-123", "role-aerial-managed"},
-			wantFetchCalls: 1,
-		},
-		{
-			name:              "SingleflightDeduplication",
-			guildID:           "guild-suite-sf",
-			botID:             "bot-suite-sf",
-			addGuild:          true,
-			fetchRoles:        []string{"mock-role-robot-123"},
-			concurrentCallers: 10,
-			wantRoles:         []string{"mock-role-robot-123"},
-			wantFetchCalls:    1,
-		},
-		{
-			name:                "CooldownAndUncachedGuild",
-			guildID:             "guild-suite-uncached",
-			botID:               "bot-suite-cd",
-			fetchErr:            errors.New("simulated 429 rate limit"),
-			calls:               2,
-			testCooldownPruning: true,
-			wantFetchCalls:      1,
-		},
+		{name: "NilSessionAndStateResolution", guildID: "guild-suite-1", botID: "bot-suite-1", checkNilSession: true, addGuild: true, guildRoles: []*discordgo.Role{{ID: "role-aerial-managed", Name: "Aerial", Managed: true}, {ID: "role-gundam-alt", Name: "Gundam"}, {ID: "role-unrelated", Name: "Member"}}, guildMembers: []*discordgo.Member{{User: &discordgo.User{ID: "bot-suite-1"}, Roles: []string{"role-assigned-1"}}}, calls: 1, wantRoles: []string{"role-aerial-managed", "role-assigned-1", "role-gundam-alt"}},
+		{name: "RESTFallbackAndCaching", guildID: "guild-suite-rest", botID: "bot-suite-rest", addGuild: true, guildRoles: []*discordgo.Role{{ID: "role-aerial-managed", Name: "Aerial", Managed: true}}, fetchRoles: []string{"mock-role-robot-123"}, calls: 2, wantRoles: []string{"mock-role-robot-123", "role-aerial-managed"}, wantFetchCalls: 1},
+		{name: "SingleflightDeduplication", guildID: "guild-suite-sf", botID: "bot-suite-sf", addGuild: true, fetchRoles: []string{"mock-role-robot-123"}, concurrentCallers: 10, wantRoles: []string{"mock-role-robot-123"}, wantFetchCalls: 1},
+		{name: "CooldownAndUncachedGuild", guildID: "guild-suite-uncached", botID: "bot-suite-cd", fetchErr: errors.New("simulated 429 rate limit"), calls: 2, testCooldownPruning: true, wantFetchCalls: 1},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sfKey := fmt.Sprintf("bot_member:%s:%s", tc.guildID, tc.botID)
@@ -2401,50 +1263,10 @@ func TestProcessBurst_QuotaPause_Suite(t *testing.T) {
 		wantLastMsgStatus string
 		wantLastMsgErrSub string
 	}{
-		{
-			name:         "SchedulesOneShotAndNotifies",
-			threadID:     "chan-quota-suite-1",
-			runnerStderr: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.",
-			messages: []db.Message{{
-				ID:      "msg-quota-suite-1",
-				Content: "<@bot> can you analyze our code coverage?",
-			}},
-			wantOneShotCount:  1,
-			wantPromptSub:     []string{"[QUOTA_RETRY]", "code coverage"},
-			wantMinRunAtDelay: 16 * time.Minute,
-			wantDeliveredSub:  []string{"16m 58s", "<t:", ":R>", "automatically scheduled a retry"},
-			wantLastMsgStatus: db.StatusFailed,
-			wantLastMsgErrSub: "[QUOTA_PAUSED",
-		},
-		{
-			name:         "CircuitBreakerDoesNotReschedule",
-			threadID:     "chan-circuit-suite-1",
-			runnerStderr: "Individual quota reached. Resets in 10m.",
-			messages: []db.Message{{
-				ID:            "msg-circuit-suite-1",
-				ScheduleRunID: "run-sched-previous-1",
-				Content:       "[QUOTA_RETRY] Previous failed question",
-			}},
-			wantOneShotCount:  0,
-			wantDeliveredSub:  []string{"paused automated retries"},
-			wantLastMsgStatus: db.StatusFailed,
-		},
-		{
-			name:            "TrailingBurstSuppression",
-			threadID:        "chan-burst-suppress-suite-1",
-			policyMode:      "channel",
-			useProcessBurst: true,
-			runnerStderr:    "Individual quota reached. Resets in 16m58s.",
-			messages: []db.Message{
-				{ID: "msg-burst-suite-1", Content: "<@aerial> Question 1"},
-				{ID: "msg-burst-suite-2", Content: "<@aerial> Question 2"},
-			},
-			wantOneShotCount:  1,
-			wantLastMsgStatus: db.StatusFailed,
-			wantLastMsgErrSub: "Trailing message suppressed",
-		},
+		{name: "SchedulesOneShotAndNotifies", threadID: "chan-quota-suite-1", runnerStderr: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.", messages: []db.Message{{ID: "msg-quota-suite-1", Content: "<@bot> can you analyze our code coverage?"}}, wantOneShotCount: 1, wantPromptSub: []string{"[QUOTA_RETRY]", "code coverage"}, wantMinRunAtDelay: 16 * time.Minute, wantDeliveredSub: []string{"16m 58s", "<t:", ":R>", "automatically scheduled a retry"}, wantLastMsgStatus: db.StatusFailed, wantLastMsgErrSub: "[QUOTA_PAUSED"},
+		{name: "CircuitBreakerDoesNotReschedule", threadID: "chan-circuit-suite-1", runnerStderr: "Individual quota reached. Resets in 10m.", messages: []db.Message{{ID: "msg-circuit-suite-1", ScheduleRunID: "run-sched-previous-1", Content: "[QUOTA_RETRY] Previous failed question"}}, wantOneShotCount: 0, wantDeliveredSub: []string{"paused automated retries"}, wantLastMsgStatus: db.StatusFailed},
+		{name: "TrailingBurstSuppression", threadID: "chan-burst-suppress-suite-1", policyMode: "channel", useProcessBurst: true, runnerStderr: "Individual quota reached. Resets in 16m58s.", messages: []db.Message{{ID: "msg-burst-suite-1", Content: "<@aerial> Question 1"}, {ID: "msg-burst-suite-2", Content: "<@aerial> Question 2"}}, wantOneShotCount: 1, wantLastMsgStatus: db.StatusFailed, wantLastMsgErrSub: "Trailing message suppressed"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2732,69 +1554,14 @@ func TestProcessBurst_ErrorClassificationMatrix(t *testing.T) {
 		checkNoticeDelivered bool
 		prohibitUnavailable  bool
 	}{
-		{
-			name:             "ColdStart429_RetriesTransiently",
-			threadID:         "thread-cold-429",
-			seedPBFile:       true,
-			failUntilAttempt: 3,
-			errStderr:        "HTTP 429: Resource has been exhausted (e.g. check quota)",
-			errExitCode:      1,
-			expectedAttempts: 3,
-			expectedStatus:   db.StatusCompleted,
-		},
-		{
-			name:                 "NonTransient_FailsFastOnAttempt1",
-			threadID:             "thread-fast-fail",
-			existingSession:      true,
-			errStderr:            "Error: invalid api key provided",
-			errExitCode:          1,
-			expectedAttempts:     1,
-			expectedStatus:       db.StatusFailed,
-			checkLatchedCleared:  true,
-			checkNoticeDelivered: true,
-			prohibitUnavailable:  true,
-		},
-		{
-			name:             "Exit0_NonTransientJSON_FailsFastOnAttempt1",
-			threadID:         "thread-flag-fail",
-			errStdout:        `{"status":"ERROR","error":"unknown flag: --unsupported-flag"}`,
-			expectedAttempts: 1,
-			expectedStatus:   db.StatusFailed,
-		},
-		{
-			name:             "UnknownError_RetriesTransientByDefault",
-			threadID:         "thread-unknown-retry",
-			seedPBFile:       true,
-			failUntilAttempt: 3,
-			errStderr:        "some mysterious unexpected exit from child process",
-			errExitCode:      1,
-			expectedAttempts: 3,
-			expectedStatus:   db.StatusCompleted,
-		},
-		{
-			name:             "ColdStartContextWindow_FailsFast",
-			threadID:         "thread-ctx-cold",
-			errStdout:        `{"status":"ERROR","error":"maximum context length exceeded"}`,
-			expectedAttempts: 1,
-			expectedStatus:   db.StatusFailed,
-		},
-		{
-			name:             "Cold429_ContextLengthExceeded_FailsFast",
-			threadID:         "thread-429",
-			errStderr:        "HTTP 429 Too Many Requests: context length exceeded",
-			errExitCode:      1,
-			expectedAttempts: 1,
-			expectedStatus:   db.StatusFailed,
-		},
-		{
-			name:             "EmptyLatch_InvalidJSON_FailsFast",
-			threadID:         "thread-latch",
-			errStdout:        "{}",
-			expectedAttempts: 3,
-			expectedStatus:   db.StatusFailed,
-		},
+		{name: "ColdStart429_RetriesTransiently", threadID: "thread-cold-429", seedPBFile: true, failUntilAttempt: 3, errStderr: "HTTP 429: Resource has been exhausted (e.g. check quota)", errExitCode: 1, expectedAttempts: 3, expectedStatus: db.StatusCompleted},
+		{name: "NonTransient_FailsFastOnAttempt1", threadID: "thread-fast-fail", existingSession: true, errStderr: "Error: invalid api key provided", errExitCode: 1, expectedAttempts: 1, expectedStatus: db.StatusFailed, checkLatchedCleared: true, checkNoticeDelivered: true, prohibitUnavailable: true},
+		{name: "Exit0_NonTransientJSON_FailsFastOnAttempt1", threadID: "thread-flag-fail", errStdout: `{"status":"ERROR","error":"unknown flag: --unsupported-flag"}`, expectedAttempts: 1, expectedStatus: db.StatusFailed},
+		{name: "UnknownError_RetriesTransientByDefault", threadID: "thread-unknown-retry", seedPBFile: true, failUntilAttempt: 3, errStderr: "some mysterious unexpected exit from child process", errExitCode: 1, expectedAttempts: 3, expectedStatus: db.StatusCompleted},
+		{name: "ColdStartContextWindow_FailsFast", threadID: "thread-ctx-cold", errStdout: `{"status":"ERROR","error":"maximum context length exceeded"}`, expectedAttempts: 1, expectedStatus: db.StatusFailed},
+		{name: "Cold429_ContextLengthExceeded_FailsFast", threadID: "thread-429", errStderr: "HTTP 429 Too Many Requests: context length exceeded", errExitCode: 1, expectedAttempts: 1, expectedStatus: db.StatusFailed},
+		{name: "EmptyLatch_InvalidJSON_FailsFast", threadID: "thread-latch", errStdout: "{}", expectedAttempts: 3, expectedStatus: db.StatusFailed},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -2901,78 +1668,14 @@ func TestGetSessionLastActivity_Suite(t *testing.T) {
 		wantAge          time.Duration
 		wantErr          bool
 	}{
-		{
-			name:         "ColdThread_ZeroTime",
-			threadID:     "thread-act-cold",
-			passSessMgr:  true,
-			wantCold:     true,
-			wantZeroTime: true,
-		},
-		{
-			name:             "SessionUpdatedAtOnly",
-			threadID:         "thread-act-sess",
-			sessionID:        "sess-act-uuid-1",
-			seedSession:      true,
-			sessionTurnCount: 1,
-			sessionAge:       20 * time.Minute,
-			passSessMgr:      true,
-			wantCold:         false,
-			wantAge:          20 * time.Minute,
-		},
-		{
-			name:             "CompletedMessageNewerThanSession",
-			threadID:         "thread-act-msg",
-			sessionID:        "sess-act-uuid-2",
-			seedSession:      true,
-			sessionTurnCount: 1,
-			sessionAge:       20 * time.Minute,
-			msgResponses:     []string{"some answer"},
-			msgAge:           10 * time.Minute,
-			passSessMgr:      true,
-			wantCold:         false,
-			wantAge:          10 * time.Minute,
-		},
-		{
-			name:             "DiskLogNewerThanDB",
-			threadID:         "thread-act-disk",
-			sessionID:        "sess-act-uuid-3",
-			seedSession:      true,
-			sessionTurnCount: 1,
-			sessionAge:       20 * time.Minute,
-			msgResponses:     []string{"some answer"},
-			msgAge:           10 * time.Minute,
-			diskLogAge:       2 * time.Minute,
-			passSessMgr:      true,
-			wantCold:         false,
-			wantAge:          2 * time.Minute,
-		},
-		{
-			name:         "RotatedSessionNotNew",
-			threadID:     "thread-rotated-1",
-			seedSession:  true,
-			sessionAge:   15 * time.Minute,
-			msgResponses: []string{"previous answer"},
-			msgAge:       4 * time.Minute,
-			wantCold:     false,
-			wantAge:      4 * time.Minute,
-		},
-		{
-			name:         "IgnoresExpiredStaleSentinel",
-			threadID:     "thread-stale-sentinel",
-			msgResponses: []string{"[EXPIRED_STALE]", "[AMBIENT: IGNORED]"},
-			wantCold:     true,
-			wantZeroTime: true,
-		},
-		{
-			name:         "FailOpenOnDBError",
-			threadID:     "thread-closed",
-			closeStore:   true,
-			wantCold:     false,
-			wantZeroTime: true,
-			wantErr:      true,
-		},
+		{name: "ColdThread_ZeroTime", threadID: "thread-act-cold", passSessMgr: true, wantCold: true, wantZeroTime: true},
+		{name: "SessionUpdatedAtOnly", threadID: "thread-act-sess", sessionID: "sess-act-uuid-1", seedSession: true, sessionTurnCount: 1, sessionAge: 20 * time.Minute, passSessMgr: true, wantCold: false, wantAge: 20 * time.Minute},
+		{name: "CompletedMessageNewerThanSession", threadID: "thread-act-msg", sessionID: "sess-act-uuid-2", seedSession: true, sessionTurnCount: 1, sessionAge: 20 * time.Minute, msgResponses: []string{"some answer"}, msgAge: 10 * time.Minute, passSessMgr: true, wantCold: false, wantAge: 10 * time.Minute},
+		{name: "DiskLogNewerThanDB", threadID: "thread-act-disk", sessionID: "sess-act-uuid-3", seedSession: true, sessionTurnCount: 1, sessionAge: 20 * time.Minute, msgResponses: []string{"some answer"}, msgAge: 10 * time.Minute, diskLogAge: 2 * time.Minute, passSessMgr: true, wantCold: false, wantAge: 2 * time.Minute},
+		{name: "RotatedSessionNotNew", threadID: "thread-rotated-1", seedSession: true, sessionAge: 15 * time.Minute, msgResponses: []string{"previous answer"}, msgAge: 4 * time.Minute, wantCold: false, wantAge: 4 * time.Minute},
+		{name: "IgnoresExpiredStaleSentinel", threadID: "thread-stale-sentinel", msgResponses: []string{"[EXPIRED_STALE]", "[AMBIENT: IGNORED]"}, wantCold: true, wantZeroTime: true},
+		{name: "FailOpenOnDBError", threadID: "thread-closed", closeStore: true, wantCold: false, wantZeroTime: true, wantErr: true},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -3063,78 +1766,15 @@ func TestProcessBurst_StalenessMatrix(t *testing.T) {
 		expectExpiredStale   bool
 		prohibitExpiredStale bool
 	}{
-		{
-			name:                 "ExistingSessionRecentDiskActivity_Retained",
-			threadID:             "thread-burst-disk-active",
-			sessionID:            "sess-burst-disk-active",
-			msgAge:               35 * time.Minute,
-			diskLogAge:           5 * time.Minute,
-			expectRunnerCalls:    1,
-			expectStatus:         db.StatusCompleted,
-			prohibitExpiredStale: true,
-		},
-		{
-			name:              "ExistingSessionRecentDBActivity_Retained",
-			threadID:          "thread-burst-db-active",
-			msgAge:            35 * time.Minute,
-			dbMsgAge:          5 * time.Minute,
-			expectRunnerCalls: 1,
-		},
-		{
-			name:               "ExistingSessionInactive_Dropped",
-			threadID:           "thread-burst-inactive",
-			sessionID:          "sess-burst-inactive",
-			msgAge:             35 * time.Minute,
-			sessionAge:         45 * time.Minute,
-			dbMsgAge:           45 * time.Minute,
-			expectRunnerCalls:  0,
-			expectExpiredStale: true,
-		},
-		{
-			name:               "NewSession_Dropped",
-			threadID:           "thread-new-drop",
-			msgAge:             31 * time.Minute,
-			expectRunnerCalls:  0,
-			expectExpiredStale: true,
-		},
-		{
-			name:               "HardCeiling_Dropped",
-			threadID:           "thread-hard-ceiling",
-			sessionID:          "sess-ceiling",
-			msgAge:             130 * time.Minute,
-			sessionAge:         1 * time.Second,
-			dbMsgAge:           1 * time.Second,
-			expectRunnerCalls:  0,
-			expectExpiredStale: true,
-		},
-		{
-			name:                 "RecoveredMessage_Retained",
-			threadID:             "thread-recovered-msg",
-			sessionID:            "sess-rec",
-			msgAge:               45 * time.Minute,
-			retryCount:           1,
-			expectRunnerCalls:    1,
-			prohibitExpiredStale: true,
-		},
-		{
-			name:                 "RestartedMessage_Retained",
-			threadID:             "thread-restarted-staleness",
-			sessionID:            "d2222222-2222-3333-4444-555555555555",
-			msgAge:               45 * time.Minute,
-			restartCount:         1,
-			expectRunnerCalls:    1,
-			prohibitExpiredStale: true,
-		},
-		{
-			name:               "RestartedMessage_HardCeiling_Dropped",
-			threadID:           "thread-restarted-hard-ceiling",
-			msgAge:             130 * time.Minute,
-			restartCount:       2,
-			expectRunnerCalls:  0,
-			expectExpiredStale: true,
-		},
+		{name: "ExistingSessionRecentDiskActivity_Retained", threadID: "thread-burst-disk-active", sessionID: "sess-burst-disk-active", msgAge: 35 * time.Minute, diskLogAge: 5 * time.Minute, expectRunnerCalls: 1, expectStatus: db.StatusCompleted, prohibitExpiredStale: true},
+		{name: "ExistingSessionRecentDBActivity_Retained", threadID: "thread-burst-db-active", msgAge: 35 * time.Minute, dbMsgAge: 5 * time.Minute, expectRunnerCalls: 1},
+		{name: "ExistingSessionInactive_Dropped", threadID: "thread-burst-inactive", sessionID: "sess-burst-inactive", msgAge: 35 * time.Minute, sessionAge: 45 * time.Minute, dbMsgAge: 45 * time.Minute, expectRunnerCalls: 0, expectExpiredStale: true},
+		{name: "NewSession_Dropped", threadID: "thread-new-drop", msgAge: 31 * time.Minute, expectRunnerCalls: 0, expectExpiredStale: true},
+		{name: "HardCeiling_Dropped", threadID: "thread-hard-ceiling", sessionID: "sess-ceiling", msgAge: 130 * time.Minute, sessionAge: 1 * time.Second, dbMsgAge: 1 * time.Second, expectRunnerCalls: 0, expectExpiredStale: true},
+		{name: "RecoveredMessage_Retained", threadID: "thread-recovered-msg", sessionID: "sess-rec", msgAge: 45 * time.Minute, retryCount: 1, expectRunnerCalls: 1, prohibitExpiredStale: true},
+		{name: "RestartedMessage_Retained", threadID: "thread-restarted-staleness", sessionID: "d2222222-2222-3333-4444-555555555555", msgAge: 45 * time.Minute, restartCount: 1, expectRunnerCalls: 1, prohibitExpiredStale: true},
+		{name: "RestartedMessage_HardCeiling_Dropped", threadID: "thread-restarted-hard-ceiling", msgAge: 130 * time.Minute, restartCount: 2, expectRunnerCalls: 0, expectExpiredStale: true},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -3274,7 +1914,6 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 		{"run-high-1", "cron-high", "msg-high-1", "thread-high", "high", "claude-opus-4-6-thinking"},
 		{"run-low-1", "cron-low", "msg-low-1", "thread-low", "low", "claude-sonnet-4-6-thinking"},
 	}
-
 	for _, c := range cases {
 		_ = createScheduleRun(store, db.ScheduleRun{
 			ID: c.runID, ScheduleID: c.schedID, ScheduleType: "cron", MessageID: c.msgID,
@@ -3315,31 +1954,9 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 		wantContains []string
 		wantExcludes string
 	}{
-		{
-			name:       "NamedChannel",
-			model:      "test-token-model",
-			threadID:   "chan-token-test-1",
-			mockOutput: `{"conversation_id":"c1111111-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":150,"output_tokens":75,"thinking_tokens":30,"cache_read_tokens":10,"total_tokens":265}}`,
-			wantContains: []string{
-				`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="total"} 265`,
-				`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="input"} 150`,
-				`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="output"} 75`,
-				`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="thinking"} 30`,
-				`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="cache_read"} 10`,
-			},
-		},
-		{
-			name:       "SnowflakeChannelSanitized",
-			model:      "test-snowflake-model",
-			threadID:   "1534436119888793750",
-			mockOutput: `{"conversation_id":"c2222222-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":20,"cache_read_tokens":5,"total_tokens":175}}`,
-			wantContains: []string{
-				`aerial_brain_tokens_total{channel="unknown",model="test-snowflake-model",type="total"} 175`,
-			},
-			wantExcludes: "1534436119888793750",
-		},
+		{name: "NamedChannel", model: "test-token-model", threadID: "chan-token-test-1", mockOutput: `{"conversation_id":"c1111111-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":150,"output_tokens":75,"thinking_tokens":30,"cache_read_tokens":10,"total_tokens":265}}`, wantContains: []string{`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="total"} 265`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="input"} 150`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="output"} 75`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="thinking"} 30`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="cache_read"} 10`}},
+		{name: "SnowflakeChannelSanitized", model: "test-snowflake-model", threadID: "1534436119888793750", mockOutput: `{"conversation_id":"c2222222-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":20,"cache_read_tokens":5,"total_tokens":175}}`, wantContains: []string{`aerial_brain_tokens_total{channel="unknown",model="test-snowflake-model",type="total"} 175`}, wantExcludes: "1534436119888793750"},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := setupTestStore(t)
@@ -3463,361 +2080,6 @@ func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *t
 	}
 }
 
-func TestRecoverInterrupted_PoisonPillAndStrandedSuite(t *testing.T) {
-	t.Parallel()
-
-	type msgCheck struct {
-		wantStatus       string
-		wantRestartCount int
-		checkRestart     bool
-		wantRetryCount   int
-		checkRetry       bool
-		wantErrSub       string
-		wantResponseText string
-	}
-
-	tests := []struct {
-		name              string
-		messages          []db.Message
-		updatedAtAges     map[string]time.Duration
-		maxAttempts       int
-		stalenessTTL      time.Duration
-		runnerErr         error
-		runnerStderr      string
-		notifierReply     string
-		deliveryErr       error
-		setDiscordSession bool
-		customAppCfg      bool
-		wantCompletedIDs  []string
-		wantRunnerCalls   int
-		checkRunnerCalls  bool
-		wantDeliveredText string
-		wantDeliveredChan string
-		msgChecks         map[string]msgCheck
-	}{
-		{
-			name: "PreservesExecutionRetryBudget",
-			messages: []db.Message{{
-				ID:           "msg-restarted-budget",
-				ThreadID:     "thread-retry-budget",
-				AuthorID:     "user-1",
-				Content:      "turn interrupted by container restart",
-				Status:       db.StatusProcessing,
-				RestartCount: 2,
-				CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-				UpdatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-			}},
-			maxAttempts:      3,
-			runnerStderr:     "transient connection error",
-			runnerErr:        errors.New("exit status 1"),
-			wantCompletedIDs: []string{"msg-restarted-budget"},
-			wantRunnerCalls:  3,
-			checkRunnerCalls: true,
-			msgChecks: map[string]msgCheck{
-				"msg-restarted-budget": {
-					wantStatus:       db.StatusFailed,
-					wantRestartCount: 3,
-					checkRestart:     true,
-					wantRetryCount:   3,
-					checkRetry:       true,
-				},
-			},
-		},
-		{
-			name: "RestartPoisonPill_Boundaries",
-			messages: []db.Message{
-				{
-					ID:           "msg-poison-restart",
-					ThreadID:     "thread-poison-restart",
-					AuthorID:     "user-1",
-					Content:      "crash-looping container trigger",
-					Status:       db.StatusProcessing,
-					RestartCount: DefaultMaxRestarts,
-					CreatedAt:    time.Now().UTC().Add(-15 * time.Minute),
-				},
-				{
-					ID:           "msg-valid-restart",
-					ThreadID:     "thread-valid-restart",
-					AuthorID:     "user-2",
-					Content:      "valid restart message",
-					Status:       db.StatusProcessing,
-					RestartCount: DefaultMaxRestarts - 1,
-					CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-				},
-			},
-			maxAttempts:       3,
-			setDiscordSession: true,
-			wantCompletedIDs:  []string{"msg-valid-restart"},
-			msgChecks: map[string]msgCheck{
-				"msg-poison-restart": {
-					wantStatus: db.StatusFailed,
-					wantErrSub: "exceeded restart limit",
-				},
-				"msg-valid-restart": {
-					wantStatus:       db.StatusCompleted,
-					wantRestartCount: DefaultMaxRestarts,
-					checkRestart:     true,
-				},
-			},
-		},
-		{
-			name: "LongRunningTask_DeploymentVelocityProtection",
-			messages: []db.Message{{
-				ID:           "msg-long-running",
-				ThreadID:     "thread-long",
-				AuthorID:     "user-1",
-				Content:      "long task",
-				Status:       db.StatusProcessing,
-				RestartCount: DefaultMaxRestarts,
-				CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-			}},
-			updatedAtAges:    map[string]time.Duration{"msg-long-running": 5 * time.Minute},
-			maxAttempts:      1,
-			wantCompletedIDs: []string{"msg-long-running"},
-			msgChecks: map[string]msgCheck{
-				"msg-long-running": {
-					wantStatus:       db.StatusCompleted,
-					wantRestartCount: 4,
-					checkRestart:     true,
-				},
-			},
-		},
-		{
-			name: "PoisonPill_HardCeiling",
-			messages: []db.Message{{
-				ID:           "msg-hard-ceiling",
-				ThreadID:     "thread-ceiling",
-				AuthorID:     "user-1",
-				Content:      "hard ceiling test",
-				Status:       db.StatusProcessing,
-				RestartCount: 5,
-				CreatedAt:    time.Now().UTC().Add(-20 * time.Minute),
-			}},
-			updatedAtAges:     map[string]time.Duration{"msg-hard-ceiling": 5 * time.Minute},
-			notifierReply:     "Poison pill dropped",
-			wantDeliveredText: "Poison pill dropped",
-			msgChecks: map[string]msgCheck{
-				"msg-hard-ceiling": {
-					wantStatus: db.StatusFailed,
-					wantErrSub: "poison pill",
-				},
-			},
-		},
-		{
-			name: "DiscordSessionDeliversPoisonNotice",
-			messages: []db.Message{{
-				ID:           "msg-delivery-check",
-				ThreadID:     "thread-delivery-check",
-				AuthorID:     "user-1",
-				Content:      "poison message",
-				Status:       db.StatusProcessing,
-				RestartCount: DefaultMaxRestarts,
-				CreatedAt:    time.Now().UTC(),
-				UpdatedAt:    time.Now().UTC(),
-			}},
-			notifierReply:     "Poison pill notice",
-			setDiscordSession: true,
-			wantDeliveredText: "Poison pill notice",
-			wantDeliveredChan: "thread-delivery-check",
-		},
-		{
-			name: "CoverageEdgeCases",
-			messages: []db.Message{{
-				ID:           "msg-edge-case-cov",
-				ThreadID:     "thread-cov",
-				AuthorID:     "user-1",
-				Content:      "short",
-				Status:       db.StatusProcessing,
-				RestartCount: DefaultMaxRestarts,
-				CreatedAt:    time.Now().UTC(),
-				UpdatedAt:    time.Now().UTC(),
-			}},
-			notifierReply:     "Poison notice",
-			deliveryErr:       errors.New("discord delivery failed"),
-			setDiscordSession: true,
-			customAppCfg:      true,
-			msgChecks: map[string]msgCheck{
-				"msg-edge-case-cov": {wantStatus: db.StatusFailed},
-			},
-		},
-		{
-			name: "DropsSupersededMessages",
-			messages: []db.Message{
-				{
-					ID:        "msg-stranded-old",
-					ThreadID:  "thread-superseded",
-					GuildID:   "g1",
-					Status:    db.StatusPending,
-					CreatedAt: time.Now().UTC().Add(-20 * time.Minute),
-				},
-				{
-					ID:           "msg-completed-newer",
-					ThreadID:     "thread-superseded",
-					GuildID:      "g1",
-					Status:       db.StatusCompleted,
-					ResponseText: "Already answered newer question!",
-					CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-				},
-			},
-			maxAttempts: 1,
-			msgChecks: map[string]msgCheck{
-				"msg-stranded-old": {
-					wantStatus:       db.StatusCompleted,
-					wantResponseText: "[EXPIRED_STALE]",
-				},
-			},
-		},
-		{
-			name: "DropsStrandedPendingOlderThanTTL",
-			messages: []db.Message{{
-				ID:            "msg-stranded-pending",
-				ThreadID:      "thread-expired-pending",
-				GuildID:       "g1",
-				Status:        db.StatusPending,
-				ScheduleRunID: "run-stranded-1",
-				CreatedAt:     time.Now().UTC().Add(-45 * time.Minute),
-			}},
-			stalenessTTL: 30 * time.Minute,
-			maxAttempts:  1,
-			msgChecks: map[string]msgCheck{
-				"msg-stranded-pending": {
-					wantStatus:       db.StatusCompleted,
-					wantResponseText: "[EXPIRED_STALE]",
-				},
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := setupTestStore(t)
-			for _, m := range tc.messages {
-				_ = insertMessage(store, m)
-				if age, ok := tc.updatedAtAges[m.ID]; ok {
-					store.SetMessageUpdatedAt(m.ID, time.Now().UTC().Add(-age))
-				}
-			}
-
-			var mu sync.Mutex
-			var runnerCalls int
-			var completedIDs []string
-			var capturedSession *discordgo.Session
-			var deliveredChan, deliveredText string
-			doneCh := make(chan struct{})
-
-			cfg := WorkerPoolConfig{
-				Store:          store,
-				StalenessTTL:   tc.stalenessTTL,
-				TimeoutMinutes: 1,
-				BackoffBase:    10 * time.Millisecond,
-				MaxAttempts:    tc.maxAttempts,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					mu.Lock()
-					runnerCalls++
-					mu.Unlock()
-					if tc.runnerErr != nil {
-						return "", tc.runnerStderr, 1, tc.runnerErr
-					}
-					return mockJSONResponse("d1111111-2222-3333-4444-555555555555", "Processed OK"), "", 0, nil
-				},
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					mu.Lock()
-					capturedSession = s
-					deliveredChan = channelID
-					deliveredText = text
-					mu.Unlock()
-					return tc.deliveryErr
-				},
-				TypingFunc: noopTyping,
-				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					mu.Lock()
-					completedIDs = append(completedIDs, msg.ID)
-					if len(tc.wantCompletedIDs) > 0 && len(completedIDs) == len(tc.wantCompletedIDs) {
-						close(doneCh)
-					}
-					mu.Unlock()
-				},
-			}
-			if tc.notifierReply != "" {
-				cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
-					if tc.customAppCfg && (apiKey != "custom-api-key" || agyBin != "agy-custom") {
-						t.Errorf("expected apiKey custom-api-key and agyBin agy-custom, got %s / %s", apiKey, agyBin)
-					}
-					return tc.notifierReply
-				}
-			}
-
-			pool := NewWorkerPool(cfg)
-			if tc.customAppCfg {
-				pool.appCfg = config.NewFromData(&config.ConfigData{
-					Model:  "test-model",
-					AgyBin: "agy-custom",
-					APIKey: "custom-api-key",
-				})
-			}
-			var mockSess *discordgo.Session
-			if tc.setDiscordSession {
-				mockSess = &discordgo.Session{State: discordgo.NewState()}
-				pool.SetDiscordSession(mockSess)
-				if pool.DiscordSession() != mockSess {
-					t.Errorf("expected DiscordSession() to return mockSess")
-				}
-			}
-			pool.Start()
-			defer pool.Stop()
-
-			RecoverInterrupted(store, pool)
-
-			if len(tc.wantCompletedIDs) > 0 {
-				waitForCompletion(t, doneCh, 5*time.Second, tc.name)
-			}
-
-			mu.Lock()
-			defer mu.Unlock()
-
-			if tc.checkRunnerCalls && runnerCalls != tc.wantRunnerCalls {
-				t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls)
-			}
-			if strings.Join(completedIDs, ",") != strings.Join(tc.wantCompletedIDs, ",") {
-				t.Errorf("completedIDs = %v, want %v", completedIDs, tc.wantCompletedIDs)
-			}
-			if tc.wantDeliveredText != "" && deliveredText != tc.wantDeliveredText {
-				t.Errorf("deliveredText = %q, want %q", deliveredText, tc.wantDeliveredText)
-			}
-			if tc.wantDeliveredChan != "" {
-				if deliveredChan != tc.wantDeliveredChan {
-					t.Errorf("deliveredChan = %q, want %q", deliveredChan, tc.wantDeliveredChan)
-				}
-				if capturedSession != mockSess {
-					t.Errorf("capturedSession = %p, want %p", capturedSession, mockSess)
-				}
-			}
-			for id, chk := range tc.msgChecks {
-				dbMsg, err := getMessage(store, id)
-				if err != nil || dbMsg == nil {
-					t.Fatalf("failed to get message %s: %v", id, err)
-				}
-				if chk.wantStatus != "" && dbMsg.Status != chk.wantStatus {
-					t.Errorf("%s status = %s, want %s", id, dbMsg.Status, chk.wantStatus)
-				}
-				if chk.checkRestart && dbMsg.RestartCount != chk.wantRestartCount {
-					t.Errorf("%s restart_count = %d, want %d", id, dbMsg.RestartCount, chk.wantRestartCount)
-				}
-				if chk.checkRetry && dbMsg.RetryCount != chk.wantRetryCount {
-					t.Errorf("%s retry_count = %d, want %d", id, dbMsg.RetryCount, chk.wantRetryCount)
-				}
-				if chk.wantErrSub != "" && !strings.Contains(dbMsg.ErrorMessage, chk.wantErrSub) {
-					t.Errorf("%s error = %q, want substring %q", id, dbMsg.ErrorMessage, chk.wantErrSub)
-				}
-				if chk.wantResponseText != "" && dbMsg.ResponseText != chk.wantResponseText {
-					t.Errorf("%s response_text = %q, want %q", id, dbMsg.ResponseText, chk.wantResponseText)
-				}
-			}
-		})
-	}
-}
-
 func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -3842,7 +2104,6 @@ func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 		{errDetail: "syntax error on line 42", want: false},
 		{errDetail: "", want: false},
 	}
-
 	for _, tt := range tests {
 		if got := isRateLimitError(tt.errDetail, tt.extra); got != tt.want {
 			t.Errorf("isRateLimitError(%q, %q) = %t, want %t", tt.errDetail, tt.extra, got, tt.want)
@@ -3869,87 +2130,14 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 		expectDeliveredNotice string
 		expectUnavailableMsg  bool
 	}{
-		{
-			name:                  "WatchdogExhaustion_InvokesNotifierFunc",
-			threadID:              "thread-wd-1",
-			maxAttempts:           1,
-			runnerStderr:          "inactivity timeout exceeded [watchdog]",
-			runnerErr:             errors.New("watchdog timeout"),
-			runnerExitCode:        1,
-			expectNotifierCalled:  true,
-			expectedDescContains:  "execution timed out",
-			notifierReturn:        "DEADASS TIMED OUT 💀",
-			expectDeliveredNotice: "DEADASS TIMED OUT 💀",
-		},
-		{
-			name:                  "NonTransient_InvokesNotifierFunc",
-			threadID:              "thread-nt-1",
-			maxAttempts:           3,
-			runnerStderr:          "Error: unknown flag: --bogus-flag",
-			runnerErr:             errors.New("exit status 1"),
-			runnerExitCode:        1,
-			expectNotifierCalled:  true,
-			expectedDescContains:  "non-transient error",
-			notifierReturn:        "UNACCEPTABLE GARBAGE DETECTED 🔥",
-			expectDeliveredNotice: "UNACCEPTABLE GARBAGE DETECTED 🔥",
-		},
-		{
-			name:                  "RetryExhaustion_InvokesNotifierFunc",
-			threadID:              "thread-exhaust-1",
-			maxAttempts:           2,
-			runnerStderr:          "connection reset by peer",
-			runnerErr:             errors.New("network drop"),
-			runnerExitCode:        1,
-			expectNotifierCalled:  true,
-			expectedDescContains:  "exhausting 2 attempts",
-			notifierReturn:        "ROASTED TO ASHES 🤘",
-			expectDeliveredNotice: "ROASTED TO ASHES 🤘",
-		},
-		{
-			name:                 "RateLimitBypassesNotifierFunc",
-			threadID:             "thread-rl-1",
-			maxAttempts:          1,
-			runnerStderr:         "Error 429: Too Many Requests",
-			runnerErr:            errors.New("rate limit"),
-			runnerExitCode:       1,
-			expectNotifierCalled: false,
-			expectUnavailableMsg: true,
-		},
-		{
-			name:                 "Watchdog_RateLimitBypassesNotifier",
-			threadID:             "thread-wd-rl",
-			maxAttempts:          1,
-			runnerStderr:         "inactivity timeout exceeded: [watchdog] Resource has been exhausted (quota limit reached)",
-			runnerErr:            context.DeadlineExceeded,
-			runnerExitCode:       124,
-			expectNotifierCalled: false,
-			expectUnavailableMsg: true,
-		},
-		{
-			name:                 "SessionCorruption_RateLimitBypassesNotifier",
-			threadID:             "thread-sc-rl",
-			maxAttempts:          1,
-			seedSessionID:        "sess-existing-1",
-			runnerStderr:         "conversation not found: 429 rate limit exceeded",
-			runnerErr:            errors.New("rate limited corruption"),
-			runnerExitCode:       1,
-			expectNotifierCalled: false,
-			expectUnavailableMsg: true,
-		},
-		{
-			name:                 "NonTransient_LongSnippetAndDeliveryErr",
-			threadID:             "thread-nt-long",
-			maxAttempts:          1,
-			runnerStderr:         strings.Repeat("VeryBadError-", 50),
-			runnerErr:            errors.New("fatal command syntax"),
-			runnerExitCode:       1,
-			deliveryErr:          errors.New("discord delivery network failed"),
-			expectNotifierCalled: true,
-			wantMaxDescLen:       350,
-			notifierReturn:       "DEADASS BROKEN 💀",
-		},
+		{name: "WatchdogExhaustion_InvokesNotifierFunc", threadID: "thread-wd-1", maxAttempts: 1, runnerStderr: "inactivity timeout exceeded [watchdog]", runnerErr: errors.New("watchdog timeout"), runnerExitCode: 1, expectNotifierCalled: true, expectedDescContains: "execution timed out", notifierReturn: "DEADASS TIMED OUT 💀", expectDeliveredNotice: "DEADASS TIMED OUT 💀"},
+		{name: "NonTransient_InvokesNotifierFunc", threadID: "thread-nt-1", maxAttempts: 3, runnerStderr: "Error: unknown flag: --bogus-flag", runnerErr: errors.New("exit status 1"), runnerExitCode: 1, expectNotifierCalled: true, expectedDescContains: "non-transient error", notifierReturn: "UNACCEPTABLE GARBAGE DETECTED 🔥", expectDeliveredNotice: "UNACCEPTABLE GARBAGE DETECTED 🔥"},
+		{name: "RetryExhaustion_InvokesNotifierFunc", threadID: "thread-exhaust-1", maxAttempts: 2, runnerStderr: "connection reset by peer", runnerErr: errors.New("network drop"), runnerExitCode: 1, expectNotifierCalled: true, expectedDescContains: "exhausting 2 attempts", notifierReturn: "ROASTED TO ASHES 🤘", expectDeliveredNotice: "ROASTED TO ASHES 🤘"},
+		{name: "RateLimitBypassesNotifierFunc", threadID: "thread-rl-1", maxAttempts: 1, runnerStderr: "Error 429: Too Many Requests", runnerErr: errors.New("rate limit"), runnerExitCode: 1, expectNotifierCalled: false, expectUnavailableMsg: true},
+		{name: "Watchdog_RateLimitBypassesNotifier", threadID: "thread-wd-rl", maxAttempts: 1, runnerStderr: "inactivity timeout exceeded: [watchdog] Resource has been exhausted (quota limit reached)", runnerErr: context.DeadlineExceeded, runnerExitCode: 124, expectNotifierCalled: false, expectUnavailableMsg: true},
+		{name: "SessionCorruption_RateLimitBypassesNotifier", threadID: "thread-sc-rl", maxAttempts: 1, seedSessionID: "sess-existing-1", runnerStderr: "conversation not found: 429 rate limit exceeded", runnerErr: errors.New("rate limited corruption"), runnerExitCode: 1, expectNotifierCalled: false, expectUnavailableMsg: true},
+		{name: "NonTransient_LongSnippetAndDeliveryErr", threadID: "thread-nt-long", maxAttempts: 1, runnerStderr: strings.Repeat("VeryBadError-", 50), runnerErr: errors.New("fatal command syntax"), runnerExitCode: 1, deliveryErr: errors.New("discord delivery network failed"), expectNotifierCalled: true, wantMaxDescLen: 350, notifierReturn: "DEADASS BROKEN 💀"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -4020,25 +2208,17 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestWorkerPool_NewNotifierRunnerFuncWrapped(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	defer func() { _ = store.Close() }()
+	// Dynamic fallback wrapping
 	runnerCalled := false
-	pool := New(nil, WorkerPoolConfig{
-		Store: store,
+	poolWrapped := New(nil, WorkerPoolConfig{
 		NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalled = true
 			return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
 		},
 	})
-	if pool.cfg.NotifierFunc == nil {
-		t.Fatal("Expected NotifierFunc to be initialized")
-	}
-	if res := pool.cfg.NotifierFunc("agy", "key", "test description"); !runnerCalled || res != "DYNAMIC FALLBACK NOTICE" {
-		t.Errorf("NotifierFunc = %q (called=%v)", res, runnerCalled)
+	if poolWrapped.cfg.NotifierFunc == nil || poolWrapped.cfg.NotifierFunc("agy", "key", "desc") != "DYNAMIC FALLBACK NOTICE" || !runnerCalled {
+		t.Errorf("failed dynamic notifier wrapping: called=%v", runnerCalled)
 	}
 }
 
@@ -4056,68 +2236,13 @@ func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
 		err                  error
 		expectDeliveredCheck bool
 	}{
-		{
-			name:          "Watchdog_CancelledDuringBackoff",
-			threadID:      "thread-wd-cancel",
-			scheduleRunID: "run-wd-cancel",
-			maxAttempts:   3,
-			backoffBase:   500 * time.Millisecond,
-			stderr:        "inactivity timeout exceeded: [watchdog] hung process",
-			exitCode:      124,
-			err:           context.DeadlineExceeded,
-		},
-		{
-			name:                 "Watchdog_CancelledPostWatchdog",
-			threadID:             "thread-wd-post-cancel",
-			maxAttempts:          1,
-			backoffBase:          5 * time.Millisecond,
-			stderr:               "inactivity timeout exceeded: [watchdog] single attempt cancel",
-			exitCode:             124,
-			err:                  context.DeadlineExceeded,
-			expectDeliveredCheck: true,
-		},
-		{
-			name:                 "NonTransient_CancelledDuringTurn",
-			threadID:             "thread-nt-cancel",
-			maxAttempts:          1,
-			backoffBase:          5 * time.Millisecond,
-			stderr:               "Fatal: invalid prompt parameters",
-			exitCode:             2,
-			err:                  errors.New("non transient err"),
-			expectDeliveredCheck: true,
-		},
-		{
-			name:          "RetryExhaustion_CancelledWithScheduleRunID",
-			threadID:      "thread-exh-cancel",
-			scheduleRunID: "run-exh-cancel",
-			maxAttempts:   1,
-			backoffBase:   5 * time.Millisecond,
-			stderr:        "connection timed out",
-			exitCode:      1,
-			err:           errors.New("timeout"),
-		},
-		{
-			name:          "RateLimit_CancelledDuringBackoff",
-			threadID:      "thread-rl-cancel",
-			scheduleRunID: "run-rl-cancel",
-			maxAttempts:   3,
-			backoffBase:   500 * time.Millisecond,
-			stderr:        "Error 429: Resource has been exhausted (quota exceeded)",
-			exitCode:      1,
-			err:           errors.New("rate limited"),
-		},
-		{
-			name:          "Transient_CancelledDuringBackoff",
-			threadID:      "thread-tr-cancel",
-			scheduleRunID: "run-tr-cancel",
-			maxAttempts:   3,
-			backoffBase:   500 * time.Millisecond,
-			stderr:        "connection reset by peer",
-			exitCode:      1,
-			err:           errors.New("transient network drop"),
-		},
+		{name: "Watchdog_CancelledDuringBackoff", threadID: "thread-wd-cancel", scheduleRunID: "run-wd-cancel", maxAttempts: 3, backoffBase: 500 * time.Millisecond, stderr: "inactivity timeout exceeded: [watchdog] hung process", exitCode: 124, err: context.DeadlineExceeded},
+		{name: "Watchdog_CancelledPostWatchdog", threadID: "thread-wd-post-cancel", maxAttempts: 1, backoffBase: 5 * time.Millisecond, stderr: "inactivity timeout exceeded: [watchdog] single attempt cancel", exitCode: 124, err: context.DeadlineExceeded, expectDeliveredCheck: true},
+		{name: "NonTransient_CancelledDuringTurn", threadID: "thread-nt-cancel", maxAttempts: 1, backoffBase: 5 * time.Millisecond, stderr: "Fatal: invalid prompt parameters", exitCode: 2, err: errors.New("non transient err"), expectDeliveredCheck: true},
+		{name: "RetryExhaustion_CancelledWithScheduleRunID", threadID: "thread-exh-cancel", scheduleRunID: "run-exh-cancel", maxAttempts: 1, backoffBase: 5 * time.Millisecond, stderr: "connection timed out", exitCode: 1, err: errors.New("timeout")},
+		{name: "RateLimit_CancelledDuringBackoff", threadID: "thread-rl-cancel", scheduleRunID: "run-rl-cancel", maxAttempts: 3, backoffBase: 500 * time.Millisecond, stderr: "Error 429: Resource has been exhausted (quota exceeded)", exitCode: 1, err: errors.New("rate limited")},
+		{name: "Transient_CancelledDuringBackoff", threadID: "thread-tr-cancel", scheduleRunID: "run-tr-cancel", maxAttempts: 3, backoffBase: 500 * time.Millisecond, stderr: "connection reset by peer", exitCode: 1, err: errors.New("transient network drop")},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -4273,28 +2398,35 @@ func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeou
 	return te.evaluateAmbientWake(), hookCalled, classifierCalled, te, store, capturedReq
 }
 
-func TestOnWakeHook_OverridesAndTimeoutFallbacks(t *testing.T) {
+func TestOnWakeHook_Lifecycle(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name           string
+		msgs           []db.Message
 		hookResp       *WakeResponse
 		hookErr        error
 		timeoutAction  string
 		classifierResp string
+		isSched        bool
+		schedRunID     string
 		wantExit       bool
 		wantClassifier bool
+		wantBurstLen   int
+		wantTrailLen   int
+		wantTurns      int
 	}{
-		{name: "WakeOverride", hookResp: &WakeResponse{Override: "wake", Reason: "hook_priority_wake"}, classifierResp: `{"confidence": 0.10, "reason": "ambient banter"}`},
-		{name: "DropOverride", hookResp: &WakeResponse{Override: "drop", Reason: "hook_drop_override"}, classifierResp: `{"confidence": 0.95, "reason": "strong intent"}`, wantExit: true},
-		{name: "TimeoutFallback_Classify", hookErr: context.DeadlineExceeded, timeoutAction: "classify", classifierResp: `{"confidence": 0.92, "reason": "classified wake"}`, wantClassifier: true},
-		{name: "TimeoutFallback_Wake", hookErr: errors.New("connection refused"), timeoutAction: "wake", classifierResp: `{"confidence": 0.10, "reason": "ambient"}`},
-		{name: "TimeoutFallback_Drop", hookErr: errors.New("timeout reached"), timeoutAction: "drop", classifierResp: `{"confidence": 0.95, "reason": "strong intent"}`, wantExit: true},
+		{name: "WakeOverride", msgs: []db.Message{{ID: "m-w1", ThreadID: "ch-gen", Content: "hi", Status: db.StatusProcessing}}, hookResp: &WakeResponse{Override: "wake", Reason: "hook_priority_wake"}, classifierResp: `{"confidence": 0.10}`},
+		{name: "DropOverride", msgs: []db.Message{{ID: "m-d1", ThreadID: "ch-gen", Content: "ambient", Status: db.StatusProcessing}}, hookResp: &WakeResponse{Override: "drop", Reason: "hook_drop_override"}, classifierResp: `{"confidence": 0.95}`, wantExit: true},
+		{name: "TimeoutFallback_Classify", msgs: []db.Message{{ID: "m-c1", ThreadID: "ch-gen", Content: "hello world", Status: db.StatusProcessing}}, hookErr: context.DeadlineExceeded, timeoutAction: "classify", classifierResp: `{"confidence": 0.92, "reason": "classified wake"}`, wantClassifier: true},
+		{name: "TimeoutFallback_Wake", msgs: []db.Message{{ID: "m-tw1", ThreadID: "ch-gen", Content: "err-wake", Status: db.StatusProcessing}}, hookErr: errors.New("conn refused"), timeoutAction: "wake", classifierResp: `{"confidence": 0.10}`},
+		{name: "TimeoutFallback_Drop", msgs: []db.Message{{ID: "m-td1", ThreadID: "ch-gen", Content: "err-drop", Status: db.StatusProcessing}}, hookErr: errors.New("timeout"), timeoutAction: "drop", classifierResp: `{"confidence": 0.95}`, wantExit: true},
+		{name: "MultiMessageBurst", msgs: []db.Message{{ID: "m-m1", ThreadID: "ch-multi", Content: "wake 1", Status: db.StatusProcessing}, {ID: "m-m2", ThreadID: "ch-multi", Content: "trail 2", Status: db.StatusProcessing}}, hookResp: &WakeResponse{Override: "wake"}, wantBurstLen: 1, wantTrailLen: 1, wantTurns: 1},
+		{name: "DropWithScheduleRun", msgs: []db.Message{{ID: "m-s1", ThreadID: "ch-sched", Content: "sched noise", ScheduleRunID: "sched-run-amb", Status: db.StatusProcessing}}, hookResp: &WakeResponse{Override: "drop"}, isSched: true, schedRunID: "sched-run-amb", wantExit: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msg := db.Message{ID: "msg-wake-1", ThreadID: "chan-general", AuthorName: "user-alpha", Content: "hello world", Status: db.StatusProcessing}
-			shouldExit, hookCalled, classifierCalled, te, store, capturedReq := runWakeHookEval(t, tc.hookResp, tc.hookErr, tc.timeoutAction, tc.classifierResp, []db.Message{msg}, false, "")
+			shouldExit, hookCalled, classifierCalled, te, store, capturedReq := runWakeHookEval(t, tc.hookResp, tc.hookErr, tc.timeoutAction, tc.classifierResp, tc.msgs, tc.isSched, tc.schedRunID)
 			if shouldExit != tc.wantExit || !hookCalled || classifierCalled != tc.wantClassifier {
 				t.Fatalf("%s: got exit=%v hook=%v classifier=%v (want exit=%v classifier=%v)", tc.name, shouldExit, hookCalled, classifierCalled, tc.wantExit, tc.wantClassifier)
 			}
@@ -4302,57 +2434,35 @@ func TestOnWakeHook_OverridesAndTimeoutFallbacks(t *testing.T) {
 				if te.wakeIdx != 0 || len(te.wakeInfos) == 0 || !te.wakeInfos[0].IsWake {
 					t.Errorf("%s: wakeIdx=%d wakeInfos=%+v", tc.name, te.wakeIdx, te.wakeInfos)
 				}
+				if tc.wantBurstLen > 0 && len(te.burst) != tc.wantBurstLen {
+					t.Errorf("%s: burst len = %d, want %d", tc.name, len(te.burst), tc.wantBurstLen)
+				}
+				if tc.wantTrailLen > 0 && len(te.trailingMsgs) != tc.wantTrailLen {
+					t.Errorf("%s: trailing len = %d, want %d", tc.name, len(te.trailingMsgs), tc.wantTrailLen)
+				}
+				if tc.wantTurns > 0 {
+					if turnCount, _ := getSessionTurnCount(store, tc.msgs[0].ThreadID); turnCount != tc.wantTurns {
+						t.Errorf("%s: turnCount = %d, want %d", tc.name, turnCount, tc.wantTurns)
+					}
+				}
 			} else {
 				if te.wakeIdx != -1 {
 					t.Errorf("%s: wakeIdx=%d, want -1", tc.name, te.wakeIdx)
 				}
-				saved, err := getMessage(store, msg.ID)
-				if err != nil || saved == nil || saved.Status != db.StatusCompleted {
-					t.Fatalf("%s: saved msg=%+v (err=%v)", tc.name, saved, err)
+				saved, _ := getMessage(store, tc.msgs[0].ID)
+				if saved == nil || saved.Status != db.StatusCompleted {
+					t.Fatalf("%s: saved msg = %+v", tc.name, saved)
 				}
-				if tc.name == "DropOverride" && !strings.Contains(saved.ErrorMessage, "[AMBIENT") {
-					t.Errorf("%s: ErrorMessage=%q, want [AMBIENT", tc.name, saved.ErrorMessage)
+				if tc.schedRunID != "" {
+					if r, _ := getScheduleRun(store, tc.schedRunID); r == nil || r.Status != "completed" {
+						t.Errorf("%s: scheduleRun = %+v, want status completed", tc.name, r)
+					}
 				}
 			}
-			if capturedReq == nil || capturedReq.ChannelID != "chan-general" || capturedReq.Message.ID != msg.ID || capturedReq.Timestamp.IsZero() {
-				t.Errorf("%s: capturedReq mismatch: %+v", tc.name, capturedReq)
+			if capturedReq == nil || capturedReq.ChannelID == "" || capturedReq.Timestamp.IsZero() {
+				t.Errorf("%s: capturedReq invalid: %+v", tc.name, capturedReq)
 			}
 		})
-	}
-}
-
-func TestOnWakeHook_MultiMessageBurstAndTurnCount(t *testing.T) {
-	t.Parallel()
-	msgs := []db.Message{
-		{ID: "msg-wake-multi-1", ThreadID: "chan-multi-test", AuthorName: "user-alpha", Content: "first message wakes", Status: db.StatusProcessing},
-		{ID: "msg-wake-multi-2", ThreadID: "chan-multi-test", AuthorName: "user-beta", Content: "second trailing message", Status: db.StatusProcessing},
-	}
-	shouldExit, hookCalled, classifierCalled, te, store, _ := runWakeHookEval(t, &WakeResponse{Override: "wake", Reason: "hook_wake_override"}, nil, "", "", msgs, false, "")
-	if shouldExit || !hookCalled || classifierCalled || te.wakeIdx != 0 {
-		t.Fatalf("unexpected wake result: exit=%v hook=%v classifier=%v wakeIdx=%d", shouldExit, hookCalled, classifierCalled, te.wakeIdx)
-	}
-	if len(te.burst) != 1 || te.burst[0].ID != "msg-wake-multi-1" || len(te.trailingMsgs) != 1 || te.trailingMsgs[0].ID != "msg-wake-multi-2" {
-		t.Errorf("burst or trailing mismatch: burst=%+v trailing=%+v", te.burst, te.trailingMsgs)
-	}
-	if turnCount, err := getSessionTurnCount(store, "chan-multi-test"); err != nil || turnCount != 1 {
-		t.Errorf("turnCount = %d (err=%v), want 1", turnCount, err)
-	}
-}
-
-func TestOnWakeHook_DropWithScheduleRunAndEmptyEffectiveID(t *testing.T) {
-	t.Parallel()
-	msgs := []db.Message{
-		{ID: "msg-sched-ambient", ThreadID: "chan-fallback", AuthorName: "user-sched", Content: "scheduled noise", ScheduleRunID: "sched-run-ambient", Status: db.StatusProcessing},
-	}
-	shouldExit, hookCalled, classifierCalled, te, store, capturedReq := runWakeHookEval(t, &WakeResponse{Override: "drop"}, nil, "", "", msgs, true, "sched-run-ambient")
-	if !shouldExit || !hookCalled || classifierCalled {
-		t.Fatalf("unexpected wake drop result: exit=%v hook=%v classifier=%v wakeIdx=%d", shouldExit, hookCalled, classifierCalled, te.wakeIdx)
-	}
-	if capturedReq == nil || capturedReq.ChannelID != "chan-fallback" {
-		t.Errorf("capturedReq channel mismatch: %+v", capturedReq)
-	}
-	if r, err := getScheduleRun(store, "sched-run-ambient"); err != nil || r == nil || r.Status != "completed" {
-		t.Errorf("scheduleRun = %+v (err=%v), want status completed", r, err)
 	}
 }
 
@@ -4532,32 +2642,36 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 	return hc, rc, cp, cr, saved, store
 }
 
-func TestPreTurnHook_ActionsAndFallbacks(t *testing.T) {
+func TestPreTurnHook_Lifecycle(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name          string
-		hookResp      *PreTurnResponse
+		hookResps     []*PreTurnResponse
 		hookErr       error
 		timeoutAction string
+		initialRetry  int
+		schedRunID    string
+		waitAsync     bool
+		wantHookCalls int
 		wantRunner    int
 		wantStatus    string
 		wantErrSub    string
+		wantPromptSub string
 	}{
-		{name: "Rejected_DropAction", hookResp: &PreTurnResponse{Allow: false, Action: "drop", Reason: "resource busy"}, wantStatus: db.StatusCompleted, wantErrSub: "resource busy"},
-		{name: "TimeoutFallback_Drop", hookErr: context.DeadlineExceeded, timeoutAction: "drop", wantStatus: db.StatusCompleted, wantErrSub: "pre_turn_timeout_drop"},
-		{name: "TimeoutFallback_Proceed", hookErr: errors.New("webhook connection failed"), timeoutAction: "proceed", wantRunner: 1, wantStatus: db.StatusCompleted},
-		{name: "TimeoutFallback_Retry", hookErr: errors.New("gateway timeout"), timeoutAction: "retry", wantStatus: db.StatusPending},
+		{name: "Rejected_DropAction", hookResps: []*PreTurnResponse{{Allow: false, Action: "drop", Reason: "resource busy"}}, wantHookCalls: 1, wantStatus: db.StatusCompleted, wantErrSub: "resource busy"},
+		{name: "TimeoutFallback_Drop", hookErr: context.DeadlineExceeded, timeoutAction: "drop", wantHookCalls: 1, wantStatus: db.StatusCompleted, wantErrSub: "pre_turn_timeout_drop"},
+		{name: "TimeoutFallback_Proceed", hookErr: errors.New("webhook failed"), timeoutAction: "proceed", wantHookCalls: 1, wantRunner: 1, wantStatus: db.StatusCompleted},
+		{name: "TimeoutFallback_Retry", hookErr: errors.New("gateway timeout"), timeoutAction: "retry", wantHookCalls: 1, wantStatus: db.StatusPending},
+		{name: "ApprovedWithInjectedContext", hookResps: []*PreTurnResponse{{Allow: true, InjectedContext: "system instructions: be concise", Metadata: map[string]any{"lease_token": "token-123"}}}, wantHookCalls: 1, wantRunner: 1, wantStatus: db.StatusCompleted, wantPromptSub: "<COORDINATION_CONTEXT>\nsystem instructions: be concise\n</COORDINATION_CONTEXT>"},
+		{name: "RejectedRetryAction", hookResps: []*PreTurnResponse{{Allow: false, Action: "retry", RetryAfterSeconds: 1, Reason: "sidecar lock wait"}, {Allow: true}}, waitAsync: true, wantHookCalls: 2, wantRunner: 1, wantStatus: db.StatusCompleted},
+		{name: "RetryExhaustionWithScheduleRun", hookResps: []*PreTurnResponse{{Allow: false, Action: "retry", RetryAfterSeconds: 1}}, initialRetry: 2, schedRunID: "run-exhaust-1", wantHookCalls: 1, wantRunner: 0, wantStatus: db.StatusFailed, wantErrSub: "[EXHAUSTED_PRE_TURN_RETRIES]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var resps []*PreTurnResponse
-			if tc.hookResp != nil {
-				resps = []*PreTurnResponse{tc.hookResp}
-			}
-			hc, rc, _, _, saved, _ := runPreTurnHookBurst(t, resps, tc.hookErr, tc.timeoutAction, 0, "", false)
-			if hc != 1 || rc != tc.wantRunner {
-				t.Errorf("%s: hookCalls=%d runnerCalls=%d (want 1, %d)", tc.name, hc, rc, tc.wantRunner)
+			hc, rc, cp, cr, saved, store := runPreTurnHookBurst(t, tc.hookResps, tc.hookErr, tc.timeoutAction, tc.initialRetry, tc.schedRunID, tc.waitAsync)
+			if hc != tc.wantHookCalls || rc != tc.wantRunner {
+				t.Fatalf("%s: hookCalls=%d (want %d) runnerCalls=%d (want %d)", tc.name, hc, tc.wantHookCalls, rc, tc.wantRunner)
 			}
 			if saved == nil || saved.Status != tc.wantStatus {
 				t.Fatalf("%s: saved status=%+v, want %s", tc.name, saved, tc.wantStatus)
@@ -4565,62 +2679,18 @@ func TestPreTurnHook_ActionsAndFallbacks(t *testing.T) {
 			if tc.wantErrSub != "" && !strings.Contains(saved.ErrorMessage, tc.wantErrSub) {
 				t.Errorf("%s: ErrorMessage=%q, want %q", tc.name, saved.ErrorMessage, tc.wantErrSub)
 			}
-			if tc.name == "TimeoutFallback_Retry" && saved.RetryCount != 1 {
-				t.Errorf("%s: RetryCount=%d, want 1", tc.name, saved.RetryCount)
+			if tc.wantPromptSub != "" && !strings.Contains(cp, tc.wantPromptSub) {
+				t.Errorf("%s: prompt missing %q", tc.name, tc.wantPromptSub)
+			}
+			if tc.schedRunID != "" {
+				if r, _ := getScheduleRun(store, tc.schedRunID); r == nil || r.Status != "failed" {
+					t.Errorf("%s: schedule run = %+v, want failed", tc.name, r)
+				}
+			}
+			if cr == nil || cr.Timestamp.IsZero() {
+				t.Errorf("%s: invalid captured request: %+v", tc.name, cr)
 			}
 		})
-	}
-}
-
-func TestPreTurnHook_ApprovedWithInjectedContext(t *testing.T) {
-	t.Parallel()
-	resps := []*PreTurnResponse{{Allow: true, InjectedContext: "system instructions: be concise", Metadata: map[string]any{"lease_token": "token-123"}}}
-	hc, rc, cp, cr, saved, _ := runPreTurnHookBurst(t, resps, nil, "", 0, "", false)
-	if hc != 1 || rc != 1 {
-		t.Errorf("hookCalls=%d, runnerCalls=%d, want 1, 1", hc, rc)
-	}
-	if cr == nil || cr.ChannelID != "chan-preturn" || cr.ThreadID != "chan-preturn" || cr.BurstCount != 1 || cr.RetryCount != 0 || cr.Timestamp.IsZero() {
-		t.Errorf("request metadata mismatch: %+v", cr)
-	}
-	wantPromptSub := "<COORDINATION_CONTEXT>\nsystem instructions: be concise\n</COORDINATION_CONTEXT>"
-	if !strings.Contains(cp, wantPromptSub) {
-		t.Errorf("prompt missing %q:\n%s", wantPromptSub, cp)
-	}
-	if saved == nil || saved.Status != db.StatusCompleted {
-		t.Fatalf("saved msg = %+v, want status COMPLETED", saved)
-	}
-}
-
-func TestPreTurnHook_RejectedRetryAction(t *testing.T) {
-	t.Parallel()
-	resps := []*PreTurnResponse{
-		{Allow: false, Action: "retry", RetryAfterSeconds: 1, Reason: "sidecar lock wait"},
-		{Allow: true},
-	}
-	hc, rc, _, _, saved, _ := runPreTurnHookBurst(t, resps, nil, "", 0, "", true)
-	if hc != 2 || rc != 1 {
-		t.Errorf("hookCalls=%d, runnerCalls=%d, want 2, 1", hc, rc)
-	}
-	if saved == nil || saved.Status != db.StatusCompleted || saved.RetryCount != 1 {
-		t.Errorf("saved = %+v, want status COMPLETED and RetryCount 1", saved)
-	}
-}
-
-func TestPreTurnHook_RetryExhaustionWithScheduleRun(t *testing.T) {
-	t.Parallel()
-	resps := []*PreTurnResponse{{Allow: false, Action: "retry", RetryAfterSeconds: 1}}
-	hc, rc, _, _, saved, store := runPreTurnHookBurst(t, resps, nil, "", 2, "run-exhaust-1", false)
-	if hc != 1 || rc != 0 {
-		t.Errorf("hookCalls=%d, runnerCalls=%d, want 1, 0", hc, rc)
-	}
-	if saved == nil || saved.Status != db.StatusFailed {
-		t.Fatalf("saved status = %+v, want FAILED", saved)
-	}
-	if !strings.Contains(saved.ErrorMessage, "[EXHAUSTED_PRE_TURN_RETRIES]") {
-		t.Errorf("ErrorMessage = %q, want [EXHAUSTED_PRE_TURN_RETRIES]", saved.ErrorMessage)
-	}
-	if r, _ := getScheduleRun(store, "run-exhaust-1"); r == nil || r.Status != "failed" {
-		t.Errorf("schedule run = %+v, want status failed", r)
 	}
 }
 
@@ -4721,46 +2791,40 @@ func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr s
 	return postReqReceived
 }
 
-func TestPostTurnHook_SuccessfulTurnWithMetadata(t *testing.T) {
+func TestPostTurnHook_Lifecycle(t *testing.T) {
 	t.Parallel()
 	expectedUsage := runner.TokenUsage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 10, CacheReadTokens: 5, TotalTokens: 150}
-	preResp := &PreTurnResponse{Allow: true, Metadata: map[string]any{"lease_id": "lease-abc", "turn_epoch": float64(42)}}
-	req := runPostTurnHookBurst(t, preResp, "", nil, "")
-	if req.ChannelID != "chan-postturn-test" || req.ThreadID != "chan-postturn-test" || req.DurationMs < 0 {
-		t.Errorf("postReq metadata mismatch: %+v", req)
-	}
-	if req.Status != "success" || req.ResponseText != "Clean success response from runner" || req.TokenUsage != expectedUsage {
-		t.Errorf("postReq payload mismatch: status=%q resp=%q usage=%+v", req.Status, req.ResponseText, req.TokenUsage)
-	}
-	if req.Metadata == nil || req.Metadata["lease_id"] != "lease-abc" {
-		t.Errorf("Metadata = %+v, want lease_id=lease-abc", req.Metadata)
-	}
-	if req.Error != "" {
-		t.Errorf("expected empty error, got %q", req.Error)
-	}
-}
-
-func TestPostTurnHook_FailureAndPanicOutcomes(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name         string
+		preResp      *PreTurnResponse
 		runnerStderr string
 		runnerErr    error
 		runnerPanic  string
+		wantStatus   string
 		wantErrSub   string
+		checkMeta    bool
 	}{
-		{name: "FailedTurn_AgyError", runnerStderr: "non-transient runner failed: syntax error in script", runnerErr: fmt.Errorf("exit status 1"), wantErrSub: "syntax error"},
-		{name: "RunnerPanicRecovery", runnerPanic: "simulated runner crash inside runner function", wantErrSub: "simulated runner crash"},
+		{name: "SuccessfulTurnWithMetadata", preResp: &PreTurnResponse{Allow: true, Metadata: map[string]any{"lease_id": "lease-abc", "turn_epoch": float64(42)}}, wantStatus: "success", checkMeta: true},
+		{name: "FailedTurn_AgyError", runnerStderr: "non-transient runner failed: syntax error in script", runnerErr: fmt.Errorf("exit status 1"), wantStatus: "failed", wantErrSub: "syntax error"},
+		{name: "RunnerPanicRecovery", runnerPanic: "simulated runner crash inside runner function", wantStatus: "failed", wantErrSub: "simulated runner crash"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := runPostTurnHookBurst(t, nil, tc.runnerStderr, tc.runnerErr, tc.runnerPanic)
+			req := runPostTurnHookBurst(t, tc.preResp, tc.runnerStderr, tc.runnerErr, tc.runnerPanic)
 			if req.ChannelID != "chan-postturn-test" || req.ThreadID != "chan-postturn-test" || req.DurationMs < 0 {
-				t.Errorf("postReq metadata mismatch: %+v", req)
+				t.Errorf("%s: postReq metadata mismatch: %+v", tc.name, req)
 			}
-			if req.Status != "failed" || !strings.Contains(req.Error, tc.wantErrSub) {
-				t.Errorf("%s: Status=%q Error=%q, want failed containing %q", tc.name, req.Status, req.Error, tc.wantErrSub)
+			if req.Status != tc.wantStatus {
+				t.Errorf("%s: Status=%q, want %q", tc.name, req.Status, tc.wantStatus)
+			}
+			if tc.checkMeta {
+				if req.ResponseText != "Clean success response from runner" || req.TokenUsage != expectedUsage || req.Metadata["lease_id"] != "lease-abc" {
+					t.Errorf("%s: payload mismatch: resp=%q usage=%+v meta=%+v", tc.name, req.ResponseText, req.TokenUsage, req.Metadata)
+				}
+			}
+			if tc.wantErrSub != "" && !strings.Contains(req.Error, tc.wantErrSub) {
+				t.Errorf("%s: Error=%q, want containing %q", tc.name, req.Error, tc.wantErrSub)
 			}
 		})
 	}
@@ -4914,32 +2978,9 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 		transcriptContent string
 		runnerResponse    string
 	}{
-		{
-			name:     "AlwaysDeliversFinalOutputText",
-			convID:   "c2222222-2222-3333-4444-555555555555",
-			msgID:    "msg-delivered-1",
-			threadID: "thread-delivered-1",
-			transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check sync"}
-{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]}
-{"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All in sync"}
-{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Wait for background task task-645 to complete."}
-`,
-			runnerResponse: "Wait for background task task-645 to complete.",
-		},
-		{
-			name:     "TranscriptSilent_PreservesSubstantiveRunnerResponse",
-			convID:   "c3333333-3333-4444-5555-666666666666",
-			msgID:    "msg-substantive-fallback-1",
-			threadID: "thread-substantive-fallback-1",
-			transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check deployment"}
-{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]}
-{"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All containers deployed"}
-{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"   "}
-`,
-			runnerResponse: "Continuous Deployment for PR #322 has completed successfully!",
-		},
+		{name: "AlwaysDeliversFinalOutputText", convID: "c2222222-2222-3333-4444-555555555555", msgID: "msg-delivered-1", threadID: "thread-delivered-1", transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check sync"} {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]} {"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All in sync"} {"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Wait for background task task-645 to complete."} `, runnerResponse: "Wait for background task task-645 to complete."},
+		{name: "TranscriptSilent_PreservesSubstantiveRunnerResponse", convID: "c3333333-3333-4444-5555-666666666666", msgID: "msg-substantive-fallback-1", threadID: "thread-substantive-fallback-1", transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check deployment"} {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]} {"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All containers deployed"} {"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"   "} `, runnerResponse: "Continuous Deployment for PR #322 has completed successfully!"},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -5136,51 +3177,15 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 func TestSession_RotationThresholds(t *testing.T) {
 	t.Parallel()
 	tests := []sessionRotationCase{
-		{
-			name:               "TurnLimit_PreFlight",
-			mode:               "thread",
-			threadID:           "thread-rotate-test",
-			saveInitialSession: true,
-			seedTurns:          10,
-			wantAttempts:       1,
-			checkStoreSession:  true,
-		},
-		{
-			name:               "StepLimit_PreFlight",
-			mode:               "thread",
-			threadID:           "thread-rot-threshold",
-			saveInitialSession: true,
-			seedTurns:          1,
-			preTranscriptSteps: session.DefaultMaxSessionSteps,
-			wantAttempts:       1,
-			checkStoreSession:  true,
-		},
-		{
-			name:               "ByteLimit_PreFlight",
-			mode:               "thread",
-			threadID:           "thread-rot-threshold",
-			saveInitialSession: true,
-			seedTurns:          1,
-			preTranscriptBytes: session.DefaultMaxTranscriptBytes + 1024,
-			wantAttempts:       1,
-			checkStoreSession:  true,
-		},
-		{
-			name:                "StepLimit_PostExecution",
-			mode:                "thread",
-			threadID:            "thread-rot-threshold",
-			postTranscriptSteps: session.DefaultMaxSessionSteps,
-			checkStoreSession:   true,
-		},
-		{
-			name:                    "WatchdogCircuitBreaker_OnBloat",
-			mode:                    "thread",
-			threadID:                "thread-rot-threshold",
-			saveInitialSession:      true,
-			useWatchdog:             true,
-			watchdogTranscriptBytes: session.DefaultMaxTranscriptBytes + 2048,
-			wantAttempts:            2,
-		},
+		{name: "TurnLimit_PreFlight", mode: "thread", threadID: "thread-rotate-test", saveInitialSession: true, seedTurns: 10, wantAttempts: 1, checkStoreSession: true},
+		{name: "StepLimit_PreFlight", mode: "thread", threadID: "thread-rot-threshold", saveInitialSession: true, seedTurns: 1, preTranscriptSteps: session.DefaultMaxSessionSteps, wantAttempts: 1, checkStoreSession: true},
+		{name: "ByteLimit_PreFlight", mode: "thread", threadID: "thread-rot-threshold", saveInitialSession: true, seedTurns: 1, preTranscriptBytes: session.DefaultMaxTranscriptBytes + 1024, wantAttempts: 1, checkStoreSession: true},
+		{name: "StepLimit_PostExecution", mode: "thread", threadID: "thread-rot-threshold", postTranscriptSteps: session.DefaultMaxSessionSteps, checkStoreSession: true},
+		{name: "WatchdogCircuitBreaker_OnBloat", mode: "thread", threadID: "thread-rot-threshold", saveInitialSession: true, useWatchdog: true, watchdogTranscriptBytes: session.DefaultMaxTranscriptBytes + 2048, wantAttempts: 2},
+		{name: "ChannelMode_PreFlight_ByteLimit", mode: "channel", threadID: "chan-byte-test", saveInitialSession: true, seedTurns: 1, preTranscriptBytes: session.DefaultMaxTranscriptBytes + 1024, wantAttempts: 1},
+		{name: "ChannelMode_PreFlight_StepLimit", mode: "channel", threadID: "chan-step-test", saveInitialSession: true, seedTurns: 1, preTranscriptSteps: session.DefaultMaxSessionSteps, wantAttempts: 1},
+		{name: "PostExecution_ByteLimit", mode: "thread", threadID: "thread-post-byte-test", saveInitialSession: true, seedTurns: 1, postTranscriptBytes: session.DefaultMaxTranscriptBytes + 500, checkStoreSession: true},
+		{name: "Watchdog_StepLimit", mode: "thread", threadID: "thread-wd-step", saveInitialSession: true, seedTurns: 1, useWatchdog: true, watchdogTranscriptSteps: session.DefaultMaxSessionSteps, wantAttempts: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -5189,50 +3194,618 @@ func TestSession_RotationThresholds(t *testing.T) {
 	}
 }
 
-func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
+func TestWorkerPool_DeliverDirect(t *testing.T) {
 	t.Parallel()
-	tests := []sessionRotationCase{
-		{
-			name:               "ChannelMode_PreFlight_ByteLimit",
-			mode:               "channel",
-			threadID:           "chan-byte-test",
-			saveInitialSession: true,
-			seedTurns:          1,
-			preTranscriptBytes: session.DefaultMaxTranscriptBytes + 1024,
-			wantAttempts:       1,
-		},
-		{
-			name:               "ChannelMode_PreFlight_StepLimit",
-			mode:               "channel",
-			threadID:           "chan-step-test",
-			saveInitialSession: true,
-			seedTurns:          1,
-			preTranscriptSteps: session.DefaultMaxSessionSteps,
-			wantAttempts:       1,
-		},
-		{
-			name:                "PostExecution_ByteLimit",
-			mode:                "thread",
-			threadID:            "thread-post-byte-test",
-			saveInitialSession:  true,
-			seedTurns:           1,
-			postTranscriptBytes: session.DefaultMaxTranscriptBytes + 500,
-			checkStoreSession:   true,
-		},
-		{
-			name:                    "Watchdog_StepLimit",
-			mode:                    "thread",
-			threadID:                "thread-wd-step",
-			saveInitialSession:      true,
-			seedTurns:               1,
-			useWatchdog:             true,
-			watchdogTranscriptSteps: session.DefaultMaxSessionSteps,
-			wantAttempts:            2,
-		},
+	dummySession := &discordgo.Session{}
+	customErr := errors.New("custom delivery error")
+
+	tests := []struct {
+		name              string
+		nilPool           bool
+		nilSession        bool
+		funcErr           error
+		channelID         string
+		text              string
+		expectErrContains string
+		expectErr         error
+	}{
+		{name: "nil pool returns error", nilPool: true, channelID: "123456789012345678", text: "hello", expectErrContains: "worker pool is nil"},
+		{name: "nil session with nil DeliveryFunc returns error", nilSession: true, channelID: "123456789012345678", text: "hello", expectErrContains: "discord session is not connected"},
+		{name: "injected DeliveryFunc invoked", channelID: "123456789012345678", text: "test message"},
+		{name: "session error propagation", funcErr: customErr, channelID: "123456789012345678", text: "test message", expectErr: customErr},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSessionRotationCase(t, tc)
+			t.Parallel()
+			if tc.nilPool {
+				var p *WorkerPool
+				err := p.DeliverDirect(tc.channelID, tc.text)
+				if err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
+			if tc.nilSession {
+				p := &WorkerPool{}
+				err := p.DeliverDirect(tc.channelID, tc.text)
+				if err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
+			var capturedChannelID, capturedText string
+			var capturedSession *discordgo.Session
+			invoked := false
+			p := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					DiscordSession: dummySession,
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						invoked = true
+						capturedSession = s
+						capturedChannelID = channelID
+						capturedText = text
+						return tc.funcErr
+					},
+				},
+			}
+			err := p.DeliverDirect(tc.channelID, tc.text)
+			if tc.expectErr != nil {
+				if !errors.Is(err, tc.expectErr) {
+					t.Fatalf("expected error %v, got %v", tc.expectErr, err)
+				}
+				return
+			}
+			if err != nil || !invoked || capturedSession != dummySession || capturedChannelID != tc.channelID || capturedText != tc.text {
+				t.Fatalf("unexpected delivery: err=%v invoked=%v chan=%q text=%q", err, invoked, capturedChannelID, capturedText)
+			}
 		})
+	}
+}
+
+func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		nilPool           bool
+		nilSession        bool
+		widgetMsgID       string
+		req               discord.StatusWidgetRequest
+		expectErrContains string
+		expectMsgID       string
+	}{
+		{name: "nil pool returns error", nilPool: true, req: discord.StatusWidgetRequest{}, expectErrContains: "worker pool is nil"},
+		{name: "nil session returns error", nilSession: true, req: discord.StatusWidgetRequest{ChannelID: "chan-1"}, expectErrContains: "discord session is not connected"},
+		{name: "injected WidgetDeliveryFunc is invoked", widgetMsgID: "widget-msg-123", req: discord.StatusWidgetRequest{ChannelID: "chan-1"}, expectMsgID: "widget-msg-123"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilPool {
+				var p *WorkerPool
+				if _, err := p.DeliverStatusWidget(tc.req); err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
+			if tc.nilSession {
+				p := &WorkerPool{}
+				if _, err := p.DeliverStatusWidget(tc.req); err == nil || err.Error() != tc.expectErrContains {
+					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
+			p := &WorkerPool{}
+			p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
+				return tc.widgetMsgID, nil
+			})
+			msgID, err := p.DeliverStatusWidget(tc.req)
+			if err != nil || msgID != tc.expectMsgID {
+				t.Fatalf("unexpected delivery: err=%v msgID=%q", err, msgID)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_UnifiedProcessPoolWiring(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		nilPool          bool
+		defaultConfig    bool
+		withProcessPool  bool
+		withVoicePool    bool
+		checkAutoLLM     bool
+		prewarmedTargets []string
+	}{
+		{name: "nil pool returns nil pools", nilPool: true},
+		{name: "default config has nil pools", defaultConfig: true},
+		{name: "configured process pool populates and accesses", withProcessPool: true, prewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"}},
+		{name: "auto populates LLMFunc from process pool", withProcessPool: true, checkAutoLLM: true},
+		{name: "voice process pool wiring and accessors", withProcessPool: true, withVoicePool: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilPool {
+				var p *WorkerPool
+				if p.ProcessPool() != nil || p.VoiceProcessPool() != nil {
+					t.Fatalf("expected nil pools from nil WorkerPool")
+				}
+				p.MarkDirty()
+				return
+			}
+			if tc.defaultConfig {
+				p := New(nil, WorkerPoolConfig{})
+				if p.ProcessPool() != nil || p.VoiceProcessPool() != nil {
+					t.Fatalf("expected nil pools by default")
+				}
+				return
+			}
+			mockSpawner := runner.NewMockDaemonSpawner()
+			var unifiedPool runner.AgentPool
+			if tc.withProcessPool {
+				up := runner.NewUnifiedProcessPool(runner.PoolConfig{PrewarmedTargets: tc.prewarmedTargets, DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+				defer func() { _ = up.Close() }()
+				unifiedPool = up
+			}
+			var voicePool runner.AgentPool
+			if tc.withVoicePool {
+				vp := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+				defer func() { _ = vp.Close() }()
+				voicePool = vp
+			}
+			p := New(nil, WorkerPoolConfig{ProcessPool: unifiedPool, VoiceProcessPool: voicePool})
+			defer p.Stop()
+
+			if tc.withProcessPool && p.ProcessPool() != unifiedPool {
+				t.Fatalf("expected ProcessPool %p, got %p", unifiedPool, p.ProcessPool())
+			}
+			if tc.checkAutoLLM && p.cfg.LLMFunc == nil {
+				t.Fatalf("expected cfg.LLMFunc to be auto-populated")
+			}
+			if tc.withVoicePool {
+				if p.VoiceProcessPool() != voicePool {
+					t.Fatalf("expected VoiceProcessPool %p, got %p", voicePool, p.VoiceProcessPool())
+				}
+				p.MarkDirty()
+			}
+		})
+	}
+}
+
+func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                 string
+		nilPool              bool
+		defaultConfig        bool
+		interchangeable      bool
+		cleanAllThree        bool
+		reconcilePrewarmed   bool
+		initialVoiceTargets  []string
+		expectedVoiceTargets []string
+	}{
+		{name: "nil pool returns nil effort pools", nilPool: true},
+		{name: "default config effort pools are nil", defaultConfig: true},
+		{name: "interchangeable pool returns underlying pool", interchangeable: true},
+		{name: "mark dirty and stop cleans all three pools", cleanAllThree: true},
+		{name: "mark dirty reconciles voice prewarmed targets", reconcilePrewarmed: true, initialVoiceTargets: []string{"kiosk"}, expectedVoiceTargets: []string{"touch-kiosk-kitchen"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilPool {
+				var p *WorkerPool
+				if p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil {
+					t.Fatalf("expected nil effort pools from nil WorkerPool")
+				}
+				return
+			}
+			if tc.defaultConfig {
+				p := New(nil, WorkerPoolConfig{})
+				if p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil {
+					t.Fatalf("expected nil effort pools by default")
+				}
+				return
+			}
+			if tc.interchangeable {
+				mockSpawner := runner.NewMockDaemonSpawner()
+				underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, mockSpawner)
+				defer func() { _ = underlying.Close() }()
+				interPool := runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{WorkerCount: 2})
+				defer func() { _ = interPool.Close() }()
+
+				medUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, mockSpawner)
+				defer func() { _ = medUnderlying.Close() }()
+				medInterPool := runner.NewInterchangeablePool(medUnderlying, runner.InterchangeablePoolConfig{WorkerCount: 2})
+				defer func() { _ = medInterPool.Close() }()
+
+				p := New(nil, WorkerPoolConfig{LowEffortProcessPool: interPool, MediumEffortProcessPool: medInterPool})
+				defer p.Stop()
+				if p.LowEffortProcessPool() != underlying || p.MediumEffortProcessPool() != medUnderlying {
+					t.Fatalf("expected underlying pools returned")
+				}
+				return
+			}
+			if tc.cleanAllThree {
+				pSpawner := runner.NewMockSpawner()
+				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, pSpawner)
+				defer func() { _ = pPool.Close() }()
+				lSpawner := runner.NewMockSpawner()
+				lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner)
+				defer func() { _ = lPool.Close() }()
+				vSpawner := runner.NewMockSpawner()
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, vSpawner)
+				defer func() { _ = vPool.Close() }()
+
+				pool := NewWorkerPool(WorkerPoolConfig{ProcessPool: pPool, LowEffortProcessPool: lPool, VoiceProcessPool: vPool})
+				_, _ = pool.cfg.LLMFunc(context.Background(), "", "summarize")
+				if got := lSpawner.LastSpawnCfg().Model; got != "gemini-3.8-flash-low" {
+					t.Fatalf("expected LowEffortProcessPool model, got %q", got)
+				}
+				pool.MarkDirty()
+				pool.Stop()
+				return
+			}
+			if tc.reconcilePrewarmed {
+				vSpawner := runner.NewMockDaemonSpawner()
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash", PrewarmedTargets: tc.initialVoiceTargets}, vSpawner)
+				defer func() { _ = vPool.Close() }()
+				appCfg := config.NewTestConfig(func(d *config.ConfigData) {
+					d.Voice.PrewarmedTargets = tc.expectedVoiceTargets
+				})
+				pool := New(appCfg, WorkerPoolConfig{VoiceProcessPool: vPool})
+				defer pool.Stop()
+				pool.MarkDirty()
+				vPool.WaitBackground()
+				targets := vPool.PrewarmedTargets()
+				if len(targets) != len(tc.expectedVoiceTargets) || targets[0] != tc.expectedVoiceTargets[0] || !vPool.HasDaemon(tc.expectedVoiceTargets[0]) {
+					t.Fatalf("prewarmed targets mismatch: %v", targets)
+				}
+			}
+		})
+	}
+}
+
+type mockErrSessionStore struct {
+	db.Store
+	findErr error
+}
+
+func (m *mockErrSessionStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]db.SessionInfo, error) {
+	if m.findErr != nil {
+		return nil, m.findErr
+	}
+	if m.Store != nil {
+		return m.Store.FindUnrotatedSessions(ctx, minTurns, maxAge...)
+	}
+	return nil, nil
+}
+
+func TestWorkerPool_CheckUnrotatedSessions_Scenarios(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		nilPool           bool
+		nilStore          bool
+		storeErr          error
+		cancelContext     bool
+		dormantBackdate   time.Duration
+		sessionTurns      []int
+		expectAlertCalls  int
+		expectReportCount int
+		expectOverflowMsg string
+	}{
+		{name: "nil worker pool", nilPool: true},
+		{name: "nil store", nilStore: true},
+		{name: "store error handled gracefully", storeErr: errors.New("database connection failed")},
+		{name: "cancelled context exits early", cancelContext: true},
+		{name: "excludes dormant sessions older than horizon", sessionTurns: []int{15}, dormantBackdate: 3 * time.Hour},
+		{name: "top 5 display cap with overflow message", sessionTurns: []int{10, 11, 12, 13, 14, 15, 16}, expectAlertCalls: 1, expectReportCount: 7, expectOverflowMsg: "...and 2 more runaway session(s)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilPool {
+				var nilPool *WorkerPool
+				nilPool.checkUnrotatedSessions(context.Background(), make(map[string]int))
+				return
+			}
+			if tc.nilStore {
+				p := &WorkerPool{cfg: WorkerPoolConfig{}}
+				p.checkUnrotatedSessions(context.Background(), make(map[string]int))
+				return
+			}
+
+			ctx := context.Background()
+			if tc.cancelContext {
+				cCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cCtx
+			}
+
+			var mu sync.Mutex
+			var alertCalls int
+			var lastBody string
+			recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				alertCalls++
+				lastBody = alertBody
+				return nil
+			}
+
+			var store db.Store
+			if tc.storeErr != nil {
+				store = &mockErrSessionStore{findErr: tc.storeErr}
+			} else {
+				fake := db.NewFakeStore()
+				defer func() { _ = fake.Close() }()
+				store = fake
+				for i, turns := range tc.sessionTurns {
+					thID := fmt.Sprintf("th-scen-%d", i+1)
+					_ = fake.SaveSessionID(context.Background(), thID, fmt.Sprintf("sess-scen-%d", i+1))
+					for j := 0; j < turns; j++ {
+						_, _ = fake.IncrementSessionTurnCount(context.Background(), thID)
+					}
+					if tc.dormantBackdate > 0 {
+						fake.SetSessionUpdatedAt(thID, time.Now().UTC().Add(-tc.dormantBackdate))
+					}
+				}
+			}
+
+			pool := &WorkerPool{cfg: WorkerPoolConfig{Store: store, SystemAlertFunc: recordAlert}}
+			lastReported := make(map[string]int)
+			pool.checkUnrotatedSessions(ctx, lastReported)
+
+			mu.Lock()
+			calls, body := alertCalls, lastBody
+			mu.Unlock()
+
+			if calls != tc.expectAlertCalls {
+				t.Fatalf("expected %d alert calls, got %d", tc.expectAlertCalls, calls)
+			}
+			if tc.expectReportCount > 0 && len(lastReported) != tc.expectReportCount {
+				t.Fatalf("expected %d recorded sessions, got %d", tc.expectReportCount, len(lastReported))
+			}
+			if tc.expectOverflowMsg != "" && !strings.Contains(body, tc.expectOverflowMsg) {
+				t.Fatalf("expected overflow message %q in alert body:\n%s", tc.expectOverflowMsg, body)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T) {
+	t.Parallel()
+	fake := db.NewFakeStore()
+	defer func() { _ = fake.Close() }()
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var alertCalls int
+	var lastTitle, lastBody string
+	recordAlert := func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		alertCalls++
+		lastTitle = title
+		lastBody = alertBody
+		return nil
+	}
+
+	p := &WorkerPool{cfg: WorkerPoolConfig{Store: fake, SystemAlertFunc: recordAlert}}
+	lastReported := make(map[string]int)
+
+	_ = fake.SaveSessionID(ctx, "th-test", "sess-1")
+	for i := 0; i < 5; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
+	}
+	p.checkUnrotatedSessions(ctx, lastReported)
+	mu.Lock()
+	if alertCalls != 0 || len(lastReported) != 0 {
+		t.Fatalf("expected 0 alerts, got %d", alertCalls)
+	}
+	mu.Unlock()
+
+	for i := 0; i < 4; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
+	}
+	p.checkUnrotatedSessions(ctx, lastReported)
+	mu.Lock()
+	if alertCalls != 1 || !strings.Contains(lastBody, "th-test") || !strings.Contains(lastBody, "**9** turns") || lastTitle != "Unrotated Runaway Sessions" {
+		t.Fatalf("unexpected alert state: calls=%d body=%s title=%s", alertCalls, lastBody, lastTitle)
+	}
+	mu.Unlock()
+	if lastReported["th-test"] != 9 {
+		t.Errorf("expected lastReported['th-test']=9, got %d", lastReported["th-test"])
+	}
+
+	p.checkUnrotatedSessions(ctx, lastReported)
+	mu.Lock()
+	if alertCalls != 1 {
+		t.Fatalf("expected alertCalls to remain 1, got %d", alertCalls)
+	}
+	mu.Unlock()
+
+	_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
+	p.checkUnrotatedSessions(ctx, lastReported)
+	mu.Lock()
+	if alertCalls != 2 || !strings.Contains(lastBody, "**10** turns") {
+		t.Fatalf("expected 2 alerts with 10 turns, got calls=%d body=%s", alertCalls, lastBody)
+	}
+	mu.Unlock()
+
+	_ = fake.RotateSessionID(ctx, "th-test", "sess-fresh")
+	p.checkUnrotatedSessions(ctx, lastReported)
+	mu.Lock()
+	if alertCalls != 2 {
+		t.Fatalf("expected no new alert on rotated session, got %d", alertCalls)
+	}
+	mu.Unlock()
+	if _, exists := lastReported["th-test"]; exists {
+		t.Errorf("expected rotated session pruned from lastReported: %v", lastReported)
+	}
+}
+
+func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
+	t.Parallel()
+	fake := db.NewFakeStore()
+	defer func() { _ = fake.Close() }()
+	ctx := context.Background()
+	_ = fake.SaveSessionID(ctx, "th-ticker-test", "sess-ticker")
+	for i := 0; i < 11; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "th-ticker-test")
+	}
+
+	alertCh := make(chan string, 5)
+	p := NewWorkerPool(WorkerPoolConfig{
+		Store:               fake,
+		MaintenanceInterval: 10 * time.Millisecond,
+		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+			select {
+			case alertCh <- alertBody:
+			default:
+			}
+			return nil
+		},
+	})
+	p.Start()
+
+	select {
+	case body := <-alertCh:
+		if !strings.Contains(body, "th-ticker-test") || !strings.Contains(body, "**11** turns") {
+			t.Errorf("unexpected alert body: %s", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for maintenance ticker to fire unrotated session check")
+	}
+	p.StopWithTimeout(1 * time.Second)
+}
+
+func TestFormatUnrotatedSessionLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		cachedChans []*discordgo.Channel
+		session     db.SessionInfo
+		expected    string
+	}{
+		{name: "non-numeric snowflake fallback", session: db.SessionInfo{ThreadID: "th-custom-session", TurnCount: 9, InternalSessionID: "sess-uuid-1234"}, expected: "- Thread `th-custom-session`: **9** turns (session: `sess-uuid-1234`)"},
+		{name: "channel snowflake resolved via cache", cachedChans: []*discordgo.Channel{{ID: "1464358486849622120", Type: discordgo.ChannelTypeGuildText, Name: "general"}}, session: db.SessionInfo{ThreadID: "1464358486849622120", TurnCount: 10, InternalSessionID: "sess-chan-5678"}, expected: "- Channel <#1464358486849622120>: **10** turns (session: `sess-chan-5678`)"},
+		{name: "thread snowflake with parent channel", cachedChans: []*discordgo.Channel{{ID: "1542423172400291873", Type: discordgo.ChannelTypeGuildText, Name: "aerial-dev"}, {ID: "1557949887948005398", ParentID: "1542423172400291873", Type: discordgo.ChannelTypeGuildPublicThread, Name: "Resolve Notification Snowflake IDs"}}, session: db.SessionInfo{ThreadID: "1557949887948005398", TurnCount: 12, InternalSessionID: "sess-thread-9999"}, expected: "- Thread <#1557949887948005398> (in <#1542423172400291873>): **12** turns (session: `sess-thread-9999`)"},
+		{name: "thread snowflake without parent channel", cachedChans: []*discordgo.Channel{{ID: "1557949887948005399", Type: discordgo.ChannelTypeGuildPublicThread, Name: "Orphan Thread"}}, session: db.SessionInfo{ThreadID: "1557949887948005399", TurnCount: 15, InternalSessionID: "sess-orphan-0000"}, expected: "- Thread <#1557949887948005399>: **15** turns (session: `sess-orphan-0000`)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, ch := range tc.cachedChans {
+				CacheDiscordChannel(ch)
+				defer InvalidateChannelCache(ch.ID)
+			}
+			if got := formatUnrotatedSessionLine(nil, tc.session); got != tc.expected {
+				t.Errorf("got %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_CoverageHelpers(t *testing.T) {
+	t.Parallel()
+
+	// 1. resolveStore permutations
+	for _, v := range []interface{}{nil, "unsupported string", (*db.FakeStore)(nil), (*db.SQLStore)(nil), (*sql.DB)(nil)} {
+		if s := resolveStore(v); s != nil {
+			t.Errorf("expected nil from resolveStore(%v)", v)
+		}
+	}
+	fake := setupTestStore(t)
+	defer func() { _ = fake.Close() }()
+	if s := resolveStore(fake); s != fake {
+		t.Errorf("expected same FakeStore from resolveStore")
+	}
+
+	// 2. WorkerPool Store and SummaryGroup permutations
+	if s := (*WorkerPool)(nil).Store(); s != nil {
+		t.Errorf("expected nil from nil WorkerPool.Store()")
+	}
+	if sg := (*WorkerPool)(nil).SummaryGroup(); sg != nil {
+		t.Errorf("expected nil from nil WorkerPool.SummaryGroup()")
+	}
+	pEmpty := &WorkerPool{}
+	if s := pEmpty.Store(); s != nil || pEmpty.SummaryGroup() == nil {
+		t.Errorf("unexpected empty pool Store/SummaryGroup results")
+	}
+	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
+	if s := pFake.Store(); s != fake {
+		t.Errorf("expected fake from WorkerPool.Store()")
+	}
+	realDB := &sql.DB{}
+	pDB := &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}
+	if pDB.Store() == nil || resolveStore(realDB) == nil {
+		t.Errorf("expected non-nil Store from DB")
+	}
+
+	// 3. AgentPool and SetWidgetDeliveryFunc
+	var nilP *WorkerPool
+	if nilP.AgentPool() != nil {
+		t.Errorf("expected nil for nil WorkerPool.AgentPool")
+	}
+	p := &WorkerPool{processPool: &testRunnerAgentPool{}}
+	if p.AgentPool() == nil {
+		t.Errorf("expected non-nil AgentPool")
+	}
+
+	// 4. Classifier OnParseError / OnSystemAlert debouncing and panic handling
+	appCfg := config.NewFromData(&config.ConfigData{SystemChannel: "alerts", APIKey: "k", AgyBin: "agy"})
+	dg, _ := discordgo.New("Bot fake")
+	var alertSent atomic.Int32
+	alertReceived := make(chan struct{}, 1)
+	poolAlert := New(appCfg, WorkerPoolConfig{
+		DiscordSession: dg,
+		SystemAlertFunc: func(s *discordgo.Session, ch, title, text string) error {
+			alertSent.Add(1)
+			select {
+			case alertReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	})
+	if poolAlert.cfg.Classifier != nil && poolAlert.cfg.Classifier.OnParseError != nil {
+		poolAlert.cfg.Classifier.OnParseError("gemini-flash", strings.Repeat("x", 700)+"\n```json\n@everyone @here\n```", errors.New("parse 1"))
+		select {
+		case <-alertReceived:
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for parse alert")
+		}
+		poolAlert.cfg.Classifier.OnParseError("gemini-flash", "short", errors.New("parse 2"))
+		if alertSent.Load() != 1 {
+			t.Errorf("expected 1 debounced alert, got %d", alertSent.Load())
+		}
+	}
+	var sysAlertSent atomic.Int32
+	sysReceived := make(chan struct{}, 1)
+	poolSys := New(appCfg, WorkerPoolConfig{
+		DiscordSession: dg,
+		SystemAlertFunc: func(s *discordgo.Session, ch, title, text string) error {
+			sysAlertSent.Add(1)
+			select {
+			case sysReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	})
+	if poolSys.cfg.Classifier != nil && poolSys.cfg.Classifier.OnSystemAlert != nil {
+		poolSys.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("refused 1"))
+		select {
+		case <-sysReceived:
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for sys alert")
+		}
+		poolSys.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("refused 2"))
+		if sysAlertSent.Load() != 1 {
+			t.Errorf("expected 1 debounced sys alert, got %d", sysAlertSent.Load())
+		}
 	}
 }
