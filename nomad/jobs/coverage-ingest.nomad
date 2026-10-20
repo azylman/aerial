@@ -69,7 +69,7 @@ apk add --no-cache postgresql-client curl >/dev/null 2>&1
 
 COVERAGE_DIR="/share/coverage"
 
-mkdir -p "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
+mkdir -p "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" "$COVERAGE_DIR/aura-farming" "$COVERAGE_DIR/photos-api" "$COVERAGE_DIR/photos-sync" "$COVERAGE_DIR/scratch-service" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covcounters.*" -mtime +2 -delete 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covmeta.*" -mtime +7 -delete 2>/dev/null || true
 
@@ -90,6 +90,14 @@ for flush_url in \
   "http://brain.aerial/debug/coverage/flush" \
   "http://mirrormere-core.aerial/debug/coverage/flush" \
   "http://mirrormere-hass-proxy.aerial/debug/coverage/flush" \
+  "http://aura-farming.aerial/debug/coverage/flush" \
+  "http://photos-api.aerial/debug/coverage/flush" \
+  "http://photos-sync.aerial/debug/coverage/flush" \
+  "http://scratch-service.aerial/debug/coverage/flush" \
+  "http://127.0.0.1:4012/debug/coverage/flush" \
+  "http://127.0.0.1:4013/debug/coverage/flush" \
+  "http://127.0.0.1:4014/debug/coverage/flush" \
+  "http://127.0.0.1:4017/debug/coverage/flush" \
   "http://127.0.0.1:4020/debug/coverage/flush" \
   "http://127.0.0.1:4025/debug/coverage/flush" \
   "http://127.0.0.1:8087/debug/coverage/flush" \
