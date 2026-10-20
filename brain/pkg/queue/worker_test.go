@@ -548,8 +548,8 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	now := time.Now().UTC()
 	mockDiscordMsgs := []*discordgo.Message{
 		nil,
-		{ID: "1552732003076669002", ChannelID: "1552732003076669460", Content: "Can we add SVG?", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "169260920550195200", Username: "arcane103"}, Mentions: []*discordgo.User{{ID: "bot-123", Username: "Aerial"}}, ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "Aerial"}}},
-		{ID: "1552732003076669001", ChannelID: "1552732003076669460", Content: "Weather widget", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "169260920550195200", Username: "arcane103"}},
+		{ID: "1552732003076669002", ChannelID: "1552732003076669460", Content: "Can we add SVG?", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "100000000000000001", Username: "test-user"}, Mentions: []*discordgo.User{{ID: "bot-123", Username: "Aerial"}}, ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "Aerial"}}},
+		{ID: "1552732003076669001", ChannelID: "1552732003076669460", Content: "Weather widget", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "100000000000000001", Username: "test-user"}},
 		{ID: "1552732003076669000", ChannelID: "1552732003076669460", Content: "Webhook notification", WebhookID: "hook-123"},
 		{ID: "1552732003076669099", ChannelID: "1552732003076669460", Content: "Current burst msg", Timestamp: now},
 	}
@@ -563,7 +563,7 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 
 	fakeStore := db.NewFakeStore()
 	ctx := context.Background()
-	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-1", ThreadID: "1552732003076669460", AuthorName: "arcane103", Content: "Normal chat", CreatedAt: now.Add(-2 * time.Minute)})
+	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-1", ThreadID: "1552732003076669460", AuthorName: "test-user", Content: "Normal chat", CreatedAt: now.Add(-2 * time.Minute)})
 	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-sched", ThreadID: "1552732003076669460", AuthorName: "Scheduler", Content: "Check PR", ScheduleRunID: "run-123", CreatedAt: now.Add(-1 * time.Minute)})
 
 	tests := []struct {
@@ -575,8 +575,8 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 		wantErr                    bool
 	}{
 		{name: "DiscordAPI_Success", dg: dgSuccess, burst: []db.Message{{ID: "1552732003076669099"}}, limit: 10, wantCount: 3, firstID: "1552732003076669000", firstAuthor: "Webhook"},
-		{name: "FallbackDB_Filtered", dg: dgFail, store: fakeStore, limit: 0, wantCount: 1, firstID: "msg-1", firstAuthor: "arcane103"},
-		{name: "FallbackDB_ClampedLimit", dg: dgFail, store: fakeStore, limit: 200, wantCount: 1, firstID: "msg-1", firstAuthor: "arcane103"},
+		{name: "FallbackDB_Filtered", dg: dgFail, store: fakeStore, limit: 0, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
+		{name: "FallbackDB_ClampedLimit", dg: dgFail, store: fakeStore, limit: 200, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
 		{name: "StoreError", store: &mockErrRecentStore{}, limit: 10, wantErr: true},
 		{name: "NilStore", limit: 10, wantCount: 0},
 	}
@@ -1288,7 +1288,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		HistoryFetcher: func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
-			return []HistoryMessage{{ID: "hist-1", AuthorName: "alex", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)}}, nil
+			return []HistoryMessage{{ID: "hist-1", AuthorName: "test-user", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)}}, nil
 		},
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
@@ -1651,7 +1651,7 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	pool := New(appCfg, WorkerPoolConfig{
 		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
 		HistoryFetcher: func(ctx context.Context, tid, beforeID string, limit int) ([]HistoryMessage, error) {
-			return []HistoryMessage{{ID: "msg-hist-1", AuthorName: "alex", Content: "pre-rotation message", CreatedAt: time.Now().Add(-10 * time.Minute)}}, nil
+			return []HistoryMessage{{ID: "msg-hist-1", AuthorName: "test-user", Content: "pre-rotation message", CreatedAt: time.Now().Add(-10 * time.Minute)}}, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			if strings.Contains(prompt, "Synthesize the following") {
@@ -1873,12 +1873,12 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			defer pool.Stop()
 
 			if tc.yieldType == "daemon_tracker" {
-				d, _ := pool.ProcessPool().GetOrCreate(context.Background(), tc.threadID, "")
+				d, _ := pool.ProcessPool().GetOrCreate(context.Background(), tc.threadID, tc.sessionID)
 				daemon = d
 				daemon.TaskTracker().Add(runner.TaskMetadata{TaskID: "task-999", StartedAt: time.Now()})
 			}
 
-			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "Alex", Content: "Run task", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "test-user", Content: "Run task", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 			_ = insertMessage(store, msg)
 			model := pool.GetRuntimeConfig()
 			initialMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))

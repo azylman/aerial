@@ -396,20 +396,22 @@ func resolveBurstEffort(burst []db.Message) string {
 	return "high"
 }
 
+func (te *turnExecution) poolCtx() context.Context {
+	if te != nil && te.pool != nil && te.pool.ctx != nil {
+		return te.pool.ctx
+	}
+	return context.Background()
+}
+
 func (te *turnExecution) resolveWebhookDispatcher() (WebhookDispatcher, context.Context) {
 	var dispatcher WebhookDispatcher
-	var poolCtx context.Context
-	if te.pool != nil {
+	if te != nil && te.pool != nil {
 		dispatcher = te.pool.WebhookDispatcher()
-		poolCtx = te.pool.ctx
 	}
 	if dispatcher == nil {
 		dispatcher = NewDefaultWebhookDispatcher()
 	}
-	if poolCtx == nil {
-		poolCtx = context.Background()
-	}
-	return dispatcher, poolCtx
+	return dispatcher, te.poolCtx()
 }
 
 func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
@@ -1064,11 +1066,7 @@ func (te *turnExecution) buildTurnPrompt() {
 			}
 			return turnHistory
 		}
-		baseCtx := context.Background()
-		if te.pool != nil && te.pool.ctx != nil {
-			baseCtx = te.pool.ctx
-		}
-		fetchCtx, fetchCancel := context.WithTimeout(baseCtx, 3*time.Second)
+		fetchCtx, fetchCancel := context.WithTimeout(te.poolCtx(), 3*time.Second)
 		defer fetchCancel()
 		var err error
 		if te.pool.cfg.HistoryFetcher != nil {
@@ -1112,11 +1110,7 @@ func (te *turnExecution) buildTurnPrompt() {
 
 	var ambientCtx string
 	if te.policy.AmbientContext != nil && te.pool != nil && te.pool.cfg.AmbientResolver != nil {
-		ctx := context.Background()
-		if te.pool.ctx != nil {
-			ctx = te.pool.ctx
-		}
-		if actx, ambErr := te.pool.cfg.AmbientResolver(ctx, te.policy.AmbientContext); ambErr != nil {
+		if actx, ambErr := te.pool.cfg.AmbientResolver(te.poolCtx(), te.policy.AmbientContext); ambErr != nil {
 			log.Printf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
 		} else if strings.TrimSpace(actx) != "" {
 			ambientCtx = actx
@@ -1249,11 +1243,7 @@ func (te *turnExecution) resolveTurnOutcome(runCtx context.Context, turnRes *run
 		stderr = turnRes.Stderr
 	}
 	if !outcome.IsSuccess && targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil {
-		poolCtx := context.Background()
-		if te.pool.ctx != nil {
-			poolCtx = te.pool.ctx
-		}
-		if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+		if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(te.poolCtx(), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
 			outcome.ErrorDetail = transcriptErr
 			stderr = transcriptErr
 		}
@@ -1384,7 +1374,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	return false
 }
 
-func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, activePool runner.AgentPool, exitCode int, stdout, stderr string, autoResumeCount *int, accumulatedUsage *runner.TokenUsage, promptToSend *string, currentModel string, runCtx context.Context) bool {
+func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, activePool runner.AgentPool, exitCode int, stdout, stderr string, autoResumeCount *int, accumulatedUsage *runner.TokenUsage, promptToSend *string, currentModel string) bool {
 	isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
 	var unfinishedTaskID string
 	detectionSource := "stderr_signature"
@@ -1428,7 +1418,7 @@ func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, activePool ru
 			}
 			if te.pool.sessionMgr != nil && targetSessID != "" {
 				if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(targetSessID); sErr == nil && sessDir != "" {
-					waitCtx, waitCancel := context.WithTimeout(runCtx, 2*time.Second)
+					waitCtx, waitCancel := context.WithTimeout(te.poolCtx(), 2*time.Second)
 					exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
 					waitCancel()
 					if wErr == nil {
@@ -1591,11 +1581,7 @@ func (te *turnExecution) executeWithRetries() {
 			promptToSend = te.turnPrompt
 			targetSess := te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr, !isSessionCorruption && te.currentSessionID == "")
 			if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
-				poolCtx := context.Background()
-				if te.pool.ctx != nil {
-					poolCtx = te.pool.ctx
-				}
-				if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+				if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(te.poolCtx(), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
 					log.Printf("[Queue] Extracted turn error from session %s transcript: %s", targetSess, transcriptErr)
 					errDetail, stderr, lastErrDetail, lastStderr = transcriptErr, transcriptErr, transcriptErr, transcriptErr
 				}
@@ -1681,7 +1667,7 @@ func (te *turnExecution) executeWithRetries() {
 					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
 				} else {
 					te.resolveAndPersistSessionID(extSess, stdout, stderr, true)
-					if te.handleYieldTrap(resp, activePool, exitCode, stdout, stderr, &autoResumeCount, &accumulatedUsage, &promptToSend, currentModel, runCtx) {
+					if te.handleYieldTrap(resp, activePool, exitCode, stdout, stderr, &autoResumeCount, &accumulatedUsage, &promptToSend, currentModel) {
 						attempt--
 						continue
 					}
