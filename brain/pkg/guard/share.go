@@ -134,11 +134,24 @@ func inspectRunCommand(cmd, cwd string) bool {
 	}
 
 	// Split compound commands by operators (;, &&, ||, |, \n)
-	subCommands := splitCommands(cmd)
+	subCommands := splitPipeline(cmd)
 	for _, sub := range subCommands {
-		tokens := tokenizeCommand(sub)
+		tokens := tokenizeQuoteAware(sub)
 		if len(tokens) == 0 {
 			continue
+		}
+
+		// Unwrap bash -c <script> or sh -c <script>
+		bin := strings.ToLower(filepath.Base(tokens[0]))
+		if (bin == "bash" || bin == "sh") && len(tokens) >= 3 {
+			for i, t := range tokens {
+				if t == "-c" && i+1 < len(tokens) {
+					if inspectRunCommand(tokens[i+1], cwd) {
+						return true
+					}
+					break
+				}
+			}
 		}
 
 		cmdBin := strings.ToLower(filepath.Base(tokens[0]))
@@ -221,31 +234,3 @@ func isGitMutating(args []string) bool {
 	return false
 }
 
-func splitCommands(cmd string) []string {
-	// Replaces operators with newline delimiter then splits
-	s := cmd
-	for _, op := range []string{";", "&&", "||", "|"} {
-		s = strings.ReplaceAll(s, op, "\n")
-	}
-	lines := strings.Split(s, "\n")
-	var result []string
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l != "" {
-			result = append(result, l)
-		}
-	}
-	return result
-}
-
-func tokenizeCommand(sub string) []string {
-	// Simple whitespace tokenizer that strips surrounding quotes
-	var tokens []string
-	for _, field := range strings.Fields(sub) {
-		trimmed := strings.Trim(field, `"'`)
-		if trimmed != "" {
-			tokens = append(tokens, trimmed)
-		}
-	}
-	return tokens
-}
