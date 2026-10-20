@@ -153,27 +153,25 @@ func NewStatusUpdater(s *discordgo.Session, threadID string, enabled bool, opts 
 		turnStart:         time.Now(),
 		done:              make(chan struct{}),
 		flushNotify:       make(chan struct{}, 1),
-	}
-
-	// Default REST implementations via delivery / discordgo
-	u.sendFunc = func(channelID, text string) (string, error) {
-		if u.s == nil {
-			return "", fmt.Errorf("discord session is nil")
-		}
-		msg, err := u.s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Content: text,
-			Flags:   discordgo.MessageFlagsSuppressEmbeds,
-		})
-		if err != nil {
-			return "", err
-		}
-		return msg.ID, nil
-	}
-	u.editFunc = func(channelID, messageID, text string) error {
-		return delivery.EditMessage(u.s, channelID, messageID, text)
-	}
-	u.deleteFunc = func(channelID, messageID string) error {
-		return delivery.DeleteMessage(u.s, channelID, messageID)
+		sendFunc: func(channelID, text string) (string, error) {
+			if s == nil {
+				return "", fmt.Errorf("discord session is nil")
+			}
+			msg, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+				Content: text,
+				Flags:   discordgo.MessageFlagsSuppressEmbeds,
+			})
+			if err != nil {
+				return "", err
+			}
+			return msg.ID, nil
+		},
+		editFunc: func(channelID, messageID, text string) error {
+			return delivery.EditMessage(s, channelID, messageID, text)
+		},
+		deleteFunc: func(channelID, messageID string) error {
+			return delivery.DeleteMessage(s, channelID, messageID)
+		},
 	}
 
 	for _, opt := range opts {
@@ -431,8 +429,8 @@ func (u *StatusUpdater) Stop() {
 	u.wg.Wait()
 }
 
-// Reset resets updater state for retry attempts and deletes any active message.
-func (u *StatusUpdater) Reset() {
+// resetState performs thread-safe reset with optional message deletion and shutdown disable.
+func (u *StatusUpdater) resetState(deleteRemote, disable bool, warnSuffix string) {
 	if u == nil {
 		return
 	}
@@ -443,42 +441,32 @@ func (u *StatusUpdater) Reset() {
 	u.activeCommand = ""
 	u.lastCompletedTool = ""
 	u.lastCompletedCommand = ""
-	u.phase = ""
-	u.dirty = false
-	u.lastDelivered = ""
-	u.turnStart = time.Now()
+	if disable {
+		u.disabled = true
+	} else {
+		u.phase = ""
+		u.dirty = false
+		u.lastDelivered = ""
+		u.turnStart = time.Now()
+	}
 	u.mu.Unlock()
 
-	if msgID != "" {
+	if deleteRemote && msgID != "" {
 		go func(threadID, messageID string) {
 			if err := u.deleteFunc(threadID, messageID); err != nil && !delivery.IsMessageNotFoundError(err) {
-				log.Printf("[StatusUpdater] Warning deleting status message: %v", err)
+				log.Printf("[StatusUpdater] Warning deleting status message%s: %v", warnSuffix, err)
 			}
 		}(u.threadID, msgID)
 	}
 }
 
+// Reset resets updater state for retry attempts and deletes any active message.
+func (u *StatusUpdater) Reset() {
+	u.resetState(true, false, "")
+}
+
 // DeleteStatusMessage cleans up the status message from Discord with zero tombstone.
 // Deletion is executed non-blockingly so the worker thread is never stalled on Discord REST latency.
 func (u *StatusUpdater) DeleteStatusMessage() {
-	if u == nil {
-		return
-	}
-	u.mu.Lock()
-	msgID := u.statusMessageID
-	u.statusMessageID = ""
-	u.activeTool = ""
-	u.activeCommand = ""
-	u.lastCompletedTool = ""
-	u.lastCompletedCommand = ""
-	u.disabled = true
-	u.mu.Unlock()
-
-	if msgID != "" {
-		go func(threadID, messageID string) {
-			if err := u.deleteFunc(threadID, messageID); err != nil && !delivery.IsMessageNotFoundError(err) {
-				log.Printf("[StatusUpdater] Warning deleting status message on shutdown: %v", err)
-			}
-		}(u.threadID, msgID)
-	}
+	u.resetState(true, true, " on shutdown")
 }
