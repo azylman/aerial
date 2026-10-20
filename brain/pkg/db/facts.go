@@ -36,6 +36,20 @@ type FactWithEmbedding struct {
 	Embedding []float32
 }
 
+func optionalVectorArg(emb []float32) any {
+	if len(emb) == ExpectedEmbeddingDim {
+		return pgvector.NewVector(emb)
+	}
+	return nil
+}
+
+func adminMetadataClause(isPg bool) string {
+	if isPg {
+		return `AND (m.metadata->>'is_admin')::boolean IS TRUE`
+	}
+	return `AND m.metadata LIKE '%"is_admin":true%'`
+}
+
 func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (id int64, err error) {
 	defer recordTranscriptQuery("insert_fact", time.Now(), &err)
 	if err = s.checkDB(); err != nil {
@@ -51,22 +65,12 @@ func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, im
 		importance = 0.5
 	}
 	now := time.Now().UTC()
-
-	var vecVal interface{}
-	if len(embedding) == ExpectedEmbeddingDim {
-		vecVal = pgvector.NewVector(embedding)
-	}
-
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `INSERT INTO facts (category, fact_text, importance, embedding, created_at, last_reinforced_at, last_decayed_at, reinforce_count) VALUES ($1, $2, $3, $4, $5, $5, $5, 1) RETURNING id`
-	var insertedID int64
-	err = s.db.QueryRowContext(queryCtx, query, category, factText, importance, vecVal, now).Scan(&insertedID)
-	if err != nil {
-		return 0, err
-	}
-	return insertedID, nil
+	err = s.db.QueryRowContext(queryCtx, query, category, factText, importance, optionalVectorArg(embedding), now).Scan(&id)
+	return id, err
 }
 
 type NullVector struct {
@@ -76,23 +80,14 @@ type NullVector struct {
 
 func (nv *NullVector) Scan(src any) error {
 	if src == nil {
-		nv.Vector = nil
-		nv.Valid = false
+		nv.Vector, nv.Valid = nil, false
 		return nil
 	}
 	switch v := src.(type) {
-	case string:
+	case string, []byte:
 		var vec pgvector.Vector
 		if err := vec.Scan(v); err == nil {
-			nv.Vector = vec.Slice()
-			nv.Valid = true
-			return nil
-		}
-	case []byte:
-		var vec pgvector.Vector
-		if err := vec.Scan(v); err == nil {
-			nv.Vector = vec.Slice()
-			nv.Valid = true
+			nv.Vector, nv.Valid = vec.Slice(), true
 			return nil
 		}
 	}
@@ -100,8 +95,7 @@ func (nv *NullVector) Scan(src any) error {
 	if err := vec.Scan(src); err != nil {
 		return err
 	}
-	nv.Vector = vec.Slice()
-	nv.Valid = true
+	nv.Vector, nv.Valid = vec.Slice(), true
 	return nil
 }
 
@@ -145,16 +139,30 @@ func scanFact(scanner interface{ Scan(dest ...any) error }) (Fact, error) {
 	if err := scanner.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 		return Fact{}, err
 	}
-	f.CreatedAt = createdAt.Time
-	f.LastReinforcedAt = lastReinforced.Time
+	f.CreatedAt, f.LastReinforcedAt, f.LastDecayedAt = createdAt.Time, lastReinforced.Time, lastDecayed.Time
 	if f.LastReinforcedAt.IsZero() {
 		f.LastReinforcedAt = f.CreatedAt
 	}
-	f.LastDecayedAt = lastDecayed.Time
 	if f.LastDecayedAt.IsZero() {
 		f.LastDecayedAt = f.CreatedAt
 	}
 	return f, nil
+}
+
+func scanFacts(rows *sql.Rows) ([]Fact, error) {
+	if rows == nil {
+		return nil, nil
+	}
+	defer rows.Close()
+	var facts []Fact
+	for rows.Next() {
+		f, err := scanFact(rows)
+		if err != nil {
+			return nil, err
+		}
+		facts = append(facts, f)
+	}
+	return facts, rows.Err()
 }
 
 func cosineSimilarity(a, b []float32) float64 {
@@ -180,7 +188,6 @@ func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding 
 	if len(embedding) != ExpectedEmbeddingDim {
 		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
-
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -204,28 +211,15 @@ func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var results []Fact
-	for rows.Next() {
-		f, err := scanFact(rows)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, f)
-	}
-	return results, rows.Err()
+	return scanFacts(rows)
 }
-
 
 func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-	hasEmbedding := len(embedding) == ExpectedEmbeddingDim
-	queryText = strings.TrimSpace(queryText)
+	hasEmbedding, queryText := len(embedding) == ExpectedEmbeddingDim, strings.TrimSpace(queryText)
 	hasText := queryText != ""
-
 	if !hasEmbedding && !hasText {
 		return nil, nil
 	}
@@ -235,7 +229,6 @@ func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, 
 	if minScore <= 0 {
 		minScore = 0.20
 	}
-
 	candidateLimit := limit * 3
 	if candidateLimit < 30 {
 		candidateLimit = 30
@@ -249,119 +242,39 @@ func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, 
 	var err error
 
 	if hasEmbedding && hasText {
-		// Hybrid RRF query: combining dense HNSW vector search with sparse FTS using 70/30 weighting
-		query = `
-		WITH vector_hits AS (
-			SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
-			FROM facts
-			WHERE embedding IS NOT NULL
-			ORDER BY embedding <=> $1
-			LIMIT $2
-		),
-		text_hits AS (
-			SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $3)) DESC) AS rank
-			FROM facts
-			WHERE fts_tokens @@ websearch_to_tsquery('simple', $3)
-			LIMIT $2
+		query = `WITH vector_hits AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank FROM facts WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT $2
+		), text_hits AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $3)) DESC) AS rank FROM facts WHERE fts_tokens @@ websearch_to_tsquery('simple', $3) LIMIT $2
 		)
-		SELECT 
-			f.id, 
-			f.category, 
-			f.fact_text, 
-			f.importance, 
-			f.created_at,
-			COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
-			COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
-			COALESCE(f.reinforce_count, 1) AS reinforce_count
-		FROM vector_hits v
-		FULL OUTER JOIN text_hits t ON v.id = t.id
-		JOIN facts f ON f.id = COALESCE(v.id, t.id)
+		SELECT f.id, f.category, f.fact_text, f.importance, f.created_at, COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at, COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at, COALESCE(f.reinforce_count, 1) AS reinforce_count
+		FROM vector_hits v FULL OUTER JOIN text_hits t ON v.id = t.id JOIN facts f ON f.id = COALESCE(v.id, t.id)
 		WHERE (((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8) * f.importance) >= $7
-		ORDER BY (((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8) * f.importance) DESC
-		LIMIT $8;
-		`
-		vec := pgvector.NewVector(embedding)
-		rows, err = s.db.QueryContext(queryCtx, query, vec, candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore, limit)
+		ORDER BY (((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8) * f.importance) DESC LIMIT $8;`
+		rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore, limit)
 	} else if hasEmbedding {
-		// Dense vector only query
-		query = `
-		WITH candidates AS (
-			SELECT 
-				id, 
-				category, 
-				fact_text, 
-				importance, 
-				created_at,
-				COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
-				COALESCE(last_decayed_at, created_at) AS last_decayed_at,
-				COALESCE(reinforce_count, 1) AS reinforce_count,
-				(1.0 - (embedding <=> $1)) AS similarity
-			FROM facts
-			WHERE embedding IS NOT NULL
-			ORDER BY embedding <=> $1
-			LIMIT $2
+		query = `WITH candidates AS (
+			SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at) AS last_reinforced_at, COALESCE(last_decayed_at, created_at) AS last_decayed_at, COALESCE(reinforce_count, 1) AS reinforce_count, (1.0 - (embedding <=> $1)) AS similarity
+			FROM facts WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT $2
 		)
-		SELECT 
-			id, 
-			category, 
-			fact_text, 
-			importance, 
-			created_at,
-			last_reinforced_at,
-			last_decayed_at,
-			reinforce_count
-		FROM candidates
-		WHERE (similarity * importance) >= $3
-		ORDER BY (similarity * importance) DESC
-		LIMIT $4;
-		`
-		vec := pgvector.NewVector(embedding)
-		rows, err = s.db.QueryContext(queryCtx, query, vec, candidateLimit, minScore, limit)
+		SELECT id, category, fact_text, importance, created_at, last_reinforced_at, last_decayed_at, reinforce_count FROM candidates WHERE (similarity * importance) >= $3 ORDER BY (similarity * importance) DESC LIMIT $4;`
+		rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, minScore, limit)
 	} else {
-		// Sparse full-text search only query
-		query = `
-		WITH text_hits AS (
-			SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank
-			FROM facts
-			WHERE fts_tokens @@ websearch_to_tsquery('simple', $1)
-			LIMIT $2
+		query = `WITH text_hits AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank FROM facts WHERE fts_tokens @@ websearch_to_tsquery('simple', $1) LIMIT $2
 		)
-		SELECT 
-			f.id, 
-			f.category, 
-			f.fact_text, 
-			f.importance, 
-			f.created_at,
-			COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
-			COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
-			COALESCE(f.reinforce_count, 1) AS reinforce_count
-		FROM text_hits t
-		JOIN facts f ON f.id = t.id
-		WHERE ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) >= $5
-		ORDER BY ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) DESC
-		LIMIT $6;
-		`
+		SELECT f.id, f.category, f.fact_text, f.importance, f.created_at, COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at, COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at, COALESCE(f.reinforce_count, 1) AS reinforce_count
+		FROM text_hits t JOIN facts f ON f.id = t.id WHERE ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) >= $5
+		ORDER BY ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) DESC LIMIT $6;`
 		rows, err = s.db.QueryContext(queryCtx, query, queryText, candidateLimit, 1.0, DefaultRRFK, minScore, limit)
 	}
 
 	if err != nil {
 		return nil, fmt.Errorf("hybrid search failed: %w", err)
 	}
-	defer rows.Close()
-
-	var facts []Fact
-	for rows.Next() {
-		f, err := scanFact(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan fact error: %w", err)
-		}
-		facts = append(facts, f)
-	}
-
-	return facts, nil
+	return scanFacts(rows)
 }
 
-// IsExtractableAdminTurn returns true if the message is a completed human admin turn with a non-ambient response.
 func IsExtractableAdminTurn(m Message) bool {
 	if m.Status != StatusCompleted || !m.Metadata.IsAdmin {
 		return false
@@ -377,77 +290,32 @@ func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, acti
 	if activeHours <= 0 {
 		activeHours = 24
 	}
-	cutoff := time.Now().UTC().Add(-time.Duration(activeHours) * time.Hour)
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	adminClause := `AND m.metadata LIKE '%"is_admin":true%'`
-	if s.isPostgres {
-		adminClause = `AND (m.metadata->>'is_admin')::boolean IS TRUE`
-	}
-
-	query := fmt.Sprintf(`
-	SELECT DISTINCT m.thread_id
-	FROM messages m
-	LEFT JOIN sessions s ON m.thread_id = s.thread_id
-	WHERE m.thread_id != ''
-	  AND m.created_at >= $1
-	  AND m.status = 'COMPLETED'
-	  AND COALESCE(TRIM(m.response_text), '') != ''
-	  AND TRIM(m.response_text) NOT LIKE '[%%'
-	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid)
-	  %s
-	ORDER BY m.thread_id
-	LIMIT 20
-	`, adminClause)
-	rows, err := s.db.QueryContext(queryCtx, query, cutoff)
+	query := fmt.Sprintf(`SELECT DISTINCT m.thread_id FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id
+	WHERE m.thread_id != '' AND m.created_at >= $1 AND m.status = 'COMPLETED' AND COALESCE(TRIM(m.response_text), '') != '' AND TRIM(m.response_text) NOT LIKE '[%%%%'
+	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid) %s ORDER BY m.thread_id LIMIT 20`, adminMetadataClause(s.isPostgres))
+	rows, err := s.db.QueryContext(queryCtx, query, time.Now().UTC().Add(-time.Duration(activeHours)*time.Hour))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var tids []string
-	for rows.Next() {
-		var tid string
-		if err := rows.Scan(&tid); err != nil {
-			return nil, err
-		}
-		if tid != "" {
-			tids = append(tids, tid)
-		}
-	}
-	return tids, nil
+	return scanNonEmptyStrings(rows)
 }
 
 func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" {
+	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	adminClause := `AND m.metadata LIKE '%"is_admin":true%'`
-	if s.isPostgres {
-		adminClause = `AND (m.metadata->>'is_admin')::boolean IS TRUE`
-	}
-
-	query := fmt.Sprintf(`
-	SELECT m.id, m.row_id, m.thread_id, m.content, COALESCE(m.response_text, ''), m.status, m.metadata
-	FROM messages m
-	LEFT JOIN sessions s ON m.thread_id = s.thread_id
-	WHERE m.thread_id = $1
-	  AND m.status = 'COMPLETED'
-	  AND COALESCE(TRIM(m.response_text), '') != ''
-	  AND TRIM(m.response_text) NOT LIKE '[%%'
-	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid)
-	  %s
-	ORDER BY m.row_id ASC
-	LIMIT 50
-	`, adminClause)
+	query := fmt.Sprintf(`SELECT m.id, m.row_id, m.thread_id, m.content, COALESCE(m.response_text, ''), m.status, m.metadata FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id
+	WHERE m.thread_id = $1 AND m.status = 'COMPLETED' AND COALESCE(TRIM(m.response_text), '') != '' AND TRIM(m.response_text) NOT LIKE '[%%%%'
+	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid) %s ORDER BY m.row_id ASC LIMIT 50`, adminMetadataClause(s.isPostgres))
 
 	rows, err := s.db.QueryContext(queryCtx, query, threadID)
 	if err != nil {
@@ -479,18 +347,8 @@ func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-	INSERT INTO sessions (thread_id, internal_session_id, last_extracted_rowid, fact_extracted_at, created_at, updated_at)
-	VALUES ($1, '', $2, $3, $4, $5)
-	ON CONFLICT(thread_id) DO UPDATE SET
-		last_extracted_rowid = CASE 
-			WHEN EXCLUDED.last_extracted_rowid > sessions.last_extracted_rowid 
-			THEN EXCLUDED.last_extracted_rowid 
-			ELSE sessions.last_extracted_rowid 
-		END,
-		fact_extracted_at = EXCLUDED.fact_extracted_at,
-		updated_at = EXCLUDED.updated_at
-	`
+	query := `INSERT INTO sessions (thread_id, internal_session_id, last_extracted_rowid, fact_extracted_at, created_at, updated_at) VALUES ($1, '', $2, $3, $4, $5)
+	ON CONFLICT(thread_id) DO UPDATE SET last_extracted_rowid = CASE WHEN EXCLUDED.last_extracted_rowid > sessions.last_extracted_rowid THEN EXCLUDED.last_extracted_rowid ELSE sessions.last_extracted_rowid END, fact_extracted_at = EXCLUDED.fact_extracted_at, updated_at = EXCLUDED.updated_at`
 	_, err := s.db.ExecContext(queryCtx, query, threadID, maxRowID, now, now, now)
 	return err
 }
@@ -523,36 +381,25 @@ type FactsResult struct {
 func EscapeSQLLike(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "%", "\\%")
-	s = strings.ReplaceAll(s, "_", "\\_")
-	return s
+	return strings.ReplaceAll(s, "_", "\\_")
 }
 
 func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-
 	if filter.Offset < 0 {
 		filter.Offset = 0
 	}
-
 	var whereClauses []string
-	var args []interface{}
+	var args []any
 	argIdx := 1
-
-	if strings.TrimSpace(filter.Category) != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("category = $%d", argIdx))
-		args = append(args, strings.TrimSpace(filter.Category))
-		argIdx++
+	if cat := strings.TrimSpace(filter.Category); cat != "" {
+		whereClauses, args, argIdx = append(whereClauses, fmt.Sprintf("category = $%d", argIdx)), append(args, cat), argIdx+1
 	}
-
-	if strings.TrimSpace(filter.Query) != "" {
-		escaped := EscapeSQLLike(strings.TrimSpace(filter.Query))
-		whereClauses = append(whereClauses, fmt.Sprintf("LOWER(fact_text) LIKE LOWER($%d) ESCAPE '\\'", argIdx))
-		args = append(args, "%"+escaped+"%")
-		argIdx++
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		whereClauses, args, argIdx = append(whereClauses, fmt.Sprintf("LOWER(fact_text) LIKE LOWER($%d) ESCAPE '\\'", argIdx)), append(args, "%"+EscapeSQLLike(q)+"%"), argIdx+1
 	}
-
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
@@ -561,58 +408,37 @@ func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	countQuery := "SELECT COUNT(*) FROM facts" + whereSQL
 	var total int
-	if err := s.db.QueryRowContext(queryCtx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM facts"+whereSQL, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("failed to count facts: %w", err)
 	}
 
 	var paginationSQL string
-	queryArgs := append([]interface{}{}, args...)
+	queryArgs := append([]any{}, args...)
 	if filter.Limit > 0 {
-		paginationSQL = fmt.Sprintf("LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
-		queryArgs = append(queryArgs, filter.Limit, filter.Offset)
+		paginationSQL, queryArgs = fmt.Sprintf("LIMIT $%d OFFSET $%d", argIdx, argIdx+1), append(queryArgs, filter.Limit, filter.Offset)
 	} else if filter.Offset > 0 {
+		offsetClause := fmt.Sprintf("LIMIT -1 OFFSET $%d", argIdx)
 		if s.isPostgres || isPostgres(s.db) {
-			paginationSQL = fmt.Sprintf("OFFSET $%d", argIdx)
-		} else {
-			paginationSQL = fmt.Sprintf("LIMIT -1 OFFSET $%d", argIdx)
+			offsetClause = fmt.Sprintf("OFFSET $%d", argIdx)
 		}
-		queryArgs = append(queryArgs, filter.Offset)
+		paginationSQL, queryArgs = offsetClause, append(queryArgs, filter.Offset)
 	}
 
-	selectQuery := fmt.Sprintf(`
-		SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, created_at,
-		       COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
-		       COALESCE(last_decayed_at, created_at) AS last_decayed_at,
-		       COALESCE(reinforce_count, 1) AS reinforce_count
-		FROM facts
-		%s
-		ORDER BY COALESCE(importance, 1.0) DESC, created_at DESC, id DESC
-		%s
-	`, whereSQL, paginationSQL)
+	selectQuery := fmt.Sprintf(`SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, created_at, COALESCE(last_reinforced_at, created_at) AS last_reinforced_at, COALESCE(last_decayed_at, created_at) AS last_decayed_at, COALESCE(reinforce_count, 1) AS reinforce_count FROM facts %s ORDER BY COALESCE(importance, 1.0) DESC, created_at DESC, id DESC %s`, whereSQL, paginationSQL)
 
 	rows, err := s.db.QueryContext(queryCtx, selectQuery, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query facts: %w", err)
 	}
-	defer rows.Close()
-
-	facts := make([]Fact, 0)
-	for rows.Next() {
-		f, err := scanFact(rows)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan fact: %w", err)
-		}
-		facts = append(facts, f)
+	facts, err := scanFacts(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan fact: %w", err)
 	}
-
-	return &FactsResult{
-		Facts:  facts,
-		Total:  total,
-		Limit:  filter.Limit,
-		Offset: filter.Offset,
-	}, nil
+	if facts == nil {
+		facts = make([]Fact, 0)
+	}
+	return &FactsResult{Facts: facts, Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
 }
 
 func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error) {
@@ -625,24 +451,14 @@ func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, m
 	if minSim <= 0 {
 		minSim = 0.85
 	}
-
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-	SELECT id, category, fact_text, importance, created_at,
-	       COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1),
-	       (1.0 - (embedding <=> $1)) AS similarity
-	FROM facts
-	WHERE embedding IS NOT NULL
-	ORDER BY embedding <=> $1
-	LIMIT 1;
-	`
-	vec := pgvector.NewVector(embedding)
+	query := `SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1), (1.0 - (embedding <=> $1)) AS similarity FROM facts WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT 1;`
 	var f Fact
 	var sim float64
 	var createdAt, lastReinforced, lastDecayed FactTime
-	err := s.db.QueryRowContext(queryCtx, query, vec).Scan(
+	err := s.db.QueryRowContext(queryCtx, query, pgvector.NewVector(embedding)).Scan(
 		&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt,
 		&lastReinforced, &lastDecayed, &f.ReinforceCount, &sim,
 	)
@@ -652,9 +468,7 @@ func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, m
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to find duplicate fact: %w", err)
 	}
-	f.CreatedAt = createdAt.Time
-	f.LastReinforcedAt = lastReinforced.Time
-	f.LastDecayedAt = lastDecayed.Time
+	f.CreatedAt, f.LastReinforcedAt, f.LastDecayedAt = createdAt.Time, lastReinforced.Time, lastDecayed.Time
 	if sim >= minSim {
 		return &f, sim, nil
 	}
@@ -671,15 +485,8 @@ func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, 
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	now := time.Now().UTC()
-	query := `
-		UPDATE facts
-		SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
-		    last_reinforced_at = $2,
-		    reinforce_count = reinforce_count + 1
-		WHERE id = $3
-	`
-	res, err := s.db.ExecContext(queryCtx, query, boost, now, id)
+	query := `UPDATE facts SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))), last_reinforced_at = $2, reinforce_count = reinforce_count + 1 WHERE id = $3`
+	res, err := s.db.ExecContext(queryCtx, query, boost, time.Now().UTC(), id)
 	if err != nil {
 		return fmt.Errorf("failed to reinforce fact: %w", err)
 	}
@@ -693,8 +500,8 @@ func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, 
 	return nil
 }
 
-func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
-	if err := s.checkDB(); err != nil {
+func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (decayedCount, prunedCount int64, err error) {
+	if err = s.checkDB(); err != nil {
 		return 0, 0, err
 	}
 	if decayStep <= 0 {
@@ -711,43 +518,23 @@ func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pr
 	defer cancel()
 
 	now := time.Now().UTC()
-	decayCutoff := now.Add(-24 * time.Hour)
-	cutoffDate := now.AddDate(0, 0, -pruneAgeDays)
-
-	var decayedCount, prunedCount int64
-
-	decayQuery := `
-		UPDATE facts
-		SET importance = GREATEST(0.0, ROUND((importance - $1)::numeric, 2)),
-		    last_decayed_at = $2
-		WHERE (last_decayed_at IS NULL OR last_decayed_at < $3)
-		  AND (last_reinforced_at IS NULL OR last_reinforced_at < $3)
-		  AND importance > 0.0
-	`
-	resDecay, err := s.db.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff)
+	decayQuery := `UPDATE facts SET importance = GREATEST(0.0, ROUND((importance - $1)::numeric, 2)), last_decayed_at = $2
+		WHERE (last_decayed_at IS NULL OR last_decayed_at < $3) AND (last_reinforced_at IS NULL OR last_reinforced_at < $3) AND importance > 0.0`
+	resDecay, err := s.db.ExecContext(queryCtx, decayQuery, decayStep, now, now.Add(-24*time.Hour))
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
 	}
 	if n, err := resDecay.RowsAffected(); err == nil {
 		decayedCount = n
-	} else {
-		log.Printf("[DB] Warning getting rows affected for decay: %v", err)
 	}
 
-	pruneQuery := `
-		DELETE FROM facts
-		WHERE importance <= $1
-		  AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)
-	`
-	resPrune, err := s.db.ExecContext(queryCtx, pruneQuery, pruneFloor, cutoffDate)
+	pruneQuery := `DELETE FROM facts WHERE importance <= $1 AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)`
+	resPrune, err := s.db.ExecContext(queryCtx, pruneQuery, pruneFloor, now.AddDate(0, 0, -pruneAgeDays))
 	if err != nil {
 		return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
 	}
 	if n, err := resPrune.RowsAffected(); err == nil {
 		prunedCount = n
-	} else {
-		log.Printf("[DB] Warning getting rows affected for prune: %v", err)
 	}
-
 	return decayedCount, prunedCount, nil
 }
