@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -34,6 +33,8 @@ type turnExecution struct {
 	threadID            string
 	triggerType         string
 	execStart           time.Time
+	activeSessionMu     sync.Mutex
+	activeSessionID     string
 	currentSessionID    string
 	previousSessionID   string
 	turnCount           int
@@ -50,7 +51,6 @@ type turnExecution struct {
 	trailingMsgs        []db.Message
 	trailingInfos       []wakeInfo
 	turnPrompt          string
-	previousTurnActions string
 	isQuotaPaused       bool
 	statusUpdater       *StatusUpdater
 	stopTyping          func()
@@ -197,72 +197,31 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	}
 }
 
-func (te *turnExecution) checkTurnEndRotation(activePool runner.AgentPool, execSession runner.AgentSession) {
-	if te == nil || te.pool == nil || activePool == nil {
-		return
-	}
-	if _, ok := activePool.(runner.LeasedAgentPool); ok {
-		// Leased pools autonomously manage rotation and DB latching via lease.Release()
-		return
-	}
-	if execSession == nil {
-		return
-	}
-	rotator, ok := activePool.(runner.SessionRotator)
-	if !ok {
-		return
-	}
-	should, rotReason := rotator.ShouldRotateSession(execSession)
-	if !should {
-		return
-	}
-
-	scope := "thread"
-	if strings.EqualFold(te.policy.Mode, "channel") {
-		scope = "channel"
-	}
-	log.Printf("[WorkerPool] Synchronously rotating session for %s %s (reason: %s)", scope, te.threadID, rotReason)
-	metrics.RecordSessionRotation("turn_end", scope, rotReason)
-
-	rotParentCtx := context.Background()
-	if te.pool.ctx != nil {
-		rotParentCtx = te.pool.ctx
-	}
-	rotCtx, cancel := context.WithTimeout(rotParentCtx, 15*time.Second)
-	defer cancel()
-
-	newSess, rotErr := rotator.RotateSession(rotCtx, te.threadID)
-	if rotErr != nil {
-		log.Printf("[WorkerPool] Warning: turn-end session rotation failed for %s: %v", te.threadID, rotErr)
-		if evictor, ok := activePool.(interface{ EvictSession(string) error }); ok {
-			if evictErr := evictor.EvictSession(te.threadID); evictErr != nil {
-				log.Printf("[WorkerPool] Warning: failed evicting session during rotation error for %s: %v", te.threadID, evictErr)
-			}
+func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify bool) {
+	durationMs := time.Since(te.execStart).Milliseconds()
+	now := time.Now().UTC()
+	for _, m := range msgs {
+		if msgStatus == db.StatusCompleted && runStatus == "completed" && (runErr == "" || msgOutput == "[EXPIRED_STALE]") && !strings.HasPrefix(msgOutput, "[") {
+			te.updateMessageCompleted(m.ID, msgOutput)
+		} else if msgStatus == db.StatusCompleted && msgOutput == "[EXPIRED_STALE]" {
+			te.updateMessageCompleted(m.ID, msgOutput)
+		} else {
+			te.updateMessageStatus(m.ID, msgStatus, msgOutput)
 		}
-		te.rotateSessionID(te.threadID, "")
-		te.currentSessionID = ""
-		return
-	}
-
-	if newSess != nil {
-		newSessionID := newSess.SessionID()
-		if s := te.store(); s != nil {
-			if dbErr := s.RotateSessionID(context.Background(), te.threadID, newSessionID); dbErr != nil {
-				log.Printf("[WorkerPool] Error latching new session ID into database for %s: %v. Evicting daemon to maintain DB truth.", te.threadID, dbErr)
-				if evictor, ok := activePool.(interface{ EvictSession(string) error }); ok {
-					if evictErr := evictor.EvictSession(te.threadID); evictErr != nil {
-						log.Printf("[WorkerPool] Warning: failed evicting session during DB latch error for %s: %v", te.threadID, evictErr)
-					}
-				}
-				te.rotateSessionID(te.threadID, "")
-				te.currentSessionID = ""
-				return
-			}
+		if m.ScheduleRunID != "" && runStatus != "" {
+			te.updateScheduleRunStatus(db.UpdateRunParams{
+				RunID:       m.ScheduleRunID,
+				MessageID:   m.ID,
+				Status:      runStatus,
+				CompletedAt: now,
+				DurationMs:  durationMs,
+				Error:       runErr,
+				Model:       model,
+			})
 		}
-		log.Printf("[WorkerPool] Successfully rotated session for %s %s to %s", scope, te.threadID, newSessionID)
-		te.previousSessionID = te.currentSessionID
-		te.currentSessionID = newSessionID
-		te.turnCount = 0
+		if notify && te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
+			te.pool.cfg.OnMessageCompleted(m, msgStatus)
+		}
 	}
 }
 
@@ -274,7 +233,7 @@ func (te *turnExecution) getSessionTurnCount(threadID string) (int, error) {
 }
 
 func (te *turnExecution) incrementSessionTurnCount(threadID string) (int, error) {
-	if te == nil || te.isEphemeral {
+	if te == nil || te.isEphemeral || (te.pool != nil && te.isNonPrimaryPool(te.resolveExecutionPool())) {
 		return 0, nil
 	}
 	if s := te.store(); s != nil {
@@ -580,15 +539,12 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	if !te.resolveTurnPolicy() {
 		return
 	}
-	activePool := te.resolveExecutionPool()
-	te.activePool = activePool
-	te.isEphemeral = te.isNonPrimaryPool(activePool)
 	if te.evaluateAmbientWake() {
 		return
 	}
 
 	// 1. Resolve active execution pool (primary vs medium vs low effort)
-	activePool = te.resolveExecutionPool()
+	activePool := te.resolveExecutionPool()
 	te.activePool = activePool
 	te.isEphemeral = te.isNonPrimaryPool(activePool)
 
@@ -721,22 +677,7 @@ func (te *turnExecution) claimAndFilterStale() bool {
 	dropBurstAsStale := func(reason string) {
 		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (%s). Marked [EXPIRED_STALE].", te.threadID, reason)
 		metrics.RecordTurnCompleted("stale", te.triggerType, "none", time.Since(latestMsg.CreatedAt))
-		for _, m := range te.burst {
-			te.updateMessageCompleted(m.ID, "[EXPIRED_STALE]")
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "completed",
-					CompletedAt: time.Now().UTC(),
-					DurationMs:  0,
-					Error:       "[EXPIRED_STALE]",
-				})
-			}
-			if te.pool.cfg.OnMessageCompleted != nil {
-				te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-			}
-		}
+		te.finalizeBurstMessages(te.burst, db.StatusCompleted, "[EXPIRED_STALE]", "completed", "[EXPIRED_STALE]", "", true)
 	}
 
 	var lastActivity time.Time
@@ -800,20 +741,8 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 	if !isHTTPClientBurst(te.burst) && te.policy.IsIgnored() {
 		log.Printf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", te.threadID, te.policy.Mode, len(te.burst))
 		metrics.RecordTurnCompleted("ignored", te.triggerType, "none", time.Since(te.execStart))
-		for _, m := range te.burst {
-			te.updateMessageStatus(m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(te.policy.Mode))))
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "completed",
-					CompletedAt: time.Now().UTC(),
-				})
-			}
-			if te.pool.cfg.OnMessageCompleted != nil {
-				te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-			}
-		}
+		tag := fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(te.policy.Mode)))
+		te.finalizeBurstMessages(te.burst, db.StatusCompleted, tag, "completed", "", "", true)
 		return false
 	}
 
@@ -1053,21 +982,7 @@ func (te *turnExecution) abortBurst(reason string) {
 		metrics.RecordTurnCompleted("aborted", te.triggerType, "pre_turn", time.Since(te.execStart))
 	}
 	telemetry := fmt.Sprintf("[SKIPPED %s]", reason)
-	for _, m := range te.burst {
-		te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
-		if m.ScheduleRunID != "" {
-			te.updateScheduleRunStatus(db.UpdateRunParams{
-				RunID:       m.ScheduleRunID,
-				MessageID:   m.ID,
-				Status:      "completed",
-				CompletedAt: time.Now().UTC(),
-				Error:       telemetry,
-			})
-		}
-		if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
-			te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-		}
-	}
+	te.finalizeBurstMessages(te.burst, db.StatusCompleted, telemetry, "completed", telemetry, "", true)
 }
 
 func (te *turnExecution) rescheduleBurst(delaySeconds int) {
@@ -1082,20 +997,7 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 	for _, m := range te.burst {
 		if m.RetryCount+1 >= maxAttempts {
 			log.Printf("[WorkerPool] Message %s in thread %s exceeded max retry attempts (%d). Marking FAILED.", m.ID, te.threadID, maxAttempts)
-			te.updateMessageStatus(m.ID, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]")
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "failed",
-					CompletedAt: time.Now().UTC(),
-					DurationMs:  time.Since(te.execStart).Milliseconds(),
-					Error:       "[EXHAUSTED_PRE_TURN_RETRIES]",
-				})
-			}
-			if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
-				te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-			}
+			te.finalizeBurstMessages([]db.Message{m}, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]", "failed", "[EXHAUSTED_PRE_TURN_RETRIES]", "", true)
 			continue
 		}
 		te.incrementMessageRetry(m.ID, "pre_turn_deferred")
@@ -1158,6 +1060,127 @@ func (te *turnExecution) handleTrailing() {
 			}
 		}
 	}
+}
+
+type attemptConfig struct {
+	model             string
+	lowEffortModel    string
+	mediumEffortModel string
+	timeoutMinutes    int
+	agyBin            string
+	apiKey            string
+}
+
+func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
+	var cfg attemptConfig
+	if te.pool == nil {
+		return cfg
+	}
+	if attempt > 1 {
+		log.Printf("[WorkerPool] Resolving attempt %d config for thread %s", attempt, te.threadID)
+	}
+	te.pool.mu.Lock()
+	cfg.model = te.pool.cfg.Model
+	cfg.lowEffortModel = te.pool.cfg.LowEffortModel
+	cfg.mediumEffortModel = te.pool.cfg.MediumEffortModel
+	cfg.timeoutMinutes = te.pool.cfg.TimeoutMinutes
+	cfg.agyBin = te.pool.cfg.AgyBin
+	cfg.apiKey = te.pool.cfg.APIKey
+	overrideModel := te.pool.overrideModel
+	te.pool.mu.Unlock()
+
+	if te.pool.appCfg != nil {
+		if cur := te.pool.appCfg.Current(); cur != nil {
+			if cur.Model != "" {
+				cfg.model = cur.Model
+			}
+			if cur.LowEffortModel != "" {
+				cfg.lowEffortModel = cur.LowEffortModel
+			}
+			if cur.MediumEffortModel != "" {
+				cfg.mediumEffortModel = cur.MediumEffortModel
+			}
+			if cur.APIKey != "" {
+				cfg.apiKey = cur.APIKey
+			}
+			if cur.AgyBin != "" {
+				cfg.agyBin = cur.AgyBin
+			}
+		}
+	}
+
+	if cfg.lowEffortModel == "" {
+		cfg.lowEffortModel = config.GetRuntimeConfig().LowEffortModel
+	}
+	if cfg.mediumEffortModel == "" {
+		cfg.mediumEffortModel = config.GetRuntimeConfig().MediumEffortModel
+	}
+
+	burstEffort := resolveBurstEffort(te.burst)
+	switch burstEffort {
+	case "medium":
+		if strings.TrimSpace(cfg.mediumEffortModel) != "" {
+			cfg.model = cfg.mediumEffortModel
+		}
+	case "low":
+		if strings.TrimSpace(cfg.lowEffortModel) != "" {
+			cfg.model = cfg.lowEffortModel
+		}
+	}
+	if reqModel := extractBurstModel(te.burst); reqModel != "" {
+		cfg.model = reqModel
+	}
+	if overrideModel != "" {
+		cfg.model = overrideModel
+	}
+
+	return cfg
+}
+
+func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr string) string {
+	te.activeSessionMu.Lock()
+	defer te.activeSessionMu.Unlock()
+
+	targetSess := candidateID
+	if targetSess == "" && te.isNonPrimaryPool(te.activePool) {
+		if d := getStreamingDaemon(te.activePool, te.threadID); d != nil && d.SessionID() != "" {
+			targetSess = d.SessionID()
+		}
+	}
+	if targetSess == "" && te.lease != nil && te.lease.SessionID() != "" {
+		targetSess = te.lease.SessionID()
+	}
+	if targetSess == "" {
+		targetSess = te.currentSessionID
+	}
+	if targetSess == "" && (stdout != "" || stderr != "") {
+		combinedOutput := stdout + "\n" + stderr
+		if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
+			targetSess = extSess
+		}
+	}
+	if targetSess == "" && te.activePool != nil {
+		if d := getStreamingDaemon(te.activePool, te.threadID); d != nil && d.SessionID() != "" {
+			targetSess = d.SessionID()
+		}
+	}
+	if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != te.activePool {
+		if d := getStreamingDaemon(te.pool.processPool, te.threadID); d != nil && d.SessionID() != "" {
+			targetSess = d.SessionID()
+		}
+	}
+
+	if targetSess != "" {
+		te.activeSessionID = targetSess
+		if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
+			log.Printf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)
+			te.currentSessionID = targetSess
+			te.saveSessionID(te.threadID, targetSess)
+		} else if te.isEphemeral && targetSess != te.currentSessionID {
+			log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, targetSess)
+		}
+	}
+	return targetSess
 }
 
 func (te *turnExecution) buildTurnPrompt() {
@@ -1226,26 +1249,24 @@ func (te *turnExecution) buildTurnPrompt() {
 				summary = cachedSum
 				log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", te.threadID, lastMsgID)
 			} else {
+				cfg := te.resolveAttemptConfig(0)
 				llmFn := te.pool.cfg.LLMFunc
 				if llmFn == nil && te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.LLMFunc != nil {
 					llmFn = te.pool.cfg.Classifier.LLMFunc
 				}
 				if llmFn == nil {
-					llmFn = classifier.NewAgyLLMFunc(te.pool.cfg.AgyBin, te.pool.cfg.APIKey, te.pool.cfg.RunnerFunc)
+					llmFn = classifier.NewAgyLLMFunc(cfg.agyBin, cfg.apiKey, te.pool.cfg.RunnerFunc)
 				}
 
 				flashModel := ""
 				if te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.Model != "" {
 					flashModel = te.pool.cfg.Classifier.Model
 				}
-				if flashModel == "" && te.pool.appCfg != nil && te.pool.appCfg.Current() != nil {
-					cur := te.pool.appCfg.Current()
-					if cur.LowEffortModel != "" {
-						flashModel = cur.LowEffortModel
-					}
+				if flashModel == "" {
+					flashModel = cfg.lowEffortModel
 				}
 				if flashModel == "" {
-					flashModel = te.pool.cfg.Model
+					flashModel = cfg.model
 				}
 
 				sumCtx, sumCancel := context.WithTimeout(te.pool.ctx, DefaultThreadSummaryTimeout)
@@ -1349,103 +1370,82 @@ func (te *turnExecution) buildTurnPrompt() {
 		InjectedHookContext: te.injectedHookContext,
 		Timezone:            tz,
 	})
-	te.turnPrompt = te.preparePrompt(te.turnPrompt)
 }
 
-func (te *turnExecution) preparePrompt(prompt string) string {
-	if te.previousTurnActions != "" && !strings.Contains(prompt, te.previousTurnActions) {
-		prompt = prompt + "\n\n" + te.previousTurnActions
+func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail, currentModel string) (shutdown bool) {
+	for _, m := range te.burst {
+		te.incrementMessageRetry(m.ID, errDetail)
 	}
-	return prompt
+	if attempt >= maxAttempts {
+		return false
+	}
+	if te.statusUpdater != nil {
+		te.statusUpdater.Reset()
+	}
+	backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
+	select {
+	case <-time.After(backoff):
+		return false
+	case <-te.pool.ctx.Done():
+		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+		te.cancelBurstOnShutdown("failed", currentModel, true)
+		return true
+	}
 }
 
-func (te *turnExecution) condenseTurnActions(rawActions string) string {
-	if len(rawActions) <= 1500 {
-		return rawActions
+func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, accumulatedUsage runner.TokenUsage, currentModel string, attempt, maxAttempts int) (bool, string) {
+	te.stopIndicators()
+
+	responseText := resp.Response
+	baseDir := "/root/.gemini/antigravity-cli/brain"
+	if te.currentSessionID != "" {
+		baseDir = filepath.Join(baseDir, te.currentSessionID)
 	}
 
-	lowEffortModel := ""
-	if te.pool != nil {
-		if te.pool.appCfg != nil {
-			if cur := te.pool.appCfg.Current(); cur != nil {
-				lowEffortModel = cur.LowEffortModel
-			}
-		}
-		if lowEffortModel == "" {
-			te.pool.mu.Lock()
-			lowEffortModel = te.pool.cfg.LowEffortModel
-			te.pool.mu.Unlock()
-		}
-	}
-	if lowEffortModel == "" {
-		lowEffortModel = config.GetRuntimeConfig().LowEffortModel
+	cleanText, attachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
+	attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
+
+	isSilent := extractBurstSilent(te.burst)
+	if !isSilent && strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
+		log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
+		return false, "agent produced empty response"
 	}
 
-	var llmFn LLMFunc
-	if te.pool != nil {
-		if te.pool.lowEffortProcessPool != nil {
-			if ep, ok := te.pool.lowEffortProcessPool.(interface {
-				EphemeralLLMFunc(string) runner.LLMFunc
-			}); ok {
-				llmFn = ep.EphemeralLLMFunc("ephemeral:summarizer")
-			}
+	if !isSilent {
+		var deliveryErr error
+		if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
+			deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
+		} else if te.pool.cfg.DeliveryFunc != nil {
+			deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
 		}
-		if llmFn == nil && te.pool.cfg.LLMFunc != nil {
-			llmFn = te.pool.cfg.LLMFunc
-		} else if llmFn == nil && te.pool.processPool != nil {
-			if ep, ok := te.pool.processPool.(interface {
-				EphemeralLLMFunc(string) runner.LLMFunc
-			}); ok {
-				llmFn = ep.EphemeralLLMFunc("ephemeral:summarizer")
-			}
+		if deliveryErr != nil {
+			log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
 		}
 	}
 
-	if llmFn == nil {
-		err := errors.New("summarizer unavailable")
-		log.Printf("[WorkerPool] Warning: failed to condense turn actions with low-effort model: %v. Falling back to clamped raw actions.", err)
-		return rawActions
-	}
+	resp.Usage.InputTokens += accumulatedUsage.InputTokens
+	resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
+	resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
+	resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
+	resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
 
-	ctx := context.Background()
-	if te.pool != nil && te.pool.ctx != nil {
-		ctx = te.pool.ctx
-	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	prompt := fmt.Sprintf("Condense the following tool actions executed in the previous attempt into a compact, deduplicated summary of key findings and actions taken. Preserve file paths, commands, exit codes, and core outputs. Output MUST be wrapped in <PREVIOUS_TURN_ACTIONS> and </PREVIOUS_TURN_ACTIONS> tags.\n\n%s", rawActions)
-
-	result, err := llmFn(timeoutCtx, lowEffortModel, prompt)
-	if err != nil {
-		log.Printf("[WorkerPool] Warning: failed to condense turn actions with low-effort model: %v. Falling back to clamped raw actions.", err)
-		return rawActions
-	}
-
-	trimmed := strings.TrimSpace(result)
-	if trimmed == "" {
-		err := errors.New("empty response from summarizer")
-		log.Printf("[WorkerPool] Warning: failed to condense turn actions with low-effort model: %v. Falling back to clamped raw actions.", err)
-		return rawActions
-	}
-
-	if strings.Contains(trimmed, "<PREVIOUS_TURN_ACTIONS>") && strings.Contains(trimmed, "</PREVIOUS_TURN_ACTIONS>") {
-		startIdx := strings.Index(trimmed, "<PREVIOUS_TURN_ACTIONS>")
-		endIdx := strings.Index(trimmed, "</PREVIOUS_TURN_ACTIONS>")
-		if startIdx <= endIdx {
-			trimmed = trimmed[startIdx : endIdx+len("</PREVIOUS_TURN_ACTIONS>")]
+	metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
+	tokenChannel := te.effectiveName
+	if tokenChannel == "" {
+		if te.triggerType == "schedule" || te.triggerType == "http" {
+			tokenChannel = te.triggerType
+		} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
+			tokenChannel = te.threadID
 		}
-	} else {
-		trimmed = "<PREVIOUS_TURN_ACTIONS>\n" + trimmed + "\n</PREVIOUS_TURN_ACTIONS>"
 	}
-
-	const maxTotalChars = 2000
-	runes := []rune(trimmed)
-	if len(runes) > maxTotalChars {
-		closing := []rune("\n</PREVIOUS_TURN_ACTIONS>")
-		trimmed = string(runes[:maxTotalChars-len(closing)]) + string(closing)
-	}
-	return trimmed
+	metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
+	te.turnStatus = "success"
+	te.turnResponseText = cleanText
+	te.turnTokenUsage = resp.Usage
+	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true)
+	log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
+	return true, ""
 }
 
 func (te *turnExecution) executeWithRetries() {
@@ -1461,87 +1461,21 @@ func (te *turnExecution) executeWithRetries() {
 		}
 	}
 
-	var currentAgyBin, currentAPIKey string
-	te.pool.mu.Lock()
-	currentAgyBin = te.pool.cfg.AgyBin
-	currentAPIKey = te.pool.cfg.APIKey
-	te.pool.mu.Unlock()
-	if te.pool.appCfg != nil {
-		if cur := te.pool.appCfg.Current(); cur != nil {
-			if cur.AgyBin != "" {
-				currentAgyBin = cur.AgyBin
-			}
-			if cur.APIKey != "" {
-				currentAPIKey = cur.APIKey
-			}
-		}
-	}
+	attemptCfg := te.resolveAttemptConfig(0)
+	currentAgyBin := attemptCfg.agyBin
+	currentAPIKey := attemptCfg.apiKey
 
 	var autoResumeCount int
 	var accumulatedUsage runner.TokenUsage
 	promptToSend := te.turnPrompt
 
 	for attempt := initialRetryCount + 1; attempt <= maxAttempts; attempt++ {
-		te.pool.mu.Lock()
-		currentModel = te.pool.cfg.Model
-		lowEffortModel := te.pool.cfg.LowEffortModel
-		mediumEffortModel := te.pool.cfg.MediumEffortModel
-		currentTimeout := te.pool.cfg.TimeoutMinutes
-		if te.pool.cfg.AgyBin != "" {
-			currentAgyBin = te.pool.cfg.AgyBin
-		}
-		if te.pool.cfg.APIKey != "" {
-			currentAPIKey = te.pool.cfg.APIKey
-		}
-		overrideModel := te.pool.overrideModel
-		te.pool.mu.Unlock()
-
-		if te.pool.appCfg != nil {
-			if cur := te.pool.appCfg.Current(); cur != nil {
-				if cur.Model != "" {
-					currentModel = cur.Model
-				}
-				if cur.LowEffortModel != "" {
-					lowEffortModel = cur.LowEffortModel
-				}
-				if cur.MediumEffortModel != "" {
-					mediumEffortModel = cur.MediumEffortModel
-				}
-				if cur.APIKey != "" {
-					currentAPIKey = cur.APIKey
-				}
-				if cur.AgyBin != "" {
-					currentAgyBin = cur.AgyBin
-				}
-			}
-		}
-
-		if lowEffortModel == "" {
-			lowEffortModel = config.GetRuntimeConfig().LowEffortModel
-		}
-		if mediumEffortModel == "" {
-			mediumEffortModel = config.GetRuntimeConfig().MediumEffortModel
-		}
-
-		// Check if any message in the burst requested medium or low effort routing
+		cfg := te.resolveAttemptConfig(attempt)
+		currentModel = cfg.model
+		currentTimeout := cfg.timeoutMinutes
+		currentAgyBin = cfg.agyBin
+		currentAPIKey = cfg.apiKey
 		burstEffort := resolveBurstEffort(te.burst)
-		switch burstEffort {
-		case "medium":
-			if strings.TrimSpace(mediumEffortModel) != "" {
-				currentModel = mediumEffortModel
-			}
-		case "low":
-			if strings.TrimSpace(lowEffortModel) != "" {
-				currentModel = lowEffortModel
-			}
-		}
-		if reqModel := extractBurstModel(te.burst); reqModel != "" {
-			currentModel = reqModel
-		}
-
-		if overrideModel != "" {
-			currentModel = overrideModel
-		}
 
 		// Global Quota Lockout Pre-check: if a quota pause is active across the pool and running in OAuth mode, fail-fast immediately
 		if currentAPIKey == "" {
@@ -1575,7 +1509,6 @@ func (te *turnExecution) executeWithRetries() {
 				promptToSend = fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
 			}
 		}
-		promptToSend = te.preparePrompt(promptToSend)
 
 		// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
 		runCtx, runCancel := context.WithTimeout(te.pool.ctx, time.Duration(currentTimeout+1)*time.Minute)
@@ -1662,14 +1595,7 @@ func (te *turnExecution) executeWithRetries() {
 		}
 		runCancel()
 
-		if outcome.SessionID != "" && outcome.SessionID != te.currentSessionID && outcome.SessionID != te.previousSessionID {
-			if te.isEphemeral {
-				log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, outcome.SessionID)
-			} else {
-				te.currentSessionID = outcome.SessionID
-				te.saveSessionID(te.threadID, te.currentSessionID)
-			}
-		}
+		targetSess := te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr)
 
 		if outcome.IsSuccess {
 			isFailure = false
@@ -1703,42 +1629,9 @@ func (te *turnExecution) executeWithRetries() {
 
 		if isFailure {
 			promptToSend = te.turnPrompt
-			targetSess := ""
-			if te.isNonPrimaryPool(activePool) {
-				if d := getStreamingDaemon(activePool, te.threadID); d != nil && d.SessionID() != "" {
-					targetSess = d.SessionID()
-				}
-			}
-			if targetSess == "" && outcome.SessionID != "" {
-				targetSess = outcome.SessionID
-			}
-			if targetSess == "" && te.lease != nil && te.lease.SessionID() != "" {
-				targetSess = te.lease.SessionID()
-			}
-			if targetSess == "" {
-				targetSess = te.currentSessionID
-			}
-			if targetSess == "" {
-				combinedOutput := stdout + "\n" + stderr
-				if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
-					targetSess = extSess
-				}
-			}
-			if targetSess == "" && te.pool != nil && activePool != nil {
-				if d := getStreamingDaemon(activePool, te.threadID); d != nil && d.SessionID() != "" {
-					targetSess = d.SessionID()
-				}
-			}
-			if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != activePool {
-				if d := getStreamingDaemon(te.pool.processPool, te.threadID); d != nil && d.SessionID() != "" {
-					targetSess = d.SessionID()
-				}
-			}
-
-			// If response was not recovered from transcript, inspect transcript for turn errors (e.g. Gemini 429 quota exhaustion)
-			if isFailure && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+			if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
 				poolCtx := context.Background()
-				if te.pool != nil && te.pool.ctx != nil {
+				if te.pool.ctx != nil {
 					poolCtx = te.pool.ctx
 				}
 				if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
@@ -1748,16 +1641,6 @@ func (te *turnExecution) executeWithRetries() {
 					lastErrDetail = transcriptErr
 					lastStderr = transcriptErr
 				}
-			}
-
-			// Cold-Start Dynamic Session Latching:
-			// If this was a cold start and remains an unrecovered failure, only latch the active session
-			// if the failure was NOT session corruption (so retries won't inherit corrupted state)
-			// and NOT the previously rotated session (so bloated sessions are never resurrected).
-			if isFailure && !te.isEphemeral && te.currentSessionID == "" && !isSessionCorruption && targetSess != "" && targetSess != te.previousSessionID {
-				log.Printf("[Queue] Latched active session from output on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, te.threadID, targetSess)
-				te.currentSessionID = targetSess
-				te.saveSessionID(te.threadID, te.currentSessionID)
 			}
 		}
 
@@ -1771,15 +1654,6 @@ func (te *turnExecution) executeWithRetries() {
 		if isFailure {
 			// Quota Lockout Fail-Fast & Auto-Retry Check
 			if runner.IsQuotaPause(errDetail, stderr) {
-				// Cold-start dynamic session latching if available
-				if !te.isEphemeral && te.currentSessionID == "" && !isSessionCorruption {
-					combinedOutput := stdout + "\n" + stderr
-					if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && extSess != te.previousSessionID && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
-						te.currentSessionID = extSess
-						te.saveSessionID(te.threadID, te.currentSessionID)
-					}
-				}
-
 				resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
 				isCapacity := runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second
 
@@ -1900,39 +1774,16 @@ func (te *turnExecution) executeWithRetries() {
 			metrics.RecordRunnerError(errCat, currentModel)
 
 			if isWatchdog {
-				for _, m := range te.burst {
-					te.incrementMessageRetry(m.ID, errDetail)
-				}
 				if attempt < maxAttempts {
-					if te.statusUpdater != nil {
-						te.statusUpdater.Reset()
-					}
-					backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
-					log.Printf("[WorkerPool] Retrying watchdog timeout in %v (attempt %d/%d, session %s)", backoff, attempt, maxAttempts, te.currentSessionID)
-					select {
-					case <-time.After(backoff):
-					case <-te.pool.ctx.Done():
-						metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-						te.turnStatus = "failed"
-						te.turnError = "context cancelled during execution"
-						te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-						for _, m := range te.burst {
-							te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-							if m.ScheduleRunID != "" {
-								te.updateScheduleRunStatus(db.UpdateRunParams{
-									RunID:       m.ScheduleRunID,
-									MessageID:   m.ID,
-									Status:      "failed",
-									CompletedAt: time.Now().UTC(),
-									DurationMs:  time.Since(te.execStart).Milliseconds(),
-									Error:       "context cancelled during execution",
-									Model:       currentModel,
-								})
-							}
-						}
+					if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
 						return
 					}
+					log.Printf("[WorkerPool] Retrying watchdog timeout (attempt %d/%d, session %s)", attempt, maxAttempts, te.currentSessionID)
 					continue
+				}
+
+				for _, m := range te.burst {
+					te.incrementMessageRetry(m.ID, errDetail)
 				}
 
 				// Exhausted all attempts on watchdog timeout
@@ -1965,26 +1816,13 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 			if resp != nil {
-				extSess := resp.ConversationID
-				if extSess == "" {
-					extSess = runner.ExtractSessionID(stdout+"\n"+stderr, te.execStart)
-				}
+				extSess := te.resolveAndPersistSessionID(resp.ConversationID, stdout, stderr)
 				if te.currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
 					isTransient = false
 					lastErrDetail = "failed to latch active session UUID on cold start"
 					errDetail = lastErrDetail
 					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
 				} else {
-					if extSess != "" && extSess != te.currentSessionID {
-						if te.isEphemeral {
-							log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, extSess)
-						} else {
-							log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", te.threadID, te.currentSessionID, extSess)
-							te.currentSessionID = extSess
-							te.saveSessionID(te.threadID, te.currentSessionID)
-						}
-					}
-
 					// Option B Background Command Yield Trap Interception:
 					isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
 					var unfinishedTaskID string
@@ -2068,80 +1906,11 @@ func (te *turnExecution) executeWithRetries() {
 						metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
 					}
 
-					te.stopIndicators()
-
-					responseText := resp.Response
-					baseDir := "/root/.gemini/antigravity-cli/brain"
-					if te.currentSessionID != "" {
-						baseDir = filepath.Join(baseDir, te.currentSessionID)
-					}
-
-					cleanText, attachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
-					attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
-
-					isSilent := extractBurstSilent(te.burst)
-					if !isSilent && strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
-						log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
-						lastErrDetail = "agent produced empty response"
-						errDetail = lastErrDetail
-					} else {
-						if !isSilent {
-							var deliveryErr error
-							if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
-								deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
-							} else if te.pool.cfg.DeliveryFunc != nil {
-								deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
-							}
-							if deliveryErr != nil {
-								log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
-							}
-						}
-
-						// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
-						resp.Usage.InputTokens += accumulatedUsage.InputTokens
-						resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
-						resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
-						resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
-						resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
-
-						// Mark all messages in the burst as completed with unpacked clean text
-						metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
-						tokenChannel := te.effectiveName
-						if tokenChannel == "" {
-							if te.triggerType == "schedule" {
-								tokenChannel = "schedule"
-							} else if te.triggerType == "http" {
-								tokenChannel = "http"
-							} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
-								tokenChannel = te.threadID
-							}
-						}
-						metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
-						te.turnStatus = "success"
-						te.turnResponseText = cleanText
-						te.turnTokenUsage = resp.Usage
-						te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-						for _, m := range te.burst {
-							te.updateMessageCompleted(m.ID, cleanText)
-							if m.ScheduleRunID != "" {
-								te.updateScheduleRunStatus(db.UpdateRunParams{
-									RunID:       m.ScheduleRunID,
-									MessageID:   m.ID,
-									Status:      "completed",
-									CompletedAt: time.Now().UTC(),
-									DurationMs:  time.Since(te.execStart).Milliseconds(),
-									Model:       currentModel,
-								})
-							}
-							if te.pool.cfg.OnMessageCompleted != nil {
-								te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-							}
-						}
-						log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
-
-						te.checkTurnEndRotation(activePool, nil)
-
+					if ok, emptyErr := te.deliverSuccessAndFinalize(resp, accumulatedUsage, currentModel, attempt, maxAttempts); ok {
 						return
+					} else {
+						lastErrDetail = emptyErr
+						errDetail = emptyErr
 					}
 				}
 			}
@@ -2162,12 +1931,6 @@ func (te *turnExecution) executeWithRetries() {
 			te.threadID, attempt, maxAttempts, isTransient, isSessionCorruption, errDetail)
 
 		if isSessionCorruption {
-			for _, m := range te.burst {
-				te.incrementMessageRetry(m.ID, errDetail)
-			}
-			if te.statusUpdater != nil {
-				te.statusUpdater.Reset()
-			}
 			te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "session reset due to context corruption", "session reset notice")
 			te.rotateSessionID(te.threadID, "")
 			te.currentSessionID = ""
@@ -2186,15 +1949,8 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 
-			if attempt < maxAttempts {
-				backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
-				select {
-				case <-time.After(backoff):
-				case <-te.pool.ctx.Done():
-					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-					te.cancelBurstOnShutdown("failed", currentModel, true)
-					return
-				}
+			if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
+				return
 			}
 			continue
 		}
@@ -2203,23 +1959,10 @@ func (te *turnExecution) executeWithRetries() {
 			if te.lease != nil {
 				te.lease.MarkDirty()
 			}
-			for _, m := range te.burst {
-				te.incrementMessageRetry(m.ID, errDetail)
+			if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
+				return
 			}
-			if attempt < maxAttempts {
-				if te.statusUpdater != nil {
-					te.statusUpdater.Reset()
-				}
-				backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
-				log.Printf("[WorkerPool] Retrying transient error in %v (preserving session %s)", backoff, te.currentSessionID)
-				select {
-				case <-time.After(backoff):
-				case <-te.pool.ctx.Done():
-					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-					te.cancelBurstOnShutdown("failed", currentModel, true)
-					return
-				}
-			}
+			log.Printf("[WorkerPool] Retrying transient error in %v (preserving session %s)", time.Duration(attempt)*te.pool.cfg.BackoffBase, te.currentSessionID)
 			continue
 		}
 
@@ -2378,63 +2121,27 @@ func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) 
 	te.turnStatus = turnStatus
 	te.turnError = sanitizedErr
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	for _, m := range te.burst {
-		te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
-		if m.ScheduleRunID != "" {
-			te.updateScheduleRunStatus(db.UpdateRunParams{
-				RunID:       m.ScheduleRunID,
-				MessageID:   m.ID,
-				Status:      "failed",
-				CompletedAt: time.Now().UTC(),
-				DurationMs:  time.Since(te.execStart).Milliseconds(),
-				Error:       sanitizedErr,
-				Model:       model,
-			})
-		}
-		if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
-			te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-		}
-	}
+	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, "failed", sanitizedErr, model, true)
 }
 
 func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
 	metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 	telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-	te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
-	if m.ScheduleRunID != "" {
-		te.updateScheduleRunStatus(db.UpdateRunParams{
-			RunID:       m.ScheduleRunID,
-			MessageID:   m.ID,
-			Status:      "completed",
-			CompletedAt: time.Now().UTC(),
-		})
-	}
-	if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
-		te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-	}
+	te.finalizeBurstMessages([]db.Message{m}, db.StatusCompleted, telemetry, "completed", "", "", true)
 }
 
 func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, failScheduleRun bool) {
 	te.turnStatus = turnStatus
 	te.turnError = "interrupted by graceful deployment"
+	runStatus := ""
+	runErr := ""
 	if failScheduleRun {
 		te.turnError = "context cancelled during execution"
+		runStatus = "failed"
+		runErr = "context cancelled during execution"
 	}
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	for _, m := range te.burst {
-		te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-		if failScheduleRun && m.ScheduleRunID != "" {
-			te.updateScheduleRunStatus(db.UpdateRunParams{
-				RunID:       m.ScheduleRunID,
-				MessageID:   m.ID,
-				Status:      "failed",
-				CompletedAt: time.Now().UTC(),
-				DurationMs:  time.Since(te.execStart).Milliseconds(),
-				Error:       "context cancelled during execution",
-				Model:       currentModel,
-			})
-		}
-	}
+	te.finalizeBurstMessages(te.burst, db.StatusPending, "interrupted by graceful deployment", runStatus, runErr, currentModel, false)
 }
 
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {

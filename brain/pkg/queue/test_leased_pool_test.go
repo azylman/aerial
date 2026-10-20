@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -51,32 +52,22 @@ func (p *testRunnerAgentPool) getTargetLock(targetKey string) *sync.Mutex {
 }
 
 func (p *testRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, bool) {
-	if p.trackerPool != nil {
-		if tp, ok := p.trackerPool.(interface {
-			Get(string) (*runner.StreamingDaemon, bool)
-		}); ok {
-			return tp.Get(threadID)
-		}
+	if tp, ok := p.trackerPool.(interface{ Get(string) (*runner.StreamingDaemon, bool) }); ok {
+		return tp.Get(threadID)
 	}
 	return nil, false
 }
 
 func (p *testRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string, sessionID string) (*runner.StreamingDaemon, error) {
-	if p.trackerPool != nil {
-		if tp, ok := p.trackerPool.(interface {
-			GetOrCreate(context.Context, string, string) (*runner.StreamingDaemon, error)
-		}); ok {
-			return tp.GetOrCreate(ctx, threadID, sessionID)
-		}
+	if tp, ok := p.trackerPool.(interface{ GetOrCreate(context.Context, string, string) (*runner.StreamingDaemon, error) }); ok {
+		return tp.GetOrCreate(ctx, threadID, sessionID)
 	}
 	return nil, fmt.Errorf("no underlying process pool")
 }
 
 func (p *testRunnerAgentPool) Underlying() *runner.UnifiedProcessPool {
-	if p.trackerPool != nil {
-		if up, ok := p.trackerPool.(*runner.UnifiedProcessPool); ok {
-			return up
-		}
+	if up, ok := p.trackerPool.(*runner.UnifiedProcessPool); ok {
+		return up
 	}
 	return nil
 }
@@ -127,41 +118,27 @@ func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string
 
 	var rec runner.SessionRecord
 	if p.cfg.Store != nil {
-		if id, err := p.cfg.Store.GetSessionID(ctx, trimmedKey); err == nil {
-			rec.ActiveSessionID = id
-		}
-		if tc, err := p.cfg.Store.GetSessionTurnCount(ctx, trimmedKey); err == nil {
-			rec.TurnCount = tc
-		}
-		if prev, err := p.cfg.Store.GetPreviousSessionID(ctx, trimmedKey); err == nil {
-			rec.PreviousSessionID = prev
-		}
+		rec.ActiveSessionID, _ = p.cfg.Store.GetSessionID(ctx, trimmedKey)
+		rec.TurnCount, _ = p.cfg.Store.GetSessionTurnCount(ctx, trimmedKey)
+		rec.PreviousSessionID, _ = p.cfg.Store.GetPreviousSessionID(ctx, trimmedKey)
 	} else {
 		s.mu.Lock()
-		rec.ActiveSessionID = s.sessionID
-		rec.TurnCount = s.turnCount
-		rec.PreviousSessionID = s.prevSessionID
+		rec.ActiveSessionID, rec.TurnCount, rec.PreviousSessionID = s.sessionID, s.turnCount, s.prevSessionID
 		s.mu.Unlock()
 	}
 
-	isCold := false
+	isCold := rec.TurnCount <= 1 || rec.ActiveSessionID == ""
 	turnCount := 0
-	if rec.TurnCount <= 1 || rec.ActiveSessionID == "" {
-		isCold = true
-	} else {
+	if !isCold {
 		turnCount = rec.TurnCount
 	}
-
-	sessID := rec.ActiveSessionID
-	s.mu.Lock()
-	s.sessionID = sessID
-	s.mu.Unlock()
+	s.setSessionID(rec.ActiveSessionID)
 
 	lease := &testSessionLease{
 		pool:       p,
 		session:    s,
 		targetKey:  trimmedKey,
-		sessionID:  sessID,
+		sessionID:  rec.ActiveSessionID,
 		prevSessID: rec.PreviousSessionID,
 		isCold:     isCold,
 		turnCount:  turnCount,
@@ -216,10 +193,7 @@ func (p *testRunnerAgentPool) ShouldRotateSession(sess runner.AgentSession) (boo
 	return false, ""
 }
 
-func (p *testRunnerAgentPool) Initialize(ctx context.Context) error {
-	return nil
-}
-
+func (p *testRunnerAgentPool) Initialize(ctx context.Context) error { return nil }
 func (p *testRunnerAgentPool) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -254,21 +228,10 @@ func (l *testSessionLease) SessionID() string {
 	return l.sessionID
 }
 
-func (l *testSessionLease) PreviousSessionID() string {
-	return l.prevSessID
-}
-
-func (l *testSessionLease) IsCold() bool {
-	return l.isCold
-}
-
-func (l *testSessionLease) IsEphemeral() bool {
-	return false
-}
-
-func (l *testSessionLease) TurnCount() int {
-	return l.turnCount
-}
+func (l *testSessionLease) PreviousSessionID() string { return l.prevSessID }
+func (l *testSessionLease) IsCold() bool             { return l.isCold }
+func (l *testSessionLease) IsEphemeral() bool        { return false }
+func (l *testSessionLease) TurnCount() int           { return l.turnCount }
 
 func (l *testSessionLease) MarkDirty() {
 	if l != nil && l.pool != nil {
@@ -300,9 +263,7 @@ func (l *testSessionLease) Execute(ctx context.Context, turn *runner.TurnContext
 	if turn.SessionID == "" {
 		l.sessionID = ""
 		if l.session != nil {
-			l.session.mu.Lock()
-			l.session.sessionID = ""
-			l.session.mu.Unlock()
+			l.session.setSessionID("")
 		}
 	}
 
@@ -351,67 +312,41 @@ type testTurnSinkWrapper struct {
 }
 
 func (s *testTurnSinkWrapper) OnTurnStarted() {
-	if s.inner != nil {
-		s.inner.OnTurnStarted()
-	}
+	if s.inner != nil { s.inner.OnTurnStarted() }
 	s.buf.OnTurnStarted()
 }
-
 func (s *testTurnSinkWrapper) OnThinking() {
-	if s.inner != nil {
-		s.inner.OnThinking()
-	}
+	if s.inner != nil { s.inner.OnThinking() }
 	s.buf.OnThinking()
 }
-
 func (s *testTurnSinkWrapper) OnStepStarted(stepIndex int) {
 	if s.inner != nil {
-		if sa, ok := s.inner.(runner.StepAwareSink); ok {
-			sa.OnStepStarted(stepIndex)
-		}
+		if sa, ok := s.inner.(runner.StepAwareSink); ok { sa.OnStepStarted(stepIndex) }
 	}
 	s.buf.OnStepStarted(stepIndex)
 }
-
 func (s *testTurnSinkWrapper) OnToolCall(toolName, commandName string) {
-	if s.inner != nil {
-		s.inner.OnToolCall(toolName, commandName)
-	}
+	if s.inner != nil { s.inner.OnToolCall(toolName, commandName) }
 	s.buf.OnToolCall(toolName, commandName)
 }
-
 func (s *testTurnSinkWrapper) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
-	if s.inner != nil {
-		s.inner.OnToolCompleted(toolName, mcpServer, duration, status)
-	}
+	if s.inner != nil { s.inner.OnToolCompleted(toolName, mcpServer, duration, status) }
 	s.buf.OnToolCompleted(toolName, mcpServer, duration, status)
 }
-
 func (s *testTurnSinkWrapper) OnSkillActivated(skillName, source string) {
-	if s.inner != nil {
-		s.inner.OnSkillActivated(skillName, source)
-	}
+	if s.inner != nil { s.inner.OnSkillActivated(skillName, source) }
 	s.buf.OnSkillActivated(skillName, source)
 }
-
 func (s *testTurnSinkWrapper) OnTextDelta(delta string) {
-	if s.inner != nil {
-		s.inner.OnTextDelta(delta)
-	}
+	if s.inner != nil { s.inner.OnTextDelta(delta) }
 	s.buf.OnTextDelta(delta)
 }
-
 func (s *testTurnSinkWrapper) OnResult(res *runner.TurnResult) {
-	if s.inner != nil {
-		s.inner.OnResult(res)
-	}
+	if s.inner != nil { s.inner.OnResult(res) }
 	s.buf.OnResult(res)
 }
-
 func (s *testTurnSinkWrapper) OnError(err error) {
-	if s.inner != nil {
-		s.inner.OnError(err)
-	}
+	if s.inner != nil { s.inner.OnError(err) }
 	s.buf.OnError(err)
 }
 
@@ -429,6 +364,12 @@ func (s *testRunnerAgentSession) SessionID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessionID
+}
+
+func (s *testRunnerAgentSession) setSessionID(id string) {
+	s.mu.Lock()
+	s.sessionID = id
+	s.mu.Unlock()
 }
 
 func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) error {
@@ -469,30 +410,18 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 	} else if s.pool.cfg.LowEffortModel != "" && strings.HasPrefix(s.targetKey, "voice-") {
 		model = s.pool.cfg.LowEffortModel
 	}
-	var sessID string
+	sessID := s.SessionID()
 	if turn != nil {
 		sessID = turn.SessionID
 		if turn.SessionID == "" {
-			s.mu.Lock()
-			s.sessionID = ""
-			s.mu.Unlock()
+			s.setSessionID("")
 		}
-	} else {
-		sessID = s.SessionID()
 	}
 	stdout, stderr, exitCode, err := s.pool.cfg.RunnerWithOptionsFunc(
-		ctx,
-		s.pool.cfg.AgyBin,
-		prompt,
-		sessID,
-		s.pool.cfg.APIKey,
-		model,
-		watchdogOpts,
+		ctx, s.pool.cfg.AgyBin, prompt, sessID, s.pool.cfg.APIKey, model, watchdogOpts,
 	)
 	if extSess := runner.ExtractSessionID(stdout+"\n"+stderr, time.Time{}); extSess != "" {
-		s.mu.Lock()
-		s.sessionID = extSess
-		s.mu.Unlock()
+		s.setSessionID(extSess)
 	}
 	rescueTranscript := func() string {
 		if s.pool.cfg.SessionManager == nil {
@@ -515,31 +444,28 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 		return ""
 	}
 
-	if err != nil {
-		combinedErr := err
-		if stderr != "" && !strings.Contains(err.Error(), stderr) {
-			combinedErr = fmt.Errorf("%w: %s", err, stderr)
-		}
+	reportErr := func(e error) error {
 		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(combinedErr)
+			turn.Sink.OnError(e)
 		}
-		return combinedErr
+		return e
+	}
+
+	if err != nil {
+		if stderr != "" && !strings.Contains(err.Error(), stderr) {
+			err = fmt.Errorf("%w: %s", err, stderr)
+		}
+		return reportErr(err)
 	}
 	if exitCode != 0 {
-		runErr := fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr)
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(runErr)
-		}
-		return runErr
+		return reportErr(fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr))
 	}
 	respText := stdout
 	var parsedUsage runner.AgyUsage
 	if parsed, pErr := runner.ParseAgyOutput(stdout); pErr == nil {
 		respText = parsed.Response
 		if parsed.ConversationID != "" {
-			s.mu.Lock()
-			s.sessionID = parsed.ConversationID
-			s.mu.Unlock()
+			s.setSessionID(parsed.ConversationID)
 		}
 		parsedUsage = parsed.Usage
 		if parsed.Error != "" {
@@ -547,25 +473,15 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 				respText = rescued
 			} else {
 				if strings.Contains(strings.ToLower(parsed.Error), "stream was interrupted") || strings.Contains(strings.ToLower(parsed.Error), "session corrupt") || strings.Contains(strings.ToLower(parsed.Error), "corrupted session") {
-					s.mu.Lock()
-					s.sessionID = ""
-					s.mu.Unlock()
+					s.setSessionID("")
 				}
-				runErr := fmt.Errorf("%s", parsed.Error)
-				if turn != nil && turn.Sink != nil {
-					turn.Sink.OnError(runErr)
-				}
-				return runErr
+				return reportErr(errors.New(parsed.Error))
 			}
 		} else if parsed.Status != "" && strings.ToUpper(parsed.Status) != "SUCCESS" {
 			if rescued := rescueTranscript(); rescued != "" {
 				respText = rescued
 			} else {
-				runErr := fmt.Errorf("runner status: %s", parsed.Status)
-				if turn != nil && turn.Sink != nil {
-					turn.Sink.OnError(runErr)
-				}
-				return runErr
+				return reportErr(fmt.Errorf("runner status: %s", parsed.Status))
 			}
 		}
 	}
@@ -590,7 +506,3 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 }
 
 var _ runner.AgentSession = (*testRunnerAgentSession)(nil)
-
-type dummyNonRotatorPool struct {
-	runner.AgentPool
-}
