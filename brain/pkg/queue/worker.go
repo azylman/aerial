@@ -817,9 +817,6 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 		return false
 	}
 
-	if !extractBurstSilent(te.burst) {
-		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), te.threadID, te.isThread)
-	}
 	var getSessErr error
 	te.currentSessionID, getSessErr = te.getSessionID(te.threadID)
 	if getSessErr != nil {
@@ -949,11 +946,12 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
 	}
 
-	if extractBurstSilent(te.burst) {
-		te.statusUpdater = nil
-	} else if te.pool.cfg.TypingFunc != nil {
-		if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), te.threadID); stop != nil {
-			te.stopTyping = stop
+	if !extractBurstSilent(te.burst) {
+		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), te.threadID, te.isThread)
+		if te.pool.cfg.TypingFunc != nil {
+			if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), te.threadID); stop != nil {
+				te.stopTyping = stop
+			}
 		}
 	}
 
