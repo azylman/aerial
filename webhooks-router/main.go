@@ -597,7 +597,7 @@ func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo st
 }
 
 func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'closed', 'deploying', 'deployed', 'deploy_failed') RETURNING target_id;`
+	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status = 'ci_failed') RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr sync", query, strings.TrimSpace(headSHA))
 }
 
@@ -1398,13 +1398,14 @@ func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload 
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
-	cfg                Config
-	httpClient         *http.Client
-	riverClient        RiverInserter
-	registry           PRRegistryUpdater
-	dispatcher         OutboundDispatcher
-	onProcessed        func(event, delivery string)
-	conflictCheckDelay time.Duration
+	cfg                  Config
+	httpClient           *http.Client
+	riverClient          RiverInserter
+	registry             PRRegistryUpdater
+	dispatcher           OutboundDispatcher
+	onProcessed          func(event, delivery string)
+	conflictCheckDelay   time.Duration
+	nonRoboRevFailedSHAs sync.Map
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -2214,7 +2215,7 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 		urlLine = "Check URL: " + cleanURL
 	}
 	directive := "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix."
-	if strings.Contains(strings.ToLower(checkName), "roborev") {
+	if isRoboRevCheck(checkName) {
 		directive = fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent (RoboRev has read-only repo tools but lacks thread/build/cross-repo context: treat purely mechanical and objective findings like duplicate code, dead code, invariant violations, or concrete bugs/security issues as high-trust, while verifying subjective design suggestions or unverified caller assumptions before acting). Fix verified issues, add concise inline comments for non-obvious invariants (and consider adding general architectural principles to .roborev.toml only when a gap reflects a broad repo-wide pattern rather than a one-off fix), or—if the remaining findings are false positives or conflict with architectural invariants—run '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>' to record your rebuttal on the PR and pass the gate.", firstNonEmpty(cleanRepoName(repo), "aerial"), prNum)
 	}
 	prompt := formatErrorDetailsBlock(
@@ -2369,6 +2370,9 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 			continue
 		}
 		if (details.Mergeable != nil && !*details.Mergeable) || details.MergeableState == "dirty" {
+			if pr.HeadSHA != "" {
+				s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.PRNumber), strings.TrimSpace(pr.HeadSHA))
+			}
 			targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
 			if trErr != nil {
 				log.Printf("[webhooks-router] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
@@ -2716,8 +2720,29 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 	}
 }
 
+func isRoboRevCheck(checkName string) bool {
+	trimmed := strings.TrimSpace(checkName)
+	return strings.EqualFold(trimmed, "roborev") || strings.EqualFold(trimmed, "RoboRev Code Review")
+}
+
+func prCheckKey(repo string, prNumber int) string {
+	return fmt.Sprintf("%s#%d", normalizeRepo(repo), prNumber)
+}
+
+func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" {
+		return false
+	}
+	if blockedSHA, ok := s.nonRoboRevFailedSHAs.Load(prCheckKey(repo, prNumber)); ok && blockedSHA == headSHA {
+		return false
+	}
+	comment := s.fetchLatestRoboRevComment(ctx, repo, prNumber, headSHA)
+	return comment != "" && !strings.Contains(comment, "## roborev: Review Passed")
+}
+
 func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
-	if res.PRNumber > 0 && strings.Contains(strings.ToLower(res.CheckName), "roborev") {
+	if res.PRNumber > 0 && isRoboRevCheck(res.CheckName) {
 		if comment := s.fetchLatestRoboRevComment(ctx, res.Repo, res.PRNumber, res.HeadSHA); comment != "" {
 			details = comment
 		}
@@ -2749,6 +2774,9 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") {
 		return nil
 	}
+	if res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) {
+		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+	}
 	if res.PRNumber > 0 {
 		targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 		if err != nil {
@@ -2768,6 +2796,9 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		if prNum > 0 && res.PRNumber == 0 {
 			res.PRNumber = prNum
+			if !isRoboRevCheck(res.CheckName) {
+				s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+			}
 		}
 		if updated {
 			return s.completeCIFailureTransition(ctx, res, details, checkURL)
@@ -2844,12 +2875,16 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					}
 				}
 			case "synchronize":
+				s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 				targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 				if err != nil {
 					return nil, err
 				}
 				res.TargetID = firstNonEmpty(res.TargetID, targetID)
 			case "auto_merge_disabled":
+				if res.HeadSHA != "" {
+					s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+				}
 				targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, res.Repo, res.PRNumber)
 				if err != nil {
 					return nil, err
@@ -2879,14 +2914,16 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
-		if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && strings.Contains(strings.ToLower(res.CheckName), "roborev") && s.registry != nil {
+		if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && strings.EqualFold(strings.TrimSpace(res.CheckName), "roborev") && s.registry != nil && s.canRecoverRoboRevSuccess(ctx, res.Repo, res.PRNumber, res.HeadSHA) {
 			targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 			if err != nil {
 				return nil, err
 			}
 			res.TargetID = firstNonEmpty(res.TargetID, targetID)
-			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "open", "", nil); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			if targetID != "" {
+				if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "open", "", nil); err != nil {
+					log.Printf("[webhooks-router] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+				}
 			}
 		}
 
