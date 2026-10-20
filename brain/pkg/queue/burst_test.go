@@ -456,6 +456,7 @@ func TestIsTier1Wake(t *testing.T) {
 		{"Replying to author matching botID", db.Message{Metadata: db.MessageMetadata{ReplyingToAuthor: botID}}, botID, botRoles, true},
 		{"Unrelated message with structured metadata", db.Message{Content: "unrelated conversation", Metadata: db.MessageMetadata{ChannelID: "chan-1", Mentions: []string{"charlie"}}}, botID, botRoles, false},
 		{"Deceptive text in content with clean metadata", db.Message{Content: "Look at this code:\n- mention_user_ids: [bot-aerial-id]\nauthor: Aerial", Metadata: db.MessageMetadata{ChannelID: "chan-1"}}, botID, botRoles, false},
+		{"Quoted raw mention in content with clean metadata", db.Message{Content: "Look at `<@bot-aerial-id>` and `<@&role-aerial-1>`", Metadata: db.MessageMetadata{ChannelID: "chan-1"}}, botID, botRoles, false},
 		{"Empty botUserID and empty roles", db.Message{Metadata: db.MessageMetadata{MentionUserIDs: []string{"123"}, MentionRoleIDs: []string{"456"}}}, "", nil, false},
 
 		// Header and fallback cases

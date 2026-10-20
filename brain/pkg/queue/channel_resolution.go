@@ -187,11 +187,13 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 		return nil
 	}
 	roleSet := make(map[string]bool)
-	guilds := sess.State.Guilds
+	var guilds []*discordgo.Guild
 	if guildID != "" {
 		if g, err := sess.State.Guild(guildID); err == nil && g != nil {
 			guilds = []*discordgo.Guild{g}
 		}
+	} else {
+		guilds = sess.State.Guilds
 	}
 	botUsername := ""
 	if sess.State.User != nil {
@@ -277,16 +279,18 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string) bool {
 
 	aliases := []string{"aerial"}
 	var mentionIDs, candidates []string
+	var rawContent string
 
 	if !m.Metadata.IsEmpty() {
 		mentionIDs = append(slices.Clone(m.Metadata.MentionUserIDs), m.Metadata.MentionRoleIDs...)
 		candidates = append(slices.Clone(m.Metadata.Mentions), m.Metadata.ReplyingToAuthor)
 	} else {
+		rawContent = m.Content
 		mentionIDs = append(extractHeaderTokens(m.Content, "- mention_user_ids: ["), extractHeaderTokens(m.Content, "- mention_role_ids: [")...)
 		candidates = append(extractHeaderTokens(m.Content, "- mentions: ["), extractReplyAuthor(m.Content))
 	}
 
-	if matchesWakeIdentity(m.Content, mentionIDs, botRoleIDs, botUserID, aliases) {
+	if matchesWakeIdentity(rawContent, mentionIDs, botRoleIDs, botUserID, aliases) {
 		return true
 	}
 	for _, text := range candidates {
@@ -361,7 +365,7 @@ func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID str
 			return true
 		}
 	}
-	if !strings.Contains(content, "<USER_REQUEST>") {
+	if content != "" && !strings.Contains(content, "<USER_REQUEST>") {
 		if botID != "" && (strings.Contains(content, "<@"+botID+">") || strings.Contains(content, "<@!"+botID+">")) {
 			return true
 		}
