@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -285,7 +286,7 @@ func TestRecoverInterrupted(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 
-			if len(completedIDs) != len(tc.wantCompletedIDs) {
+			if !slices.Equal(completedIDs, tc.wantCompletedIDs) {
 				t.Fatalf("completedIDs = %v, want %v", completedIDs, tc.wantCompletedIDs)
 			}
 			for msgID, wantStatus := range tc.wantMsgStatuses {
@@ -2978,8 +2979,8 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 		transcriptContent string
 		runnerResponse    string
 	}{
-		{name: "AlwaysDeliversFinalOutputText", convID: "c2222222-2222-3333-4444-555555555555", msgID: "msg-delivered-1", threadID: "thread-delivered-1", transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check sync"} {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]} {"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All in sync"} {"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Wait for background task task-645 to complete."} `, runnerResponse: "Wait for background task task-645 to complete."},
-		{name: "TranscriptSilent_PreservesSubstantiveRunnerResponse", convID: "c3333333-3333-4444-5555-666666666666", msgID: "msg-substantive-fallback-1", threadID: "thread-substantive-fallback-1", transcriptContent: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check deployment"} {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]} {"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All containers deployed"} {"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"   "} `, runnerResponse: "Continuous Deployment for PR #322 has completed successfully!"},
+		{name: "AlwaysDeliversFinalOutputText", convID: "c2222222-2222-3333-4444-555555555555", msgID: "msg-delivered-1", threadID: "thread-delivered-1", transcriptContent: "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"content\":\"Check sync\"}\n{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"Checking status now...\",\"tool_calls\":[{\"name\":\"status\"}]}\n{\"step_index\":2,\"source\":\"SYSTEM\",\"type\":\"USER_INPUT\",\"content\":\"All in sync\"}\n{\"step_index\":3,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"Wait for background task task-645 to complete.\"}\n", runnerResponse: "Wait for background task task-645 to complete."},
+		{name: "TranscriptSilent_PreservesSubstantiveRunnerResponse", convID: "c3333333-3333-4444-5555-666666666666", msgID: "msg-substantive-fallback-1", threadID: "thread-substantive-fallback-1", transcriptContent: "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"content\":\"Check deployment\"}\n{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"Checking status now...\",\"tool_calls\":[{\"name\":\"status\"}]}\n{\"step_index\":2,\"source\":\"SYSTEM\",\"type\":\"USER_INPUT\",\"content\":\"All containers deployed\"}\n{\"step_index\":3,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"   \"}\n", runnerResponse: "Continuous Deployment for PR #322 has completed successfully!"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3709,103 +3710,134 @@ func TestFormatUnrotatedSessionLine(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_CoverageHelpers(t *testing.T) {
+func TestResolveStore(t *testing.T) {
 	t.Parallel()
-
-	// 1. resolveStore permutations
-	for _, v := range []interface{}{nil, "unsupported string", (*db.FakeStore)(nil), (*db.SQLStore)(nil), (*sql.DB)(nil)} {
-		if s := resolveStore(v); s != nil {
-			t.Errorf("expected nil from resolveStore(%v)", v)
-		}
-	}
 	fake := setupTestStore(t)
-	defer func() { _ = fake.Close() }()
-	if s := resolveStore(fake); s != fake {
-		t.Errorf("expected same FakeStore from resolveStore")
-	}
-
-	// 2. WorkerPool Store and SummaryGroup permutations
-	if s := (*WorkerPool)(nil).Store(); s != nil {
-		t.Errorf("expected nil from nil WorkerPool.Store()")
-	}
-	if sg := (*WorkerPool)(nil).SummaryGroup(); sg != nil {
-		t.Errorf("expected nil from nil WorkerPool.SummaryGroup()")
-	}
-	pEmpty := &WorkerPool{}
-	if s := pEmpty.Store(); s != nil || pEmpty.SummaryGroup() == nil {
-		t.Errorf("unexpected empty pool Store/SummaryGroup results")
-	}
-	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
-	if s := pFake.Store(); s != fake {
-		t.Errorf("expected fake from WorkerPool.Store()")
-	}
 	realDB := &sql.DB{}
-	pDB := &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}
-	if pDB.Store() == nil || resolveStore(realDB) == nil {
-		t.Errorf("expected non-nil Store from DB")
-	}
 
-	// 3. AgentPool and SetWidgetDeliveryFunc
-	var nilP *WorkerPool
-	if nilP.AgentPool() != nil {
-		t.Errorf("expected nil for nil WorkerPool.AgentPool")
+	tests := []struct {
+		name    string
+		input   any
+		wantNil bool
+	}{
+		{name: "nil_input", input: nil, wantNil: true},
+		{name: "unsupported_string", input: "unsupported string", wantNil: true},
+		{name: "typed_nil_fakestore", input: (*db.FakeStore)(nil), wantNil: true},
+		{name: "typed_nil_sqlstore", input: (*db.SQLStore)(nil), wantNil: true},
+		{name: "typed_nil_sqldb", input: (*sql.DB)(nil), wantNil: true},
+		{name: "valid_fakestore", input: fake, wantNil: false},
+		{name: "valid_sqldb", input: realDB, wantNil: false},
 	}
-	p := &WorkerPool{processPool: &testRunnerAgentPool{}}
-	if p.AgentPool() == nil {
-		t.Errorf("expected non-nil AgentPool")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveStore(tc.input)
+			if (got == nil) != tc.wantNil {
+				t.Errorf("resolveStore(%v) = %v, wantNil=%v", tc.input, got, tc.wantNil)
+			}
+		})
 	}
+}
 
-	// 4. Classifier OnParseError / OnSystemAlert debouncing and panic handling
+func TestWorkerPool_Accessors(t *testing.T) {
+	t.Parallel()
+	fake := setupTestStore(t)
+	realDB := &sql.DB{}
+
+	tests := []struct {
+		name             string
+		pool             *WorkerPool
+		wantStoreNil     bool
+		wantSummaryNil   bool
+		wantAgentPoolNil bool
+	}{
+		{name: "nil_pool", pool: nil, wantStoreNil: true, wantSummaryNil: true, wantAgentPoolNil: true},
+		{name: "empty_pool", pool: &WorkerPool{}, wantStoreNil: true, wantSummaryNil: false, wantAgentPoolNil: true},
+		{name: "pool_with_fakestore_and_agentpool", pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fake}, processPool: &testRunnerAgentPool{}}, wantStoreNil: false, wantSummaryNil: false, wantAgentPoolNil: false},
+		{name: "pool_with_sqldb", pool: &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}, wantStoreNil: false, wantSummaryNil: false, wantAgentPoolNil: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if (tc.pool.Store() == nil) != tc.wantStoreNil {
+				t.Errorf("Store() nil = %v, want %v", tc.pool.Store() == nil, tc.wantStoreNil)
+			}
+			if (tc.pool.SummaryGroup() == nil) != tc.wantSummaryNil {
+				t.Errorf("SummaryGroup() nil = %v, want %v", tc.pool.SummaryGroup() == nil, tc.wantSummaryNil)
+			}
+			if (tc.pool.AgentPool() == nil) != tc.wantAgentPoolNil {
+				t.Errorf("AgentPool() nil = %v, want %v", tc.pool.AgentPool() == nil, tc.wantAgentPoolNil)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_ClassifierAlertDebouncing(t *testing.T) {
+	t.Parallel()
 	appCfg := config.NewFromData(&config.ConfigData{SystemChannel: "alerts", APIKey: "k", AgyBin: "agy"})
 	dg, _ := discordgo.New("Bot fake")
-	var alertSent atomic.Int32
-	alertReceived := make(chan struct{}, 1)
-	poolAlert := New(appCfg, WorkerPoolConfig{
-		DiscordSession: dg,
-		SystemAlertFunc: func(s *discordgo.Session, ch, title, text string) error {
-			alertSent.Add(1)
-			select {
-			case alertReceived <- struct{}{}:
-			default:
-			}
-			return nil
+
+	tests := []struct {
+		name            string
+		model           string
+		rawOutput       string
+		endpoint        string
+		wantParseSubstr string
+		wantSysSubstr   string
+	}{
+		{
+			name:            "TruncatedAndSanitizedOutput",
+			model:           "gemini-flash",
+			rawOutput:       strings.Repeat("x", 700) + "\n```json\n@everyone @here\n```",
+			endpoint:        "http://192.168.1.70:8000/v1/systemone",
+			wantParseSubstr: "... (truncated)",
+			wantSysSubstr:   "http://192.168.1.70:8000/v1/systemone",
 		},
-	})
-	if poolAlert.cfg.Classifier != nil && poolAlert.cfg.Classifier.OnParseError != nil {
-		poolAlert.cfg.Classifier.OnParseError("gemini-flash", strings.Repeat("x", 700)+"\n```json\n@everyone @here\n```", errors.New("parse 1"))
-		select {
-		case <-alertReceived:
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for parse alert")
-		}
-		poolAlert.cfg.Classifier.OnParseError("gemini-flash", "short", errors.New("parse 2"))
-		if alertSent.Load() != 1 {
-			t.Errorf("expected 1 debounced alert, got %d", alertSent.Load())
-		}
+		{
+			name:            "ShortOutputAndMentions",
+			model:           "gemini-pro",
+			rawOutput:       "```json\n@everyone @here\n```",
+			endpoint:        "http://127.0.0.1:8000/v1/systemone",
+			wantParseSubstr: "'''json",
+			wantSysSubstr:   "http://127.0.0.1:8000/v1/systemone",
+		},
 	}
-	var sysAlertSent atomic.Int32
-	sysReceived := make(chan struct{}, 1)
-	poolSys := New(appCfg, WorkerPoolConfig{
-		DiscordSession: dg,
-		SystemAlertFunc: func(s *discordgo.Session, ch, title, text string) error {
-			sysAlertSent.Add(1)
-			select {
-			case sysReceived <- struct{}{}:
-			default:
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			var alerts []string
+			alertCh := make(chan struct{}, 4)
+			pool := New(appCfg, WorkerPoolConfig{
+				DiscordSession: dg,
+				SystemAlertFunc: func(s *discordgo.Session, ch, title, text string) error {
+					mu.Lock()
+					alerts = append(alerts, text)
+					mu.Unlock()
+					alertCh <- struct{}{}
+					return nil
+				},
+			})
+
+			pool.cfg.Classifier.OnParseError(tc.model, tc.rawOutput, errors.New("parse 1"))
+			waitForCompletion(t, alertCh, 1*time.Second, tc.name+"/parse")
+			pool.cfg.Classifier.OnParseError(tc.model, "duplicate", errors.New("parse 2"))
+
+			pool.cfg.Classifier.OnSystemAlert(tc.endpoint, errors.New("refused 1"))
+			waitForCompletion(t, alertCh, 1*time.Second, tc.name+"/sys")
+			pool.cfg.Classifier.OnSystemAlert(tc.endpoint, errors.New("refused 2"))
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(alerts) != 2 {
+				t.Fatalf("expected 2 debounced alerts (1 parse + 1 sys), got %d", len(alerts))
 			}
-			return nil
-		},
-	})
-	if poolSys.cfg.Classifier != nil && poolSys.cfg.Classifier.OnSystemAlert != nil {
-		poolSys.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("refused 1"))
-		select {
-		case <-sysReceived:
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for sys alert")
-		}
-		poolSys.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("refused 2"))
-		if sysAlertSent.Load() != 1 {
-			t.Errorf("expected 1 debounced sys alert, got %d", sysAlertSent.Load())
-		}
+			if !strings.Contains(alerts[0], tc.wantParseSubstr) {
+				t.Errorf("parse alert %q missing %q", alerts[0], tc.wantParseSubstr)
+			}
+			if !strings.Contains(alerts[1], tc.wantSysSubstr) {
+				t.Errorf("sys alert %q missing %q", alerts[1], tc.wantSysSubstr)
+			}
+		})
 	}
 }

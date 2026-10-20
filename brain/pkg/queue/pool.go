@@ -289,8 +289,12 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		agyBin, apiKey := cfg.AgyBin, cfg.APIKey
 		if appCfg != nil {
 			if cur := appCfg.Current(); cur != nil {
-				if cur.APIKey != "" { agyBin, apiKey = cur.AgyBin, cur.APIKey }
-				if cur.AgyBin != "" { agyBin = cur.AgyBin }
+				if cur.APIKey != "" {
+					apiKey = cur.APIKey
+				}
+				if cur.AgyBin != "" {
+					agyBin = cur.AgyBin
+				}
 			}
 		}
 		cfg.Classifier = classifier.NewClassifier(
