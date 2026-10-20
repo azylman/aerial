@@ -347,8 +347,9 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			if c, ok := tc["command"].(string); ok { cmdName = c }
 			isToolStart = true
 		}
-		su, _ := raw["step_update"].(map[string]any)
-		if su != nil {
+		var su map[string]any
+		if m, ok := raw["step_update"].(map[string]any); ok && m != nil {
+			su = m
 			var state, typ string
 			if s, ok := su["state"].(string); ok { state = strings.ToUpper(s)
 			} else if s, ok := su["status"].(string); ok { state = strings.ToUpper(s) }
@@ -510,7 +511,10 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 
 		respStr := extractResponseString(raw)
 		var status, errMsg string
-		resObj, _ := raw["result"].(map[string]any)
+		var resObj map[string]any
+		if r, ok := raw["result"].(map[string]any); ok {
+			resObj = r
+		}
 		for _, m := range []map[string]any{resObj, raw} {
 			if m == nil { continue }
 			if status == "" {
@@ -568,7 +572,10 @@ func extractResponseString(raw map[string]any) string {
 
 func populateUsage(res *TurnResult, raw map[string]any) {
 	if res == nil || raw == nil { return }
-	usageObj, _ := raw["usage"].(map[string]any)
+	var usageObj map[string]any
+	if u, ok := raw["usage"].(map[string]any); ok {
+		usageObj = u
+	}
 	if resObj, ok := raw["result"].(map[string]any); ok {
 		if u, ok := resObj["usage"].(map[string]any); ok { usageObj = u }
 	}
