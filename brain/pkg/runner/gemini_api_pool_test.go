@@ -344,187 +344,17 @@ func TestGeminiAPIPool_PrewarmedAndClose(t *testing.T) {
 	}
 }
 
-func TestGeminiAPISession_EdgeCasesAndJSONRPCBody(t *testing.T) {
+func TestGeminiAPISession_EdgeCases(t *testing.T) {
 	t.Parallel()
 	sess := &GeminiAPISession{targetKey: "fallback-target"}
 	if sess.SessionID() != "fallback-target" || sess.transcriptPath() != "" {
 		t.Errorf("expected fallback session ID and empty transcript path")
-	}
-	rpcTests := []struct {
-		name      string
-		body      []byte
-		expectErr bool
-	}{
-		{name: "nil body", body: nil, expectErr: true},
-		{name: "whitespace body", body: []byte("   \n\t  "), expectErr: true},
-		{name: "standard json", body: []byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}`)},
-		{name: "sse valid", body: []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n")},
-		{name: "sse non-json data", body: []byte("event: message\ndata: not json\n\n"), expectErr: true},
-		{name: "completely invalid json", body: []byte("not json at all"), expectErr: true},
-	}
-	for _, tc := range rpcTests {
-		resp, err := parseJSONRPCBody(tc.body)
-		if (tc.expectErr && err == nil) || (!tc.expectErr && (err != nil || resp == nil)) {
-			t.Errorf("%s: unexpected result: resp=%v, err=%v", tc.name, resp, err)
-		}
 	}
 }
 
 type errMockDispatcher struct{}
 func (d *errMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) { return nil, errors.New("declarations query failed") }
 func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) { return "", errors.New("execute failed") }
-
-func TestMCPDispatcher_ListDeclarationsJSONAndSSE(t *testing.T) {
-	t.Parallel()
-	tsJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"schedule_once","description":"Schedule a reminder","inputSchema":{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]}}]}}`))
-	}))
-	defer tsJSON.Close()
-
-	tsSSE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"ha_call_write_tool\",\"description\":\"Call HA service\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}}}}]}}\n\n"))
-	}))
-	defer tsSSE.Close()
-
-	disp := NewDefaultMCPDispatcher([]MCPServerConfig{
-		{Name: "scheduler", ServerURL: tsJSON.URL},
-		{Name: "ha-mcp", ServerURL: tsSSE.URL, Headers: map[string]string{"Authorization": "Bearer token123"}},
-	}, tsJSON.Client())
-
-	decls, err := disp.ListDeclarations(context.Background())
-	if err != nil || len(decls) != 2 { t.Fatalf("unexpected ListDeclarations: decls=%v, err=%v", decls, err) }
-	names := map[string]bool{}
-	for _, d := range decls {
-		names[d.Name] = true
-		if _, hasSchema := d.Parameters["$schema"]; hasSchema { t.Errorf("expected $schema stripped from %s", d.Name) }
-	}
-	if !names["schedule_once"] || !names["ha_call_write_tool"] { t.Errorf("missing expected tools: %v", names) }
-}
-
-func TestMCPDispatcher_ExecutePaths(t *testing.T) {
-	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Method string `json:"method"`
-			Params struct{ Name string `json:"name"` } `json:"params"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Method == "tools/list" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"good_tool"},{"name":"error_tool"},{"name":"raw_tool"}]}}`))
-			return
-		}
-		switch req.Params.Name {
-		case "good_tool":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Light turned on\"}]}}\n\n"))
-		case "error_tool":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"Device not reachable"}]}}`))
-		case "raw_tool":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}`))
-		default:
-			http.Error(w, "unknown tool", http.StatusNotFound)
-		}
-	}))
-	defer ts.Close()
-
-	disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}}, ts.Client())
-	ctx := context.Background()
-
-	if out, err := disp.Execute(ctx, "good_tool", map[string]interface{}{"entity": "light.1"}); err != nil || out != "Light turned on" {
-		t.Errorf("unexpected execute good_tool: %q, %v", out, err)
-	}
-	if outErr, err := disp.Execute(ctx, "error_tool", nil); err == nil || !strings.Contains(err.Error(), "Device not reachable") || outErr != "Device not reachable" {
-		t.Errorf("unexpected error_tool: %q, %v", outErr, err)
-	}
-	if rawOut, err := disp.Execute(ctx, "raw_tool", nil); err != nil || !strings.Contains(rawOut, `"status":"ok"`) {
-		t.Errorf("unexpected raw_tool: %q, %v", rawOut, err)
-	}
-	if _, err := disp.Execute(ctx, "non_existent", nil); err == nil { t.Errorf("expected error for non_existent tool") }
-}
-
-func TestMCPDispatcher_DeclarationsAndExecutionEdgeCases(t *testing.T) {
-	t.Parallel()
-	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "server error", http.StatusInternalServerError) }))
-	defer ts500.Close()
-	tsRPCErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}`))
-	}))
-	defer tsRPCErr.Close()
-	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`not a json response`))
-	}))
-	defer tsBadJSON.Close()
-	tsEmptyName := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"","description":"empty"},{"name":"valid_t","description":"ok"}]}}`))
-	}))
-	defer tsEmptyName.Close()
-
-	var nilDisp *DefaultMCPDispatcher
-	if decls, err := nilDisp.ListDeclarations(context.Background()); err != nil || decls != nil { t.Errorf("expected nil decls from nil dispatcher") }
-	if _, err := nilDisp.Execute(context.Background(), "tool", nil); err == nil { t.Errorf("expected error executing on nil dispatcher") }
-
-	emptyDisp := NewDefaultMCPDispatcher(nil, nil)
-	if decls, err := emptyDisp.ListDeclarations(context.Background()); err != nil || decls != nil { t.Errorf("expected nil decls from empty dispatcher") }
-
-	skipDisp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "empty-url", ServerURL: "   "}}, http.DefaultClient)
-	if decls, err := skipDisp.ListDeclarations(context.Background()); err != nil || len(decls) != 0 { t.Errorf("expected empty decls for empty server URL") }
-
-	errDisp := NewDefaultMCPDispatcher([]MCPServerConfig{
-		{Name: "srv-500", ServerURL: ts500.URL},
-		{Name: "srv-rpc-err", ServerURL: tsRPCErr.URL},
-		{Name: "srv-bad-json", ServerURL: tsBadJSON.URL},
-		{Name: "srv-empty-name", ServerURL: tsEmptyName.URL},
-		{Name: "srv-unreachable", ServerURL: "http://127.0.0.1:0"},
-	}, ts500.Client())
-
-	decls, err := errDisp.ListDeclarations(context.Background())
-	if err != nil || len(decls) != 1 || decls[0].Name != "valid_t" {
-		t.Fatalf("expected 1 valid declaration valid_t, got %d decls (%v)", len(decls), err)
-	}
-
-	execErrorTests := []struct {
-		toolName, serverName, serverURL string
-	}{
-		{"crash_tool", "srv-500", ts500.URL},
-		{"rpc_err_tool", "srv-rpc-err", tsRPCErr.URL},
-		{"bad_json_tool", "srv-bad-json", tsBadJSON.URL},
-		{"unreachable_tool", "srv-unreachable", "http://127.0.0.1:0"},
-	}
-	for _, et := range execErrorTests {
-		errDisp.toolRoutes[et.toolName] = MCPServerConfig{Name: et.serverName, ServerURL: et.serverURL}
-		if _, err := errDisp.Execute(context.Background(), et.toolName, nil); err == nil {
-			t.Errorf("expected error executing %s on %s", et.toolName, et.serverURL)
-		}
-	}
-}
-
-func TestMCPDispatcher_HeadersAndMultiPartContent(t *testing.T) {
-	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Custom-Auth") != "Bearer secret123" {
-			http.Error(w, "missing header", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]}}`))
-	}))
-	defer ts.Close()
-
-	srvCfg := MCPServerConfig{Name: "auth-srv", ServerURL: ts.URL, Headers: map[string]string{"X-Custom-Auth": "Bearer secret123"}}
-	disp := NewDefaultMCPDispatcher([]MCPServerConfig{srvCfg}, ts.Client())
-	disp.toolRoutes["multi_tool"] = srvCfg
-
-	res, err := disp.Execute(context.Background(), "multi_tool", map[string]interface{}{"foo": "bar"})
-	if err != nil || res != "line one\nline two" { t.Errorf("unexpected multi-part execution: %q, %v", res, err) }
-}
 
 type toolCallingTestCase struct {
 	name, mcpMode, geminiMode, expectToolCall, expectResponseSub string
@@ -711,29 +541,6 @@ func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 	}
 }
 
-func TestIsMissingSessionIDErr_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		status   int
-		body     []byte
-		rpcErr   *jsonRPCResponse
-		expected bool
-	}{
-		{name: "Status400", status: 400, expected: true},
-		{name: "MissingSessionBody", status: 200, body: []byte("missing session ID"), expected: true},
-		{name: "RPCErrorBadRequest", status: 200, rpcErr: &jsonRPCResponse{Error: &jsonRPCError{Code: -32600, Message: "Bad Request"}}, expected: true},
-		{name: "RPCErrorMissingSessionMsg", status: 200, rpcErr: &jsonRPCResponse{Error: &jsonRPCError{Code: -32000, Message: "Missing session ID required"}}, expected: true},
-		{name: "InternalServerError", status: 500, body: []byte("internal server error"), expected: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if isMissingSessionIDErr(tc.status, tc.body, tc.rpcErr) != tc.expected { t.Errorf("%s failed", tc.name) }
-		})
-	}
-}
-
 func TestCleanParameters(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -836,74 +643,6 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	if leaf := probe["properties"].(map[string]interface{})["leaf"].(map[string]interface{}); leaf["type"] != "STRING" {
 		t.Fatalf("leaf not preserved: %+v", leaf)
 	}
-}
-
-func TestDefaultMCPDispatcher_SessionHandshake(t *testing.T) {
-	t.Parallel()
-	var initCount, notifyCount, listCount, callCount int32
-	const validSessID = "sess-handshake-12345"
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Method string `json:"method"` }
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		sessHdr := r.Header.Get("mcp-session-id")
-		w.Header().Set("Content-Type", "application/json")
-		switch req.Method {
-		case "initialize":
-			atomic.AddInt32(&initCount, 1)
-			w.Header().Set("mcp-session-id", validSessID)
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}`))
-		case "notifications/initialized":
-			atomic.AddInt32(&notifyCount, 1)
-			if sessHdr != validSessID { http.Error(w, "bad session", http.StatusBadRequest); return }
-			w.WriteHeader(http.StatusOK)
-		case "tools/list":
-			atomic.AddInt32(&listCount, 1)
-			if sessHdr != validSessID {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"code":-32600,"message":"Bad Request: Missing session ID"}`))
-				return
-			}
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_tool","description":"A test tool","inputSchema":{"type":"object"}}]}}`))
-		case "tools/call":
-			atomic.AddInt32(&callCount, 1)
-			if sessHdr != validSessID {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"code":-32600,"message":"Bad Request: Missing session ID"}`))
-				return
-			}
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Executed successfully"}]}}`))
-		default:
-			http.Error(w, "unknown method", http.StatusNotFound)
-		}
-	}))
-	defer ts.Close()
-
-	disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "stateful-mcp", ServerURL: ts.URL}}, ts.Client())
-	ctx := context.Background()
-
-	decls, err := disp.ListDeclarations(ctx)
-	if err != nil || len(decls) != 1 || decls[0].Name != "test_tool" || initCount != 1 || notifyCount != 1 || listCount != 2 {
-		t.Fatalf("ListDeclarations failed: decls=%+v, err=%v, counts=%d/%d/%d", decls, err, initCount, notifyCount, listCount)
-	}
-
-	out, err := disp.Execute(ctx, "test_tool", map[string]interface{}{})
-	if err != nil || out != "Executed successfully" || callCount != 1 {
-		t.Fatalf("Execute failed: out=%q, callCount=%d, err=%v", out, callCount, err)
-	}
-
-	const concurrency = 10
-	errCh := make(chan error, concurrency)
-	for i := 0; i < concurrency; i++ {
-		go func() {
-			res, e := disp.Execute(ctx, "test_tool", nil)
-			if e != nil || res != "Executed successfully" { errCh <- fmt.Errorf("res=%q, err=%w", res, e) } else { errCh <- nil }
-		}()
-	}
-	for i := 0; i < concurrency; i++ {
-		if e := <-errCh; e != nil { t.Fatalf("concurrent execution failed: %v", e) }
-	}
-	if initCount != 1 { t.Errorf("expected initialize count 1 after concurrency, got %d", initCount) }
 }
 
 func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
@@ -1022,105 +761,6 @@ func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	}
 }
 
-func TestMCPDispatcher_MissingSessionRetry(t *testing.T) {
-	t.Parallel()
-	var initCalls, execCalls int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Method string `json:"method"` }
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		w.Header().Set("Content-Type", "application/json")
-		switch req.Method {
-		case "initialize":
-			atomic.AddInt32(&initCalls, 1)
-			w.Header().Set("mcp-session-id", "new-sess-123")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`))
-		case "notifications/initialized":
-			w.WriteHeader(http.StatusOK)
-		case "tools/list":
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_exec","description":"Test Exec"}]}}`))
-		case "tools/call":
-			if atomic.AddInt32(&execCalls, 1) == 1 || r.Header.Get("mcp-session-id") != "new-sess-123" {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
-				return
-			}
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Success after retry"}]}}`))
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
-		}
-	}))
-	defer ts.Close()
-
-	dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "exec-retry-srv", ServerURL: ts.URL}}, ts.Client())
-	res, err := dispatcher.Execute(context.Background(), "test_exec", nil)
-	if err != nil || res != "Success after retry" || atomic.LoadInt32(&initCalls) < 1 || atomic.LoadInt32(&execCalls) != 2 {
-		t.Fatalf("Execute failed: res=%q, inits=%d, execs=%d, err=%v", res, atomic.LoadInt32(&initCalls), atomic.LoadInt32(&execCalls), err)
-	}
-
-	tsRetryFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
-	}))
-	defer tsRetryFail.Close()
-	dispFail := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "retry-fail-srv", ServerURL: tsRetryFail.URL}}, tsRetryFail.Client())
-	if decls, err := dispFail.ListDeclarations(context.Background()); err != nil || len(decls) != 0 {
-		t.Errorf("expected 0 decls from failing srv, got %d, err=%v", len(decls), err)
-	}
-	if _, err := dispFail.Execute(context.Background(), "non_existent_tool", nil); err == nil {
-		t.Errorf("expected error executing non-existent tool")
-	}
-}
-
-func TestMCPDispatcher_NormalizeGoogleUserEmail(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name, inputEmail, calendarID, expectedEmail string
-		shouldHaveEmail                             bool
-	}{
-		{name: "Primary", inputEmail: "primary", calendarID: "primary"},
-		{name: "Me", inputEmail: "me"},
-		{name: "UserEmail", inputEmail: "user@example.com", expectedEmail: "user@example.com", shouldHaveEmail: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var receivedParams map[string]interface{}
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				var req struct {
-					Method string `json:"method"`
-					Params struct{ Arguments map[string]interface{} `json:"arguments"` } `json:"params"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&req)
-				if req.Method == "tools/list" {
-					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_events"}]}}`))
-					return
-				}
-				receivedParams = req.Params.Arguments
-				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`))
-			}))
-			defer ts.Close()
-
-			disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "google", ServerURL: ts.URL}}, ts.Client())
-			ctx := context.Background()
-			_, _ = disp.ListDeclarations(ctx)
-			args := map[string]interface{}{"user_google_email": tc.inputEmail}
-			if tc.calendarID != "" { args["calendar_id"] = tc.calendarID }
-			if _, err := disp.Execute(ctx, "get_events", args); err != nil {
-				t.Fatalf("Execute failed for %s: %v", tc.inputEmail, err)
-			}
-			val, exists := receivedParams["user_google_email"]
-			if exists != tc.shouldHaveEmail || (tc.shouldHaveEmail && val != tc.expectedEmail) {
-				t.Errorf("case %q: expected exists=%v val=%v, got exists=%v val=%v", tc.inputEmail, tc.shouldHaveEmail, tc.expectedEmail, exists, val)
-			}
-			if tc.calendarID != "" && receivedParams["calendar_id"] != tc.calendarID {
-				t.Errorf("case %q: expected calendar_id=%q, got %v", tc.inputEmail, tc.calendarID, receivedParams["calendar_id"])
-			}
-		})
-	}
-}
-
 func newAllowedToolsMockServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1143,6 +783,17 @@ func newAllowedToolsMockServer() *httptest.Server {
 
 func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 	t.Parallel()
+	var nilDisp *DefaultMCPDispatcher
+	if decls, err := nilDisp.ListDeclarations(context.Background()); err != nil || decls != nil {
+		t.Errorf("expected nil decls")
+	}
+	if _, err := nilDisp.Execute(context.Background(), "t", nil); err == nil {
+		t.Errorf("expected err on nil Execute")
+	}
+	if err := nilDisp.Prime(context.Background()); err != nil {
+		t.Errorf("expected nil Prime err")
+	}
+
 	poolTS := newAllowedToolsMockServer()
 	t.Cleanup(poolTS.Close)
 	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
@@ -1150,7 +801,7 @@ func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 		MCPServers:   []MCPServerConfig{{Name: "test-mcp", ServerURL: poolTS.URL}},
 		AllowedTools: []string{"ha_call_read_tool"},
 	})
-	defer pool.Close()
+	t.Cleanup(func() { _ = pool.Close() })
 	if pool.cfg.MCPDispatcher == nil { t.Fatalf("expected DefaultMCPDispatcher auto-wired") }
 	if decls, err := pool.cfg.MCPDispatcher.ListDeclarations(context.Background()); err != nil || len(decls) != 1 || decls[0].Name != "ha_call_read_tool" {
 		t.Fatalf("unexpected decls: %v, %v", decls, err)

@@ -20,23 +20,14 @@ func TestConfigureSysProcAttr_Windows(t *testing.T) {
 
 	killProcessGroup(nil)
 	killProcessGroup(&exec.Cmd{})
-	terminateProcessGroup(nil)
 
-	var customKillCalled, customTermCalled bool
+	var customKillCalled bool
 	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 12345}}
 	killProcessGroupWith(mockCmd, func(p *os.Process) error {
 		customKillCalled = true
 		return errors.New("simulated kill error")
 	})
-	terminateProcessGroupWith(mockCmd, func(p *os.Process) error {
-		customTermCalled = true
-		return os.ErrProcessDone
-	})
-	if !customKillCalled || !customTermCalled {
-		t.Errorf("expected custom funcs called")
-	}
-
-	if isProcessTerminatedBySignal(nil) || !isProcessTerminatedBySignal(&exec.ExitError{}) {
-		t.Errorf("isProcessTerminatedBySignal failed")
+	if !customKillCalled {
+		t.Errorf("expected custom kill func called")
 	}
 }

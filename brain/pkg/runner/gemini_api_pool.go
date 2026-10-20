@@ -32,38 +32,7 @@ type (
 		ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error)
 		Execute(ctx context.Context, name string, args map[string]interface{}) (string, error)
 	}
-	jsonRPCResponse struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      interface{}     `json:"id"`
-		Result  json.RawMessage `json:"result,omitempty"`
-		Error   *jsonRPCError   `json:"error,omitempty"`
-	}
-	jsonRPCError struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
 )
-
-func parseJSONRPCBody(body []byte) (*jsonRPCResponse, error) {
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 { return nil, errors.New("empty response body") }
-	if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) || bytes.Contains(trimmed, []byte("\ndata:")) {
-		for _, rawLine := range bytes.Split(trimmed, []byte("\n")) {
-			if line := bytes.TrimSpace(rawLine); bytes.HasPrefix(line, []byte("data:")) {
-				payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-				if len(payload) > 0 && payload[0] == '{' {
-					var resp jsonRPCResponse
-					if json.Unmarshal(payload, &resp) == nil { return &resp, nil }
-				}
-			}
-		}
-	}
-	var resp jsonRPCResponse
-	if err := json.Unmarshal(trimmed, &resp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal JSON-RPC response: %w", err)
-	}
-	return &resp, nil
-}
 
 func cleanParameters(schema map[string]interface{}) map[string]interface{} {
 	res := cleanSchemaNode(schema)
@@ -221,26 +190,14 @@ func cleanSchemaNode(schema map[string]interface{}) map[string]interface{} {
 	return cp
 }
 
-func isMissingSessionIDErr(statusCode int, bodyBytes []byte, rpcResp *jsonRPCResponse) bool {
-	if statusCode == http.StatusBadRequest { return true }
-	if rpcResp != nil && rpcResp.Error != nil && (rpcResp.Error.Code == -32600 || strings.Contains(strings.ToLower(rpcResp.Error.Message), "missing session id")) {
-		return true
-	}
-	return bytes.Contains(bytes.ToLower(bodyBytes), []byte("missing session id"))
-}
-
 type DefaultMCPDispatcher struct {
-	d          *mcp.DefaultDispatcher
-	toolRoutes map[string]MCPServerConfig
+	d *mcp.DefaultDispatcher
 }
 
 var _ MCPDispatcher = (*DefaultMCPDispatcher)(nil)
 
 func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client, allowedTools ...[]string) *DefaultMCPDispatcher {
-	return &DefaultMCPDispatcher{
-		d:          mcp.NewDispatcher(servers, client, allowedTools...),
-		toolRoutes: make(map[string]MCPServerConfig),
-	}
+	return &DefaultMCPDispatcher{d: mcp.NewDispatcher(servers, client, allowedTools...)}
 }
 
 func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
@@ -256,9 +213,6 @@ func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFu
 
 func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
 	if d == nil || d.d == nil { return "", errors.New("mcp dispatcher is nil") }
-	if d.toolRoutes != nil {
-		if srv, ok := d.toolRoutes[name]; ok { d.d.RegisterToolRoute(name, srv) }
-	}
 	res, err := d.d.Execute(ctx, name, args)
 	if err != nil && strings.Contains(err.Error(), "is not in the allowed tools list") {
 		return "", fmt.Errorf("tool %q is not in the allowed voice tools list", name)

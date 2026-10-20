@@ -8,34 +8,6 @@ import (
 	"time"
 )
 
-// AgyArgsInput holds the configuration parameters for building CLI arguments.
-type AgyArgsInput struct {
-	OutputFormat string
-	Model        string
-	SessionID    string
-	WorkerMode   bool
-}
-
-// BuildAgyArgs constructs command-line arguments for executing the agy binary.
-func BuildAgyArgs(input AgyArgsInput) []string {
-	outFmt := strings.TrimSpace(input.OutputFormat)
-	if outFmt == "" {
-		outFmt = "stream-json"
-	}
-	args := []string{"--dangerously-skip-permissions"}
-	if input.WorkerMode {
-		args = append(args, "--input-format", "stream-json")
-	}
-	args = append(args, "--output-format", outFmt)
-	if s := strings.TrimSpace(input.SessionID); s != "" {
-		args = append(args, "--conversation", s)
-	}
-	if m := strings.TrimSpace(input.Model); m != "" {
-		args = append(args, "--model", m)
-	}
-	return args
-}
-
 // AgyEnvInput holds environment configuration parameters.
 type AgyEnvInput struct {
 	BaseEnv  []string
