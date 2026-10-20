@@ -52,8 +52,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -o pipefail
+          SHORT_SHA="${HEAD_SHA:0:7}"
+          if [ -n "${PR_NUMBER:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            OVERRIDE_COMMENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+              --jq "[.[] | select(.user.login == \"azylman\" and (.body | contains(\"## roborev-override\")) and ((.body | contains(\"${HEAD_SHA}\")) or (.body | contains(\"${SHORT_SHA}\"))))] | last | .body // empty" 2>/dev/null || true)
+            if [ -n "${OVERRIDE_COMMENT}" ]; then
+              echo "${OVERRIDE_COMMENT}" >> "$GITHUB_STEP_SUMMARY"
+              echo "RoboRev gate overridden for commit ${SHORT_SHA} via verified technical rebuttal."
+              exit 0
+            fi
+          fi
           roborev ci review \
             --comment \
             --agent gemini \
