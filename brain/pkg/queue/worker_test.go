@@ -3136,10 +3136,20 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 			name: "SilentFlashBurst",
 			burst: []db.Message{
 				{ID: "m1", Metadata: db.MessageMetadata{Silent: true}},
-				{ID: "m2", Metadata: db.MessageMetadata{Model: "  gemini-4-flash  "}},
+				{ID: "m2", Metadata: db.MessageMetadata{Silent: true, Model: "  gemini-4-flash  "}},
 			},
 			wantModel:  "gemini-4-flash",
 			wantSilent: true,
+			wantEffort: "low",
+		},
+		{
+			name: "MixedSilentAndNormalBurst",
+			burst: []db.Message{
+				{ID: "m1", Metadata: db.MessageMetadata{Silent: true}},
+				{ID: "m2", Metadata: db.MessageMetadata{Silent: false, Model: "  gemini-4-flash  "}},
+			},
+			wantModel:  "gemini-4-flash",
+			wantSilent: false,
 			wantEffort: "low",
 		},
 		{
