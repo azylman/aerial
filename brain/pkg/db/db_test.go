@@ -27,6 +27,20 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
+func mustOK(t *testing.T, err error, desc string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s failed: %v", desc, err)
+	}
+}
+
+func assertErr(t *testing.T, err error, desc string) {
+	t.Helper()
+	if err == nil {
+		t.Errorf("expected error on %s", desc)
+	}
+}
+
 type dummyTestCloser struct {
 	err error
 }
@@ -37,12 +51,8 @@ func (d *dummyTestCloser) Close() error {
 
 func TestDBInitAndDSN(t *testing.T) {
 	tests := []struct {
-		name    string
-		url     string
-		cfgNil  bool
-		snapNil bool
-		wantErr bool
-		errSub  string
+		name, url, errSub        string
+		cfgNil, snapNil, wantErr bool
 	}{
 		{name: "nil_config", cfgNil: true, wantErr: true},
 		{name: "empty_url", url: "", wantErr: true},
@@ -91,58 +101,43 @@ func TestDBInitAndDSN(t *testing.T) {
 	if oldHook != nil {
 		tmpFile := filepath.Join(t.TempDir(), "subfolder", "test.db")
 		cfgHooked := config.NewFromData(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
-		if dbHooked, err := New(cfgHooked); err != nil {
-			t.Fatalf("expected New with hooked sqlite to succeed: %v", err)
-		} else {
-			_ = dbHooked.Close()
-		}
+		dbHooked, err := New(cfgHooked)
+		mustOK(t, err, "New with hooked sqlite")
+		_ = dbHooked.Close()
 		if _, err := os.Stat(tmpFile); os.IsNotExist(err) {
 			t.Errorf("expected sqlite db file to exist at %s", tmpFile)
 		}
 	}
 	for _, dsn := range []string{"file:mem_1?mode=memory&cache=shared", "file:mem_2?mode=memory&_pragma=busy_timeout(5000)", "sqlite://:memory:"} {
-		if dbPragma, err := InitDB(dsn); err != nil {
-			t.Fatalf("InitDB(%q) failed: %v", dsn, err)
-		} else {
-			_ = dbPragma.Close()
-		}
+		dbPragma, err := InitDB(dsn)
+		mustOK(t, err, "InitDB")
+		_ = dbPragma.Close()
 	}
-	if _, err := InitDB(12345); err == nil {
-		t.Fatalf("expected error for non-string InitDB")
-	}
+	_, errNonStr := InitDB(12345)
+	assertErr(t, errNonStr, "non-string InitDB")
 
 	database := setupTestDB(t)
 	defer database.Close()
 	_, err := database.Exec("SELECT id, row_id, thread_id, guild_id, author_id, author_name, content, status, retry_count, restart_count, error_message, response_text, created_at, updated_at FROM messages LIMIT 0")
-	if err != nil {
-		t.Fatalf("messages schema check failed: %v", err)
-	}
+	mustOK(t, err, "messages schema check")
 	var fk int
 	if err := database.QueryRow("PRAGMA foreign_keys;").Scan(&fk); err != nil || fk != 1 {
 		t.Errorf("expected foreign_keys=1, got %d, %v", fk, err)
 	}
 	closedDB, _ := initTestSQLite(filepath.Join(t.TempDir(), "closed-mig.db"))
 	_ = closedDB.Close()
-	if err := initSchemaSQLite(closedDB); err == nil {
-		t.Errorf("expected error on closed db initSchemaSQLite")
-	}
+	assertErr(t, initSchemaSQLite(closedDB), "closed db initSchemaSQLite")
 }
 
 func TestStoreUnavailableContract(t *testing.T) {
 	database := setupTestDB(t)
 	_ = database.Close()
-	store := NewSQLStore(database)
-	assertStoreUnavailable(t, store)
-
+	assertStoreUnavailable(t, NewSQLStore(database))
 	assertStoreUnavailable(t, &SQLStore{})
-
 	closeWarn(nil, "test")
 	rollbackWarn(nil, "test")
-	if isPostgres(nil) {
-		t.Errorf("expected isPostgres(nil) to be false")
-	}
-	if isPostgres(database) {
-		t.Errorf("expected isPostgres(sqlite) to be false")
+	if isPostgres(nil) || isPostgres(database) {
+		t.Errorf("expected isPostgres false for nil/sqlite")
 	}
 }
 
@@ -154,36 +149,17 @@ func TestMessageLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	msg := Message{
-		ID:         "msg-1",
-		ThreadID:   "th-1",
-		GuildID:    "guild-1",
-		AuthorID:   "author-1",
-		AuthorName: "Alice",
-		Content:    "Hello Aerial",
-		Status:     StatusPending,
-		Metadata: MessageMetadata{
-			Mentions:       []string{"@aerial"},
-			MentionUserIDs: []string{"1001"},
-			MentionRoleIDs: []string{"2001"},
-			Attachments:    []string{"https://example.com/file.png"},
-			IsAdmin:        true,
-		},
+		ID: "msg-1", ThreadID: "th-1", GuildID: "guild-1", AuthorID: "author-1", AuthorName: "Alice", Content: "Hello Aerial", Status: StatusPending,
+		Metadata: MessageMetadata{Mentions: []string{"@aerial"}, MentionUserIDs: []string{"1001"}, MentionRoleIDs: []string{"2001"}, Attachments: []string{"https://example.com/file.png"}, IsAdmin: true},
 	}
 
-	if err := store.InsertMessage(ctx, msg); err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
-	// Idempotent duplicate insert
-	if err := store.InsertMessage(ctx, msg); err != nil {
-		t.Fatalf("Duplicate InsertMessage failed: %v", err)
-	}
+	mustOK(t, store.InsertMessage(ctx, msg), "InsertMessage")
+	mustOK(t, store.InsertMessage(ctx, msg), "Duplicate InsertMessage")
 
 	got, err := store.GetMessage(ctx, "msg-1")
-	if err != nil || got == nil || got.Content != "Hello Aerial" {
-		t.Fatalf("GetMessage failed: %v, got: %+v", err, got)
-	}
-	if !got.Metadata.IsAdmin || len(got.Metadata.Mentions) != 1 {
-		t.Errorf("Metadata mismatch: %+v", got.Metadata)
+	mustOK(t, err, "GetMessage msg-1")
+	if got == nil || got.Content != "Hello Aerial" || !got.Metadata.IsAdmin || len(got.Metadata.Mentions) != 1 {
+		t.Fatalf("GetMessage unexpected: %+v", got)
 	}
 
 	if exists, err := store.MessageExists(ctx, "msg-1"); err != nil || !exists {
@@ -200,77 +176,48 @@ func TestMessageLifecycle(t *testing.T) {
 		t.Errorf("ClaimPendingMessage already claimed = true, want false")
 	}
 
-	if err := store.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "working"); err != nil {
-		t.Fatalf("UpdateMessageStatus failed: %v", err)
-	}
-	if err := store.IncrementMessageRetry(ctx, "msg-1", "timeout"); err != nil {
-		t.Fatalf("IncrementMessageRetry failed: %v", err)
-	}
+	mustOK(t, store.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "working"), "UpdateMessageStatus")
+	mustOK(t, store.IncrementMessageRetry(ctx, "msg-1", "timeout"), "IncrementMessageRetry")
 	got, _ = store.GetMessage(ctx, "msg-1")
 	if got.RetryCount != 1 || got.ErrorMessage != "timeout" {
 		t.Errorf("retry mismatch: %+v", got)
 	}
 
-	if err := store.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered"); err != nil {
-		t.Fatalf("ResetMessageToPendingWithRestart failed: %v", err)
-	}
+	mustOK(t, store.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered"), "ResetMessageToPendingWithRestart")
 	got, _ = store.GetMessage(ctx, "msg-1")
 	if got.Status != StatusPending || got.RestartCount != 1 {
 		t.Errorf("restart mismatch: %+v", got)
 	}
 
-	if err := store.UpdateMessageCompleted(ctx, "msg-1", "Task complete"); err != nil {
-		t.Fatalf("UpdateMessageCompleted failed: %v", err)
-	}
+	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-1", "Task complete"), "UpdateMessageCompleted")
 	got, _ = store.GetMessage(ctx, "msg-1")
 	if got.Status != StatusCompleted || got.ResponseText != "Task complete" {
 		t.Errorf("completed mismatch: %+v", got)
 	}
 
-	// Additional messages for querying
-	msg2 := Message{ID: "msg-2", ThreadID: "th-1", Content: "Message 2", Status: StatusPending}
-	_ = store.InsertMessage(ctx, msg2)
-	pending, err := store.GetPendingOrProcessingMessages(ctx, 10)
-	if err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
+	_ = store.InsertMessage(ctx, Message{ID: "msg-2", ThreadID: "th-1", Content: "Message 2", Status: StatusPending})
+	if pending, err := store.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
 		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
 	}
-
-	maxRow, err := store.GetMaxMessageRowID(ctx, "th-1")
-	if err != nil || maxRow != 1 {
+	if maxRow, err := store.GetMaxMessageRowID(ctx, "th-1"); err != nil || maxRow != 1 {
 		t.Errorf("GetMaxMessageRowID = %d, %v, want 1", maxRow, err)
 	}
-
-	threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour)
-	if err != nil || len(threadIDs) != 1 || threadIDs[0] != "th-1" {
+	if threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 || threadIDs[0] != "th-1" {
 		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
 	}
-
-	recent, err := store.GetRecentThreadMessages(ctx, "th-1", 10)
-	if err != nil || len(recent) != 2 {
+	if recent, err := store.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
 		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
 	}
-
-	tasks, err := store.GetActiveTasks(ctx)
-	if err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
+	if tasks, err := store.GetActiveTasks(ctx); err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
 		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
 	}
 
 	// Empty ID validation
-	if err := store.InsertMessage(ctx, Message{ID: ""}); err == nil {
-		t.Errorf("expected error inserting empty ID message")
-	}
-	if err := store.UpdateMessageStatus(ctx, "", StatusCompleted, ""); err == nil {
-		t.Errorf("expected error on empty ID UpdateMessageStatus")
-	}
-	if err := store.UpdateMessageCompleted(ctx, "", "resp"); err == nil {
-		t.Errorf("expected error on empty ID UpdateMessageCompleted")
-	}
-	if err := store.IncrementMessageRetry(ctx, "", "err"); err == nil {
-		t.Errorf("expected error on empty ID IncrementMessageRetry")
-	}
-	if err := store.ResetMessageToPendingWithRestart(ctx, "", "reason"); err == nil {
-		t.Errorf("expected error on empty ID ResetMessageToPendingWithRestart")
-	}
+	assertErr(t, store.InsertMessage(ctx, Message{ID: ""}), "InsertMessage empty ID")
+	assertErr(t, store.UpdateMessageStatus(ctx, "", StatusCompleted, ""), "UpdateMessageStatus empty ID")
+	assertErr(t, store.UpdateMessageCompleted(ctx, "", "resp"), "UpdateMessageCompleted empty ID")
+	assertErr(t, store.IncrementMessageRetry(ctx, "", "err"), "IncrementMessageRetry empty ID")
+	assertErr(t, store.ResetMessageToPendingWithRestart(ctx, "", "reason"), "ResetMessageToPendingWithRestart empty ID")
 	if m, err := store.GetMessage(ctx, ""); err != nil || m != nil {
 		t.Errorf("expected nil, nil on empty ID GetMessage")
 	}
@@ -296,9 +243,7 @@ func TestSessionLifecycle(t *testing.T) {
 	if id, err := store.GetSessionID(ctx, "th-1"); err != nil || id != "" {
 		t.Errorf("expected empty session ID, got %q, %v", id, err)
 	}
-	if err := store.SaveSessionID(ctx, "th-1", "sess-1"); err != nil {
-		t.Fatalf("SaveSessionID failed: %v", err)
-	}
+	mustOK(t, store.SaveSessionID(ctx, "th-1", "sess-1"), "SaveSessionID")
 	if id, _ := store.GetSessionID(ctx, "th-1"); id != "sess-1" {
 		t.Errorf("expected sess-1, got %q", id)
 	}
@@ -311,9 +256,7 @@ func TestSessionLifecycle(t *testing.T) {
 		t.Errorf("GetSessionTurnCount = %d, want 2", cnt)
 	}
 
-	if err := store.RotateSessionID(ctx, "th-1", "sess-2"); err != nil {
-		t.Fatalf("RotateSessionID failed: %v", err)
-	}
+	mustOK(t, store.RotateSessionID(ctx, "th-1", "sess-2"), "RotateSessionID")
 	curr, _ := store.GetSessionID(ctx, "th-1")
 	prev, _ := store.GetPreviousSessionID(ctx, "th-1")
 	turns, _ := store.GetSessionTurnCount(ctx, "th-1")
@@ -325,9 +268,7 @@ func TestSessionLifecycle(t *testing.T) {
 	if sum, wm, err := store.GetThreadSummary(ctx, "th-1"); err != nil || sum != "" || wm != "" {
 		t.Errorf("GetThreadSummary empty = %q, %q, %v", sum, wm, err)
 	}
-	if err := store.SaveThreadSummary(ctx, "th-1", "Thread summary", "msg-100"); err != nil {
-		t.Fatalf("SaveThreadSummary failed: %v", err)
-	}
+	mustOK(t, store.SaveThreadSummary(ctx, "th-1", "Thread summary", "msg-100"), "SaveThreadSummary")
 	if sum, wm, _ := store.GetThreadSummary(ctx, "th-1"); sum != "Thread summary" || wm != "msg-100" {
 		t.Errorf("GetThreadSummary = %q, %q", sum, wm)
 	}
@@ -350,8 +291,7 @@ func TestSessionLifecycle(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		_, _ = store.IncrementSessionTurnCount(ctx, "th-1")
 	}
-	unrotated, err := store.FindUnrotatedSessions(ctx, 5)
-	if err != nil || len(unrotated) != 1 || unrotated[0].ThreadID != "th-1" {
+	if unrotated, err := store.FindUnrotatedSessions(ctx, 5); err != nil || len(unrotated) != 1 || unrotated[0].ThreadID != "th-1" {
 		t.Errorf("FindUnrotatedSessions = %+v, %v", unrotated, err)
 	}
 	_, _ = store.FindUnrotatedSessions(ctx, 0)
@@ -388,18 +328,13 @@ func TestSessionLifecycle(t *testing.T) {
 	if id, err := store.GetSessionID(ctx, ""); err != nil || id != "" {
 		t.Errorf("expected empty GetSessionID")
 	}
-	if err := store.SaveSessionID(ctx, "", "s1"); err != nil {
-		t.Errorf("SaveSessionID empty key err: %v", err)
-	}
-	if _, err := store.IncrementSessionTurnCount(ctx, ""); err == nil {
-		t.Errorf("expected error IncrementSessionTurnCount empty key")
-	}
+	_ = store.SaveSessionID(ctx, "", "s1")
+	_, errEmptyTurn := store.IncrementSessionTurnCount(ctx, "")
+	assertErr(t, errEmptyTurn, "IncrementSessionTurnCount empty key")
 	if cnt, err := store.GetSessionTurnCount(ctx, ""); err != nil || cnt != 0 {
 		t.Errorf("GetSessionTurnCount empty key = %d, %v", cnt, err)
 	}
-	if err := store.RotateSessionID(ctx, "", "s2"); err == nil {
-		t.Errorf("expected error RotateSessionID empty key")
-	}
+	assertErr(t, store.RotateSessionID(ctx, "", "s2"), "RotateSessionID empty key")
 	if prev, err := store.GetPreviousSessionID(ctx, ""); err != nil || prev != "" {
 		t.Errorf("GetPreviousSessionID empty key = %q, %v", prev, err)
 	}
@@ -417,128 +352,60 @@ func TestScheduleLifecycle(t *testing.T) {
 	now := time.Now().Truncate(time.Second).UTC()
 
 	// 1. OneShot Schedule CRUD & consumption
-	osSched := OneShotSchedule{
-		ID:        "os-1",
-		ThreadID:  "th-1",
-		Prompt:    "Run once prompt",
-		RunAt:     now.Add(-time.Minute),
-		CreatedAt: now,
-		Effort:    "low",
-	}
-	if err := store.CreateOneShotSchedule(ctx, osSched); err != nil {
-		t.Fatalf("CreateOneShotSchedule failed: %v", err)
-	}
-	dueOS, err := store.GetDueOneShotSchedules(ctx)
-	if err != nil || len(dueOS) != 1 || dueOS[0].ID != "os-1" {
+	mustOK(t, store.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-1", ThreadID: "th-1", Prompt: "Run once prompt", RunAt: now.Add(-time.Minute), CreatedAt: now, Effort: "low"}), "CreateOneShotSchedule")
+	if dueOS, err := store.GetDueOneShotSchedules(ctx); err != nil || len(dueOS) != 1 || dueOS[0].ID != "os-1" {
 		t.Fatalf("GetDueOneShotSchedules = %+v, %v", dueOS, err)
 	}
-	allOS, err := store.GetAllOneShotSchedules(ctx, "th-1")
-	if err != nil || len(allOS) != 1 {
+	if allOS, err := store.GetAllOneShotSchedules(ctx, "th-1"); err != nil || len(allOS) != 1 {
 		t.Fatalf("GetAllOneShotSchedules = %+v, %v", allOS, err)
 	}
 	_, _ = store.GetAllOneShotSchedules(ctx, "")
 
 	msg := Message{ID: "msg-os-1", ThreadID: "th-1", Content: "Executed", Status: StatusPending}
-	if err := store.InsertMessageAndConsumeOneShot(ctx, "os-1", msg); err != nil {
-		t.Fatalf("InsertMessageAndConsumeOneShot failed: %v", err)
-	}
-	if err := store.InsertMessageAndConsumeOneShot(ctx, "non-existent", msg); err == nil {
-		t.Errorf("expected error on consuming non-existent one-shot")
-	}
+	mustOK(t, store.InsertMessageAndConsumeOneShot(ctx, "os-1", msg), "InsertMessageAndConsumeOneShot")
+	assertErr(t, store.InsertMessageAndConsumeOneShot(ctx, "non-existent", msg), "consuming non-existent one-shot")
 
 	// 2. Cron Schedule CRUD
-	cronSched := CronSchedule{
-		ID:          "cron-1",
-		TargetID:    "chan-1",
-		TitlePrefix: "Weather",
-		CronExpr:    "0 6 * * *",
-		Prompt:      "Morning forecast",
-		NextRunAt:   now.Add(-time.Minute),
-		Enabled:     true,
-		Effort:      "high",
-		CreatedAt:   now,
-	}
-	_, err = database.ExecContext(ctx, `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		cronSched.ID, cronSched.TargetID, cronSched.TitlePrefix, cronSched.CronExpr, cronSched.Prompt, "America/Los_Angeles", cronSched.NextRunAt, cronSched.Enabled, cronSched.CreatedAt, cronSched.Effort)
-	if err != nil {
-		t.Fatalf("insert cron failed: %v", err)
-	}
+	_, err := database.ExecContext(ctx, `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('cron-1', 'chan-1', 'Weather', '0 6 * * *', 'Morning forecast', 'America/Los_Angeles', $1, true, $2, 'high')`, now.Add(-time.Minute), now)
+	mustOK(t, err, "insert cron")
 
-	dueCron, err := store.GetDueCronSchedules(ctx)
-	if err != nil || len(dueCron) != 1 || dueCron[0].Effort != "high" {
+	if dueCron, err := store.GetDueCronSchedules(ctx); err != nil || len(dueCron) != 1 || dueCron[0].Effort != "high" {
 		t.Fatalf("GetDueCronSchedules = %+v, %v", dueCron, err)
 	}
-	allCron, err := store.GetAllCronSchedules(ctx, "chan-1")
-	if err != nil || len(allCron) != 1 {
+	if allCron, err := store.GetAllCronSchedules(ctx, "chan-1"); err != nil || len(allCron) != 1 {
 		t.Fatalf("GetAllCronSchedules = %+v, %v", allCron, err)
 	}
 	_, _ = store.GetAllCronSchedules(ctx, "")
-	if err := store.UpdateCronNextRun(ctx, "cron-1", now.Add(time.Hour)); err != nil {
-		t.Fatalf("UpdateCronNextRun failed: %v", err)
-	}
+	mustOK(t, store.UpdateCronNextRun(ctx, "cron-1", now.Add(time.Hour)), "UpdateCronNextRun")
 
 	// 3. Schedule Runs CRUD
-	run := ScheduleRun{
-		ID:           "run-1",
-		ScheduleID:   "cron-1",
-		ScheduleType: "cron",
-		TargetID:     "chan-1",
-		ThreadID:     "th-1",
-		Status:       "running",
-		StartedAt:    now.Add(-2 * time.Hour),
-		Effort:       "high",
-		Model:        "claude-3-5",
-	}
-	if err := store.CreateScheduleRun(ctx, run); err != nil {
-		t.Fatalf("CreateScheduleRun failed: %v", err)
-	}
-
-	updateParams := UpdateRunParams{
-		RunID:       "run-1",
-		Status:      "completed",
-		DurationMs:  1200,
-		CompletedAt: now,
-		Model:       "claude-3-5",
-	}
-	if err := store.UpdateScheduleRunStatus(ctx, updateParams); err != nil {
-		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
-	}
+	mustOK(t, store.CreateScheduleRun(ctx, ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", TargetID: "chan-1", ThreadID: "th-1", Status: "running", StartedAt: now.Add(-2 * time.Hour), Effort: "high", Model: "claude-3-5"}), "CreateScheduleRun")
+	mustOK(t, store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-1", Status: "completed", DurationMs: 1200, CompletedAt: now, Model: "claude-3-5"}), "UpdateScheduleRunStatus")
 	_ = store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-1"})
 
-	runs, total, err := store.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", "completed")
-	if err != nil || total != 1 || len(runs) != 1 {
+	if runs, total, err := store.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", "completed"); err != nil || total != 1 || len(runs) != 1 {
 		t.Fatalf("GetScheduleRunsPaginated = len %d, total %d, %v", len(runs), total, err)
 	}
-	runsClamp, _, _ := store.GetScheduleRunsPaginated(ctx, -5, -10, "", "")
-	if len(runsClamp) != 1 {
+	if runsClamp, _, _ := store.GetScheduleRunsPaginated(ctx, -5, -10, "", ""); len(runsClamp) != 1 {
 		t.Errorf("GetScheduleRunsPaginated clamping failed: len=%d", len(runsClamp))
 	}
 
 	// 4. Summary metrics
-	metrics, err := store.GetScheduleSummaryMetrics(ctx)
-	if err != nil || metrics.CronCount != 1 || metrics.TotalRuns24h != 1 {
+	if metrics, err := store.GetScheduleSummaryMetrics(ctx); err != nil || metrics.CronCount != 1 || metrics.TotalRuns24h != 1 {
 		t.Errorf("GetScheduleSummaryMetrics = %+v, %v", metrics, err)
 	}
 
 	// 5. Orphan reconciliation & pruning
 	_ = store.CreateScheduleRun(ctx, ScheduleRun{ID: "run-orphan", ScheduleID: "cron-1", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-3 * time.Hour)})
-	reconciled, err := store.ReconcileOrphanedScheduleRuns(ctx)
-	if err != nil || reconciled == 0 {
+	if reconciled, err := store.ReconcileOrphanedScheduleRuns(ctx); err != nil || reconciled == 0 {
 		t.Errorf("ReconcileOrphanedScheduleRuns = %d, %v", reconciled, err)
 	}
-	pruned, err := store.PruneScheduleRuns(ctx, 100, time.Hour)
-	if err != nil {
-		t.Errorf("PruneScheduleRuns failed: %v", err)
-	}
-	_ = pruned
+	_, errPrune := store.PruneScheduleRuns(ctx, 100, time.Hour)
+	mustOK(t, errPrune, "PruneScheduleRuns")
 
 	// 6. Empty validations
-	if err := store.CreateScheduleRun(ctx, ScheduleRun{ID: ""}); err == nil {
-		t.Errorf("expected error on empty ID CreateScheduleRun")
-	}
-	if err := store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: ""}); err == nil {
-		t.Errorf("expected error on empty RunID UpdateScheduleRunStatus")
-	}
+	assertErr(t, store.CreateScheduleRun(ctx, ScheduleRun{ID: ""}), "CreateScheduleRun empty ID")
+	assertErr(t, store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: ""}), "UpdateScheduleRunStatus empty RunID")
 	if err := store.UpdateCronNextRun(ctx, "", time.Now()); err != nil {
 		t.Errorf("UpdateCronNextRun empty id = %v", err)
 	}
@@ -551,83 +418,57 @@ func TestFactLifecycle(t *testing.T) {
 	store := NewSQLStore(database)
 	ctx := context.Background()
 
-	emb1 := make([]float32, ExpectedEmbeddingDim)
-	emb1[0] = 1.0
-	emb2 := make([]float32, ExpectedEmbeddingDim)
-	emb2[0] = 0.9
-	emb2[1] = 0.1
+	emb1, emb2 := make([]float32, ExpectedEmbeddingDim), make([]float32, ExpectedEmbeddingDim)
+	emb1[0], emb2[0], emb2[1] = 1.0, 0.9, 0.1
 
 	// 1. InsertFact & defaults
 	fID1, err := store.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
-	if err != nil || fID1 <= 0 {
-		t.Fatalf("InsertFact 1 failed: %v, id=%d", err, fID1)
-	}
+	mustOK(t, err, "InsertFact 1")
 	fID2, err := store.InsertFact(ctx, "", "Default cat and imp", -1.0, emb2)
-	if err != nil || fID2 <= 0 {
-		t.Fatalf("InsertFact 2 with defaults failed: %v, id=%d", err, fID2)
-	}
-	if _, err := store.InsertFact(ctx, "cat", "", 1.0, nil); err == nil {
-		t.Errorf("expected error for empty fact text")
-	}
+	mustOK(t, err, "InsertFact 2 with defaults")
+	_, errEmptyFact := store.InsertFact(ctx, "cat", "", 1.0, nil)
+	assertErr(t, errEmptyFact, "empty fact text")
 
 	// 2. SearchSimilarFacts & FindDuplicateFact (tested on in-memory FakeStore, and query paths on SQLStore)
 	fakeStore := NewFakeStore()
 	_, _ = fakeStore.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
-	similar, err := fakeStore.SearchSimilarFacts(ctx, emb1, "matcha", 5, 0.5)
-	if err != nil || len(similar) == 0 || similar[0].FactText != "Likes matcha latte" {
+	if similar, err := fakeStore.SearchSimilarFacts(ctx, emb1, "matcha", 5, 0.5); err != nil || len(similar) == 0 || similar[0].FactText != "Likes matcha latte" {
 		t.Fatalf("SearchSimilarFacts failed: %v, similar=%+v", err, similar)
 	}
-	dup, sim, err := fakeStore.FindDuplicateFact(ctx, emb1, 0.85)
-	if err != nil || dup == nil || sim < 0.85 {
+	if dup, sim, err := fakeStore.FindDuplicateFact(ctx, emb1, 0.85); err != nil || dup == nil || sim < 0.85 {
 		t.Fatalf("FindDuplicateFact failed: dup=%+v, sim=%f, %v", dup, sim, err)
 	}
 	if resEmpty, err := store.SearchSimilarFacts(ctx, nil, "", 10, 0.2); err != nil || resEmpty != nil {
 		t.Errorf("expected nil, nil for empty query and embedding, got %v, %v", resEmpty, err)
 	}
-	if _, err := store.SearchSimilarFacts(ctx, emb1, "", 10, 0.2); err == nil {
-		t.Errorf("expected error running pgvector query on sqlite")
-	}
+	_, errPGVec := store.SearchSimilarFacts(ctx, emb1, "", 10, 0.2)
+	assertErr(t, errPGVec, "running pgvector query on sqlite")
 
 	// 4. GetFactsPaginated
-	res, err := store.GetFactsPaginated(ctx, FactsFilter{Category: "personal", Limit: 10})
-	if err != nil || res.Total != 1 || len(res.Facts) != 1 {
+	if res, err := store.GetFactsPaginated(ctx, FactsFilter{Category: "personal", Limit: 10}); err != nil || res.Total != 1 || len(res.Facts) != 1 {
 		t.Fatalf("GetFactsPaginated category failed: %+v, %v", res, err)
 	}
-	resQ, _ := store.GetFactsPaginated(ctx, FactsFilter{Query: "Default"})
-	if len(resQ.Facts) != 1 {
+	if resQ, _ := store.GetFactsPaginated(ctx, FactsFilter{Query: "Default"}); len(resQ.Facts) != 1 {
 		t.Errorf("GetFactsPaginated query failed: %+v", resQ)
 	}
-	resOffsetOnly, _ := store.GetFactsPaginated(ctx, FactsFilter{Offset: 1})
-	if resOffsetOnly == nil {
-		t.Errorf("GetFactsPaginated offset only failed")
-	}
-	resClamped, _ := store.GetFactsPaginated(ctx, FactsFilter{Limit: -1, Offset: -5})
-	if resClamped == nil {
-		t.Errorf("GetFactsPaginated clamped failed")
-	}
-	resEscape, _ := store.GetFactsPaginated(ctx, FactsFilter{Query: "test\\_%", Category: "cat"})
-	if resEscape == nil {
-		t.Errorf("GetFactsPaginated escape failed")
+	for _, f := range []FactsFilter{{Offset: 1}, {Limit: -1, Offset: -5}, {Query: "test\\_%", Category: "cat"}} {
+		if res, _ := store.GetFactsPaginated(ctx, f); res == nil {
+			t.Errorf("GetFactsPaginated(%+v) returned nil", f)
+		}
 	}
 
 	// 5. Watermarks & Active conversations
 	adminMeta := MessageMetadata{IsAdmin: true}
 	_ = store.InsertMessage(ctx, Message{ID: "m-ext-1", ThreadID: "th-1", Status: StatusCompleted, Content: "user prompt", ResponseText: "aerial answer", Metadata: adminMeta})
 	_ = store.InsertMessage(ctx, Message{ID: "m-ext-2", ThreadID: "th-1", Status: StatusCompleted, Content: "ambient prompt", ResponseText: "[AMBIENT_SILENT]", Metadata: adminMeta})
-	activeConvs, err := store.GetActiveConversationsForExtraction(ctx, 24)
-	if err != nil || len(activeConvs) != 1 || activeConvs[0] != "th-1" {
+	if activeConvs, err := store.GetActiveConversationsForExtraction(ctx, 24); err != nil || len(activeConvs) != 1 || activeConvs[0] != "th-1" {
 		t.Fatalf("GetActiveConversationsForExtraction failed: %v, active=%v", err, activeConvs)
 	}
-	turns, err := store.GetUnextractedAdminTurns(ctx, "th-1")
-	if err != nil || len(turns) != 1 || turns[0].ID != "m-ext-1" {
+	if turns, err := store.GetUnextractedAdminTurns(ctx, "th-1"); err != nil || len(turns) != 1 || turns[0].ID != "m-ext-1" {
 		t.Fatalf("GetUnextractedAdminTurns failed: %v, turns=%+v", err, turns)
 	}
-	if err := store.UpdateConversationFactWatermark(ctx, "th-1", 5); err != nil {
-		t.Fatalf("UpdateConversationFactWatermark failed: %v", err)
-	}
-	if err := store.UpdateConversationFactExtractedAt(ctx, "th-1"); err != nil {
-		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
-	}
+	mustOK(t, store.UpdateConversationFactWatermark(ctx, "th-1", 5), "UpdateConversationFactWatermark")
+	mustOK(t, store.UpdateConversationFactExtractedAt(ctx, "th-1"), "UpdateConversationFactExtractedAt")
 	if convsAfter, _ := store.GetActiveConversationsForExtraction(ctx, 24); len(convsAfter) != 0 {
 		t.Errorf("expected 0 active conversations after watermark catch-up, got %d", len(convsAfter))
 	}
@@ -635,35 +476,21 @@ func TestFactLifecycle(t *testing.T) {
 	// 6. UpdateFactEmbedding
 	embUpdated := make([]float32, ExpectedEmbeddingDim)
 	embUpdated[1] = 1.0
-	if err := store.UpdateFactEmbedding(ctx, fID2, embUpdated); err != nil {
-		t.Fatalf("UpdateFactEmbedding failed: %v", err)
-	}
-	if err := store.UpdateFactEmbedding(ctx, fID2, []float32{1.0, 2.0}); err == nil {
-		t.Errorf("expected error updating fact embedding with invalid dim")
-	}
+	mustOK(t, store.UpdateFactEmbedding(ctx, fID2, embUpdated), "UpdateFactEmbedding")
+	assertErr(t, store.UpdateFactEmbedding(ctx, fID2, []float32{1.0, 2.0}), "fact embedding with invalid dim")
 
 	// 7. ReinforceFact & DecayAndPruneFacts
 	_ = fakeStore.ReinforceFact(ctx, 1, "Likes iced matcha latte", emb1, 0.1)
-	if err := store.ReinforceFact(ctx, fID1, "Likes iced matcha latte", emb1, 0.1); err == nil {
-		t.Errorf("expected error on SQLite for ::numeric syntax in ReinforceFact")
-	}
-	if _, _, err := store.DecayAndPruneFacts(ctx, 0.1, 0.2, 30); err == nil {
-		t.Errorf("expected error on SQLite for ::numeric syntax in DecayAndPruneFacts")
-	}
+	assertErr(t, store.ReinforceFact(ctx, fID1, "Likes iced matcha latte", emb1, 0.1), "SQLite ::numeric syntax in ReinforceFact")
+	_, _, errDecay := store.DecayAndPruneFacts(ctx, 0.1, 0.2, 30)
+	assertErr(t, errDecay, "SQLite ::numeric syntax in DecayAndPruneFacts")
 
 	// 8. Missing embeddings & nil context
-	missing, err := store.GetFactsMissingEmbeddings(ctx, 10)
-	if err != nil {
-		t.Fatalf("GetFactsMissingEmbeddings failed: %v", err)
-	}
-	_ = missing
-
-	idNilCtx, err := store.InsertFact(nil, "cat", "fact text nil ctx", 1.0, emb1)
-	if err != nil || idNilCtx <= 0 {
+	_, _ = store.GetFactsMissingEmbeddings(ctx, 10)
+	if idNilCtx, err := store.InsertFact(nil, "cat", "fact text nil ctx", 1.0, emb1); err != nil || idNilCtx <= 0 {
 		t.Fatalf("InsertFact with nil ctx failed: %v", err)
 	}
-	resNilCtx, err := store.GetFactsPaginated(nil, FactsFilter{Limit: 5})
-	if err != nil || resNilCtx.Total == 0 {
+	if resNilCtx, err := store.GetFactsPaginated(nil, FactsFilter{Limit: 5}); err != nil || resNilCtx.Total == 0 {
 		t.Fatalf("GetFactsPaginated with nil ctx failed: %v", err)
 	}
 }
@@ -672,8 +499,7 @@ func TestVectorAndArrayHelpers(t *testing.T) {
 	// 1. Table-driven cosineSimilarity
 	simTests := []struct {
 		name     string
-		a        []float32
-		b        []float32
+		a, b     []float32
 		expected float64
 	}{
 		{name: "both_nil", a: nil, b: nil, expected: 0.0},
@@ -693,11 +519,10 @@ func TestVectorAndArrayHelpers(t *testing.T) {
 
 	// 2. Table-driven NullVector Scan
 	nvTests := []struct {
-		name    string
-		input   any
-		wantErr bool
-		valid   bool
-		len     int
+		name           string
+		input          any
+		wantErr, valid bool
+		len            int
 	}{
 		{name: "nil", input: nil, wantErr: false, valid: false, len: 0},
 		{name: "invalid_type", input: 12345, wantErr: true},
@@ -721,10 +546,9 @@ func TestVectorAndArrayHelpers(t *testing.T) {
 	// 3. Table-driven FactTime Scan
 	now := time.Now()
 	ftTests := []struct {
-		name    string
-		input   any
-		wantErr bool
-		valid   bool
+		name           string
+		input          any
+		wantErr, valid bool
 	}{
 		{name: "nil", input: nil, wantErr: false, valid: false},
 		{name: "time_val", input: now, wantErr: false, valid: true},
@@ -842,31 +666,11 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 		msg  Message
 		want bool
 	}{
-		{
-			name: "not_completed",
-			msg:  Message{Status: StatusPending, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "hello"},
-			want: false,
-		},
-		{
-			name: "not_admin",
-			msg:  Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: false}, ResponseText: "hello"},
-			want: false,
-		},
-		{
-			name: "empty_response",
-			msg:  Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "   "},
-			want: false,
-		},
-		{
-			name: "starts_with_bracket",
-			msg:  Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "[thinking] done"},
-			want: false,
-		},
-		{
-			name: "valid_admin_turn",
-			msg:  Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "All done!"},
-			want: true,
-		},
+		{name: "not_completed", msg: Message{Status: StatusPending, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "hello"}, want: false},
+		{name: "not_admin", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: false}, ResponseText: "hello"}, want: false},
+		{name: "empty_response", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "   "}, want: false},
+		{name: "starts_with_bracket", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "[thinking] done"}, want: false},
+		{name: "valid_admin_turn", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "All done!"}, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
