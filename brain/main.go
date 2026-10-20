@@ -1776,14 +1776,15 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			Cwd:               cur.DataDir,
 			Env:               poolEnv,
 			Timezone:          cur.Timezone,
-			MemoryRetriever:   memoryRetriever,
 			TranscriptRescuer: sessionMgr.ExtractResponseSince,
 			SessionManager:    sessionMgr,
 			PrewarmedTargets:  prewarmed,
 		}
 	}
 
-	discordPrimaryPool := runner.NewUnifiedProcessPool(basePoolCfg(discordHome, cur.Model, nil), appOpts.processSpawner)
+	primaryCfg := basePoolCfg(discordHome, cur.Model, nil)
+	primaryCfg.MemoryRetriever = memoryRetriever
+	discordPrimaryPool := runner.NewUnifiedProcessPool(primaryCfg, appOpts.processSpawner)
 	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), appOpts.processSpawner, "ephemeral:worker")
 	discordLowEffortPool := newWorkerInterchangeablePool(basePoolCfg(discordHome, lowEffortModel, []string{"discord:worker-0", "discord:worker-1"}), appOpts.processSpawner, "discord:worker")
 	discordMediumEffortPool := newWorkerInterchangeablePool(basePoolCfg(discordHome, mediumEffortModel, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), appOpts.processSpawner, "discord:medium-worker")
