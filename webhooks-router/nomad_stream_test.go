@@ -54,6 +54,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		streamLines       []string
 		deploymentsJSON   string
 		allocationsJSON   string
+		jobSpecJSON       string
 		reg               *mockPRRegistry
 		channelContextMap map[string][]ChannelMessageContext
 		systemChannelID   string
@@ -245,6 +246,15 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantDMs:          1,
 			wantDMSubstr:     "💥 Nomad job `infisical` crashed or failed. Following up...",
 		},
+		{
+			name:             "job registered periodic batch job dispatches success",
+			streamLines:      []string{`{"Index":2060,"Events":[{"Topic":"Job","Type":"JobRegistered","Payload":{"Job":{"ID":"coverage-ingest","ModifyIndex":851}}}]}`},
+			jobSpecJSON:      `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`,
+			reg:              mkDeployedReg(validThread, 851, validSHA, validRepo, true),
+			wantDeployedJobs: []string{"coverage-ingest"},
+			wantPrompts:      1,
+			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job coverage-ingest", "ref: job-registered-851"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -270,6 +280,14 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 				if strings.Contains(r.URL.Path, "/allocations") {
 					if tt.allocationsJSON != "" {
 						_, _ = w.Write([]byte(tt.allocationsJSON))
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if strings.HasPrefix(r.URL.Path, "/v1/job/") {
+					if tt.jobSpecJSON != "" {
+						_, _ = w.Write([]byte(tt.jobSpecJSON))
 						return
 					}
 					w.WriteHeader(http.StatusNotFound)
@@ -346,6 +364,9 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 		{name: "allocation failed dispatches failure", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-fail-direct","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed"}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "evaluation complete dispatches success", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-comp-direct","JobID":"brain","Status":"complete","DeploymentID":""}}`, reg: mkDeployedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "evaluation failed dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-fail-direct","JobID":"brain","Status":"failed","StatusDescription":"timed out","DeploymentID":""}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "job deregistered returns nil", topic: "Job", eventType: "JobDeregistered", payload: `{"Job":{"ID":"coverage-ingest","ModifyIndex":10}}`},
+		{name: "malformed job payload returns error", topic: "Job", eventType: "JobRegistered", payload: `{invalid`, wantErr: true},
+		{name: "job registered with empty ID returns nil", topic: "Job", eventType: "JobRegistered", payload: `{"Job":{"ID":"","ModifyIndex":10}}`},
 	}
 
 	for _, tt := range tests {
@@ -558,11 +579,12 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 				`{"Index":2004,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-run","JobID":"scheduler-mcp","DesiredStatus":"run","ClientStatus":"running"}}}]}`,
 				`{"Index":2005,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-fail","JobID":"discord-mcp","Status":"failed","StatusDescription":"oom"}}}]}`,
 				`{"Index":2010,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-dead-1","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed"}}}]}`,
+				`{"Index":2011,"Events":[{"Topic":"Job","Type":"JobRegistered","Payload":{"Job":{"ID":"coverage-ingest","ModifyIndex":42}}}]}`,
 				"{}",
 			},
-			wantJobs:    4,
-			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation"},
-			wantSubstrs: []string{"dep-succ", "alloc-run", "dep-fail", ":failed"},
+			wantJobs:    5,
+			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation", "Job"},
+			wantSubstrs: []string{"dep-succ", "alloc-run", "dep-fail", ":failed", "nomad:job:coverage-ingest:42:registered"},
 		},
 		{
 			name: "duplicate nomad event increments skipped metric",
@@ -586,6 +608,9 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 				`{"Index":2002,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":"malformed"}]}`,
 				`{"Index":2003,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":"malformed"}]}`,
 				`{"Index":2004,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":"malformed"}]}`,
+				`{"Index":2005,"Events":[{"Topic":"Job","Type":"JobDeregistered","Payload":{"Job":{"ID":"coverage-ingest"}}}]}`,
+				`{"Index":2006,"Events":[{"Topic":"Job","Type":"JobRegistered","Payload":"malformed"}]}`,
+				`{"Index":2007,"Events":[{"Topic":"Job","Type":"JobRegistered","Payload":{"Job":{"ID":"   "}}}]}`,
 			},
 			wantJobs: 0,
 		},

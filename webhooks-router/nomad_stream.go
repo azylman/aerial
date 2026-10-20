@@ -84,6 +84,14 @@ func allFailedTaskGroupsQueued(failedTG map[string]interface{}, queued map[strin
 }
 
 
+// NomadJobEventPayload captures job registration updates from Nomad.
+type NomadJobEventPayload struct {
+	Job struct {
+		ID          string `json:"ID"`
+		ModifyIndex uint64 `json:"ModifyIndex"`
+	} `json:"Job"`
+}
+
 // NomadTaskEvent captures task lifecycle events within an allocation.
 type NomadTaskEvent struct {
 	Type            string            `json:"Type"`
@@ -227,7 +235,7 @@ func (sub *NomadStreamSubscriber) consumeStream(ctx context.Context) error {
 	idx := sub.lastIndex
 	sub.mu.Unlock()
 
-	streamURL := fmt.Sprintf("%s/v1/event/stream?topic=Deployment:*&topic=Allocation:*&topic=Evaluation:*", sub.nomadAddr)
+	streamURL := fmt.Sprintf("%s/v1/event/stream?topic=Deployment:*&topic=Allocation:*&topic=Evaluation:*&topic=Job:*", sub.nomadAddr)
 	if idx > 0 {
 		streamURL += fmt.Sprintf("&index=%d", idx)
 	}
@@ -379,6 +387,19 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		} else {
 			return
 		}
+	case "Job":
+		if !strings.EqualFold(event.Type, "JobRegistered") {
+			return
+		}
+		var jobPayload NomadJobEventPayload
+		if err := json.Unmarshal(event.Payload, &jobPayload); err != nil {
+			return
+		}
+		jobID := strings.TrimSpace(jobPayload.Job.ID)
+		if jobID == "" {
+			return
+		}
+		idempotencyKey = fmt.Sprintf("nomad:job:%s:%d:registered", jobID, jobPayload.Job.ModifyIndex)
 	default:
 		// Drop unhandled topics immediately
 		return
@@ -471,6 +492,18 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 			return nil
 		} else if strings.EqualFold(eval.Status, "complete") && s.isNomadJobHealthy(ctx, eval.JobID) {
 			return s.HandleNomadJobSuccess(ctx, eval.JobID, eval.ID)
+		}
+	case "Job":
+		if !strings.EqualFold(eventType, "JobRegistered") {
+			return nil
+		}
+		var jobPayload NomadJobEventPayload
+		if err := json.Unmarshal(rawPayload, &jobPayload); err != nil {
+			return fmt.Errorf("unmarshal nomad job payload: %w", err)
+		}
+		jobID := strings.TrimSpace(jobPayload.Job.ID)
+		if jobID != "" && s.isNomadBatchTemplateHealthy(ctx, jobID) {
+			return s.HandleNomadJobSuccess(ctx, jobID, fmt.Sprintf("job-registered-%d", jobPayload.Job.ModifyIndex))
 		}
 	}
 	return nil
