@@ -1498,6 +1498,48 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "roborev", wantPrompts: 1, wantPromptSubstr: "Found SQL injection in query",
 		},
 		{
+			name: "check_run failure for roborev produces critical evaluation and override prompt", event: "check_run", delivery: "del-cr-roborev-override",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "roborev", wantPrompts: 1, wantPromptSubstr: "override-roborev 525",
+		},
+		{
+			name: "check_run success for roborev calls UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-success",
+			payload:        `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:            &mockPRRegistry{syncTargetID: "1555405874565091380"},
+			wantPR:         525,
+			wantHeadSHA:    "robo525abcdef",
+			wantTargetID:   "1555405874565091380",
+			wantSyncCalls:  1,
+			wantConclusion: "success",
+		},
+		{
+			name: "check_run success for Check RoboRev Bootstrap State ignores UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-bootstrap-success",
+			payload:        `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Check RoboRev Bootstrap State","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Bootstrap OK","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:            &mockPRRegistry{syncTargetID: "1555405874565091380"},
+			wantPR:         525,
+			wantHeadSHA:    "robo525abcdef",
+			wantSyncCalls:  0,
+			wantConclusion: "success",
+		},
+		{
+			name: "check_run success for roborev without prior roborev failure ignores UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-firstpass-success",
+			payload:        `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"headsha789","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/530","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":530,"head":{"ref":"feat/test","sha":"headsha789"}}]}}`,
+			reg:            &mockPRRegistry{syncTargetID: "1555405874565091380"},
+			wantPR:         530,
+			wantHeadSHA:    "headsha789",
+			wantSyncCalls:  0,
+			wantConclusion: "success",
+		},
+		{
+			name: "check_run failure for standard CI check produces standard fix prompt", event: "check_run", delivery: "del-cr-standard-ci-fail",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "Unit Tests", wantPrompts: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
+		},
+		{
 			name: "check_run failure with ciFailCount exceeding cap suppresses prompt and dispatches cap DM", event: "check_run", delivery: "del-cr-cap",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true, ciFailCount: 4},
@@ -3349,12 +3391,26 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			}}
 		},
 	}
-	srvPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), &mockOutboundDispatcher{})
+	dispPG := &mockOutboundDispatcher{}
+	srvPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), dispPG)
 	if err := srvPG.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "main", "sha1", 42); err != nil {
 		t.Errorf("dispatchConflictPrompt with pgReg: %v", err)
 	}
 	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "run", "azylman/aerial", "sha1", 42, "fail", "http://ci.test"); err != nil {
 		t.Errorf("dispatchCIFailurePrompt with pgReg: %v", err)
+	}
+	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "RoboRev Code Review", "azylman/aerial", "sha1", 42, "findings", "http://ci.test"); err != nil {
+		t.Errorf("dispatchCIFailurePrompt(roborev) with pgReg: %v", err)
+	}
+	pgPrompts := dispPG.PromptCalls()
+	if len(pgPrompts) < 3 {
+		t.Fatalf("expected at least 3 prompts from srvPG, got %d", len(pgPrompts))
+	}
+	if !strings.Contains(pgPrompts[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") {
+		t.Errorf("expected standard CI prompt, got %s", pgPrompts[1].Prompt)
+	}
+	if !strings.Contains(pgPrompts[2].Prompt, "override-roborev 42") {
+		t.Errorf("expected roborev override prompt, got %s", pgPrompts[2].Prompt)
 	}
 
 	// dispatchAlertWithPrompt with DM error
@@ -5317,7 +5373,8 @@ func TestFetchLatestRoboRevComment(t *testing.T) {
 				{"id": 1, "body": "regular comment"},
 				{"id": 2, "body": "## roborev: Review Complete (` + "`sha1111`" + `)\nold report"},
 				{"id": 3, "body": "## roborev: Combined Review (` + "`sha2222`" + `)\nfound issue"},
-				{"id": 4, "body": "## roborev: Combined Review (` + "`fullsha3333333333`" + `)\nfull sha match"}
+				{"id": 4, "body": "## roborev: Combined Review (` + "`fullsha3333333333`" + `)\nfull sha match"},
+				{"id": 5, "body": "## roborev: Review Passed (` + "`pass444`" + `)\nNo issues found."}
 			]`))
 			return
 		}
@@ -5326,22 +5383,26 @@ func TestFetchLatestRoboRevComment(t *testing.T) {
 	t.Cleanup(mockServer.Close)
 
 	router := newTestRouter(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client(), &mockPRRegistry{}, &mockOutboundDispatcher{})
+	router.nonRoboRevFailedSHAs.Store(prCheckKey("azylman/aerial", 10), "blockedsha555")
 
 	tests := []struct {
-		name     string
-		srv      *RouterServer
-		repo     string
-		prNumber int
-		headSHA  string
-		wantSub  string
+		name           string
+		srv            *RouterServer
+		repo           string
+		prNumber       int
+		headSHA        string
+		wantSub        string
+		wantCanRecover bool
 	}{
-		{name: "nil server guard", srv: nil, repo: "azylman/aerial", prNumber: 10, headSHA: "sha2222", wantSub: ""},
-		{name: "empty repo guard", srv: router, repo: "", prNumber: 10, headSHA: "sha2222", wantSub: ""},
-		{name: "invalid prNumber guard", srv: router, repo: "azylman/aerial", prNumber: 0, headSHA: "sha2222", wantSub: ""},
-		{name: "github api 404", srv: router, repo: "azylman/aerial", prNumber: 99, headSHA: "sha2222", wantSub: ""},
-		{name: "matching short sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "sha2222extra", wantSub: "found issue"},
-		{name: "matching full sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "fullsha3333333333", wantSub: "full sha match"},
-		{name: "no matching sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "nomatchsha", wantSub: ""},
+		{name: "nil server guard", srv: nil, repo: "azylman/aerial", prNumber: 10, headSHA: "sha2222", wantSub: "", wantCanRecover: false},
+		{name: "empty repo guard", srv: router, repo: "", prNumber: 10, headSHA: "sha2222", wantSub: "", wantCanRecover: false},
+		{name: "invalid prNumber guard", srv: router, repo: "azylman/aerial", prNumber: 0, headSHA: "sha2222", wantSub: "", wantCanRecover: false},
+		{name: "github api 404", srv: router, repo: "azylman/aerial", prNumber: 99, headSHA: "sha2222", wantSub: "", wantCanRecover: false},
+		{name: "matching short sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "sha2222extra", wantSub: "found issue", wantCanRecover: true},
+		{name: "matching full sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "fullsha3333333333", wantSub: "full sha match", wantCanRecover: true},
+		{name: "review passed comment does not trigger recovery", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "pass444", wantSub: "Review Passed", wantCanRecover: false},
+		{name: "blocked by non-roborev failure on same sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "blockedsha555", wantSub: "", wantCanRecover: false},
+		{name: "no matching sha", srv: router, repo: "azylman/aerial", prNumber: 10, headSHA: "nomatchsha", wantSub: "", wantCanRecover: false},
 	}
 
 	for _, tc := range tests {
@@ -5353,6 +5414,9 @@ func TestFetchLatestRoboRevComment(t *testing.T) {
 			}
 			if tc.wantSub != "" && !strings.Contains(got, tc.wantSub) {
 				t.Fatalf("fetchLatestRoboRevComment got %q, want substring %q", got, tc.wantSub)
+			}
+			if gotRecover := tc.srv.canRecoverRoboRevSuccess(ctx, tc.repo, tc.prNumber, tc.headSHA); gotRecover != tc.wantCanRecover {
+				t.Fatalf("canRecoverRoboRevSuccess got %v, want %v", gotRecover, tc.wantCanRecover)
 			}
 		})
 	}

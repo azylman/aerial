@@ -394,6 +394,17 @@ All code and configuration changes across all repositories (`aerial`, `aerial-co
      5. Commit and push directly to the PR branch (`git push origin <branch>`).
      6. Auto-merge remains armed and will merge once CI turns green.
      7. Never report a failure to the user without attempting remediation, unless an unrecoverable architectural conflict exists.
+   - **Independent RoboRev Evaluation & Disagreement Protocol**: Distinguish deterministic CI checks (authoritative; unit tests, linters, types, builds must be fixed) from `roborev` AI code reviews (advisory second opinion running `agy` with read-only repo tools, but lacking Discord thread intent, multi-chunk Vanadis build plans, and cross-repo context; must be critically evaluated against codebase reality and architectural intent rather than blindly accepted):
+     - **Signal Calibration (Mechanical vs. Non-Mechanical)**:
+       - *High Trust (Mechanical & Objective)*: Duplicate/copy-pasted code blocks, dead/unreachable code, explicit repo invariant violations (closure fields in table-driven tests, `time.Sleep`, imperative DDL), unquoted shell/JQ interpolation, unchecked errors, and concrete logic or concurrency bugs. Treat these as high-signal and fix them.
+       - *Lower Trust / Verify First (Subjective Design & Unverified Assumptions)*: Subjective `design` preferences, multi-chunk Vanadis build or cross-repo boundaries, or unverified assumptions about transitive callers where the reviewer did not trace the full call chain. Verify before changing code.
+     - **True Positive**: Fix the verified defect locally, run verification checks, and push to the PR branch.
+     - **Context Gap**: Add a concise inline code comment explaining the non-obvious cross-file invariant and push. Additionally, evaluate whether `.roborev.toml` (`review_guidelines`) needs updating—only add general, repo-wide architectural context/principles there (never narrow one-off exceptions, so not every context-gap fix will require a `.roborev.toml` change).
+     - **False Positive / Architectural Disagreement**: Reject the suggestion and invoke:
+       ```bash
+       /share/aerial/scripts/aerial-pr.sh --repo <repo> override-roborev <pr_num> '<technical_rebuttal>'
+       ```
+       This posts a commit-SHA-bound `## roborev-override` comment with your technical rebuttal to the PR, re-runs the RoboRev gate to pass it, and clears the failure banner in the PR status widget so automated workflows never stall on disputed findings.
 
 ### 5.2 PR Submission, Description & Status Reporting Standards
 - **Mandatory PR Descriptions**: Pull Request descriptions are strictly mandatory under all circumstances. Submissions without a description will fail fast with exit code 1. Authors must provide a description via `PR_DESCRIPTION.md` in the scratch root (the recommended path for agents; automatically consumed and deleted before staging) or `--body-file <path>`.
