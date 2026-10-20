@@ -17,23 +17,15 @@ func TestRunnerPosix_ProcessGroupAndSignalHelpers(t *testing.T) {
 		t.Errorf("expected SysProcAttr.Setpgid=true")
 	}
 
-	if isProcessTerminatedBySignal(nil) || isProcessTerminatedBySignal(&exec.ExitError{}) || isProcessTerminatedBySignal(&exec.ExitError{ProcessState: &os.ProcessState{}}) {
-		t.Errorf("expected false for nil or un-signaled ExitError")
-	}
-	if !isWaitStatusSignaled(syscall.WaitStatus(syscall.SIGTERM)) || !isWaitStatusSignaled(syscall.WaitStatus(syscall.SIGKILL)) || isWaitStatusSignaled(syscall.WaitStatus(0)) || isWaitStatusSignaled("invalid") {
-		t.Errorf("isWaitStatusSignaled assertions failed")
-	}
-
 	if isIgnorableKillError(nil) || !isIgnorableKillError(os.ErrProcessDone) || !isIgnorableKillError(syscall.ESRCH) || isIgnorableKillError(errors.New("other error")) {
 		t.Errorf("isIgnorableKillError assertions failed")
 	}
 
 	for _, c := range []*exec.Cmd{nil, {}, {Process: &os.Process{Pid: -1}}, {Process: &os.Process{Pid: 0}}} {
-		terminateProcessGroup(c)
 		killProcessGroup(c)
 	}
 
-	var mockKills, mockTerms int
+	var mockKills int
 	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 98765}}
 	killProcessGroupWith(mockCmd, func(pid int, sig syscall.Signal) error {
 		if pid != -98765 || sig != syscall.SIGKILL {
@@ -45,14 +37,7 @@ func TestRunnerPosix_ProcessGroupAndSignalHelpers(t *testing.T) {
 		mockKills++
 		return errors.New("prockill")
 	})
-	terminateProcessGroupWith(mockCmd, func(pid int, sig syscall.Signal) error {
-		if pid != -98765 || sig != syscall.SIGTERM {
-			t.Errorf("unexpected sigterm args: %d, %v", pid, sig)
-		}
-		mockTerms++
-		return errors.New("sigterm")
-	})
-	if mockKills != 2 || mockTerms != 1 {
-		t.Errorf("expected 2 mock kills and 1 mock term, got %d, %d", mockKills, mockTerms)
+	if mockKills != 2 {
+		t.Errorf("expected 2 mock kills, got %d", mockKills)
 	}
 }

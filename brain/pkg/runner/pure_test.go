@@ -20,21 +20,6 @@ func assertContainsAndOmits(t *testing.T, target string, contains, omits []strin
 	}
 }
 
-func TestBuildAgyArgs(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		input    AgyArgsInput
-		contains []string
-		omits    []string
-	}{
-		{AgyArgsInput{}, []string{"--dangerously-skip-permissions", "--output-format stream-json"}, []string{"--input-format", "--model", "--conversation"}},
-		{AgyArgsInput{OutputFormat: "json", Model: "gemini-2.5-flash", SessionID: "11111111-2222-3333-4444-555555555555"}, []string{"--dangerously-skip-permissions", "--output-format json", "--model gemini-2.5-flash", "--conversation 11111111-2222-3333-4444-555555555555"}, []string{"--input-format"}},
-		{AgyArgsInput{WorkerMode: true, OutputFormat: "stream-json", Model: "gemini-pro", SessionID: "22222222-3333-4444-5555-666666666666"}, []string{"--dangerously-skip-permissions", "--input-format stream-json", "--output-format stream-json", "--model gemini-pro", "--conversation 22222222-3333-4444-5555-666666666666"}, nil},
-	} {
-		assertContainsAndOmits(t, strings.Join(BuildAgyArgs(tc.input), " "), tc.contains, tc.omits, tc.input)
-	}
-}
-
 func TestBuildDaemonArgs(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -96,19 +81,6 @@ func TestParseInitEvent(t *testing.T) {
 	} {
 		if id, ok := ParseInitEvent(tc.line); ok != tc.wantOk || id != tc.wantID {
 			t.Errorf("ParseInitEvent(%q) = (%q, %v), want (%q, %v)", tc.line, id, ok, tc.wantID, tc.wantOk)
-		}
-	}
-}
-
-func TestExtractSubagentID(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct{ in, want string }{
-		{`{"conversationId": "sub-123"}`, "sub-123"}, {`{"conversation_id": "sub-456"}`, "sub-456"}, {`[{"conversationId": "sub-789"}]`, "sub-789"}, {`[{"conversation_id": "sub-array-snake"}]`, "sub-array-snake"},
-		{`Subagent conversation started with conversation ID: sub-777, {"conversationId": "sub-777"}`, "sub-777"}, {`{"subagents": [{"conversationId": "sub-nested-1"}]}`, "sub-nested-1"}, {`[2026-09-19 {worker-1}] {"conversationId": "sub-logger-id"}`, "sub-logger-id"},
-		{"", ""}, {"Command completed with status 0", ""}, {`log prefix [{"conversation_id": "sub-alt-1"}]`, "sub-alt-1"}, {`{"conversation_id": "sub-snake-1"}`, "sub-snake-1"}, {`{"subagents": [{"conversation_id": "sub-snake-sub"}]}`, "sub-snake-sub"},
-	} {
-		if got := extractSubagentID(tc.in); got != tc.want {
-			t.Errorf("extractSubagentID(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

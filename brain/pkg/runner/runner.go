@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -31,11 +30,6 @@ var (
 		"hours", "h", "hour", "h", "hrs", "h", "hr", "h",
 		"seconds", "s", "second", "s", "secs", "s", "sec", "s",
 	)
-)
-
-var (
-	ErrInactivityTimeout = errors.New("watchdog: inactivity timeout exceeded")
-	ErrMaxDuration       = errors.New("watchdog: max duration exceeded")
 )
 
 func IsValidUUID(s string) bool { return reStrictUUID.MatchString(s) }
