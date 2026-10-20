@@ -105,7 +105,7 @@ for flush_url in \
   "http://127.0.0.1:4001/debug/coverage/flush" \
   "http://127.0.0.1:8084/debug/coverage/flush" \
   "http://127.0.0.1:8088/debug/coverage/flush"; do
-  curl -fsS -m 2 "$flush_url" >/dev/null 2>&1 || true
+  curl -fsS -X POST -m 2 "$flush_url" >/dev/null 2>&1 || true
 done
 
 # 2. Sweep service directories
