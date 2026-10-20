@@ -7,36 +7,11 @@ import (
 )
 
 var knownAbbreviations = map[string]bool{
-	"mr":     true,
-	"mrs":    true,
-	"ms":     true,
-	"dr":     true,
-	"prof":   true,
-	"sr":     true,
-	"jr":     true,
-	"vs":     true,
-	"etc":    true,
-	"e.g":    true,
-	"eg":     true,
-	"i.e":    true,
-	"ie":     true,
-	"a.m":    true,
-	"am":     true,
-	"p.m":    true,
-	"pm":     true,
-	"approx": true,
-	"dept":   true,
-	"est":    true,
-	"fig":    true,
-	"inc":    true,
-	"ltd":    true,
-	"gen":    true,
-	"gov":    true,
-	"sgt":    true,
-	"cpt":    true,
-	"lt":     true,
-	"no":     true,
-	"vol":    true,
+	"mr": true, "mrs": true, "ms": true, "dr": true, "prof": true, "sr": true, "jr": true,
+	"vs": true, "etc": true, "e.g": true, "eg": true, "i.e": true, "ie": true, "a.m": true,
+	"am": true, "p.m": true, "pm": true, "approx": true, "dept": true, "est": true, "fig": true,
+	"inc": true, "ltd": true, "gen": true, "gov": true, "sgt": true, "cpt": true, "lt": true,
+	"no": true, "vol": true,
 }
 
 // SentenceDetector buffers streaming text tokens and detects natural sentence boundaries
@@ -56,10 +31,8 @@ func (sd *SentenceDetector) Feed(delta string, emit func(sentence string)) {
 	if delta == "" {
 		return
 	}
-
 	sd.mu.Lock()
 	defer sd.mu.Unlock()
-
 	sd.buffer.WriteString(delta)
 	sd.drain(false, emit)
 }
@@ -68,7 +41,6 @@ func (sd *SentenceDetector) Feed(delta string, emit func(sentence string)) {
 func (sd *SentenceDetector) Flush(emit func(sentence string)) {
 	sd.mu.Lock()
 	defer sd.mu.Unlock()
-
 	sd.drain(true, emit)
 }
 
@@ -85,12 +57,10 @@ func (sd *SentenceDetector) drain(isFinal bool, emit func(sentence string)) {
 		if splitIdx == -1 {
 			break
 		}
-
 		sentence := strings.TrimSpace(txt[:endIdx])
 		if isEmittable(sentence) && emit != nil {
 			emit(sentence)
 		}
-
 		txt = strings.TrimLeft(txt[endIdx:], " \t\r\n")
 	}
 
@@ -129,9 +99,7 @@ func findSentenceBoundary(txt string) (int, int) {
 			for endIdx < n && unicode.IsSpace(runes[endIdx]) {
 				endIdx++
 			}
-			byteSplit := len(string(runes[:i]))
-			byteEnd := len(string(runes[:endIdx]))
-			return byteSplit, byteEnd
+			return len(string(runes[:i])), len(string(runes[:endIdx]))
 		}
 
 		if r != '.' && r != '!' && r != '?' {
@@ -141,25 +109,12 @@ func findSentenceBoundary(txt string) (int, int) {
 		// Handle ellipses: if consecutive dots, skip until the last dot
 		isEllipsis := false
 		if r == '.' {
-			if i+1 < n && runes[i+1] == '.' {
+			for i+1 < n && runes[i+1] == '.' {
 				isEllipsis = true
-				for i+1 < n && runes[i+1] == '.' {
-					i++
-				}
+				i++
 			}
-
-			// Decimal number check: digit before and digit after (e.g. 3.14)
-			if i > 0 && unicode.IsDigit(runes[i-1]) && i+1 < n && unicode.IsDigit(runes[i+1]) {
-				continue
-			}
-
-			// Numbered list prefix check: e.g. "1. " or "2. "
-			if isNumberedListPrefix(runes, i) {
-				continue
-			}
-
-			// Abbreviation / single-letter initial check
-			if isAbbrev(runes, i) {
+			if (i > 0 && unicode.IsDigit(runes[i-1]) && i+1 < n && unicode.IsDigit(runes[i+1])) ||
+				isNumberedListPrefix(runes, i) || isAbbrev(runes, i) {
 				continue
 			}
 		}
@@ -173,7 +128,6 @@ func findSentenceBoundary(txt string) (int, int) {
 		// Boundary requires whitespace (or newline) after punctuation/closing quotes
 		if endIdx < n && unicode.IsSpace(runes[endIdx]) {
 			if isEllipsis {
-				// Peek ahead: if followed by lowercase letter, treat as continuation
 				nextNonSpace := endIdx
 				for nextNonSpace < n && unicode.IsSpace(runes[nextNonSpace]) {
 					nextNonSpace++
@@ -182,10 +136,7 @@ func findSentenceBoundary(txt string) (int, int) {
 					continue
 				}
 			}
-			// Convert rune offsets to byte indices in txt
-			byteSplit := len(string(runes[:i+1]))
-			byteEnd := len(string(runes[:endIdx]))
-			return byteSplit, byteEnd
+			return len(string(runes[:i+1])), len(string(runes[:endIdx]))
 		}
 	}
 
@@ -196,8 +147,7 @@ func findSentenceBoundary(txt string) (int, int) {
 			r := runes[i]
 			if (r == ',' || r == ';' || r == ':') && i+1 < n && unicode.IsSpace(runes[i+1]) {
 				byteSplit := len(string(runes[:i+1]))
-				byteEnd := len(string(runes[:i+1]))
-				return byteSplit, byteEnd
+				return byteSplit, byteSplit
 			}
 		}
 	}
@@ -206,12 +156,7 @@ func findSentenceBoundary(txt string) (int, int) {
 }
 
 func isClosingPunctuation(r rune) bool {
-	switch r {
-	case '"', '\'', ')', ']', '}', '”', '’', '»':
-		return true
-	default:
-		return false
-	}
+	return strings.ContainsRune(`"')]}”’»`, r)
 }
 
 func isNumberedListPrefix(runes []rune, dotIdx int) bool {
@@ -219,11 +164,7 @@ func isNumberedListPrefix(runes []rune, dotIdx int) bool {
 	for start >= 0 && unicode.IsDigit(runes[start]) {
 		start--
 	}
-	// All digits between start and dotIdx. Check if preceded by line start or space.
-	if start < dotIdx-1 && (start < 0 || runes[start] == '\n' || runes[start] == ' ' || runes[start] == '\t') {
-		return true
-	}
-	return false
+	return start < dotIdx-1 && (start < 0 || unicode.IsSpace(runes[start]))
 }
 
 func isAbbrev(runes []rune, dotIdx int) bool {
@@ -231,36 +172,25 @@ func isAbbrev(runes []rune, dotIdx int) bool {
 	for start >= 0 && (unicode.IsLetter(runes[start]) || runes[start] == '.') {
 		start--
 	}
-	start++
-	if start >= dotIdx {
+	if start++; start >= dotIdx {
 		return false
 	}
-
 	wordRunes := runes[start:dotIdx]
-	// Single letter uppercase initial (e.g. "J. Doe")
 	if len(wordRunes) == 1 && unicode.IsUpper(wordRunes[0]) {
 		return true
 	}
-
 	word := strings.ToLower(string(wordRunes))
 	if knownAbbreviations[word] {
 		return true
 	}
-
-	// Acronyms with dots: e.g. "u.s", "ph.d", "a.m", "i.e"
 	parts := strings.Split(word, ".")
-	if len(parts) > 1 {
-		allShort := true
-		for _, p := range parts {
-			if len(p) == 0 || len(p) > 2 {
-				allShort = false
-				break
-			}
-		}
-		if allShort {
-			return true
+	if len(parts) <= 1 {
+		return false
+	}
+	for _, p := range parts {
+		if len(p) == 0 || len(p) > 2 {
+			return false
 		}
 	}
-
-	return false
+	return true
 }
