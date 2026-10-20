@@ -39,20 +39,12 @@ func CleanTaskSummary(content string) string {
 	if trimmed == "" {
 		return "Agent Task"
 	}
-
-	body := ExtractMessageBody(trimmed)
-
-	cleaned := tagRegex.ReplaceAllString(body, " ")
-	cleaned = sanitizer.SanitizeMentions(cleaned)
-	cleaned = markdownRegex.ReplaceAllString(cleaned, "")
-	cleaned = sanitizer.NormalizeWhitespace(cleaned)
-
+	cleaned := tagRegex.ReplaceAllString(ExtractMessageBody(trimmed), " ")
+	cleaned = sanitizer.NormalizeWhitespace(markdownRegex.ReplaceAllString(sanitizer.SanitizeMentions(cleaned), ""))
 	if cleaned == "" {
 		cleaned = "Agent Task"
 	}
-
-	runes := []rune(cleaned)
-	if len(runes) > 140 {
+	if runes := []rune(cleaned); len(runes) > 140 {
 		return strings.TrimSpace(string(runes[:137])) + "..."
 	}
 	return cleaned
@@ -63,13 +55,13 @@ func InferTriggerType(authorID, scheduleRunID string) string {
 	if authorID == "http-client" {
 		return "http"
 	}
-	if scheduleRunID != "" {
-		if strings.HasPrefix(scheduleRunID, "cron-") {
-			return "cron"
-		}
-		return "reminder"
+	if scheduleRunID == "" {
+		return "discord"
 	}
-	return "discord"
+	if strings.HasPrefix(scheduleRunID, "cron-") {
+		return "cron"
+	}
+	return "reminder"
 }
 
 // GetActiveTasks returns up to 50 active tasks for telemetry HUD visualization.
@@ -80,28 +72,7 @@ func (s *SQLStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	query := `
-	SELECT 
-		m.id,
-		COALESCE(m.row_id, 0),
-		m.thread_id,
-		COALESCE(s.internal_session_id, '') AS session_id,
-		m.author_name,
-		m.author_id,
-		m.content,
-		COALESCE(m.summary, '') AS summary,
-		m.status,
-		m.retry_count,
-		COALESCE(m.schedule_run_id, '') AS schedule_run_id,
-		m.created_at,
-		m.updated_at
-	FROM messages m
-	LEFT JOIN sessions s ON m.thread_id = s.thread_id
-	WHERE m.status IN ('PENDING', 'PROCESSING')
-	ORDER BY m.created_at ASC
-	LIMIT 50;
-	`
-	rows, err := s.db.QueryContext(queryCtx, query)
+	rows, err := s.db.QueryContext(queryCtx, `SELECT m.id, COALESCE(m.row_id, 0), m.thread_id, COALESCE(s.internal_session_id, '') AS session_id, m.author_name, m.author_id, m.content, COALESCE(m.summary, '') AS summary, m.status, m.retry_count, COALESCE(m.schedule_run_id, '') AS schedule_run_id, m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id WHERE m.status IN ('PENDING', 'PROCESSING') ORDER BY m.created_at ASC LIMIT 50;`)
 	if err != nil {
 		return nil, fmt.Errorf("query active tasks: %w", err)
 	}
@@ -111,34 +82,15 @@ func (s *SQLStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
 	for rows.Next() {
 		var t ActiveTask
 		var schedID sql.NullString
-		if err := rows.Scan(
-			&t.ID,
-			&t.RowID,
-			&t.ThreadID,
-			&t.SessionID,
-			&t.AuthorName,
-			&t.AuthorID,
-			&t.Prompt,
-			&t.Summary,
-			&t.Status,
-			&t.RetryCount,
-			&schedID,
-			&t.CreatedAt,
-			&t.UpdatedAt,
-		); err != nil {
+		if err := rows.Scan(&t.ID, &t.RowID, &t.ThreadID, &t.SessionID, &t.AuthorName, &t.AuthorID, &t.Prompt, &t.Summary, &t.Status, &t.RetryCount, &schedID, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan active task: %w", err)
 		}
-		if schedID.Valid {
-			t.ScheduleRunID = schedID.String
-		}
+		t.ScheduleRunID = schedID.String
 		if t.Summary == "" {
 			t.Summary = CleanTaskSummary(t.Prompt)
 		}
 		t.TriggerType = InferTriggerType(t.AuthorID, t.ScheduleRunID)
 		tasks = append(tasks, t)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate active tasks: %w", err)
-	}
-	return tasks, nil
+	return tasks, rows.Err()
 }
