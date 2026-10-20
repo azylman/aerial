@@ -50,29 +50,15 @@ func sanitizeErrorText(errStr string) string {
 var testPoolHook func(cfg WorkerPoolConfig) runner.AgentPool
 
 type WorkerPoolConfig struct {
-	DB             *sql.DB
-	Store          db.Store
-	DiscordSession *discordgo.Session
-	AgyBin         string
-	APIKey         string
-	Model             string
-	LowEffortModel    string
-	MediumEffortModel string
-	SystemPrompt   string
-	TimeoutMinutes int
-	BackoffBase    time.Duration
-	MaxAttempts    int
-	Classifier     *classifier.Classifier
-	StalenessTTL   time.Duration
-	IdleTimeout    time.Duration
-	DrainTimeout       time.Duration
-	RetryDelayOverride time.Duration
-	SessionManager       *session.Manager
-	ProcessPool             runner.AgentPool
-	LowEffortProcessPool    runner.AgentPool
-	MediumEffortProcessPool runner.AgentPool
-	VoiceProcessPool        runner.AgentPool
-	MaintenanceInterval time.Duration
+	DB                          *sql.DB
+	Store                       db.Store
+	DiscordSession              *discordgo.Session
+	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt string
+	TimeoutMinutes, MaxAttempts int
+	BackoffBase, StalenessTTL, IdleTimeout, DrainTimeout, RetryDelayOverride, MaintenanceInterval time.Duration
+	SessionManager              *session.Manager
+	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
+	Classifier                  *classifier.Classifier
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -101,42 +87,33 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
-	appCfg            *config.Config
-	overrideModel     string
-	cfg               WorkerPoolConfig
-	sessionMgr        *session.Manager
-	mu                sync.Mutex
-	threadChs         map[string]*threadWorkerState
-	wg                sync.WaitGroup
-	ctx               context.Context
-	cancel            context.CancelFunc
-	stopped           bool
-	quotaLockedUntil  atomic.Int64
-	scopeLocks        sync.Map
-	webhookDispatcher WebhookDispatcher
-	summaryGroup      singleflight.Group
-	processPool             runner.AgentPool
-	lowEffortProcessPool    runner.AgentPool
-	mediumEffortProcessPool runner.AgentPool
-	voiceProcessPool        runner.AgentPool
+	appCfg                                                                       *config.Config
+	overrideModel                                                                string
+	cfg                                                                          WorkerPoolConfig
+	sessionMgr                                                                   *session.Manager
+	mu                                                                           sync.Mutex
+	threadChs                                                                    map[string]*threadWorkerState
+	wg                                                                           sync.WaitGroup
+	ctx                                                                          context.Context
+	cancel                                                                       context.CancelFunc
+	stopped                                                                      bool
+	quotaLockedUntil                                                             atomic.Int64
+	scopeLocks                                                                   sync.Map
+	webhookDispatcher                                                            WebhookDispatcher
+	summaryGroup                                                                 singleflight.Group
+	processPool, lowEffortProcessPool, mediumEffortProcessPool, voiceProcessPool runner.AgentPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
 func (p *WorkerPool) SummaryGroup() *singleflight.Group {
-	if p == nil {
-		return nil
-	}
+	if p == nil { return nil }
 	return &p.summaryGroup
 }
 
 // Store returns the configured db.Store, resolving cfg.Store or wrapping cfg.DB if necessary.
 func (p *WorkerPool) Store() db.Store {
-	if p == nil {
-		return nil
-	}
-	if p.cfg.Store != nil {
-		return p.cfg.Store
-	}
+	if p == nil { return nil }
+	if p.cfg.Store != nil { return p.cfg.Store }
 	if p.cfg.DB != nil {
 		p.cfg.Store = db.NewSQLStore(p.cfg.DB)
 		return p.cfg.Store
@@ -145,51 +122,28 @@ func (p *WorkerPool) Store() db.Store {
 }
 
 func resolveStore(dbOrStore any) db.Store {
-	if dbOrStore == nil {
-		return nil
-	}
 	switch s := dbOrStore.(type) {
 	case *db.FakeStore:
-		if s == nil {
-			return nil
-		}
-		return s
+		if s != nil { return s }
 	case *db.SQLStore:
-		if s == nil {
-			return nil
-		}
-		return s
+		if s != nil { return s }
 	case db.Store:
 		return s
 	case *sql.DB:
-		if s == nil {
-			return nil
-		}
-		return db.NewSQLStore(s)
-	default:
-		return nil
+		if s != nil { return db.NewSQLStore(s) }
 	}
+	return nil
 }
 
 func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
 	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
 		sessID, err := store.GetSessionID(ctx, targetKey)
-		if err != nil {
-			return runner.SessionRecord{}, err
-		}
+		if err != nil { return runner.SessionRecord{}, err }
 		turns, err := store.GetSessionTurnCount(ctx, targetKey)
-		if err != nil {
-			turns = 0
-		}
+		if err != nil { turns = 0 }
 		prevID, err := store.GetPreviousSessionID(ctx, targetKey)
-		if err != nil {
-			prevID = ""
-		}
-		return runner.SessionRecord{
-			ActiveSessionID:   sessID,
-			PreviousSessionID: prevID,
-			TurnCount:         turns,
-		}, nil
+		if err != nil { prevID = "" }
+		return runner.SessionRecord{ActiveSessionID: sessID, PreviousSessionID: prevID, TurnCount: turns}, nil
 	}
 	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
 		return store.RotateSessionID(ctx, targetKey, newSessionID)
@@ -199,9 +153,7 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
 func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
-	if cfg.Store == nil && cfg.DB != nil {
-		cfg.Store = db.NewSQLStore(cfg.DB)
-	}
+	if cfg.Store == nil && cfg.DB != nil { cfg.Store = db.NewSQLStore(cfg.DB) }
 	isExplicitAppCfg := (appCfg != nil)
 	if appCfg == nil {
 		def := config.DefaultConfigData()
@@ -220,12 +172,8 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
 		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			timeoutMins := int(opts.MaxDuration / time.Minute)
-			if timeoutMins <= 0 {
-				timeoutMins = int(opts.InactivityTimeout / time.Minute)
-			}
-			if timeoutMins <= 0 {
-				timeoutMins = cfg.TimeoutMinutes
-			}
+			if timeoutMins <= 0 { timeoutMins = int(opts.InactivityTimeout / time.Minute) }
+			if timeoutMins <= 0 { timeoutMins = cfg.TimeoutMinutes }
 			return cfg.RunnerFunc(ctx, agyBin, prompt, sessionID, apiKey, model, timeoutMins)
 		}
 	} else if cfg.RunnerFunc == nil && cfg.RunnerWithOptionsFunc != nil {
@@ -233,55 +181,37 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			return cfg.RunnerWithOptionsFunc(ctx, agyBin, prompt, sessionID, apiKey, model, runner.DefaultWatchdogOptions(timeoutMinutes))
 		}
 	} else if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc == nil {
-		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		cfg.RunnerFunc = func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
 			return "", "", 1, fmt.Errorf("queue: RunnerFunc not configured on WorkerPool")
 		}
-		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+		cfg.RunnerWithOptionsFunc = func(context.Context, string, string, string, string, string, runner.WatchdogOptions) (string, string, int, error) {
 			return "", "", 1, fmt.Errorf("queue: RunnerWithOptionsFunc not configured on WorkerPool")
 		}
 	}
 	if hasCustomRunner && testPoolHook != nil {
-		if wrapped := testPoolHook(cfg); wrapped != nil {
-			cfg.ProcessPool = wrapped
-		}
+		if wrapped := testPoolHook(cfg); wrapped != nil { cfg.ProcessPool = wrapped }
 	}
 	if cfg.NotifierFunc == nil {
 		notifierRunner := cfg.NotifierRunnerFunc
-		if notifierRunner == nil && isExplicitAppCfg {
-			notifierRunner = cfg.RunnerFunc
-		}
+		if notifierRunner == nil && isExplicitAppCfg { notifierRunner = cfg.RunnerFunc }
 		if notifierRunner != nil {
-			cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
-				return notifier.GenerateDynamicNotification(agyBin, apiKey, contextDescription, notifierRunner)
-			}
+			cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return notifier.GenerateDynamicNotification(agyBin, apiKey, desc, notifierRunner) }
 		} else {
-			cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
-				return notifier.StaticFallback(contextDescription)
-			}
+			cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return notifier.StaticFallback(desc) }
 		}
 	}
 	if cfg.DeliveryWithAttachmentsFunc == nil {
 		if cfg.DeliveryFunc != nil {
-			cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
-				return cfg.DeliveryFunc(s, channelID, text)
-			}
+			cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, cID, txt string, atts []*delivery.Attachment) error { return cfg.DeliveryFunc(s, cID, txt) }
 		} else {
 			cfg.DeliveryWithAttachmentsFunc = delivery.SendMessageWithAttachments
 		}
 	}
-	if cfg.DeliveryFunc == nil {
-		cfg.DeliveryFunc = delivery.SendMessage
-	}
-	if cfg.TypingFunc == nil {
-		cfg.TypingFunc = delivery.StartTyping
-	}
+	if cfg.DeliveryFunc == nil { cfg.DeliveryFunc = delivery.SendMessage }
+	if cfg.TypingFunc == nil { cfg.TypingFunc = delivery.StartTyping }
 	sessMgr := cfg.SessionManager
 	if sessMgr == nil {
-		if appCfg != nil {
-			sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
-		} else {
-			sessMgr = session.New("", "")
-		}
+		if appCfg != nil { sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir()) } else { sessMgr = session.New("", "") }
 	}
 	cfg.SessionManager = sessMgr
 
@@ -289,59 +219,35 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		agyBin, apiKey := cfg.AgyBin, cfg.APIKey
 		if appCfg != nil {
 			if cur := appCfg.Current(); cur != nil {
-				if cur.APIKey != "" {
-					apiKey = cur.APIKey
-				}
-				if cur.AgyBin != "" {
-					agyBin = cur.AgyBin
-				}
+				if cur.APIKey != "" { apiKey = cur.APIKey }
+				if cur.AgyBin != "" { agyBin = cur.AgyBin }
 			}
 		}
-		cfg.Classifier = classifier.NewClassifier(
-			classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, cfg.RunnerFunc)),
-		)
+		cfg.Classifier = classifier.NewClassifier(classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, cfg.RunnerFunc)))
 	}
 	if cfg.LLMFunc == nil {
 		for _, candidate := range []runner.AgentPool{cfg.LowEffortProcessPool, cfg.ProcessPool} {
-			if candidate == nil {
-				continue
-			}
-			if ep, ok := candidate.(interface {
-				EphemeralLLMFunc(string) runner.LLMFunc
-			}); ok {
+			if candidate == nil { continue }
+			if ep, ok := candidate.(interface{ EphemeralLLMFunc(string) runner.LLMFunc }); ok {
 				cfg.LLMFunc = ep.EphemeralLLMFunc("ephemeral:summarizer")
 				break
 			}
 		}
 	}
 	if cfg.ResolveChannelPolicy == nil {
-		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
-			if appCfg != nil {
-				return appCfg.ResolveChannelPolicy(channelID, channelName)
-			}
-			return config.ActiveConfig().ResolveChannelPolicy(channelID, channelName)
+		cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy {
+			if appCfg != nil { return appCfg.ResolveChannelPolicy(cID, cName) }
+			return config.ActiveConfig().ResolveChannelPolicy(cID, cName)
 		}
 	}
-	if cfg.SystemAlertFunc == nil {
-		cfg.SystemAlertFunc = delivery.SendSystemAlert
-	}
-	if cfg.WebhookDispatcher == nil {
-		cfg.WebhookDispatcher = NewDefaultWebhookDispatcher()
-	}
+	if cfg.SystemAlertFunc == nil { cfg.SystemAlertFunc = delivery.SendSystemAlert }
+	if cfg.WebhookDispatcher == nil { cfg.WebhookDispatcher = NewDefaultWebhookDispatcher() }
 
 	ctx, cancel := context.WithCancel(context.Background())
-
 	p := &WorkerPool{
-		appCfg:            appCfg,
-		cfg:               cfg,
-		processPool:             cfg.ProcessPool,
-		lowEffortProcessPool:    cfg.LowEffortProcessPool,
-		mediumEffortProcessPool: cfg.MediumEffortProcessPool,
-		voiceProcessPool:        cfg.VoiceProcessPool,
-		sessionMgr:        sessMgr,
-		threadChs:         make(map[string]*threadWorkerState),
-		ctx:               ctx,
-		cancel:            cancel,
+		appCfg: appCfg, cfg: cfg, processPool: cfg.ProcessPool, lowEffortProcessPool: cfg.LowEffortProcessPool,
+		mediumEffortProcessPool: cfg.MediumEffortProcessPool, voiceProcessPool: cfg.VoiceProcessPool,
+		sessionMgr: sessMgr, threadChs: make(map[string]*threadWorkerState), ctx: ctx, cancel: cancel,
 		webhookDispatcher: cfg.WebhookDispatcher,
 	}
 
@@ -353,12 +259,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			daemonDataDir = cur.DataDir
 			if defaultModel == "" { defaultModel = cur.Model }
 		}
-		poolCfg := runner.PoolConfig{
-			AgyBin:       daemonBin,
-			Cwd:          daemonDataDir,
-			Env:          os.Environ(),
-			DefaultModel: defaultModel,
-		}
+		poolCfg := runner.PoolConfig{AgyBin: daemonBin, Cwd: daemonDataDir, Env: os.Environ(), DefaultModel: defaultModel}
 		if p.sessionMgr != nil {
 			poolCfg.TranscriptRescuer = p.sessionMgr.ExtractResponseSince
 			poolCfg.SessionManager = p.sessionMgr
@@ -372,41 +273,31 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if p.sessionMgr != nil {
 		for _, pool := range []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool} {
 			if pool == nil { continue }
-			if tr, ok := pool.(interface{ SetTranscriptRescuer(func(string, time.Time) string) }); ok {
-				tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
-			}
-			if sm, ok := pool.(interface{ SetSessionManager(*session.Manager) }); ok {
-				sm.SetSessionManager(p.sessionMgr)
-			}
+			if tr, ok := pool.(interface{ SetTranscriptRescuer(func(string, time.Time) string) }); ok { tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince) }
+			if sm, ok := pool.(interface{ SetSessionManager(*session.Manager) }); ok { sm.SetSessionManager(p.sessionMgr) }
 		}
 	}
 
 	if store := p.Store(); store != nil {
 		getRec, onRot := makeSessionCallbacks(store)
-		if sc, ok := p.processPool.(interface {
-			SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
-		}); ok {
+		if sc, ok := p.processPool.(interface{ SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) }); ok {
 			sc.SetSessionCallbacks(getRec, onRot)
 		}
 	}
 
 	if p.cfg.HistoryFetcher == nil {
-		p.cfg.HistoryFetcher = func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
-			fetcher := DefaultHistoryFetcher(p.getDiscordSession(), p.Store())
-			return fetcher(ctx, channelID, beforeID, limit)
+		p.cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) {
+			return DefaultHistoryFetcher(p.getDiscordSession(), p.Store())(ctx, cID, beforeID, limit)
 		}
 	}
 
 	var lastAlertMu sync.Mutex
 	var lastClassifierAlertTime, lastSystemAlertTime time.Time
-
 	if p.cfg.Classifier != nil && p.cfg.Classifier.OnParseError == nil {
 		p.cfg.Classifier.OnParseError = func(model, raw string, parseErr error) {
 			p.makeDebouncedAlertHandler(&lastAlertMu, &lastClassifierAlertTime, "OnParseError", "Classifier JSON Parse Error", fmt.Sprintf("classifier JSON parse alert: %v", parseErr), func() string {
 				snippet := raw
-				if runes := []rune(snippet); len(runes) > 600 {
-					snippet = string(runes[:590]) + "\n... (truncated)"
-				}
+				if runes := []rune(snippet); len(runes) > 600 { snippet = string(runes[:590]) + "\n... (truncated)" }
 				snippet = strings.ReplaceAll(snippet, "```", "'''")
 				snippet = strings.ReplaceAll(snippet, "@everyone", "@\u200beveryone")
 				snippet = strings.ReplaceAll(snippet, "@here", "@\u200bhere")
@@ -492,39 +383,21 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 	return p.cfg.DiscordSession
 }
 
-// DiscordSession returns the currently assigned discordgo session.
-func (p *WorkerPool) DiscordSession() *discordgo.Session {
-	return p.getDiscordSession()
-}
+func (p *WorkerPool) DiscordSession() *discordgo.Session { return p.getDiscordSession() }
 
-// DeliverDirect delivers a message directly to the target Discord channel or thread,
-// completely bypassing the worker queue and LLM agent execution.
 func (p *WorkerPool) DeliverDirect(channelID, text string) error {
-	if p == nil {
-		return errors.New("worker pool is nil")
-	}
+	if p == nil { return errors.New("worker pool is nil") }
 	sess := p.DiscordSession()
-	if sess == nil && p.cfg.DeliveryFunc == nil {
-		return errors.New("discord session is not connected")
-	}
-	if p.cfg.DeliveryFunc != nil {
-		return p.cfg.DeliveryFunc(sess, channelID, text)
-	}
+	if sess == nil && p.cfg.DeliveryFunc == nil { return errors.New("discord session is not connected") }
+	if p.cfg.DeliveryFunc != nil { return p.cfg.DeliveryFunc(sess, channelID, text) }
 	return delivery.SendMessage(sess, channelID, text)
 }
 
-// DeliverStatusWidget delivers or updates a status tracker widget directly to Discord.
 func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (string, error) {
-	if p == nil {
-		return "", errors.New("worker pool is nil")
-	}
-	if p.cfg.WidgetDeliveryFunc != nil {
-		return p.cfg.WidgetDeliveryFunc(req)
-	}
+	if p == nil { return "", errors.New("worker pool is nil") }
+	if p.cfg.WidgetDeliveryFunc != nil { return p.cfg.WidgetDeliveryFunc(req) }
 	sess := p.DiscordSession()
-	if sess == nil {
-		return "", errors.New("discord session is not connected")
-	}
+	if sess == nil { return "", errors.New("discord session is not connected") }
 	return discord.DeliverStatusWidget(sess, req, time.Now())
 }
 
@@ -550,16 +423,6 @@ func (p *WorkerPool) SetWebhookDispatcher(d WebhookDispatcher) {
 	}
 	p.webhookDispatcher = d
 	p.cfg.WebhookDispatcher = d
-}
-
-func (p *WorkerPool) UpdateRuntimeConfig(model string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if strings.TrimSpace(model) != "" {
-		p.overrideModel = model
-		p.cfg.Model = model
-	}
-	log.Printf("[WorkerPool] Runtime config updated: model=%s", model)
 }
 
 func (p *WorkerPool) GetRuntimeConfig() string {
@@ -588,9 +451,7 @@ func (p *WorkerPool) Start() {
 		go func() {
 			defer p.wg.Done()
 			interval := p.cfg.MaintenanceInterval
-			if interval <= 0 {
-				interval = 30 * time.Minute
-			}
+			if interval <= 0 { interval = 30 * time.Minute }
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			lastReportedTurnCount := make(map[string]int)
@@ -607,17 +468,10 @@ func (p *WorkerPool) Start() {
 }
 
 // checkUnrotatedSessions scans for active sessions exceeding the turn limit without rotating and alerts the system channel.
-// It deduplicates alerts via lastReportedTurnCount so dormant threads do not produce repetitive notifications.
 func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTurnCount map[string]int) {
-	if p == nil || p.cfg.Store == nil {
-		return
-	}
+	if p == nil || p.cfg.Store == nil { return }
 	parentCtx := context.Background()
-	if ctx != nil {
-		parentCtx = ctx
-	} else if p.ctx != nil {
-		parentCtx = p.ctx
-	}
+	if ctx != nil { parentCtx = ctx } else if p.ctx != nil { parentCtx = p.ctx }
 	checkCtx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
 	defer cancel()
 
@@ -631,18 +485,12 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 	var runawayList []db.SessionInfo
 	for _, s := range sessions {
 		activeUnrotated[s.ThreadID] = struct{}{}
-		if s.TurnCount > lastReportedTurnCount[s.ThreadID] {
-			runawayList = append(runawayList, s)
-		}
+		if s.TurnCount > lastReportedTurnCount[s.ThreadID] { runawayList = append(runawayList, s) }
 	}
 	for threadID := range lastReportedTurnCount {
-		if _, exists := activeUnrotated[threadID]; !exists {
-			delete(lastReportedTurnCount, threadID)
-		}
+		if _, exists := activeUnrotated[threadID]; !exists { delete(lastReportedTurnCount, threadID) }
 	}
-	if len(runawayList) == 0 {
-		return
-	}
+	if len(runawayList) == 0 { return }
 
 	sess := p.getDiscordSession()
 	var lines []string
@@ -653,9 +501,7 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 		}
 		lines = append(lines, formatUnrotatedSessionLine(sess, s))
 	}
-	for _, s := range runawayList {
-		lastReportedTurnCount[s.ThreadID] = s.TurnCount
-	}
+	for _, s := range runawayList { lastReportedTurnCount[s.ThreadID] = s.TurnCount }
 
 	sysChan := p.systemChannel()
 	alertMsg := fmt.Sprintf("⚠️ **Unrotated Runaway Sessions Detected**\n\nThe following sessions have exceeded the turn limit (%d turns) without rotating:\n%s\n\n*Purely informational watchdog alert. Sessions may require investigation if turn count continues increasing.*",
@@ -667,13 +513,11 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 	}
 }
 
-// formatUnrotatedSessionLine formats an unrotated session entry for system alerts, resolving Discord snowflakes
-// to readable channel or thread mention links.
+// formatUnrotatedSessionLine formats an unrotated session entry for system alerts.
 func formatUnrotatedSessionLine(sess *discordgo.Session, s db.SessionInfo) string {
 	if !IsNumericSnowflake(s.ThreadID) {
 		return fmt.Sprintf("- Thread `%s`: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
 	}
-
 	effID, _, isThread, _ := ResolveChannelAndThread(sess, s.ThreadID)
 	if isThread {
 		if effID != "" && effID != s.ThreadID {
@@ -681,12 +525,10 @@ func formatUnrotatedSessionLine(sess *discordgo.Session, s db.SessionInfo) strin
 		}
 		return fmt.Sprintf("- Thread <#%s>: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
 	}
-
 	return fmt.Sprintf("- Channel <#%s>: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
 }
 
-// StopWithTimeout initiates a bounded graceful drain of the worker pool, allowing inflight turns
-// to complete and deliver to Discord before cancelling context.
+// StopWithTimeout initiates a bounded graceful drain of the worker pool.
 func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 	p.mu.Lock()
 	if p.stopped {
@@ -698,12 +540,9 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 
 	if drainTimeout <= 0 {
 		drainTimeout = p.cfg.DrainTimeout
-		if drainTimeout <= 0 {
-			drainTimeout = 10 * time.Second
-		}
+		if drainTimeout <= 0 { drainTimeout = 10 * time.Second }
 	}
 
-	// Stage 1: Wait up to drainTimeout for pending messages and in-flight bursts to finish
 	deadline := time.Now().Add(drainTimeout)
 	for time.Now().Before(deadline) {
 		p.mu.Lock()
@@ -715,17 +554,11 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 			}
 		}
 		p.mu.Unlock()
-
-		if !busy {
-			break
-		}
+		if !busy { break }
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// Stage 2: Queues drained and turns completed (or timeout reached).
-	// Cancel context to wake up all idle worker goroutines.
 	p.cancel()
-
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
@@ -739,7 +572,6 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
 	}
 
-	// Stage 3: Atomic safety net: sweep any remaining PROCESSING messages to PENDING
 	sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer sweepCancel()
 	if store := p.Store(); store != nil {
@@ -760,17 +592,9 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 }
 
 func unwrapUnifiedPool(pool runner.AgentPool) *runner.UnifiedProcessPool {
-	if pool == nil {
-		return nil
-	}
-	if up, ok := pool.(*runner.UnifiedProcessPool); ok {
-		return up
-	}
-	if uw, ok := pool.(interface {
-		Underlying() *runner.UnifiedProcessPool
-	}); ok {
-		return uw.Underlying()
-	}
+	if pool == nil { return nil }
+	if up, ok := pool.(*runner.UnifiedProcessPool); ok { return up }
+	if uw, ok := pool.(interface{ Underlying() *runner.UnifiedProcessPool }); ok { return uw.Underlying() }
 	return nil
 }
 
@@ -790,9 +614,7 @@ func (p *WorkerPool) Stop() {
 }
 
 // ProcessPool returns the configured runner.UnifiedProcessPool, or nil if unconfigured or p is nil.
-func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
-	return unwrapUnifiedPool(p.AgentPool())
-}
+func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool { return unwrapUnifiedPool(p.AgentPool()) }
 
 func (p *WorkerPool) getPool(getter func() runner.AgentPool) runner.AgentPool {
 	if p == nil { return nil }
@@ -801,17 +623,17 @@ func (p *WorkerPool) getPool(getter func() runner.AgentPool) runner.AgentPool {
 	return getter()
 }
 
-// LowEffortProcessPool returns the configured runner.UnifiedProcessPool for low effort turns, or nil if unconfigured or p is nil.
+// LowEffortProcessPool returns the configured runner.UnifiedProcessPool for low effort turns.
 func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
 	return unwrapUnifiedPool(p.getPool(func() runner.AgentPool { return p.lowEffortProcessPool }))
 }
 
-// MediumEffortProcessPool returns the configured runner.UnifiedProcessPool for medium effort turns, or nil if unconfigured or p is nil.
+// MediumEffortProcessPool returns the configured runner.UnifiedProcessPool for medium effort turns.
 func (p *WorkerPool) MediumEffortProcessPool() *runner.UnifiedProcessPool {
 	return unwrapUnifiedPool(p.getPool(func() runner.AgentPool { return p.mediumEffortProcessPool }))
 }
 
-// VoiceProcessPool returns the configured runner.AgentPool for voice turns, or nil if unconfigured or p is nil.
+// VoiceProcessPool returns the configured runner.AgentPool for voice turns.
 func (p *WorkerPool) VoiceProcessPool() runner.AgentPool {
 	return p.getPool(func() runner.AgentPool { return p.voiceProcessPool })
 }
@@ -823,82 +645,58 @@ func (p *WorkerPool) AgentPool() runner.AgentPool {
 
 // MarkDirty notifies the process pools to mark active daemons dirty and evict idle daemons.
 func (p *WorkerPool) MarkDirty() {
-	if p == nil {
-		return
-	}
+	if p == nil { return }
 	p.mu.Lock()
 	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool, p.voiceProcessPool}
 	var voiceTargets []string
-	if p.appCfg != nil {
-		voiceTargets = p.appCfg.VoicePrewarmedTargets()
-	}
+	if p.appCfg != nil { voiceTargets = p.appCfg.VoicePrewarmedTargets() }
 	p.mu.Unlock()
 	for _, pool := range pools {
-		if pool == nil {
-			continue
-		}
+		if pool == nil { continue }
 		if targetUpdater, ok := pool.(interface{ UpdatePrewarmedTargets([]string) }); ok && voiceTargets != nil {
 			targetUpdater.UpdatePrewarmedTargets(voiceTargets)
 		}
-		if md, ok := pool.(interface{ MarkDirty() }); ok {
-			md.MarkDirty()
-		}
+		if md, ok := pool.(interface{ MarkDirty() }); ok { md.MarkDirty() }
 	}
 }
 
 func (p *WorkerPool) resolveEffortModel(getApp func(*config.ConfigData) string, cfgModel, def string) string {
-	if p == nil {
-		return def
-	}
+	if p == nil { return def }
 	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(getApp(cur)) != "" {
-			return strings.TrimSpace(getApp(cur))
-		}
+		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(getApp(cur)) != "" { return strings.TrimSpace(getApp(cur)) }
 	}
-	if strings.TrimSpace(cfgModel) != "" {
-		return strings.TrimSpace(cfgModel)
-	}
+	if strings.TrimSpace(cfgModel) != "" { return strings.TrimSpace(cfgModel) }
 	return def
 }
 
 // LowEffortModel returns the configured low effort reasoning model name.
 func (p *WorkerPool) LowEffortModel() string {
-	if p == nil {
-		return config.DefaultConfigData().LowEffortModel
-	}
-	return p.resolveEffortModel(func(c *config.ConfigData) string { return c.LowEffortModel }, p.cfg.LowEffortModel, config.DefaultConfigData().LowEffortModel)
+	cfgModel := ""
+	if p != nil { cfgModel = p.cfg.LowEffortModel }
+	return p.resolveEffortModel(func(c *config.ConfigData) string { return c.LowEffortModel }, cfgModel, config.DefaultConfigData().LowEffortModel)
 }
 
 // MediumEffortModel returns the configured medium effort reasoning model name.
 func (p *WorkerPool) MediumEffortModel() string {
-	if p == nil {
-		return config.DefaultConfigData().MediumEffortModel
-	}
-	return p.resolveEffortModel(func(c *config.ConfigData) string { return c.MediumEffortModel }, p.cfg.MediumEffortModel, config.DefaultConfigData().MediumEffortModel)
+	cfgModel := ""
+	if p != nil { cfgModel = p.cfg.MediumEffortModel }
+	return p.resolveEffortModel(func(c *config.ConfigData) string { return c.MediumEffortModel }, cfgModel, config.DefaultConfigData().MediumEffortModel)
 }
 
 func (p *WorkerPool) runnerCredentials() (string, string) {
 	agyBin, apiKey := p.cfg.AgyBin, p.cfg.APIKey
-	if p.appCfg != nil {
+	if p != nil && p.appCfg != nil {
 		if cur := p.appCfg.Current(); cur != nil {
-			if cur.AgyBin != "" {
-				agyBin = cur.AgyBin
-			}
-			if cur.APIKey != "" {
-				apiKey = cur.APIKey
-			}
+			if cur.AgyBin != "" { agyBin = cur.AgyBin }
+			if cur.APIKey != "" { apiKey = cur.APIKey }
 		}
 	}
 	return agyBin, apiKey
 }
 
-// ExecuteVoiceTurn synchronously executes a turn for voice queries, enforcing low effort reasoning
-// and streaming intermediate tool execution status and sentence callbacks.
+// ExecuteVoiceTurn synchronously executes a turn for voice queries.
 func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID string, onStatus func(status string), onSentence ...func(sentence string)) (string, string, error) {
-	if p == nil {
-		return "", "", fmt.Errorf("worker pool is uninitialized")
-	}
-
+	if p == nil { return "", "", fmt.Errorf("worker pool is uninitialized") }
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
@@ -906,22 +704,16 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 	p.mu.Unlock()
 
-	// Guard against background pool context cancellation or caller cancellation
 	select {
-	case <-p.ctx.Done():
-		return "", "", fmt.Errorf("brain is shutting down")
-	case <-ctx.Done():
-		return "", "", ctx.Err()
+	case <-p.ctx.Done(): return "", "", fmt.Errorf("brain is shutting down")
+	case <-ctx.Done(): return "", "", ctx.Err()
 	default:
 	}
 
 	deviceKey := strings.TrimSpace(sessionID)
-	if deviceKey == "" {
-		return "", "", fmt.Errorf("queue: session_id is required for voice turn routing")
-	}
+	if deviceKey == "" { return "", "", fmt.Errorf("queue: session_id is required for voice turn routing") }
 	threadID := "voice-" + deviceKey
 
-	// Mutual exclusion on session / threadID to prevent concurrent turn collisions
 	lockVal, _ := p.scopeLocks.LoadOrStore(threadID, &sync.Mutex{})
 	scopeLock, ok := lockVal.(*sync.Mutex)
 	if !ok {
@@ -932,12 +724,9 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	defer scopeLock.Unlock()
 
 	var sentenceCb func(string)
-	if len(onSentence) > 0 {
-		sentenceCb = onSentence[0]
-	}
+	if len(onSentence) > 0 { sentenceCb = onSentence[0] }
 
 	turnPrompt := prompt
-
 	if (p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil) || p.cfg.VoiceRunnerFunc != nil {
 		start := time.Now()
 		var reply, conv string
@@ -955,80 +744,45 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	p.mu.Lock()
 	var procPool runner.AgentPool
-	if p.voiceProcessPool != nil {
-		procPool = p.voiceProcessPool
-	} else if p.processPool != nil {
-		procPool = p.processPool
-	}
+	if p.voiceProcessPool != nil { procPool = p.voiceProcessPool } else if p.processPool != nil { procPool = p.processPool }
 	p.mu.Unlock()
-	if procPool == nil {
-		return "", deviceKey, fmt.Errorf("voice daemon pool unavailable")
-	}
+	if procPool == nil { return "", deviceKey, fmt.Errorf("voice daemon pool unavailable") }
 
 	model := p.LowEffortModel()
 	start := time.Now()
 	nodeInstructions := config.LoadScopeInstructions(deviceKey)
 
 	var detector *SentenceDetector
-	if sentenceCb != nil {
-		detector = NewSentenceDetector()
-	}
+	if sentenceCb != nil { detector = NewSentenceDetector() }
 	sink := newVoiceTurnSink(ctx, onStatus, sentenceCb, detector)
 
-	var turnRes *runner.TurnResult
-	var turnErr error
-	activeSession := deviceKey
-
 	turnCtx := &runner.TurnContext{
-		TurnID:            uuid.New().String(),
-		SessionID:         deviceKey,
-		Model:             model,
-		Prompt:            turnPrompt,
-		ScopeInstructions: nodeInstructions,
-		Sink:              sink,
-		CreatedAt:         time.Now(),
-		Ctx:               ctx,
+		TurnID: uuid.New().String(), SessionID: deviceKey, Model: model,
+		Prompt: turnPrompt, ScopeInstructions: nodeInstructions, Sink: sink, CreatedAt: time.Now(), Ctx: ctx,
 	}
 
-	if leasedPool, ok := procPool.(runner.LeasedAgentPool); ok {
-		lease, lErr := leasedPool.AcquireLease(ctx, deviceKey)
-		if lErr != nil {
-			metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-			return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", lErr)
-		}
-		defer func() {
-			if relErr := lease.Release(); relErr != nil {
-				log.Printf("[WorkerPool] Warning releasing voice lease for %s: %v", deviceKey, relErr)
-			}
-		}()
-		activeSession = lease.SessionID()
-		if activeSession == "" {
-			activeSession = deviceKey
-		}
-		turnCtx.SessionID = activeSession
-		turnRes, turnErr = lease.Execute(ctx, turnCtx)
-		if turnErr != nil && !errors.Is(turnErr, context.Canceled) && !errors.Is(turnErr, context.DeadlineExceeded) {
-			turnErr = fmt.Errorf("failed sending turn to voice daemon: %w", turnErr)
-		}
-	} else {
-		daemon, dErr := procPool.GetOrCreateSession(ctx, deviceKey, "")
-		if dErr != nil {
-			metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-			return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
-		}
-		if sendErr := daemon.Send(turnPrompt, turnCtx); sendErr != nil {
-			metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-			return "", deviceKey, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
-		}
-		turnRes, turnErr = sink.Wait(ctx)
-		if daemon.SessionID() != "" {
-			activeSession = daemon.SessionID()
-		}
+	leasedPool, ok := procPool.(runner.LeasedAgentPool)
+	if !ok {
+		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+		return "", deviceKey, fmt.Errorf("queue: active pool does not implement runner.LeasedAgentPool for voice %s", deviceKey)
+	}
+	lease, lErr := leasedPool.AcquireLease(ctx, deviceKey)
+	if lErr != nil {
+		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", lErr)
+	}
+	defer func() {
+		if relErr := lease.Release(); relErr != nil { log.Printf("[WorkerPool] Warning releasing voice lease for %s: %v", deviceKey, relErr) }
+	}()
+	activeSession := lease.SessionID()
+	if activeSession == "" { activeSession = deviceKey }
+	turnCtx.SessionID = activeSession
+	turnRes, turnErr := lease.Execute(ctx, turnCtx)
+	if turnErr != nil && !errors.Is(turnErr, context.Canceled) && !errors.Is(turnErr, context.DeadlineExceeded) {
+		turnErr = fmt.Errorf("failed sending turn to voice daemon: %w", turnErr)
 	}
 
-	resolver := runner.NewTurnResolver()
-	outcome := resolver.Resolve(ctx, turnRes, turnErr, activeSession)
-
+	outcome := runner.NewTurnResolver().Resolve(ctx, turnRes, turnErr, activeSession)
 	if outcome.IsSuccess {
 		metrics.RecordRunnerExecution("success", model, "voice", time.Since(start))
 		if outcome.Usage.TotalTokens > 0 {
@@ -1037,9 +791,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		if !sink.EmittedAny() && sentenceCb != nil && detector != nil && outcome.Response != "" {
 			emitSentence := func(s string) {
 				sink.MarkEmitted()
-				if sentenceCb != nil {
-					sentenceCb(s)
-				}
+				if sentenceCb != nil { sentenceCb(s) }
 			}
 			detector.Feed(outcome.Response, emitSentence)
 			detector.Flush(emitSentence)
@@ -1048,12 +800,8 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 
 	metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-	if turnErr != nil {
-		return "", activeSession, turnErr
-	}
-	if ctx.Err() != nil {
-		return "", activeSession, ctx.Err()
-	}
+	if turnErr != nil { return "", activeSession, turnErr }
+	if ctx.Err() != nil { return "", activeSession, ctx.Err() }
 	return "", activeSession, fmt.Errorf("%s", outcome.ErrorDetail)
 }
 
