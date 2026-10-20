@@ -1498,6 +1498,30 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "roborev", wantPrompts: 1, wantPromptSubstr: "Found SQL injection in query",
 		},
 		{
+			name: "check_run failure for roborev produces critical evaluation and override prompt", event: "check_run", delivery: "del-cr-roborev-override",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "roborev", wantPrompts: 1, wantPromptSubstr: "override-roborev 525",
+		},
+		{
+			name: "check_run success for roborev calls UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-success",
+			payload:        `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:            &mockPRRegistry{syncTargetID: "1555405874565091380"},
+			wantPR:         525,
+			wantHeadSHA:    "robo525abcdef",
+			wantTargetID:   "1555405874565091380",
+			wantSyncCalls:  1,
+			wantConclusion: "success",
+		},
+		{
+			name: "check_run failure for standard CI check produces standard fix prompt", event: "check_run", delivery: "del-cr-standard-ci-fail",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
+			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "Unit Tests", wantPrompts: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
+		},
+		{
 			name: "check_run failure with ciFailCount exceeding cap suppresses prompt and dispatches cap DM", event: "check_run", delivery: "del-cr-cap",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true, ciFailCount: 4},
@@ -3349,12 +3373,26 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			}}
 		},
 	}
-	srvPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), &mockOutboundDispatcher{})
+	dispPG := &mockOutboundDispatcher{}
+	srvPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), dispPG)
 	if err := srvPG.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "main", "sha1", 42); err != nil {
 		t.Errorf("dispatchConflictPrompt with pgReg: %v", err)
 	}
 	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "run", "azylman/aerial", "sha1", 42, "fail", "http://ci.test"); err != nil {
 		t.Errorf("dispatchCIFailurePrompt with pgReg: %v", err)
+	}
+	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "RoboRev Code Review", "azylman/aerial", "sha1", 42, "findings", "http://ci.test"); err != nil {
+		t.Errorf("dispatchCIFailurePrompt(roborev) with pgReg: %v", err)
+	}
+	pgPrompts := dispPG.PromptCalls()
+	if len(pgPrompts) < 3 {
+		t.Fatalf("expected at least 3 prompts from srvPG, got %d", len(pgPrompts))
+	}
+	if !strings.Contains(pgPrompts[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") {
+		t.Errorf("expected standard CI prompt, got %s", pgPrompts[1].Prompt)
+	}
+	if !strings.Contains(pgPrompts[2].Prompt, "override-roborev 42") {
+		t.Errorf("expected roborev override prompt, got %s", pgPrompts[2].Prompt)
 	}
 
 	// dispatchAlertWithPrompt with DM error

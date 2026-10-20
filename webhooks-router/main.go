@@ -2213,10 +2213,14 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
 		urlLine = "Check URL: " + cleanURL
 	}
+	directive := "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix."
+	if strings.Contains(strings.ToLower(checkName), "roborev") {
+		directive = fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent (RoboRev has narrower context than you). Fix verified issues, add concise inline comments for non-obvious invariants (and consider adding general architectural principles to .roborev.toml only when a gap reflects a broad repo-wide pattern rather than a one-off fix), or—if the remaining findings are false positives or conflict with architectural invariants—run '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>' to record your rebuttal on the PR and pass the gate.", firstNonEmpty(cleanRepoName(repo), "aerial"), prNum)
+	}
 	prompt := formatErrorDetailsBlock(
 		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
 		details, urlLine,
-		"Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix.",
+		directive,
 	)
 	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt, s.isVanadisPR(ctx, repo, prNum))
 }
@@ -2874,6 +2878,17 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
 		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
+
+		if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && strings.Contains(strings.ToLower(res.CheckName), "roborev") && s.registry != nil {
+			targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
+			if err != nil {
+				return nil, err
+			}
+			res.TargetID = firstNonEmpty(res.TargetID, targetID)
+			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "open", "", nil); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			}
+		}
 
 		details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
 		checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
