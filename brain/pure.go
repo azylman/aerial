@@ -52,11 +52,9 @@ func Ordinal(n int) string {
 // FormatCronDescription converts a standard 5-field cron expression or descriptor into human-readable English.
 func FormatCronDescription(cronExpr string) string {
 	expr := strings.TrimSpace(cronExpr)
-	if expr == "" {
-		return ""
-	}
-
 	switch strings.ToLower(expr) {
+	case "":
+		return ""
 	case "@yearly", "@annually":
 		return "Every year on Jan 1st at 00:00"
 	case "@monthly":
@@ -75,105 +73,74 @@ func FormatCronDescription(cronExpr string) string {
 	}
 
 	minStr, hourStr, domStr, monStr, dowStr := fields[0], fields[1], fields[2], fields[3], fields[4]
-
-	// Case: Every minute (* * * * *)
 	if minStr == "*" && hourStr == "*" && domStr == "*" && monStr == "*" && dowStr == "*" {
 		return "Every minute"
 	}
-
-	// Case: Every X minutes (*/N * * * *)
 	if strings.HasPrefix(minStr, "*/") && hourStr == "*" && domStr == "*" && monStr == "*" && dowStr == "*" {
-		interval := strings.TrimPrefix(minStr, "*/")
-		return fmt.Sprintf("Every %s minutes", interval)
+		return fmt.Sprintf("Every %s minutes", strings.TrimPrefix(minStr, "*/"))
 	}
-
-	// Case: Every X hours (0 */N * * *)
 	if minStr == "0" && strings.HasPrefix(hourStr, "*/") && domStr == "*" && monStr == "*" && dowStr == "*" {
-		interval := strings.TrimPrefix(hourStr, "*/")
-		return fmt.Sprintf("Every %s hours", interval)
+		return fmt.Sprintf("Every %s hours", strings.TrimPrefix(hourStr, "*/"))
 	}
 
-	// Try to parse hour and minute as integers
 	m, minErr := strconv.Atoi(minStr)
 	h, hourErr := strconv.Atoi(hourStr)
-
-	if minErr == nil && hourErr == nil {
-		timeStr := fmt.Sprintf("%02d:%02d", h, m)
-
-		// 1. Every day at HH:MM (0 9 * * *)
-		if domStr == "*" && monStr == "*" && dowStr == "*" {
-			return fmt.Sprintf("Every day at %s", timeStr)
-		}
-
-		// 2. Specific day of week (0 9 * * 1-5, 0 9 * * 0, etc.)
-		if domStr == "*" && monStr == "*" && dowStr != "*" {
-			dowUpper := strings.ToUpper(dowStr)
-			if dowUpper == "1-5" || dowUpper == "MON-FRI" {
-				return fmt.Sprintf("Weekdays (Mon–Fri) at %s", timeStr)
-			}
-			if dowUpper == "0,6" || dowUpper == "6,0" || dowUpper == "SAT,SUN" || dowUpper == "SUN,SAT" {
-				return fmt.Sprintf("Weekends (Sat–Sun) at %s", timeStr)
-			}
-
-			// Single number day of week
-			if dowNum, err := strconv.Atoi(dowStr); err == nil && dowNum >= 0 && dowNum <= 7 {
-				return fmt.Sprintf("Every %s at %s", cronDayNames[dowNum], timeStr)
-			}
-
-			// Comma-separated list of days (e.g. 1,3,5 or Mon,Wed,Fri)
-			parts := strings.Split(dowStr, ",")
-			var names []string
-			for _, p := range parts {
-				pTrim := strings.TrimSpace(p)
-				if dNum, err := strconv.Atoi(pTrim); err == nil && dNum >= 0 && dNum <= 7 {
-					names = append(names, cronDayShortNames[dNum])
-				} else {
-					names = append(names, pTrim)
-				}
-			}
-			if len(names) > 0 {
-				return fmt.Sprintf("%s at %s", strings.Join(names, ", "), timeStr)
-			}
-		}
-
-		// 3. Specific day of month (0 12 1 * *)
-		if domStr != "*" && monStr == "*" && dowStr == "*" {
-			if domNum, err := strconv.Atoi(domStr); err == nil && domNum >= 1 && domNum <= 31 {
-				return fmt.Sprintf("%s of every month at %s", Ordinal(domNum), timeStr)
-			}
-		}
-
-		// 4. Specific month and day (0 0 1 1 *)
-		if domStr != "*" && monStr != "*" && dowStr == "*" {
-			domNum, errDom := strconv.Atoi(domStr)
-			monNum, errMon := strconv.Atoi(monStr)
-			if errDom == nil && errMon == nil && monNum >= 1 && monNum <= 12 {
-				return fmt.Sprintf("Every year on %s %s at %s", cronMonthNames[monNum], Ordinal(domNum), timeStr)
-			}
-		}
-
-		return fmt.Sprintf("At %s (cron: %s)", timeStr, expr)
+	if minErr != nil || hourErr != nil {
+		return expr
 	}
 
-	return expr
+	timeStr := fmt.Sprintf("%02d:%02d", h, m)
+	if domStr == "*" && monStr == "*" && dowStr == "*" {
+		return fmt.Sprintf("Every day at %s", timeStr)
+	}
+	if domStr == "*" && monStr == "*" && dowStr != "*" {
+		switch strings.ToUpper(dowStr) {
+		case "1-5", "MON-FRI":
+			return fmt.Sprintf("Weekdays (Mon–Fri) at %s", timeStr)
+		case "0,6", "6,0", "SAT,SUN", "SUN,SAT":
+			return fmt.Sprintf("Weekends (Sat–Sun) at %s", timeStr)
+		}
+		if dowNum, err := strconv.Atoi(dowStr); err == nil && dowNum >= 0 && dowNum <= 7 {
+			return fmt.Sprintf("Every %s at %s", cronDayNames[dowNum], timeStr)
+		}
+		var names []string
+		for _, p := range strings.Split(dowStr, ",") {
+			pTrim := strings.TrimSpace(p)
+			if dNum, err := strconv.Atoi(pTrim); err == nil && dNum >= 0 && dNum <= 7 {
+				names = append(names, cronDayShortNames[dNum])
+			} else {
+				names = append(names, pTrim)
+			}
+		}
+		if len(names) > 0 {
+			return fmt.Sprintf("%s at %s", strings.Join(names, ", "), timeStr)
+		}
+	}
+	if domStr != "*" && monStr == "*" && dowStr == "*" {
+		if domNum, err := strconv.Atoi(domStr); err == nil && domNum >= 1 && domNum <= 31 {
+			return fmt.Sprintf("%s of every month at %s", Ordinal(domNum), timeStr)
+		}
+	}
+	if domStr != "*" && monStr != "*" && dowStr == "*" {
+		domNum, errDom := strconv.Atoi(domStr)
+		monNum, errMon := strconv.Atoi(monStr)
+		if errDom == nil && errMon == nil && monNum >= 1 && monNum <= 12 {
+			return fmt.Sprintf("Every year on %s %s at %s", cronMonthNames[monNum], Ordinal(domNum), timeStr)
+		}
+	}
+	return fmt.Sprintf("At %s (cron: %s)", timeStr, expr)
 }
 
 // DeriveThreadTitle extracts a clean, readable thread title from a message content string.
 func DeriveThreadTitle(content string) string {
-	cleaned := mentionAndEmojiRegex.ReplaceAllString(content, "")
-	cleaned = strings.TrimSpace(cleaned)
-
+	cleaned := strings.TrimSpace(mentionAndEmojiRegex.ReplaceAllString(content, ""))
 	var firstLine string
 	for _, line := range strings.Split(cleaned, "\n") {
-		trimmed := strings.TrimSpace(line)
-		trimmed = strings.TrimLeft(trimmed, "#> \t")
-		trimmed = strings.TrimSpace(trimmed)
-		if trimmed != "" {
+		if trimmed := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#> \t")); trimmed != "" {
 			firstLine = trimmed
 			break
 		}
 	}
-
 	if firstLine == "" {
 		firstLine = "Aerial Discussion"
 	}
@@ -181,8 +148,8 @@ func DeriveThreadTitle(content string) string {
 	if len(runes) > 60 {
 		cut := runes[:57]
 		for len(cut) > 0 {
-			last := cut[len(cut)-1]
-			if last == '\u200D' || last == '\u200B' || last == '\uFEFF' {
+			switch cut[len(cut)-1] {
+			case '\u200D', '\u200B', '\uFEFF':
 				cut = cut[:len(cut)-1]
 				continue
 			}
