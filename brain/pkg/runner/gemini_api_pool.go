@@ -419,10 +419,14 @@ func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string
 	if p.closed {
 		return nil, errors.New("gemini api pool is closed")
 	}
-	if sess, exists := p.sessions[targetKey]; exists && (sessionID == "" || sess.sessionID == sessionID) {
+	trimmedID := strings.TrimSpace(sessionID)
+	if sess, exists := p.sessions[targetKey]; exists && (trimmedID == "" || sess.SessionID() == trimmedID) {
 		return sess, nil
 	}
-	sess := &GeminiAPISession{pool: p, targetKey: targetKey, sessionID: sessionID, dataDir: p.cfg.DataDir}
+	if trimmedID == "" {
+		trimmedID = targetKey
+	}
+	sess := &GeminiAPISession{pool: p, targetKey: targetKey, sessionID: trimmedID, dataDir: p.cfg.DataDir}
 	sess.hydrateHistory()
 	p.sessions[targetKey] = sess
 	return sess, nil
@@ -938,7 +942,7 @@ func (l *geminiSessionLease) Release() error {
 					return
 				}
 			}
-			if _, rotErr := l.pool.RotateSession(context.Background(), l.targetKey); rotErr != nil {
+			if _, rotErr := l.pool.GetOrCreateSession(context.Background(), l.targetKey, newSessionID); rotErr != nil {
 				log.Printf("[GeminiAPIPool] Warning rotating session for %s: %v", l.targetKey, rotErr)
 				l.pool.mu.Lock()
 				delete(l.pool.sessions, l.targetKey)

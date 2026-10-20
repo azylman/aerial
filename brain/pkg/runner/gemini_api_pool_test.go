@@ -31,7 +31,7 @@ func TestGeminiAPIPool_ContextCancellation(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
-			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Partial\"}],\"role\":\"model\"}}]}\\n\\n"))
+			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Partial\"}],\"role\":\"model\"}}]}\n\n"))
 			f.Flush()
 			select {
 			case <-flushedCh:
@@ -183,10 +183,6 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 				}
 				return
 			}
-			if tc.expectEmptyHist {
-				if hist := sess.(*GeminiAPISession).History(); len(hist) != 0 { t.Errorf("expected empty history, got %d", len(hist)) }
-				return
-			}
 
 			turnCtx := ctx
 			if tc.preCancelCtx {
@@ -233,6 +229,10 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 			}
 
 			if sendErr != nil { t.Fatalf("unexpected Send error: %v", sendErr) }
+			if tc.expectEmptyHist {
+				if hist := sess.(*GeminiAPISession).History(); len(hist) != 0 { t.Errorf("expected empty history, got %d", len(hist)) }
+				return
+			}
 			if sink != nil {
 				sink.mu.Lock()
 				defer sink.mu.Unlock()
