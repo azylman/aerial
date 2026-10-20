@@ -230,13 +230,14 @@ func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 			}
 		} else if probe.Event == "result" {
 			var res AgyResponse
+			raw := []byte(line)
 			if len(probe.Result) > 0 {
-				_ = json.Unmarshal(probe.Result, &res)
-			} else {
-				_ = json.Unmarshal([]byte(line), &res)
+				raw = probe.Result
 			}
-			resultResp = &res
-			if resultResp.ConversationID == "" {
+			if json.Unmarshal(raw, &res) == nil {
+				resultResp = &res
+			}
+			if resultResp != nil && resultResp.ConversationID == "" {
 				resultResp.ConversationID = probe.extractUUID()
 			}
 		} else if id := probe.extractUUID(); id != "" && initConvID == "" {
@@ -531,13 +532,12 @@ func checkCorruption(s string) bool {
 	return hasCorruptionKeyword(s)
 }
 
-func classifyErrorTarget(target, detail string) (matched, isCorrupt, isTransient bool, outDetail string) {
+func classifyErrorTarget(target string) (isCorrupt, isTransient bool) {
 	lower := strings.ToLower(target)
-	isCorrupt = checkCorruption(lower) || (!isMCPSessionError(lower) && strings.Contains(lower, "conversation not found"))
-	if isCorrupt {
-		return true, true, false, detail
+	if checkCorruption(lower) || (!isMCPSessionError(lower) && strings.Contains(lower, "conversation not found")) {
+		return true, false
 	}
-	return true, false, !isNonTransientError(lower), detail
+	return false, !isNonTransientError(lower)
 }
 
 func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTransient bool, isSessionCorruption bool, errDetail string) {
@@ -585,7 +585,7 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			if detail == "" {
 				detail = fmt.Sprintf("runner status: %s", resp.Status)
 			}
-			_, isCorrupt, isTrans, _ := classifyErrorTarget(resp.Status+" "+resp.Error+" "+trimmedStderr, detail)
+			isCorrupt, isTrans := classifyErrorTarget(resp.Status + " " + resp.Error + " " + trimmedStderr)
 			return true, isTrans, isCorrupt, detail
 		}
 
@@ -600,8 +600,7 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	}
 
 	errorTarget := trimmedStderr
-	resp, _ := ParseAgyOutput(stdout)
-	if resp != nil && resp.Error != "" {
+	if resp, err := ParseAgyOutput(stdout); err == nil && resp != nil && resp.Error != "" {
 		errorTarget = resp.Status + " " + resp.Error + " " + trimmedStderr
 		errDetail = resp.Error
 	} else if errorTarget == "" && len(trimmedStdout) < 300 {
@@ -615,7 +614,7 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		}
 	}
 
-	_, isSessionCorruption, isTransient, _ = classifyErrorTarget(errorTarget, errDetail)
+	isSessionCorruption, isTransient = classifyErrorTarget(errorTarget)
 	return true, isTransient, isSessionCorruption, errDetail
 }
 

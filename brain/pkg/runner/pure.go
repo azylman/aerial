@@ -130,9 +130,13 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string)
 	}
 	if toolName == "call_mcp_tool" {
 		if params != nil {
-			sName, _ := params["ServerName"].(string)
-			tName, _ := params["ToolName"].(string)
-			sName, tName = CleanUnescapedString(sName), CleanUnescapedString(tName)
+			var sName, tName string
+			if s, ok := params["ServerName"].(string); ok {
+				sName = CleanUnescapedString(s)
+			}
+			if t, ok := params["ToolName"].(string); ok {
+				tName = CleanUnescapedString(t)
+			}
 			if tName != "" && sName != "" {
 				return tName, sName
 			} else if tName != "" {

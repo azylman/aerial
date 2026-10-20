@@ -173,7 +173,9 @@ func spawnDefaultMockPipes(cfg DaemonConfig, closeOutW bool, logPrefix string) (
 		if sessID == "" || !IsValidUUID(sessID) {
 			sessID = "550e8400-e29b-41d4-a716-446655440000"
 		}
-		_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)
+		if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
+			log.Printf("%s Warning: failed to write init event: %v", logPrefix, err)
+		}
 	}()
 	return inW, outR, errR, &MockProcessHandle{pid: 12345}, nil
 }
