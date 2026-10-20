@@ -587,7 +587,7 @@ func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo stri
 }
 
 func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET status = 'merged', merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr merged", query, strings.TrimSpace(mergeSHA))
 }
 
@@ -597,12 +597,12 @@ func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo st
 }
 
 func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'closed', 'deploying', 'deployed', 'deploy_failed') RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr sync", query, strings.TrimSpace(headSHA))
 }
 
 func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET merge_sha = $3, status = 'merged', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "backfill push merge_sha", query, strings.TrimSpace(mergeSHA))
 }
 
