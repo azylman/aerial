@@ -235,7 +235,7 @@ init_scratch() {
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
     local clone_out=""
-    if ! clone_out=$(git clone --depth 1 --single-branch -b "$DEFAULT_BRANCH" "$REPO_URL" "$scratch_dir" 2>&1); then
+    if ! clone_out=$(git clone --depth 20 --single-branch -b "$DEFAULT_BRANCH" "$REPO_URL" "$scratch_dir" 2>&1); then
         echo "ERROR: Failed to clone ${REPO_URL} into scratch directory: ${clone_out}" >&2
         rm -rf "$scratch_dir"
         exit 1
@@ -752,6 +752,35 @@ register_pr_in_brain() {
     return 1
 }
 
+rebase_staged_changes() {
+    local target_branch="${1:-$DEFAULT_BRANCH}"
+    local msg="${2:-chore: temporary rebase commit}"
+    if ! git fetch origin "$target_branch" >/dev/null 2>&1; then
+        echo "⚠️ [aerial-pr] Warning: Could not fetch origin/${target_branch}; proceeding with current base." >&2
+        return 0
+    fi
+    local head_sha upstream_sha
+    head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
+    upstream_sha=$(git rev-parse "origin/${target_branch}" 2>/dev/null || echo "")
+    if [ -z "$upstream_sha" ] || [ "$head_sha" = "$upstream_sha" ]; then
+        return 0
+    fi
+    git commit -q -m "$msg" >/dev/null 2>&1
+    if ! git rebase "origin/${target_branch}" >/dev/null 2>&1; then
+        git rebase --abort >/dev/null 2>&1 || true
+        git reset --soft HEAD~1 >/dev/null 2>&1 || true
+        echo "ERROR: Failed to rebase scratch branch onto origin/${target_branch} due to merge conflicts. Aborting submit." >&2
+        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+            SCRATCH_DIR_CLEANUP=""
+        fi
+        return 1
+    fi
+    git reset --soft "origin/${target_branch}" >/dev/null 2>&1
+    echo "🔄 [aerial-pr] Rebased staged changes onto latest origin/${target_branch} (${upstream_sha:0:7})." >&2
+    return 0
+}
+
 submit_scratch() {
     local target_id="$(resolve_target_id)"
     local scratch_dir=""
@@ -969,19 +998,6 @@ submit_scratch() {
     git add -A
     git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
 
-    # 3. Pre-flight verification (universal contract: run repo-defined staged verify suite on staged changes)
-    if ! run_preflight_verification "."; then
-        exit 1
-    fi
-
-    # 4. Commit (preserves complete multi-line commit message in git history)
-    git commit -m "$commit_msg" >/dev/null
-
-    local branch
-    branch=$(git rev-parse --abbrev-ref HEAD)
-    local commit_sha
-    commit_sha=$(git rev-parse HEAD)
-
     local auth_header
     auth_header=$(build_auth_header)
 
@@ -992,7 +1008,29 @@ submit_scratch() {
     export GIT_CONFIG_KEY_1="http.version"
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
-    # 5. Push branch to remote
+    # 3. Rebase staged changes onto latest origin/DEFAULT_BRANCH before pre-flight verification
+    if ! rebase_staged_changes "$DEFAULT_BRANCH" "$commit_msg"; then
+        exit 1
+    fi
+    if git diff --cached --quiet; then
+        echo "{\"status\":\"no_changes\",\"message\":\"No modifications remaining after rebasing onto origin/${DEFAULT_BRANCH}.\"}"
+        exit 0
+    fi
+
+    # 4. Pre-flight verification (universal contract: run repo-defined staged verify suite on combined tree)
+    if ! run_preflight_verification "."; then
+        exit 1
+    fi
+
+    # 5. Commit (preserves complete multi-line commit message in git history)
+    git commit -m "$commit_msg" >/dev/null
+
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    local commit_sha
+    commit_sha=$(git rev-parse HEAD)
+
+    # 6. Push branch to remote
     echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
     git push -u origin "$branch" >/dev/null 2>&1 || {
         echo "ERROR: Failed to push branch ${branch} to GitHub." >&2

@@ -1199,23 +1199,27 @@ type OutboundDispatcher interface {
 }
 
 type DefaultOutboundDispatcher struct {
-	hangarURL   string
-	brainURL    string
-	httpClient  *http.Client
-	retryDelay  time.Duration
-	maxAttempts int
+	hangarURL     string
+	brainURL      string
+	httpClient    *http.Client
+	gitPushClient *http.Client
+	retryDelay    time.Duration
+	maxAttempts   int
 }
 
 func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
+	gitPushClient := client
 	if client == nil {
-		client = &http.Client{Timeout: 65 * time.Second}
+		client = &http.Client{Timeout: 15 * time.Second}
+		gitPushClient = &http.Client{Timeout: 65 * time.Second}
 	}
 	return &DefaultOutboundDispatcher{
-		hangarURL:   strings.TrimRight(hangarURL, "/"),
-		brainURL:    strings.TrimRight(brainURL, "/"),
-		httpClient:  client,
-		retryDelay:  1500 * time.Millisecond,
-		maxAttempts: 6,
+		hangarURL:     strings.TrimRight(hangarURL, "/"),
+		brainURL:      strings.TrimRight(brainURL, "/"),
+		httpClient:    client,
+		gitPushClient: gitPushClient,
+		retryDelay:    1500 * time.Millisecond,
+		maxAttempts:   6,
 	}
 }
 
@@ -1236,7 +1240,11 @@ func (d *DefaultOutboundDispatcher) postHangar(ctx context.Context, endpointPath
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := d.httpClient.Do(httpReq)
+	httpClient := d.httpClient
+	if endpointPath == "/events/git_push" && d.gitPushClient != nil {
+		httpClient = d.gitPushClient
+	}
+	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return nil, false, fmt.Errorf("%s request failed: %w", opName, err)
 	}

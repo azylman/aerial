@@ -330,6 +330,69 @@ assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg1:ok' && echo true |
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg2:ok:2' && echo true || echo false)" "register_pr_in_brain retries transient error and succeeds on attempt 2"
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg3:failed_as_expected:3' && echo true || echo false)" "register_pr_in_brain fails non-zero after exhausting all 3 attempts"
 
+# Case 11: rebase_staged_changes rebases onto advanced upstream before verification and aborts on conflict
+REBASE_STAGED_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-rebase-remote.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-rebase-work.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-rebase-up.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\" \"\$UPSTREAM_DIR\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    echo 'base' > \"\$UPSTREAM_DIR/shared.txt\"
+    git -C \"\$UPSTREAM_DIR\" add .
+    git -C \"\$UPSTREAM_DIR\" commit -q -m 'initial'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    git clone -q -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b feat/test
+
+    # Advance upstream main with a non-conflicting commit
+    echo 'upstream-new' > \"\$UPSTREAM_DIR/upstream.txt\"
+    git -C \"\$UPSTREAM_DIR\" add .
+    git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream advance'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+    UP_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
+
+    # Stage local feature file in work dir and run rebase_staged_changes
+    cd \"\$WORK_DIR\"
+    echo 'feature-change' > local.txt
+    git add local.txt
+    if rebase_staged_changes main 'feat: local' 2>/dev/null; then
+        HEAD_NOW=\$(git rev-parse HEAD)
+        STAGED_FILES=\$(git diff --cached --name-only)
+        if [ \"\$HEAD_NOW\" = \"\$UP_SHA\" ] && [ \"\$STAGED_FILES\" = \"local.txt\" ] && [ -f upstream.txt ]; then
+            echo 'rebase_clean:ok'
+        else
+            echo \"rebase_clean:fail:\$HEAD_NOW:\$STAGED_FILES\"
+        fi
+    fi
+
+    # Advance upstream with a conflicting edit to shared.txt
+    echo 'upstream-conflict' > \"\$UPSTREAM_DIR/shared.txt\"
+    git -C \"\$UPSTREAM_DIR\" add .
+    git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream conflict'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+
+    echo 'local-conflict' > \"\$WORK_DIR/shared.txt\"
+    git -C \"\$WORK_DIR\" add shared.txt
+    SCRATCH_DIR_CLEANUP=\"\$WORK_DIR\"
+    if ! rebase_staged_changes main 'feat: conflict' 2>/dev/null; then
+        if [ -z \"\$SCRATCH_DIR_CLEANUP\" ] && git diff --cached --name-only | grep -q 'shared.txt'; then
+            echo 'rebase_conflict:aborted_cleanly'
+        fi
+    fi
+")
+assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_clean:ok' && echo true || echo false)" "rebase_staged_changes rebases onto advanced upstream and keeps changes staged"
+assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_conflict:aborted_cleanly' && echo true || echo false)" "rebase_staged_changes fails closed on merge conflict, restores staged changes, and preserves workspace"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then
