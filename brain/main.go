@@ -66,6 +66,27 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	}
 }
 
+func writeErr(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func writeStoreErr(w http.ResponseWriter, entity string, err error) {
+	log.Printf("[HTTP] Error fetching %s: %v", entity, err)
+	writeErr(w, http.StatusInternalServerError, "Failed to fetch "+entity)
+}
+
+func validateSnowflakeID(w http.ResponseWriter, id, field string) bool {
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("Invalid payload: '%s' field is required and cannot be empty", field))
+		return false
+	}
+	if !queue.IsNumericSnowflake(id) {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("Invalid payload: '%s' must be a valid numeric Discord snowflake", field))
+		return false
+	}
+	return true
+}
+
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -73,34 +94,17 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		body, err := io.ReadAll(r.Body)
-		if closeErr := r.Body.Close(); closeErr != nil {
-			log.Printf("[HTTP] Warning closing request body: %v", closeErr)
-		}
-		if err != nil {
-			http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
+		var req PromptRequest
+		if !readPostJSON(w, r, &req) {
 			return
 		}
-
-		var req PromptRequest
-		if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Prompt) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "Invalid payload: 'prompt' field is required and cannot be empty",
-			})
+		if strings.TrimSpace(req.Prompt) == "" {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty")
 			return
 		}
 
 		channelID := strings.TrimSpace(req.ChannelID)
-		if channelID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "Invalid payload: 'channel_id' field is required and cannot be empty",
-			})
-			return
-		}
-		if !queue.IsNumericSnowflake(channelID) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake",
-			})
+		if !validateSnowflakeID(w, channelID, "channel_id") {
 			return
 		}
 
@@ -140,9 +144,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		if store == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "Database store not configured",
-			})
+			writeErr(w, http.StatusInternalServerError, "Database store not configured")
 			return
 		}
 
@@ -150,9 +152,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		if err := store.InsertMessage(insertCtx, msg); err != nil {
 			insertCancel()
 			log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": fmt.Sprintf("Failed to persist prompt message: %v", err),
-			})
+			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist prompt message: %v", err))
 			return
 		}
 		insertCancel()
@@ -178,7 +178,8 @@ type DirectMessageRequest struct {
 }
 
 func readPostJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	body, err := io.ReadAll(r.Body)
 	if closeErr := r.Body.Close(); closeErr != nil {
 		log.Printf("[HTTP] Warning closing request body: %v", closeErr)
 	}
@@ -195,33 +196,39 @@ func readPostJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 func writeDiscordDeliveryError(w http.ResponseWriter, err error, failPrefix string) {
 	if strings.Contains(err.Error(), "discord session is not connected") || strings.Contains(err.Error(), "discord session is nil") {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Discord session not connected"})
+		writeErr(w, http.StatusServiceUnavailable, "Discord session not connected")
 		return
 	}
 	var restErr *discordgo.RESTError
 	if errors.As(err, &restErr) {
 		if restErr.Response != nil && restErr.Response.StatusCode >= 400 && restErr.Response.StatusCode < 500 {
-			writeJSON(w, restErr.Response.StatusCode, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+			writeErr(w, restErr.Response.StatusCode, fmt.Sprintf("Discord client error: %v", err))
 			return
 		}
 	}
 	if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "cannot send") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Discord client error: %v", err)})
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("Discord client error: %v", err))
 		return
 	}
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%s: %v", failPrefix, err)})
+	writeErr(w, http.StatusInternalServerError, fmt.Sprintf("%s: %v", failPrefix, err))
+}
+
+func requirePostWithPool(w http.ResponseWriter, r *http.Request, pool *queue.WorkerPool) bool {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return false
+	}
+	if pool == nil {
+		writeErr(w, http.StatusInternalServerError, "Worker pool not available")
+		return false
+	}
+	return true
 }
 
 func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", "POST")
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if pool == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Worker pool not available"})
+		if !requirePostWithPool(w, r, pool) {
 			return
 		}
 
@@ -234,12 +241,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 		if targetID == "" {
 			targetID = strings.TrimSpace(req.ThreadID)
 		}
-		if targetID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' field is required and cannot be empty"})
-			return
-		}
-		if !queue.IsNumericSnowflake(targetID) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"})
+		if !validateSnowflakeID(w, targetID, "channel_id") {
 			return
 		}
 
@@ -248,7 +250,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 			content = strings.TrimSpace(req.Text)
 		}
 		if content == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'content' field is required and cannot be empty"})
+			writeErr(w, http.StatusBadRequest, "Invalid payload: 'content' field is required and cannot be empty")
 			return
 		}
 
@@ -263,14 +265,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 
 func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", "POST")
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
-			return
-		}
-
-		if pool == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Worker pool not available"})
+		if !requirePostWithPool(w, r, pool) {
 			return
 		}
 
@@ -280,17 +275,12 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		targetID := strings.TrimSpace(req.ChannelID)
-		if targetID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' field is required and cannot be empty"})
-			return
-		}
-		if !queue.IsNumericSnowflake(targetID) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"})
+		if !validateSnowflakeID(w, targetID, "channel_id") {
 			return
 		}
 
 		if len(req.Chunks) == 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid payload: 'chunks' field is required and cannot be empty"})
+			writeErr(w, http.StatusBadRequest, "Invalid payload: 'chunks' field is required and cannot be empty")
 			return
 		}
 
@@ -328,18 +318,11 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB ceiling
-		body, err := io.ReadAll(r.Body)
-		if closeErr := r.Body.Close(); closeErr != nil {
-			log.Printf("[HTTP] Warning closing voice request body: %v", closeErr)
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+		var req VoiceAskRequest
+		if !readPostJSON(w, r, &req) {
 			return
 		}
-
-		var req VoiceAskRequest
-		if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Prompt) == "" {
+		if strings.TrimSpace(req.Prompt) == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error": "Invalid payload: 'prompt' field is required and cannot be empty",
 			})
@@ -468,28 +451,6 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
-// DefaultTranscriptRoots returns the search roots for conversation transcripts
-// based on the provided configuration. In production, this includes the persistent
-// data brain directory as well as CLI and Antigravity brain directories under GeminiHomeDir.
-func DefaultTranscriptRoots(cfg *config.Config) []string {
-	if cfg == nil {
-		return []string{"/data/brain"}
-	}
-	var roots []string
-	dataDir := strings.TrimSpace(cfg.DataDir())
-	if dataDir == "" {
-		dataDir = "/data"
-	}
-	roots = append(roots, filepath.Join(dataDir, "brain"))
-	if homeDir := strings.TrimSpace(cfg.GeminiHomeDir()); homeDir != "" {
-		roots = append(roots,
-			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-		)
-	}
-	return roots
-}
-
 func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type TranscriptEntry struct {
@@ -614,11 +575,23 @@ func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 
 func requireGetWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) bool {
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return false
 	}
 	if storeNil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+		writeErr(w, http.StatusInternalServerError, "Database not available")
+		return false
+	}
+	return true
+}
+
+func requirePostWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) bool {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return false
+	}
+	if storeNil {
+		writeErr(w, http.StatusInternalServerError, "Database not available")
 		return false
 	}
 	return true
@@ -647,7 +620,7 @@ func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.Embedd
 
 		res, err := transcript.SearchTranscripts(r.Context(), store, embedder, q, mode, session, tool, limit)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -663,7 +636,7 @@ func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 
 		syncStates, err := store.GetSessionSyncStates(r.Context())
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -720,8 +693,7 @@ func handleFacts(store db.Store) http.HandlerFunc {
 
 		result, err := store.GetFactsPaginated(r.Context(), filter)
 		if err != nil {
-			log.Printf("[HTTP] Error fetching facts: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch facts"})
+			writeStoreErr(w, "facts", err)
 			return
 		}
 
@@ -806,22 +778,19 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 
 		summary, err := store.GetScheduleSummaryMetrics(r.Context())
 		if err != nil {
-			log.Printf("[HTTP] Error fetching schedule summary: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch schedule summary"})
+			writeStoreErr(w, "schedule summary", err)
 			return
 		}
 
 		rawCrons, err := store.GetAllCronSchedules(r.Context(), "")
 		if err != nil {
-			log.Printf("[HTTP] Error fetching cron schedules: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch cron schedules"})
+			writeStoreErr(w, "cron schedules", err)
 			return
 		}
 
 		rawOneShots, err := store.GetAllOneShotSchedules(r.Context(), "")
 		if err != nil {
-			log.Printf("[HTTP] Error fetching one-shot schedules: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch one-shot schedules"})
+			writeStoreErr(w, "one-shot schedules", err)
 			return
 		}
 
@@ -885,8 +854,7 @@ func handleScheduleRuns(store db.Store) http.HandlerFunc {
 
 		rawRuns, total, err := store.GetScheduleRunsPaginated(r.Context(), limit, offset, scheduleID, status)
 		if err != nil {
-			log.Printf("[HTTP] Error fetching schedule runs: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch schedule runs"})
+			writeStoreErr(w, "schedule runs", err)
 			return
 		}
 
@@ -948,8 +916,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 
 		rawTasks, err := store.GetActiveTasks(r.Context())
 		if err != nil {
-			log.Printf("[HTTP] Error fetching active tasks: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch active tasks"})
+			writeStoreErr(w, "active tasks", err)
 			return
 		}
 
@@ -989,15 +956,112 @@ type PRRegisterRequest struct {
 	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
 }
 
-func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+func deliverPRRegistrationWidget(ctx context.Context, store db.Store, activePool *queue.WorkerPool, req PRRegisterRequest, chunkID string) {
+	if activePool == nil {
+		return
+	}
+	if chunkID != "" {
+		chunk, err := store.GetVanadisChunk(ctx, chunkID)
+		if err != nil {
+			log.Printf("[HTTP] [pr_register] warning loading chunk %s for widget: %v", chunkID, err)
 			return
 		}
+		if chunk == nil {
+			return
+		}
+		build, chunks, err := store.GetVanadisBuild(ctx, chunk.BuildID)
+		if err != nil {
+			log.Printf("[HTTP] [pr_register] warning loading build %s for widget: %v", chunk.BuildID, err)
+			return
+		}
+		if build == nil {
+			return
+		}
+		widgetChunks := make([]discord.StatusWidgetChunk, len(chunks))
+		for i, c := range chunks {
+			widgetChunks[i] = discord.StatusWidgetChunk{
+				Index:     c.ChunkIndex,
+				Repo:      c.Repo,
+				Title:     c.Title,
+				Status:    c.Status,
+				PRNumber:  c.PRNumber,
+				StartedAt: c.StartedAt,
+				UpdatedAt: c.UpdatedAt,
+			}
+		}
+		buildTitle := strings.TrimSpace(build.Title)
+		if buildTitle == "" {
+			buildTitle = build.Objective
+		}
+		widgetReq := discord.StatusWidgetRequest{
+			ID:        build.ID,
+			ChannelID: build.ThreadID,
+			MessageID: build.StatusMessageID,
+			Tier:      build.Tier,
+			Title:     buildTitle,
+			Status:    build.Status,
+			Chunks:    widgetChunks,
+		}
+		msgID, err := activePool.DeliverStatusWidget(widgetReq)
+		if err != nil {
+			log.Printf("[HTTP] [pr_register] warning delivering vanadis build widget for build %s: %v", build.ID, err)
+		} else if msgID != "" && msgID != build.StatusMessageID {
+			if err := store.UpdateVanadisBuildStatusMessageID(ctx, build.ID, msgID); err != nil {
+				log.Printf("[HTTP] [pr_register] warning persisting status_message_id for build %s: %v", build.ID, err)
+			}
+		}
+		return
+	}
 
-		if store == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+	if req.TargetID == "" {
+		return
+	}
+	prTitle := req.Title
+	if prTitle == "" {
+		prTitle = fmt.Sprintf("PR #%d", req.PRNumber)
+	}
+	existingPR, err := store.GetPRByNumber(ctx, req.Repo, req.PRNumber)
+	if err != nil {
+		log.Printf("[HTTP] [pr_register] info loading PR %s#%d for widget: %v", req.Repo, req.PRNumber, err)
+	}
+	msgID := ""
+	var prStartedAt, prUpdatedAt time.Time
+	if existingPR != nil {
+		msgID = existingPR.StatusMessageID
+		prStartedAt = existingPR.CreatedAt
+		prUpdatedAt = existingPR.UpdatedAt
+	}
+	widgetReq := discord.StatusWidgetRequest{
+		ID:        fmt.Sprintf("pr-%s-%d", req.Repo, req.PRNumber),
+		ChannelID: req.TargetID,
+		MessageID: msgID,
+		Title:     prTitle,
+		Status:    "open",
+		Chunks: []discord.StatusWidgetChunk{
+			{
+				Index:     0,
+				Repo:      req.Repo,
+				Title:     prTitle,
+				Status:    "open",
+				PRNumber:  req.PRNumber,
+				StartedAt: prStartedAt,
+				UpdatedAt: prUpdatedAt,
+			},
+		},
+	}
+	newMsgID, err := activePool.DeliverStatusWidget(widgetReq)
+	if err != nil {
+		log.Printf("[HTTP] [pr_register] warning delivering standalone PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
+	} else if newMsgID != "" && newMsgID != msgID {
+		if err := store.UpdatePRStatusMessageID(ctx, req.Repo, req.PRNumber, newMsgID); err != nil {
+			log.Printf("[HTTP] [pr_register] warning persisting status_message_id for PR %s#%d: %v", req.Repo, req.PRNumber, err)
+		}
+	}
+}
+
+func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePostWithStore(w, r, store == nil) {
 			return
 		}
 
@@ -1013,19 +1077,19 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 		req.Title = strings.TrimSpace(req.Title)
 
 		if req.Repo == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo cannot be empty"})
+			writeErr(w, http.StatusBadRequest, "repo cannot be empty")
 			return
 		}
 		if req.PRNumber <= 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pr_number must be greater than 0"})
+			writeErr(w, http.StatusBadRequest, "pr_number must be greater than 0")
 			return
 		}
 		if req.Branch == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "branch cannot be empty"})
+			writeErr(w, http.StatusBadRequest, "branch cannot be empty")
 			return
 		}
 		if req.HeadSHA == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
+			writeErr(w, http.StatusBadRequest, "head_sha cannot be empty")
 			return
 		}
 		chunkID := strings.TrimSpace(req.VanadisChunkID)
@@ -1038,12 +1102,12 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 		}
 
 		if req.TargetID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
+			writeErr(w, http.StatusBadRequest, "target_id cannot be empty")
 			return
 		}
 
 		if len(req.TargetID) < 17 || len(req.TargetID) > 20 || !queue.IsNumericSnowflake(req.TargetID) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+			writeErr(w, http.StatusBadRequest, "target_id must be a valid Discord snowflake (17-20 digits)")
 			return
 		}
 
@@ -1060,110 +1124,23 @@ func handlePRRegister(store db.Store, pool ...*queue.WorkerPool) http.HandlerFun
 
 		if err := store.UpsertPR(r.Context(), rec); err != nil {
 			log.Printf("[HTTP] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
+			writeErr(w, http.StatusInternalServerError, "Failed to register PR")
 			return
 		}
 
 		if chunkID != "" {
 			if err := store.AttachVanadisChunkPR(r.Context(), chunkID, req.PRNumber); err != nil {
 				log.Printf("[HTTP] Failed to attach PR #%d to Vanadis chunk %s: %v", req.PRNumber, chunkID, err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to attach PR to Vanadis chunk"})
+				writeErr(w, http.StatusInternalServerError, "Failed to attach PR to Vanadis chunk")
 				return
 			}
 		}
 
 		var activePool *queue.WorkerPool
-		if len(pool) > 0 && pool[0] != nil {
+		if len(pool) > 0 {
 			activePool = pool[0]
 		}
-
-		if activePool != nil {
-			if chunkID != "" {
-				chunk, err := store.GetVanadisChunk(r.Context(), chunkID)
-				if err != nil {
-					log.Printf("[HTTP] [pr_register] warning loading chunk %s for widget: %v", chunkID, err)
-				} else if chunk != nil {
-					build, chunks, err := store.GetVanadisBuild(r.Context(), chunk.BuildID)
-					if err != nil {
-						log.Printf("[HTTP] [pr_register] warning loading build %s for widget: %v", chunk.BuildID, err)
-					} else if build != nil {
-						widgetChunks := make([]discord.StatusWidgetChunk, len(chunks))
-						for i, c := range chunks {
-							widgetChunks[i] = discord.StatusWidgetChunk{
-								Index:     c.ChunkIndex,
-								Repo:      c.Repo,
-								Title:     c.Title,
-								Status:    c.Status,
-								PRNumber:  c.PRNumber,
-								StartedAt: c.StartedAt,
-								UpdatedAt: c.UpdatedAt,
-							}
-						}
-						buildTitle := strings.TrimSpace(build.Title)
-						if buildTitle == "" {
-							buildTitle = build.Objective
-						}
-						widgetReq := discord.StatusWidgetRequest{
-							ID:        build.ID,
-							ChannelID: build.ThreadID,
-							MessageID: build.StatusMessageID,
-							Tier:      build.Tier,
-							Title:     buildTitle,
-							Status:    build.Status,
-							Chunks:    widgetChunks,
-						}
-						if msgID, err := activePool.DeliverStatusWidget(widgetReq); err != nil {
-							log.Printf("[HTTP] [pr_register] warning delivering vanadis build widget for build %s: %v", build.ID, err)
-						} else if msgID != "" && msgID != build.StatusMessageID {
-							if err := store.UpdateVanadisBuildStatusMessageID(r.Context(), build.ID, msgID); err != nil {
-								log.Printf("[HTTP] [pr_register] warning persisting status_message_id for build %s: %v", build.ID, err)
-							}
-						}
-					}
-				}
-			} else if req.TargetID != "" {
-				prTitle := req.Title
-				if prTitle == "" {
-					prTitle = fmt.Sprintf("PR #%d", req.PRNumber)
-				}
-				existingPR, err := store.GetPRByNumber(r.Context(), req.Repo, req.PRNumber)
-				if err != nil {
-					log.Printf("[HTTP] [pr_register] info loading PR %s#%d for widget: %v", req.Repo, req.PRNumber, err)
-				}
-				msgID := ""
-				var prStartedAt, prUpdatedAt time.Time
-				if existingPR != nil {
-					msgID = existingPR.StatusMessageID
-					prStartedAt = existingPR.CreatedAt
-					prUpdatedAt = existingPR.UpdatedAt
-				}
-				widgetReq := discord.StatusWidgetRequest{
-					ID:        fmt.Sprintf("pr-%s-%d", req.Repo, req.PRNumber),
-					ChannelID: req.TargetID,
-					MessageID: msgID,
-					Title:     prTitle,
-					Status:    "open",
-					Chunks: []discord.StatusWidgetChunk{
-						{
-							Index:     0,
-							Repo:      req.Repo,
-							Title:     prTitle,
-							Status:    "open",
-							PRNumber:  req.PRNumber,
-							StartedAt: prStartedAt,
-							UpdatedAt: prUpdatedAt,
-						},
-					},
-				}
-				if newMsgID, err := activePool.DeliverStatusWidget(widgetReq); err != nil {
-					log.Printf("[HTTP] [pr_register] warning delivering standalone PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
-				} else if newMsgID != "" && newMsgID != msgID {
-					if err := store.UpdatePRStatusMessageID(r.Context(), req.Repo, req.PRNumber, newMsgID); err != nil {
-						log.Printf("[HTTP] [pr_register] warning persisting status_message_id for PR %s#%d: %v", req.Repo, req.PRNumber, err)
-					}
-				}
-			}
-		}
+		deliverPRRegistrationWidget(r.Context(), store, activePool, req, chunkID)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"status":    "registered",
@@ -1192,8 +1169,8 @@ func (rec *statusRecorder) Flush() {
 
 func normalizeRoute(path string) string {
 	switch {
-	case path == "/prompt":
-		return "/prompt"
+	case path == "/prompt", path == "/schedules", path == "/schedules/runs", path == "/health", path == "/metrics":
+		return path
 	case path == "/voice/ask" || path == "/api/voice/ask":
 		return "/voice/ask"
 	case path == "/transcripts" || strings.HasPrefix(path, "/transcripts/"):
@@ -1202,14 +1179,6 @@ func normalizeRoute(path string) string {
 		return "/tasks"
 	case path == "/facts" || strings.HasPrefix(path, "/facts/"):
 		return "/facts"
-	case path == "/schedules":
-		return "/schedules"
-	case path == "/schedules/runs":
-		return "/schedules/runs"
-	case path == "/health":
-		return "/health"
-	case path == "/metrics":
-		return "/metrics"
 	default:
 		return "unmatched"
 	}
@@ -1310,18 +1279,6 @@ type reloadConfigOptions struct {
 func WithDiscordSession(s *discordgo.Session) ReloadOption {
 	return func(o *reloadConfigOptions) {
 		o.dgSession = s
-	}
-}
-
-func WithReloadSupplier(fn func(active *config.Config) error) ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.reloadSupplier = fn
-	}
-}
-
-func WithSkipEnvironmentSync() ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.skipEnvironmentSync = true
 	}
 }
 
@@ -1510,17 +1467,15 @@ func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []st
 	}
 
 	var extra []string
-	if !envMap["GOCACHE"] {
-		extra = append(extra, "GOCACHE="+filepath.Join(cacheBase, "go-build"))
-	}
-	if !envMap["GOPATH"] {
-		extra = append(extra, "GOPATH="+filepath.Join(cacheBase, "go"))
-	}
-	if !envMap["GOMODCACHE"] {
-		extra = append(extra, "GOMODCACHE="+filepath.Join(cacheBase, "go", "pkg", "mod"))
-	}
-	if !envMap["GOLANGCI_LINT_CACHE"] {
-		extra = append(extra, "GOLANGCI_LINT_CACHE="+filepath.Join(cacheBase, "golangci-lint"))
+	for _, item := range []struct{ key, sub string }{
+		{"GOCACHE", "go-build"},
+		{"GOPATH", "go"},
+		{"GOMODCACHE", filepath.Join("go", "pkg", "mod")},
+		{"GOLANGCI_LINT_CACHE", "golangci-lint"},
+	} {
+		if !envMap[item.key] {
+			extra = append(extra, item.key+"="+filepath.Join(cacheBase, item.sub))
+		}
 	}
 	if !envMap["TZ"] {
 		var tz string
@@ -1813,78 +1768,41 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}
 
-	discordPrimaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir:     discordHome,
-		Model:             cur.Model,
-		AgyBin:            cur.AgyBin,
-		Cwd:               cur.DataDir,
-		Env:               poolEnv,
-		Timezone:          cur.Timezone,
-		MemoryRetriever:   memoryRetriever,
-		TranscriptRescuer: sessionMgr.ExtractResponseSince,
-		SessionManager:    sessionMgr,
-	}, appOpts.processSpawner)
-	defer func() {
-		if err := discordPrimaryPool.Close(); err != nil {
-			log.Printf("[WARN] Failed to close discord primary process pool: %v", err)
+	basePoolCfg := func(home, model string, prewarmed []string) runner.PoolConfig {
+		return runner.PoolConfig{
+			GeminiHomeDir:     home,
+			Model:             model,
+			AgyBin:            cur.AgyBin,
+			Cwd:               cur.DataDir,
+			Env:               poolEnv,
+			Timezone:          cur.Timezone,
+			MemoryRetriever:   memoryRetriever,
+			TranscriptRescuer: sessionMgr.ExtractResponseSince,
+			SessionManager:    sessionMgr,
+			PrewarmedTargets:  prewarmed,
 		}
-	}()
+	}
 
-	ephemeralPool := newWorkerInterchangeablePool(runner.PoolConfig{
-		GeminiHomeDir:     ephemeralHome,
-		Model:             lowEffortModel,
-		AgyBin:            cur.AgyBin,
-		Cwd:               cur.DataDir,
-		Env:               poolEnv,
-		Timezone:          cur.Timezone,
-		PrewarmedTargets:  []string{"ephemeral:worker-0", "ephemeral:worker-1"},
-		TranscriptRescuer: sessionMgr.ExtractResponseSince,
-		SessionManager:    sessionMgr,
-	}, appOpts.processSpawner, "ephemeral:worker")
-	defer func() {
-		if err := ephemeralPool.Close(); err != nil {
-			log.Printf("[WARN] Failed to close ephemeral process pool: %v", err)
-		}
-	}()
-
-	discordLowEffortPool := newWorkerInterchangeablePool(runner.PoolConfig{
-		GeminiHomeDir:     discordHome,
-		Model:             lowEffortModel,
-		AgyBin:            cur.AgyBin,
-		Cwd:               cur.DataDir,
-		Env:               poolEnv,
-		Timezone:          cur.Timezone,
-		TranscriptRescuer: sessionMgr.ExtractResponseSince,
-		PrewarmedTargets:  []string{"discord:worker-0", "discord:worker-1"},
-		SessionManager:    sessionMgr,
-	}, appOpts.processSpawner, "discord:worker")
-	defer func() {
-		if err := discordLowEffortPool.Close(); err != nil {
-			log.Printf("[WARN] Failed to close discord low effort process pool: %v", err)
-		}
-	}()
-
-	discordMediumEffortPool := newWorkerInterchangeablePool(runner.PoolConfig{
-		GeminiHomeDir:     discordHome,
-		Model:             mediumEffortModel,
-		AgyBin:            cur.AgyBin,
-		Cwd:               cur.DataDir,
-		Env:               poolEnv,
-		Timezone:          cur.Timezone,
-		TranscriptRescuer: sessionMgr.ExtractResponseSince,
-		PrewarmedTargets:  []string{"discord:medium-worker-0", "discord:medium-worker-1"},
-		SessionManager:    sessionMgr,
-	}, appOpts.processSpawner, "discord:medium-worker")
-	defer func() {
-		if err := discordMediumEffortPool.Close(); err != nil {
-			log.Printf("[WARN] Failed to close discord medium effort process pool: %v", err)
-		}
-	}()
-
+	discordPrimaryPool := runner.NewUnifiedProcessPool(basePoolCfg(discordHome, cur.Model, nil), appOpts.processSpawner)
+	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), appOpts.processSpawner, "ephemeral:worker")
+	discordLowEffortPool := newWorkerInterchangeablePool(basePoolCfg(discordHome, lowEffortModel, []string{"discord:worker-0", "discord:worker-1"}), appOpts.processSpawner, "discord:worker")
+	discordMediumEffortPool := newWorkerInterchangeablePool(basePoolCfg(discordHome, mediumEffortModel, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), appOpts.processSpawner, "discord:medium-worker")
 	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner, memoryRetriever)
+
 	defer func() {
-		if err := voicePool.Close(); err != nil {
-			log.Printf("[WARN] Failed to close voice process pool: %v", err)
+		for _, p := range []struct {
+			name string
+			pool io.Closer
+		}{
+			{"discord primary", discordPrimaryPool},
+			{"ephemeral", ephemeralPool},
+			{"discord low effort", discordLowEffortPool},
+			{"discord medium effort", discordMediumEffortPool},
+			{"voice", voicePool},
+		} {
+			if err := p.pool.Close(); err != nil {
+				log.Printf("[WARN] Failed to close %s process pool: %v", p.name, err)
+			}
 		}
 	}()
 

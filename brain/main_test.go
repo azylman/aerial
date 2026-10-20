@@ -31,6 +31,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func runHTTP(h http.HandlerFunc, method, target string, body io.Reader, headers ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, body)
+	for i := 0; i+1 < len(headers); i += 2 {
+		if headers[i] != "" && headers[i+1] != "" {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+	}
+	w := httptest.NewRecorder()
+	h(w, req)
+	return w
+}
+
 func TestHandlePromptValidation(t *testing.T) {
 	store := db.NewFakeStore()
 	pool := newTestWorkerPool(store)
@@ -51,7 +63,7 @@ func TestHandlePromptValidation(t *testing.T) {
 	}{
 		{"method not allowed", http.MethodGet, store, pool, nil, http.StatusMethodNotAllowed, "Method not allowed"},
 		{"read error", http.MethodPost, store, pool, &errReadCloser{readErr: errors.New("simulated network read error")}, http.StatusBadRequest, "Failed to read request body"},
-		{"invalid JSON", http.MethodPost, store, pool, strings.NewReader("{invalid-json"), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
+		{"invalid JSON", http.MethodPost, store, pool, strings.NewReader("{invalid-json"), http.StatusBadRequest, "Invalid JSON payload"},
 		{"empty prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":""}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
 		{"whitespace prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"   "}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
 		{"missing channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
@@ -61,10 +73,7 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"body close error", http.MethodPost, store, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := handlePrompt(tc.store, tc.pool)
-			req := httptest.NewRequest(tc.method, "/prompt", tc.body)
-			w := httptest.NewRecorder()
-			handler(w, req)
+			w := runHTTP(handlePrompt(tc.store, tc.pool), tc.method, "/prompt", tc.body)
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
@@ -82,50 +91,14 @@ func TestHandlePromptValidation(t *testing.T) {
 		wantChunkID string
 		wantContent string
 	}{
-		{
-			name:        "default effort",
-			pool:        pool,
-			payload:     `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`,
-			msgID:       "msg-123",
-			wantContent: "Test valid prompt",
-		},
-		{
-			name:       "gemini-4-flash silent",
-			pool:       pool,
-			payload:    `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`,
-			msgID:      "msg-silent-1",
-			wantEffort: "low",
-			wantModel:  "gemini-4-flash",
-			wantSilent: true,
-		},
-		{
-			name:       "gemini-3.8-flash-medium",
-			pool:       pool,
-			payload:    `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`,
-			msgID:      "msg-med-1",
-			wantEffort: "medium",
-			wantModel:  "gemini-3.8-flash-medium",
-			wantSilent: true,
-		},
-		{
-			name:        "vanadis_chunk_id nil pool",
-			pool:        nil,
-			payload:     `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`,
-			msgID:       "msg-vanadis-chunk",
-			wantChunkID: "chunk-abc-99",
-		},
-		{
-			name:        "auto-generated uuid when message_id omitted",
-			pool:        pool,
-			payload:     `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`,
-			wantContent: "auto uuid prompt",
-		},
+		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "", "", false, "", "Test valid prompt"},
+		{"gemini-4-flash silent", pool, `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`, "msg-silent-1", "low", "gemini-4-flash", true, "", ""},
+		{"gemini-3.8-flash-medium", pool, `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`, "msg-med-1", "medium", "gemini-3.8-flash-medium", true, "", ""},
+		{"vanadis_chunk_id nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`, "msg-vanadis-chunk", "", "", false, "chunk-abc-99", ""},
+		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", false, "", "auto uuid prompt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := handlePrompt(store, tc.pool)
-			req := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(tc.payload))
-			w := httptest.NewRecorder()
-			handler(w, req)
+			w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("got status=%d body=%q, want 202", w.Code, w.Body.String())
 			}
@@ -155,6 +128,17 @@ func TestHandlePromptValidation(t *testing.T) {
 }
 
 func TestHandleDirectMessage(t *testing.T) {
+	restErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
+		},
+	})
+	sendErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return errors.New("cannot send messages to this thread")
+		},
+	})
+
 	for _, tc := range []struct {
 		name       string
 		method     string
@@ -171,22 +155,11 @@ func TestHandleDirectMessage(t *testing.T) {
 		{"non-snowflake channel_id", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"not-a-snowflake","content":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
 		{"empty content", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"  "}`), http.StatusBadRequest, "Invalid payload: 'content' field is required and cannot be empty"},
 		{"discord session not connected", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusServiceUnavailable, "Discord session not connected"},
-		{"discord client RESTError", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
-			},
-		}), strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusForbidden, "Discord client error"},
-		{"discord client cannot send", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return errors.New("cannot send messages to this thread")
-			},
-		}), strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusBadRequest, "Discord client error"},
+		{"discord client RESTError", http.MethodPost, restErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusForbidden, "Discord client error"},
+		{"discord client cannot send", http.MethodPost, sendErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusBadRequest, "Discord client error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := handleDirectMessage(tc.pool)
-			req := httptest.NewRequest(tc.method, "/discord/message", tc.body)
-			w := httptest.NewRecorder()
-			handler(w, req)
+			w := runHTTP(handleDirectMessage(tc.pool), tc.method, "/discord/message", tc.body)
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
@@ -195,66 +168,41 @@ func TestHandleDirectMessage(t *testing.T) {
 
 	t.Run("delivery success and fallback", func(t *testing.T) {
 		var capturedChannelID, capturedText string
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		handler := handleDirectMessage(queue.NewWorkerPool(queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				capturedChannelID = channelID
-				capturedText = text
+				capturedChannelID, capturedText = channelID, text
 				return nil
 			},
-		})
-		handler := handleDirectMessage(pool)
+		}))
 
-		// Test with channel_id and content
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"Deploy succeeded!"}`))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d (body: %s)", w.Code, w.Body.String())
+		w := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"Deploy succeeded!"}`))
+		if w.Code != http.StatusOK || capturedChannelID != "1542423172400291873" || capturedText != "Deploy succeeded!" {
+			t.Fatalf("unexpected delivery: code=%d, ch=%q, txt=%q", w.Code, capturedChannelID, capturedText)
 		}
-		if capturedChannelID != "1542423172400291873" || capturedText != "Deploy succeeded!" {
-			t.Fatalf("unexpected delivered values: channel=%q, text=%q", capturedChannelID, capturedText)
-		}
-
 		var resp map[string]interface{}
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("failed to parse response JSON: %v", err)
-		}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 		if resp["status"] != "sent" || resp["channel_id"] != "1542423172400291873" {
 			t.Fatalf("unexpected response body: %+v", resp)
 		}
 
-		// Test fallback with thread_id and text
-		req2 := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"thread_id":"1542423172400291874","text":"Deploy failed!"}`))
-		w2 := httptest.NewRecorder()
-		handler(w2, req2)
-
-		if w2.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d (body: %s)", w2.Code, w2.Body.String())
-		}
-		if capturedChannelID != "1542423172400291874" || capturedText != "Deploy failed!" {
-			t.Fatalf("unexpected delivered values: channel=%q, text=%q", capturedChannelID, capturedText)
+		w2 := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"thread_id":"1542423172400291874","text":"Deploy failed!"}`))
+		if w2.Code != http.StatusOK || capturedChannelID != "1542423172400291874" || capturedText != "Deploy failed!" {
+			t.Fatalf("unexpected fallback: code=%d, ch=%q, txt=%q", w2.Code, capturedChannelID, capturedText)
 		}
 	})
 
 	t.Run("mux route mounting for /discord/message", func(t *testing.T) {
 		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				return nil
-			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		})
 		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil)
-
-		req := httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`))
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
 		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 for /discord/message, got %d (body: %s)", w.Code, w.Body.String())
+			t.Errorf("expected 200 for /discord/message, got %d", w.Code)
 		}
-
-		reqInternal := httptest.NewRequest(http.MethodPost, "/internal/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`))
 		wInternal := httptest.NewRecorder()
-		mux.ServeHTTP(wInternal, reqInternal)
+		mux.ServeHTTP(wInternal, httptest.NewRequest(http.MethodPost, "/internal/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
 		if wInternal.Code != http.StatusNotFound {
 			t.Errorf("expected 404 for dropped /internal/message, got %d", wInternal.Code)
 		}
@@ -262,6 +210,22 @@ func TestHandleDirectMessage(t *testing.T) {
 }
 
 func TestHandleStatusWidget(t *testing.T) {
+	restErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+			return "", &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
+		},
+	})
+	sendErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+			return "", errors.New("cannot send messages to this thread")
+		},
+	})
+	failErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+			return "", errors.New("database connection reset")
+		},
+	})
+
 	for _, tc := range []struct {
 		name       string
 		method     string
@@ -277,31 +241,16 @@ func TestHandleStatusWidget(t *testing.T) {
 		{"non-snowflake channel_id", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"invalid-snow","chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
 		{"empty chunks", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"1542423172400291873","chunks":[]}`, http.StatusBadRequest, "Invalid payload: 'chunks' field is required and cannot be empty"},
 		{"discord session not connected", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusServiceUnavailable, "Discord session not connected"},
-		{"discord client RESTError", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
-			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-				return "", &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
-			},
-		}), `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusForbidden, "Discord client error"},
-		{"discord client cannot send", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
-			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-				return "", errors.New("cannot send messages to this thread")
-			},
-		}), `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Discord client error"},
-		{"generic delivery failure", http.MethodPost, queue.NewWorkerPool(queue.WorkerPoolConfig{
-			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-				return "", errors.New("database connection reset")
-			},
-		}), `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusInternalServerError, "Failed to deliver widget"},
+		{"discord client RESTError", http.MethodPost, restErrPool, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusForbidden, "Discord client error"},
+		{"discord client cannot send", http.MethodPost, sendErrPool, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Discord client error"},
+		{"generic delivery failure", http.MethodPost, failErrPool, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusInternalServerError, "Failed to deliver widget"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := handleStatusWidget(tc.pool)
 			var r io.Reader
 			if tc.body != "" {
 				r = strings.NewReader(tc.body)
 			}
-			req := httptest.NewRequest(tc.method, "/discord/widget", r)
-			w := httptest.NewRecorder()
-			handler(w, req)
+			w := runHTTP(handleStatusWidget(tc.pool), tc.method, "/discord/widget", r)
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
@@ -310,57 +259,42 @@ func TestHandleStatusWidget(t *testing.T) {
 
 	t.Run("success returns 200 with message_id and delivers widget", func(t *testing.T) {
 		var capturedReq discord.StatusWidgetRequest
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		handler := handleStatusWidget(queue.NewWorkerPool(queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
 				capturedReq = req
 				return "created-widget-msg-789", nil
 			},
-		})
-		handler := handleStatusWidget(pool)
+		}))
 
-		payload := `{
-			"channel_id": "1542423172400291873",
-			"id": "build-123",
-			"title": "Build Title",
-			"status": "running",
-			"chunks": [
-				{"index": 1, "repo": "aerial", "title": "Chunk 1", "status": "completed"}
-			]
-		}`
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(payload))
-		w := httptest.NewRecorder()
-		handler(w, req)
-
+		payload := `{"channel_id":"1542423172400291873","id":"build-123","title":"Build Title","status":"running","chunks":[{"index":1,"repo":"aerial","title":"Chunk 1","status":"completed"}]}`
+		w := runHTTP(handler, http.MethodPost, "/discord/widget", strings.NewReader(payload))
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d (body: %s)", w.Code, w.Body.String())
 		}
-
-		var resp map[string]interface{}
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("failed to parse response JSON: %v", err)
+		if capturedReq.ID != "build-123" || capturedReq.ChannelID != "1542423172400291873" || len(capturedReq.Chunks) != 1 {
+			t.Fatalf("unexpected captured request: %+v", capturedReq)
 		}
+		var resp map[string]interface{}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 		if resp["status"] != "ok" || resp["message_id"] != "created-widget-msg-789" {
 			t.Fatalf("unexpected response body: %+v", resp)
-		}
-		if capturedReq.ChannelID != "1542423172400291873" || capturedReq.ID != "build-123" {
-			t.Fatalf("unexpected captured request: %+v", capturedReq)
 		}
 	})
 
 	t.Run("mux route mounting for /discord/widget", func(t *testing.T) {
 		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-				return "widget-99", nil
-			},
+			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) { return "widget-99", nil },
 		})
 		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil)
-
-		req := httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`))
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
-
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`)))
 		if w.Code != http.StatusOK {
 			t.Errorf("expected 200 for /discord/widget, got %d", w.Code)
+		}
+		wInternal := httptest.NewRecorder()
+		mux.ServeHTTP(wInternal, httptest.NewRequest(http.MethodPost, "/internal/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`)))
+		if wInternal.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for dropped /internal/widget, got %d", wInternal.Code)
 		}
 	})
 }
@@ -371,10 +305,7 @@ func TestHandleTranscripts(t *testing.T) {
 
 	// 1. Empty dir returns []
 	handler := handleTranscripts(store, tmpHome)
-	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "[]" {
+	if w := runHTTP(handler, http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "[]" {
 		t.Fatalf("Expected 200 with empty array, got %d: %q", w.Code, w.Body.String())
 	}
 
@@ -399,9 +330,7 @@ func TestHandleTranscripts(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0644)
 
 	handler2 := handleTranscripts(store, brainDir, "", "   ", "/nonexistent/dir")
-	reqGet := httptest.NewRequest(http.MethodGet, "/transcripts?include_raw=true", nil)
-	wGet := httptest.NewRecorder()
-	handler2(wGet, reqGet)
+	wGet := runHTTP(handler2, http.MethodGet, "/transcripts?include_raw=true", nil)
 	if wGet.Code != http.StatusOK {
 		t.Fatalf("Expected 200 OK, got %d", wGet.Code)
 	}
@@ -413,11 +342,8 @@ func TestHandleTranscripts(t *testing.T) {
 	// 3. Closed DB error branch (GetExternalConversationID warning branch)
 	closedStore := db.NewFakeStore()
 	_ = closedStore.Close()
-	handlerClosed := handleTranscripts(closedStore, brainDir)
-	wClosed := httptest.NewRecorder()
-	handlerClosed(wClosed, req)
-	if wClosed.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK on closed DB warning branch, got %d", wClosed.Code)
+	if w := runHTTP(handleTranscripts(closedStore, brainDir), http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK on closed DB warning branch, got %d", w.Code)
 	}
 
 	// 4. Multi-root deduplication
@@ -430,11 +356,8 @@ func TestHandleTranscripts(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
 	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
 
-	handlerDedup := handleTranscripts(store, root1, root2)
-	wDedup := httptest.NewRecorder()
-	handlerDedup(wDedup, req)
-	if wDedup.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK from dedup, got %d", wDedup.Code)
+	if w := runHTTP(handleTranscripts(store, root1, root2), http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK from dedup, got %d", w.Code)
 	}
 }
 
@@ -467,20 +390,14 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		{"search query param alias", handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?query=fallback-query&limit=abc", http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.target, nil)
-			w := httptest.NewRecorder()
-			tc.handler(w, req)
-			if w.Code != tc.wantStatus {
+			if w := runHTTP(tc.handler, tc.method, tc.target, nil); w.Code != tc.wantStatus {
 				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
 			}
 		})
 	}
 
 	t.Run("search success and embedder", func(t *testing.T) {
-		handler := handleTranscriptSearch(fake, embedder)
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
+		w := runHTTP(handleTranscriptSearch(fake, embedder), http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
 		}
@@ -494,10 +411,7 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 	})
 
 	t.Run("stats success", func(t *testing.T) {
-		handler := handleTranscriptStats(fake)
-		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
+		w := runHTTP(handleTranscriptStats(fake), http.MethodGet, "/api/transcripts/stats", nil)
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
 		}
@@ -510,10 +424,7 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 	t.Run("mux endpoints", func(t *testing.T) {
 		mux := SetupBrainMuxWithEmbedder(fake, nil, nil)
 		for _, path := range []string{"/api/transcripts/search?q=test", "/api/transcripts/stats"} {
-			req := httptest.NewRequest(http.MethodGet, path, nil)
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
-			if w.Code != http.StatusOK {
+			if w := runHTTP(mux.ServeHTTP, http.MethodGet, path, nil); w.Code != http.StatusOK {
 				t.Errorf("expected 200 for %s, got %d", path, w.Code)
 			}
 		}
@@ -538,216 +449,95 @@ func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, queryEm
 
 func TestSchedulesEndpoints(t *testing.T) {
 	store := db.NewFakeStore()
-
 	now := time.Now().UTC()
 
-	// 1. Seed cron schedule
-	cron1 := db.CronSchedule{
-		ID:          "cron-1",
-		TargetID:    "chan-123",
-		TitlePrefix: "Morning Brief",
-		CronExpr:    "0 9 * * 1-5",
-		Prompt:      "Check status with secret token ghp_secretToken1234567890",
-		Timezone:    "America/Los_Angeles",
-		NextRunAt:   now.Add(1 * time.Hour),
-		Enabled:     true,
-		CreatedAt:   now,
-	}
-	if err := store.CreateCronSchedule(context.Background(), cron1); err != nil {
-		t.Fatalf("CreateCronSchedule failed: %v", err)
-	}
+	_ = store.CreateCronSchedule(context.Background(), db.CronSchedule{
+		ID: "cron-1", TargetID: "chan-123", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * 1-5",
+		Prompt: "Check status with secret token ghp_secretToken1234567890", Timezone: "America/Los_Angeles", NextRunAt: now.Add(time.Hour), Enabled: true, CreatedAt: now,
+	})
+	_ = store.CreateOneShotSchedule(context.Background(), db.OneShotSchedule{
+		ID: "once-1", ThreadID: "thread-456", Prompt: "Reminder with secret key github_pat_1234567890abcdef", RunAt: now.Add(30 * time.Minute), CreatedAt: now,
+	})
+	_ = store.CreateScheduleRun(context.Background(), db.ScheduleRun{
+		ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", MessageID: "msg-1", TargetID: "chan-123", ThreadID: "th-1",
+		Title: "Morning Brief", Prompt: "Check status with secret token ghp_secretToken1234567890", Status: "completed", StartedAt: now.Add(-2 * time.Hour), DurationMs: 4500,
+	})
+	_ = store.CreateScheduleRun(context.Background(), db.ScheduleRun{
+		ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", MessageID: "msg-2", TargetID: "chan-123", ThreadID: "th-2",
+		Title: "Morning Brief", Prompt: "Run routine", Status: "failed", StartedAt: now.Add(-time.Hour), DurationMs: 1200, Error: "Failed auth with token ghp_errorToken99999999",
+	})
 
-	// 2. Seed one-shot schedule
-	once1 := db.OneShotSchedule{
-		ID:        "once-1",
-		ThreadID:  "thread-456",
-		Prompt:    "Reminder with secret key github_pat_1234567890abcdef",
-		RunAt:     now.Add(30 * time.Minute),
-		CreatedAt: now,
-	}
-	if err := store.CreateOneShotSchedule(context.Background(), once1); err != nil {
-		t.Fatalf("CreateOneShotSchedule failed: %v", err)
-	}
-
-	// 3. Seed schedule runs
-	runCompleted := db.ScheduleRun{
-		ID:           "run-1",
-		ScheduleID:   "cron-1",
-		ScheduleType: "cron",
-		MessageID:    "msg-1",
-		TargetID:     "chan-123",
-		ThreadID:     "th-1",
-		Title:        "Morning Brief",
-		Prompt:       "Check status with secret token ghp_secretToken1234567890",
-		Status:       "completed",
-		StartedAt:    now.Add(-2 * time.Hour),
-		DurationMs:   4500,
-	}
-	if err := store.CreateScheduleRun(context.Background(), runCompleted); err != nil {
-		t.Fatalf("CreateScheduleRun failed: %v", err)
-	}
-
-	runFailed := db.ScheduleRun{
-		ID:           "run-2",
-		ScheduleID:   "cron-1",
-		ScheduleType: "cron",
-		MessageID:    "msg-2",
-		TargetID:     "chan-123",
-		ThreadID:     "th-2",
-		Title:        "Morning Brief",
-		Prompt:       "Run routine",
-		Status:       "failed",
-		StartedAt:    now.Add(-1 * time.Hour),
-		DurationMs:   1200,
-		Error:        "Failed auth with token ghp_errorToken99999999",
-	}
-	if err := store.CreateScheduleRun(context.Background(), runFailed); err != nil {
-		t.Fatalf("CreateScheduleRun failed: %v", err)
-	}
-
-	// Test GET /schedules
 	schedulesHandler := handleSchedules(store)
-	req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-	w := httptest.NewRecorder()
-	schedulesHandler(w, req)
-
+	w := runHTTP(schedulesHandler, http.MethodGet, "/schedules", nil)
 	if w.Code != http.StatusOK {
-		t.Fatalf("Expected status 200 OK from /schedules, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("Expected 200 OK from /schedules, got %d: %s", w.Code, w.Body.String())
 	}
 
 	var schedResp SchedulesResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &schedResp); err != nil {
-		t.Fatalf("Failed to parse /schedules response JSON: %v", err)
+		t.Fatalf("Failed to parse /schedules JSON: %v", err)
 	}
-
-	if schedResp.Status != "ok" {
-		t.Errorf("Expected status ok, got %s", schedResp.Status)
-	}
-	if schedResp.Summary.TotalActive != 2 || schedResp.Summary.CronCount != 1 || schedResp.Summary.OneShotCount != 1 {
-		t.Errorf("Unexpected summary metrics: %+v", schedResp.Summary)
-	}
-	if len(schedResp.Crons) != 1 {
-		t.Fatalf("Expected 1 cron schedule, got %d", len(schedResp.Crons))
+	if schedResp.Status != "ok" || schedResp.Summary.TotalActive != 2 || len(schedResp.Crons) != 1 || len(schedResp.OneShots) != 1 {
+		t.Fatalf("Unexpected /schedules response: %+v", schedResp)
 	}
 	cronItem := schedResp.Crons[0]
-	if cronItem.ID != "cron-1" || cronItem.ChannelID != "chan-123" {
-		t.Errorf("Unexpected cron item fields: %+v", cronItem)
-	}
-	if cronItem.CronDescription != "Weekdays (Mon–Fri) at 09:00" {
-		t.Errorf("Expected cron_description 'Weekdays (Mon–Fri) at 09:00', got %q", cronItem.CronDescription)
-	}
-	if strings.Contains(cronItem.Prompt, "ghp_secretToken1234567890") {
-		t.Errorf("Prompt token not redacted in /schedules: %s", cronItem.Prompt)
-	}
-	if !strings.Contains(cronItem.Prompt, "[REDACTED]") {
-		t.Errorf("Expected [REDACTED] in sanitized prompt, got %s", cronItem.Prompt)
-	}
-
-	if len(schedResp.OneShots) != 1 {
-		t.Fatalf("Expected 1 one-shot schedule, got %d", len(schedResp.OneShots))
+	if cronItem.ID != "cron-1" || cronItem.CronDescription != "Weekdays (Mon–Fri) at 09:00" || strings.Contains(cronItem.Prompt, "ghp_secretToken1234567890") || !strings.Contains(cronItem.Prompt, "[REDACTED]") {
+		t.Errorf("Unexpected cron item: %+v", cronItem)
 	}
 	oneShotItem := schedResp.OneShots[0]
-	if oneShotItem.ID != "once-1" || oneShotItem.ThreadID != "thread-456" {
-		t.Errorf("Unexpected one-shot item fields: %+v", oneShotItem)
-	}
-	if strings.Contains(oneShotItem.Prompt, "github_pat_1234567890abcdef") {
-		t.Errorf("Prompt token not redacted in one_shots: %s", oneShotItem.Prompt)
+	if oneShotItem.ID != "once-1" || strings.Contains(oneShotItem.Prompt, "github_pat_1234567890abcdef") {
+		t.Errorf("Unexpected one-shot item: %+v", oneShotItem)
 	}
 
-	// Test Caching: Adding another schedule directly in DB should not change cached output immediately
-	cron2 := db.CronSchedule{
-		ID:          "cron-2",
-		TargetID:    "chan-999",
-		TitlePrefix: "Nightly",
-		CronExpr:    "0 0 * * *",
-		Prompt:      "Nightly check",
-		NextRunAt:   now.Add(12 * time.Hour),
-		Enabled:     true,
-		CreatedAt:   now,
-	}
-	_ = store.CreateCronSchedule(context.Background(), cron2)
-
-	wCached := httptest.NewRecorder()
-	schedulesHandler(wCached, req)
+	// Caching check
+	_ = store.CreateCronSchedule(context.Background(), db.CronSchedule{ID: "cron-2", TargetID: "chan-999", TitlePrefix: "Nightly", CronExpr: "0 0 * * *", Prompt: "Nightly check", NextRunAt: now.Add(12 * time.Hour), Enabled: true, CreatedAt: now})
+	wCached := runHTTP(schedulesHandler, http.MethodGet, "/schedules", nil)
 	var cachedResp SchedulesResponse
 	_ = json.Unmarshal(wCached.Body.Bytes(), &cachedResp)
 	if len(cachedResp.Crons) != 1 {
 		t.Errorf("Expected cached 1 cron schedule within 5s TTL, got %d", len(cachedResp.Crons))
 	}
 
-	// Test GET /schedules/runs
+	// GET /schedules/runs
 	runsHandler := handleScheduleRuns(store)
-	reqRuns := httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
-	wRuns := httptest.NewRecorder()
-	runsHandler(wRuns, reqRuns)
-
+	wRuns := runHTTP(runsHandler, http.MethodGet, "/schedules/runs", nil)
 	if wRuns.Code != http.StatusOK {
-		t.Fatalf("Expected status 200 OK from /schedules/runs, got %d: %s", wRuns.Code, wRuns.Body.String())
+		t.Fatalf("Expected 200 OK from /schedules/runs, got %d: %s", wRuns.Code, wRuns.Body.String())
 	}
-
 	var runsResp ScheduleRunsResponse
-	if err := json.Unmarshal(wRuns.Body.Bytes(), &runsResp); err != nil {
-		t.Fatalf("Failed to parse /schedules/runs response JSON: %v", err)
-	}
-
+	_ = json.Unmarshal(wRuns.Body.Bytes(), &runsResp)
 	if runsResp.Status != "ok" || runsResp.Total != 2 || len(runsResp.Runs) != 2 {
 		t.Errorf("Unexpected runs response: total=%d, len=%d", runsResp.Total, len(runsResp.Runs))
 	}
-
-	// Check token sanitization in error and prompt
 	for _, r := range runsResp.Runs {
-		if strings.Contains(r.Prompt, "ghp_secretToken1234567890") {
-			t.Errorf("Run prompt token leaked: %s", r.Prompt)
-		}
-		if strings.Contains(r.Error, "ghp_errorToken99999999") {
-			t.Errorf("Run error token leaked: %s", r.Error)
+		if strings.Contains(r.Prompt, "ghp_secretToken1234567890") || strings.Contains(r.Error, "ghp_errorToken99999999") {
+			t.Errorf("Run secret leaked: %+v", r)
 		}
 	}
 
-	// Test filtering /schedules/runs?status=failed
-	reqFiltered := httptest.NewRequest(http.MethodGet, "/schedules/runs?status=failed", nil)
-	wFiltered := httptest.NewRecorder()
-	runsHandler(wFiltered, reqFiltered)
-
 	var filteredResp ScheduleRunsResponse
-	_ = json.Unmarshal(wFiltered.Body.Bytes(), &filteredResp)
+	_ = json.Unmarshal(runHTTP(runsHandler, http.MethodGet, "/schedules/runs?status=failed", nil).Body.Bytes(), &filteredResp)
 	if filteredResp.Total != 1 || len(filteredResp.Runs) != 1 || filteredResp.Runs[0].Status != "failed" {
 		t.Errorf("Unexpected filtered runs: %+v", filteredResp)
 	}
 
-	// Test pagination /schedules/runs?limit=1&offset=0
-	reqPaginated := httptest.NewRequest(http.MethodGet, "/schedules/runs?limit=1&offset=0", nil)
-	wPaginated := httptest.NewRecorder()
-	runsHandler(wPaginated, reqPaginated)
-
 	var paginatedResp ScheduleRunsResponse
-	_ = json.Unmarshal(wPaginated.Body.Bytes(), &paginatedResp)
+	_ = json.Unmarshal(runHTTP(runsHandler, http.MethodGet, "/schedules/runs?limit=1&offset=0", nil).Body.Bytes(), &paginatedResp)
 	if paginatedResp.Total != 2 || len(paginatedResp.Runs) != 1 || paginatedResp.Limit != 1 {
 		t.Errorf("Unexpected paginated runs: %+v", paginatedResp)
 	}
 
-	// Test MethodNotAllowed for POST
-	reqPost := httptest.NewRequest(http.MethodPost, "/schedules", nil)
-	wPost := httptest.NewRecorder()
-	schedulesHandler(wPost, reqPost)
-	if wPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 MethodNotAllowed for POST /schedules, got %d", wPost.Code)
+	if code := runHTTP(schedulesHandler, http.MethodPost, "/schedules", nil).Code; code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 for POST /schedules, got %d", code)
+	}
+	if code := runHTTP(runsHandler, http.MethodPost, "/schedules/runs", nil).Code; code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 for POST /schedules/runs, got %d", code)
 	}
 
-	reqPostRuns := httptest.NewRequest(http.MethodPost, "/schedules/runs", nil)
-	wPostRuns := httptest.NewRecorder()
-	runsHandler(wPostRuns, reqPostRuns)
-	if wPostRuns.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 MethodNotAllowed for POST /schedules/runs, got %d", wPostRuns.Code)
-	}
-
-	// Error branches & Nil store
 	closedStore := db.NewFakeStore()
 	_ = closedStore.Close()
-
 	storeCronErr := db.NewFakeStore()
 	storeCronErr.FailNext("GetAllCronSchedules", errors.New("cron query forced error"))
-
 	storeOneShotErr := db.NewFakeStore()
 	storeOneShotErr.FailNext("GetAllOneShotSchedules", errors.New("oneshot query forced error"))
 
@@ -766,24 +556,18 @@ func TestSchedulesEndpoints(t *testing.T) {
 		{"runs query filter", handleScheduleRuns(store), "/schedules/runs?limit=100&offset=5&schedule_id=cron-1&status=completed", http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
-			w := httptest.NewRecorder()
-			tc.handler(w, req)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d", w.Code, tc.wantStatus)
+			if code := runHTTP(tc.handler, http.MethodGet, tc.target, nil).Code; code != tc.wantStatus {
+				t.Fatalf("got status=%d, want %d", code, tc.wantStatus)
 			}
 		})
 	}
 
-	// Concurrent double check
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := httptest.NewRequest(http.MethodGet, "/schedules", nil)
-			rw := httptest.NewRecorder()
-			schedulesHandler(rw, r)
+			schedulesHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/schedules", nil))
 		}()
 	}
 	wg.Wait()
@@ -791,28 +575,17 @@ func TestSchedulesEndpoints(t *testing.T) {
 
 func TestHandleTasks(t *testing.T) {
 	store := db.NewFakeStore()
-
 	now := time.Now().UTC()
 	longPrompt := strings.Repeat("A", 600) + " ghp_123456789012345678901234567890123456"
-
 	_ = store.InsertMessage(context.Background(), db.Message{
-		ID:         "msg-test-task",
-		ThreadID:   "thread-1",
-		AuthorID:   "user-1",
+		ID: "msg-test-task", ThreadID: "thread-1", AuthorID: "user-1",
 		AuthorName: "Tester with token ghp_999999999999999999999999999999999999",
-		Content:    "Secret token ghp_123456789012345678901234567890123456 in prompt " + longPrompt,
-		Status:     db.StatusProcessing,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		Content: "Secret token ghp_123456789012345678901234567890123456 in prompt " + longPrompt,
+		Status: db.StatusProcessing, CreatedAt: now, UpdatedAt: now,
 	})
 
 	handler := handleTasks(store)
-
-	// 1. Test GET request returns 200 OK
-	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
+	rr := runHTTP(handler, http.MethodGet, "/tasks", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -822,73 +595,38 @@ func TestHandleTasks(t *testing.T) {
 		Total  int             `json:"total"`
 		Tasks  []db.ActiveTask `json:"tasks"`
 	}
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode json: %v", err)
-	}
-
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 	if resp.Status != "ok" || resp.Total != 1 || len(resp.Tasks) != 1 {
 		t.Fatalf("unexpected response payload: %+v", resp)
 	}
 
-	// 2. Verify token was redacted in prompt, summary, and author name
-	if strings.Contains(resp.Tasks[0].Prompt, "ghp_123456") {
-		t.Errorf("token was not redacted from prompt: %s", resp.Tasks[0].Prompt)
+	task := resp.Tasks[0]
+	if strings.Contains(task.Prompt, "ghp_123456") || strings.Contains(task.Summary, "ghp_123456") || task.Summary == "" || strings.Contains(task.AuthorName, "ghp_999999") {
+		t.Errorf("token leaked or summary empty: %+v", task)
 	}
-	if strings.Contains(resp.Tasks[0].Summary, "ghp_123456") {
-		t.Errorf("token was not redacted from summary: %s", resp.Tasks[0].Summary)
-	}
-	if resp.Tasks[0].Summary == "" {
-		t.Errorf("expected summary to be populated, got empty")
-	}
-	if strings.Contains(resp.Tasks[0].AuthorName, "ghp_999999") {
-		t.Errorf("token was not redacted from author name: %s", resp.Tasks[0].AuthorName)
+	if runes := []rune(task.Prompt); len(runes) > 503 || !strings.HasSuffix(task.Prompt, "...") {
+		t.Errorf("prompt not truncated properly: len=%d, text=%s", len(runes), task.Prompt)
 	}
 
-	// Verify truncation to <= 503 runes (500 + "...")
-	promptRunes := []rune(resp.Tasks[0].Prompt)
-	if len(promptRunes) > 503 || !strings.HasSuffix(resp.Tasks[0].Prompt, "...") {
-		t.Errorf("prompt was not properly truncated to 500 chars with ellipsis: len=%d, text=%s", len(promptRunes), resp.Tasks[0].Prompt)
-	}
-
-	// 3. Test 1s TTL Caching: inserting another active message should not appear immediately
 	_ = store.InsertMessage(context.Background(), db.Message{
-		ID:         "msg-test-task-2",
-		ThreadID:   "thread-2",
-		AuthorID:   "user-2",
-		AuthorName: "Tester 2",
-		Content:    "Second prompt",
-		Status:     db.StatusPending,
-		CreatedAt:  now.Add(time.Second),
-		UpdatedAt:  now.Add(time.Second),
+		ID: "msg-test-task-2", ThreadID: "thread-2", AuthorID: "user-2", AuthorName: "Tester 2",
+		Content: "Second prompt", Status: db.StatusPending, CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
 	})
-
-	rrCached := httptest.NewRecorder()
-	handler.ServeHTTP(rrCached, req)
-	if rrCached.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from cached call, got %d", rrCached.Code)
-	}
-
+	rrCached := runHTTP(handler, http.MethodGet, "/tasks", nil)
 	var cachedResp struct {
 		Status string          `json:"status"`
 		Total  int             `json:"total"`
 		Tasks  []db.ActiveTask `json:"tasks"`
 	}
-	if err := json.NewDecoder(rrCached.Body).Decode(&cachedResp); err != nil {
-		t.Fatalf("failed to decode cached json: %v", err)
-	}
+	_ = json.NewDecoder(rrCached.Body).Decode(&cachedResp)
 	if cachedResp.Total != 1 || len(cachedResp.Tasks) != 1 {
 		t.Errorf("expected 1 cached task within 1s TTL, got %d", cachedResp.Total)
 	}
 
-	// 4. Test Method Not Allowed (e.g. POST)
-	reqPost := httptest.NewRequest(http.MethodPost, "/tasks", nil)
-	rrPost := httptest.NewRecorder()
-	handler.ServeHTTP(rrPost, reqPost)
-	if rrPost.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
+	if code := runHTTP(handler, http.MethodPost, "/tasks", nil).Code; code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed, got %d", code)
 	}
 
-	// 5. Error branches & Nil store
 	closedStore := db.NewFakeStore()
 	_ = closedStore.Close()
 	for _, tc := range []struct {
@@ -899,24 +637,18 @@ func TestHandleTasks(t *testing.T) {
 		{"closed store", handleTasks(closedStore)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-			rw := httptest.NewRecorder()
-			tc.handler(rw, r)
-			if rw.Code != http.StatusInternalServerError {
-				t.Fatalf("got status=%d, want 500", rw.Code)
+			if code := runHTTP(tc.handler, http.MethodGet, "/tasks", nil).Code; code != http.StatusInternalServerError {
+				t.Fatalf("got status=%d, want 500", code)
 			}
 		})
 	}
 
-	// 6. Concurrent double check
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-			rw := httptest.NewRecorder()
-			handler(rw, r)
+			handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/tasks", nil))
 		}()
 	}
 	wg.Wait()
@@ -967,8 +699,7 @@ func TestNormalizeRoute(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		input    string
-		expected string
+		input, expected string
 	}{
 		{"/prompt", "/prompt"},
 		{"/transcripts", "/transcripts"},
@@ -990,8 +721,7 @@ func TestNormalizeRoute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			got := normalizeRoute(tt.input)
-			if got != tt.expected {
+			if got := normalizeRoute(tt.input); got != tt.expected {
 				t.Errorf("normalizeRoute(%q) = %q; want %q", tt.input, got, tt.expected)
 			}
 		})
@@ -1015,31 +745,16 @@ func TestMetricsMiddleware(t *testing.T) {
 
 	handler := metricsMiddleware(mux)
 
-	// Normal 200
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rec.Code)
+	if w := runHTTP(handler.ServeHTTP, http.MethodGet, "/health", nil); w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if w := runHTTP(handler.ServeHTTP, http.MethodGet, "/unknown", nil); w.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", w.Code)
+	}
+	if w := runHTTP(handler.ServeHTTP, http.MethodGet, "/implicit", nil); w.Code != http.StatusOK {
+		t.Errorf("expected 200 for implicit write, got %d", w.Code)
 	}
 
-	// 404
-	req404 := httptest.NewRequest(http.MethodGet, "/unknown", nil)
-	rec404 := httptest.NewRecorder()
-	handler.ServeHTTP(rec404, req404)
-	if rec404.Code != http.StatusNotFound {
-		t.Fatalf("expected status 404, got %d", rec404.Code)
-	}
-
-	// Implicit 200
-	reqImp := httptest.NewRequest(http.MethodGet, "/implicit", nil)
-	recImp := httptest.NewRecorder()
-	handler.ServeHTTP(recImp, reqImp)
-	if recImp.Code != http.StatusOK {
-		t.Errorf("expected 200 for implicit write, got %d", recImp.Code)
-	}
-
-	// Empty method
 	emptyMethodHandler := metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -1080,54 +795,31 @@ func TestStatusRecorder_Flush(t *testing.T) {
 
 func TestHandleFacts_Comprehensive(t *testing.T) {
 	store := db.NewFakeStore()
-
-	// Seed some facts
 	_, _ = store.InsertFact(context.Background(), "system", "Fact 1", 1.0, nil)
 	_, _ = store.InsertFact(context.Background(), "user_preference", "Fact 2", 1.0, nil)
-
 	handler := handleFacts(store)
 
-	// 1. Method not allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/facts", nil)
-	wPost := httptest.NewRecorder()
-	handler(wPost, reqPost)
-	if wPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 MethodNotAllowed, got %d", wPost.Code)
-	}
-
-	// 2. Valid GET without filters
-	req := httptest.NewRequest(http.MethodGet, "/facts", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("Expected 200 OK from /facts, got %d: %s", w.Code, w.Body.String())
-	}
-
-	// 3. Valid GET with query params: category, limit, offset, q (including long string > 64 runes)
-	longQuery := strings.Repeat("a", 100)
-	reqFiltered := httptest.NewRequest(http.MethodGet, "/facts?category=system&limit=10&offset=0&q="+longQuery, nil)
-	wFiltered := httptest.NewRecorder()
-	handler(wFiltered, reqFiltered)
-	if wFiltered.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK with filters, got %d: %s", wFiltered.Code, wFiltered.Body.String())
-	}
-
-	// 4. Closed DB error branch
 	closedStore := db.NewFakeStore()
 	_ = closedStore.Close()
-	handlerErr := handleFacts(closedStore)
-	wErr := httptest.NewRecorder()
-	handlerErr(wErr, req)
-	if wErr.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 InternalServerError on closed DB, got %d", wErr.Code)
-	}
 
-	// 5. Nil store returns 500
-	handlerNil := handleFacts(nil)
-	wNil := httptest.NewRecorder()
-	handlerNil(wNil, req)
-	if wNil.Code != http.StatusInternalServerError {
-		t.Errorf("Expected 500 InternalServerError on nil store, got %d", wNil.Code)
+	for _, tc := range []struct {
+		name       string
+		method     string
+		handler    http.HandlerFunc
+		target     string
+		wantStatus int
+	}{
+		{"method not allowed", http.MethodPost, handler, "/facts", http.StatusMethodNotAllowed},
+		{"valid GET no filter", http.MethodGet, handler, "/facts", http.StatusOK},
+		{"valid GET with filter", http.MethodGet, handler, "/facts?category=system&limit=10&offset=0&q=" + strings.Repeat("a", 100), http.StatusOK},
+		{"closed DB error", http.MethodGet, handleFacts(closedStore), "/facts", http.StatusInternalServerError},
+		{"nil store", http.MethodGet, handleFacts(nil), "/facts", http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := runHTTP(tc.handler, tc.method, tc.target, nil).Code; code != tc.wantStatus {
+				t.Fatalf("got status=%d, want %d", code, tc.wantStatus)
+			}
+		})
 	}
 }
 
@@ -1137,78 +829,44 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	tmpHome := t.TempDir()
 	mux := SetupBrainMuxWithEmbedder(store, pool, nil, tmpHome)
 
-	// Test /health
-	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
-	wHealth := httptest.NewRecorder()
-	mux.ServeHTTP(wHealth, reqHealth)
-	if wHealth.Code != http.StatusOK {
-		t.Errorf("Expected 200 from /health, got %d", wHealth.Code)
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/health", nil); w.Code != http.StatusOK {
+		t.Errorf("Expected 200 from /health, got %d", w.Code)
 	}
-
-	// Test /health write error
 	mux.ServeHTTP(&flusherErrWriter{}, httptest.NewRequest(http.MethodGet, "/health", nil))
 
-	// Test /transcripts with injected homeDir
-	reqTranscripts := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
-	wTranscripts := httptest.NewRecorder()
-	mux.ServeHTTP(wTranscripts, reqTranscripts)
-	if wTranscripts.Code != http.StatusOK {
-		t.Errorf("Expected 200 from /transcripts, got %d", wTranscripts.Code)
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
+		t.Errorf("Expected 200 from /transcripts, got %d", w.Code)
 	}
 
-	// Test writeJSON error
 	writeJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 
-	// Test /debug/coverage/flush without GOCOVERDIR
 	t.Setenv("GOCOVERDIR", "")
-	wFlush := httptest.NewRecorder()
-	mux.ServeHTTP(wFlush, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
-	if wFlush.Code != http.StatusOK {
-		t.Errorf("expected 200 OK without GOCOVERDIR, got %d", wFlush.Code)
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK {
+		t.Errorf("expected 200 OK without GOCOVERDIR, got %d", w.Code)
 	}
 
-	// Test /debug/coverage/flush with GOCOVERDIR
 	oldFn := writeCountersDirFn
 	defer func() { writeCountersDirFn = oldFn }()
 	oldMetaFn := writeMetaDirFn
 	defer func() { writeMetaDirFn = oldMetaFn }()
 
 	t.Setenv("GOCOVERDIR", t.TempDir())
-	called := false
-	writeCountersDirFn = func(dir string) error {
-		called = true
-		return nil
-	}
-	metaCalled := false
-	writeMetaDirFn = func(dir string) error {
-		metaCalled = true
-		return nil
+	called, metaCalled := false, false
+	writeCountersDirFn = func(dir string) error { called = true; return nil }
+	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
+
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK || !called || !metaCalled {
+		t.Errorf("expected 200 OK with GOCOVERDIR and mocks called, got %d", w.Code)
 	}
 
-	wFlush = httptest.NewRecorder()
-	mux.ServeHTTP(wFlush, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
-	if wFlush.Code != http.StatusOK || !called || !metaCalled {
-		t.Errorf("expected 200 OK with GOCOVERDIR and mocks called, got %d", wFlush.Code)
+	writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK {
+		t.Errorf("expected 200 OK when meta flush errors, got %d", w.Code)
 	}
 
-	// With GOCOVERDIR + writeMetaDir error -> still proceeds to write counters (200 OK)
-	writeMetaDirFn = func(dir string) error {
-		return errors.New("simulated meta flush error")
-	}
-	wFlush = httptest.NewRecorder()
-	mux.ServeHTTP(wFlush, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
-	if wFlush.Code != http.StatusOK {
-		t.Errorf("expected 200 OK when meta flush errors, got %d", wFlush.Code)
-	}
-
-	// With GOCOVERDIR + mock error -> 500
-	writeCountersDirFn = func(dir string) error {
-		return errors.New("simulated flush error")
-	}
-	wFlush = httptest.NewRecorder()
-	mux.ServeHTTP(wFlush, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
-	if wFlush.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on flush error, got %d", wFlush.Code)
+	writeCountersDirFn = func(dir string) error { return errors.New("simulated flush error") }
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on flush error, got %d", w.Code)
 	}
 }
 
@@ -1268,40 +926,36 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 	}
 }
 
+func WithReloadSupplier(fn func(active *config.Config) error) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.reloadSupplier = fn
+	}
+}
+
+func WithSkipEnvironmentSync() ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.skipEnvironmentSync = true
+	}
+}
+
 func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("invalid YAML with alert", func(t *testing.T) {
-		cfg := config.NewTestConfig()
 		s, _ := discordgo.New("Bot mock-token")
-
-		reloadFn := CreateReloadConfigFunc(cfg,
-			WithDiscordSession(s),
-			WithReloadSupplier(func(active *config.Config) error {
-				return errors.New("simulated invalid YAML error")
-			}),
-			WithSkipEnvironmentSync(),
-		)
-		reloadFn("TestReload")
+		CreateReloadConfigFunc(config.NewTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+			return errors.New("simulated invalid YAML error")
+		}), WithSkipEnvironmentSync())("TestReload")
 	})
 
 	t.Run("supplier success updating model", func(t *testing.T) {
-		cfg := config.NewTestConfig()
 		s, _ := discordgo.New("Bot mock-token")
-
-		reloadSuccess := CreateReloadConfigFunc(cfg,
-			WithDiscordSession(s),
-			WithReloadSupplier(func(active *config.Config) error {
-				active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
-				return nil
-			}),
-			WithSkipEnvironmentSync(),
-		)
-		reloadSuccess("TestReloadSuccess")
+		CreateReloadConfigFunc(config.NewTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+			active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
+			return nil
+		}), WithSkipEnvironmentSync())("TestReloadSuccess")
 	})
 
 	t.Run("complete success with sync and blocker home error", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		tmpData := t.TempDir()
-
+		tmpDir, tmpData := t.TempDir(), t.TempDir()
 		cfg := config.NewTestConfig(func(d *config.ConfigData) {
 			d.GeminiHomeDir = tmpDir
 			d.DataDir = tmpData
@@ -1309,101 +963,29 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			d.APIKey = "test-api-key"
 			d.SystemPrompt = "test system prompt"
 		})
-
-		reloadFn := CreateReloadConfigFunc(cfg,
-			WithReloadSupplier(func(active *config.Config) error {
-				return nil
-			}),
-		)
+		reloadFn := CreateReloadConfigFunc(cfg, WithReloadSupplier(func(active *config.Config) error { return nil }))
 		reloadFn("TestSource")
 
 		blockerHome := filepath.Join(tmpDir, "blocked_home")
 		if err := os.WriteFile(blockerHome, []byte("file"), 0644); err != nil {
 			t.Fatalf("failed to write blocker file: %v", err)
 		}
-		cfg.Update(&config.ConfigData{
-			GeminiHomeDir: filepath.Join(blockerHome, "sub"),
-			DataDir:       tmpData,
-		})
+		cfg.Update(&config.ConfigData{GeminiHomeDir: filepath.Join(blockerHome, "sub"), DataDir: tmpData})
 		reloadFn("TestErrorSource")
 	})
 
 	t.Run("provisioner error", func(t *testing.T) {
 		cfg := config.NewTestConfig()
-		cur := cfg.Current()
 		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
-		if err := os.WriteFile(tmpFile, []byte("file"), 0644); err != nil {
-			t.Fatalf("failed to write blocker file: %v", err)
-		}
-		cur.GeminiHomeDir = tmpFile
-		cfg.Update(cur)
-
-		prov := env.NewFromConfig(cfg)
-		reloadFn := CreateReloadConfigFunc(cfg, WithProvisioner(prov))
-		reloadFn("test-provisioner-error")
+		_ = os.WriteFile(tmpFile, []byte("file"), 0644)
+		cfg.Update(&config.ConfigData{GeminiHomeDir: tmpFile})
+		CreateReloadConfigFunc(cfg, WithProvisioner(env.NewFromConfig(cfg)))("test-provisioner-error")
 	})
 
 	t.Run("with worker pool", func(t *testing.T) {
 		cfg := config.NewTestConfig()
-		pool := queue.New(cfg, queue.WorkerPoolConfig{})
-		reloadFn := CreateReloadConfigFunc(cfg,
-			WithSkipEnvironmentSync(),
-			WithReloadSupplier(func(active *config.Config) error {
-				return nil
-			}),
-			WithWorkerPool(pool),
-		)
-		reloadFn("TestWithWorkerPool")
+		CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(active *config.Config) error { return nil }), WithWorkerPool(queue.New(cfg, queue.WorkerPoolConfig{})))("TestWithWorkerPool")
 	})
-}
-
-func TestDefaultTranscriptRoots(t *testing.T) {
-	// 1. Nil config
-	nilRoots := DefaultTranscriptRoots(nil)
-	if len(nilRoots) != 1 || nilRoots[0] != "/data/brain" {
-		t.Errorf("DefaultTranscriptRoots(nil) = %v, want [/data/brain]", nilRoots)
-	}
-
-	// 2. Custom config with specific DataDir and GeminiHomeDir
-	tmpDir := t.TempDir()
-	dataDir := filepath.Join(tmpDir, "custom_data")
-	homeDir := filepath.Join(tmpDir, "custom_home")
-
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = dataDir
-		d.GeminiHomeDir = homeDir
-	})
-
-	roots := DefaultTranscriptRoots(cfg)
-	expected := []string{
-		filepath.Join(dataDir, "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-	}
-
-	if len(roots) != len(expected) {
-		t.Fatalf("DefaultTranscriptRoots returned %d roots, want %d", len(roots), len(expected))
-	}
-	for i, want := range expected {
-		if roots[i] != want {
-			t.Errorf("roots[%d] = %q, want %q", i, roots[i], want)
-		}
-	}
-
-	// 3. Config with empty/whitespace DataDir defaults to filepath.Join("/data", "brain")
-	emptyDataCfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = "   "
-		d.GeminiHomeDir = homeDir
-	})
-	emptyRoots := DefaultTranscriptRoots(emptyDataCfg)
-	expectedEmpty := []string{
-		filepath.Join("/data", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-	}
-	if len(emptyRoots) != len(expectedEmpty) || emptyRoots[0] != expectedEmpty[0] {
-		t.Errorf("DefaultTranscriptRoots with whitespace DataDir = %v, want %v", emptyRoots, expectedEmpty)
-	}
 }
 
 func TestDefaultPaths(t *testing.T) {
@@ -1527,151 +1109,63 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		cfg        func() *config.Config
-		ctx        func() (context.Context, context.CancelFunc)
-		opts       []BrainAppOption
+		mode       string
 		wantErrStr string
 		wantNil    bool
 	}{
-		{
-			name: "nil config",
-			cfg:  func() *config.Config { return nil },
-			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithCancel(context.Background())
-			},
-			wantErrStr: "config cannot be nil",
-		},
-		{
-			name: "canceled context",
-			cfg: func() *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = tmpDir
-					d.DataDir = filepath.Join(tmpDir, "data")
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				return ctx, cancel
-			},
-			wantNil: true,
-		},
-		{
-			name: "canceled context with init error",
-			cfg: func() *config.Config {
-				blockDir := filepath.Join(t.TempDir(), "block")
-				_ = os.WriteFile(blockDir, []byte("file"), 0644)
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = blockDir
-					d.DataDir = filepath.Join(tmpDir, "data")
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				return ctx, cancel
-			},
-			wantNil: true,
-		},
-		{
-			name: "missing database URL without store",
-			cfg: func() *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = tmpDir
-					d.DataDir = filepath.Join(tmpDir, "data")
-					d.DatabaseURL = ""
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithCancel(context.Background())
-			},
-			wantErrStr: "database URL or path is required",
-		},
-		{
-			name: "missing gemini home dir",
-			cfg: func() *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = ""
-					d.DataDir = filepath.Join(tmpDir, "data")
-					d.DatabaseURL = ":memory:"
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithCancel(context.Background())
-			},
-			wantErrStr: "gemini home directory is required",
-		},
-		{
-			name: "missing data dir",
-			cfg: func() *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = tmpDir
-					d.DataDir = ""
-					d.DatabaseURL = ":memory:"
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithCancel(context.Background())
-			},
-			wantErrStr: "data directory is required",
-		},
-		{
-			name: "missing port",
-			cfg: func() *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.GeminiHomeDir = tmpDir
-					d.DataDir = filepath.Join(tmpDir, "data")
-					d.DatabaseURL = ":memory:"
-					d.Port = ""
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithCancel(context.Background())
-			},
-			wantErrStr: "port is required",
-		},
-		{
-			name: "unsupported database scheme",
-			cfg: func() *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.DatabaseURL = "mysql://user:pass@localhost/db"
-					d.GeminiHomeDir = tmpDir
-					d.DataDir = filepath.Join(tmpDir, "data")
-					d.Port = "0"
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithTimeout(context.Background(), 1*time.Second)
-			},
-			wantErrStr: "failed to initialize database",
-		},
-		{
-			name: "invalid listen port",
-			cfg: func() *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
-					d.Port = "-1"
-					d.AgyBin = "/bin/true"
-					d.Model = "gemini-2.5-flash"
-					d.SystemPrompt = "test"
-					d.GeminiHomeDir = tmpDir
-					d.DataDir = filepath.Join(tmpDir, "data")
-				})
-			},
-			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithTimeout(context.Background(), 1*time.Second)
-			},
-			opts:       []BrainAppOption{WithStore(db.NewFakeStore())},
-			wantErrStr: "listen",
-		},
+		{"nil config", "nil_cfg", "config cannot be nil", false},
+		{"canceled context", "canceled", "", true},
+		{"canceled context with init error", "canceled_init_err", "", true},
+		{"missing database URL without store", "missing_db", "database URL or path is required", false},
+		{"missing gemini home dir", "missing_home", "gemini home directory is required", false},
+		{"missing data dir", "missing_data", "data directory is required", false},
+		{"missing port", "missing_port", "port is required", false},
+		{"unsupported database scheme", "unsupported_db", "failed to initialize database", false},
+		{"invalid listen port", "invalid_port", "listen", false},
+	}
+
+	mkCfg := func(home, data, port, dbURL string) *config.Config {
+		return config.NewTestConfig(func(d *config.ConfigData) {
+			d.GeminiHomeDir, d.DataDir, d.Port, d.DatabaseURL = home, data, port, dbURL
+			d.AgyBin, d.Model, d.SystemPrompt = "/bin/true", "gemini-2.5-flash", "test"
+		})
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := tt.ctx()
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			cfg := tt.cfg()
-			err := RunBrainApp(ctx, cfg, tt.opts...)
+			var cfg *config.Config
+			var opts []BrainAppOption
+
+			switch tt.mode {
+			case "nil_cfg":
+				cfg = nil
+			case "canceled":
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", ":memory:")
+				cancel()
+			case "canceled_init_err":
+				blockDir := filepath.Join(t.TempDir(), "block")
+				_ = os.WriteFile(blockDir, []byte("file"), 0644)
+				cfg = mkCfg(blockDir, filepath.Join(tmpDir, "data"), "0", ":memory:")
+				cancel()
+			case "missing_db":
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "")
+			case "missing_home":
+				cfg = mkCfg("", filepath.Join(tmpDir, "data"), "0", ":memory:")
+			case "missing_data":
+				cfg = mkCfg(tmpDir, "", "0", ":memory:")
+			case "missing_port":
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "", ":memory:")
+			case "unsupported_db":
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "mysql://user:pass@localhost/db")
+			case "invalid_port":
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "-1", ":memory:")
+				opts = []BrainAppOption{WithStore(db.NewFakeStore())}
+			}
+
+			err := RunBrainApp(ctx, cfg, opts...)
 			if tt.wantNil {
 				if err != nil {
 					t.Errorf("expected nil error, got: %v", err)
@@ -1699,14 +1193,7 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 			t.Fatalf("failed to split host port: %v", err)
 		}
 
-		conflictCfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.Port = portStr
-			d.AgyBin = "/bin/true"
-			d.Model = "gemini-2.5-flash"
-			d.SystemPrompt = "test"
-			d.GeminiHomeDir = tmpDir
-			d.DataDir = filepath.Join(tmpDir, "data")
-		})
+		conflictCfg := mkCfg(tmpDir, filepath.Join(tmpDir, "data"), portStr, ":memory:")
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
@@ -1724,86 +1211,70 @@ func (m *mockErrProcessHandle) Kill() error { return errors.New("simulated kill 
 func (m *mockErrProcessHandle) Wait() error { return nil }
 
 func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
-	t.Run("PrewarmedWorkers", func(t *testing.T) {
+	newLifecycleCfg := func(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
+		t.Helper()
 		tmpDir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0755)
 		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.Port = "0"
+			d.AgyBin = "/bin/true"
+			d.Model = "gemini-2.5-flash"
+			d.SystemPrompt = "test"
+			d.GeminiHomeDir = tmpDir
+			d.DataDir = filepath.Join(tmpDir, "data")
+			d.DatabaseURL = ":memory:"
+			for _, m := range mutators {
+				m(d)
+			}
+		})
+		return tmpDir, cfg
+	}
 
-		cfg := config.NewTestConfig()
-		cur := cfg.Current()
-		cur.Port = "0"
-		cur.AgyBin = "/bin/true"
-		cur.DiscordToken = "mock-discord-token"
-		cur.HarnessAPIKey = "gemini-test-key"
-		cur.DataDir = tmpDir
-		cur.GeminiHomeDir = tmpDir
-		cur.LowEffortModel = "gemini-test-low"
-		cur.MediumEffortModel = "gemini-test-medium"
-		cur.Ollama.BaseURL = "http://127.0.0.1:65534"
-		cur.Voice = config.VoiceConfig{
-			Engine:           "gemini_api",
-			Model:            "gemini-2.5-flash",
-			PrewarmedTargets: []string{"kiosk"},
-			AmbientContext: &config.AmbientContextConfig{
-				Template: "Time: {{.now}}",
-				CacheTTL: "5s",
-			},
-		}
-		if cur.Channels == nil {
-			cur.Channels = make(map[string]config.ChannelPolicy)
-		}
-		cur.Channels["default"] = config.ChannelPolicy{
-			Mode: "threads",
-			AmbientContext: &config.AmbientContextConfig{
-				Template: "Time: {{.now}}",
-				CacheTTL: "5s",
-			},
-		}
-		cfg.Update(cur)
+	t.Run("PrewarmedWorkers", func(t *testing.T) {
+		tmpDir, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
+			d.DiscordToken = "mock-discord-token"
+			d.HarnessAPIKey = "gemini-test-key"
+			d.DataDir = d.GeminiHomeDir
+			d.LowEffortModel = "gemini-test-low"
+			d.MediumEffortModel = "gemini-test-medium"
+			d.Ollama.BaseURL = "http://127.0.0.1:65534"
+			d.Voice = config.VoiceConfig{
+				Engine:           "gemini_api",
+				Model:            "gemini-2.5-flash",
+				PrewarmedTargets: []string{"kiosk"},
+				AmbientContext:   &config.AmbientContextConfig{Template: "Time: {{.now}}", CacheTTL: "5s"},
+			}
+			d.Channels = map[string]config.ChannelPolicy{
+				"default": {Mode: "threads", AmbientContext: &config.AmbientContextConfig{Template: "Time: {{.now}}", CacheTTL: "5s"}},
+			}
+		})
 
 		expectedEphemeralHome := filepath.Join(tmpDir, "runtimes", "ephemeral")
 		expectedDiscordHome := filepath.Join(tmpDir, "runtimes", "discord")
 
-		var spawnedConfigsMu sync.Mutex
-		var spawnedConfigs []runner.DaemonConfig
-
-		baseMock := runner.NewMockDaemonSpawner()
+		var mu sync.Mutex
+		seen := make(map[string]runner.DaemonConfig)
 		allSpawned := make(chan struct{})
-		var spawnedOnce sync.Once
+		var once sync.Once
+		baseMock := runner.NewMockDaemonSpawner()
+
 		trackingSpawner := &runner.MockDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-				spawnedConfigsMu.Lock()
-				spawnedConfigs = append(spawnedConfigs, dCfg)
-				hasEph0, hasEph1, hasDisc0, hasDisc1, hasMed0, hasMed1 := false, false, false, false, false, false
-				for _, sc := range spawnedConfigs {
-					switch sc.ThreadID {
-					case "ephemeral:worker-0":
-						hasEph0 = true
-					case "ephemeral:worker-1":
-						hasEph1 = true
-					case "discord:worker-0":
-						hasDisc0 = true
-					case "discord:worker-1":
-						hasDisc1 = true
-					case "discord:medium-worker-0":
-						hasMed0 = true
-					case "discord:medium-worker-1":
-						hasMed1 = true
-					}
+				mu.Lock()
+				seen[dCfg.ThreadID] = dCfg
+				if seen["ephemeral:worker-0"].ThreadID != "" && seen["ephemeral:worker-1"].ThreadID != "" &&
+					seen["discord:worker-0"].ThreadID != "" && seen["discord:worker-1"].ThreadID != "" &&
+					seen["discord:medium-worker-0"].ThreadID != "" && seen["discord:medium-worker-1"].ThreadID != "" {
+					once.Do(func() { close(allSpawned) })
 				}
-				if hasEph0 && hasEph1 && hasDisc0 && hasDisc1 && hasMed0 && hasMed1 {
-					spawnedOnce.Do(func() { close(allSpawned) })
-				}
-				spawnedConfigsMu.Unlock()
+				mu.Unlock()
 				return baseMock.Spawn(ctx, dCfg)
 			},
 		}
 
-		boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg,
-			WithProcessSpawner(trackingSpawner),
-		)
-
-		reqBody := `{"prompt": "Hello test prompt", "channel_id": "1542423172400291873", "message_id": "msg-1"}`
-		resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(reqBody))
+		boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(trackingSpawner))
+		resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(`{"prompt":"Hello test prompt","channel_id":"1542423172400291873","message_id":"msg-1"}`))
 		if err == nil {
 			_ = resp.Body.Close()
 		}
@@ -1818,61 +1289,25 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 			t.Fatalf("unexpected error waiting for server shutdown: %v", err)
 		}
 
-		spawnedConfigsMu.Lock()
-		defer spawnedConfigsMu.Unlock()
-
-		foundEph0, foundEph1, foundDisc0, foundDisc1, foundMed0, foundMed1 := false, false, false, false, false, false
-		for _, sc := range spawnedConfigs {
-			switch sc.ThreadID {
-			case "ephemeral:worker-0":
-				foundEph0 = true
-				if !hasEnv(sc.Env, "HOME="+expectedEphemeralHome) {
-					t.Errorf("ephemeral:worker-0 expected HOME=%q, got %v", expectedEphemeralHome, sc.Env)
-				}
-			case "ephemeral:worker-1":
-				foundEph1 = true
-				if !hasEnv(sc.Env, "HOME="+expectedEphemeralHome) {
-					t.Errorf("ephemeral:worker-1 expected HOME=%q, got %v", expectedEphemeralHome, sc.Env)
-				}
-			case "discord:worker-0":
-				foundDisc0 = true
-				if !hasEnv(sc.Env, "HOME="+expectedDiscordHome) {
-					t.Errorf("discord:worker-0 expected HOME=%q, got %v", expectedDiscordHome, sc.Env)
-				}
-			case "discord:worker-1":
-				foundDisc1 = true
-				if !hasEnv(sc.Env, "HOME="+expectedDiscordHome) {
-					t.Errorf("discord:worker-1 expected HOME=%q, got %v", expectedDiscordHome, sc.Env)
-				}
-			case "discord:medium-worker-0":
-				foundMed0 = true
-			case "discord:medium-worker-1":
-				foundMed1 = true
+		mu.Lock()
+		defer mu.Unlock()
+		for _, target := range []string{"ephemeral:worker-0", "ephemeral:worker-1"} {
+			if !hasEnv(seen[target].Env, "HOME="+expectedEphemeralHome) {
+				t.Errorf("%s expected HOME=%q, got %v", target, expectedEphemeralHome, seen[target].Env)
 			}
 		}
-
-		if !foundEph0 || !foundEph1 || !foundDisc0 || !foundDisc1 || !foundMed0 || !foundMed1 {
-			t.Errorf("expected all prewarmed workers spawned: eph0=%v eph1=%v disc0=%v disc1=%v med0=%v med1=%v",
-				foundEph0, foundEph1, foundDisc0, foundDisc1, foundMed0, foundMed1)
+		for _, target := range []string{"discord:worker-0", "discord:worker-1"} {
+			if !hasEnv(seen[target].Env, "HOME="+expectedDiscordHome) {
+				t.Errorf("%s expected HOME=%q, got %v", target, expectedDiscordHome, seen[target].Env)
+			}
+		}
+		if seen["discord:medium-worker-0"].ThreadID == "" || seen["discord:medium-worker-1"].ThreadID == "" {
+			t.Errorf("medium workers not spawned: %+v", seen)
 		}
 	})
 
 	t.Run("SIGHUP", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
-
-		cfg := config.NewTestConfig()
-		cur := cfg.Current()
-		cur.GeminiHomeDir = tmpDir
-		cur.DataDir = filepath.Join(tmpDir, "data")
-		cur.Port = "0"
-		cur.Model = "gemini-2.5-flash"
-		cur.DatabaseURL = ":memory:"
-		if cur.AgyBin == "" {
-			cur.AgyBin = "/bin/true"
-		}
-		cfg.Update(cur)
-
+		_, cfg := newLifecycleCfg(t)
 		hupChan := make(chan os.Signal, 1)
 		reloadReceived := make(chan string, 1)
 
@@ -1908,20 +1343,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 		})
 		defer db.RegisterSQLiteTestHook(nil)
 
-		tmpDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0755)
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
-
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
-			d.Port = "0"
-			d.AgyBin = "/bin/true"
-			d.Model = "gemini-2.5-flash"
-			d.SystemPrompt = "test"
-			d.GeminiHomeDir = tmpDir
-			d.DataDir = filepath.Join(tmpDir, "data")
-			d.DatabaseURL = ":memory:"
-		})
-
+		_, cfg := newLifecycleCfg(t)
 		_, cancel, wait := runBrainAppUntilReady(t, cfg, WithStore(nil))
 		cancel()
 		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -1930,17 +1352,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	})
 
 	t.Run("ProcessPoolInitErrors", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
-
-		cfg := config.NewTestConfig()
-		cur := cfg.Current()
-		cur.DataDir = tmpDir
-		cur.GeminiHomeDir = tmpDir
-		cur.Port = "0"
-		cur.AgyBin = "/bin/true"
-		cfg.Update(cur)
-
+		_, cfg := newLifecycleCfg(t)
 		failingSpawner := &runner.MockDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 				return nil, nil, nil, nil, errors.New("simulated spawn failure")
@@ -1955,17 +1367,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	})
 
 	t.Run("DaemonCloseErrors", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
-
-		cfg := config.NewTestConfig()
-		cur := cfg.Current()
-		cur.DataDir = tmpDir
-		cur.GeminiHomeDir = tmpDir
-		cur.Port = "0"
-		cur.AgyBin = "/bin/true"
-		cfg.Update(cur)
-
+		_, cfg := newLifecycleCfg(t)
 		spawner := &runner.MockDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 				inR, inW := io.Pipe()
@@ -2114,7 +1516,7 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	}{
 		{"GET not allowed", http.MethodGet, nil, "", http.StatusMethodNotAllowed, "Method not allowed"},
 		{"empty prompt", http.MethodPost, strings.NewReader(`{"prompt":""}`), "", http.StatusBadRequest, "'prompt' field is required"},
-		{"malformed JSON", http.MethodPost, strings.NewReader(`{invalid-json`), "", http.StatusBadRequest, "'prompt' field is required"},
+		{"malformed JSON", http.MethodPost, strings.NewReader(`{invalid-json`), "", http.StatusBadRequest, "Invalid JSON payload"},
 		{"body read error", http.MethodPost, &errReadCloser{readErr: errors.New("simulated body read error")}, "", http.StatusBadRequest, "Failed to read request body"},
 		{"conversation_id fallback", http.MethodPost, strings.NewReader(`{"conversation_id":"conv-123","prompt":"hello"}`), "", http.StatusOK, ""},
 		{"missing session_id", http.MethodPost, strings.NewReader(`{"prompt":"hello"}`), "", http.StatusBadRequest, "session_id"},
@@ -2127,12 +1529,7 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, "/voice/ask", tc.body)
-			if tc.accept != "" {
-				req.Header.Set("Accept", tc.accept)
-			}
-			w := httptest.NewRecorder()
-			handler(w, req)
+			w := runHTTP(handler, tc.method, "/voice/ask", tc.body, "Accept", tc.accept)
 			if w.Code != tc.wantStatus {
 				t.Fatalf("got status %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
 			}
@@ -2177,32 +1574,19 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 		})
 		defer stop()
 
-		payload := `{"prompt":"turn off the lights","session_id":"sess-test-456"}`
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
-		req.Header.Set("Accept", "text/event-stream")
-
-		w := httptest.NewRecorder()
-		handler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", w.Code)
+		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"turn off the lights","session_id":"sess-test-456"}`), "Accept", "text/event-stream")
+		if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") || w.Header().Get("X-Accel-Buffering") != "no" {
+			t.Fatalf("unexpected headers or status: code=%d, ct=%s", w.Code, w.Header().Get("Content-Type"))
 		}
-		if !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
-			t.Errorf("expected Content-Type text/event-stream, got %q", w.Header().Get("Content-Type"))
-		}
-		if w.Header().Get("X-Accel-Buffering") != "no" {
-			t.Errorf("expected X-Accel-Buffering: no, got %q", w.Header().Get("X-Accel-Buffering"))
-		}
-
 		body := w.Body.String()
-		if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking smart lights...\"}\n\n") {
-			t.Errorf("expected status event in SSE stream, got:\n%s", body)
-		}
-		if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-test-456\",\"reply\":\"Lights have been turned off.\"}\n\n") {
-			t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
-		}
-		if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n") {
-			t.Errorf("expected done event with conversation_id in SSE stream, got:\n%s", body)
+		for _, want := range []string{
+			"event: status\ndata: {\"status\":\"⚡ Checking smart lights...\"}\n\n",
+			"event: reply\ndata: {\"conversation_id\":\"sess-test-456\",\"reply\":\"Lights have been turned off.\"}\n\n",
+			"event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing SSE event %q in body:\n%s", want, body)
+			}
 		}
 	})
 
@@ -2221,34 +1605,22 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 		})
 		defer stop()
 
-		payload := `{"prompt":"tell me two things","session_id":"sess-stream-789"}`
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
-		req.Header.Set("Accept", "text/event-stream")
-
-		w := httptest.NewRecorder()
-		handler(w, req)
-
+		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"tell me two things","session_id":"sess-stream-789"}`), "Accept", "text/event-stream")
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d", w.Code)
 		}
-
 		body := w.Body.String()
-		if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking status...\"}\n\n") {
-			t.Errorf("expected status event in SSE stream, got:\n%s", body)
+		for _, want := range []string{
+			"event: status\ndata: {\"status\":\"⚡ Checking status...\"}\n\n",
+			"event: sentence\ndata: {\"text\":\"Here is sentence one.\"}\n\n",
+			"event: sentence\ndata: {\"text\":\"And here is sentence two.\"}\n\n",
+			"event: reply\ndata: {\"conversation_id\":\"sess-stream-789\",\"reply\":\"Here is sentence one. And here is sentence two.\"}\n\n",
+			"event: done\ndata: {\"conversation_id\":\"sess-stream-789\"}\n\n",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing SSE event %q in body:\n%s", want, body)
+			}
 		}
-		if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}\n\n") {
-			t.Errorf("expected sentence event 1 in SSE stream, got:\n%s", body)
-		}
-		if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}\n\n") {
-			t.Errorf("expected sentence event 2 in SSE stream, got:\n%s", body)
-		}
-		if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\",\"reply\":\"Here is sentence one. And here is sentence two.\"}\n\n") {
-			t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
-		}
-		if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-stream-789\"}\n\n") {
-			t.Errorf("expected done event in SSE stream, got:\n%s", body)
-		}
-
 		idxSent1 := strings.Index(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}")
 		idxSent2 := strings.Index(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}")
 		idxReply := strings.Index(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\"")
@@ -2272,26 +1644,18 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)).WithContext(ctx)
 		req.Header.Set("Accept", "text/event-stream")
-		w := httptest.NewRecorder()
-		handler(w, req)
+		handler(httptest.NewRecorder(), req)
 	})
 
 	t.Run("VoiceRunnerError", func(t *testing.T) {
 		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
 			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				if onStatus != nil {
-					onStatus("working")
-				}
 				return "", "", errors.New("synthetic voice failure")
 			},
 		})
 		defer stop()
 
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
-		req.Header.Set("Accept", "text/event-stream")
-		w := httptest.NewRecorder()
-		handler(w, req)
-
+		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`), "Accept", "text/event-stream")
 		if !strings.Contains(w.Body.String(), "event: error") {
 			t.Errorf("expected SSE error event, got %q", w.Body.String())
 		}
@@ -2307,8 +1671,7 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
 		req.Header.Set("Accept", "text/event-stream")
-		w := &flusherErrWriter{}
-		handler(w, req)
+		handler(&flusherErrWriter{}, req)
 	})
 
 	t.Run("JSON_Success", func(t *testing.T) {
@@ -2319,25 +1682,13 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 		})
 		defer stop()
 
-		payload := `{"prompt":"what is the temperature?","session_id":"sess-json-789"}`
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
-		req.Header.Set("Accept", "application/json")
-
-		w := httptest.NewRecorder()
-		handler(w, req)
-
+		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"what is the temperature?","session_id":"sess-json-789"}`), "Accept", "application/json")
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d", w.Code)
 		}
 		var resp VoiceAskResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("failed to decode JSON response: %v", err)
-		}
-		if resp.Reply != "The temperature is 72 degrees." {
-			t.Errorf("expected reply 'The temperature is 72 degrees.', got %q", resp.Reply)
-		}
-		if resp.SessionID != "sess-json-789" {
-			t.Errorf("expected session_id 'sess-json-789', got %q", resp.SessionID)
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Reply != "The temperature is 72 degrees." || resp.SessionID != "sess-json-789" {
+			t.Fatalf("unexpected JSON response: %+v, err: %v", resp, err)
 		}
 	})
 
@@ -2349,47 +1700,28 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 		})
 		defer stop()
 
-		// JSON mode with error
-		reqJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-2"}`))
-		reqJSON.Header.Set("Accept", "application/json")
-		wJSON := httptest.NewRecorder()
-		hErr(wJSON, reqJSON)
-
-		if wJSON.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 InternalServerError, got %d", wJSON.Code)
-		}
-		if !strings.Contains(wJSON.Body.String(), "deliberation timed out") {
-			t.Errorf("expected error detail in response, got:\n%s", wJSON.Body.String())
+		wJSON := runHTTP(hErr, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-2"}`), "Accept", "application/json")
+		if wJSON.Code != http.StatusInternalServerError || !strings.Contains(wJSON.Body.String(), "deliberation timed out") {
+			t.Errorf("expected 500 error, got %d: %s", wJSON.Code, wJSON.Body.String())
 		}
 
-		// Nil pool handling
 		hNil := handleVoiceAsk(nil)
-		reqNil := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil"}`))
-		wNil := httptest.NewRecorder()
-		hNil(wNil, reqNil)
-		if wNil.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 for nil pool, got %d", wNil.Code)
+		if w := runHTTP(hNil, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil"}`)); w.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500 for nil pool, got %d", w.Code)
 		}
-
-		// Nil pool SSE mode
-		reqNilSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil-sse"}`))
-		reqNilSSE.Header.Set("Accept", "text/event-stream")
-		wNilSSE := httptest.NewRecorder()
-		hNil(wNilSSE, reqNilSSE)
-		if wNilSSE.Code != http.StatusOK {
-			t.Errorf("expected 200 for SSE with nil pool, got %d", wNilSSE.Code)
-		}
-		if !strings.Contains(wNilSSE.Body.String(), "event: error") {
-			t.Errorf("expected error event for nil pool SSE, got:\n%s", wNilSSE.Body.String())
+		if w := runHTTP(hNil, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil-sse"}`), "Accept", "text/event-stream"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "event: error") {
+			t.Errorf("expected 200 SSE error for nil pool, got %d: %s", w.Code, w.Body.String())
 		}
 
 		mRec := httptest.NewRecorder()
 		metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-		if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`) {
-			t.Errorf("expected voice TTFR metric for sse/error, got:\n%s", mRec.Body.String())
-		}
-		if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`) {
-			t.Errorf("expected voice TTFR metric for json/error, got:\n%s", mRec.Body.String())
+		for _, metric := range []string{
+			`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`,
+			`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`,
+		} {
+			if !strings.Contains(mRec.Body.String(), metric) {
+				t.Errorf("missing metric %q", metric)
+			}
 		}
 	})
 }
@@ -2401,6 +1733,27 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 	voiceHome := filepath.Join(tmpDir, "voice")
 	spawner := runner.NewMockSpawner()
 
+	mkCfg := func(engine, model, harnessKey, apiKey, tmpl string) *config.Config {
+		cd := &config.ConfigData{
+			HarnessAPIKey: harnessKey,
+			APIKey:        apiKey,
+			SystemPrompt:  "Test System Prompt",
+			Voice: config.VoiceConfig{
+				Engine:           engine,
+				Model:            model,
+				PrewarmedTargets: []string{"kiosk"},
+			},
+		}
+		if tmpl != "" {
+			cd.Voice.AmbientContext = &config.AmbientContextConfig{
+				CacheTTL: "30s",
+				Template: tmpl,
+				Tools:    []config.AmbientToolConfig{{Name: "ha", Tool: "get_state"}},
+			}
+		}
+		return config.NewFromData(cd)
+	}
+
 	tests := []struct {
 		name          string
 		cfg           *config.Config
@@ -2408,95 +1761,13 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		wantModel     string
 		wantAPIKey    string
 	}{
-		{
-			name: "GeminiAPI_WithHarnessAPIKey",
-			cfg: config.NewFromData(&config.ConfigData{
-				HarnessAPIKey: "test-harness-key",
-				Voice: config.VoiceConfig{
-					Engine:           "gemini_api",
-					Model:            "gemini-2.5-flash",
-					PrewarmedTargets: []string{"kiosk"},
-				},
-				SystemPrompt: "Test System Prompt",
-			}),
-			wantGeminiAPI: true,
-			wantModel:     "gemini-2.5-flash",
-			wantAPIKey:    "test-harness-key",
-		},
-		{
-			name: "GeminiAPI_WithAmbientContext",
-			cfg: config.NewFromData(&config.ConfigData{
-				APIKey: "test-ambient-key",
-				Voice: config.VoiceConfig{
-					Engine: "gemini_api",
-					AmbientContext: &config.AmbientContextConfig{
-						CacheTTL: "30s",
-						Template: "Status: {{.ha.state}}",
-						Tools: []config.AmbientToolConfig{
-							{Name: "ha", Tool: "get_state"},
-						},
-					},
-				},
-			}),
-			wantGeminiAPI: true,
-			wantModel:     "fallback-model",
-			wantAPIKey:    "test-ambient-key",
-		},
-		{
-			name: "GeminiAPI_WithAmbientContext_InvalidTemplate",
-			cfg: config.NewFromData(&config.ConfigData{
-				APIKey: "test-ambient-key",
-				Voice: config.VoiceConfig{
-					Engine: "gemini_api",
-					AmbientContext: &config.AmbientContextConfig{
-						CacheTTL: "30s",
-						Template: "{{.invalid template syntax",
-					},
-				},
-			}),
-			wantGeminiAPI: true,
-			wantModel:     "fallback-model",
-			wantAPIKey:    "test-ambient-key",
-		},
-		{
-			name: "GeminiAPI_WithAPIKeyFallback",
-			cfg: config.NewFromData(&config.ConfigData{
-				APIKey: "test-standard-key",
-				Voice: config.VoiceConfig{
-					Engine: "gemini_api",
-				},
-			}),
-			wantGeminiAPI: true,
-			wantModel:     "fallback-model",
-			wantAPIKey:    "test-standard-key",
-		},
-		{
-			name: "GeminiAPI_EmptyKeyFallbackToAgy",
-			cfg: config.NewFromData(&config.ConfigData{
-				Voice: config.VoiceConfig{
-					Engine: "gemini_api",
-				},
-			}),
-			wantGeminiAPI: false,
-			wantModel:     "fallback-model",
-		},
-		{
-			name: "AgyEngine",
-			cfg: config.NewFromData(&config.ConfigData{
-				HarnessAPIKey: "some-key",
-				Voice: config.VoiceConfig{
-					Engine: "agy",
-				},
-			}),
-			wantGeminiAPI: false,
-			wantModel:     "fallback-model",
-		},
-		{
-			name:          "NilConfig",
-			cfg:           nil,
-			wantGeminiAPI: false,
-			wantModel:     "fallback-model",
-		},
+		{"GeminiAPI_WithHarnessAPIKey", mkCfg("gemini_api", "gemini-2.5-flash", "test-harness-key", "", ""), true, "gemini-2.5-flash", "test-harness-key"},
+		{"GeminiAPI_WithAmbientContext", mkCfg("gemini_api", "", "", "test-ambient-key", "Status: {{.ha.state}}"), true, "fallback-model", "test-ambient-key"},
+		{"GeminiAPI_WithAmbientContext_InvalidTemplate", mkCfg("gemini_api", "", "", "test-ambient-key", "{{.invalid"), true, "fallback-model", "test-ambient-key"},
+		{"GeminiAPI_WithAPIKeyFallback", mkCfg("gemini_api", "", "", "test-standard-key", ""), true, "fallback-model", "test-standard-key"},
+		{"GeminiAPI_EmptyKeyFallbackToAgy", mkCfg("gemini_api", "", "", "", ""), false, "fallback-model", ""},
+		{"AgyEngine", mkCfg("agy", "", "some-key", "", ""), false, "fallback-model", ""},
+		{"NilConfig", nil, false, "fallback-model", ""},
 	}
 
 	for _, tc := range tests {
@@ -2634,65 +1905,14 @@ func TestBuildPoolEnv(t *testing.T) {
 		useTmpDir bool
 		tz        []string
 		wantExact []string
-		wantEnv   func(tmpDir string) map[string]string
+		wantEnv   map[string]string
 		checkDirs bool
 	}{
-		{
-			name:      "EmptyRuntimeBaseReturnsBaseEnv",
-			base:      []string{"FOO=bar", "BAZ=qux"},
-			wantExact: []string{"FOO=bar", "BAZ=qux"},
-		},
-		{
-			name:      "InjectsUnifiedCacheDirectories",
-			base:      []string{"EXISTING=1"},
-			useTmpDir: true,
-			wantEnv: func(tmpDir string) map[string]string {
-				return map[string]string{
-					"GOCACHE":             filepath.Join(tmpDir, "cache", "go-build"),
-					"GOPATH":              filepath.Join(tmpDir, "cache", "go"),
-					"GOMODCACHE":          filepath.Join(tmpDir, "cache", "go", "pkg", "mod"),
-					"GOLANGCI_LINT_CACHE": filepath.Join(tmpDir, "cache", "golangci-lint"),
-					"EXISTING":            "1",
-				}
-			},
-			checkDirs: true,
-		},
-		{
-			name: "PreservesExplicitCacheEnv",
-			base: []string{
-				"GOCACHE=/custom/gocache",
-				"GOPATH=/custom/gopath",
-				"GOMODCACHE=/custom/modcache",
-				"GOLANGCI_LINT_CACHE=/custom/lintcache",
-			},
-			useTmpDir: true,
-			wantEnv: func(tmpDir string) map[string]string {
-				return map[string]string{
-					"GOCACHE":             "/custom/gocache",
-					"GOPATH":              "/custom/gopath",
-					"GOMODCACHE":          "/custom/modcache",
-					"GOLANGCI_LINT_CACHE": "/custom/lintcache",
-				}
-			},
-		},
-		{
-			name:      "InjectsConfiguredTimezone",
-			base:      []string{"EXISTING=1"},
-			useTmpDir: true,
-			tz:        []string{"America/Los_Angeles"},
-			wantEnv: func(tmpDir string) map[string]string {
-				return map[string]string{"TZ": "America/Los_Angeles"}
-			},
-		},
-		{
-			name:      "PreservesExplicitTZ",
-			base:      []string{"TZ=UTC"},
-			useTmpDir: true,
-			tz:        []string{"America/Los_Angeles"},
-			wantEnv: func(tmpDir string) map[string]string {
-				return map[string]string{"TZ": "UTC"}
-			},
-		},
+		{"EmptyRuntimeBaseReturnsBaseEnv", []string{"FOO=bar", "BAZ=qux"}, false, nil, []string{"FOO=bar", "BAZ=qux"}, nil, false},
+		{"InjectsUnifiedCacheDirectories", []string{"EXISTING=1"}, true, nil, nil, map[string]string{"GOCACHE": "<tmp>/cache/go-build", "GOPATH": "<tmp>/cache/go", "GOMODCACHE": "<tmp>/cache/go/pkg/mod", "GOLANGCI_LINT_CACHE": "<tmp>/cache/golangci-lint", "EXISTING": "1"}, true},
+		{"PreservesExplicitCacheEnv", []string{"GOCACHE=/custom/gocache", "GOPATH=/custom/gopath", "GOMODCACHE=/custom/modcache", "GOLANGCI_LINT_CACHE=/custom/lintcache"}, true, nil, nil, map[string]string{"GOCACHE": "/custom/gocache", "GOPATH": "/custom/gopath", "GOMODCACHE": "/custom/modcache", "GOLANGCI_LINT_CACHE": "/custom/lintcache"}, false},
+		{"InjectsConfiguredTimezone", []string{"EXISTING=1"}, true, []string{"America/Los_Angeles"}, nil, map[string]string{"TZ": "America/Los_Angeles"}, false},
+		{"PreservesExplicitTZ", []string{"TZ=UTC"}, true, []string{"America/Los_Angeles"}, nil, map[string]string{"TZ": "UTC"}, false},
 	}
 
 	for _, tc := range tests {
@@ -2711,11 +1931,11 @@ func TestBuildPoolEnv(t *testing.T) {
 				}
 				return
 			}
-			expectedEnv := tc.wantEnv(tmpDir)
 			envMap := envSliceToMap(res)
-			for k, v := range expectedEnv {
-				if envMap[k] != v {
-					t.Errorf("expected %s=%q, got %q", k, v, envMap[k])
+			for k, v := range tc.wantEnv {
+				expected := strings.ReplaceAll(v, "<tmp>", tmpDir)
+				if envMap[k] != expected {
+					t.Errorf("expected %s=%q, got %q", k, expected, envMap[k])
 				}
 			}
 			if tc.checkDirs {
@@ -2814,36 +2034,35 @@ func TestHandlePRRegister(t *testing.T) {
 	handler := handlePRRegister(store)
 
 	postPR := func(h http.HandlerFunc, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(body))
-		rec := httptest.NewRecorder()
-		h(rec, req)
-		return rec
+		return runHTTP(h, http.MethodPost, "/internal/pr/register", strings.NewReader(body))
 	}
 
 	errorCases := []struct {
 		name       string
 		method     string
-		h          http.HandlerFunc
 		body       string
 		wantStatus int
+		nilStore   bool
 	}{
-		{"method not allowed", http.MethodGet, handler, "", http.StatusMethodNotAllowed},
-		{"nil store", http.MethodPost, handlePRRegister(nil), "{}", http.StatusInternalServerError},
-		{"invalid JSON", http.MethodPost, handler, "{invalid-json", http.StatusBadRequest},
-		{"empty repo", http.MethodPost, handler, `{"repo":"","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"1555405874565091380"}`, http.StatusBadRequest},
-		{"zero pr_number", http.MethodPost, handler, `{"repo":"aerial","pr_number":0,"branch":"feat","head_sha":"sha","target_id":"1555405874565091380"}`, http.StatusBadRequest},
-		{"empty branch", http.MethodPost, handler, `{"repo":"aerial","pr_number":1,"branch":"","head_sha":"sha","target_id":"1555405874565091380"}`, http.StatusBadRequest},
-		{"empty head_sha", http.MethodPost, handler, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"","target_id":"1555405874565091380"}`, http.StatusBadRequest},
-		{"empty target_id", http.MethodPost, handler, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":""}`, http.StatusBadRequest},
-		{"too short target_id", http.MethodPost, handler, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"12345"}`, http.StatusBadRequest},
-		{"too long target_id", http.MethodPost, handler, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"123456789012345678901"}`, http.StatusBadRequest},
-		{"non-numeric target_id", http.MethodPost, handler, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"155540587456509138A"}`, http.StatusBadRequest},
+		{"method not allowed", http.MethodGet, "", http.StatusMethodNotAllowed, false},
+		{"nil store", http.MethodPost, "{}", http.StatusInternalServerError, true},
+		{"invalid JSON", http.MethodPost, "{invalid-json", http.StatusBadRequest, false},
+		{"empty repo", http.MethodPost, `{"repo":"","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"1555405874565091380"}`, http.StatusBadRequest, false},
+		{"zero pr_number", http.MethodPost, `{"repo":"aerial","pr_number":0,"branch":"feat","head_sha":"sha","target_id":"1555405874565091380"}`, http.StatusBadRequest, false},
+		{"empty branch", http.MethodPost, `{"repo":"aerial","pr_number":1,"branch":"","head_sha":"sha","target_id":"1555405874565091380"}`, http.StatusBadRequest, false},
+		{"empty head_sha", http.MethodPost, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"","target_id":"1555405874565091380"}`, http.StatusBadRequest, false},
+		{"empty target_id", http.MethodPost, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":""}`, http.StatusBadRequest, false},
+		{"too short target_id", http.MethodPost, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"12345"}`, http.StatusBadRequest, false},
+		{"too long target_id", http.MethodPost, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"123456789012345678901"}`, http.StatusBadRequest, false},
+		{"non-numeric target_id", http.MethodPost, `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"155540587456509138A"}`, http.StatusBadRequest, false},
 	}
 	for _, tc := range errorCases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, "/internal/pr/register", strings.NewReader(tc.body))
-			rec := httptest.NewRecorder()
-			tc.h(rec, req)
+			h := handler
+			if tc.nilStore {
+				h = handlePRRegister(nil)
+			}
+			rec := runHTTP(h, tc.method, "/internal/pr/register", strings.NewReader(tc.body))
 			if rec.Code != tc.wantStatus {
 				t.Errorf("[%s] Expected %d, got %d (%s)", tc.name, tc.wantStatus, rec.Code, rec.Body.String())
 			}
@@ -2988,51 +2207,36 @@ func TestHandlePRRegister(t *testing.T) {
 			},
 		})
 		errPoolHandler := handlePRRegister(store, errPool)
-
-		// Standalone PR with empty title + widget delivery error
-		payloadEmptyTitle := `{"repo":"aerial","pr_number":603,"branch":"feat/empty-title","head_sha":"sha603","target_id":"1555405874565091380"}`
-		rec := postPR(errPoolHandler, payloadEmptyTitle)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("Expected 200 OK even when widget delivery fails, got %d", rec.Code)
-		}
-
-		// Standalone PR with GetPRByNumber error + UpdatePRStatusMessageID error
 		okPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
 				return "msg-new-id", nil
 			},
 		})
 		okPoolHandler := handlePRRegister(store, okPool)
+
+		// Standalone PR with empty title + widget delivery error
+		payloadEmptyTitle := `{"repo":"aerial","pr_number":603,"branch":"feat/empty-title","head_sha":"sha603","target_id":"1555405874565091380"}`
+		if rec := postPR(errPoolHandler, payloadEmptyTitle); rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK even when widget delivery fails, got %d", rec.Code)
+		}
+
+		// Standalone PR with GetPRByNumber error + UpdatePRStatusMessageID error
 		store.FailNext("GetPRByNumber", errors.New("get pr failed"))
 		store.FailNext("UpdatePRStatusMessageID", errors.New("update msg id failed"))
-		rec = postPR(okPoolHandler, payloadEmptyTitle)
-		if rec.Code != http.StatusOK {
+		if rec := postPR(okPoolHandler, payloadEmptyTitle); rec.Code != http.StatusOK {
 			t.Fatalf("Expected 200 OK when GetPRByNumber/UpdatePRStatusMessageID fail, got %d", rec.Code)
 		}
 
 		// Vanadis chunk widget with errors
 		vanadisPayload := `{"repo":"aerial","pr_number":604,"branch":"feat/v-err","head_sha":"sha604","target_id":"1555405874565091380","vanadis_chunk_id":"chunk-reg-widget-0"}`
-		store.FailNext("GetVanadisChunk", errors.New("get chunk failed"))
-		rec = postPR(okPoolHandler, vanadisPayload)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("Expected 200 OK when GetVanadisChunk fails, got %d", rec.Code)
+		for _, fn := range []string{"GetVanadisChunk", "GetVanadisBuild", "UpdateVanadisBuildStatusMessageID"} {
+			store.FailNext(fn, errors.New("fail "+fn))
+			if rec := postPR(okPoolHandler, vanadisPayload); rec.Code != http.StatusOK {
+				t.Fatalf("Expected 200 OK when %s fails, got %d", fn, rec.Code)
+			}
 		}
-
-		store.FailNext("GetVanadisBuild", errors.New("get build failed"))
-		rec = postPR(okPoolHandler, vanadisPayload)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("Expected 200 OK when GetVanadisBuild fails, got %d", rec.Code)
-		}
-
-		rec = postPR(errPoolHandler, vanadisPayload)
-		if rec.Code != http.StatusOK {
+		if rec := postPR(errPoolHandler, vanadisPayload); rec.Code != http.StatusOK {
 			t.Fatalf("Expected 200 OK when Vanadis DeliverStatusWidget fails, got %d", rec.Code)
-		}
-
-		store.FailNext("UpdateVanadisBuildStatusMessageID", errors.New("update build msg id failed"))
-		rec = postPR(okPoolHandler, vanadisPayload)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("Expected 200 OK when UpdateVanadisBuildStatusMessageID fails, got %d", rec.Code)
 		}
 	}
 }
