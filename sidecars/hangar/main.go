@@ -2925,7 +2925,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		defer cancel()
 
 		resp, code := daemon.ExecuteGitPushEvent(ctx, req)
