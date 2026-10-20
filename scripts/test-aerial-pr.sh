@@ -584,6 +584,16 @@ CLI_DISPUTE_CHECK=$(bash -c "
 ")
 assert_eq "true" "$(echo "$CLI_DISPUTE_CHECK" | grep -q 'Valid numeric pr_num required for roborev override' && echo true || echo false)" "CLI dispatch: dispute-roborev dispatches to override_roborev"
 
+# Case 13: format_aerial_pr_trailer embeds single-line self-healing HTML comment
+TRAILER_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    echo \"t1:\$(format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2')\"
+    echo \"t2:\$(format_aerial_pr_trailer '' '')\"
+")
+assert_eq 't1:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2"} -->' "$(echo "$TRAILER_CHECK" | grep '^t1:')" "format_aerial_pr_trailer formats compact JSON trailer comment"
+assert_eq "t2:" "$(echo "$TRAILER_CHECK" | grep '^t2:')" "format_aerial_pr_trailer returns empty string when all metadata fields are empty"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

@@ -487,6 +487,7 @@ type PRRegistryUpdater interface {
 	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
 	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
+	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error)
 }
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
@@ -638,6 +639,35 @@ func (r *PostgresPRRegistry) IncrementCIFailCount(ctx context.Context, repo stri
 		return 0, err
 	}
 	return count, nil
+}
+
+func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return "", nil
+	}
+	targetID, vanadisChunkID = strings.TrimSpace(targetID), strings.TrimSpace(vanadisChunkID)
+	if vanadisChunkID != "" {
+		chunkQuery := `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND (c.pr_number IS NULL OR c.pr_number = 0 OR c.pr_number = $1) RETURNING b.thread_id;`
+		var chunkThreadID string
+		found, err := r.queryRowScan(ctx, "ensure vanadis chunk pr registered", chunkQuery, []any{&chunkThreadID}, prNumber, vanadisChunkID)
+		if err != nil {
+			return "", err
+		}
+		if found && !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(chunkThreadID) {
+			targetID = strings.TrimSpace(chunkThreadID)
+		}
+	}
+	if !IsValidDiscordSnowflake(targetID) {
+		return "", nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN EXCLUDED.head_sha != '' AND COALESCE(pr_registry.merge_sha, '') = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title)); err != nil {
+		return "", fmt.Errorf("ensure pr registered: %w", err)
+	}
+	return targetID, nil
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
@@ -2483,10 +2513,37 @@ type GitHubPRRef struct {
 type GitHubPullRequest struct {
 	Number         int         `json:"number"`
 	Title          string      `json:"title"`
+	Body           string      `json:"body"`
 	Head           GitHubPRRef `json:"head"`
 	Base           GitHubPRRef `json:"base"`
 	Merged         bool        `json:"merged"`
 	MergeCommitSHA string      `json:"merge_commit_sha"`
+}
+
+const aerialPRMetadataPrefix = "<!-- aerial-pr:"
+
+func ParseAerialPRMetadata(body string) (string, string, bool) {
+	idx := strings.LastIndex(body, aerialPRMetadataPrefix)
+	if idx < 0 {
+		return "", "", false
+	}
+	rest := body[idx+len(aerialPRMetadataPrefix):]
+	endIdx := strings.Index(rest, "-->")
+	if endIdx < 0 {
+		return "", "", false
+	}
+	var trailer struct {
+		TargetID       string `json:"target_id"`
+		VanadisChunkID string `json:"vanadis_chunk_id"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(rest[:endIdx])), &trailer); err != nil {
+		return "", "", false
+	}
+	targetID, chunkID := strings.TrimSpace(trailer.TargetID), strings.TrimSpace(trailer.VanadisChunkID)
+	if !IsValidDiscordSnowflake(targetID) {
+		targetID = ""
+	}
+	return targetID, chunkID, targetID != "" || chunkID != ""
 }
 
 type GitHubPullRequestPayload struct {
@@ -2864,6 +2921,18 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
 
 		if s.registry != nil && res.PRNumber > 0 {
+			if trailerTargetID, trailerChunkID, ok := ParseAerialPRMetadata(p.PullRequest.Body); ok {
+				resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, trailerTargetID, trailerChunkID)
+				if err != nil {
+					return nil, err
+				}
+				res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, trailerTargetID)
+				if res.Action == "opened" {
+					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "", "", nil); err != nil {
+						log.Printf("[webhooks-router] [widget] warning syncing pr_opened widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+					}
+				}
+			}
 			switch res.Action {
 			case "closed":
 				if p.PullRequest.Merged {

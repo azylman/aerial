@@ -752,6 +752,14 @@ register_pr_in_brain() {
     return 1
 }
 
+format_aerial_pr_trailer() {
+    local t_id="${1:-}" v_id="${2:-}"
+    if [ -z "$t_id" ] && [ -z "$v_id" ]; then
+        return 0
+    fi
+    printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" '{target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id}')"
+}
+
 rebase_staged_changes() {
     local target_branch="${1:-$DEFAULT_BRANCH}"
     local msg="${2:-chore: temporary rebase commit}"
@@ -1030,6 +1038,12 @@ submit_scratch() {
     local commit_sha
     commit_sha=$(git rev-parse HEAD)
 
+    local pr_trailer
+    pr_trailer=$(format_aerial_pr_trailer "$target_id" "$vanadis_chunk_id")
+    if [ -n "$pr_trailer" ]; then
+        pr_body="${pr_body}"$'\n\n'"${pr_trailer}"
+    fi
+
     # 6. Push branch to remote
     echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
     git push -u origin "$branch" >/dev/null 2>&1 || {
@@ -1136,11 +1150,15 @@ submit_scratch() {
         '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $metadata, vanadis_chunk_id: $vanadis_chunk_id}')
 
     if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
-        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-            SCRATCH_DIR_CLEANUP=""
+        if [ -n "$pr_trailer" ]; then
+            echo "⚠️ [aerial-pr] Warning: Brain registration unreachable; relying on webhooks-router PR trailer self-healing for PR #${pr_num}." >&2
+        else
+            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+                SCRATCH_DIR_CLEANUP=""
+            fi
+            exit 1
         fi
-        exit 1
     fi
 
     # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
