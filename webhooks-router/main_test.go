@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1912,12 +1913,14 @@ func TestProcessHangarEvent(t *testing.T) {
 	tests := []struct {
 		name               string
 		evt                HangarDeployEvent
+		nomadJobJSON       string
 		reg                *mockPRRegistry
 		disp               *mockOutboundDispatcher
 		wantErr            bool
 		wantPR             int
 		wantTargetID       string
 		wantDeployingCalls int
+		wantDeployedJobs   []string
 		wantAdvanceCalls   int
 		wantPrompts        int
 		wantDMs            int
@@ -2120,6 +2123,29 @@ func TestProcessHangarEvent(t *testing.T) {
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
+		{
+			name:               "deploy_started periodic batch job transitions to deployed immediately",
+			evt:                mkHangarEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
+			nomadJobJSON:       `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`,
+			reg:                mkDeployedReg("1555405874565091380", 851, "1fc4aaf", "azylman/aerial", true),
+			disp:               &mockOutboundDispatcher{},
+			wantPR:             851,
+			wantTargetID:       "1555405874565091380",
+			wantDeployingCalls: 1,
+			wantDeployedJobs:   []string{"coverage-ingest"},
+			wantPrompts:        1,
+			wantPromptSubs:     []string{"Continuous Delivery deployment completed for job coverage-ingest on azylman/aerial (PR #851, commit: 1fc4aaf, ref: batch-registered)"},
+		},
+		{
+			name:               "deploy_started periodic batch job tolerates HandleNomadJobSuccess error",
+			evt:                mkHangarEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
+			nomadJobJSON:       `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`,
+			reg:                &mockPRRegistry{deployedErr: errors.New("db transition err")},
+			disp:               &mockOutboundDispatcher{},
+			wantPR:             851,
+			wantTargetID:       "1555405874565091380",
+			wantDeployingCalls: 1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2133,7 +2159,18 @@ func TestProcessHangarEvent(t *testing.T) {
 			if tc.disp != nil {
 				disp = tc.disp
 			}
-			srv := newTestRouter(Config{}, &http.Client{Transport: &zeroCallTransport{}}, reg, disp)
+			cfg := Config{}
+			client := &http.Client{Transport: &zeroCallTransport{}}
+			if tc.nomadJobJSON != "" {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(tc.nomadJobJSON))
+				}))
+				defer ts.Close()
+				cfg.NomadAddr = ts.URL
+				client = ts.Client()
+			}
+			srv := newTestRouter(cfg, client, reg, disp)
 			res, err := srv.ProcessHangarEvent(ctx, tc.evt)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ProcessHangarEvent() err = %v, wantErr %v", err, tc.wantErr)
@@ -2150,6 +2187,9 @@ func TestProcessHangarEvent(t *testing.T) {
 			if tc.reg != nil {
 				if tc.wantDeployingCalls > 0 && len(tc.reg.deployingCalls) != tc.wantDeployingCalls {
 					t.Errorf("deployingCalls = %d, want %d", len(tc.reg.deployingCalls), tc.wantDeployingCalls)
+				}
+				if len(tc.wantDeployedJobs) > 0 && !reflect.DeepEqual(tc.reg.deployedJobCalls, tc.wantDeployedJobs) {
+					t.Errorf("deployedJobCalls = %v, want %v", tc.reg.deployedJobCalls, tc.wantDeployedJobs)
 				}
 				if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
 					t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)

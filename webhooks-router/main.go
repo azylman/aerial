@@ -1998,6 +1998,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	if s.registry != nil && evt.PRNumber > 0 && evt.Event == "deploy_started" && evt.JobName != "" {
 		if _, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
 			log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
+		} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) {
+			if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
+				log.Printf("[webhooks-router] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
+			}
+			return &evt, nil
 		}
 	}
 
