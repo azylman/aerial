@@ -159,16 +159,12 @@ func spawnDefaultMockPipes(cfg DaemonConfig, closeOutW bool, logPrefix string) (
 	outR, outW := io.Pipe()
 	errR, errW := io.Pipe()
 
-	go func() {
+	discardIn := func() {
 		if _, err := io.Copy(io.Discard, inR); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
 			log.Printf("%s Warning: failed to discard stdin: %v", logPrefix, err)
 		}
-	}()
+	}
 	go func() {
-		defer closeQuietly(errW)
-		if closeOutW {
-			defer closeQuietly(outW)
-		}
 		sessID := cfg.SessionID
 		if sessID == "" || !IsValidUUID(sessID) {
 			sessID = "550e8400-e29b-41d4-a716-446655440000"
@@ -176,6 +172,16 @@ func spawnDefaultMockPipes(cfg DaemonConfig, closeOutW bool, logPrefix string) (
 		if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
 			log.Printf("%s Warning: failed to write init event: %v", logPrefix, err)
 		}
+		closeQuietly(errW)
+		if closeOutW {
+			var buf [4096]byte
+			if _, err := inR.Read(buf[:]); err == nil {
+				go discardIn()
+			}
+			closeQuietly(outW)
+			return
+		}
+		discardIn()
 	}()
 	return inW, outR, errR, &MockProcessHandle{pid: 12345}, nil
 }
