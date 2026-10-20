@@ -13,80 +13,26 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 		expected          []string
 		minExpectedChunks int
 	}{
-		{
-			name:     "single complete sentence",
-			chunks:   []string{"Hello, world. "},
-			expected: []string{"Hello, world."},
-		},
-		{
-			name:     "token deltas streaming sentences",
-			chunks:   []string{"Hello", ", ", "Alex", ". ", "How", " are", " you?"},
-			expected: []string{"Hello, Alex.", "How are you?"},
-		},
-		{
-			name:     "multiple sentences in single delta",
-			chunks:   []string{"First sentence. Second sentence! Third sentence? "},
-			expected: []string{"First sentence.", "Second sentence!", "Third sentence?"},
-		},
-		{
-			name:     "decimal numbers are not split",
-			chunks:   []string{"The price is $3.14 today. ", "That is cheap."},
-			expected: []string{"The price is $3.14 today.", "That is cheap."},
-		},
-		{
-			name:     "abbreviations are not split",
-			chunks:   []string{"Dr. Smith visited e.g. the clinic at 5 p.m. yesterday. ", "All was well."},
-			expected: []string{"Dr. Smith visited e.g. the clinic at 5 p.m. yesterday.", "All was well."},
-		},
-		{
-			name:     "numbered list prefixes are not split",
-			chunks:   []string{"1. First item on the list. ", "2. Second item on the list."},
-			expected: []string{"1. First item on the list.", "2. Second item on the list."},
-		},
-		{
-			name:     "initials and acronyms are not split",
-			chunks:   []string{"Agent J. Doe arrived from the U.S. base today. ", "He is ready."},
-			expected: []string{"Agent J. Doe arrived from the U.S. base today.", "He is ready."},
-		},
-		{
-			name:     "ellipses followed by text",
-			chunks:   []string{"Thinking... wait for it. ", "Done."},
-			expected: []string{"Thinking... wait for it.", "Done."},
-		},
-		{
-			name:     "closing quotes after punctuation",
-			chunks:   []string{"She said, \"Turn off the lights!\" ", "And he did."},
-			expected: []string{"She said, \"Turn off the lights!\"", "And he did."},
-		},
-		{
-			name:     "double newline paragraph break",
-			chunks:   []string{"Here is the first paragraph with no period\n\nAnd here is the second paragraph."},
-			expected: []string{"Here is the first paragraph with no period", "And here is the second paragraph."},
-		},
-		{
-			name:     "unpunctuated text emitted on flush",
-			chunks:   []string{"Incomplete sentence with no ending punctuation"},
-			expected: []string{"Incomplete sentence with no ending punctuation"},
-		},
-		{
-			name:     "empty chunks, whitespace, and isolated punctuation",
-			chunks:   []string{"", "   ", "First sentence.   ", "", "  ", ".", "  "},
-			expected: []string{"First sentence."},
-		},
-		{
-			name:              "soft ceiling run on clause split",
-			chunks:            []string{strings.Repeat("word ", 26) + ", " + "this is a very long run-on clause that just keeps going and going and going without any period"},
-			minExpectedChunks: 2,
-		},
+		{"single complete sentence", []string{"Hello, world. "}, []string{"Hello, world."}, 0},
+		{"token deltas streaming sentences", []string{"Hello", ", ", "Alex", ". ", "How", " are", " you?"}, []string{"Hello, Alex.", "How are you?"}, 0},
+		{"multiple sentences in single delta", []string{"First sentence. Second sentence! Third sentence? "}, []string{"First sentence.", "Second sentence!", "Third sentence?"}, 0},
+		{"decimal numbers are not split", []string{"The price is $3.14 today. ", "That is cheap."}, []string{"The price is $3.14 today.", "That is cheap."}, 0},
+		{"abbreviations are not split", []string{"Dr. Smith visited e.g. the clinic at 5 p.m. yesterday. ", "All was well."}, []string{"Dr. Smith visited e.g. the clinic at 5 p.m. yesterday.", "All was well."}, 0},
+		{"numbered list prefixes are not split", []string{"1. First item on the list. ", "2. Second item on the list."}, []string{"1. First item on the list.", "2. Second item on the list."}, 0},
+		{"initials and acronyms are not split", []string{"Agent J. Doe arrived from the U.S. base today. ", "He is ready."}, []string{"Agent J. Doe arrived from the U.S. base today.", "He is ready."}, 0},
+		{"ellipses followed by text", []string{"Thinking... wait for it. ", "Done."}, []string{"Thinking... wait for it.", "Done."}, 0},
+		{"closing quotes after punctuation", []string{"She said, \"Turn off the lights!\" ", "And he did."}, []string{"She said, \"Turn off the lights!\"", "And he did."}, 0},
+		{"double newline paragraph break", []string{"Here is the first paragraph with no period\n\nAnd here is the second paragraph."}, []string{"Here is the first paragraph with no period", "And here is the second paragraph."}, 0},
+		{"unpunctuated text emitted on flush", []string{"Incomplete sentence with no ending punctuation"}, []string{"Incomplete sentence with no ending punctuation"}, 0},
+		{"empty chunks, whitespace, and isolated punctuation", []string{"", "   ", "First sentence.   ", "", "  ", ".", "  "}, []string{"First sentence."}, 0},
+		{"soft ceiling run on clause split", []string{strings.Repeat("word ", 26) + ", " + "this is a very long run-on clause that just keeps going and going and going without any period"}, nil, 2},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sd := NewSentenceDetector()
 			var got []string
-			emit := func(s string) {
-				got = append(got, s)
-			}
+			emit := func(s string) { got = append(got, s) }
 
 			for _, c := range tc.chunks {
 				sd.Feed(c, emit)
@@ -99,7 +45,6 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 				}
 				return
 			}
-
 			if len(got) == 0 && len(tc.expected) == 0 {
 				return
 			}
@@ -113,9 +58,7 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 func TestSentenceDetector_IdempotentFlush(t *testing.T) {
 	sd := NewSentenceDetector()
 	var got []string
-	emit := func(s string) {
-		got = append(got, s)
-	}
+	emit := func(s string) { got = append(got, s) }
 
 	sd.Feed("One sentence. Trailing thought", emit)
 	sd.Flush(emit)
