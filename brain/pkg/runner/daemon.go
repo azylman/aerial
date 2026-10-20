@@ -53,118 +53,76 @@ type streamInputMessage struct {
 
 // BuildDaemonArgs constructs the CLI arguments for launching an agy streaming daemon process.
 func BuildDaemonArgs(cfg DaemonConfig) []string {
-	args := []string{
-		"--dangerously-skip-permissions",
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-	}
+	args := []string{"--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json"}
 	if cfg.SessionID != "" {
 		args = append(args, "--conversation", cfg.SessionID)
 	}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-
-	printTimeout := cfg.Timeout
-	if printTimeout <= 0 {
-		printTimeout = 60 * time.Minute
+	t := cfg.Timeout
+	if t <= 0 {
+		t = 60 * time.Minute
 	}
-	if int(printTimeout.Seconds())%60 == 0 {
-		args = append(args, "--print-timeout", fmt.Sprintf("%dm", int(printTimeout.Minutes())))
+	if int(t.Seconds())%60 == 0 {
+		args = append(args, "--print-timeout", fmt.Sprintf("%dm", int(t.Minutes())))
 	} else {
-		args = append(args, "--print-timeout", fmt.Sprintf("%ds", int(printTimeout.Seconds())))
+		args = append(args, "--print-timeout", fmt.Sprintf("%ds", int(t.Seconds())))
 	}
-
 	return args
 }
 
 // extractSubagentID extracts a subagent conversation ID from invoke_subagent tool output.
-// It parses JSON objects and arrays via json.Unmarshal / json.Decoder, supporting both
-// camelCase ("conversationId") and snake_case ("conversation_id") keys.
 func extractSubagentID(toolOut string) string {
 	trimmed := strings.TrimSpace(toolOut)
 	if trimmed == "" {
 		return ""
 	}
-
-	type subagentItem struct {
-		ConversationID string `json:"conversationId"`
-		AltConvID      string `json:"conversation_id"`
+	type itemJSON struct {
+		ID    string `json:"conversationId"`
+		AltID string `json:"conversation_id"`
 	}
-	type subagentPayload struct {
-		ConversationID string         `json:"conversationId"`
-		AltConvID      string         `json:"conversation_id"`
-		Subagents      []subagentItem `json:"subagents"`
+	type payload struct {
+		itemJSON
+		Subagents []itemJSON `json:"subagents"`
 	}
-
-	extractFromItem := func(item subagentItem) string {
-		id := strings.TrimSpace(item.ConversationID)
-		if id == "" {
-			id = strings.TrimSpace(item.AltConvID)
+	getID := func(i itemJSON) string {
+		if s := strings.TrimSpace(i.ID); s != "" {
+			return s
 		}
-		if id != "" {
-			return strings.Clone(id)
-		}
-		return ""
+		return strings.TrimSpace(i.AltID)
 	}
-
-	extractFromPayload := func(payload subagentPayload) string {
-		id := strings.TrimSpace(payload.ConversationID)
-		if id == "" {
-			id = strings.TrimSpace(payload.AltConvID)
-		}
-		if id != "" {
-			return strings.Clone(id)
-		}
-		for _, item := range payload.Subagents {
-			if subID := extractFromItem(item); subID != "" {
-				return subID
-			}
-		}
-		return ""
-	}
-
-	// 1. Direct array unmarshal
-	var list []subagentItem
-	if err := json.Unmarshal([]byte(trimmed), &list); err == nil {
-		for _, item := range list {
-			if id := extractFromItem(item); id != "" {
+	decodeAt := func(s string) string {
+		var p payload
+		if err := json.NewDecoder(strings.NewReader(s)).Decode(&p); err == nil {
+			if id := getID(p.itemJSON); id != "" {
 				return id
 			}
-		}
-	}
-
-	// 2. Direct object unmarshal
-	var payload subagentPayload
-	if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-		if id := extractFromPayload(payload); id != "" {
-			return id
-		}
-	}
-
-	// 3. Embedded JSON fallback for lines with prefixes
-	for i := 0; i < len(trimmed); i++ {
-		switch trimmed[i] {
-		case '[':
-			var embeddedList []subagentItem
-			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
-			if err := dec.Decode(&embeddedList); err == nil {
-				for _, item := range embeddedList {
-					if id := extractFromItem(item); id != "" {
-						return id
-					}
-				}
-			}
-		case '{':
-			var embeddedPayload subagentPayload
-			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
-			if err := dec.Decode(&embeddedPayload); err == nil {
-				if id := extractFromPayload(embeddedPayload); id != "" {
+			for _, sub := range p.Subagents {
+				if id := getID(sub); id != "" {
 					return id
 				}
 			}
 		}
+		var list []itemJSON
+		if err := json.NewDecoder(strings.NewReader(s)).Decode(&list); err == nil {
+			for _, sub := range list {
+				if id := getID(sub); id != "" {
+					return id
+				}
+			}
+		}
+		return ""
 	}
-
+	if id := decodeAt(trimmed); id != "" {
+		return id
+	}
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '{' || trimmed[i] == '[' {
+			if id := decodeAt(trimmed[i:]); id != "" {
+				return id
+			}
+		}
+	}
 	return ""
 }
