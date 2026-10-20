@@ -31,7 +31,6 @@ type threadSummaryRecord struct {
 }
 
 // FakeStore is a thread-safe, pure Go in-memory implementation of db.Store.
-// It stores state in memory without any external SQL driver, filesystem, or CGo dependencies.
 type FakeStore struct {
 	mu sync.RWMutex
 
@@ -53,10 +52,10 @@ type FakeStore struct {
 	runs     map[string]*ScheduleRun
 
 	// FactStore state
-	facts        map[int64]*FactWithEmbedding
-	nextFactID   int64
-	watermarks   map[string]int64
-	extractedAt  map[string]time.Time
+	facts       map[int64]*FactWithEmbedding
+	nextFactID  int64
+	watermarks  map[string]int64
+	extractedAt map[string]time.Time
 
 	// TranscriptStore state
 	sessionSummaries map[string]*SessionSummary
@@ -119,27 +118,6 @@ func (f *FakeStore) checkClosedAndFail(method string) error {
 	return nil
 }
 
-// Deep clone helpers to prevent pointer leaks across -race test goroutines
-func cloneMessage(m *Message) *Message {
-	if m == nil {
-		return nil
-	}
-	cp := *m
-	if m.Metadata.Mentions != nil {
-		cp.Metadata.Mentions = append([]string(nil), m.Metadata.Mentions...)
-	}
-	if m.Metadata.MentionUserIDs != nil {
-		cp.Metadata.MentionUserIDs = append([]string(nil), m.Metadata.MentionUserIDs...)
-	}
-	if m.Metadata.MentionRoleIDs != nil {
-		cp.Metadata.MentionRoleIDs = append([]string(nil), m.Metadata.MentionRoleIDs...)
-	}
-	if m.Metadata.Attachments != nil {
-		cp.Metadata.Attachments = append([]string(nil), m.Metadata.Attachments...)
-	}
-	return &cp
-}
-
 func clonePtr[T any](v *T) *T {
 	if v == nil {
 		return nil
@@ -148,19 +126,24 @@ func clonePtr[T any](v *T) *T {
 	return &cp
 }
 
-func cloneSessionInfo(s *SessionInfo) *SessionInfo     { return clonePtr(s) }
-func cloneOneShot(s *OneShotSchedule) *OneShotSchedule { return clonePtr(s) }
-func cloneCron(c *CronSchedule) *CronSchedule          { return clonePtr(c) }
+func cloneMessage(m *Message) *Message {
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	cp.Metadata.Mentions = cloneSlice(m.Metadata.Mentions)
+	cp.Metadata.MentionUserIDs = cloneSlice(m.Metadata.MentionUserIDs)
+	cp.Metadata.MentionRoleIDs = cloneSlice(m.Metadata.MentionRoleIDs)
+	cp.Metadata.Attachments = cloneSlice(m.Metadata.Attachments)
+	return &cp
+}
 
 func cloneRun(r *ScheduleRun) *ScheduleRun {
 	if r == nil {
 		return nil
 	}
 	cp := *r
-	if r.CompletedAt != nil {
-		t := *r.CompletedAt
-		cp.CompletedAt = &t
-	}
+	cp.CompletedAt = clonePtr(r.CompletedAt)
 	return &cp
 }
 
@@ -169,10 +152,7 @@ func cloneFactWithEmbedding(fe *FactWithEmbedding) *FactWithEmbedding {
 		return nil
 	}
 	cp := *fe
-	if fe.Embedding != nil {
-		cp.Embedding = make([]float32, len(fe.Embedding))
-		copy(cp.Embedding, fe.Embedding)
-	}
+	cp.Embedding = cloneSlice(fe.Embedding)
 	return &cp
 }
 
@@ -181,39 +161,37 @@ func cloneSessionSummary(s *SessionSummary) *SessionSummary {
 		return nil
 	}
 	cp := *s
-	if s.Embedding != nil {
-		cp.Embedding = append([]float32(nil), s.Embedding...)
-	}
+	cp.Embedding = cloneSlice(s.Embedding)
 	return &cp
 }
 
 func cloneTranscriptSteps(steps []TranscriptStep) []TranscriptStep {
-	if steps == nil {
-		return nil
+	return cloneSlice(steps)
+}
+
+func cloneSliceNonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
 	}
-	cp := make([]TranscriptStep, len(steps))
-	copy(cp, steps)
+	return cloneSlice(s)
+}
+
+func cloneVanadisChunk(c *VanadisChunk) VanadisChunk {
+	cp := *c
+	cp.TargetFiles = cloneSliceNonNil(c.TargetFiles)
+	cp.TargetSymbols = cloneSliceNonNil(c.TargetSymbols)
+	cp.AcceptanceCriteria = cloneSliceNonNil(c.AcceptanceCriteria)
+	if strings.TrimSpace(cp.Effort) == "" {
+		cp.Effort = "medium"
+	}
 	return cp
 }
 
-// =========================================================================
-// MessageStore implementation
-// =========================================================================
-
-func (f *FakeStore) InsertMessage(ctx context.Context, msg Message) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.checkClosedAndFail("InsertMessage"); err != nil {
-		return err
-	}
-
+func (f *FakeStore) insertMessageLocked(msg Message) {
 	if _, exists := f.messages[msg.ID]; exists {
-		// Idempotent insert: do not overwrite or reassign row_id
-		return nil
+		return
 	}
-
-	rowID := atomic.AddInt64(&f.nextRowID, 1)
-	msg.RowID = rowID
+	msg.RowID = atomic.AddInt64(&f.nextRowID, 1)
 	now := time.Now().UTC()
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = now
@@ -226,6 +204,15 @@ func (f *FakeStore) InsertMessage(ctx context.Context, msg Message) error {
 	}
 	f.messages[msg.ID] = cloneMessage(&msg)
 	f.messageOrder = append(f.messageOrder, msg.ID)
+}
+
+func (f *FakeStore) InsertMessage(ctx context.Context, msg Message) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkClosedAndFail("InsertMessage"); err != nil {
+		return err
+	}
+	f.insertMessageLocked(msg)
 	return nil
 }
 
@@ -235,27 +222,22 @@ func (f *FakeStore) mutateMessage(method, id string, fn func(*Message)) error {
 	if err := f.checkClosedAndFail(method); err != nil {
 		return err
 	}
-
-	m, ok := f.messages[id]
-	if !ok {
-		return nil
+	if m, ok := f.messages[id]; ok {
+		fn(m)
+		m.UpdatedAt = time.Now().UTC()
 	}
-	fn(m)
-	m.UpdatedAt = time.Now().UTC()
 	return nil
 }
 
 func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
 	return f.mutateMessage("UpdateMessageStatus", id, func(m *Message) {
-		m.Status = status
-		m.ErrorMessage = errorMsg
+		m.Status, m.ErrorMessage = status, errorMsg
 	})
 }
 
 func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
 	return f.mutateMessage("UpdateMessageCompleted", id, func(m *Message) {
-		m.Status = StatusCompleted
-		m.ResponseText = responseText
+		m.Status, m.ResponseText = StatusCompleted, responseText
 	})
 }
 
@@ -268,23 +250,19 @@ func (f *FakeStore) IncrementMessageRetry(ctx context.Context, id, errorMsg stri
 
 func (f *FakeStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
 	return f.mutateMessage("ResetMessageToPendingWithRestart", id, func(m *Message) {
-		m.Status = StatusPending
-		m.RestartCount++
-		m.ErrorMessage = reason
+		m.Status, m.RestartCount, m.ErrorMessage = StatusPending, m.RestartCount+1, reason
 	})
 }
 
 func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetPendingOrProcessingMessages"); err != nil {
 		return nil, err
 	}
-
 	var results []Message
 	for _, id := range f.messageOrder {
-		m := f.messages[id]
-		if m != nil && (m.Status == StatusPending || m.Status == StatusProcessing) {
+		if m := f.messages[id]; m != nil && (m.Status == StatusPending || m.Status == StatusProcessing) {
 			results = append(results, *cloneMessage(m))
 			if limit > 0 && len(results) >= limit {
 				break
@@ -295,26 +273,23 @@ func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit in
 }
 
 func (f *FakeStore) GetMessage(ctx context.Context, id string) (*Message, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetMessage"); err != nil {
 		return nil, err
 	}
-
-	m, ok := f.messages[id]
-	if !ok {
-		return nil, sql.ErrNoRows
+	if m, ok := f.messages[id]; ok {
+		return cloneMessage(m), nil
 	}
-	return cloneMessage(m), nil
+	return nil, sql.ErrNoRows
 }
 
 func (f *FakeStore) MessageExists(ctx context.Context, id string) (bool, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("MessageExists"); err != nil {
 		return false, err
 	}
-
 	_, exists := f.messages[id]
 	return exists, nil
 }
@@ -325,62 +300,51 @@ func (f *FakeStore) ClaimPendingMessage(ctx context.Context, id string) (bool, e
 	if err := f.checkClosedAndFail("ClaimPendingMessage"); err != nil {
 		return false, err
 	}
-
 	m, ok := f.messages[id]
 	if !ok || m.Status != StatusPending {
 		return false, nil
 	}
-	m.Status = StatusProcessing
-	m.UpdatedAt = time.Now().UTC()
+	m.Status, m.UpdatedAt = StatusProcessing, time.Now().UTC()
 	return true, nil
 }
 
-
 func (f *FakeStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetActiveRecentThreadIDs"); err != nil {
 		return nil, err
 	}
-
 	cutoff := time.Now().UTC().Add(-since)
 	seen := make(map[string]bool)
 	var threadIDs []string
 	for i := len(f.messageOrder) - 1; i >= 0; i-- {
 		id := f.messageOrder[i]
-		m := f.messages[id]
-		if m != nil && m.ThreadID != "" && m.UpdatedAt.After(cutoff) {
-			if !seen[m.ThreadID] {
-				seen[m.ThreadID] = true
-				threadIDs = append(threadIDs, m.ThreadID)
-			}
+		if m := f.messages[id]; m != nil && m.ThreadID != "" && m.UpdatedAt.After(cutoff) && !seen[m.ThreadID] {
+			seen[m.ThreadID] = true
+			threadIDs = append(threadIDs, m.ThreadID)
 		}
 	}
 	return threadIDs, nil
 }
 
 func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetRecentThreadMessages"); err != nil {
 		return nil, err
 	}
-
 	if limit <= 0 {
 		limit = 10
 	}
 	var matches []Message
 	for i := len(f.messageOrder) - 1; i >= 0; i-- {
-		id := f.messageOrder[i]
-		m := f.messages[id]
-		if m != nil && m.ThreadID == threadID {
+		if m := f.messages[f.messageOrder[i]]; m != nil && m.ThreadID == threadID {
 			matches = append(matches, *cloneMessage(m))
 			if len(matches) >= limit {
 				break
 			}
 		}
 	}
-	// Return ascending order (oldest to newest)
 	for i, j := 0, len(matches)-1; i < j; i, j = i+1, j-1 {
 		matches[i], matches[j] = matches[j], matches[i]
 	}
@@ -388,25 +352,20 @@ func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string
 }
 
 func (f *FakeStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetMaxMessageRowID"); err != nil {
 		return 0, err
 	}
-
 	var maxID int64
 	for _, id := range f.messageOrder {
-		m := f.messages[id]
-		if m != nil && m.ThreadID == threadID && m.Status == StatusCompleted {
-			if m.RowID > maxID {
-				maxID = m.RowID
-			}
+		if m := f.messages[id]; m != nil && m.ThreadID == threadID && m.Status == StatusCompleted && m.RowID > maxID {
+			maxID = m.RowID
 		}
 	}
 	return maxID, nil
 }
 
-// SetMessageUpdatedAt updates the UpdatedAt timestamp of an existing message (useful in tests).
 func (f *FakeStore) SetMessageUpdatedAt(id string, t time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -415,7 +374,6 @@ func (f *FakeStore) SetMessageUpdatedAt(id string, t time.Time) {
 	}
 }
 
-// SetSessionUpdatedAt updates the UpdatedAt timestamp of an existing session (useful in tests).
 func (f *FakeStore) SetSessionUpdatedAt(threadID string, t time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -425,40 +383,34 @@ func (f *FakeStore) SetSessionUpdatedAt(threadID string, t time.Time) {
 }
 
 func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetActiveTasks"); err != nil {
 		return nil, err
 	}
-
 	var activeMsgs []*Message
 	for _, id := range f.messageOrder {
-		if m, ok := f.messages[id]; ok && m != nil {
-			if m.Status == StatusPending || m.Status == StatusProcessing {
-				activeMsgs = append(activeMsgs, m)
-			}
+		if m := f.messages[id]; m != nil && (m.Status == StatusPending || m.Status == StatusProcessing) {
+			activeMsgs = append(activeMsgs, m)
 		}
 	}
-
 	sort.Slice(activeMsgs, func(i, j int) bool {
 		return activeMsgs[i].CreatedAt.Before(activeMsgs[j].CreatedAt)
 	})
-
 	if len(activeMsgs) > 50 {
 		activeMsgs = activeMsgs[:50]
 	}
-
-	tasks := make([]ActiveTask, 0, len(activeMsgs))
-	for _, m := range activeMsgs {
+	tasks := make([]ActiveTask, len(activeMsgs))
+	for i, m := range activeMsgs {
 		sessionID := ""
-		if s, ok := f.sessions[m.ThreadID]; ok && s != nil {
+		if s := f.sessions[m.ThreadID]; s != nil {
 			sessionID = s.InternalSessionID
 		}
 		summary := m.Summary
 		if summary == "" {
 			summary = CleanTaskSummary(m.Content)
 		}
-		tasks = append(tasks, ActiveTask{
+		tasks[i] = ActiveTask{
 			ID:            m.ID,
 			RowID:         m.RowID,
 			ThreadID:      m.ThreadID,
@@ -472,41 +424,33 @@ func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
 			ScheduleRunID: m.ScheduleRunID,
 			CreatedAt:     m.CreatedAt,
 			UpdatedAt:     m.UpdatedAt,
-		})
+		}
 	}
 	return tasks, nil
 }
 
-// =========================================================================
-// SessionStore implementation
-// =========================================================================
-
 func (f *FakeStore) GetSessionID(ctx context.Context, threadID string) (string, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetSessionID"); err != nil {
 		return "", err
 	}
-
-	s, ok := f.sessions[threadID]
-	if !ok || s == nil {
-		return "", nil
+	if s := f.sessions[threadID]; s != nil {
+		return s.InternalSessionID, nil
 	}
-	return s.InternalSessionID, nil
+	return "", nil
 }
 
 func (f *FakeStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetPreviousSessionID"); err != nil {
 		return "", err
 	}
-
-	s, ok := f.sessions[threadID]
-	if !ok || s == nil {
-		return "", nil
+	if s := f.sessions[threadID]; s != nil {
+		return s.PreviousSessionID, nil
 	}
-	return s.PreviousSessionID, nil
+	return "", nil
 }
 
 func (f *FakeStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
@@ -515,23 +459,14 @@ func (f *FakeStore) SaveSessionID(ctx context.Context, threadID, sessionID strin
 	if err := f.checkClosedAndFail("SaveSessionID"); err != nil {
 		return err
 	}
-
 	now := time.Now().UTC()
-	s, ok := f.sessions[threadID]
-	if !ok || s == nil {
-		f.sessions[threadID] = &SessionInfo{
-			ThreadID:          threadID,
-			InternalSessionID: sessionID,
-			CreatedAt:         now,
-			UpdatedAt:         now,
-		}
+	if s, ok := f.sessions[threadID]; ok && s != nil {
+		s.InternalSessionID, s.UpdatedAt = sessionID, now
 		return nil
 	}
-	s.InternalSessionID = sessionID
-	s.UpdatedAt = now
+	f.sessions[threadID] = &SessionInfo{ThreadID: threadID, InternalSessionID: sessionID, CreatedAt: now, UpdatedAt: now}
 	return nil
 }
-
 
 func (f *FakeStore) IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
 	f.mu.Lock()
@@ -539,17 +474,10 @@ func (f *FakeStore) IncrementSessionTurnCount(ctx context.Context, sessionKey st
 	if err := f.checkClosedAndFail("IncrementSessionTurnCount"); err != nil {
 		return 0, err
 	}
-
 	now := time.Now().UTC()
 	s, ok := f.sessions[sessionKey]
 	if !ok || s == nil {
-		s = &SessionInfo{
-			ThreadID:  sessionKey,
-			TurnCount: 1,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		f.sessions[sessionKey] = s
+		f.sessions[sessionKey] = &SessionInfo{ThreadID: sessionKey, TurnCount: 1, CreatedAt: now, UpdatedAt: now}
 		return 1, nil
 	}
 	s.TurnCount++
@@ -558,17 +486,15 @@ func (f *FakeStore) IncrementSessionTurnCount(ctx context.Context, sessionKey st
 }
 
 func (f *FakeStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetSessionTurnCount"); err != nil {
 		return 0, err
 	}
-
-	s, ok := f.sessions[sessionKey]
-	if !ok || s == nil {
-		return 0, nil
+	if s := f.sessions[sessionKey]; s != nil {
+		return s.TurnCount, nil
 	}
-	return s.TurnCount, nil
+	return 0, nil
 }
 
 func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
@@ -577,30 +503,19 @@ func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionI
 	if err := f.checkClosedAndFail("RotateSessionID"); err != nil {
 		return err
 	}
-
 	now := time.Now().UTC()
 	s, ok := f.sessions[sessionKey]
 	if !ok || s == nil {
-		f.sessions[sessionKey] = &SessionInfo{
-			ThreadID:          sessionKey,
-			InternalSessionID: newSessionID,
-			TurnCount:         0,
-			CreatedAt:         now,
-			UpdatedAt:         now,
-		}
+		f.sessions[sessionKey] = &SessionInfo{ThreadID: sessionKey, InternalSessionID: newSessionID, CreatedAt: now, UpdatedAt: now}
 		return nil
 	}
-	s.PreviousSessionID = s.InternalSessionID
-	s.InternalSessionID = newSessionID
-	s.TurnCount = 0
-	s.UpdatedAt = now
+	s.PreviousSessionID, s.InternalSessionID, s.TurnCount, s.UpdatedAt = s.InternalSessionID, newSessionID, 0, now
 	return nil
 }
 
-
 func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("FindUnrotatedSessions"); err != nil {
 		return nil, err
 	}
@@ -619,7 +534,7 @@ func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, max
 	for _, s := range f.sessions {
 		if s != nil && s.TurnCount > minTurns {
 			if limitAge <= 0 || s.UpdatedAt.After(cutoff) || s.UpdatedAt.Equal(cutoff) {
-				res = append(res, *cloneSessionInfo(s))
+				res = append(res, *clonePtr(s))
 			}
 		}
 	}
@@ -630,12 +545,11 @@ func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, max
 }
 
 func (f *FakeStore) GetThreadSummary(ctx context.Context, threadID string) (string, string, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetThreadSummary"); err != nil {
 		return "", "", err
 	}
-
 	rec, ok := f.threadSummaries[threadID]
 	if !ok {
 		return "", "", nil
@@ -649,81 +563,62 @@ func (f *FakeStore) SaveThreadSummary(ctx context.Context, threadID, summary, la
 	if err := f.checkClosedAndFail("SaveThreadSummary"); err != nil {
 		return err
 	}
-
-	f.threadSummaries[threadID] = threadSummaryRecord{
-		summary:   summary,
-		watermark: lastSummarizedMsgID,
-	}
+	f.threadSummaries[threadID] = threadSummaryRecord{summary: summary, watermark: lastSummarizedMsgID}
 	return nil
 }
 
 func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetSessionActivityStats"); err != nil {
 		return nil, err
 	}
-
 	stats := &SessionActivityStats{}
-	if s, ok := f.sessions[threadID]; ok && s != nil {
+	if s := f.sessions[threadID]; s != nil {
 		stats.InternalSessionID = s.InternalSessionID
 		stats.TurnCount = s.TurnCount
 		stats.SessionUpdatedAt = s.UpdatedAt
 	}
-
-	var completedCount int64
-	var maxUpdated time.Time
-	var maxCreated time.Time
 	for _, id := range f.messageOrder {
 		m := f.messages[id]
 		if m != nil && m.ThreadID == threadID && m.Status == StatusCompleted {
 			if !strings.HasPrefix(m.ResponseText, "[EXPIRED_STALE]") &&
 				!strings.HasPrefix(m.ResponseText, "[AMBIENT") &&
 				!strings.HasPrefix(m.ResponseText, "[IGNORED") {
-				completedCount++
-				if m.UpdatedAt.After(maxUpdated) {
-					maxUpdated = m.UpdatedAt
+				stats.CompletedTurns++
+				if m.UpdatedAt.After(stats.LastMessageAt) {
+					stats.LastMessageAt = m.UpdatedAt
 				}
-				if m.CreatedAt.After(maxCreated) {
-					maxCreated = m.CreatedAt
+				if m.CreatedAt.After(stats.LastCompletedMessageCreatedAt) {
+					stats.LastCompletedMessageCreatedAt = m.CreatedAt
 				}
 			}
 		}
 	}
-	stats.CompletedTurns = completedCount
-	stats.LastMessageAt = maxUpdated
-	stats.LastCompletedMessageCreatedAt = maxCreated
 	return stats, nil
 }
 
-// SetSessionInfo sets or overwrites session info for a thread (useful in tests).
 func (f *FakeStore) SetSessionInfo(s SessionInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sessions[s.ThreadID] = cloneSessionInfo(&s)
+	f.sessions[s.ThreadID] = clonePtr(&s)
 }
 
 func (f *FakeStore) GetExternalConversationID(ctx context.Context, internalID string) (string, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetExternalConversationID"); err != nil {
 		return "", err
 	}
-	if internalID == "" {
-		return "", nil
-	}
-	for threadID, sess := range f.sessions {
-		if sess != nil && sess.InternalSessionID == internalID {
-			return threadID, nil
+	if internalID != "" {
+		for threadID, sess := range f.sessions {
+			if sess != nil && sess.InternalSessionID == internalID {
+				return threadID, nil
+			}
 		}
 	}
 	return "", nil
 }
-
-
-// =========================================================================
-// ScheduleStore implementation
-// =========================================================================
 
 func (f *FakeStore) CreateOneShotSchedule(ctx context.Context, s OneShotSchedule) error {
 	f.mu.Lock()
@@ -731,26 +626,24 @@ func (f *FakeStore) CreateOneShotSchedule(ctx context.Context, s OneShotSchedule
 	if err := f.checkClosedAndFail("CreateOneShotSchedule"); err != nil {
 		return err
 	}
-
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
-	f.oneShots[s.ID] = cloneOneShot(&s)
+	f.oneShots[s.ID] = clonePtr(&s)
 	return nil
 }
 
 func (f *FakeStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetDueOneShotSchedules"); err != nil {
 		return nil, err
 	}
-
 	now := time.Now().UTC()
 	var due []OneShotSchedule
 	for _, s := range f.oneShots {
 		if s != nil && !s.RunAt.After(now) {
-			due = append(due, *cloneOneShot(s))
+			due = append(due, *clonePtr(s))
 		}
 	}
 	sort.Slice(due, func(i, j int) bool {
@@ -759,43 +652,30 @@ func (f *FakeStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedu
 	return due, nil
 }
 
-
 func (f *FakeStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("InsertMessageAndConsumeOneShot"); err != nil {
 		return err
 	}
-
 	if _, exists := f.oneShots[scheduleID]; !exists {
 		return ErrScheduleAlreadyConsumed
 	}
 	delete(f.oneShots, scheduleID)
-
-	rowID := atomic.AddInt64(&f.nextRowID, 1)
-	msg.RowID = rowID
-	if msg.CreatedAt.IsZero() {
-		msg.CreatedAt = time.Now().UTC()
-	}
-	if msg.UpdatedAt.IsZero() {
-		msg.UpdatedAt = msg.CreatedAt
-	}
-	f.messages[msg.ID] = cloneMessage(&msg)
-	f.messageOrder = append(f.messageOrder, msg.ID)
+	f.insertMessageLocked(msg)
 	return nil
 }
 
 func (f *FakeStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetAllOneShotSchedules"); err != nil {
 		return nil, err
 	}
-
 	var results []OneShotSchedule
 	for _, s := range f.oneShots {
 		if s != nil && (threadID == "" || s.ThreadID == threadID) {
-			results = append(results, *cloneOneShot(s))
+			results = append(results, *clonePtr(s))
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -810,26 +690,24 @@ func (f *FakeStore) CreateCronSchedule(ctx context.Context, c CronSchedule) erro
 	if err := f.checkClosedAndFail("CreateCronSchedule"); err != nil {
 		return err
 	}
-
 	if c.CreatedAt.IsZero() {
 		c.CreatedAt = time.Now().UTC()
 	}
-	f.crons[c.ID] = cloneCron(&c)
+	f.crons[c.ID] = clonePtr(&c)
 	return nil
 }
 
 func (f *FakeStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetDueCronSchedules"); err != nil {
 		return nil, err
 	}
-
 	now := time.Now().UTC()
 	var due []CronSchedule
 	for _, c := range f.crons {
 		if c != nil && c.Enabled && !c.NextRunAt.After(now) {
-			due = append(due, *cloneCron(c))
+			due = append(due, *clonePtr(c))
 		}
 	}
 	sort.Slice(due, func(i, j int) bool {
@@ -839,16 +717,15 @@ func (f *FakeStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, er
 }
 
 func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetAllCronSchedules"); err != nil {
 		return nil, err
 	}
-
 	var results []CronSchedule
 	for _, c := range f.crons {
 		if c != nil && (targetID == "" || c.TargetID == targetID) {
-			results = append(results, *cloneCron(c))
+			results = append(results, *clonePtr(c))
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -857,22 +734,17 @@ func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([
 	return results, nil
 }
 
-
 func (f *FakeStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("UpdateCronNextRun"); err != nil {
 		return err
 	}
-
-	c, ok := f.crons[id]
-	if !ok {
-		return nil
+	if c, ok := f.crons[id]; ok {
+		c.NextRunAt = nextRunAt
 	}
-	c.NextRunAt = nextRunAt
 	return nil
 }
-
 
 func (f *FakeStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error {
 	f.mu.Lock()
@@ -880,7 +752,6 @@ func (f *FakeStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) erro
 	if err := f.checkClosedAndFail("CreateScheduleRun"); err != nil {
 		return err
 	}
-
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now().UTC()
 	}
@@ -894,7 +765,6 @@ func (f *FakeStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRu
 	if err := f.checkClosedAndFail("UpdateScheduleRunStatus"); err != nil {
 		return err
 	}
-
 	r, ok := f.runs[params.RunID]
 	if !ok {
 		return nil
@@ -922,12 +792,11 @@ func (f *FakeStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRu
 }
 
 func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetScheduleRunsPaginated"); err != nil {
 		return nil, 0, err
 	}
-
 	var filtered []ScheduleRun
 	for _, r := range f.runs {
 		if r == nil {
@@ -941,14 +810,12 @@ func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset 
 		}
 		filtered = append(filtered, *cloneRun(r))
 	}
-
 	sort.Slice(filtered, func(i, j int) bool {
 		if filtered[i].StartedAt.Equal(filtered[j].StartedAt) {
 			return filtered[i].ID > filtered[j].ID
 		}
 		return filtered[i].StartedAt.After(filtered[j].StartedAt)
 	})
-
 	total := len(filtered)
 	if offset > total {
 		return nil, total, nil
@@ -960,27 +827,24 @@ func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset 
 	return filtered[offset:end], total, nil
 }
 
-// GetScheduleRun retrieves a schedule run by its ID (useful in tests).
 func (f *FakeStore) GetScheduleRun(id string) (*ScheduleRun, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetScheduleRun"); err != nil {
 		return nil, err
 	}
-	r, ok := f.runs[id]
-	if !ok || r == nil {
-		return nil, sql.ErrNoRows
+	if r, ok := f.runs[id]; ok && r != nil {
+		return cloneRun(r), nil
 	}
-	return cloneRun(r), nil
+	return nil, sql.ErrNoRows
 }
 
 func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetScheduleSummaryMetrics"); err != nil {
 		return ScheduleSummaryMetrics{}, err
 	}
-
 	var m ScheduleSummaryMetrics
 	for _, c := range f.crons {
 		if c != nil && c.Enabled {
@@ -994,10 +858,7 @@ func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSumm
 	cutoff24h := now.Add(-24 * time.Hour)
 	var totalRuns, completedRuns int
 	for _, r := range f.runs {
-		if r == nil {
-			continue
-		}
-		if !r.StartedAt.Before(cutoff24h) {
+		if r != nil && !r.StartedAt.Before(cutoff24h) {
 			totalRuns++
 			if r.Status == "completed" {
 				completedRuns++
@@ -1013,19 +874,15 @@ func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSumm
 
 	var earliest *time.Time
 	for _, c := range f.crons {
-		if c != nil && c.Enabled {
-			if earliest == nil || c.NextRunAt.Before(*earliest) {
-				t := c.NextRunAt
-				earliest = &t
-			}
+		if c != nil && c.Enabled && (earliest == nil || c.NextRunAt.Before(*earliest)) {
+			t := c.NextRunAt
+			earliest = &t
 		}
 	}
 	for _, s := range f.oneShots {
-		if s != nil {
-			if earliest == nil || s.RunAt.Before(*earliest) {
-				t := s.RunAt
-				earliest = &t
-			}
+		if s != nil && (earliest == nil || s.RunAt.Before(*earliest)) {
+			t := s.RunAt
+			earliest = &t
 		}
 	}
 	m.NextRunAt = earliest
@@ -1038,14 +895,11 @@ func (f *FakeStore) ReconcileOrphanedScheduleRuns(ctx context.Context) (int64, e
 	if err := f.checkClosedAndFail("ReconcileOrphanedScheduleRuns"); err != nil {
 		return 0, err
 	}
-
 	now := time.Now().UTC()
 	var reconciled int64
 	for _, r := range f.runs {
 		if r != nil && (r.Status == "enqueued" || r.Status == "running") {
-			r.Status = "failed"
-			r.Error = "Interrupted by server restart"
-			r.CompletedAt = &now
+			r.Status, r.Error, r.CompletedAt = "failed", "Interrupted by server restart", &now
 			reconciled++
 		}
 	}
@@ -1058,14 +912,12 @@ func (f *FakeStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge 
 	if err := f.checkClosedAndFail("PruneScheduleRuns"); err != nil {
 		return 0, err
 	}
-
 	if maxCount <= 0 {
 		maxCount = 1000
 	}
 	if maxAge <= 0 {
 		maxAge = 30 * 24 * time.Hour
 	}
-
 	var pruned int64
 	cutoff := time.Now().UTC().Add(-maxAge)
 	for id, r := range f.runs {
@@ -1093,10 +945,6 @@ func (f *FakeStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge 
 	return pruned, nil
 }
 
-// =========================================================================
-// FactStore implementation
-// =========================================================================
-
 func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1106,7 +954,6 @@ func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, i
 	if importance <= 0 {
 		importance = 0.5
 	}
-
 	id := atomic.AddInt64(&f.nextFactID, 1)
 	now := time.Now().UTC()
 	fe := &FactWithEmbedding{
@@ -1127,74 +974,60 @@ func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, i
 }
 
 func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("SearchSimilarFacts"); err != nil {
 		return nil, err
 	}
-
 	if limit <= 0 {
 		limit = 10
 	}
 	if minScore <= 0 {
 		minScore = 0.20
 	}
-
 	type scored struct {
 		fact  Fact
 		score float64
 	}
 	var matches []scored
 	qLower := strings.ToLower(strings.TrimSpace(queryText))
-	hasVec := len(embedding) > 0
-	hasText := qLower != ""
-
+	hasVec, hasText := len(embedding) > 0, qLower != ""
 	if !hasVec && !hasText {
 		return nil, nil
 	}
-
 	for _, fe := range f.facts {
 		if fe == nil {
 			continue
 		}
-		var sim float64
+		var sim, textScore float64
 		if hasVec && len(embedding) == len(fe.Embedding) {
 			sim = cosineSimilarity(embedding, fe.Embedding)
 		}
-		var textScore float64
-		if hasText {
-			if strings.Contains(strings.ToLower(fe.Fact.FactText), qLower) {
-				textScore = 1.0
-			}
+		if hasText && strings.Contains(strings.ToLower(fe.Fact.FactText), qLower) {
+			textScore = 1.0
 		}
-
 		imp := fe.Fact.Importance
 		if imp <= 0 {
 			imp = 1.0
 		}
-
 		var score float64
 		if hasVec && hasText {
 			score = (0.70*sim + 0.30*textScore) * imp
 		} else if hasVec {
 			score = sim * imp
-		} else if hasText {
+		} else {
 			score = textScore * imp
 		}
-
 		if score >= minScore {
 			matches = append(matches, scored{fact: fe.Fact, score: score})
 		}
 	}
-
 	sort.Slice(matches, func(i, j int) bool {
 		return matches[i].score > matches[j].score
 	})
-
 	if len(matches) > limit {
 		matches = matches[:limit]
 	}
-
 	result := make([]Fact, len(matches))
 	for i, m := range matches {
 		result[i] = m.fact
@@ -1203,12 +1036,11 @@ func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32,
 }
 
 func (f *FakeStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetFactsPaginated"); err != nil {
 		return nil, err
 	}
-
 	var list []Fact
 	for _, fe := range f.facts {
 		if fe == nil {
@@ -1222,34 +1054,30 @@ func (f *FakeStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (
 		}
 		list = append(list, fe.Fact)
 	}
-
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].CreatedAt.After(list[j].CreatedAt)
 	})
-
 	total := len(list)
-	offset := filter.Offset
-	if offset > total {
+	if filter.Offset > total {
 		return &FactsResult{Facts: nil, Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
 	}
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	end := offset + limit
+	end := filter.Offset + limit
 	if end > total {
 		end = total
 	}
-	return &FactsResult{Facts: list[offset:end], Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
+	return &FactsResult{Facts: list[filter.Offset:end], Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
 }
 
 func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetFactsByThreadWithEmbeddings"); err != nil {
 		return nil, err
 	}
-
 	var results []FactWithEmbedding
 	for _, fe := range f.facts {
 		if fe != nil {
@@ -1266,12 +1094,11 @@ func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID
 }
 
 func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetActiveConversationsForExtraction"); err != nil {
 		return nil, err
 	}
-
 	if activeHours <= 0 {
 		activeHours = 24
 	}
@@ -1282,13 +1109,11 @@ func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, act
 		m := f.messages[id]
 		if m != nil && m.ThreadID != "" && (m.CreatedAt.After(cutoff) || m.CreatedAt.Equal(cutoff)) && IsExtractableAdminTurn(*m) {
 			watermark := f.watermarks[m.ThreadID]
-			if watermark == 0 || m.RowID > watermark {
-				if !seen[m.ThreadID] {
-					seen[m.ThreadID] = true
-					threads = append(threads, m.ThreadID)
-					if len(threads) >= 20 {
-						break
-					}
+			if (watermark == 0 || m.RowID > watermark) && !seen[m.ThreadID] {
+				seen[m.ThreadID] = true
+				threads = append(threads, m.ThreadID)
+				if len(threads) >= 20 {
+					break
 				}
 			}
 		}
@@ -1298,13 +1123,12 @@ func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, act
 }
 
 func (f *FakeStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetUnextractedAdminTurns"); err != nil {
 		return nil, err
 	}
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" {
+	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil
 	}
 	watermark := f.watermarks[threadID]
@@ -1324,7 +1148,6 @@ func (f *FakeStore) UpdateConversationFactWatermark(ctx context.Context, threadI
 	if err := f.checkClosedAndFail("UpdateConversationFactWatermark"); err != nil {
 		return err
 	}
-
 	f.watermarks[threadID] = maxRowID
 	return nil
 }
@@ -1335,29 +1158,26 @@ func (f *FakeStore) UpdateConversationFactExtractedAt(ctx context.Context, threa
 	if err := f.checkClosedAndFail("UpdateConversationFactExtractedAt"); err != nil {
 		return err
 	}
-
 	f.extractedAt[threadID] = time.Now().UTC()
 	return nil
 }
 
 func (f *FakeStore) FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("FindDuplicateFact"); err != nil {
 		return nil, 0, err
 	}
 	if minSim <= 0 {
 		minSim = 0.85
 	}
-
 	var bestFact *Fact
 	var bestSim float64
 	for _, fe := range f.facts {
 		if fe == nil || len(fe.Embedding) == 0 {
 			continue
 		}
-		sim := cosineSimilarity(embedding, fe.Embedding)
-		if sim >= minSim && sim > bestSim {
+		if sim := cosineSimilarity(embedding, fe.Embedding); sim >= minSim && sim > bestSim {
 			bestSim = sim
 			cp := fe.Fact
 			bestFact = &cp
@@ -1372,7 +1192,6 @@ func (f *FakeStore) ReinforceFact(ctx context.Context, id int64, newText string,
 	if err := f.checkClosedAndFail("ReinforceFact"); err != nil {
 		return err
 	}
-
 	fe, ok := f.facts[id]
 	if !ok || fe == nil {
 		return ErrFactNotFound
@@ -1392,18 +1211,15 @@ func (f *FakeStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, p
 	if err := f.checkClosedAndFail("DecayAndPruneFacts"); err != nil {
 		return 0, 0, err
 	}
-
 	if decayStep <= 0 {
 		decayStep = 0.05
 	}
 	if pruneFloor <= 0 {
 		pruneFloor = 0.15
 	}
-
 	now := time.Now().UTC()
 	ageCutoff := now.Add(-time.Duration(pruneAgeDays) * 24 * time.Hour)
 	var decayed, pruned int64
-
 	for id, fe := range f.facts {
 		if fe == nil {
 			continue
@@ -1411,7 +1227,6 @@ func (f *FakeStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, p
 		fe.Fact.Importance = math.Max(0.0, math.Round((fe.Fact.Importance-decayStep)*100)/100)
 		fe.Fact.LastDecayedAt = now
 		decayed++
-
 		if fe.Fact.Importance <= pruneFloor && (pruneAgeDays <= 0 || fe.Fact.CreatedAt.Before(ageCutoff)) {
 			delete(f.facts, id)
 			pruned++
@@ -1421,12 +1236,11 @@ func (f *FakeStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, p
 }
 
 func (f *FakeStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetFactsMissingEmbeddings"); err != nil {
 		return nil, err
 	}
-
 	var results []Fact
 	for _, fe := range f.facts {
 		if fe != nil && len(fe.Embedding) == 0 {
@@ -1445,38 +1259,29 @@ func (f *FakeStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding
 	if err := f.checkClosedAndFail("UpdateFactEmbedding"); err != nil {
 		return err
 	}
-
 	fe, ok := f.facts[id]
 	if !ok || fe == nil {
 		return ErrFactNotFound
 	}
-	fe.Embedding = make([]float32, len(embedding))
-	copy(fe.Embedding, embedding)
+	fe.Embedding = cloneSlice(embedding)
 	return nil
 }
 
-
-// =========================================================================
-// TranscriptStore implementation
-// =========================================================================
-
 func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetSessionSyncStates"); err != nil {
 		return nil, err
 	}
-
 	res := make(map[string]SessionSyncState, len(f.sessionSummaries))
 	for id, s := range f.sessionSummaries {
-		if s == nil {
-			continue
-		}
-		res[id] = SessionSyncState{
-			SessionID:       id,
-			LastMtime:       s.LastMtime,
-			LastIndexedStep: s.LastIndexedStep,
-			IsSettled:       s.IsSettled,
+		if s != nil {
+			res[id] = SessionSyncState{
+				SessionID:       id,
+				LastMtime:       s.LastMtime,
+				LastIndexedStep: s.LastIndexedStep,
+				IsSettled:       s.IsSettled,
+			}
 		}
 	}
 	return res, nil
@@ -1488,11 +1293,9 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary SessionSum
 	if err := f.checkClosedAndFail("UpsertSessionSummary"); err != nil {
 		return err
 	}
-
 	if strings.TrimSpace(summary.SessionID) == "" {
 		return fmt.Errorf("session ID cannot be empty")
 	}
-
 	now := time.Now().UTC()
 	if existing, ok := f.sessionSummaries[summary.SessionID]; ok && existing != nil {
 		if summary.ThreadID != "" {
@@ -1502,7 +1305,7 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary SessionSum
 			existing.Summary = summary.Summary
 		}
 		if len(summary.Embedding) > 0 {
-			existing.Embedding = append([]float32(nil), summary.Embedding...)
+			existing.Embedding = cloneSlice(summary.Embedding)
 		}
 		if summary.LastIndexedStep >= 0 {
 			existing.LastIndexedStep = summary.LastIndexedStep
@@ -1523,7 +1326,6 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary SessionSum
 		existing.UpdatedAt = now
 		return nil
 	}
-
 	cp := summary
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = now
@@ -1539,7 +1341,6 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Tran
 	if err := f.checkClosedAndFail("BatchInsertTranscriptSteps"); err != nil {
 		return err
 	}
-
 	now := time.Now().UTC()
 	for _, s := range steps {
 		if strings.TrimSpace(s.SessionID) == "" {
@@ -1549,7 +1350,6 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Tran
 		if cp.CreatedAt.IsZero() {
 			cp.CreatedAt = now
 		}
-
 		existingSteps := f.transcriptSteps[s.SessionID]
 		found := false
 		for _, existing := range existingSteps {
@@ -1566,16 +1366,14 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Tran
 }
 
 func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("SearchSessionSummaries"); err != nil {
 		return nil, err
 	}
-
 	hasEmbedding := len(embedding) == ExpectedEmbeddingDim
 	queryText = strings.TrimSpace(queryText)
 	hasText := queryText != ""
-
 	if !hasEmbedding && !hasText {
 		return nil, nil
 	}
@@ -1585,10 +1383,8 @@ func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []floa
 	if minScore < 0 {
 		minScore = 0.0
 	}
-
 	qLower := strings.ToLower(queryText)
 	var scored []SessionSummary
-
 	for _, s := range f.sessionSummaries {
 		if s == nil {
 			continue
@@ -1619,17 +1415,15 @@ func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []floa
 			score = 0.50*sim + 0.50*textScore
 		} else if hasEmbedding {
 			score = sim
-		} else if hasText {
+		} else {
 			score = textScore
 		}
-
 		if score >= minScore {
 			cp := *cloneSessionSummary(s)
 			cp.Score = score
 			scored = append(scored, cp)
 		}
 	}
-
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].Score > scored[j].Score
 	})
@@ -1640,26 +1434,20 @@ func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []floa
 }
 
 func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("SearchTranscriptSteps"); err != nil {
 		return nil, err
 	}
-
-	queryText = strings.TrimSpace(queryText)
-	sessionFilter = strings.TrimSpace(sessionFilter)
-	toolFilter = strings.TrimSpace(toolFilter)
-
+	queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
 	if queryText == "" && sessionFilter == "" && toolFilter == "" {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 20
 	}
-
 	qLower := strings.ToLower(queryText)
 	var matched []TranscriptStep
-
 	for sid, steps := range f.transcriptSteps {
 		if sessionFilter != "" && sid != sessionFilter {
 			continue
@@ -1691,7 +1479,6 @@ func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessio
 			}
 		}
 	}
-
 	sort.Slice(matched, func(i, j int) bool {
 		return matched[i].CreatedAt.After(matched[j].CreatedAt)
 	})
@@ -1705,23 +1492,18 @@ func prKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s/%d", normalizeRepo(repo), prNumber)
 }
 
-// UpsertPR inserts or updates a Pull Request tracking record in FakeStore.
 func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	if err := f.checkClosedAndFail("UpsertPR"); err != nil {
 		return err
 	}
-
 	norm, err := validateAndNormalizeUpsertPR(record)
 	if err != nil {
 		return err
 	}
-
 	key := prKey(norm.Repo, norm.PRNumber)
 	now := time.Now()
-
 	existing, exists := f.prRecords[key]
 	if exists {
 		existing.Branch = norm.Branch
@@ -1742,9 +1524,8 @@ func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 		existing.UpdatedAt = now
 		return nil
 	}
-
 	f.nextPRID++
-	rec := &PRRecord{
+	f.prRecords[key] = &PRRecord{
 		ID:              f.nextPRID,
 		Repo:            norm.Repo,
 		PRNumber:        norm.PRNumber,
@@ -1759,26 +1540,19 @@ func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	f.prRecords[key] = rec
 	return nil
 }
 
-// GetPRByNumber retrieves a PR record by repository name and PR number.
 func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int) (*PRRecord, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetPRByNumber"); err != nil {
 		return nil, err
 	}
-
-	repo = normalizeRepo(repo)
-	if repo == "" {
+	if repo = normalizeRepo(repo); repo == "" {
 		return nil, fmt.Errorf("repo cannot be empty")
 	}
-
-	key := prKey(repo, prNumber)
-	rec, exists := f.prRecords[key]
+	rec, exists := f.prRecords[prKey(repo, prNumber)]
 	if !exists {
 		return nil, ErrPRNotFound
 	}
@@ -1786,71 +1560,36 @@ func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int
 	return &cp, nil
 }
 
-// UpdatePRStatusMessageID updates the status_message_id of a PR in FakeStore.
 func (f *FakeStore) UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	if err := f.checkClosedAndFail("UpdatePRStatusMessageID"); err != nil {
 		return err
 	}
-
-	repo = normalizeRepo(repo)
-	if repo == "" {
+	if repo = normalizeRepo(repo); repo == "" {
 		return fmt.Errorf("repo cannot be empty")
 	}
-
-	key := prKey(repo, prNumber)
-	rec, exists := f.prRecords[key]
+	rec, exists := f.prRecords[prKey(repo, prNumber)]
 	if !exists {
 		return ErrPRNotFound
 	}
-	rec.StatusMessageID = strings.TrimSpace(messageID)
-	rec.UpdatedAt = time.Now()
+	rec.StatusMessageID, rec.UpdatedAt = strings.TrimSpace(messageID), time.Now()
 	return nil
 }
 
-func cloneVanadisChunk(c *VanadisChunk) VanadisChunk {
-	cp := *c
-	if c.TargetFiles != nil {
-		cp.TargetFiles = append([]string(nil), c.TargetFiles...)
-	} else {
-		cp.TargetFiles = []string{}
-	}
-	if c.TargetSymbols != nil {
-		cp.TargetSymbols = append([]string(nil), c.TargetSymbols...)
-	} else {
-		cp.TargetSymbols = []string{}
-	}
-	if c.AcceptanceCriteria != nil {
-		cp.AcceptanceCriteria = append([]string(nil), c.AcceptanceCriteria...)
-	} else {
-		cp.AcceptanceCriteria = []string{}
-	}
-	if strings.TrimSpace(cp.Effort) == "" {
-		cp.Effort = "medium"
-	}
-	return cp
-}
-
-// CreateVanadisBuild inserts a VanadisBuild and its ordered VanadisChunks in FakeStore.
 func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	if err := f.checkClosedAndFail("CreateVanadisBuild"); err != nil {
 		return err
 	}
-
 	normBuild, normChunks, err := validateAndNormalizeVanadisBuild(build, chunks)
 	if err != nil {
 		return err
 	}
-
 	if _, exists := f.vanadisBuilds[normBuild.ID]; exists {
 		return fmt.Errorf("vanadis build %s already exists", normBuild.ID)
 	}
-
 	seenChunkIDs := make(map[string]bool, len(normChunks))
 	seenIndices := make(map[int]bool, len(normChunks))
 	for _, c := range normChunks {
@@ -1863,7 +1602,6 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		seenChunkIDs[c.ID] = true
 		seenIndices[c.ChunkIndex] = true
 	}
-
 	now := time.Now()
 	f.vanadisBuilds[normBuild.ID] = &VanadisBuild{
 		ID:              normBuild.ID,
@@ -1877,20 +1615,11 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-
 	for _, c := range normChunks {
 		startedAt := c.StartedAt
 		if startedAt.IsZero() && (c.Status == "running" || c.Status == "coding") {
 			startedAt = now
 		}
-
-		files := make([]string, len(c.TargetFiles))
-		copy(files, c.TargetFiles)
-		symbols := make([]string, len(c.TargetSymbols))
-		copy(symbols, c.TargetSymbols)
-		criteria := make([]string, len(c.AcceptanceCriteria))
-		copy(criteria, c.AcceptanceCriteria)
-
 		f.vanadisChunks[c.ID] = &VanadisChunk{
 			ID:                 c.ID,
 			BuildID:            c.BuildID,
@@ -1898,10 +1627,10 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 			Repo:               c.Repo,
 			Title:              c.Title,
 			Instructions:       c.Instructions,
-			TargetFiles:        files,
-			TargetSymbols:      symbols,
+			TargetFiles:        cloneSlice(c.TargetFiles),
+			TargetSymbols:      cloneSlice(c.TargetSymbols),
 			Effort:             c.Effort,
-			AcceptanceCriteria: criteria,
+			AcceptanceCriteria: cloneSlice(c.AcceptanceCriteria),
 			Status:             c.Status,
 			PRNumber:           c.PRNumber,
 			StartedAt:          startedAt,
@@ -1912,25 +1641,19 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 	return nil
 }
 
-// GetVanadisBuild retrieves a VanadisBuild and its ordered VanadisChunks by buildID.
 func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetVanadisBuild"); err != nil {
 		return nil, nil, err
 	}
-
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
+	if buildID = strings.TrimSpace(buildID); buildID == "" {
 		return nil, nil, fmt.Errorf("build id cannot be empty")
 	}
-
 	b, exists := f.vanadisBuilds[buildID]
 	if !exists {
 		return nil, nil, ErrVanadisBuildNotFound
 	}
-
 	var chunks []VanadisChunk
 	for _, c := range f.vanadisChunks {
 		if c.BuildID == buildID {
@@ -1940,25 +1663,19 @@ func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanad
 	sort.Slice(chunks, func(i, j int) bool {
 		return chunks[i].ChunkIndex < chunks[j].ChunkIndex
 	})
-
 	cp := *b
 	return &cp, chunks, nil
 }
 
-// GetVanadisChunk retrieves a single VanadisChunk by chunkID.
 func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("GetVanadisChunk"); err != nil {
 		return nil, err
 	}
-
-	chunkID = strings.TrimSpace(chunkID)
-	if chunkID == "" {
+	if chunkID = strings.TrimSpace(chunkID); chunkID == "" {
 		return nil, fmt.Errorf("chunk id cannot be empty")
 	}
-
 	c, exists := f.vanadisChunks[chunkID]
 	if !exists {
 		return nil, ErrVanadisChunkNotFound
@@ -1967,23 +1684,18 @@ func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*Vanad
 	return &cp, nil
 }
 
-// AttachVanadisChunkPR links an opened Pull Request to a VanadisChunk and marks it 'pr_opened'.
 func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	if err := f.checkClosedAndFail("AttachVanadisChunkPR"); err != nil {
 		return err
 	}
-
-	chunkID = strings.TrimSpace(chunkID)
-	if chunkID == "" {
+	if chunkID = strings.TrimSpace(chunkID); chunkID == "" {
 		return fmt.Errorf("chunk id cannot be empty")
 	}
 	if prNumber <= 0 {
 		return fmt.Errorf("pr_number must be greater than 0")
 	}
-
 	c, exists := f.vanadisChunks[chunkID]
 	if !exists {
 		return ErrVanadisChunkNotFound
@@ -2001,25 +1713,19 @@ func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, pr
 	return nil
 }
 
-// UpdateVanadisBuildStatusMessageID updates the status_message_id of a VanadisBuild.
 func (f *FakeStore) UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	if err := f.checkClosedAndFail("UpdateVanadisBuildStatusMessageID"); err != nil {
 		return err
 	}
-
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
+	if buildID = strings.TrimSpace(buildID); buildID == "" {
 		return fmt.Errorf("build id cannot be empty")
 	}
-
 	b, exists := f.vanadisBuilds[buildID]
 	if !exists {
 		return ErrVanadisBuildNotFound
 	}
-	b.StatusMessageID = strings.TrimSpace(messageID)
-	b.UpdatedAt = time.Now()
+	b.StatusMessageID, b.UpdatedAt = strings.TrimSpace(messageID), time.Now()
 	return nil
 }

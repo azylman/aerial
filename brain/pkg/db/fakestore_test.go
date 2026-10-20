@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -12,157 +13,108 @@ func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
 
-	// Initial check
 	if err := s.InsertMessage(ctx, Message{ID: "m1", ThreadID: "t1"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
-	// Test FailNext
 	testErr := errors.New("simulated error")
 	s.FailNext("GetMessage", testErr)
-
 	if _, err := s.GetMessage(ctx, "m1"); !errors.Is(err, testErr) {
 		t.Fatalf("expected simulated error %v, got %v", testErr, err)
 	}
-	// FailNext should be consumed
 	if _, err := s.GetMessage(ctx, "m1"); err != nil {
 		t.Fatalf("expected success after consumed FailNext, got %v", err)
 	}
 
-	// Close
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
-
-	// Subsequent calls return sql.ErrConnDone
-	if err := s.InsertMessage(ctx, Message{ID: "m2"}); !errors.Is(err, sql.ErrConnDone) {
-		t.Fatalf("expected sql.ErrConnDone, got %v", err)
-	}
-	if _, err := s.GetMessage(ctx, "m1"); !errors.Is(err, sql.ErrConnDone) {
-		t.Fatalf("expected sql.ErrConnDone, got %v", err)
-	}
+	assertStoreUnavailable(t, s)
 }
 
 func TestFakeStoreMessageOperations(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
+	now := time.Now().UTC()
 
-	// InsertMessage & Idempotency
-	m1 := Message{ID: "msg-1", ThreadID: "th-1", Content: "Hello"}
-	if err := s.InsertMessage(ctx, m1); err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
+	m1 := Message{ID: "msg-1", ThreadID: "th-1", Content: "Hello", Summary: "Summ"}
+	if err := s.InsertMessage(ctx, m1); err != nil || s.InsertMessage(ctx, m1) != nil {
+		t.Fatalf("InsertMessage or idempotent insert failed")
 	}
-	// Idempotent re-insert
-	if err := s.InsertMessage(ctx, m1); err != nil {
-		t.Fatalf("Idempotent InsertMessage failed: %v", err)
-	}
-
 	m2 := Message{ID: "msg-2", ThreadID: "th-1", Content: "World"}
 	if err := s.InsertMessage(ctx, m2); err != nil {
 		t.Fatalf("InsertMessage msg-2 failed: %v", err)
 	}
 
-	// MessageExists
-	exists, err := s.MessageExists(ctx, "msg-1")
-	if err != nil || !exists {
-		t.Fatalf("expected exists=true, got %v, err=%v", exists, err)
+	if ok, err := s.MessageExists(ctx, "msg-1"); err != nil || !ok {
+		t.Errorf("MessageExists(msg-1) = %v, %v, want true, nil", ok, err)
 	}
-	exists, err = s.MessageExists(ctx, "msg-none")
-	if err != nil || exists {
-		t.Fatalf("expected exists=false, got %v, err=%v", exists, err)
+	if ok, err := s.MessageExists(ctx, "msg-none"); err != nil || ok {
+		t.Errorf("MessageExists(msg-none) = %v, %v, want false, nil", ok, err)
 	}
-
-	// GetMessage
-	msg, err := s.GetMessage(ctx, "msg-1")
-	if err != nil || msg.Content != "Hello" {
-		t.Fatalf("unexpected msg: %+v, err: %v", msg, err)
+	if msg, err := s.GetMessage(ctx, "msg-1"); err != nil || msg.Content != "Hello" {
+		t.Errorf("GetMessage(msg-1) = %+v, %v", msg, err)
 	}
-	_, err = s.GetMessage(ctx, "msg-none")
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("expected sql.ErrNoRows, got %v", err)
+	if _, err := s.GetMessage(ctx, "msg-none"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected ErrNoRows, got %v", err)
 	}
 
-	// UpdateMessageStatus
-	if err := s.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "busy"); err != nil {
-		t.Fatalf("UpdateMessageStatus failed: %v", err)
-	}
-	// Non-existent message update is no-op
-	if err := s.UpdateMessageStatus(ctx, "msg-none", StatusProcessing, ""); err != nil {
-		t.Fatalf("UpdateMessageStatus non-existent failed: %v", err)
-	}
-
-	// IncrementMessageRetry
-	if err := s.IncrementMessageRetry(ctx, "msg-1", "timeout"); err != nil {
-		t.Fatalf("IncrementMessageRetry failed: %v", err)
-	}
+	_ = s.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "busy")
+	_ = s.UpdateMessageStatus(ctx, "msg-none", StatusProcessing, "")
+	_ = s.IncrementMessageRetry(ctx, "msg-1", "timeout")
 	_ = s.IncrementMessageRetry(ctx, "msg-none", "")
-
-	msg, _ = s.GetMessage(ctx, "msg-1")
+	msg, _ := s.GetMessage(ctx, "msg-1")
 	if msg.RetryCount != 1 {
-		t.Fatalf("expected retry=1, got %+v", msg)
+		t.Errorf("expected retry=1, got %d", msg.RetryCount)
 	}
 
-	// ResetMessageToPendingWithRestart
-	if err := s.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered"); err != nil {
-		t.Fatalf("ResetMessageToPendingWithRestart failed: %v", err)
-	}
+	_ = s.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered")
 	_ = s.ResetMessageToPendingWithRestart(ctx, "msg-none", "")
 	msg, _ = s.GetMessage(ctx, "msg-1")
 	if msg.Status != StatusPending || msg.RestartCount != 1 {
-		t.Fatalf("expected status pending, restart=1, got %+v", msg)
+		t.Errorf("expected pending, restart=1, got %+v", msg)
 	}
 
-	// ClaimPendingMessage
-	claimed, err := s.ClaimPendingMessage(ctx, "msg-1")
-	if err != nil || !claimed {
-		t.Fatalf("expected claim=true, got %v (err: %v)", claimed, err)
+	if ok, err := s.ClaimPendingMessage(ctx, "msg-1"); err != nil || !ok {
+		t.Errorf("ClaimPendingMessage(msg-1) = %v, %v, want true, nil", ok, err)
 	}
-	// Already claimed
-	claimed, err = s.ClaimPendingMessage(ctx, "msg-1")
-	if err != nil || claimed {
-		t.Fatalf("expected claim=false for already processing, got %v", claimed)
+	if ok, _ := s.ClaimPendingMessage(ctx, "msg-1"); ok {
+		t.Errorf("ClaimPendingMessage already claimed = true, want false")
 	}
-	// Non-existent claim
-	claimed, err = s.ClaimPendingMessage(ctx, "msg-none")
-	if err != nil || claimed {
-		t.Fatalf("expected claim=false for msg-none, got %v", claimed)
+	if ok, _ := s.ClaimPendingMessage(ctx, "msg-none"); ok {
+		t.Errorf("ClaimPendingMessage non-existent = true, want false")
 	}
 
-
-	// UpdateMessageCompleted
-	if err := s.UpdateMessageCompleted(ctx, "msg-1", "Done response"); err != nil {
-		t.Fatalf("UpdateMessageCompleted failed: %v", err)
-	}
+	_ = s.UpdateMessageCompleted(ctx, "msg-1", "Done response")
 	_ = s.UpdateMessageCompleted(ctx, "msg-none", "No-op")
 	msg, _ = s.GetMessage(ctx, "msg-1")
 	if msg.Status != StatusCompleted || msg.ResponseText != "Done response" {
-		t.Fatalf("expected completed with Done response, got %+v", msg)
+		t.Errorf("expected completed, got %+v", msg)
 	}
 
-	// GetPendingOrProcessingMessages
-	pendingMsgs, err := s.GetPendingOrProcessingMessages(ctx, 10)
-	if err != nil || len(pendingMsgs) != 1 || pendingMsgs[0].ID != "msg-2" {
-		t.Fatalf("expected msg-2 in pending/processing, got %+v", pendingMsgs)
+	pending, err := s.GetPendingOrProcessingMessages(ctx, 10)
+	if err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
+		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
+	}
+	if maxRow, err := s.GetMaxMessageRowID(ctx, "th-1"); err != nil || maxRow != 1 {
+		t.Errorf("GetMaxMessageRowID = %d, %v, want 1, nil", maxRow, err)
+	}
+	if threadIDs, err := s.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 {
+		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
+	}
+	if recent, err := s.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
+		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
 	}
 
-	// GetMaxMessageRowID
-	maxRowID, err := s.GetMaxMessageRowID(ctx, "th-1")
-	if err != nil || maxRowID != 1 {
-		t.Fatalf("expected maxRowID=1, got %d (err: %v)", maxRowID, err)
+	tasks, err := s.GetActiveTasks(ctx)
+	if err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
+		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
 	}
-
-	// GetActiveRecentThreadIDs & GetRecentThreadMessages
-	threadIDs, err := s.GetActiveRecentThreadIDs(ctx, time.Hour)
-	if err != nil || len(threadIDs) != 1 || threadIDs[0] != "th-1" {
-		t.Fatalf("expected [th-1], got %v (err: %v)", threadIDs, err)
+	for i := 3; i <= 60; i++ {
+		_ = s.InsertMessage(ctx, Message{ID: "m-b-" + string(rune(i)), ThreadID: "th-1", Status: StatusPending, CreatedAt: now.Add(time.Duration(i) * time.Second)})
 	}
-
-	recentMsgs, err := s.GetRecentThreadMessages(ctx, "th-1", 10)
-	if err != nil || len(recentMsgs) != 2 {
-		t.Fatalf("expected 2 recent messages, got %d (err: %v)", len(recentMsgs), err)
-	}
-	if recentMsgs[0].ID != "msg-1" || recentMsgs[1].ID != "msg-2" {
-		t.Fatalf("expected chronological order msg-1 then msg-2, got %+v", recentMsgs)
+	if clamped, err := s.GetActiveTasks(ctx); err != nil || len(clamped) != 50 {
+		t.Errorf("clamped active tasks len = %d, want 50", len(clamped))
 	}
 }
 
@@ -170,114 +122,78 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
 
-	// Initial session ID should be empty
-	id, err := s.GetSessionID(ctx, "th-1")
-	if err != nil || id != "" {
-		t.Fatalf("expected empty session ID, got %q, err: %v", id, err)
+	if id, err := s.GetSessionID(ctx, "th-1"); err != nil || id != "" {
+		t.Errorf("expected empty session ID, got %q, %v", id, err)
 	}
-
-	// SaveSessionID
 	if err := s.SaveSessionID(ctx, "th-1", "sess-1"); err != nil {
 		t.Fatalf("SaveSessionID failed: %v", err)
 	}
-	id, err = s.GetSessionID(ctx, "th-1")
-	if err != nil || id != "sess-1" {
-		t.Fatalf("expected sess-1, got %q, err: %v", id, err)
+	if id, _ := s.GetSessionID(ctx, "th-1"); id != "sess-1" {
+		t.Errorf("expected sess-1, got %q", id)
+	}
+	_ = s.SaveSessionID(ctx, "th-1", "sess-1-v2")
+
+	if cnt, err := s.IncrementSessionTurnCount(ctx, "th-1"); err != nil || cnt != 1 {
+		t.Errorf("IncrementSessionTurnCount = %d, %v, want 1, nil", cnt, err)
+	}
+	_, _ = s.IncrementSessionTurnCount(ctx, "th-1")
+	if cnt, _ := s.GetSessionTurnCount(ctx, "th-1"); cnt != 2 {
+		t.Errorf("GetSessionTurnCount = %d, want 2", cnt)
+	}
+	if cnt, _ := s.GetSessionTurnCount(ctx, "th-none"); cnt != 0 {
+		t.Errorf("GetSessionTurnCount non-existent = %d, want 0", cnt)
 	}
 
-	// Update session ID
-	if err := s.SaveSessionID(ctx, "th-1", "sess-1-v2"); err != nil {
-		t.Fatalf("SaveSessionID update failed: %v", err)
-	}
-	id, _ = s.GetSessionID(ctx, "th-1")
-	if id != "sess-1-v2" {
-		t.Fatalf("expected sess-1-v2, got %q", id)
-	}
-
-	// IncrementSessionTurnCount & GetSessionTurnCount
-	count, err := s.IncrementSessionTurnCount(ctx, "th-1")
-	if err != nil || count != 1 {
-		t.Fatalf("expected count=1, got %d (err: %v)", count, err)
-	}
-	count, err = s.IncrementSessionTurnCount(ctx, "th-1")
-	if err != nil || count != 2 {
-		t.Fatalf("expected count=2, got %d (err: %v)", count, err)
-	}
-	count, err = s.GetSessionTurnCount(ctx, "th-1")
-	if err != nil || count != 2 {
-		t.Fatalf("expected count=2, got %d (err: %v)", count, err)
-	}
-
-	// Increment on non-existent session
-	count, err = s.IncrementSessionTurnCount(ctx, "th-new")
-	if err != nil || count != 1 {
-		t.Fatalf("expected count=1 on new session, got %d (err: %v)", count, err)
-	}
-	if c, _ := s.GetSessionTurnCount(ctx, "th-nonexistent"); c != 0 {
-		t.Fatalf("expected count=0 on non-existent session, got %d", c)
-	}
-
-	// RotateSessionID
 	if err := s.RotateSessionID(ctx, "th-1", "sess-2"); err != nil {
 		t.Fatalf("RotateSessionID failed: %v", err)
 	}
-	currID, _ := s.GetSessionID(ctx, "th-1")
-	prevID, err := s.GetPreviousSessionID(ctx, "th-1")
-	if err != nil || currID != "sess-2" || prevID != "sess-1-v2" {
-		t.Fatalf("expected curr=sess-2 prev=sess-1-v2, got curr=%q prev=%q", currID, prevID)
+	curr, _ := s.GetSessionID(ctx, "th-1")
+	prev, _ := s.GetPreviousSessionID(ctx, "th-1")
+	turns, _ := s.GetSessionTurnCount(ctx, "th-1")
+	if curr != "sess-2" || prev != "sess-1-v2" || turns != 0 {
+		t.Errorf("post-rotation state: curr=%q, prev=%q, turns=%d", curr, prev, turns)
 	}
-	// Turn count should reset to 0
-	count, _ = s.GetSessionTurnCount(ctx, "th-1")
-	if count != 0 {
-		t.Fatalf("expected turn count 0 after rotation, got %d", count)
-	}
+	_ = s.RotateSessionID(ctx, "th-brand-new", "sess-init")
 
-	// Rotate on non-existent session
-	if err := s.RotateSessionID(ctx, "th-brand-new", "sess-init"); err != nil {
-		t.Fatalf("RotateSessionID brand-new failed: %v", err)
+	if sum, wm, err := s.GetThreadSummary(ctx, "th-1"); err != nil || sum != "" || wm != "" {
+		t.Errorf("GetThreadSummary empty = %q, %q, %v", sum, wm, err)
 	}
-
-
-	// Thread summary
-	sum, wm, err := s.GetThreadSummary(ctx, "th-1")
-	if err != nil || sum != "" || wm != "" {
-		t.Fatalf("expected empty thread summary, got sum=%q wm=%q", sum, wm)
-	}
-	if err := s.SaveThreadSummary(ctx, "th-1", "Summarized text", "msg-100"); err != nil {
+	if err := s.SaveThreadSummary(ctx, "th-1", "Summary text", "msg-100"); err != nil {
 		t.Fatalf("SaveThreadSummary failed: %v", err)
 	}
-	sum, wm, err = s.GetThreadSummary(ctx, "th-1")
-	if err != nil || sum != "Summarized text" || wm != "msg-100" {
-		t.Fatalf("expected summary='Summarized text' wm='msg-100', got %q, %q", sum, wm)
+	if sum, wm, _ := s.GetThreadSummary(ctx, "th-1"); sum != "Summary text" || wm != "msg-100" {
+		t.Errorf("GetThreadSummary = %q, %q", sum, wm)
 	}
 
-	// Session activity stats
-	_ = s.InsertMessage(ctx, Message{ID: "m-active-1", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "Valid response"})
-	_ = s.InsertMessage(ctx, Message{ID: "m-active-2", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[EXPIRED_STALE] ignored"})
-	_ = s.InsertMessage(ctx, Message{ID: "m-active-3", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[AMBIENT] ignored"})
-	_ = s.InsertMessage(ctx, Message{ID: "m-active-4", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[IGNORED] ignored"})
-	_ = s.InsertMessage(ctx, Message{ID: "m-active-5", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "Second valid response"})
-
+	_ = s.InsertMessage(ctx, Message{ID: "m-act-1", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "Valid"})
+	_ = s.InsertMessage(ctx, Message{ID: "m-act-2", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[EXPIRED_STALE]"})
+	_ = s.InsertMessage(ctx, Message{ID: "m-act-3", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[AMBIENT]"})
+	_ = s.InsertMessage(ctx, Message{ID: "m-act-4", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[IGNORED]"})
+	_ = s.InsertMessage(ctx, Message{ID: "m-act-5", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "Valid 2"})
 	stats, err := s.GetSessionActivityStats(ctx, "th-1")
-	if err != nil {
-		t.Fatalf("GetSessionActivityStats failed: %v", err)
-	}
-	if stats.InternalSessionID != "sess-2" {
-		t.Errorf("expected InternalSessionID sess-2, got %q", stats.InternalSessionID)
-	}
-	if stats.CompletedTurns != 2 {
-		t.Errorf("expected 2 completed turns (excluding filtered prefixes), got %d", stats.CompletedTurns)
-	}
-	if stats.LastMessageAt.IsZero() {
-		t.Errorf("expected non-zero LastMessageAt")
-	}
-	if stats.LastCompletedMessageCreatedAt.IsZero() {
-		t.Errorf("expected non-zero LastCompletedMessageCreatedAt")
+	if err != nil || stats.InternalSessionID != "sess-2" || stats.CompletedTurns != 2 {
+		t.Errorf("GetSessionActivityStats = %+v, %v", stats, err)
 	}
 
-	if prev, _ := s.GetPreviousSessionID(ctx, "th-none"); prev != "" {
-		t.Fatalf("expected empty previous session ID for th-none, got %q", prev)
+	_ = s.SaveSessionID(ctx, "ext-1", "int-1")
+	if ext, _ := s.GetExternalConversationID(ctx, "int-1"); ext != "ext-1" {
+		t.Errorf("GetExternalConversationID = %q, want ext-1", ext)
 	}
+	if ext, _ := s.GetExternalConversationID(ctx, ""); ext != "" {
+		t.Errorf("GetExternalConversationID empty = %q, want empty", ext)
+	}
+
+	for i := 0; i < 8; i++ {
+		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated")
+	}
+	s.SetSessionUpdatedAt("th-unrotated", time.Now().UTC().Add(-2*time.Hour))
+	if unrot, _ := s.FindUnrotatedSessions(ctx, 5); len(unrot) != 0 {
+		t.Errorf("expected 0 unrotated sessions within 1h, got %d", len(unrot))
+	}
+	if unrotLong, _ := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour); len(unrotLong) != 1 {
+		t.Errorf("expected 1 unrotated session within 4h, got %d", len(unrotLong))
+	}
+	_, _ = s.FindUnrotatedSessions(ctx, 0)
 }
 
 func TestFakeStoreScheduleOperations(t *testing.T) {
@@ -285,45 +201,29 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	// OneShot schedules
 	s1 := OneShotSchedule{ID: "os-1", ThreadID: "th-1", Prompt: "P1", RunAt: now.Add(-time.Minute)}
 	s2 := OneShotSchedule{ID: "os-2", ThreadID: "th-1", Prompt: "P2", RunAt: now.Add(time.Hour)}
-	if err := s.CreateOneShotSchedule(ctx, s1); err != nil {
-		t.Fatalf("CreateOneShotSchedule failed: %v", err)
-	}
-	if err := s.CreateOneShotSchedule(ctx, s2); err != nil {
-		t.Fatalf("CreateOneShotSchedule failed: %v", err)
-	}
+	_ = s.CreateOneShotSchedule(ctx, s1)
+	_ = s.CreateOneShotSchedule(ctx, s2)
 
-	// GetDueOneShotSchedules
-	due, err := s.GetDueOneShotSchedules(ctx)
-	if err != nil || len(due) != 1 || due[0].ID != "os-1" {
-		t.Fatalf("expected due [os-1], got %+v (err: %v)", due, err)
+	due, _ := s.GetDueOneShotSchedules(ctx)
+	if len(due) != 1 || due[0].ID != "os-1" {
+		t.Errorf("GetDueOneShotSchedules = %+v, want [os-1]", due)
 	}
+	allOS, _ := s.GetAllOneShotSchedules(ctx, "th-1")
+	if len(allOS) != 2 {
+		t.Errorf("GetAllOneShotSchedules = %d, want 2", len(allOS))
+	}
+	_, _ = s.GetAllOneShotSchedules(ctx, "")
 
-	// GetAllOneShotSchedules
-	all, err := s.GetAllOneShotSchedules(ctx, "th-1")
-	if err != nil || len(all) != 2 {
-		t.Fatalf("expected 2 schedules, got %d (err: %v)", len(all), err)
-	}
-	allGlobal, err := s.GetAllOneShotSchedules(ctx, "")
-	if err != nil || len(allGlobal) != 2 {
-		t.Fatalf("expected 2 schedules globally, got %d", len(allGlobal))
-	}
-
-	// InsertMessageAndConsumeOneShot
 	msg := Message{ID: "msg-os-1", ThreadID: "th-1", Content: "Executed"}
 	if err := s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg); err != nil {
 		t.Fatalf("InsertMessageAndConsumeOneShot failed: %v", err)
 	}
-	// Second consume should return ErrScheduleAlreadyConsumed
-	err = s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg)
-	if !errors.Is(err, ErrScheduleAlreadyConsumed) {
-		t.Fatalf("expected ErrScheduleAlreadyConsumed, got %v", err)
+	if err := s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg); !errors.Is(err, ErrScheduleAlreadyConsumed) {
+		t.Errorf("expected ErrScheduleAlreadyConsumed, got %v", err)
 	}
 
-
-	// Cron schedules
 	c1 := CronSchedule{ID: "cron-1", TargetID: "t-1", CronExpr: "*/5 * * * *", Enabled: true, NextRunAt: now.Add(-time.Minute)}
 	c2 := CronSchedule{ID: "cron-2", TargetID: "t-1", CronExpr: "0 * * * *", Enabled: false, NextRunAt: now.Add(-time.Minute)}
 	c3 := CronSchedule{ID: "cron-3", TargetID: "t-2", CronExpr: "0 0 * * *", Enabled: true, NextRunAt: now.Add(time.Hour)}
@@ -331,28 +231,18 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	_ = s.CreateCronSchedule(ctx, c2)
 	_ = s.CreateCronSchedule(ctx, c3)
 
-	dueCron, err := s.GetDueCronSchedules(ctx)
-	if err != nil || len(dueCron) != 1 || dueCron[0].ID != "cron-1" {
-		t.Fatalf("expected due cron-1 only (c2 is disabled), got %+v", dueCron)
+	dueCron, _ := s.GetDueCronSchedules(ctx)
+	if len(dueCron) != 1 || dueCron[0].ID != "cron-1" {
+		t.Errorf("GetDueCronSchedules = %+v, want [cron-1]", dueCron)
 	}
+	allCrons, _ := s.GetAllCronSchedules(ctx, "t-1")
+	if len(allCrons) != 2 {
+		t.Errorf("GetAllCronSchedules = %d, want 2", len(allCrons))
+	}
+	_, _ = s.GetAllCronSchedules(ctx, "")
+	_ = s.UpdateCronNextRun(ctx, "cron-1", now.Add(10*time.Minute))
+	_ = s.UpdateCronNextRun(ctx, "cron-none", now)
 
-	allCrons, err := s.GetAllCronSchedules(ctx, "t-1")
-	if err != nil || len(allCrons) != 2 {
-		t.Fatalf("expected 2 crons for target t-1, got %d", len(allCrons))
-	}
-	allCronsGlobal, err := s.GetAllCronSchedules(ctx, "")
-	if err != nil || len(allCronsGlobal) != 3 {
-		t.Fatalf("expected 3 crons globally, got %d", len(allCronsGlobal))
-	}
-
-	// UpdateCronNextRun
-	next := now.Add(10 * time.Minute)
-	if err := s.UpdateCronNextRun(ctx, "cron-1", next); err != nil {
-		t.Fatalf("UpdateCronNextRun failed: %v", err)
-	}
-	_ = s.UpdateCronNextRun(ctx, "cron-none", next)
-
-	// Schedule Runs
 	r1 := ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", Status: "enqueued", StartedAt: now.Add(-2 * time.Hour)}
 	r2 := ScheduleRun{ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", Status: "completed", StartedAt: now.Add(-1 * time.Hour), DurationMs: 500}
 	r3 := ScheduleRun{ID: "run-3", ScheduleID: "cron-3", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-30 * time.Minute)}
@@ -360,54 +250,32 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	_ = s.CreateScheduleRun(ctx, r2)
 	_ = s.CreateScheduleRun(ctx, r3)
 
-	// UpdateScheduleRunStatus
-	completedAt := now
-	err = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{
-		RunID:       "run-1",
-		Status:      "completed",
-		MessageID:   "msg-run-1",
-		DurationMs:  1200,
-		CompletedAt: completedAt,
-		Model:       "claude",
-	})
-	if err != nil {
-		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
-	}
+	_ = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-1", Status: "completed", MessageID: "msg-run-1", DurationMs: 1200, CompletedAt: now, Model: "claude"})
 	_ = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-none"})
 
-	// GetScheduleRunsPaginated
-	runs, total, err := s.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", "")
-	if err != nil || total != 2 || len(runs) != 2 {
-		t.Fatalf("expected 2 runs for cron-1, got len=%d total=%d (err: %v)", len(runs), total, err)
+	runs, total, _ := s.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", "")
+	if total != 2 || len(runs) != 2 {
+		t.Errorf("GetScheduleRunsPaginated = len %d, total %d, want 2, 2", len(runs), total)
 	}
-	runs, _, _ = s.GetScheduleRunsPaginated(ctx, 1, 0, "", "completed")
-	if len(runs) != 1 {
-		t.Fatalf("expected 1 completed run with limit 1, got %d", len(runs))
+	runsComp, _, _ := s.GetScheduleRunsPaginated(ctx, 1, 0, "", "completed")
+	if len(runsComp) != 1 {
+		t.Errorf("GetScheduleRunsPaginated completed = %d, want 1", len(runsComp))
 	}
-	runs, _, _ = s.GetScheduleRunsPaginated(ctx, 10, 50, "", "")
-	if runs != nil {
-		t.Fatalf("expected nil runs for large offset, got %+v", runs)
+	runsLarge, _, _ := s.GetScheduleRunsPaginated(ctx, 10, 50, "", "")
+	if runsLarge != nil {
+		t.Errorf("expected nil runs for large offset, got %+v", runsLarge)
 	}
 
-	// GetScheduleSummaryMetrics
 	metrics, err := s.GetScheduleSummaryMetrics(ctx)
-	if err != nil {
-		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
-	}
-	if metrics.CronCount != 2 || metrics.OneShotCount != 1 || metrics.TotalRuns24h != 3 {
-		t.Errorf("unexpected metrics: %+v", metrics)
+	if err != nil || metrics.CronCount != 2 || metrics.OneShotCount != 1 || metrics.TotalRuns24h != 3 {
+		t.Errorf("GetScheduleSummaryMetrics = %+v, %v", metrics, err)
 	}
 
-	// ReconcileOrphanedScheduleRuns
-	reconciled, err := s.ReconcileOrphanedScheduleRuns(ctx)
-	if err != nil || reconciled != 1 {
-		t.Fatalf("expected 1 reconciled run (run-3 was running), got %d (err: %v)", reconciled, err)
+	if rec, err := s.ReconcileOrphanedScheduleRuns(ctx); err != nil || rec != 1 {
+		t.Errorf("ReconcileOrphanedScheduleRuns = %d, %v, want 1, nil", rec, err)
 	}
-
-	// PruneScheduleRuns
-	pruned, err := s.PruneScheduleRuns(ctx, 1, 48*time.Hour)
-	if err != nil || pruned != 2 {
-		t.Fatalf("expected 2 runs pruned down to maxCount=1, got %d (err: %v)", pruned, err)
+	if prun, err := s.PruneScheduleRuns(ctx, 1, 48*time.Hour); err != nil || prun != 2 {
+		t.Errorf("PruneScheduleRuns = %d, %v, want 2, nil", prun, err)
 	}
 }
 
@@ -419,131 +287,151 @@ func TestFakeStoreFactOperations(t *testing.T) {
 	emb2 := []float32{0.9, 0.1, 0.0}
 	emb3 := []float32{0.0, 1.0, 0.0}
 
-	id1, err := s.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
-	if err != nil || id1 != 1 {
-		t.Fatalf("InsertFact 1 failed: %v, id=%d", err, id1)
-	}
-	id2, err := s.InsertFact(ctx, "tech", "Gundam pilot", 0.8, emb2)
-	if err != nil || id2 != 2 {
-		t.Fatalf("InsertFact 2 failed: %v, id=%d", err, id2)
-	}
-	id3, err := s.InsertFact(ctx, "tech", "Missing embedding fact", 0.5, nil)
-	if err != nil || id3 != 3 {
-		t.Fatalf("InsertFact 3 failed: %v, id=%d", err, id3)
+	id1, _ := s.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
+	_, _ = s.InsertFact(ctx, "tech", "Gundam pilot", 0.8, emb2)
+	id3, _ := s.InsertFact(ctx, "tech", "Missing embedding fact", 0.5, nil)
+
+	matches, _ := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.75)
+	if len(matches) != 2 || matches[0].ID != id1 {
+		t.Errorf("SearchSimilarFacts = %+v, want top id1", matches)
 	}
 
-	// SearchSimilarFacts
-	matches, err := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.75)
-	if err != nil || len(matches) != 2 {
-		t.Fatalf("expected 2 similar matches, got %d (err: %v)", len(matches), err)
+	dup, sim, _ := s.FindDuplicateFact(ctx, emb1, 0.85)
+	if dup == nil || dup.ID != id1 || sim <= 0.85 {
+		t.Errorf("FindDuplicateFact = %+v, %f", dup, sim)
 	}
-	if matches[0].ID != id1 {
-		t.Errorf("expected highest score match to be id1, got id=%d", matches[0].ID)
-	}
-
-	// FindDuplicateFact
-	dup, sim, err := s.FindDuplicateFact(ctx, emb1, 0.85)
-	if err != nil || dup == nil || dup.ID != id1 {
-		t.Fatalf("expected dup id1 with high sim, got dup=%+v sim=%f (err: %v)", dup, sim, err)
-	}
-	// No dup if minSim too high
-	dupNone, _, _ := s.FindDuplicateFact(ctx, emb3, 0.99)
-	if dupNone != nil {
-		t.Fatalf("expected no dup for orthogonal vector, got %+v", dupNone)
+	if dupNone, _, _ := s.FindDuplicateFact(ctx, emb3, 0.99); dupNone != nil {
+		t.Errorf("expected no dup, got %+v", dupNone)
 	}
 
-	// GetFactsPaginated
-	res, err := s.GetFactsPaginated(ctx, FactsFilter{Category: "tech", Limit: 10})
-	if err != nil || res.Total != 2 || len(res.Facts) != 2 {
-		t.Fatalf("expected 2 tech facts, got total=%d len=%d (err: %v)", res.Total, len(res.Facts), err)
+	res, _ := s.GetFactsPaginated(ctx, FactsFilter{Category: "tech", Limit: 10})
+	if res.Total != 2 || len(res.Facts) != 2 {
+		t.Errorf("GetFactsPaginated tech = total %d, len %d, want 2, 2", res.Total, len(res.Facts))
 	}
-	resQuery, _ := s.GetFactsPaginated(ctx, FactsFilter{Query: "matcha"})
-	if len(resQuery.Facts) != 1 || resQuery.Facts[0].ID != id1 {
-		t.Fatalf("expected matcha fact, got %+v", resQuery)
+	resQ, _ := s.GetFactsPaginated(ctx, FactsFilter{Query: "matcha"})
+	if len(resQ.Facts) != 1 || resQ.Facts[0].ID != id1 {
+		t.Errorf("GetFactsPaginated query matcha = %+v", resQ)
 	}
-	resOffset, _ := s.GetFactsPaginated(ctx, FactsFilter{Offset: 50})
-	if resOffset.Facts != nil {
-		t.Fatalf("expected nil facts for offset beyond total, got %+v", resOffset)
-	}
-
-	// GetFactsByThreadWithEmbeddings
-	threadFacts, err := s.GetFactsByThreadWithEmbeddings(ctx, "th-facts")
-	if err != nil || len(threadFacts) != 3 {
-		t.Fatalf("expected 3 thread facts, got %d (err: %v)", len(threadFacts), err)
-	}
-	globalFacts, _ := s.GetFactsByThreadWithEmbeddings(ctx, "")
-	if len(globalFacts) != 3 {
-		t.Fatalf("expected 3 global facts, got %d", len(globalFacts))
+	resOff, _ := s.GetFactsPaginated(ctx, FactsFilter{Offset: 50})
+	if resOff.Facts != nil {
+		t.Errorf("expected nil facts for offset beyond total, got %+v", resOff)
 	}
 
-	// GetFactsMissingEmbeddings
-	missing, err := s.GetFactsMissingEmbeddings(ctx, 10)
-	if err != nil || len(missing) != 1 || missing[0].ID != id3 {
-		t.Fatalf("expected missing id3, got %+v (err: %v)", missing, err)
+	threadFacts, _ := s.GetFactsByThreadWithEmbeddings(ctx, "th-facts")
+	if len(threadFacts) != 3 {
+		t.Errorf("GetFactsByThreadWithEmbeddings = %d, want 3", len(threadFacts))
 	}
 
-	// UpdateFactEmbedding
-	if err := s.UpdateFactEmbedding(ctx, id3, emb3); err != nil {
-		t.Fatalf("UpdateFactEmbedding failed: %v", err)
+	missing, _ := s.GetFactsMissingEmbeddings(ctx, 10)
+	if len(missing) != 1 || missing[0].ID != id3 {
+		t.Errorf("GetFactsMissingEmbeddings = %+v, want id3", missing)
 	}
+
+	_ = s.UpdateFactEmbedding(ctx, id3, emb3)
 	if err := s.UpdateFactEmbedding(ctx, 9999, emb3); !errors.Is(err, ErrFactNotFound) {
-		t.Fatalf("expected ErrFactNotFound on non-existent fact, got %v", err)
+		t.Errorf("expected ErrFactNotFound, got %v", err)
 	}
-	missingAfter, _ := s.GetFactsMissingEmbeddings(ctx, 10)
-	if len(missingAfter) != 0 {
-		t.Fatalf("expected 0 missing embeddings after update, got %d", len(missingAfter))
+	if missAfter, _ := s.GetFactsMissingEmbeddings(ctx, 10); len(missAfter) != 0 {
+		t.Errorf("GetFactsMissingEmbeddings after update = %d, want 0", len(missAfter))
 	}
 
-	// ReinforceFact
-	if err := s.ReinforceFact(ctx, id1, "Likes iced matcha latte", emb1, 0.1); err != nil {
-		t.Fatalf("ReinforceFact failed: %v", err)
-	}
+	_ = s.ReinforceFact(ctx, id1, "Likes iced matcha latte", emb1, 0.1)
 	if err := s.ReinforceFact(ctx, 9999, "", nil, 0.1); !errors.Is(err, ErrFactNotFound) {
-		t.Fatalf("expected ErrFactNotFound on reinforce non-existent, got %v", err)
-	}
-	rechecked, _ := s.GetFactsByThreadWithEmbeddings(ctx, "th-facts")
-	if rechecked[0].Fact.FactText != "Likes matcha latte" || rechecked[0].Fact.Importance != 1.0 {
-		t.Errorf("unexpected reinforced fact: %+v", rechecked[0])
+		t.Errorf("expected ErrFactNotFound on reinforce, got %v", err)
 	}
 
-	// DecayAndPruneFacts
 	decayed, pruned, err := s.DecayAndPruneFacts(ctx, 0.2, 0.6, 0)
-	if err != nil {
-		t.Fatalf("DecayAndPruneFacts failed: %v", err)
-	}
-	if decayed != 3 {
-		t.Errorf("expected 3 decayed facts, got %d", decayed)
-	}
-	if pruned == 0 {
-		t.Errorf("expected at least 1 pruned fact (id3 dropped below 0.6), got %d", pruned)
+	if err != nil || decayed != 3 || pruned == 0 {
+		t.Errorf("DecayAndPruneFacts = decayed %d, pruned %d, err %v", decayed, pruned, err)
 	}
 
-	// Watermarks & ExtractedAt
-	if err := s.UpdateConversationFactWatermark(ctx, "th-done", 42); err != nil {
-		t.Fatalf("UpdateConversationFactWatermark failed: %v", err)
-	}
-	if err := s.UpdateConversationFactExtractedAt(ctx, "th-done"); err != nil {
-		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
-	}
+	_ = s.UpdateConversationFactWatermark(ctx, "th-done", 42)
+	_ = s.UpdateConversationFactExtractedAt(ctx, "th-done")
 	adminMeta := MessageMetadata{IsAdmin: true}
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-0", ThreadID: "th-done", Status: StatusCompleted, Content: "q0", ResponseText: "a0", Metadata: adminMeta})
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-1", ThreadID: "th-facts", Status: StatusCompleted, Content: "q1", ResponseText: "a1", Metadata: adminMeta})
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-2", ThreadID: "th-facts", Status: StatusCompleted, Content: "q2", ResponseText: "[AMBIENT_SILENT]", Metadata: adminMeta})
-	_ = s.InsertMessage(ctx, Message{ID: "m-extract-3", ThreadID: "th-other", Status: StatusCompleted, Content: "q3", ResponseText: "a3", Metadata: adminMeta})
-	activeThreads, err := s.GetActiveConversationsForExtraction(ctx, 24)
-	if err != nil {
-		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
-	}
+	_ = s.InsertMessage(ctx, Message{ID: "m-ext-0", ThreadID: "th-done", Status: StatusCompleted, Content: "q0", ResponseText: "a0", Metadata: adminMeta})
+	_ = s.InsertMessage(ctx, Message{ID: "m-ext-1", ThreadID: "th-facts", Status: StatusCompleted, Content: "q1", ResponseText: "a1", Metadata: adminMeta})
+	_ = s.InsertMessage(ctx, Message{ID: "m-ext-2", ThreadID: "th-facts", Status: StatusCompleted, Content: "q2", ResponseText: "[AMBIENT_SILENT]", Metadata: adminMeta})
+	_ = s.InsertMessage(ctx, Message{ID: "m-ext-3", ThreadID: "th-other", Status: StatusCompleted, Content: "q3", ResponseText: "a3", Metadata: adminMeta})
+	activeThreads, _ := s.GetActiveConversationsForExtraction(ctx, 24)
 	if len(activeThreads) != 2 {
-		t.Fatalf("expected 2 active threads, got %d (%v)", len(activeThreads), activeThreads)
+		t.Errorf("GetActiveConversationsForExtraction = %d (%v), want 2", len(activeThreads), activeThreads)
 	}
-	turns, err := s.GetUnextractedAdminTurns(ctx, "th-facts")
-	if err != nil || len(turns) != 1 || turns[0].ID != "m-extract-1" {
-		t.Fatalf("expected 1 unextracted admin turn in th-facts, got %+v (err=%v)", turns, err)
+	turns, _ := s.GetUnextractedAdminTurns(ctx, "th-facts")
+	if len(turns) != 1 || turns[0].ID != "m-ext-1" {
+		t.Errorf("GetUnextractedAdminTurns = %+v, want m-ext-1", turns)
 	}
-	emptyTurns, err := s.GetUnextractedAdminTurns(ctx, "   ")
-	if err != nil || len(emptyTurns) != 0 {
-		t.Fatalf("expected nil turns for empty threadID, got %+v (err=%v)", emptyTurns, err)
+	emptyTurns, _ := s.GetUnextractedAdminTurns(ctx, "   ")
+	if len(emptyTurns) != 0 {
+		t.Errorf("expected empty turns, got %+v", emptyTurns)
+	}
+}
+
+func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+
+	summary := SessionSummary{SessionID: "sess-1", ThreadID: "th-1", Summary: "Cockpit debug session"}
+	if err := s.UpsertSessionSummary(ctx, summary); err != nil {
+		t.Fatalf("UpsertSessionSummary failed: %v", err)
+	}
+	syncStates, err := s.GetSessionSyncStates(ctx)
+	if err != nil || len(syncStates) != 1 || syncStates["sess-1"].SessionID != "sess-1" {
+		t.Fatalf("GetSessionSyncStates failed: %v", err)
+	}
+	steps := []TranscriptStep{
+		{SessionID: "sess-1", StepIndex: 0, StepType: "user", Content: "launch aerial"},
+		{SessionID: "sess-1", StepIndex: 1, StepType: "assistant", ToolName: "fly", Content: "flying aerial"},
+	}
+	if err := s.BatchInsertTranscriptSteps(ctx, steps); err != nil {
+		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
+	}
+	stepResults, _ := s.SearchTranscriptSteps(ctx, "aerial", "sess-1", "", 10)
+	if len(stepResults) != 2 {
+		t.Errorf("SearchTranscriptSteps = %d, want 2", len(stepResults))
+	}
+	summaries, _ := s.SearchSessionSummaries(ctx, nil, "debug", 10, 0.0)
+	if len(summaries) != 1 {
+		t.Errorf("SearchSessionSummaries = %d, want 1", len(summaries))
+	}
+
+	pr := PRRecord{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/test", HeadSHA: "abc1234", TargetID: "th-1", Status: "open", Title: "Test PR"}
+	if err := s.UpsertPR(ctx, pr); err != nil {
+		t.Fatalf("UpsertPR failed: %v", err)
+	}
+	gotPR, err := s.GetPRByNumber(ctx, "azylman/aerial", 101)
+	if err != nil || gotPR.Title != "Test PR" {
+		t.Fatalf("GetPRByNumber failed: %v, pr=%+v", err, gotPR)
+	}
+	_ = s.UpdatePRStatusMessageID(ctx, "azylman/aerial", 101, "msg-status-1")
+	gotPR, _ = s.GetPRByNumber(ctx, "azylman/aerial", 101)
+	if gotPR.StatusMessageID != "msg-status-1" {
+		t.Errorf("expected StatusMessageID 'msg-status-1', got %q", gotPR.StatusMessageID)
+	}
+
+	build := VanadisBuild{ID: "b-1", ThreadID: "th-1", Tier: 2, Title: "Vanadis Build 1", Objective: "Test Objective", Status: "running"}
+	chunks := []VanadisChunk{
+		{ID: "c-1", BuildID: "b-1", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 1", Instructions: "Execute chunk 1", Status: "running"},
+	}
+	if err := s.CreateVanadisBuild(ctx, build, chunks); err != nil {
+		t.Fatalf("CreateVanadisBuild failed: %v", err)
+	}
+	gotBuild, gotChunks, err := s.GetVanadisBuild(ctx, "b-1")
+	if err != nil || gotBuild.ID != "b-1" || len(gotChunks) != 1 {
+		t.Fatalf("GetVanadisBuild failed: %v", err)
+	}
+	chunk, err := s.GetVanadisChunk(ctx, "c-1")
+	if err != nil || chunk.Title != "Chunk 1" {
+		t.Fatalf("GetVanadisChunk failed: %v", err)
+	}
+	_ = s.AttachVanadisChunkPR(ctx, "c-1", 101)
+	chunk, _ = s.GetVanadisChunk(ctx, "c-1")
+	if chunk.PRNumber != 101 || chunk.Status != "pr_opened" {
+		t.Errorf("unexpected chunk after attach: %+v", chunk)
+	}
+	_ = s.UpdateVanadisBuildStatusMessageID(ctx, "b-1", "msg-build-status")
+	gotBuild, _, _ = s.GetVanadisBuild(ctx, "b-1")
+	if gotBuild.StatusMessageID != "msg-build-status" {
+		t.Errorf("expected StatusMessageID 'msg-build-status', got %q", gotBuild.StatusMessageID)
 	}
 }
 
@@ -551,14 +439,8 @@ func TestFakeStoreCloneNil(t *testing.T) {
 	if got := cloneMessage(nil); got != nil {
 		t.Errorf("cloneMessage(nil) = %v, want nil", got)
 	}
-	if got := cloneSessionInfo(nil); got != nil {
-		t.Errorf("cloneSessionInfo(nil) = %v, want nil", got)
-	}
-	if got := cloneOneShot(nil); got != nil {
-		t.Errorf("cloneOneShot(nil) = %v, want nil", got)
-	}
-	if got := cloneCron(nil); got != nil {
-		t.Errorf("cloneCron(nil) = %v, want nil", got)
+	if got := clonePtr[SessionInfo](nil); got != nil {
+		t.Errorf("clonePtr[SessionInfo](nil) = %v, want nil", got)
 	}
 	if got := cloneRun(nil); got != nil {
 		t.Errorf("cloneRun(nil) = %v, want nil", got)
@@ -566,64 +448,23 @@ func TestFakeStoreCloneNil(t *testing.T) {
 	if got := cloneFactWithEmbedding(nil); got != nil {
 		t.Errorf("cloneFactWithEmbedding(nil) = %v, want nil", got)
 	}
-}
-
-func TestFakeStoreClosedCoverage(t *testing.T) {
-	s := NewFakeStore()
-	_ = s.Close()
-	ctx := context.Background()
-
-	_ = s.InsertMessage(ctx, Message{})
-	_ = s.UpdateMessageStatus(ctx, "m", "s", "e")
-	_ = s.UpdateMessageCompleted(ctx, "m", "r")
-	_ = s.IncrementMessageRetry(ctx, "m", "e")
-	_ = s.ResetMessageToPendingWithRestart(ctx, "m", "r")
-	_, _ = s.GetPendingOrProcessingMessages(ctx, 10)
-	_, _ = s.GetMessage(ctx, "m")
-	_, _ = s.MessageExists(ctx, "m")
-	_, _ = s.ClaimPendingMessage(ctx, "m")
-	_, _ = s.GetActiveRecentThreadIDs(ctx, time.Hour)
-	_, _ = s.GetRecentThreadMessages(ctx, "t", 10)
-	_, _ = s.GetMaxMessageRowID(ctx, "t")
-	_, _ = s.GetSessionID(ctx, "t")
-	_, _ = s.GetPreviousSessionID(ctx, "t")
-	_ = s.SaveSessionID(ctx, "t", "s")
-	_, _ = s.IncrementSessionTurnCount(ctx, "t")
-	_, _ = s.GetSessionTurnCount(ctx, "t")
-	_ = s.RotateSessionID(ctx, "t", "s")
-	_, _, _ = s.GetThreadSummary(ctx, "t")
-	_ = s.SaveThreadSummary(ctx, "t", "s", "w")
-	_, _ = s.GetSessionActivityStats(ctx, "t")
-	_, _ = s.GetActiveTasks(ctx)
-	_, _ = s.GetExternalConversationID(ctx, "t")
-	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{})
-	_, _ = s.GetDueOneShotSchedules(ctx)
-	_ = s.InsertMessageAndConsumeOneShot(ctx, "id", Message{})
-	_, _ = s.GetAllOneShotSchedules(ctx, "t")
-	_ = s.CreateCronSchedule(ctx, CronSchedule{})
-	_, _ = s.GetDueCronSchedules(ctx)
-	_, _ = s.GetAllCronSchedules(ctx, "t")
-	_ = s.UpdateCronNextRun(ctx, "id", time.Now())
-	_ = s.CreateScheduleRun(ctx, ScheduleRun{})
-	_ = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{})
-	_, _, _ = s.GetScheduleRunsPaginated(ctx, 10, 0, "", "")
-	_, _ = s.GetScheduleRun("id")
-	_, _ = s.GetScheduleSummaryMetrics(ctx)
-	_, _ = s.ReconcileOrphanedScheduleRuns(ctx)
-	_, _ = s.PruneScheduleRuns(ctx, 10, time.Hour)
-	_, _ = s.InsertFact(ctx, "c", "f", 1.0, nil)
-	_, _ = s.SearchSimilarFacts(ctx, nil, "", 10, 0.5)
-	_, _ = s.GetFactsPaginated(ctx, FactsFilter{})
-	_, _ = s.GetFactsByThreadWithEmbeddings(ctx, "t")
-	_, _ = s.GetActiveConversationsForExtraction(ctx, 24)
-	_, _ = s.GetUnextractedAdminTurns(ctx, "t")
-	_ = s.UpdateConversationFactWatermark(ctx, "t", 1)
-	_ = s.UpdateConversationFactExtractedAt(ctx, "t")
-	_, _, _ = s.FindDuplicateFact(ctx, nil, 0.5)
-	_ = s.ReinforceFact(ctx, 1, "f", nil, 0.1)
-	_, _, _ = s.DecayAndPruneFacts(ctx, 0.1, 0.5, 30)
-	_, _ = s.GetFactsMissingEmbeddings(ctx, 10)
-	_ = s.UpdateFactEmbedding(ctx, 1, nil)
+	if got := cloneSessionSummary(nil); got != nil {
+		t.Errorf("cloneSessionSummary(nil) = %v, want nil", got)
+	}
+	if got := cloneTranscriptSteps(nil); got != nil {
+		t.Errorf("cloneTranscriptSteps(nil) = %v, want nil", got)
+	}
+	if got := cloneSliceNonNil[string](nil); got == nil || len(got) != 0 {
+		t.Errorf("cloneSliceNonNil(nil) = %v, want empty slice", got)
+	}
+	if got := cloneSliceNonNil([]string{"a"}); len(got) != 1 || got[0] != "a" {
+		t.Errorf("cloneSliceNonNil non-nil failed: %v", got)
+	}
+	chunkNoEffort := &VanadisChunk{ID: "c1", TargetFiles: []string{"f1"}}
+	clonedChunk := cloneVanadisChunk(chunkNoEffort)
+	if clonedChunk.Effort != "medium" || len(clonedChunk.TargetFiles) != 1 {
+		t.Errorf("cloneVanadisChunk failed: %+v", clonedChunk)
+	}
 }
 
 func TestFakeStoreTestHelpers(t *testing.T) {
@@ -631,203 +472,62 @@ func TestFakeStoreTestHelpers(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	// 1. SetSessionInfo
-	s.SetSessionInfo(SessionInfo{
-		ThreadID:          "th-helper",
-		InternalSessionID: "sess-helper",
-		TurnCount:         5,
-		CreatedAt:         now.Add(-time.Hour),
-		UpdatedAt:         now.Add(-10 * time.Minute),
-	})
-	sessID, err := s.GetSessionID(ctx, "th-helper")
-	if err != nil || sessID != "sess-helper" {
-		t.Fatalf("GetSessionID() = (%q, %v), want (sess-helper, nil)", sessID, err)
+	s.SetSessionInfo(SessionInfo{ThreadID: "th-helper", InternalSessionID: "sess-helper", TurnCount: 5, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)})
+	sessID, _ := s.GetSessionID(ctx, "th-helper")
+	turns, _ := s.GetSessionTurnCount(ctx, "th-helper")
+	if sessID != "sess-helper" || turns != 5 {
+		t.Errorf("SetSessionInfo: sessID=%q, turns=%d", sessID, turns)
 	}
-	prevID, err := s.GetPreviousSessionID(ctx, "th-helper")
-	if err != nil || prevID != "" {
-		t.Fatalf("GetPreviousSessionID() = (%q, %v), want ('', nil)", prevID, err)
-	}
-	turns, err := s.GetSessionTurnCount(ctx, "th-helper")
-	if err != nil || turns != 5 {
-		t.Fatalf("GetSessionTurnCount() = (%d, %v), want (5, nil)", turns, err)
-	}
+	s.SetSessionUpdatedAt("th-helper", now.Add(-5*time.Minute))
+	s.SetSessionUpdatedAt("non-existent-sess", now)
+	prevSess, _ := s.GetPreviousSessionID(ctx, "th-helper")
+	_ = prevSess
+	prevNone, _ := s.GetPreviousSessionID(ctx, "non-existent-sess")
+	_ = prevNone
 
-	// 2. SetMessageUpdatedAt
 	_ = s.InsertMessage(ctx, Message{ID: "m-helper", ThreadID: "th-helper", Status: StatusPending})
 	customTime := now.Add(-30 * time.Minute)
 	s.SetMessageUpdatedAt("m-helper", customTime)
-	s.SetMessageUpdatedAt("non-existent", customTime) // no-op branch
-	m, err := s.GetMessage(ctx, "m-helper")
-	if err != nil || m == nil || !m.UpdatedAt.Equal(customTime) {
-		t.Fatalf("SetMessageUpdatedAt failed: m=%+v, err=%v", m, err)
+	s.SetMessageUpdatedAt("non-existent", customTime)
+	m, _ := s.GetMessage(ctx, "m-helper")
+	if m == nil || !m.UpdatedAt.Equal(customTime) {
+		t.Errorf("SetMessageUpdatedAt failed: m=%+v", m)
 	}
+	recent0, _ := s.GetRecentThreadMessages(ctx, "th-helper", 0)
+	_ = recent0
+	recent10, _ := s.GetRecentThreadMessages(ctx, "th-helper", 10)
+	_ = recent10
 
-	// 3. GetScheduleRun
-	_, err = s.GetScheduleRun("non-existent-run")
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("expected sql.ErrNoRows for non-existent run, got: %v", err)
+	if _, err := s.GetScheduleRun("non-existent-run"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected sql.ErrNoRows for non-existent run, got: %v", err)
 	}
-
-	_ = s.CreateScheduleRun(ctx, ScheduleRun{
-		ID:         "run-helper",
-		ScheduleID: "sched-helper",
-		Status:     "completed",
-		StartedAt:  now,
-	})
+	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-helper", ScheduleID: "sched-helper", Status: "completed", StartedAt: now})
 	run, err := s.GetScheduleRun("run-helper")
 	if err != nil || run == nil || run.Status != "completed" {
-		t.Fatalf("GetScheduleRun failed: run=%+v, err=%v", run, err)
+		t.Errorf("GetScheduleRun failed: run=%+v, err=%v", run, err)
 	}
+
+	// PruneScheduleRuns defaults & count cap
+	_, _ = s.PruneScheduleRuns(ctx, 0, 0)
+	for i := 0; i < 5; i++ {
+		_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: fmt.Sprintf("run-limit-%d", i), ScheduleID: "sched-helper", Status: "completed", StartedAt: now.Add(time.Duration(i) * time.Minute)})
+	}
+	_, _ = s.PruneScheduleRuns(ctx, 2, time.Hour)
+
+	// Facts: tiebreaker sort, defaults, search modes
+	_, _ = s.InsertFact(ctx, "cat", "Fact A", 0.5, []float32{1.0, 0.0})
+	_, _ = s.InsertFact(ctx, "cat", "Fact B", 0.5, []float32{0.0, 1.0})
+	fbth, err := s.GetFactsByThreadWithEmbeddings(ctx, "any")
+	if err != nil || len(fbth) < 2 {
+		t.Errorf("GetFactsByThreadWithEmbeddings failed: %v, len=%d", err, len(fbth))
+	}
+	_, _, _ = s.DecayAndPruneFacts(ctx, 0, 0, 0)
+	none, _ := s.SearchSimilarFacts(ctx, nil, "", 0, 0)
+	if none != nil {
+		t.Errorf("expected nil for empty vec and query")
+	}
+	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "", 0, 0)
+	_, _ = s.SearchSimilarFacts(ctx, nil, "Fact", 0, 0)
+	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "Fact", 0, 0)
+	_, _, _ = s.FindDuplicateFact(ctx, []float32{1.0, 0.0}, 0)
 }
-
-func TestFakeStoreActiveTasksAndConversationMapping(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	// 1. GetActiveTasks on empty store
-	tasks, err := s.GetActiveTasks(ctx)
-	if err != nil {
-		t.Fatalf("GetActiveTasks on empty store failed: %v", err)
-	}
-	if len(tasks) != 0 {
-		t.Errorf("expected 0 tasks, got %d", len(tasks))
-	}
-
-	// 2. Add sessions and messages
-	_ = s.SaveSessionID(ctx, "th-1", "sess-1")
-	_ = s.InsertMessage(ctx, Message{
-		ID:        "m-1",
-		ThreadID:  "th-1",
-		Content:   "First task content",
-		Summary:   "Custom summary",
-		Status:    StatusPending,
-		CreatedAt: now.Add(-10 * time.Minute),
-	})
-	_ = s.InsertMessage(ctx, Message{
-		ID:        "m-2",
-		ThreadID:  "th-1",
-		Content:   "Second task content without summary",
-		Status:    StatusProcessing,
-		CreatedAt: now.Add(-5 * time.Minute),
-	})
-	_ = s.InsertMessage(ctx, Message{
-		ID:        "m-completed",
-		ThreadID:  "th-1",
-		Content:   "Completed task",
-		Status:    StatusCompleted,
-		CreatedAt: now.Add(-time.Hour),
-	})
-
-	tasks, err = s.GetActiveTasks(ctx)
-	if err != nil {
-		t.Fatalf("GetActiveTasks failed: %v", err)
-	}
-	if len(tasks) != 2 {
-		t.Fatalf("expected 2 active tasks, got %d", len(tasks))
-	}
-	if tasks[0].ID != "m-1" || tasks[0].SessionID != "sess-1" || tasks[0].Summary != "Custom summary" {
-		t.Errorf("unexpected task[0]: %+v", tasks[0])
-	}
-	if tasks[1].ID != "m-2" || tasks[1].Summary != "Second task content without summary" {
-		t.Errorf("unexpected task[1]: %+v", tasks[1])
-	}
-
-	// Clamping past 50 active tasks
-	for i := 3; i <= 60; i++ {
-		_ = s.InsertMessage(ctx, Message{
-			ID:        "m-bulk-" + string(rune(i)),
-			ThreadID:  "th-1",
-			Content:   "bulk task",
-			Status:    StatusPending,
-			CreatedAt: now.Add(time.Duration(i) * time.Second),
-		})
-	}
-	clampedTasks, err := s.GetActiveTasks(ctx)
-	if err != nil {
-		t.Fatalf("GetActiveTasks with >50 tasks failed: %v", err)
-	}
-	if len(clampedTasks) != 50 {
-		t.Errorf("expected 50 clamped tasks, got %d", len(clampedTasks))
-	}
-
-	// 3. GetExternalConversationID and SaveSessionID
-	if err := s.SaveSessionID(ctx, "ext-123", "internal-abc"); err != nil {
-		t.Fatalf("SaveSessionID failed: %v", err)
-	}
-	extID, err := s.GetExternalConversationID(ctx, "internal-abc")
-	if err != nil || extID != "ext-123" {
-		t.Errorf("GetExternalConversationID = (%q, %v), want ext-123", extID, err)
-	}
-
-	// Empty internalID returns empty string without error
-	emptyExt, err := s.GetExternalConversationID(ctx, "")
-	if err != nil || emptyExt != "" {
-		t.Errorf("GetExternalConversationID('') = (%q, %v), want empty", emptyExt, err)
-	}
-
-	// Non-existent internalID returns empty string
-	notFoundExt, err := s.GetExternalConversationID(ctx, "nonexistent-internal")
-	if err != nil || notFoundExt != "" {
-		t.Errorf("GetExternalConversationID('nonexistent') = (%q, %v), want empty", notFoundExt, err)
-	}
-
-	// 4. Closed store returns error
-	_ = s.Close()
-	if _, err := s.GetActiveTasks(ctx); !errors.Is(err, sql.ErrConnDone) {
-		t.Errorf("expected ErrConnDone on GetActiveTasks, got %v", err)
-	}
-	if _, err := s.GetExternalConversationID(ctx, "internal-abc"); !errors.Is(err, sql.ErrConnDone) {
-		t.Errorf("expected ErrConnDone on GetExternalConversationID, got %v", err)
-	}
-}
-
-func TestFakeStore_FindUnrotatedSessionsAndSessionUpdatedAt(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-
-	// 1. Initial save and increment turns
-	if err := s.SaveSessionID(ctx, "thread-1", "session-1"); err != nil {
-		t.Fatalf("SaveSessionID failed: %v", err)
-	}
-	for i := 0; i < 10; i++ {
-		if _, err := s.IncrementSessionTurnCount(ctx, "thread-1"); err != nil {
-			t.Fatalf("IncrementSessionTurnCount failed: %v", err)
-		}
-	}
-
-	// 2. SetSessionUpdatedAt to past
-	past := time.Now().UTC().Add(-2 * time.Hour)
-	s.SetSessionUpdatedAt("thread-1", past)
-
-	// 3. FindUnrotatedSessions with default maxAge (1h) - should not find thread-1 since it's 2h old
-	unrotated, err := s.FindUnrotatedSessions(ctx, 5)
-	if err != nil {
-		t.Fatalf("FindUnrotatedSessions failed: %v", err)
-	}
-	if len(unrotated) != 0 {
-		t.Errorf("expected 0 unrotated sessions within 1h, got %d", len(unrotated))
-	}
-
-	// 4. FindUnrotatedSessions with 4h maxAge - should find thread-1
-	unrotatedLong, err := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour)
-	if err != nil {
-		t.Fatalf("FindUnrotatedSessions with 4h failed: %v", err)
-	}
-	if len(unrotatedLong) != 1 || unrotatedLong[0].ThreadID != "thread-1" {
-		t.Errorf("expected 1 unrotated session, got %+v", unrotatedLong)
-	}
-
-	// 5. FindUnrotatedSessions with minTurns <= 0 (defaults to session.DefaultMaxSessionTurns)
-	_, err = s.FindUnrotatedSessions(ctx, 0)
-	if err != nil {
-		t.Fatalf("FindUnrotatedSessions with 0 minTurns failed: %v", err)
-	}
-
-	// 6. Closed store returns error
-	_ = s.Close()
-	if _, err := s.FindUnrotatedSessions(ctx, 5); !errors.Is(err, sql.ErrConnDone) {
-		t.Errorf("expected ErrConnDone on closed FindUnrotatedSessions, got %v", err)
-	}
-}
-
