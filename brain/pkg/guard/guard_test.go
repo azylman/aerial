@@ -45,7 +45,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"read-only git status in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/share/aerial"}}}`, false},
 		{"read-only git log in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git log -n 5", "Cwd": "/share/aerial"}}}`, false},
 		{"git -C share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C /share/aerial checkout main", "Cwd": "/data"}}}`, true},
-		{"git -C attached share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C/share/aerial -c core.pager=cat checkout main", "Cwd": "/data"}}}`, true},
+		{"git -C attached share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C/share/aerial --no-pager checkout main", "Cwd": "/data"}}}`, true},
 		{"git --git-dir share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git --git-dir=/share/aerial/.git checkout main", "Cwd": "/data"}}}`, true},
 		{"git --work-tree share branch -d denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git --work-tree=/share/aerial branch -d old", "Cwd": "/data"}}}`, true},
 		{"git -C share diff allowed", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C /share/aerial diff", "Cwd": "/data"}}}`, false},
