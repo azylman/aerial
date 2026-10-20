@@ -171,6 +171,10 @@ type mockPRRegistry struct {
 	ciFailCount    int
 	ciFailCountErr error
 
+	ensureCalls    []prCall
+	ensureTargetID string
+	ensureErr      error
+
 	err error
 }
 
@@ -342,6 +346,14 @@ func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, 
 
 func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
 	return m.ciFailCount, m.checkErr(m.ciFailCountErr)
+}
+
+func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string, jobs []string) (string, error) {
+	m.ensureCalls = append(m.ensureCalls, prCall{repo: repo, prNumber: prNumber, headSHA: headSHA, sha: vanadisChunkID})
+	if err := m.checkErr(m.ensureErr); err != nil {
+		return "", err
+	}
+	return firstNonEmpty(m.ensureTargetID, targetID), nil
 }
 
 type mockOutboundDispatcher struct {
@@ -1330,6 +1342,7 @@ type ghEventCase struct {
 	wantConflictCalls int
 	wantAdvanceCalls  int
 	wantFailVanadis   int
+	wantEnsureCalls   int
 	wantGitPushes     int
 	wantPrompts       int
 	wantDMs           int
@@ -1724,6 +1737,16 @@ func TestProcessGitHubEvent(t *testing.T) {
 			reg:     &mockPRRegistry{err: errors.New("sync db error")},
 			wantErr: true,
 		},
+		{
+			name: "pull_request opened with aerial-pr trailer self-heals registration", event: "pull_request", delivery: "del-pr-trailer-open",
+			payload: `{"action":"opened","number":692,"pull_request":{"number":692,"title":"fix: chunk 2","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"build-1792510680-f4ce8eee-chunk-2\",\"jobs\":[\"kiosk-client\"]} -->","head":{"ref":"feat/chunk2","sha":"head692"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{resolveTargetID: "1562162630997581946", resolveBranch: "feat/chunk2"}, wantPR: 692, wantTargetID: "1562162630997581946", wantEnsureCalls: 1,
+		},
+		{
+			name: "pull_request with aerial-pr trailer EnsurePRRegistered error propagates", event: "pull_request", delivery: "del-pr-trailer-err",
+			payload: `{"action":"opened","number":693,"pull_request":{"number":693,"title":"fix: chunk 3","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"build-123-chunk-3\",\"jobs\":[]} -->","head":{"ref":"feat/chunk3","sha":"head693"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{ensureErr: errors.New("ensure db error")}, wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -1823,6 +1846,9 @@ func TestProcessGitHubEvent(t *testing.T) {
 				}
 				if len(tc.reg.failVanadisCalls) != tc.wantFailVanadis {
 					t.Errorf("failVanadisCalls = %d, want %d", len(tc.reg.failVanadisCalls), tc.wantFailVanadis)
+				}
+				if len(tc.reg.ensureCalls) != tc.wantEnsureCalls {
+					t.Errorf("ensureCalls = %d, want %d", len(tc.reg.ensureCalls), tc.wantEnsureCalls)
 				}
 			}
 			if tc.disp != nil {
@@ -4377,6 +4403,13 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "AtomicTransitionDeployFailedByJob exec error", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockExecErr: errors.New("exec err"), wantErr: true},
 		{name: "AtomicTransitionDeployFailedByJob RowsAffected 0", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", rowsAffected: 0, wantUpdated: false},
 		{name: "AtomicTransitionDeployFailedByJob success", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "1555405874565091380"},
+
+		// EnsurePRRegistered
+		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
+		{name: "EnsurePRRegistered chunk query error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", mockSelectErr: errors.New("chunk db err"), wantErr: true},
+		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry with jobs", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", jobs: []string{"kiosk-client"}, targetIDReturn: "1562162630997581946", wantTarget: "1562162630997581946", wantSQLSubstr: "AND c.repo = $3"},
+		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
+		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -4714,9 +4747,42 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				if gotPR != tc.wantPRNum {
 					t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
 				}
+			case "EnsurePRRegistered":
+				gotTarget, err := reg.EnsurePRRegistered(ctx, tc.repo, tc.prNumber, "feat/branch", "head123", "feat: title", tc.targetID, tc.jobName, tc.jobs)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("EnsurePRRegistered err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
 			}
 			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) {
 				t.Errorf("gotSQL = %q, want substring %q", gotSQL, tc.wantSQLSubstr)
+			}
+		})
+	}
+}
+
+func TestParseAerialPRMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body, wantTarget, wantChunk string
+		wantJobs                          []string
+		wantOK                            bool
+	}{
+		{name: "no trailer", body: "Standard PR body\n<!-- regular comment -->"},
+		{name: "unclosed trailer", body: "Body\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\"}"},
+		{name: "invalid json", body: "Body\n<!-- aerial-pr: {bad-json} -->"},
+		{name: "invalid target and empty chunk", body: "Body\n<!-- aerial-pr: {\"target_id\":\"bad\",\"vanadis_chunk_id\":\"\"} -->"},
+		{name: "valid target, chunk, and jobs", body: "<!-- x -->\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"chunk-2\",\"jobs\":[\"kiosk-client\",\"kiosk-client\"]} -->", wantTarget: "1562162630997581946", wantChunk: "chunk-2", wantJobs: []string{"kiosk-client"}, wantOK: true},
+		{name: "valid chunk only", body: "<!-- aerial-pr: {\"target_id\":\"\",\"vanadis_chunk_id\":\"chunk-only\"} -->", wantChunk: "chunk-only", wantOK: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotTarget, gotChunk, gotJobs, gotOK := ParseAerialPRMetadata(tc.body)
+			if gotOK != tc.wantOK || gotTarget != tc.wantTarget || gotChunk != tc.wantChunk || strings.Join(gotJobs, ",") != strings.Join(tc.wantJobs, ",") {
+				t.Fatalf("ParseAerialPRMetadata() = (%q, %q, %v, %v), want (%q, %q, %v, %v)", gotTarget, gotChunk, gotJobs, gotOK, tc.wantTarget, tc.wantChunk, tc.wantJobs, tc.wantOK)
 			}
 		})
 	}
