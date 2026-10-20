@@ -321,11 +321,25 @@ func parseHunkLineNum(hunkHeader string) int {
 // IsCommitCommand determines whether a command executes a git commit or aerial-pr.sh submit.
 // It parses compound commands (&&, ;, ||, |) and extracts target directory and submit flag.
 func IsCommitCommand(cmd string) (isCommit bool, targetDir string, isSubmit bool) {
-	subCommands := splitCommands(cmd)
+	subCommands := splitPipeline(cmd)
 	for _, sub := range subCommands {
-		tokens := tokenizeCommand(sub)
+		tokens := tokenizeQuoteAware(sub)
 		if len(tokens) == 0 {
 			continue
+		}
+
+		// Unwrap bash -c <script> or sh -c <script>
+		bin := strings.ToLower(filepath.Base(tokens[0]))
+		if (bin == "bash" || bin == "sh") && len(tokens) >= 3 {
+			for i, t := range tokens {
+				if t == "-c" && i+1 < len(tokens) {
+					c, d, s := IsCommitCommand(tokens[i+1])
+					if c {
+						return c, d, s
+					}
+					break
+				}
+			}
 		}
 
 		// 1. Check for aerial-pr.sh submit
@@ -349,7 +363,6 @@ func IsCommitCommand(cmd string) (isCommit bool, targetDir string, isSubmit bool
 		}
 
 		// 2. Check for git commit
-		bin := strings.ToLower(filepath.Base(tokens[0]))
 		if bin == "git" {
 			var foundDir string
 			for i := 1; i < len(tokens); i++ {
@@ -467,13 +480,24 @@ func IsCoreAerial(targetDir string, cmd string) bool {
 
 // isAllCommit checks if git commit was called with -a, -am, or --all flags.
 func isAllCommit(cmd string) bool {
-	subCommands := splitCommands(cmd)
+	subCommands := splitPipeline(cmd)
 	for _, sub := range subCommands {
-		tokens := tokenizeCommand(sub)
+		tokens := tokenizeQuoteAware(sub)
 		if len(tokens) == 0 {
 			continue
 		}
-		if strings.ToLower(filepath.Base(tokens[0])) == "git" {
+		bin := strings.ToLower(filepath.Base(tokens[0]))
+		if (bin == "bash" || bin == "sh") && len(tokens) >= 3 {
+			for i, t := range tokens {
+				if t == "-c" && i+1 < len(tokens) {
+					if isAllCommit(tokens[i+1]) {
+						return true
+					}
+					break
+				}
+			}
+		}
+		if bin == "git" {
 			isCommit := false
 			hasAll := false
 			for _, tok := range tokens[1:] {

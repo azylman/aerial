@@ -79,7 +79,7 @@ func splitPipeline(cmd string) []string {
 				i++
 				continue
 			}
-			if r == ';' || r == '|' {
+			if r == ';' || r == '|' || r == '\n' {
 				if s := strings.TrimSpace(current.String()); s != "" {
 					cmds = append(cmds, s)
 				}

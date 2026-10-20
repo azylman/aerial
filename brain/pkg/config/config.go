@@ -105,32 +105,6 @@ func (p ChannelPolicy) IsIgnored() bool {
 	return m == "ignore" || m == "disabled"
 }
 
-// Normalize canonicalizes legacy mode and wake_mode combinations into the unified mode enum.
-func (p *ChannelPolicy) Normalize() {
-	if p == nil {
-		return
-	}
-	rawMode := strings.ToLower(strings.TrimSpace(p.Mode))
-	rawWake := strings.ToLower(strings.TrimSpace(p.WakeMode))
-
-	switch rawMode {
-	case "threads", "thread":
-		p.Mode = "thread"
-	case "channel":
-		switch rawWake {
-		case "mention", "mentions", "direct":
-			p.Mode = "mention"
-		default:
-			p.Mode = "classifier"
-		}
-	case "ignore", "disabled":
-		p.Mode = "ignore"
-	case "mention", "mentions", "direct":
-		p.Mode = "mention"
-	case "classifier", "ambient":
-		p.Mode = "classifier"
-	}
-}
 
 // GetWakeMode returns the effective wake mode for this channel policy.
 // Supported canonical values: "mention", "classifier", "all".
@@ -181,10 +155,6 @@ func (p ChannelPolicy) IsBotIgnored() bool {
 	return false
 }
 
-// GetHooks returns the channel lifecycle webhook configuration.
-func (p ChannelPolicy) GetHooks() ChannelHooksConfig {
-	return p.Hooks
-}
 
 // GetTimeout returns the configured timeout duration, defaulting to 3000ms if unspecified or non-positive.
 func (e *WebhookEndpoint) GetTimeout() time.Duration {
@@ -706,16 +676,6 @@ func (c *Config) Clone() *Config {
 	return NewFromData(c.Current())
 }
 
-// LoadConfigFromBytes parses YAML bytes into a Config instance.
-func LoadConfigFromBytes(data []byte) (*Config, error) {
-	var cfgData ConfigData
-	if err := yaml.Unmarshal(data, &cfgData); err != nil {
-		return nil, err
-	}
-	cfg := &Config{}
-	cfg.current.Store(&cfgData)
-	return cfg, nil
-}
 
 // GeminiHomeDir returns the configured base directory for .gemini files.
 func (c *Config) GeminiHomeDir() string {
@@ -774,9 +734,6 @@ func New() (*Config, error) {
 	return LoadConfigFromPaths(ConfigSearchPaths...)
 }
 
-func LoadConfig() (*Config, error) {
-	return New()
-}
 
 func ReloadWithSupplier(activeCfg *Config, supplier func() (*Config, error)) error {
 	if activeCfg == nil {
@@ -913,13 +870,6 @@ func GetTimezone() string {
 	return "America/Los_Angeles"
 }
 
-func GetSystemChannel() string {
-	cfg := activeGlobalConfig.Current()
-	if cfg != nil && strings.TrimSpace(cfg.SystemChannel) != "" {
-		return cfg.SystemChannel
-	}
-	return "aerial-dev"
-}
 
 func isContainerColdBoot(paths ...string) bool {
 	for _, p := range paths {
@@ -1018,10 +968,6 @@ func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config,
 	return NewFromData(data), nil
 }
 
-// NewFromLookup constructs a Config instance by searching standard paths using the provided lookup.
-func NewFromLookup(lookup func(string) string) (*Config, error) {
-	return LoadConfigFromLookup(lookup, ConfigSearchPaths...)
-}
 
 func LoadConfigFromPaths(paths ...string) (*Config, error) {
 	if isContainerColdBoot(paths...) {
@@ -1152,19 +1098,11 @@ func validateWebhookEndpoint(channelName, hookName string, ep *WebhookEndpoint, 
 }
 
 func validateHooks(channelName string, hooks ChannelHooksConfig, targetPath string) error {
-	if hooks.OnWake != nil {
-		if err := validateWebhookEndpoint(channelName, "on_wake", hooks.OnWake, targetPath); err != nil {
-			return err
-		}
-	}
-	if hooks.PreTurn != nil {
-		if err := validateWebhookEndpoint(channelName, "pre_turn", hooks.PreTurn, targetPath); err != nil {
-			return err
-		}
-	}
-	if hooks.PostTurn != nil {
-		if err := validateWebhookEndpoint(channelName, "post_turn", hooks.PostTurn, targetPath); err != nil {
-			return err
+	for name, ep := range map[string]*WebhookEndpoint{"on_wake": hooks.OnWake, "pre_turn": hooks.PreTurn, "post_turn": hooks.PostTurn} {
+		if ep != nil {
+			if err := validateWebhookEndpoint(channelName, name, ep, targetPath); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1240,21 +1178,18 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	} else {
 		res.AmbientWakeThreshold = clonePtr(res.AmbientWakeThreshold)
 	}
-	if res.Hooks.OnWake != nil {
-		res.Hooks.OnWake = clonePtr(res.Hooks.OnWake)
-	} else {
-		res.Hooks.OnWake = clonePtr(def.Hooks.OnWake)
+	if res.Hooks.OnWake == nil {
+		res.Hooks.OnWake = def.Hooks.OnWake
 	}
-	if res.Hooks.PreTurn != nil {
-		res.Hooks.PreTurn = clonePtr(res.Hooks.PreTurn)
-	} else {
-		res.Hooks.PreTurn = clonePtr(def.Hooks.PreTurn)
+	if res.Hooks.PreTurn == nil {
+		res.Hooks.PreTurn = def.Hooks.PreTurn
 	}
-	if res.Hooks.PostTurn != nil {
-		res.Hooks.PostTurn = clonePtr(res.Hooks.PostTurn)
-	} else {
-		res.Hooks.PostTurn = clonePtr(def.Hooks.PostTurn)
+	if res.Hooks.PostTurn == nil {
+		res.Hooks.PostTurn = def.Hooks.PostTurn
 	}
+	res.Hooks.OnWake = clonePtr(res.Hooks.OnWake)
+	res.Hooks.PreTurn = clonePtr(res.Hooks.PreTurn)
+	res.Hooks.PostTurn = clonePtr(res.Hooks.PostTurn)
 	if res.AmbientContext != nil {
 		res.AmbientContext = cloneAmbientContextConfig(res.AmbientContext)
 	} else if def.AmbientContext != nil {
@@ -1301,10 +1236,6 @@ func getEnvFromLookup(lookup func(string) string, key, defaultVal string) string
 	return defaultVal
 }
 
-// GetEnvFromLookup returns the value of the environment variable resolved via lookup or defaultVal.
-func GetEnvFromLookup(lookup func(string) string, key, defaultVal string) string {
-	return getEnvFromLookup(lookup, key, defaultVal)
-}
 
 // NormalizeChannelName standardizes channel names for config key and file lookups.
 // It trims whitespace, strips any leading '#', lowercases, and strictly blocks directory traversal.
@@ -1398,9 +1329,4 @@ func LoadScopeInstructions(scopeName string) string {
 	return ""
 }
 
-// LoadChannelInstructions loads per-channel instructions from convention-based markdown files.
-// Deprecated: Use LoadScopeInstructions instead.
-func LoadChannelInstructions(channelName string) string {
-	return LoadScopeInstructions(channelName)
-}
 

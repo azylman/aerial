@@ -86,7 +86,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 }
 
 func TestIsProtectedPath(t *testing.T) {
-	t.Parallel()
+	t.Chdir(t.TempDir())
 
 	tmp := t.TempDir()
 	tempAerial := filepath.Join(tmp, "share", "aerial")
@@ -119,7 +119,6 @@ func TestIsProtectedPath(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := IsProtectedPath(tc.path)
 			if got != tc.want {
 				t.Fatalf("IsProtectedPath(%q) = %v, want %v", tc.path, got, tc.want)

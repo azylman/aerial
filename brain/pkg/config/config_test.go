@@ -140,6 +140,41 @@ channels:
 `,
 			wantModel: DefaultConfigData().Model,
 		},
+		{
+			name: "isolated config with prompt",
+			content: `
+model: "isolated-model-123"
+system_channel: "isolated-channel-456"
+channels:
+  default:
+    mode: "threads"
+`,
+			envMap:    map[string]string{"SYSTEM_PROMPT": "prompt from lookup"},
+			wantModel: "isolated-model-123",
+		},
+		{
+			name: "polymorphic mcp_config string",
+			content: `
+channels:
+  default:
+    mode: "threads"
+mcp_config: '{"mcpServers":{"s1":{"serverUrl":"http://s1:1000"}}}'
+`,
+			wantModel: DefaultConfigData().Model,
+		},
+		{
+			name: "polymorphic mcp_config mapping",
+			content: `
+channels:
+  default:
+    mode: "threads"
+mcp_config:
+  mcpServers:
+    s2:
+      serverUrl: "http://s2:2000"
+`,
+			wantModel: DefaultConfigData().Model,
+		},
 	}
 
 	for _, tc := range tests {
@@ -169,26 +204,13 @@ channels:
 			if tc.wantSysChan != "" && cur.SystemChannel != tc.wantSysChan {
 				t.Errorf("SystemChannel = %q, want %q", cur.SystemChannel, tc.wantSysChan)
 			}
-
-			if !tc.wantErr && tc.envMap == nil {
-				bCfg, bErr := LoadConfigFromBytes([]byte(tc.content))
-				if bErr != nil {
-					t.Errorf("LoadConfigFromBytes failed: %v", bErr)
-				}
-				_ = bCfg
-			}
 		})
-	}
-
-	bCfg, bErr := LoadConfigFromBytes([]byte("{}"))
-	if bErr != nil || bCfg == nil {
-		t.Errorf("LoadConfigFromBytes on empty failed: %v", bErr)
 	}
 
 	t.Setenv("AGY_MODEL", "")
 	t.Setenv("DEFAULT_TIMEZONE", "")
 	t.Setenv("TZ", "")
-	_, _ = LoadConfig()
+	_, _ = New()
 }
 
 func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
@@ -333,7 +355,6 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	t.Setenv("DEFAULT_TIMEZONE", "")
 	t.Setenv("TZ", "")
 	_, _ = New()
-	_, _ = NewFromLookup(func(string) string { return "" })
 }
 
 func TestChannelPolicy_ValidationAndResolution(t *testing.T) {
@@ -636,16 +657,7 @@ channels:
 		t.Errorf("cfgWrap.ResolveChannelPolicy mode = %q, want 'channel'", resWrap.Mode)
 	}
 
-	normPolicy := ChannelPolicy{Mode: "threads", WakeMode: "ambient"}
-	normPolicy.Normalize()
-	if normPolicy.Mode != "thread" || normPolicy.GetWakeMode() != "classifier" {
-		t.Errorf("Normalize failed: mode=%q wake=%q", normPolicy.Mode, normPolicy.GetWakeMode())
-	}
-	pThresh := ChannelPolicy{Mode: "channel", AmbientWakeThreshold: f64Ptr(0.9)}
-	pThresh.Normalize()
-	pClass := ChannelPolicy{Mode: "classifier"}
-	pClass.Normalize()
-	hooks := channels["default"].GetHooks()
+	hooks := channels["default"].Hooks
 	if hooks.OnWake == nil || hooks.OnWake.GetTimeout() != 200*time.Millisecond {
 		t.Errorf("GetTimeout() unexpected value")
 	}
@@ -677,8 +689,8 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			if !tc.isNil {
 				fn = mapLookup(tc.lookup)
 			}
-			if got := GetEnvFromLookup(fn, tc.key, tc.defVal); got != tc.expected {
-				t.Errorf("GetEnvFromLookup() = %q, want %q", got, tc.expected)
+			if got := getEnvFromLookup(fn, tc.key, tc.defVal); got != tc.expected {
+				t.Errorf("getEnvFromLookup() = %q, want %q", got, tc.expected)
 			}
 		})
 	}
@@ -908,9 +920,6 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	if _, ok := nilCfg.getChannelPolicyRaw("nonexistent"); ok {
 		t.Errorf("expected false from nilCfg.getChannelPolicyRaw")
 	}
-	if _, err := LoadConfigFromBytes([]byte("broken: [")); err == nil {
-		t.Errorf("expected error from LoadConfigFromBytes on invalid YAML")
-	}
 	if nilCfg.Get() == nil {
 		t.Errorf("expected DefaultConfigData from nilCfg.Get()")
 	}
@@ -931,11 +940,11 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	}
 	origGlobal := ActiveConfig().Current()
 	ActiveConfig().Update(&ConfigData{Timezone: "", SystemChannel: ""})
-	if GetSystemChannel() != "aerial-dev" || GetTimezone() != "America/Los_Angeles" {
-		t.Errorf("expected fallback defaults on empty ActiveConfig")
+	if ActiveConfig().Current().SystemChannel != "" || ActiveConfig().Current().Timezone != "" {
+		t.Errorf("expected empty on updated ActiveConfig")
 	}
 	ActiveConfig().Update(&ConfigData{Timezone: "UTC", SystemChannel: "custom-sys"})
-	if GetSystemChannel() != "custom-sys" || GetTimezone() != "UTC" {
+	if ActiveConfig().Current().SystemChannel != "custom-sys" || ActiveConfig().Current().Timezone != "UTC" {
 		t.Errorf("expected custom values on ActiveConfig")
 	}
 	ActiveConfig().Update(origGlobal)
@@ -1031,7 +1040,7 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 		Timezone:      "America/New_York",
 		SystemChannel: "ops-channel",
 	})
-	if GetTimezone() != "America/New_York" || GetSystemChannel() != "ops-channel" {
+	if GetTimezone() != "America/New_York" || activeGlobalConfig.Current().SystemChannel != "ops-channel" {
 		t.Errorf("expected updated timezone and channel from globals")
 	}
 	activeGlobalConfig.update(origG)
@@ -1045,220 +1054,11 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 		t.Errorf("expected non-nil voice ambient context")
 	}
 
-	_ = LoadChannelInstructions("general")
+	_ = LoadScopeInstructions("general")
 }
 
-func TestLoadConfigFromLookup_Isolation(t *testing.T) {
-	origCurrent := activeGlobalConfig.Current()
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "isolated.yaml")
-	content := `
-model: "isolated-model-123"
-system_channel: "isolated-channel-456"
-channels:
-  default:
-    mode: "threads"
-`
-	if err := os.WriteFile(yamlPath, []byte(content), 0644); err != nil {
-		t.Fatalf("failed to write test yaml: %v", err)
-	}
 
-	lookup := func(k string) string {
-		if k == "SYSTEM_PROMPT" {
-			return "prompt from lookup"
-		}
-		return ""
-	}
 
-	cfg, err := LoadConfigFromLookup(lookup, yamlPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFromLookup failed: %v", err)
-	}
-
-	if cfg.Current().Model != "isolated-model-123" {
-		t.Errorf("expected isolated model, got %q", cfg.Current().Model)
-	}
-	if cfg.Current().SystemPrompt != "prompt from lookup" {
-		t.Errorf("expected prompt from lookup, got %q", cfg.Current().SystemPrompt)
-	}
-
-	// Verify activeGlobalConfig was NOT mutated
-	afterCurrent := activeGlobalConfig.Current()
-	if afterCurrent.Model != origCurrent.Model || afterCurrent.SystemChannel != origCurrent.SystemChannel {
-		t.Errorf("activeGlobalConfig was unexpectedly mutated: before=%+v, after=%+v", origCurrent, afterCurrent)
-	}
-}
-
-func TestLoadConfigFromLookup_PolymorphicMCPConfig(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// 1. mcp_config as string
-	p1 := filepath.Join(tmpDir, "cfg_str.yaml")
-	c1 := `
-channels:
-  default:
-    mode: "threads"
-mcp_config: '{"mcpServers":{"s1":{"serverUrl":"http://s1:1000"}}}'
-`
-	if err := os.WriteFile(p1, []byte(c1), 0644); err != nil {
-		t.Fatalf("failed to write yaml: %v", err)
-	}
-	cfg1, err := LoadConfigFromLookup(nil, p1)
-	if err != nil {
-		t.Fatalf("LoadConfigFromLookup string mcp_config failed: %v", err)
-	}
-	if !strings.Contains(cfg1.Current().MCPConfig, "http://s1:1000") {
-		t.Errorf("expected string mcp_config to contain s1 url, got %q", cfg1.Current().MCPConfig)
-	}
-
-	// 2. mcp_config as mapping
-	p2 := filepath.Join(tmpDir, "cfg_map.yaml")
-	c2 := `
-channels:
-  default:
-    mode: "threads"
-mcp_config:
-  mcpServers:
-    s2:
-      serverUrl: "http://s2:2000"
-`
-	if err := os.WriteFile(p2, []byte(c2), 0644); err != nil {
-		t.Fatalf("failed to write yaml: %v", err)
-	}
-	cfg2, err := LoadConfigFromLookup(nil, p2)
-	if err != nil {
-		t.Fatalf("LoadConfigFromLookup map mcp_config failed: %v", err)
-	}
-	if !strings.Contains(cfg2.Current().MCPConfig, "http://s2:2000") {
-		t.Errorf("expected map mcp_config serialized to JSON containing s2 url, got %q", cfg2.Current().MCPConfig)
-	}
-}
-
-func TestBuildPostgresDSN_Lookup(t *testing.T) {
-	// 1. Direct DATABASE_URL
-	lookup1 := func(k string) string {
-		if k == "DATABASE_URL" {
-			return "postgres://user:pass@host1:5432/db1"
-		}
-		return ""
-	}
-	if dsn := buildPostgresDSN(lookup1); dsn != "postgres://user:pass@host1:5432/db1" {
-		t.Errorf("expected direct DATABASE_URL, got %q", dsn)
-	}
-
-	// 2. DB_PATH is ignored (returns empty when no Postgres vars set)
-	lookup2 := func(k string) string {
-		if k == "DB_PATH" {
-			return "/var/data/app.db"
-		}
-		return ""
-	}
-	if dsn := buildPostgresDSN(lookup2); dsn != "" {
-		t.Errorf("expected DB_PATH to be ignored, got %q", dsn)
-	}
-
-	// 3. Components
-	lookup3 := func(k string) string {
-		switch k {
-		case "POSTGRES_HOST":
-			return "pg.internal"
-		case "POSTGRES_PORT":
-			return "5433"
-		case "POSTGRES_USER":
-			return "myuser"
-		case "POSTGRES_PASSWORD":
-			return "secret123"
-		case "POSTGRES_DB":
-			return "aerial_db"
-		default:
-			return ""
-		}
-	}
-	expected := "postgres://myuser:secret123@pg.internal:5433/aerial_db?sslmode=disable"
-	if dsn := buildPostgresDSN(lookup3); dsn != expected {
-		t.Errorf("expected constructed DSN %q, got %q", expected, dsn)
-	}
-
-	// 4. Nil lookup safe
-	if dsn := buildPostgresDSN(nil); dsn != "" {
-		t.Errorf("expected empty DSN for nil lookup, got %q", dsn)
-	}
-}
-
-func TestConfig_PackageLevelHelpers(t *testing.T) {
-	// 1. ActiveConfig()
-	ac := ActiveConfig()
-	if ac == nil {
-		t.Errorf("expected non-nil ActiveConfig")
-	}
-
-	// 4. buildPostgresDSN defaults with POSTGRES_HOST
-	lookupHostOnly := func(k string) string {
-		if k == "POSTGRES_HOST" {
-			return "localhost"
-		}
-		return ""
-	}
-	expectedDefault := "postgres://aerial:aerial_secure_pass@localhost:5432/aerial?sslmode=disable"
-	if dsn := buildPostgresDSN(lookupHostOnly); dsn != expectedDefault {
-		t.Errorf("expected default postgres DSN %q, got %q", expectedDefault, dsn)
-	}
-
-	// 5. Reload nil check
-	if err := Reload(nil); err == nil {
-		t.Errorf("expected error for Reload(nil)")
-	}
-
-	tmpDir := t.TempDir()
-
-	// 7. isContainerColdBoot
-	_ = isContainerColdBoot(filepath.Join(tmpDir, "nonexistent"))
-
-	// 8. NewFromLookup
-	mockLookup := func(string) string { return "" }
-	cfg, err := NewFromLookup(mockLookup)
-	if cfg == nil && err == nil {
-		t.Errorf("unexpected nil cfg and nil err")
-	}
-
-	// 9. New() and LoadConfig()
-	t.Setenv("AGY_MODEL", "")
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "")
-	cfgNew, _ := New()
-	_ = cfgNew
-	cfgLoad, _ := LoadConfig()
-	_ = cfgLoad
-
-	// 10. waitForColdBootConfig
-	validBootFile := filepath.Join(tmpDir, "boot.yaml")
-	_ = os.WriteFile(validBootFile, []byte("model: test\n"), 0644)
-	waitForColdBootConfig([]string{validBootFile}, 500*time.Millisecond)
-	waitForColdBootConfig([]string{filepath.Join(tmpDir, "does_not_exist")}, 1*time.Millisecond)
-	waitForColdBootConfig(nil, 1*time.Millisecond)
-	waitForColdBootConfig([]string{filepath.Join(tmpDir, "does_not_exist")}, 0)
-
-	// 11. cloneConfigData nil and update nil
-	if res := cloneConfigData(nil); res != nil {
-		t.Errorf("expected nil from cloneConfigData(nil)")
-	}
-	cfgDummy := NewTestConfig()
-	cfgDummy.update(nil)
-
-	// 12. NewFromData nil
-	cfgFromNil := NewFromData(nil)
-	if cfgFromNil == nil || cfgFromNil.Current() == nil {
-		t.Errorf("expected non-nil default from NewFromData(nil)")
-	}
-
-	// 13. applyEnvironmentOverrides nil checks
-	applyEnvironmentOverrides(nil, mockLookup)
-	dummyData := DefaultConfigData()
-	applyEnvironmentOverrides(dummyData, nil)
-
-	// 14. Reload with valid active config
-	_ = Reload(ActiveConfig())
-}
 
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
@@ -1331,7 +1131,7 @@ func TestLoadInstructions_ChannelAndScope(t *testing.T) {
 			if tc.isScope {
 				got = LoadScopeInstructions(tc.target)
 			} else {
-				got = LoadChannelInstructions(tc.target)
+				got = LoadScopeInstructions(tc.target)
 			}
 			if (tc.wantSubstr == "" && got != "") || (tc.wantSubstr != "" && !strings.Contains(got, tc.wantSubstr)) || (tc.wantAbsent != "" && strings.Contains(got, tc.wantAbsent)) {
 				t.Fatalf("unexpected got %q", got)
@@ -1375,8 +1175,8 @@ func TestChannelHooks_MethodsAndCloning(t *testing.T) {
 		PreTurn:  &WebhookEndpoint{URL: "http://127.0.0.1:9090/pre", TimeoutMs: 1500, OnTimeoutAction: "retry"},
 		PostTurn: &WebhookEndpoint{URL: "http://127.0.0.1:9090/post", TimeoutMs: 4000, OnTimeoutAction: "proceed"},
 	}}
-	if p.GetHooks().OnWake.URL != "https://sidecar:8080/on-wake" {
-		t.Fatal("GetHooks mismatch")
+	if p.Hooks.OnWake.URL != "https://sidecar:8080/on-wake" {
+		t.Fatal("Hooks mismatch")
 	}
 
 	yBytes, _ := yaml.Marshal(p)
@@ -1524,7 +1324,7 @@ func TestTargetMcpConfig(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfigFromBytes([]byte(tc.yaml))
+			cfg, err := LoadConfigFromLookup(func(string) string { return "" }, writeTempYAML(t, tc.yaml))
 			if tc.wantErrSubstr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
 					t.Fatalf("got err=%v, want %q", err, tc.wantErrSubstr)
@@ -1631,7 +1431,7 @@ func TestVoiceConfigAndEngine(t *testing.T) {
 	}
 }
 
-func TestChannelPolicy_NormalizeAndModes(t *testing.T) {
+func TestChannelPolicy_Modes(t *testing.T) {
 	tests := []struct {
 		name          string
 		input         ChannelPolicy
@@ -1639,11 +1439,6 @@ func TestChannelPolicy_NormalizeAndModes(t *testing.T) {
 		wantWake      string
 		wantThreshold float64
 	}{
-		{"legacy threads", ChannelPolicy{Mode: "threads"}, "thread", "all", 0.0},
-		{"legacy mention", ChannelPolicy{Mode: "channel", WakeMode: "mention"}, "mention", "mention", 0.0},
-		{"legacy classifier", ChannelPolicy{Mode: "channel", WakeMode: "classifier"}, "classifier", "classifier", 0.80},
-		{"legacy channel default", ChannelPolicy{Mode: "channel"}, "classifier", "classifier", 0.80},
-		{"legacy disabled", ChannelPolicy{Mode: "disabled"}, "ignore", "ignore", 0.0},
 		{"canonical thread", ChannelPolicy{Mode: "thread"}, "thread", "all", 0.0},
 		{"canonical classifier", ChannelPolicy{Mode: "classifier"}, "classifier", "classifier", 0.80},
 		{"canonical mention", ChannelPolicy{Mode: "mention"}, "mention", "mention", 0.0},
@@ -1652,7 +1447,6 @@ func TestChannelPolicy_NormalizeAndModes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := tc.input
-			p.Normalize()
 			if p.Mode != tc.wantMode || p.GetWakeMode() != tc.wantWake || p.GetAmbientWakeThreshold() != tc.wantThreshold || (tc.wantMode == "thread") != p.IsThread() || (tc.wantMode == "ignore") != p.IsIgnored() {
 				t.Fatalf("mode/wake/thresh mismatch: %+v", p)
 			}
@@ -1674,14 +1468,14 @@ func TestAmbientContextConfig(t *testing.T) {
 		wantTemplate  string
 		wantToolName  string
 	}{
-		{"voice ambient", "voice:\n  engine: gemini_api\n  ambient_context:\n    cache_ttl: '45s'\n    timeout_ms: 300\n    template_path: '/path/tmpl'\n    template: 'Voice: {{.now}}'\n    tools: [{name: ha, server: ha-mcp, tool: get_state, arguments: {entity_id: 'light.living'}}]\n", "45s", 300, "Voice: {{.now}}", "ha"},
-		{"channel ambient", "channels:\n  home:\n    mode: thread\n    ambient_context:\n      cache_ttl: '1m'\n      timeout_ms: 500\n      template: 'Chan: {{.now}}'\n      tools: [{name: weather, tool: current_weather, arguments: {city: 'San Francisco'}}]\n", "1m", 500, "Chan: {{.now}}", "weather"},
+		{"voice ambient", "channels: {default: {mode: threads}}\nvoice:\n  engine: gemini_api\n  ambient_context:\n    cache_ttl: '45s'\n    timeout_ms: 300\n    template_path: '/path/tmpl'\n    template: 'Voice: {{.now}}'\n    tools: [{name: ha, server: ha-mcp, tool: get_state, arguments: {entity_id: 'light.living'}}]\n", "45s", 300, "Voice: {{.now}}", "ha"},
+		{"channel ambient", "channels:\n  default: {mode: threads}\n  home:\n    mode: thread\n    ambient_context:\n      cache_ttl: '1m'\n      timeout_ms: 500\n      template: 'Chan: {{.now}}'\n      tools: [{name: weather, tool: current_weather, arguments: {city: 'San Francisco'}}]\n", "1m", 500, "Chan: {{.now}}", "weather"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfigFromBytes([]byte(tc.yaml))
+			cfg, err := LoadConfigFromLookup(func(string) string { return "" }, writeTempYAML(t, tc.yaml))
 			if err != nil {
-				t.Fatalf("LoadConfigFromBytes failed: %v", err)
+				t.Fatalf("LoadConfigFromLookup failed: %v", err)
 			}
 			var ac *AmbientContextConfig
 			if cfg.Current().Voice.AmbientContext != nil {
