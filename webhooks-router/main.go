@@ -2649,6 +2649,25 @@ func isZeroSHA(sha string) bool {
 	return strings.Trim(sha, "0") == ""
 }
 
+var (
+	squashCommitPRRegex = regexp.MustCompile(`\(#([1-9][0-9]*)\)\s*$`)
+	mergeCommitPRRegex  = regexp.MustCompile(`^Merge pull request #([1-9][0-9]*)\b`)
+)
+
+func extractPRNumberFromCommitMessage(msg string) int {
+	firstLine := strings.TrimSpace(strings.SplitN(strings.TrimSpace(msg), "\n", 2)[0])
+	for _, re := range []*regexp.Regexp{squashCommitPRRegex, mergeCommitPRRegex} {
+		if m := re.FindStringSubmatch(firstLine); len(m) == 2 {
+			prNum := 0
+			for _, ch := range m[1] {
+				prNum = prNum*10 + int(ch-'0')
+			}
+			return prNum
+		}
+	}
+	return 0
+}
+
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 	if strings.TrimSpace(event) == "" {
@@ -2987,6 +3006,12 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 
 		s.resolveEventPR(ctx, res, nil, "")
+		if res.PRNumber == 0 && p.HeadCommit != nil {
+			if prNum := extractPRNumberFromCommitMessage(p.HeadCommit.Message); prNum > 0 {
+				res.PRNumber = prNum
+				res.ResolutionSource = "commit_message"
+			}
+		}
 		if res.PRNumber > 0 {
 			res.MergeSHA = res.HeadSHA
 		}
