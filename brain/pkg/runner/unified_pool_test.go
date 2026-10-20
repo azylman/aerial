@@ -692,7 +692,7 @@ func TestUnifiedProcessPool_SessionRotator(t *testing.T) {
 	if should, _ := pool.ShouldRotateSession(rotatedSess); should { t.Error("expected false") }
 
 	if err := pool.Close(); err != nil { t.Fatalf("unexpected pool.Close() error: %v", err) }
-	if _, err := pool.RotateSession(ctx, "target-turn-hook"); err == nil { t.Error("expected error on closed pool") }
+	if sess, err := pool.RotateSession(ctx, "target-turn-hook"); err == nil || sess != nil { t.Errorf("expected nil session and error on closed pool, got (%v, %v)", sess, err) }
 	if should, _ := pool.ShouldRotateSession(rotatedSess); should { t.Error("expected false") }
 }
 
@@ -1377,7 +1377,7 @@ func TestUnifiedSessionLease_Release_RotationFailurePaths(t *testing.T) {
 	}
 }
 
-func TestUnifiedProcessPool_EvictAndRescuerCoverage(t *testing.T) {
+func TestUnifiedProcessPool_EvictSessionAndTranscriptRescuer(t *testing.T) {
 	t.Parallel()
 	var nilUnified *UnifiedProcessPool
 	if err := nilUnified.EvictSession("target-1"); err != nil {

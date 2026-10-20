@@ -536,7 +536,11 @@ func (p *UnifiedProcessPool) ShouldRotateSession(sess AgentSession) (bool, strin
 }
 
 func (p *UnifiedProcessPool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
-	return p.RotateDaemon(ctx, targetKey, "")
+	d, err := p.RotateDaemon(ctx, targetKey, "")
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
 }
 
 // ExecuteEphemeral dispatches a prompt to targetKey's daemon and synchronously awaits the response.
