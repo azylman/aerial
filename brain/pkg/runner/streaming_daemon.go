@@ -62,32 +62,29 @@ type inFlightToolCall struct {
 // StreamingDaemon manages a long-lived streaming agy subprocess, its lifecycle state,
 // and the stdout NDJSON event streaming loop.
 type StreamingDaemon struct {
-	cfg          DaemonConfig
-	spawner      DaemonSpawner
-	handle       ProcessHandle
-	stdin        io.WriteCloser
-	stdout       io.ReadCloser
-	stderrCloser io.Closer
-	stderr       *ActivityWriter
-	taskTracker  *TaskTracker
-
-	mu        sync.RWMutex
-	stdinMu   sync.Mutex
-	state     DaemonState
-	sessionID string
-	dirty     bool
-	lastUsed  time.Time
+	cfg            DaemonConfig
+	spawner        DaemonSpawner
+	handle         ProcessHandle
+	stdin          io.WriteCloser
+	stdout         io.ReadCloser
+	stderrCloser   io.Closer
+	stderr         *ActivityWriter
+	taskTracker    *TaskTracker
+	mu             sync.RWMutex
+	stdinMu        sync.Mutex
+	state          DaemonState
+	sessionID      string
+	dirty          bool
+	lastUsed       time.Time
 	turnCount      int
 	stepCount      int
 	onTurnFinished func(d *StreamingDaemon)
-
-	inflightMu    sync.Mutex
-	inflight      []*TurnContext
-	inFlightTools map[int]inFlightToolCall
-
-	readerWg  sync.WaitGroup
-	closeOnce sync.Once
-	closed    atomic.Bool
+	inflightMu     sync.Mutex
+	inflight       []*TurnContext
+	inFlightTools  map[int]inFlightToolCall
+	readerWg       sync.WaitGroup
+	closeOnce      sync.Once
+	closed         atomic.Bool
 }
 
 func closeStreamQuietly(c io.Closer, name string) {
@@ -113,7 +110,6 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	if spawner == nil {
 		spawner = &DefaultDaemonSpawner{}
 	}
-
 	stdin, stdout, stderr, handle, err := spawner.Spawn(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed spawning daemon: %w", err)
@@ -130,39 +126,28 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	}
 
 	d := &StreamingDaemon{
-		cfg:           cfg,
-		spawner:       spawner,
-		handle:        handle,
-		stdin:         stdin,
-		stdout:        stdout,
-		stderrCloser:  stderr,
-		stderr:        actWriter,
-		taskTracker:   NewTaskTracker(),
-		state:         StateStarting,
-		lastUsed:      time.Now(),
-		turnCount:     cfg.InitialTurnCount,
-		inFlightTools: make(map[int]inFlightToolCall),
+		cfg: cfg, spawner: spawner, handle: handle, stdin: stdin,
+		stdout: stdout, stderrCloser: stderr, stderr: actWriter,
+		taskTracker: NewTaskTracker(), state: StateStarting, lastUsed: time.Now(),
+		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
 	}
 
-	// Determine handshake timeout from cfg.Timeout if provided, defaulting to DefaultHandshakeTimeout (30s)
-	handshakeTimeout := DefaultHandshakeTimeout
+	timeout := DefaultHandshakeTimeout
 	if cfg.Timeout > 0 {
-		handshakeTimeout = cfg.Timeout
+		timeout = cfg.Timeout
 	}
-	timer := time.NewTimer(handshakeTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	reader := bufio.NewReader(stdout)
-	lineChan := make(chan string, 1)
-	errChan := make(chan error, 1)
-
+	lineChan, errChan := make(chan string, 1), make(chan error, 1)
 	go func() {
 		line, readErr := reader.ReadString('\n')
 		if readErr != nil {
 			errChan <- readErr
-			return
+		} else {
+			lineChan <- line
 		}
-		lineChan <- line
 	}()
 
 	select {
@@ -182,118 +167,36 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 			return nil, fmt.Errorf("failed parsing init event (%q)", line)
 		}
 		d.mu.Lock()
-		d.sessionID = initSessID
-		d.state = StateReady
+		d.sessionID, d.state = initSessID, StateReady
 		d.mu.Unlock()
 		d.stderr.SetSessionID(initSessID)
 	}
 
 	d.readerWg.Add(1)
 	go d.readStdoutLoop(reader)
-
 	return d, nil
 }
 
-// State returns the current lifecycle state of the daemon.
-func (d *StreamingDaemon) State() DaemonState {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.state
+func (d *StreamingDaemon) State() DaemonState       { d.mu.RLock(); defer d.mu.RUnlock(); return d.state }
+func (d *StreamingDaemon) SessionID() string        { if d == nil { return "" }; d.mu.RLock(); defer d.mu.RUnlock(); return d.sessionID }
+func (d *StreamingDaemon) SetTranscriptRescuer(r func(string, time.Time) string) {
+	if d == nil { return }
+	d.mu.Lock(); defer d.mu.Unlock(); d.cfg.TranscriptRescuer = r
 }
-
-// SessionID returns the latched session UUID.
-func (d *StreamingDaemon) SessionID() string {
-	if d == nil {
-		return ""
-	}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.sessionID
-}
-
-// SetTranscriptRescuer dynamically updates the transcript rescuer callback on the daemon.
-func (d *StreamingDaemon) SetTranscriptRescuer(rescuer func(convID string, since time.Time) string) {
-	if d == nil {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.cfg.TranscriptRescuer = rescuer
-}
-
-// TurnCount returns the total number of completed turns executed by this daemon.
-func (d *StreamingDaemon) TurnCount() int {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.turnCount
-}
-
-// StepCount returns the total number of raw NDJSON step_update events received across all turns.
-// Note: This reflects stdout streaming chunk volume, not conversation trajectory steps (which
-// are canonically tracked in transcript.jsonl via SessionManager.CountTranscriptSteps).
-func (d *StreamingDaemon) StepCount() int {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.stepCount
-}
-
-// LastUsed returns the timestamp of daemon initialization or the most recent turn completion.
-func (d *StreamingDaemon) LastUsed() time.Time {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.lastUsed
-}
-
-// TaskTracker returns the background task tracker instance for this daemon.
-func (d *StreamingDaemon) TaskTracker() *TaskTracker {
-	return d.taskTracker
-}
-
-// InflightCount returns the number of active in-flight turns currently queued or executing.
-func (d *StreamingDaemon) InflightCount() int {
-	d.inflightMu.Lock()
-	defer d.inflightMu.Unlock()
-	return len(d.inflight)
-}
-
-// IsDirty reports whether the daemon encountered an unrecoverable write error or closed state.
-func (d *StreamingDaemon) IsDirty() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.dirty
-}
-
-// SetSessionID updates the session ID latched to this daemon.
-func (d *StreamingDaemon) SetSessionID(id string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.sessionID = id
-	if d.stderr != nil {
-		d.stderr.SetSessionID(id)
-	}
-}
-
-// MarkDirty marks the daemon dirty so it will be rotated or recreated on next use.
-func (d *StreamingDaemon) MarkDirty() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.dirty = true
-}
-
-// SetOnTurnFinished registers a callback invoked when an in-flight turn finishes and no more in-flight turns remain.
+func (d *StreamingDaemon) TurnCount() int           { d.mu.RLock(); defer d.mu.RUnlock(); return d.turnCount }
+func (d *StreamingDaemon) StepCount() int           { d.mu.RLock(); defer d.mu.RUnlock(); return d.stepCount }
+func (d *StreamingDaemon) LastUsed() time.Time      { d.mu.RLock(); defer d.mu.RUnlock(); return d.lastUsed }
+func (d *StreamingDaemon) TaskTracker() *TaskTracker { return d.taskTracker }
+func (d *StreamingDaemon) InflightCount() int       { d.inflightMu.Lock(); defer d.inflightMu.Unlock(); return len(d.inflight) }
+func (d *StreamingDaemon) IsDirty() bool            { d.mu.RLock(); defer d.mu.RUnlock(); return d.dirty }
+func (d *StreamingDaemon) SetSessionID(id string)   { d.mu.Lock(); defer d.mu.Unlock(); d.sessionID = id; if d.stderr != nil { d.stderr.SetSessionID(id) } }
+func (d *StreamingDaemon) MarkDirty()               { d.mu.Lock(); defer d.mu.Unlock(); d.dirty = true }
 func (d *StreamingDaemon) SetOnTurnFinished(fn func(d *StreamingDaemon)) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.onTurnFinished = fn
+	d.mu.Lock(); defer d.mu.Unlock(); d.onTurnFinished = fn
 }
 
-
-// Send serializes prompt input writing to the daemon stdin under stdinMu mutex protection,
-// tracks the TurnContext in the in-flight FIFO queue, and transitions daemon state to StateExecuting.
 func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
-	d.stdinMu.Lock()
-	defer d.stdinMu.Unlock()
-
+	d.stdinMu.Lock(); defer d.stdinMu.Unlock()
 	d.mu.RLock()
 	if d.state == StateClosed || d.closed.Load() {
 		d.mu.RUnlock()
@@ -302,21 +205,10 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.mu.RUnlock()
 
 	ctx := context.Background()
-	if turnCtx != nil && turnCtx.Ctx != nil {
-		ctx = turnCtx.Ctx
-	}
+	if turnCtx != nil && turnCtx.Ctx != nil { ctx = turnCtx.Ctx }
 	payloadPrompt := injectRetrievedContext(ctx, prompt, d.cfg.AmbientContextRetriever, 500*time.Millisecond, d.cfg.MemoryRetriever, 2*time.Second, "[StreamingDaemon]")
-
-	wireMsg := streamInputPayload{
-		Event: "user",
-		Message: streamInputMessage{
-			Content: payloadPrompt,
-		},
-	}
-	encoded, err := json.Marshal(wireMsg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal turn prompt: %w", err)
-	}
+	encoded, err := json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
+	if err != nil { return fmt.Errorf("failed to marshal turn prompt: %w", err) }
 	encoded = append(encoded, '\n')
 
 	d.inflightMu.Lock()
@@ -324,13 +216,10 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.inflightMu.Unlock()
 
 	d.mu.Lock()
-	d.state = StateExecuting
-	d.lastUsed = time.Now()
+	d.state, d.lastUsed = StateExecuting, time.Now()
 	d.mu.Unlock()
 
-	if turnCtx != nil && turnCtx.Sink != nil {
-		turnCtx.Sink.OnTurnStarted()
-	}
+	if turnCtx != nil && turnCtx.Sink != nil { turnCtx.Sink.OnTurnStarted() }
 
 	if _, err := d.stdin.Write(encoded); err != nil {
 		d.inflightMu.Lock()
@@ -338,24 +227,17 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 			d.inflight = d.inflight[:len(d.inflight)-1]
 		}
 		d.inflightMu.Unlock()
-		d.mu.Lock()
-		d.dirty = true
-		d.state = StateClosed
-		d.mu.Unlock()
+		d.mu.Lock(); d.dirty, d.state = true, StateClosed; d.mu.Unlock()
 		return fmt.Errorf("failed writing prompt to daemon stdin: %w", err)
 	}
-
 	return nil
 }
 
-// Close gracefully terminates the daemon process, closes streams, and notifies any in-flight turns.
 func (d *StreamingDaemon) Close() error {
 	var closeErr error
 	d.closeOnce.Do(func() {
 		d.closed.Store(true)
-		d.mu.Lock()
-		d.state = StateClosed
-		d.mu.Unlock()
+		d.mu.Lock(); d.state = StateClosed; d.mu.Unlock()
 
 		closeStreamQuietly(d.stdin, "stdin")
 		closeStreamQuietly(d.stdout, "stdout")
@@ -371,7 +253,6 @@ func (d *StreamingDaemon) Close() error {
 		}
 		d.readerWg.Wait()
 
-		// Drain any remaining inflight turns with error
 		d.inflightMu.Lock()
 		remaining := d.inflight
 		d.inflight = nil
@@ -386,25 +267,24 @@ func (d *StreamingDaemon) Close() error {
 	return closeErr
 }
 
+func (d *StreamingDaemon) drainInFlightToolsLocked() []inFlightToolCall {
+	if len(d.inFlightTools) == 0 { return nil }
+	dangling := make([]inFlightToolCall, 0, len(d.inFlightTools))
+	for _, rec := range d.inFlightTools { dangling = append(dangling, rec) }
+	d.inFlightTools = make(map[int]inFlightToolCall)
+	return dangling
+}
+
 func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 	defer d.readerWg.Done()
-
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			if !d.closed.Load() {
-				d.mu.Lock()
-				d.state = StateClosed
-				d.mu.Unlock()
-
+				d.mu.Lock(); d.state = StateClosed; d.mu.Unlock()
 				d.inflightMu.Lock()
-				remaining := d.inflight
+				remaining, dangling := d.inflight, d.drainInFlightToolsLocked()
 				d.inflight = nil
-				var dangling []inFlightToolCall
-				for _, rec := range d.inFlightTools {
-					dangling = append(dangling, rec)
-				}
-				d.inFlightTools = make(map[int]inFlightToolCall)
 				d.inflightMu.Unlock()
 
 				for _, rec := range dangling {
@@ -412,17 +292,12 @@ func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 						remaining[0].Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
 					}
 				}
-
 				for _, turn := range remaining {
 					if turn != nil && turn.Sink != nil {
 						if d.cfg.TranscriptRescuer != nil && d.SessionID() != "" {
 							if rescued := d.cfg.TranscriptRescuer(d.SessionID(), turn.CreatedAt); IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
 								log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after unexpected EOF", d.SessionID())
-								turn.Sink.OnResult(&TurnResult{
-									ConversationID: d.SessionID(),
-									Response:       strings.TrimSpace(rescued),
-									Duration:       time.Since(turn.CreatedAt),
-								})
+								turn.Sink.OnResult(&TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Duration: time.Since(turn.CreatedAt)})
 								continue
 							}
 						}
@@ -432,268 +307,168 @@ func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 			}
 			return
 		}
-
 		d.dispatchNDJSONLine(line)
 	}
 }
 
 func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return
-	}
-
+	if trimmed == "" { return }
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 		log.Printf("[StreamingDaemon] Malformed NDJSON line: %v", err)
 		return
 	}
-
 	event, ok := raw["event"].(string)
 	if !ok {
 		log.Printf("[StreamingDaemon] NDJSON line missing string event field: %v", raw["event"])
 		return
 	}
-
 	d.inflightMu.Lock()
 	var activeTurn *TurnContext
-	if len(d.inflight) > 0 {
-		activeTurn = d.inflight[0]
-	}
+	if len(d.inflight) > 0 { activeTurn = d.inflight[0] }
 	d.inflightMu.Unlock()
-
-	if activeTurn == nil {
-		return
-	}
+	if activeTurn == nil { return }
 
 	switch event {
 	case "step_update":
-		d.mu.Lock()
-		d.stepCount++
-		d.mu.Unlock()
+		d.mu.Lock(); d.stepCount++; d.mu.Unlock()
+		if activeTurn.Sink == nil { return }
 
-		if activeTurn.Sink != nil {
-			var (
-				toolName           string
-				canonicalTool      string
-				mcpServer          string
-				cmdName            string
-				stepIdx            int
-				hasStepIdx         bool
-				isToolStart        bool
-				isToolEnd          bool
-				toolEndStatus      string
-				completedRecord    inFlightToolCall
-				hasCompletedRecord bool
-				activatedSkill     string
-				hasSkill           bool
-				toolParams         map[string]any
-			)
+		var (
+			toolName, canonicalTool, mcpServer, cmdName, activatedSkill string
+			stepIdx int; hasStepIdx, isToolStart, isToolEnd, hasSkill bool
+			toolEndStatus string; completedRecord inFlightToolCall; hasCompletedRecord bool
+			toolParams map[string]any
+		)
 
-			if toolCall, ok := raw["tool_call"].(map[string]any); ok {
-				if n, ok := toolCall["name"].(string); ok {
-					toolName = n
+		if tc, ok := raw["tool_call"].(map[string]any); ok {
+			if n, ok := tc["name"].(string); ok { toolName = n }
+			if c, ok := tc["command"].(string); ok { cmdName = c }
+			isToolStart = true
+		}
+		su, _ := raw["step_update"].(map[string]any)
+		if su != nil {
+			var state, typ string
+			if s, ok := su["state"].(string); ok { state = strings.ToUpper(s)
+			} else if s, ok := su["status"].(string); ok { state = strings.ToUpper(s) }
+			if t, ok := su["type"].(string); ok { typ = strings.ToLower(t)
+			} else if t, ok := su["step_type"].(string); ok { typ = strings.ToLower(t) }
+			if idx, ok := su["step_index"].(float64); ok { stepIdx, hasStepIdx = int(idx), true
+			} else if idx, ok := su["step_index"].(int); ok { stepIdx, hasStepIdx = idx, true }
+			if tn, ok := su["tool_name"].(string); ok && tn != "" { toolName = tn }
+			if info, ok := su["tool_info"].(map[string]any); ok {
+				if params, ok := info["parameters"].(map[string]any); ok {
+					toolParams = params
+					if cl, ok := params["CommandLine"].(string); ok && cl != "" { cmdName = cl }
 				}
-				if c, ok := toolCall["command"].(string); ok {
-					cmdName = c
-				}
-				isToolStart = true
 			}
-			if su, ok := raw["step_update"].(map[string]any); ok {
-				var state, typ string
-				if s, ok := su["state"].(string); ok {
-					state = strings.ToUpper(s)
-				} else if s, ok := su["status"].(string); ok {
-					state = strings.ToUpper(s)
-				}
-				if t, ok := su["type"].(string); ok {
-					typ = strings.ToLower(t)
-				} else if t, ok := su["step_type"].(string); ok {
-					typ = strings.ToLower(t)
-				}
-				if idx, ok := su["step_index"].(float64); ok {
-					stepIdx = int(idx)
-					hasStepIdx = true
-				} else if idx, ok := su["step_index"].(int); ok {
-					stepIdx = idx
-					hasStepIdx = true
-				}
-
-				if tn, ok := su["tool_name"].(string); ok && tn != "" {
-					toolName = tn
-				}
-				if info, ok := su["tool_info"].(map[string]any); ok {
-					if params, ok := info["parameters"].(map[string]any); ok {
-						toolParams = params
-						if cl, ok := params["CommandLine"].(string); ok && cl != "" {
-							cmdName = cl
-						}
-					}
-				}
-				if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
-					if firstTc, ok := tcs[0].(map[string]any); ok {
-						if n, ok := firstTc["name"].(string); ok && toolName == "" {
-							toolName = n
-						}
-						if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
-							toolParams = args
-							if cl, ok := args["CommandLine"].(string); ok && cl != "" {
-								cmdName = cl
-							}
-						}
-					}
-				}
-
-				if typ == "tool_call" || typ == "tool" {
-					if state != "DONE" && state != "ERROR" {
-						isToolStart = true
-					} else {
-						isToolStart = false
-						isToolEnd = true
-						if state == "DONE" {
-							toolEndStatus = "ok"
-						} else {
-							toolEndStatus = "error"
-						}
+			if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
+				if firstTc, ok := tcs[0].(map[string]any); ok {
+					if n, ok := firstTc["name"].(string); ok && toolName == "" { toolName = n }
+					if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
+						toolParams = args
+						if cl, ok := args["CommandLine"].(string); ok && cl != "" { cmdName = cl }
 					}
 				}
 			}
-
-			if !hasStepIdx {
-				if idx, ok := raw["step_index"].(float64); ok {
-					stepIdx = int(idx)
-					hasStepIdx = true
-				} else if idx, ok := raw["step_index"].(int); ok {
-					stepIdx = idx
-					hasStepIdx = true
-				}
-			}
-
-			if hasStepIdx {
-				d.inflightMu.Lock()
-				isNewStep := !activeTurn.hasSeenStep || stepIdx != activeTurn.lastStepIndex
-				if isNewStep {
-					activeTurn.hasSeenStep = true
-					activeTurn.lastStepIndex = stepIdx
-				}
-				d.inflightMu.Unlock()
-
-				if isNewStep {
-					if sa, ok := activeTurn.Sink.(StepAwareSink); ok {
-						sa.OnStepStarted(stepIdx)
-					}
-				}
-			}
-
-			var isNewToolStart bool
-
-			if isToolStart {
-				canonicalTool, mcpServer = ExtractMCPToolInfo(toolName, toolParams)
-				if toolParams != nil {
-					if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
-						if skill, ok := ExtractSkillFromTarget(path); ok {
-							activatedSkill = skill
-							hasSkill = true
-						}
-					}
-				}
-				if !hasSkill && cmdName != "" {
-					if skill, ok := ExtractSkillFromTarget(cmdName); ok {
-						activatedSkill = skill
-						hasSkill = true
-					}
-				}
-
-				d.inflightMu.Lock()
-				if d.inFlightTools == nil {
-					d.inFlightTools = make(map[int]inFlightToolCall)
-				}
-				if hasStepIdx {
-					if _, exists := d.inFlightTools[stepIdx]; !exists {
-						d.inFlightTools[stepIdx] = inFlightToolCall{
-							stepIndex: stepIdx,
-							toolName:  canonicalTool,
-							mcpServer: mcpServer,
-							startedAt: time.Now(),
-						}
-						isNewToolStart = true
-					}
+			if typ == "tool_call" || typ == "tool" {
+				if state != "DONE" && state != "ERROR" {
+					isToolStart = true
 				} else {
-					alreadyInFlight := false
-					for _, rec := range d.inFlightTools {
-						if rec.toolName == canonicalTool {
-							alreadyInFlight = true
+					isToolStart, isToolEnd = false, true
+					if state == "DONE" { toolEndStatus = "ok" } else { toolEndStatus = "error" }
+				}
+			}
+		}
+
+		if !hasStepIdx {
+			if idx, ok := raw["step_index"].(float64); ok { stepIdx, hasStepIdx = int(idx), true
+			} else if idx, ok := raw["step_index"].(int); ok { stepIdx, hasStepIdx = idx, true }
+		}
+
+		if hasStepIdx {
+			d.inflightMu.Lock()
+			isNewStep := !activeTurn.hasSeenStep || stepIdx != activeTurn.lastStepIndex
+			if isNewStep { activeTurn.hasSeenStep, activeTurn.lastStepIndex = true, stepIdx }
+			d.inflightMu.Unlock()
+			if isNewStep {
+				if sa, ok := activeTurn.Sink.(StepAwareSink); ok { sa.OnStepStarted(stepIdx) }
+			}
+		}
+
+		var isNewToolStart bool
+		if isToolStart {
+			canonicalTool, mcpServer = ExtractMCPToolInfo(toolName, toolParams)
+			if toolParams != nil {
+				if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
+					if skill, ok := ExtractSkillFromTarget(path); ok { activatedSkill, hasSkill = skill, true }
+				}
+			}
+			if !hasSkill && cmdName != "" {
+				if skill, ok := ExtractSkillFromTarget(cmdName); ok { activatedSkill, hasSkill = skill, true }
+			}
+
+			d.inflightMu.Lock()
+			if d.inFlightTools == nil { d.inFlightTools = make(map[int]inFlightToolCall) }
+			if hasStepIdx {
+				if _, exists := d.inFlightTools[stepIdx]; !exists {
+					d.inFlightTools[stepIdx] = inFlightToolCall{stepIndex: stepIdx, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
+					isNewToolStart = true
+				}
+			} else {
+				alreadyInFlight := false
+				for _, rec := range d.inFlightTools {
+					if rec.toolName == canonicalTool { alreadyInFlight = true; break }
+				}
+				if !alreadyInFlight {
+					d.inFlightTools[-1] = inFlightToolCall{stepIndex: -1, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
+					isNewToolStart = true
+				}
+			}
+			d.inflightMu.Unlock()
+		} else if isToolEnd {
+			d.inflightMu.Lock()
+			if d.inFlightTools != nil {
+				if hasStepIdx {
+					if rec, exists := d.inFlightTools[stepIdx]; exists {
+						completedRecord, hasCompletedRecord = rec, true
+						delete(d.inFlightTools, stepIdx)
+					}
+				}
+				if !hasCompletedRecord && len(d.inFlightTools) > 0 {
+					cTool, _ := ExtractMCPToolInfo(toolName, toolParams)
+					for idx, rec := range d.inFlightTools {
+						if rec.toolName == toolName || rec.toolName == cTool || toolName == "call_mcp_tool" || len(d.inFlightTools) == 1 {
+							completedRecord, hasCompletedRecord = rec, true
+							delete(d.inFlightTools, idx)
 							break
 						}
 					}
-					if !alreadyInFlight {
-						d.inFlightTools[-1] = inFlightToolCall{
-							stepIndex: -1,
-							toolName:  canonicalTool,
-							mcpServer: mcpServer,
-							startedAt: time.Now(),
-						}
-						isNewToolStart = true
-					}
 				}
-				d.inflightMu.Unlock()
-			} else if isToolEnd {
-				d.inflightMu.Lock()
-				if d.inFlightTools != nil {
-					if hasStepIdx {
-						if rec, exists := d.inFlightTools[stepIdx]; exists {
-							completedRecord = rec
-							hasCompletedRecord = true
-							delete(d.inFlightTools, stepIdx)
-						}
-					}
-					// If not matched by stepIdx, match any in-flight record by canonicalTool or toolName
-					if !hasCompletedRecord && len(d.inFlightTools) > 0 {
-						cTool, _ := ExtractMCPToolInfo(toolName, toolParams)
-						for idx, rec := range d.inFlightTools {
-							if rec.toolName == toolName || rec.toolName == cTool || toolName == "call_mcp_tool" || len(d.inFlightTools) == 1 {
-								completedRecord = rec
-								hasCompletedRecord = true
-								delete(d.inFlightTools, idx)
-								break
-							}
-						}
-					}
-				}
-				d.inflightMu.Unlock()
 			}
+			d.inflightMu.Unlock()
+		}
 
-			if isNewToolStart && (canonicalTool != "" || cmdName != "") {
-				activeTurn.Sink.OnToolCall(canonicalTool, cmdName)
+		if isNewToolStart && (canonicalTool != "" || cmdName != "") {
+			activeTurn.Sink.OnToolCall(canonicalTool, cmdName)
+		}
+		if hasSkill { activeTurn.Sink.OnSkillActivated(activatedSkill, "discord") }
+		if isToolEnd && hasCompletedRecord {
+			activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), toolEndStatus)
+		}
+		var delta string
+		for _, m := range []map[string]any{raw, su} {
+			if m == nil || delta != "" { continue }
+			for _, k := range []string{"delta", "text_delta"} {
+				if d, ok := m[k].(string); ok && d != "" { delta = d; break }
 			}
-			if hasSkill {
-				activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
-			}
-			if isToolEnd && hasCompletedRecord {
-				activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), toolEndStatus)
-			}
-			var delta string
-			if d, ok := raw["delta"].(string); ok && d != "" {
-				delta = d
-			} else if d, ok := raw["text_delta"].(string); ok && d != "" {
-				delta = d
-			} else if su, ok := raw["step_update"].(map[string]any); ok {
-				if d, ok := su["text_delta"].(string); ok && d != "" {
-					delta = d
-				} else if d, ok := su["delta"].(string); ok && d != "" {
-					delta = d
-				}
-			}
-			if delta != "" {
-				activeTurn.Sink.OnTextDelta(delta)
-			}
-			if _, ok := raw["thinking"]; ok {
-				activeTurn.Sink.OnThinking()
-			} else if su, ok := raw["step_update"].(map[string]any); ok {
-				if _, ok := su["thinking"]; ok {
-					activeTurn.Sink.OnThinking()
-				}
-			}
+		}
+		if delta != "" { activeTurn.Sink.OnTextDelta(delta) }
+		if _, ok := raw["thinking"]; ok {
+			activeTurn.Sink.OnThinking()
+		} else if su != nil {
+			if _, ok := su["thinking"]; ok { activeTurn.Sink.OnThinking() }
 		}
 
 	case "result":
@@ -703,12 +478,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			d.inflight = d.inflight[1:]
 		}
 		hasMoreInflight := len(d.inflight) > 0
-
-		var dangling []inFlightToolCall
-		for _, rec := range d.inFlightTools {
-			dangling = append(dangling, rec)
-		}
-		d.inFlightTools = make(map[int]inFlightToolCall)
+		dangling := d.drainInFlightToolsLocked()
 		d.inflightMu.Unlock()
 
 		for _, rec := range dangling {
@@ -726,46 +496,28 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			}
 		}
 		var turnFinishedCb func(d *StreamingDaemon)
-		if !hasMoreInflight {
-			turnFinishedCb = d.onTurnFinished
-		}
+		if !hasMoreInflight { turnFinishedCb = d.onTurnFinished }
 		d.mu.Unlock()
 
-		if turnFinishedCb != nil {
-			go turnFinishedCb(d)
-		}
-
-		if activeTurn == nil || activeTurn.Sink == nil {
-			return
-		}
+		if turnFinishedCb != nil { go turnFinishedCb(d) }
+		if activeTurn == nil || activeTurn.Sink == nil { return }
 
 		currentModel := d.cfg.Model
 		if activeTurn != nil && strings.TrimSpace(activeTurn.Model) != "" {
 			currentModel = strings.TrimSpace(activeTurn.Model)
 		}
-		if currentModel == "" {
-			currentModel = "default"
-		}
+		if currentModel == "" { currentModel = "default" }
 
 		respStr := extractResponseString(raw)
-
 		var status, errMsg string
-		if resObj, ok := raw["result"].(map[string]any); ok {
-			if s, ok := resObj["status"].(string); ok {
-				status = s
+		resObj, _ := raw["result"].(map[string]any)
+		for _, m := range []map[string]any{resObj, raw} {
+			if m == nil { continue }
+			if status == "" {
+				if s, ok := m["status"].(string); ok { status = s }
 			}
-			if em, ok := resObj["error"].(string); ok {
-				errMsg = em
-			}
-		}
-		if status == "" {
-			if s, ok := raw["status"].(string); ok {
-				status = s
-			}
-		}
-		if errMsg == "" {
-			if em, ok := raw["error"].(string); ok {
-				errMsg = em
+			if errMsg == "" {
+				if em, ok := m["error"].(string); ok { errMsg = em }
 			}
 		}
 
@@ -775,12 +527,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				if rescued != "" && IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
 					log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after error/empty result: %s", d.SessionID(), rescued)
 					recordStreamErrorMetric(errMsg, currentModel, false)
-					res := &TurnResult{
-						ConversationID: d.SessionID(),
-						Response:       strings.TrimSpace(rescued),
-						Stderr:         errMsg,
-						Duration:       time.Since(activeTurn.CreatedAt),
-					}
+					res := &TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
 					populateUsage(res, raw)
 					activeTurn.Sink.OnResult(res)
 					return
@@ -789,9 +536,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			if strings.EqualFold(status, "ERROR") {
 				if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
 					recordStreamErrorMetric(errMsg, currentModel, true)
-					if errMsg == "" {
-						errMsg = "daemon execution failed"
-					}
+					if errMsg == "" { errMsg = "daemon execution failed" }
 					activeTurn.Sink.OnError(errors.New(errMsg))
 					return
 				}
@@ -802,80 +547,44 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			}
 		}
 
-		res := &TurnResult{
-			ConversationID: d.SessionID(),
-			Response:       respStr,
-			Stderr:         errMsg,
-			Duration:       time.Since(activeTurn.CreatedAt),
-		}
+		res := &TurnResult{ConversationID: d.SessionID(), Response: respStr, Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
 		populateUsage(res, raw)
 		activeTurn.Sink.OnResult(res)
 	}
 }
 
 func extractResponseString(raw map[string]any) string {
+	keys := []string{"response", "result", "content", "text"}
 	if resObj, ok := raw["result"].(map[string]any); ok {
-		if resp, ok := resObj["response"].(string); ok && strings.TrimSpace(resp) != "" {
-			return resp
-		}
-		if resp, ok := resObj["result"].(string); ok && strings.TrimSpace(resp) != "" {
-			return resp
-		}
-		if resp, ok := resObj["content"].(string); ok && strings.TrimSpace(resp) != "" {
-			return resp
-		}
-		if resp, ok := resObj["text"].(string); ok && strings.TrimSpace(resp) != "" {
-			return resp
+		for _, k := range keys {
+			if resp, ok := resObj[k].(string); ok && strings.TrimSpace(resp) != "" { return resp }
 		}
 	}
-	if resp, ok := raw["response"].(string); ok && strings.TrimSpace(resp) != "" {
-		return resp
-	}
-	if resp, ok := raw["content"].(string); ok && strings.TrimSpace(resp) != "" {
-		return resp
-	}
-	if resp, ok := raw["text"].(string); ok && strings.TrimSpace(resp) != "" {
-		return resp
+	for _, k := range []string{"response", "content", "text"} {
+		if resp, ok := raw[k].(string); ok && strings.TrimSpace(resp) != "" { return resp }
 	}
 	return ""
 }
 
 func populateUsage(res *TurnResult, raw map[string]any) {
-	if res == nil || raw == nil {
-		return
-	}
-	var usageObj map[string]any
-	if u, ok := raw["usage"].(map[string]any); ok {
-		usageObj = u
-	}
+	if res == nil || raw == nil { return }
+	usageObj, _ := raw["usage"].(map[string]any)
 	if resObj, ok := raw["result"].(map[string]any); ok {
-		if u, ok := resObj["usage"].(map[string]any); ok {
-			usageObj = u
-		}
+		if u, ok := resObj["usage"].(map[string]any); ok { usageObj = u }
 	}
-	if usageObj != nil {
-		if it, ok := usageObj["input_tokens"].(float64); ok {
-			res.Usage.InputTokens = int(it)
-		}
-		if ot, ok := usageObj["output_tokens"].(float64); ok {
-			res.Usage.OutputTokens = int(ot)
-		}
-		if tt, ok := usageObj["thinking_tokens"].(float64); ok {
-			res.Usage.ThinkingTokens = int(tt)
-		}
-		if crt, ok := usageObj["cache_read_tokens"].(float64); ok {
-			res.Usage.CacheReadTokens = int(crt)
-		}
-		if tot, ok := usageObj["total_tokens"].(float64); ok {
-			res.Usage.TotalTokens = int(tot)
-		}
+	if usageObj == nil { return }
+	getInt := func(k string, dst *int) {
+		if v, ok := usageObj[k].(float64); ok { *dst = int(v) }
 	}
+	getInt("input_tokens", &res.Usage.InputTokens)
+	getInt("output_tokens", &res.Usage.OutputTokens)
+	getInt("thinking_tokens", &res.Usage.ThinkingTokens)
+	getInt("cache_read_tokens", &res.Usage.CacheReadTokens)
+	getInt("total_tokens", &res.Usage.TotalTokens)
 }
 
 func recordStreamErrorMetric(errMsg, model string, recordProcessErr bool) {
-	if errMsg == "" && !recordProcessErr {
-		return
-	}
+	if errMsg == "" && !recordProcessErr { return }
 	if IsCapacityBlip(errMsg, "") {
 		metrics.RecordRunnerError("capacity_throttle", model)
 	} else if IsQuotaPause(errMsg, "") {
