@@ -19,32 +19,28 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-var funnelCfg atomic.Pointer[config.Config]
-var funnelPool atomic.Pointer[queue.WorkerPool]
-var activeInteractionRouter atomic.Pointer[interactions.Router]
-var titleSummarizeSem = make(chan struct{}, 2)
-var discordSessionOpener = func(dg *discordgo.Session) error {
-	return dg.Open()
-}
-var funnelRetryBackoff = 2 * time.Second
-var funnelMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
-	if s == nil {
-		return nil, errors.New("nil session")
+var (
+	funnelCfg               atomic.Pointer[config.Config]
+	funnelPool              atomic.Pointer[queue.WorkerPool]
+	activeInteractionRouter atomic.Pointer[interactions.Router]
+	titleSummarizeSem       = make(chan struct{}, 2)
+	discordSessionOpener    = func(dg *discordgo.Session) error { return dg.Open() }
+	funnelRetryBackoff      = 2 * time.Second
+	funnelMemberFetcher     = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+		if s == nil {
+			return nil, errors.New("nil session")
+		}
+		return s.GuildMember(guildID, userID)
 	}
-	return s.GuildMember(guildID, userID)
-}
+)
 
 func syncBotMemberRoles(ctx context.Context, s *discordgo.Session, guildID, botID string) {
-	if s == nil || s.State == nil || guildID == "" || botID == "" {
-		return
-	}
-	if ctx != nil && ctx.Err() != nil {
+	if s == nil || s.State == nil || guildID == "" || botID == "" || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
 	if m, err := s.State.Member(guildID, botID); err == nil && m != nil {
 		return
 	}
-
 	m, err := funnelMemberFetcher(s, guildID, botID)
 	if err != nil || m == nil {
 		log.Printf("Warning: failed to fetch bot member roles for guild %s: %v", guildID, err)
@@ -100,13 +96,7 @@ func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channe
 		if snap.IsThread {
 			chType = discordgo.ChannelTypeGuildPublicThread
 		}
-		return &discordgo.Channel{
-			ID:       snap.ID,
-			Name:     snap.Name,
-			GuildID:  snap.GuildID,
-			ParentID: snap.ParentID,
-			Type:     chType,
-		}
+		return &discordgo.Channel{ID: snap.ID, Name: snap.Name, GuildID: snap.GuildID, ParentID: snap.ParentID, Type: chType}
 	}
 	if s != nil && s.Token != "" && queue.IsNumericSnowflake(channelID) {
 		if ch, err := s.Channel(channelID); err == nil && ch != nil {
@@ -150,14 +140,10 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 
 	var channelName string
 	var isAlreadyThread bool
-
 	if ch := getDiscordChannel(s, m.ChannelID); ch != nil {
 		channelName = ch.Name
-		if ch.IsThread() {
-			isAlreadyThread = true
-		}
+		isAlreadyThread = ch.IsThread()
 	}
-
 	if isAlreadyThread {
 		return m.ChannelID, true
 	}
@@ -178,15 +164,10 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 		}
 	}
 
-	shouldSummarize := true
-	if len(allowSummarize) > 0 {
-		shouldSummarize = allowSummarize[0]
-	}
-
+	shouldSummarize := len(allowSummarize) == 0 || allowSummarize[0]
 	title := ""
 	if shouldSummarize {
-		cls := currentFunnelClassifier()
-		if cls != nil {
+		if cls := currentFunnelClassifier(); cls != nil {
 			select {
 			case titleSummarizeSem <- struct{}{}:
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -207,52 +188,50 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 		title = DeriveThreadTitle(m.Content)
 	}
 
-	if s != nil && s.Token != "" {
-		cacheAndRegisterThread := func(th *discordgo.Channel) {
-			if th.ParentID == "" {
-				th.ParentID = m.ChannelID
-			}
-			if th.GuildID == "" {
-				th.GuildID = guildID
-			}
-			queue.CacheDiscordChannel(th)
-			if s.State != nil {
-				if err := s.State.ChannelAdd(th); err != nil {
-					log.Printf("[WARN] Failed to add thread %s to session state: %v", th.ID, err)
-				}
-			}
-		}
-
-		thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
-		if err != nil {
-			if IsThreadAlreadyExistsError(err) && queue.IsNumericSnowflake(m.ID) {
-				metrics.RecordThreadCreated("already_exists")
-				log.Printf("Thread already exists for message %s in channel %s (code 160004); resolving thread ID %s", m.ID, m.ChannelID, m.ID)
-				var existingThread *discordgo.Channel
-				if ch, fetchErr := s.Channel(m.ID); fetchErr == nil && ch != nil {
-					existingThread = ch
-				} else {
-					existingThread = &discordgo.Channel{
-						ID:       m.ID,
-						GuildID:  guildID,
-						ParentID: m.ChannelID,
-						Type:     discordgo.ChannelTypeGuildPublicThread,
-					}
-				}
-				cacheAndRegisterThread(existingThread)
-				return m.ID, true
-			}
-			metrics.RecordThreadCreated("error")
-			log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
-			return m.ChannelID, false
-		} else if thread != nil {
-			metrics.RecordThreadCreated("created")
-			cacheAndRegisterThread(thread)
-		}
-		log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
-		return thread.ID, true
+	if s == nil || s.Token == "" {
+		return m.ChannelID, false
 	}
-	return m.ChannelID, false
+
+	cacheAndRegisterThread := func(th *discordgo.Channel) {
+		if th.ParentID == "" {
+			th.ParentID = m.ChannelID
+		}
+		if th.GuildID == "" {
+			th.GuildID = guildID
+		}
+		queue.CacheDiscordChannel(th)
+		if s.State != nil {
+			if err := s.State.ChannelAdd(th); err != nil {
+				log.Printf("[WARN] Failed to add thread %s to session state: %v", th.ID, err)
+			}
+		}
+	}
+
+	thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
+	if err != nil {
+		if IsThreadAlreadyExistsError(err) && queue.IsNumericSnowflake(m.ID) {
+			metrics.RecordThreadCreated("already_exists")
+			log.Printf("Thread already exists for message %s in channel %s (code 160004); resolving thread ID %s", m.ID, m.ChannelID, m.ID)
+			existingThread, fetchErr := s.Channel(m.ID)
+			if fetchErr != nil || existingThread == nil {
+				existingThread = &discordgo.Channel{
+					ID:       m.ID,
+					GuildID:  guildID,
+					ParentID: m.ChannelID,
+					Type:     discordgo.ChannelTypeGuildPublicThread,
+				}
+			}
+			cacheAndRegisterThread(existingThread)
+			return m.ID, true
+		}
+		metrics.RecordThreadCreated("error")
+		log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
+		return m.ChannelID, false
+	}
+	metrics.RecordThreadCreated("created")
+	cacheAndRegisterThread(thread)
+	log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
+	return thread.ID, true
 }
 
 // resolveMessageContent resolves Discord mention snowflakes (<@ID>, <@!ID>, <@&ID>, <#ID>)
@@ -298,18 +277,12 @@ func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetTh
 	}
 	var adminUsers []string
 	if cfg := currentFunnelConfig(); cfg != nil {
-		cur := cfg.Current()
-		adminUsers = cur.AdminUsers
+		adminUsers = cfg.Current().AdminUsers
 	}
-	isAdmin := false
-	globalName := ""
-	authorBot := false
-	username := ""
+	isAdmin, username, globalName, authorBot := false, "", "", false
 	if m.Author != nil {
 		isAdmin = config.IsAdmin(adminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
-		username = m.Author.Username
-		globalName = m.Author.GlobalName
-		authorBot = m.Author.Bot
+		username, globalName, authorBot = m.Author.Username, m.Author.GlobalName, m.Author.Bot
 	}
 
 	var replyingToAuthor, replyingToContent string
@@ -321,40 +294,34 @@ func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetTh
 		replyingToContent = resolveMessageContent(s, m.ReferencedMessage)
 	}
 
-	var mentions []string
-	var mentionUserIDs []string
+	cleanStr := func(str string) string { return strings.ReplaceAll(strings.ReplaceAll(str, "\n", " "), "\r", "") }
+	var mentions, mentionUserIDs []string
 	for _, u := range m.Mentions {
 		if u != nil {
-			cleanU := strings.ReplaceAll(strings.ReplaceAll(u.Username, "\n", " "), "\r", "")
-			mentions = append(mentions, cleanU)
+			mentions = append(mentions, cleanStr(u.Username))
 			if u.ID != "" {
 				mentionUserIDs = append(mentionUserIDs, u.ID)
 			}
 		}
 	}
-
 	var mentionRoleIDs []string
 	for _, roleID := range m.MentionRoles {
-		roleName := roleID
+		name := roleID
 		if rName, ok := roleNames[roleID]; ok && rName != "" {
-			roleName = rName
+			name = rName
 		}
-		cleanR := strings.ReplaceAll(strings.ReplaceAll(roleName, "\n", " "), "\r", "")
-		mentions = append(mentions, cleanR)
+		mentions = append(mentions, cleanStr(name))
 		if roleID != "" {
 			mentionRoleIDs = append(mentionRoleIDs, roleID)
 		}
 	}
-
 	var attachments []string
 	for _, a := range m.Attachments {
 		if a != nil && a.URL != "" {
 			attachments = append(attachments, a.URL)
 		}
 	}
-
 	_, effName, _, threadName := queue.ResolveChannelAndThread(s, m.ChannelID)
-
 	return db.MessageMetadata{
 		ChannelID:         m.ChannelID,
 		ChannelName:       effName,
@@ -375,8 +342,6 @@ func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetTh
 }
 
 // resolveEffectiveChannelPolicy resolves the ChannelPolicy for a channel or thread.
-// If channelID is a Discord thread, it resolves the parent channel's policy so threads
-// inherit ignore/whitelisting rules from their parent channel.
 func resolveEffectiveChannelPolicy(s *discordgo.Session, channelID string) (config.ChannelPolicy, bool) {
 	effID, effName, isThread := queue.ResolveEffectiveChannel(s, channelID)
 	return config.ResolveChannelPolicy(currentFunnelConfig().Current().Channels, effID, effName), isThread
@@ -387,52 +352,19 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	if m == nil || m.Message == nil || m.Author == nil {
 		return false
 	}
-
-	botUserID := ""
-	if s != nil && s.State != nil && s.State.User != nil {
-		botUserID = s.State.User.ID
-	}
-	if botUserID != "" && m.Author.ID == botUserID {
+	if s != nil && s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID {
 		return false
 	}
-
 	policy, isThread := resolveEffectiveChannelPolicy(s, m.ChannelID)
-	if policy.IsIgnored() {
+	if policy.IsIgnored() || (policy.IsBotIgnored() && m.Author.Bot) {
 		return false
 	}
-	if policy.IsBotIgnored() && m.Author.Bot {
-		return false
-	}
-
-	guildID := resolveGuildID(s, m.Message)
-	if guildID == "" {
-		return true
-	}
-
-	if !policy.IsThread() {
-		return true
-	}
-
-	if len(m.Mentions) > 0 {
+	if resolveGuildID(s, m.Message) == "" || !policy.IsThread() || len(m.Mentions) > 0 || m.ReferencedMessage != nil || m.MessageReference != nil || len(m.MentionRoles) > 0 || isThread {
 		return true
 	}
 	contentLower := strings.ToLower(m.Content)
-	if strings.Contains(contentLower, "aerial") ||
-		strings.Contains(contentLower, "gundam") ||
-		strings.Contains(contentLower, "brain") ||
-		strings.Contains(contentLower, "bot") {
-		return true
-	}
-	if m.ReferencedMessage != nil || m.MessageReference != nil {
-		return true
-	}
-	if len(m.MentionRoles) > 0 {
-		return true
-	}
-	if isThread {
-		return true
-	}
-	return false
+	return strings.Contains(contentLower, "aerial") || strings.Contains(contentLower, "gundam") ||
+		strings.Contains(contentLower, "brain") || strings.Contains(contentLower, "bot")
 }
 
 func handleDiscordReady(ctx context.Context, s *discordgo.Session, r *discordgo.Ready, store db.Store, pool *queue.WorkerPool) {
@@ -447,13 +379,11 @@ func handleDiscordReady(ctx context.Context, s *discordgo.Session, r *discordgo.
 	log.Printf("Discord funnel gateway session ready as %s", userStr)
 	if s != nil && s.State != nil {
 		botUserID := ""
-		if r != nil && r.User != nil {
+		if r.User != nil {
 			botUserID = r.User.ID
 		}
 		for _, g := range s.State.Guilds {
-			if g != nil {
-				cacheGuildChannelsAndRegisterCommands(s, g, botUserID)
-			}
+			cacheGuildChannelsAndRegisterCommands(s, g, botUserID)
 		}
 	}
 	if ctx != nil && store != nil && pool != nil && s != nil {
@@ -495,6 +425,39 @@ func handleGuildMemberUpdate(s *discordgo.Session, m *discordgo.GuildMemberUpdat
 		}
 		log.Printf("Discord funnel updated bot roles (%d roles) in real-time for guild %s", len(m.Member.Roles), m.Member.GuildID)
 	}
+}
+
+func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, store db.Store, m *discordgo.Message, targetThreadID string, createdAt time.Time) (db.Message, error) {
+	resolvedGuildID := resolveGuildID(s, m)
+	if m != nil {
+		m.GuildID = resolvedGuildID
+	}
+	metadata := extractDiscordMetadata(s, m, targetThreadID)
+	authorID, authorName, rawContent, msgID := "", "Discord User", "", ""
+	if m != nil {
+		msgID = m.ID
+		if m.Author != nil {
+			authorID = m.Author.ID
+			authorName = m.Author.Username
+		}
+		rawContent = resolveMessageContent(s, m)
+	}
+	msg := db.Message{
+		ID:         msgID,
+		ThreadID:   targetThreadID,
+		GuildID:    resolvedGuildID,
+		AuthorID:   authorID,
+		AuthorName: authorName,
+		Content:    rawContent,
+		Metadata:   metadata,
+		Status:     db.StatusPending,
+		CreatedAt:  createdAt,
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := store.InsertMessage(ctx, msg); err != nil {
+		return msg, err
+	}
+	return msg, nil
 }
 
 func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.WorkerPool, token string) *discordgo.Session {
@@ -552,46 +515,33 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		}
 	})
 
-	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelCreate) {
-		metrics.DiscordEventsTotal.WithLabelValues("channel_create").Inc()
-		if c != nil && c.Channel != nil {
-			queue.CacheDiscordChannel(c.Channel)
+	handleCacheEvent := func(evt string, ch *discordgo.Channel, del bool) {
+		metrics.DiscordEventsTotal.WithLabelValues(evt).Inc()
+		if ch != nil {
+			if del {
+				queue.InvalidateChannelCache(ch.ID)
+			} else {
+				queue.CacheDiscordChannel(ch)
+			}
 		}
+	}
+	dg.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelCreate) {
+		if c != nil { handleCacheEvent("channel_create", c.Channel, false) }
 	})
-
-	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelUpdate) {
-		metrics.DiscordEventsTotal.WithLabelValues("channel_update").Inc()
-		if c != nil && c.Channel != nil {
-			queue.CacheDiscordChannel(c.Channel)
-		}
+	dg.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelUpdate) {
+		if c != nil { handleCacheEvent("channel_update", c.Channel, false) }
 	})
-
-	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelDelete) {
-		metrics.DiscordEventsTotal.WithLabelValues("channel_delete").Inc()
-		if c != nil && c.Channel != nil {
-			queue.InvalidateChannelCache(c.Channel.ID)
-		}
+	dg.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) {
+		if c != nil { handleCacheEvent("channel_delete", c.Channel, true) }
 	})
-
-	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadCreate) {
-		metrics.DiscordEventsTotal.WithLabelValues("thread_create").Inc()
-		if t != nil && t.Channel != nil {
-			queue.CacheDiscordChannel(t.Channel)
-		}
+	dg.AddHandler(func(_ *discordgo.Session, t *discordgo.ThreadCreate) {
+		if t != nil { handleCacheEvent("thread_create", t.Channel, false) }
 	})
-
-	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadUpdate) {
-		metrics.DiscordEventsTotal.WithLabelValues("thread_update").Inc()
-		if t != nil && t.Channel != nil {
-			queue.CacheDiscordChannel(t.Channel)
-		}
+	dg.AddHandler(func(_ *discordgo.Session, t *discordgo.ThreadUpdate) {
+		if t != nil { handleCacheEvent("thread_update", t.Channel, false) }
 	})
-
-	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadDelete) {
-		metrics.DiscordEventsTotal.WithLabelValues("thread_delete").Inc()
-		if t != nil && t.Channel != nil {
-			queue.InvalidateChannelCache(t.Channel.ID)
-		}
+	dg.AddHandler(func(_ *discordgo.Session, t *discordgo.ThreadDelete) {
+		if t != nil { handleCacheEvent("thread_delete", t.Channel, true) }
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
@@ -624,40 +574,8 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 			}
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
-			resolvedGuildID := resolveGuildID(s, m.Message)
-			m.GuildID = resolvedGuildID
-			if m.Message != nil {
-				m.Message.GuildID = resolvedGuildID
-			}
-			metadata := extractDiscordMetadata(s, m.Message, targetThreadID)
-
-			authorID := ""
-			authorName := "Discord User"
-			if m.Author != nil {
-				authorID = m.Author.ID
-				authorName = m.Author.Username
-			}
-
-			rawContent := ""
-			if m.Message != nil {
-				rawContent = resolveMessageContent(s, m.Message)
-			}
-
-			msg := db.Message{
-				ID:         m.ID,
-				ThreadID:   targetThreadID,
-				GuildID:    resolvedGuildID,
-				AuthorID:   authorID,
-				AuthorName: authorName,
-				Content:    rawContent,
-				Metadata:   metadata,
-				Status:     db.StatusPending,
-				CreatedAt:  m.Timestamp,
-				UpdatedAt:  time.Now().UTC(),
-			}
-
 			insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := store.InsertMessage(insertCtx, msg)
+			msg, err := buildAndInsertFunnelMessage(insertCtx, s, store, m.Message, targetThreadID, m.Timestamp)
 			insertCancel()
 			if err != nil {
 				log.Printf("Failed to insert message %s: %v", m.ID, err)
@@ -665,7 +583,7 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 			}
 
 			metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
-			log.Printf("Discord funnel enqueued message %s from %s (thread: %s, is_thread: %t)", m.ID, authorName, targetThreadID, isThread)
+			log.Printf("Discord funnel enqueued message %s from %s (thread: %s, is_thread: %t)", m.ID, msg.AuthorName, targetThreadID, isThread)
 			if pool != nil {
 				pool.Enqueue(msg)
 			}
@@ -769,11 +687,7 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 		botUserID = s.State.User.ID
 	}
 
-	// 1. Gather target candidate channels:
-	// Prioritize: recent active threads from DB, active guild threads, and top-level guild text channels.
 	targetMap := make(map[string]bool)
-
-	// A. Recent threads from DB (last 48 hours)
 	if recentThreadIDs, err := store.GetActiveRecentThreadIDs(sweepCtx, 48*time.Hour); err == nil {
 		for _, thID := range recentThreadIDs {
 			if thID != "" {
@@ -782,7 +696,6 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 		}
 	}
 
-	// B. Active Guild Threads & Guild Channels from state / REST
 	var guilds []*discordgo.Guild
 	if s.State != nil {
 		guilds = s.State.Guilds
@@ -799,7 +712,6 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 		if s.Token == "" {
 			break
 		}
-		// Active threads in guild
 		if activeThreads, err := s.GuildThreadsActive(g.ID); err == nil && activeThreads != nil {
 			for _, th := range activeThreads.Threads {
 				if th != nil && IsMessageableChannel(th.Type) {
@@ -807,8 +719,6 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 				}
 			}
 		}
-
-		// Top-level guild channels
 		if channels, err := s.GuildChannels(g.ID); err == nil {
 			for _, ch := range channels {
 				if ch != nil && IsMessageableChannel(ch.Type) {
@@ -843,7 +753,6 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 			continue
 		}
 
-		// Pre-flight permission check if available in state
 		if botUserID != "" && s.State != nil {
 			if perms, err := s.State.UserChannelPermissions(botUserID, chID); err == nil {
 				hasView := (perms & discordgo.PermissionViewChannel) != 0
@@ -854,7 +763,6 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 			}
 		}
 
-		// Fetch latest messages from Discord REST API
 		fetched, err := s.ChannelMessages(chID, 50, "", "", "")
 		if err != nil {
 			consecutiveErrors++
@@ -870,19 +778,12 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 			continue
 		}
 
-		// Reverse slice to restore chronological FIFO order (oldest -> newest)
 		for i, j := 0, len(fetched)-1; i < j; i, j = i+1, j-1 {
 			fetched[i], fetched[j] = fetched[j], fetched[i]
 		}
 
 		for _, m := range fetched {
-			if m == nil || m.Author == nil {
-				continue
-			}
-			if m.Author.Bot && policy.IsBotIgnored() {
-				continue
-			}
-			if botUserID != "" && m.Author.ID == botUserID {
+			if m == nil || m.Author == nil || (m.Author.Bot && policy.IsBotIgnored()) || (botUserID != "" && m.Author.ID == botUserID) {
 				continue
 			}
 
@@ -892,13 +793,11 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 				continue
 			}
 
-			// Check if message is targeted at the bot
 			if !isFunnelBotTargeted(s, &discordgo.MessageCreate{Message: m}) {
 				skippedCount++
 				continue
 			}
 
-			// Check if already in DB
 			exists, err := store.MessageExists(sweepCtx, m.ID)
 			if err != nil {
 				log.Printf("[Startup Recovery] Warning checking message existence for %s: %v", m.ID, err)
@@ -909,10 +808,6 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 			}
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m, false)
-			resolvedGuildID := resolveGuildID(s, m)
-			m.GuildID = resolvedGuildID
-			metadata := extractDiscordMetadata(s, m, targetThreadID)
-
 			stats, statsErr := store.GetSessionActivityStats(sweepCtx, targetThreadID)
 			if statsErr == nil && stats != nil && !stats.LastCompletedMessageCreatedAt.IsZero() && stats.LastCompletedMessageCreatedAt.After(msgTime) {
 				log.Printf("[CatchUpSweep] Skipping missed message %s in thread %s: newer completed message exists in thread (completed created_at %s > msg %s).",
@@ -921,29 +816,14 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 				continue
 			}
 
-			authorID := m.Author.ID
-			authorName := m.Author.Username
-
-			msg := db.Message{
-				ID:         m.ID,
-				ThreadID:   targetThreadID,
-				GuildID:    resolvedGuildID,
-				AuthorID:   authorID,
-				AuthorName: authorName,
-				Content:    resolveMessageContent(s, m),
-				Metadata:   metadata,
-				Status:     db.StatusPending,
-				CreatedAt:  msgTime,
-				UpdatedAt:  time.Now().UTC(),
-			}
-
-			if err := store.InsertMessage(sweepCtx, msg); err != nil {
+			msg, err := buildAndInsertFunnelMessage(sweepCtx, s, store, m, targetThreadID, msgTime)
+			if err != nil {
 				log.Printf("[CatchUpSweep] Failed to insert missed message %s: %v", m.ID, err)
 				continue
 			}
 
 			log.Printf("[CatchUpSweep] Recovered missed message %s from %s (channel %s, target_thread: %s, is_thread: %t). Enqueued to worker pool.",
-				m.ID, authorName, m.ChannelID, targetThreadID, isThread)
+				m.ID, msg.AuthorName, m.ChannelID, targetThreadID, isThread)
 
 			pool.Enqueue(msg)
 			recoveredCount++

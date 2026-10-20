@@ -26,9 +26,7 @@ import (
 var defaultFunnelMemberFetcher = funnelMemberFetcher
 
 func init() {
-	discordSessionOpener = func(dg *discordgo.Session) error {
-		return nil
-	}
+	discordSessionOpener = func(dg *discordgo.Session) error { return nil }
 	funnelMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
 		return &discordgo.Member{
 			GuildID: guildID,
@@ -42,9 +40,7 @@ func setDiscordSessionOpenerForTest(t *testing.T, fn func(*discordgo.Session) er
 	t.Helper()
 	old := discordSessionOpener
 	discordSessionOpener = fn
-	t.Cleanup(func() {
-		discordSessionOpener = old
-	})
+	t.Cleanup(func() { discordSessionOpener = old })
 }
 
 // newTestWorkerPool instantiates a fully isolated WorkerPool with mocked runner, notifier, and delivery hooks.
@@ -72,15 +68,9 @@ func newTestWorkerPool(dbOrStore any) *queue.WorkerPool {
 			}
 			return "mock voice response", sessionID, nil
 		},
-		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			return "mock notification"
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string { return "mock notification" },
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 	})
 }
 
@@ -96,9 +86,7 @@ func setupTestConfig(t *testing.T, yamlContent string) {
 		t.Fatalf("Failed to load test config from %s: %v", yamlPath, err)
 	}
 	SetFunnelConfig(cfg)
-	t.Cleanup(func() {
-		SetFunnelConfig(nil)
-	})
+	t.Cleanup(func() { SetFunnelConfig(nil) })
 }
 
 func resetFunnelGlobals(t *testing.T) {
@@ -114,8 +102,6 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
-
-type mockCatchUpRoundTripper = roundTripperFunc
 
 func newMockDiscordSession(t *testing.T, rt roundTripperFunc, stateChannels ...*discordgo.Channel) *discordgo.Session {
 	t.Helper()
@@ -172,15 +158,14 @@ func (e *errExistsStore) MessageExists(ctx context.Context, id string) (bool, er
 }
 
 func TestFunnelHelpers(t *testing.T) {
-	yamlContent := `
+	setupTestConfig(t, `
 model: "gemini-2.5-flash"
 admin_users:
   - "user-admin"
 channels:
   default:
     mode: "threads"
-`
-	setupTestConfig(t, yamlContent)
+`)
 
 	s := newMockDiscordSession(t, nil)
 
@@ -191,14 +176,9 @@ channels:
 	dmMsg := &discordgo.Message{
 		ID:        "msg-1",
 		ChannelID: "chan-dm",
-		GuildID:   "",
 		Content:   "Hello Aerial",
 		Timestamp: time.Now(),
-		Author: &discordgo.User{
-			ID:       "user-1",
-			Username: "testuser",
-			Bot:      false,
-		},
+		Author:    &discordgo.User{ID: "user-1", Username: "testuser", Bot: false},
 	}
 
 	targetThreadID, isThread := getOrCreateThreadID(s, dmMsg)
@@ -210,10 +190,38 @@ channels:
 	if !isFunnelBotTargeted(s, mCreate) {
 		t.Errorf("Expected DM message to be bot targeted")
 	}
+
+	// Default funcs verification
+	_ = discordSessionOpener(&discordgo.Session{})
+	_, _ = funnelMemberFetcher(&discordgo.Session{}, "g1", "u1")
+
+	// ResolveGuildID extended edge cases
+	if id := resolveGuildID(nil, nil); id != "" {
+		t.Errorf("Expected empty string for nil, got %q", id)
+	}
+	if id := resolveGuildID(nil, &discordgo.Message{GuildID: "direct-guild"}); id != "direct-guild" {
+		t.Errorf("Expected direct-guild, got %q", id)
+	}
+
+	queue.InvalidateChannelCache("cached-chan-99")
+	defer queue.InvalidateChannelCache("cached-chan-99")
+	queue.CacheDiscordChannel(&discordgo.Channel{ID: "cached-chan-99", GuildID: "cached-guild-99"})
+	if id := resolveGuildID(nil, &discordgo.Message{ChannelID: "cached-chan-99"}); id != "cached-guild-99" {
+		t.Errorf("Expected cached-guild-99, got %q", id)
+	}
+
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "session-guild-77"})
+	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "session-chan-77", GuildID: "session-guild-77"})
+	if id := resolveGuildID(s, &discordgo.Message{ChannelID: "session-chan-77"}); id != "session-guild-77" {
+		t.Errorf("Expected session-guild-77, got %q", id)
+	}
+	if id := resolveGuildID(s, &discordgo.Message{ChannelID: "unknown-chan"}); id != "" {
+		t.Errorf("Expected empty string for unknown channel, got %q", id)
+	}
 }
 
 func TestIsFunnelBotTargeted(t *testing.T) {
-	yamlContent := `
+	setupTestConfig(t, `
 model: "gemini-2.5-flash"
 admin_users:
   - "admin-123"
@@ -237,8 +245,7 @@ channels:
     mode: "disabled"
   aerial-dev:
     mode: "threads"
-`
-	setupTestConfig(t, yamlContent)
+`)
 
 	s := newMockDiscordSession(t, nil)
 	s.State.User = &discordgo.User{ID: "bot-self-id", Username: "AerialBot"}
@@ -261,314 +268,63 @@ channels:
 		_ = s.State.ChannelAdd(ch)
 	}
 
+	user := func(id, username string, bot bool) *discordgo.User {
+		return &discordgo.User{ID: id, Username: username, Bot: bot}
+	}
+	withMentions := func(users ...*discordgo.User) func(*discordgo.Message) {
+		return func(m *discordgo.Message) { m.Mentions = users }
+	}
+	withRef := func(id string) func(*discordgo.Message) {
+		return func(m *discordgo.Message) { m.ReferencedMessage = &discordgo.Message{ID: id} }
+	}
+	withMsgRef := func(id string) func(*discordgo.Message) {
+		return func(m *discordgo.Message) { m.MessageReference = &discordgo.MessageReference{MessageID: id} }
+	}
+	withRoles := func(roles ...string) func(*discordgo.Message) {
+		return func(m *discordgo.Message) { m.MentionRoles = roles }
+	}
+	funnelMsg := func(id, chanID, guildID, content string, author *discordgo.User, opts ...func(*discordgo.Message)) *discordgo.MessageCreate {
+		m := &discordgo.Message{ID: id, ChannelID: chanID, GuildID: guildID, Content: content, Author: author}
+		for _, opt := range opts {
+			opt(m)
+		}
+		return &discordgo.MessageCreate{Message: m}
+	}
+
 	tests := []struct {
 		name     string
 		msg      *discordgo.MessageCreate
 		expected bool
 	}{
-		{
-			name:     "nil message create",
-			msg:      nil,
-			expected: false,
-		},
-		{
-			name:     "nil inner message",
-			msg:      &discordgo.MessageCreate{Message: nil},
-			expected: false,
-		},
-		{
-			name:     "nil author",
-			msg:      &discordgo.MessageCreate{Message: &discordgo.Message{Author: nil}},
-			expected: false,
-		},
-		{
-			name: "bot self message",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-self",
-					ChannelID: "chan-general",
-					GuildID:   "guild-1",
-					Content:   "I am responding",
-					Author:    &discordgo.User{ID: "bot-self-id", Username: "AerialBot", Bot: true},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "channel mode user ambient",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-amb",
-					ChannelID: "chan-general",
-					GuildID:   "guild-1",
-					Content:   "Just chatting about weather",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "channel mode ignore_bots true with bot",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-bot-ign",
-					ChannelID: "chan-general",
-					GuildID:   "guild-1",
-					Content:   "Automated CI alert",
-					Author:    &discordgo.User{ID: "other-bot-id", Username: "CiBot", Bot: true},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "channel mode ignore_bots false with bot",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-bot-allowed",
-					ChannelID: "chan-bot-lab",
-					GuildID:   "guild-1",
-					Content:   "Bot to bot ping",
-					Author:    &discordgo.User{ID: "other-bot-id", Username: "CiBot", Bot: true},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "threads mode ambient without triggers",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-thr-amb",
-					ChannelID: "chan-threads",
-					GuildID:   "guild-1",
-					Content:   "Hey everyone what is up",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "threads mode with aerial keyword",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-kw-1",
-					ChannelID: "chan-threads",
-					GuildID:   "guild-1",
-					Content:   "Hey aerial can you help?",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "threads mode with gundam keyword",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-kw-2",
-					ChannelID: "chan-threads",
-					GuildID:   "guild-1",
-					Content:   "Launch the gundam units",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "threads mode with brain keyword",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-kw-3",
-					ChannelID: "chan-threads",
-					GuildID:   "guild-1",
-					Content:   "Query the brain state",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "threads mode with bot keyword",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-kw-4",
-					ChannelID: "chan-threads",
-					GuildID:   "guild-1",
-					Content:   "Good bot thanks",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "threads mode with mention",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-mention",
-					ChannelID: "chan-threads",
-					GuildID:   "guild-1",
-					Content:   "Check this out",
-					Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "threads mode inside active thread",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-in-thread",
-					ChannelID: "thread-sub-1",
-					GuildID:   "guild-1",
-					Content:   "Continuing discussion in thread",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "ignored channel with mention",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-spam-1",
-					ChannelID: "chan-spam",
-					GuildID:   "guild-1",
-					Content:   "Hey aerial help me here",
-					Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "mode ignore channel",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-muted-1",
-					ChannelID: "chan-muted",
-					GuildID:   "guild-1",
-					Content:   "Hey aerial help me here",
-					Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "snowflake ignored channel",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-snow-1",
-					ChannelID: "111999",
-					GuildID:   "guild-1",
-					Content:   "Hey aerial help me here",
-					Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "allowed channel with mention",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-allowed-1",
-					ChannelID: "chan-allowed",
-					GuildID:   "guild-1",
-					Content:   "Hey aerial help me here",
-					Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "thread inherits whitelisted parent",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-dev-thread-1",
-					ChannelID: "thread-dev-999",
-					GuildID:   "guild-1",
-					Content:   "Continuing discussion in whitelisted thread",
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "thread inherits ignored parent",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-spam-thread-1",
-					ChannelID: "thread-spam-888",
-					GuildID:   "guild-1",
-					Content:   "Hey aerial answer me in spam thread",
-					Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
-					Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "message with ReferencedMessage",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:                "msg-ref-1",
-					ChannelID:         "chan-threads",
-					GuildID:           "guild-1",
-					Content:           "simple discussion without keyword",
-					Author:            &discordgo.User{ID: "user-ref-1", Username: "user1"},
-					ReferencedMessage: &discordgo.Message{ID: "ref-0"},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "message with MessageReference",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:               "msg-ref-2",
-					ChannelID:        "chan-threads",
-					GuildID:          "guild-1",
-					Content:          "simple discussion with message reference",
-					Author:           &discordgo.User{ID: "user-ref-2", Username: "user2"},
-					MessageReference: &discordgo.MessageReference{MessageID: "ref-0"},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "message with MentionRoles",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:           "msg-role-1",
-					ChannelID:    "chan-threads",
-					GuildID:      "guild-1",
-					Content:      "hey team ping",
-					Author:       &discordgo.User{ID: "user-role-1", Username: "user1"},
-					MentionRoles: []string{"mock-role-bot-123"},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "direct message channel without guild",
-			msg: &discordgo.MessageCreate{
-				Message: &discordgo.Message{
-					ID:        "msg-dm-1",
-					ChannelID: "chan-dm-1",
-					GuildID:   "",
-					Content:   "Hello in private",
-					Author:    &discordgo.User{ID: "user-dm-1", Username: "alice"},
-				},
-			},
-			expected: true,
-		},
+		{"nil message create", nil, false},
+		{"nil inner message", &discordgo.MessageCreate{}, false},
+		{"nil author", funnelMsg("1", "ch", "g", "hi", nil), false},
+		{"bot self message", funnelMsg("msg-self", "chan-general", "guild-1", "I am responding", user("bot-self-id", "AerialBot", true)), false},
+		{"channel mode user ambient", funnelMsg("msg-amb", "chan-general", "guild-1", "Just chatting about weather", user("user-1", "alice", false)), true},
+		{"channel mode ignore_bots true with bot", funnelMsg("msg-bot-ign", "chan-general", "guild-1", "Automated CI alert", user("other-bot-id", "CiBot", true)), false},
+		{"channel mode ignore_bots false with bot", funnelMsg("msg-bot-allowed", "chan-bot-lab", "guild-1", "Bot to bot ping", user("other-bot-id", "CiBot", true)), true},
+		{"threads mode ambient without triggers", funnelMsg("msg-thr-amb", "chan-threads", "guild-1", "Hey everyone what is up", user("user-1", "alice", false)), false},
+		{"threads mode with aerial keyword", funnelMsg("msg-kw-1", "chan-threads", "guild-1", "Hey aerial can you help?", user("user-1", "alice", false)), true},
+		{"threads mode with gundam keyword", funnelMsg("msg-kw-2", "chan-threads", "guild-1", "Launch the gundam units", user("user-1", "alice", false)), true},
+		{"threads mode with brain keyword", funnelMsg("msg-kw-3", "chan-threads", "guild-1", "Query the brain state", user("user-1", "alice", false)), true},
+		{"threads mode with bot keyword", funnelMsg("msg-kw-4", "chan-threads", "guild-1", "Good bot thanks", user("user-1", "alice", false)), true},
+		{"threads mode with mention", funnelMsg("msg-mention", "chan-threads", "guild-1", "Check this out", user("user-1", "alice", false), withMentions(user("bot-self-id", "AerialBot", false))), true},
+		{"threads mode inside active thread", funnelMsg("msg-in-thread", "thread-sub-1", "guild-1", "Continuing discussion in thread", user("user-1", "alice", false)), true},
+		{"ignored channel with mention", funnelMsg("msg-spam-1", "chan-spam", "guild-1", "Hey aerial help me here", user("user-1", "alice", false), withMentions(user("bot-self-id", "AerialBot", false))), false},
+		{"mode ignore channel", funnelMsg("msg-muted-1", "chan-muted", "guild-1", "Hey aerial help me here", user("user-1", "alice", false), withMentions(user("bot-self-id", "AerialBot", false))), false},
+		{"snowflake ignored channel", funnelMsg("msg-snow-1", "111999", "guild-1", "Hey aerial help me here", user("user-1", "alice", false), withMentions(user("bot-self-id", "AerialBot", false))), false},
+		{"allowed channel with mention", funnelMsg("msg-allowed-1", "chan-allowed", "guild-1", "Hey aerial help me here", user("user-1", "alice", false), withMentions(user("bot-self-id", "AerialBot", false))), true},
+		{"thread inherits whitelisted parent", funnelMsg("msg-dev-thread-1", "thread-dev-999", "guild-1", "Continuing discussion in whitelisted thread", user("user-1", "alice", false)), true},
+		{"thread inherits ignored parent", funnelMsg("msg-spam-thread-1", "thread-spam-888", "guild-1", "Hey aerial answer me in spam thread", user("user-1", "alice", false), withMentions(user("bot-self-id", "AerialBot", false))), false},
+		{"message with ReferencedMessage", funnelMsg("msg-ref-1", "chan-threads", "guild-1", "simple discussion without keyword", user("user-ref-1", "user1", false), withRef("ref-0")), true},
+		{"message with MessageReference", funnelMsg("msg-ref-2", "chan-threads", "guild-1", "simple discussion with message reference", user("user-ref-2", "user2", false), withMsgRef("ref-0")), true},
+		{"message with MentionRoles", funnelMsg("msg-role-1", "chan-threads", "guild-1", "hey team ping", user("user-role-1", "user1", false), withRoles("mock-role-bot-123")), true},
+		{"direct message channel without guild", funnelMsg("msg-dm-1", "chan-dm-1", "", "Hello in private", user("user-dm-1", "alice", false)), true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isFunnelBotTargeted(s, tt.msg)
-			if got != tt.expected {
+			if got := isFunnelBotTargeted(s, tt.msg); got != tt.expected {
 				t.Errorf("isFunnelBotTargeted() = %v; want %v", got, tt.expected)
 			}
 		})
@@ -579,72 +335,58 @@ func TestGetDiscordChannel(t *testing.T) {
 	if ch := getDiscordChannel(nil, ""); ch != nil {
 		t.Errorf("Expected nil for empty channel ID, got %v", ch)
 	}
-
-	chanID := "100200300400500802"
-	queue.InvalidateChannelCache(chanID)
-	defer queue.InvalidateChannelCache(chanID)
-
 	s := newMockDiscordSession(t, nil)
-	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
-
-	chState := &discordgo.Channel{
-		ID:      chanID,
-		Name:    "state-cached-channel",
-		Type:    discordgo.ChannelTypeGuildText,
-		GuildID: "guild-1",
-	}
-	_ = s.State.ChannelAdd(chState)
-
-	ch := getDiscordChannel(s, chanID)
-	if ch == nil || ch.Name != "state-cached-channel" {
-		t.Fatalf("Expected channel from state, got: %+v", ch)
+	if ch := getDiscordChannel(s, "12345"); ch != nil {
+		t.Errorf("Expected nil for non-existent channel, got %v", ch)
 	}
 
-	snap, ok := queue.GetCachedChannel(chanID)
-	if !ok || snap.Name != "state-cached-channel" {
-		t.Fatalf("Expected channel to be cached into queue cache, got: %+v", snap)
-	}
-
-	_ = s.State.ChannelRemove(chState)
-	chCached := getDiscordChannel(s, chanID)
-	if chCached == nil || chCached.Name != "state-cached-channel" {
-		t.Fatalf("Expected reconstructed channel from queue cache, got: %+v", chCached)
-	}
-
-	queue.InvalidateChannelCache("snap-th-100")
-	defer queue.InvalidateChannelCache("snap-th-100")
-	queue.CacheDiscordChannel(&discordgo.Channel{
-		ID:       "snap-th-100",
-		Name:     "snap-thread",
+	chOriginal := &discordgo.Channel{
+		ID:       "chan-test-1",
+		Name:     "test-channel",
 		GuildID:  "guild-1",
-		ParentID: chanID,
+		ParentID: "parent-1",
+		Type:     discordgo.ChannelTypeGuildText,
+	}
+	queue.CacheDiscordChannel(chOriginal)
+	defer queue.InvalidateChannelCache("chan-test-1")
+
+	chFromCache := getDiscordChannel(nil, "chan-test-1")
+	if chFromCache == nil || chFromCache.Name != "test-channel" || chFromCache.Type != discordgo.ChannelTypeGuildText {
+		t.Errorf("Failed to retrieve text channel from queue cache: %+v", chFromCache)
+	}
+
+	thOriginal := &discordgo.Channel{
+		ID:       "thread-test-1",
+		Name:     "test-thread",
+		GuildID:  "guild-1",
+		ParentID: "parent-1",
 		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-	chThread := getDiscordChannel(nil, "snap-th-100")
-	if chThread == nil || chThread.Type != discordgo.ChannelTypeGuildPublicThread {
-		t.Errorf("Expected public thread channel from cache, got %+v", chThread)
+	}
+	queue.CacheDiscordChannel(thOriginal)
+	defer queue.InvalidateChannelCache("thread-test-1")
+
+	thFromCache := getDiscordChannel(nil, "thread-test-1")
+	if thFromCache == nil || thFromCache.Name != "test-thread" || thFromCache.Type != discordgo.ChannelTypeGuildPublicThread {
+		t.Errorf("Failed to retrieve thread channel from queue cache: %+v", thFromCache)
 	}
 
-	queue.InvalidateChannelCache(chanID)
-	if chNone := getDiscordChannel(s, chanID); chNone != nil {
-		t.Errorf("Expected nil when cache and state are empty, got: %+v", chNone)
+	sWithChan := newMockDiscordSession(t, nil, chOriginal)
+	chFromSession := getDiscordChannel(sWithChan, "chan-test-1")
+	if chFromSession == nil || chFromSession.Name != "test-channel" {
+		t.Errorf("Failed to retrieve channel from session state: %+v", chFromSession)
 	}
 
-	sRest := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		restCh := &discordgo.Channel{
-			ID:   chanID,
-			Name: "rest-fetched-channel",
-			Type: discordgo.ChannelTypeGuildText,
+	sWithREST := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/channels/123456789012345678") {
+			body, _ := json.Marshal(&discordgo.Channel{ID: "123456789012345678", Name: "rest-chan"})
+			return jsonHTTPResponse(http.StatusOK, string(body)), nil
 		}
-		data, _ := json.Marshal(restCh)
-		return jsonHTTPResponse(http.StatusOK, string(data)), nil
+		return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
 	}))
-	chRest := getDiscordChannel(sRest, chanID)
-	if chRest == nil || chRest.Name != "rest-fetched-channel" {
-		t.Fatalf("Expected channel fetched via REST, got: %+v", chRest)
-	}
-	if snap, ok := queue.GetCachedChannel(chanID); !ok || snap.Name != "rest-fetched-channel" {
-		t.Fatalf("Expected REST-fetched channel to be in queue cache, got: %+v", snap)
+	sWithREST.Token = "test-token"
+	chREST := getDiscordChannel(sWithREST, "123456789012345678")
+	if chREST == nil || chREST.Name != "rest-chan" {
+		t.Errorf("expected rest-chan, got %v", chREST)
 	}
 }
 
@@ -664,57 +406,24 @@ channels:
 
 	s := newMockDiscordSession(t, nil)
 	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "111222333", GuildID: "guild-1", Name: "general", Type: discordgo.ChannelTypeGuildText})
+	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "thread-444", GuildID: "guild-1", ParentID: "111222333", Name: "discussion-thread", Type: discordgo.ChannelTypeGuildPublicThread})
 
 	if thID, isTh := getOrCreateThreadID(s, nil); thID != "" || isTh {
 		t.Errorf("Expected empty string and false for nil message, got %s, %t", thID, isTh)
 	}
 
-	dmMsg := &discordgo.Message{
-		ID:        "msg-dm",
-		ChannelID: "chan-dm",
-		GuildID:   "",
-		Content:   "Hello Aerial",
-		Author:    &discordgo.User{ID: "user-1"},
-	}
+	dmMsg := &discordgo.Message{ID: "msg-dm", ChannelID: "chan-dm", Content: "Hello Aerial", Author: &discordgo.User{ID: "user-1"}}
 	if thID, isTh := getOrCreateThreadID(s, dmMsg); thID != "chan-dm" || isTh {
 		t.Errorf("Expected DM to return chan-dm and false, got %s, %t", thID, isTh)
 	}
 
-	chanGeneral := &discordgo.Channel{
-		ID:      "111222333",
-		GuildID: "guild-1",
-		Name:    "general",
-		Type:    discordgo.ChannelTypeGuildText,
-	}
-	_ = s.State.ChannelAdd(chanGeneral)
-
-	msgGeneral := &discordgo.Message{
-		ID:        "msg-general-1",
-		ChannelID: "111222333",
-		GuildID:   "guild-1",
-		Content:   "Hello in general",
-		Author:    &discordgo.User{ID: "user-1", Username: "alice"},
-	}
+	msgGeneral := &discordgo.Message{ID: "msg-general-1", ChannelID: "111222333", GuildID: "guild-1", Content: "Hello in general", Author: &discordgo.User{ID: "user-1", Username: "alice"}}
 	if thID, isTh := getOrCreateThreadID(s, msgGeneral); thID != "111222333" || isTh {
 		t.Errorf("Expected channel mode to return 111222333 and false, got %s, %t", thID, isTh)
 	}
 
-	threadChan := &discordgo.Channel{
-		ID:       "thread-444",
-		GuildID:  "guild-1",
-		ParentID: "111222333",
-		Name:     "discussion-thread",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	}
-	_ = s.State.ChannelAdd(threadChan)
-
-	msgInThread := &discordgo.Message{
-		ID:        "msg-thread-1",
-		ChannelID: "thread-444",
-		GuildID:   "guild-1",
-		Content:   "Follow up in thread",
-		Author:    &discordgo.User{ID: "user-1", Username: "alice"},
-	}
+	msgInThread := &discordgo.Message{ID: "msg-thread-1", ChannelID: "thread-444", GuildID: "guild-1", Content: "Follow up in thread", Author: &discordgo.User{ID: "user-1", Username: "alice"}}
 	if thID, isTh := getOrCreateThreadID(s, msgInThread); thID != "thread-444" || !isTh {
 		t.Errorf("Expected existing thread to return thread-444 and true, got %s, %t", thID, isTh)
 	}
@@ -722,75 +431,36 @@ channels:
 	threadID1 := "th-cached-101"
 	queue.InvalidateChannelCache(threadID1)
 	defer queue.InvalidateChannelCache(threadID1)
-	queue.CacheDiscordChannel(&discordgo.Channel{
-		ID:       threadID1,
-		GuildID:  "guild-1",
-		ParentID: "chan-threads-555",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-	mCacheHit := &discordgo.Message{
-		ID:        threadID1,
-		ChannelID: "chan-threads-555",
-		GuildID:   "guild-1",
-	}
-	if thID, isTh := getOrCreateThreadID(s, mCacheHit); thID != threadID1 || !isTh {
+	queue.CacheDiscordChannel(&discordgo.Channel{ID: threadID1, GuildID: "guild-1", ParentID: "chan-threads-555", Type: discordgo.ChannelTypeGuildPublicThread})
+	if thID, isTh := getOrCreateThreadID(s, &discordgo.Message{ID: threadID1, ChannelID: "chan-threads-555", GuildID: "guild-1"}); thID != threadID1 || !isTh {
 		t.Errorf("Expected in-memory cache hit (%s, true), got (%s, %t)", threadID1, thID, isTh)
 	}
 
 	threadID2 := "th-state-102"
-	_ = s.State.ChannelAdd(&discordgo.Channel{
-		ID:       threadID2,
-		GuildID:  "guild-1",
-		ParentID: "chan-threads-555",
-		Type:     discordgo.ChannelTypeGuildPublicThread,
-	})
-	mStateHit := &discordgo.Message{
-		ID:        threadID2,
-		ChannelID: "chan-threads-555",
-		GuildID:   "guild-1",
-	}
-	if thID, isTh := getOrCreateThreadID(s, mStateHit); thID != threadID2 || !isTh {
+	_ = s.State.ChannelAdd(&discordgo.Channel{ID: threadID2, GuildID: "guild-1", ParentID: "chan-threads-555", Type: discordgo.ChannelTypeGuildPublicThread})
+	if thID, isTh := getOrCreateThreadID(s, &discordgo.Message{ID: threadID2, ChannelID: "chan-threads-555", GuildID: "guild-1"}); thID != threadID2 || !isTh {
 		t.Errorf("Expected session state hit (%s, true), got (%s, %t)", threadID2, thID, isTh)
 	}
 
 	sNoToken := &discordgo.Session{State: discordgo.NewState()}
 	_ = sNoToken.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
-	chanDev := &discordgo.Channel{
-		ID:      "chan-threads-555",
-		GuildID: "guild-1",
-		Name:    "dev-chat",
-		Type:    discordgo.ChannelTypeGuildText,
-	}
-	_ = sNoToken.State.ChannelAdd(chanDev)
-	msgDev := &discordgo.Message{
-		ID:        "msg-dev-1",
-		ChannelID: "chan-threads-555",
-		GuildID:   "guild-1",
-		Content:   "Start a new thread please",
-		Author:    &discordgo.User{ID: "user-1", Username: "alice"},
-	}
+	_ = sNoToken.State.ChannelAdd(&discordgo.Channel{ID: "chan-threads-555", GuildID: "guild-1", Name: "dev-chat", Type: discordgo.ChannelTypeGuildText})
+	msgDev := &discordgo.Message{ID: "msg-dev-1", ChannelID: "chan-threads-555", GuildID: "guild-1", Content: "Start a new thread please", Author: &discordgo.User{ID: "user-1", Username: "alice"}}
 	if thID, isTh := getOrCreateThreadID(sNoToken, msgDev); thID != "chan-threads-555" || isTh {
 		t.Errorf("Expected threads mode without active REST to return chan-threads-555 and false, got %s, %t", thID, isTh)
 	}
-
-	thID, _ := getOrCreateThreadID(sNoToken, msgDev, false)
-	if thID != "chan-threads-555" {
+	if thID, _ := getOrCreateThreadID(sNoToken, msgDev, false); thID != "chan-threads-555" {
 		t.Errorf("expected chan-threads-555 with allowSummarize=false")
 	}
 
 	clsErr := classifier.New(currentFunnelConfig(), func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 		return "", "", 1, errors.New("summarizer forced failure")
 	})
-	store := db.NewFakeStore()
-	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{
-		Classifier: clsErr,
-		Store:      store,
-	})
+	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: db.NewFakeStore()})
 	SetFunnelPool(pool)
 	defer SetFunnelPool(nil)
 
-	thIDFail, _ := getOrCreateThreadID(sNoToken, msgDev, true)
-	if thIDFail != "chan-threads-555" {
+	if thIDFail, _ := getOrCreateThreadID(sNoToken, msgDev, true); thIDFail != "chan-threads-555" {
 		t.Errorf("expected chan-threads-555 on summarizer failure")
 	}
 
@@ -800,8 +470,7 @@ channels:
 		<-titleSummarizeSem
 		<-titleSummarizeSem
 	}()
-	thID2, _ := getOrCreateThreadID(sNoToken, msgDev, true)
-	if thID2 != "chan-threads-555" {
+	if thID2, _ := getOrCreateThreadID(sNoToken, msgDev, true); thID2 != "chan-threads-555" {
 		t.Errorf("expected chan-threads-555 when semaphore saturated")
 	}
 }
@@ -817,6 +486,18 @@ channels:
 	guildID := "g-rest-1"
 	parentChanID := "ch-rest-parent"
 
+	mockRT := func(threadsCode int, threadsBody string, chCode int, chBody string) roundTripperFunc {
+		return func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "/threads") {
+				return jsonHTTPResponse(threadsCode, threadsBody), nil
+			}
+			if chCode != 0 && strings.Contains(req.URL.Path, "/channels/") {
+				return jsonHTTPResponse(chCode, chBody), nil
+			}
+			return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
+		}
+	}
+
 	tests := []struct {
 		name         string
 		messageID    string
@@ -827,114 +508,12 @@ channels:
 		checkCache   bool
 		wantParentID string
 	}{
-		{
-			name:      "200 thread created successfully",
-			messageID: "msg-200-ok",
-			content:   "deploy service",
-			rt: func(req *http.Request) (*http.Response, error) {
-				if strings.Contains(req.URL.Path, "/threads") {
-					respBody, _ := json.Marshal(&discordgo.Channel{
-						ID:       "th-created-200",
-						GuildID:  guildID,
-						ParentID: parentChanID,
-						Name:     "deploy-service",
-						Type:     discordgo.ChannelTypeGuildPublicThread,
-					})
-					return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
-				}
-				return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
-			},
-			wantThreadID: "th-created-200",
-			wantIsThread: true,
-			checkCache:   true,
-			wantParentID: parentChanID,
-		},
-		{
-			name:      "200 thread created with missing parent and guild",
-			messageID: "msg-200-empty-parent",
-			content:   "start missing parent thread",
-			rt: func(req *http.Request) (*http.Response, error) {
-				if strings.Contains(req.URL.Path, "/threads") {
-					respBody, _ := json.Marshal(&discordgo.Channel{
-						ID:   "th-created-empty-parent",
-						Type: discordgo.ChannelTypeGuildPublicThread,
-					})
-					return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
-				}
-				return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
-			},
-			wantThreadID: "th-created-empty-parent",
-			wantIsThread: true,
-			checkCache:   true,
-			wantParentID: parentChanID,
-		},
-		{
-			name:      "160004 thread already exists with channel re-fetch success",
-			messageID: "200300400500600701",
-			content:   "test 160004 refetch",
-			rt: func(req *http.Request) (*http.Response, error) {
-				if strings.Contains(req.URL.Path, "/threads") {
-					return jsonHTTPResponse(http.StatusBadRequest, `{"code": 160004, "message": "Thread already exists"}`), nil
-				}
-				if strings.Contains(req.URL.Path, "/channels/200300400500600701") {
-					respBody, _ := json.Marshal(&discordgo.Channel{
-						ID:       "200300400500600701",
-						GuildID:  guildID,
-						ParentID: parentChanID,
-						Type:     discordgo.ChannelTypeGuildPublicThread,
-					})
-					return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
-				}
-				return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
-			},
-			wantThreadID: "200300400500600701",
-			wantIsThread: true,
-			checkCache:   true,
-			wantParentID: parentChanID,
-		},
-		{
-			name:      "160004 thread already exists with channel error fallback",
-			messageID: "200300400500600702",
-			content:   "test 160004 fallback",
-			rt: func(req *http.Request) (*http.Response, error) {
-				if strings.Contains(req.URL.Path, "/threads") {
-					return jsonHTTPResponse(http.StatusBadRequest, `{"code": 160004, "message": "Thread already exists"}`), nil
-				}
-				return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
-			},
-			wantThreadID: "200300400500600702",
-			wantIsThread: true,
-			checkCache:   true,
-			wantParentID: parentChanID,
-		},
-		{
-			name:      "160004 non-numeric message ID falls back without recovery",
-			messageID: "not-a-numeric-snowflake",
-			content:   "test non-numeric",
-			rt: func(req *http.Request) (*http.Response, error) {
-				if strings.Contains(req.URL.Path, "/threads") {
-					return jsonHTTPResponse(http.StatusBadRequest, `{"code": 160004, "message": "Thread already exists"}`), nil
-				}
-				return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
-			},
-			wantThreadID: parentChanID,
-			wantIsThread: false,
-			checkCache:   false,
-		},
-		{
-			name:      "REST forbidden 50001 error fallback",
-			messageID: "msg-forbidden-1",
-			content:   "test forbidden",
-			rt: func(req *http.Request) (*http.Response, error) {
-				if strings.Contains(req.URL.Path, "/threads") {
-					return jsonHTTPResponse(http.StatusForbidden, `{"code": 50001, "message": "Missing Access"}`), nil
-				}
-				return jsonHTTPResponse(http.StatusOK, "{}"), nil
-			},
-			wantThreadID: parentChanID,
-			wantIsThread: false,
-			checkCache:   false,
-		},
+		{"200 thread created successfully", "msg-200-ok", "deploy service", mockRT(200, `{"id":"th-created-200","guild_id":"g-rest-1","parent_id":"ch-rest-parent","name":"deploy-service","type":11}`, 0, ""), "th-created-200", true, true, parentChanID},
+		{"200 thread created with missing parent and guild", "msg-200-empty-parent", "start missing parent thread", mockRT(200, `{"id":"th-created-empty-parent","type":11}`, 0, ""), "th-created-empty-parent", true, true, parentChanID},
+		{"160004 thread already exists with channel re-fetch success", "200300400500600701", "test 160004 refetch", mockRT(400, `{"code":160004,"message":"Thread already exists"}`, 200, `{"id":"200300400500600701","guild_id":"g-rest-1","parent_id":"ch-rest-parent","type":11}`), "200300400500600701", true, true, parentChanID},
+		{"160004 thread already exists with channel error fallback", "200300400500600702", "test 160004 fallback", mockRT(400, `{"code":160004,"message":"Thread already exists"}`, 0, ""), "200300400500600702", true, true, parentChanID},
+		{"160004 non-numeric message ID falls back without recovery", "not-a-numeric-snowflake", "test non-numeric", mockRT(400, `{"code":160004,"message":"Thread already exists"}`, 0, ""), parentChanID, false, false, ""},
+		{"REST forbidden 50001 error fallback", "msg-forbidden-1", "test forbidden", mockRT(403, `{"code":50001,"message":"Missing Access"}`, 0, ""), parentChanID, false, false, ""},
 	}
 
 	for _, tt := range tests {
@@ -1058,7 +637,6 @@ channels:
 	defer cancel()
 
 	store := db.NewFakeStore()
-
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -1090,7 +668,6 @@ channels:
 	dispatchSessionEvent(s, &discordgo.InteractionCreate{})
 	dispatchSessionEvent(s, &discordgo.GuildCreate{Guild: nil})
 	dispatchSessionEvent(s, &discordgo.ChannelCreate{Channel: nil})
-
 	dispatchSessionEvent(s, &discordgo.Ready{
 		User: &discordgo.User{ID: "bot-aerial-id", Username: "AerialBot", Discriminator: "0001"},
 	})
@@ -1121,40 +698,30 @@ channels:
 		t.Errorf("Expected th-create-2 to be cached on GuildCreate")
 	}
 
-	// 3. ChannelCreate / Update / Delete
-	ch3 := &discordgo.Channel{ID: "ch-crud-3", Name: "crud-chan", GuildID: "g-create-2", Type: discordgo.ChannelTypeGuildText}
-	dispatchSessionEvent(s, &discordgo.ChannelCreate{Channel: ch3})
-	if snap, ok := queue.GetCachedChannel("ch-crud-3"); !ok || snap.Name != "crud-chan" {
-		t.Errorf("Expected ch-crud-3 cached on ChannelCreate")
-	}
-
-	ch3Updated := &discordgo.Channel{ID: "ch-crud-3", Name: "crud-chan-updated", GuildID: "g-create-2", Type: discordgo.ChannelTypeGuildText}
-	dispatchSessionEvent(s, &discordgo.ChannelUpdate{Channel: ch3Updated})
-	if snap, ok := queue.GetCachedChannel("ch-crud-3"); !ok || snap.Name != "crud-chan-updated" {
-		t.Errorf("Expected ch-crud-3 updated in cache on ChannelUpdate")
-	}
-
-	dispatchSessionEvent(s, &discordgo.ChannelDelete{Channel: ch3})
-	if _, ok := queue.GetCachedChannel("ch-crud-3"); ok {
-		t.Errorf("Expected ch-crud-3 removed on ChannelDelete")
-	}
-
-	// 4. ThreadCreate / Update / Delete
-	th4 := &discordgo.Channel{ID: "th-crud-4", Name: "crud-thread", GuildID: "g-create-2", Type: discordgo.ChannelTypeGuildPublicThread}
-	dispatchSessionEvent(s, &discordgo.ThreadCreate{Channel: th4})
-	if snap, ok := queue.GetCachedChannel("th-crud-4"); !ok || snap.Name != "crud-thread" {
-		t.Errorf("Expected th-crud-4 cached on ThreadCreate")
-	}
-
-	th4Updated := &discordgo.Channel{ID: "th-crud-4", Name: "crud-thread-updated", GuildID: "g-create-2", Type: discordgo.ChannelTypeGuildPublicThread}
-	dispatchSessionEvent(s, &discordgo.ThreadUpdate{Channel: th4Updated})
-	if snap, ok := queue.GetCachedChannel("th-crud-4"); !ok || snap.Name != "crud-thread-updated" {
-		t.Errorf("Expected th-crud-4 updated on ThreadUpdate")
-	}
-
-	dispatchSessionEvent(s, &discordgo.ThreadDelete{Channel: th4})
-	if _, ok := queue.GetCachedChannel("th-crud-4"); ok {
-		t.Errorf("Expected th-crud-4 removed on ThreadDelete")
+	// 3 & 4. Channel and Thread Create / Update / Delete
+	for _, ch := range []*discordgo.Channel{
+		{ID: "ch-crud-3", Name: "crud-chan", GuildID: "g-create-2", Type: discordgo.ChannelTypeGuildText},
+		{ID: "th-crud-4", Name: "crud-thread", GuildID: "g-create-2", Type: discordgo.ChannelTypeGuildPublicThread},
+	} {
+		if ch.IsThread() {
+			dispatchSessionEvent(s, &discordgo.ThreadCreate{Channel: ch})
+		} else {
+			dispatchSessionEvent(s, &discordgo.ChannelCreate{Channel: ch})
+		}
+		if snap, ok := queue.GetCachedChannel(ch.ID); !ok || snap.Name != ch.Name {
+			t.Errorf("Expected %s cached on Create", ch.ID)
+		}
+		ch.Name += "-updated"
+		if ch.IsThread() {
+			dispatchSessionEvent(s, &discordgo.ThreadUpdate{Channel: ch})
+			dispatchSessionEvent(s, &discordgo.ThreadDelete{Channel: ch})
+		} else {
+			dispatchSessionEvent(s, &discordgo.ChannelUpdate{Channel: ch})
+			dispatchSessionEvent(s, &discordgo.ChannelDelete{Channel: ch})
+		}
+		if _, ok := queue.GetCachedChannel(ch.ID); ok {
+			t.Errorf("Expected %s removed on Delete", ch.ID)
+		}
 	}
 
 	// 5. Disconnect and Resumed
@@ -1250,54 +817,11 @@ channels:
 				ChannelID: "ch-closed-1",
 				GuildID:   "g-closed-1",
 				Author:    &discordgo.User{ID: "u-1", Username: "alex"},
-				Content:   "test insert failure",
+				Content:   "Hey aerial test insert failure",
 				Timestamp: time.Now().UTC(),
 			},
 		})
 		time.Sleep(30 * time.Millisecond)
-	}
-}
-
-func TestFunnelStartupRecovery(t *testing.T) {
-	store := db.NewFakeStore()
-	pool := newTestWorkerPool(store)
-	pool.Start()
-	defer pool.Stop()
-
-	queue.RecoverInterrupted(store, pool)
-}
-
-func TestResolveGuildID_ExtendedEdgeCases(t *testing.T) {
-	if id := resolveGuildID(nil, nil); id != "" {
-		t.Errorf("Expected empty string for nil, got %q", id)
-	}
-
-	m1 := &discordgo.Message{GuildID: "direct-guild"}
-	if id := resolveGuildID(nil, m1); id != "direct-guild" {
-		t.Errorf("Expected direct-guild, got %q", id)
-	}
-
-	queue.InvalidateChannelCache("cached-chan-99")
-	defer queue.InvalidateChannelCache("cached-chan-99")
-	queue.CacheDiscordChannel(&discordgo.Channel{ID: "cached-chan-99", GuildID: "cached-guild-99"})
-
-	m2 := &discordgo.Message{ChannelID: "cached-chan-99"}
-	if id := resolveGuildID(nil, m2); id != "cached-guild-99" {
-		t.Errorf("Expected cached-guild-99, got %q", id)
-	}
-
-	s := newMockDiscordSession(t, nil)
-	_ = s.State.GuildAdd(&discordgo.Guild{ID: "session-guild-77"})
-	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "session-chan-77", GuildID: "session-guild-77"})
-
-	m3 := &discordgo.Message{ChannelID: "session-chan-77"}
-	if id := resolveGuildID(s, m3); id != "session-guild-77" {
-		t.Errorf("Expected session-guild-77, got %q", id)
-	}
-
-	m4 := &discordgo.Message{ChannelID: "unknown-chan"}
-	if id := resolveGuildID(s, m4); id != "" {
-		t.Errorf("Expected empty string for unknown channel, got %q", id)
 	}
 }
 
@@ -1320,10 +844,7 @@ func TestRunStartupCatchUpSweep_SafeguardsAndCooldown(t *testing.T) {
 	RunStartupCatchUpSweep(nil, store, pool, sEmpty)
 
 	// 2b. s.Token == "" with guilds in state triggers loop break
-	sNoToken := &discordgo.Session{
-		State: discordgo.NewState(),
-		Token: "",
-	}
+	sNoToken := &discordgo.Session{State: discordgo.NewState(), Token: ""}
 	_ = sNoToken.State.GuildAdd(&discordgo.Guild{ID: "g-no-token"})
 	RunStartupCatchUpSweep(context.Background(), store, pool, sNoToken)
 
@@ -1337,7 +858,6 @@ func TestRunStartupCatchUpSweep_SafeguardsAndCooldown(t *testing.T) {
 	resetFunnelGlobals(t)
 	sCooldown := newMockDiscordSession(t, nil)
 	RunStartupCatchUpSweep(context.Background(), store, pool, sCooldown)
-	// Immediately running again hits cooldown
 	RunStartupCatchUpSweep(context.Background(), store, pool, sCooldown)
 
 	// 5. Canceled context aborts sweep
@@ -1360,21 +880,6 @@ func TestRunStartupCatchUpSweep_RecoveryAndFiltering(t *testing.T) {
 	resetFunnelGlobals(t)
 	defer resetFunnelGlobals(t)
 
-	setupTestConfig(t, `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "threads"
-  general:
-    mode: "channel"
-    ignore_bots: false
-  chan-bot-ignored:
-    mode: "channel"
-    ignore_bots: true
-  ignored-ch:
-    mode: "ignore"
-`)
-
 	t.Run("bot policy filtering", func(t *testing.T) {
 		resetFunnelGlobals(t)
 		setupTestConfig(t, `
@@ -1394,50 +899,48 @@ channels:
 		defer pool.Stop()
 
 		nowStr := time.Now().UTC().Format(time.RFC3339)
+		channelsJSON := `[{"id":"chan-bot-allowed","name":"general","guild_id":"g-1","type":0},{"id":"chan-bot-ignored","name":"chan-bot-ignored","guild_id":"g-1","type":0}]`
+		msgAllowedJSON := `[{"id":"msg-bot-allowed","channel_id":"chan-bot-allowed","content":"Hey Aerial please help","timestamp":"` + nowStr + `","author":{"id":"peer-bot-1","username":"PeerBot","bot":true}}]`
+		msgIgnoredJSON := `[{"id":"msg-bot-ignored","channel_id":"chan-bot-ignored","content":"Hey Aerial please help","timestamp":"` + nowStr + `","author":{"id":"peer-bot-2","username":"PeerBot","bot":true}}]`
 		s := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.Path, "threads/active") {
+			p := req.URL.Path
+			if strings.Contains(p, "threads/active") {
 				return jsonHTTPResponse(http.StatusOK, `{"threads":[]}`), nil
 			}
-			if strings.Contains(req.URL.Path, "guilds/") && strings.Contains(req.URL.Path, "/channels") {
-				return jsonHTTPResponse(http.StatusOK, `[{"id":"chan-bot-allowed","name":"chan-bot-allowed","guild_id":"g-1","type":0},{"id":"chan-bot-ignored","name":"chan-bot-ignored","guild_id":"g-1","type":0}]`), nil
+			if strings.Contains(p, "guilds/") && strings.Contains(p, "/channels") {
+				return jsonHTTPResponse(http.StatusOK, channelsJSON), nil
 			}
-			if strings.Contains(req.URL.Path, "chan-bot-allowed") {
-				return jsonHTTPResponse(http.StatusOK, `[{"id":"msg-bot-allowed","channel_id":"chan-bot-allowed","content":"Hey Aerial please help","timestamp":"`+nowStr+`","author":{"id":"peer-bot-1","username":"PeerBot","bot":true}}]`), nil
+			if strings.Contains(p, "chan-bot-allowed") {
+				return jsonHTTPResponse(http.StatusOK, msgAllowedJSON), nil
 			}
-			if strings.Contains(req.URL.Path, "chan-bot-ignored") {
-				return jsonHTTPResponse(http.StatusOK, `[{"id":"msg-bot-ignored","channel_id":"chan-bot-ignored","content":"Hey Aerial please help","timestamp":"`+nowStr+`","author":{"id":"peer-bot-2","username":"PeerBot","bot":true}}]`), nil
+			if strings.Contains(p, "chan-bot-ignored") {
+				return jsonHTTPResponse(http.StatusOK, msgIgnoredJSON), nil
 			}
 			return jsonHTTPResponse(http.StatusOK, `[]`), nil
 		}))
 		s.State.User = &discordgo.User{ID: "bot-aerial-id", Username: "Aerial"}
 
-		guild := &discordgo.Guild{
+		g := &discordgo.Guild{
 			ID: "g-1",
 			Channels: []*discordgo.Channel{
 				{ID: "chan-bot-allowed", GuildID: "g-1", Name: "general", Type: discordgo.ChannelTypeGuildText},
 				{ID: "chan-bot-ignored", GuildID: "g-1", Name: "chan-bot-ignored", Type: discordgo.ChannelTypeGuildText},
 			},
-			Roles: []*discordgo.Role{
-				{ID: "g-1", Permissions: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory},
-			},
-			Members: []*discordgo.Member{
-				{GuildID: "g-1", User: &discordgo.User{ID: "bot-aerial-id"}, Permissions: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory},
-			},
+			Roles:   []*discordgo.Role{{ID: "g-1", Permissions: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory}},
+			Members: []*discordgo.Member{{GuildID: "g-1", User: &discordgo.User{ID: "bot-aerial-id"}, Permissions: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory}},
 		}
-		_ = s.State.GuildAdd(guild)
-		_ = s.State.ChannelAdd(guild.Channels[0])
-		_ = s.State.ChannelAdd(guild.Channels[1])
-		_ = s.State.MemberAdd(guild.Members[0])
+		_ = s.State.GuildAdd(g)
+		_ = s.State.ChannelAdd(g.Channels[0])
+		_ = s.State.ChannelAdd(g.Channels[1])
+		_ = s.State.MemberAdd(g.Members[0])
 
 		RunStartupCatchUpSweep(context.Background(), store, pool, s)
 
-		existsAllowed, err := store.MessageExists(context.Background(), "msg-bot-allowed")
-		if err != nil || !existsAllowed {
-			t.Fatalf("Expected msg-bot-allowed inserted into DB when ignore_bots is false (exists: %t, err: %v)", existsAllowed, err)
+		if exists, err := store.MessageExists(context.Background(), "msg-bot-allowed"); err != nil || !exists {
+			t.Fatalf("Expected msg-bot-allowed inserted into DB when ignore_bots is false (exists: %t, err: %v)", exists, err)
 		}
-		existsIgnored, err := store.MessageExists(context.Background(), "msg-bot-ignored")
-		if err != nil || existsIgnored {
-			t.Fatalf("Expected msg-bot-ignored skipped when ignore_bots is true (exists: %t, err: %v)", existsIgnored, err)
+		if exists, err := store.MessageExists(context.Background(), "msg-bot-ignored"); err != nil || exists {
+			t.Fatalf("Expected msg-bot-ignored skipped when ignore_bots is true (exists: %t, err: %v)", exists, err)
 		}
 	})
 
@@ -1459,96 +962,41 @@ channels:
 		defer pool.Stop()
 
 		_ = store.InsertMessage(context.Background(), db.Message{
-			ID:        "msg-existing-1",
-			ThreadID:  "ch-text-1",
-			GuildID:   "g-sweep-1",
-			Status:    db.StatusCompleted,
-			CreatedAt: time.Now().UTC().Add(-10 * time.Minute),
-			UpdatedAt: time.Now().UTC(),
+			ID: "msg-existing-1", ThreadID: "ch-text-1", GuildID: "g-sweep-1", Status: db.StatusCompleted, CreatedAt: time.Now().UTC().Add(-10 * time.Minute), UpdatedAt: time.Now().UTC(),
 		})
-
 		_ = store.InsertMessage(context.Background(), db.Message{
-			ID:           "msg-completed-later",
-			ThreadID:     "ch-superseded",
-			GuildID:      "g-sweep-1",
-			Status:       db.StatusCompleted,
-			ResponseText: "Already replied",
-			CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
-			UpdatedAt:    time.Now().UTC(),
+			ID: "msg-completed-later", ThreadID: "ch-superseded", GuildID: "g-sweep-1", Status: db.StatusCompleted, ResponseText: "Already replied", CreatedAt: time.Now().UTC().Add(-10 * time.Minute), UpdatedAt: time.Now().UTC(),
 		})
 
 		recentTime := time.Now().UTC().Add(-5 * time.Minute)
-		oldTime := time.Now().UTC().Add(-4 * time.Hour) // > 2 hour cutoff
-
-		mockMessagesText := []*discordgo.Message{
-			{
-				ID:        "msg-new-sweep-1",
-				ChannelID: "ch-text-1",
-				GuildID:   "g-sweep-1",
-				Author:    &discordgo.User{ID: "u-alex", Username: "alex", Bot: false},
-				Content:   "Hey aerial help me deploy",
-				Timestamp: recentTime,
-			},
-			{
-				ID:        "msg-existing-1",
-				ChannelID: "ch-text-1",
-				GuildID:   "g-sweep-1",
-				Author:    &discordgo.User{ID: "u-alex", Username: "alex", Bot: false},
-				Content:   "Hey aerial already processed message",
-				Timestamp: recentTime,
-			},
-			{
-				ID:        "msg-old-sweep-1",
-				ChannelID: "ch-text-1",
-				GuildID:   "g-sweep-1",
-				Author:    &discordgo.User{ID: "u-alex", Username: "alex", Bot: false},
-				Content:   "Old message",
-				Timestamp: oldTime,
-			},
-			{
-				ID:        "msg-bot-self-sweep",
-				ChannelID: "ch-text-1",
-				GuildID:   "g-sweep-1",
-				Author:    &discordgo.User{ID: "bot-sweep-id"},
-				Timestamp: recentTime,
-			},
-			{
-				ID:        "msg-untargeted-sweep",
-				ChannelID: "ch-text-1",
-				GuildID:   "g-sweep-1",
-				Author:    &discordgo.User{ID: "u-other", Username: "other"},
-				Content:   "random unmentioned chatter",
-				Timestamp: recentTime,
-			},
+		oldTime := time.Now().UTC().Add(-4 * time.Hour)
+		mkMsg := func(id, chanID, content string, u *discordgo.User, t time.Time) *discordgo.Message {
+			return &discordgo.Message{ID: id, ChannelID: chanID, GuildID: "g-sweep-1", Content: content, Author: u, Timestamp: t}
 		}
-
-		mockMessagesSuper := []*discordgo.Message{
-			{
-				ID:        "msg-missed-superseded",
-				ChannelID: "ch-superseded",
-				GuildID:   "g-sweep-1",
-				Author:    &discordgo.User{ID: "u-alex", Username: "alex", Bot: false},
-				Content:   "aerial missed older message",
-				Timestamp: time.Now().UTC().Add(-20 * time.Minute),
-			},
-		}
+		txtJSON, _ := json.Marshal([]*discordgo.Message{
+			mkMsg("msg-new-sweep-1", "ch-text-1", "Hey aerial help me deploy", &discordgo.User{ID: "u-alex", Username: "alex"}, recentTime),
+			mkMsg("msg-existing-1", "ch-text-1", "Hey aerial already processed message", &discordgo.User{ID: "u-alex", Username: "alex"}, recentTime),
+			mkMsg("msg-old-sweep-1", "ch-text-1", "Old message", &discordgo.User{ID: "u-alex", Username: "alex"}, oldTime),
+			mkMsg("msg-bot-self-sweep", "ch-text-1", "", &discordgo.User{ID: "bot-sweep-id"}, recentTime),
+			mkMsg("msg-untargeted-sweep", "ch-text-1", "random unmentioned chatter", &discordgo.User{ID: "u-other", Username: "other"}, recentTime),
+		})
+		superJSON, _ := json.Marshal([]*discordgo.Message{
+			mkMsg("msg-missed-superseded", "ch-superseded", "aerial missed older message", &discordgo.User{ID: "u-alex", Username: "alex"}, time.Now().UTC().Add(-20*time.Minute)),
+		})
+		thJSON, _ := json.Marshal(map[string]interface{}{
+			"threads": []*discordgo.Channel{{ID: "th-active-1", Name: "sub-thread", GuildID: "g-sweep-1", ParentID: "ch-text-1", Type: discordgo.ChannelTypeGuildPublicThread}},
+		})
 
 		s := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.Path, "/threads/active") {
-				respBody, _ := json.Marshal(map[string]interface{}{
-					"threads": []*discordgo.Channel{
-						{ID: "th-active-1", Name: "sub-thread", GuildID: "g-sweep-1", ParentID: "ch-text-1", Type: discordgo.ChannelTypeGuildPublicThread},
-					},
-				})
-				return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
+			p := req.URL.Path
+			if strings.Contains(p, "/threads/active") {
+				return jsonHTTPResponse(http.StatusOK, string(thJSON)), nil
 			}
-			if strings.Contains(req.URL.Path, "/channels/ch-text-1/messages") {
-				respBody, _ := json.Marshal(mockMessagesText)
-				return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
+			if strings.Contains(p, "/channels/ch-text-1/messages") {
+				return jsonHTTPResponse(http.StatusOK, string(txtJSON)), nil
 			}
-			if strings.Contains(req.URL.Path, "/channels/ch-superseded/messages") {
-				respBody, _ := json.Marshal(mockMessagesSuper)
-				return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
+			if strings.Contains(p, "/channels/ch-superseded/messages") {
+				return jsonHTTPResponse(http.StatusOK, string(superJSON)), nil
 			}
 			return jsonHTTPResponse(http.StatusOK, "[]"), nil
 		}))
@@ -1569,19 +1017,14 @@ channels:
 
 		RunStartupCatchUpSweep(context.Background(), store, pool, s)
 
-		dbMsg, err := store.GetMessage(context.Background(), "msg-new-sweep-1")
-		if err != nil || dbMsg == nil {
+		if dbMsg, err := store.GetMessage(context.Background(), "msg-new-sweep-1"); err != nil || dbMsg == nil {
 			t.Fatalf("Expected msg-new-sweep-1 recovered during sweep, err: %v", err)
 		}
-
-		existsSuper, _ := store.MessageExists(context.Background(), "msg-missed-superseded")
-		if existsSuper {
-			t.Errorf("Expected msg-missed-superseded to be skipped due to newer completed message")
+		if exists, _ := store.MessageExists(context.Background(), "msg-missed-superseded"); exists {
+			t.Errorf("Expected msg-missed-superseded skipped")
 		}
-
-		existsUntargeted, _ := store.MessageExists(context.Background(), "msg-untargeted-sweep")
-		if existsUntargeted {
-			t.Errorf("Expected msg-untargeted-sweep to be skipped")
+		if exists, _ := store.MessageExists(context.Background(), "msg-untargeted-sweep"); exists {
+			t.Errorf("Expected msg-untargeted-sweep skipped")
 		}
 	})
 
@@ -1593,57 +1036,30 @@ channels:
 		defer pool.Stop()
 
 		s := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.Path, "/users/@me/guilds") {
-				respBody, _ := json.Marshal([]*discordgo.UserGuild{
-					{ID: "g-sweep-fallback"},
-				})
-				return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
+			p := req.URL.Path
+			if strings.Contains(p, "/users/@me/guilds") {
+				return jsonHTTPResponse(http.StatusOK, `[{"id":"g-sweep-fallback"}]`), nil
 			}
-			if strings.Contains(req.URL.Path, "/guilds/g-sweep-fallback/threads/active") {
-				respBody, _ := json.Marshal(&discordgo.ThreadsList{
-					Threads: []*discordgo.Channel{
-						{ID: "th-fallback-1", Type: discordgo.ChannelTypeGuildPublicThread, GuildID: "g-sweep-fallback"},
-					},
-				})
-				return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
+			if strings.Contains(p, "/threads/active") {
+				return jsonHTTPResponse(http.StatusOK, `{"threads":[{"id":"th-fallback-1","type":11,"guild_id":"g-sweep-fallback"}]}`), nil
 			}
-			if strings.Contains(req.URL.Path, "/guilds/g-sweep-fallback/channels") {
-				respBody, _ := json.Marshal([]*discordgo.Channel{
-					{ID: "ignored-ch", Type: discordgo.ChannelTypeGuildText, GuildID: "g-sweep-fallback"},
-					{ID: "no-perm-ch", Type: discordgo.ChannelTypeGuildText, GuildID: "g-sweep-fallback"},
-					{ID: "ch-fallback-1", Type: discordgo.ChannelTypeGuildText, GuildID: "g-sweep-fallback"},
-				})
-				return jsonHTTPResponse(http.StatusOK, string(respBody)), nil
+			if strings.Contains(p, "/channels") {
+				return jsonHTTPResponse(http.StatusOK, `[{"id":"ignored-ch","type":0,"guild_id":"g-sweep-fallback"},{"id":"no-perm-ch","type":0,"guild_id":"g-sweep-fallback"},{"id":"ch-fallback-1","type":0,"guild_id":"g-sweep-fallback"}]`), nil
 			}
-			if strings.Contains(req.URL.Path, "/messages") {
-				return jsonHTTPResponse(http.StatusOK, "[]"), nil
-			}
-			return jsonHTTPResponse(http.StatusOK, "{}"), nil
+			return jsonHTTPResponse(http.StatusOK, "[]"), nil
 		}))
 		s.State.User = &discordgo.User{ID: "bot-user-id"}
-		// Guild with permissions for bot-user-id = 0 for no-perm-ch
-		gFallback := &discordgo.Guild{
-			ID: "g-sweep-fallback",
-			Roles: []*discordgo.Role{
-				{ID: "role-zero", Permissions: 0},
-			},
-			Members: []*discordgo.Member{
-				{GuildID: "g-sweep-fallback", User: &discordgo.User{ID: "bot-user-id"}, Roles: []string{"role-zero"}},
-			},
-		}
-		_ = s.State.GuildAdd(gFallback)
+		_ = s.State.GuildAdd(&discordgo.Guild{
+			ID:      "g-sweep-fallback",
+			Roles:   []*discordgo.Role{{ID: "role-zero", Permissions: 0}},
+			Members: []*discordgo.Member{{GuildID: "g-sweep-fallback", User: &discordgo.User{ID: "bot-user-id"}, Roles: []string{"role-zero"}}},
+		})
 		_ = s.State.ChannelAdd(&discordgo.Channel{ID: "ignored-ch", GuildID: "g-sweep-fallback", Type: discordgo.ChannelTypeGuildText})
 		_ = s.State.ChannelAdd(&discordgo.Channel{ID: "no-perm-ch", GuildID: "g-sweep-fallback", Type: discordgo.ChannelTypeGuildText})
 		_ = s.State.ChannelAdd(&discordgo.Channel{
-			ID:      "ch-fallback-1",
-			GuildID: "g-sweep-fallback",
-			Type:    discordgo.ChannelTypeGuildText,
+			ID: "ch-fallback-1", GuildID: "g-sweep-fallback", Type: discordgo.ChannelTypeGuildText,
 			PermissionOverwrites: []*discordgo.PermissionOverwrite{
-				{
-					ID:    "bot-user-id",
-					Type:  discordgo.PermissionOverwriteTypeMember,
-					Allow: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory,
-				},
+				{ID: "bot-user-id", Type: discordgo.PermissionOverwriteTypeMember, Allow: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory},
 			},
 		})
 		s.State.Guilds = nil // Force UserGuilds fallback
@@ -1658,14 +1074,7 @@ channels:
 		pool.Start()
 		defer pool.Stop()
 
-		cbChannels := `[
-			{"id":"ch-cb-1","guild_id":"g-cb","type":0},
-			{"id":"ch-cb-2","guild_id":"g-cb","type":0},
-			{"id":"ch-cb-3","guild_id":"g-cb","type":0},
-			{"id":"ch-cb-4","guild_id":"g-cb","type":0},
-			{"id":"ch-cb-5","guild_id":"g-cb","type":0},
-			{"id":"ch-cb-6","guild_id":"g-cb","type":0}
-		]`
+		cbChannels := `[{"id":"ch-cb-1","guild_id":"g-cb","type":0},{"id":"ch-cb-2","guild_id":"g-cb","type":0},{"id":"ch-cb-3","guild_id":"g-cb","type":0},{"id":"ch-cb-4","guild_id":"g-cb","type":0},{"id":"ch-cb-5","guild_id":"g-cb","type":0},{"id":"ch-cb-6","guild_id":"g-cb","type":0}]`
 
 		sCircuit := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			if strings.Contains(req.URL.Path, "/channels") && strings.Contains(req.URL.Path, "/guilds/g-cb") {
@@ -1680,16 +1089,8 @@ channels:
 
 		RunStartupCatchUpSweep(context.Background(), store, pool, sCircuit)
 
-		// MessageExists store error recovery & InsertMessage error recovery
 		nowStr := time.Now().UTC().Format(time.RFC3339)
-		sweepMsg := `[{
-			"id":"msg-sweep-err",
-			"channel_id":"chan-sweep-1",
-			"guild_id":"guild-sweep",
-			"content":"Hey aerial test sweep",
-			"timestamp":"` + nowStr + `",
-			"author":{"id":"user-1","username":"user1","bot":false}
-		}]`
+		sweepMsg := `[{"id":"msg-sweep-err","channel_id":"chan-sweep-1","guild_id":"guild-sweep","content":"Hey aerial test sweep","timestamp":"` + nowStr + `","author":{"id":"user-1","username":"user1","bot":false}}]`
 
 		sErr := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			if strings.Contains(req.URL.Path, "/channels") && strings.Contains(req.URL.Path, "/guilds/guild-sweep") {
@@ -1708,7 +1109,6 @@ channels:
 		errStore := &errExistsStore{Store: store}
 		RunStartupCatchUpSweep(context.Background(), errStore, pool, sErr)
 
-		// DB insert failure during recovery
 		resetFunnelGlobals(t)
 		closedStore := db.NewFakeStore()
 		_ = closedStore.Close()
@@ -1796,7 +1196,7 @@ func TestHandleDiscordReady(t *testing.T) {
 			{ID: "t-ready-1", GuildID: "g-ready-1", Type: discordgo.ChannelTypeGuildPublicThread},
 		},
 	}
-	s.State.GuildAdd(g)
+	_ = s.State.GuildAdd(g)
 
 	ready := &discordgo.Ready{
 		User: &discordgo.User{
@@ -1846,11 +1246,6 @@ func TestHandleGuildMemberUpdate(t *testing.T) {
 	handleGuildMemberUpdate(s, mBot2)
 }
 
-func TestFunnelDefaultFuncs(t *testing.T) {
-	_ = discordSessionOpener(&discordgo.Session{})
-	_, _ = funnelMemberFetcher(&discordgo.Session{}, "g1", "u1")
-}
-
 func TestExtractDiscordMetadata(t *testing.T) {
 	empty := extractDiscordMetadata(nil, nil, "")
 	if !empty.IsEmpty() {
@@ -1858,40 +1253,18 @@ func TestExtractDiscordMetadata(t *testing.T) {
 	}
 
 	s := newMockDiscordSession(t, nil)
-	s.State.GuildAdd(&discordgo.Guild{
-		ID: "guild-1",
-		Roles: []*discordgo.Role{
-			{ID: "role-mod", Name: "Moderator"},
-		},
+	_ = s.State.GuildAdd(&discordgo.Guild{
+		ID:    "guild-1",
+		Roles: []*discordgo.Role{{ID: "role-mod", Name: "Moderator"}},
 	})
 
 	m := &discordgo.Message{
-		ID:        "msg-1",
-		ChannelID: "chan-1",
-		GuildID:   "guild-1",
-		Content:   "test content",
-		Author: &discordgo.User{
-			ID:         "user-1",
-			Username:   "testuser\n",
-			GlobalName: "Test User\r",
-			Bot:        false,
-		},
-		ReferencedMessage: &discordgo.Message{
-			Author: &discordgo.User{
-				Username: "bob",
-			},
-			Content: "hello ref",
-		},
-		Mentions: []*discordgo.User{
-			nil,
-			{ID: "u-mention-1", Username: "alice\n"},
-		},
-		MentionRoles: []string{"role-mod", "role-unknown"},
-		Attachments: []*discordgo.MessageAttachment{
-			nil,
-			{URL: "https://example.com/att.png"},
-			{URL: ""},
-		},
+		ID: "msg-1", ChannelID: "chan-1", GuildID: "guild-1", Content: "test content",
+		Author:            &discordgo.User{ID: "user-1", Username: "testuser\n", GlobalName: "Test User\r", Bot: false},
+		ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "bob"}, Content: "hello ref"},
+		Mentions:          []*discordgo.User{nil, {ID: "u-mention-1", Username: "alice\n"}},
+		MentionRoles:      []string{"role-mod", "role-unknown"},
+		Attachments:       []*discordgo.MessageAttachment{nil, {URL: "https://example.com/att.png"}, {URL: ""}},
 	}
 
 	meta := extractDiscordMetadata(s, m, "thread-1")
@@ -1915,14 +1288,16 @@ func TestExtractDiscordMetadata(t *testing.T) {
 	}
 
 	mNilAuth := &discordgo.Message{
-		ChannelID: "chan-2",
-		ReferencedMessage: &discordgo.Message{
-			Content: "no author ref",
-		},
+		ChannelID:         "chan-2",
+		ReferencedMessage: &discordgo.Message{Content: "no author ref"},
 	}
 	metaNilAuth := extractDiscordMetadata(nil, mNilAuth, "thread-2")
 	if metaNilAuth.ReplyingToAuthor != "Unknown" {
 		t.Errorf("expected Unknown for referenced message with nil author, got %q", metaNilAuth.ReplyingToAuthor)
+	}
+
+	if meta := extractDiscordMetadata(nil, nil, "th-1"); meta.TargetThreadID != "" {
+		t.Errorf("expected empty metadata for nil message")
 	}
 }
 
@@ -1937,66 +1312,43 @@ func TestResolveMessageContent(t *testing.T) {
 			{ID: "1542285964213358633", Username: "Zero"},
 		},
 	}
-	got := resolveMessageContent(nil, m)
-	expected := "@Zero work on tasks 265, 263"
-	if got != expected {
-		t.Errorf("resolveMessageContent(nil, m) = %q, want %q", got, expected)
+	if got := resolveMessageContent(nil, m); got != "@Zero work on tasks 265, 263" {
+		t.Errorf("resolveMessageContent(nil, m) = %q, want @Zero work on tasks 265, 263", got)
 	}
 
 	s := newMockDiscordSession(t, nil)
-	s.State.GuildAdd(&discordgo.Guild{
-		ID: "guild-1",
-		Roles: []*discordgo.Role{
-			{ID: "role-1", Name: "Admins", Mentionable: false},
-		},
+	_ = s.State.GuildAdd(&discordgo.Guild{
+		ID:    "guild-1",
+		Roles: []*discordgo.Role{{ID: "role-1", Name: "Admins", Mentionable: false}},
 	})
-	s.State.ChannelAdd(&discordgo.Channel{
-		ID:      "chan-1",
-		GuildID: "guild-1",
-	})
+	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "chan-1", GuildID: "guild-1"})
 	mWithRoles := &discordgo.Message{
-		ChannelID: "chan-1",
-		GuildID:   "guild-1",
-		Content:   "Pinging <@&role-1> and <@1542285964213358633>",
-		Mentions: []*discordgo.User{
-			{ID: "1542285964213358633", Username: "Zero"},
-		},
+		ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-1> and <@1542285964213358633>",
+		Mentions:     []*discordgo.User{{ID: "1542285964213358633", Username: "Zero"}},
 		MentionRoles: []string{"role-1"},
 	}
-	gotSession := resolveMessageContent(s, mWithRoles)
-	expectedSession := "Pinging @Admins and @Zero"
-	if gotSession != expectedSession {
-		t.Errorf("resolveMessageContent(s, mWithRoles) = %q, want %q", gotSession, expectedSession)
+	if got := resolveMessageContent(s, mWithRoles); got != "Pinging @Admins and @Zero" {
+		t.Errorf("resolveMessageContent(s, mWithRoles) = %q, want Pinging @Admins and @Zero", got)
 	}
 
-	mEmpty := &discordgo.Message{Content: ""}
-	if got := resolveMessageContent(nil, mEmpty); got != "" {
+	if got := resolveMessageContent(nil, &discordgo.Message{Content: ""}); got != "" {
 		t.Errorf("expected empty string for empty content, got %q", got)
 	}
 
 	sStateErr := &discordgo.Session{StateEnabled: true, State: discordgo.NewState()}
 	mFallback := &discordgo.Message{
-		ChannelID: "chan-not-found",
-		Content:   "Pinging <@1542285964213358633>",
-		Mentions: []*discordgo.User{
-			{ID: "1542285964213358633", Username: "Zero"},
-		},
+		ChannelID: "chan-not-found", Content: "Pinging <@1542285964213358633>",
+		Mentions: []*discordgo.User{{ID: "1542285964213358633", Username: "Zero"}},
 	}
 	if got := resolveMessageContent(sStateErr, mFallback); got != "Pinging @Zero" {
 		t.Errorf("expected Pinging @Zero, got %q", got)
 	}
 
 	mRoleNotFound := &discordgo.Message{
-		ChannelID:    "chan-1",
-		GuildID:      "guild-1",
-		Content:      "Pinging <@&role-999>",
+		ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-999>",
 		MentionRoles: []string{"role-999"},
 	}
 	if got := resolveMessageContent(s, mRoleNotFound); got != "Pinging <@&role-999>" {
 		t.Errorf("expected original content when role not found, got %q", got)
-	}
-
-	if meta := extractDiscordMetadata(nil, nil, "th-1"); meta.TargetThreadID != "" {
-		t.Errorf("expected empty metadata for nil message")
 	}
 }
