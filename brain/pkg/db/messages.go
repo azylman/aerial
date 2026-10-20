@@ -102,7 +102,7 @@ type Message struct {
 }
 
 func unescapeUserRequest(s string) string {
-	return strings.TrimSpace(strings.ReplaceAll(s, `<\/USER_REQUEST>`, "</USER_REQUEST>"))
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, `<\/USER_REQUEST>`, "</USER_REQUEST>"), `<\USER_REQUEST>`, "<USER_REQUEST>"))
 }
 
 // ExtractMessageBody extracts the raw user utterance from a legacy prompt envelope string.
