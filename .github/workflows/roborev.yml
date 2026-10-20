@@ -67,9 +67,7 @@ jobs:
             fi
           fi
           roborev ci review \
-            --comment \
             --agent gemini \
-            --review-types default,security,design \
             --min-severity medium \
             --reasoning thorough | tee /tmp/roborev-review.md
           cat /tmp/roborev-review.md >> "$GITHUB_STEP_SUMMARY"
@@ -80,6 +78,9 @@ jobs:
           if grep -Eq '^## roborev: Review Passed|^No issues found\.$|^No findings at or above [a-z]+ severity\.$|roborev: no changes to review' /tmp/roborev-review.md; then
             echo "RoboRev gate passed."
             exit 0
+          fi
+          if [ -n "${PR_NUMBER:-}" ]; then
+            gh pr comment "${PR_NUMBER}" --body-file /tmp/roborev-review.md || true
           fi
           echo "::error::RoboRev reported actionable findings (>= medium severity)."
           exit 1
