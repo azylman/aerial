@@ -15,10 +15,7 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 }
 
 func isIgnorableKillError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+	return err != nil && (errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH))
 }
 
 // GroupSignalFunc sends a signal to a process group or process.
@@ -27,7 +24,6 @@ type GroupSignalFunc func(pid int, sig syscall.Signal) error
 // ProcessKillFunc terminates a single process.
 type ProcessKillFunc func(p *os.Process) error
 
-// killProcessGroupWith sends SIGKILL to the process group using the provided signal sender and process killer.
 func killProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc, killFunc ProcessKillFunc) {
 	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
 		if signalFunc == nil {
@@ -45,12 +41,8 @@ func killProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc, killFunc Pr
 	}
 }
 
-// killProcessGroup sends SIGKILL to the process group with default OS syscalls.
-func killProcessGroup(cmd *exec.Cmd) {
-	killProcessGroupWith(cmd, syscall.Kill, nil)
-}
+func killProcessGroup(cmd *exec.Cmd) { killProcessGroupWith(cmd, syscall.Kill, nil) }
 
-// terminateProcessGroupWith sends SIGTERM to the process group using the provided signal sender.
 func terminateProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc) {
 	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
 		if signalFunc == nil {
@@ -62,10 +54,7 @@ func terminateProcessGroupWith(cmd *exec.Cmd, signalFunc GroupSignalFunc) {
 	}
 }
 
-// terminateProcessGroup sends SIGTERM to the process group with default OS syscalls.
-func terminateProcessGroup(cmd *exec.Cmd) {
-	terminateProcessGroupWith(cmd, syscall.Kill)
-}
+func terminateProcessGroup(cmd *exec.Cmd) { terminateProcessGroupWith(cmd, syscall.Kill) }
 
 func isProcessTerminatedBySignal(exitErr *exec.ExitError) bool {
 	if exitErr == nil {
