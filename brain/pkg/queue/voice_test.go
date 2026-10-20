@@ -53,45 +53,64 @@ func TestWorkerPool_EffortModelResolution(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			resolve := func(p *WorkerPool) string {
-				if tt.effort == "medium" { return p.MediumEffortModel() }
+				if tt.effort == "medium" {
+					return p.MediumEffortModel()
+				}
 				return p.LowEffortModel()
 			}
 			if tt.poolNil {
 				var nilPool *WorkerPool
-				if got := resolve(nilPool); got != tt.wantResult { t.Errorf("%s EffortModel() = %q, want %q", tt.effort, got, tt.wantResult) }
+				if got := resolve(nilPool); got != tt.wantResult {
+					t.Errorf("%s EffortModel() = %q, want %q", tt.effort, got, tt.wantResult)
+				}
 				return
 			}
 			var appCfg *config.Config
 			if tt.appCfgVal != nil {
 				val := *tt.appCfgVal
 				appCfg = config.NewTestConfig(func(d *config.ConfigData) {
-					if tt.effort == "medium" { d.MediumEffortModel = val } else { d.LowEffortModel = val }
+					if tt.effort == "medium" {
+						d.MediumEffortModel = val
+					} else {
+						d.LowEffortModel = val
+					}
 				})
 			}
 			cfg := WorkerPoolConfig{}
-			if tt.effort == "medium" { cfg.MediumEffortModel = tt.cfgModel } else { cfg.LowEffortModel = tt.cfgModel }
+			if tt.effort == "medium" {
+				cfg.MediumEffortModel = tt.cfgModel
+			} else {
+				cfg.LowEffortModel = tt.cfgModel
+			}
 			p := New(appCfg, cfg)
-			if got := resolve(p); got != tt.wantResult { t.Errorf("%s EffortModel() = %q, want %q", tt.effort, got, tt.wantResult) }
+			if got := resolve(p); got != tt.wantResult {
+				t.Errorf("%s EffortModel() = %q, want %q", tt.effort, got, tt.wantResult)
+			}
 		})
 	}
 }
 
 type voiceTurnTestCase struct {
 	name, prompt, sessionID, runnerOut, runnerErrOut, wantReply, wantConvID, wantErrSub, wantStatusSub, wantSentenceSub string
-	runnerCode, resultExitCode                                                                                           int
-	runnerErr, spawnerErr, wantErrIs, hookErr                                                                            error
-	poolNil, poolStopped, poolDeadCtx, cancelCaller, nilProcessPool, useVoiceHook, useVoiceStreamHook                    bool
-	closePipeImmediately, cancelCallerOnScan, clearPreSpawnedSessionID                                                   bool
-	resultStatus, resultError                                                                                            string
+	runnerCode, resultExitCode                                                                                          int
+	runnerErr, spawnerErr, wantErrIs, hookErr                                                                           error
+	poolNil, poolStopped, poolDeadCtx, cancelCaller, nilProcessPool, useVoiceHook, useVoiceStreamHook                   bool
+	closePipeImmediately, cancelCallerOnScan, clearPreSpawnedSessionID                                                  bool
+	resultStatus, resultError                                                                                           string
 }
 
 func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller context.CancelFunc, onRecordPrompt func(string)) (*WorkerPool, *runner.UnifiedProcessPool, bool) {
-	if tt.poolNil { return nil, nil, false }
+	if tt.poolNil {
+		return nil, nil, false
+	}
 	if tt.poolDeadCtx {
-		deadCtx, deadCancel := context.WithCancel(context.Background()); deadCancel()
+		deadCtx, deadCancel := context.WithCancel(context.Background())
+		deadCancel()
 		return &WorkerPool{ctx: deadCtx}, nil, false
 	}
-	if tt.poolStopped { return &WorkerPool{stopped: true}, nil, false }
+	if tt.poolStopped {
+		return &WorkerPool{stopped: true}, nil, false
+	}
 	if tt.nilProcessPool {
 		p := New(nil, WorkerPoolConfig{})
 		p.processPool = nil
@@ -101,9 +120,13 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 		p := New(nil, WorkerPoolConfig{
 			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
 				onRecordPrompt(prompt)
-				if onStatus != nil { onStatus("⚡ Custom hook running...") }
+				if onStatus != nil {
+					onStatus("⚡ Custom hook running...")
+				}
 				reply := "voice hook reply"
-				if prompt == "what is the cluster node status?" { reply = "All three nodes are online." }
+				if prompt == "what is the cluster node status?" {
+					reply = "All three nodes are online."
+				}
 				return reply, sessionID, nil
 			},
 		})
@@ -113,9 +136,15 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 	if tt.useVoiceStreamHook {
 		p := New(nil, WorkerPoolConfig{
 			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
-				if tt.hookErr != nil { return "", sessionID, tt.hookErr }
-				if onStatus != nil { onStatus("⚡ Streaming hook running...") }
-				if onSentence != nil { onSentence("Streaming sentence.") }
+				if tt.hookErr != nil {
+					return "", sessionID, tt.hookErr
+				}
+				if onStatus != nil {
+					onStatus("⚡ Streaming hook running...")
+				}
+				if onSentence != nil {
+					onSentence("Streaming sentence.")
+				}
 				return "voice stream reply", sessionID, nil
 			},
 		})
@@ -181,36 +210,60 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if tt.cancelCaller { cancel() }
+			if tt.cancelCaller {
+				cancel()
+			}
 
 			var recordedPrompt, statusReceived, sentenceReceived string
 			pool, procPool, shouldStop := setupVoiceTestPool(t, &tt, cancel, func(p string) { recordedPrompt = p })
-			if shouldStop && pool != nil { defer pool.Stop() }
-			if procPool != nil { defer procPool.Close() }
+			if shouldStop && pool != nil {
+				defer pool.Stop()
+			}
+			if procPool != nil {
+				defer procPool.Close()
+			}
 
 			targetSess := tt.sessionID
 			if tt.clearPreSpawnedSessionID && procPool != nil {
 				targetSess = "fallback-conv-id"
 				d, err := procPool.GetOrCreate(context.Background(), targetSess, "")
-				if err != nil { t.Fatalf("failed pre-spawning: %v", err) }
+				if err != nil {
+					t.Fatalf("failed pre-spawning: %v", err)
+				}
 				d.SetSessionID("")
 			}
 
 			reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
 			if tt.wantErrIs != nil {
-				if !errors.Is(err, tt.wantErrIs) { t.Fatalf("expected error %v, got %v", tt.wantErrIs, err) }
+				if !errors.Is(err, tt.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tt.wantErrIs, err)
+				}
 				return
 			}
 			if tt.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) { t.Fatalf("expected error containing %q, got: %v", tt.wantErrSub, err) }
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("expected error containing %q, got: %v", tt.wantErrSub, err)
+				}
 				return
 			}
-			if err != nil { t.Fatalf("unexpected error: %v", err) }
-			if tt.wantReply != "" && reply != tt.wantReply { t.Errorf("reply = %q, want %q", reply, tt.wantReply) }
-			if tt.wantConvID != "" && convID != tt.wantConvID { t.Errorf("convID = %q, want %q", convID, tt.wantConvID) }
-			if tt.wantStatusSub != "" && !strings.Contains(statusReceived, tt.wantStatusSub) { t.Errorf("status = %q, want substring %q", statusReceived, tt.wantStatusSub) }
-			if tt.wantSentenceSub != "" && sentenceReceived != tt.wantSentenceSub { t.Errorf("sentence = %q, want %q", sentenceReceived, tt.wantSentenceSub) }
-			if tt.name == "ForwardCleanPrompt" && recordedPrompt != tt.prompt { t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tt.prompt) }
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantReply != "" && reply != tt.wantReply {
+				t.Errorf("reply = %q, want %q", reply, tt.wantReply)
+			}
+			if tt.wantConvID != "" && convID != tt.wantConvID {
+				t.Errorf("convID = %q, want %q", convID, tt.wantConvID)
+			}
+			if tt.wantStatusSub != "" && !strings.Contains(statusReceived, tt.wantStatusSub) {
+				t.Errorf("status = %q, want substring %q", statusReceived, tt.wantStatusSub)
+			}
+			if tt.wantSentenceSub != "" && sentenceReceived != tt.wantSentenceSub {
+				t.Errorf("sentence = %q, want %q", sentenceReceived, tt.wantSentenceSub)
+			}
+			if tt.name == "ForwardCleanPrompt" && recordedPrompt != tt.prompt {
+				t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tt.prompt)
+			}
 		})
 	}
 }
@@ -233,28 +286,50 @@ type voiceProcessPoolSpawnerConfig struct {
 func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *runner.MockDaemonSpawner {
 	return &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, daemonCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			if cfg.spawnerErr != nil { return nil, nil, nil, nil, cfg.spawnerErr }
-			inR, inW := io.Pipe(); outR, outW := io.Pipe(); errR, errW := io.Pipe()
-			if cfg.closeInRPipeImmediately { _ = inR.Close() }
+			if cfg.spawnerErr != nil {
+				return nil, nil, nil, nil, cfg.spawnerErr
+			}
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			if cfg.closeInRPipeImmediately {
+				_ = inR.Close()
+			}
 			go func() {
-				defer outW.Close(); defer errW.Close()
+				defer outW.Close()
+				defer errW.Close()
 				sessID := cfg.initSessionID
-				if sessID == "" { sessID = "550e8400-e29b-41d4-a716-446655440000" }
+				if sessID == "" {
+					sessID = "550e8400-e29b-41d4-a716-446655440000"
+				}
 				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q,\"conversation_id\":%q}\n", sessID, sessID)))
 				scanner := bufio.NewScanner(inR)
-				if scanner.Scan() && cfg.cancelCallerOnScan != nil { cfg.cancelCallerOnScan() }
-				if cfg.blockUntilDone != nil { <-cfg.blockUntilDone; return }
-				for _, step := range cfg.stepUpdates { _, _ = outW.Write([]byte(step + "\n")) }
+				if scanner.Scan() && cfg.cancelCallerOnScan != nil {
+					cfg.cancelCallerOnScan()
+				}
+				if cfg.blockUntilDone != nil {
+					<-cfg.blockUntilDone
+					return
+				}
+				for _, step := range cfg.stepUpdates {
+					_, _ = outW.Write([]byte(step + "\n"))
+				}
 				if cfg.writeTranscriptLogsDir != "" {
 					now := time.Now().UTC().Format(time.RFC3339Nano)
 					transcript := fmt.Sprintf("{\"type\":\"USER_INPUT\",\"source\":\"USER_EXPLICIT\",\"content\":\"What is the status?\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":%q,\"created_at\":%q}\n", now, cfg.resultResponse, now)
 					_ = os.WriteFile(filepath.Join(cfg.writeTranscriptLogsDir, "transcript.jsonl"), []byte(transcript), 0644)
 				}
 				status := cfg.resultStatus
-				if status == "" { status = "SUCCESS" }
+				if status == "" {
+					status = "SUCCESS"
+				}
 				exitPart, usagePart := "", ""
-				if cfg.resultExitCode != 0 { exitPart = fmt.Sprintf(",\"exit_code\":%d", cfg.resultExitCode) }
-				if cfg.tokens.TotalTokens > 0 { usagePart = fmt.Sprintf(",\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d,\"total_tokens\":%d}", cfg.tokens.InputTokens, cfg.tokens.OutputTokens, cfg.tokens.TotalTokens) }
+				if cfg.resultExitCode != 0 {
+					exitPart = fmt.Sprintf(",\"exit_code\":%d", cfg.resultExitCode)
+				}
+				if cfg.tokens.TotalTokens > 0 {
+					usagePart = fmt.Sprintf(",\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d,\"total_tokens\":%d}", cfg.tokens.InputTokens, cfg.tokens.OutputTokens, cfg.tokens.TotalTokens)
+				}
 				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":%q,\"response\":%q,\"error\":%q,\"conversation_id\":%q%s%s}}\n", status, cfg.resultResponse, cfg.resultError, sessID, exitPart, usagePart)))
 			}()
 			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
@@ -287,11 +362,15 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolSuccessAndMetrics(t *testing.T) 
 		t.Fatalf("unexpected success result: convID=%q statuses=%v err=%v", convID, statuses, err)
 	}
 	reply2, _, err2 := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "sess-no-status", nil, nil)
-	if err2 != nil || reply2 != "daemon voice turn reply" { t.Fatalf("unexpected nil onStatus error: %v", err2) }
+	if err2 != nil || reply2 != "daemon voice turn reply" {
+		t.Fatalf("unexpected nil onStatus error: %v", err2)
+	}
 
 	pool.scopeLocks.Store("voice-sess-bad-lock", "not-a-mutex")
 	reply3, _, err3 := pool.ExecuteVoiceTurn(context.Background(), "test", "sess-bad-lock", nil, nil)
-	if err3 != nil || reply3 != "daemon voice turn reply" { t.Fatalf("unexpected error on recovered bad lock: %v", err3) }
+	if err3 != nil || reply3 != "daemon voice turn reply" {
+		t.Fatalf("unexpected error on recovered bad lock: %v", err3)
+	}
 
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -364,9 +443,12 @@ func TestWorkerPool_Stop_ProcessPoolCloseError(t *testing.T) {
 	mockHandle.SetKillErr(errors.New("simulated kill process failure"))
 	spawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			inR, inW := io.Pipe(); outR, outW := io.Pipe(); errR, errW := io.Pipe()
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
 			go func() {
-				defer outW.Close(); defer errW.Close()
+				defer outW.Close()
+				defer errW.Close()
 				_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440001\"}\n"))
 				_, _ = io.Copy(io.Discard, inR)
 			}()
@@ -376,7 +458,8 @@ func TestWorkerPool_Stop_ProcessPoolCloseError(t *testing.T) {
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
 	_, _ = procPool.GetOrCreate(context.Background(), "kiosk", "")
 	pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
-	pool.Start(); pool.Stop()
+	pool.Start()
+	pool.Stop()
 }
 
 type queueMockVoiceSession struct {
@@ -386,7 +469,9 @@ type queueMockVoiceSession struct {
 
 func (s *queueMockVoiceSession) SessionID() string { return s.sessionID }
 func (s *queueMockVoiceSession) Send(prompt string, turn *runner.TurnContext) error {
-	if s.sendFn != nil { return s.sendFn(prompt, turn) }
+	if s.sendFn != nil {
+		return s.sendFn(prompt, turn)
+	}
 	if turn != nil && turn.Sink != nil {
 		turn.Sink.OnTurnStarted()
 		turn.Sink.OnTextDelta("Hello from mock voice.")
@@ -402,20 +487,31 @@ type queueMockVoiceProcessPool struct {
 }
 
 func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
-	if p.closeCalled { return nil, errors.New("pool closed") }
-	if s, ok := p.sessions[targetKey]; ok { return s, nil }
+	if p.closeCalled {
+		return nil, errors.New("pool closed")
+	}
+	if s, ok := p.sessions[targetKey]; ok {
+		return s, nil
+	}
 	sess := &queueMockVoiceSession{sessionID: "sess-" + targetKey}
 	p.sessions[targetKey] = sess
 	return sess, nil
 }
-func (p *queueMockVoiceProcessPool) Initialize(ctx context.Context) error { p.initCalled = true; return nil }
-func (p *queueMockVoiceProcessPool) Close() error                         { p.closeCalled = true; return nil }
-func (p *queueMockVoiceProcessPool) EvictSession(targetKey string)       { delete(p.sessions, targetKey) }
+func (p *queueMockVoiceProcessPool) Initialize(ctx context.Context) error {
+	p.initCalled = true
+	return nil
+}
+func (p *queueMockVoiceProcessPool) Close() error                  { p.closeCalled = true; return nil }
+func (p *queueMockVoiceProcessPool) EvictSession(targetKey string) { delete(p.sessions, targetKey) }
 
 func (p *queueMockVoiceProcessPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
-	if p.closeCalled { return nil, errors.New("pool closed") }
+	if p.closeCalled {
+		return nil, errors.New("pool closed")
+	}
 	sess, err := p.GetOrCreateSession(ctx, targetKey, "")
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return &mockVoiceSessionLease{pool: p, sess: sess.(*queueMockVoiceSession), targetKey: targetKey}, nil
 }
 
@@ -427,15 +523,19 @@ type mockVoiceSessionLease struct {
 
 func (l *mockVoiceSessionLease) SessionID() string         { return l.sess.SessionID() }
 func (l *mockVoiceSessionLease) PreviousSessionID() string { return "" }
-func (l *mockVoiceSessionLease) IsCold() bool             { return false }
-func (l *mockVoiceSessionLease) IsEphemeral() bool        { return false }
-func (l *mockVoiceSessionLease) TurnCount() int           { return 1 }
-func (l *mockVoiceSessionLease) MarkDirty()               { l.pool.EvictSession(l.targetKey) }
-func (l *mockVoiceSessionLease) Release() error           { return nil }
+func (l *mockVoiceSessionLease) IsCold() bool              { return false }
+func (l *mockVoiceSessionLease) IsEphemeral() bool         { return false }
+func (l *mockVoiceSessionLease) TurnCount() int            { return 1 }
+func (l *mockVoiceSessionLease) MarkDirty()                { l.pool.EvictSession(l.targetKey) }
+func (l *mockVoiceSessionLease) Release() error            { return nil }
 func (l *mockVoiceSessionLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
-	if err := l.sess.Send(turn.Prompt, turn); err != nil { return nil, err }
+	if err := l.sess.Send(turn.Prompt, turn); err != nil {
+		return nil, err
+	}
 	if turn != nil && turn.Sink != nil {
-		if buf, ok := turn.Sink.(*runner.BufferingTurnSink); ok { return buf.Wait(ctx) }
+		if buf, ok := turn.Sink.(*runner.BufferingTurnSink); ok {
+			return buf.Wait(ctx)
+		}
 	}
 	return &runner.TurnResult{ConversationID: l.SessionID(), Response: "Hello from mock voice."}, nil
 }
@@ -504,17 +604,20 @@ func TestGetSessionLastActivity(t *testing.T) {
 func TestTurnExecution_StoreDelegates(t *testing.T) {
 	t.Parallel()
 	fake := setupTestStore(t)
+	closedFake := setupTestStore(t)
+	_ = closedFake.Close()
 	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
-	pErr := &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: fake}}}
+	pErr := &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: closedFake}}}
 
 	tests := []struct {
 		name      string
 		te        *turnExecution
 		wantCount int
+		wantErr   bool
 	}{
 		{name: "nil_pool_delegates", te: &turnExecution{}, wantCount: 0},
 		{name: "valid_store_delegates", te: &turnExecution{pool: pFake}, wantCount: 1},
-		{name: "error_store_delegates", te: &turnExecution{pool: pErr}, wantCount: 1},
+		{name: "error_store_delegates", te: &turnExecution{pool: pErr}, wantCount: 0, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -527,14 +630,14 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 			tc.te.saveSessionID(threadID, "s1")
 			tc.te.rotateSessionID(threadID, "s2")
 			cnt, err := tc.te.incrementSessionTurnCount(threadID)
-			if err != nil || cnt != tc.wantCount {
-				t.Errorf("incrementSessionTurnCount() = (%d, %v), want %d", cnt, err, tc.wantCount)
+			if (err != nil) != tc.wantErr || cnt != tc.wantCount {
+				t.Errorf("incrementSessionTurnCount() = (%d, %v), want (%d, err=%v)", cnt, err, tc.wantCount, tc.wantErr)
 			}
 			_, _ = tc.te.getSessionID(threadID)
-			_, _ = tc.te.getPreviousSessionID(threadID)
+			_ = tc.te.getPreviousSessionID(threadID)
 			_ = tc.te.createOneShotSchedule(db.OneShotSchedule{ID: "os-" + tc.name})
-			_ = tc.te.saveThreadSummary(threadID, "sum", "m1")
-			_, _, _ = tc.te.getThreadSummary(threadID)
+			tc.te.saveThreadSummary(threadID, "sum", "m1")
+			_, _ = tc.te.getThreadSummary(threadID)
 			_, _ = tc.te.getRecentThreadMessages(threadID, 10)
 		})
 	}
@@ -562,7 +665,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	tests := []struct {
 		name, threadID, beforeID, wantSummarySub string
 		limit                                    int
-		useEmptyStore, withLLM                  bool
+		useEmptyStore, withLLM                   bool
 	}{
 		{name: "fast_db_summary", threadID: "thread-fast-1", beforeID: "msg-role-7", limit: 10, withLLM: true, wantSummarySub: "Summary result"},
 		{name: "rest_snowflake_zero_limit", threadID: "123456789012345678", beforeID: "123456789012345678", limit: 0, useEmptyStore: true},
@@ -573,29 +676,35 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			targetStore := fake
-			if tc.useEmptyStore { targetStore = emptyStore }
+			if tc.useEmptyStore {
+				targetStore = emptyStore
+			}
 			if tc.withLLM {
-				llm := func(ctx context.Context, model, prompt string) (string, error) { return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil }
+				llm := func(ctx context.Context, model, prompt string) (string, error) {
+					return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
+				}
 				msgs := []HistoryMessage{{ID: "m1", Content: "fresh", CreatedAt: now}}
 				sumRes, sumErr := SummarizeThreadHistoryWithGroup(ctx, nil, llm, "test-model", tc.threadID, msgs)
 				if sumErr != nil || !strings.Contains(sumRes, tc.wantSummarySub) {
 					t.Errorf("SummarizeThreadHistoryWithGroup() = (%q, %v), wantSub=%q", sumRes, sumErr, tc.wantSummarySub)
 				}
-				_, _ = SummarizeThreadHistory(ctx, llm, "test-model", tc.threadID, msgs)
 			}
 			_, _ = fetchHistoryFromDB(targetStore, tc.threadID, tc.beforeID, tc.limit)
 			_, _ = FetchRecentThreadHistory(ctx, dgHist, targetStore, tc.threadID, tc.limit)
 			_, _ = FetchRecentThreadHistory(ctx, nil, fake, "", tc.limit)
 			fetcher := DefaultHistoryFetcher(dgHist, targetStore)
 			_, _ = fetcher(ctx, tc.threadID, tc.beforeID, tc.limit)
-			if got := FilterAssistantMessages(nil); len(got) != 0 { t.Errorf("expected empty slice from FilterAssistantMessages(nil)") }
+			if got := FilterAssistantMessages(nil); len(got) != 0 {
+				t.Errorf("expected empty slice from FilterAssistantMessages(nil)")
+			}
 		})
 	}
 
-	_ = containsToken("foo", "foo"); _ = containsToken("foo", ""); _ = containsToken("foo bar", "baz")
-	teNil := &turnExecution{pool: &WorkerPool{}}; _, _ = teNil.resolveWebhookDispatcher(); _ = teNil.resolveTurnPolicy()
+	teNil := &turnExecution{pool: &WorkerPool{}}
+	_, _ = teNil.resolveWebhookDispatcher()
+	_ = teNil.resolveTurnPolicy()
 	teTrail := &turnExecution{
-		pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fake, OnMessageCompleted: func(db.Message, string) {}}},
+		pool:          &WorkerPool{cfg: WorkerPoolConfig{Store: fake, OnMessageCompleted: func(db.Message, string) {}}},
 		isQuotaPaused: true, trailingMsgs: []db.Message{{ID: "m-tr1", ScheduleRunID: "run-tr1", Content: "tr1"}, {ID: "m-tr2", Content: "tr2"}},
 		trailingInfos: []WakeInfo{{IsWake: true}, {IsWake: false}},
 	}
@@ -658,18 +767,29 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	}
 
 	var nilPool *WorkerPool
-	_ = nilPool.DeliverDirect("c", "t"); _, _ = nilPool.DeliverStatusWidget(discord.StatusWidgetRequest{})
+	_ = nilPool.DeliverDirect("c", "t")
+	_, _ = nilPool.DeliverStatusWidget(discord.StatusWidgetRequest{})
 	pEmpty := &WorkerPool{}
-	_ = pEmpty.DeliverDirect("c", "t"); _, _ = pEmpty.DeliverStatusWidget(discord.StatusWidgetRequest{})
+	_ = pEmpty.DeliverDirect("c", "t")
+	_, _ = pEmpty.DeliverStatusWidget(discord.StatusWidgetRequest{})
 
-	getRec, onRot := makeSessionCallbacks(fake); _, _ = getRec(ctx, "t1")
-	if err := onRot(ctx, "t1", "old", "new"); err != nil { t.Errorf("onRot error: %v", err) }
-	getRecErr, _ := makeSessionCallbacks(&errQueueStore{Store: fake}); _, _ = getRecErr(ctx, "t1")
-	if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil { t.Errorf("expected nil from unwrapUnifiedPool") }
+	getRec, onRot := makeSessionCallbacks(fake)
+	_, _ = getRec(ctx, "t1")
+	if err := onRot(ctx, "t1", "old", "new"); err != nil {
+		t.Errorf("onRot error: %v", err)
+	}
+	getRecErr, _ := makeSessionCallbacks(&errQueueStore{Store: fake})
+	_, _ = getRecErr(ctx, "t1")
+	if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil {
+		t.Errorf("expected nil from unwrapUnifiedPool")
+	}
 
 	mockDrain := &mockDrainErrStore{Store: fake, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
 	pDrain := New(nil, WorkerPoolConfig{Store: mockDrain, DrainTimeout: 10 * time.Millisecond})
-	RecoverInterrupted(mockDrain, pDrain); RecoverInterrupted(nil, nil); RecoverInterrupted(fake, nil); RecoverInterrupted(nil, &WorkerPool{})
+	RecoverInterrupted(mockDrain, pDrain)
+	RecoverInterrupted(nil, nil)
+	RecoverInterrupted(fake, nil)
+	RecoverInterrupted(nil, &WorkerPool{})
 	pDrain.StopWithTimeout(0)
 
 	recStore := setupTestStore(t)
@@ -680,7 +800,10 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	RecoverInterrupted(recStore, pRec)
 
 	p := New(nil, WorkerPoolConfig{Store: fake})
-	p.EnqueueBurst(); p.processBurst(nil); p.processBurst([]db.Message{}); p.cancel()
+	p.EnqueueBurst()
+	p.processBurst(nil)
+	p.processBurst([]db.Message{})
+	p.cancel()
 	stF := &threadWorkerState{ch: make(chan db.Message, 1)}
 	stF.ch <- db.Message{ID: "m0"}
 	p.threadChs["t-full"] = stF
@@ -727,15 +850,25 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	}
 
 	var nilSu *StatusUpdater
-	nilSu.MarkTurnStarted(); nilSu.Stop(); nilSu.Reset(); nilSu.DeleteStatusMessage()
+	nilSu.MarkTurnStarted()
+	nilSu.Stop()
+	nilSu.Reset()
+	nilSu.DeleteStatusMessage()
 	nilSu.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 
-	uDis := NewStatusUpdater(nil, "thread-dis", false); uDis.Start(); uDis.triggerFlush()
-	uEn := NewStatusUpdater(nil, "thread-en", true, WithStatusInterval(50*time.Millisecond)); uEn.Start(); uEn.Stop()
+	uDis := NewStatusUpdater(nil, "thread-dis", false)
+	uDis.Start()
+	uDis.triggerFlush()
+	uEn := NewStatusUpdater(nil, "thread-en", true, WithStatusInterval(50*time.Millisecond))
+	uEn.Start()
+	uEn.Stop()
 
 	uStep := NewStatusUpdater(nil, "thread-step", true, WithStatusInterval(10*time.Hour))
-	uStep.Stop(); uStep.disabled = true; uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-	uStep.disabled = false; uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
+	uStep.Stop()
+	uStep.disabled = true
+	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
+	uStep.disabled = false
+	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ACTIVE", ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "ls"}}})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "other_tool", State: "DONE"})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ERROR"})
@@ -743,16 +876,25 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 
 	uREST := NewStatusUpdater(s, "thread-rest-123", true)
 	msgID, err := uREST.sendFunc("thread-rest-123", "hello")
-	if err != nil || msgID != "msg-created-123" { t.Errorf("sendFunc() = (%q, %v), want msg-created-123", msgID, err) }
-	if err := uREST.editFunc("thread-rest-123", msgID, "edited"); err != nil { t.Errorf("editFunc() err = %v", err) }
-	if err := uREST.deleteFunc("thread-rest-123", msgID); err != nil { t.Errorf("deleteFunc() err = %v", err) }
+	if err != nil || msgID != "msg-created-123" {
+		t.Errorf("sendFunc() = (%q, %v), want msg-created-123", msgID, err)
+	}
+	if err := uREST.editFunc("thread-rest-123", msgID, "edited"); err != nil {
+		t.Errorf("editFunc() err = %v", err)
+	}
+	if err := uREST.deleteFunc("thread-rest-123", msgID); err != nil {
+		t.Errorf("deleteFunc() err = %v", err)
+	}
 
 	up404 := NewStatusUpdater(nil, "thread-404", true)
-	up404.turnStart = time.Now().Add(10 * time.Second); _ = up404.currentStatusText()
+	up404.turnStart = time.Now().Add(10 * time.Second)
+	_ = up404.currentStatusText()
 	up404.phase, up404.dirty, up404.lastDelivered, up404.statusMessageID = "thinking", true, "old text", "msg-edit-404"
 	up404.editFunc = func(c, m, txt string) error { return errors.New("HTTP 404 Not Found, 10008 Unknown Message") }
 	up404.flush()
-	if up404.statusMessageID != "" { t.Errorf("expected statusMessageID cleared on 404, got %q", up404.statusMessageID) }
+	if up404.statusMessageID != "" {
+		t.Errorf("expected statusMessageID cleared on 404, got %q", up404.statusMessageID)
+	}
 }
 
 func TestChannelCacheAndMessageEffort(t *testing.T) {
@@ -785,21 +927,33 @@ func TestChannelCacheAndMessageEffort(t *testing.T) {
 		})
 	}
 
-	if roles := ResolveBotRoleIDs(dgBot, "", "bot-1"); len(roles) == 0 { t.Errorf("expected non-empty roles") }
-	if roles := ResolveBotRoleIDs(&discordgo.Session{}, "", ""); roles != nil { t.Errorf("expected nil roles for nil State") }
-	CacheDiscordChannel(nil); CacheDiscordChannel(&discordgo.Channel{})
+	if roles := ResolveBotRoleIDs(dgBot, "", "bot-1"); len(roles) == 0 {
+		t.Errorf("expected non-empty roles")
+	}
+	if roles := ResolveBotRoleIDs(&discordgo.Session{}, "", ""); roles != nil {
+		t.Errorf("expected nil roles for nil State")
+	}
+	CacheDiscordChannel(nil)
+	CacheDiscordChannel(&discordgo.Channel{})
 	CacheDiscordChannel(&discordgo.Channel{ID: "parent-ch", GuildID: "guild-parent"})
 	CacheDiscordChannel(&discordgo.Channel{ID: "child-ch", ParentID: "parent-ch", Type: discordgo.ChannelTypeGuildPublicThread})
-	InvalidateChannelCache("parent-ch"); InvalidateChannelCache("child-ch")
+	InvalidateChannelCache("parent-ch")
+	InvalidateChannelCache("child-ch")
 
-	if tok := extractHeaderTokens("- mentions: [unclosed", "- mentions: ["); tok != nil { t.Errorf("expected nil from unclosed extractHeaderTokens") }
-	if layer := prependPromptLayer("", "lonely layer"); layer != "lonely layer" { t.Errorf("prependPromptLayer() = %q", layer) }
+	if tok := extractHeaderTokens("- mentions: [unclosed", "- mentions: ["); tok != nil {
+		t.Errorf("expected nil from unclosed extractHeaderTokens")
+	}
+	if layer := prependPromptLayer("", "lonely layer"); layer != "lonely layer" {
+		t.Errorf("prependPromptLayer() = %q", layer)
+	}
 	hist := FormatChannelHistory([]HistoryMessage{
 		{ID: "m1", AuthorName: "User[\n\rName]", Role: "", Content: "Hello world", CreatedAt: now},
 		{ID: "m2", AuthorName: "", Role: "Assistant", Content: "Aerial response", CreatedAt: now},
 		{ID: "m3", AuthorName: "", Role: "User", Content: "Anon user", CreatedAt: now},
 	})
-	if !strings.Contains(hist, "@UserName (User)") { t.Errorf("expected sanitized author name in %q", hist) }
+	if !strings.Contains(hist, "@UserName (User)") {
+		t.Errorf("expected sanitized author name in %q", hist)
+	}
 }
 
 func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
@@ -809,13 +963,13 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 
 	tests := []struct {
 		name, runnerOut, runnerErrOut, wantMsgStatus, wantRunStatus string
-		msg                                                          db.Message
-		trailing                                                     *db.Message
-		run                                                          *db.ScheduleRun
-		runnerCode                                                   int
-		runnerErr, claimErr                                          error
-		policy                                                       *config.ChannelPolicy
-		nilClassifier, unclaimed                                     bool
+		msg                                                         db.Message
+		trailing                                                    *db.Message
+		run                                                         *db.ScheduleRun
+		runnerCode                                                  int
+		runnerErr, claimErr                                         error
+		policy                                                      *config.ChannelPolicy
+		nilClassifier, unclaimed                                    bool
 	}{
 		{name: "claim_error_aborts_burst", msg: db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now}, claimErr: errors.New("db lock error")},
 		{name: "unclaimed_message_skipped", msg: db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now}, unclaimed: true},
@@ -829,20 +983,32 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fake := setupTestStore(t)
-			if tc.run != nil { _ = createScheduleRun(fake, *tc.run) }
+			if tc.run != nil {
+				_ = createScheduleRun(fake, *tc.run)
+			}
 			_ = insertMessage(fake, tc.msg)
 			burst := []db.Message{tc.msg}
-			if tc.trailing != nil { _ = insertMessage(fake, *tc.trailing); burst = append(burst, *tc.trailing) }
+			if tc.trailing != nil {
+				_ = insertMessage(fake, *tc.trailing)
+				burst = append(burst, *tc.trailing)
+			}
 			var store db.Store = fake
-			if tc.claimErr != nil || tc.unclaimed { store = &mockClaimStore{Store: fake, claimed: !tc.unclaimed, claimErr: tc.claimErr} }
+			if tc.claimErr != nil || tc.unclaimed {
+				store = &mockClaimStore{Store: fake, claimed: !tc.unclaimed, claimErr: tc.claimErr}
+			}
 			pool := New(nil, WorkerPoolConfig{
 				Store: store, MaxAttempts: 1, BackoffBase: time.Millisecond,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					return tc.runnerOut, tc.runnerErrOut, tc.runnerCode, tc.runnerErr
 				},
 			})
-			if tc.nilClassifier { pool.cfg.Classifier = nil }
-			if tc.policy != nil { pol := *tc.policy; pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return pol } }
+			if tc.nilClassifier {
+				pool.cfg.Classifier = nil
+			}
+			if tc.policy != nil {
+				pol := *tc.policy
+				pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return pol }
+			}
 			pool.processBurst(burst)
 
 			if tc.wantMsgStatus != "" {

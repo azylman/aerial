@@ -73,11 +73,19 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 			if tc.wantErr && err == nil {
 				t.Errorf("expected error, got nil")
 			} else if !tc.wantErr {
-				if err != nil { t.Fatalf("unexpected error: %v", err) }
-				if logPath != logFile { t.Errorf("expected log path %s, got %s", logFile, logPath) }
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if logPath != logFile {
+					t.Errorf("expected log path %s, got %s", logFile, logPath)
+				}
 			}
-			if code != tc.wantCode { t.Errorf("expected code %d, got %d", tc.wantCode, code) }
-			if done != nil { <-done }
+			if code != tc.wantCode {
+				t.Errorf("expected code %d, got %d", tc.wantCode, code)
+			}
+			if done != nil {
+				<-done
+			}
 		})
 	}
 }
@@ -90,9 +98,13 @@ func TestWorker_PoolDaemonAccessors(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{ProcessPool: procPool})
 	defer pool.Stop()
 
-	if pool.ProcessPool() == nil { t.Errorf("expected non-nil ProcessPool") }
+	if pool.ProcessPool() == nil {
+		t.Errorf("expected non-nil ProcessPool")
+	}
 	var nilPool *WorkerPool
-	if nilPool.ProcessPool() != nil { t.Errorf("expected nil ProcessPool for nil WorkerPool") }
+	if nilPool.ProcessPool() != nil {
+		t.Errorf("expected nil ProcessPool for nil WorkerPool")
+	}
 }
 
 func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
@@ -112,7 +124,9 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 			defer errW.Close()
 			go func() {
 				sessID := cfg.SessionID
-				if sessID == "" { sessID = "c1111111-2222-3333-4444-555555555555" }
+				if sessID == "" {
+					sessID = "c1111111-2222-3333-4444-555555555555"
+				}
 				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","conversation_id":%q}`+"\n", sessID)))
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
@@ -133,7 +147,9 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 		Store:          store,
 		TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted { completedCh <- msg.ID }
+			if status == db.StatusCompleted {
+				completedCh <- msg.ID
+			}
 		},
 	})
 	defer pool.Stop()
@@ -147,7 +163,9 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	waitCompleted := func(expectedID string) {
 		select {
 		case id := <-completedCh:
-			if id != expectedID { t.Fatalf("unexpected message completed: %s", id) }
+			if id != expectedID {
+				t.Fatalf("unexpected message completed: %s", id)
+			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("timeout waiting for %s", expectedID)
 		}
@@ -161,9 +179,15 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(capturedConfigs) != 2 { t.Fatalf("expected 2 daemon spawns, got %d", len(capturedConfigs)) }
-	if capturedConfigs[0].SessionID != expectedSessID { t.Errorf("expected DaemonConfig.SessionID %q, got %q", expectedSessID, capturedConfigs[0].SessionID) }
-	if capturedConfigs[1].SessionID != "" { t.Errorf("expected DaemonConfig.SessionID empty, got %q", capturedConfigs[1].SessionID) }
+	if len(capturedConfigs) != 2 {
+		t.Fatalf("expected 2 daemon spawns, got %d", len(capturedConfigs))
+	}
+	if capturedConfigs[0].SessionID != expectedSessID {
+		t.Errorf("expected DaemonConfig.SessionID %q, got %q", expectedSessID, capturedConfigs[0].SessionID)
+	}
+	if capturedConfigs[1].SessionID != "" {
+		t.Errorf("expected DaemonConfig.SessionID empty, got %q", capturedConfigs[1].SessionID)
+	}
 }
 
 func TestWorker_ActiveTasksPreventReap(t *testing.T) {
@@ -195,16 +219,24 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 				SessionManager: session.New(tmpHome, tempData), Store: store,
 				TimeoutMinutes: 1, MaxAttempts: 1, IdleTimeout: 20 * time.Millisecond,
 				OnMessageCompleted: func(msg db.Message, status string) {
-					select { case <-doneCh: default: close(doneCh) }
+					select {
+					case <-doneCh:
+					default:
+						close(doneCh)
+					}
 				},
 			})
 			defer pool.Stop()
 
 			ctx := context.Background()
 			targetPool := pool.ProcessPool()
-			if tc.isLowPool { targetPool = pool.LowEffortProcessPool() }
+			if tc.isLowPool {
+				targetPool = pool.LowEffortProcessPool()
+			}
 			daemon, err := targetPool.GetOrCreate(ctx, tc.threadID, "")
-			if err != nil { t.Fatalf("failed to create daemon: %v", err) }
+			if err != nil {
+				t.Fatalf("failed to create daemon: %v", err)
+			}
 			daemon.TaskTracker().Add(runner.TaskMetadata{TaskID: tc.taskID, StartedAt: time.Now()})
 
 			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, Content: "Hello reap test", Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now()}
@@ -221,7 +253,9 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 			pool.mu.Lock()
 			_, workerStillActive := pool.threadChs[tc.wantScopeKey]
 			pool.mu.Unlock()
-			if !workerStillActive { t.Errorf("expected worker active for scope %s", tc.wantScopeKey) }
+			if !workerStillActive {
+				t.Errorf("expected worker active for scope %s", tc.wantScopeKey)
+			}
 
 			if !tc.isLowPool {
 				daemon.TaskTracker().Remove(tc.taskID)
@@ -235,7 +269,9 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 						pool.mu.Lock()
 						_, active := pool.threadChs[tc.wantScopeKey]
 						pool.mu.Unlock()
-						if !active { reaped = true }
+						if !active {
+							reaped = true
+						}
 					}
 				}
 			}
@@ -265,7 +301,11 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 				TimeoutMinutes: 1, MaxAttempts: 1,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusFailed {
-						select { case <-failedCh: default: close(failedCh) }
+						select {
+						case <-failedCh:
+						default:
+							close(failedCh)
+						}
 					}
 				},
 			})
@@ -298,31 +338,31 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 	}{
 		{
 			name: "ColdStart_Success", threadID: "thread-cold-persist-success", daemonUUID: "c1111111-2222-3333-4444-555555555555",
-			turnResponses: []string{`{"event":"result","result":{"status":"SUCCESS","response":"Cold start completed successfully!","usage":{"total_tokens":25}}}` + "\n"},
+			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"Cold start completed successfully!","usage":{"total_tokens":25}}}` + "\n"},
 			expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Cold start completed successfully!", wantSavedSession: "c1111111-2222-3333-4444-555555555555", checkMetrics: true,
 		},
 		{
 			name: "ColdStart_RejectsForeignSessionOnDisk", threadID: "thread-cold-persist-no-foreign", daemonUUID: "d1111111-2222-3333-4444-555555555555",
-			turnResponses: []string{`{"event":"result","result":{"status":"SUCCESS","response":"Turn completed","usage":{"total_tokens":15}}}` + "\n"},
+			turnResponses:   []string{`{"event":"result","result":{"status":"SUCCESS","response":"Turn completed","usage":{"total_tokens":15}}}` + "\n"},
 			foreignDiskUUID: "f1111111-2222-3333-4444-555555555555", expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Turn completed",
 			wantSavedSession: "d1111111-2222-3333-4444-555555555555", expectSessionReject: "f1111111-2222-3333-4444-555555555555",
 		},
 		{
 			name: "EmptyResponse_TranscriptFallback", threadID: "thread-empty-resp-fallback", daemonUUID: "e1111111-2222-3333-4444-555555555555",
-			turnResponses: []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":10}}}` + "\n"},
-			transcriptContent: `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered from transcript!"}` + "\n",
+			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":10}}}` + "\n"},
+			transcriptContent:   `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered from transcript!"}` + "\n",
 			expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Recovered from transcript!",
 		},
 		{
 			name: "DaemonEmptyResponse_TranscriptFallback", threadID: "thread-daemon-empty-fallback", daemonUUID: "e3333333-4444-5555-6666-777777777777",
-			turnResponses: []string{`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}` + "\n" + `{"event":"result","result":{"status":"SUCCESS","response":""}}` + "\n"},
-			transcriptContent: `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered after daemon empty response!"}` + "\n",
+			turnResponses:       []string{`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}` + "\n" + `{"event":"result","result":{"status":"SUCCESS","response":""}}` + "\n"},
+			transcriptContent:   `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered after daemon empty response!"}` + "\n",
 			expectedFinalStatus: db.StatusCompleted, wantDeliveredSubstr: "Recovered after daemon empty response!",
 		},
 		{
 			name: "QuotaExhaustion_FromTranscript", threadID: "thread-quota-exhaustion-test", daemonUUID: "f2222222-3333-4444-5555-666666666666", presetSessionInDB: "f2222222-3333-4444-5555-666666666666",
-			turnResponses: []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
-			transcriptContent: fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":%q}`+"\n", time.Now().UTC().Format(time.RFC3339)),
+			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
+			transcriptContent:   fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":%q}`+"\n", time.Now().UTC().Format(time.RFC3339)),
 			expectedFinalStatus: db.StatusFailed, wantDeliveredSubstr: "resets in", checkQuotaSchedule: true, checkQuotaDbError: true,
 		},
 		{
@@ -342,7 +382,9 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			defer procPool.Close()
 
 			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
-			if tc.presetSessionInDB != "" { _ = store.SaveSessionID(context.Background(), tc.threadID, tc.presetSessionInDB) }
+			if tc.presetSessionInDB != "" {
+				_ = store.SaveSessionID(context.Background(), tc.threadID, tc.presetSessionInDB)
+			}
 			if tc.transcriptContent != "" {
 				sessDir := filepath.Join(tempData, "brain", tc.daemonUUID, ".system_generated", "logs")
 				_ = os.MkdirAll(sessDir, 0755)
@@ -363,7 +405,11 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 				DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error { deliveredText = content; return nil },
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == tc.expectedFinalStatus {
-						select { case <-doneCh: default: close(doneCh) }
+						select {
+						case <-doneCh:
+						default:
+							close(doneCh)
+						}
 					}
 				},
 			})
@@ -381,7 +427,9 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			}
 
 			if tc.checkMetrics {
-				if pool.ProcessPool() == nil || !pool.ProcessPool().HasDaemon(tc.threadID) { t.Errorf("expected daemon for %s", tc.threadID) }
+				if pool.ProcessPool() == nil || !pool.ProcessPool().HasDaemon(tc.threadID) {
+					t.Errorf("expected daemon for %s", tc.threadID)
+				}
 				rec := httptest.NewRecorder()
 				metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 				b := rec.Body.String()
@@ -394,23 +442,34 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			}
 			if tc.wantSavedSession != "" {
 				s, _ := store.GetSessionID(context.Background(), tc.threadID)
-				if s != tc.wantSavedSession { t.Errorf("saved session = %q, want %q", s, tc.wantSavedSession) }
+				if s != tc.wantSavedSession {
+					t.Errorf("saved session = %q, want %q", s, tc.wantSavedSession)
+				}
 			}
 			if tc.expectSessionReject != "" {
 				s, _ := store.GetSessionID(context.Background(), tc.threadID)
-				if s == tc.expectSessionReject { t.Fatalf("security violation: latched foreign session %q", tc.expectSessionReject) }
+				if s == tc.expectSessionReject {
+					t.Fatalf("security violation: latched foreign session %q", tc.expectSessionReject)
+				}
 			}
 			if tc.checkQuotaDbError {
 				dbMsg, _ := store.GetMessage(context.Background(), msgID)
-				if dbMsg == nil || !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") { t.Errorf("expected [QUOTA_PAUSED]") }
+				if dbMsg == nil || !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
+					t.Errorf("expected [QUOTA_PAUSED]")
+				}
 			}
 			if tc.checkQuotaSchedule {
 				schedules, _ := store.GetAllOneShotSchedules(context.Background(), tc.threadID)
 				found := false
 				for _, s := range schedules {
-					if s.ThreadID == tc.threadID && strings.Contains(s.Prompt, "[QUOTA_RETRY]") { found = true; break }
+					if s.ThreadID == tc.threadID && strings.Contains(s.Prompt, "[QUOTA_RETRY]") {
+						found = true
+						break
+					}
 				}
-				if !found { t.Errorf("expected one-shot retry with [QUOTA_RETRY]") }
+				if !found {
+					t.Errorf("expected one-shot retry with [QUOTA_RETRY]")
+				}
 			}
 		})
 	}
@@ -454,7 +513,11 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error { return nil },
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
-				select { case <-doneCh: default: close(doneCh) }
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
 			}
 		},
 	})
@@ -524,11 +587,17 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 			te := &turnExecution{pool: pool, burst: tc.burst}
 			msgs, err := te.getRecentThreadMessages("1552732003076669460", tc.limit)
 			if tc.wantErr {
-				if err == nil { t.Fatalf("expected error, got nil") }
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
 				return
 			}
-			if err != nil { t.Fatalf("unexpected error: %v", err) }
-			if len(msgs) != tc.wantCount { t.Fatalf("expected %d messages, got %d", tc.wantCount, len(msgs)) }
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(msgs) != tc.wantCount {
+				t.Fatalf("expected %d messages, got %d", tc.wantCount, len(msgs))
+			}
 			if tc.wantCount > 0 && (msgs[0].ID != tc.firstID || msgs[0].AuthorName != tc.firstAuthor) {
 				t.Errorf("mismatch on first message: got %+v, want ID=%s Author=%s", msgs[0], tc.firstID, tc.firstAuthor)
 			}
@@ -537,6 +606,7 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 }
 
 type mockErrRecentStore struct{ db.Store }
+
 func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]db.Message, error) {
 	return nil, errors.New("simulated db failure")
 }
@@ -552,7 +622,9 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, processPool: procPool}, threadID: "thread-evict-1"}
 
 	te.rotateSessionID("thread-evict-1", "new-sess-1")
-	if !procPool.HasDaemon("thread-evict-1") { t.Errorf("expected daemon to remain when newSessionID is non-empty") }
+	if !procPool.HasDaemon("thread-evict-1") {
+		t.Errorf("expected daemon to remain when newSessionID is non-empty")
+	}
 
 	te.rotateSessionID("thread-evict-1", "")
 	if storedSess, _ := fakeStore.GetSessionID(ctx, "thread-evict-1"); storedSess != "" {
@@ -588,8 +660,12 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 			sessMgr := session.New(tmpDir, tmpDir)
 			oldSess, convDir := "sess-"+tc.name, filepath.Join(tmpDir, "conversations")
 			_ = os.MkdirAll(convDir, 0755)
-			if tc.preWriteDBBytes > 0 { _ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0644) }
-			if tc.preWriteWALBytes > 0 { _ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0644) }
+			if tc.preWriteDBBytes > 0 {
+				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0644)
+			}
+			if tc.preWriteWALBytes > 0 {
+				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0644)
+			}
 
 			threadID := "thread-" + tc.name
 			_ = saveSessionID(store, threadID, oldSess)
@@ -604,7 +680,10 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 				TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					select { case doneCh <- struct{}{}: default: }
+					select {
+					case doneCh <- struct{}{}:
+					default:
+					}
 				},
 				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 					mu.Lock()
@@ -649,8 +728,12 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 			mu.Lock()
 			gotAttempts := len(attempts)
 			mu.Unlock()
-			if gotAttempts != tc.wantAttempts { t.Fatalf("attempts = %d, want %d", gotAttempts, tc.wantAttempts) }
-			if curSess, _ := getSessionID(store, threadID); curSess != oldSess { t.Errorf("session %q != %q", curSess, oldSess) }
+			if gotAttempts != tc.wantAttempts {
+				t.Fatalf("attempts = %d, want %d", gotAttempts, tc.wantAttempts)
+			}
+			if curSess, _ := getSessionID(store, threadID); curSess != oldSess {
+				t.Errorf("session %q != %q", curSess, oldSess)
+			}
 		})
 	}
 }
@@ -683,7 +766,9 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 					attemptCount++
 					cur := attemptCount
 					mu.Unlock()
-					if cur == 1 { return "", tt.runnerErr, 1, errors.New("exit code 1") }
+					if cur == 1 {
+						return "", tt.runnerErr, 1, errors.New("exit code 1")
+					}
 					return mockJSONResponse(uuid.New().String(), "Recovered on attempt 2!"), "", 0, nil
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -694,7 +779,10 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 				},
 				TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
 				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					select { case doneCh <- struct{}{}: default: }
+					select {
+					case doneCh <- struct{}{}:
+					default:
+					}
 				},
 			})
 			pool.Start()
@@ -715,15 +803,27 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 			mu.Lock()
 			attempts, delivered := attemptCount, deliveredText
 			mu.Unlock()
-			if attempts != tt.wantAttempts { t.Fatalf("attempts = %d, want %d", attempts, tt.wantAttempts) }
+			if attempts != tt.wantAttempts {
+				t.Fatalf("attempts = %d, want %d", attempts, tt.wantAttempts)
+			}
 			dbMsg, _ := store.GetMessage(context.Background(), msgID)
-			if dbMsg.Status != tt.wantFinalStatus { t.Errorf("status = %s, want %s", dbMsg.Status, tt.wantFinalStatus) }
-			if tt.wantErrContains != "" && !strings.Contains(dbMsg.ErrorMessage, tt.wantErrContains) { t.Errorf("expected error %q in %q", tt.wantErrContains, dbMsg.ErrorMessage) }
-			if tt.wantDeliveryContains != "" && !strings.Contains(delivered, tt.wantDeliveryContains) { t.Errorf("expected delivery %q in %q", tt.wantDeliveryContains, delivered) }
-			if tt.checkGlobalLockZero && pool.quotaLockedUntil.Load() > 0 { t.Errorf("expected quotaLockedUntil == 0") }
+			if dbMsg.Status != tt.wantFinalStatus {
+				t.Errorf("status = %s, want %s", dbMsg.Status, tt.wantFinalStatus)
+			}
+			if tt.wantErrContains != "" && !strings.Contains(dbMsg.ErrorMessage, tt.wantErrContains) {
+				t.Errorf("expected error %q in %q", tt.wantErrContains, dbMsg.ErrorMessage)
+			}
+			if tt.wantDeliveryContains != "" && !strings.Contains(delivered, tt.wantDeliveryContains) {
+				t.Errorf("expected delivery %q in %q", tt.wantDeliveryContains, delivered)
+			}
+			if tt.checkGlobalLockZero && pool.quotaLockedUntil.Load() > 0 {
+				t.Errorf("expected quotaLockedUntil == 0")
+			}
 			if tt.checkNoSchedules {
 				s, _ := store.GetAllOneShotSchedules(context.Background(), threadID)
-				if len(s) > 0 { t.Errorf("expected 0 schedules, got %d", len(s)) }
+				if len(s) > 0 {
+					t.Errorf("expected 0 schedules, got %d", len(s))
+				}
 			}
 		})
 	}
@@ -747,7 +847,9 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 				threadAAttempts++
 				att := threadAAttempts
 				mu.Unlock()
-				if att == 1 { return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1") }
+				if att == 1 {
+					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+				}
 				return mockJSONResponse(uuid.New().String(), "Thread A success"), "", 0, nil
 			}
 			return mockJSONResponse(uuid.New().String(), "Thread B success"), "", 0, nil
@@ -759,10 +861,16 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 			defer mu.Unlock()
 			if msg.ThreadID == "thread-A" && finalStatus == db.StatusCompleted {
 				threadACompleted = time.Now()
-				select { case doneA <- struct{}{}: default: }
+				select {
+				case doneA <- struct{}{}:
+				default:
+				}
 			} else if msg.ThreadID == "thread-B" && finalStatus == db.StatusCompleted {
 				threadBCompleted = time.Now()
-				select { case doneB <- struct{}{}: default: }
+				select {
+				case doneB <- struct{}{}:
+				default:
+				}
 			}
 		},
 	})
@@ -775,15 +883,29 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 	pool.Enqueue(msgA)
 	pool.Enqueue(msgB)
 
-	select { case <-doneB: case <-time.After(10 * time.Second): t.Fatal("Timeout waiting for Thread B completed") }
-	select { case <-doneA: case <-time.After(10 * time.Second): t.Fatal("Timeout waiting for Thread A completed") }
-	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 { t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil) }
+	select {
+	case <-doneB:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for Thread B completed")
+	}
+	select {
+	case <-doneA:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for Thread A completed")
+	}
+	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+	}
 	mu.Lock()
 	aDone, bDone := threadACompleted.IsZero(), threadBCompleted.IsZero()
 	mu.Unlock()
-	if aDone || bDone { t.Errorf("Expected both threads to complete") }
+	if aDone || bDone {
+		t.Errorf("Expected both threads to complete")
+	}
 	dbMsgB, _ := store.GetMessage(context.Background(), "msg-thread-B")
-	if dbMsgB == nil || dbMsgB.Status != db.StatusCompleted { t.Errorf("Expected Thread B StatusCompleted") }
+	if dbMsgB == nil || dbMsgB.Status != db.StatusCompleted {
+		t.Errorf("Expected Thread B StatusCompleted")
+	}
 }
 
 func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
@@ -806,7 +928,10 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 			pool := New(appCfg, WorkerPoolConfig{
 				SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: 2,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					select { case startedCh <- struct{}{}: default: }
+					select {
+					case startedCh <- struct{}{}:
+					default:
+					}
 					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
@@ -824,7 +949,11 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 			_ = insertMessage(store, msg)
 			pool.Enqueue(msg)
 
-			select { case <-startedCh: case <-time.After(5 * time.Second): t.Fatal("Timeout waiting for attempt 1") }
+			select {
+			case <-startedCh:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Timeout waiting for attempt 1")
+			}
 			pool.cancel()
 			waitPoolWorkersDone(t, pool, 3*time.Second)
 
@@ -832,13 +961,17 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 				typingMu.Lock()
 				active, stopped := typingActive, typingStopped
 				typingMu.Unlock()
-				if !active || !stopped { t.Errorf("expected typing active and then stopped on cancel") }
+				if !active || !stopped {
+					t.Errorf("expected typing active and then stopped on cancel")
+				}
 			}
 			dbMsg, _ := store.GetMessage(context.Background(), tc.msgID)
 			if dbMsg == nil || dbMsg.Status != db.StatusPending || !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
 				t.Errorf("expected StatusPending with interrupted message")
 			}
-			if pool.quotaLockedUntil.Load() > 0 { t.Errorf("expected quotaLockedUntil == 0") }
+			if pool.quotaLockedUntil.Load() > 0 {
+				t.Errorf("expected quotaLockedUntil == 0")
+			}
 		})
 	}
 }
@@ -846,9 +979,9 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 func TestWorkerPool_ProgressiveCapacityBackoff(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                string
-		attempt             int
-		resetDur            time.Duration
+		name                 string
+		attempt              int
+		resetDur             time.Duration
 		minFloor, maxCeiling time.Duration
 	}{
 		{name: "Attempt1_Floor30s", attempt: 1, resetDur: 0, minFloor: 30 * time.Second, maxCeiling: 33 * time.Second},
@@ -876,7 +1009,9 @@ func TestDiscordTurnSink_Callbacks(t *testing.T) {
 	sink.OnTextDelta("some text")
 	sink.OnError(errors.New("test error"))
 	res, err := sink.Wait(context.Background())
-	if err != nil || res.Response != "some text" { t.Fatalf("unexpected error/response: %v, %q", err, res.Response) }
+	if err != nil || res.Response != "some text" {
+		t.Fatalf("unexpected error/response: %v, %q", err, res.Response)
+	}
 
 	sinkNoDeltas := newDiscordTurnSink(nil)
 	expectedErr := errors.New("hard failure")
@@ -899,9 +1034,15 @@ func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
 		t.Helper()
 		updater.mu.Lock()
 		defer updater.mu.Unlock()
-		if updater.phase != wantPhase { t.Errorf("[%s] phase = %q, want %q", step, updater.phase, wantPhase) }
-		if wantTool != "" && updater.activeTool != wantTool { t.Errorf("[%s] activeTool = %q, want %q", step, updater.activeTool, wantTool) }
-		if wantCmd != "" && updater.activeCommand != wantCmd { t.Errorf("[%s] activeCommand = %q, want %q", step, updater.activeCommand, wantCmd) }
+		if updater.phase != wantPhase {
+			t.Errorf("[%s] phase = %q, want %q", step, updater.phase, wantPhase)
+		}
+		if wantTool != "" && updater.activeTool != wantTool {
+			t.Errorf("[%s] activeTool = %q, want %q", step, updater.activeTool, wantTool)
+		}
+		if wantCmd != "" && updater.activeCommand != wantCmd {
+			t.Errorf("[%s] activeCommand = %q, want %q", step, updater.activeCommand, wantCmd)
+		}
 	}
 
 	sink.OnThinking()
@@ -932,10 +1073,10 @@ func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
 func TestWorker_DualPoolRouting(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                                                       string
-		effort                                                     string
-		useFallbackNilLowPool, useFallbackNilMedPool               bool
-		wantPrimaryCount, wantLowCount, wantMedCount               int
+		name                                         string
+		effort                                       string
+		useFallbackNilLowPool, useFallbackNilMedPool bool
+		wantPrimaryCount, wantLowCount, wantMedCount int
 	}{
 		{name: "LowEffortRoutesToLowPool", effort: "low", wantLowCount: 1},
 		{name: "MediumEffortRoutesToMediumPool", effort: "medium", wantMedCount: 1},
@@ -981,7 +1122,12 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool, MediumEffortProcessPool: medPool,
 				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 				OnMessageCompleted: func(msg db.Message, status string) {
-					if status == db.StatusCompleted { select { case doneCh <- struct{}{}: default: } }
+					if status == db.StatusCompleted {
+						select {
+						case doneCh <- struct{}{}:
+						default:
+						}
+					}
 				},
 			})
 			pool.Start()
@@ -992,10 +1138,20 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
-			select { case <-doneCh: case <-time.After(5 * time.Second): t.Fatalf("timeout waiting for turn completion") }
-			if p := int(primarySpawnCount.Load()); p != tt.wantPrimaryCount { t.Errorf("primarySpawnCount = %d, want %d", p, tt.wantPrimaryCount) }
-			if l := int(lowSpawnCount.Load()); l != tt.wantLowCount { t.Errorf("lowSpawnCount = %d, want %d", l, tt.wantLowCount) }
-			if m := int(medSpawnCount.Load()); m != tt.wantMedCount { t.Errorf("medSpawnCount = %d, want %d", m, tt.wantMedCount) }
+			select {
+			case <-doneCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timeout waiting for turn completion")
+			}
+			if p := int(primarySpawnCount.Load()); p != tt.wantPrimaryCount {
+				t.Errorf("primarySpawnCount = %d, want %d", p, tt.wantPrimaryCount)
+			}
+			if l := int(lowSpawnCount.Load()); l != tt.wantLowCount {
+				t.Errorf("lowSpawnCount = %d, want %d", l, tt.wantLowCount)
+			}
+			if m := int(medSpawnCount.Load()); m != tt.wantMedCount {
+				t.Errorf("medSpawnCount = %d, want %d", m, tt.wantMedCount)
+			}
 		})
 	}
 }
@@ -1017,7 +1173,10 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"d1111111-2222-3333-4444-555555555555\"}\n"))
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
-					select { case lowStartedCh <- struct{}{}: default: }
+					select {
+					case lowStartedCh <- struct{}{}:
+					default:
+					}
 					<-lowBlockCh
 					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"low reply\",\"usage\":{\"total_tokens\":5}}}\n"))
 				}
@@ -1036,8 +1195,12 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
-			if msg.ID == "msg-norm-concurrent" && status == db.StatusCompleted { close(normDoneCh) }
-			if msg.ID == "msg-low-concurrent" && status == db.StatusCompleted { close(lowDoneCh) }
+			if msg.ID == "msg-norm-concurrent" && status == db.StatusCompleted {
+				close(normDoneCh)
+			}
+			if msg.ID == "msg-low-concurrent" && status == db.StatusCompleted {
+				close(lowDoneCh)
+			}
 		},
 	})
 	defer pool.Stop()
@@ -1047,15 +1210,27 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 	_ = store.InsertMessage(context.Background(), lowMsg)
 	pool.Enqueue(lowMsg)
 
-	select { case <-lowStartedCh: case <-time.After(5 * time.Second): t.Fatalf("timeout waiting for low-effort turn to start") }
+	select {
+	case <-lowStartedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for low-effort turn to start")
+	}
 
 	normMsg := db.Message{ID: "msg-norm-concurrent", ThreadID: threadID, Content: "user asks what is happening", Effort: "medium", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), normMsg)
 	pool.Enqueue(normMsg)
 
-	select { case <-normDoneCh: case <-time.After(2 * time.Second): t.Fatalf("primary message was blocked by low-effort task") }
+	select {
+	case <-normDoneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("primary message was blocked by low-effort task")
+	}
 	close(lowBlockCh)
-	select { case <-lowDoneCh: case <-time.After(5 * time.Second): t.Fatalf("timeout waiting for low-effort task to complete") }
+	select {
+	case <-lowDoneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for low-effort task to complete")
+	}
 }
 
 func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testing.T) {
@@ -1084,7 +1259,9 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 				buf := make([]byte, 16384)
 				for {
 					n, rErr := inR.Read(buf)
-					if rErr != nil { return }
+					if rErr != nil {
+						return
+					}
 					if n > 0 {
 						mu.Lock()
 						capturedPrompts = append(capturedPrompts, string(buf[:n]))
@@ -1114,7 +1291,9 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 			return []HistoryMessage{{ID: "hist-1", AuthorName: "alex", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)}}, nil
 		},
 		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted { doneCh <- struct{}{} }
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
 		},
 	})
 	defer pool.Stop()
@@ -1128,13 +1307,21 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	msg1 := db.Message{ID: "msg-ephem-1", ThreadID: threadID, Content: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(ctx, msg1)
 	pool.Enqueue(msg1)
-	select { case <-doneCh: case <-time.After(5 * time.Second): t.Fatalf("timeout waiting for ephemeral turn 1") }
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for ephemeral turn 1")
+	}
 	lowPool.WaitBackground()
 
 	msg2 := db.Message{ID: "msg-ephem-2", ThreadID: threadID, Content: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(ctx, msg2)
 	pool.Enqueue(msg2)
-	select { case <-doneCh: case <-time.After(5 * time.Second): t.Fatalf("timeout waiting for ephemeral turn 2") }
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for ephemeral turn 2")
+	}
 	lowPool.WaitBackground()
 
 	mu.Lock()
@@ -1142,7 +1329,9 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	spawns := spawnSeq
 	mu.Unlock()
 
-	if len(prompts) != 2 { t.Fatalf("expected 2 captured prompts, got %d", len(prompts)) }
+	if len(prompts) != 2 {
+		t.Fatalf("expected 2 captured prompts, got %d", len(prompts))
+	}
 	for i, p := range prompts {
 		if strings.Contains(p, "<THREAD_SUMMARY>") || strings.Contains(p, "Cached summary that must not be injected") {
 			t.Errorf("turn %d prompt unexpectedly contained <THREAD_SUMMARY>", i+1)
@@ -1154,11 +1343,17 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 			t.Errorf("turn %d prompt unexpectedly contained <PREVIOUS_SESSION>", i+1)
 		}
 	}
-	if spawns < 2 { t.Errorf("expected worker daemon rotation (spawns >= 2), got %d", spawns) }
+	if spawns < 2 {
+		t.Errorf("expected worker daemon rotation (spawns >= 2), got %d", spawns)
+	}
 	currentSess, err := store.GetSessionID(ctx, threadID)
-	if err != nil || currentSess != primarySessUUID { t.Errorf("expected primary session %s untouched, got %s", primarySessUUID, currentSess) }
+	if err != nil || currentSess != primarySessUUID {
+		t.Errorf("expected primary session %s untouched, got %s", primarySessUUID, currentSess)
+	}
 	turnCount, err := store.GetSessionTurnCount(ctx, threadID)
-	if err != nil || turnCount != 0 { t.Errorf("expected primary session turn count 0, got %d", turnCount) }
+	if err != nil || turnCount != 0 {
+		t.Errorf("expected primary session turn count 0, got %d", turnCount)
+	}
 }
 
 func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
@@ -1200,7 +1395,11 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				turnCount.Add(1)
-				select { case <-doneCh: default: close(doneCh) }
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
 			}
 		},
 	})
@@ -1208,15 +1407,23 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 
 	ctx := context.Background()
 	lowDaemon, err := lowPool.GetOrCreate(ctx, threadID, "")
-	if err != nil { t.Fatalf("failed to create low daemon: %v", err) }
+	if err != nil {
+		t.Fatalf("failed to create low daemon: %v", err)
+	}
 	lowDaemon.TaskTracker().Add(runner.TaskMetadata{TaskID: "bg-task-in-low-pool", StartedAt: time.Now()})
 
 	msg := db.Message{ID: "msg-yield-fb-1", ThreadID: threadID, Content: "run command and wait", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), msg)
 	pool.Enqueue(msg)
 
-	select { case <-doneCh: case <-time.After(5 * time.Second): t.Fatalf("timed out waiting for message completion") }
-	if tc := int(turnCount.Load()); tc < 1 { t.Errorf("expected auto-resumption from yield-trap detection, turnCount=%d", tc) }
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+	if tc := int(turnCount.Load()); tc < 1 {
+		t.Errorf("expected auto-resumption from yield-trap detection, turnCount=%d", tc)
+	}
 }
 
 func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
@@ -1247,7 +1454,13 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
 				OnMessageCompleted: func(msg db.Message, status string) {
-					if status == db.StatusFailed { select { case <-doneCh: default: close(doneCh) } }
+					if status == db.StatusFailed {
+						select {
+						case <-doneCh:
+						default:
+							close(doneCh)
+						}
+					}
 				},
 			})
 			defer pool.Stop()
@@ -1257,7 +1470,11 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
-			select { case <-doneCh: case <-time.After(5 * time.Second): t.Fatalf("timed out waiting for message completion") }
+			select {
+			case <-doneCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timed out waiting for message completion")
+			}
 			schedules, err := store.GetAllOneShotSchedules(context.Background(), threadID)
 			if err != nil || len(schedules) != 1 || schedules[0].Effort != tt.expectedEffort {
 				t.Fatalf("expected 1 schedule with effort %q, got %v (err=%v)", tt.expectedEffort, schedules, err)
@@ -1319,7 +1536,13 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 				TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 				OnMessageCompleted: func(msg db.Message, status string) {
-					if status == db.StatusCompleted { select { case <-doneCh: default: close(doneCh) } }
+					if status == db.StatusCompleted {
+						select {
+						case <-doneCh:
+						default:
+							close(doneCh)
+						}
+					}
 				},
 			})
 			pool.Start()
@@ -1329,14 +1552,26 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 			_ = store.InsertMessage(context.Background(), msg)
 			pool.Enqueue(msg)
 
-			select { case <-doneCh: case <-time.After(10 * time.Second): t.Fatalf("timed out waiting for turn completion") }
+			select {
+			case <-doneCh:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("timed out waiting for turn completion")
+			}
 			mu.Lock()
 			defer mu.Unlock()
-			if len(recordedPrompts) != tt.wantAttempts { t.Fatalf("expected %d attempts, got %d", tt.wantAttempts, len(recordedPrompts)) }
-			if recordedSessions[0] != validUUID { t.Errorf("expected attempt 1 session %q, got %q", validUUID, recordedSessions[0]) }
-			if strings.Contains(recordedPrompts[0], "<PREVIOUS_TURN_ACTIONS>") { t.Errorf("unexpected PREVIOUS_TURN_ACTIONS in attempt 1") }
+			if len(recordedPrompts) != tt.wantAttempts {
+				t.Fatalf("expected %d attempts, got %d", tt.wantAttempts, len(recordedPrompts))
+			}
+			if recordedSessions[0] != validUUID {
+				t.Errorf("expected attempt 1 session %q, got %q", validUUID, recordedSessions[0])
+			}
+			if strings.Contains(recordedPrompts[0], "<PREVIOUS_TURN_ACTIONS>") {
+				t.Errorf("unexpected PREVIOUS_TURN_ACTIONS in attempt 1")
+			}
 			for i := 1; i < tt.wantAttempts; i++ {
-				if tt.wantRetainSession && recordedSessions[i] != validUUID { t.Errorf("expected attempt %d session %q, got %q", i+1, validUUID, recordedSessions[i]) }
+				if tt.wantRetainSession && recordedSessions[i] != validUUID {
+					t.Errorf("expected attempt %d session %q, got %q", i+1, validUUID, recordedSessions[i])
+				}
 			}
 		})
 	}
@@ -1346,12 +1581,12 @@ func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
 	t.Parallel()
 	ambCfg := &config.AmbientContextConfig{Template: "Kitchen Temp: {{.temp}}"}
 	tests := []struct {
-		name                                      string
-		ambCfg                                    *config.AmbientContextConfig
-		resolverErr                               error
-		resolverText                              string
-		wantResolverCalled                        bool
-		wantPromptContains, wantPromptExcludes   []string
+		name                                   string
+		ambCfg                                 *config.AmbientContextConfig
+		resolverErr                            error
+		resolverText                           string
+		wantResolverCalled                     bool
+		wantPromptContains, wantPromptExcludes []string
 	}{
 		{name: "ConfiguredChannel", ambCfg: ambCfg, resolverText: "<ambient_context>\nKitchen Temp: 71F\n</ambient_context>", wantResolverCalled: true, wantPromptContains: []string{"<ambient_context>", "Kitchen Temp: 71F", "turn off kitchen lights"}},
 		{name: "UnconfiguredChannel_Bypass", ambCfg: nil, resolverText: "<ambient_context>should not appear</ambient_context>", wantResolverCalled: false, wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"}},
@@ -1366,7 +1601,9 @@ func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
 				cfg: WorkerPoolConfig{
 					AmbientResolver: func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error) {
 						resolverCalled.Store(true)
-						if tt.resolverErr != nil { return "", tt.resolverErr }
+						if tt.resolverErr != nil {
+							return "", tt.resolverErr
+						}
 						return tt.resolverText, nil
 					},
 				},
@@ -1374,15 +1611,21 @@ func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
 			te := &turnExecution{
 				pool: pool, effectiveName: "kitchen", threadID: "t-amb-1", currentSessionID: "sess-amb-1",
 				policy: config.ChannelPolicy{AmbientContext: tt.ambCfg},
-				burst: []db.Message{{ID: "m1", ThreadID: "t-amb-1", Content: "turn off kitchen lights"}},
+				burst:  []db.Message{{ID: "m1", ThreadID: "t-amb-1", Content: "turn off kitchen lights"}},
 			}
 			te.buildTurnPrompt()
-			if called := resolverCalled.Load(); called != tt.wantResolverCalled { t.Errorf("resolverCalled = %t, want %t", called, tt.wantResolverCalled) }
+			if called := resolverCalled.Load(); called != tt.wantResolverCalled {
+				t.Errorf("resolverCalled = %t, want %t", called, tt.wantResolverCalled)
+			}
 			for _, sub := range tt.wantPromptContains {
-				if !strings.Contains(te.turnPrompt, sub) { t.Errorf("expected prompt containing %q", sub) }
+				if !strings.Contains(te.turnPrompt, sub) {
+					t.Errorf("expected prompt containing %q", sub)
+				}
 			}
 			for _, sub := range tt.wantPromptExcludes {
-				if strings.Contains(te.turnPrompt, sub) { t.Errorf("expected prompt NOT containing %q", sub) }
+				if strings.Contains(te.turnPrompt, sub) {
+					t.Errorf("expected prompt NOT containing %q", sub)
+				}
 			}
 		})
 	}
@@ -1419,8 +1662,8 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 			mu.Unlock()
 			return mockJSONResponse(sessionID, "Turn response"), "", 0, nil
 		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		DeliveryFunc:       func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:         func(s *discordgo.Session, channelID string) func() { return func() {} },
 		OnMessageCompleted: func(msg db.Message, finalStatus string) { doneCh <- struct{}{} },
 	})
 	pool.Start()
@@ -1429,16 +1672,26 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	msg1 := db.Message{ID: "msg-post-rot-1", ThreadID: threadID, Content: "what was discussed earlier?"}
 	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
-	select { case <-doneCh: case <-time.After(10 * time.Second): t.Fatal("Timeout waiting for message 1") }
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message 1")
+	}
 
 	msg2 := db.Message{ID: "msg-post-rot-2", ThreadID: threadID, Content: "follow-up question"}
 	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
-	select { case <-doneCh: case <-time.After(10 * time.Second): t.Fatal("Timeout waiting for message 2") }
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message 2")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(capturedPrompts) != 2 { t.Fatalf("Expected 2 captured prompts, got %d", len(capturedPrompts)) }
+	if len(capturedPrompts) != 2 {
+		t.Fatalf("Expected 2 captured prompts, got %d", len(capturedPrompts))
+	}
 	if !strings.Contains(capturedPrompts[0], "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>") || !strings.Contains(capturedPrompts[0], "<PREVIOUS_SESSION>") || !strings.Contains(capturedPrompts[0], "<CHANNEL_HISTORY>") {
 		t.Errorf("Turn 1 prompt missing expected cold-start context")
 	}
@@ -1467,9 +1720,15 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 	for _, tt := range burstTests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := extractBurstModel(tt.burst); got != tt.wantModel { t.Errorf("extractBurstModel = %q, want %q", got, tt.wantModel) }
-			if got := extractBurstSilent(tt.burst); got != tt.wantSilent { t.Errorf("extractBurstSilent = %t, want %t", got, tt.wantSilent) }
-			if got := resolveBurstEffort(tt.burst); got != tt.wantEffort { t.Errorf("resolveBurstEffort = %q, want %q", got, tt.wantEffort) }
+			if got := extractBurstModel(tt.burst); got != tt.wantModel {
+				t.Errorf("extractBurstModel = %q, want %q", got, tt.wantModel)
+			}
+			if got := extractBurstSilent(tt.burst); got != tt.wantSilent {
+				t.Errorf("extractBurstSilent = %t, want %t", got, tt.wantSilent)
+			}
+			if got := resolveBurstEffort(tt.burst); got != tt.wantEffort {
+				t.Errorf("resolveBurstEffort = %q, want %q", got, tt.wantEffort)
+			}
 		})
 	}
 }
@@ -1513,7 +1772,9 @@ func TestWorker_SilentBurst_Execution(t *testing.T) {
 
 	select {
 	case status := <-doneCh:
-		if status != db.StatusCompleted { t.Fatalf("expected StatusCompleted, got %s", status) }
+		if status != db.StatusCompleted {
+			t.Fatalf("expected StatusCompleted, got %s", status)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for silent message completion")
 	}
@@ -1589,10 +1850,14 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 							return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Waiting on background task task-999 to complete.","usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID), "", 0, nil
 						}
 						msg := fmt.Sprintf("Still waiting turn %d", inv)
-						if tc.maxYields == 1 { msg = "Waiting on background task task-444" }
+						if tc.maxYields == 1 {
+							msg = "Waiting on background task task-444"
+						}
 						return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID, msg), "terminating 1 background task(s) on exit\n", 0, nil
 					}
-					if daemon != nil { daemon.TaskTracker().Remove("task-999") }
+					if daemon != nil {
+						daemon.TaskTracker().Remove("task-999")
+					}
 					return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":150,"output_tokens":35,"total_tokens":185}}`, tc.sessionID, tc.expectDeliveredText), "", 0, nil
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -1625,12 +1890,16 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 				t.Fatal("Timeout waiting for message processing")
 			}
 
-			if runnerInvocations.Load() != tc.expectInvocations { t.Fatalf("invocations = %d, want %d", runnerInvocations.Load(), tc.expectInvocations) }
+			if runnerInvocations.Load() != tc.expectInvocations {
+				t.Fatalf("invocations = %d, want %d", runnerInvocations.Load(), tc.expectInvocations)
+			}
 			if tc.verifyPromptsSeen {
 				promptsSeenMu.Lock()
 				seenCount := len(promptsSeen)
 				secondPrompt := ""
-				if seenCount > 1 { secondPrompt = promptsSeen[1] }
+				if seenCount > 1 {
+					secondPrompt = promptsSeen[1]
+				}
 				promptsSeenMu.Unlock()
 				if seenCount != int(tc.expectInvocations) || secondPrompt != tc.expectedSecondPrompt {
 					t.Errorf("prompts mismatch: count=%d second=%q", seenCount, secondPrompt)
@@ -1639,9 +1908,13 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			deliveredMu.Lock()
 			finalText := deliveredText
 			deliveredMu.Unlock()
-			if finalText != tc.expectDeliveredText { t.Errorf("delivered = %q, want %q", finalText, tc.expectDeliveredText) }
+			if finalText != tc.expectDeliveredText {
+				t.Errorf("delivered = %q, want %q", finalText, tc.expectDeliveredText)
+			}
 			newMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
-			if newMetric != initialMetric+1 { t.Errorf("metric delta = %.0f, want 1", newMetric-initialMetric) }
+			if newMetric != initialMetric+1 {
+				t.Errorf("metric delta = %.0f, want 1", newMetric-initialMetric)
+			}
 		})
 	}
 }
