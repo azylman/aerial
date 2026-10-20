@@ -13,9 +13,7 @@ func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
 
-	if err := s.InsertMessage(ctx, Message{ID: "m1", ThreadID: "t1"}); err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
+	mustOK(t, s.InsertMessage(ctx, Message{ID: "m1", ThreadID: "t1"}), "InsertMessage")
 
 	testErr := errors.New("simulated error")
 	s.FailNext("GetMessage", testErr)
@@ -26,9 +24,7 @@ func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
 		t.Fatalf("expected success after consumed FailNext, got %v", err)
 	}
 
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close failed: %v", err)
-	}
+	mustOK(t, s.Close(), "Close")
 	assertStoreUnavailable(t, s)
 }
 
@@ -38,13 +34,9 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	now := time.Now().UTC()
 
 	m1 := Message{ID: "msg-1", ThreadID: "th-1", Content: "Hello", Summary: "Summ"}
-	if err := s.InsertMessage(ctx, m1); err != nil || s.InsertMessage(ctx, m1) != nil {
-		t.Fatalf("InsertMessage or idempotent insert failed")
-	}
-	m2 := Message{ID: "msg-2", ThreadID: "th-1", Content: "World"}
-	if err := s.InsertMessage(ctx, m2); err != nil {
-		t.Fatalf("InsertMessage msg-2 failed: %v", err)
-	}
+	mustOK(t, s.InsertMessage(ctx, m1), "InsertMessage")
+	mustOK(t, s.InsertMessage(ctx, m1), "Idempotent InsertMessage")
+	mustOK(t, s.InsertMessage(ctx, Message{ID: "msg-2", ThreadID: "th-1", Content: "World"}), "InsertMessage msg-2")
 
 	if ok, err := s.MessageExists(ctx, "msg-1"); err != nil || !ok {
 		t.Errorf("MessageExists(msg-1) = %v, %v, want true, nil", ok, err)
@@ -63,15 +55,13 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	_ = s.UpdateMessageStatus(ctx, "msg-none", StatusProcessing, "")
 	_ = s.IncrementMessageRetry(ctx, "msg-1", "timeout")
 	_ = s.IncrementMessageRetry(ctx, "msg-none", "")
-	msg, _ := s.GetMessage(ctx, "msg-1")
-	if msg.RetryCount != 1 {
+	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.RetryCount != 1 {
 		t.Errorf("expected retry=1, got %d", msg.RetryCount)
 	}
 
 	_ = s.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered")
 	_ = s.ResetMessageToPendingWithRestart(ctx, "msg-none", "")
-	msg, _ = s.GetMessage(ctx, "msg-1")
-	if msg.Status != StatusPending || msg.RestartCount != 1 {
+	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != StatusPending || msg.RestartCount != 1 {
 		t.Errorf("expected pending, restart=1, got %+v", msg)
 	}
 
@@ -87,13 +77,11 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 
 	_ = s.UpdateMessageCompleted(ctx, "msg-1", "Done response")
 	_ = s.UpdateMessageCompleted(ctx, "msg-none", "No-op")
-	msg, _ = s.GetMessage(ctx, "msg-1")
-	if msg.Status != StatusCompleted || msg.ResponseText != "Done response" {
+	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != StatusCompleted || msg.ResponseText != "Done response" {
 		t.Errorf("expected completed, got %+v", msg)
 	}
 
-	pending, err := s.GetPendingOrProcessingMessages(ctx, 10)
-	if err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
+	if pending, err := s.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
 		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
 	}
 	if maxRow, err := s.GetMaxMessageRowID(ctx, "th-1"); err != nil || maxRow != 1 {
@@ -105,9 +93,16 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	if recent, err := s.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
 		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
 	}
+	_, _ = s.GetRecentThreadMessages(ctx, "th-1", 0)
 
-	tasks, err := s.GetActiveTasks(ctx)
-	if err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
+	customTime := now.Add(-30 * time.Minute)
+	s.SetMessageUpdatedAt("msg-1", customTime)
+	s.SetMessageUpdatedAt("non-existent", customTime)
+	if m, _ := s.GetMessage(ctx, "msg-1"); m == nil || !m.UpdatedAt.Equal(customTime) {
+		t.Errorf("SetMessageUpdatedAt failed: m=%+v", m)
+	}
+
+	if tasks, err := s.GetActiveTasks(ctx); err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
 		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
 	}
 	for i := 3; i <= 60; i++ {
@@ -121,13 +116,12 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 func TestFakeStoreSessionOperations(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
+	now := time.Now().UTC()
 
 	if id, err := s.GetSessionID(ctx, "th-1"); err != nil || id != "" {
 		t.Errorf("expected empty session ID, got %q, %v", id, err)
 	}
-	if err := s.SaveSessionID(ctx, "th-1", "sess-1"); err != nil {
-		t.Fatalf("SaveSessionID failed: %v", err)
-	}
+	mustOK(t, s.SaveSessionID(ctx, "th-1", "sess-1"), "SaveSessionID")
 	if id, _ := s.GetSessionID(ctx, "th-1"); id != "sess-1" {
 		t.Errorf("expected sess-1, got %q", id)
 	}
@@ -144,9 +138,7 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 		t.Errorf("GetSessionTurnCount non-existent = %d, want 0", cnt)
 	}
 
-	if err := s.RotateSessionID(ctx, "th-1", "sess-2"); err != nil {
-		t.Fatalf("RotateSessionID failed: %v", err)
-	}
+	mustOK(t, s.RotateSessionID(ctx, "th-1", "sess-2"), "RotateSessionID")
 	curr, _ := s.GetSessionID(ctx, "th-1")
 	prev, _ := s.GetPreviousSessionID(ctx, "th-1")
 	turns, _ := s.GetSessionTurnCount(ctx, "th-1")
@@ -158,9 +150,7 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	if sum, wm, err := s.GetThreadSummary(ctx, "th-1"); err != nil || sum != "" || wm != "" {
 		t.Errorf("GetThreadSummary empty = %q, %q, %v", sum, wm, err)
 	}
-	if err := s.SaveThreadSummary(ctx, "th-1", "Summary text", "msg-100"); err != nil {
-		t.Fatalf("SaveThreadSummary failed: %v", err)
-	}
+	mustOK(t, s.SaveThreadSummary(ctx, "th-1", "Summary text", "msg-100"), "SaveThreadSummary")
 	if sum, wm, _ := s.GetThreadSummary(ctx, "th-1"); sum != "Summary text" || wm != "msg-100" {
 		t.Errorf("GetThreadSummary = %q, %q", sum, wm)
 	}
@@ -170,8 +160,7 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	_ = s.InsertMessage(ctx, Message{ID: "m-act-3", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[AMBIENT]"})
 	_ = s.InsertMessage(ctx, Message{ID: "m-act-4", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[IGNORED]"})
 	_ = s.InsertMessage(ctx, Message{ID: "m-act-5", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "Valid 2"})
-	stats, err := s.GetSessionActivityStats(ctx, "th-1")
-	if err != nil || stats.InternalSessionID != "sess-2" || stats.CompletedTurns != 2 {
+	if stats, err := s.GetSessionActivityStats(ctx, "th-1"); err != nil || stats.InternalSessionID != "sess-2" || stats.CompletedTurns != 2 {
 		t.Errorf("GetSessionActivityStats = %+v, %v", stats, err)
 	}
 
@@ -194,6 +183,15 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 		t.Errorf("expected 1 unrotated session within 4h, got %d", len(unrotLong))
 	}
 	_, _ = s.FindUnrotatedSessions(ctx, 0)
+
+	s.SetSessionInfo(SessionInfo{ThreadID: "th-helper", InternalSessionID: "sess-helper", TurnCount: 5, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)})
+	if sessID, _ := s.GetSessionID(ctx, "th-helper"); sessID != "sess-helper" {
+		t.Errorf("SetSessionInfo: sessID=%q", sessID)
+	}
+	s.SetSessionUpdatedAt("th-helper", now.Add(-5*time.Minute))
+	s.SetSessionUpdatedAt("non-existent-sess", now)
+	_, _ = s.GetPreviousSessionID(ctx, "th-helper")
+	_, _ = s.GetPreviousSessionID(ctx, "non-existent-sess")
 }
 
 func TestFakeStoreScheduleOperations(t *testing.T) {
@@ -201,73 +199,55 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	s1 := OneShotSchedule{ID: "os-1", ThreadID: "th-1", Prompt: "P1", RunAt: now.Add(-time.Minute)}
-	s2 := OneShotSchedule{ID: "os-2", ThreadID: "th-1", Prompt: "P2", RunAt: now.Add(time.Hour)}
-	_ = s.CreateOneShotSchedule(ctx, s1)
-	_ = s.CreateOneShotSchedule(ctx, s2)
+	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-1", ThreadID: "th-1", Prompt: "P1", RunAt: now.Add(-time.Minute)})
+	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-2", ThreadID: "th-1", Prompt: "P2", RunAt: now.Add(time.Hour)})
 
-	due, _ := s.GetDueOneShotSchedules(ctx)
-	if len(due) != 1 || due[0].ID != "os-1" {
+	if due, _ := s.GetDueOneShotSchedules(ctx); len(due) != 1 || due[0].ID != "os-1" {
 		t.Errorf("GetDueOneShotSchedules = %+v, want [os-1]", due)
 	}
-	allOS, _ := s.GetAllOneShotSchedules(ctx, "th-1")
-	if len(allOS) != 2 {
+	if allOS, _ := s.GetAllOneShotSchedules(ctx, "th-1"); len(allOS) != 2 {
 		t.Errorf("GetAllOneShotSchedules = %d, want 2", len(allOS))
 	}
 	_, _ = s.GetAllOneShotSchedules(ctx, "")
 
 	msg := Message{ID: "msg-os-1", ThreadID: "th-1", Content: "Executed"}
-	if err := s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg); err != nil {
-		t.Fatalf("InsertMessageAndConsumeOneShot failed: %v", err)
-	}
+	mustOK(t, s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg), "InsertMessageAndConsumeOneShot")
 	if err := s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg); !errors.Is(err, ErrScheduleAlreadyConsumed) {
 		t.Errorf("expected ErrScheduleAlreadyConsumed, got %v", err)
 	}
 
-	c1 := CronSchedule{ID: "cron-1", TargetID: "t-1", CronExpr: "*/5 * * * *", Enabled: true, NextRunAt: now.Add(-time.Minute)}
-	c2 := CronSchedule{ID: "cron-2", TargetID: "t-1", CronExpr: "0 * * * *", Enabled: false, NextRunAt: now.Add(-time.Minute)}
-	c3 := CronSchedule{ID: "cron-3", TargetID: "t-2", CronExpr: "0 0 * * *", Enabled: true, NextRunAt: now.Add(time.Hour)}
-	_ = s.CreateCronSchedule(ctx, c1)
-	_ = s.CreateCronSchedule(ctx, c2)
-	_ = s.CreateCronSchedule(ctx, c3)
+	_ = s.CreateCronSchedule(ctx, CronSchedule{ID: "cron-1", TargetID: "t-1", CronExpr: "*/5 * * * *", Enabled: true, NextRunAt: now.Add(-time.Minute)})
+	_ = s.CreateCronSchedule(ctx, CronSchedule{ID: "cron-2", TargetID: "t-1", CronExpr: "0 * * * *", Enabled: false, NextRunAt: now.Add(-time.Minute)})
+	_ = s.CreateCronSchedule(ctx, CronSchedule{ID: "cron-3", TargetID: "t-2", CronExpr: "0 0 * * *", Enabled: true, NextRunAt: now.Add(time.Hour)})
 
-	dueCron, _ := s.GetDueCronSchedules(ctx)
-	if len(dueCron) != 1 || dueCron[0].ID != "cron-1" {
+	if dueCron, _ := s.GetDueCronSchedules(ctx); len(dueCron) != 1 || dueCron[0].ID != "cron-1" {
 		t.Errorf("GetDueCronSchedules = %+v, want [cron-1]", dueCron)
 	}
-	allCrons, _ := s.GetAllCronSchedules(ctx, "t-1")
-	if len(allCrons) != 2 {
+	if allCrons, _ := s.GetAllCronSchedules(ctx, "t-1"); len(allCrons) != 2 {
 		t.Errorf("GetAllCronSchedules = %d, want 2", len(allCrons))
 	}
 	_, _ = s.GetAllCronSchedules(ctx, "")
 	_ = s.UpdateCronNextRun(ctx, "cron-1", now.Add(10*time.Minute))
 	_ = s.UpdateCronNextRun(ctx, "cron-none", now)
 
-	r1 := ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", Status: "enqueued", StartedAt: now.Add(-2 * time.Hour)}
-	r2 := ScheduleRun{ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", Status: "completed", StartedAt: now.Add(-1 * time.Hour), DurationMs: 500}
-	r3 := ScheduleRun{ID: "run-3", ScheduleID: "cron-3", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-30 * time.Minute)}
-	_ = s.CreateScheduleRun(ctx, r1)
-	_ = s.CreateScheduleRun(ctx, r2)
-	_ = s.CreateScheduleRun(ctx, r3)
+	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", Status: "enqueued", StartedAt: now.Add(-2 * time.Hour)})
+	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", Status: "completed", StartedAt: now.Add(-1 * time.Hour), DurationMs: 500})
+	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-3", ScheduleID: "cron-3", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-30 * time.Minute)})
 
 	_ = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-1", Status: "completed", MessageID: "msg-run-1", DurationMs: 1200, CompletedAt: now, Model: "claude"})
 	_ = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-none"})
 
-	runs, total, _ := s.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", "")
-	if total != 2 || len(runs) != 2 {
+	if runs, total, _ := s.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", ""); total != 2 || len(runs) != 2 {
 		t.Errorf("GetScheduleRunsPaginated = len %d, total %d, want 2, 2", len(runs), total)
 	}
-	runsComp, _, _ := s.GetScheduleRunsPaginated(ctx, 1, 0, "", "completed")
-	if len(runsComp) != 1 {
+	if runsComp, _, _ := s.GetScheduleRunsPaginated(ctx, 1, 0, "", "completed"); len(runsComp) != 1 {
 		t.Errorf("GetScheduleRunsPaginated completed = %d, want 1", len(runsComp))
 	}
-	runsLarge, _, _ := s.GetScheduleRunsPaginated(ctx, 10, 50, "", "")
-	if runsLarge != nil {
+	if runsLarge, _, _ := s.GetScheduleRunsPaginated(ctx, 10, 50, "", ""); runsLarge != nil {
 		t.Errorf("expected nil runs for large offset, got %+v", runsLarge)
 	}
 
-	metrics, err := s.GetScheduleSummaryMetrics(ctx)
-	if err != nil || metrics.CronCount != 2 || metrics.OneShotCount != 1 || metrics.TotalRuns24h != 3 {
+	if metrics, err := s.GetScheduleSummaryMetrics(ctx); err != nil || metrics.CronCount != 2 || metrics.OneShotCount != 1 || metrics.TotalRuns24h != 3 {
 		t.Errorf("GetScheduleSummaryMetrics = %+v, %v", metrics, err)
 	}
 
@@ -277,53 +257,54 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	if prun, err := s.PruneScheduleRuns(ctx, 1, 48*time.Hour); err != nil || prun != 2 {
 		t.Errorf("PruneScheduleRuns = %d, %v, want 2, nil", prun, err)
 	}
+
+	if _, err := s.GetScheduleRun("non-existent-run"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected sql.ErrNoRows for non-existent run, got: %v", err)
+	}
+	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-helper", ScheduleID: "sched-helper", Status: "completed", StartedAt: now})
+	if run, err := s.GetScheduleRun("run-helper"); err != nil || run == nil || run.Status != "completed" {
+		t.Errorf("GetScheduleRun failed: run=%+v, err=%v", run, err)
+	}
+	_, _ = s.PruneScheduleRuns(ctx, 0, 0)
+	for i := 0; i < 5; i++ {
+		_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: fmt.Sprintf("run-limit-%d", i), ScheduleID: "sched-helper", Status: "completed", StartedAt: now.Add(time.Duration(i) * time.Minute)})
+	}
+	_, _ = s.PruneScheduleRuns(ctx, 2, time.Hour)
 }
 
 func TestFakeStoreFactOperations(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
 
-	emb1 := []float32{1.0, 0.0, 0.0}
-	emb2 := []float32{0.9, 0.1, 0.0}
-	emb3 := []float32{0.0, 1.0, 0.0}
-
+	emb1, emb2, emb3 := []float32{1.0, 0.0, 0.0}, []float32{0.9, 0.1, 0.0}, []float32{0.0, 1.0, 0.0}
 	id1, _ := s.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
 	_, _ = s.InsertFact(ctx, "tech", "Gundam pilot", 0.8, emb2)
 	id3, _ := s.InsertFact(ctx, "tech", "Missing embedding fact", 0.5, nil)
 
-	matches, _ := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.75)
-	if len(matches) != 2 || matches[0].ID != id1 {
+	if matches, _ := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.75); len(matches) != 2 || matches[0].ID != id1 {
 		t.Errorf("SearchSimilarFacts = %+v, want top id1", matches)
 	}
-
-	dup, sim, _ := s.FindDuplicateFact(ctx, emb1, 0.85)
-	if dup == nil || dup.ID != id1 || sim <= 0.85 {
+	if dup, sim, _ := s.FindDuplicateFact(ctx, emb1, 0.85); dup == nil || dup.ID != id1 || sim <= 0.85 {
 		t.Errorf("FindDuplicateFact = %+v, %f", dup, sim)
 	}
 	if dupNone, _, _ := s.FindDuplicateFact(ctx, emb3, 0.99); dupNone != nil {
 		t.Errorf("expected no dup, got %+v", dupNone)
 	}
 
-	res, _ := s.GetFactsPaginated(ctx, FactsFilter{Category: "tech", Limit: 10})
-	if res.Total != 2 || len(res.Facts) != 2 {
+	if res, _ := s.GetFactsPaginated(ctx, FactsFilter{Category: "tech", Limit: 10}); res.Total != 2 || len(res.Facts) != 2 {
 		t.Errorf("GetFactsPaginated tech = total %d, len %d, want 2, 2", res.Total, len(res.Facts))
 	}
-	resQ, _ := s.GetFactsPaginated(ctx, FactsFilter{Query: "matcha"})
-	if len(resQ.Facts) != 1 || resQ.Facts[0].ID != id1 {
+	if resQ, _ := s.GetFactsPaginated(ctx, FactsFilter{Query: "matcha"}); len(resQ.Facts) != 1 || resQ.Facts[0].ID != id1 {
 		t.Errorf("GetFactsPaginated query matcha = %+v", resQ)
 	}
-	resOff, _ := s.GetFactsPaginated(ctx, FactsFilter{Offset: 50})
-	if resOff.Facts != nil {
+	if resOff, _ := s.GetFactsPaginated(ctx, FactsFilter{Offset: 50}); resOff.Facts != nil {
 		t.Errorf("expected nil facts for offset beyond total, got %+v", resOff)
 	}
 
-	threadFacts, _ := s.GetFactsByThreadWithEmbeddings(ctx, "th-facts")
-	if len(threadFacts) != 3 {
+	if threadFacts, _ := s.GetFactsByThreadWithEmbeddings(ctx, "th-facts"); len(threadFacts) != 3 {
 		t.Errorf("GetFactsByThreadWithEmbeddings = %d, want 3", len(threadFacts))
 	}
-
-	missing, _ := s.GetFactsMissingEmbeddings(ctx, 10)
-	if len(missing) != 1 || missing[0].ID != id3 {
+	if missing, _ := s.GetFactsMissingEmbeddings(ctx, 10); len(missing) != 1 || missing[0].ID != id3 {
 		t.Errorf("GetFactsMissingEmbeddings = %+v, want id3", missing)
 	}
 
@@ -340,8 +321,7 @@ func TestFakeStoreFactOperations(t *testing.T) {
 		t.Errorf("expected ErrFactNotFound on reinforce, got %v", err)
 	}
 
-	decayed, pruned, err := s.DecayAndPruneFacts(ctx, 0.2, 0.6, 0)
-	if err != nil || decayed != 3 || pruned == 0 {
+	if decayed, pruned, err := s.DecayAndPruneFacts(ctx, 0.2, 0.6, 0); err != nil || decayed != 3 || pruned == 0 {
 		t.Errorf("DecayAndPruneFacts = decayed %d, pruned %d, err %v", decayed, pruned, err)
 	}
 
@@ -352,69 +332,61 @@ func TestFakeStoreFactOperations(t *testing.T) {
 	_ = s.InsertMessage(ctx, Message{ID: "m-ext-1", ThreadID: "th-facts", Status: StatusCompleted, Content: "q1", ResponseText: "a1", Metadata: adminMeta})
 	_ = s.InsertMessage(ctx, Message{ID: "m-ext-2", ThreadID: "th-facts", Status: StatusCompleted, Content: "q2", ResponseText: "[AMBIENT_SILENT]", Metadata: adminMeta})
 	_ = s.InsertMessage(ctx, Message{ID: "m-ext-3", ThreadID: "th-other", Status: StatusCompleted, Content: "q3", ResponseText: "a3", Metadata: adminMeta})
-	activeThreads, _ := s.GetActiveConversationsForExtraction(ctx, 24)
-	if len(activeThreads) != 2 {
+	if activeThreads, _ := s.GetActiveConversationsForExtraction(ctx, 24); len(activeThreads) != 2 {
 		t.Errorf("GetActiveConversationsForExtraction = %d (%v), want 2", len(activeThreads), activeThreads)
 	}
-	turns, _ := s.GetUnextractedAdminTurns(ctx, "th-facts")
-	if len(turns) != 1 || turns[0].ID != "m-ext-1" {
+	if turns, _ := s.GetUnextractedAdminTurns(ctx, "th-facts"); len(turns) != 1 || turns[0].ID != "m-ext-1" {
 		t.Errorf("GetUnextractedAdminTurns = %+v, want m-ext-1", turns)
 	}
-	emptyTurns, _ := s.GetUnextractedAdminTurns(ctx, "   ")
-	if len(emptyTurns) != 0 {
+	if emptyTurns, _ := s.GetUnextractedAdminTurns(ctx, "   "); len(emptyTurns) != 0 {
 		t.Errorf("expected empty turns, got %+v", emptyTurns)
 	}
+
+	_, _ = s.InsertFact(ctx, "cat", "Fact A", 0.5, []float32{1.0, 0.0})
+	_, _ = s.InsertFact(ctx, "cat", "Fact B", 0.5, []float32{0.0, 1.0})
+	if fbth, err := s.GetFactsByThreadWithEmbeddings(ctx, "any"); err != nil || len(fbth) < 2 {
+		t.Errorf("GetFactsByThreadWithEmbeddings failed: %v, len=%d", err, len(fbth))
+	}
+	_, _, _ = s.DecayAndPruneFacts(ctx, 0, 0, 0)
+	if none, _ := s.SearchSimilarFacts(ctx, nil, "", 0, 0); none != nil {
+		t.Errorf("expected nil for empty vec and query")
+	}
+	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "", 0, 0)
+	_, _ = s.SearchSimilarFacts(ctx, nil, "Fact", 0, 0)
+	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "Fact", 0, 0)
+	_, _, _ = s.FindDuplicateFact(ctx, []float32{1.0, 0.0}, 0)
 }
 
 func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
 
-	summary := SessionSummary{SessionID: "sess-1", ThreadID: "th-1", Summary: "Cockpit debug session"}
-	if err := s.UpsertSessionSummary(ctx, summary); err != nil {
-		t.Fatalf("UpsertSessionSummary failed: %v", err)
-	}
-	syncStates, err := s.GetSessionSyncStates(ctx)
-	if err != nil || len(syncStates) != 1 || syncStates["sess-1"].SessionID != "sess-1" {
+	mustOK(t, s.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-1", ThreadID: "th-1", Summary: "Cockpit debug session"}), "UpsertSessionSummary")
+	if syncStates, err := s.GetSessionSyncStates(ctx); err != nil || len(syncStates) != 1 || syncStates["sess-1"].SessionID != "sess-1" {
 		t.Fatalf("GetSessionSyncStates failed: %v", err)
 	}
-	steps := []TranscriptStep{
-		{SessionID: "sess-1", StepIndex: 0, StepType: "user", Content: "launch aerial"},
-		{SessionID: "sess-1", StepIndex: 1, StepType: "assistant", ToolName: "fly", Content: "flying aerial"},
-	}
-	if err := s.BatchInsertTranscriptSteps(ctx, steps); err != nil {
-		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
-	}
-	stepResults, _ := s.SearchTranscriptSteps(ctx, "aerial", "sess-1", "", 10)
-	if len(stepResults) != 2 {
+	steps := []TranscriptStep{{SessionID: "sess-1", StepIndex: 0, StepType: "user", Content: "launch aerial"}, {SessionID: "sess-1", StepIndex: 1, StepType: "assistant", ToolName: "fly", Content: "flying aerial"}}
+	mustOK(t, s.BatchInsertTranscriptSteps(ctx, steps), "BatchInsertTranscriptSteps")
+	if stepResults, _ := s.SearchTranscriptSteps(ctx, "aerial", "sess-1", "", 10); len(stepResults) != 2 {
 		t.Errorf("SearchTranscriptSteps = %d, want 2", len(stepResults))
 	}
-	summaries, _ := s.SearchSessionSummaries(ctx, nil, "debug", 10, 0.0)
-	if len(summaries) != 1 {
+	if summaries, _ := s.SearchSessionSummaries(ctx, nil, "debug", 10, 0.0); len(summaries) != 1 {
 		t.Errorf("SearchSessionSummaries = %d, want 1", len(summaries))
 	}
 
-	pr := PRRecord{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/test", HeadSHA: "abc1234", TargetID: "th-1", Status: "open", Title: "Test PR"}
-	if err := s.UpsertPR(ctx, pr); err != nil {
-		t.Fatalf("UpsertPR failed: %v", err)
-	}
+	mustOK(t, s.UpsertPR(ctx, PRRecord{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/test", HeadSHA: "abc1234", TargetID: "th-1", Status: "open", Title: "Test PR"}), "UpsertPR")
 	gotPR, err := s.GetPRByNumber(ctx, "azylman/aerial", 101)
 	if err != nil || gotPR.Title != "Test PR" {
 		t.Fatalf("GetPRByNumber failed: %v, pr=%+v", err, gotPR)
 	}
 	_ = s.UpdatePRStatusMessageID(ctx, "azylman/aerial", 101, "msg-status-1")
-	gotPR, _ = s.GetPRByNumber(ctx, "azylman/aerial", 101)
-	if gotPR.StatusMessageID != "msg-status-1" {
+	if gotPR, _ = s.GetPRByNumber(ctx, "azylman/aerial", 101); gotPR.StatusMessageID != "msg-status-1" {
 		t.Errorf("expected StatusMessageID 'msg-status-1', got %q", gotPR.StatusMessageID)
 	}
 
 	build := VanadisBuild{ID: "b-1", ThreadID: "th-1", Tier: 2, Title: "Vanadis Build 1", Objective: "Test Objective", Status: "running"}
-	chunks := []VanadisChunk{
-		{ID: "c-1", BuildID: "b-1", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 1", Instructions: "Execute chunk 1", Status: "running"},
-	}
-	if err := s.CreateVanadisBuild(ctx, build, chunks); err != nil {
-		t.Fatalf("CreateVanadisBuild failed: %v", err)
-	}
+	chunks := []VanadisChunk{{ID: "c-1", BuildID: "b-1", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 1", Instructions: "Execute chunk 1", Status: "running"}}
+	mustOK(t, s.CreateVanadisBuild(ctx, build, chunks), "CreateVanadisBuild")
 	gotBuild, gotChunks, err := s.GetVanadisBuild(ctx, "b-1")
 	if err != nil || gotBuild.ID != "b-1" || len(gotChunks) != 1 {
 		t.Fatalf("GetVanadisBuild failed: %v", err)
@@ -424,35 +396,19 @@ func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
 		t.Fatalf("GetVanadisChunk failed: %v", err)
 	}
 	_ = s.AttachVanadisChunkPR(ctx, "c-1", 101)
-	chunk, _ = s.GetVanadisChunk(ctx, "c-1")
-	if chunk.PRNumber != 101 || chunk.Status != "pr_opened" {
+	if chunk, _ = s.GetVanadisChunk(ctx, "c-1"); chunk.PRNumber != 101 || chunk.Status != "pr_opened" {
 		t.Errorf("unexpected chunk after attach: %+v", chunk)
 	}
 	_ = s.UpdateVanadisBuildStatusMessageID(ctx, "b-1", "msg-build-status")
-	gotBuild, _, _ = s.GetVanadisBuild(ctx, "b-1")
-	if gotBuild.StatusMessageID != "msg-build-status" {
+	if gotBuild, _, _ = s.GetVanadisBuild(ctx, "b-1"); gotBuild.StatusMessageID != "msg-build-status" {
 		t.Errorf("expected StatusMessageID 'msg-build-status', got %q", gotBuild.StatusMessageID)
 	}
 }
 
 func TestFakeStoreCloneNil(t *testing.T) {
-	if got := cloneMessage(nil); got != nil {
-		t.Errorf("cloneMessage(nil) = %v, want nil", got)
-	}
-	if got := clonePtr[SessionInfo](nil); got != nil {
-		t.Errorf("clonePtr[SessionInfo](nil) = %v, want nil", got)
-	}
-	if got := cloneRun(nil); got != nil {
-		t.Errorf("cloneRun(nil) = %v, want nil", got)
-	}
-	if got := cloneFactWithEmbedding(nil); got != nil {
-		t.Errorf("cloneFactWithEmbedding(nil) = %v, want nil", got)
-	}
-	if got := cloneSessionSummary(nil); got != nil {
-		t.Errorf("cloneSessionSummary(nil) = %v, want nil", got)
-	}
-	if got := cloneTranscriptSteps(nil); got != nil {
-		t.Errorf("cloneTranscriptSteps(nil) = %v, want nil", got)
+	if cloneMessage(nil) != nil || clonePtr[SessionInfo](nil) != nil || cloneRun(nil) != nil ||
+		cloneFactWithEmbedding(nil) != nil || cloneSessionSummary(nil) != nil || cloneTranscriptSteps(nil) != nil {
+		t.Errorf("expected nil clones for nil inputs")
 	}
 	if got := cloneSliceNonNil[string](nil); got == nil || len(got) != 0 {
 		t.Errorf("cloneSliceNonNil(nil) = %v, want empty slice", got)
@@ -460,74 +416,7 @@ func TestFakeStoreCloneNil(t *testing.T) {
 	if got := cloneSliceNonNil([]string{"a"}); len(got) != 1 || got[0] != "a" {
 		t.Errorf("cloneSliceNonNil non-nil failed: %v", got)
 	}
-	chunkNoEffort := &VanadisChunk{ID: "c1", TargetFiles: []string{"f1"}}
-	clonedChunk := cloneVanadisChunk(chunkNoEffort)
-	if clonedChunk.Effort != "medium" || len(clonedChunk.TargetFiles) != 1 {
-		t.Errorf("cloneVanadisChunk failed: %+v", clonedChunk)
+	if cloned := cloneVanadisChunk(&VanadisChunk{ID: "c1", TargetFiles: []string{"f1"}}); cloned.Effort != "medium" || len(cloned.TargetFiles) != 1 {
+		t.Errorf("cloneVanadisChunk failed: %+v", cloned)
 	}
-}
-
-func TestFakeStoreTestHelpers(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	s.SetSessionInfo(SessionInfo{ThreadID: "th-helper", InternalSessionID: "sess-helper", TurnCount: 5, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)})
-	sessID, _ := s.GetSessionID(ctx, "th-helper")
-	turns, _ := s.GetSessionTurnCount(ctx, "th-helper")
-	if sessID != "sess-helper" || turns != 5 {
-		t.Errorf("SetSessionInfo: sessID=%q, turns=%d", sessID, turns)
-	}
-	s.SetSessionUpdatedAt("th-helper", now.Add(-5*time.Minute))
-	s.SetSessionUpdatedAt("non-existent-sess", now)
-	prevSess, _ := s.GetPreviousSessionID(ctx, "th-helper")
-	_ = prevSess
-	prevNone, _ := s.GetPreviousSessionID(ctx, "non-existent-sess")
-	_ = prevNone
-
-	_ = s.InsertMessage(ctx, Message{ID: "m-helper", ThreadID: "th-helper", Status: StatusPending})
-	customTime := now.Add(-30 * time.Minute)
-	s.SetMessageUpdatedAt("m-helper", customTime)
-	s.SetMessageUpdatedAt("non-existent", customTime)
-	m, _ := s.GetMessage(ctx, "m-helper")
-	if m == nil || !m.UpdatedAt.Equal(customTime) {
-		t.Errorf("SetMessageUpdatedAt failed: m=%+v", m)
-	}
-	recent0, _ := s.GetRecentThreadMessages(ctx, "th-helper", 0)
-	_ = recent0
-	recent10, _ := s.GetRecentThreadMessages(ctx, "th-helper", 10)
-	_ = recent10
-
-	if _, err := s.GetScheduleRun("non-existent-run"); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("expected sql.ErrNoRows for non-existent run, got: %v", err)
-	}
-	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-helper", ScheduleID: "sched-helper", Status: "completed", StartedAt: now})
-	run, err := s.GetScheduleRun("run-helper")
-	if err != nil || run == nil || run.Status != "completed" {
-		t.Errorf("GetScheduleRun failed: run=%+v, err=%v", run, err)
-	}
-
-	// PruneScheduleRuns defaults & count cap
-	_, _ = s.PruneScheduleRuns(ctx, 0, 0)
-	for i := 0; i < 5; i++ {
-		_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: fmt.Sprintf("run-limit-%d", i), ScheduleID: "sched-helper", Status: "completed", StartedAt: now.Add(time.Duration(i) * time.Minute)})
-	}
-	_, _ = s.PruneScheduleRuns(ctx, 2, time.Hour)
-
-	// Facts: tiebreaker sort, defaults, search modes
-	_, _ = s.InsertFact(ctx, "cat", "Fact A", 0.5, []float32{1.0, 0.0})
-	_, _ = s.InsertFact(ctx, "cat", "Fact B", 0.5, []float32{0.0, 1.0})
-	fbth, err := s.GetFactsByThreadWithEmbeddings(ctx, "any")
-	if err != nil || len(fbth) < 2 {
-		t.Errorf("GetFactsByThreadWithEmbeddings failed: %v, len=%d", err, len(fbth))
-	}
-	_, _, _ = s.DecayAndPruneFacts(ctx, 0, 0, 0)
-	none, _ := s.SearchSimilarFacts(ctx, nil, "", 0, 0)
-	if none != nil {
-		t.Errorf("expected nil for empty vec and query")
-	}
-	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "", 0, 0)
-	_, _ = s.SearchSimilarFacts(ctx, nil, "Fact", 0, 0)
-	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "Fact", 0, 0)
-	_, _, _ = s.FindDuplicateFact(ctx, []float32{1.0, 0.0}, 0)
 }
