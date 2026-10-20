@@ -18,14 +18,12 @@ import (
 )
 
 var (
-	sqliteTestInitHook func(string) (*sql.DB, error)
+	sqliteTestInitHook  func(string) (*sql.DB, error)
+	postgresMaxAttempts = 10
+	postgresRetryBase   = 500 * time.Millisecond
 )
 
-// RegisterSQLiteTestHook allows test suites to hook in-memory SQLite initialization
-// without linking modernc.org/sqlite into the production binary.
-func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) {
-	sqliteTestInitHook = fn
-}
+func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) { sqliteTestInitHook = fn }
 
 func isPostgres(database DBTX) (isPg bool) {
 	if database == nil {
@@ -36,24 +34,15 @@ func isPostgres(database DBTX) (isPg bool) {
 			isPg = false
 		}
 	}()
-	type driverGetter interface {
-		Driver() driver.Driver
-	}
+	type driverGetter interface{ Driver() driver.Driver }
 	if dg, ok := database.(driverGetter); ok && dg.Driver() != nil {
-		driverType := fmt.Sprintf("%T", dg.Driver())
-		return strings.Contains(driverType, "stdlib") || strings.Contains(driverType, "pgx")
+		dt := fmt.Sprintf("%T", dg.Driver())
+		return strings.Contains(dt, "stdlib") || strings.Contains(dt, "pgx")
 	}
 	return false
 }
 
-var (
-	postgresMaxAttempts = 10
-	postgresRetryBase   = 500 * time.Millisecond
-)
-
 // New establishes a database connection pool using the DatabaseURL from cfg.
-// In production, cfg.DatabaseURL must be a valid PostgreSQL connection string starting with
-// postgres:// or postgresql://.
 func New(cfg *config.Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("db: config cannot be nil")
@@ -62,17 +51,10 @@ func New(cfg *config.Config) (*sql.DB, error) {
 	if cur == nil {
 		return nil, fmt.Errorf("db: config snapshot is nil")
 	}
-	trimmed := strings.TrimSpace(cur.DatabaseURL)
-	if trimmed == "" {
+	if strings.TrimSpace(cur.DatabaseURL) == "" {
 		return nil, fmt.Errorf("db: database URL cannot be empty")
 	}
-	if sqliteTestInitHook != nil && (trimmed == ":memory:" || strings.HasPrefix(trimmed, "file:") || strings.Contains(trimmed, ".db") || strings.HasPrefix(trimmed, "sqlite://")) {
-		return sqliteTestInitHook(trimmed)
-	}
-	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
-		return nil, fmt.Errorf("db: unsupported database scheme in %q: only postgres:// or postgresql:// supported", trimmed)
-	}
-	return initDB(trimmed)
+	return InitDB(cur.DatabaseURL)
 }
 
 // InitDB is a compatibility wrapper for New and existing tests during migration.
@@ -88,6 +70,9 @@ func InitDB(dsnOrCfg any) (*sql.DB, error) {
 		if sqliteTestInitHook != nil && (trimmed == ":memory:" || strings.HasPrefix(trimmed, "file:") || strings.Contains(trimmed, ".db") || strings.HasPrefix(trimmed, "sqlite://")) {
 			return sqliteTestInitHook(trimmed)
 		}
+		if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
+			return nil, fmt.Errorf("db: unsupported database scheme in %q: only postgres:// or postgresql:// supported", trimmed)
+		}
 		return initDB(trimmed)
 	default:
 		return nil, fmt.Errorf("db: unsupported InitDB argument type: %T", dsnOrCfg)
@@ -95,26 +80,13 @@ func InitDB(dsnOrCfg any) (*sql.DB, error) {
 }
 
 func initDB(dsn string) (*sql.DB, error) {
-	trimmed := strings.TrimSpace(dsn)
-	if trimmed == "" {
-		return nil, fmt.Errorf("db: connection string cannot be empty")
-	}
-
-	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
-		return nil, fmt.Errorf("db: unsupported database scheme in %q: only postgres:// or postgresql:// supported", trimmed)
-	}
-
-	if _, err := pgx.ParseConfig(trimmed); err != nil {
+	if _, err := pgx.ParseConfig(dsn); err != nil {
 		return nil, fmt.Errorf("db: invalid postgres connection string: %w", err)
 	}
-
 	var database *sql.DB
 	var err error
-
-	// 1. Connection retry loop with exponential backoff for containerized startup
 	for attempt := 1; attempt <= postgresMaxAttempts; attempt++ {
-		database, err = sql.Open("pgx", trimmed)
-		if err == nil {
+		if database, err = sql.Open("pgx", dsn); err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			pingErr := database.PingContext(ctx)
 			cancel()
@@ -130,14 +102,11 @@ func initDB(dsn string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to PostgreSQL after retries: %w", err)
 	}
-
-	// 2. Tune connection pool
 	database.SetMaxOpenConns(25)
 	database.SetMaxIdleConns(10)
 	database.SetConnMaxLifetime(5 * time.Minute)
 	database.SetConnMaxIdleTime(2 * time.Minute)
-
-	log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", trimmed)
+	log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", dsn)
 	metrics.RegisterDBStats(database)
 	return database, nil
 }

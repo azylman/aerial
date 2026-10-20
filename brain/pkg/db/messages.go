@@ -42,24 +42,11 @@ type MessageMetadata struct {
 
 // IsEmpty returns true if all metadata fields are zero/empty.
 func (m MessageMetadata) IsEmpty() bool {
-	return m.ChannelID == "" &&
-		m.ChannelName == "" &&
-		m.TargetThreadID == "" &&
-		m.ThreadName == "" &&
-		m.GuildID == "" &&
-		m.AuthorUsername == "" &&
-		m.AuthorGlobalName == "" &&
-		!m.AuthorBot &&
-		!m.IsAdmin &&
-		len(m.Mentions) == 0 &&
-		len(m.MentionUserIDs) == 0 &&
-		len(m.MentionRoleIDs) == 0 &&
-		m.ReplyingToAuthor == "" &&
-		m.ReplyingToContent == "" &&
-		len(m.Attachments) == 0 &&
-		m.Model == "" &&
-		!m.Silent &&
-		m.VanadisChunkID == ""
+	return m.ChannelID == "" && m.ChannelName == "" && m.TargetThreadID == "" && m.ThreadName == "" &&
+		m.GuildID == "" && m.AuthorUsername == "" && m.AuthorGlobalName == "" && !m.AuthorBot && !m.IsAdmin &&
+		len(m.Mentions) == 0 && len(m.MentionUserIDs) == 0 && len(m.MentionRoleIDs) == 0 &&
+		m.ReplyingToAuthor == "" && m.ReplyingToContent == "" && len(m.Attachments) == 0 &&
+		m.Model == "" && !m.Silent && m.VanadisChunkID == ""
 }
 
 // Value implements driver.Valuer for PostgreSQL JSONB and SQLite TEXT.
@@ -68,10 +55,7 @@ func (m MessageMetadata) Value() (driver.Value, error) {
 		return "{}", nil
 	}
 	bytes, err := json.Marshal(m)
-	if err != nil {
-		return nil, fmt.Errorf("marshal message metadata: %w", err)
-	}
-	return string(bytes), nil
+	return string(bytes), err
 }
 
 // Scan implements sql.Scanner for PostgreSQL JSONB and SQLite TEXT.
@@ -87,7 +71,7 @@ func (m *MessageMetadata) Scan(src any) error {
 	case string:
 		data = []byte(v)
 	default:
-		return fmt.Errorf("unsupported message metadata type: %T", src)
+		return fmt.Errorf("cannot scan type %T into MessageMetadata", src)
 	}
 	if len(data) == 0 || string(data) == "{}" || string(data) == "null" {
 		*m = MessageMetadata{}
@@ -108,74 +92,51 @@ type Message struct {
 	Status        string          `json:"status"`
 	RetryCount    int             `json:"retry_count"`
 	RestartCount  int             `json:"restart_count"`
-	Effort        string          `json:"effort,omitempty"`
+	Effort        string          `json:"effort"`
 	ErrorMessage  string          `json:"error_message,omitempty"`
 	ResponseText  string          `json:"response_text,omitempty"`
 	ScheduleRunID string          `json:"schedule_run_id,omitempty"`
-	Metadata      MessageMetadata `json:"metadata,omitempty"`
+	Metadata      MessageMetadata `json:"metadata"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+func unescapeUserRequest(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(s, `<\/USER_REQUEST>`, "</USER_REQUEST>"))
 }
 
 // ExtractMessageBody extracts the raw user utterance from a legacy prompt envelope string.
 func ExtractMessageBody(content string) string {
 	trimmed := strings.TrimSpace(content)
-	if strings.Contains(trimmed, "<USER_REQUEST>") {
-		contentMarker := "- content:"
-		idx := strings.Index(trimmed, contentMarker)
-		if idx != -1 {
-			start := idx + len(contentMarker)
-			rest := trimmed[start:]
-
-			// Find boundary of next envelope field
-			endIdx := -1
-			markers := []string{"\n- timestamp:", "\n- mentions:", "\n- attachments:", "\n- ", "\n</USER_REQUEST>"}
-			for _, m := range markers {
-				if pos := strings.Index(rest, m); pos != -1 {
-					if endIdx == -1 || pos < endIdx {
-						endIdx = pos
-					}
-				}
-			}
-			var val string
-			if endIdx != -1 {
-				val = rest[:endIdx]
-			} else {
-				val = rest
-			}
-			val = strings.TrimSpace(val)
-			val = strings.ReplaceAll(val, "<\\/USER_REQUEST>", "</USER_REQUEST>")
-			val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
-			return val
-		}
-
-		promptMarker := "Prompt:"
-		if pIdx := strings.Index(trimmed, promptMarker); pIdx != -1 {
-			start := pIdx + len(promptMarker)
-			rest := trimmed[start:]
-			if endIdx := strings.Index(rest, "</USER_REQUEST>"); endIdx != -1 {
-				rest = rest[:endIdx]
-			}
-			val := strings.TrimSpace(rest)
-			val = strings.ReplaceAll(val, "<\\/USER_REQUEST>", "</USER_REQUEST>")
-			val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
-			return val
-		}
-
-		inner := strings.TrimPrefix(trimmed, "<USER_REQUEST>")
-		inner = strings.TrimSuffix(inner, "</USER_REQUEST>")
-		return strings.TrimSpace(inner)
+	if !strings.Contains(trimmed, "<USER_REQUEST>") {
+		return trimmed
 	}
-	return trimmed
+	if idx := strings.Index(trimmed, "- content:"); idx != -1 {
+		rest := trimmed[idx+len("- content:"):]
+		endIdx := -1
+		for _, m := range []string{"\n- timestamp:", "\n- mentions:", "\n- attachments:", "\n- ", "\n</USER_REQUEST>"} {
+			if pos := strings.Index(rest, m); pos != -1 && (endIdx == -1 || pos < endIdx) {
+				endIdx = pos
+			}
+		}
+		if endIdx != -1 {
+			rest = rest[:endIdx]
+		}
+		return unescapeUserRequest(rest)
+	}
+	if pIdx := strings.Index(trimmed, "Prompt:"); pIdx != -1 {
+		rest := trimmed[pIdx+len("Prompt:"):]
+		if endIdx := strings.Index(rest, "</USER_REQUEST>"); endIdx != -1 {
+			rest = rest[:endIdx]
+		}
+		return unescapeUserRequest(rest)
+	}
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "<USER_REQUEST>"), "</USER_REQUEST>"))
 }
 
 // BodyText returns the clean user utterance. If Metadata is present, m.Content is already the raw user message.
-// If Metadata is empty, it checks for legacy prompt envelope wrapping for backward compatibility.
 func (m Message) BodyText() string {
-	if !m.Metadata.IsEmpty() {
-		return m.Content
-	}
-	if strings.Contains(m.Content, "<USER_REQUEST>") {
+	if m.Metadata.IsEmpty() && strings.Contains(m.Content, "<USER_REQUEST>") {
 		return ExtractMessageBody(m.Content)
 	}
 	return m.Content
@@ -186,7 +147,6 @@ const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_i
 // InsertMessage stores a new message in the database.
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 	defer recordTranscriptQuery("insert_message", time.Now(), &err)
-
 	if err = s.checkDB(); err != nil {
 		return err
 	}
@@ -206,33 +166,11 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 	if msg.UpdatedAt.IsZero() {
 		msg.UpdatedAt = now
 	}
-
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `
-	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, effort, error_message, response_text, schedule_run_id, metadata, created_at, updated_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-	ON CONFLICT (id) DO NOTHING;
-	`
-	_, err = s.db.ExecContext(queryCtx, query,
-		msg.ID,
-		msg.ThreadID,
-		msg.GuildID,
-		msg.AuthorID,
-		msg.AuthorName,
-		msg.Content,
-		msg.Summary,
-		msg.Status,
-		msg.RetryCount,
-		msg.RestartCount,
-		msg.Effort,
-		msg.ErrorMessage,
-		msg.ResponseText,
-		msg.ScheduleRunID,
-		msg.Metadata,
-		msg.CreatedAt,
-		msg.UpdatedAt,
+	_, err = s.execWithTimeout(ctx, 5*time.Second, `INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, effort, error_message, response_text, schedule_run_id, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (id) DO NOTHING;`,
+		msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName,
+		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
+		msg.Effort, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID,
+		msg.Metadata, msg.CreatedAt, msg.UpdatedAt,
 	)
 	return err
 }
@@ -246,19 +184,27 @@ func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary 
 	); err != nil {
 		return Message{}, err
 	}
-	if errMsg.Valid {
-		m.ErrorMessage = errMsg.String
-	}
-	if respText.Valid {
-		m.ResponseText = respText.String
-	}
-	if schedID.Valid {
-		m.ScheduleRunID = schedID.String
-	}
+	m.ErrorMessage, m.ResponseText, m.ScheduleRunID = errMsg.String, respText.String, schedID.String
 	if autoCleanSummary && m.Summary == "" {
 		m.Summary = CleanTaskSummary(m.Content)
 	}
 	return m, nil
+}
+
+func scanMessages(rows *sql.Rows, autoCleanSummary bool) ([]Message, error) {
+	if rows == nil {
+		return nil, nil
+	}
+	defer rows.Close()
+	results := make([]Message, 0)
+	for rows.Next() {
+		m, err := scanMessage(rows, autoCleanSummary)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, m)
+	}
+	return results, rows.Err()
 }
 
 func (s *SQLStore) execMessageUpdate(ctx context.Context, id, query string, args ...any) error {
@@ -268,165 +214,80 @@ func (s *SQLStore) execMessageUpdate(ctx context.Context, id, query string, args
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("message id cannot be empty")
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	_, err := s.db.ExecContext(queryCtx, query, args...)
+	_, err := s.execWithTimeout(ctx, 5*time.Second, query, args...)
 	return err
 }
 
-// UpdateMessageStatus updates the execution status and error message of a message.
-func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id string, status string, errorMsg string) error {
-	now := time.Now().UTC()
-	query := `
-	UPDATE messages
-	SET status = $1, error_message = $2, updated_at = $3
-	WHERE id = $4
-	`
-	return s.execMessageUpdate(ctx, id, query, status, errorMsg, now, id)
+func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
+	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`, status, errorMsg, time.Now().UTC(), id)
+}
+func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
+	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', updated_at = $3 WHERE id = $4`, StatusCompleted, responseText, time.Now().UTC(), id)
+}
+func (s *SQLStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
+	return s.execMessageUpdate(ctx, id, `UPDATE messages SET retry_count = retry_count + 1, error_message = $1, updated_at = $2 WHERE id = $3`, errorMsg, time.Now().UTC(), id)
+}
+func (s *SQLStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
+	return s.execMessageUpdate(ctx, id, `UPDATE messages SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2 WHERE id = $3 AND status = 'PROCESSING'`, reason, time.Now().UTC(), id)
 }
 
-// UpdateMessageCompleted marks a message as completed with its response text.
-func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id string, responseText string) error {
-	now := time.Now().UTC()
-	query := `
-	UPDATE messages
-	SET status = $1, response_text = $2, error_message = '', updated_at = $3
-	WHERE id = $4
-	`
-	return s.execMessageUpdate(ctx, id, query, StatusCompleted, responseText, now, id)
-}
-
-// IncrementMessageRetry increments the retry count and records the failure reason.
-func (s *SQLStore) IncrementMessageRetry(ctx context.Context, id string, errorMsg string) error {
-	now := time.Now().UTC()
-	query := `
-	UPDATE messages
-	SET retry_count = retry_count + 1, error_message = $1, updated_at = $2
-	WHERE id = $3
-	`
-	return s.execMessageUpdate(ctx, id, query, errorMsg, now, id)
-}
-
-// ResetMessageToPendingWithRestart atomically increments restart_count, sets status to PENDING, and updates error_message.
-func (s *SQLStore) ResetMessageToPendingWithRestart(ctx context.Context, id string, reason string) error {
-	now := time.Now().UTC()
-	query := `
-	UPDATE messages
-	SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2
-	WHERE id = $3 AND status = 'PROCESSING'
-	`
-	return s.execMessageUpdate(ctx, id, query, reason, now, id)
-}
-
-// GetPendingOrProcessingMessages returns active messages awaiting processing or recovery.
 func (s *SQLStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) (results []Message, err error) {
 	defer recordTranscriptQuery("get_pending_messages", time.Now(), &err)
-
 	if err = s.checkDB(); err != nil {
 		return nil, err
 	}
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
-
-	query := fmt.Sprintf(`
-	SELECT %s
-	FROM messages
-	WHERE status IN ('PENDING', 'PROCESSING')
-	ORDER BY created_at ASC
-	`, messageSelectCols)
-	rows, queryErr := s.db.QueryContext(queryCtx, query)
+	rows, queryErr := s.db.QueryContext(queryCtx, fmt.Sprintf("SELECT %s FROM messages WHERE status IN ('PENDING', 'PROCESSING') ORDER BY created_at ASC", messageSelectCols))
 	if queryErr != nil {
 		return nil, queryErr
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		m, scanErr := scanMessage(rows, true)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		results = append(results, m)
-	}
-	if err = rows.Err(); err != nil {
+	results, err = scanMessages(rows, true)
+	if err != nil {
 		return nil, err
 	}
 	if limit > 0 && len(results) > limit {
-		return results[:limit], nil
+		results = results[:limit]
 	}
 	return results, nil
 }
 
-// GetMessage retrieves a message by its ID.
 func (s *SQLStore) GetMessage(ctx context.Context, id string) (*Message, error) {
-	if err := s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil || id == "" {
 		return nil, err
-	}
-	if id == "" {
-		return nil, nil
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
-
-	query := fmt.Sprintf(`
-	SELECT %s
-	FROM messages
-	WHERE id = $1
-	`, messageSelectCols)
-	m, err := scanMessage(s.db.QueryRowContext(queryCtx, query, id), true)
+	m, err := scanMessage(s.db.QueryRowContext(queryCtx, fmt.Sprintf("SELECT %s FROM messages WHERE id = $1", messageSelectCols), id), true)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &m, nil
+	return &m, err
 }
 
-// MessageExists checks if a message with the given ID exists.
 func (s *SQLStore) MessageExists(ctx context.Context, id string) (bool, error) {
-	if err := s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil || id == "" {
 		return false, err
-	}
-	if id == "" {
-		return false, nil
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
-
 	var exists int
 	err := s.db.QueryRowContext(queryCtx, "SELECT 1 FROM messages WHERE id = $1 LIMIT 1", id).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
+	return err == nil, err
 }
 
-// ClaimPendingMessage atomically transitions a message from PENDING to PROCESSING using CAS.
-// It returns true if and only if the message was successfully claimed from PENDING state (strictly-once).
 func (s *SQLStore) ClaimPendingMessage(ctx context.Context, id string) (claimed bool, err error) {
 	defer recordTranscriptQuery("claim_message", time.Now(), &err)
-
-	if err = s.checkDB(); err != nil {
+	if err = s.checkDB(); err != nil || id == "" {
 		return false, err
 	}
-	if id == "" {
-		return false, nil
-	}
-	now := time.Now().UTC()
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
-
-	query := `
-	UPDATE messages
-	SET status = 'PROCESSING', updated_at = $1
-	WHERE id = $2 AND status = 'PENDING'
-	RETURNING id;
-	`
 	var claimedID string
-	err = s.db.QueryRowContext(queryCtx, query, now, id).Scan(&claimedID)
+	err = s.db.QueryRowContext(queryCtx, `UPDATE messages SET status = 'PROCESSING', updated_at = $1 WHERE id = $2 AND status = 'PENDING' RETURNING id;`, time.Now().UTC(), id).Scan(&claimedID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -436,7 +297,6 @@ func (s *SQLStore) ClaimPendingMessage(ctx context.Context, id string) (claimed 
 	return true, nil
 }
 
-// GetActiveRecentThreadIDs returns distinct thread IDs that have had recent activity.
 func (s *SQLStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
@@ -444,112 +304,47 @@ func (s *SQLStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Dura
 	if since <= 0 {
 		since = 24 * time.Hour
 	}
-	cutoff := time.Now().UTC().Add(-since)
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
-
-	query := `
-	SELECT thread_id
-	FROM (
-		SELECT thread_id, MAX(updated_at) AS max_updated_at
-		FROM (
-			SELECT thread_id, updated_at FROM messages WHERE thread_id != '' AND updated_at >= $1
-			UNION ALL
-			SELECT thread_id, updated_at FROM sessions WHERE thread_id != '' AND updated_at >= $2
-		) sub
-		GROUP BY thread_id
-	) combined
-	ORDER BY max_updated_at DESC
-	LIMIT 50
-	`
-	rows, err := s.db.QueryContext(queryCtx, query, cutoff, cutoff)
+	cutoff := time.Now().UTC().Add(-since)
+	rows, err := s.db.QueryContext(queryCtx, `SELECT thread_id FROM (SELECT thread_id, MAX(updated_at) AS max_updated_at FROM (SELECT thread_id, updated_at FROM messages WHERE thread_id != '' AND updated_at >= $1 UNION ALL SELECT thread_id, updated_at FROM sessions WHERE thread_id != '' AND updated_at >= $2) sub GROUP BY thread_id) combined ORDER BY max_updated_at DESC LIMIT 50`, cutoff, cutoff)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var threadIDs []string
-	for rows.Next() {
-		var thID string
-		if err := rows.Scan(&thID); err != nil {
-			return nil, err
-		}
-		if thID != "" {
-			threadIDs = append(threadIDs, thID)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return threadIDs, nil
+	return scanNonEmptyStrings(rows)
 }
 
-// GetRecentThreadMessages returns the most recent messages in a thread in chronological order.
 func (s *SQLStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) (msgs []Message, err error) {
 	defer recordTranscriptQuery("get_recent_thread_messages", time.Now(), &err)
-
-	if err = s.checkDB(); err != nil {
+	if err = s.checkDB(); err != nil || threadID == "" {
 		return nil, err
-	}
-	if threadID == "" {
-		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 10
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
-
-	query := fmt.Sprintf(`
-	SELECT %s
-	FROM (
-		SELECT %s
-		FROM messages
-		WHERE thread_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2
-	) recent
-	ORDER BY created_at ASC
-	`, messageSelectCols, messageSelectCols)
-	rows, queryErr := s.db.QueryContext(queryCtx, query, threadID, limit)
+	rows, queryErr := s.db.QueryContext(queryCtx, fmt.Sprintf("SELECT %s FROM (SELECT %s FROM messages WHERE thread_id = $1 ORDER BY created_at DESC LIMIT $2) recent ORDER BY created_at ASC", messageSelectCols, messageSelectCols), threadID, limit)
 	if queryErr != nil {
 		return nil, fmt.Errorf("failed to query recent thread messages: %w", queryErr)
 	}
-	defer rows.Close()
-
-	msgs = make([]Message, 0)
-	for rows.Next() {
-		m, scanErr := scanMessage(rows, false)
-		if scanErr != nil {
-			return nil, fmt.Errorf("failed to scan recent message: %w", scanErr)
-		}
-		msgs = append(msgs, m)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate recent messages: %w", err)
+	msgs, err = scanMessages(rows, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan recent message: %w", err)
 	}
 	return msgs, nil
 }
 
-// GetMaxMessageRowID returns the maximum row_id for COMPLETED messages in the specified thread.
 func (s *SQLStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
-	if err := s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil || threadID == "" {
 		return 0, err
-	}
-	if threadID == "" {
-		return 0, nil
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
-
 	var maxRowID sql.NullInt64
-	query := `SELECT MAX(row_id) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED'`
-	err := s.db.QueryRowContext(queryCtx, query, threadID).Scan(&maxRowID)
+	err := s.db.QueryRowContext(queryCtx, `SELECT MAX(row_id) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED'`, threadID).Scan(&maxRowID)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, err
 	}
-	if maxRowID.Valid {
-		return maxRowID.Int64, nil
-	}
-	return 0, nil
+	return maxRowID.Int64, nil
 }

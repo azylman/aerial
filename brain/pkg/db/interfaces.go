@@ -52,11 +52,9 @@ type ScheduleStore interface {
 	GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error)
 	InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error
 	GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error)
-
 	GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error)
 	GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error)
 	UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error
-
 	CreateScheduleRun(ctx context.Context, run ScheduleRun) error
 	UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error
 	GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error)
