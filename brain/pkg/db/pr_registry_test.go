@@ -6,220 +6,150 @@ import (
 	"testing"
 )
 
-func runPRRegistryTests(t *testing.T, store Store) {
+func runPRRegistryLifecycle(t *testing.T, store Store) {
+	t.Helper()
 	ctx := context.Background()
 
-	// 1. Validation errors
-	badRecords := []PRRecord{
-		{Repo: "", PRNumber: 1, Branch: "feat", HeadSHA: "sha1", TargetID: "123"},
-		{Repo: "aerial", PRNumber: 0, Branch: "feat", HeadSHA: "sha1", TargetID: "123"},
-		{Repo: "aerial", PRNumber: -1, Branch: "feat", HeadSHA: "sha1", TargetID: "123"},
-		{Repo: "aerial", PRNumber: 1, Branch: "", HeadSHA: "sha1", TargetID: "123"},
-		{Repo: "aerial", PRNumber: 1, Branch: "feat", HeadSHA: "", TargetID: "123"},
-		{Repo: "aerial", PRNumber: 1, Branch: "feat", HeadSHA: "sha1", TargetID: ""},
-	}
-	for i, bad := range badRecords {
-		err := store.UpsertPR(ctx, bad)
-		if err == nil {
-			t.Errorf("[%d] Expected validation error for record %+v, got nil", i, bad)
+	for _, bad := range []PRRecord{
+		{Repo: "", PRNumber: 1, Branch: "b", HeadSHA: "s", TargetID: "t"},
+		{Repo: "aerial", PRNumber: 0, Branch: "b", HeadSHA: "s", TargetID: "t"},
+		{Repo: "aerial", PRNumber: -1, Branch: "b", HeadSHA: "s", TargetID: "t"},
+		{Repo: "aerial", PRNumber: 1, Branch: "", HeadSHA: "s", TargetID: "t"},
+		{Repo: "aerial", PRNumber: 1, Branch: "b", HeadSHA: "", TargetID: "t"},
+		{Repo: "aerial", PRNumber: 1, Branch: "b", HeadSHA: "s", TargetID: ""},
+	} {
+		if err := store.UpsertPR(ctx, bad); err == nil {
+			t.Errorf("expected validation error for %+v", bad)
 		}
 	}
 
-	// 2. Initial Upsert
-	rec := PRRecord{
-		Repo:     "aerial",
-		PRNumber: 101,
-		Branch:   "feat/push-pipeline",
-		HeadSHA:  "head1234",
-		TargetID: "1555405874565091380",
-		Title:    "feat: add push pipeline",
-		Metadata: `{"author":"alex"}`,
-	}
+	rec := PRRecord{Repo: "aerial", PRNumber: 101, Branch: "feat/push-pipeline", HeadSHA: "head1234", TargetID: "1555405874565091380", Title: "feat: add push pipeline", Metadata: `{"author":"alex"}`}
 	if err := store.UpsertPR(ctx, rec); err != nil {
 		t.Fatalf("UpsertPR failed: %v", err)
 	}
 
-	// 3. GetPRByNumber
 	got, err := store.GetPRByNumber(ctx, "aerial", 101)
-	if err != nil {
-		t.Fatalf("GetPRByNumber failed: %v", err)
+	if err != nil || got.Repo != "azylman/aerial" || got.PRNumber != 101 || got.Branch != "feat/push-pipeline" || got.HeadSHA != "head1234" || got.TargetID != "1555405874565091380" || got.Status != "open" {
+		t.Fatalf("unexpected record content: %+v (err: %v)", got, err)
 	}
-	if got.Repo != "azylman/aerial" || got.PRNumber != 101 || got.Branch != "feat/push-pipeline" || got.HeadSHA != "head1234" || got.TargetID != "1555405874565091380" {
-		t.Errorf("Unexpected record content: %+v", got)
-	}
-	if got.Status != "open" {
-		t.Errorf("Expected status 'open', got %q", got.Status)
+	if _, err := store.GetPRByNumber(ctx, "aerial", 9999); !errors.Is(err, ErrPRNotFound) {
+		t.Errorf("expected ErrPRNotFound, got %v", err)
 	}
 
-	// Non-existent GetPRByNumber
-	_, err = store.GetPRByNumber(ctx, "aerial", 9999)
-	if !errors.Is(err, ErrPRNotFound) {
-		t.Errorf("Expected ErrPRNotFound, got %v", err)
-	}
-
-	// 4. Idempotent Upsert (update head_sha & title)
-	rec.HeadSHA = "head5678"
-	rec.Title = "feat: add push pipeline updated"
+	rec.HeadSHA, rec.Title = "head5678", "feat: add push pipeline updated"
 	if err := store.UpsertPR(ctx, rec); err != nil {
 		t.Fatalf("UpsertPR update failed: %v", err)
 	}
-	updated, err := store.GetPRByNumber(ctx, "aerial", 101)
-	if err != nil {
-		t.Fatalf("GetPRByNumber after update failed: %v", err)
-	}
-	if updated.HeadSHA != "head5678" || updated.Title != "feat: add push pipeline updated" {
-		t.Errorf("Updated fields mismatch: %+v", updated)
+	if updated, err := store.GetPRByNumber(ctx, "aerial", 101); err != nil || updated.HeadSHA != "head5678" || updated.Title != "feat: add push pipeline updated" {
+		t.Fatalf("updated record mismatch: %+v (err: %v)", updated, err)
 	}
 
-	// 5. Preserving deploying/merged/deployed status on UpsertPR
-	recDeploying := PRRecord{
-		Repo:     "aerial",
-		PRNumber: 102,
-		Branch:   "feat/deploying",
-		HeadSHA:  "head102",
-		TargetID: "1555405874565091380",
-		Status:   "deploying",
-	}
+	recDeploying := PRRecord{Repo: "aerial", PRNumber: 102, Branch: "feat/deploying", HeadSHA: "head102", TargetID: "1555405874565091380", Status: "deploying"}
 	if err := store.UpsertPR(ctx, recDeploying); err != nil {
-		t.Fatalf("UpsertPR on deploying PR failed: %v", err)
+		t.Fatalf("UpsertPR deploying failed: %v", err)
 	}
-	recReupsert := recDeploying
-	recReupsert.Status = "open"
-	if err := store.UpsertPR(ctx, recReupsert); err != nil {
+	recDeploying.Status = "open"
+	if err := store.UpsertPR(ctx, recDeploying); err != nil {
 		t.Fatalf("UpsertPR reupsert failed: %v", err)
 	}
-	afterReupsert, err := store.GetPRByNumber(ctx, "aerial", 102)
-	if err != nil || afterReupsert.Status != "deploying" {
-		t.Fatalf("Expected UpsertPR to preserve 'deploying' status, got %+v (err: %v)", afterReupsert, err)
+	if afterReupsert, err := store.GetPRByNumber(ctx, "aerial", 102); err != nil || afterReupsert.Status != "deploying" {
+		t.Fatalf("expected deploying status preserved, got %+v (err: %v)", afterReupsert, err)
 	}
 
-	// 6. UpdatePRStatusMessageID
 	if err := store.UpdatePRStatusMessageID(ctx, "aerial", 101, "  msg-widget-777  "); err != nil {
 		t.Fatalf("UpdatePRStatusMessageID failed: %v", err)
 	}
-	withMsgID, err := store.GetPRByNumber(ctx, "aerial", 101)
-	if err != nil || withMsgID.StatusMessageID != "msg-widget-777" {
-		t.Fatalf("Expected status_message_id 'msg-widget-777', got %+v (err: %v)", withMsgID, err)
+	if withMsgID, err := store.GetPRByNumber(ctx, "aerial", 101); err != nil || withMsgID.StatusMessageID != "msg-widget-777" {
+		t.Fatalf("expected msg-widget-777, got %+v (err: %v)", withMsgID, err)
 	}
-	err = store.UpdatePRStatusMessageID(ctx, "aerial", 9999, "msg-widget-999")
-	if !errors.Is(err, ErrPRNotFound) {
-		t.Errorf("Expected ErrPRNotFound on UpdatePRStatusMessageID for non-existent PR, got %v", err)
+	if err := store.UpdatePRStatusMessageID(ctx, "aerial", 9999, "msg-widget-999"); !errors.Is(err, ErrPRNotFound) {
+		t.Errorf("expected ErrPRNotFound on non-existent PR, got %v", err)
 	}
 	if err := store.UpdatePRStatusMessageID(ctx, "", 101, "msg-widget-777"); err == nil {
-		t.Errorf("Expected validation error on empty repo in UpdatePRStatusMessageID")
+		t.Errorf("expected validation error on empty repo")
 	}
 }
 
-func TestPRRegistry_SQLStore(t *testing.T) {
-	store := NewTestStore(t)
-	runPRRegistryTests(t, store)
-}
-
-func TestPRRegistry_FakeStore(t *testing.T) {
-	store := NewFakeStore()
-	runPRRegistryTests(t, store)
+func TestPRRegistry_StoreParity(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store Store
+	}{
+		{"SQLStore", NewTestStore(t)},
+		{"FakeStore", NewFakeStore()},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runPRRegistryLifecycle(t, tc.store) })
+	}
 }
 
 func TestPRRegistry_FakeStore_Failures(t *testing.T) {
-	store := NewFakeStore()
-	ctx := context.Background()
-
 	simErr := errors.New("simulated error")
-
-	// UpsertPR fail
-	store.FailNext("UpsertPR", simErr)
-	err := store.UpsertPR(ctx, PRRecord{Repo: "a", PRNumber: 1, Branch: "b", HeadSHA: "c", TargetID: "d"})
-	if !errors.Is(err, simErr) {
-		t.Errorf("Expected %v, got %v", simErr, err)
-	}
-
-	// GetPRByNumber fail
-	store.FailNext("GetPRByNumber", simErr)
-	_, err = store.GetPRByNumber(ctx, "a", 1)
-	if !errors.Is(err, simErr) {
-		t.Errorf("Expected %v, got %v", simErr, err)
-	}
-
-	// UpdatePRStatusMessageID fail
-	store.FailNext("UpdatePRStatusMessageID", simErr)
-	err = store.UpdatePRStatusMessageID(ctx, "a", 1, "msg-1")
-	if !errors.Is(err, simErr) {
-		t.Errorf("Expected %v, got %v", simErr, err)
+	for _, op := range []string{"UpsertPR", "GetPRByNumber", "UpdatePRStatusMessageID"} {
+		t.Run(op, func(t *testing.T) {
+			store := NewFakeStore()
+			ctx := context.Background()
+			store.FailNext(op, simErr)
+			var err error
+			switch op {
+			case "UpsertPR":
+				err = store.UpsertPR(ctx, PRRecord{Repo: "a", PRNumber: 1, Branch: "b", HeadSHA: "c", TargetID: "d"})
+			case "GetPRByNumber":
+				_, err = store.GetPRByNumber(ctx, "a", 1)
+			case "UpdatePRStatusMessageID":
+				err = store.UpdatePRStatusMessageID(ctx, "a", 1, "msg-1")
+			}
+			if !errors.Is(err, simErr) {
+				t.Fatalf("expected %v, got %v", simErr, err)
+			}
+		})
 	}
 }
 
 func TestPRRegistry_SQLStore_NilAndValidationBranches(t *testing.T) {
 	ctx := context.Background()
-	var nilStore *SQLStore
-	storeNilDB := &SQLStore{db: nil}
-
-	stores := []*SQLStore{nilStore, storeNilDB}
-	for i, s := range stores {
-		if err := s.UpsertPR(ctx, PRRecord{Repo: "aerial", PRNumber: 1, Branch: "b", HeadSHA: "h", TargetID: "t"}); err == nil {
-			t.Errorf("[%d] expected error on UpsertPR with nil store/db", i)
-		}
-		if _, err := s.GetPRByNumber(ctx, "aerial", 1); err == nil {
-			t.Errorf("[%d] expected error on GetPRByNumber with nil store/db", i)
-		}
-		if err := s.UpdatePRStatusMessageID(ctx, "aerial", 1, "msg-1"); err == nil {
-			t.Errorf("[%d] expected error on UpdatePRStatusMessageID with nil store/db", i)
-		}
-	}
-
-	store := NewTestStore(t)
-	sqlStore, ok := store.(*SQLStore)
-	if !ok {
-		t.Fatalf("expected *SQLStore")
-	}
-
-	// Empty repo validation
-	if _, err := sqlStore.GetPRByNumber(ctx, "", 1); err == nil {
-		t.Errorf("expected error on empty repo GetPRByNumber")
-	}
-	if err := sqlStore.UpdatePRStatusMessageID(ctx, "", 1, "msg-1"); err == nil {
-		t.Errorf("expected error on empty repo UpdatePRStatusMessageID")
-	}
-
-	// Upsert with explicit status and non-empty metadata
-	recExplicit := PRRecord{
-		Repo:     "azylman/aerial",
-		PRNumber: 202,
-		Branch:   "feat/custom",
-		HeadSHA:  "headcustom",
-		TargetID: "1555405874565091380",
-		Status:   "custom_status",
-		Metadata: `{"custom":"value"}`,
-	}
-	if err := sqlStore.UpsertPR(ctx, recExplicit); err != nil {
-		t.Fatalf("UpsertPR explicit failed: %v", err)
-	}
-}
-
-func TestPRRegistry_SQLStore_ClosedDBBranches(t *testing.T) {
-	ctx := context.Background()
-	tmpPath := t.TempDir() + "/closed_pr.db"
-	closedDB, err := initTestSQLite(tmpPath)
+	closedDB, err := initTestSQLite(t.TempDir() + "/closed_pr.db")
 	if err != nil {
-		t.Fatalf("failed to init db: %v", err)
+		t.Fatalf("initTestSQLite failed: %v", err)
 	}
 	closedStore := NewSQLStore(closedDB)
 	_ = closedDB.Close()
 
-	rec := PRRecord{
-		Repo:     "aerial",
-		PRNumber: 1,
-		Branch:   "b",
-		HeadSHA:  "h",
-		TargetID: "t",
+	rec := PRRecord{Repo: "aerial", PRNumber: 1, Branch: "b", HeadSHA: "h", TargetID: "t"}
+	for _, tc := range []struct {
+		name  string
+		store *SQLStore
+	}{
+		{"nil_store", nil},
+		{"nil_db", &SQLStore{db: nil}},
+		{"closed_db", closedStore.(*SQLStore)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, err := range []error{
+				tc.store.UpsertPR(ctx, rec),
+				c1(tc.store.GetPRByNumber(ctx, "aerial", 1)),
+				tc.store.UpdatePRStatusMessageID(ctx, "aerial", 1, "msg-1"),
+			} {
+				if err == nil {
+					t.Errorf("[%s] expected error", tc.name)
+				}
+			}
+		})
 	}
 
-	if err := closedStore.UpsertPR(ctx, rec); err == nil {
-		t.Errorf("expected error on closed db UpsertPR")
+	live := NewTestStore(t).(*SQLStore)
+	if _, err := live.GetPRByNumber(ctx, "", 1); err == nil {
+		t.Error("expected error on empty repo GetPRByNumber")
 	}
-	if _, err := closedStore.GetPRByNumber(ctx, "aerial", 1); err == nil {
-		t.Errorf("expected error on closed db GetPRByNumber")
+	if err := live.UpdatePRStatusMessageID(ctx, "", 1, "msg-1"); err == nil {
+		t.Error("expected error on empty repo UpdatePRStatusMessageID")
 	}
-	if err := closedStore.UpdatePRStatusMessageID(ctx, "aerial", 1, "msg-1"); err == nil {
-		t.Errorf("expected error on closed db UpdatePRStatusMessageID")
+	if err := live.UpsertPR(ctx, PRRecord{Repo: "azylman/aerial", PRNumber: 202, Branch: "feat/custom", HeadSHA: "headcustom", TargetID: "1555405874565091380", Status: "custom_status", Metadata: `{"custom":"value"}`}); err != nil {
+		t.Fatalf("UpsertPR explicit failed: %v", err)
+	}
+	if err := live.SaveThreadSummary(ctx, "", "sum", "m1"); err != nil {
+		t.Error("expected nil on empty threadID SaveThreadSummary")
+	}
+	if _, err := live.PruneScheduleRuns(ctx, 0, 0); err != nil {
+		t.Errorf("PruneScheduleRuns(0, 0) failed: %v", err)
 	}
 }

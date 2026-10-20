@@ -77,20 +77,12 @@ func normalizeScheduleEffort(effort string) string {
 	}
 }
 
-func (s *SQLStore) CreateOneShotSchedule(ctx context.Context, sched OneShotSchedule) error {
-	if err := s.checkDB(); err != nil {
-		return err
+func (s *SQLStore) execRowsAffected(ctx context.Context, d time.Duration, query string, args ...any) (int64, error) {
+	res, err := s.execWithTimeout(ctx, d, query, args...)
+	if err != nil {
+		return 0, err
 	}
-	if sched.CreatedAt.IsZero() {
-		sched.CreatedAt = time.Now().UTC()
-	}
-	sched.Effort = normalizeScheduleEffort(sched.Effort)
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6)`
-	_, err := s.db.ExecContext(queryCtx, query, sched.ID, sched.ThreadID, sched.Prompt, sched.RunAt, sched.CreatedAt, sched.Effort)
-	return err
+	return res.RowsAffected()
 }
 
 func scanOneShotRows(rows *sql.Rows) ([]OneShotSchedule, error) {
@@ -102,42 +94,46 @@ func scanOneShotRows(rows *sql.Rows) ([]OneShotSchedule, error) {
 		}
 		results = append(results, s)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return results, rows.Err()
 }
 
-func scanCronRows(rows *sql.Rows) ([]CronSchedule, error) {
-	var results []CronSchedule
-	for rows.Next() {
-		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
-			return nil, err
-		}
-		results = append(results, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-
-func (s *SQLStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error) {
+func (s *SQLStore) queryOneShotSchedules(ctx context.Context, suffixSQL string, args ...any) ([]OneShotSchedule, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
-
-	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= $1`
-	rows, err := s.db.QueryContext(queryCtx, query, time.Now().UTC())
+	query := "SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules"
+	if suffixSQL != "" {
+		query += " " + suffixSQL
+	}
+	rows, err := s.db.QueryContext(queryCtx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	return scanOneShotRows(rows)
+}
+
+func (s *SQLStore) CreateOneShotSchedule(ctx context.Context, sched OneShotSchedule) error {
+	if sched.CreatedAt.IsZero() {
+		sched.CreatedAt = time.Now().UTC()
+	}
+	sched.Effort = normalizeScheduleEffort(sched.Effort)
+	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6)`
+	_, err := s.execWithTimeout(ctx, 5*time.Second, query, sched.ID, sched.ThreadID, sched.Prompt, sched.RunAt, sched.CreatedAt, sched.Effort)
+	return err
+}
+
+func (s *SQLStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error) {
+	return s.queryOneShotSchedules(ctx, "WHERE run_at <= $1", time.Now().UTC())
+}
+
+func (s *SQLStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error) {
+	if threadID != "" {
+		return s.queryOneShotSchedules(ctx, "WHERE thread_id = $1 ORDER BY run_at ASC", threadID)
+	}
+	return s.queryOneShotSchedules(ctx, "ORDER BY run_at ASC")
 }
 
 func (s *SQLStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error {
@@ -154,8 +150,7 @@ func (s *SQLStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleI
 	var tx *sql.Tx
 	if b, ok := s.db.(beginner); ok {
 		var err error
-		tx, err = b.BeginTx(queryCtx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-		if err != nil {
+		if tx, err = b.BeginTx(queryCtx, &sql.TxOptions{Isolation: sql.LevelReadCommitted}); err != nil {
 			return err
 		}
 		defer rollbackWarn(tx, "tx")
@@ -165,109 +160,71 @@ func (s *SQLStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleI
 	if err := (&SQLStore{db: exec, isPostgres: s.isPostgres}).InsertMessage(queryCtx, msg); err != nil {
 		return err
 	}
-
 	var deletedID string
-	deleteQuery := `DELETE FROM one_shot_schedules WHERE id = $1 RETURNING id;`
-	err := exec.QueryRowContext(queryCtx, deleteQuery, scheduleID).Scan(&deletedID)
+	err := exec.QueryRowContext(queryCtx, `DELETE FROM one_shot_schedules WHERE id = $1 RETURNING id;`, scheduleID).Scan(&deletedID)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("one-shot schedule %s not found or already consumed", scheduleID)
 	}
 	if err != nil {
 		return err
 	}
-
 	if tx != nil {
 		return tx.Commit()
 	}
 	return nil
 }
 
-func (s *SQLStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
+func scanCronRows(rows *sql.Rows) ([]CronSchedule, error) {
+	var results []CronSchedule
+	for rows.Next() {
+		var c CronSchedule
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
+			return nil, err
+		}
+		results = append(results, c)
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules`
-	var rows *sql.Rows
-	var err error
-	if threadID != "" {
-		query += ` WHERE thread_id = $1 ORDER BY run_at ASC`
-		rows, err = s.db.QueryContext(queryCtx, query, threadID)
-	} else {
-		query += ` ORDER BY run_at ASC`
-		rows, err = s.db.QueryContext(queryCtx, query)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return scanOneShotRows(rows)
+	return results, rows.Err()
 }
 
-
-func (s *SQLStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error) {
+func (s *SQLStore) queryCronSchedules(ctx context.Context, suffixSQL string, args ...any) ([]CronSchedule, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1`
-	rows, err := s.db.QueryContext(queryCtx, query, time.Now().UTC())
+	query := "SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE"
+	if suffixSQL != "" {
+		query += " " + suffixSQL
+	}
+	rows, err := s.db.QueryContext(queryCtx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	return scanCronRows(rows)
+}
+
+func (s *SQLStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error) {
+	return s.queryCronSchedules(ctx, "AND next_run_at <= $1", time.Now().UTC())
 }
 
 func (s *SQLStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE`
-	var rows *sql.Rows
-	var err error
 	if targetID != "" {
-		query += ` AND target_id = $1 ORDER BY created_at ASC`
-		rows, err = s.db.QueryContext(queryCtx, query, targetID)
-	} else {
-		query += ` ORDER BY created_at ASC`
-		rows, err = s.db.QueryContext(queryCtx, query)
+		return s.queryCronSchedules(ctx, "AND target_id = $1 ORDER BY created_at ASC", targetID)
 	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return scanCronRows(rows)
+	return s.queryCronSchedules(ctx, "ORDER BY created_at ASC")
 }
 
 func (s *SQLStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
 	if id == "" {
 		return nil
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	_, err := s.db.ExecContext(queryCtx, `UPDATE cron_schedules SET next_run_at = $1 WHERE id = $2`, nextRunAt, id)
+	_, err := s.execWithTimeout(ctx, 5*time.Second, `UPDATE cron_schedules SET next_run_at = $1 WHERE id = $2`, nextRunAt, id)
 	return err
 }
 
 func (s *SQLStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
 	if run.ID == "" {
 		return fmt.Errorf("schedule run id cannot be empty")
 	}
@@ -277,100 +234,40 @@ func (s *SQLStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error
 	if run.Status == "" {
 		run.Status = "enqueued"
 	}
-	run.Effort = normalizeScheduleEffort(run.Effort)
-
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	var completedAtVal interface{}
+	var completedAtVal any
 	if run.CompletedAt != nil {
 		completedAtVal = *run.CompletedAt
 	}
-
-	query := `
-	INSERT INTO schedule_runs (
-		id, schedule_id, schedule_type, message_id, target_id,
-		thread_id, title, prompt, status, started_at,
-		completed_at, duration_ms, error, effort, model
-	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-	`
-	_, err := s.db.ExecContext(queryCtx, query,
-		run.ID,
-		run.ScheduleID,
-		run.ScheduleType,
-		run.MessageID,
-		run.TargetID,
-		run.ThreadID,
-		run.Title,
-		run.Prompt,
-		run.Status,
-		run.StartedAt,
-		completedAtVal,
-		run.DurationMs,
-		run.Error,
-		run.Effort,
-		run.Model,
-	)
+	query := `INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+	_, err := s.execWithTimeout(ctx, 5*time.Second, query, run.ID, run.ScheduleID, run.ScheduleType, run.MessageID, run.TargetID, run.ThreadID, run.Title, run.Prompt, run.Status, run.StartedAt, completedAtVal, run.DurationMs, run.Error, normalizeScheduleEffort(run.Effort), run.Model)
 	return err
 }
 
 func (s *SQLStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
 	if params.RunID == "" {
 		return fmt.Errorf("schedule run id cannot be empty")
 	}
-
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	var sets []string
-	var args []interface{}
-	idx := 1
-
-	if params.Status != "" {
-		sets = append(sets, fmt.Sprintf("status = $%d", idx))
-		args = append(args, params.Status)
-		idx++
+	var args []any
+	addSet := func(col string, val any) {
+		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)+1))
+		args = append(args, val)
 	}
-	if params.MessageID != "" {
-		sets = append(sets, fmt.Sprintf("message_id = $%d", idx))
-		args = append(args, params.MessageID)
-		idx++
-	}
-	if !params.CompletedAt.IsZero() {
-		sets = append(sets, fmt.Sprintf("completed_at = $%d", idx))
-		args = append(args, params.CompletedAt)
-		idx++
-	}
-	if params.DurationMs != 0 {
-		sets = append(sets, fmt.Sprintf("duration_ms = $%d", idx))
-		args = append(args, params.DurationMs)
-		idx++
-	}
-	if params.Model != "" {
-		sets = append(sets, fmt.Sprintf("model = $%d", idx))
-		args = append(args, params.Model)
-		idx++
-	}
+	if params.Status != "" { addSet("status", params.Status) }
+	if params.MessageID != "" { addSet("message_id", params.MessageID) }
+	if !params.CompletedAt.IsZero() { addSet("completed_at", params.CompletedAt) }
+	if params.DurationMs != 0 { addSet("duration_ms", params.DurationMs) }
+	if params.Model != "" { addSet("model", params.Model) }
 	if params.Error != "" {
-		sets = append(sets, fmt.Sprintf("error = $%d", idx))
-		args = append(args, params.Error)
-		idx++
+		addSet("error", params.Error)
 	} else if params.Status == "completed" {
 		sets = append(sets, "error = ''")
 	}
-
 	if len(sets) == 0 {
 		return nil
 	}
-
-	query := fmt.Sprintf("UPDATE schedule_runs SET %s WHERE id = $%d", strings.Join(sets, ", "), idx)
 	args = append(args, params.RunID)
-
-	_, err := s.db.ExecContext(queryCtx, query, args...)
+	_, err := s.execWithTimeout(ctx, 5*time.Second, fmt.Sprintf("UPDATE schedule_runs SET %s WHERE id = $%d", strings.Join(sets, ", "), len(args)), args...)
 	return err
 }
 
@@ -384,51 +281,32 @@ func (s *SQLStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset i
 	if offset < 0 {
 		offset = 0
 	}
-
 	var whereClauses []string
-	var args []interface{}
-	argIdx := 1
-
-	if strings.TrimSpace(scheduleID) != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("schedule_id = $%d", argIdx))
-		args = append(args, strings.TrimSpace(scheduleID))
-		argIdx++
+	var args []any
+	if sID := strings.TrimSpace(scheduleID); sID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("schedule_id = $%d", len(args)+1))
+		args = append(args, sID)
 	}
-	if strings.TrimSpace(status) != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("status = $%d", argIdx))
-		args = append(args, strings.TrimSpace(status))
-		argIdx++
+	if st := strings.TrimSpace(status); st != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("status = $%d", len(args)+1))
+		args = append(args, st)
 	}
-
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
 	}
-
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
-
-	countQuery := "SELECT COUNT(*) FROM schedule_runs" + whereSQL
 	var total int
-	if err := s.db.QueryRowContext(queryCtx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM schedule_runs"+whereSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("failed to count schedule runs: %w", err)
 	}
-
-	selectQuery := fmt.Sprintf(`
-		SELECT id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, COALESCE(NULLIF(effort, ''), 'medium'), COALESCE(model, '')
-		FROM schedule_runs
-		%s
-		ORDER BY started_at DESC, id DESC
-		LIMIT $%d OFFSET $%d
-	`, whereSQL, argIdx, argIdx+1)
-
-	queryArgs := append(args, limit, offset)
-	rows, err := s.db.QueryContext(queryCtx, selectQuery, queryArgs...)
+	selectQuery := fmt.Sprintf(`SELECT id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, COALESCE(NULLIF(effort, ''), 'medium'), COALESCE(model, '') FROM schedule_runs%s ORDER BY started_at DESC, id DESC LIMIT $%d OFFSET $%d`, whereSQL, len(args)+1, len(args)+2)
+	rows, err := s.db.QueryContext(queryCtx, selectQuery, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query schedule runs: %w", err)
 	}
 	defer rows.Close()
-
 	runs := make([]ScheduleRun, 0)
 	for rows.Next() {
 		var r ScheduleRun
@@ -441,11 +319,7 @@ func (s *SQLStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset i
 		}
 		runs = append(runs, r)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterate schedule runs: %w", err)
-	}
-
-	return runs, total, nil
+	return runs, total, rows.Err()
 }
 
 func (s *SQLStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error) {
@@ -454,116 +328,52 @@ func (s *SQLStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSumma
 	}
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
-
 	var metrics ScheduleSummaryMetrics
-
-	// 1. Cron count (enabled only)
 	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM cron_schedules WHERE enabled = TRUE").Scan(&metrics.CronCount); err != nil {
 		return metrics, fmt.Errorf("failed to count cron schedules: %w", err)
 	}
-
-	// 2. One-shot count
 	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM one_shot_schedules").Scan(&metrics.OneShotCount); err != nil {
 		return metrics, fmt.Errorf("failed to count one-shot schedules: %w", err)
 	}
-
 	metrics.TotalActive = metrics.CronCount + metrics.OneShotCount
 
-	// 3. Next run timestamp
 	var cronNext, oneShotNext sql.NullTime
-	errCron := s.db.QueryRowContext(queryCtx, "SELECT next_run_at FROM cron_schedules WHERE enabled = TRUE ORDER BY next_run_at ASC LIMIT 1").Scan(&cronNext)
-	if errCron != nil && errCron != sql.ErrNoRows {
-		return metrics, fmt.Errorf("failed to query next cron run: %w", errCron)
+	if err := s.db.QueryRowContext(queryCtx, "SELECT next_run_at FROM cron_schedules WHERE enabled = TRUE ORDER BY next_run_at ASC LIMIT 1").Scan(&cronNext); err != nil && err != sql.ErrNoRows {
+		return metrics, fmt.Errorf("failed to query next cron run: %w", err)
 	}
-	errOneShot := s.db.QueryRowContext(queryCtx, "SELECT run_at FROM one_shot_schedules ORDER BY run_at ASC LIMIT 1").Scan(&oneShotNext)
-	if errOneShot != nil && errOneShot != sql.ErrNoRows {
-		return metrics, fmt.Errorf("failed to query next one-shot run: %w", errOneShot)
+	if err := s.db.QueryRowContext(queryCtx, "SELECT run_at FROM one_shot_schedules ORDER BY run_at ASC LIMIT 1").Scan(&oneShotNext); err != nil && err != sql.ErrNoRows {
+		return metrics, fmt.Errorf("failed to query next one-shot run: %w", err)
 	}
-
-	if cronNext.Valid && oneShotNext.Valid {
-		if cronNext.Time.Before(oneShotNext.Time) {
-			metrics.NextRunAt = &cronNext.Time
-		} else {
-			metrics.NextRunAt = &oneShotNext.Time
-		}
-	} else if cronNext.Valid {
+	if cronNext.Valid {
 		metrics.NextRunAt = &cronNext.Time
-	} else if oneShotNext.Valid {
+	}
+	if oneShotNext.Valid && (metrics.NextRunAt == nil || oneShotNext.Time.Before(*metrics.NextRunAt)) {
 		metrics.NextRunAt = &oneShotNext.Time
 	}
 
-	// 4. 24-hour run stats and success rate
-	cutoff24h := time.Now().UTC().Add(-24 * time.Hour)
-	runs24hQuery := `
-	SELECT 
-		COUNT(*),
-		COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)
-	FROM schedule_runs
-	WHERE started_at >= $1
-	`
 	var totalRuns, completedRuns int
-	if err := s.db.QueryRowContext(queryCtx, runs24hQuery, cutoff24h).Scan(&totalRuns, &completedRuns); err != nil {
+	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) FROM schedule_runs WHERE started_at >= $1", time.Now().UTC().Add(-24*time.Hour)).Scan(&totalRuns, &completedRuns); err != nil {
 		return metrics, fmt.Errorf("failed to query 24h run metrics: %w", err)
 	}
-
 	metrics.TotalRuns24h = totalRuns
 	if totalRuns == 0 {
 		metrics.SuccessRate24h = 100.0
 	} else {
 		metrics.SuccessRate24h = math.Round((float64(completedRuns)/float64(totalRuns))*1000.0) / 10.0
 	}
-
 	return metrics, nil
 }
 
 func (s *SQLStore) ReconcileOrphanedScheduleRuns(ctx context.Context) (int64, error) {
-	if err := s.checkDB(); err != nil {
-		return 0, err
-	}
-	now := time.Now().UTC()
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `
-	UPDATE schedule_runs
-	SET status = 'failed',
-	    error = 'Interrupted by server restart',
-	    completed_at = $1
-	WHERE status IN ('enqueued', 'running')
-	`
-	res, err := s.db.ExecContext(queryCtx, query, now)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return s.execRowsAffected(ctx, 5*time.Second, `UPDATE schedule_runs SET status = 'failed', error = 'Interrupted by server restart', completed_at = $1 WHERE status IN ('enqueued', 'running')`, time.Now().UTC())
 }
 
 func (s *SQLStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge time.Duration) (int64, error) {
-	if err := s.checkDB(); err != nil {
-		return 0, err
-	}
 	if maxCount <= 0 {
 		maxCount = 1000
 	}
 	if maxAge <= 0 {
 		maxAge = 30 * 24 * time.Hour
 	}
-	cutoff := time.Now().UTC().Add(-maxAge)
-	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	query := `
-	DELETE FROM schedule_runs
-	WHERE started_at < $1
-	   OR id NOT IN (
-		   SELECT id FROM schedule_runs
-		   ORDER BY started_at DESC, id DESC
-		   LIMIT $2
-	   )
-	`
-	res, err := s.db.ExecContext(queryCtx, query, cutoff, maxCount)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return s.execRowsAffected(ctx, 10*time.Second, `DELETE FROM schedule_runs WHERE started_at < $1 OR id NOT IN (SELECT id FROM schedule_runs ORDER BY started_at DESC, id DESC LIMIT $2)`, time.Now().UTC().Add(-maxAge), maxCount)
 }
