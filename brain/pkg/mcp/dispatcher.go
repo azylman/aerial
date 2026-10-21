@@ -220,6 +220,72 @@ func (d *DefaultDispatcher) EnsureSession(ctx context.Context, serverName string
 	return sessID, nil
 }
 
+func (d *DefaultDispatcher) doJSONRPCWithRetry(ctx context.Context, srv ServerConfig, sessID string, reqBody []byte, maxBytes int64) (*jsonRPCResponse, error) {
+	currentSessID := sessID
+	if maxBytes <= 0 {
+		maxBytes = 10 << 20
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request for %s: %w", srv.Name, err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "application/json, text/event-stream")
+		for k, v := range srv.Headers {
+			httpReq.Header.Set(k, v)
+		}
+		if currentSessID != "" {
+			httpReq.Header.Set("mcp-session-id", currentSessID)
+		}
+
+		resp, err := d.httpClient.Do(httpReq)
+		if err != nil {
+			if attempt == 0 {
+				return nil, fmt.Errorf("failed to call %s: %w", srv.Name, err)
+			}
+			return nil, fmt.Errorf("failed to call %s on retry: %w", srv.Name, err)
+		}
+
+		respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+		_ = resp.Body.Close()
+		if rErr != nil {
+			return nil, fmt.Errorf("read error from %s: %w", srv.Name, rErr)
+		}
+
+		rpcResp, parseErr := parseJSONRPCBody(respBytes)
+		if attempt == 0 && isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
+			d.mu.Lock()
+			if d.sessionIDs[srv.Name] == currentSessID {
+				delete(d.sessionIDs, srv.Name)
+			}
+			d.mu.Unlock()
+
+			newSessID, sErr := d.EnsureSession(ctx, srv.Name)
+			if sErr != nil {
+				return nil, fmt.Errorf("failed to re-establish session for %s: %w", srv.Name, sErr)
+			}
+			currentSessID = newSessID
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("mcp server %s returned status %d: %s", srv.Name, resp.StatusCode, string(respBytes))
+		}
+		if parseErr != nil || rpcResp == nil {
+			return nil, fmt.Errorf("empty or invalid JSON-RPC response from %s: %w", srv.Name, parseErr)
+		}
+		if rpcResp.Error != nil {
+			return nil, fmt.Errorf("mcp server %s returned error: %s (code %d)", srv.Name, rpcResp.Error.Message, rpcResp.Error.Code)
+		}
+
+		return rpcResp, nil
+	}
+
+	return nil, fmt.Errorf("request to %s failed after retry", srv.Name)
+}
+
 func (d *DefaultDispatcher) fetchServerTools(ctx context.Context, srv ServerConfig) ([]Tool, error) {
 	d.mu.RLock()
 	sessID := d.sessionIDs[srv.Name]
@@ -235,74 +301,9 @@ func (d *DefaultDispatcher) fetchServerTools(ctx context.Context, srv ServerConf
 		return nil, fmt.Errorf("failed to marshal tools/list payload: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+	rpcResp, err := d.doJSONRPCWithRetry(ctx, srv, sessID, reqBody, 10<<20)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request for %s: %w", srv.Name, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range srv.Headers {
-		httpReq.Header.Set(k, v)
-	}
-	if sessID != "" {
-		httpReq.Header.Set("mcp-session-id", sessID)
-	}
-
-	resp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query tools/list on %s: %w", srv.Name, err)
-	}
-	respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
-	_ = resp.Body.Close()
-
-	rpcResp, parseErr := parseJSONRPCBody(respBytes)
-	if isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
-		d.mu.Lock()
-		if d.sessionIDs[srv.Name] == sessID {
-			delete(d.sessionIDs, srv.Name)
-		}
-		d.mu.Unlock()
-
-		newSessID, sErr := d.EnsureSession(ctx, srv.Name)
-		if sErr != nil {
-			return nil, fmt.Errorf("failed to re-establish session for %s: %w", srv.Name, sErr)
-		}
-
-		retryReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
-		if reqErr != nil {
-			return nil, fmt.Errorf("failed to create retry request for %s: %w", srv.Name, reqErr)
-		}
-		retryReq.Header.Set("Content-Type", "application/json")
-		retryReq.Header.Set("Accept", "application/json, text/event-stream")
-		for k, v := range srv.Headers {
-			retryReq.Header.Set(k, v)
-		}
-		if newSessID != "" {
-			retryReq.Header.Set("mcp-session-id", newSessID)
-		}
-
-		retryResp, doErr := d.httpClient.Do(retryReq)
-		if doErr != nil {
-			return nil, fmt.Errorf("failed to query tools/list on retry for %s: %w", srv.Name, doErr)
-		}
-		resp = retryResp
-		respBytes, rErr = io.ReadAll(io.LimitReader(retryResp.Body, 512*1024))
-		_ = retryResp.Body.Close()
-		rpcResp, parseErr = parseJSONRPCBody(respBytes)
-	}
-
-	if rErr != nil {
-		return nil, fmt.Errorf("read error from %s: %w", srv.Name, rErr)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("mcp server %s returned status %d: %s", srv.Name, resp.StatusCode, string(respBytes))
-	}
-
-	if parseErr != nil || rpcResp == nil {
-		return nil, fmt.Errorf("empty or invalid JSON-RPC response from %s: %w", srv.Name, parseErr)
-	}
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("mcp server %s returned error: %s (code %d)", srv.Name, rpcResp.Error.Message, rpcResp.Error.Code)
+		return nil, err
 	}
 
 	var listResult struct {
@@ -350,16 +351,6 @@ func (d *DefaultDispatcher) ListTools(ctx context.Context) ([]Tool, error) {
 		allTools = append(allTools, tools...)
 	}
 	return allTools, nil
-}
-
-// RegisterToolRoute manually associates a tool name with a server config.
-func (d *DefaultDispatcher) RegisterToolRoute(toolName string, srv ServerConfig) {
-	if d == nil {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.toolRoutes[toolName] = srv
 }
 
 // Execute calls a named tool on the corresponding MCP server with the provided arguments.
@@ -432,78 +423,9 @@ func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[s
 		return "", fmt.Errorf("failed to marshal tools/call request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+	rpcResp, err := d.doJSONRPCWithRetry(ctx, srv, sessID, reqBody, 50<<20)
 	if err != nil {
-		return "", fmt.Errorf("failed to create http request for tool %q: %w", name, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range srv.Headers {
-		httpReq.Header.Set(k, v)
-	}
-	if sessID != "" {
-		httpReq.Header.Set("mcp-session-id", sessID)
-	}
-
-	resp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("failed to call tool %q on %s: %w", name, srv.Name, err)
-	}
-
-	respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	_ = resp.Body.Close()
-	if rErr != nil {
-		return "", fmt.Errorf("failed to read response for tool %q: %w", name, rErr)
-	}
-
-	rpcResp, parseErr := parseJSONRPCBody(respBytes)
-	if isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
-		d.mu.Lock()
-		if d.sessionIDs[srv.Name] == sessID {
-			delete(d.sessionIDs, srv.Name)
-		}
-		d.mu.Unlock()
-
-		newSessID, sErr := d.EnsureSession(ctx, srv.Name)
-		if sErr != nil {
-			return "", fmt.Errorf("failed to establish session with %s for tool %q: %w", srv.Name, name, sErr)
-		}
-
-		retryReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
-		if reqErr != nil {
-			return "", fmt.Errorf("failed to create retry request for tool %q: %w", name, reqErr)
-		}
-		retryReq.Header.Set("Content-Type", "application/json")
-		retryReq.Header.Set("Accept", "application/json, text/event-stream")
-		for k, v := range srv.Headers {
-			retryReq.Header.Set(k, v)
-		}
-		if newSessID != "" {
-			retryReq.Header.Set("mcp-session-id", newSessID)
-		}
-
-		retryResp, doErr := d.httpClient.Do(retryReq)
-		if doErr != nil {
-			return "", fmt.Errorf("failed to retry tool %q on %s: %w", name, srv.Name, doErr)
-		}
-		resp = retryResp
-		respBytes, rErr = io.ReadAll(io.LimitReader(retryResp.Body, 1024*1024))
-		_ = retryResp.Body.Close()
-		if rErr != nil {
-			return "", fmt.Errorf("failed to read retry response for tool %q: %w", name, rErr)
-		}
-		rpcResp, parseErr = parseJSONRPCBody(respBytes)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("mcp server %s returned status %d: %s", srv.Name, resp.StatusCode, string(respBytes))
-	}
-
-	if parseErr != nil || rpcResp == nil {
-		return "", fmt.Errorf("empty or invalid JSON-RPC response for tool %q: %w", name, parseErr)
-	}
-	if rpcResp.Error != nil {
-		return "", fmt.Errorf("mcp tool %q error: %s (code %d)", name, rpcResp.Error.Message, rpcResp.Error.Code)
+		return "", err
 	}
 
 	var callResult struct {
