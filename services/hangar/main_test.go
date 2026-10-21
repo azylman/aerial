@@ -3094,6 +3094,20 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			checkDeferralJob: "vanadis",
 		},
 		{
+			name:      "mixed build and untouched repo nomad job applies untouched job immediately",
+			gitScript: mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameOnly: "services/hangar/main.go\nnomad/jobs/hangar.nomad\nnomad/jobs/eri.nomad\n", nameStatus: "M\tnomad/jobs/hangar.nomad\nM\tnomad/jobs/eri.nomad\n"},
+			jobFiles: map[string]string{
+				"nomad/jobs/hangar.nomad": `job "hangar" { task "hangar" { config { image = "ghcr.io/azylman/aerial-hangar:${var.image_tag}" } } }`,
+				"nomad/jobs/eri.nomad":    `job "eri" { task "eri" { config { image = "ghcr.io/azylman/aerial-eri:${var.image_tag}" } } }`,
+			},
+			registryMode:     "digest_ready",
+			req:              GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "sha_after", PRNumber: 948, TargetID: "1562543935417487501"},
+			wantCode:         http.StatusOK,
+			wantBuilding:     true,
+			wantNomadChanged: true,
+			wantApplied:      []string{"eri"},
+		},
+		{
 			name: "job rename with containers building defers delete",
 			gitScript: mockGitScript{
 				beforeSHA:  "sha_rename_before",
