@@ -562,6 +562,40 @@ func (d *SyncDaemon) drainPendingNomadChanges() []NomadChangeEvent {
 	return out
 }
 
+// drainPendingNomadDeletes extracts and returns only delete actions from pendingNomadChanges,
+// leaving any non-delete actions (add, modify, apply) intact in the queue.
+func (d *SyncDaemon) drainPendingNomadDeletes() []NomadChangeEvent {
+	d.pendingNomadMu.Lock()
+	defer d.pendingNomadMu.Unlock()
+
+	var deleteEvents []NomadChangeEvent
+	var remainingEvents []NomadChangeEvent
+
+	for _, evt := range d.pendingNomadChanges {
+		var deletes []NomadFileChange
+		var keeps []NomadFileChange
+		for _, ch := range evt.Changes {
+			if ch.Action == "delete" {
+				deletes = append(deletes, ch)
+			} else {
+				keeps = append(keeps, ch)
+			}
+		}
+		if len(deletes) > 0 {
+			evtCopy := evt
+			evtCopy.Changes = deletes
+			deleteEvents = append(deleteEvents, evtCopy)
+		}
+		if len(keeps) > 0 {
+			evtCopy := evt
+			evtCopy.Changes = keeps
+			remainingEvents = append(remainingEvents, evtCopy)
+		}
+	}
+	d.pendingNomadChanges = remainingEvents
+	return deleteEvents
+}
+
 // getComposeArgs constructs the compose CLI flags with base docker-compose.yml and any present overrides.
 func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []string {
 	baseFile := filepath.Join(composeDir, "docker-compose.yml")
@@ -2394,42 +2428,47 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
 
-			hasDeferredApply := false
-			for _, ch := range nomadChanges {
-				if ch.Action != "delete" {
-					fullPath := filepath.Join(repoPath, ch.Path)
-					if content, readErr := os.ReadFile(fullPath); readErr == nil {
-						jobSpec := string(content)
-						if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
-							hasDeferredApply = true
-							break
-						}
-					}
-				}
+			type classifiedChange struct {
+				change   NomadFileChange
+				deferred bool
 			}
+			classified := make([]classifiedChange, 0, len(nomadChanges))
+			hasDeferredApply := false
 
-			var immediateChanges []NomadFileChange
-			var deferredDeletes []NomadFileChange
 			for _, ch := range nomadChanges {
 				if ch.Action == "delete" {
-					if hasDeferredApply || containersBuilding {
-						deferredDeletes = append(deferredDeletes, ch)
-					} else {
-						immediateChanges = append(immediateChanges, ch)
-					}
+					classified = append(classified, classifiedChange{change: ch})
 					continue
 				}
 
 				fullPath := filepath.Join(repoPath, ch.Path)
+				deferred := false
 				if content, readErr := os.ReadFile(fullPath); readErr == nil {
 					jobSpec := string(content)
 					if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
-						resp.ContainersBuilding = true
-						log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
-						continue
+						deferred = true
 					}
 				}
-				immediateChanges = append(immediateChanges, ch)
+				if deferred {
+					hasDeferredApply = true
+					resp.ContainersBuilding = true
+					log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
+				}
+				classified = append(classified, classifiedChange{change: ch, deferred: deferred})
+			}
+
+			var immediateChanges []NomadFileChange
+			var deferredDeletes []NomadFileChange
+			for _, item := range classified {
+				if item.change.Action == "delete" {
+					if hasDeferredApply || containersBuilding {
+						deferredDeletes = append(deferredDeletes, item.change)
+					} else {
+						immediateChanges = append(immediateChanges, item.change)
+					}
+				} else if !item.deferred {
+					immediateChanges = append(immediateChanges, item.change)
+				}
 			}
 
 			if len(deferredDeletes) > 0 {
@@ -2562,21 +2601,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 
 	SortMatchedJobsHangarLast(matches)
 
-	pending := d.drainPendingNomadChanges()
-	var pendingTeardowns []NomadChangeEvent
-	for _, evt := range pending {
-		var deletes []NomadFileChange
-		for _, ch := range evt.Changes {
-			if ch.Action == "delete" {
-				deletes = append(deletes, ch)
-			}
-		}
-		if len(deletes) > 0 {
-			evtCopy := evt
-			evtCopy.Changes = deletes
-			pendingTeardowns = append(pendingTeardowns, evtCopy)
-		}
-	}
+	pendingTeardowns := d.drainPendingNomadDeletes()
 	if len(pendingTeardowns) > 0 {
 		d.ExecuteNomadTeardowns(ctx, pendingTeardowns)
 	}

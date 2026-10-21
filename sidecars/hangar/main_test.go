@@ -3493,25 +3493,26 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 	}`
 
 	type imageReadyCase struct {
-		name                string
-		jobDir              string
-		jobFile             string
-		jobHCL              string
-		req                 ImageReadyEventRequest
-		valErr              error
-		runErr              error
-		restartErr          error
-		registryNotFound    bool
-		removeJobOnRegistry bool
-		pendingDeletes      []NomadFileChange
-		wantCode            int
-		wantStatus          string
-		wantRuns            int
-		wantRests           int
-		wantRunArg          string
-		wantEvent           string
-		wantCachedDigest    string
-		wantStoppedJobs     []string
+		name                 string
+		jobDir               string
+		jobFile              string
+		jobHCL               string
+		req                  ImageReadyEventRequest
+		valErr               error
+		runErr               error
+		restartErr           error
+		registryNotFound     bool
+		removeJobOnRegistry  bool
+		pendingDeletes       []NomadFileChange
+		wantCode             int
+		wantStatus           string
+		wantRuns             int
+		wantRests            int
+		wantRunArg           string
+		wantEvent            string
+		wantCachedDigest     string
+		wantStoppedJobs      []string
+		wantRemainingPending int
 	}
 
 	cases := []imageReadyCase{
@@ -3728,6 +3729,34 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantRuns:        1,
 			wantStoppedJobs: []string{"memory-mcp"},
 		},
+		{
+			name:    "drains deletes while preserving non-delete changes",
+			jobFile: "coven.nomad",
+			jobHCL: `variable "image_tag" {
+				type    = string
+				default = "latest"
+			}
+			job "coven" {
+				task "coven" {
+					config {
+						image = "ghcr.io/azylman/aerial-coven:${var.image_tag}"
+					}
+				}
+			}`,
+			req: ImageReadyEventRequest{
+				Image:     "ghcr.io/azylman/aerial-coven:latest",
+				CommitSHA: "sha_coven_ready",
+			},
+			pendingDeletes: []NomadFileChange{
+				{JobName: "memory-mcp", Action: "delete"},
+				{JobName: "pending-service", Action: "apply"},
+			},
+			wantCode:             http.StatusOK,
+			wantStatus:           "accepted",
+			wantRuns:             1,
+			wantStoppedJobs:      []string{"memory-mcp"},
+			wantRemainingPending: 1,
+		},
 	}
 
 	for _, tc := range cases {
@@ -3806,8 +3835,13 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 						t.Errorf("stopped job[%d] = %q, want %q", i, stopped[i], j)
 					}
 				}
-				if remainingPending := env.daemon.drainPendingNomadChanges(); len(remainingPending) != 0 {
-					t.Fatalf("expected zero remaining pending changes after drain, got %+v", remainingPending)
+				remainingPending := env.daemon.drainPendingNomadChanges()
+				var gotRemainingCount int
+				for _, evt := range remainingPending {
+					gotRemainingCount += len(evt.Changes)
+				}
+				if gotRemainingCount != tc.wantRemainingPending {
+					t.Fatalf("expected %d remaining pending changes after drain, got %d (%+v)", tc.wantRemainingPending, gotRemainingCount, remainingPending)
 				}
 			}
 			if tc.wantCachedDigest != "" {
@@ -5069,7 +5103,11 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		dEmpty.recordPendingNomadChanges("/repo/b", []NomadFileChange{
 			{JobName: "job-b", Path: "jobs/job-b.nomad", Action: "delete"},
 		})
-		if drained := dEmpty.drainPendingNomadChanges(); len(drained) != 2 || len(dEmpty.drainPendingNomadChanges()) != 0 {
+		delOnly := dEmpty.drainPendingNomadDeletes()
+		if len(delOnly) != 1 || len(delOnly[0].Changes) != 1 || delOnly[0].Changes[0].JobName != "job-b" {
+			t.Fatalf("unexpected drainPendingNomadDeletes result: %+v", delOnly)
+		}
+		if drained := dEmpty.drainPendingNomadChanges(); len(drained) != 1 || len(drained[0].Changes) != 1 || drained[0].Changes[0].JobName != "job-a" || len(dEmpty.drainPendingNomadChanges()) != 0 {
 			t.Fatalf("unexpected drain result: len=%d", len(drained))
 		}
 
