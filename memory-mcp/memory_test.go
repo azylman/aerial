@@ -1497,6 +1497,33 @@ func TestServer_Endpoints(t *testing.T) {
 			wantStatus: http.StatusMethodNotAllowed,
 		},
 		{
+			name:       "ConsolidateOK",
+			method:     http.MethodPost,
+			path:       "/consolidate",
+			wantStatus: http.StatusOK,
+			wantSubstr: `"consolidated":0`,
+		},
+		{
+			name:       "ConsolidateStoreError",
+			method:     http.MethodPost,
+			path:       "/consolidate",
+			storeFail:  "GetAllFactsWithEmbeddings",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "ConsolidateMethodNotAllowed",
+			method:     http.MethodGet,
+			path:       "/consolidate",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "MCPDirectConsolidateRoute",
+			method:     http.MethodPost,
+			path:       "/consolidate",
+			directMCP:  true,
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:       "MCPGetProbe",
 			method:     http.MethodGet,
 			path:       "/mcp",

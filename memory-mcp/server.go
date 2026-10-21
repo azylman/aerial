@@ -90,6 +90,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/debug/coverage/flush", s.handleCoverageFlush)
 	mux.HandleFunc("/facts", s.handleFacts)
 	mux.HandleFunc("/context", s.handleContext)
+	mux.HandleFunc("/consolidate", s.handleConsolidate)
 
 	mcpBridge := http.HandlerFunc(s.handleMCP)
 	mux.Handle("/mcp", mcpBridge)
@@ -197,6 +198,25 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleConsolidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	consolidated, err := s.handler.Consolidate(context.WithoutCancel(r.Context()))
+	if err != nil {
+		log.Printf("[memory-mcp] error consolidating facts: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	writeResponse(w, r, []byte(fmt.Sprintf(`{"status":"ok","consolidated":%d}`, consolidated)))
+}
+
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/health" {
 		s.handleHealth(w, r)
@@ -212,6 +232,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/context" {
 		s.handleContext(w, r)
+		return
+	}
+	if r.URL.Path == "/consolidate" {
+		s.handleConsolidate(w, r)
 		return
 	}
 
