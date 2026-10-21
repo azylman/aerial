@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -127,7 +128,8 @@ func isLikelyLatexMath(s string) bool {
 		for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
 			k++
 		}
-		return k < len(s) && strings.ContainsRune(`\=^_<>±×·+-*/`, rune(s[k]))
+		r, _ := utf8.DecodeRuneInString(s[k:])
+		return k < len(s) && strings.ContainsRune(`\=^_<>±×·+-*/`, r)
 	}
 	if len(s) == 1 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
 		return true
