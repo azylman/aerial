@@ -10,6 +10,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
@@ -141,29 +142,7 @@ func (r *Router) handleRotate(s *discordgo.Session, i *discordgo.InteractionCrea
 		}
 	}
 
-	if pool := r.getPool(); pool != nil {
-		if procPool := pool.ProcessPool(); procPool != nil {
-			if d, ok := procPool.Get(targetThreadID); ok && d != nil {
-				if err := d.Close(); err != nil {
-					log.Printf("[Interactions] Warning: failed to close process on rotate: %v", err)
-				}
-			}
-		}
-		if lowPool := pool.LowEffortProcessPool(); lowPool != nil {
-			if d, ok := lowPool.Get(targetThreadID); ok && d != nil {
-				if err := d.Close(); err != nil {
-					log.Printf("[Interactions] Warning: failed to close low-effort process on rotate: %v", err)
-				}
-			}
-		}
-		if medPool := pool.MediumEffortProcessPool(); medPool != nil {
-			if d, ok := medPool.Get(targetThreadID); ok && d != nil {
-				if err := d.Close(); err != nil {
-					log.Printf("[Interactions] Warning: failed to close medium-effort process on rotate: %v", err)
-				}
-			}
-		}
-	}
+	r.closeThreadProcesses(targetThreadID, "rotate")
 
 	msg := fmt.Sprintf("🔄 Session rotated for <#%s>. Fresh context initialized (`%s`).", targetThreadID, newSessionID[:8])
 	if bare {
@@ -180,35 +159,38 @@ func (r *Router) handleRotate(s *discordgo.Session, i *discordgo.InteractionCrea
 	}
 }
 
+func (r *Router) closeThreadProcesses(threadID, reason string) {
+	pool := r.getPool()
+	if pool == nil {
+		return
+	}
+	pools := []struct {
+		desc string
+		p    *runner.UnifiedProcessPool
+	}{
+		{"process", pool.ProcessPool()},
+		{"low-effort process", pool.LowEffortProcessPool()},
+		{"medium-effort process", pool.MediumEffortProcessPool()},
+	}
+	for _, target := range pools {
+		if target.p == nil {
+			continue
+		}
+		if d, ok := target.p.Get(threadID); ok && d != nil {
+			if err := d.Close(); err != nil {
+				log.Printf("[Interactions] Warning: failed to close %s on %s: %v", target.desc, reason, err)
+			}
+		}
+	}
+}
+
 func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	drainQueue := getBoolOption(data.Options, "drain_queue", true)
 	reset := getBoolOption(data.Options, "reset", false)
 	targetThreadID := i.ChannelID
 
 	// Terminate active running daemon and process group
-	if pool := r.getPool(); pool != nil {
-		if procPool := pool.ProcessPool(); procPool != nil {
-			if d, ok := procPool.Get(targetThreadID); ok && d != nil {
-				if err := d.Close(); err != nil {
-					log.Printf("[Interactions] Warning: failed to close process on interrupt: %v", err)
-				}
-			}
-		}
-		if lowPool := pool.LowEffortProcessPool(); lowPool != nil {
-			if d, ok := lowPool.Get(targetThreadID); ok && d != nil {
-				if err := d.Close(); err != nil {
-					log.Printf("[Interactions] Warning: failed to close low-effort process on interrupt: %v", err)
-				}
-			}
-		}
-		if medPool := pool.MediumEffortProcessPool(); medPool != nil {
-			if d, ok := medPool.Get(targetThreadID); ok && d != nil {
-				if err := d.Close(); err != nil {
-					log.Printf("[Interactions] Warning: failed to close medium-effort process on interrupt: %v", err)
-				}
-			}
-		}
-	}
+	r.closeThreadProcesses(targetThreadID, "interrupt")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
