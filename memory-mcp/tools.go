@@ -10,9 +10,8 @@ import (
 
 // MemorySearchArgs defines inputs for the memory_search MCP tool.
 type MemorySearchArgs struct {
-	Query    string `json:"query" jsonschema:"Search query text to find semantically relevant facts."`
-	Category string `json:"category,omitempty" jsonschema:"Optional fact category filter (e.g. user_preference, system_config, identity)."`
-	Limit    int    `json:"limit,omitempty" jsonschema:"Maximum number of facts to return (default 5, max 20)."`
+	Query string `json:"query" jsonschema:"Search query text to find semantically relevant facts."`
+	Limit int    `json:"limit,omitempty" jsonschema:"Maximum number of facts to return (default 5, max 20)."`
 }
 
 // MemorySearchOutput defines the output structure for memory_search.
@@ -24,10 +23,8 @@ type MemorySearchOutput struct {
 
 // MemoryStoreArgs defines inputs for the memory_store MCP tool.
 type MemoryStoreArgs struct {
-	FactText     string  `json:"fact_text" jsonschema:"The fact text to persist or update."`
-	Category     string  `json:"category,omitempty" jsonschema:"Category of the fact (e.g. user_preference, system_config, identity)."`
-	Importance   float64 `json:"importance,omitempty" jsonschema:"Importance score from 0.1 to 1.0 (default 0.7)."`
-	SupersedesID int64   `json:"supersedes_id,omitempty" jsonschema:"Optional ID of an existing fact to overwrite and supersede."`
+	FactText     string `json:"fact_text" jsonschema:"The fact text to persist or update."`
+	SupersedesID int64  `json:"supersedes_id,omitempty" jsonschema:"Optional ID of an existing fact to overwrite and supersede."`
 }
 
 // MemoryStoreOutput defines the result structure for memory_store.
@@ -80,11 +77,7 @@ func FormatMemoryContext(facts []Fact) string {
 	var sb strings.Builder
 	sb.WriteString("<retrieved_memory>\n")
 	for _, f := range facts {
-		cat := f.Category
-		if cat == "" {
-			cat = "general"
-		}
-		sb.WriteString(fmt.Sprintf("- [%s] %s\n", cat, f.FactText))
+		sb.WriteString(fmt.Sprintf("- [id:%d] %s\n", f.ID, f.FactText))
 	}
 	sb.WriteString("</retrieved_memory>\n")
 	return sb.String()
@@ -120,7 +113,7 @@ func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (
 		}
 	}
 
-	candidates, err := h.store.SearchCandidateFacts(ctx, emb, query, strings.TrimSpace(args.Category), candidateLimit, DefaultMinScore)
+	candidates, err := h.store.SearchCandidateFacts(ctx, emb, query, candidateLimit, DefaultMinScore)
 	if err != nil {
 		return MemorySearchOutput{Facts: []Fact{}}, fmt.Errorf("failed to search candidate facts: %w", err)
 	}
@@ -145,44 +138,30 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 		return MemoryStoreOutput{}, fmt.Errorf("'fact_text' cannot be empty")
 	}
 
-	category := strings.TrimSpace(args.Category)
-	if category == "" {
-		category = "general"
-	}
-
-	importance := args.Importance
-	if importance <= 0 {
-		importance = 0.70
-	}
-	if importance > 1.0 {
-		importance = 1.0
-	}
-
 	if args.SupersedesID == 0 {
-		admit, adjustedImportance, reason := EvaluateCandidateAdmission(ExtractedFactItem{
-			Category:   category,
-			FactText:   factText,
-			Importance: importance,
+		admit, _, reason := EvaluateCandidateAdmission(ExtractedFactItem{
+			FactText: factText,
 		})
 		if !admit {
 			return MemoryStoreOutput{}, fmt.Errorf("fact rejected by admission gate (%s)", reason)
 		}
-		importance = adjustedImportance
 	}
 
-	var emb []float32
-	if h.ollama != nil {
-		vec, err := h.ollama.GenerateEmbedding(ctx, factText, false, 1)
-		if err != nil {
-			log.Printf("[Memory] Warning: Document embedding generation failed: %v", err)
-		} else {
-			emb = vec
-		}
+	if h.ollama == nil {
+		return MemoryStoreOutput{}, fmt.Errorf("ollama client is required for embedding generation")
+	}
+
+	emb, err := h.ollama.GenerateEmbedding(ctx, factText, false, 1)
+	if err != nil {
+		return MemoryStoreOutput{}, fmt.Errorf("failed to generate embedding: %w", err)
+	}
+	if len(emb) != ExpectedEmbeddingDim {
+		return MemoryStoreOutput{}, fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(emb))
 	}
 
 	// 1. Explicit overwrite via supersedes_id
 	if args.SupersedesID > 0 {
-		err := h.store.UpdateFact(ctx, args.SupersedesID, category, factText, importance, emb)
+		err := h.store.UpdateFact(ctx, args.SupersedesID, factText, emb)
 		if err != nil {
 			if errors.Is(err, ErrFactNotFound) {
 				return MemoryStoreOutput{}, fmt.Errorf("fact with id %d not found to supersede", args.SupersedesID)
@@ -198,24 +177,22 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	}
 
 	// 2. Near-duplicate deduplication via cosine similarity threshold (0.85)
-	if len(emb) > 0 {
-		dup, sim, err := h.store.FindDuplicateFact(ctx, emb, 0.85)
-		if err == nil && dup != nil {
-			log.Printf("[Memory] Reinforcing duplicate fact %d (sim=%.2f, text=%q)", dup.ID, sim, dup.FactText)
-			if err := h.store.ReinforceFact(ctx, dup.ID, factText, emb, 0.15); err != nil {
-				return MemoryStoreOutput{}, fmt.Errorf("failed to reinforce duplicate fact: %w", err)
-			}
-			return MemoryStoreOutput{
-				Status:  "success",
-				FactID:  dup.ID,
-				Action:  "reinforced",
-				Message: "Fact reinforced successfully.",
-			}, nil
+	dup, sim, err := h.store.FindDuplicateFact(ctx, emb, 0.85)
+	if err == nil && dup != nil {
+		log.Printf("[Memory] Reinforcing duplicate fact %d (sim=%.2f, text=%q)", dup.ID, sim, dup.FactText)
+		if err := h.store.ReinforceFact(ctx, dup.ID); err != nil {
+			return MemoryStoreOutput{}, fmt.Errorf("failed to reinforce duplicate fact: %w", err)
 		}
+		return MemoryStoreOutput{
+			Status:  "success",
+			FactID:  dup.ID,
+			Action:  "reinforced",
+			Message: "Fact reinforced successfully.",
+		}, nil
 	}
 
 	// 3. Insert new fact
-	id, err := h.store.InsertFact(ctx, category, factText, importance, emb)
+	id, err := h.store.InsertFact(ctx, factText, emb)
 	if err != nil {
 		return MemoryStoreOutput{}, fmt.Errorf("failed to insert fact: %w", err)
 	}
@@ -290,7 +267,7 @@ func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (
 		}
 	}
 
-	candidates, err := h.store.SearchCandidateFacts(ctx, emb, cleanQuery, "", candidateLimit, DefaultMinScore)
+	candidates, err := h.store.SearchCandidateFacts(ctx, emb, cleanQuery, candidateLimit, DefaultMinScore)
 	if err != nil {
 		log.Printf("[Memory] Warning: Candidate search failed: %v. Proceeding with empty context.", err)
 		return &ContextResponse{
@@ -303,16 +280,6 @@ func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (
 	facts := make([]Fact, len(scored))
 	for i, s := range scored {
 		facts[i] = s.Fact
-	}
-
-	if len(facts) > 0 {
-		ids := make([]int64, len(facts))
-		for i, f := range facts {
-			ids[i] = f.ID
-		}
-		if err := h.store.TouchRetrievedFacts(ctx, ids, 0.02); err != nil {
-			log.Printf("[Memory] Warning: TouchRetrievedFacts failed: %v", err)
-		}
 	}
 
 	return &ContextResponse{

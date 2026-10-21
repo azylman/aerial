@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -20,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pgvector/pgvector-go"
 	_ "modernc.org/sqlite"
 )
 
@@ -54,6 +54,20 @@ func newTestMemStore() *TestMemStore {
 	}
 }
 
+func testEmbedding(firstVal float32) []float32 {
+	emb := make([]float32, ExpectedEmbeddingDim)
+	emb[0] = firstVal
+	return emb
+}
+
+func testEmbeddingAt(idx int, val float32) []float32 {
+	emb := make([]float32, ExpectedEmbeddingDim)
+	if idx >= 0 && idx < ExpectedEmbeddingDim {
+		emb[idx] = val
+	}
+	return emb
+}
+
 func (m *TestMemStore) SetFail(op string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -61,54 +75,59 @@ func (m *TestMemStore) SetFail(op string, err error) {
 	m.failErr = err
 }
 
-func (m *TestMemStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
+func (m *TestMemStore) InsertFact(ctx context.Context, factText string, embedding []float32) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "InsertFact" {
 		return 0, m.failErr
+	}
+	factText = strings.TrimSpace(factText)
+	if factText == "" {
+		return 0, fmt.Errorf("fact text cannot be empty")
+	}
+	if len(embedding) != ExpectedEmbeddingDim {
+		return 0, fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
 	id := m.nextID
 	m.nextID++
 	now := time.Now().UTC()
 	f := &Fact{
 		ID:               id,
-		Category:         category,
 		FactText:         factText,
-		Importance:       importance,
 		CreatedAt:        now,
 		LastReinforcedAt: now,
-		LastDecayedAt:    now,
 		ReinforceCount:   1,
 	}
 	m.facts[id] = f
-	if len(embedding) > 0 {
-		m.embeddings[id] = append([]float32(nil), embedding...)
-	}
+	m.embeddings[id] = append([]float32(nil), embedding...)
 	return id, nil
 }
 
-func (m *TestMemStore) UpdateFact(ctx context.Context, id int64, category, factText string, importance float64, embedding []float32) error {
+func (m *TestMemStore) UpdateFact(ctx context.Context, id int64, factText string, embedding []float32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "UpdateFact" {
 		return m.failErr
 	}
+	factText = strings.TrimSpace(factText)
+	if factText == "" {
+		return fmt.Errorf("fact text cannot be empty")
+	}
+	if len(embedding) != ExpectedEmbeddingDim {
+		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
+	}
 	f, ok := m.facts[id]
 	if !ok {
 		return ErrFactNotFound
 	}
-	f.Category = category
 	f.FactText = factText
-	f.Importance = importance
 	f.LastReinforcedAt = time.Now().UTC()
 	f.ReinforceCount++
-	if len(embedding) > 0 {
-		m.embeddings[id] = append([]float32(nil), embedding...)
-	}
+	m.embeddings[id] = append([]float32(nil), embedding...)
 	return nil
 }
 
-func (m *TestMemStore) ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error {
+func (m *TestMemStore) ReinforceFact(ctx context.Context, id int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "ReinforceFact" {
@@ -118,15 +137,8 @@ func (m *TestMemStore) ReinforceFact(ctx context.Context, id int64, newText stri
 	if !ok {
 		return ErrFactNotFound
 	}
-	f.Importance = min(1.0, f.Importance+boost)
 	f.LastReinforcedAt = time.Now().UTC()
 	f.ReinforceCount++
-	if newText != "" {
-		f.FactText = newText
-	}
-	if len(newEmbedding) > 0 {
-		m.embeddings[id] = append([]float32(nil), newEmbedding...)
-	}
 	return nil
 }
 
@@ -150,9 +162,18 @@ func (m *TestMemStore) FindDuplicateFact(ctx context.Context, embedding []float3
 	if m.failOp == "FindDuplicateFact" {
 		return nil, 0, m.failErr
 	}
+	if len(embedding) != ExpectedEmbeddingDim {
+		return nil, 0, nil
+	}
+	if minSim <= 0 {
+		minSim = 0.85
+	}
 	var bestFact *Fact
 	var bestSim float64
 	for id, emb := range m.embeddings {
+		if len(emb) != ExpectedEmbeddingDim {
+			continue
+		}
 		sim := CosineSimilarity(embedding, emb)
 		if sim >= minSim && sim > bestSim {
 			bestSim = sim
@@ -163,40 +184,45 @@ func (m *TestMemStore) FindDuplicateFact(ctx context.Context, embedding []float3
 	return bestFact, bestSim, nil
 }
 
-func (m *TestMemStore) SearchCandidateFacts(ctx context.Context, embedding []float32, queryText, category string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error) {
+func (m *TestMemStore) SearchCandidateFacts(ctx context.Context, embedding []float32, queryText string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "SearchCandidateFacts" {
 		return nil, m.failErr
 	}
+	queryText = strings.TrimSpace(queryText)
+	if len(embedding) != ExpectedEmbeddingDim || queryText == "" {
+		return nil, nil
+	}
+	if candidateLimit <= 0 {
+		candidateLimit = DefaultCandidateLimit
+	}
+	if minScore <= 0 {
+		minScore = DefaultMinScore
+	}
 	var candidates []ScoredFactWithEmbedding
 	for id, f := range m.facts {
-		if category != "" && f.Category != category {
+		emb := m.embeddings[id]
+		if len(emb) != ExpectedEmbeddingDim {
 			continue
 		}
-		var sim float64
-		if len(embedding) > 0 && len(m.embeddings[id]) > 0 {
-			sim = CosineSimilarity(embedding, m.embeddings[id])
-		}
+		sim := CosineSimilarity(embedding, emb)
 		var textScore float64
-		if queryText != "" && strings.Contains(strings.ToLower(f.FactText), strings.ToLower(queryText)) {
+		if strings.Contains(strings.ToLower(f.FactText), strings.ToLower(queryText)) {
 			textScore = 1.0
 		}
-		score := f.Importance
-		if len(embedding) > 0 && queryText != "" {
-			score = (0.70*sim + 0.30*textScore) * f.Importance
-		} else if len(embedding) > 0 {
-			score = sim * f.Importance
-		} else if queryText != "" {
-			score = textScore * f.Importance
-		}
+		score := (DefaultDenseWeight*sim + DefaultSparseWeight*textScore) * (1.0 + 0.15*math.Log(1.0+float64(f.ReinforceCount)))
 		if score >= minScore {
 			candidates = append(candidates, ScoredFactWithEmbedding{
 				Fact:      *f,
-				Embedding: m.embeddings[id],
+				Embedding: emb,
 				Score:     score,
 			})
 		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+	if candidateLimit > 0 && len(candidates) > candidateLimit {
+		candidates = candidates[:candidateLimit]
 	}
 	return candidates, nil
 }
@@ -209,16 +235,25 @@ func (m *TestMemStore) GetFactsPaginated(ctx context.Context, filter FactsFilter
 	}
 	var list []Fact
 	for _, f := range m.facts {
-		if filter.Category != "" && f.Category != filter.Category {
-			continue
-		}
 		if filter.Query != "" && !strings.Contains(strings.ToLower(f.FactText), strings.ToLower(filter.Query)) {
 			continue
 		}
 		list = append(list, *f)
 	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].ReinforceCount != list[j].ReinforceCount {
+			return list[i].ReinforceCount > list[j].ReinforceCount
+		}
+		if !list[i].LastReinforcedAt.Equal(list[j].LastReinforcedAt) {
+			return list[i].LastReinforcedAt.After(list[j].LastReinforcedAt)
+		}
+		return list[i].ID > list[j].ID
+	})
 	total := len(list)
 	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
 	if offset > total {
 		offset = total
 	}
@@ -237,113 +272,6 @@ func (m *TestMemStore) GetFactsPaginated(ctx context.Context, filter FactsFilter
 		Offset: filter.Offset,
 		Status: "ok",
 	}, nil
-}
-
-func (m *TestMemStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.failOp == "GetFactsMissingEmbeddings" {
-		return nil, m.failErr
-	}
-	var res []Fact
-	for id, f := range m.facts {
-		if len(m.embeddings[id]) == 0 {
-			res = append(res, *f)
-			if limit > 0 && len(res) >= limit {
-				break
-			}
-		}
-	}
-	return res, nil
-}
-
-func (m *TestMemStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.failOp == "UpdateFactEmbedding" {
-		return m.failErr
-	}
-	if _, ok := m.facts[id]; !ok {
-		return ErrFactNotFound
-	}
-	m.embeddings[id] = append([]float32(nil), embedding...)
-	return nil
-}
-
-func (m *TestMemStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.failOp == "DecayAndPruneFacts" {
-		return 0, 0, m.failErr
-	}
-	if decayStep <= 0 {
-		decayStep = 0.05
-	}
-	if pruneFloor <= 0 {
-		pruneFloor = 0.15
-	}
-	if pruneAgeDays <= 0 {
-		pruneAgeDays = 14
-	}
-	var decayed, pruned int64
-	now := time.Now().UTC()
-	decayCutoff := now.Add(-24 * time.Hour)
-	pruneCutoff := now.AddDate(0, 0, -pruneAgeDays)
-
-	for id, f := range m.facts {
-		floor := 0.0
-		switch f.Category {
-		case "user_preference":
-			floor = 0.75
-		case "system_config":
-			floor = 0.60
-		case "routine":
-			floor = 0.50
-		}
-
-		if (f.LastDecayedAt.IsZero() || f.LastDecayedAt.Before(decayCutoff)) &&
-			(f.LastReinforcedAt.IsZero() || f.LastReinforcedAt.Before(decayCutoff)) &&
-			f.Importance > floor {
-			f.Importance = math.Max(floor, math.Round((f.Importance-decayStep)*100)/100)
-			f.LastDecayedAt = now
-			decayed++
-		}
-		if f.Importance <= pruneFloor && (f.LastReinforcedAt.IsZero() || f.LastReinforcedAt.Before(pruneCutoff)) {
-			delete(m.facts, id)
-			delete(m.embeddings, id)
-			pruned++
-		}
-	}
-	return decayed, pruned, nil
-}
-
-func (m *TestMemStore) TouchRetrievedFacts(ctx context.Context, ids []int64, boost float64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.failOp == "TouchRetrievedFacts" {
-		return m.failErr
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	if boost <= 0 {
-		boost = 0.02
-	}
-	now := time.Now().UTC()
-	cutoff := now.Add(-24 * time.Hour)
-	for _, id := range ids {
-		if f, ok := m.facts[id]; ok {
-			if f.LastReinforcedAt.IsZero() || f.LastReinforcedAt.Before(cutoff) {
-				f.Importance = math.Min(1.0, math.Round((f.Importance+boost)*100)/100)
-				f.LastReinforcedAt = now
-				if f.ReinforceCount == 0 {
-					f.ReinforceCount = 1
-				}
-				f.ReinforceCount++
-			}
-		}
-	}
-	return nil
 }
 
 func (m *TestMemStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error) {
@@ -1112,15 +1040,15 @@ func TestFormatMemoryContext(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
-			name: "CategorizedFacts",
+			name: "FormattedFacts",
 			facts: []Fact{
-				{Category: "user_preference", FactText: "Prefers Pacific timezone"},
-				{Category: "", FactText: "Default category fallback"},
+				{ID: 1, FactText: "Prefers Pacific timezone"},
+				{ID: 2, FactText: "Default category fallback"},
 			},
 			wantContains: []string{
 				"<retrieved_memory>",
-				"- [user_preference] Prefers Pacific timezone",
-				"- [general] Default category fallback",
+				"- [id:1] Prefers Pacific timezone",
+				"- [id:2] Default category fallback",
 				"</retrieved_memory>",
 			},
 		},
@@ -1143,8 +1071,8 @@ func TestFormatMemoryContext(t *testing.T) {
 
 func TestToolHandler_MemorySearch(t *testing.T) {
 	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "user", "User lives in Metropolis", 0.9, []float32{1, 0})
-	_, _ = store.InsertFact(context.Background(), "work", "User works in tech", 0.8, []float32{0, 1})
+	_, _ = store.InsertFact(context.Background(), "User lives in Metropolis", testEmbedding(1.0))
+	_, _ = store.InsertFact(context.Background(), "User works in tech", testEmbeddingAt(1, 1.0))
 
 	tests := []struct {
 		name      string
@@ -1163,7 +1091,7 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 			name:      "NegativeLimitAndOllamaWarningFallback",
 			args:      MemorySearchArgs{Query: "Metropolis", Limit: -1},
 			ollamaErr: errors.New("ollama offline"),
-			wantCount: 1,
+			wantCount: 0,
 		},
 		{
 			name:      "HighLimitClamped",
@@ -1185,7 +1113,7 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ollama := &MockOllamaClient{embedding: []float32{1, 0}, err: tc.ollamaErr}
+			ollama := &MockOllamaClient{embedding: testEmbedding(1.0), err: tc.ollamaErr}
 			handler := NewToolHandler(&Config{}, store, ollama)
 			if tc.storeFail {
 				store.SetFail("SearchCandidateFacts", errors.New("search fail"))
@@ -1204,7 +1132,7 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 
 func TestToolHandler_MemoryStore(t *testing.T) {
 	store := newTestMemStore()
-	existingID, _ := store.InsertFact(context.Background(), "user", "Existing Fact", 0.8, []float32{1.0, 0.0})
+	existingID, _ := store.InsertFact(context.Background(), "Existing Fact", testEmbedding(1.0))
 
 	tests := []struct {
 		name       string
@@ -1218,47 +1146,47 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 	}{
 		{
 			name:       "ReinforceDuplicateFact",
-			args:       MemoryStoreArgs{FactText: "Brand new fact", Category: "system"},
-			emb:        []float32{1.0, 0.0},
+			args:       MemoryStoreArgs{FactText: "Brand new fact"},
+			emb:        testEmbedding(1.0),
 			wantAction: "reinforced",
 			wantID:     existingID,
 		},
 		{
 			name:      "ReinforceDuplicateError",
 			args:      MemoryStoreArgs{FactText: "Brand new fact"},
-			emb:       []float32{1.0, 0.0},
+			emb:       testEmbedding(1.0),
 			storeFail: "ReinforceFact",
 			wantErr:   true,
 		},
 		{
-			name:       "InsertUniqueFactWithClampedHighImportance",
-			args:       MemoryStoreArgs{FactText: "Unique fact", Importance: 5.0},
-			emb:        []float32{0.0, 1.0},
+			name:       "InsertUniqueFact",
+			args:       MemoryStoreArgs{FactText: "Unique fact"},
+			emb:        testEmbeddingAt(2, 1.0),
 			wantAction: "inserted",
 		},
 		{
-			name:       "InsertWithOllamaWarningAndNegativeImportance",
-			args:       MemoryStoreArgs{FactText: "Fact without embedding", Importance: -0.5},
-			ollamaErr:  errors.New("embed error"),
-			wantAction: "inserted",
+			name:      "InsertWithOllamaErrorFails",
+			args:      MemoryStoreArgs{FactText: "Fact with error"},
+			ollamaErr: errors.New("embed error"),
+			wantErr:   true,
 		},
 		{
 			name:       "SupersedeExistingFact",
-			args:       MemoryStoreArgs{FactText: "Updated Fact", Category: "user", SupersedesID: existingID},
-			emb:        []float32{1.0, 0.0},
+			args:       MemoryStoreArgs{FactText: "Updated Fact", SupersedesID: existingID},
+			emb:        testEmbedding(1.0),
 			wantAction: "updated",
 			wantID:     existingID,
 		},
 		{
 			name:    "SupersedeNonexistentFails",
 			args:    MemoryStoreArgs{FactText: "Updated Fact", SupersedesID: 999999},
-			emb:     []float32{1.0, 0.0},
+			emb:     testEmbedding(1.0),
 			wantErr: true,
 		},
 		{
 			name:      "SupersedeStoreError",
 			args:      MemoryStoreArgs{FactText: "Updated Fact", SupersedesID: existingID},
-			emb:       []float32{1.0, 0.0},
+			emb:       testEmbedding(1.0),
 			storeFail: "UpdateFact",
 			wantErr:   true,
 		},
@@ -1270,6 +1198,7 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 		{
 			name:      "InsertStoreFails",
 			args:      MemoryStoreArgs{FactText: "Failing fact"},
+			emb:       testEmbeddingAt(3, 1.0),
 			storeFail: "InsertFact",
 			wantErr:   true,
 		},
@@ -1301,7 +1230,7 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 
 func TestToolHandler_MemoryForget(t *testing.T) {
 	store := newTestMemStore()
-	id, _ := store.InsertFact(context.Background(), "user", "Forget me", 0.5, nil)
+	id, _ := store.InsertFact(context.Background(), "Forget me", testEmbedding(1.0))
 	handler := NewToolHandler(&Config{}, store, nil)
 
 	tests := []struct {
@@ -1352,7 +1281,7 @@ func TestToolHandler_MemoryForget(t *testing.T) {
 
 func TestToolHandler_GetFacts(t *testing.T) {
 	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "profile", "Profile fact", 0.8, []float32{1, 0})
+	_, _ = store.InsertFact(context.Background(), "Profile fact", testEmbedding(1.0))
 	handler := NewToolHandler(&Config{}, store, nil)
 
 	tests := []struct {
@@ -1361,13 +1290,13 @@ func TestToolHandler_GetFacts(t *testing.T) {
 		wantTotal int
 	}{
 		{
-			name:      "MatchingCategory",
-			filter:    FactsFilter{Category: "profile"},
+			name:      "MatchingQuery",
+			filter:    FactsFilter{Query: "Profile"},
 			wantTotal: 1,
 		},
 		{
-			name:      "NonMatchingCategory",
-			filter:    FactsFilter{Category: "other"},
+			name:      "NonMatchingQuery",
+			filter:    FactsFilter{Query: "other"},
 			wantTotal: 0,
 		},
 	}
@@ -1387,7 +1316,7 @@ func TestToolHandler_GetFacts(t *testing.T) {
 
 func TestToolHandler_GetContext(t *testing.T) {
 	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "profile", "Profile fact", 0.8, []float32{1, 0})
+	_, _ = store.InsertFact(context.Background(), "Profile fact", testEmbedding(1.0))
 
 	tests := []struct {
 		name       string
@@ -1415,7 +1344,7 @@ func TestToolHandler_GetContext(t *testing.T) {
 			query:      "Profile",
 			limit:      -1,
 			ollamaErr:  errors.New("ollama down"),
-			wantSubstr: "Profile fact",
+			wantSubstr: "",
 		},
 		{
 			name:       "HighLimitClamped",
@@ -1440,7 +1369,7 @@ func TestToolHandler_GetContext(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ollama := &MockOllamaClient{embedding: []float32{1, 0}, err: tc.ollamaErr}
+			ollama := &MockOllamaClient{embedding: testEmbedding(1.0), err: tc.ollamaErr}
 			handler := NewToolHandler(&Config{}, store, ollama)
 			if tc.storeFail {
 				store.SetFail("SearchCandidateFacts", errors.New("search err"))
@@ -1470,8 +1399,8 @@ func TestServer_Endpoints(t *testing.T) {
 	}()
 
 	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "general", "Server fact test", 0.75, []float32{1, 0})
-	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: []float32{1, 0}})
+	_, _ = store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0))
+	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler)
 	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
@@ -1698,33 +1627,6 @@ func TestServer_PanicOnNilHandler(t *testing.T) {
 	_ = NewServer(nil)
 }
 
-func TestNullVector_Scan(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     any
-		wantValid bool
-		wantErr   bool
-	}{
-		{"NilInput", nil, false, false},
-		{"StringVector", "[1.0,2.0]", true, false},
-		{"PgvectorValue", pgvector.NewVector([]float32{3.0, 4.0}), true, false},
-		{"InvalidIntInput", 12345, false, true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var nv NullVector
-			err := nv.Scan(tc.input)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("NullVector.Scan() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && nv.Valid != tc.wantValid {
-				t.Errorf("nv.Valid = %v, want %v", nv.Valid, tc.wantValid)
-			}
-		})
-	}
-}
-
 func TestFactTime_Scan(t *testing.T) {
 	now := time.Now().UTC()
 	var nilTimePtr *time.Time
@@ -1771,12 +1673,6 @@ func TestEscapeSQLLikeAndHelpers(t *testing.T) {
 	writeResponse(httptest.NewRecorder(), nil, []byte("ok"))
 	writeResponse(&mockErrWriter{err: errors.New("write err")}, nil, []byte("fail"))
 
-	if optionalVectorArg(nil) != nil {
-		t.Error("expected nil for nil embedding")
-	}
-	if optionalVectorArg(make([]float32, ExpectedEmbeddingDim)) == nil {
-		t.Error("expected non-nil for 384-dim embedding")
-	}
 	if got := EscapeSQLLike("a%b_c\\d"); got != "a\\%b\\_c\\\\d" {
 		t.Errorf("EscapeSQLLike() = %q", got)
 	}
@@ -2001,42 +1897,50 @@ func setupTestDBMem(t *testing.T) *sql.DB {
 func TestSQLStore_InsertFact(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
-	emb := make([]float32, ExpectedEmbeddingDim)
+	validEmb := make([]float32, ExpectedEmbeddingDim)
 
 	tests := []struct {
-		name       string
-		nilDB      bool
-		category   string
-		factText   string
-		importance float64
-		queryErr   error
-		rowSQL     string
-		wantErr    bool
-		wantID     int64
+		name     string
+		nilDB    bool
+		factText string
+		emb      []float32
+		queryErr error
+		rowSQL   string
+		wantErr  bool
+		wantID   int64
 	}{
 		{
 			name:     "NilDBError",
 			nilDB:    true,
 			factText: "valid",
+			emb:      validEmb,
 			wantErr:  true,
 		},
 		{
 			name:     "EmptyFactText",
 			factText: "",
+			emb:      validEmb,
+			wantErr:  true,
+		},
+		{
+			name:     "InvalidEmbeddingDim",
+			factText: "valid",
+			emb:      make([]float32, 10),
 			wantErr:  true,
 		},
 		{
 			name:     "QueryError",
 			factText: "valid fact",
+			emb:      validEmb,
 			queryErr: errors.New("insert error"),
 			wantErr:  true,
 		},
 		{
-			name:       "SuccessDefaultCategoryAndImportance",
-			factText:   "valid fact",
-			importance: -1,
-			rowSQL:     "SELECT 42",
-			wantID:     42,
+			name:     "SuccessValidFact",
+			factText: "valid fact",
+			emb:      validEmb,
+			rowSQL:   "SELECT 42",
+			wantID:   42,
 		},
 	}
 
@@ -2052,7 +1956,7 @@ func TestSQLStore_InsertFact(t *testing.T) {
 					rowSQL:   tc.rowSQL,
 				})
 			}
-			id, err := store.InsertFact(ctx, tc.category, tc.factText, tc.importance, emb)
+			id, err := store.InsertFact(ctx, tc.factText, tc.emb)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("InsertFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -2066,14 +1970,13 @@ func TestSQLStore_InsertFact(t *testing.T) {
 func TestSQLStore_UpdateFact(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
-	emb := make([]float32, ExpectedEmbeddingDim)
+	validEmb := make([]float32, ExpectedEmbeddingDim)
 
 	tests := []struct {
 		name         string
 		nilDB        bool
-		category     string
 		factText     string
-		importance   float64
+		emb          []float32
 		execErr      error
 		rowsAffected int64
 		wantErr      bool
@@ -2082,29 +1985,39 @@ func TestSQLStore_UpdateFact(t *testing.T) {
 			name:     "NilDBError",
 			nilDB:    true,
 			factText: "valid",
+			emb:      validEmb,
 			wantErr:  true,
 		},
 		{
 			name:     "EmptyFactText",
 			factText: "",
+			emb:      validEmb,
+			wantErr:  true,
+		},
+		{
+			name:     "InvalidEmbeddingDim",
+			factText: "valid",
+			emb:      make([]float32, 10),
 			wantErr:  true,
 		},
 		{
 			name:     "ExecError",
 			factText: "valid",
+			emb:      validEmb,
 			execErr:  errors.New("update err"),
 			wantErr:  true,
 		},
 		{
 			name:         "NotFoundZeroRows",
 			factText:     "valid",
+			emb:          validEmb,
 			rowsAffected: 0,
 			wantErr:      true,
 		},
 		{
-			name:         "SuccessWithDefaults",
+			name:         "SuccessValidFact",
 			factText:     "valid",
-			importance:   -1,
+			emb:          validEmb,
 			rowsAffected: 1,
 			wantErr:      false,
 		},
@@ -2122,7 +2035,7 @@ func TestSQLStore_UpdateFact(t *testing.T) {
 					rowsAffected: tc.rowsAffected,
 				})
 			}
-			err := store.UpdateFact(ctx, 10, tc.category, tc.factText, tc.importance, emb)
+			err := store.UpdateFact(ctx, 10, tc.factText, tc.emb)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("UpdateFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -2133,12 +2046,10 @@ func TestSQLStore_UpdateFact(t *testing.T) {
 func TestSQLStore_ReinforceFact(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
-	emb := make([]float32, ExpectedEmbeddingDim)
 
 	tests := []struct {
 		name         string
 		nilDB        bool
-		boost        float64
 		execErr      error
 		rowsAffected int64
 		wantErr      bool
@@ -2159,8 +2070,7 @@ func TestSQLStore_ReinforceFact(t *testing.T) {
 			wantErr:      true,
 		},
 		{
-			name:         "SuccessDefaultBoost",
-			boost:        -1,
+			name:         "Success",
 			rowsAffected: 1,
 			wantErr:      false,
 		},
@@ -2178,7 +2088,7 @@ func TestSQLStore_ReinforceFact(t *testing.T) {
 					rowsAffected: tc.rowsAffected,
 				})
 			}
-			err := store.ReinforceFact(ctx, 10, "new text", emb, tc.boost)
+			err := store.ReinforceFact(ctx, 10)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ReinforceFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -2283,7 +2193,7 @@ func TestSQLStore_FindDuplicateFact(t *testing.T) {
 			name:       "MatchedAboveMin",
 			embLen:     ExpectedEmbeddingDim,
 			minSim:     0.85,
-			rowSQL:     "SELECT 7, 'cat', 'fact text', 0.9, '2026-10-21 09:00:00', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.92",
+			rowSQL:     "SELECT 7, 'fact text', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.92",
 			wantID:     7,
 			wantSimMin: 0.90,
 		},
@@ -2291,7 +2201,7 @@ func TestSQLStore_FindDuplicateFact(t *testing.T) {
 			name:    "MatchedBelowMin",
 			embLen:  ExpectedEmbeddingDim,
 			minSim:  0.85,
-			rowSQL:  "SELECT 8, 'cat', 'fact text', 0.9, '2026-10-21 09:00:00', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.40",
+			rowSQL:  "SELECT 8, 'fact text', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.40",
 			wantNil: true,
 		},
 	}
@@ -2338,7 +2248,6 @@ func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 		nilDB        bool
 		emb          []float32
 		query        string
-		category     string
 		limit        int
 		minScore     float64
 		queryErr     error
@@ -2355,64 +2264,24 @@ func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:      "NeitherEmbeddingNorQuery",
-			emb:       nil,
+			name:      "ShortEmbeddingReturnsNil",
+			emb:       make([]float32, 10),
+			query:     "fact",
+			wantCount: 0,
+		},
+		{
+			name:      "EmptyQueryReturnsNil",
+			emb:       emb,
 			query:     "",
 			wantCount: 0,
 		},
 		{
-			name:         "BothWithCategory",
+			name:         "BothWithDefaultBounds",
 			emb:          emb,
 			query:        "test query",
-			category:     "work",
-			limit:        10,
-			minScore:     0.20,
-			wantPatterns: []string{"vector_hits", "text_hits", "category = $2"},
-		},
-		{
-			name:         "BothWithoutCategoryDefaultBounds",
-			emb:          emb,
-			query:        "test query",
-			category:     "",
 			limit:        -1,
 			minScore:     -1,
-			wantPatterns: []string{"vector_hits", "text_hits"},
-		},
-		{
-			name:         "OnlyEmbeddingWithCategory",
-			emb:          emb,
-			query:        "",
-			category:     "personal",
-			limit:        10,
-			minScore:     0.20,
-			wantPatterns: []string{"candidates", "category = $2"},
-		},
-		{
-			name:         "OnlyEmbeddingWithoutCategory",
-			emb:          emb,
-			query:        "",
-			category:     "",
-			limit:        10,
-			minScore:     0.20,
-			wantPatterns: []string{"candidates"},
-		},
-		{
-			name:         "OnlyTextWithCategory",
-			emb:          nil,
-			query:        "test query",
-			category:     "personal",
-			limit:        10,
-			minScore:     0.20,
-			wantPatterns: []string{"text_hits", "category = $2"},
-		},
-		{
-			name:         "OnlyTextWithoutCategory",
-			emb:          nil,
-			query:        "test query",
-			category:     "",
-			limit:        10,
-			minScore:     0.20,
-			wantPatterns: []string{"text_hits"},
+			wantPatterns: []string{"vector_hits", "text_hits", "rrf"},
 		},
 		{
 			name:     "QueryError",
@@ -2425,7 +2294,7 @@ func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 			name:      "SuccessfulRowsScan",
 			emb:       emb,
 			query:     "fact",
-			rowSQL:    "SELECT 5, 'general', 'scanned fact', 0.85, '2026-10-21 09:00:00', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 1, '[0.1,0.2]', 0.88",
+			rowSQL:    "SELECT 5, 'scanned fact', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 1, '[0.1,0.2]', 0.88",
 			wantCount: 1,
 		},
 	}
@@ -2444,7 +2313,7 @@ func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 					capturedQuery: &captured,
 				})
 			}
-			results, err := store.SearchCandidateFacts(ctx, tc.emb, tc.query, tc.category, tc.limit, tc.minScore)
+			results, err := store.SearchCandidateFacts(ctx, tc.emb, tc.query, tc.limit, tc.minScore)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("SearchCandidateFacts() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -2486,9 +2355,9 @@ func TestSQLStore_GetFactsPaginated(t *testing.T) {
 			wantErr:  true,
 		},
 		{
-			name:         "SuccessWithCategoryAndQuery",
-			filter:       FactsFilter{Category: "tech", Query: "linux", Limit: 5, Offset: -1},
-			wantPatterns: []string{"category = $1", "LOWER(fact_text) LIKE", "LIMIT 5 OFFSET 0"},
+			name:         "SuccessWithQuery",
+			filter:       FactsFilter{Query: "linux", Limit: 5, Offset: -1},
+			wantPatterns: []string{"LOWER(fact_text) LIKE", "LIMIT 5 OFFSET 0"},
 		},
 		{
 			name:         "OffsetOnly",
@@ -2498,7 +2367,7 @@ func TestSQLStore_GetFactsPaginated(t *testing.T) {
 		{
 			name:      "SuccessfulRowsScan",
 			filter:    FactsFilter{Limit: 5},
-			rowSQL:    "SELECT 1, 'cat', 'fact', 0.9, '2026-10-21 09:00:00', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 1",
+			rowSQL:    "SELECT 1, 'fact', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 1",
 			wantTotal: 1,
 		},
 		{
@@ -2730,214 +2599,6 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 			got := IsExtractableAdminTurn(tc.msg)
 			if got != tc.want {
 				t.Fatalf("IsExtractableAdminTurn() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestSQLStore_GetFactsMissingEmbeddings(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-
-	tests := []struct {
-		name         string
-		nilDB        bool
-		limit        int
-		queryErr     error
-		rowSQL       string
-		wantErr      bool
-		wantCount    int
-		wantPatterns []string
-	}{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			wantErr: true,
-		},
-		{
-			name:     "QueryError",
-			queryErr: errors.New("query failed"),
-			wantErr:  true,
-		},
-		{
-			name:    "RowScanError",
-			rowSQL:  "SELECT 'not-an-int' AS id",
-			wantErr: true,
-		},
-		{
-			name:         "SuccessWithLimit",
-			limit:        5,
-			wantPatterns: []string{"SELECT id", "embedding IS NULL", "LIMIT 5"},
-		},
-		{
-			name:         "SuccessNoLimit",
-			limit:        0,
-			wantPatterns: []string{"SELECT id", "embedding IS NULL"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var captured string
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:         dbMem,
-					queryErr:      tc.queryErr,
-					rowSQL:        tc.rowSQL,
-					capturedQuery: &captured,
-				})
-			}
-			facts, err := store.GetFactsMissingEmbeddings(ctx, tc.limit)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("GetFactsMissingEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			for _, pat := range tc.wantPatterns {
-				if !strings.Contains(captured, pat) {
-					t.Errorf("captured query missing %q: %s", pat, captured)
-				}
-			}
-			if tc.wantCount > 0 && len(facts) != tc.wantCount {
-				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
-			}
-		})
-	}
-}
-
-func TestSQLStore_UpdateFactEmbedding(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []struct {
-		name         string
-		nilDB        bool
-		emb          []float32
-		execErr      error
-		rowsAffected int64
-		wantErr      bool
-	}{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			emb:     validEmb,
-			wantErr: true,
-		},
-		{
-			name:    "InvalidDimension",
-			emb:     []float32{1.0, 2.0},
-			wantErr: true,
-		},
-		{
-			name:    "ExecError",
-			emb:     validEmb,
-			execErr: errors.New("exec error"),
-			wantErr: true,
-		},
-		{
-			name:         "NotFoundZeroRows",
-			emb:          validEmb,
-			rowsAffected: 0,
-			wantErr:      true,
-		},
-		{
-			name:         "Success",
-			emb:          validEmb,
-			rowsAffected: 1,
-			wantErr:      false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:        dbMem,
-					execErr:      tc.execErr,
-					rowsAffected: tc.rowsAffected,
-				})
-			}
-			err := store.UpdateFactEmbedding(ctx, 42, tc.emb)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("UpdateFactEmbedding() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestSQLStore_DecayAndPruneFacts(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-
-	tests := []struct {
-		name         string
-		nilDB        bool
-		decayStep    float64
-		pruneFloor   float64
-		pruneAgeDays int
-		execErr      error
-		rowsAffected int64
-		wantErr      bool
-		wantDecayed  int64
-		wantPruned   int64
-	}{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			wantErr: true,
-		},
-		{
-			name:    "DecayExecError",
-			execErr: errors.New("decay failed"),
-			wantErr: true,
-		},
-		{
-			name:         "SuccessDefaults",
-			decayStep:    -1,
-			pruneFloor:   -1,
-			pruneAgeDays: -1,
-			rowsAffected: 3,
-			wantErr:      false,
-			wantDecayed:  3,
-			wantPruned:   3,
-		},
-		{
-			name:         "SuccessCustom",
-			decayStep:    0.1,
-			pruneFloor:   0.2,
-			pruneAgeDays: 30,
-			rowsAffected: 2,
-			wantErr:      false,
-			wantDecayed:  2,
-			wantPruned:   2,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:        dbMem,
-					execErr:      tc.execErr,
-					rowsAffected: tc.rowsAffected,
-				})
-			}
-			decayed, pruned, err := store.DecayAndPruneFacts(ctx, tc.decayStep, tc.pruneFloor, tc.pruneAgeDays)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("DecayAndPruneFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr {
-				if decayed != tc.wantDecayed || pruned != tc.wantPruned {
-					t.Errorf("DecayAndPruneFacts() = (%d, %d), want (%d, %d)", decayed, pruned, tc.wantDecayed, tc.wantPruned)
-				}
 			}
 		})
 	}
@@ -3347,7 +3008,7 @@ func TestSQLStore_FindNearestScoredFacts(t *testing.T) {
 			emb:          emb,
 			limit:        -1,
 			minSim:       -1,
-			rowSQL:       "SELECT 10, 'routine', 'Morning walk', 0.8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 0.77",
+			rowSQL:       "SELECT 10, 'Morning walk', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 0.77",
 			wantCount:    1,
 			wantMinScore: 0.77,
 		},
@@ -3650,120 +3311,6 @@ func TestParseFactsJSON(t *testing.T) {
 	}
 }
 
-func TestBackfillMissingEmbeddings(t *testing.T) {
-	ctx := context.Background()
-	canceledCtx, cancel := context.WithCancel(ctx)
-	cancel()
-
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []struct {
-		name         string
-		ctx          context.Context
-		nilStore     bool
-		nilClient    bool
-		storeFailOp  string
-		ollamaFail   bool
-		facts        []Fact
-		wantBackfill int
-		wantErr      bool
-	}{
-		{
-			name:     "NilStoreFails",
-			ctx:      ctx,
-			nilStore: true,
-			wantErr:  true,
-		},
-		{
-			name:      "NilClientFails",
-			ctx:       ctx,
-			nilClient: true,
-			wantErr:   true,
-		},
-		{
-			name:        "StoreQueryFails",
-			ctx:         ctx,
-			storeFailOp: "GetFactsMissingEmbeddings",
-			wantErr:     true,
-		},
-		{
-			name:         "EmptyMissingList",
-			ctx:          ctx,
-			wantBackfill: 0,
-			wantErr:      false,
-		},
-		{
-			name: "SuccessBackfilling",
-			ctx:  ctx,
-			facts: []Fact{
-				{ID: 1, FactText: "Fact without embedding 1"},
-				{ID: 2, FactText: "   "},
-				{ID: 3, FactText: "Fact without embedding 2"},
-			},
-			wantBackfill: 2,
-		},
-		{
-			name:       "OllamaFailsContinues",
-			ctx:        ctx,
-			ollamaFail: true,
-			facts: []Fact{
-				{ID: 4, FactText: "Fact with failing ollama"},
-			},
-			wantBackfill: 0,
-		},
-		{
-			name:        "StoreUpdateFailsContinues",
-			ctx:         ctx,
-			storeFailOp: "UpdateFactEmbedding",
-			facts: []Fact{
-				{ID: 5, FactText: "Fact with failing store update"},
-			},
-			wantBackfill: 0,
-		},
-		{
-			name: "ContextCanceledAborts",
-			ctx:  canceledCtx,
-			facts: []Fact{
-				{ID: 6, FactText: "Fact canceled"},
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var store Store
-			if !tc.nilStore {
-				mem := newTestMemStore()
-				for _, f := range tc.facts {
-					mem.facts[f.ID] = &Fact{ID: f.ID, FactText: f.FactText}
-				}
-				if tc.storeFailOp != "" {
-					mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
-				}
-				store = mem
-			}
-
-			var client OllamaClient
-			if !tc.nilClient {
-				mockOllama := &MockOllamaClient{embedding: validEmb}
-				if tc.ollamaFail {
-					mockOllama.err = errors.New("ollama err")
-				}
-				client = mockOllama
-			}
-
-			count, err := BackfillMissingEmbeddings(tc.ctx, store, client)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("BackfillMissingEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && count != tc.wantBackfill {
-				t.Errorf("BackfillMissingEmbeddings() = %d, want %d", count, tc.wantBackfill)
-			}
-		})
-	}
-}
-
 func TestExtractActiveConversationFacts(t *testing.T) {
 	ctx := context.Background()
 	canceledCtx, cancel := context.WithCancel(ctx)
@@ -3950,10 +3497,10 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 						memStore.maxRowIDs[tid] = tc.threadMaxID
 					}
 				}
-				memStore.facts[1] = &Fact{ID: 1, Category: "user_preference", FactText: "Old preference"}
-				memStore.facts[2] = &Fact{ID: 2, Category: "general", FactText: "Obsolete fact"}
+				memStore.facts[1] = &Fact{ID: 1, FactText: "Old preference"}
+				memStore.facts[2] = &Fact{ID: 2, FactText: "Obsolete fact"}
 				if tc.seedNearest {
-					memStore.facts[99] = &Fact{ID: 99, Category: "system_config", FactText: "Existing nearest fact"}
+					memStore.facts[99] = &Fact{ID: 99, FactText: "Existing nearest fact"}
 					memStore.embeddings[99] = validEmb
 				}
 				if tc.storeFailOp != "" {
@@ -4045,7 +3592,7 @@ func TestReconcileExtractedFact(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := newTestMemStore()
 			if tc.seedDup {
-				mem.facts[10] = &Fact{ID: 10, FactText: "Duplicate text candidate here", Importance: 0.8}
+				mem.facts[10] = &Fact{ID: 10, FactText: "Duplicate text candidate here"}
 				mem.embeddings[10] = validEmb
 			}
 			if tc.storeFailOp != "" {
@@ -4192,7 +3739,6 @@ func TestBuildCandidateReconcilePrompt(t *testing.T) {
 		{
 			Fact: Fact{
 				ID:       42,
-				Category: "user_preference",
 				FactText: "User prefers light mode on mobile displays",
 			},
 			Score: 0.76,
@@ -4416,7 +3962,7 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 			if !tc.nilStore {
 				mem = newTestMemStore()
 				if tc.neighborID > 0 && len(tc.neighborEmb) > 0 {
-					mem.facts[tc.neighborID] = &Fact{ID: tc.neighborID, FactText: "Existing neighbor text", Importance: 0.7, ReinforceCount: 1}
+					mem.facts[tc.neighborID] = &Fact{ID: tc.neighborID, FactText: "Existing neighbor text", ReinforceCount: 1}
 					mem.embeddings[tc.neighborID] = tc.neighborEmb
 				}
 				if tc.storeFailOp != "" {
@@ -4763,74 +4309,6 @@ func TestWorker_Start(t *testing.T) {
 	}
 }
 
-func TestSQLStore_TouchRetrievedFacts(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-
-	tests := []struct {
-		name         string
-		nilDB        bool
-		ids          []int64
-		boost        float64
-		execErr      error
-		rowsAffected int64
-		wantErr      bool
-	}{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			ids:     []int64{1},
-			wantErr: true,
-		},
-		{
-			name:    "EmptyIDsNoop",
-			ids:     nil,
-			wantErr: false,
-		},
-		{
-			name:    "ExecError",
-			ids:     []int64{1},
-			execErr: errors.New("exec touch failed"),
-			wantErr: true,
-		},
-		{
-			name:         "SuccessDefaults",
-			ids:          []int64{1, 2},
-			boost:        -1,
-			rowsAffected: 2,
-			wantErr:      false,
-		},
-		{
-			name:         "SuccessCustomBoost",
-			ids:          []int64{3},
-			boost:        0.05,
-			rowsAffected: 1,
-			wantErr:      false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var captured string
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:         dbMem,
-					execErr:       tc.execErr,
-					rowsAffected:  tc.rowsAffected,
-					capturedQuery: &captured,
-				})
-			}
-			err := store.TouchRetrievedFacts(ctx, tc.ids, tc.boost)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("TouchRetrievedFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
 func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
@@ -4865,7 +4343,7 @@ func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
 		},
 		{
 			name:      "SuccessRow",
-			rowSQL:    "SELECT 1, 'routine', 'Morning run', 0.8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, '[0.1,0.2]'",
+			rowSQL:    "SELECT 1, 'Morning run', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, '[0.1,0.2]'",
 			wantCount: 1,
 			wantErr:   false,
 		},
@@ -4889,109 +4367,6 @@ func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
 			}
 			if tc.wantCount > 0 && len(facts) != tc.wantCount {
 				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
-			}
-		})
-	}
-}
-
-func TestMemStore_TouchRetrievedFacts(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name           string
-		storeFail      string
-		ids            []int64
-		boost          float64
-		initImportance float64
-		lastReinforced time.Time
-		reinforceCount int
-		wantErr        bool
-		wantImportance float64
-		wantCount      int
-	}{
-		{
-			name:      "StoreFail",
-			storeFail: "TouchRetrievedFacts",
-			ids:       []int64{1},
-			wantErr:   true,
-		},
-		{
-			name:    "EmptyIDsNoop",
-			ids:     nil,
-			wantErr: false,
-		},
-		{
-			name:           "BoostsUnreinforcedFactWithDefault",
-			ids:            []int64{1},
-			boost:          0,
-			initImportance: 0.70,
-			reinforceCount: 0,
-			wantErr:        false,
-			wantImportance: 0.72,
-			wantCount:      2,
-		},
-		{
-			name:           "BoostsUnreinforcedFactWithCustomBoost",
-			ids:            []int64{1},
-			boost:          0.05,
-			initImportance: 0.70,
-			reinforceCount: 1,
-			wantErr:        false,
-			wantImportance: 0.75,
-			wantCount:      2,
-		},
-		{
-			name:           "ThrottledWithin24Hours",
-			ids:            []int64{1},
-			boost:          0.05,
-			initImportance: 0.70,
-			lastReinforced: time.Now().UTC().Add(-2 * time.Hour),
-			reinforceCount: 3,
-			wantErr:        false,
-			wantImportance: 0.70,
-			wantCount:      3,
-		},
-		{
-			name:           "BoostClampedToOne",
-			ids:            []int64{1},
-			boost:          0.10,
-			initImportance: 0.95,
-			reinforceCount: 1,
-			wantErr:        false,
-			wantImportance: 1.0,
-			wantCount:      2,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			if tc.storeFail != "" {
-				mem.SetFail(tc.storeFail, errors.New("touch fail"))
-			}
-			fID, _ := mem.InsertFact(ctx, "user_preference", "Dark theme preference", tc.initImportance, []float32{1, 0})
-			if f, ok := mem.facts[fID]; ok {
-				f.LastReinforcedAt = tc.lastReinforced
-				f.ReinforceCount = tc.reinforceCount
-			}
-
-			ids := tc.ids
-			if len(ids) > 0 && ids[0] == 1 {
-				ids = []int64{fID}
-			}
-
-			err := mem.TouchRetrievedFacts(ctx, ids, tc.boost)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("TouchRetrievedFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && len(ids) > 0 {
-				f := mem.facts[fID]
-				if math.Abs(f.Importance-tc.wantImportance) > 0.001 {
-					t.Errorf("f.Importance = %f, want %f", f.Importance, tc.wantImportance)
-				}
-				if f.ReinforceCount != tc.wantCount {
-					t.Errorf("f.ReinforceCount = %d, want %d", f.ReinforceCount, tc.wantCount)
-				}
 			}
 		})
 	}
@@ -5033,9 +4408,11 @@ func TestMemStore_GetAllFactsWithEmbeddings(t *testing.T) {
 				mem.SetFail(tc.storeFail, errors.New("get fail"))
 			}
 			if tc.addFacts {
-				_, _ = mem.InsertFact(ctx, "routine", "Fact with emb 1", 0.8, []float32{1, 0})
-				_, _ = mem.InsertFact(ctx, "routine", "Fact without emb", 0.8, nil)
-				_, _ = mem.InsertFact(ctx, "routine", "Fact with emb 2", 0.8, []float32{0, 1})
+				_, _ = mem.InsertFact(ctx, "Fact with emb 1", testEmbedding(1))
+				mem.mu.Lock()
+				mem.facts[99] = &Fact{ID: 99, FactText: "Fact without emb"}
+				mem.mu.Unlock()
+				_, _ = mem.InsertFact(ctx, "Fact with emb 2", testEmbedding(0.5))
 			}
 			facts, err := mem.GetAllFactsWithEmbeddings(ctx)
 			if (err != nil) != tc.wantErr {
@@ -5048,197 +4425,31 @@ func TestMemStore_GetAllFactsWithEmbeddings(t *testing.T) {
 	}
 }
 
-func TestStore_DecayAndPruneFacts_CategoryFloors(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name           string
-		category       string
-		importance     float64
-		lastDecayed    time.Time
-		lastReinforced time.Time
-		decayStep      float64
-		pruneFloor     float64
-		pruneAgeDays   int
-		wantDecayed    int64
-		wantPruned     int64
-		wantImportance float64
-		wantRemaining  bool
-	}{
-		{
-			name:           "UserPreferenceAboveFloorDecaysToFloor",
-			category:       "user_preference",
-			importance:     0.78,
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    1,
-			wantPruned:     0,
-			wantImportance: 0.75,
-			wantRemaining:  true,
-		},
-		{
-			name:           "UserPreferenceAtFloorDoesNotDecay",
-			category:       "user_preference",
-			importance:     0.75,
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    0,
-			wantPruned:     0,
-			wantImportance: 0.75,
-			wantRemaining:  true,
-		},
-		{
-			name:           "UserPreferenceBelowFloorDoesNotDecayOrPromote",
-			category:       "user_preference",
-			importance:     0.50,
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    0,
-			wantPruned:     0,
-			wantImportance: 0.50,
-			wantRemaining:  true,
-		},
-		{
-			name:           "SystemConfigAboveFloorDecaysToFloor",
-			category:       "system_config",
-			importance:     0.63,
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    1,
-			wantPruned:     0,
-			wantImportance: 0.60,
-			wantRemaining:  true,
-		},
-		{
-			name:           "SystemConfigAtFloorDoesNotDecay",
-			category:       "system_config",
-			importance:     0.60,
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    0,
-			wantPruned:     0,
-			wantImportance: 0.60,
-			wantRemaining:  true,
-		},
-		{
-			name:           "RoutineAboveFloorDecaysToFloor",
-			category:       "routine",
-			importance:     0.52,
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    1,
-			wantPruned:     0,
-			wantImportance: 0.50,
-			wantRemaining:  true,
-		},
-		{
-			name:           "RoutineAtFloorDoesNotDecay",
-			category:       "routine",
-			importance:     0.50,
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    0,
-			wantPruned:     0,
-			wantImportance: 0.50,
-			wantRemaining:  true,
-		},
-		{
-			name:           "GeneralCategoryDecaysToZero",
-			category:       "general",
-			importance:     0.20,
-			decayStep:      0.05,
-			pruneFloor:     0.10,
-			pruneAgeDays:   14,
-			wantDecayed:    1,
-			wantPruned:     0,
-			wantImportance: 0.15,
-			wantRemaining:  true,
-		},
-		{
-			name:           "StaleFactPrunedWhenBelowPruneFloor",
-			category:       "general",
-			importance:     0.10,
-			lastReinforced: time.Now().UTC().AddDate(0, 0, -20),
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    1,
-			wantPruned:     1,
-			wantRemaining:  false,
-		},
-		{
-			name:           "RecentlyDecayedSkippedByThrottle",
-			category:       "general",
-			importance:     0.80,
-			lastDecayed:    time.Now().UTC().Add(-2 * time.Hour),
-			decayStep:      0.05,
-			pruneFloor:     0.15,
-			pruneAgeDays:   14,
-			wantDecayed:    0,
-			wantPruned:     0,
-			wantImportance: 0.80,
-			wantRemaining:  true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			fID, _ := mem.InsertFact(ctx, tc.category, "Test fact for decay", tc.importance, []float32{1, 0})
-			if f, ok := mem.facts[fID]; ok {
-				f.LastDecayedAt = tc.lastDecayed
-				f.LastReinforcedAt = tc.lastReinforced
-			}
-
-			decayed, pruned, err := mem.DecayAndPruneFacts(ctx, tc.decayStep, tc.pruneFloor, tc.pruneAgeDays)
-			if err != nil {
-				t.Fatalf("DecayAndPruneFacts() err = %v", err)
-			}
-			if decayed != tc.wantDecayed {
-				t.Errorf("decayed = %d, want %d", decayed, tc.wantDecayed)
-			}
-			if pruned != tc.wantPruned {
-				t.Errorf("pruned = %d, want %d", pruned, tc.wantPruned)
-			}
-			f, exists := mem.facts[fID]
-			if exists != tc.wantRemaining {
-				t.Errorf("fact exists = %v, want %v", exists, tc.wantRemaining)
-			}
-			if exists && math.Abs(f.Importance-tc.wantImportance) > 0.001 {
-				t.Errorf("f.Importance = %f, want %f", f.Importance, tc.wantImportance)
-			}
-		})
-	}
-}
-
 func makePairwiseSimilarVectors(n int, targetSim float64) [][]float32 {
 	// Component 0 has sqrt(targetSim), each vector has sqrt(1 - targetSim) at component i+1
 	s := float32(math.Sqrt(targetSim))
 	rem := float32(math.Sqrt(1.0 - targetSim))
 	vecs := make([][]float32, n)
 	for i := 0; i < n; i++ {
-		v := make([]float32, n+1)
+		v := make([]float32, ExpectedEmbeddingDim)
 		v[0] = s
-		v[i+1] = rem
+		if i+1 < ExpectedEmbeddingDim {
+			v[i+1] = rem
+		}
 		vecs[i] = v
 	}
 	return vecs
 }
 
-func makeScoredFactFixture(id int64, cat, text string, emb []float32) ScoredFactWithEmbedding {
+func makeScoredFactFixture(id int64, text string, emb []float32) ScoredFactWithEmbedding {
+	now := time.Now().UTC()
 	return ScoredFactWithEmbedding{
 		Fact: Fact{
-			ID:         id,
-			Category:   cat,
-			FactText:   text,
-			Importance: 0.8,
+			ID:               id,
+			FactText:         text,
+			CreatedAt:        now,
+			LastReinforcedAt: now,
+			ReinforceCount:   1,
 		},
 		Embedding: emb,
 	}
@@ -5246,8 +4457,16 @@ func makeScoredFactFixture(id int64, cat, text string, emb []float32) ScoredFact
 
 func TestFindConsolidationCliques(t *testing.T) {
 	vecs := makePairwiseSimilarVectors(8, 0.75) // Pairwise similarity = 0.75 (in [0.70, 0.88])
-	orthogonalVec := make([]float32, 9)
-	orthogonalVec[8] = 1.0 // Orthogonal to vecs[0..7]
+	orthogonalVec := make([]float32, ExpectedEmbeddingDim)
+	orthogonalVec[ExpectedEmbeddingDim-1] = 1.0 // Orthogonal to vecs[0..7]
+
+	vecsB := make([][]float32, 3)
+	for i := 0; i < 3; i++ {
+		v := make([]float32, ExpectedEmbeddingDim)
+		v[10] = float32(math.Sqrt(0.75))
+		v[11+i] = float32(math.Sqrt(0.25))
+		vecsB[i] = v
+	}
 
 	tests := []struct {
 		name      string
@@ -5267,20 +4486,20 @@ func TestFindConsolidationCliques(t *testing.T) {
 		{
 			name: "FactsWithoutEmbeddingsIgnored",
 			facts: []ScoredFactWithEmbedding{
-				makeScoredFactFixture(1, "routine", "Fact 1", nil),
-				makeScoredFactFixture(2, "routine", "Fact 2", []float32{}),
+				makeScoredFactFixture(1, "Fact 1", nil),
+				makeScoredFactFixture(2, "Fact 2", []float32{}),
 			},
 			wantCount: 0,
 		},
 		{
-			name: "DifferentCategoriesFormSeparateCliques",
+			name: "SeparateDisjointCliquesFormed",
 			facts: []ScoredFactWithEmbedding{
-				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
-				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
-				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
-				makeScoredFactFixture(4, "catB", "B1", vecs[0]),
-				makeScoredFactFixture(5, "catB", "B2", vecs[1]),
-				makeScoredFactFixture(6, "catB", "B3", vecs[2]),
+				makeScoredFactFixture(1, "A1", vecs[0]),
+				makeScoredFactFixture(2, "A2", vecs[1]),
+				makeScoredFactFixture(3, "A3", vecs[2]),
+				makeScoredFactFixture(4, "B1", vecsB[0]),
+				makeScoredFactFixture(5, "B2", vecsB[1]),
+				makeScoredFactFixture(6, "B3", vecsB[2]),
 			},
 			wantCount: 2,
 			wantSizes: []int{3, 3},
@@ -5288,8 +4507,8 @@ func TestFindConsolidationCliques(t *testing.T) {
 		{
 			name: "MinSizeThresholdEnforced",
 			facts: []ScoredFactWithEmbedding{
-				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
-				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
+				makeScoredFactFixture(1, "A1", vecs[0]),
+				makeScoredFactFixture(2, "A2", vecs[1]),
 			},
 			minSize:   3,
 			wantCount: 0,
@@ -5297,13 +4516,13 @@ func TestFindConsolidationCliques(t *testing.T) {
 		{
 			name: "MaxSizeCapEnforced",
 			facts: []ScoredFactWithEmbedding{
-				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
-				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
-				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
-				makeScoredFactFixture(4, "catA", "A4", vecs[3]),
-				makeScoredFactFixture(5, "catA", "A5", vecs[4]),
-				makeScoredFactFixture(6, "catA", "A6", vecs[5]),
-				makeScoredFactFixture(7, "catA", "A7", vecs[6]),
+				makeScoredFactFixture(1, "A1", vecs[0]),
+				makeScoredFactFixture(2, "A2", vecs[1]),
+				makeScoredFactFixture(3, "A3", vecs[2]),
+				makeScoredFactFixture(4, "A4", vecs[3]),
+				makeScoredFactFixture(5, "A5", vecs[4]),
+				makeScoredFactFixture(6, "A6", vecs[5]),
+				makeScoredFactFixture(7, "A7", vecs[6]),
 			},
 			minSize:   3,
 			maxSize:   5,
@@ -5313,10 +4532,10 @@ func TestFindConsolidationCliques(t *testing.T) {
 		{
 			name: "NonCliqueOrthogonalMemberExcluded",
 			facts: []ScoredFactWithEmbedding{
-				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
-				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
-				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
-				makeScoredFactFixture(4, "catA", "A4", orthogonalVec),
+				makeScoredFactFixture(1, "A1", vecs[0]),
+				makeScoredFactFixture(2, "A2", vecs[1]),
+				makeScoredFactFixture(3, "A3", vecs[2]),
+				makeScoredFactFixture(4, "A4", orthogonalVec),
 			},
 			minSize:   3,
 			maxSize:   6,
@@ -5326,9 +4545,9 @@ func TestFindConsolidationCliques(t *testing.T) {
 		{
 			name: "DefaultsAppliedForInvalidArgs",
 			facts: []ScoredFactWithEmbedding{
-				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
-				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
-				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
+				makeScoredFactFixture(1, "A1", vecs[0]),
+				makeScoredFactFixture(2, "A2", vecs[1]),
+				makeScoredFactFixture(3, "A3", vecs[2]),
 			},
 			minSim:    -1,
 			maxSim:    -1,
@@ -5338,11 +4557,11 @@ func TestFindConsolidationCliques(t *testing.T) {
 			wantSizes: []int{3},
 		},
 		{
-			name: "EmptyCategoryDefaultsToGeneralAndMaxSizeLessThanMinSize",
+			name: "MaxSizeLessThanMinSizeDefaults",
 			facts: []ScoredFactWithEmbedding{
-				makeScoredFactFixture(1, "", "A1", vecs[0]),
-				makeScoredFactFixture(2, "", "A2", vecs[1]),
-				makeScoredFactFixture(3, "", "A3", vecs[2]),
+				makeScoredFactFixture(1, "A1", vecs[0]),
+				makeScoredFactFixture(2, "A2", vecs[1]),
+				makeScoredFactFixture(3, "A3", vecs[2]),
 			},
 			minSize:   3,
 			maxSize:   2,
@@ -5506,9 +4725,9 @@ func TestConsolidateFactClusters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := newTestMemStore()
 			if tc.addFacts {
-				_, _ = mem.InsertFact(ctx, "pref", "Fact A", 0.70, vecs[0])
-				_, _ = mem.InsertFact(ctx, "pref", "Fact B", 0.80, vecs[1])
-				_, _ = mem.InsertFact(ctx, "pref", "Fact C", 0.75, vecs[2])
+				_, _ = mem.InsertFact(ctx, "Fact A", vecs[0])
+				_, _ = mem.InsertFact(ctx, "Fact B", vecs[1])
+				_, _ = mem.InsertFact(ctx, "Fact C", vecs[2])
 			}
 			if tc.storeFail != "" {
 				mem.SetFail(tc.storeFail, errors.New("store failed"))
@@ -5562,17 +4781,17 @@ func TestToolHandler_MemoryStore_AdmissionGate(t *testing.T) {
 	}{
 		{
 			name:    "TooShortFactRejected",
-			args:    MemoryStoreArgs{FactText: "short", Category: "general"},
+			args:    MemoryStoreArgs{FactText: "short"},
 			wantErr: true,
 		},
 		{
 			name:    "EphemeralTelemetryRejected",
-			args:    MemoryStoreArgs{FactText: "PR #100 was merged with auto-merge armed", Category: "general"},
+			args:    MemoryStoreArgs{FactText: "PR #100 was merged with auto-merge armed"},
 			wantErr: true,
 		},
 		{
 			name:       "DurableTelemetryAdmitted",
-			args:       MemoryStoreArgs{FactText: "Auto-merge armed must always remain active for all PRs", Category: "general"},
+			args:       MemoryStoreArgs{FactText: "Auto-merge armed must always remain active for all PRs"},
 			wantErr:    false,
 			wantAction: "inserted",
 		},
@@ -5586,58 +4805,13 @@ func TestToolHandler_MemoryStore_AdmissionGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := newTestMemStore()
-			h := NewToolHandler(&Config{}, mem, &MockOllamaClient{embedding: []float32{1, 0}})
+			h := NewToolHandler(&Config{}, mem, &MockOllamaClient{embedding: testEmbedding(1.0)})
 			out, err := h.MemoryStore(ctx, tc.args)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MemoryStore() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantAction != "" && out.Action != tc.wantAction {
 				t.Errorf("out.Action = %s, want %s", out.Action, tc.wantAction)
-			}
-		})
-	}
-}
-
-func TestToolHandler_GetContext_TouchRetrieved(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name           string
-		storeFail      string
-		wantReinforced bool
-	}{
-		{
-			name:           "TouchRetrievedSuccess",
-			wantReinforced: true,
-		},
-		{
-			name:           "TouchRetrievedStoreErrorGraceful",
-			storeFail:      "TouchRetrievedFacts",
-			wantReinforced: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			fID, _ := mem.InsertFact(ctx, "routine", "Evening walk with dog", 0.80, []float32{1, 0})
-			if tc.storeFail != "" {
-				mem.SetFail(tc.storeFail, errors.New("touch fail"))
-			}
-
-			h := NewToolHandler(&Config{}, mem, &MockOllamaClient{embedding: []float32{1, 0}})
-			res, err := h.GetContext(ctx, "Evening walk", 5)
-			if err != nil {
-				t.Fatalf("GetContext() unexpected error: %v", err)
-			}
-			if len(res.Facts) == 0 {
-				t.Fatalf("expected retrieved facts, got none")
-			}
-			if tc.wantReinforced {
-				f := mem.facts[fID]
-				if f.LastReinforcedAt.IsZero() {
-					t.Errorf("expected LastReinforcedAt to be non-zero")
-				}
 			}
 		})
 	}
@@ -5675,9 +4849,9 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := newTestMemStore()
-			_, _ = mem.InsertFact(ctx, "pref", "Fact 1", 0.70, vecs[0])
-			_, _ = mem.InsertFact(ctx, "pref", "Fact 2", 0.80, vecs[1])
-			_, _ = mem.InsertFact(ctx, "pref", "Fact 3", 0.75, vecs[2])
+			_, _ = mem.InsertFact(ctx, "Fact 1", vecs[0])
+			_, _ = mem.InsertFact(ctx, "Fact 2", vecs[1])
+			_, _ = mem.InsertFact(ctx, "Fact 3", vecs[2])
 
 			var ollama OllamaClient = &MockOllamaClient{embedding: vecs[0]}
 			if tc.nilOllama {
@@ -5687,7 +4861,7 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 				if tc.llmErr != nil {
 					return "", tc.llmErr
 				}
-				return `{"facts":[{"category":"pref","fact_text":"Consolidated fact","importance_score":0.85}]}`, nil
+				return `{"facts":[{"fact_text":"Consolidated fact"}]}`, nil
 			}
 			if tc.nilLLM {
 				llm = nil
