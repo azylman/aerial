@@ -70,6 +70,7 @@ apk add --no-cache postgresql-client curl >/dev/null 2>&1
 COVERAGE_DIR="/share/coverage"
 
 mkdir -p "$COVERAGE_DIR/coven" "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" "$COVERAGE_DIR/aura-farming" "$COVERAGE_DIR/photos-api" "$COVERAGE_DIR/photos-sync" "$COVERAGE_DIR/scratch-service" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
+find "$COVERAGE_DIR/brain" -maxdepth 1 -type f -name "covmeta.*" -size -100 -delete 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covcounters.*" -mtime +2 -delete 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covmeta.*" -mtime +7 -delete 2>/dev/null || true
 
@@ -116,14 +117,10 @@ for svc_path in "$COVERAGE_DIR"/*; do
   svc_name="$(basename "$svc_path")"
 
   # Prune orphan counter files lacking a matching covmeta.<hash>
-  for cf in "$svc_path"/covcounters.*; do
-    [ -f "$cf" ] || continue
-    base="$(basename "$cf")"
-    rest="$${base#covcounters.}"
-    hash="$${rest%%.*}"
+  for hash in $(find "$svc_path" -maxdepth 1 -type f -name "covcounters.*" 2>/dev/null | sed 's|.*/covcounters\.||; s|\..*||' | sort -u); do
     if [ ! -f "$svc_path/covmeta.$hash" ]; then
-      echo "🧹 [coverage-ingest] Removing orphan counter file $base for $svc_name (missing covmeta.$hash)"
-      rm -f "$cf"
+      echo "🧹 [coverage-ingest] Removing orphan counter files for $svc_name (missing covmeta.$hash)"
+      find "$svc_path" -maxdepth 1 -type f -name "covcounters.$${hash}.*" -delete
     fi
   done
 
@@ -135,18 +132,23 @@ for svc_path in "$COVERAGE_DIR"/*; do
 
   echo "⚡ [coverage-ingest] Ingesting $count counter file(s) for service: $svc_name"
   sql_tmp="/tmp/$${svc_name}.sql"
-  echo "BEGIN;" > "$sql_tmp"
+  printf "BEGIN;\nCREATE TEMP TABLE active_coverage_symbols (file TEXT NOT NULL, function_name TEXT NOT NULL, PRIMARY KEY (file, function_name)) ON COMMIT DROP;\n" > "$sql_tmp"
 
   for meta_file in $(ls -1tr "$svc_path"/covmeta.* 2>/dev/null); do
     [ -f "$meta_file" ] || continue
     meta_base="$(basename "$meta_file")"
     hash="$${meta_base#covmeta.}"
-    set -- "$svc_path"/covcounters."$hash".*
-    [ -f "$1" ] || continue
+    if [ "$svc_name" = "brain" ] && [ "$(wc -c < "$meta_file")" -lt 50000 ]; then
+      rm -f "$meta_file" && find "$svc_path" -maxdepth 1 -type f -name "covcounters.$${hash}.*" -delete
+      continue
+    fi
+    first_counter=$(find "$svc_path" -maxdepth 1 -type f -name "covcounters.$${hash}.*" 2>/dev/null | head -n 1)
+    [ -n "$first_counter" ] || continue
 
     stage_dir="/tmp/stage_$${svc_name}_$${hash}"
     rm -rf "$stage_dir" && mkdir -p "$stage_dir"
-    cp "$meta_file" "$svc_path"/covcounters."$hash".* "$stage_dir/"
+    ln -s "$meta_file" "$stage_dir/"
+    find "$svc_path" -maxdepth 1 -type f -name "covcounters.$${hash}.*" -exec sh -c 'dest="$1"; shift; ln -s "$@" "$dest/"' _ "$stage_dir" {} +
 
     go tool covdata func -i="$stage_dir" 2>/dev/null | awk -v svc="$svc_name" '
       /^total/ || NF < 3 { next }
@@ -158,6 +160,8 @@ for svc_path in "$COVERAGE_DIR"/*; do
         gsub(/\x27/, "\x27\x27", file_name)
         gsub(/\x27/, "\x27\x27", fn_name)
         if (file_name != "" && fn_name != "" && pct != "") {
+          if (!truncated) { printf "TRUNCATE active_coverage_symbols;\n"; truncated = 1 }
+          printf "INSERT INTO active_coverage_symbols (file, function_name) VALUES (\x27%s\x27, \x27%s\x27) ON CONFLICT DO NOTHING;\n", file_name, fn_name
           printf "INSERT INTO production_code_coverage (service, file, function_name, coverage_percent, last_executed_at, updated_at) VALUES (\x27%s\x27, \x27%s\x27, \x27%s\x27, %s, CASE WHEN %s > 0 THEN CURRENT_TIMESTAMP ELSE NULL END, CURRENT_TIMESTAMP) ON CONFLICT (service, file, function_name) DO UPDATE SET coverage_percent = CASE WHEN EXCLUDED.coverage_percent > 0 THEN EXCLUDED.coverage_percent ELSE production_code_coverage.coverage_percent END, last_executed_at = CASE WHEN EXCLUDED.coverage_percent > 0 THEN CURRENT_TIMESTAMP ELSE production_code_coverage.last_executed_at END, updated_at = CURRENT_TIMESTAMP;\n", svc, file_name, fn_name, pct, pct
         }
       }
@@ -166,18 +170,18 @@ for svc_path in "$COVERAGE_DIR"/*; do
     rm -rf "$stage_dir"
   done
 
-  if ! grep -q "^INSERT INTO" "$sql_tmp"; then
+  if ! grep -q "^INSERT INTO production_code_coverage" "$sql_tmp"; then
     echo "🚨 [coverage-ingest] Zero coverage rows extracted for $svc_name; preserving counter files"
     rm -f "$sql_tmp"
     continue
   fi
 
-  echo "COMMIT;" >> "$sql_tmp"
+  printf "DELETE FROM production_code_coverage p WHERE p.service = '%s' AND EXISTS (SELECT 1 FROM active_coverage_symbols LIMIT 1) AND NOT EXISTS (SELECT 1 FROM active_coverage_symbols a WHERE a.file = p.file AND a.function_name = p.function_name);\nCOMMIT;\n" "$svc_name" >> "$sql_tmp"
 
   if psql "$POSTGRES_URL" -v ON_ERROR_STOP=1 -f "$sql_tmp" >/dev/null 2>&1; then
     echo "✅ [coverage-ingest] Upserted coverage for $svc_name into production_code_coverage."
-    rm -f "$svc_path"/covcounters.*
-    ls -1t "$svc_path"/covmeta.* 2>/dev/null | tail -n +5 | xargs -r rm -f
+    find "$svc_path" -maxdepth 1 -type f -name "covcounters.*" -delete
+    ls -1t "$svc_path"/covmeta.* 2>/dev/null | tail -n +2 | xargs -r rm -f
   else
     echo "🚨 [coverage-ingest] SQL upsert failed for $svc_name"
   fi
