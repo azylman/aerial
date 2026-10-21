@@ -502,10 +502,10 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		minSim = 0.75
 	}
 	if maxSim <= 0 {
-		maxSim = 0.88
+		maxSim = 1.0
 	}
 	if minSize <= 0 {
-		minSize = 3
+		minSize = 2
 	}
 	if maxSize < minSize {
 		maxSize = 6
@@ -526,31 +526,46 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		return group[i].Fact.ID < group[j].Fact.ID
 	})
 
+	type candidateMatch struct {
+		fact ScoredFactWithEmbedding
+		sim  float64
+	}
+
 	var cliques [][]ScoredFactWithEmbedding
 	used := make(map[int64]bool, len(group))
 	for i := 0; i < len(group); i++ {
 		if used[group[i].Fact.ID] {
 			continue
 		}
-		clique := []ScoredFactWithEmbedding{group[i]}
+		var cands []candidateMatch
 		for j := i + 1; j < len(group); j++ {
 			if used[group[j].Fact.ID] {
 				continue
 			}
+			sim := CosineSimilarity(group[i].Embedding, group[j].Embedding)
+			if sim >= minSim && (maxSim >= 1.0 || sim <= maxSim) {
+				cands = append(cands, candidateMatch{fact: group[j], sim: sim})
+			}
+		}
+		sort.SliceStable(cands, func(a, b int) bool {
+			return cands[a].sim > cands[b].sim
+		})
+
+		clique := []ScoredFactWithEmbedding{group[i]}
+		for _, c := range cands {
 			if len(clique) >= maxSize {
 				break
 			}
-			cand := group[j]
 			matchesAll := true
-			for _, member := range clique {
-				sim := CosineSimilarity(member.Embedding, cand.Embedding)
-				if sim < minSim || sim > maxSim {
+			for _, member := range clique[1:] {
+				sim := CosineSimilarity(member.Embedding, c.fact.Embedding)
+				if sim < minSim || (maxSim < 1.0 && sim > maxSim) {
 					matchesAll = false
 					break
 				}
 			}
 			if matchesAll {
-				clique = append(clique, cand)
+				clique = append(clique, c.fact)
 			}
 		}
 		if len(clique) >= minSize {
@@ -577,7 +592,7 @@ Output strictly a JSON object matching this schema:
   ]
 }
 Rules:
-1. Produce at most 2 consolidated facts.
+1. Produce 1 consolidated fact (or 2 facts ONLY when a cluster of 3+ facts spans two genuinely distinct sub-topics). If a 2-fact cluster already consists of two distinct, non-redundant facts that should not be merged into 1, return {"facts": []}.
 2. Keep each consolidated fact strictly atomic (one single topic/predicate and one sentence per fact). If the cluster spans two distinct sub-topics (e.g. household composition vs. dietary restrictions), emit 2 separate facts rather than merging them into a multi-sentence compound fact.
 3. Output nothing else outside the JSON object.`
 
@@ -613,7 +628,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 		return 0, nil
 	}
 
-	cliques := FindConsolidationCliques(allFacts, 0.75, 0.88, 3, 6)
+	cliques := FindConsolidationCliques(allFacts, 0.75, 1.0, 2, 6)
 	if len(cliques) == 0 {
 		return 0, nil
 	}
@@ -641,9 +656,17 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 			continue
 		}
 
-		candidates := payload.Facts
-		if len(candidates) > 2 {
-			candidates = candidates[:2]
+		var candidates []string
+		for _, c := range payload.Facts {
+			if text := strings.TrimSpace(c.FactText); text != "" {
+				candidates = append(candidates, text)
+				if len(candidates) == 2 {
+					break
+				}
+			}
+		}
+		if len(candidates) == 0 || len(candidates) >= len(clique) {
+			continue
 		}
 
 		maxReinforce := 1
@@ -654,12 +677,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 		}
 
 		var inserted int
-		for _, c := range candidates {
-			text := strings.TrimSpace(c.FactText)
-			if text == "" {
-				continue
-			}
-
+		for _, text := range candidates {
 			emb, err := client.GenerateEmbedding(ctx, text, false, 1)
 			if err != nil {
 				log.Printf("[Memory] Warning: Failed to generate embedding for consolidated fact %q: %v", text, err)
