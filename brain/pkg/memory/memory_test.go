@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,215 +34,19 @@ func mockEmbeddingResponse(vec []float32) *http.Response {
 	return mockJSONResponse(http.StatusOK, string(b))
 }
 
+type mockCloseErrReader struct {
+	io.Reader
+}
+
+func (m *mockCloseErrReader) Close() error {
+	return errors.New("simulated close error")
+}
+
 func newMockClient(rt roundTripperFunc, roots ...string) *Client {
 	c := NewClient("http://mock-ollama:11434", roots...)
 	c.httpClient = &http.Client{Transport: rt}
 	c.retryDelay = -1
 	return c
-}
-
-
-func TestNew_ConfigPointerInjection(t *testing.T) {
-	cfg := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{
-			BaseURL:     "http://localhost:11434",
-			Model:       "nomic-embed-text",
-			QueryPrefix: "search_query: ",
-		},
-	})
-	client := New(cfg)
-	if client == nil {
-		t.Fatalf("expected non-nil client")
-	}
-	if client.cfg != cfg {
-		t.Errorf("expected client to store injected *config.Config")
-	}
-}
-
-
-func TestDotProduct(t *testing.T) {
-	v1 := []float32{1.0, 0.0, 0.0}
-	v2 := []float32{1.0, 0.0, 0.0}
-	v3 := []float32{0.0, 1.0, 0.0}
-
-	dot12 := DotProduct(v1, v2)
-	if dot12 != 1.0 {
-		t.Errorf("expected 1.0, got %f", dot12)
-	}
-
-	dot13 := DotProduct(v1, v3)
-	if dot13 != 0.0 {
-		t.Errorf("expected 0.0, got %f", dot13)
-	}
-}
-
-func TestRankFacts(t *testing.T) {
-	queryVec := []float32{1.0, 0.0, 0.0}
-	facts := []db.FactWithEmbedding{
-		{
-			Fact:      db.Fact{ID: 1, Category: "cat1", FactText: "Fact 1", Importance: 1.0},
-			Embedding: []float32{0.9, 0.1, 0.0}, // Dot product = 0.9
-		},
-		{
-			Fact:      db.Fact{ID: 2, Category: "cat2", FactText: "Fact 2", Importance: 1.0},
-			Embedding: []float32{0.3, 0.7, 0.0}, // Dot product = 0.3 (below threshold 0.45)
-		},
-		{
-			Fact:      db.Fact{ID: 3, Category: "cat3", FactText: "Fact 3", Importance: 1.0},
-			Embedding: []float32{0.95, 0.05, 0.0}, // Dot product = 0.95
-		},
-	}
-
-	ranked := RankFacts(queryVec, facts, 0.45, 10)
-	if len(ranked) != 2 {
-		t.Fatalf("expected 2 facts above threshold 0.45, got %d", len(ranked))
-	}
-
-	if ranked[0].ID != 3 {
-		t.Errorf("expected top fact ID 3 (score 0.95), got %d", ranked[0].ID)
-	}
-	if ranked[1].ID != 1 {
-		t.Errorf("expected second fact ID 1 (score 0.9), got %d", ranked[1].ID)
-	}
-}
-
-func TestFormatMemoryContext(t *testing.T) {
-	facts := []db.Fact{
-		{Category: "user_preference", FactText: "Prefers Pacific Time"},
-		{Category: "system_config", FactText: "Docker Daemon at unix:///var/run/docker.sock"},
-	}
-
-	formatted := FormatMemoryContext(facts)
-	expectedSubstrings := []string{
-		"<retrieved_memory>",
-		"- [user_preference] Prefers Pacific Time",
-		"- [system_config] Docker Daemon at unix:///var/run/docker.sock",
-		"</retrieved_memory>",
-	}
-
-	for _, sub := range expectedSubstrings {
-		if !strings.Contains(formatted, sub) {
-			t.Errorf("expected formatted memory to contain %q, got: %s", sub, formatted)
-		}
-	}
-}
-
-func TestMockOllamaClient(t *testing.T) {
-	var receivedPrompt string
-	var receivedOptions map[string]any
-	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		var r EmbeddingRequest
-		_ = json.NewDecoder(req.Body).Decode(&r)
-		receivedPrompt = r.Prompt
-		receivedOptions = r.Options
-		return mockJSONResponse(http.StatusOK, `{"embedding":[0.1, 0.2, 0.3]}`), nil
-	})
-
-	cfg := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{
-			BaseURL: "http://mock-ollama:11434",
-		},
-	})
-	client := New(cfg)
-	client.httpClient = &http.Client{Transport: rt}
-	client.retryDelay = -1
-
-	// Test query embedding without prefix configured (default for all-minilm)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	emb, err := client.GenerateEmbedding(ctx, "test query", true, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(emb) != 3 {
-		t.Errorf("expected embedding len 3, got %d", len(emb))
-	}
-	if receivedPrompt != "test query" {
-		t.Errorf("expected clean prompt 'test query', got: %s", receivedPrompt)
-	}
-	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(512) {
-		t.Errorf("expected default options num_ctx 512, got: %v", receivedOptions)
-	}
-
-	// Test query embedding with QueryPrefix configured in Config
-	cfgPrefixed := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{
-			BaseURL:     "http://mock-ollama:11434",
-			QueryPrefix: "Represent this query: ",
-		},
-	})
-	clientPrefixed := New(cfgPrefixed)
-	clientPrefixed.httpClient = &http.Client{Transport: rt}
-	clientPrefixed.retryDelay = -1
-
-	embPrefixed, err := clientPrefixed.GenerateEmbedding(ctx, "test query 2", true, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(embPrefixed) != 3 {
-		t.Errorf("expected embedding len 3, got %d", len(embPrefixed))
-	}
-	if receivedPrompt != "Represent this query: test query 2" {
-		t.Errorf("expected prefixed prompt, got: %s", receivedPrompt)
-	}
-	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(512) {
-		t.Errorf("expected default options num_ctx 512, got: %v", receivedOptions)
-	}
-
-	// Test document embedding (should NOT prepend prefix)
-	embDoc, err := client.GenerateEmbedding(ctx, "test doc", false, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(embDoc) != 3 {
-		t.Errorf("expected embedding len 3, got %d", len(embDoc))
-	}
-	if receivedPrompt != "test doc" {
-		t.Errorf("expected document prompt 'test doc', got: %s", receivedPrompt)
-	}
-	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(512) {
-		t.Errorf("expected default options num_ctx 512, got: %v", receivedOptions)
-	}
-
-	// Test custom NumCtx configured in Config
-	cfgCustomCtx := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{
-			BaseURL: "http://mock-ollama:11434",
-			NumCtx:  1024,
-		},
-	})
-	clientCustomCtx := New(cfgCustomCtx)
-	clientCustomCtx.httpClient = &http.Client{Transport: rt}
-	clientCustomCtx.retryDelay = -1
-
-	_, err = clientCustomCtx.GenerateEmbedding(ctx, "test custom ctx", false, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(1024) {
-		t.Errorf("expected custom options num_ctx 1024, got: %v", receivedOptions)
-	}
-}
-
-func TestParseFactsJSON(t *testing.T) {
-	raw := "```json\n{\"facts\":[{\"category\":\"user_preference\",\"fact_text\":\"User likes Go\",\"importance_score\":1.0}]}\n```"
-	payload, err := parseFactsJSON(raw)
-	if err != nil {
-		t.Fatalf("unexpected error parsing facts: %v", err)
-	}
-
-	if len(payload.Facts) != 1 {
-		t.Fatalf("expected 1 fact, got %d", len(payload.Facts))
-	}
-	if payload.Facts[0].FactText != "User likes Go" {
-		t.Errorf("expected 'User likes Go', got %q", payload.Facts[0].FactText)
-	}
-}
-
-func setupTestStore(t *testing.T) *db.FakeStore {
-	t.Helper()
-	return db.NewFakeStore()
 }
 
 func makeDimVector(x, y float32) []float32 {
@@ -254,766 +56,9 @@ func makeDimVector(x, y float32) []float32 {
 	return v
 }
 
-func TestDBFactInsertionAndRetrieval(t *testing.T) {
-	store := setupTestStore(t)
-	defer func() { _ = store.Close() }()
-
-	ctx := context.Background()
-	emb := makeDimVector(0.5, 0.5)
-	id, err := store.InsertFact(ctx, "user_pref", "User prefers dark mode", 1.0, emb)
-	if err != nil {
-		t.Fatalf("failed to insert fact: %v", err)
-	}
-	if id <= 0 {
-		t.Errorf("expected valid insert id > 0, got %d", id)
-	}
-
-	facts, err := store.GetFactsByThreadWithEmbeddings(ctx, "thread-123")
-	if err != nil {
-		t.Fatalf("failed to get facts with embeddings: %v", err)
-	}
-	if len(facts) != 1 {
-		t.Fatalf("expected 1 fact, got %d", len(facts))
-	}
-
-	if facts[0].Fact.FactText != "User prefers dark mode" {
-		t.Errorf("expected fact text 'User prefers dark mode', got %q", facts[0].Fact.FactText)
-	}
-	if len(facts[0].Embedding) != db.ExpectedEmbeddingDim {
-		t.Fatalf("expected embedding len %d, got %d", db.ExpectedEmbeddingDim, len(facts[0].Embedding))
-	}
-	if facts[0].Embedding[0] != 0.5 || facts[0].Embedding[1] != 0.5 {
-		t.Errorf("embedding mismatch: %v", facts[0].Embedding[:5])
-	}
-}
-
-func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
-	store := setupTestStore(t)
-	defer func() { _ = store.Close() }()
-
-	tmpDir := t.TempDir()
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
-	}, tmpDir)
-
-	// Mock LLM function returning the same fact
-	llmFunc := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[{"category":"user_pref","fact_text":"User likes matcha","importance_score":1.0}]}`, nil
-	}
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	_ = store.InsertMessage(ctx, db.Message{
-		ID: "m1", ThreadID: "thread-test-1", Content: "I love matcha", ResponseText: "Noted!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
-	})
-
-	// Pre-insert an existing identical/similar fact with same vector
-	_, _ = store.InsertFact(ctx, "user_pref", "User likes matcha", 1.0, makeDimVector(1.0, 0.0))
-
-	err := processThreadFacts(ctx, store, client, llmFunc, "thread-test-1")
-	if err != nil {
-		t.Fatalf("processThreadFacts failed: %v", err)
-	}
-
-	// Verify that duplicate fact was NOT inserted (count remains 1)
-	facts, err := store.GetFactsByThreadWithEmbeddings(ctx, "thread-test-1")
-	if err != nil {
-		t.Fatalf("GetFactsByThreadWithEmbeddings failed: %v", err)
-	}
-	if len(facts) != 1 {
-		t.Fatalf("Expected exactly 1 fact due to semantic deduplication, got %d", len(facts))
-	}
-
-	// Verify watermark was updated and thread is no longer eligible for extraction
-	eligible, err := store.GetActiveConversationsForExtraction(ctx, 12)
-	if err != nil {
-		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
-	}
-	if len(eligible) != 0 {
-		t.Fatalf("Expected 0 eligible threads after extraction watermark, got %v", eligible)
-	}
-}
-
-func TestProcessThreadFactsGlobalDeduplicationAndReinforce(t *testing.T) {
-	store := setupTestStore(t)
-	defer func() { _ = store.Close() }()
-
-	tmpDir := t.TempDir()
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
-	}, tmpDir)
-
-	// Mock LLM function returning a rephrased fact from thread-beta
-	llmFunc := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[{"category":"user_preference","fact_text":"Alex prefers oat milk in matcha latte","importance_score":0.60}]}`, nil
-	}
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	_ = store.InsertMessage(ctx, db.Message{
-		ID: "m-beta-1", ThreadID: "thread-beta", Content: "Oat milk in matcha", ResponseText: "Got it!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
-	})
-
-	// Pre-insert fact in thread-alpha with lower importance (0.50)
-	origID, err := store.InsertFact(ctx, "user_preference", "Alex likes oat milk in matcha", 0.50, makeDimVector(1.0, 0.0))
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-
-	err = processThreadFacts(ctx, store, client, llmFunc, "thread-beta")
-	if err != nil {
-		t.Fatalf("processThreadFacts failed: %v", err)
-	}
-
-	// Verify global deduplication: no new fact in thread-beta
-	allFacts, err := store.GetFactsPaginated(ctx, db.FactsFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated failed: %v", err)
-	}
-	if len(allFacts.Facts) != 1 {
-		t.Fatalf("Expected exactly 1 fact globally due to cross-thread deduplication, got %d", len(allFacts.Facts))
-	}
-
-	reinforcedFact := allFacts.Facts[0]
-	if reinforcedFact.ID != origID {
-		t.Errorf("Expected reinforced fact ID %d, got %d", origID, reinforcedFact.ID)
-	}
-	if reinforcedFact.FactText != "Alex likes oat milk in matcha" {
-		t.Errorf("Expected immutable fact text, got %q", reinforcedFact.FactText)
-	}
-	if reinforcedFact.Importance < 0.70 {
-		t.Errorf("Expected importance boosted to at least 0.70, got %f", reinforcedFact.Importance)
-	}
-	if reinforcedFact.ReinforceCount != 2 {
-		t.Errorf("Expected reinforce_count = 2, got %d", reinforcedFact.ReinforceCount)
-	}
-}
-
-func TestExtractQueryText(t *testing.T) {
-	// Case 1: Discord prompt format with mention
-	discordPrompt := `<USER_REQUEST>
-Here's a message someone sent you from Discord:
-
-- id: 1543706746294509568
-- channel_id: 1542423172400291873
-- thread_id: 1543706746294509568
-- author_id: 123456789
-- author_username: testuser
-- content: <@1542035925603713086> What office do I work from on Thursdays?
-- timestamp: 2026-08-30T19:39:29Z
-- mentions: [Aerial]
-- attachments: []
-
-Please formulate your response and output it clearly. It will be delivered directly to the Discord thread.
-</USER_REQUEST>`
-
-	extracted := ExtractQueryText(discordPrompt)
-	expected := "What office do I work from on Thursdays?"
-	if extracted != expected {
-		t.Errorf("expected %q, got %q", expected, extracted)
-	}
-
-	// Case 2: XML envelope format
-	xmlPrompt := "<USER_REQUEST>\n  Show me system status\n</USER_REQUEST>"
-	extractedXML := ExtractQueryText(xmlPrompt)
-	if extractedXML != "Show me system status" {
-		t.Errorf("expected 'Show me system status', got %q", extractedXML)
-	}
-
-	// Case 3: Plain text
-	plain := "What is the weather today?"
-	extractedPlain := ExtractQueryText(plain)
-	if extractedPlain != plain {
-		t.Errorf("expected %q, got %q", plain, extractedPlain)
-	}
-
-	// Case 4: Empty
-	if ExtractQueryText("") != "" {
-		t.Errorf("expected empty string for empty input")
-	}
-
-	// Case 5: Role and channel mentions stripped
-	mentionText := "Hey <@&987654> check <#123456> please"
-	if extracted := ExtractQueryText(mentionText); extracted != "Hey check please" {
-		t.Errorf("expected 'Hey check please', got %q", extracted)
-	}
-
-	// Case 6: Previous session envelope stripped
-	prevSessionText := "<PREVIOUS_SESSION>\nPrior context\n</PREVIOUS_SESSION>\nWhat is my schedule?"
-	if extracted := ExtractQueryText(prevSessionText); extracted != "What is my schedule?" {
-		t.Errorf("expected 'What is my schedule?', got %q", extracted)
-	}
-}
-
-func TestBackfillMissingEmbeddings(t *testing.T) {
-	store := setupTestStore(t)
-	defer func() { _ = store.Close() }()
-
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(makeDimVector(0.5, 0.5)), nil
-	})
-
-	ctx := context.Background()
-	// Insert facts: 1 with embedding, 2 without embedding, 1 empty text
-	_, _ = store.InsertFact(ctx, "system_config", "Fact 1 with emb", 1.0, makeDimVector(0.1, 0.2))
-	_, _ = store.InsertFact(ctx, "system_config", "Fact 2 missing emb", 1.0, nil)
-	_, _ = store.InsertFact(ctx, "user_pref", "Fact 3 missing emb", 0.9, nil)
-	_, _ = store.InsertFact(ctx, "empty_cat", "   ", 0.5, nil)
-
-	backfilled, err := BackfillMissingEmbeddings(ctx, store, client)
-	if err != nil {
-		t.Fatalf("BackfillMissingEmbeddings failed: %v", err)
-	}
-	if backfilled != 2 {
-		t.Fatalf("expected 2 backfilled facts, got %d", backfilled)
-	}
-
-	// Verify all 3 facts now have valid embeddings
-	facts, err := store.GetFactsByThreadWithEmbeddings(ctx, "thread-1")
-	if err != nil {
-		t.Fatalf("GetFactsByThreadWithEmbeddings failed: %v", err)
-	}
-	if len(facts) != 4 {
-		t.Fatalf("expected 4 facts, got %d", len(facts))
-	}
-
-	// Empty embedding test branch
-	emptyEmbClient := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse([]float32{}), nil
-	})
-	storeEmptyEmb := setupTestStore(t)
-	_, _ = storeEmptyEmb.InsertFact(ctx, "cat", "valid text", 1.0, nil)
-	nEmpty, errEmpty := BackfillMissingEmbeddings(ctx, storeEmptyEmb, emptyEmbClient)
-	if errEmpty != nil || nEmpty != 0 {
-		t.Errorf("expected 0 backfilled on empty embedding, got %d, %v", nEmpty, errEmpty)
-	}
-}
-
-func TestRetrieveRelevantFacts(t *testing.T) {
-	store := setupTestStore(t)
-	defer func() { _ = store.Close() }()
-
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
-	})
-
-	ctx := context.Background()
-	// Insert facts into DB
-	_, _ = store.InsertFact(ctx, "system_config", "Server port is 8080", 1.0, makeDimVector(0.9, 0.1))
-	_, _ = store.InsertFact(ctx, "routine", "Low scoring fact", 1.0, makeDimVector(0.1, 0.9))
-
-	facts, err := RetrieveRelevantFacts(ctx, store, client, "What port is the server?", 5)
-	if err != nil {
-		t.Fatalf("RetrieveRelevantFacts failed: %v", err)
-	}
-
-	if len(facts) != 1 {
-		t.Fatalf("expected 1 relevant fact, got %d", len(facts))
-	}
-	if facts[0].FactText != "Server port is 8080" {
-		t.Errorf("expected 'Server port is 8080', got %q", facts[0].FactText)
-	}
-}
-
-func TestExtractActiveConversationFacts(t *testing.T) {
-	store := setupTestStore(t)
-	defer func() { _ = store.Close() }()
-
-	tmpDir := t.TempDir()
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
-	}, tmpDir)
-
-	llmFunc := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[{"category":"user_preference","fact_text":"User prefers vim keybindings","importance_score":0.9}]}`, nil
-	}
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	_ = store.InsertMessage(ctx, db.Message{
-		ID: "m-extract-1", ThreadID: "thread-active-1", Content: "I love vim keybindings", ResponseText: "Noted!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
-	})
-
-	err := ExtractActiveConversationFacts(ctx, store, client, llmFunc, 12)
-	if err != nil {
-		t.Fatalf("ExtractActiveConversationFacts failed: %v", err)
-	}
-}
-
-func TestMemory_ClientCreationAndConfig(t *testing.T) {
-	// 1. Explicit baseURL in Config
-	cfg1 := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{
-			BaseURL: "http://custom:11434/",
-		},
-	})
-	c1 := New(cfg1)
-	if c1.BaseURL() != "http://custom:11434" {
-		t.Errorf("expected trimmed baseURL, got %q", c1.BaseURL())
-	}
-
-	// 2. Custom BaseURL in Config
-	cfg2 := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{
-			BaseURL: "http://env-ollama:11434/",
-		},
-	})
-	c2 := New(cfg2)
-	if c2.BaseURL() != "http://env-ollama:11434" {
-		t.Errorf("expected configured baseURL, got %q", c2.BaseURL())
-	}
-
-	// 3. Fallback default
-	cfg3 := config.NewFromData(&config.ConfigData{})
-	c3 := New(cfg3)
-	if c3.BaseURL() != DefaultOllamaURL {
-		t.Errorf("expected DefaultOllamaURL %q, got %q", DefaultOllamaURL, c3.BaseURL())
-	}
-
-	// 4. Nil config fallback
-	cNil := New(nil)
-	if cNil.BaseURL() != DefaultOllamaURL {
-		t.Errorf("expected DefaultOllamaURL %q for nil cfg, got %q", DefaultOllamaURL, cNil.BaseURL())
-	}
-
-	// 5. Compatibility NewClient with string
-	cCompat := NewClient("http://custom:11434/", "  /path/one  ", "", "/path/two")
-	if cCompat.BaseURL() != "http://custom:11434" {
-		t.Errorf("expected trimmed baseURL from NewClient, got %q", cCompat.BaseURL())
-	}
-	roots := cCompat.Roots()
-	if len(roots) != 2 || roots[0] != "/path/one" || roots[1] != "/path/two" {
-		t.Errorf("expected clean roots [/path/one /path/two], got %v", roots)
-	}
-	// Verify defensive copy
-	roots[0] = "/modified"
-	if cCompat.Roots()[0] != "/path/one" {
-		t.Errorf("expected roots to be defensive copy, modified internal state")
-	}
-	if cNil.Roots() != nil {
-		t.Errorf("expected nil roots for cNil, got %v", cNil.Roots())
-	}
-}
-
-func TestMemory_GenerateEmbedding_ErrorsAndRetries(t *testing.T) {
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return nil, errors.New("connection refused")
-	})
-
-	// 1. Empty text
-	_, err := client.GenerateEmbedding(context.Background(), "", false, 1)
-	if err == nil {
-		t.Error("expected error for empty text")
-	}
-
-	// 2. Negative retries should be clamped
-	_, err = client.GenerateEmbedding(context.Background(), "hello", false, -1)
-	if err == nil {
-		t.Error("expected connection error")
-	}
-
-	// 3. Context cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err = client.GenerateEmbedding(ctx, "hello", false, 1)
-	if err == nil {
-		t.Error("expected context canceled error")
-	}
-
-	// 4. Server error 500
-	c500 := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusInternalServerError, "internal server error"), nil
-	})
-	_, err = c500.GenerateEmbedding(context.Background(), "hello", false, 0)
-	if err == nil {
-		t.Error("expected error on HTTP 500")
-	}
-
-	// 5. Server returns error in JSON
-	cErrJson := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, `{"error":"model not loaded"}`), nil
-	})
-	_, err = cErrJson.GenerateEmbedding(context.Background(), "hello", false, 0)
-	if err == nil || !strings.Contains(err.Error(), "model not loaded") {
-		t.Errorf("expected 'model not loaded' error, got %v", err)
-	}
-
-	// 6. Server returns empty embedding array
-	cEmptyEmb := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, `{"embedding":[]}`), nil
-	})
-	_, err = cEmptyEmb.GenerateEmbedding(context.Background(), "hello", false, 0)
-	if err == nil || !strings.Contains(err.Error(), "empty embedding returned") {
-		t.Errorf("expected 'empty embedding returned' error, got %v", err)
-	}
-
-	// 7. Server returns non-JSON invalid payload
-	cBadJson := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, "not valid json"), nil
-	})
-	_, err = cBadJson.GenerateEmbedding(context.Background(), "hello", false, 0)
-	if err == nil {
-		t.Error("expected JSON unmarshal error")
-	}
-
-	var receivedModel string
-	rtModel := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		var reqBody EmbeddingRequest
-		_ = json.NewDecoder(req.Body).Decode(&reqBody)
-		receivedModel = reqBody.Model
-		return mockJSONResponse(http.StatusOK, `{"embedding":[1.0, 2.0]}`), nil
-	})
-
-	// 8. Custom model via Config
-	cfgModel := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{
-			BaseURL: "http://mock-ollama:11434",
-			Model:   "custom-bge-model",
-		},
-	})
-	cModel := New(cfgModel)
-	cModel.httpClient = &http.Client{Transport: rtModel}
-	cModel.retryDelay = -1
-	_, _ = cModel.GenerateEmbedding(context.Background(), "hello", false, 0)
-	if receivedModel != "custom-bge-model" {
-		t.Errorf("expected custom-bge-model, got %q", receivedModel)
-	}
-}
-
-func TestMemory_BackfillMissingEmbeddings_EdgeCases(t *testing.T) {
-	// 1. Nil args
-	if _, err := BackfillMissingEmbeddings(context.Background(), nil, nil); err == nil {
-		t.Error("expected error for nil args")
-	}
-
-	// 2. Closed DB
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-	c := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return nil, errors.New("connection refused")
-	})
-	if _, err := BackfillMissingEmbeddings(context.Background(), closedStore, c); err == nil {
-		t.Error("expected error for closed DB")
-	}
-
-	// 3. 0 missing facts
-	memStore := db.NewFakeStore()
-	defer memStore.Close()
-
-	n, err := BackfillMissingEmbeddings(context.Background(), memStore, c)
-	if err != nil || n != 0 {
-		t.Errorf("expected 0 backfilled, got %d, err: %v", n, err)
-	}
-
-	// 4. Backfill with embedding error (should continue without panic)
-	_, _ = memStore.InsertFact(context.Background(), "user_pref", "Test fact", 1.0, nil)
-	nFail, _ := BackfillMissingEmbeddings(context.Background(), memStore, c)
-	if nFail != 0 {
-		t.Errorf("expected 0 backfilled on ollama failure, got %d", nFail)
-	}
-
-	// 5. Backfill with context cancel during loop
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _ = BackfillMissingEmbeddings(ctx, memStore, c)
-}
-
-func TestMemory_ExtractActiveConversationFacts_EdgeCases(t *testing.T) {
-	// 1. Nil args
-	if err := ExtractActiveConversationFacts(context.Background(), nil, nil, nil, 12); err == nil {
-		t.Error("expected error for nil args")
-	}
-
-	// 2. Mutex contention / TryLock already locked
-	dummyStore := db.NewFakeStore()
-	defer dummyStore.Close()
-	extractionMutex.Lock()
-	err := ExtractActiveConversationFacts(context.Background(), dummyStore, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12)
-	extractionMutex.Unlock()
-	if err != nil {
-		t.Errorf("expected nil error on overlapping execution, got %v", err)
-	}
-
-	// 3. Closed DB
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
-	if err := ExtractActiveConversationFacts(context.Background(), closedStore, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12); err == nil {
-		t.Error("expected error for closed DB")
-	}
-
-	// 4. 0 active conversations
-	memStore := db.NewFakeStore()
-	defer memStore.Close()
-	if err := ExtractActiveConversationFacts(context.Background(), memStore, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12); err != nil {
-		t.Errorf("expected nil for 0 conversations, got %v", err)
-	}
-
-	// 5. Context cancelled in loop
-	now := time.Now().UTC()
-	_ = memStore.InsertMessage(context.Background(), db.Message{
-		ID: "m-cancel-1", ThreadID: "th-cancel", Content: "hi", ResponseText: "hello", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_ = ExtractActiveConversationFacts(ctx, memStore, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12)
-}
-
-func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
-	store := db.NewFakeStore()
-	defer store.Close()
-
-	tmpDir := t.TempDir()
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return nil, errors.New("connection refused")
-	}, tmpDir)
-	now := time.Now().UTC()
-	adminMeta := db.MessageMetadata{IsAdmin: true}
-
-	// 1. GetUnextractedAdminTurns error
-	storeTurnsFail := db.NewFakeStore()
-	storeTurnsFail.FailNext("GetUnextractedAdminTurns", errors.New("turns query error"))
-	err := processThreadFacts(context.Background(), storeTurnsFail, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-1")
-	if err == nil || !strings.Contains(err.Error(), "failed to get unextracted turns") {
-		t.Errorf("expected unextracted turns error, got %v", err)
-	}
-
-	// 2. Empty extractable turns (ambient response)
-	_ = store.InsertMessage(context.Background(), db.Message{
-		ID: "m-pf-empty", ThreadID: "th-pf-empty", Content: "hello", ResponseText: "[AMBIENT_SILENT]", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now,
-	})
-	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-empty")
-	if err != nil {
-		t.Errorf("expected nil error for empty extractable turns, got %v", err)
-	}
-
-	// 3. Extractable turn exists, but LLM call fails
-	_ = store.InsertMessage(context.Background(), db.Message{
-		ID: "m-pf-fail", ThreadID: "th-pf-llm-fail", Content: "hello", ResponseText: "world", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now,
-	})
-	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) {
-		return "", fmt.Errorf("llm rate limited")
-	}, "th-pf-llm-fail")
-	if err == nil || !strings.Contains(err.Error(), "LLM fact extraction call failed") {
-		t.Errorf("expected LLM failure error, got %v", err)
-	}
-
-	// 4. Extractable turn exists, LLM returns invalid JSON
-	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) {
-		return "invalid json output", nil
-	}, "th-pf-llm-fail")
-	if err == nil || !strings.Contains(err.Error(), "failed to parse extracted facts JSON") {
-		t.Errorf("expected JSON parse error, got %v", err)
-	}
-
-	// 5. Extractable turn exists, LLM returns facts with empty text and embedding failure
-	err = processThreadFacts(context.Background(), store, client, func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[{"category":"user_pref","fact_text":"","importance_score":1.0},{"category":"user_pref","fact_text":"Valid fact","importance_score":1.0}]}`, nil
-	}, "th-pf-llm-fail")
-	if err != nil {
-		t.Errorf("expected nil error when embedding fails (logged warning), got %v", err)
-	}
-
-	// 6. MaxRowID error
-	errRowStore := &errRowIDStore{FakeStore: db.NewFakeStore()}
-	err = processThreadFacts(context.Background(), errRowStore, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-err")
-	if err == nil || !strings.Contains(err.Error(), "failed to get max message rowid") {
-		t.Errorf("expected max rowid error, got %v", err)
-	}
-
-	// 7. FindDuplicateFact check failure
-	storeDupFail := db.NewFakeStore()
-	_ = storeDupFail.InsertMessage(context.Background(), db.Message{ID: "m-dup-fail", ThreadID: "th-pf-dup-fail", Content: "valid", ResponseText: "reply", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now})
-	storeDupFail.FailNext("FindDuplicateFact", errors.New("dup check error"))
-	cValid := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
-	}, tmpDir)
-	err = processThreadFacts(context.Background(), storeDupFail, cValid, func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[{"category":"user_pref","fact_text":"Fact 1","importance_score":1.0}]}`, nil
-	}, "th-pf-dup-fail")
-	if err != nil {
-		t.Errorf("expected nil error on find duplicate failure warning, got %v", err)
-	}
-
-	// 8. ReinforceFact error
-	storeReinfFail := db.NewFakeStore()
-	_, _ = storeReinfFail.InsertFact(context.Background(), "user_pref", "Fact 1", 1.0, makeDimVector(1.0, 0.0))
-	_ = storeReinfFail.InsertMessage(context.Background(), db.Message{ID: "m-reinf-fail", ThreadID: "th-pf-dup-fail", Content: "valid", ResponseText: "reply", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now})
-	storeReinfFail.FailNext("ReinforceFact", errors.New("reinforce error"))
-	err = processThreadFacts(context.Background(), storeReinfFail, cValid, func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[{"category":"user_pref","fact_text":"Fact 1","importance_score":1.0}]}`, nil
-	}, "th-pf-dup-fail")
-	if err != nil {
-		t.Errorf("expected nil error on reinforce failure warning, got %v", err)
-	}
-
-	// 9. InsertFact error
-	storeInsFail := db.NewFakeStore()
-	_ = storeInsFail.InsertMessage(context.Background(), db.Message{ID: "m-ins-fail", ThreadID: "th-pf-dup-fail", Content: "valid", ResponseText: "reply", Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now})
-	storeInsFail.FailNext("InsertFact", errors.New("insert error"))
-	err = processThreadFacts(context.Background(), storeInsFail, cValid, func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[{"category":"user_pref","fact_text":"Fact new","importance_score":1.0}]}`, nil
-	}, "th-pf-dup-fail")
-	if err != nil {
-		t.Errorf("expected nil error on insert failure warning, got %v", err)
-	}
-}
-
-func TestMemory_FormatExtractableTurns_TruncationAndEmpty(t *testing.T) {
-	_ = filepath.Join(os.TempDir(), "noop")
-	if got := formatExtractableTurns(nil); got != "" {
-		t.Errorf("expected empty string for nil turns, got %q", got)
-	}
-	if got := formatExtractableTurns([]db.Message{{Content: "   ", ResponseText: "  "}}); got != "" {
-		t.Errorf("expected empty string for whitespace turn, got %q", got)
-	}
-
-	var longTurns []db.Message
-	for i := 0; i < 400; i++ {
-		longTurns = append(longTurns, db.Message{
-			Content:      "Long conversation user prompt message snippet for testing truncation boundary",
-			ResponseText: "Long conversation assistant response message snippet for testing truncation",
-		})
-	}
-	text := formatExtractableTurns(longTurns)
-	if len(text) == 0 || len(text) > 20000 {
-		t.Errorf("expected truncated transcript <= 20000 bytes, got %d", len(text))
-	}
-}
-
-
-func TestMemory_Search_EdgeCases(t *testing.T) {
-	// 1. sanitizeQueryText long text > 1000
-	longQuery := strings.Repeat("word ", 300)
-	sanitized := sanitizeQueryText(longQuery)
-	if len(sanitized) > 1000 {
-		t.Errorf("expected length <= 1000, got %d", len(sanitized))
-	}
-
-	// 2. DotProduct edge cases
-	if DotProduct(nil, []float32{1.0}) != 0 {
-		t.Error("expected 0 for nil slice")
-	}
-	if DotProduct([]float32{1.0}, []float32{1.0, 2.0}) != 0 {
-		t.Error("expected 0 for mismatched lengths")
-	}
-
-	// 3. RankFacts edge cases
-	if RankFacts(nil, nil, 0, 0) != nil {
-		t.Error("expected nil for empty inputs")
-	}
-	facts := []db.FactWithEmbedding{
-		{
-			Fact:      db.Fact{ID: 1, Category: "user_pref", FactText: "Fact 1", Importance: 1.0},
-			Embedding: []float32{1.0}, // mismatched len with queryVec len 2
-		},
-	}
-	ranked := RankFacts([]float32{1.0, 0.0}, facts, -1, -1)
-	if len(ranked) != 0 {
-		t.Errorf("expected 0 ranked facts due to dimension mismatch, got %d", len(ranked))
-	}
-
-	// 4. RetrieveRelevantFacts nil args and long text
-	res, err := RetrieveRelevantFacts(context.Background(), nil, nil, "", 5)
-	if res != nil || err != nil {
-		t.Error("expected nil, nil for nil args")
-	}
-
-	// 5. RetrieveRelevantFacts with Ollama failure (graceful fallback)
-	memStore := db.NewFakeStore()
-	defer memStore.Close()
-	cFail := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return nil, errors.New("connection refused")
-	})
-	resFail, errFail := RetrieveRelevantFacts(context.Background(), memStore, cFail, "What is my name?", 5)
-	if len(resFail) != 0 || errFail != nil {
-		t.Errorf("expected empty results and nil error on vector embedding failure fallback, got %v, %v", resFail, errFail)
-	}
-
-	// 6. FormatMemoryContext with empty category defaulting to 'general'
-	fmtOut := FormatMemoryContext([]db.Fact{
-		{Category: "", FactText: "Fact with no category"},
-	})
-	if !strings.Contains(fmtOut, "- [general] Fact with no category") {
-		t.Errorf("expected '[general]', got %q", fmtOut)
-	}
-	if FormatMemoryContext(nil) != "" {
-		t.Error("expected empty string for nil facts")
-	}
-}
-
-func TestMemory_NewClient_Variants(t *testing.T) {
-	// 1. Config pointer
-	cfg := config.NewFromData(&config.ConfigData{
-		Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434"},
-	})
-	c1 := NewClient(cfg, "/tmp/root1")
-	if len(c1.Roots()) != 1 || c1.Roots()[0] != "/tmp/root1" {
-		t.Errorf("unexpected roots: %v", c1.Roots())
-	}
-	// 2. Fallback / default (nil / unknown type)
-	c2 := NewClient(12345)
-	if c2 == nil || c2.BaseURL() != DefaultOllamaURL {
-		t.Errorf("unexpected client from unknown type: %v", c2)
-	}
-	// 3. Roots on nil receiver
-	var nilClient *Client
-	if nilClient.Roots() != nil {
-		t.Errorf("expected nil roots on nil client")
-	}
-	// 4. getOllamaConfig on nil receiver and nil config
-	cfgNil := nilClient.getOllamaConfig()
-	if cfgNil.BaseURL != DefaultOllamaURL {
-		t.Errorf("expected default ollama url, got %s", cfgNil.BaseURL)
-	}
-	if cfgNil.NumCtx != 512 {
-		t.Errorf("expected default num_ctx 512 for nil client, got %d", cfgNil.NumCtx)
-	}
-	cEmpty := &Client{}
-	cfgEmpty := cEmpty.getOllamaConfig()
-	if cfgEmpty.BaseURL != DefaultOllamaURL {
-		t.Errorf("expected default ollama url, got %s", cfgEmpty.BaseURL)
-	}
-	if cfgEmpty.NumCtx != 512 {
-		t.Errorf("expected default num_ctx 512 for empty client, got %d", cfgEmpty.NumCtx)
-	}
-}
-
-func TestMemory_Client_DoRequestErrors(t *testing.T) {
-	// 1. HTTP 500 status code
-	c500 := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusInternalServerError, "internal error"), nil
-	})
-	_, err := c500.GenerateEmbedding(context.Background(), "test", false, 0)
-	if err == nil || !strings.Contains(err.Error(), "ollama HTTP 500") {
-		t.Errorf("expected HTTP 500 error, got %v", err)
-	}
-
-	// 2. HTTP 200 with invalid JSON
-	cBadJSON := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, "not valid json"), nil
-	})
-	_, err = cBadJSON.GenerateEmbedding(context.Background(), "test", false, 0)
-	if err == nil {
-		t.Errorf("expected json unmarshal error, got nil")
-	}
-
-	// 3. HTTP 200 with error field
-	cErrResp := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, `{"error":"model not found"}`), nil
-	})
-	_, err = cErrResp.GenerateEmbedding(context.Background(), "test", false, 0)
-	if err == nil || !strings.Contains(err.Error(), "model not found") {
-		t.Errorf("expected model not found error, got %v", err)
-	}
-
-	// 4. HTTP 200 with empty embedding
-	cEmptyEmb := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, `{"embedding":[]}`), nil
-	})
-	_, err = cEmptyEmb.GenerateEmbedding(context.Background(), "test", false, 0)
-	if err == nil || !strings.Contains(err.Error(), "empty embedding returned") {
-		t.Errorf("expected empty embedding error, got %v", err)
-	}
+func setupTestStore(t *testing.T) *db.FakeStore {
+	t.Helper()
+	return db.NewFakeStore()
 }
 
 type errFactStore struct {
@@ -1022,6 +67,14 @@ type errFactStore struct {
 
 func (e *errFactStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]db.Fact, error) {
 	return nil, fmt.Errorf("search failed")
+}
+
+type errRowIDStore struct {
+	*db.FakeStore
+}
+
+func (e *errRowIDStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
+	return 0, fmt.Errorf("simulated max rowid error")
 }
 
 type errInsertFactStore struct {
@@ -1039,220 +92,6 @@ func (e *errInsertFactStore) UpdateConversationFactWatermark(ctx context.Context
 }
 func (e *errInsertFactStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
 	return 0, fmt.Errorf("simulated insert error")
-}
-
-type errRowIDStore struct {
-	*db.FakeStore
-}
-
-func (e *errRowIDStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
-	return 0, fmt.Errorf("simulated max rowid error")
-}
-
-func TestMemory_RetrieveRelevantFacts_TypesAndErrors(t *testing.T) {
-	// 1. Long query > 1000 runes
-	c := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse([]float32{0.1, 0.2}), nil
-	})
-
-	memStore := db.NewFakeStore()
-	defer memStore.Close()
-
-	longQuery := strings.Repeat("hello world ", 100) // > 1000 chars
-	facts, err := RetrieveRelevantFacts(context.Background(), memStore, c, longQuery, 5)
-	if err != nil {
-		t.Errorf("expected nil error for long query, got %v", err)
-	}
-	_ = facts
-
-	// 2. Nil FactStore
-	var nilFactStore db.FactStore
-	facts, err = RetrieveRelevantFacts(context.Background(), nilFactStore, c, "hello", 5)
-	if facts != nil || err != nil {
-		t.Errorf("expected nil, nil for nil FactStore, got %v, %v", facts, err)
-	}
-
-	// 3. Nil client
-	facts, err = RetrieveRelevantFacts(context.Background(), memStore, nil, "hello", 5)
-	if len(facts) != 0 || err != nil {
-		t.Errorf("expected empty results and nil error for nil client, got %v, %v", facts, err)
-	}
-
-	// 4. FactStore interface directly
-	store := db.NewFakeStore()
-	facts, err = RetrieveRelevantFacts(context.Background(), store, c, "query", 5)
-	if err != nil {
-		t.Errorf("expected nil error for FactStore interface, got %v", err)
-	}
-
-	// 5. FactStore search error
-	errStore := &errFactStore{}
-	_, err = RetrieveRelevantFacts(context.Background(), errStore, c, "query", 5)
-	if err == nil {
-		t.Errorf("expected error from closed database in RetrieveRelevantFacts, got nil")
-	}
-}
-
-func TestMemory_Extractor_EdgeCases(t *testing.T) {
-	// 1. BackfillMissingEmbeddings nil store or client
-	n, err := BackfillMissingEmbeddings(context.Background(), nil, nil)
-	if n != 0 || err == nil {
-		t.Errorf("expected 0, err for nil store or client, got %d, %v", n, err)
-	}
-
-	// 2. ExtractActiveConversationFacts nil database / client / llmFunc
-	err = ExtractActiveConversationFacts(context.Background(), nil, nil, nil, 24)
-	if err == nil {
-		t.Errorf("expected error for nil args in ExtractActiveConversationFacts")
-	}
-
-	// 3. processThreadFacts nil database
-	err = processThreadFacts(context.Background(), nil, nil, nil, "")
-	if err == nil {
-		t.Errorf("expected error for nil database in processThreadFacts, got nil")
-	}
-
-	// 4. processThreadFacts empty factsJSON
-	memStore := db.NewFakeStore()
-	defer memStore.Close()
-	c := NewClient("http://127.0.0.1:11434")
-	err = processThreadFacts(context.Background(), memStore, c, func(ctx context.Context, prompt string) (string, error) {
-		return "", nil
-	}, "th-123")
-	if err != nil {
-		t.Errorf("expected nil error for empty factsJSON, got %v", err)
-	}
-}
-
-func TestMemory_AdditionalCoverage(t *testing.T) {
-	// 1. search.go RankFacts len(scored) > topN
-	qVec := []float32{1.0, 0.0}
-	facts := []db.FactWithEmbedding{
-		{Fact: db.Fact{ID: 1, Category: "c", FactText: "t1", Importance: 1.0}, Embedding: []float32{1.0, 0.0}},
-		{Fact: db.Fact{ID: 2, Category: "c", FactText: "t2", Importance: 1.0}, Embedding: []float32{0.9, 0.1}},
-	}
-	res := RankFacts(qVec, facts, 0.1, 1)
-	if len(res) != 1 {
-		t.Errorf("expected 1 fact after topN truncation, got %d", len(res))
-	}
-
-	// 2. ollama.go GenerateEmbedding with empty prompt
-	c := NewClient("http://127.0.0.1:11434")
-	emb, err := c.GenerateEmbedding(context.Background(), "", false, 0)
-	if emb != nil || err == nil || !strings.Contains(err.Error(), "text cannot be empty") {
-		t.Errorf("expected 'text cannot be empty' error, got emb: %v, err: %v", emb, err)
-	}
-
-	// 3. ollama.go getOllamaConfig with cfg.Current() == nil
-	emptyCfg := config.NewFromData(nil)
-	cEmptyCfg := New(emptyCfg)
-	cfgRes := cEmptyCfg.getOllamaConfig()
-	if cfgRes.BaseURL != DefaultOllamaURL {
-		t.Errorf("expected default ollama URL for uninitialized config, got %s", cfgRes.BaseURL)
-	}
-
-	// 4. extractor.go BackfillMissingEmbeddings with nil FactStore
-	var nilFactStore db.FactStore
-	_, err = BackfillMissingEmbeddings(context.Background(), nilFactStore, c)
-	if err == nil {
-		t.Errorf("expected error for nil FactStore in BackfillMissingEmbeddings")
-	}
-
-	// 5. extractor.go BackfillMissingEmbeddings with cancelled context during iteration
-	memStore2 := db.NewFakeStore()
-	defer memStore2.Close()
-	_, _ = memStore2.InsertFact(context.Background(), "test", "fact 1", 1.0, nil)
-	_, _ = memStore2.InsertFact(context.Background(), "test", "fact 2", 1.0, nil)
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	cCancel := newMockClient(func(req *http.Request) (*http.Response, error) {
-		cancel()
-		return mockEmbeddingResponse(make([]float32, 384)), nil
-	})
-	_, err = BackfillMissingEmbeddings(cancelCtx, memStore2, cCancel)
-	if err == nil {
-		t.Errorf("expected context cancellation error, got nil")
-	}
-
-	// 6. extractor.go BackfillMissingEmbeddings UpdateFactEmbedding error
-	memStore3 := db.NewFakeStore()
-	_, _ = memStore3.InsertFact(context.Background(), "test", "fact 1", 1.0, nil)
-	cUpdateErr := newMockClient(func(req *http.Request) (*http.Response, error) {
-		_ = memStore3.Close()
-		return mockEmbeddingResponse(make([]float32, 384)), nil
-	})
-	_, _ = BackfillMissingEmbeddings(context.Background(), memStore3, cUpdateErr)
-
-	// 7. extractor.go ExtractActiveConversationFacts with db.FactStore directly
-	memStore := db.NewFakeStore()
-	err = ExtractActiveConversationFacts(context.Background(), memStore, c, func(ctx context.Context, p string) (string, error) { return "", nil }, 24)
-	if err != nil {
-		t.Errorf("expected nil error for ExtractActiveConversationFacts with FactStore, got %v", err)
-	}
-
-	// 8. extractor.go processThreadFacts with InsertFact error
-	insErrStore := &errInsertFactStore{FakeStore: db.NewFakeStore()}
-	defer insErrStore.Close()
-	_ = processThreadFacts(context.Background(), insErrStore, c, func(ctx context.Context, p string) (string, error) {
-		return `{"facts":[{"category":"user_pref","fact_text":"Fact to fail","importance_score":1.0}]}`, nil
-	}, "th-ins-err")
-}
-
-func TestMemory_SettersAndNilClient(t *testing.T) {
-	c := NewClient("http://mock-ollama:11434")
-	origHTTP := c.httpClient
-	origDelay := c.retryDelay
-
-	dummyClient := &http.Client{}
-	restoreHTTP := c.SetHTTPClientForTest(dummyClient)
-	if c.httpClient != dummyClient {
-		t.Errorf("expected custom http client to be set")
-	}
-	restoreHTTP()
-	if c.httpClient != origHTTP {
-		t.Errorf("expected http client to be restored")
-	}
-
-	var nilClient *Client
-	nilRestoreHTTP := nilClient.SetHTTPClientForTest(dummyClient)
-	nilRestoreHTTP()
-
-	restoreDelay := c.SetRetryDelayForTest(10 * time.Millisecond)
-	if c.retryDelay != 10*time.Millisecond {
-		t.Errorf("expected retry delay to be 10ms")
-	}
-	restoreDelay()
-	if c.retryDelay != origDelay {
-		t.Errorf("expected retry delay to be restored")
-	}
-
-	nilRestoreDelay := nilClient.SetRetryDelayForTest(10 * time.Millisecond)
-	nilRestoreDelay()
-
-	// doRequest with nil httpClient fallback
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	cNilHTTP := NewClient("http://mock-ollama:11434")
-	cNilHTTP.httpClient = nil
-	_, err := cNilHTTP.doRequest(ctx, []byte(`{}`))
-	if err == nil {
-		t.Errorf("expected context cancelled error from default client")
-	}
-
-	// doRequest with invalid URL
-	cBadURL := NewClient("http://\x7f")
-	_, err = cBadURL.doRequest(context.Background(), []byte(`{}`))
-	if err == nil {
-		t.Errorf("expected error with invalid URL")
-	}
-
-	// doRequest with invalid response JSON
-	cBadJSON := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, `invalid-json`), nil
-	})
-	_, err = cBadJSON.doRequest(context.Background(), []byte(`{}`))
-	if err == nil {
-		t.Errorf("expected unmarshal error for invalid JSON")
-	}
 }
 
 type mockErrWatermarkFactStore struct {
@@ -1275,152 +114,979 @@ func (m *mockErrWatermarkFactStore) UpdateConversationFactExtractedAt(ctx contex
 	return m.FakeStore.UpdateConversationFactExtractedAt(ctx, threadID)
 }
 
-type mockCloseErrReader struct {
-	io.Reader
+func TestClient_NewAndConfig(t *testing.T) {
+	cfgCustom := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL: "http://custom:11434/",
+			Model:   "nomic-embed-text",
+			NumCtx:  1024,
+		},
+	})
+	cfgEmpty := config.NewFromData(nil)
+
+	tests := []struct {
+		name        string
+		client      *Client
+		wantBaseURL string
+		wantRoots   []string
+		wantNumCtx  int
+	}{
+		{"NewNilConfig", New(nil), DefaultOllamaURL, nil, 512},
+		{"NewCustomConfig", New(cfgCustom, " /r1 ", "", " /r2 "), "http://custom:11434", []string{"/r1", "/r2"}, 1024},
+		{"NewClientString", NewClient("http://host:11434/", "/path"), "http://host:11434", []string{"/path"}, 512},
+		{"NewClientConfig", NewClient(cfgCustom), "http://custom:11434", nil, 1024},
+		{"NewClientUnknownType", NewClient(12345), DefaultOllamaURL, nil, 512},
+		{"NilClient", nil, DefaultOllamaURL, nil, 512},
+		{"EmptyClient", &Client{}, DefaultOllamaURL, nil, 512},
+		{"EmptyDataConfig", New(cfgEmpty), DefaultOllamaURL, nil, 512},
+		{"UninitializedConfig", New(&config.Config{}), DefaultOllamaURL, nil, 512},
+		{"ClientWithNilConfig", &Client{cfg: nil}, DefaultOllamaURL, nil, 512},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.client.BaseURL(); got != tc.wantBaseURL {
+				t.Errorf("BaseURL() = %q, want %q", got, tc.wantBaseURL)
+			}
+			roots := tc.client.Roots()
+			if len(roots) != len(tc.wantRoots) {
+				t.Fatalf("Roots() len = %d, want %d", len(roots), len(tc.wantRoots))
+			}
+			for i, r := range roots {
+				if r != tc.wantRoots[i] {
+					t.Errorf("Roots()[%d] = %q, want %q", i, r, tc.wantRoots[i])
+				}
+			}
+			if len(roots) > 0 {
+				roots[0] = "mutated"
+				if tc.client.Roots()[0] == "mutated" {
+					t.Errorf("Roots() is not a defensive copy")
+				}
+			}
+			cfg := tc.client.getOllamaConfig()
+			if cfg.NumCtx != tc.wantNumCtx {
+				t.Errorf("getOllamaConfig().NumCtx = %d, want %d", cfg.NumCtx, tc.wantNumCtx)
+			}
+		})
+	}
 }
 
-func (m *mockCloseErrReader) Close() error {
-	return errors.New("simulated close error")
+func TestDotProduct(t *testing.T) {
+	tests := []struct {
+		name string
+		a    []float32
+		b    []float32
+		want float64
+	}{
+		{"IdenticalUnit", []float32{1.0, 0.0, 0.0}, []float32{1.0, 0.0, 0.0}, 1.0},
+		{"Orthogonal", []float32{1.0, 0.0, 0.0}, []float32{0.0, 1.0, 0.0}, 0.0},
+		{"Scaled", []float32{0.5, 0.5}, []float32{0.5, 0.5}, 0.5},
+		{"NilFirst", nil, []float32{1.0}, 0.0},
+		{"NilSecond", []float32{1.0}, nil, 0.0},
+		{"MismatchedLen", []float32{1.0}, []float32{1.0, 2.0}, 0.0},
+		{"BothEmpty", []float32{}, []float32{}, 0.0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DotProduct(tc.a, tc.b); got != tc.want {
+				t.Errorf("DotProduct() = %f, want %f", got, tc.want)
+			}
+		})
+	}
 }
 
-func TestMemory_SwallowedErrorsBranches(t *testing.T) {
-	// 1. extractor.go UpdateConversationFactWatermark error on empty transcript
-	fakeStore := db.NewFakeStore()
-	defer fakeStore.Close()
-	errStore := &mockErrWatermarkFactStore{
-		FakeStore:    fakeStore,
-		watermarkErr: errors.New("simulated watermark error on empty transcript"),
-	}
-	clientNoRoots := NewClient("http://127.0.0.1:11434")
-	err := processThreadFacts(context.Background(), errStore, clientNoRoots, func(ctx context.Context, p string) (string, error) {
-		return "", nil
-	}, "th-empty-warn")
-	if err != nil {
-		t.Errorf("expected nil error despite watermark warning, got %v", err)
+func TestGenerateEmbedding(t *testing.T) {
+	tests := []struct {
+		name         string
+		text         string
+		isQuery      bool
+		maxRetries   int
+		queryPrefix  string
+		model        string
+		numCtx       int
+		httpStatus   int
+		httpBody     string
+		netErr       bool
+		closeErr     bool
+		cancelCtx    bool
+		nilHTTP      bool
+		badURL       bool
+		wantLen      int
+		wantErr      bool
+		wantSubstr   string
+		expectPrompt string
+	}{
+		{
+			name:       "EmptyText",
+			text:       "",
+			wantErr:    true,
+			wantSubstr: "text cannot be empty",
+		},
+		{
+			name:         "SuccessDocument",
+			text:         "hello world",
+			isQuery:      false,
+			maxRetries:   1,
+			httpStatus:   http.StatusOK,
+			httpBody:     `{"embedding":[0.1, 0.2, 0.3]}`,
+			wantLen:      3,
+			expectPrompt: "hello world",
+		},
+		{
+			name:         "SuccessQueryWithPrefix",
+			text:         "user search",
+			isQuery:      true,
+			queryPrefix:  "query: ",
+			httpStatus:   http.StatusOK,
+			httpBody:     `{"embedding":[0.5, 0.6]}`,
+			wantLen:      2,
+			expectPrompt: "query: user search",
+		},
+		{
+			name:         "SuccessCustomModelAndCtx",
+			text:         "custom test",
+			model:        "custom-model",
+			numCtx:       1024,
+			httpStatus:   http.StatusOK,
+			httpBody:     `{"embedding":[1.0]}`,
+			wantLen:      1,
+			expectPrompt: "custom test",
+		},
+		{
+			name:       "HTTP500Error",
+			text:       "fail 500",
+			httpStatus: http.StatusInternalServerError,
+			httpBody:   "internal error",
+			wantErr:    true,
+			wantSubstr: "ollama HTTP 500",
+		},
+		{
+			name:       "APIErrorResponse",
+			text:       "fail api error",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"error":"model not loaded"}`,
+			wantErr:    true,
+			wantSubstr: "model not loaded",
+		},
+		{
+			name:       "EmptyEmbeddingResponse",
+			text:       "fail empty emb",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"embedding":[]}`,
+			wantErr:    true,
+			wantSubstr: "empty embedding returned",
+		},
+		{
+			name:       "InvalidJSON",
+			text:       "fail json",
+			httpStatus: http.StatusOK,
+			httpBody:   "not-valid-json",
+			wantErr:    true,
+		},
+		{
+			name:       "NetworkErrorNegativeRetries",
+			text:       "fail net",
+			maxRetries: -1,
+			netErr:     true,
+			wantErr:    true,
+			wantSubstr: "connection refused",
+		},
+		{
+			name:       "ContextCancelled",
+			text:       "cancelled",
+			cancelCtx:  true,
+			wantErr:    true,
+		},
+		{
+			name:       "BodyCloseErrorIgnored",
+			text:       "close err",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"embedding":[0.7, 0.8]}`,
+			closeErr:   true,
+			wantLen:    2,
+		},
+		{
+			name:      "NilHTTPClientFallbackCancelled",
+			text:      "nil http",
+			nilHTTP:   true,
+			cancelCtx: true,
+			wantErr:   true,
+		},
+		{
+			name:    "BadURLRequestError",
+			text:    "bad url",
+			badURL:  true,
+			wantErr: true,
+		},
 	}
 
-	// 2. extractor.go UpdateConversationFactWatermark and UpdateConversationFactExtractedAt error on extracted facts
-	now := time.Now().UTC()
-	_ = fakeStore.InsertMessage(context.Background(), db.Message{
-		ID: "m-warn-post", ThreadID: "th-warn-post", Content: "Alex prefers matcha", ResponseText: "Noted!", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var receivedPrompt string
+			rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if tc.netErr {
+					return nil, errors.New("connection refused")
+				}
+				var reqBody EmbeddingRequest
+				_ = json.NewDecoder(req.Body).Decode(&reqBody)
+				receivedPrompt = reqBody.Prompt
 
-	clientWithRoots := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(make([]float32, 384)), nil
-	})
+				resp := mockJSONResponse(tc.httpStatus, tc.httpBody)
+				if tc.closeErr {
+					resp.Body = &mockCloseErrReader{Reader: strings.NewReader(tc.httpBody)}
+				}
+				return resp, nil
+			})
 
-	errStorePost := &mockErrWatermarkFactStore{
-		FakeStore:      fakeStore,
-		watermarkErr:   errors.New("simulated post-extraction watermark error"),
-		extractedAtErr: errors.New("simulated post-extraction extracted_at error"),
+			cfg := config.NewFromData(&config.ConfigData{
+				Ollama: config.OllamaConfig{
+					BaseURL:     "http://mock-ollama:11434",
+					Model:       tc.model,
+					QueryPrefix: tc.queryPrefix,
+					NumCtx:      tc.numCtx,
+				},
+			})
+			client := New(cfg)
+			client.httpClient = &http.Client{Transport: rt}
+			client.retryDelay = -1
+
+			if tc.nilHTTP {
+				client.httpClient = nil
+			}
+			if tc.badURL {
+				client = NewClient("http://\x7f")
+				client.retryDelay = -1
+			}
+
+			ctx := context.Background()
+			if tc.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			emb, err := client.GenerateEmbedding(ctx, tc.text, tc.isQuery, tc.maxRetries)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(emb) != tc.wantLen {
+				t.Errorf("len(emb) = %d, want %d", len(emb), tc.wantLen)
+			}
+			if tc.expectPrompt != "" && receivedPrompt != tc.expectPrompt {
+				t.Errorf("prompt = %q, want %q", receivedPrompt, tc.expectPrompt)
+			}
+		})
+	}
+}
+
+func TestExtractQueryText(t *testing.T) {
+	longText := strings.Repeat("word ", 300)
+	tests := []struct {
+		name    string
+		content string
+		want    string
+		maxLen  int
+	}{
+		{
+			name: "DiscordPromptWithMention",
+			content: `<USER_REQUEST>
+Here's a message someone sent you from Discord:
+- id: 1543706746294509568
+- content: <@1542035925603713086> What office do I work from on Thursdays?
+- mentions: [Aerial]
+</USER_REQUEST>`,
+			want: "What office do I work from on Thursdays?",
+		},
+		{
+			name:    "XMLPrompt",
+			content: "<USER_REQUEST>\n  Show me system status\n</USER_REQUEST>",
+			want:    "Show me system status",
+		},
+		{
+			name:    "PlainText",
+			content: "What is the weather today?",
+			want:    "What is the weather today?",
+		},
+		{
+			name:    "Empty",
+			content: "",
+			want:    "",
+		},
+		{
+			name:    "MentionsStripped",
+			content: "Hey <@&987654> check <#123456> please",
+			want:    "Hey check please",
+		},
+		{
+			name:    "PreviousSessionStripped",
+			content: "<PREVIOUS_SESSION>\nPrior context\n</PREVIOUS_SESSION>\nWhat is my schedule?",
+			want:    "What is my schedule?",
+		},
+		{
+			name:    "LongTextTruncated",
+			content: longText,
+			maxLen:  1000,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExtractQueryText(tc.content)
+			if tc.maxLen > 0 {
+				if len(got) > tc.maxLen {
+					t.Errorf("len(got) = %d, want <= %d", len(got), tc.maxLen)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("ExtractQueryText() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRankFacts(t *testing.T) {
+	factsStandard := []db.FactWithEmbedding{
+		{Fact: db.Fact{ID: 1, Category: "c1", FactText: "Fact 1", Importance: 1.0}, Embedding: []float32{0.9, 0.1, 0.0}},
+		{Fact: db.Fact{ID: 2, Category: "c2", FactText: "Fact 2", Importance: 1.0}, Embedding: []float32{0.3, 0.7, 0.0}},
+		{Fact: db.Fact{ID: 3, Category: "c3", FactText: "Fact 3", Importance: 1.0}, Embedding: []float32{0.95, 0.05, 0.0}},
+	}
+	tests := []struct {
+		name     string
+		qVec     []float32
+		facts    []db.FactWithEmbedding
+		minScore float64
+		topN     int
+		wantIDs  []int64
+	}{
+		{"StandardThresholdAndRanking", []float32{1.0, 0.0, 0.0}, factsStandard, 0.45, 10, []int64{3, 1}},
+		{"TopNTruncation", []float32{1.0, 0.0, 0.0}, factsStandard, 0.1, 1, []int64{3}},
+		{"DefaultTopN", []float32{1.0, 0.0, 0.0}, factsStandard, 0.45, 0, []int64{3, 1}},
+		{"DimensionMismatch", []float32{1.0, 0.0}, []db.FactWithEmbedding{{Fact: db.Fact{ID: 1}, Embedding: []float32{1.0}}}, 0.0, 10, nil},
+		{"EmptyFacts", []float32{1.0, 0.0}, nil, 0.0, 10, nil},
+		{"EmptyQueryVector", nil, factsStandard, 0.0, 10, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RankFacts(tc.qVec, tc.facts, tc.minScore, tc.topN)
+			if len(got) != len(tc.wantIDs) {
+				t.Fatalf("RankFacts() len = %d, want %d", len(got), len(tc.wantIDs))
+			}
+			for i, id := range tc.wantIDs {
+				if got[i].ID != id {
+					t.Errorf("got[%d].ID = %d, want %d", i, got[i].ID, id)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatMemoryContext(t *testing.T) {
+	tests := []struct {
+		name         string
+		facts        []db.Fact
+		wantContains []string
+		wantEmpty    bool
+	}{
+		{
+			name: "StandardFacts",
+			facts: []db.Fact{
+				{Category: "user_preference", FactText: "Prefers Pacific Time"},
+				{Category: "system_config", FactText: "Docker Daemon at unix:///var/run/docker.sock"},
+			},
+			wantContains: []string{"<retrieved_memory>", "- [user_preference] Prefers Pacific Time", "- [system_config] Docker Daemon at unix:///var/run/docker.sock", "</retrieved_memory>"},
+		},
+		{
+			name:         "DefaultGeneralCategory",
+			facts:        []db.Fact{{Category: "", FactText: "No category fact"}},
+			wantContains: []string{"- [general] No category fact"},
+		},
+		{"NilFacts", nil, nil, true},
+		{"EmptyFacts", []db.Fact{}, nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatMemoryContext(tc.facts)
+			if tc.wantEmpty {
+				if got != "" {
+					t.Errorf("FormatMemoryContext() = %q, want empty", got)
+				}
+				return
+			}
+			for _, sub := range tc.wantContains {
+				if !strings.Contains(got, sub) {
+					t.Errorf("FormatMemoryContext() missing %q, got: %s", sub, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRetrieveRelevantFacts(t *testing.T) {
+	tests := []struct {
+		name       string
+		nilStore   bool
+		nilClient  bool
+		storeErr   bool
+		clientErr  bool
+		query      string
+		maxFacts   int
+		wantLen    int
+		wantErr    bool
+		wantSubstr string
+	}{
+		{"NilStore", true, false, false, false, "query", 5, 0, false, ""},
+		{"NilClient", false, true, false, false, "query", 5, 0, false, ""},
+		{"LongQuerySucceeds", false, false, false, false, strings.Repeat("hello world ", 100), 5, 1, false, "Server port is 8080"},
+		{"StoreSearchError", false, false, true, false, "query", 5, 0, true, "failed to search similar facts"},
+		{"ClientEmbeddingErrorFallback", false, false, false, true, "What port?", 5, 0, false, ""},
+		{"SuccessVectorRetrieval", false, false, false, false, "What port is server?", 5, 1, false, "Server port is 8080"},
 	}
 
-	err = processThreadFacts(context.Background(), errStorePost, clientWithRoots, func(ctx context.Context, p string) (string, error) {
-		return `{"facts":[{"category":"user_preference","fact_text":"Alex prefers matcha","importance_score":0.9}]}`, nil
-	}, "th-warn-post")
-	if err != nil {
-		t.Errorf("expected nil error despite post-extraction warnings, got %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var store db.FactStore
+			if !tc.nilStore {
+				if tc.storeErr {
+					store = &errFactStore{}
+				} else {
+					fs := setupTestStore(t)
+					defer fs.Close()
+					_, _ = fs.InsertFact(ctx, "system_config", "Server port is 8080", 1.0, makeDimVector(0.9, 0.1))
+					_, _ = fs.InsertFact(ctx, "routine", "Low scoring fact", 1.0, makeDimVector(0.1, 0.9))
+					store = fs
+				}
+			}
 
-	// 3. ollama.go:234 resp.Body.Close() error
-	cCloseErr := newMockClient(func(req *http.Request) (*http.Response, error) {
-		embJSON, _ := json.Marshal(EmbeddingResponse{Embedding: []float32{0.1, 0.2}})
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       &mockCloseErrReader{Reader: strings.NewReader(string(embJSON))},
-			Header:     make(http.Header),
-		}, nil
-	})
-	vec, err := cCloseErr.GenerateEmbedding(context.Background(), "test embedding", false, 0)
-	if err != nil {
-		t.Errorf("expected nil error from GenerateEmbedding when close fails, got %v", err)
-	}
-	if len(vec) != 2 {
-		t.Errorf("expected embedding vector length 2, got %d", len(vec))
+			var client *Client
+			if !tc.nilClient {
+				client = newMockClient(func(req *http.Request) (*http.Response, error) {
+					if tc.clientErr {
+						return nil, errors.New("connection refused")
+					}
+					return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+				})
+			}
+
+			facts, err := RetrieveRelevantFacts(ctx, store, client, tc.query, tc.maxFacts)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(facts) != tc.wantLen {
+				t.Fatalf("len(facts) = %d, want %d", len(facts), tc.wantLen)
+			}
+			if tc.wantSubstr != "" && facts[0].FactText != tc.wantSubstr {
+				t.Errorf("fact text = %q, want %q", facts[0].FactText, tc.wantSubstr)
+			}
+		})
 	}
 }
 
 func TestRetrieveFormattedContext(t *testing.T) {
-	ctx := context.Background()
-
-	client := newMockClient(func(req *http.Request) (*http.Response, error) {
-		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
-	})
-
-	store := setupTestStore(t)
-	defer store.Close()
-
-	// 1. nil factStore, nil client, empty query
-	res, err := RetrieveFormattedContext(ctx, nil, client, "query", 5)
-	if err != nil || res != "" {
-		t.Errorf("expected empty string and nil error for nil factStore, got %q, %v", res, err)
+	tests := []struct {
+		name         string
+		nilStore     bool
+		nilClient    bool
+		storeErr     bool
+		emptyQuery   bool
+		zeroFacts    bool
+		wantContains []string
+		wantEmpty    bool
+	}{
+		{"NilStore", true, false, false, false, false, nil, true},
+		{"NilClient", false, true, false, false, false, nil, true},
+		{"EmptyQuery", false, false, false, true, false, nil, true},
+		{"StoreSearchErrorFallback", false, false, true, false, false, nil, true},
+		{"ZeroFacts", false, false, false, false, true, nil, true},
+		{
+			name:         "SuccessContextFormatting",
+			wantContains: []string{"<retrieved_memory>", "- [user_preference] User prefers dark mode", "</retrieved_memory>"},
+		},
 	}
 
-	res, err = RetrieveFormattedContext(ctx, store, nil, "query", 5)
-	if err != nil || res != "" {
-		t.Errorf("expected empty string and nil error for nil client, got %q, %v", res, err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var store db.FactStore
+			if !tc.nilStore {
+				if tc.storeErr {
+					store = &errFactStore{}
+				} else {
+					fs := setupTestStore(t)
+					defer fs.Close()
+					if !tc.zeroFacts {
+						_, _ = fs.InsertFact(ctx, "user_preference", "User prefers dark mode", 1.0, makeDimVector(0.9, 0.1))
+					}
+					store = fs
+				}
+			}
 
-	res, err = RetrieveFormattedContext(ctx, store, client, "", 5)
-	if err != nil || res != "" {
-		t.Errorf("expected empty string and nil error for empty query, got %q, %v", res, err)
-	}
+			var client *Client
+			if !tc.nilClient {
+				client = newMockClient(func(req *http.Request) (*http.Response, error) {
+					return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+				})
+			}
 
-	res, err = RetrieveFormattedContext(ctx, store, client, "   \t\n", 5)
-	if err != nil || res != "" {
-		t.Errorf("expected empty string and nil error for whitespace query, got %q, %v", res, err)
-	}
+			query := "dark mode"
+			if tc.emptyQuery {
+				query = "   \t\n"
+			}
 
-	// 2. retrieval error fallback (returns "", nil)
-	errStore := &errFactStore{}
-	res, err = RetrieveFormattedContext(ctx, errStore, client, "query", 5)
-	if err != nil {
-		t.Errorf("expected nil error on retrieval error fallback, got %v", err)
-	}
-	if res != "" {
-		t.Errorf("expected empty string on retrieval error fallback, got %q", res)
-	}
-
-	// 3. zero facts (returns "", nil)
-	emptyStore := setupTestStore(t)
-	defer emptyStore.Close()
-	res, err = RetrieveFormattedContext(ctx, emptyStore, client, "nonexistent query", 5)
-	if err != nil {
-		t.Errorf("expected nil error for zero facts, got %v", err)
-	}
-	if res != "" {
-		t.Errorf("expected empty string for zero facts, got %q", res)
-	}
-
-	// 4. successful fact retrieval and XML formatting
-	validStore := setupTestStore(t)
-	defer validStore.Close()
-	_, err = validStore.InsertFact(ctx, "user_preference", "User prefers dark mode", 1.0, makeDimVector(0.9, 0.1))
-	if err != nil {
-		t.Fatalf("failed to insert fact: %v", err)
-	}
-
-	res, err = RetrieveFormattedContext(ctx, validStore, client, "dark mode", 5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expectedSubstrings := []string{
-		"<retrieved_memory>",
-		"- [user_preference] User prefers dark mode",
-		"</retrieved_memory>",
-	}
-	for _, sub := range expectedSubstrings {
-		if !strings.Contains(res, sub) {
-			t.Errorf("expected context to contain %q, got: %s", sub, res)
-		}
+			res, err := RetrieveFormattedContext(ctx, store, client, query, 5)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantEmpty {
+				if res != "" {
+					t.Errorf("RetrieveFormattedContext() = %q, want empty", res)
+				}
+				return
+			}
+			for _, sub := range tc.wantContains {
+				if !strings.Contains(res, sub) {
+					t.Errorf("RetrieveFormattedContext() missing %q, got: %s", sub, res)
+				}
+			}
+		})
 	}
 }
 
+func TestBackfillMissingEmbeddings(t *testing.T) {
+	tests := []struct {
+		name          string
+		nilStore      bool
+		nilClient     bool
+		closedDB      bool
+		zeroMissing   bool
+		emptyEmbResp  bool
+		embGenErr     bool
+		cancelContext bool
+		updateErr     bool
+		wantCount     int
+		wantErr       bool
+	}{
+		{"NilStore", true, false, false, false, false, false, false, false, 0, true},
+		{"NilClient", false, true, false, false, false, false, false, false, 0, true},
+		{"ClosedDB", false, false, true, false, false, false, false, false, 0, true},
+		{"ZeroMissing", false, false, false, true, false, false, false, false, 0, false},
+		{"EmptyEmbeddingReturned", false, false, false, false, true, false, false, false, 0, false},
+		{"EmbeddingGenError", false, false, false, false, false, true, false, false, 0, false},
+		{"CancelledContext", false, false, false, false, false, false, true, false, 0, true},
+		{"UpdateEmbeddingError", false, false, false, false, false, false, false, true, 0, false},
+		{"SuccessBackfill", false, false, false, false, false, false, false, false, 2, false},
+	}
 
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
+			var factStore db.FactStore
+			if !tc.nilStore {
+				store := setupTestStore(t)
+				defer store.Close()
+				if !tc.zeroMissing {
+					_, _ = store.InsertFact(ctx, "c1", "Fact 1 has emb", 1.0, makeDimVector(0.1, 0.2))
+					_, _ = store.InsertFact(ctx, "c2", "Fact 2 needs emb", 1.0, nil)
+					if tc.emptyEmbResp || tc.updateErr {
+						// single fact
+					} else {
+						_, _ = store.InsertFact(ctx, "c3", "Fact 3 needs emb", 0.9, nil)
+						_, _ = store.InsertFact(ctx, "c4", "   ", 0.5, nil) // whitespace skipped
+					}
+				}
+				if tc.closedDB {
+					_ = store.Close()
+				}
+				factStore = store
+			}
 
+			var client *Client
+			if !tc.nilClient {
+				client = newMockClient(func(req *http.Request) (*http.Response, error) {
+					if tc.cancelContext {
+						cancel()
+						return nil, context.Canceled
+					}
+					if tc.embGenErr {
+						return nil, errors.New("embedding generation error")
+					}
+					if tc.emptyEmbResp {
+						return mockEmbeddingResponse([]float32{}), nil
+					}
+					if tc.updateErr && factStore != nil {
+						if fs, ok := factStore.(*db.FakeStore); ok {
+							_ = fs.Close()
+						}
+					}
+					return mockEmbeddingResponse(makeDimVector(0.5, 0.5)), nil
+				})
+			}
 
+			count, err := BackfillMissingEmbeddings(ctx, factStore, client)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if count != tc.wantCount {
+				t.Errorf("BackfillMissingEmbeddings() count = %d, want %d", count, tc.wantCount)
+			}
+		})
+	}
+}
 
+func TestParseFactsJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		wantFacts  int
+		wantText   string
+		wantErr    bool
+		wantSubstr string
+	}{
+		{
+			name:      "ValidMarkdownCodeBlock",
+			raw:       "```json\n{\"facts\":[{\"category\":\"user_preference\",\"fact_text\":\"User likes Go\",\"importance_score\":1.0}]}\n```",
+			wantFacts: 1,
+			wantText:  "User likes Go",
+		},
+		{
+			name:      "ValidRawJSON",
+			raw:       `{"facts":[{"category":"routine","fact_text":"Morning coffee at 8am","importance_score":0.8}]}`,
+			wantFacts: 1,
+			wantText:  "Morning coffee at 8am",
+		},
+		{
+			name:       "EmptyPayload",
+			raw:        "   ",
+			wantErr:    true,
+			wantSubstr: "empty raw facts payload",
+		},
+		{
+			name:       "NoJSONObject",
+			raw:        "Here are no facts found",
+			wantErr:    true,
+			wantSubstr: "no json object found",
+		},
+		{
+			name:    "InvalidJSONSyntax",
+			raw:     "{not a valid json}",
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := parseFactsJSON(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(payload.Facts) != tc.wantFacts {
+				t.Fatalf("len(payload.Facts) = %d, want %d", len(payload.Facts), tc.wantFacts)
+			}
+			if tc.wantText != "" && payload.Facts[0].FactText != tc.wantText {
+				t.Errorf("fact text = %q, want %q", payload.Facts[0].FactText, tc.wantText)
+			}
+		})
+	}
+}
 
+func TestFormatExtractableTurns(t *testing.T) {
+	var longTurns []db.Message
+	for i := 0; i < 400; i++ {
+		longTurns = append(longTurns, db.Message{
+			Content:      "Long conversation user prompt message snippet for testing truncation boundary",
+			ResponseText: "Long conversation assistant response message snippet for testing truncation",
+		})
+	}
 
+	tests := []struct {
+		name      string
+		turns     []db.Message
+		wantEmpty bool
+		maxLen    int
+	}{
+		{"NilTurns", nil, true, 0},
+		{"WhitespaceTurns", []db.Message{{Content: "   ", ResponseText: "  "}}, true, 0},
+		{"TruncationBoundary", longTurns, false, 20000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatExtractableTurns(tc.turns)
+			if tc.wantEmpty {
+				if got != "" {
+					t.Errorf("formatExtractableTurns() = %q, want empty", got)
+				}
+				return
+			}
+			if len(got) == 0 || (tc.maxLen > 0 && len(got) > tc.maxLen) {
+				t.Errorf("len(got) = %d, want > 0 and <= %d", len(got), tc.maxLen)
+			}
+		})
+	}
+}
 
+func TestExtractActiveConversationFacts(t *testing.T) {
+	tests := []struct {
+		name          string
+		nilStore      bool
+		nilClient     bool
+		nilLLM        bool
+		closedDB      bool
+		zeroActive    bool
+		mutexLocked   bool
+		cancelContext bool
+		threadErr     bool
+		wantErr       bool
+	}{
+		{"NilArgs", true, true, true, false, false, false, false, false, true},
+		{"ClosedDB", false, false, false, true, false, false, false, false, true},
+		{"ZeroActiveConversations", false, false, false, false, true, false, false, false, false},
+		{"MutexContentionReturnsNil", false, false, false, false, false, true, false, false, false},
+		{"CancelledContext", false, false, false, false, false, false, true, false, true},
+		{"ThreadProcessingErrorLogged", false, false, false, false, false, false, false, true, false},
+		{"SuccessExtraction", false, false, false, false, false, false, false, false, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var store *db.FakeStore
+			if !tc.nilStore {
+				store = setupTestStore(t)
+				defer store.Close()
+				now := time.Now().UTC()
+				if !tc.zeroActive {
+					_ = store.InsertMessage(ctx, db.Message{
+						ID: "m-act-1", ThreadID: "th-act-1", Content: "I prefer vim keybindings", ResponseText: "Noted!",
+						Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}, CreatedAt: now, UpdatedAt: now,
+					})
+				}
+				if tc.closedDB {
+					_ = store.Close()
+				}
+			}
+
+			var client *Client
+			if !tc.nilClient {
+				client = newMockClient(func(req *http.Request) (*http.Response, error) {
+					return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+				})
+			}
+
+			var llmFunc LLMClientFunc
+			if !tc.nilLLM {
+				llmFunc = func(ctx context.Context, prompt string) (string, error) {
+					if tc.threadErr {
+						return "", errors.New("simulated thread llm error")
+					}
+					return `{"facts":[{"category":"user_preference","fact_text":"User prefers vim keybindings","importance_score":0.9}]}`, nil
+				}
+			}
+
+			if tc.mutexLocked {
+				extractionMutex.Lock()
+				defer extractionMutex.Unlock()
+			}
+
+			if tc.cancelContext {
+				cancel()
+			}
+
+			err := ExtractActiveConversationFacts(ctx, store, client, llmFunc, 12)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestProcessThreadFacts(t *testing.T) {
+	tests := []struct {
+		name           string
+		nilStore       bool
+		emptyAmbient   bool
+		turnsErr       bool
+		llmErr         bool
+		llmBadJSON     bool
+		emptyFactText  bool
+		maxRowErr      bool
+		dupCheckErr    bool
+		reinforceErr   bool
+		insertErr      bool
+		emptyWatermark bool
+		postWatermark  bool
+		postExtractErr bool
+		semanticDup    bool
+		crossReinforce bool
+		wantErr        bool
+		wantSubstr     string
+	}{
+		{"NilStore", true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, "database is nil"},
+		{"EmptyExtractableTurnsAmbient", false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, ""},
+		{"GetUnextractedTurnsError", false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, true, "failed to get unextracted turns"},
+		{"LLMCallError", false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, true, "LLM fact extraction call failed"},
+		{"LLMInvalidJSON", false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, true, "failed to parse extracted facts JSON"},
+		{"EmptyFactTextEmbeddingErrorSwallowed", false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, ""},
+		{"MaxRowIDError", false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, true, "failed to get max message rowid"},
+		{"FindDuplicateFactErrorWarningSwallowed", false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, ""},
+		{"ReinforceFactErrorWarningSwallowed", false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, ""},
+		{"InsertFactErrorWarningSwallowed", false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, ""},
+		{"EmptyTranscriptWatermarkWarningSwallowed", false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, ""},
+		{"PostExtractionWatermarkWarningsSwallowed", false, false, false, false, false, false, false, false, false, false, false, true, true, false, false, false, ""},
+		{"SemanticDeduplicationWithinThread", false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, ""},
+		{"CrossThreadGlobalDeduplicationAndReinforce", false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC()
+			adminMeta := db.MessageMetadata{IsAdmin: true}
+
+			var store db.Store
+			var fake *db.FakeStore
+			if !tc.nilStore {
+				fake = setupTestStore(t)
+				defer fake.Close()
+
+				if tc.maxRowErr {
+					store = &errRowIDStore{FakeStore: fake}
+				} else if tc.insertErr {
+					store = &errInsertFactStore{FakeStore: fake}
+				} else if tc.emptyWatermark {
+					store = &mockErrWatermarkFactStore{FakeStore: fake, watermarkErr: errors.New("watermark error")}
+				} else if tc.postWatermark {
+					store = &mockErrWatermarkFactStore{FakeStore: fake, watermarkErr: errors.New("post watermark error"), extractedAtErr: errors.New("post extracted_at error")}
+				} else {
+					store = fake
+				}
+
+				if tc.turnsErr {
+					fake.FailNext("GetUnextractedAdminTurns", errors.New("turns query error"))
+				}
+				if tc.dupCheckErr {
+					fake.FailNext("FindDuplicateFact", errors.New("dup check error"))
+				}
+				if tc.reinforceErr {
+					fake.FailNext("ReinforceFact", errors.New("reinforce error"))
+				}
+
+				if tc.emptyAmbient {
+					_ = fake.InsertMessage(ctx, db.Message{
+						ID: "m-amb", ThreadID: "th-amb", Content: "hello", ResponseText: "[AMBIENT_SILENT]",
+						Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now,
+					})
+				} else if !tc.turnsErr && !tc.maxRowErr && !tc.emptyWatermark {
+					_ = fake.InsertMessage(ctx, db.Message{
+						ID: "m-main", ThreadID: "th-main", Content: "Alex likes matcha", ResponseText: "Noted!",
+						Status: db.StatusCompleted, Metadata: adminMeta, CreatedAt: now, UpdatedAt: now,
+					})
+				}
+
+				if tc.semanticDup || tc.reinforceErr {
+					_, _ = fake.InsertFact(ctx, "user_pref", "Alex likes matcha", 1.0, makeDimVector(1.0, 0.0))
+				}
+				if tc.crossReinforce {
+					_, _ = fake.InsertFact(ctx, "user_pref", "Alex likes matcha", 0.50, makeDimVector(1.0, 0.0))
+				}
+			}
+
+			client := newMockClient(func(req *http.Request) (*http.Response, error) {
+				if tc.emptyFactText {
+					return nil, errors.New("embedding fail")
+				}
+				return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+			})
+
+			llmFunc := func(ctx context.Context, prompt string) (string, error) {
+				if tc.llmErr {
+					return "", errors.New("llm rate limited")
+				}
+				if tc.llmBadJSON {
+					return "invalid json output", nil
+				}
+				if tc.emptyFactText {
+					return `{"facts":[{"category":"user_pref","fact_text":"","importance_score":1.0},{"category":"user_pref","fact_text":"Valid fact","importance_score":1.0}]}`, nil
+				}
+				return `{"facts":[{"category":"user_pref","fact_text":"Alex likes matcha","importance_score":0.90}]}`, nil
+			}
+
+			threadID := "th-main"
+			if tc.emptyAmbient {
+				threadID = "th-amb"
+			} else if tc.emptyWatermark {
+				threadID = "th-empty"
+			}
+
+			err := processThreadFacts(ctx, store, client, llmFunc, threadID)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tc.semanticDup {
+				facts, err := fake.GetFactsByThreadWithEmbeddings(ctx, "th-main")
+				if err != nil || len(facts) != 1 {
+					t.Errorf("expected 1 fact after deduplication, got %d (err: %v)", len(facts), err)
+				}
+			}
+			if tc.crossReinforce {
+				facts, err := fake.GetFactsPaginated(ctx, db.FactsFilter{Limit: 10})
+				if err != nil || len(facts.Facts) != 1 {
+					t.Fatalf("expected 1 reinforced fact, got %d (err: %v)", len(facts.Facts), err)
+				}
+				if facts.Facts[0].ReinforceCount < 2 {
+					t.Errorf("expected reinforce count >= 2, got %d", facts.Facts[0].ReinforceCount)
+				}
+			}
+		})
+	}
+}
