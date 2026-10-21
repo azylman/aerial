@@ -41,6 +41,7 @@ type TurnContext struct {
 	SessionID           string
 	Model               string
 	Prompt              string
+	MemoryQuery         string
 	ScopeInstructions   string
 	ChannelInstructions string // Deprecated: Use ScopeInstructions
 	CoordinationContext string
@@ -266,7 +267,11 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	if turnCtx != nil && turnCtx.Ctx != nil {
 		ctx = turnCtx.Ctx
 	}
-	payloadPrompt := injectRetrievedContext(ctx, prompt, d.cfg.AmbientContextRetriever, 500*time.Millisecond, d.cfg.MemoryRetriever, 2*time.Second, "[StreamingDaemon]")
+	memQuery := prompt
+	if turnCtx != nil && strings.TrimSpace(turnCtx.MemoryQuery) != "" {
+		memQuery = strings.TrimSpace(turnCtx.MemoryQuery)
+	}
+	payloadPrompt := injectRetrievedContext(ctx, prompt, memQuery, d.cfg.AmbientContextRetriever, 500*time.Millisecond, d.cfg.MemoryRetriever, 2*time.Second, "[StreamingDaemon]")
 	encoded, err := json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
 	if err != nil {
 		return fmt.Errorf("failed to marshal turn prompt: %w", err)

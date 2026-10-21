@@ -2,8 +2,10 @@ package interactions
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -26,14 +28,32 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 
 	factCount := 0
 	latestFactStr := "none recorded yet"
-	if r.deps.Store != nil {
-		res, err := r.deps.Store.GetFactsPaginated(ctx, db.FactsFilter{Limit: 1})
-		if err == nil && res != nil {
-			factCount = res.Total
-			if len(res.Facts) > 0 {
-				f := res.Facts[0]
-				timeAgo := formatRelativeTime(time.Since(f.CreatedAt))
-				latestFactStr = fmt.Sprintf("%q (%s ago)", truncateRunes(f.FactText, 60), timeAgo)
+	memURL := strings.TrimRight(strings.TrimSpace(r.deps.MemoryURL), "/")
+	if memURL == "" {
+		memURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
+	}
+	if memURL == "" {
+		memURL = "http://memory-mcp.aerial"
+	}
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, memURL+"/facts?limit=1", nil); err == nil {
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var res struct {
+					Total int `json:"total"`
+					Facts []struct {
+						FactText  string    `json:"fact_text"`
+						CreatedAt time.Time `json:"created_at"`
+					} `json:"facts"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&res) == nil {
+					factCount = res.Total
+					if len(res.Facts) > 0 {
+						f := res.Facts[0]
+						timeAgo := formatRelativeTime(time.Since(f.CreatedAt))
+						latestFactStr = fmt.Sprintf("%q (%s ago)", truncateRunes(f.FactText, 60), timeAgo)
+					}
+				}
 			}
 		}
 	}

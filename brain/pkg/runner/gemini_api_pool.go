@@ -683,7 +683,11 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	if s.pool != nil {
 		ambRetriever, memRetriever = s.pool.cfg.AmbientContextRetriever, s.pool.cfg.MemoryRetriever
 	}
-	payloadPrompt := injectRetrievedContext(ctx, prompt, ambRetriever, 300*time.Millisecond, memRetriever, 1500*time.Millisecond, "[GeminiAPISession]")
+	memQuery := prompt
+	if turn != nil && strings.TrimSpace(turn.MemoryQuery) != "" {
+		memQuery = strings.TrimSpace(turn.MemoryQuery)
+	}
+	payloadPrompt := injectRetrievedContext(ctx, prompt, memQuery, ambRetriever, 300*time.Millisecond, memRetriever, 1500*time.Millisecond, "[GeminiAPISession]")
 
 	workingContents := append(append([]geminiContent(nil), s.history...), geminiContent{
 		Role:  "user",

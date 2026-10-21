@@ -296,6 +296,41 @@ func TestCloneTranscriptSteps(t *testing.T) {
 	}
 }
 
+type testCustomResult struct {
+	rows int64
+	err  error
+}
+
+func (r testCustomResult) LastInsertId() (int64, error) { return 0, nil }
+func (r testCustomResult) RowsAffected() (int64, error) { return r.rows, r.err }
+
+type testMockDBTX struct {
+	execFn     func(ctx context.Context, query string, args ...any) (sql.Result, error)
+	queryFn    func(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	queryRowFn func(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func (m testMockDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if m.execFn != nil {
+		return m.execFn(ctx, query, args...)
+	}
+	return testCustomResult{}, nil
+}
+
+func (m testMockDBTX) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if m.queryFn != nil {
+		return m.queryFn(ctx, query, args...)
+	}
+	return nil, nil
+}
+
+func (m testMockDBTX) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if m.queryRowFn != nil {
+		return m.queryRowFn(ctx, query, args...)
+	}
+	return nil
+}
+
 func TestTranscriptStore_GetSessionSyncStatesWithContext_MockDB(t *testing.T) {
 	dbMem := initTestSQLiteDB(t)
 	for _, tc := range []struct {

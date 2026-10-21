@@ -93,20 +93,6 @@ func TestSQLStoreHoistedMethods(t *testing.T) {
 	if stats, err := store.GetSessionActivityStats(ctx, "thread-test-1"); err != nil || stats.CompletedTurns != 1 || stats.LastCompletedMessageCreatedAt.IsZero() {
 		t.Fatalf("expected 1 completed turn in stats, got %+v (err: %v)", stats, err)
 	}
-
-	factID, err := store.InsertFact(ctx, "test", "Fact without embedding", 1.0, nil)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-	missing, err := store.GetFactsMissingEmbeddings(ctx, 10)
-	if err != nil || len(missing) == 0 {
-		t.Fatalf("GetFactsMissingEmbeddings failed: %+v (err: %v)", missing, err)
-	}
-	emb := make([]float32, ExpectedEmbeddingDim)
-	emb[0] = 0.5
-	if err := store.UpdateFactEmbedding(ctx, factID, emb); err != nil {
-		t.Fatalf("UpdateFactEmbedding failed: %v", err)
-	}
 }
 
 func TestSQLStoreDelegationAndQueries(t *testing.T) {

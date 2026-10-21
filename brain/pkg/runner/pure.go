@@ -189,7 +189,7 @@ func compileLeasePrompt(turn *TurnContext, isCold bool, prevSessID string) strin
 }
 
 // injectRetrievedContext retrieves ambient context and memory within specified timeouts and prepends them to prompt.
-func injectRetrievedContext(ctx context.Context, prompt string, amb AmbientContextRetriever, ambTimeout time.Duration, mem MemoryRetriever, memTimeout time.Duration, logPrefix string) string {
+func injectRetrievedContext(ctx context.Context, prompt, memQuery string, amb AmbientContextRetriever, ambTimeout time.Duration, mem MemoryRetriever, memTimeout time.Duration, logPrefix string) string {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -210,7 +210,11 @@ func injectRetrievedContext(ctx context.Context, prompt string, amb AmbientConte
 		fetch("<ambient_context>", "AmbientContextRetriever", ambTimeout, amb)
 	}
 	if mem != nil {
-		fetch("<retrieved_memory>", "MemoryRetriever", memTimeout, func(c context.Context) (string, error) { return mem(c, prompt) })
+		q := strings.TrimSpace(memQuery)
+		if q == "" {
+			q = prompt
+		}
+		fetch("<retrieved_memory>", "MemoryRetriever", memTimeout, func(c context.Context) (string, error) { return mem(c, q) })
 	}
 	return payloadPrompt
 }

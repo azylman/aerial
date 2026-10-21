@@ -27,6 +27,7 @@ jobs:
     outputs:
       brain: ${{ steps.filter.outputs.brain }}
       scheduler-mcp: ${{ steps.filter.outputs.scheduler-mcp }}
+      memory-mcp: ${{ steps.filter.outputs.memory-mcp }}
       discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
       docker-mcp: ${{ steps.filter.outputs.docker-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
@@ -51,6 +52,8 @@ jobs:
               - 'brain/**'
             scheduler-mcp:
               - 'scheduler-mcp/**'
+            memory-mcp:
+              - 'memory-mcp/**'
             discord-mcp:
               - 'discord-mcp/**'
             docker-mcp:
@@ -83,6 +86,7 @@ jobs:
             const filter = {
               brain: "${{ steps.filter.outputs.brain }}",
               "scheduler-mcp": "${{ steps.filter.outputs.scheduler-mcp }}",
+              "memory-mcp": "${{ steps.filter.outputs.memory-mcp }}",
               "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
               "docker-mcp": "${{ steps.filter.outputs.docker-mcp }}",
               "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
@@ -100,6 +104,7 @@ jobs:
             const catalog = [
               { service: "brain", context: ".", file: "./brain/Dockerfile", image_name: "aerial-brain" },
               { service: "scheduler-mcp", context: "./scheduler-mcp", file: "./scheduler-mcp/Dockerfile", image_name: "aerial-scheduler-mcp" },
+              { service: "memory-mcp", context: "./memory-mcp", file: "./memory-mcp/Dockerfile", image_name: "aerial-memory-mcp" },
               { service: "discord-mcp", context: "./discord-mcp", file: "./discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
               { service: "docker-mcp", context: "./docker-mcp", file: "./docker-mcp/Dockerfile", image_name: "aerial-docker-mcp" },
               { service: "github-mcp", context: "./github-mcp", file: "./github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
@@ -250,6 +255,23 @@ jobs:
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in scheduler-mcp:"
+            echo "$DEAD"
+            exit 1
+          fi
+
+      - name: Lint Memory MCP
+        if: needs.changes.outputs.memory-mcp == 'true'
+        run: |
+          cd memory-mcp
+          golangci-lint run --path-prefix=memory-mcp/ ./...
+
+      - name: Check Dead Code in Memory MCP
+        if: needs.changes.outputs.memory-mcp == 'true'
+        run: |
+          cd memory-mcp
+          DEAD=$(deadcode -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable dead code detected in memory-mcp:"
             echo "$DEAD"
             exit 1
           fi

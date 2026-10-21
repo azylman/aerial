@@ -4,12 +4,43 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	pgvector "github.com/pgvector/pgvector-go"
 )
+
+const (
+	ExpectedEmbeddingDim = 384
+	DefaultDenseWeight   = 0.70
+	DefaultSparseWeight  = 0.30
+	DefaultRRFK          = 60.0
+)
+
+func optionalVectorArg(emb []float32) any {
+	if len(emb) == ExpectedEmbeddingDim {
+		return pgvector.NewVector(emb)
+	}
+	return nil
+}
+
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
 
 func recordTranscriptQuery(op string, start time.Time, errp *error) {
 	status := "success"

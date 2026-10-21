@@ -20,7 +20,6 @@ var (
 	_ MessageStore    = (*FakeStore)(nil)
 	_ ScheduleStore   = (*FakeStore)(nil)
 	_ SessionStore    = (*FakeStore)(nil)
-	_ FactStore       = (*FakeStore)(nil)
 	_ TranscriptStore = (*FakeStore)(nil)
 	_ PRRegistryStore = (*FakeStore)(nil)
 	_ VanadisStore    = (*FakeStore)(nil)
@@ -61,9 +60,9 @@ type FakeStore struct {
 	closed   bool
 	failNext map[string]error
 
-	messages                        map[string]*Message
-	messageOrder                    []string
-	nextRowID, nextFactID, nextPRID int64
+	messages            map[string]*Message
+	messageOrder        []string
+	nextRowID, nextPRID int64
 
 	sessions        map[string]*SessionInfo
 	threadSummaries map[string]threadSummaryRecord
@@ -71,10 +70,6 @@ type FakeStore struct {
 	oneShots map[string]*OneShotSchedule
 	crons    map[string]*CronSchedule
 	runs     map[string]*ScheduleRun
-
-	facts       map[int64]*FactWithEmbedding
-	watermarks  map[string]int64
-	extractedAt map[string]time.Time
 
 	sessionSummaries map[string]*SessionSummary
 	transcriptSteps  map[string][]TranscriptStep
@@ -89,7 +84,6 @@ func NewFakeStore() *FakeStore {
 	f := &FakeStore{failNext: make(map[string]error), messages: make(map[string]*Message), messageOrder: make([]string, 0)}
 	f.sessions, f.threadSummaries = make(map[string]*SessionInfo), make(map[string]threadSummaryRecord)
 	f.oneShots, f.crons, f.runs = make(map[string]*OneShotSchedule), make(map[string]*CronSchedule), make(map[string]*ScheduleRun)
-	f.facts, f.watermarks, f.extractedAt = make(map[int64]*FactWithEmbedding), make(map[string]int64), make(map[string]time.Time)
 	f.sessionSummaries, f.transcriptSteps = make(map[string]*SessionSummary), make(map[string][]TranscriptStep)
 	f.prRecords, f.vanadisBuilds, f.vanadisChunks = make(map[string]*PRRecord), make(map[string]*VanadisBuild), make(map[string]*VanadisChunk)
 	return f
@@ -181,15 +175,6 @@ func cloneRun(r *ScheduleRun) *ScheduleRun {
 	}
 	cp := *r
 	cp.CompletedAt = clonePtr(r.CompletedAt)
-	return &cp
-}
-
-func cloneFactWithEmbedding(fe *FactWithEmbedding) *FactWithEmbedding {
-	if fe == nil {
-		return nil
-	}
-	cp := *fe
-	cp.Embedding = cloneSlice(fe.Embedding)
 	return &cp
 }
 
@@ -786,226 +771,6 @@ func (f *FakeStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge 
 			}
 		}
 		return pruned, nil
-	})
-}
-
-func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
-	return withFakeLock(f, "InsertFact", func() (int64, error) {
-		importance = defaultVal(importance, 0.5)
-		id, now := atomic.AddInt64(&f.nextFactID, 1), time.Now().UTC()
-		fe := &FactWithEmbedding{Fact: Fact{ID: id, Category: category, FactText: factText, Importance: importance, CreatedAt: now, LastReinforcedAt: now, LastDecayedAt: now, ReinforceCount: 1}, Embedding: embedding}
-		f.facts[id] = cloneFactWithEmbedding(fe)
-		return id, nil
-	})
-}
-
-func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
-	return withFakeLock(f, "SearchSimilarFacts", func() ([]Fact, error) {
-		limit, minScore = defaultVal(limit, 10), defaultVal(minScore, 0.20)
-		type scored struct {
-			fact  Fact
-			score float64
-		}
-		qLower := strings.ToLower(strings.TrimSpace(queryText))
-		hasVec, hasText := len(embedding) > 0, qLower != ""
-		if !hasVec && !hasText {
-			return nil, nil
-		}
-		var matches []scored
-		for _, fe := range f.facts {
-			if fe == nil {
-				continue
-			}
-			var sim, textScore float64
-			if hasVec && len(embedding) == len(fe.Embedding) {
-				sim = cosineSimilarity(embedding, fe.Embedding)
-			}
-			if hasText && strings.Contains(strings.ToLower(fe.Fact.FactText), qLower) {
-				textScore = 1.0
-			}
-			imp := fe.Fact.Importance
-			if imp <= 0 {
-				imp = 1.0
-			}
-			score := textScore * imp
-			if hasVec && hasText {
-				score = (0.70*sim + 0.30*textScore) * imp
-			} else if hasVec {
-				score = sim * imp
-			}
-			if score >= minScore {
-				matches = append(matches, scored{fact: fe.Fact, score: score})
-			}
-		}
-		sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
-		limit = min(limit, len(matches))
-		result := make([]Fact, limit)
-		for i := 0; i < limit; i++ {
-			result[i] = matches[i].fact
-		}
-		return result, nil
-	})
-}
-
-func (f *FakeStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
-	return withFakeLock(f, "GetFactsPaginated", func() (*FactsResult, error) {
-		var list []Fact
-		for _, fe := range f.facts {
-			if fe == nil || (filter.Category != "" && fe.Fact.Category != filter.Category) || (filter.Query != "" && !strings.Contains(strings.ToLower(fe.Fact.FactText), strings.ToLower(filter.Query))) {
-				continue
-			}
-			list = append(list, fe.Fact)
-		}
-		sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })
-		total := len(list)
-		if filter.Offset > total {
-			return &FactsResult{Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
-		}
-		limit := filter.Limit
-		if limit <= 0 {
-			limit = 50
-		}
-		return &FactsResult{Facts: list[filter.Offset:min(filter.Offset+limit, total)], Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
-	})
-}
-
-func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
-	return withFakeLock(f, "GetFactsByThreadWithEmbeddings", func() ([]FactWithEmbedding, error) {
-		results := mapValuesFiltered(f.facts, nil)
-		for i := range results {
-			results[i].Embedding = cloneSlice(results[i].Embedding)
-		}
-		sort.Slice(results, func(i, j int) bool {
-			return results[i].Fact.CreatedAt.Before(results[j].Fact.CreatedAt) || (results[i].Fact.CreatedAt.Equal(results[j].Fact.CreatedAt) && results[i].Fact.ID < results[j].Fact.ID)
-		})
-		return results, nil
-	})
-}
-
-func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
-	return withFakeLock(f, "GetActiveConversationsForExtraction", func() ([]string, error) {
-		activeHours = defaultVal(activeHours, 24)
-		cutoff, seen := time.Now().UTC().Add(-time.Duration(activeHours)*time.Hour), make(map[string]bool)
-		var threads []string
-		for _, id := range f.messageOrder {
-			if m := f.messages[id]; m != nil && m.ThreadID != "" && !m.CreatedAt.Before(cutoff) && IsExtractableAdminTurn(*m) && !seen[m.ThreadID] && (f.watermarks[m.ThreadID] == 0 || m.RowID > f.watermarks[m.ThreadID]) {
-				seen[m.ThreadID] = true
-				threads = append(threads, m.ThreadID)
-				if len(threads) >= 20 {
-					break
-				}
-			}
-		}
-		sort.Strings(threads)
-		return threads, nil
-	})
-}
-
-func (f *FakeStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
-	return withFakeLock(f, "GetUnextractedAdminTurns", func() ([]Message, error) {
-		if threadID = strings.TrimSpace(threadID); threadID == "" {
-			return nil, nil
-		}
-		watermark := f.watermarks[threadID]
-		var turns []Message
-		for _, id := range f.messageOrder {
-			if m := f.messages[id]; m != nil && m.ThreadID == threadID && (watermark == 0 || m.RowID > watermark) && IsExtractableAdminTurn(*m) {
-				turns = append(turns, *cloneMessage(m))
-			}
-		}
-		return turns, nil
-	})
-}
-
-func (f *FakeStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
-	return f.withLockErr("UpdateConversationFactWatermark", func() error {
-		f.watermarks[threadID] = maxRowID
-		return nil
-	})
-}
-
-func (f *FakeStore) UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error {
-	return f.withLockErr("UpdateConversationFactExtractedAt", func() error {
-		f.extractedAt[threadID] = time.Now().UTC()
-		return nil
-	})
-}
-
-func (f *FakeStore) FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error) {
-	return withFakeLock2(f, "FindDuplicateFact", func() (*Fact, float64, error) {
-		minSim = defaultVal(minSim, 0.85)
-		var bestFact *Fact
-		var bestSim float64
-		for _, fe := range f.facts {
-			if fe != nil && len(fe.Embedding) > 0 {
-				if sim := cosineSimilarity(embedding, fe.Embedding); sim >= minSim && sim > bestSim {
-					bestSim, bestFact = sim, clonePtr(&fe.Fact)
-				}
-			}
-		}
-		return bestFact, bestSim, nil
-	})
-}
-
-func (f *FakeStore) ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error {
-	return f.withLockErr("ReinforceFact", func() error {
-		fe, ok := f.facts[id]
-		if !ok || fe == nil {
-			return ErrFactNotFound
-		}
-		boost = defaultVal(boost, 0.15)
-		fe.Fact.Importance = math.Min(1.0, math.Max(0.70, math.Round((fe.Fact.Importance+boost)*100)/100))
-		fe.Fact.LastReinforcedAt = time.Now().UTC()
-		fe.Fact.ReinforceCount++
-		return nil
-	})
-}
-
-func (f *FakeStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
-	return withFakeLock2(f, "DecayAndPruneFacts", func() (int64, int64, error) {
-		decayStep, pruneFloor = defaultVal(decayStep, 0.05), defaultVal(pruneFloor, 0.15)
-		now := time.Now().UTC()
-		ageCutoff := now.Add(-time.Duration(pruneAgeDays) * 24 * time.Hour)
-		var decayed, pruned int64
-		for id, fe := range f.facts {
-			if fe == nil {
-				continue
-			}
-			fe.Fact.Importance = math.Max(0.0, math.Round((fe.Fact.Importance-decayStep)*100)/100)
-			fe.Fact.LastDecayedAt = now
-			decayed++
-			if fe.Fact.Importance <= pruneFloor && (pruneAgeDays <= 0 || fe.Fact.CreatedAt.Before(ageCutoff)) {
-				delete(f.facts, id)
-				pruned++
-			}
-		}
-		return decayed, pruned, nil
-	})
-}
-
-func (f *FakeStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
-	return withFakeLock(f, "GetFactsMissingEmbeddings", func() ([]Fact, error) {
-		var results []Fact
-		for _, fe := range f.facts {
-			if fe != nil && len(fe.Embedding) == 0 {
-				results = append(results, fe.Fact)
-				if limit > 0 && len(results) >= limit {
-					break
-				}
-			}
-		}
-		return results, nil
-	})
-}
-
-func (f *FakeStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
-	return f.withLockErr("UpdateFactEmbedding", func() error {
-		fe, ok := f.facts[id]
-		if !ok || fe == nil {
-			return ErrFactNotFound
-		}
-		fe.Embedding = cloneSlice(embedding)
-		return nil
 	})
 }
 

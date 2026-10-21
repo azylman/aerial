@@ -30,4 +30,5 @@ type InteractionDeps struct {
 	AppID                string
 	DeployStatusProvider DeployStatusProvider
 	GitOpsChannelUpdater GitOpsChannelUpdater
+	MemoryURL            string
 }

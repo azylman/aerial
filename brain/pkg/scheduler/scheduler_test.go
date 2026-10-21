@@ -2,11 +2,9 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +15,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/queue"
-	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -90,13 +86,12 @@ func setupTestStore(t *testing.T) *db.FakeStore {
 
 type mockStoreWrapper struct {
 	db.Store
-	getDueCronSchedulesFn                 func(ctx context.Context) ([]db.CronSchedule, error)
-	updateCronNextRunFn                   func(ctx context.Context, id string, nextRunAt time.Time) error
-	createScheduleRunFn                   func(ctx context.Context, run db.ScheduleRun) error
-	insertMessageFn                       func(ctx context.Context, msg db.Message) error
-	getDueOneShotSchedulesFn              func(ctx context.Context) ([]db.OneShotSchedule, error)
-	insertMessageAndConsumeOneShotFn      func(ctx context.Context, scheduleID string, msg db.Message) error
-	getActiveConversationsForExtractionFn func(ctx context.Context, activeHours int) ([]string, error)
+	getDueCronSchedulesFn            func(ctx context.Context) ([]db.CronSchedule, error)
+	updateCronNextRunFn              func(ctx context.Context, id string, nextRunAt time.Time) error
+	createScheduleRunFn              func(ctx context.Context, run db.ScheduleRun) error
+	insertMessageFn                  func(ctx context.Context, msg db.Message) error
+	getDueOneShotSchedulesFn         func(ctx context.Context) ([]db.OneShotSchedule, error)
+	insertMessageAndConsumeOneShotFn func(ctx context.Context, scheduleID string, msg db.Message) error
 }
 
 func (m *mockStoreWrapper) GetDueCronSchedules(ctx context.Context) ([]db.CronSchedule, error) {
@@ -157,16 +152,6 @@ func (m *mockStoreWrapper) InsertMessageAndConsumeOneShot(ctx context.Context, s
 		return m.Store.InsertMessageAndConsumeOneShot(ctx, scheduleID, msg)
 	}
 	return nil
-}
-
-func (m *mockStoreWrapper) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
-	if m.getActiveConversationsForExtractionFn != nil {
-		return m.getActiveConversationsForExtractionFn(ctx, activeHours)
-	}
-	if m.Store != nil {
-		return m.Store.GetActiveConversationsForExtraction(ctx, activeHours)
-	}
-	return nil, nil
 }
 
 func TestNew_AndOptions(t *testing.T) {
@@ -624,61 +609,7 @@ func TestProcessDueSchedules_GuardsAndStoreErrors(t *testing.T) {
 	}
 }
 
-func TestExtractFactsLLM(t *testing.T) {
-	tests := []struct {
-		name       string
-		sched      *Scheduler
-		runnerFn   runner.RunnerFunc
-		llmFn      runner.LLMFunc
-		cfg        *config.Config
-		wantRes    string
-		wantErr    bool
-		errContain string
-	}{
-		{"nil scheduler", nil, nil, nil, nil, "", true, "not initialized"},
-		{"neither configured", &Scheduler{cfg: newTestConfig()}, nil, nil, newTestConfig(), "", true, "RunnerFunc not configured"},
-		{"nil config", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "", 0, nil
-		}, nil, nil, "", true, "config cannot be nil"},
-		{"empty model", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "", 0, nil
-		}, nil, config.NewFromData(&config.ConfigData{Model: "   "}), "", true, "model is not configured"},
-		{"llm func success prefers low effort", &Scheduler{}, nil, func(ctx context.Context, model, prompt string) (string, error) {
-			return fmt.Sprintf("llm:%s:%s", model, prompt), nil
-		}, config.NewFromData(&config.ConfigData{Model: "high", LowEffortModel: "low"}), "llm:low:fact-prompt", false, ""},
-		{"runner func success custom agy bin", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return fmt.Sprintf(`{"status":"SUCCESS","response":"runner:%s:%s"}`, agyBin, model), "", 0, nil
-		}, nil, config.NewFromData(&config.ConfigData{Model: "main-model", AgyBin: "/usr/bin/custom-agy", APIKey: "key"}), "runner:/usr/bin/custom-agy:main-model", false, ""},
-		{"runner non-zero exit code", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "", "err", 1, fmt.Errorf("exit 1")
-		}, nil, config.NewFromData(&config.ConfigData{Model: "main-model"}), "", true, "exitCode=1"},
-		{"runner invalid json output", &Scheduler{}, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "not-json", "", 0, nil
-		}, nil, config.NewFromData(&config.ConfigData{Model: "main-model"}), "", true, "failed to parse agy json"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := tc.sched
-			if s != nil {
-				s.runnerFn = tc.runnerFn
-				s.llmFn = tc.llmFn
-				s.cfg = tc.cfg
-			}
-			res, err := s.ExtractFactsLLM(context.Background(), "fact-prompt")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("wantErr=%v got err=%v", tc.wantErr, err)
-			}
-			if tc.errContain != "" && (err == nil || !strings.Contains(err.Error(), tc.errContain)) {
-				t.Errorf("expected error containing %q, got %v", tc.errContain, err)
-			}
-			if !tc.wantErr && res != tc.wantRes {
-				t.Errorf("got %q, want %q", res, tc.wantRes)
-			}
-		})
-	}
-}
-
-func TestMaintenanceJobs_RetentionDecayFactsTranscript(t *testing.T) {
+func TestMaintenanceJobs_RetentionAndTranscript(t *testing.T) {
 	store := setupTestStore(t)
 	defer store.Close()
 
@@ -695,49 +626,7 @@ func TestMaintenanceJobs_RetentionDecayFactsTranscript(t *testing.T) {
 	})
 	RunPruneRetentionWithContext(context.Background(), store)
 
-	// 2. RunMemoryDecayWithContext & TryLock contention
-	RunMemoryDecayWithContext(context.Background(), nil)
-	closedStore2 := setupTestStore(t)
-	_ = closedStore2.Close()
-	RunMemoryDecayWithContext(context.Background(), closedStore2)
-
-	emb := make([]float32, db.ExpectedEmbeddingDim)
-	emb[0] = 1.0
-	_, _ = store.InsertFact(context.Background(), "general", "Fact 1", 0.50, emb)
-	RunMemoryDecayWithContext(context.Background(), store)
-
-	decayMutex.Lock()
-	RunMemoryDecayWithContext(context.Background(), store)
-	decayMutex.Unlock()
-
-	// 3. RunFactExtraction
-	RunFactExtraction(context.Background(), nil, nil, nil)
-	cancCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	RunFactExtraction(cancCtx, store, memory.NewClient(""), func(ctx context.Context, p string) (string, error) { return "[]", nil })
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		emb384 := make([]float32, 384)
-		emb384[0] = 0.5
-		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": emb384})
-	}))
-	defer ts.Close()
-
-	_, _ = store.InsertFact(context.Background(), "pref", "No emb fact", 0.8, nil)
-	client := memory.NewClient(ts.URL)
-	llmFunc := func(ctx context.Context, p string) (string, error) { return "[]", nil }
-	RunFactExtraction(context.Background(), store, client, llmFunc)
-
-	mockStore := &mockStoreWrapper{
-		Store: store,
-		getActiveConversationsForExtractionFn: func(ctx context.Context, h int) ([]string, error) {
-			return nil, fmt.Errorf("active conv retrieval failed")
-		},
-	}
-	RunFactExtraction(context.Background(), mockStore, client, llmFunc)
-
-	// 4. RunTranscriptSync & runTranscriptSync method
+	// 2. RunTranscriptSync & runTranscriptSync method
 	stats, err := RunTranscriptSync(context.Background(), nil, "/tmp", nil, nil)
 	if err != nil || stats.Synced != 0 {
 		t.Fatalf("expected nil err on nil store")
@@ -777,7 +666,9 @@ func TestMaintenanceJobs_RetentionDecayFactsTranscript(t *testing.T) {
 	emptySched.wg.Wait()
 
 	cfg := newTestConfig()
-	schedMethod, _ := New(cfg, store, nil, nil, WithBrainDir(tempBrain))
+	schedMethod, _ := New(cfg, store, nil, nil, WithBrainDir(tempBrain), WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return "summary", nil
+	}))
 	schedMethod.runTranscriptSync(context.Background())
 	schedMethod.wg.Wait()
 
@@ -823,7 +714,7 @@ func TestScheduler_RunAndStartLifecycle(t *testing.T) {
 	schedInitErr.Run(ctxCancel, 10*time.Millisecond)
 
 	// 4. handleTick evaluations
-	nilSched.handleTick(context.Background(), 120, nil, nil)
+	nilSched.handleTick(context.Background(), 120)
 
 	mockStoreFast := &mockStoreWrapper{
 		Store:                    store,
@@ -831,10 +722,10 @@ func TestScheduler_RunAndStartLifecycle(t *testing.T) {
 		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) { return nil, nil },
 	}
 	schedFast, _ := New(cfg, mockStoreFast, nil, nil)
-	schedFast.handleTick(context.Background(), 10, nil, nil)
-	schedFast.handleTick(context.Background(), 60, nil, nil)
-	schedFast.handleTick(context.Background(), 120, nil, nil)
-	schedFast.handleTick(context.Background(), 2880, nil, nil)
+	schedFast.handleTick(context.Background(), 10)
+	schedFast.handleTick(context.Background(), 60)
+	schedFast.handleTick(context.Background(), 120)
+	schedFast.handleTick(context.Background(), 2880)
 
 	// 5. Short ticker run loop terminates cleanly on cancellation without time.Sleep
 	var ticks atomic.Int64

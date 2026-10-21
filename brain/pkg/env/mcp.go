@@ -19,10 +19,13 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	mergedServers := make(map[string]interface{})
 
 	// 1. Start with built-in default MCP microservices
-	// Scheduler is common across all runtimes except ephemeral
+	// Scheduler and memory are common across all runtimes except ephemeral
 	if target != TargetEphemeral {
 		mergedServers["scheduler"] = map[string]interface{}{
 			"serverUrl": "http://scheduler-mcp:8080/mcp",
+		}
+		mergedServers["memory"] = map[string]interface{}{
+			"serverUrl": "http://memory-mcp.aerial/mcp",
 		}
 	}
 

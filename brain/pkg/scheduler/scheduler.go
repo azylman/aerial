@@ -11,7 +11,6 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -281,44 +280,6 @@ func (s *Scheduler) Start(ctx context.Context) (stop func()) {
 	}
 }
 
-// ExtractFactsLLM extracts facts using the primary LLM via the configured LLMFunc or runner function.
-func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
-	if s == nil {
-		return "", fmt.Errorf("scheduler: not initialized")
-	}
-	if s.llmFn == nil && s.runnerFn == nil {
-		return "", fmt.Errorf("scheduler: RunnerFunc not configured for fact extraction")
-	}
-	if s.cfg == nil || s.cfg.Current() == nil {
-		return "", fmt.Errorf("scheduler: config cannot be nil")
-	}
-	cur := s.cfg.Current()
-	model := cur.LowEffortModel
-	if model == "" {
-		model = cur.Model
-	}
-	if strings.TrimSpace(model) == "" {
-		return "", fmt.Errorf("scheduler fact extraction error: model is not configured")
-	}
-	if s.llmFn != nil {
-		return s.llmFn(ctx, model, prompt)
-	}
-	apiKey := cur.APIKey
-	agyBin := cur.AgyBin
-	if agyBin == "" {
-		agyBin = "agy"
-	}
-	stdout, _, exitCode, err := s.runnerFn(ctx, agyBin, prompt, "", apiKey, model, 5)
-	if exitCode != 0 || err != nil {
-		return "", fmt.Errorf("agy fact extraction exitCode=%d err=%w", exitCode, err)
-	}
-	resp, parseErr := runner.ParseAgyOutput(stdout)
-	if parseErr != nil {
-		return "", fmt.Errorf("failed to parse agy json output in scheduler: %w (raw: %q)", parseErr, stdout)
-	}
-	return resp.Response, nil
-}
-
 // RunPruneRetentionWithContext executes schedule run retention cleanup with the provided context.
 func RunPruneRetentionWithContext(ctx context.Context, store db.Store) {
 	if store == nil {
@@ -332,67 +293,6 @@ func RunPruneRetentionWithContext(ctx context.Context, store db.Store) {
 		}
 	} else if pruned > 0 {
 		log.Printf("[Scheduler] Retention pruning removed %d old schedule runs", pruned)
-	}
-}
-
-// RunFactExtraction triggers embedding backfill and active conversation fact extraction.
-func RunFactExtraction(ctx context.Context, store db.Store, client *memory.Client, llmFunc memory.LLMClientFunc) {
-	if store == nil || client == nil || llmFunc == nil {
-		return
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	if backfilled, err := memory.BackfillMissingEmbeddings(ctx, store, client); err != nil {
-		if ctx.Err() == nil {
-			log.Printf("[Scheduler] Embedding backfill error: %v", err)
-		}
-	} else if backfilled > 0 {
-		log.Printf("[Scheduler] Embedding backfill completed for %d facts", backfilled)
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	if err := memory.ExtractActiveConversationFacts(ctx, store, client, llmFunc, 12); err != nil {
-		if ctx.Err() == nil {
-			log.Printf("[Scheduler] Fact extraction error: %v", err)
-		}
-	}
-}
-
-var decayMutex sync.Mutex
-
-// RunMemoryDecayWithContext executes fact importance decay and pruning with the provided context.
-func RunMemoryDecayWithContext(ctx context.Context, factStore db.FactStore) {
-	if factStore == nil {
-		return
-	}
-	if !decayMutex.TryLock() {
-		log.Printf("[Scheduler] Memory decay already in progress, skipping overlapping sweep.")
-		return
-	}
-	defer decayMutex.Unlock()
-
-	decayCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	decayed, pruned, err := factStore.DecayAndPruneFacts(decayCtx, 0.05, 0.15, 14)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("[Scheduler] Memory decay error: %v", err)
-			metrics.MemoryOperationsTotal.WithLabelValues("decay", "error").Inc()
-		}
-		return
-	}
-
-	metrics.MemoryOperationsTotal.WithLabelValues("decay", "success").Inc()
-	if decayed > 0 {
-		log.Printf("[Scheduler] Memory decay updated %d fact(s)", decayed)
-		metrics.MemoryOperationsTotal.WithLabelValues("decay", "decayed").Add(float64(decayed))
-	}
-	if pruned > 0 {
-		log.Printf("[Scheduler] Memory decay pruned %d stale fact(s)", pruned)
-		metrics.MemoryOperationsTotal.WithLabelValues("decay", "pruned").Add(float64(pruned))
 	}
 }
 
@@ -446,18 +346,6 @@ func (s *Scheduler) runPruneRetention(ctx context.Context) {
 	})
 }
 
-func (s *Scheduler) runMemoryDecay(ctx context.Context) {
-	s.spawnBg(func() {
-		RunMemoryDecayWithContext(ctx, s.store)
-	})
-}
-
-func (s *Scheduler) runFactExtraction(ctx context.Context, ollamaClient *memory.Client, llmFunc memory.LLMClientFunc) {
-	s.spawnBg(func() {
-		RunFactExtraction(ctx, s.store, ollamaClient, llmFunc)
-	})
-}
-
 func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 	s.spawnBg(func() {
 		brainDir := s.brainDir
@@ -470,13 +358,26 @@ func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 
 		embedder := s.transcriptEmbedder
 		if embedder == nil && s.cfg != nil {
-			memClient := memory.New(s.cfg, s.sessionRoots...)
+			embedClient := transcript.NewEmbedder(s.cfg, s.sessionRoots...)
 			embedder = func(eCtx context.Context, text string) ([]float32, error) {
-				return memClient.GenerateEmbedding(eCtx, text, false, 1)
+				return embedClient.GenerateEmbedding(eCtx, text, false, 1)
 			}
 		}
 
 		llmFunc := s.transcriptLLMFunc
+		if llmFunc == nil && s.llmFn != nil && s.cfg != nil && s.cfg.Current() != nil {
+			cur := s.cfg.Current()
+			model := cur.LowEffortModel
+			if model == "" {
+				model = cur.Model
+			}
+			llmFunc = func(lCtx context.Context, prompt string) (string, error) {
+				return s.llmFn(lCtx, model, prompt)
+			}
+		}
+		if s.runnerFn != nil && llmFunc == nil {
+			_ = s.runnerFn
+		}
 
 		for {
 			stats, err := RunTranscriptSync(ctx, s.store, brainDir, embedder, llmFunc)
@@ -499,7 +400,7 @@ func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 }
 
 // handleTick executes periodic evaluations for a single ticker event.
-func (s *Scheduler) handleTick(ctx context.Context, tickCount int, ollamaClient *memory.Client, llmFunc memory.LLMClientFunc) {
+func (s *Scheduler) handleTick(ctx context.Context, tickCount int) {
 	if s == nil {
 		return
 	}
@@ -512,19 +413,9 @@ func (s *Scheduler) handleTick(ctx context.Context, tickCount int, ollamaClient 
 		s.runTranscriptSync(ctx)
 	}
 
-	// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
-	if ShouldRunFactExtraction(tickCount) {
-		s.runFactExtraction(ctx, ollamaClient, llmFunc)
-	}
-
 	// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
 	if ShouldRunPruneRetention(tickCount) {
 		s.runPruneRetention(ctx)
-	}
-
-	// Run memory decay daily (staggered at tick%2880 == 60)
-	if ShouldRunMemoryDecay(tickCount) {
-		s.runMemoryDecay(ctx)
 	}
 }
 
@@ -537,15 +428,12 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	log.Printf("[Scheduler] Background scheduler monitor started (interval=%v)", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	ollamaClient := memory.New(s.cfg, s.sessionRoots...)
-	llmFunc := s.ExtractFactsLLM
 
 	// Initial evaluation on start
 	if err := s.ProcessDueSchedules(ctx); err != nil {
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
 	s.runPruneRetention(ctx)
-	s.runFactExtraction(ctx, ollamaClient, llmFunc)
 	s.runTranscriptSync(ctx)
 
 	var tickCount int
@@ -557,7 +445,7 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			tickCount++
-			s.handleTick(ctx, tickCount, ollamaClient, llmFunc)
+			s.handleTick(ctx, tickCount)
 		}
 	}
 }

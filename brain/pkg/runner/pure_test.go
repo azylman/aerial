@@ -163,13 +163,20 @@ func TestExtractSkillFromTarget(t *testing.T) {
 	}
 
 	var gotMemQuery string
-	injected := injectRetrievedContext(nil, "raw query", func(context.Context) (string, error) {
+	injected := injectRetrievedContext(nil, "full prompt envelope", "raw query", func(context.Context) (string, error) {
 		return "<ambient_context>amb</ambient_context>", nil
 	}, time.Second, func(_ context.Context, q string) (string, error) {
 		gotMemQuery = q
 		return "<retrieved_memory>mem</retrieved_memory>", nil
 	}, time.Second, "[Test]")
-	if gotMemQuery != "raw query" || !strings.HasPrefix(injected, "<retrieved_memory>mem</retrieved_memory>\n\n<ambient_context>amb</ambient_context>\n\nraw query") {
+	if gotMemQuery != "raw query" || !strings.HasPrefix(injected, "<retrieved_memory>mem</retrieved_memory>\n\n<ambient_context>amb</ambient_context>\n\nfull prompt envelope") {
 		t.Errorf("injectRetrievedContext query=%q, out=%q", gotMemQuery, injected)
+	}
+	_ = injectRetrievedContext(context.Background(), "fallback prompt", "", nil, time.Second, func(_ context.Context, q string) (string, error) {
+		gotMemQuery = q
+		return "", nil
+	}, time.Second, "[Test]")
+	if gotMemQuery != "fallback prompt" {
+		t.Errorf("expected fallback prompt, got %q", gotMemQuery)
 	}
 }

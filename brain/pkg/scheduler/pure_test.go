@@ -317,33 +317,22 @@ func TestStructBuilders_TableDriven(t *testing.T) {
 
 func TestPeriodicTickPredicates_TableDriven(t *testing.T) {
 	tests := []struct {
-		name        string
-		tickCount   int
-		wantFactExt bool
-		wantPrune   bool
-		wantDecay   bool
-		wantSync    bool
+		name      string
+		tickCount int
+		wantPrune bool
+		wantSync  bool
 	}{
-		{"negative tick", -10, false, false, false, false},
-		{"zero tick", 0, false, false, false, false},
-		{"regular tick 1", 1, false, false, false, false},
-		{"transcript sync tick 10", 10, false, false, false, true},
-		{"memory decay tick 60", 60, false, false, true, true},
-		{"fact extraction tick 120", 120, true, false, false, true},
-		{"staggered decay 2940", 2940, false, false, true, true},
-		{"full daily prune 2880", 2880, true, true, false, true},
-		{"double daily prune 5760", 5760, true, true, false, true},
+		{"negative tick", -10, false, false},
+		{"zero tick", 0, false, false},
+		{"regular tick 1", 1, false, false},
+		{"transcript sync tick 10", 10, false, true},
+		{"full daily prune 2880", 2880, true, true},
+		{"double daily prune 5760", 5760, true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ShouldRunFactExtraction(tc.tickCount); got != tc.wantFactExt {
-				t.Errorf("ShouldRunFactExtraction: got %v, want %v", got, tc.wantFactExt)
-			}
 			if got := ShouldRunPruneRetention(tc.tickCount); got != tc.wantPrune {
 				t.Errorf("ShouldRunPruneRetention: got %v, want %v", got, tc.wantPrune)
-			}
-			if got := ShouldRunMemoryDecay(tc.tickCount); got != tc.wantDecay {
-				t.Errorf("ShouldRunMemoryDecay: got %v, want %v", got, tc.wantDecay)
 			}
 			if got := ShouldRunTranscriptSync(tc.tickCount); got != tc.wantSync {
 				t.Errorf("ShouldRunTranscriptSync: got %v, want %v", got, tc.wantSync)
