@@ -1792,6 +1792,29 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 		return err
 	}
 
+	if statusOverride == "deployed" {
+		sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'deploying', 'deploy_failed') RETURNING pr_number`
+		if rows, sErr := pgReg.pool.Query(qCtx, sweepQuery, repo, prNumber); sErr == nil && rows != nil {
+			var olderPRs []int
+			for rows.Next() {
+				var oldPR int
+				if rows.Scan(&oldPR) == nil && oldPR > 0 {
+					olderPRs = append(olderPRs, oldPR)
+				}
+			}
+			rows.Close()
+			for _, oldPR := range olderPRs {
+				if wErr := s.syncSinglePRWidget(qCtx, pgReg, repo, oldPR, "deployed", "", nil); wErr != nil {
+					log.Printf("[webhooks-router] [widget] warning syncing older deployed PR %s#%d: %v", repo, oldPR, wErr)
+				}
+			}
+		}
+	}
+
+	return s.syncSinglePRWidget(qCtx, pgReg, repo, prNumber, statusOverride, banner, deployingJobs)
+}
+
+func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, statusOverride string, banner string, deployingJobs []string) error {
 	// 1. Check if (repo, prNumber) belongs to a vanadis_chunks row
 	selectChunkQuery := `
 		SELECT c.id, c.build_id, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
