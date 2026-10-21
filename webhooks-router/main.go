@@ -1116,34 +1116,40 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 	}, nil
 }
 
-func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
+func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo string, prNumber int) (bool, string, string, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
-		return false, nil
+		return false, "", "", nil
 	}
 	query := `
-		SELECT EXISTS (
-			SELECT 1
-			FROM vanadis_chunks c
-			JOIN vanadis_builds b ON c.build_id = b.id
-			WHERE c.repo = $1 AND c.pr_number = $2
-			  AND (
-				  b.status = 'running'
-				  OR EXISTS (
-					  SELECT 1 FROM vanadis_chunks c2
-					  WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
-				  )
+		SELECT TRUE, c.id, COALESCE(NULLIF(c.effort, ''), 'medium')
+		FROM vanadis_chunks c
+		JOIN vanadis_builds b ON c.build_id = b.id
+		WHERE c.repo = $1 AND c.pr_number = $2
+		  AND (
+			  b.status = 'running'
+			  OR EXISTS (
+				  SELECT 1 FROM vanadis_chunks c2
+				  WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
 			  )
-		);`
-	var exists bool
-	found, err := r.queryRowScan(ctx, "check vanadis deploy wake suppression", query, []any{&exists}, repo, prNumber)
-	if err != nil {
-		return false, err
+		  )
+		ORDER BY c.updated_at DESC LIMIT 1;`
+	var matched bool
+	var chunkID, effort string
+	found, err := r.queryRowScan(ctx, "check vanadis deploy wake suppression", query, []any{&matched, &chunkID, &effort}, repo, prNumber)
+	if err != nil || !found || !matched {
+		return false, "", "", err
 	}
-	if !found {
-		return false, nil
+	cleanEffort := "medium"
+	if strings.EqualFold(strings.TrimSpace(effort), "low") {
+		cleanEffort = "low"
 	}
-	return exists, nil
+	return true, strings.TrimSpace(chunkID), cleanEffort, nil
+}
+
+func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
+	matched, _, _, err := r.ResolveVanadisChunkForPR(ctx, repo, prNumber)
+	return matched, err
 }
 
 func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -1211,9 +1217,11 @@ type ImageReadyEventRequest struct {
 }
 
 type PromptRequest struct {
-	ChannelID string `json:"channel_id"`
-	Prompt    string `json:"prompt"`
-	Silent    bool   `json:"silent,omitempty"`
+	ChannelID      string `json:"channel_id"`
+	Prompt         string `json:"prompt"`
+	Effort         string `json:"effort,omitempty"`
+	Silent         bool   `json:"silent,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
 }
 
 type DirectMessageRequest struct {
@@ -1928,29 +1936,52 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	return nil
 }
 
-func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) bool {
+type vanadisPromptOpts struct {
+	silent  bool
+	chunkID string
+	effort  string
+}
+
+func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum int) vanadisPromptOpts {
 	if s == nil || s.registry == nil || prNum <= 0 {
-		return false
+		return vanadisPromptOpts{}
+	}
+	if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
+		if matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum); err == nil && matched {
+			return vanadisPromptOpts{silent: true, chunkID: chunkID, effort: effort}
+		}
+		return vanadisPromptOpts{}
 	}
 	suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
 	if err != nil {
 		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis status for %s#%d: %v", repo, prNum, err)
-		return false
+		return vanadisPromptOpts{}
 	}
-	return suppressed
+	if !suppressed {
+		return vanadisPromptOpts{}
+	}
+	return vanadisPromptOpts{silent: true, effort: "medium"}
 }
 
-func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, silent ...bool) error {
+func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) bool {
+	return s.vanadisPromptOpts(ctx, repo, prNum).silent
+}
+
+func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, vOpts ...vanadisPromptOpts) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
 	}
-	isSilent := len(silent) > 0 && silent[0]
-	if !isSilent && dmMsg != "" {
+	var opt vanadisPromptOpts
+	if len(vOpts) > 0 {
+		opt = vOpts[0]
+	}
+	if !opt.silent && dmMsg != "" {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
 	}
-	if err := s.dispatcher.DispatchPrompt(ctx, PromptRequest{ChannelID: targetID, Prompt: prompt, Silent: isSilent}); err != nil {
+	req := PromptRequest{ChannelID: targetID, Prompt: prompt, Effort: opt.effort, Silent: opt.silent, VanadisChunkID: opt.chunkID}
+	if err := s.dispatcher.DispatchPrompt(ctx, req); err != nil {
 		log.Printf("[webhooks-router] [dispatcher] error dispatching %s prompt: %v", label, err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)
 	}
@@ -2103,7 +2134,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 			evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
 		)
-		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.isVanadisPR(ctx, evt.Repo, evt.PRNumber))
+		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 	case "sync_success":
 		if evt.PRNumber > 0 {
 			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "merged", "", nil); err != nil {
@@ -2126,7 +2157,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			}
 		}
 		prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
-		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.isVanadisPR(ctx, evt.Repo, evt.PRNumber))
+		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 	}
 	return &evt, nil
 }
@@ -2261,7 +2292,7 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 		details, urlLine,
 		directive,
 	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt, s.isVanadisPR(ctx, repo, prNum))
+	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNum))
 }
 
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
@@ -2276,7 +2307,7 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 		}
 	}
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt, s.isVanadisPR(ctx, repo, prNum))
+	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNum))
 }
 
 // GitHubIssueComment represents a comment on a GitHub issue or pull request.
