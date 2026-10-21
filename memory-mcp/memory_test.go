@@ -3935,6 +3935,7 @@ func TestBuildCandidateReconcilePrompt(t *testing.T) {
 		"User prefers light mode on mobile displays",
 		"supersedes_id",
 		"delete_id",
+		"Never merge distinct topics",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Errorf("buildCandidateReconcilePrompt missing expected substring %q in:\n%s", expected, prompt)
@@ -4703,15 +4704,16 @@ func makeScoredFactFixture(id int64, text string, emb []float32) ScoredFactWithE
 }
 
 func TestFindConsolidationCliques(t *testing.T) {
-	vecs := makePairwiseSimilarVectors(8, 0.75) // Pairwise similarity = 0.75 (in [0.70, 0.88])
+	vecs := makePairwiseSimilarVectors(8, 0.78) // Pairwise similarity = 0.78 (in [0.75, 0.88])
+	looseVecs := makePairwiseSimilarVectors(3, 0.72)
 	orthogonalVec := make([]float32, ExpectedEmbeddingDim)
 	orthogonalVec[ExpectedEmbeddingDim-1] = 1.0 // Orthogonal to vecs[0..7]
 
 	vecsB := make([][]float32, 3)
 	for i := 0; i < 3; i++ {
 		v := make([]float32, ExpectedEmbeddingDim)
-		v[10] = float32(math.Sqrt(0.75))
-		v[11+i] = float32(math.Sqrt(0.25))
+		v[10] = float32(math.Sqrt(0.78))
+		v[11+i] = float32(math.Sqrt(0.22))
 		vecsB[i] = v
 	}
 
@@ -4815,6 +4817,15 @@ func TestFindConsolidationCliques(t *testing.T) {
 			wantCount: 1,
 			wantSizes: []int{3},
 		},
+		{
+			name: "BelowDefaultMinSim075Excluded",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "L1", looseVecs[0]),
+				makeScoredFactFixture(2, "L2", looseVecs[1]),
+				makeScoredFactFixture(3, "L3", looseVecs[2]),
+			},
+			wantCount: 0,
+		},
 	}
 
 	for _, tc := range tests {
@@ -4834,7 +4845,7 @@ func TestFindConsolidationCliques(t *testing.T) {
 
 func TestConsolidateFactClusters(t *testing.T) {
 	ctx := context.Background()
-	vecs := makePairwiseSimilarVectors(4, 0.75)
+	vecs := makePairwiseSimilarVectors(4, 0.78)
 	validJSON := `{"facts":[{"category":"pref","fact_text":"User prefers dark mode everywhere","importance_score":0.85}]}`
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -5113,7 +5124,7 @@ func TestToolHandler_MemoryStore_AdmissionGate(t *testing.T) {
 
 func TestWorker_RunDaily_Dreaming(t *testing.T) {
 	ctx := context.Background()
-	vecs := makePairwiseSimilarVectors(3, 0.75)
+	vecs := makePairwiseSimilarVectors(3, 0.78)
 
 	tests := []struct {
 		name         string

@@ -91,12 +91,12 @@ Requirements:
 {
   "facts": [
     {
-      "fact_text": "1-2 concise sentences stating the fact clearly"
+      "fact_text": "A single concise sentence stating one atomic proposition clearly"
     }
   ],
   "reinforced_ids": [42]
 }
-2. Extract only durable, atomic facts not ephemeral details. Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
+2. Extract only durable, single-proposition atomic facts (one sentence and one topic/predicate per fact; never combine distinct topics such as family composition and dietary restrictions into a single compound fact). Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
 3. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
 4. If no durable facts are present in the conversation, return {"facts": []}.
 5. Do NOT include markdown text formatting outside the JSON block.
@@ -200,8 +200,8 @@ Requirements:
   ]
 }
 2. Actions:
-- "ADD": Candidate is a distinct fact. Does not replace any neighbor.
-- "UPDATE": Candidate modifies or updates a neighbor. Set "supersedes_id" to that neighbor's ID.
+- "ADD": Candidate is a distinct fact or covers a different topic/predicate from existing neighbors. Does not replace any neighbor.
+- "UPDATE": Candidate modifies or refines the exact same topic/predicate as a neighbor. Set "supersedes_id" to that neighbor's ID. Never merge distinct topics that merely share a subject into a multi-sentence compound fact; use "ADD" instead.
 - "DELETE": Candidate invalidates a neighbor that is no longer true. Set "delete_id" to that neighbor's ID.
 - "NOOP": Candidate is already accurately captured or corroborated by an existing neighbor. Set "supersedes_id" to that neighbor's ID.
 3. Only reference neighbor IDs explicitly listed above.
@@ -499,7 +499,7 @@ func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
 // where every pair of facts (u, v) in the clique satisfies minSim <= CosineSimilarity(u.Embedding, v.Embedding) <= maxSim.
 func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int) [][]ScoredFactWithEmbedding {
 	if minSim <= 0 {
-		minSim = 0.70
+		minSim = 0.75
 	}
 	if maxSim <= 0 {
 		maxSim = 0.88
@@ -566,7 +566,7 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 
 // FactConsolidationPrompt defines the system prompt instructing the LLM to consolidate related facts.
 const FactConsolidationPrompt = `You are a memory consolidation engine.
-Synthesize the provided cluster of semantically related facts into 1 or at most 2 dense, canonical, and durable facts that preserve all specific information, preferences, constraints, and context without redundancy.
+Synthesize the provided cluster of semantically related facts into 1 or at most 2 concise, canonical, single-topic facts that preserve all specific information, preferences, constraints, and context without redundancy.
 
 Output strictly a JSON object matching this schema:
 {
@@ -578,7 +578,8 @@ Output strictly a JSON object matching this schema:
 }
 Rules:
 1. Produce at most 2 consolidated facts.
-2. Output nothing else outside the JSON object.`
+2. Keep each consolidated fact strictly atomic (one single topic/predicate and one sentence per fact). If the cluster spans two distinct sub-topics (e.g. household composition vs. dietary restrictions), emit 2 separate facts rather than merging them into a multi-sentence compound fact.
+3. Output nothing else outside the JSON object.`
 
 func buildConsolidationPrompt(clique []ScoredFactWithEmbedding) string {
 	var b strings.Builder
@@ -612,7 +613,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 		return 0, nil
 	}
 
-	cliques := FindConsolidationCliques(allFacts, 0.70, 0.88, 3, 6)
+	cliques := FindConsolidationCliques(allFacts, 0.75, 0.88, 3, 6)
 	if len(cliques) == 0 {
 		return 0, nil
 	}
