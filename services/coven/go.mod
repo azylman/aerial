@@ -1,4 +1,4 @@
-module github.com/azylman/aerial/memory-mcp
+module github.com/azylman/aerial/services/coven
 
 go 1.27.1
 

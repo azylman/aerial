@@ -3,7 +3,7 @@ variable "image_tag" {
   default = "latest"
 }
 
-job "memory-mcp" {
+job "coven" {
   datacenters = ["dc1"]
   type        = "service"
 
@@ -18,7 +18,7 @@ job "memory-mcp" {
     auto_revert       = true
   }
 
-  group "memory-mcp" {
+  group "coven" {
     count = 1
 
     network {
@@ -27,30 +27,35 @@ job "memory-mcp" {
       }
     }
 
-    task "memory-mcp" {
+    task "coven" {
       driver = "docker"
 
       config {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-memory-mcp:${var.image_tag}"
+        image        = "ghcr.io/azylman/aerial-coven:${var.image_tag}"
         ports        = ["http"]
         healthchecks {
           disable = true
         }
         volumes = [
           "/mnt/data/supervisor/share/aerial-config:/config:ro",
-          "/mnt/data/supervisor/share/coverage/memory-mcp:/coverage:rw",
+          "/mnt/data/supervisor/share/coverage/coven:/coverage:rw",
         ]
       }
 
       env {
-        GOCOVERDIR = "/coverage"
+        GOCOVERDIR    = "/coverage"
+        BRAIN_LLM_URL = "http://eri.aerial/internal/llm"
       }
 
       template {
         data = <<EOH
-{{- if nomadVarExists "nomad/jobs/memory-mcp" -}}
+{{- if nomadVarExists "nomad/jobs/coven" -}}
+{{- with nomadVar "nomad/jobs/coven" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- else if nomadVarExists "nomad/jobs/memory-mcp" -}}
 {{- with nomadVar "nomad/jobs/memory-mcp" -}}
 {{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
 {{- end -}}
@@ -73,12 +78,12 @@ EOH
       }
 
       service {
-        name     = "memory-mcp"
+        name     = "coven"
         port     = "http"
         provider = "nomad"
 
         check {
-          name     = "memory-mcp-health"
+          name     = "coven-health"
           type     = "http"
           path     = "/health"
           interval = "15s"
@@ -92,7 +97,7 @@ EOH
       }
 
       service {
-        name     = "coven"
+        name     = "memory-mcp"
         port     = "http"
         provider = "nomad"
       }

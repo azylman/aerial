@@ -1901,7 +1901,7 @@ vanadis_url: "http://vanadis:8089"
 			nilLookup:      true,
 			wantPort:       "8080",
 			wantBrainURL:   "http://brain:8080",
-			wantMemoryURL:  "http://memory-mcp.aerial",
+			wantMemoryURL:  "http://coven.aerial",
 			wantGHRepo:     "azylman/aerial",
 			wantGHRepos:    []string{"azylman/aerial"},
 			wantGHToken:    "",

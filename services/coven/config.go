@@ -15,7 +15,7 @@ const DefaultConfigPath = "/config/config.yaml"
 const DefaultPort = "4008"
 
 // DefaultBrainLLMURL is the fallback brain LLM proxy URL.
-const DefaultBrainLLMURL = "http://brain.aerial/internal/llm"
+const DefaultBrainLLMURL = "http://eri.aerial/internal/llm"
 
 // DefaultOllamaURL is the fallback Ollama API base URL.
 const DefaultOllamaURL = "http://ollama:11434"

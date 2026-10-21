@@ -25,7 +25,7 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 			"serverUrl": "http://scheduler-mcp:8080/mcp",
 		}
 		mergedServers["memory"] = map[string]interface{}{
-			"serverUrl": "http://memory-mcp.aerial/mcp",
+			"serverUrl": "http://coven.aerial/mcp",
 		}
 	}
 

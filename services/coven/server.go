@@ -39,7 +39,7 @@ func NewServer(handler *ToolHandler) *Server {
 	}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "memory-mcp",
+		Name:    "coven",
 		Version: "1.0.0",
 	}, nil)
 
@@ -114,10 +114,10 @@ var (
 func (s *Server) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
 	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
 		if err := writeMetaDirFn(dir); err != nil {
-			log.Printf("[memory-mcp] coverage meta flush error: %v", err)
+			log.Printf("[coven] coverage meta flush error: %v", err)
 		}
 		if err := writeCountersDirFn(dir); err != nil {
-			log.Printf("[memory-mcp] coverage flush error: %v", err)
+			log.Printf("[coven] coverage flush error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -151,7 +151,7 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.handler.GetFacts(r.Context(), filter)
 	if err != nil {
-		log.Printf("[memory-mcp] error getting facts: %v", err)
+		log.Printf("[coven] error getting facts: %v", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -159,7 +159,7 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(res); err != nil {
-		log.Printf("[memory-mcp] json encode error: %v", err)
+		log.Printf("[coven] json encode error: %v", err)
 	}
 }
 
@@ -178,7 +178,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.handler.GetContext(r.Context(), q, limit)
 	if err != nil {
-		log.Printf("[memory-mcp] error getting context: %v", err)
+		log.Printf("[coven] error getting context: %v", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
@@ -194,7 +194,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(res); err != nil {
-		log.Printf("[memory-mcp] json encode error: %v", err)
+		log.Printf("[coven] json encode error: %v", err)
 	}
 }
 
@@ -297,7 +297,7 @@ func isClientDisconnect(r *http.Request, err error) bool {
 func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
 	if _, err := w.Write(data); err != nil {
 		if !isClientDisconnect(r, err) {
-			log.Printf("[memory-mcp] response write error: %v", err)
+			log.Printf("[coven] response write error: %v", err)
 		}
 	}
 }

@@ -495,6 +495,7 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "dashboard service", jobName: "Build & Push dashboard", expected: "dashboard"},
 		{name: "proxy service", jobName: "test-proxy-service", expected: "proxy"},
 		{name: "scheduler mcp", jobName: "scheduler-mcp CI", expected: "scheduler-mcp"},
+		{name: "coven service", jobName: "Build & Push coven", expected: "coven"},
 		{name: "discord mcp", jobName: "discord-mcp Tests", expected: "discord-mcp"},
 		{name: "docker mcp", jobName: "docker-mcp Unit", expected: "docker-mcp"},
 		{name: "github mcp", jobName: "github-mcp Deploy", expected: "github-mcp"},

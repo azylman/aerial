@@ -94,7 +94,7 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: false
     options:
-      path: /share/aerial/grafana/dashboards
+      path: /share/aerial/nomad/grafana/dashboards
       foldersFromFilesStructure: true
 EOH
         destination = "local/provisioning/dashboards/dashboards.yml"

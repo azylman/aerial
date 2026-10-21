@@ -44,7 +44,7 @@ job "vector" {
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock:ro",
           "/var/lib/docker/containers:/var/lib/docker/containers:ro",
-          "/mnt/data/supervisor/share/aerial/vector:/etc/vector:ro"
+          "/mnt/data/supervisor/share/aerial/nomad/vector:/etc/vector:ro"
         ]
       }
 
