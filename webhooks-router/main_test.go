@@ -4178,6 +4178,7 @@ func (r mockVanadisPgxRow) Scan(dest ...any) error {
 type mockVanadisPgxRows struct {
 	pgx.Rows
 	items     []VanadisChunkSummary
+	intItems  []int
 	idx       int
 	scanErr   error
 	rowsErr   error
@@ -4189,6 +4190,9 @@ func (r *mockVanadisPgxRows) Close()     {}
 func (r *mockVanadisPgxRows) Err() error { return r.rowsErr }
 func (r *mockVanadisPgxRows) Next() bool {
 	limit := len(r.items)
+	if len(r.intItems) > limit {
+		limit = len(r.intItems)
+	}
 	if r.totalRows > limit {
 		limit = r.totalRows
 	}
@@ -4205,6 +4209,10 @@ func (r *mockVanadisPgxRows) Scan(dest ...any) error {
 	}
 	if r.scanRowFn != nil {
 		return r.scanRowFn(r.idx-1, dest...)
+	}
+	if len(r.intItems) > 0 {
+		*dest[0].(*int) = r.intItems[r.idx-1]
+		return nil
 	}
 	it := r.items[r.idx-1]
 	*dest[0].(*string) = it.ID
@@ -5176,6 +5184,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		statusOverride string
 		banner         string
 		deployingJobs  []string
+		olderPRs       []int
 		vanadisMatch   bool
 		dispErr        error
 		queryErr       error
@@ -5238,18 +5247,23 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			wantChunks:     1,
 		},
 		{
-			name:           "Postgres Vanadis chunk match with mock pool",
+			name:           "Postgres Vanadis chunk match with mock pool and older PR sweep",
 			repo:           "azylman/aerial",
 			prNumber:       102,
 			statusOverride: "deployed",
 			banner:         "Deploying now",
 			deployingJobs:  []string{"job-a"},
+			olderPRs:       []int{101},
 			vanadisMatch:   true,
 			wantDispatched: true,
 			wantWidgetID:   "build-abc",
 			wantStatus:     "running",
 			wantBanner:     "Deploying now",
 			wantChunks:     2,
+		},
+		{
+			name: "Postgres deployed sweep logs warning when older PR widget dispatch fails", repo: "azylman/aerial",
+			prNumber: 102, statusOverride: "deployed", olderPRs: []int{101}, vanadisMatch: true, dispErr: errors.New("dispatch error"), wantErr: true,
 		},
 		{
 			name:           "Postgres Vanadis chunk completed status override",
@@ -5383,6 +5397,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					return &mockVanadisPgxRow{}
 				},
 				queryFn: func(qCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
+					if strings.Contains(sql, "UPDATE pr_registry") {
+						return &mockVanadisPgxRows{intItems: tc.olderPRs}, nil
+					}
 					if tc.queryErr != nil {
 						return nil, tc.queryErr
 					}
