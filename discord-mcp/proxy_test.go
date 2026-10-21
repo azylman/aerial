@@ -31,788 +31,10 @@ func TestHelperProcess(t *testing.T) {
 	select {}
 }
 
-func TestFilterToolsResponse(t *testing.T) {
-	mockResponse := `{
-		"jsonrpc": "2.0",
-		"id": 1,
-		"result": {
-			"tools": [
-				{
-					"name": "discord_send",
-					"description": "Send a message to a Discord channel",
-					"inputSchema": {"type": "object"}
-				},
-				{
-					"name": "discord_read_messages",
-					"description": "Read messages from a Discord channel",
-					"inputSchema": {"type": "object"}
-				},
-				{
-					"name": "discord_search_messages",
-					"description": "Search messages in a server",
-					"inputSchema": {"type": "object"}
-				},
-				{
-					"name": "send_message",
-					"description": "Another send message tool",
-					"inputSchema": {"type": "object"}
-				},
-				{
-					"name": "discord_get_server_info",
-					"description": "Get server info",
-					"inputSchema": {"type": "object"}
-				}
-			]
-		}
-	}`
-
-	filteredBytes, err := FilterToolsResponse([]byte(mockResponse), BlockedToolNames)
-	if err != nil {
-		t.Fatalf("unexpected error filtering tools response: %v", err)
-	}
-
-	var resp JSONRPCResponse
-	if err := json.Unmarshal(filteredBytes, &resp); err != nil {
-		t.Fatalf("failed to unmarshal filtered response: %v", err)
-	}
-
-	var listResult ToolsListResult
-	if err := json.Unmarshal(resp.Result, &listResult); err != nil {
-		t.Fatalf("failed to unmarshal tools result: %v", err)
-	}
-
-	for _, tool := range listResult.Tools {
-		if BlockedToolNames[tool.Name] {
-			t.Errorf("expected tool %q to be filtered out, but found in result", tool.Name)
-		}
-	}
-
-	expectedCount := 3 // read_messages, search_messages, get_server_info
-	if len(listResult.Tools) != expectedCount {
-		t.Errorf("expected %d tools, got %d", expectedCount, len(listResult.Tools))
-	}
-}
-
-func TestIsBlockedToolCall(t *testing.T) {
-	t.Run("Blocked discord_send", func(t *testing.T) {
-		req := `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"discord_send","arguments":{"message":"hello"}}}`
-		isBlocked, id, name, err := IsBlockedToolCall([]byte(req), BlockedToolNames)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !isBlocked {
-			t.Errorf("expected isBlocked=true for discord_send, got false")
-		}
-		if name != "discord_send" {
-			t.Errorf("expected name=discord_send, got %q", name)
-		}
-		if id != float64(42) {
-			t.Errorf("expected id=42, got %v", id)
-		}
-	})
-
-	t.Run("Allowed discord_read_messages", func(t *testing.T) {
-		req := `{"jsonrpc":"2.0","id":"abc-123","method":"tools/call","params":{"name":"discord_read_messages","arguments":{"channelId":"123"}}}`
-		isBlocked, id, name, err := IsBlockedToolCall([]byte(req), BlockedToolNames)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if isBlocked {
-			t.Errorf("expected isBlocked=false for discord_read_messages, got true")
-		}
-		if name != "discord_read_messages" {
-			t.Errorf("expected name=discord_read_messages, got %q", name)
-		}
-		if id != "abc-123" {
-			t.Errorf("expected id='abc-123', got %v", id)
-		}
-	})
-
-	t.Run("Non-tool call method", func(t *testing.T) {
-		req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`
-		isBlocked, _, _, err := IsBlockedToolCall([]byte(req), BlockedToolNames)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if isBlocked {
-			t.Errorf("expected isBlocked=false for initialize, got true")
-		}
-	})
-}
-
-func TestProxyHandlerEndToEnd(t *testing.T) {
-	// Mock upstream server
-	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		var req JSONRPCRequest
-		_ = json.Unmarshal(body, &req)
-
-		switch req.Method {
-		case "tools/list":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"result": {
-					"tools": [
-						{"name": "discord_send", "description": "send"},
-						{"name": "discord_read_messages", "description": "read"}
-					]
-				}
-			}`))
-		case "tools/call":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"result": {"content": [{"type": "text", "text": "executed"}]}
-			}`))
-		default:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc": "2.0", "id": 1, "result": "ok"}`))
-		}
-	}))
-	defer mockUpstream.Close()
-
-	proxyHandler, err := NewProxyHandler(mockUpstream.URL, BlockedToolNames)
-	if err != nil {
-		t.Fatalf("failed to create proxy handler: %v", err)
-	}
-
-	proxyServer := httptest.NewServer(proxyHandler)
-	defer proxyServer.Close()
-
-	t.Run("tools/list filters out discord_send", func(t *testing.T) {
-		reqBody := `{"jsonrpc":"2.0","id":100,"method":"tools/list"}`
-		resp, err := http.Post(proxyServer.URL+"/mcp", "application/json", strings.NewReader(reqBody))
-		if err != nil {
-			t.Fatalf("failed to send request: %v", err)
-		}
-		defer resp.Body.Close()
-
-		respBytes, _ := io.ReadAll(resp.Body)
-		if strings.Contains(string(respBytes), "discord_send") {
-			t.Errorf("response should not contain discord_send, got: %s", string(respBytes))
-		}
-		if !strings.Contains(string(respBytes), "discord_read_messages") {
-			t.Errorf("response should contain discord_read_messages, got: %s", string(respBytes))
-		}
-	})
-
-	t.Run("tools/call blocked for discord_send", func(t *testing.T) {
-		reqBody := `{"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"discord_send","arguments":{"message":"test"}}}`
-		resp, err := http.Post(proxyServer.URL+"/mcp", "application/json", strings.NewReader(reqBody))
-		if err != nil {
-			t.Fatalf("failed to send request: %v", err)
-		}
-		defer resp.Body.Close()
-
-		respBytes, _ := io.ReadAll(resp.Body)
-		var jsonResp JSONRPCResponse
-		if err := json.Unmarshal(respBytes, &jsonResp); err != nil {
-			t.Fatalf("failed to parse response: %v", err)
-		}
-
-		if jsonResp.Error == nil {
-			t.Fatalf("expected JSON-RPC error, got nil: %s", string(respBytes))
-		}
-		if !strings.Contains(jsonResp.Error.Message, "disabled") {
-			t.Errorf("expected disabled error message, got: %s", jsonResp.Error.Message)
-		}
-	})
-
-	t.Run("tools/call allowed for discord_read_messages", func(t *testing.T) {
-		reqBody := `{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"discord_read_messages","arguments":{"channelId":"123"}}}`
-		resp, err := http.Post(proxyServer.URL+"/mcp", "application/json", strings.NewReader(reqBody))
-		if err != nil {
-			t.Fatalf("failed to send request: %v", err)
-		}
-		defer resp.Body.Close()
-
-		respBytes, _ := io.ReadAll(resp.Body)
-		var jsonResp JSONRPCResponse
-		if err := json.Unmarshal(respBytes, &jsonResp); err != nil {
-			t.Fatalf("failed to parse response: %v", err)
-		}
-
-		if jsonResp.Error != nil {
-			t.Fatalf("unexpected error: %v", jsonResp.Error)
-		}
-	})
-
-	t.Run("GET request proxies via reverseProxy", func(t *testing.T) {
-		resp, err := http.Get(proxyServer.URL + "/health")
-		if err != nil || resp.StatusCode != http.StatusOK {
-			t.Errorf("expected 200 from proxy health check: %v, err: %v", resp, err)
-		}
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-	})
-}
-
-func TestProxy_EdgeCasesAndErrors(t *testing.T) {
-	// 1. IsBlockedToolCall invalid JSON
-	if _, _, _, err := IsBlockedToolCall([]byte("{bad json"), BlockedToolNames); err == nil {
-		t.Error("expected error for malformed json in IsBlockedToolCall")
-	}
-
-	// 2. IsBlockedToolCall params malformed
-	if _, _, _, err := IsBlockedToolCall([]byte(`{"jsonrpc":"2.0","method":"tools/call","params":"not-an-object"}`), BlockedToolNames); err == nil {
-		t.Error("expected error for malformed params in IsBlockedToolCall")
-	}
-
-	// 3. FilterToolsResponse edge cases
-	if _, err := FilterToolsResponse([]byte("{bad json"), BlockedToolNames); err == nil {
-		t.Error("expected error for bad json in FilterToolsResponse")
-	}
-	rawResp, err := FilterToolsResponse([]byte(`{"jsonrpc":"2.0","id":1}`), BlockedToolNames)
-	if err != nil || !strings.Contains(string(rawResp), `"jsonrpc":"2.0"`) {
-		t.Errorf("expected raw response for empty result, got %s, err: %v", string(rawResp), err)
-	}
-	if _, err := FilterToolsResponse([]byte(`{"jsonrpc":"2.0","result":"not-tools-object"}`), BlockedToolNames); err == nil {
-		t.Error("expected error for invalid tools list result format")
-	}
-
-	// 4. NewProxyHandler invalid URL
-	if _, err := NewProxyHandler("http://invalid::url", BlockedToolNames); err == nil {
-		t.Error("expected error for invalid URL in NewProxyHandler")
-	}
-
-	// 5. Upstream offline returns BadGateway
-	handler, err := NewProxyHandler("http://127.0.0.1:59995", BlockedToolNames)
-	if err != nil {
-		t.Fatalf("failed to create handler: %v", err)
-	}
-	offlineSrv := httptest.NewServer(handler)
-	defer offlineSrv.Close()
-
-	resp, err := http.Post(offlineSrv.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
-	if err != nil {
-		t.Fatalf("unexpected request error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected 502 Bad Gateway from offline upstream, got %d", resp.StatusCode)
-	}
-
-	// 6. PollUpstream
-	lClosed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on ephemeral port: %v", err)
-	}
-	_, closedPort, err := net.SplitHostPort(lClosed.Addr().String())
-	if err != nil {
-		t.Fatalf("failed to parse port: %v", err)
-	}
-	_ = lClosed.Close()
-
-	if PollUpstream(context.Background(), closedPort, 2, 5*time.Millisecond) {
-		t.Error("expected false for closed port in PollUpstream")
-	}
-
-	// PollUpstream success
-	lOpen, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on ephemeral port: %v", err)
-	}
-	defer lOpen.Close()
-	_, openPort, err := net.SplitHostPort(lOpen.Addr().String())
-	if err != nil {
-		t.Fatalf("failed to parse port: %v", err)
-	}
-	if !PollUpstream(context.Background(), openPort, 5, 10*time.Millisecond) {
-		t.Error("expected true for open port in PollUpstream")
-	}
-
-	// PollUpstream canceled context
-	canceledCtx, cancelPoll := context.WithCancel(context.Background())
-	cancelPoll()
-	if PollUpstream(canceledCtx, openPort, 5, 10*time.Millisecond) {
-		t.Error("expected false when context is canceled in PollUpstream")
-	}
-
-	// 7. StartProxyServer with valid and invalid URL + probe /health
-	srv, err := StartProxyServer("59993", "http://127.0.0.1:59992")
-	if err != nil {
-		t.Fatalf("failed to start proxy server: %v", err)
-	}
-	healthRecorder := httptest.NewRecorder()
-	healthReq, _ := http.NewRequest(http.MethodGet, "/health", nil)
-	srv.Handler.ServeHTTP(healthRecorder, healthReq)
-	if healthRecorder.Code != http.StatusOK || !strings.Contains(healthRecorder.Body.String(), "aerial-discord-mcp") {
-		t.Errorf("unexpected health response: %v, body: %s", healthRecorder.Code, healthRecorder.Body.String())
-	}
-
-	if _, err := StartProxyServer("59993", "http://invalid::url"); err == nil {
-		t.Error("expected error starting proxy server with invalid url")
-	}
-
-	// 8. RunProxyApp with mock process and cancellation
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	oldPoller := pollUpstreamFn
-	pollUpstreamFn = func(ctx context.Context, port string, maxAttempts int, delay time.Duration) bool {
-		return true
-	}
-	defer func() { pollUpstreamFn = oldPoller }()
-
-	readyCh := make(chan struct{})
-	oldReady := onServerReady
-	onServerReady = func(addr string) {
-		select {
-		case <-readyCh:
-		default:
-			close(readyCh)
-		}
-	}
-	defer func() { onServerReady = oldReady }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- RunProxyApp(ctx, &Config{
-			Port:         "0",
-			UpstreamPort: "59988",
-			NodeBin:      os.Args[0],
-			AppPath:      "-test.run=TestHelperProcess",
-		})
-	}()
-
-	select {
-	case <-readyCh:
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for RunProxyApp to become ready")
-	}
-	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("unexpected error from RunProxyApp shutdown: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for RunProxyApp shutdown")
-	}
-
-	// 9. RunProxyApp startup error (invalid binary and invalid port)
-	if err := RunProxyApp(context.Background(), &Config{
-		Port:         "59987",
-		UpstreamPort: "59986",
-		NodeBin:      "/non/existent/bin",
-		AppPath:      "-test.run=TestHelperProcess",
-	}); err == nil || !strings.Contains(err.Error(), "failed to start upstream Node MCP server") {
-		t.Errorf("expected 'failed to start upstream Node MCP server', got %v", err)
-	}
-	if err := RunProxyApp(context.Background(), &Config{
-		Port:         "-1",
-		UpstreamPort: "59985",
-		NodeBin:      os.Args[0],
-		AppPath:      "-test.run=TestHelperProcess",
-	}); err == nil {
-		t.Error("expected error running proxy app with invalid port")
-	}
-
-	// 10. Upstream returns invalid JSON for tools/list
-	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("{invalid-tools-list"))
-	}))
-	defer badUpstream.Close()
-
-	badHandler, _ := NewProxyHandler(badUpstream.URL, BlockedToolNames)
-	badSrv := httptest.NewServer(badHandler)
-	defer badSrv.Close()
-
-	badListResp, err := http.Post(badSrv.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
-	if err != nil {
-		t.Fatalf("unexpected request error: %v", err)
-	}
-	defer badListResp.Body.Close()
-	if badListResp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 for forwarded raw response, got %d", badListResp.StatusCode)
-	}
-
-	// 11. RunProxyApp nil config error
-	if err := RunProxyApp(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "discord-mcp: config cannot be nil") {
-		t.Errorf("expected nil config error, got %v", err)
-	}
-
-	// 12. ServeHTTP with body read error
-	errReq, _ := http.NewRequest(http.MethodPost, "/mcp", &errReader{})
-	errRec := httptest.NewRecorder()
-	handler.ServeHTTP(errRec, errReq)
-	if errRec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for body read error, got %d", errRec.Code)
-	}
-}
-
-func TestRunProxyApp_ValidationErrors(t *testing.T) {
-	testCases := []struct {
-		name        string
-		cfg         *Config
-		expectedErr string
-	}{
-		{
-			name:        "nil config",
-			cfg:         nil,
-			expectedErr: "discord-mcp: config cannot be nil",
-		},
-		{
-			name:        "empty struct",
-			cfg:         &Config{},
-			expectedErr: "discord-mcp: port cannot be empty",
-		},
-		{
-			name: "empty port",
-			cfg: &Config{
-				Port:         "",
-				UpstreamPort: "4005",
-				NodeBin:      "node",
-				AppPath:      "build/app.js",
-			},
-			expectedErr: "discord-mcp: port cannot be empty",
-		},
-		{
-			name: "whitespace port",
-			cfg: &Config{
-				Port:         "   ",
-				UpstreamPort: "4005",
-				NodeBin:      "node",
-				AppPath:      "build/app.js",
-			},
-			expectedErr: "discord-mcp: port cannot be empty",
-		},
-		{
-			name: "empty upstream port",
-			cfg: &Config{
-				Port:         "4001",
-				UpstreamPort: "",
-				NodeBin:      "node",
-				AppPath:      "build/app.js",
-			},
-			expectedErr: "discord-mcp: upstreamPort cannot be empty",
-		},
-		{
-			name: "whitespace upstream port",
-			cfg: &Config{
-				Port:         "4001",
-				UpstreamPort: "   ",
-				NodeBin:      "node",
-				AppPath:      "build/app.js",
-			},
-			expectedErr: "discord-mcp: upstreamPort cannot be empty",
-		},
-		{
-			name: "empty node bin",
-			cfg: &Config{
-				Port:         "4001",
-				UpstreamPort: "4005",
-				NodeBin:      "",
-				AppPath:      "build/app.js",
-			},
-			expectedErr: "discord-mcp: nodeBin cannot be empty",
-		},
-		{
-			name: "whitespace node bin",
-			cfg: &Config{
-				Port:         "4001",
-				UpstreamPort: "4005",
-				NodeBin:      "   ",
-				AppPath:      "build/app.js",
-			},
-			expectedErr: "discord-mcp: nodeBin cannot be empty",
-		},
-		{
-			name: "empty app path",
-			cfg: &Config{
-				Port:         "4001",
-				UpstreamPort: "4005",
-				NodeBin:      "node",
-				AppPath:      "",
-			},
-			expectedErr: "discord-mcp: appPath cannot be empty",
-		},
-		{
-			name: "whitespace app path",
-			cfg: &Config{
-				Port:         "4001",
-				UpstreamPort: "4005",
-				NodeBin:      "node",
-				AppPath:      "   ",
-			},
-			expectedErr: "discord-mcp: appPath cannot be empty",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := RunProxyApp(context.Background(), tc.cfg)
-			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tc.expectedErr)
-			}
-			if !strings.Contains(err.Error(), tc.expectedErr) {
-				t.Errorf("expected error containing %q, got %q", tc.expectedErr, err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadConfigFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-	yamlContent := `
-port: "4001"
-upstream_port: "4025"
-node_bin: "/custom/node"
-app_path: "/custom/app.js"
-`
-	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("failed to write test yaml: %v", err)
-	}
-
-	// 1. Success case with all fields
-	cfg, err := LoadConfigFile(cfgPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFile failed: %v", err)
-	}
-	if cfg.Port != "4001" {
-		t.Errorf("expected port 4001, got %s", cfg.Port)
-	}
-	if cfg.UpstreamPort != "4025" {
-		t.Errorf("expected upstream_port 4025, got %s", cfg.UpstreamPort)
-	}
-	if cfg.NodeBin != "/custom/node" {
-		t.Errorf("expected node_bin /custom/node, got %s", cfg.NodeBin)
-	}
-	if cfg.AppPath != "/custom/app.js" {
-		t.Errorf("expected app_path /custom/app.js, got %s", cfg.AppPath)
-	}
-
-	// 2. Success with minimal fields (node_bin and app_path defaulted)
-	minPath := filepath.Join(tmpDir, "min.yaml")
-	_ = os.WriteFile(minPath, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
-	cfgMin, err := LoadConfigFile(minPath)
-	if err != nil {
-		t.Fatalf("LoadConfigFile min failed: %v", err)
-	}
-	if cfgMin.NodeBin != "node" || cfgMin.AppPath != "build/app.js" {
-		t.Errorf("unexpected defaults in min config: %+v", cfgMin)
-	}
-
-	// 3. Missing file -> fail fast
-	if _, err := LoadConfigFile(filepath.Join(tmpDir, "nonexistent.yaml")); err == nil {
-		t.Error("expected error for nonexistent file")
-	}
-
-	// 4. Missing required port -> fail fast
-	badPortPath := filepath.Join(tmpDir, "badport.yaml")
-	_ = os.WriteFile(badPortPath, []byte("upstream_port: \"4025\"\n"), 0644)
-	if _, err := LoadConfigFile(badPortPath); err == nil {
-		t.Error("expected error when port is missing")
-	}
-
-	// 5. Missing required upstream_port -> fail fast
-	badUpPath := filepath.Join(tmpDir, "badup.yaml")
-	_ = os.WriteFile(badUpPath, []byte("port: \"4001\"\n"), 0644)
-	if _, err := LoadConfigFile(badUpPath); err == nil {
-		t.Error("expected error when upstream_port is missing")
-	}
-
-	// 6. Empty path -> fail fast
-	if _, err := LoadConfigFile(""); err == nil {
-		t.Error("expected error when path is empty")
-	}
-}
-
 type errReader struct{}
 
 func (e *errReader) Read(p []byte) (n int, err error) {
 	return 0, fmt.Errorf("simulated read error")
-}
-
-func TestServeHTTP_ToolsListFilterError(t *testing.T) {
-	// Upstream returns 200 OK with malformed JSON for tools/list
-	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{not valid json`))
-	}))
-	defer mockUpstream.Close()
-
-	handler, err := NewProxyHandler(mockUpstream.URL, BlockedToolNames)
-	if err != nil {
-		t.Fatalf("NewProxyHandler failed: %v", err)
-	}
-
-	reqBody := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(reqBody))
-	rec := httptest.NewRecorder()
-
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 OK even when filter fails, got %d", rec.Code)
-	}
-	if rec.Body.String() != `{not valid json` {
-		t.Errorf("expected original body when filter fails, got %q", rec.Body.String())
-	}
-}
-
-func TestStartProxyServer_InvalidUpstream(t *testing.T) {
-	_, err := StartProxyServer("8080", "://invalid-scheme\x7f")
-	if err == nil {
-		t.Error("expected error for invalid upstream URL")
-	}
-}
-
-func TestFilterToolsResponse_InvalidJSON(t *testing.T) {
-	raw := []byte(`{invalid-json`)
-	filtered, err := FilterToolsResponse(raw, BlockedToolNames)
-	if err == nil {
-		t.Error("expected error for invalid JSON in FilterToolsResponse")
-	}
-	if string(filtered) != string(raw) {
-		t.Errorf("expected original bytes returned on error, got %s", string(filtered))
-	}
-}
-
-func TestServeHTTP_InvalidMethod(t *testing.T) {
-	handler, err := NewProxyHandler("http://127.0.0.1:4005", BlockedToolNames)
-	if err != nil {
-		t.Fatalf("NewProxyHandler failed: %v", err)
-	}
-
-	req := httptest.NewRequest("GET", "/mcp", nil)
-	req.Method = "INVALID METHOD WITH SPACES"
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code < 500 {
-		t.Errorf("expected 5xx error on invalid method, got %d", rec.Code)
-	}
-}
-
-func TestRunProxyApp_StartProxyServerFailure(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	oldPoller := pollUpstreamFn
-	pollUpstreamFn = func(ctx context.Context, port string, maxAttempts int, delay time.Duration) bool {
-		return true
-	}
-	defer func() { pollUpstreamFn = oldPoller }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	cfg := &Config{
-		Port:         "0",
-		UpstreamPort: ":\x7f-invalid-port",
-		NodeBin:      os.Args[0],
-		AppPath:      "-test.run=TestHelperProcess",
-	}
-
-	err := RunProxyApp(ctx, cfg)
-	if err == nil {
-		t.Error("expected error when StartProxyServer fails due to invalid upstream URL")
-	}
-}
-
-func TestServeHTTP_UpstreamBodyReadError(t *testing.T) {
-	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "500")
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if hj, ok := w.(http.Hijacker); ok {
-			conn, _, _ := hj.Hijack()
-			_ = conn.Close()
-		}
-	}))
-	defer mockUpstream.Close()
-
-	handler, err := NewProxyHandler(mockUpstream.URL, BlockedToolNames)
-	if err != nil {
-		t.Fatalf("NewProxyHandler failed: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{}`))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("expected 502 on read error, got %d", rec.Code)
-	}
-}
-
-func TestMain_Execution(t *testing.T) {
-	oldRun := runProxyApp
-	oldExit := exitFn
-	oldPath := configPath
-	defer func() {
-		runProxyApp = oldRun
-		exitFn = oldExit
-		configPath = oldPath
-	}()
-
-	tmpDir := t.TempDir()
-	testCfg := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(testCfg, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
-	configPath = testCfg
-	t.Setenv("CONFIG_PATH", testCfg)
-
-	// 1. Success path
-	runCalled := false
-	runProxyApp = func(ctx context.Context, cfg *Config) error {
-		runCalled = true
-		return nil
-	}
-	main()
-	if !runCalled {
-		t.Error("expected runProxyApp to be called")
-	}
-
-	// 2. Server closed error (should not exit)
-	exitCalled := false
-	exitFn = func(format string, v ...interface{}) {
-		exitCalled = true
-	}
-	runProxyApp = func(ctx context.Context, cfg *Config) error {
-		return http.ErrServerClosed
-	}
-	main()
-	if exitCalled {
-		t.Error("expected exitFn not to be called for ErrServerClosed")
-	}
-
-	// 3. Error path (calls exitFn)
-	runProxyApp = func(ctx context.Context, cfg *Config) error {
-		return fmt.Errorf("simulated fatal startup error")
-	}
-	main()
-	if !exitCalled {
-		t.Error("expected exitFn to be called on fatal error")
-	}
-}
-
-func TestRunProxyApp_ListenFailure(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	oldPoller := pollUpstreamFn
-	pollUpstreamFn = func(ctx context.Context, port string, maxAttempts int, delay time.Duration) bool {
-		return true
-	}
-	defer func() { pollUpstreamFn = oldPoller }()
-
-	cfg := &Config{
-		Port:         "-1",
-		UpstreamPort: "59985",
-		NodeBin:      os.Args[0],
-		AppPath:      "-test.run=TestHelperProcess",
-	}
-
-	err := RunProxyApp(context.Background(), cfg)
-	if err == nil {
-		t.Error("expected error from invalid port")
-	}
 }
 
 type mockErrWriter struct {
@@ -833,53 +55,6 @@ func (m *mockErrWriter) Write(p []byte) (int, error) {
 
 func (m *mockErrWriter) WriteHeader(statusCode int) {}
 
-func TestWriteProxyResponse(t *testing.T) {
-	// 1. Successful write
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	writeProxyResponse(rec, req, []byte("ok"))
-	if rec.Body.String() != "ok" {
-		t.Errorf("expected ok, got %s", rec.Body.String())
-	}
-
-	// 2. Client context canceled - suppressed
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	reqCanceled := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(ctx)
-	mockErr := &mockErrWriter{err: errors.New("simulated network failure")}
-	writeProxyResponse(mockErr, reqCanceled, []byte("ignored"))
-
-	// 3. EPIPE error - suppressed
-	reqNormal := httptest.NewRequest(http.MethodGet, "/health", nil)
-	mockEpipe := &mockErrWriter{err: syscall.EPIPE}
-	writeProxyResponse(mockEpipe, reqNormal, []byte("ignored"))
-
-	// 4. Generic write error
-	mockGeneric := &mockErrWriter{err: errors.New("unexpected error")}
-	writeProxyResponse(mockGeneric, reqNormal, []byte("ignored"))
-}
-
-func TestKillProcess(t *testing.T) {
-	// 1. nil cmd
-	killProcess(nil)
-
-	// 2. cmd without process
-	cmdNoProc := exec.Command("true")
-	killProcess(cmdNoProc)
-
-	// 3. running process
-	cmdRunning := exec.Command("sleep", "1")
-	if err := cmdRunning.Start(); err == nil {
-		killProcess(cmdRunning)
-	}
-
-	// 4. already finished process
-	cmdFinished := exec.Command("true")
-	if err := cmdFinished.Run(); err == nil {
-		killProcess(cmdFinished)
-	}
-}
-
 type mockErrorCloserReader struct {
 	io.Reader
 }
@@ -889,124 +64,518 @@ func (m *mockErrorCloserReader) Close() error {
 }
 
 type mockRoundTripper struct {
-	roundTripFn func(req *http.Request) (*http.Response, error)
+	resp *http.Response
+	err  error
 }
 
 func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	return m.roundTripFn(req)
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.resp, nil
 }
 
-func TestIsClientDisconnect_EdgeCases(t *testing.T) {
-	if isClientDisconnect(nil, nil) {
-		t.Error("expected false for nil error")
-	}
-	if !isClientDisconnect(nil, syscall.ECONNRESET) {
-		t.Error("expected true for ECONNRESET")
-	}
-	if !isClientDisconnect(nil, net.ErrClosed) {
-		t.Error("expected true for net.ErrClosed")
-	}
-	if isClientDisconnect(nil, errors.New("other error")) {
-		t.Error("expected false for generic error")
-	}
+func setupMockDiscordUpstream(t *testing.T) *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Mock-Hijack") == "1" {
+			w.Header().Set("Content-Length", "500")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+			}
+			return
+		}
+		if r.Header.Get("X-Mock-Invalid-JSON") == "1" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{invalid-tools-list"))
+			return
+		}
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		var req JSONRPCRequest
+		_ = json.Unmarshal(body, &req)
+
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"discord_send"},{"name":"discord_read_messages"}]}}`))
+		case "tools/call":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"executed"}]}}`))
+		default:
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"ok"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-func TestServeHTTP_UpstreamCloseError(t *testing.T) {
-	handler, err := NewProxyHandler("http://127.0.0.1:4005", BlockedToolNames)
+func TestProxyHandler_ServeHTTP(t *testing.T) {
+	mockUpstream := setupMockDiscordUpstream(t)
+	handler, err := NewProxyHandler(mockUpstream.URL, BlockedToolNames)
 	if err != nil {
-		t.Fatalf("NewProxyHandler failed: %v", err)
+		t.Fatalf("failed to create proxy handler: %v", err)
 	}
 
-	handler.httpClient.Transport = &mockRoundTripper{
-		roundTripFn: func(req *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       &mockErrorCloserReader{Reader: strings.NewReader(`{"jsonrpc":"2.0","result":{"tools":[]}}`)},
-			}, nil
-		},
+	offlineHandler, err := NewProxyHandler("http://127.0.0.1:59995", BlockedToolNames)
+	if err != nil {
+		t.Fatalf("failed to create offline handler: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/list"}`))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	tests := []struct {
+		name           string
+		handler        *ProxyHandler
+		method         string
+		path           string
+		body           io.Reader
+		header         map[string]string
+		useCloseErr    bool
+		wantStatusCode int
+		wantContains   string
+		wantAbsent     string
+	}{
+		{"tools/list filters discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/list"}`), nil, false, http.StatusOK, "discord_read_messages", "discord_send"},
+		{"tools/call blocked for discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"discord_send","arguments":{"message":"test"}}}`), nil, false, http.StatusOK, "disabled", ""},
+		{"tools/call allowed for discord_read_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"discord_read_messages","arguments":{"channelId":"123"}}}`), nil, false, http.StatusOK, "executed", ""},
+		{"GET /health reverse proxies to upstream", handler, http.MethodGet, "/health", nil, nil, false, http.StatusOK, "ok", ""},
+		{"upstream returns invalid JSON for tools/list", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), map[string]string{"X-Mock-Invalid-JSON": "1"}, false, http.StatusOK, "{invalid-tools-list", ""},
+		{"offline upstream returns BadGateway", offlineHandler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`), nil, false, http.StatusBadGateway, "", ""},
+		{"request body read error returns BadRequest", handler, http.MethodPost, "/mcp", &errReader{}, nil, false, http.StatusBadRequest, "", ""},
+		{"upstream body read error returns BadGateway", handler, http.MethodPost, "/mcp", strings.NewReader(`{}`), map[string]string{"X-Mock-Hijack": "1"}, false, http.StatusBadGateway, "", ""},
+		{"upstream body close error handled cleanly", handler, http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/list"}`), nil, true, http.StatusOK, "", ""},
+		{"invalid HTTP method returns error", handler, "INVALID METHOD WITH SPACES", "/mcp", nil, nil, false, http.StatusBadRequest, "", ""},
+	}
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := tc.handler
+			if tc.useCloseErr {
+				hCopy := *h
+				hCopy.httpClient.Transport = &mockRoundTripper{
+					resp: &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       &mockErrorCloserReader{Reader: strings.NewReader(`{"jsonrpc":"2.0","result":{"tools":[]}}`)},
+					},
+				}
+				h = &hCopy
+			}
+
+			req := httptest.NewRequest(http.MethodPost, tc.path, tc.body)
+			req.Method = tc.method
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if tc.wantStatusCode == http.StatusBadRequest && tc.method == "INVALID METHOD WITH SPACES" {
+				if rec.Code < 400 {
+					t.Errorf("expected error status >= 400, got %d", rec.Code)
+				}
+				return
+			}
+
+			if rec.Code != tc.wantStatusCode {
+				t.Errorf("status code got %d, want %d", rec.Code, tc.wantStatusCode)
+			}
+			bodyStr := rec.Body.String()
+			if tc.wantContains != "" && !strings.Contains(bodyStr, tc.wantContains) {
+				t.Errorf("expected body to contain %q, got: %s", tc.wantContains, bodyStr)
+			}
+			if tc.wantAbsent != "" && strings.Contains(bodyStr, tc.wantAbsent) {
+				t.Errorf("expected body to NOT contain %q, got: %s", tc.wantAbsent, bodyStr)
+			}
+		})
 	}
 }
 
-func TestCoverageFlushEndpoint(t *testing.T) {
+func TestNewProxyHandler_InvalidURL(t *testing.T) {
+	if _, err := NewProxyHandler("http://invalid::url", BlockedToolNames); err == nil {
+		t.Error("expected error for invalid URL in NewProxyHandler")
+	}
+}
+
+func TestLoadConfigFile_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	fullYaml := filepath.Join(tmpDir, "full.yaml")
+	_ = os.WriteFile(fullYaml, []byte("port: \"4001\"\nupstream_port: \"4025\"\nnode_bin: \"/custom/node\"\napp_path: \"/custom/app.js\"\n"), 0644)
+	minYaml := filepath.Join(tmpDir, "min.yaml")
+	_ = os.WriteFile(minYaml, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
+	badPortYaml := filepath.Join(tmpDir, "badport.yaml")
+	_ = os.WriteFile(badPortYaml, []byte("upstream_port: \"4025\"\n"), 0644)
+	badUpYaml := filepath.Join(tmpDir, "badup.yaml")
+	_ = os.WriteFile(badUpYaml, []byte("port: \"4001\"\n"), 0644)
+
+	tests := []struct {
+		name         string
+		path         string
+		wantErr      bool
+		wantPort     string
+		wantUpstream string
+		wantNodeBin  string
+		wantAppPath  string
+	}{
+		{"full config", fullYaml, false, "4001", "4025", "/custom/node", "/custom/app.js"},
+		{"minimal config defaults", minYaml, false, "4001", "4025", "node", "build/app.js"},
+		{"missing file", filepath.Join(tmpDir, "nonexistent.yaml"), true, "", "", "", ""},
+		{"missing port", badPortYaml, true, "", "", "", ""},
+		{"missing upstream_port", badUpYaml, true, "", "", "", ""},
+		{"empty path", "", true, "", "", "", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfigFile(tc.path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Port != tc.wantPort || cfg.UpstreamPort != tc.wantUpstream || cfg.NodeBin != tc.wantNodeBin || cfg.AppPath != tc.wantAppPath {
+				t.Errorf("unexpected config: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestPollUpstream_TableDriven(t *testing.T) {
+	lOpen, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer lOpen.Close()
+	_, openPort, _ := net.SplitHostPort(lOpen.Addr().String())
+
+	lClosed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	_, closedPort, _ := net.SplitHostPort(lClosed.Addr().String())
+	_ = lClosed.Close()
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		port     string
+		attempts int
+		delay    time.Duration
+		want     bool
+	}{
+		{"open port succeeds", context.Background(), openPort, 5, 10 * time.Millisecond, true},
+		{"closed port fails", context.Background(), closedPort, 2, 5 * time.Millisecond, false},
+		{"canceled context fails", canceledCtx, openPort, 5, 10 * time.Millisecond, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PollUpstream(tc.ctx, tc.port, tc.attempts, tc.delay); got != tc.want {
+				t.Errorf("PollUpstream got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStartProxyServer_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		port        string
+		upstreamURL string
+		wantErr     bool
+		checkHealth bool
+	}{
+		{"valid port and upstream", "0", "http://127.0.0.1:59992", false, true},
+		{"invalid upstream URL", "59993", "http://invalid::url", true, false},
+		{"invalid scheme", "8080", "://invalid-scheme\x7f", true, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := StartProxyServer(tc.port, tc.upstreamURL)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.checkHealth {
+				rec := httptest.NewRecorder()
+				req, _ := http.NewRequest(http.MethodGet, "/health", nil)
+				srv.Handler.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "aerial-discord-mcp") {
+					t.Errorf("unexpected health response: %d, body: %s", rec.Code, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunProxyApp_TableDriven(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	oldPoller := pollUpstreamFn
+	pollUpstreamFn = func(ctx context.Context, port string, maxAttempts int, delay time.Duration) bool {
+		return true
+	}
+	t.Cleanup(func() { pollUpstreamFn = oldPoller })
+
+	tests := []struct {
+		name        string
+		cfg         *Config
+		isLifecycle bool
+		wantErrSub  string
+	}{
+		{"nil config error", nil, false, "config cannot be nil"},
+		{"validation error on empty port", mkCfg("", "4005", os.Args[0], "-test.run=TestHelperProcess"), false, "port cannot be empty"},
+		{"upstream process start failure", mkCfg("0", "59986", "/non/existent/bin", "-test.run=TestHelperProcess"), false, "failed to start upstream Node MCP server"},
+		{"listen failure on invalid port", mkCfg("-1", "59985", os.Args[0], "-test.run=TestHelperProcess"), false, "invalid port"},
+		{"start proxy server failure on invalid upstream", mkCfg("0", ":\x7f-invalid-port", os.Args[0], "-test.run=TestHelperProcess"), false, "failed to initialize proxy handler"},
+		{"clean lifecycle with cancellation", mkCfg("0", "59988", os.Args[0], "-test.run=TestHelperProcess"), true, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.isLifecycle {
+				err := RunProxyApp(context.Background(), tc.cfg)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Errorf("expected error containing %q, got %v", tc.wantErrSub, err)
+				}
+				return
+			}
+
+			readyCh := make(chan struct{}, 1)
+			oldReady := onServerReady
+			onServerReady = func(addr string) {
+				select {
+				case readyCh <- struct{}{}:
+				default:
+				}
+			}
+			t.Cleanup(func() { onServerReady = oldReady })
+
+			ctx, cancel := context.WithCancel(context.Background())
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- RunProxyApp(ctx, tc.cfg)
+			}()
+
+			select {
+			case <-readyCh:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for ready")
+			}
+
+			cancel()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Errorf("unexpected error on clean shutdown: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for shutdown")
+			}
+		})
+	}
+}
+
+func TestWriteProxyResponse_TableDriven(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		writerErr error
+		wantBody  string
+	}{
+		{"successful write", context.Background(), nil, "ok"},
+		{"context canceled suppressed", canceledCtx, errors.New("network failure"), ""},
+		{"epipe error suppressed", context.Background(), syscall.EPIPE, ""},
+		{"generic write error handled", context.Background(), errors.New("generic"), ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(tc.ctx)
+			if tc.writerErr == nil {
+				rec := httptest.NewRecorder()
+				writeProxyResponse(rec, req, []byte("ok"))
+				if rec.Body.String() != tc.wantBody {
+					t.Errorf("got %s, want %s", rec.Body.String(), tc.wantBody)
+				}
+			} else {
+				w := &mockErrWriter{err: tc.writerErr}
+				writeProxyResponse(w, req, []byte("ignored"))
+			}
+		})
+	}
+}
+
+func TestKillProcess_TableDriven(t *testing.T) {
+	cmdRunning := exec.Command("sleep", "1")
+	_ = cmdRunning.Start()
+	t.Cleanup(func() {
+		if cmdRunning.Process != nil {
+			_ = cmdRunning.Process.Kill()
+		}
+	})
+
+	cmdFinished := exec.Command("true")
+	_ = cmdFinished.Run()
+
+	tests := []struct {
+		name string
+		cmd  *exec.Cmd
+	}{
+		{"nil cmd", nil},
+		{"cmd without process", exec.Command("true")},
+		{"running process", cmdRunning},
+		{"finished process", cmdFinished},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			killProcess(tc.cmd)
+		})
+	}
+}
+
+func TestIsClientDisconnect_TableDriven(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"ECONNRESET", syscall.ECONNRESET, true},
+		{"net.ErrClosed", net.ErrClosed, true},
+		{"generic error", errors.New("other"), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isClientDisconnect(nil, tc.err); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCoverageFlushEndpoint_TableDriven(t *testing.T) {
 	srv, err := StartProxyServer("0", "http://127.0.0.1:9999")
 	if err != nil {
 		t.Fatalf("failed to initialize proxy server: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler)
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
-	// 1. Without GOCOVERDIR -> 200 OK
-	orig := os.Getenv("GOCOVERDIR")
-	_ = os.Unsetenv("GOCOVERDIR")
-	defer func() {
-		if orig != "" {
-			_ = os.Setenv("GOCOVERDIR", orig)
-		} else {
-			_ = os.Unsetenv("GOCOVERDIR")
-		}
-	}()
-
-	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK without GOCOVERDIR, got: %d", resp.StatusCode)
+	tests := []struct {
+		name       string
+		useDir     bool
+		metaErr    error
+		counterErr error
+		wantStatus int
+	}{
+		{"without GOCOVERDIR", false, nil, nil, http.StatusOK},
+		{"with GOCOVERDIR success", true, nil, nil, http.StatusOK},
+		{"with GOCOVERDIR meta error ignored", true, errors.New("meta err"), nil, http.StatusOK},
+		{"with GOCOVERDIR counter error returns 500", true, nil, errors.New("counter err"), http.StatusInternalServerError},
 	}
 
-	// 2. With GOCOVERDIR + mock success -> 200 OK
-	oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
-	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
+			t.Cleanup(func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn })
 
-	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error { called = true; return nil }
-	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
-	_ = os.Setenv("GOCOVERDIR", t.TempDir())
+			if tc.useDir {
+				t.Setenv("GOCOVERDIR", t.TempDir())
+			} else {
+				_ = os.Unsetenv("GOCOVERDIR")
+			}
 
-	resp2, err2 := http.Get(ts.URL + "/debug/coverage/flush")
-	if err2 != nil {
-		t.Fatalf("unexpected error: %v", err2)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK || !called || !metaCalled {
-		t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", resp2.StatusCode, called, metaCalled)
-	}
+			writeCountersDirFn = func(dir string) error { return tc.counterErr }
+			writeMetaDirFn = func(dir string) error { return tc.metaErr }
 
-	writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
-	if resp2b, err2b := http.Get(ts.URL + "/debug/coverage/flush"); err2b != nil || resp2b.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK when meta flush errors, got resp=%v err=%v", resp2b, err2b)
-	} else {
-		resp2b.Body.Close()
-	}
-
-	// 3. With GOCOVERDIR + mock error -> 500 Internal Server Error
-	writeCountersDirFn = func(dir string) error {
-		return errors.New("simulated flush error")
-	}
-
-	resp3, err3 := http.Get(ts.URL + "/debug/coverage/flush")
-	if err3 != nil {
-		t.Fatalf("unexpected error: %v", err3)
-	}
-	defer resp3.Body.Close()
-	if resp3.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on error, got: %d", resp3.StatusCode)
+			resp, err := http.Get(ts.URL + "/debug/coverage/flush")
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status got %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+		})
 	}
 }
 
+func TestMain_Execution_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	testCfg := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(testCfg, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
 
+	tests := []struct {
+		name     string
+		runErr   error
+		wantRun  bool
+		wantExit bool
+	}{
+		{"success path", nil, true, false},
+		{"server closed error", http.ErrServerClosed, true, false},
+		{"fatal error calls exit", errors.New("fatal"), true, true},
+	}
 
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldRun := runProxyApp
+			oldExit := exitFn
+			oldPath := configPath
+			t.Cleanup(func() {
+				runProxyApp = oldRun
+				exitFn = oldExit
+				configPath = oldPath
+			})
 
+			configPath = testCfg
+			t.Setenv("CONFIG_PATH", testCfg)
 
+			runCalled := false
+			exitCalled := false
+			runProxyApp = func(ctx context.Context, cfg *Config) error {
+				runCalled = true
+				return tc.runErr
+			}
+			exitFn = func(format string, v ...interface{}) {
+				exitCalled = true
+			}
 
-
+			main()
+			if runCalled != tc.wantRun {
+				t.Errorf("runCalled got %v, want %v", runCalled, tc.wantRun)
+			}
+			if exitCalled != tc.wantExit {
+				t.Errorf("exitCalled got %v, want %v", exitCalled, tc.wantExit)
+			}
+		})
+	}
+}

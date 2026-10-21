@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+func mkCfg(port, upstreamPort, nodeBin, appPath string) *Config {
+	return &Config{Port: port, UpstreamPort: upstreamPort, NodeBin: nodeBin, AppPath: appPath}
+}
+
 func TestIsBlockedToolCall_TableDriven(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -18,152 +22,23 @@ func TestIsBlockedToolCall_TableDriven(t *testing.T) {
 		expectTool    string
 		expectErr     bool
 	}{
-		{
-			name:          "single call - blocked discord_send",
-			rawReq:        `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"discord_send"}}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: true,
-			expectTool:    "discord_send",
-			expectErr:     false,
-		},
-		{
-			name:          "single call - blocked send_message",
-			rawReq:        `{"jsonrpc":"2.0","id":"two","method":"tools/call","params":{"name":"send_message"}}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: true,
-			expectTool:    "send_message",
-			expectErr:     false,
-		},
-		{
-			name:          "single call - case variant Discord_Send",
-			rawReq:        `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"Discord_Send"}}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: true,
-			expectTool:    "Discord_Send",
-			expectErr:     false,
-		},
-		{
-			name:          "single call - case variant SEND_MESSAGE with whitespace",
-			rawReq:        `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"  SEND_MESSAGE  "}}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: true,
-			expectTool:    "  SEND_MESSAGE  ",
-			expectErr:     false,
-		},
-		{
-			name:          "single call - allowed tool discord_read_messages",
-			rawReq:        `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"discord_read_messages"}}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "discord_read_messages",
-			expectErr:     false,
-		},
-		{
-			name:          "single call - non-tool method ping",
-			rawReq:        `{"jsonrpc":"2.0","id":6,"method":"ping"}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     false,
-		},
-		{
-			name:          "single call - empty params",
-			rawReq:        `{"jsonrpc":"2.0","id":7,"method":"tools/call"}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     false,
-		},
-		{
-			name:          "single call - malformed params scalar",
-			rawReq:        `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":"not-an-object"}`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     true,
-		},
-		{
-			name:          "single call - empty raw request",
-			rawReq:        "",
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     true,
-		},
-		{
-			name:          "single call - malformed json",
-			rawReq:        `{invalid json`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     true,
-		},
-		{
-			name:          "single call - nil blocked map uses default",
-			rawReq:        `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"discord_create_thread"}}`,
-			blockedMap:    nil,
-			expectBlocked: true,
-			expectTool:    "discord_create_thread",
-			expectErr:     false,
-		},
-		{
-			name: "batch request - contains blocked tool",
-			rawReq: `[
-				{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"discord_read_messages"}},
-				{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"discord_send"}}
-			]`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: true,
-			expectTool:    "discord_send",
-			expectErr:     false,
-		},
-		{
-			name: "batch request - contains case variant blocked tool",
-			rawReq: `[
-				{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"DISCORD_CREATE_THREAD"}}
-			]`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: true,
-			expectTool:    "DISCORD_CREATE_THREAD",
-			expectErr:     false,
-		},
-		{
-			name: "batch request - allowed tools only",
-			rawReq: `[
-				{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"discord_read_messages"}},
-				{"jsonrpc":"2.0","id":14,"method":"ping"}
-			]`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     false,
-		},
-		{
-			name:          "batch request - empty array",
-			rawReq:        `[]`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     false,
-		},
-		{
-			name:          "batch request - malformed json array",
-			rawReq:        `[{"jsonrpc":"2.0", invalid`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     true,
-		},
-		{
-			name: "batch request - malformed item params",
-			rawReq: `[
-				{"jsonrpc":"2.0","id":15,"method":"tools/call","params":12345}
-			]`,
-			blockedMap:    BlockedToolNames,
-			expectBlocked: false,
-			expectTool:    "",
-			expectErr:     true,
-		},
+		{"single call - blocked discord_send", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"discord_send"}}`, BlockedToolNames, true, "discord_send", false},
+		{"single call - blocked send_message", `{"jsonrpc":"2.0","id":"two","method":"tools/call","params":{"name":"send_message"}}`, BlockedToolNames, true, "send_message", false},
+		{"single call - case variant Discord_Send", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"Discord_Send"}}`, BlockedToolNames, true, "Discord_Send", false},
+		{"single call - case variant SEND_MESSAGE with whitespace", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"  SEND_MESSAGE  "}}`, BlockedToolNames, true, "  SEND_MESSAGE  ", false},
+		{"single call - allowed tool discord_read_messages", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"discord_read_messages"}}`, BlockedToolNames, false, "discord_read_messages", false},
+		{"single call - non-tool method ping", `{"jsonrpc":"2.0","id":6,"method":"ping"}`, BlockedToolNames, false, "", false},
+		{"single call - empty params", `{"jsonrpc":"2.0","id":7,"method":"tools/call"}`, BlockedToolNames, false, "", false},
+		{"single call - malformed params scalar", `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":"not-an-object"}`, BlockedToolNames, false, "", true},
+		{"single call - empty raw request", "", BlockedToolNames, false, "", true},
+		{"single call - malformed json", `{invalid json`, BlockedToolNames, false, "", true},
+		{"single call - nil blocked map uses default", `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"discord_create_thread"}}`, nil, true, "discord_create_thread", false},
+		{"batch request - contains blocked tool", `[{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"discord_read_messages"}},{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"discord_send"}}]`, BlockedToolNames, true, "discord_send", false},
+		{"batch request - contains case variant blocked tool", `[{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"DISCORD_CREATE_THREAD"}}]`, BlockedToolNames, true, "DISCORD_CREATE_THREAD", false},
+		{"batch request - allowed tools only", `[{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"discord_read_messages"}},{"jsonrpc":"2.0","id":14,"method":"ping"}]`, BlockedToolNames, false, "", false},
+		{"batch request - empty array", `[]`, BlockedToolNames, false, "", false},
+		{"batch request - malformed json array", `[{"jsonrpc":"2.0", invalid`, BlockedToolNames, false, "", true},
+		{"batch request - malformed item params", `[{"jsonrpc":"2.0","id":15,"method":"tools/call","params":12345}]`, BlockedToolNames, false, "", true},
 	}
 
 	for _, tt := range tests {
@@ -187,154 +62,73 @@ func TestIsBlockedToolCall_TableDriven(t *testing.T) {
 
 func TestFilterToolsResponse_TableDriven(t *testing.T) {
 	tests := []struct {
-		name         string
-		rawResp      string
-		blockedMap   map[string]bool
-		expectErr    bool
-		assertResult func(t *testing.T, out []byte)
+		name          string
+		rawResp       string
+		blockedMap    map[string]bool
+		wantUnchanged bool
+		wantTools     []string
+		wantErrorMsg  string
 	}{
-		{
-			name: "standard response with blocked and allowed tools",
-			rawResp: `{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"result": {
-					"tools": [
-						{"name": "discord_send", "description": "Send a message"},
-						{"name": "discord_read_messages", "description": "Read messages"},
-						{"name": "send_message", "description": "Send another message"}
-					]
-				}
-			}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  false,
-			assertResult: func(t *testing.T, out []byte) {
-				var parsed map[string]interface{}
-				_ = json.Unmarshal(out, &parsed)
-				res := parsed["result"].(map[string]interface{})
-				tools := res["tools"].([]interface{})
-				if len(tools) != 1 {
-					t.Fatalf("expected 1 tool remaining, got %d", len(tools))
-				}
-				item := tools[0].(map[string]interface{})
-				if item["name"] != "discord_read_messages" {
-					t.Errorf("expected remaining tool to be discord_read_messages, got %v", item["name"])
-				}
-			},
-		},
-		{
-			name: "preserves nextCursor and _meta in result",
-			rawResp: `{
-				"jsonrpc": "2.0",
-				"id": 2,
-				"result": {
-					"tools": [
-						{"name": "discord_send"},
-						{"name": "allowed_tool"}
-					],
-					"nextCursor": "cursor-token-xyz",
-					"_meta": {"version": "2024-11-05"}
-				}
-			}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  false,
-			assertResult: func(t *testing.T, out []byte) {
-				var parsed map[string]interface{}
-				_ = json.Unmarshal(out, &parsed)
-				res := parsed["result"].(map[string]interface{})
-				if res["nextCursor"] != "cursor-token-xyz" {
-					t.Errorf("expected nextCursor to be preserved, got %v", res["nextCursor"])
-				}
-				meta, ok := res["_meta"].(map[string]interface{})
-				if !ok || meta["version"] != "2024-11-05" {
-					t.Errorf("expected _meta to be preserved, got %v", res["_meta"])
-				}
-			},
-		},
-		{
-			name: "case variant blocked tool filtered",
-			rawResp: `{
-				"jsonrpc": "2.0",
-				"id": 3,
-				"result": {
-					"tools": [
-						{"name": "DISCORD_SEND"},
-						{"name": "valid_tool"}
-					]
-				}
-			}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  false,
-			assertResult: func(t *testing.T, out []byte) {
-				if strings.Contains(string(out), "DISCORD_SEND") {
-					t.Errorf("expected DISCORD_SEND to be filtered out, got %s", string(out))
-				}
-			},
-		},
-		{
-			name:       "empty result preserves raw response",
-			rawResp:    `{"jsonrpc":"2.0","id":4}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  false,
-			assertResult: func(t *testing.T, out []byte) {
-				if string(out) != `{"jsonrpc":"2.0","id":4}` {
-					t.Errorf("expected unmodified raw response, got %s", string(out))
-				}
-			},
-		},
-		{
-			name:       "null result preserves raw response without shape mutation",
-			rawResp:    `{"jsonrpc":"2.0","id":5,"result":null}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  false,
-			assertResult: func(t *testing.T, out []byte) {
-				if !strings.Contains(string(out), `"result":null`) {
-					t.Errorf("expected result:null preserved, got %s", string(out))
-				}
-			},
-		},
-		{
-			name:       "non-object result returns error",
-			rawResp:    `{"jsonrpc":"2.0","id":6,"result":"hello"}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  true,
-		},
-		{
-			name:       "missing tools array in result preserves raw response",
-			rawResp:    `{"jsonrpc":"2.0","id":7,"result":{"other":"data"}}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  false,
-			assertResult: func(t *testing.T, out []byte) {
-				if !strings.Contains(string(out), `"other":"data"`) {
-					t.Errorf("expected result preserved, got %s", string(out))
-				}
-			},
-		},
-		{
-			name:       "malformed top-level JSON returns error",
-			rawResp:    `{invalid json`,
-			blockedMap: BlockedToolNames,
-			expectErr:  true,
-		},
-		{
-			name:       "malformed tools list JSON returns error",
-			rawResp:    `{"jsonrpc":"2.0","id":9,"result":{"tools":"not-an-array"}}`,
-			blockedMap: BlockedToolNames,
-			expectErr:  true,
-		},
+		{"standard response with blocked and allowed tools", `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"discord_send"},{"name":"discord_read_messages"},{"name":"send_message"}]}}`, BlockedToolNames, false, []string{"discord_read_messages"}, ""},
+		{"preserves nextCursor and _meta in result", `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"discord_send"},{"name":"allowed_tool"}],"nextCursor":"cursor-token-xyz","_meta":{"version":"2024-11-05"}}}`, BlockedToolNames, false, []string{"allowed_tool"}, ""},
+		{"case variant blocked tool filtered", `{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"DISCORD_SEND"},{"name":"valid_tool"}]}}`, BlockedToolNames, false, []string{"valid_tool"}, ""},
+		{"empty result preserves raw response", `{"jsonrpc":"2.0","id":4}`, BlockedToolNames, true, nil, ""},
+		{"null result preserves raw response without shape mutation", `{"jsonrpc":"2.0","id":5,"result":null}`, BlockedToolNames, true, nil, ""},
+		{"non-object result returns error", `{"jsonrpc":"2.0","id":6,"result":"hello"}`, BlockedToolNames, false, nil, "cannot unmarshal"},
+		{"missing tools array in result preserves raw response", `{"jsonrpc":"2.0","id":7,"result":{"other":"data"}}`, BlockedToolNames, true, nil, ""},
+		{"malformed top-level JSON returns error", `{invalid json`, BlockedToolNames, false, nil, "invalid"},
+		{"malformed tools list JSON returns error", `{"jsonrpc":"2.0","id":9,"result":{"tools":"not-an-array"}}`, BlockedToolNames, false, nil, "cannot unmarshal"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out, err := FilterToolsResponse([]byte(tt.rawResp), tt.blockedMap)
-			if tt.expectErr && err == nil {
-				t.Fatalf("expected error, got nil")
+			if tt.wantErrorMsg != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrorMsg) {
+					t.Fatalf("expected error containing %q, got: %v", tt.wantErrorMsg, err)
+				}
+				return
 			}
-			if !tt.expectErr && err != nil {
+			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if tt.assertResult != nil {
-				tt.assertResult(t, out)
+			if tt.wantUnchanged {
+				if string(out) != tt.rawResp {
+					t.Errorf("expected unchanged response, got %s", string(out))
+				}
+				return
+			}
+			if tt.wantTools != nil {
+				var parsed struct {
+					Result struct {
+						Tools []struct {
+							Name string `json:"name"`
+						} `json:"tools"`
+						NextCursor string         `json:"nextCursor"`
+						Meta       map[string]any `json:"_meta"`
+					} `json:"result"`
+				}
+				if err := json.Unmarshal(out, &parsed); err != nil {
+					t.Fatalf("failed to unmarshal output: %v", err)
+				}
+				var gotNames []string
+				for _, tool := range parsed.Result.Tools {
+					gotNames = append(gotNames, tool.Name)
+				}
+				if len(gotNames) != len(tt.wantTools) {
+					t.Fatalf("expected %d tools, got %d (%v)", len(tt.wantTools), len(gotNames), gotNames)
+				}
+				for i, want := range tt.wantTools {
+					if gotNames[i] != want {
+						t.Errorf("tool[%d]: expected %q, got %q", i, want, gotNames[i])
+					}
+				}
+				if strings.Contains(tt.rawResp, "nextCursor") && parsed.Result.NextCursor != "cursor-token-xyz" {
+					t.Errorf("expected nextCursor to be preserved, got %q", parsed.Result.NextCursor)
+				}
+				if strings.Contains(tt.rawResp, "_meta") && parsed.Result.Meta["version"] != "2024-11-05" {
+					t.Errorf("expected _meta to be preserved, got %v", parsed.Result.Meta)
+				}
 			}
 		})
 	}
@@ -346,46 +140,14 @@ func TestIsToolsListRequest_TableDriven(t *testing.T) {
 		rawReq   string
 		expected bool
 	}{
-		{
-			name:     "valid tools/list request",
-			rawReq:   `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
-			expected: true,
-		},
-		{
-			name:     "valid tools/list request with whitespace",
-			rawReq:   `  {"jsonrpc":"2.0","id":1,"method":"  tools/list  "}  `,
-			expected: true,
-		},
-		{
-			name:     "tools/call request returns false",
-			rawReq:   `{"jsonrpc":"2.0","id":2,"method":"tools/call"}`,
-			expected: false,
-		},
-		{
-			name:     "other method returns false",
-			rawReq:   `{"jsonrpc":"2.0","id":3,"method":"ping"}`,
-			expected: false,
-		},
-		{
-			name:     "empty method returns false",
-			rawReq:   `{"jsonrpc":"2.0","id":4}`,
-			expected: false,
-		},
-		{
-			name:     "empty body returns false",
-			rawReq:   "",
-			expected: false,
-		},
-		{
-			name:     "array returns false",
-			rawReq:   `[{"jsonrpc":"2.0","method":"tools/list"}]`,
-			expected: false,
-		},
-		{
-			name:     "invalid json returns false",
-			rawReq:   `{invalid json`,
-			expected: false,
-		},
+		{"valid tools/list request", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, true},
+		{"valid tools/list request with whitespace", `  {"jsonrpc":"2.0","id":1,"method":"  tools/list  "}  `, true},
+		{"tools/call request returns false", `{"jsonrpc":"2.0","id":2,"method":"tools/call"}`, false},
+		{"other method returns false", `{"jsonrpc":"2.0","id":3,"method":"ping"}`, false},
+		{"empty method returns false", `{"jsonrpc":"2.0","id":4}`, false},
+		{"empty body returns false", "", false},
+		{"array returns false", `[{"jsonrpc":"2.0","method":"tools/list"}]`, false},
+		{"invalid json returns false", `{invalid json`, false},
 	}
 
 	for _, tt := range tests {
@@ -399,59 +161,40 @@ func TestIsToolsListRequest_TableDriven(t *testing.T) {
 
 func TestBuildJSONRPCErrorResponse_TableDriven(t *testing.T) {
 	tests := []struct {
-		name       string
-		id         interface{}
-		code       int
-		message    string
-		assertJSON func(t *testing.T, out []byte)
+		name     string
+		id       any
+		code     int
+		message  string
+		wantCode int
+		wantMsg  string
+		wantID   any
 	}{
-		{
-			name:    "integer id",
-			id:      42,
-			code:    -32601,
-			message: "Tool disabled",
-			assertJSON: func(t *testing.T, out []byte) {
-				var resp JSONRPCResponse
-				if err := json.Unmarshal(out, &resp); err != nil {
-					t.Fatalf("unmarshal failed: %v", err)
-				}
-				if resp.ID != float64(42) || resp.Error.Code != -32601 || resp.Error.Message != "Tool disabled" {
-					t.Errorf("unexpected response: %+v", resp)
-				}
-			},
-		},
-		{
-			name:    "string id",
-			id:      "req-uuid-123",
-			code:    -32700,
-			message: "Parse error",
-			assertJSON: func(t *testing.T, out []byte) {
-				var resp JSONRPCResponse
-				if err := json.Unmarshal(out, &resp); err != nil {
-					t.Fatalf("unmarshal failed: %v", err)
-				}
-				if resp.ID != "req-uuid-123" {
-					t.Errorf("expected string id, got %v", resp.ID)
-				}
-			},
-		},
-		{
-			name:    "nil id preserves id: null",
-			id:      nil,
-			code:    -32600,
-			message: "Invalid request",
-			assertJSON: func(t *testing.T, out []byte) {
-				if !strings.Contains(string(out), `"id":null`) {
-					t.Errorf("expected '\"id\":null' in error response, got %s", string(out))
-				}
-			},
-		},
+		{"integer id", 42, -32601, "Tool disabled", -32601, "Tool disabled", float64(42)},
+		{"string id", "req-uuid-123", -32700, "Parse error", -32700, "Parse error", "req-uuid-123"},
+		{"nil id preserves id: null", nil, -32600, "Invalid request", -32600, "Invalid request", nil},
+		{"unmarshallable channel id triggers fallback", make(chan int), -32603, "internal error", -32603, "internal error marshalling response", nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := BuildJSONRPCErrorResponse(tt.id, tt.code, tt.message)
-			tt.assertJSON(t, out)
+			var resp JSONRPCResponse
+			if err := json.Unmarshal(out, &resp); err != nil {
+				t.Fatalf("unmarshal failed: %v", err)
+			}
+			if resp.Error.Code != tt.wantCode {
+				t.Errorf("code: got %d, want %d", resp.Error.Code, tt.wantCode)
+			}
+			if !strings.Contains(resp.Error.Message, tt.wantMsg) {
+				t.Errorf("message: got %q, want containing %q", resp.Error.Message, tt.wantMsg)
+			}
+			if tt.wantID == nil {
+				if !strings.Contains(string(out), `"id":null`) {
+					t.Errorf("expected '\"id\":null' in error response, got %s", string(out))
+				}
+			} else if resp.ID != tt.wantID {
+				t.Errorf("id: got %v, want %v", resp.ID, tt.wantID)
+			}
 		})
 	}
 }
@@ -461,57 +204,48 @@ func TestBuildHealthResponse_TableDriven(t *testing.T) {
 		name         string
 		wrapper      string
 		blockedTools []string
-		assertJSON   func(t *testing.T, out []byte)
+		wantStatus   string
+		wantService  string
+		wantTools    []string
 	}{
-		{
-			name:         "default wrapper and canonical blocked tools",
-			wrapper:      "",
-			blockedTools: DefaultBlockedToolList,
-			assertJSON: func(t *testing.T, out []byte) {
-				var resp HealthResponse
-				if err := json.Unmarshal(out, &resp); err != nil {
-					t.Fatalf("unmarshal failed: %v", err)
-				}
-				if resp.Status != "ok" || resp.Wrapper != "aerial-discord-mcp" {
-					t.Errorf("unexpected health status or wrapper: %+v", resp)
-				}
-				if len(resp.BlockedTools) != 3 || resp.BlockedTools[0] != "discord_create_thread" {
-					t.Errorf("unexpected sorted blocked tools: %+v", resp.BlockedTools)
-				}
-			},
-		},
-		{
-			name:         "custom wrapper and unsorted input gets sorted",
-			wrapper:      "custom-wrapper",
-			blockedTools: []string{"z_tool", "a_tool", "m_tool"},
-			assertJSON: func(t *testing.T, out []byte) {
-				var resp HealthResponse
-				_ = json.Unmarshal(out, &resp)
-				if resp.Wrapper != "custom-wrapper" {
-					t.Errorf("expected custom-wrapper, got %s", resp.Wrapper)
-				}
-				if resp.BlockedTools[0] != "a_tool" || resp.BlockedTools[1] != "m_tool" || resp.BlockedTools[2] != "z_tool" {
-					t.Errorf("expected sorted tools, got %v", resp.BlockedTools)
-				}
-			},
-		},
-		{
-			name:         "nil blocked tools serializes as empty slice",
-			wrapper:      "test",
-			blockedTools: nil,
-			assertJSON: func(t *testing.T, out []byte) {
-				if !strings.Contains(string(out), `"blocked_tools":[]`) {
-					t.Errorf("expected '\"blocked_tools\":[]', got %s", string(out))
-				}
-			},
-		},
+		{"default wrapper and canonical blocked tools", "", DefaultBlockedToolList, "ok", "aerial-discord-mcp", []string{"discord_create_thread", "discord_send", "send_message"}},
+		{"custom wrapper and unsorted input gets sorted", "custom-wrapper", []string{"z_tool", "a_tool", "m_tool"}, "ok", "custom-wrapper", []string{"a_tool", "m_tool", "z_tool"}},
+		{"nil blocked tools serializes as empty slice", "test", nil, "ok", "test", []string{}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := BuildHealthResponse(tt.wrapper, tt.blockedTools)
-			tt.assertJSON(t, out)
+			var resp HealthResponse
+			if err := json.Unmarshal(out, &resp); err != nil {
+				t.Fatalf("unmarshal failed: %v", err)
+			}
+			if resp.Status != tt.wantStatus || resp.Wrapper != tt.wantService {
+				t.Errorf("unexpected status/wrapper: got status=%q wrapper=%q, want status=%q wrapper=%q",
+					resp.Status, resp.Wrapper, tt.wantStatus, tt.wantService)
+			}
+			if len(resp.BlockedTools) != len(tt.wantTools) {
+				t.Fatalf("blocked tools length mismatch: got %d, want %d", len(resp.BlockedTools), len(tt.wantTools))
+			}
+			for i, tool := range tt.wantTools {
+				if resp.BlockedTools[i] != tool {
+					t.Errorf("blocked tool[%d]: got %q, want %q", i, resp.BlockedTools[i], tool)
+				}
+			}
 		})
+	}
+}
+
+func TestBuildHealthResponse_MarshalError(t *testing.T) {
+	oldMarshal := marshalFn
+	t.Cleanup(func() { marshalFn = oldMarshal })
+	marshalFn = func(v interface{}) ([]byte, error) {
+		return nil, errors.New("simulated marshal error")
+	}
+
+	health := BuildHealthResponse("test-service", []string{"tool1"})
+	if !strings.Contains(string(health), `"status":"error"`) {
+		t.Errorf("expected fallback health response, got %s", string(health))
 	}
 }
 
@@ -522,65 +256,16 @@ func TestValidateConfig_TableDriven(t *testing.T) {
 		expectErr   bool
 		errContains string
 	}{
-		{
-			name:        "nil config",
-			cfg:         nil,
-			expectErr:   true,
-			errContains: "config cannot be nil",
-		},
-		{
-			name:        "empty port",
-			cfg:         &Config{Port: "", UpstreamPort: "4005", NodeBin: "node", AppPath: "build/app.js"},
-			expectErr:   true,
-			errContains: "port cannot be empty",
-		},
-		{
-			name:        "whitespace port",
-			cfg:         &Config{Port: "   ", UpstreamPort: "4005", NodeBin: "node", AppPath: "build/app.js"},
-			expectErr:   true,
-			errContains: "port cannot be empty",
-		},
-		{
-			name:        "empty upstream port",
-			cfg:         &Config{Port: "4001", UpstreamPort: "", NodeBin: "node", AppPath: "build/app.js"},
-			expectErr:   true,
-			errContains: "upstreamPort cannot be empty",
-		},
-		{
-			name:        "whitespace upstream port",
-			cfg:         &Config{Port: "4001", UpstreamPort: "  ", NodeBin: "node", AppPath: "build/app.js"},
-			expectErr:   true,
-			errContains: "upstreamPort cannot be empty",
-		},
-		{
-			name:        "empty node bin",
-			cfg:         &Config{Port: "4001", UpstreamPort: "4005", NodeBin: "", AppPath: "build/app.js"},
-			expectErr:   true,
-			errContains: "nodeBin cannot be empty",
-		},
-		{
-			name:        "whitespace node bin",
-			cfg:         &Config{Port: "4001", UpstreamPort: "4005", NodeBin: "  ", AppPath: "build/app.js"},
-			expectErr:   true,
-			errContains: "nodeBin cannot be empty",
-		},
-		{
-			name:        "empty app path",
-			cfg:         &Config{Port: "4001", UpstreamPort: "4005", NodeBin: "node", AppPath: ""},
-			expectErr:   true,
-			errContains: "appPath cannot be empty",
-		},
-		{
-			name:        "whitespace app path",
-			cfg:         &Config{Port: "4001", UpstreamPort: "4005", NodeBin: "node", AppPath: "  \t "},
-			expectErr:   true,
-			errContains: "appPath cannot be empty",
-		},
-		{
-			name:      "valid config with trimming",
-			cfg:       &Config{Port: " 4001 ", UpstreamPort: " 4005 ", NodeBin: " node ", AppPath: " app.js "},
-			expectErr: false,
-		},
+		{"nil config", nil, true, "config cannot be nil"},
+		{"empty port", mkCfg("", "4005", "node", "build/app.js"), true, "port cannot be empty"},
+		{"whitespace port", mkCfg("   ", "4005", "node", "build/app.js"), true, "port cannot be empty"},
+		{"empty upstream port", mkCfg("4001", "", "node", "build/app.js"), true, "upstreamPort cannot be empty"},
+		{"whitespace upstream port", mkCfg("4001", "  ", "node", "build/app.js"), true, "upstreamPort cannot be empty"},
+		{"empty node bin", mkCfg("4001", "4005", "", "build/app.js"), true, "nodeBin cannot be empty"},
+		{"whitespace node bin", mkCfg("4001", "4005", "  ", "build/app.js"), true, "nodeBin cannot be empty"},
+		{"empty app path", mkCfg("4001", "4005", "node", ""), true, "appPath cannot be empty"},
+		{"whitespace app path", mkCfg("4001", "4005", "node", "  \t "), true, "appPath cannot be empty"},
+		{"valid config with trimming", mkCfg(" 4001 ", " 4005 ", " node ", " app.js "), false, ""},
 	}
 
 	for _, tt := range tests {
@@ -610,59 +295,31 @@ func TestBuildNodeEnv_TableDriven(t *testing.T) {
 		name         string
 		environ      []string
 		upstreamPort string
-		assertEnv    func(t *testing.T, env []string)
+		wantContains []string
+		wantAbsent   []string
 	}{
-		{
-			name:         "strips uppercase PORT and appends new",
-			environ:      []string{"PORT=3000", "PATH=/usr/bin", "FOO=bar"},
-			upstreamPort: "4005",
-			assertEnv: func(t *testing.T, env []string) {
-				foundPort := false
-				for _, e := range env {
-					if strings.HasPrefix(e, "PORT=") {
-						if foundPort {
-							t.Errorf("duplicate PORT found: %s", e)
-						}
-						foundPort = true
-						if e != "PORT=4005" {
-							t.Errorf("expected PORT=4005, got %s", e)
-						}
-					}
-				}
-				if !foundPort {
-					t.Error("PORT=4005 not found in env")
-				}
-			},
-		},
-		{
-			name:         "case-insensitively strips port= and Port=",
-			environ:      []string{"port=3000", "Port=9999", "OTHER=1"},
-			upstreamPort: "4005",
-			assertEnv: func(t *testing.T, env []string) {
-				if len(env) != 2 {
-					t.Fatalf("expected 2 items, got %d: %v", len(env), env)
-				}
-				if env[0] != "OTHER=1" || env[1] != "PORT=4005" {
-					t.Errorf("unexpected env items: %v", env)
-				}
-			},
-		},
-		{
-			name:         "empty input environment",
-			environ:      nil,
-			upstreamPort: "4005",
-			assertEnv: func(t *testing.T, env []string) {
-				if len(env) != 1 || env[0] != "PORT=4005" {
-					t.Errorf("expected [PORT=4005], got %v", env)
-				}
-			},
-		},
+		{"strips uppercase PORT and appends new", []string{"PORT=3000", "PATH=/usr/bin", "FOO=bar"}, "4005", []string{"PORT=4005", "PATH=/usr/bin", "FOO=bar"}, []string{"PORT=3000"}},
+		{"case-insensitively strips port= and Port=", []string{"port=3000", "Port=9999", "OTHER=1"}, "4005", []string{"PORT=4005", "OTHER=1"}, []string{"port=3000", "Port=9999"}},
+		{"empty input environment", nil, "4005", []string{"PORT=4005"}, nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			env := BuildNodeEnv(tt.environ, tt.upstreamPort)
-			tt.assertEnv(t, env)
+			envMap := make(map[string]bool)
+			for _, e := range env {
+				envMap[e] = true
+			}
+			for _, want := range tt.wantContains {
+				if !envMap[want] {
+					t.Errorf("expected env to contain %q, got: %v", want, env)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if envMap[absent] {
+					t.Errorf("expected env not to contain %q, got: %v", absent, env)
+				}
+			}
 		})
 	}
 }
@@ -673,16 +330,8 @@ func TestFormatUpstreamURL_TableDriven(t *testing.T) {
 		upstreamPort string
 		expected     string
 	}{
-		{
-			name:         "clean port",
-			upstreamPort: "4005",
-			expected:     "http://127.0.0.1:4005",
-		},
-		{
-			name:         "port with whitespace",
-			upstreamPort: "  5001  ",
-			expected:     "http://127.0.0.1:5001",
-		},
+		{"clean port", "4005", "http://127.0.0.1:4005"},
+		{"port with whitespace", "  5001  ", "http://127.0.0.1:5001"},
 	}
 
 	for _, tt := range tests {
@@ -694,26 +343,6 @@ func TestFormatUpstreamURL_TableDriven(t *testing.T) {
 	}
 }
 
-func TestMarshalFallbacks(t *testing.T) {
-	// 1. BuildJSONRPCErrorResponse with un-marshallable ID
-	resp := BuildJSONRPCErrorResponse(make(chan int), -32603, "internal error")
-	if !strings.Contains(string(resp), "internal error marshalling response") {
-		t.Errorf("expected fallback error response, got %s", string(resp))
-	}
-
-	// 2. BuildHealthResponse with marshal failure
-	oldMarshal := marshalFn
-	defer func() { marshalFn = oldMarshal }()
-	marshalFn = func(v interface{}) ([]byte, error) {
-		return nil, errors.New("simulated marshal error")
-	}
-
-	health := BuildHealthResponse("test-service", []string{"tool1"})
-	if !strings.Contains(string(health), `"status":"error"`) {
-		t.Errorf("expected fallback health response, got %s", string(health))
-	}
-}
-
 func TestIsToolNameBlocked_MixedCase(t *testing.T) {
 	blocked := map[string]bool{"  DISCORD_SEND  ": true}
 	if !isToolNameBlocked("discord_send", blocked) {
@@ -721,64 +350,40 @@ func TestIsToolNameBlocked_MixedCase(t *testing.T) {
 	}
 }
 
-func TestResolveConfigPath(t *testing.T) {
+func TestResolveConfigPath_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	localFile := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(localFile, []byte("port: '4001'\nupstream_port: '4025'\n"), 0644); err != nil {
+		t.Fatalf("failed to write temp local config: %v", err)
+	}
+	emptyFile := filepath.Join(tmpDir, "empty.yaml")
+	if err := os.WriteFile(emptyFile, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write empty local config: %v", err)
+	}
+
 	fallback := "/config/config.yaml"
+	tests := []struct {
+		name      string
+		envVal    string
+		localPath string
+		want      string
+	}{
+		{"CONFIG_PATH env precedence", "/custom/override/config.yaml", localFile, "/custom/override/config.yaml"},
+		{"local config non-zero size", "", localFile, localFile},
+		{"local config zero size falls back", "", emptyFile, fallback},
+		{"local config nonexistent falls back", "", filepath.Join(tmpDir, "nonexistent.yaml"), fallback},
+	}
 
-	t.Run("CONFIG_PATH environment variable takes precedence", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "/custom/override/config.yaml")
-		got := ResolveConfigPath(fallback)
-		if got != "/custom/override/config.yaml" {
-			t.Errorf("expected /custom/override/config.yaml, got %s", got)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", tc.envVal)
+			oldLocal := localConfigPath
+			localConfigPath = tc.localPath
+			t.Cleanup(func() { localConfigPath = oldLocal })
 
-	t.Run("Local config exists and has non-zero size", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "")
-		tmpDir := t.TempDir()
-		localFile := filepath.Join(tmpDir, "config.yaml")
-		if err := os.WriteFile(localFile, []byte("port: '4001'\nupstream_port: '4025'\n"), 0644); err != nil {
-			t.Fatalf("failed to write temp local config: %v", err)
-		}
-
-		oldLocal := localConfigPath
-		localConfigPath = localFile
-		t.Cleanup(func() { localConfigPath = oldLocal })
-
-		got := ResolveConfigPath(fallback)
-		if got != localFile {
-			t.Errorf("expected %s, got %s", localFile, got)
-		}
-	})
-
-	t.Run("Local config exists but has zero size falls back", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "")
-		tmpDir := t.TempDir()
-		emptyFile := filepath.Join(tmpDir, "empty.yaml")
-		if err := os.WriteFile(emptyFile, []byte(""), 0644); err != nil {
-			t.Fatalf("failed to write empty local config: %v", err)
-		}
-
-		oldLocal := localConfigPath
-		localConfigPath = emptyFile
-		t.Cleanup(func() { localConfigPath = oldLocal })
-
-		got := ResolveConfigPath(fallback)
-		if got != fallback {
-			t.Errorf("expected fallback %s, got %s", fallback, got)
-		}
-	})
-
-	t.Run("Local config does not exist falls back", func(t *testing.T) {
-		t.Setenv("CONFIG_PATH", "")
-		oldLocal := localConfigPath
-		localConfigPath = "/non/existent/config.yaml"
-		t.Cleanup(func() { localConfigPath = oldLocal })
-
-		got := ResolveConfigPath(fallback)
-		if got != fallback {
-			t.Errorf("expected fallback %s, got %s", fallback, got)
-		}
-	})
+			if got := ResolveConfigPath(fallback); got != tc.want {
+				t.Errorf("ResolveConfigPath got %s, want %s", got, tc.want)
+			}
+		})
+	}
 }
-
-
