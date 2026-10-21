@@ -39,7 +39,7 @@ job "memory-mcp" {
           disable = true
         }
         volumes = [
-          "/share/aerial-config:/config:ro",
+          "/mnt/data/supervisor/share/aerial-config:/config:ro",
           "/mnt/data/supervisor/share/coverage/memory-mcp:/coverage:rw",
         ]
       }
