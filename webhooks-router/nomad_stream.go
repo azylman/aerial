@@ -535,7 +535,7 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		fmt.Sprintf("Nomad deployment for job %s failed with status %q (PR #%d on %s, commit: %s, deployment ID: %s).", cleanJob, status, prNumber, repo, mergeSHA, refID),
 		statusDesc, "", "Please investigate and fix the deployment failure.",
 	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "failure", dmMsg, prompt, s.isVanadisPR(ctx, repo, prNumber))
+	return s.dispatchAlertWithPrompt(ctx, targetID, "failure", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNumber))
 }
 
 // HandleNomadJobSuccess processes a confirmed successful deployment or running allocation for a Nomad job.

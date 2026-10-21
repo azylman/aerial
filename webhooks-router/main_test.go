@@ -3459,7 +3459,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		t.Errorf("dispatchAlertWithPrompt with dm err: %v", err)
 	}
 
-	// Vanadis silent auto-fix prompts suppress DM and set Silent: true
+	// Vanadis silent auto-fix prompts suppress DM and set Silent: true with Vanadis effort/chunk routing
 	dispVanadis := &mockOutboundDispatcher{}
 	srvVanadis := newTestRouter(Config{}, nil, &mockPRRegistry{suppressVanadisRes: true}, dispVanadis)
 	if err := srvVanadis.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
@@ -3472,8 +3472,32 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		t.Errorf("expected 0 DMs for Vanadis auto-fix, got %d", len(dispVanadis.DirectMessageCalls()))
 	}
 	vPrompts := dispVanadis.PromptCalls()
-	if len(vPrompts) != 2 || !vPrompts[0].Silent || !vPrompts[1].Silent {
-		t.Errorf("expected 2 silent prompts for Vanadis auto-fix, got %+v", vPrompts)
+	if len(vPrompts) != 2 || !vPrompts[0].Silent || vPrompts[0].Effort != "medium" || !vPrompts[1].Silent || vPrompts[1].Effort != "medium" {
+		t.Errorf("expected 2 silent medium-effort prompts for Vanadis auto-fix, got %+v", vPrompts)
+	}
+
+	poolVanadisPG := &mockVanadisPgxPool{
+		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+			return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+				if len(dest) == 3 {
+					if b, ok := dest[0].(*bool); ok {
+						*b = true
+						*dest[1].(*string) = "chunk-885"
+						*dest[2].(*string) = "low"
+					}
+				}
+				return nil
+			}}
+		},
+	}
+	dispVanadisPG := &mockOutboundDispatcher{}
+	srvVanadisPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(poolVanadisPG), dispVanadisPG)
+	if err := srvVanadisPG.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
+		t.Errorf("dispatchCIFailurePrompt(vanadis pg): %v", err)
+	}
+	vpgPrompts := dispVanadisPG.PromptCalls()
+	if len(vpgPrompts) != 1 || !vpgPrompts[0].Silent || vpgPrompts[0].Effort != "low" || vpgPrompts[0].VanadisChunkID != "chunk-885" {
+		t.Errorf("expected silent low-effort prompt with chunk-885, got %+v", vpgPrompts)
 	}
 }
 
