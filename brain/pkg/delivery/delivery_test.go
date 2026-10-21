@@ -118,6 +118,11 @@ func TestSplitMessage(t *testing.T) {
 			wantChunks: 2,
 			checkCode:  true,
 		},
+		{name: "ProseNearLimitBeforeOpeningFence", text: strings.Repeat("A", 1997) + "\n```go\nfmt.Println(1)\n```", limit: 2000, wantChunks: 2, wantFirst: strings.Repeat("A", 1997), wantLast: "```go\nfmt.Println(1)\n```"},
+		{name: "ProseWhereOpeningFenceFitsButCodeLineDoesNot", text: strings.Repeat("A", 1989) + "\n```go\nfmt.Println(1)\n```", limit: 2000, wantChunks: 2, wantFirst: strings.Repeat("A", 1989), wantLast: "```go\nfmt.Println(1)\n```"},
+		{name: "IndentedClosingFenceExceedingChunkLimit", text: "```go\n" + strings.Repeat("x", 1989) + "\n    ```", limit: 2000, wantChunks: 1, wantFirst: "```go\n" + strings.Repeat("x", 1989) + "\n```", wantLast: "```go\n" + strings.Repeat("x", 1989) + "\n```", checkCode: true},
+		{name: "SingleLineInlineCodeFenceAtBoundary", text: strings.Repeat("A", 1990) + "\n```inline```\n" + strings.Repeat("B", 20), limit: 2000, wantChunks: 2, wantFirst: strings.Repeat("A", 1990), wantLast: "```inline```\n" + strings.Repeat("B", 20)},
+		{name: "FenceWithLongLanguageTagAtSmallLimit", text: "```javascript\nconsole.log(1)\n```", limit: 12, wantChunks: 2, checkCode: true},
 	}
 
 	for _, tc := range tests {
