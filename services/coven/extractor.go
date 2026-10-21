@@ -448,10 +448,6 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	}
 }
 
-func reconcileExtractedFact(ctx context.Context, store Store, client OllamaClient, item ExtractedFactItem) {
-	reconcileCandidateFact(ctx, store, client, nil, item)
-}
-
 func formatExtractableTurns(turns []Message) string {
 	var b strings.Builder
 	for _, m := range turns {

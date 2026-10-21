@@ -21,7 +21,6 @@ var (
 	reGeneralSession             = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
 	reQuotaResetIn               = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
 	reWhitespace                 = regexp.MustCompile(`\s+`)
-	reFatalError                 = regexp.MustCompile(`(?i)(?:fatal|panic|traceback|terminated due to error|error:\s+[^\n\r]+)`)
 	safeCmdRegex                 = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 	reTerminatingBackgroundTasks = regexp.MustCompile(`(?i)terminating\s+([1-9]\d*)\s+background\s+task\(s\)`)
 
@@ -94,15 +93,13 @@ func (p *sessionProbe) extractUUID() string {
 }
 
 type ActivityWriter struct {
-	mu           sync.Mutex
-	buf          bytes.Buffer
-	lastActivity atomic.Int64
-	sessionID    atomic.Pointer[string]
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	sessionID atomic.Pointer[string]
 }
 
 func NewActivityWriter(initialSessionID string) *ActivityWriter {
 	w := &ActivityWriter{}
-	w.lastActivity.Store(time.Now().UnixNano())
 	if initialSessionID != "" {
 		w.sessionID.Store(&initialSessionID)
 	}
@@ -113,7 +110,6 @@ func (w *ActivityWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	w.lastActivity.Store(time.Now().UnixNano())
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n, err := w.buf.Write(p)
@@ -146,16 +142,6 @@ func (w *ActivityWriter) String() string {
 	defer w.mu.Unlock()
 	return w.buf.String()
 }
-
-func (w *ActivityWriter) ResetBuffer() {
-	if w != nil {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		w.buf.Reset()
-	}
-}
-
-func (w *ActivityWriter) LastActivity() time.Time { return time.Unix(0, w.lastActivity.Load()) }
 
 func (w *ActivityWriter) SessionID() string {
 	if ptr := w.sessionID.Load(); ptr != nil {
@@ -284,19 +270,6 @@ func firstNonEmpty(vals ...string) string {
 		if v != "" {
 			return v
 		}
-	}
-	return ""
-}
-
-func (e *StepUpdateEvent) ResolvedTextDelta() string {
-	if e == nil {
-		return ""
-	}
-	if d := firstNonEmpty(e.TextDelta, e.Delta); d != "" {
-		return d
-	}
-	if e.ResolvedType() == "agent_response" {
-		return e.Content
 	}
 	return ""
 }
@@ -479,22 +452,6 @@ func IsInactivityTimeout(errDetail, stderr string) bool {
 	return isWatchdogMatch(c, "inactivity timeout") || isWatchdogMatch(c, "inactivity")
 }
 
-func isWatchdogInactivity(s string) bool  { return isWatchdogMatch(s, "inactivity") }
-func isWatchdogMaxDuration(s string) bool { return isWatchdogMatch(s, "max duration") }
-
-func extractWatchdogDetail(source, fallbackKeyword string) string {
-	for _, l := range strings.Split(source, "\n") {
-		trimmed := strings.TrimSpace(l)
-		if strings.Contains(trimmed, "[watchdog]") || strings.Contains(strings.ToLower(trimmed), fallbackKeyword) {
-			if len(trimmed) > 200 {
-				return trimmed[:197] + "..."
-			}
-			return trimmed
-		}
-	}
-	return fallbackKeyword
-}
-
 var nonTransientKeywords = []string{
 	"invalid api key", "invalid_api_key", "authentication failed", "unauthorized", "permission_denied", "permissiondenied",
 	"unknown flag", "flag provided but not defined", "unknown command", "executable file not found", "command not found",
@@ -507,132 +464,6 @@ func isNonTransientError(s string) bool {
 	}
 	lower := strings.ToLower(s)
 	return hasKeyword(lower, nonTransientKeywords) || (strings.Contains(lower, "fork/exec") && (strings.Contains(lower, "no such file or directory") || strings.Contains(lower, "permission denied")))
-}
-
-func isMCPSessionError(s string) bool {
-	lower := strings.ToLower(s)
-	return strings.Contains(lower, "failed to connect (session id") || strings.Contains(lower, "calling \"initialize\"") || strings.Contains(lower, "server name") || strings.Contains(lower, "mcp server")
-}
-
-func checkCorruption(s string) bool {
-	if hasContextWindowKeyword(s) {
-		return true
-	}
-	if isMCPSessionError(s) {
-		return false
-	}
-	return hasCorruptionKeyword(s)
-}
-
-func classifyErrorTarget(target string) (isCorrupt, isTransient bool) {
-	lower := strings.ToLower(target)
-	if checkCorruption(lower) || (!isMCPSessionError(lower) && strings.Contains(lower, "conversation not found")) {
-		return true, false
-	}
-	return false, !isNonTransientError(lower)
-}
-
-func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTransient bool, isSessionCorruption bool, errDetail string) {
-	trimmedStdout, trimmedStderr := strings.TrimSpace(stdout), strings.TrimSpace(stderr)
-
-	if exitCode != 0 {
-		if isWatchdogInactivity(trimmedStderr) {
-			return true, false, false, extractWatchdogDetail(trimmedStderr, "inactivity timeout exceeded")
-		}
-		if isWatchdogMaxDuration(trimmedStderr) {
-			return true, false, false, extractWatchdogDetail(trimmedStderr, "max duration exceeded")
-		}
-	}
-
-	if exitCode == 0 {
-		if trimmedStdout == "" {
-			detail := extractErrorDetail(trimmedStderr, exitCode)
-			if strings.HasPrefix(detail, "execution failed with exit code") || trimmedStderr == "" {
-				detail = "process produced empty stdout"
-			}
-			return true, !containsFatalStderrError(trimmedStderr) && !isNonTransientError(trimmedStderr), false, detail
-		}
-
-		resp, parseErr := ParseAgyOutput(stdout)
-		if parseErr != nil {
-			errTarget := trimmedStderr
-			if len(trimmedStdout) < 300 {
-				errTarget += " " + trimmedStdout
-			}
-			lower := strings.ToLower(errTarget)
-			if hasContextWindowKeyword(lower) {
-				return true, false, true, "context window exceeded"
-			}
-			if checkCorruption(lower) {
-				return true, false, true, extractErrorDetail(trimmedStderr, exitCode)
-			}
-			if containsFatalStderrError(trimmedStderr) || isNonTransientError(lower) {
-				return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
-			}
-			return true, true, false, fmt.Sprintf("invalid json response from runner: %v", parseErr)
-		}
-
-		if (resp.Status != "" && strings.ToUpper(resp.Status) != "SUCCESS") || resp.Error != "" {
-			detail := resp.Error
-			if detail == "" {
-				detail = fmt.Sprintf("runner status: %s", resp.Status)
-			}
-			isCorrupt, isTrans := classifyErrorTarget(resp.Status + " " + resp.Error + " " + trimmedStderr)
-			return true, isTrans, isCorrupt, detail
-		}
-
-		if trimmedStderr != "" && containsFatalStderrError(trimmedStderr) {
-			return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
-		}
-
-		if strings.TrimSpace(resp.Response) != "" {
-			return false, false, false, ""
-		}
-		return true, false, false, "process produced empty response"
-	}
-
-	errorTarget := trimmedStderr
-	if resp, err := ParseAgyOutput(stdout); err == nil && resp != nil && resp.Error != "" {
-		errorTarget = resp.Status + " " + resp.Error + " " + trimmedStderr
-		errDetail = resp.Error
-	} else if errorTarget == "" && len(trimmedStdout) < 300 {
-		errorTarget = trimmedStdout
-	}
-
-	if errDetail == "" {
-		errDetail = extractErrorDetail(stderr, exitCode)
-		if (errDetail == "" || strings.HasPrefix(errDetail, "execution failed with exit code")) && len(trimmedStdout) < 300 && trimmedStdout != "" {
-			errDetail = trimmedStdout
-		}
-	}
-
-	isSessionCorruption, isTransient = classifyErrorTarget(errorTarget)
-	return true, isTransient, isSessionCorruption, errDetail
-}
-
-func containsFatalStderrError(stderr string) bool {
-	return stderr != "" && reFatalError.MatchString(stderr)
-}
-
-func extractErrorDetail(stderr string, exitCode int) string {
-	fallback := fmt.Sprintf("execution failed with exit code %d", exitCode)
-	if stderr == "" {
-		return fallback
-	}
-	var lastLine string
-	for _, l := range strings.Split(stderr, "\n") {
-		trimmed := strings.TrimSpace(l)
-		if trimmed != "" && !strings.Contains(trimmed, "Starting conversation update stream") && !strings.HasPrefix(trimmed, "DEBUG") && !strings.HasPrefix(trimmed, "INFO") {
-			lastLine = trimmed
-		}
-	}
-	if lastLine == "" {
-		return fallback
-	}
-	if len(lastLine) > 200 {
-		return lastLine[:197] + "..."
-	}
-	return lastLine
 }
 
 func IsQuotaPause(errDetail, stderr string) bool {

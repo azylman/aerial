@@ -213,12 +213,6 @@ func (s *BufferingTurnSink) Wait(ctx context.Context) (*TurnResult, error) {
 	return selectContext(ctx, s.resCh, s.errCh, nil)
 }
 
-func (s *BufferingTurnSink) AccumulatedText() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.builder.String()
-}
-
 func (s *BufferingTurnSink) EmittedAny() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

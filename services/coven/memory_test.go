@@ -3847,7 +3847,7 @@ func TestReconcileExtractedFact(t *testing.T) {
 			}
 
 			mockClient := &MockOllamaClient{embedding: validEmb, err: tc.ollamaErr}
-			reconcileExtractedFact(ctx, mem, mockClient, tc.item)
+			reconcileCandidateFact(ctx, mem, mockClient, nil, tc.item)
 		})
 	}
 }
