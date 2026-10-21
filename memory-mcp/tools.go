@@ -55,18 +55,34 @@ type ContextResponse struct {
 
 // ToolHandler provides methods executing MCP tool invocations and HTTP endpoints.
 type ToolHandler struct {
-	cfg    *Config
-	store  Store
-	ollama OllamaClient
+	cfg       *Config
+	store     Store
+	ollama    OllamaClient
+	llmClient LLMClientFunc
 }
 
 // NewToolHandler creates a new ToolHandler instance.
 func NewToolHandler(cfg *Config, store Store, ollama OllamaClient) *ToolHandler {
-	return &ToolHandler{
-		cfg:    cfg,
-		store:  store,
-		ollama: ollama,
+	var brainURL string
+	if cfg != nil {
+		brainURL = cfg.BrainLLMURL
 	}
+	return &ToolHandler{
+		cfg:       cfg,
+		store:     store,
+		ollama:    ollama,
+		llmClient: HTTPBrainLLMClient(brainURL, nil),
+	}
+}
+
+// Consolidate runs a complete-linkage clique dreaming pass over all stored facts.
+func (h *ToolHandler) Consolidate(ctx context.Context) (int, error) {
+	consolidated, err := ConsolidateFactClusters(ctx, h.store, h.ollama, h.llmClient)
+	if err != nil {
+		return consolidated, err
+	}
+	log.Printf("[Memory] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
+	return consolidated, nil
 }
 
 // FormatMemoryContext converts retrieved facts into a markdown prompt block.
