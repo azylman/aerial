@@ -101,20 +101,6 @@ func StaticFallback(contextDescription string) string {
 	return "An unexpected error occurred while processing the request. Please try again."
 }
 
-// GenerateSessionResetMessage uses a lightweight agy call to synthesize a persona-aligned reset notice, with static fallback.
-func GenerateSessionResetMessage(agyBin, apiKey string, runnerFns ...runner.RunnerFunc) string {
-	return GenerateDynamicNotification(agyBin, apiKey, "session reset due to context corruption", runnerFns...)
-}
-
-// GeneratePoisonPillMessage uses a lightweight agy call to synthesize a notice explaining the message caused repeated crashes and had to be dropped, with static fallback.
-func GeneratePoisonPillMessage(agyBin, apiKey, promptSnippet string, runnerFns ...runner.RunnerFunc) string {
-	desc := "a message caused repeated crashes and had to be dropped"
-	if strings.TrimSpace(promptSnippet) != "" {
-		desc = fmt.Sprintf("a message caused repeated crashes and had to be dropped (message snippet: %q)", promptSnippet)
-	}
-	return GenerateDynamicNotification(agyBin, apiKey, desc, runnerFns...)
-}
-
 // GenerateDynamicNotification attempts to generate a persona-compliant message using a lightweight agy call,
 // falling back to static predefined neutral messages on error, timeout, or if no runner function is provided.
 func GenerateDynamicNotification(agyBin, apiKey, contextDescription string, runnerFns ...runner.RunnerFunc) string {

@@ -51,42 +51,6 @@ func (a *Attachment) ToDiscordFile() *discordgo.File {
 	}
 }
 
-// MergeAttachments combines two attachment slices, deduplicating by Filename
-// and capping the total merged slice at MaxAttachmentsPerMessage.
-func MergeAttachments(primary, secondary []*Attachment) []*Attachment {
-	if len(secondary) == 0 {
-		if len(primary) > MaxAttachmentsPerMessage {
-			return primary[:MaxAttachmentsPerMessage]
-		}
-		return primary
-	}
-	seen := make(map[string]struct{}, len(primary)+len(secondary))
-	merged := make([]*Attachment, 0, len(primary)+len(secondary))
-	for _, att := range primary {
-		if len(merged) >= MaxAttachmentsPerMessage {
-			break
-		}
-		if att != nil && att.Filename != "" {
-			if _, ok := seen[att.Filename]; !ok {
-				seen[att.Filename] = struct{}{}
-				merged = append(merged, att)
-			}
-		}
-	}
-	for _, att := range secondary {
-		if len(merged) >= MaxAttachmentsPerMessage {
-			break
-		}
-		if att != nil && att.Filename != "" {
-			if _, ok := seen[att.Filename]; !ok {
-				seen[att.Filename] = struct{}{}
-				merged = append(merged, att)
-			}
-		}
-	}
-	return merged
-}
-
 var mdImageRegex = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 
 // ExtractAndSanitizeMedia parses markdown image references, resolves and validates local files,

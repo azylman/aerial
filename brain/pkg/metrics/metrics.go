@@ -148,15 +148,6 @@ var (
 		},
 	)
 
-	DaemonAcquisitionDurationSeconds = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "aerial_brain_daemon_acquisition_duration_seconds",
-			Help:    "Duration to acquire or spawn an agy daemon in seconds.",
-			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
-		},
-		[]string{"status"},
-	)
-
 	// Voice Telemetry
 	VoiceTTFRDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -490,14 +481,6 @@ var (
 		},
 		[]string{"skill", "source"},
 	)
-
-	SubagentInvocationsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "aerial_brain_subagent_invocations_total",
-			Help: "Total number of subagent dispatches executed by Aerial Brain.",
-		},
-		[]string{"type_name", "role"},
-	)
 )
 
 func init() {
@@ -510,7 +493,6 @@ func init() {
 		ToolCallsTotal,
 		ToolDurationSeconds,
 		SkillInvocationsTotal,
-		SubagentInvocationsTotal,
 		TurnsTotal,
 		TurnDurationSeconds,
 		TokensTotal,
@@ -561,7 +543,6 @@ func init() {
 		ActiveTasksGauge,
 		DaemonMemoryBytes,
 		TaskTimeoutsTotal,
-		DaemonAcquisitionDurationSeconds,
 		VoiceTTFRDurationSeconds,
 		BuildInfo,
 	)
@@ -873,19 +854,6 @@ func RecordSessionRotation(phase, scope, reason string) {
 	SessionRotationsTotal.WithLabelValues(phase, scope, reason).Inc()
 }
 
-
-
-// RecordDaemonAcquisition records daemon acquisition latency categorized by status (warm_hit, cold_start, error).
-func RecordDaemonAcquisition(status string, duration time.Duration) {
-	if status == "" {
-		status = "unknown"
-	}
-	if duration < 0 {
-		duration = 0
-	}
-	DaemonAcquisitionDurationSeconds.WithLabelValues(status).Observe(duration.Seconds())
-}
-
 // RecordVoiceTTFR records time to first response latency for voice interactions categorized by mode (sse, json) and status (success, error).
 func RecordVoiceTTFR(mode, status string, duration time.Duration) {
 	if mode == "" {
@@ -932,17 +900,4 @@ func RecordSkillActivation(skill, source string) {
 		source = "unknown"
 	}
 	SkillInvocationsTotal.WithLabelValues(skill, source).Inc()
-}
-
-// RecordSubagentInvocation records when a subagent is dispatched.
-func RecordSubagentInvocation(typeName, role string) {
-	typeName = strings.TrimSpace(typeName)
-	if typeName == "" {
-		typeName = "unknown"
-	}
-	role = strings.TrimSpace(role)
-	if role == "" {
-		role = "unknown"
-	}
-	SubagentInvocationsTotal.WithLabelValues(typeName, role).Inc()
 }

@@ -99,27 +99,6 @@ type Classifier struct {
 // Option configures a Classifier instance.
 type Option func(*Classifier)
 
-// WithOnParseError sets the callback invoked when classification JSON parsing fails.
-func WithOnParseError(fn func(model, raw string, err error)) Option { return func(c *Classifier) { c.OnParseError = fn } }
-
-// WithOnSystemAlert sets the callback invoked when classifier endpoint fails across all retries.
-func WithOnSystemAlert(fn func(endpoint string, err error)) Option { return func(c *Classifier) { c.OnSystemAlert = fn } }
-
-// WithSystemOneHTTPClient sets the HTTP client used for System 1 requests.
-func WithSystemOneHTTPClient(client *http.Client) Option { return func(c *Classifier) { c.systemOneHTTPClient = client } }
-
-// WithRetrySleepFunc overrides the sleep function between retry attempts for hermetic testing.
-func WithRetrySleepFunc(fn func(ctx context.Context, d time.Duration) error) Option { return func(c *Classifier) { c.retrySleepFunc = fn } }
-
-// WithRetryDelayFunc overrides the retry delay calculation for hermetic testing.
-func WithRetryDelayFunc(fn func(attempt int) time.Duration) Option { return func(c *Classifier) { c.retryDelayFunc = fn } }
-
-// WithPrimaryLLMFunc sets the underlying primary runner.LLMFunc used when ClassifierURL is unconfigured.
-func WithPrimaryLLMFunc(fn runner.LLMFunc) Option { return func(c *Classifier) { c.primaryLLMFunc = fn } }
-
-// WithPrimaryTitleLLMFunc sets the underlying primary runner.LLMFunc used for thread title summarization.
-func WithPrimaryTitleLLMFunc(fn runner.LLMFunc) Option { return func(c *Classifier) { c.primaryTitleLLMFunc = fn } }
-
 // EphemeralProcessPool abstracts process pools that can generate EphemeralLLMFuncs.
 type EphemeralProcessPool interface {
 	EphemeralLLMFunc(targetKey string) runner.LLMFunc
@@ -139,23 +118,8 @@ func WithProcessPool(pool EphemeralProcessPool) Option {
 // WithLLMFunc sets the LLM invocation function.
 func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option { return func(c *Classifier) { c.LLMFunc = fn } }
 
-// WithTitleLLMFunc sets the LLM invocation function for thread title summarization.
-func WithTitleLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option { return func(c *Classifier) { c.TitleLLMFunc = fn } }
-
 // WithModel sets the LLM model identifier.
 func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
-
-// WithTimeout sets the per-classification timeout duration.
-func WithTimeout(timeout time.Duration) Option { return func(c *Classifier) { c.Timeout = timeout } }
-
-// WithFailureThreshold sets consecutive failure threshold to trip circuit breaker.
-func WithFailureThreshold(threshold int) Option { return func(c *Classifier) { c.FailureThreshold = threshold } }
-
-// WithCooldownDuration sets the cooldown period after circuit breaker trips.
-func WithCooldownDuration(duration time.Duration) Option { return func(c *Classifier) { c.CooldownDuration = duration } }
-
-// WithClock sets a custom clock function for deterministic testing.
-func WithClock(clock func() time.Time) Option { return func(c *Classifier) { c.Clock = clock } }
 
 // New constructs a Classifier with pure *config.Config dependency injection and an optional runnerFunc.
 func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classifier {
@@ -239,27 +203,6 @@ func (c *Classifier) recordSuccess() {
 	defer c.mu.Unlock()
 	c.consecutiveFailures = 0
 	c.circuitOpen = false
-}
-
-// IsCircuitOpen returns whether the circuit breaker is currently tripped open.
-func (c *Classifier) IsCircuitOpen() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.circuitOpen {
-		return false
-	}
-	now := time.Now()
-	if c.Clock != nil {
-		now = c.Clock()
-	}
-	return now.Before(c.circuitOpenUntil)
-}
-
-// ConsecutiveFailures returns the current number of consecutive failures.
-func (c *Classifier) ConsecutiveFailures() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.consecutiveFailures
 }
 
 // SanitizeContent neutralizes XML tag injection attempts in user content.
@@ -482,25 +425,12 @@ func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agy
 	}
 }
 
-func (c *Classifier) resolveModel() string {
-	if c.cfg != nil {
-		if cur := c.cfg.Current(); cur != nil {
-			if cur.ClassifierURL != "" {
-				if cur.ClassifierModel != "" {
-					return cur.ClassifierModel
-				}
-				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
-					return c.Model
-				}
-				return DefaultAGYClassifierModel
-			}
-			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
-				return c.Model
-			}
-			if strings.TrimSpace(cur.LowEffortModel) != "" {
-				return cur.LowEffortModel
-			}
-		}
+func (c *Classifier) fallbackModel(cur *config.ConfigData) string {
+	if c.Model != "" && c.Model != DefaultAGYClassifierModel {
+		return c.Model
+	}
+	if cur != nil && strings.TrimSpace(cur.LowEffortModel) != "" {
+		return cur.LowEffortModel
 	}
 	if strings.TrimSpace(c.Model) != "" {
 		return c.Model
@@ -508,39 +438,49 @@ func (c *Classifier) resolveModel() string {
 	return config.DefaultConfigData().LowEffortModel
 }
 
-func (c *Classifier) resolveTitleModel() string {
+func (c *Classifier) resolveModel() string {
+	var cur *config.ConfigData
 	if c.cfg != nil {
-		if cur := c.cfg.Current(); cur != nil {
-			if cur.ThreadTitleModel != "" {
-				return cur.ThreadTitleModel
+		cur = c.cfg.Current()
+	}
+	if cur != nil && cur.ClassifierURL != "" {
+		if cur.ClassifierModel != "" {
+			return cur.ClassifierModel
+		}
+		if c.Model != "" && c.Model != DefaultAGYClassifierModel {
+			return c.Model
+		}
+		return DefaultAGYClassifierModel
+	}
+	return c.fallbackModel(cur)
+}
+
+func (c *Classifier) resolveTitleModel() string {
+	var cur *config.ConfigData
+	if c.cfg != nil {
+		cur = c.cfg.Current()
+	}
+	if cur != nil {
+		if cur.ThreadTitleModel != "" {
+			return cur.ThreadTitleModel
+		}
+		if cur.ThreadTitleURL != "" {
+			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
+				return c.Model
 			}
-			if cur.ThreadTitleURL != "" {
-				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
-					return c.Model
-				}
-				return DefaultAGYClassifierModel
-			}
-			if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
-				if cur.ClassifierModel != "" {
-					return cur.ClassifierModel
-				}
-				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
-					return c.Model
-				}
-				return DefaultAGYClassifierModel
+			return DefaultAGYClassifierModel
+		}
+		if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
+			if cur.ClassifierModel != "" {
+				return cur.ClassifierModel
 			}
 			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 				return c.Model
 			}
-			if strings.TrimSpace(cur.LowEffortModel) != "" {
-				return cur.LowEffortModel
-			}
+			return DefaultAGYClassifierModel
 		}
 	}
-	if strings.TrimSpace(c.Model) != "" {
-		return c.Model
-	}
-	return config.DefaultConfigData().LowEffortModel
+	return c.fallbackModel(cur)
 }
 
 func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) ClassificationResult {

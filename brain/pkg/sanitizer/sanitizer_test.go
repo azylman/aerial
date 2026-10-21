@@ -206,81 +206,6 @@ func TestSanitizeLog_UsesRedactedToken(t *testing.T) {
 	}
 }
 
-func TestSanitizeEnvVars(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []string
-		expected []string
-	}{
-		{
-			name:     "nil slice",
-			input:    nil,
-			expected: nil,
-		},
-		{
-			name:     "empty slice",
-			input:    []string{},
-			expected: []string{},
-		},
-		{
-			name: "system variables must NOT be redacted",
-			input: []string{
-				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-				"COMPAT_MODE=1",
-				"SPATIAL_INDEX=true",
-				"PATTERN=*.go",
-				"HOTKEY=ctrl+c",
-				"TELEMETRY_DISPATCHER=enabled",
-			},
-			expected: []string{
-				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-				"COMPAT_MODE=1",
-				"SPATIAL_INDEX=true",
-				"PATTERN=*.go",
-				"HOTKEY=ctrl+c",
-				"TELEMETRY_DISPATCHER=enabled",
-			},
-		},
-		{
-			name: "sensitive variables must be redacted",
-			input: []string{
-				"PORT=8080",
-				"GEMINI_API_KEY=secret_key_value",
-				"DISCORD_BOT_TOKEN=bot_token_value",
-				"GITHUB_PAT=pat_token_value",
-				"CUSTOM_AUTH=bearer_token",
-				"DATABASE_PASSWORD=super_secret_db_pass",
-				"AERIAL_PROJECT_DIR=/share/aerial",
-				"MALFORMED_LINE",
-			},
-			expected: []string{
-				"PORT=8080",
-				"GEMINI_API_KEY=[REDACTED]",
-				"DISCORD_BOT_TOKEN=[REDACTED]",
-				"GITHUB_PAT=[REDACTED]",
-				"CUSTOM_AUTH=[REDACTED]",
-				"DATABASE_PASSWORD=[REDACTED]",
-				"AERIAL_PROJECT_DIR=/share/aerial",
-				"MALFORMED_LINE",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := SanitizeEnvVars(tt.input)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("length mismatch: got %d, want %d", len(got), len(tt.expected))
-			}
-			for i := range got {
-				if got[i] != tt.expected[i] {
-					t.Errorf("item %d mismatch: got %q, want %q", i, got[i], tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
 func TestRegisterConfigTokens_EdgeCases(t *testing.T) {
 	// Nil config
 	RegisterConfigTokens(nil)
@@ -288,28 +213,6 @@ func TestRegisterConfigTokens_EdgeCases(t *testing.T) {
 	// Config with nil data
 	emptyCfg := &config.Config{}
 	RegisterConfigTokens(emptyCfg)
-}
-
-func TestIsSensitiveEnvKey_Direct(t *testing.T) {
-	cases := []struct {
-		key      string
-		expected bool
-	}{
-		{"", false},
-		{"   ", false},
-		{"AUTH", true},
-		{"CREDENTIALS", true},
-		{"AUTH_HEADER", true},
-		{"MY_AUTH_TOKEN", true},
-		{"PAT_VALUE", true},
-		{"DB_PAT_TOKEN", true},
-		{"NORMAL_VAR", false},
-	}
-	for _, tc := range cases {
-		if res := isSensitiveEnvKey(tc.key); res != tc.expected {
-			t.Errorf("isSensitiveEnvKey(%q) = %v; want %v", tc.key, res, tc.expected)
-		}
-	}
 }
 
 func BenchmarkSanitizeString_Clean(b *testing.B) {

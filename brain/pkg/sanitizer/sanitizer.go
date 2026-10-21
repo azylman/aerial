@@ -3,7 +3,6 @@
 package sanitizer
 
 import (
-	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
@@ -138,45 +137,6 @@ func ResetSensitiveTokens() {
 	sensitiveTokensPtr.Store(&empty)
 }
 
-// isSensitiveEnvKey strictly verifies whether an environment variable key represents a secret,
-// preventing accidental collisions with system variables like PATH, COMPAT, PATTERN, etc.
-func isSensitiveEnvKey(key string) bool {
-	k := strings.ToUpper(strings.TrimSpace(key))
-	if k == "" {
-		return false
-	}
-
-	// Exact matches
-	if k == "TOKEN" || k == "KEY" || k == "SECRET" || k == "PASSWORD" || k == "PAT" ||
-		k == "AUTH" || k == "CREDENTIAL" || k == "CREDENTIALS" {
-		return true
-	}
-
-	// Strict Suffix matches
-	if strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") ||
-		strings.HasSuffix(k, "_SECRET") || strings.HasSuffix(k, "_PASSWORD") ||
-		strings.HasSuffix(k, "_PAT") || strings.HasSuffix(k, "_AUTH") ||
-		strings.HasSuffix(k, "_CREDENTIAL") || strings.HasSuffix(k, "_CREDENTIALS") {
-		return true
-	}
-
-	// Strict Prefix matches
-	if strings.HasPrefix(k, "TOKEN_") || strings.HasPrefix(k, "KEY_") ||
-		strings.HasPrefix(k, "SECRET_") || strings.HasPrefix(k, "PASSWORD_") ||
-		strings.HasPrefix(k, "PAT_") || strings.HasPrefix(k, "AUTH_") {
-		return true
-	}
-
-	// Strict delimited Substrings
-	if strings.Contains(k, "_TOKEN_") || strings.Contains(k, "_KEY_") ||
-		strings.Contains(k, "_SECRET_") || strings.Contains(k, "_PASSWORD_") ||
-		strings.Contains(k, "_PAT_") || strings.Contains(k, "_AUTH_") {
-		return true
-	}
-
-	return false
-}
-
 // sanitizeInternal executes the unified sanitization pipeline with a designated replacement placeholder.
 func sanitizeInternal(input string, placeholder string) string {
 	if input == "" {
@@ -226,32 +186,6 @@ func SanitizeString(input string) string {
 // replacing them with "[REDACTED_TOKEN]".
 func SanitizeLog(input string) string {
 	return sanitizeInternal(input, "[REDACTED_TOKEN]")
-}
-
-// SanitizeEnvVars takes a slice of "KEY=VALUE" environment strings and redacts sensitive values.
-// Strictly guards system variables like PATH, COMPAT, PATTERN against false-positive redaction.
-func SanitizeEnvVars(envVars []string) []string {
-	if envVars == nil {
-		return nil
-	}
-	cleaned := make([]string, 0, len(envVars))
-
-	for _, env := range envVars {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			cleaned = append(cleaned, env)
-			continue
-		}
-		key := parts[0]
-
-		if isSensitiveEnvKey(key) {
-			cleaned = append(cleaned, fmt.Sprintf("%s=[REDACTED]", key))
-		} else {
-			cleaned = append(cleaned, env)
-		}
-	}
-
-	return cleaned
 }
 
 // SanitizeMentions strips Discord user mentions (<@123>, <@!123>), role mentions (<@&123>),
