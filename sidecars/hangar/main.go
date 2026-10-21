@@ -90,7 +90,6 @@ func SanitizeLog(input string) string {
 	return out
 }
 
-
 // RepoSyncResult holds telemetry for a single repository sync operation.
 type RepoSyncResult struct {
 	Repo         string `json:"repo"`
@@ -137,7 +136,6 @@ type ConfigSyncContext struct {
 	DiffGated        bool
 	SkipPendingNomad bool
 }
-
 
 // HangarStatusResponse is the aggregated telemetry payload returned by GET /status.
 type HangarStatusResponse struct {
@@ -229,22 +227,22 @@ func runGitCommand(ctx context.Context, dir, pat string, args ...string) ([]byte
 
 // SyncDaemon coordinates periodic and on-demand repository synchronizations.
 type SyncDaemon struct {
-	sfg           singleflight.Group
-	mu            sync.Mutex
-	ticker        *time.Ticker
-	interval      time.Duration
-	repos         []string
-	repoUrls      map[string]string
-	pat           string
-	composeDir    string
-	configDir     string
-	reconcileCh   chan struct{}
-	lastReconcile time.Time
+	sfg             singleflight.Group
+	mu              sync.Mutex
+	ticker          *time.Ticker
+	interval        time.Duration
+	repos           []string
+	repoUrls        map[string]string
+	pat             string
+	composeDir      string
+	configDir       string
+	reconcileCh     chan struct{}
+	lastReconcile   time.Time
 	lastSyncTimes   map[string]time.Time
 	repoGitHubSlugs map[string]string
 	statusMu        sync.RWMutex
-	triggerFn     func() ([]RepoSyncResult, error)
-	reconcileFn   func(ctx context.Context) error
+	triggerFn       func() ([]RepoSyncResult, error)
+	reconcileFn     func(ctx context.Context) error
 
 	brainInternalURL string
 	extraSecrets     []string
@@ -279,8 +277,8 @@ type SyncDaemon struct {
 	registryClient *http.Client
 
 	// Webhooks & Deploy Lifecycle
-	webhooksRouterURL      string
-	deployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
+	webhooksRouterURL string
+	deployDispatcher  func(ctx context.Context, evt HangarDeployEvent) error
 
 	// Nomad Config Cache
 	lastPushedConfigMu sync.Mutex
@@ -295,7 +293,6 @@ func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
 	}
 	return defaultComposeExecutor
 }
-
 
 func (d *SyncDaemon) getNomadExecutor() NomadExecutor {
 	if d != nil && d.nomadExecutor != nil {
@@ -391,7 +388,6 @@ func (d *SyncDaemon) DispatchDeployEvent(evt HangarDeployEvent) {
 		}
 	}()
 }
-
 
 // GetLastReconcile returns the timestamp of the last successful reconciliation under statusMu read lock.
 func (d *SyncDaemon) GetLastReconcile() time.Time {
@@ -542,6 +538,7 @@ func parseNomadMeta(meta []string) (repo, commit, targetID string, prNumber int)
 	}
 	return repo, commit, targetID, prNumber
 }
+
 func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadFileChange, meta ...string) {
 	d.pendingNomadMu.Lock()
 	defer d.pendingNomadMu.Unlock()
@@ -607,7 +604,6 @@ func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []strin
 
 	return append(args, subCmd...)
 }
-
 
 var sha256DigestRegex = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
@@ -838,8 +834,6 @@ func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string
 	return rev, nil
 }
 
-
-
 func (d *SyncDaemon) getRepoLock(repoPath string) *sync.Mutex {
 	cleaned := filepath.Clean(repoPath)
 	d.repoLocksMu.Lock()
@@ -918,7 +912,6 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
-
 
 func (d *SyncDaemon) runNomadValidate(ctx context.Context, subCmd, targetPath string, requireNonNilExec bool) error {
 	valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1055,7 +1048,6 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	return err
 }
 
-
 func (d *SyncDaemon) ExecuteNomadTeardowns(ctx context.Context, pending []NomadChangeEvent) {
 	if len(pending) == 0 {
 		return
@@ -1111,76 +1103,76 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 
 			images := ExtractNomadJobImages(content)
 			for _, imgRef := range images {
-					remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
-					if digestErr != nil || remoteDigest == "" {
-						continue
+				remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
+				if digestErr != nil || remoteDigest == "" {
+					continue
+				}
+
+				key := jobName + ":" + imgRef
+				d.nomadDigestsMu.RLock()
+				lastDigest, seen := d.nomadKnownDigests[key]
+				d.nomadDigestsMu.RUnlock()
+
+				if !seen {
+					d.nomadDigestsMu.Lock()
+					if d.nomadKnownDigests == nil {
+						d.nomadKnownDigests = make(map[string]string)
+					}
+					d.nomadKnownDigests[key] = remoteDigest
+					d.nomadDigestsMu.Unlock()
+					continue
+				}
+
+				if lastDigest != remoteDigest {
+					log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
+					d.nomadDigestsMu.Lock()
+					d.nomadKnownDigests[key] = remoteDigest
+					d.nomadDigestsMu.Unlock()
+
+					// Resolve commit SHA: first try reading remote container image OCI revision labels,
+					// falling back to local git repo HEAD if unavailable.
+					var headSHA string
+					if rev, revErr := d.GetRemoteImageRevision(pollCtx, imgRef); revErr == nil && rev != "" {
+						headSHA = rev
+						log.Printf("[Hangar:NomadImagePoll] Resolved commit SHA %s from image labels for %s", headSHA, imgRef)
+					} else {
+						if revErr != nil {
+							log.Printf("[Hangar:NomadImagePoll] Notice: could not resolve revision from image %s: %v (falling back to git HEAD)", imgRef, revErr)
+						}
+						if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
+							headSHA = strings.TrimSpace(string(headOut))
+						}
 					}
 
-					key := jobName + ":" + imgRef
-					d.nomadDigestsMu.RLock()
-					lastDigest, seen := d.nomadKnownDigests[key]
-					d.nomadDigestsMu.RUnlock()
-
-					if !seen {
-						d.nomadDigestsMu.Lock()
-						if d.nomadKnownDigests == nil {
-							d.nomadKnownDigests = make(map[string]string)
+					repoName := ImageSourceRepo(imgRef)
+					if repoName == "" {
+						repoName = filepath.Base(repo)
+						if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
+							repoName = "azylman/" + repoName
 						}
-						d.nomadKnownDigests[key] = remoteDigest
-						d.nomadDigestsMu.Unlock()
-						continue
 					}
 
-					if lastDigest != remoteDigest {
-						log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
-						d.nomadDigestsMu.Lock()
-						d.nomadKnownDigests[key] = remoteDigest
-						d.nomadDigestsMu.Unlock()
+					deployEvt := HangarDeployEvent{
+						Event:     "deploy_started",
+						JobName:   jobName,
+						Repo:      repoName,
+						CommitSHA: headSHA,
+						Image:     imgRef,
+						Digest:    remoteDigest,
+						Status:    "started",
+						Details:   fmt.Sprintf("nomad image poll restart for %s (digest %s)", imgRef, remoteDigest),
+						Timestamp: time.Now().UTC(),
+					}
+					d.DispatchDeployEvent(deployEvt)
 
-						// Resolve commit SHA: first try reading remote container image OCI revision labels,
-						// falling back to local git repo HEAD if unavailable.
-						var headSHA string
-						if rev, revErr := d.GetRemoteImageRevision(pollCtx, imgRef); revErr == nil && rev != "" {
-							headSHA = rev
-							log.Printf("[Hangar:NomadImagePoll] Resolved commit SHA %s from image labels for %s", headSHA, imgRef)
-						} else {
-							if revErr != nil {
-								log.Printf("[Hangar:NomadImagePoll] Notice: could not resolve revision from image %s: %v (falling back to git HEAD)", imgRef, revErr)
-							}
-							if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
-								headSHA = strings.TrimSpace(string(headOut))
-							}
-						}
-
-						repoName := ImageSourceRepo(imgRef)
-						if repoName == "" {
-							repoName = filepath.Base(repo)
-							if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
-								repoName = "azylman/" + repoName
-							}
-						}
-
-						deployEvt := HangarDeployEvent{
-							Event:     "deploy_started",
-							JobName:   jobName,
-							Repo:      repoName,
-							CommitSHA: headSHA,
-							Image:     imgRef,
-							Digest:    remoteDigest,
-							Status:    "started",
-							Details:   fmt.Sprintf("nomad image poll restart for %s (digest %s)", imgRef, remoteDigest),
-							Timestamp: time.Now().UTC(),
-						}
-						d.DispatchDeployEvent(deployEvt)
-
-						out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
-						if runErr != nil {
-							log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
-						} else {
-							log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
-						}
+					out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
+					if runErr != nil {
+						log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
+					} else {
+						log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
 					}
 				}
+			}
 			return true
 		})
 	}
@@ -1252,7 +1244,7 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 	}
 
 	log.Printf("[Hangar] Bootstrapping repository at %s from %s...", repoPath, repoURL)
-	if err := os.MkdirAll(repoPath, 0755); err != nil {
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
 		return fmt.Errorf("failed to create repo directory %s: %w", repoPath, err)
 	}
 
@@ -1950,27 +1942,27 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) HangarStatusResponse {
 
 // DaemonConfig holds configuration options for the GitSync daemon.
 type DaemonConfig struct {
-	Port                   string
-	Repos                  []string
-	RepoURLs               map[string]string
-	Interval               time.Duration
-	PAT                    string
-	ComposeDir             string
-	ConfigDir              string
-	DiscordToken           string
-	DiscordChannel         string
-	DiscordWebhookURL      string
-	BrainInternalURL       string
-	ExtraSecrets           []string
-	ComposeExecutor        ComposeExecutor
-	GitExecutor            GitExecutor
-	NomadExecutor          NomadExecutor
-	NomadAddr              string
-	NomadToken             string
-	RegistryClient         *http.Client
-	WebhooksRouterURL      string
-	DeployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
-	ServiceConfigs         []ServiceConfigMapping
+	Port              string
+	Repos             []string
+	RepoURLs          map[string]string
+	Interval          time.Duration
+	PAT               string
+	ComposeDir        string
+	ConfigDir         string
+	DiscordToken      string
+	DiscordChannel    string
+	DiscordWebhookURL string
+	BrainInternalURL  string
+	ExtraSecrets      []string
+	ComposeExecutor   ComposeExecutor
+	GitExecutor       GitExecutor
+	NomadExecutor     NomadExecutor
+	NomadAddr         string
+	NomadToken        string
+	RegistryClient    *http.Client
+	WebhooksRouterURL string
+	DeployDispatcher  func(ctx context.Context, evt HangarDeployEvent) error
+	ServiceConfigs    []ServiceConfigMapping
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -2078,7 +2070,7 @@ func EnsureDockerAuthPath(
 	configPath := ResolveDockerConfigPath(lookup)
 	configDir := filepath.Dir(configPath)
 
-	if err := mkdirAll(configDir, 0700); err != nil {
+	if err := mkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create docker config directory %s: %w", configDir, err)
 	}
 
@@ -2095,7 +2087,7 @@ func EnsureDockerAuthPath(
 		return fmt.Errorf("failed to generate docker config: %w", err)
 	}
 
-	if err := writeFile(configPath, newContent, 0600); err != nil {
+	if err := writeFile(configPath, newContent, 0o600); err != nil {
 		return fmt.Errorf("failed to write docker config to %s: %w", configPath, err)
 	}
 
@@ -2641,7 +2633,6 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	}, http.StatusOK
 }
 
-
 // EnqueueImageReadyEvent validates an incoming image ready notification, records all matching
 // Nomad jobs into the pending rollout batch, signals the debouncer worker, and returns HTTP 202 Accepted immediately.
 func (d *SyncDaemon) EnqueueImageReadyEvent(req ImageReadyEventRequest) (ImageReadyEventResponse, int) {
@@ -2811,6 +2802,7 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	}
 	return true
 }
+
 // SetupMux configures HTTP handlers for metrics, health, status, and sync.
 func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux := http.NewServeMux()
@@ -2955,7 +2947,6 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		writeJSON(w, r, code, resp)
 	})
 
-
 	return mux
 }
 
@@ -2982,7 +2973,6 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 			log.Printf("[Hangar] Initial startup sync completed with notice: %v", err)
 		}
 	}()
-
 
 	mux := SetupMux(daemon)
 

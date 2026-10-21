@@ -615,6 +615,7 @@ func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
 
 // SetRiverClient updates the RiverInserter backing the server.
 func (s *VanadisServer) SetRiverClient(rc RiverInserter) { s.riverClient = rc }
+
 func (s *VanadisServer) postBrainJSON(ctx context.Context, path string, payload any, errReadLimit int64) ([]byte, error) {
 	if s == nil || s.httpClient == nil {
 		return nil, errors.New("http client is nil")
@@ -844,6 +845,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 
 // Routes returns the HTTP handler for the server.
 func (s *VanadisServer) Routes() http.Handler { return SetupMux(s) }
+
 func (s *VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1138,6 +1140,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 // RunApp runs the Vanadis orchestrator application until the context is canceled.
 func RunApp(ctx context.Context, cfg Config) error { return runServer(ctx, cfg, nil) }
+
 func main() {
 	cfg := LoadConfigFromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

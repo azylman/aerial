@@ -613,7 +613,6 @@ func GetMimeType(filename string) string {
 	return "application/octet-stream"
 }
 
-
 var stageRank = map[string]int{
 	"swapping":      6,
 	"pulling":       5,
@@ -731,7 +730,6 @@ func MergeClusterDeploymentsWithHangar(
 		}
 		return strings.ToLower(trimmed)
 	}
-
 
 	type pipelineEntry struct {
 		dep       *DeploymentStatus

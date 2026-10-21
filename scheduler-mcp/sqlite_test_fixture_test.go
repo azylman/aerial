@@ -14,7 +14,7 @@ import (
 func initTestSQLite(trimmed string) (*sql.DB, error) {
 	trimmed = strings.TrimPrefix(trimmed, "sqlite://")
 	if trimmed != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(trimmed), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(trimmed), 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create db directory: %w", err)
 		}
 	}

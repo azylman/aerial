@@ -70,25 +70,25 @@ func TestGetComposeArgs_TableDriven(t *testing.T) {
 			}
 			baseFile := filepath.Join(composeDir, "docker-compose.yml")
 			if tc.writeBaseCompose {
-				if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+				if err := os.WriteFile(baseFile, []byte("services: {}"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
 			overrideFile := filepath.Join(configDir, "docker-compose.override.yml")
 			if tc.writeConfigOverride {
-				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
+				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if tc.writeLocalOverride {
 				localOverride := filepath.Join(composeDir, "docker-compose.override.yml")
-				if err := os.WriteFile(localOverride, []byte("services: { brain: {} }"), 0644); err != nil {
+				if err := os.WriteFile(localOverride, []byte("services: { brain: {} }"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
 			envFile := filepath.Join(composeDir, ".env")
 			if tc.writeEnvFile {
-				if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0644); err != nil {
+				if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -278,7 +278,6 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 						t.Errorf("expected repo sync_status %q, got %q", tc.wantRepoSyncStatus, repoSt.SyncStatus)
 					}
 				}
-
 			})
 		}
 	})
@@ -286,21 +285,21 @@ func TestGetRepoCommitAndStatus_TableDriven(t *testing.T) {
 	t.Run("resolveGitDir", func(t *testing.T) {
 		tempDir := t.TempDir()
 		standardRepo := filepath.Join(tempDir, "standard")
-		_ = os.MkdirAll(filepath.Join(standardRepo, ".git"), 0755)
+		_ = os.MkdirAll(filepath.Join(standardRepo, ".git"), 0o755)
 
 		worktreeRepo := filepath.Join(tempDir, "worktree")
-		_ = os.MkdirAll(worktreeRepo, 0755)
+		_ = os.MkdirAll(worktreeRepo, 0o755)
 		targetGitDir := filepath.Join(tempDir, "target-git-dir")
-		_ = os.MkdirAll(targetGitDir, 0755)
-		_ = os.WriteFile(filepath.Join(worktreeRepo, ".git"), []byte("gitdir: "+targetGitDir+"\n"), 0644)
+		_ = os.MkdirAll(targetGitDir, 0o755)
+		_ = os.WriteFile(filepath.Join(worktreeRepo, ".git"), []byte("gitdir: "+targetGitDir+"\n"), 0o644)
 
 		relWorktreeRepo := filepath.Join(tempDir, "relworktree")
-		_ = os.MkdirAll(relWorktreeRepo, 0755)
-		_ = os.WriteFile(filepath.Join(relWorktreeRepo, ".git"), []byte("gitdir: ../target-git-dir\n"), 0644)
+		_ = os.MkdirAll(relWorktreeRepo, 0o755)
+		_ = os.WriteFile(filepath.Join(relWorktreeRepo, ".git"), []byte("gitdir: ../target-git-dir\n"), 0o644)
 
 		plainFileRepo := filepath.Join(tempDir, "plainfile")
-		_ = os.MkdirAll(plainFileRepo, 0755)
-		_ = os.WriteFile(filepath.Join(plainFileRepo, ".git"), []byte("not_a_gitdir"), 0644)
+		_ = os.MkdirAll(plainFileRepo, 0o755)
+		_ = os.WriteFile(filepath.Join(plainFileRepo, ".git"), []byte("not_a_gitdir"), 0o644)
 
 		tests := []struct {
 			name, repoPath, wantGitDir string
@@ -456,11 +455,11 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 				tempDir := t.TempDir()
 				repoPath := filepath.Join(tempDir, "repo")
 				if tc.seedRegularFile {
-					_ = os.WriteFile(repoPath, []byte("regular file"), 0644)
+					_ = os.WriteFile(repoPath, []byte("regular file"), 0o644)
 				}
 				if tc.seedNonEmptyDir {
-					_ = os.MkdirAll(repoPath, 0755)
-					_ = os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("data"), 0644)
+					_ = os.MkdirAll(repoPath, 0o755)
+					_ = os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("data"), 0o644)
 				}
 
 				var calls []string
@@ -472,7 +471,7 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 							calls = append(calls, cmd)
 							if cmd == "clone" && tc.cloneCreatesGitDir {
 								cloneCalled = true
-								_ = os.MkdirAll(filepath.Join(args[len(args)-1], ".git"), 0755)
+								_ = os.MkdirAll(filepath.Join(args[len(args)-1], ".git"), 0o755)
 							}
 							if err, ok := tc.gitErrOnCmd[cmd]; ok && err != nil {
 								return nil, []byte("fatal: " + err.Error()), err
@@ -553,14 +552,14 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 					repoPath = filepath.Join(tempDir, "nonexistent")
 				}
 				if tc.seedMode == "git" || tc.seedMode == "index_lock" {
-					_ = os.MkdirAll(filepath.Join(repoPath, ".git"), 0755)
+					_ = os.MkdirAll(filepath.Join(repoPath, ".git"), 0o755)
 				}
 				if tc.seedMode == "non_empty_no_git" {
-					_ = os.MkdirAll(repoPath, 0755)
-					_ = os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("content"), 0644)
+					_ = os.MkdirAll(repoPath, 0o755)
+					_ = os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("content"), 0o644)
 				}
 				if tc.seedMode == "index_lock" {
-					_ = os.WriteFile(filepath.Join(repoPath, ".git", "index.lock"), []byte(""), 0644)
+					_ = os.WriteFile(filepath.Join(repoPath, ".git", "index.lock"), []byte(""), 0o644)
 				}
 
 				currentHead := tc.initHead
@@ -641,11 +640,11 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 	t.Run("TriggerSync", func(t *testing.T) {
 		tempDir := t.TempDir()
 		localDir := filepath.Join(tempDir, "local")
-		_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+		_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0o755)
 		configDir := filepath.Join(tempDir, "config")
-		_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0755)
-		_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0644)
-		_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 4001\n"), 0644)
+		_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0o755)
+		_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 4001\n"), 0o644)
 
 		head1 := "1111111111111111111111111111111111111111"
 		head2 := "2222222222222222222222222222222222222222"
@@ -812,7 +811,7 @@ service_configs:
 			}
 			if tt.yamlContent != "" {
 				cfgPath := filepath.Join(t.TempDir(), "hangar.yaml")
-				if err := os.WriteFile(cfgPath, []byte(tt.yamlContent), 0644); err != nil {
+				if err := os.WriteFile(cfgPath, []byte(tt.yamlContent), 0o644); err != nil {
 					t.Fatalf("failed to write test yaml: %v", err)
 				}
 				envMap["CONFIG_PATH"] = cfgPath
@@ -891,9 +890,9 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 	t.Run("SetupMux endpoints and HTTP methods", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		jobsDir := filepath.Join(tmpDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
-		_ = os.WriteFile(filepath.Join(jobsDir, "test.nomad"), []byte(`job "test" { task "t" { config { image = "ghcr.io/azylman/aerial:latest" } } }`), 0644)
+		_ = os.MkdirAll(jobsDir, 0o755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755)
+		_ = os.WriteFile(filepath.Join(jobsDir, "test.nomad"), []byte(`job "test" { task "t" { config { image = "ghcr.io/azylman/aerial:latest" } } }`), 0o644)
 
 		tests := []struct {
 			name, method, path, body, contentType, reconcileMode string
@@ -975,7 +974,7 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 				if tc.withRepo {
 					t.Setenv("DOCKER_CONFIG", t.TempDir())
 					repoDir := filepath.Join(t.TempDir(), "repo")
-					_ = os.MkdirAll(filepath.Join(repoDir, ".git"), 0755)
+					_ = os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755)
 					started := make(chan struct{}, 1)
 					cfg.Interval = time.Hour
 					cfg.Repos = []string{repoDir}
@@ -1029,8 +1028,14 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 		defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
 
 		called, metaCalled := false, false
-		writeCountersDirFn = func(dir string) error { called = true; return nil }
-		writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
+		writeCountersDirFn = func(dir string) error {
+			called = true
+			return nil
+		}
+		writeMetaDirFn = func(dir string) error {
+			metaCalled = true
+			return nil
+		}
 		_ = os.Setenv("GOCOVERDIR", t.TempDir())
 
 		rec2 := httptest.NewRecorder()
@@ -1157,14 +1162,14 @@ func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase) {
 			t.Parallel()
 			env := newNomadConfigSyncTestEnv(t)
 			if tc.dirAsFile != "" {
-				if err := os.MkdirAll(filepath.Join(env.configDir, tc.dirAsFile), 0755); err != nil {
+				if err := os.MkdirAll(filepath.Join(env.configDir, tc.dirAsFile), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}
 			for rel, content := range tc.files {
 				full := filepath.Join(env.configDir, rel)
-				_ = os.MkdirAll(filepath.Dir(full), 0755)
-				_ = os.WriteFile(full, []byte(content), 0644)
+				_ = os.MkdirAll(filepath.Dir(full), 0o755)
+				_ = os.WriteFile(full, []byte(content), 0o644)
 			}
 			if tc.disableNomad {
 				env.daemon.nomadAddr = ""
@@ -1255,10 +1260,10 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 			{
 				name: "brain",
 				setup: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(validBrainYAML), 0644)
+					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(validBrainYAML), 0o644)
 				},
 				modify: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("channels:\n  default:\n    mode: always\n"), 0644)
+					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("channels:\n  default:\n    mode: always\n"), 0o644)
 				},
 				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
 					return d.SyncBrainConfigToNomad(ctx, dir, sCtx...)
@@ -1273,20 +1278,20 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 			{
 				name: "homepage",
 				setup: func(dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "homepage"), 0755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\nallowed_hosts: \"*\"\n"), 0644)
-					_ = os.MkdirAll(filepath.Join(dir, "homepage", "subdir"), 0755)
+					_ = os.MkdirAll(filepath.Join(dir, "services", "homepage"), 0o755)
+					_ = os.WriteFile(filepath.Join(dir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\nallowed_hosts: \"*\"\n"), 0o644)
+					_ = os.MkdirAll(filepath.Join(dir, "homepage", "subdir"), 0o755)
 					for name, content := range map[string]string{
 						"services.yaml": "- My Group: []\n",
 						"widgets.yaml":  "- search: {}\n",
 						".hidden":       "ignore me",
 						"temp.tmp":      "ignore me too",
 					} {
-						_ = os.WriteFile(filepath.Join(dir, "homepage", name), []byte(content), 0644)
+						_ = os.WriteFile(filepath.Join(dir, "homepage", name), []byte(content), 0o644)
 					}
 				},
 				modify: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "homepage", "widgets.yaml"), []byte("- search: { updated: true }\n"), 0644)
+					_ = os.WriteFile(filepath.Join(dir, "homepage", "widgets.yaml"), []byte("- search: { updated: true }\n"), 0o644)
 				},
 				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
 					return d.SyncHomepageConfigToNomad(ctx, dir, sCtx...)
@@ -1307,12 +1312,12 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 						"services/hangar/hangar.yaml":     "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/mcp/scheduler-mcp.yaml\"\n    nomad_var: \"nomad/jobs/scheduler-mcp\"\n    var_key: \"CONFIG_YAML\"\n",
 					} {
 						full := filepath.Join(dir, rel)
-						_ = os.MkdirAll(filepath.Dir(full), 0755)
-						_ = os.WriteFile(full, []byte(content), 0644)
+						_ = os.MkdirAll(filepath.Dir(full), 0o755)
+						_ = os.WriteFile(full, []byte(content), 0o644)
 					}
 				},
 				modify: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "services", "voice", "voice.yaml"), []byte("model: distil-small.en\n"), 0644)
+					_ = os.WriteFile(filepath.Join(dir, "services", "voice", "voice.yaml"), []byte("model: distil-small.en\n"), 0o644)
 				},
 				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
 					return d.SyncServiceConfigsToNomad(ctx, dir, sCtx...)
@@ -1394,8 +1399,8 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 		}
 
 		customDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(customDir, "services", "hangar"), 0755)
-		_ = os.WriteFile(filepath.Join(customDir, "services", "hangar", "hangar.yaml"), []byte("service_configs:\n  - rel_path: \"services/custom/custom.yaml\"\n    nomad_var: \"nomad/jobs/custom-job\"\n    var_key: \"CONFIG_YAML\"\n"), 0644)
+		_ = os.MkdirAll(filepath.Join(customDir, "services", "hangar"), 0o755)
+		_ = os.WriteFile(filepath.Join(customDir, "services", "hangar", "hangar.yaml"), []byte("service_configs:\n  - rel_path: \"services/custom/custom.yaml\"\n    nomad_var: \"nomad/jobs/custom-job\"\n    var_key: \"CONFIG_YAML\"\n"), 0o644)
 		d := NewDaemon(DaemonConfig{ConfigDir: customDir})
 		if customMappings := d.GetServiceConfigMappings(customDir); len(customMappings) != 1 || customMappings[0].RelPath != "services/custom/custom.yaml" || customMappings[0].NomadVar != "nomad/jobs/custom-job" {
 			t.Fatalf("expected custom mappings from hangar.yaml, got %v", customMappings)
@@ -1412,8 +1417,8 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 
 		env := newNomadConfigSyncTestEnv(t)
 		env.daemon.serviceConfigs = []ServiceConfigMapping{{RelPath: "proxy/default.conf", NomadVar: "nomad/jobs/mesh-proxy", VarKey: "DEFAULT_CONF"}}
-		_ = os.MkdirAll(filepath.Join(env.configDir, "proxy"), 0755)
-		_ = os.WriteFile(filepath.Join(env.configDir, "proxy", "default.conf"), []byte("server { listen 80; proxy_pass http://backend; }"), 0644)
+		_ = os.MkdirAll(filepath.Join(env.configDir, "proxy"), 0o755)
+		_ = os.WriteFile(filepath.Join(env.configDir, "proxy", "default.conf"), []byte("server { listen 80; proxy_pass http://backend; }"), 0o644)
 		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
 			t.Fatalf("expected non-YAML config to sync with 1 call, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
@@ -1451,7 +1456,10 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 func TestTriggerReconcile_TableDriven(t *testing.T) {
 	ctx := context.Background()
 	calledSync := false
-	d := &SyncDaemon{reconcileFn: func(ctx context.Context) error { calledSync = true; return nil }}
+	d := &SyncDaemon{reconcileFn: func(ctx context.Context) error {
+		calledSync = true
+		return nil
+	}}
 	if err := d.TriggerReconcile(ctx, false); err != nil || !calledSync {
 		t.Fatalf("expected TriggerReconcile(false) to execute reconcileFn, err=%v", err)
 	}
@@ -1493,15 +1501,15 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 	t.Run("defaultComposeExecutor CLI mocking", func(t *testing.T) {
 		tempDir := t.TempDir()
 		binDir := filepath.Join(tempDir, "bin")
-		if err := os.MkdirAll(binDir, 0755); err != nil {
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
 			t.Fatalf("failed to create bin dir: %v", err)
 		}
 		if runtime.GOOS == "windows" {
 			script := "@echo off\r\nset \"arg=%*\"\r\necho %arg% | findstr /i \"waitloop\" >nul && goto do_wait\r\necho %arg% | findstr /i \"compose\" >nul && (echo Docker Compose mock v2.0 & exit /b 0)\r\necho %arg% | findstr /i \"version\" >nul && (echo Docker mock v24.0 & exit /b 0)\r\necho unknown cmd >&2\r\nexit /b 1\r\n:do_wait\r\ngoto do_wait\r\n"
-			_ = os.WriteFile(filepath.Join(binDir, "docker.cmd"), []byte(script), 0755)
+			_ = os.WriteFile(filepath.Join(binDir, "docker.cmd"), []byte(script), 0o755)
 		} else {
 			script := "#!/bin/sh\ncase \"$*\" in\n  *\"waitloop\"*) trap 'exit 0' TERM INT; while :; do :; done;;\n  *\"compose\"*) echo \"Docker Compose mock v2.0\"; exit 0;;\n  *\"version\"*) echo \"Docker mock v24.0\"; exit 0;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
-			_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0755)
+			_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755)
 		}
 		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -1568,7 +1576,10 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 			t.Errorf("expected error from deploy dispatcher when deployDispatcher is nil")
 		}
 		customDisp := false
-		dCustomDisp := &SyncDaemon{deployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error { customDisp = true; return nil }}
+		dCustomDisp := &SyncDaemon{deployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			customDisp = true
+			return nil
+		}}
 		if err := dCustomDisp.getDeployDispatcher()(context.Background(), HangarDeployEvent{}); err != nil || !customDisp {
 			t.Errorf("expected custom deploy dispatcher to be called: %v", err)
 		}
@@ -1743,7 +1754,7 @@ func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 					t.Fatalf("unexpected error: %v", err)
 				}
 				if tc.wantAuthUser != "" {
-					if filepath.ToSlash(writtenPath) != "/mock/docker/config.json" || writtenMode != 0600 {
+					if filepath.ToSlash(writtenPath) != "/mock/docker/config.json" || writtenMode != 0o600 {
 						t.Errorf("expected /mock/docker/config.json and 0600, got %s and %v", writtenPath, writtenMode)
 					}
 					var parsed struct {
@@ -2370,14 +2381,14 @@ func newImagePollTestEnv(t *testing.T, tc nomadImagePollCase) *imagePollTestEnv 
 		baseDir = filepath.Join(tmpDir, "aerial")
 	}
 	jobsDir := filepath.Join(baseDir, "jobs")
-	_ = os.MkdirAll(jobsDir, 0755)
+	_ = os.MkdirAll(jobsDir, 0o755)
 
 	if tc.seedNonNomad {
-		_ = os.MkdirAll(filepath.Join(jobsDir, "nested-dir"), 0755)
-		_ = os.WriteFile(filepath.Join(jobsDir, "readme.txt"), []byte("not a nomad file"), 0644)
+		_ = os.MkdirAll(filepath.Join(jobsDir, "nested-dir"), 0o755)
+		_ = os.WriteFile(filepath.Join(jobsDir, "readme.txt"), []byte("not a nomad file"), 0o644)
 	}
 	if tc.jobFile != "" {
-		_ = os.WriteFile(filepath.Join(jobsDir, tc.jobFile), []byte(tc.jobContent), 0644)
+		_ = os.WriteFile(filepath.Join(jobsDir, tc.jobFile), []byte(tc.jobContent), 0o644)
 	}
 
 	curDigest := tc.initialDigest
@@ -2733,13 +2744,13 @@ func newPushEventTestEnv(t *testing.T, opts ...func(*DaemonConfig)) *pushEventTe
 	aerialDir := filepath.Join(tmpDir, "aerial")
 	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
 	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
-	_ = os.MkdirAll(aerialDir, 0755)
-	_ = os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0755)
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
-	_ = os.MkdirAll(mirrormereDir, 0755)
-	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0755)
-	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
-	_ = os.MkdirAll(filepath.Join(mirrormereDir, ".git"), 0755)
+	_ = os.MkdirAll(aerialDir, 0o755)
+	_ = os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0o755)
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0o755)
+	_ = os.MkdirAll(mirrormereDir, 0o755)
+	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0o755)
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0o755)
+	_ = os.MkdirAll(filepath.Join(mirrormereDir, ".git"), 0o755)
 
 	repos := []string{aerialDir, aerialConfigDir, mirrormereDir}
 	evtCh := make(chan HangarDeployEvent, 50)
@@ -2840,11 +2851,11 @@ func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
 		env.daemon.nomadAddr = tc.nomadAddr
 	}
 	if tc.serviceFiles {
-		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "voice"), 0755)
-		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "hangar"), 0755)
-		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "voice", "voice.yaml"), []byte("model: small.en\n"), 0644)
+		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "voice"), 0o755)
+		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "hangar"), 0o755)
+		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "voice", "voice.yaml"), []byte("model: small.en\n"), 0o644)
 		hangarContent := "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n"
-		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "hangar", "hangar.yaml"), []byte(hangarContent), 0644)
+		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "hangar", "hangar.yaml"), []byte(hangarContent), 0o644)
 	}
 	targetDir := env.aerialDir
 	if strings.Contains(tc.req.Repo, "aerial-config") {
@@ -2852,8 +2863,8 @@ func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
 	}
 	for p, content := range tc.jobFiles {
 		fullP := filepath.Join(targetDir, p)
-		_ = os.MkdirAll(filepath.Dir(fullP), 0755)
-		_ = os.WriteFile(fullP, []byte(content), 0644)
+		_ = os.MkdirAll(filepath.Dir(fullP), 0o755)
+		_ = os.WriteFile(fullP, []byte(content), 0o644)
 	}
 	env.daemon.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 		if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
@@ -3271,10 +3282,10 @@ func newImageReadyTestEnv(t *testing.T, opts ...func(*DaemonConfig)) *imageReady
 	t.Helper()
 	tmpDir := t.TempDir()
 	jobsDir := filepath.Join(tmpDir, "jobs")
-	_ = os.MkdirAll(jobsDir, 0755)
+	_ = os.MkdirAll(jobsDir, 0o755)
 
 	coreJobsDir := filepath.Join(tmpDir, "core", "nomad", "jobs")
-	_ = os.MkdirAll(coreJobsDir, 0755)
+	_ = os.MkdirAll(coreJobsDir, 0o755)
 
 	env := &imageReadyTestEnv{
 		t:           t,
@@ -3365,7 +3376,7 @@ func (e *imageReadyTestEnv) writeJob(relDir, filename, hcl string) string {
 		targetDir = e.jobsDir
 	}
 	path := filepath.Join(targetDir, filename)
-	if err := os.WriteFile(path, []byte(hcl), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(hcl), 0o644); err != nil {
 		e.t.Fatalf("failed writing job file %s: %v", path, err)
 	}
 	return path
@@ -4255,7 +4266,6 @@ func mockGitDiffExec(primaryOut, fallbackOut string, primaryErr, fallbackErr err
 }
 
 func TestNomadChangeDetection_TableDriven(t *testing.T) {
-
 	t.Run("HasNomadConfigChanges_table", func(t *testing.T) {
 		tests := []struct {
 			name         string
@@ -4415,7 +4425,6 @@ func TestNomadChangeDetection_TableDriven(t *testing.T) {
 }
 
 func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
-
 	t.Run("defaultNomadExecutor_and_accessors", func(t *testing.T) {
 		ctx := context.Background()
 		cancelCtx, cancel := context.WithCancel(context.Background())
@@ -4453,7 +4462,7 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 	t.Run("ValidateNomadConfig_table", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		jobFile := filepath.Join(tmpDir, "test.nomad")
-		_ = os.WriteFile(jobFile, []byte(`job "test" {}`), 0644)
+		_ = os.WriteFile(jobFile, []byte(`job "test" {}`), 0o644)
 
 		tests := []struct {
 			name      string
@@ -4522,7 +4531,7 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 		}
 
 		nomadDir := filepath.Join(tmpDir, "nomad")
-		if err := os.MkdirAll(nomadDir, 0755); err != nil {
+		if err := os.MkdirAll(nomadDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 
@@ -4601,11 +4610,11 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 	t.Run("IsHangarRequest_table", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		jobsDir := filepath.Join(tmpDir, "nomad", "jobs")
-		if err := os.MkdirAll(jobsDir, 0755); err != nil {
+		if err := os.MkdirAll(jobsDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		hcl := `job "hangar" { group "g" { task "t" { config { image = "ghcr.io/custom/worker:v1" } } } }`
-		if err := os.WriteFile(filepath.Join(jobsDir, "hangar.nomad"), []byte(hcl), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(jobsDir, "hangar.nomad"), []byte(hcl), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -4635,15 +4644,14 @@ func newNomadReconcileDaemon(opts ...func(*DaemonConfig)) *SyncDaemon {
 }
 
 func TestNomadJobReconciliation_TableDriven(t *testing.T) {
-
 	t.Run("ReconcileNomadChanges_teardown_order_and_cases", func(t *testing.T) {
 		ctx := context.Background()
 		tmpDir := t.TempDir()
 		jobsDir := filepath.Join(tmpDir, "jobs")
-		_ = os.MkdirAll(jobsDir, 0755)
-		_ = os.WriteFile(filepath.Join(jobsDir, "valid.nomad"), []byte(`job "valid" {}`), 0644)
-		_ = os.WriteFile(filepath.Join(jobsDir, "invalid.nomad"), []byte(`job "invalid" {}`), 0644)
-		_ = os.WriteFile(filepath.Join(jobsDir, "runfail.nomad"), []byte(`job "runfail" {}`), 0644)
+		_ = os.MkdirAll(jobsDir, 0o755)
+		_ = os.WriteFile(filepath.Join(jobsDir, "valid.nomad"), []byte(`job "valid" {}`), 0o644)
+		_ = os.WriteFile(filepath.Join(jobsDir, "invalid.nomad"), []byte(`job "invalid" {}`), 0o644)
+		_ = os.WriteFile(filepath.Join(jobsDir, "runfail.nomad"), []byte(`job "runfail" {}`), 0o644)
 
 		var executedCalls [][]string
 		var mu sync.Mutex
@@ -4844,10 +4852,10 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		tempDir := t.TempDir()
 		repoA := filepath.Join(tempDir, "aerial-config")
 		repoB := filepath.Join(tempDir, "aerial")
-		_ = os.MkdirAll(filepath.Join(repoA, "jobs"), 0755)
+		_ = os.MkdirAll(filepath.Join(repoA, "jobs"), 0o755)
 		nomadJobsDirB := filepath.Join(repoB, "nomad", "jobs")
-		_ = os.MkdirAll(nomadJobsDirB, 0755)
-		_ = os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(`job "brain" {}`), 0644)
+		_ = os.MkdirAll(nomadJobsDirB, 0o755)
+		_ = os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(`job "brain" {}`), 0o644)
 
 		dCross := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
 			cfg.Repos = []string{repoA, repoB}
@@ -4954,7 +4962,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 
 		// 3. Valid pending job with PR metadata
 		tmpDir := t.TempDir()
-		_ = os.WriteFile(filepath.Join(tmpDir, "bot.nomad"), []byte(`job "bot" {}`), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "bot.nomad"), []byte(`job "bot" {}`), 0o644)
 		evtCh := make(chan HangarDeployEvent, 10)
 		dMeta := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
 			cfg.DeployDispatcher = func(ctx context.Context, evt HangarDeployEvent) error {
@@ -4983,7 +4991,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 
 		// 4. Pending job fails validation (error aggregation)
 		invalidDir := t.TempDir()
-		_ = os.WriteFile(filepath.Join(invalidDir, "invalid.nomad"), []byte(`job "invalid" {}`), 0644)
+		_ = os.WriteFile(filepath.Join(invalidDir, "invalid.nomad"), []byte(`job "invalid" {}`), 0o644)
 		dFailVal := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
 			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				if len(args) >= 3 && args[0] == "job" && args[1] == "validate" {

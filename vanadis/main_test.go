@@ -30,7 +30,7 @@ type mockRow struct {
 }
 
 func fillBuildDest(b VanadisBuild, dest []any) {
-	*(dest[0].(*string)), *(dest[1].(*string)), *(dest[2].(*int)), *(dest[3].(*string)), *(dest[4].(*string)), *(dest[5].(*string)), *(dest[6].(*string)), *(dest[7].(*string)), *(dest[8].(*time.Time)), *(dest[9].(*time.Time)) = b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.CreatedAt, b.UpdatedAt
+	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*string), *dest[8].(*time.Time), *dest[9].(*time.Time) = b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.CreatedAt, b.UpdatedAt
 }
 
 func (r *mockRow) Scan(dest ...any) error {
@@ -74,7 +74,7 @@ func (r *mockRows) Scan(dest ...any) error {
 		return nil
 	}
 	c := r.items[r.idx-1]
-	*(dest[0].(*string)), *(dest[1].(*string)), *(dest[2].(*int)), *(dest[3].(*string)), *(dest[4].(*string)), *(dest[5].(*string)), *(dest[6].(*[]string)), *(dest[7].(*[]string)), *(dest[8].(*string)), *(dest[9].(*[]string)), *(dest[10].(*string)), *(dest[11].(*int)), *(dest[12].(*sql.NullTime)), *(dest[13].(*time.Time)), *(dest[14].(*time.Time)) = c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
+	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*[]string), *dest[7].(*[]string), *dest[8].(*string), *dest[9].(*[]string), *dest[10].(*string), *dest[11].(*int), *dest[12].(*sql.NullTime), *dest[13].(*time.Time), *dest[14].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 	return nil
 }
 
@@ -106,18 +106,21 @@ func (db *mockDB) Exec(ctx context.Context, s string, a ...any) (pgconn.CommandT
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
+
 func (db *mockDB) Query(ctx context.Context, s string, a ...any) (pgx.Rows, error) {
 	if db.queryFn != nil {
 		return db.queryFn(ctx, s, a...)
 	}
 	return &mockRows{}, nil
 }
+
 func (db *mockDB) QueryRow(ctx context.Context, s string, a ...any) pgx.Row {
 	if db.queryRowFn != nil {
 		return db.queryRowFn(ctx, s, a...)
 	}
 	return &mockRow{}
 }
+
 func (db *mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 	if db.beginFn != nil {
 		return db.beginFn(ctx)
@@ -213,9 +216,11 @@ func (m *memoryVanadisStore) setBuild(id string, fn func(*VanadisBuild)) error {
 	m.builds[id] = b
 	return nil
 }
+
 func (m *memoryVanadisStore) UpdateBuildStatus(_ context.Context, id, status string) error {
 	return m.setBuild(id, func(b *VanadisBuild) { b.Status = status })
 }
+
 func (m *memoryVanadisStore) UpdateBuildStatusMessageID(_ context.Context, id, msgID string) error {
 	return m.setBuild(id, func(b *VanadisBuild) { b.StatusMessageID = msgID })
 }
@@ -320,8 +325,10 @@ func TestExecuteChunkArgsAndNormalizeRepo(t *testing.T) {
 	repoTests := []struct {
 		name, input, want string
 	}{
-		{"empty repo", "", ""}, {"whitespace repo", "   ", ""},
-		{"already qualified", "azylman/aerial", "azylman/aerial"}, {"unqualified repo", "aerial", "azylman/aerial"},
+		{"empty repo", "", ""},
+		{"whitespace repo", "   ", ""},
+		{"already qualified", "azylman/aerial", "azylman/aerial"},
+		{"unqualified repo", "aerial", "azylman/aerial"},
 		{"unqualified with spaces", "  mirrormere  ", "azylman/mirrormere"},
 	}
 	for _, tc := range repoTests {
@@ -355,10 +362,14 @@ func TestPostgresVanadisStore(t *testing.T) {
 		build  VanadisBuild
 		chunks []VanadisChunk
 	}{
-		{"empty build id", mkBuild("", "1", "", "o", ""), nil}, {"empty thread", mkBuild("b", "", "", "o", ""), nil},
-		{"empty objective", mkBuild("b", "1", "", "", ""), nil}, {"empty chunk id", validBuild, []VanadisChunk{mkChunk("", "", 0, "t", "i", "", "")}},
-		{"mismatched chunk build_id", validBuild, []VanadisChunk{mkChunk("c", "other", 0, "t", "i", "", "")}}, {"empty chunk title", validBuild, []VanadisChunk{mkChunk("c", "", 0, "", "i", "", "")}},
-		{"empty chunk instructions", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "", "", "")}}, {"invalid chunk effort", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "i", "ultra", "")}},
+		{"empty build id", mkBuild("", "1", "", "o", ""), nil},
+		{"empty thread", mkBuild("b", "", "", "o", ""), nil},
+		{"empty objective", mkBuild("b", "1", "", "", ""), nil},
+		{"empty chunk id", validBuild, []VanadisChunk{mkChunk("", "", 0, "t", "i", "", "")}},
+		{"mismatched chunk build_id", validBuild, []VanadisChunk{mkChunk("c", "other", 0, "t", "i", "", "")}},
+		{"empty chunk title", validBuild, []VanadisChunk{mkChunk("c", "", 0, "", "i", "", "")}},
+		{"empty chunk instructions", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "", "", "")}},
+		{"invalid chunk effort", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "i", "ultra", "")}},
 	} {
 		if err := store.CreateBuild(ctx, tc.build, tc.chunks); err == nil {
 			t.Fatalf("expected error for case %s", tc.name)
@@ -718,9 +729,12 @@ func TestHTTPEndpoints(t *testing.T) {
 		m, p string
 		w    int
 	}{
-		{http.MethodGet, "/builds/", http.StatusBadRequest}, {http.MethodDelete, "/builds/" + buildID, http.StatusMethodNotAllowed},
-		{http.MethodGet, "/builds/unknown-id", http.StatusNotFound}, {http.MethodGet, "/builds/" + buildID, http.StatusOK},
-		{http.MethodGet, "/builds/" + buildID + "/cancel", http.StatusMethodNotAllowed}, {http.MethodPost, "/builds/%20/cancel", http.StatusBadRequest},
+		{http.MethodGet, "/builds/", http.StatusBadRequest},
+		{http.MethodDelete, "/builds/" + buildID, http.StatusMethodNotAllowed},
+		{http.MethodGet, "/builds/unknown-id", http.StatusNotFound},
+		{http.MethodGet, "/builds/" + buildID, http.StatusOK},
+		{http.MethodGet, "/builds/" + buildID + "/cancel", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/builds/%20/cancel", http.StatusBadRequest},
 		{http.MethodPost, "/builds/unknown-id/cancel", http.StatusNotFound},
 	} {
 		checkCode(tc.m, tc.p, nil, tc.w)
@@ -796,6 +810,7 @@ func TestHTTPEndpoints(t *testing.T) {
 		t.Fatalf("unexpected Entry: %+v", detailResp.Entry)
 	}
 }
+
 func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
 	origPoolFn, origRiverFn := newPgxPoolFn, newRiverClientFn
 	defer func() { newPgxPoolFn, newRiverClientFn = origPoolFn, origRiverFn }()
@@ -861,6 +876,7 @@ func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
 		t.Fatalf("unexpected RunApp error: %v", err)
 	}
 }
+
 func TestSyncBuildWidget(t *testing.T) {
 	ctx := context.Background()
 	var nilSrv *VanadisServer
@@ -905,6 +921,7 @@ func TestSyncBuildWidget(t *testing.T) {
 	store.updateBuildErr = errors.New("simulated store failure")
 	srv.syncBuildWidget(ctx, build, chunks, "")
 }
+
 func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
 	t.Parallel()
 	classifyTests := []struct {
@@ -913,14 +930,19 @@ func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
 		chunks      []VanadisChunk
 		expected    string
 	}{
-		{"completed status", "completed", nil, "completed"}, {"merged status", "merged", nil, "completed"},
-		{"failed status", "failed", nil, "completed"}, {"cancelled status", "cancelled", nil, "completed"},
-		{"canceled status uppercase", "CANCELED", nil, "completed"}, {"queued status", "queued", nil, "queued"},
-		{"pending status", "pending", nil, "queued"}, {"running with empty chunks", "running", []VanadisChunk{}, "running"},
+		{"completed status", "completed", nil, "completed"},
+		{"merged status", "merged", nil, "completed"},
+		{"failed status", "failed", nil, "completed"},
+		{"cancelled status", "cancelled", nil, "completed"},
+		{"canceled status uppercase", "CANCELED", nil, "completed"},
+		{"queued status", "queued", nil, "queued"},
+		{"pending status", "pending", nil, "queued"},
+		{"running with empty chunks", "running", []VanadisChunk{}, "running"},
 		{"running with all pending chunks", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "pending"), mkChunk("c2", "", 1, "", "", "", "pending")}, "queued"},
 		{"running with mixed chunks", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "pending"), mkChunk("c2", "", 1, "", "", "", "running")}, "running"},
 		{"running with completed chunk", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "completed")}, "running"},
-		{"unknown status defaults to queued", "unknown_state", nil, "queued"}, {"whitespace padded status", "  completed  ", nil, "completed"},
+		{"unknown status defaults to queued", "unknown_state", nil, "queued"},
+		{"whitespace padded status", "  completed  ", nil, "completed"},
 	}
 	for _, tt := range classifyTests {
 		t.Run(tt.name, func(t *testing.T) {

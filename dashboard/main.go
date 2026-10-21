@@ -458,7 +458,6 @@ func normalizeGitCommit(commit string) string {
 }
 
 func getGitCommit(customPaths ...string) string {
-
 	paths := defaultGitCommitPaths
 	if len(customPaths) > 0 {
 		paths = customPaths
@@ -483,7 +482,6 @@ func getGitCommit(customPaths ...string) string {
 
 	return "latest"
 }
-
 
 func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 	var cleaned []string
@@ -519,7 +517,6 @@ func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 		stopCh: make(chan struct{}),
 	}
 }
-
 
 // fetchHangarRepos queries Hangar's GET /status endpoint and extracts valid github_repo slugs.
 func fetchHangarRepos(ctx context.Context, hangarURL string, client *http.Client) []string {
@@ -649,7 +646,6 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 		}
 	}()
 }
-
 
 func drainAndClose(body io.ReadCloser, name string) {
 	if body == nil {
@@ -1872,7 +1868,6 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
 	}

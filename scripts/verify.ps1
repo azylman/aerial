@@ -12,7 +12,7 @@ $mode = if ($Staged) { "staged" } else { "full" }
 Write-Host "⚡ [Aerial Verify] Running $mode verification checks on Windows..." -ForegroundColor Cyan
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$goServices = @("brain", "scheduler-mcp", "discord-mcp", "dashboard", "sidecars/hangar")
+$goServices = @("brain", "scheduler-mcp", "discord-mcp", "dashboard", "sidecars/hangar", "webhooks-router", "vanadis")
 
 $gitCmd = if (Get-Command "git" -ErrorAction SilentlyContinue) { "git" }
           elseif (Test-Path "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe") { 
@@ -228,6 +228,31 @@ function Run-NodeTest($relDir, $testPattern) {
     }
 }
 
+function Check-Gofmt($stagedFiles) {
+    if (-not $hasGo) { return }
+    $unformatted = @()
+    if ($stagedFiles) {
+        $goStaged = $stagedFiles | Where-Object { $_ -like "*.go" }
+        foreach ($gf in $goStaged) {
+            $fullGf = Join-Path $repoRoot $gf
+            if (Test-Path $fullGf) {
+                $out = & gofmt -l $fullGf
+                if ($LASTEXITCODE -eq 0 -and $out) {
+                    $unformatted += $out
+                }
+            }
+        }
+    } else {
+        $out = & gofmt -l .
+        if ($LASTEXITCODE -eq 0 -and $out) {
+            $unformatted = $out | Where-Object { $_ -notmatch '(^|[/\\])vendor[/\\]' }
+        }
+    }
+    if ($unformatted.Count -gt 0) {
+        throw "Unformatted Go files detected (run gofmt -w or golangci-lint fmt):`n" + ($unformatted -join "`n")
+    }
+}
+
 function Check-RuleFileSizes {
     $maxBytes = 23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
     foreach ($name in @("GEMINI.md", "AGENTS.md")) {
@@ -248,6 +273,7 @@ if ($Staged) {
         Write-Host "✅ [Aerial Verify] No staged files to verify." -ForegroundColor Green
         exit 0
     }
+    Check-Gofmt $stagedFiles
 
     foreach ($svc in $goServices) {
         $svcStaged = $stagedFiles | Where-Object { $_ -like "$svc/*.go" }
@@ -281,8 +307,9 @@ if ($Staged) {
     exit 0
 }
 
-Write-Host "=== 0. Rule File Size Budget ===" -ForegroundColor Yellow
+Write-Host "=== 0. Rule File Size Budget & Formatting Hygiene ===" -ForegroundColor Yellow
 Check-RuleFileSizes
+Check-Gofmt $null
 
 Write-Host "=== 1. Static Analysis & Linting ===" -ForegroundColor Yellow
 foreach ($svc in $goServices) {

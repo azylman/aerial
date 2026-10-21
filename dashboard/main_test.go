@@ -226,7 +226,7 @@ func TestStatusHandler(t *testing.T) {
 			if tc.yamlContent != "" {
 				tempDir := t.TempDir()
 				cfgFile = filepath.Join(tempDir, "config.yaml")
-				if err := os.WriteFile(cfgFile, []byte(tc.yamlContent), 0644); err != nil {
+				if err := os.WriteFile(cfgFile, []byte(tc.yamlContent), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -619,10 +619,10 @@ func TestGetGitCommit(t *testing.T) {
 			} else {
 				if tc.refRelPath != "" {
 					refFile := filepath.Join(tempDir, tc.refRelPath)
-					_ = os.MkdirAll(filepath.Dir(refFile), 0755)
-					_ = os.WriteFile(refFile, []byte(tc.refContent), 0644)
+					_ = os.MkdirAll(filepath.Dir(refFile), 0o755)
+					_ = os.WriteFile(refFile, []byte(tc.refContent), 0o644)
 				}
-				_ = os.WriteFile(headFile, []byte(tc.headContent), 0644)
+				_ = os.WriteFile(headFile, []byte(tc.headContent), 0o644)
 			}
 			if c := getGitCommit(headFile); c != tc.want {
 				t.Errorf("expected %q, got %q", tc.want, c)
@@ -1648,7 +1648,7 @@ vanadis_url: ""
 				path = filepath.Join(t.TempDir(), "nonexistent.yaml")
 			} else if !tc.noFile {
 				path = filepath.Join(t.TempDir(), "config.yaml")
-				if err := os.WriteFile(path, []byte(tc.yamlData), 0644); err != nil {
+				if err := os.WriteFile(path, []byte(tc.yamlData), 0o644); err != nil {
 					t.Fatalf("failed to write test yaml: %v", err)
 				}
 			}
@@ -1841,7 +1841,7 @@ github_repos:
 config_path: "/custom/aerial-config/config.yaml"
 vanadis_url: "http://vanadis:8089"
 `
-	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("failed to write test dashboard.yaml: %v", err)
 	}
 
@@ -1995,14 +1995,14 @@ vanadis_url: "http://vanadis:8089"
 				}
 				if tc.userYAML != "" {
 					userPath := filepath.Join(t.TempDir(), "user-config.yaml")
-					if err := os.WriteFile(userPath, []byte(tc.userYAML), 0644); err != nil {
+					if err := os.WriteFile(userPath, []byte(tc.userYAML), 0o644); err != nil {
 						t.Fatal(err)
 					}
 					envMap["AERIAL_CONFIG_PATH"] = userPath
 				}
 				if tc.customYAML != "" {
 					customPath := filepath.Join(t.TempDir(), "dashboard.yaml")
-					if err := os.WriteFile(customPath, []byte(tc.customYAML), 0644); err != nil {
+					if err := os.WriteFile(customPath, []byte(tc.customYAML), 0o644); err != nil {
 						t.Fatal(err)
 					}
 					envMap["CONFIG_PATH"] = customPath
@@ -2393,7 +2393,6 @@ func (m *mockErrWriter) WriteHeader(statusCode int) {
 }
 
 func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
-
 	// 2. drainAndClose with nil, success, copy error, and close error
 	drainAndClose(nil, "nil body")
 	drainAndClose(&mockReadCloser{Reader: strings.NewReader("clean body content"), closeErr: nil}, "clean body")
@@ -2503,10 +2502,10 @@ func TestGitHubPoller_PollAndDecode(t *testing.T) {
 		wantEvent        string
 	}{
 		{
-			name:       "StandardPollAndETagJobsCaching",
-			repos:      []string{"azylman/aerial"},
-			runsETag:   "runs-etag-1",
-			jobsETag:   "job-etag-1",
+			name:     "StandardPollAndETagJobsCaching",
+			repos:    []string{"azylman/aerial"},
+			runsETag: "runs-etag-1",
+			jobsETag: "job-etag-1",
 			runsBody: fmt.Sprintf(`{
 				"total_count": 1,
 				"workflow_runs": [
@@ -2999,7 +2998,7 @@ dashboard:
   github_repos:
     - "azylman/aerial"
 `
-				if err := os.WriteFile(cfgFile, []byte(initialYaml), 0644); err != nil {
+				if err := os.WriteFile(cfgFile, []byte(initialYaml), 0o644); err != nil {
 					t.Fatal(err)
 				}
 
@@ -3035,7 +3034,7 @@ dashboard:
     - "azylman/aerial"
     - "azylman/aerial-sidecars"
 `
-				if err := os.WriteFile(cfgFile, []byte(updatedYaml), 0644); err != nil {
+				if err := os.WriteFile(cfgFile, []byte(updatedYaml), 0o644); err != nil {
 					t.Fatal(err)
 				}
 
@@ -3312,8 +3311,14 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
 
 	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error { called = true; return nil }
-	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
+	writeCountersDirFn = func(dir string) error {
+		called = true
+		return nil
+	}
+	writeMetaDirFn = func(dir string) error {
+		metaCalled = true
+		return nil
+	}
 	_ = os.Setenv("GOCOVERDIR", t.TempDir())
 
 	resp3, err3 := http.Get(ts.URL + "/debug/coverage/flush")

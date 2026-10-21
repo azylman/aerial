@@ -83,7 +83,6 @@ func allFailedTaskGroupsQueued(failedTG map[string]interface{}, queued map[strin
 	return true
 }
 
-
 // NomadJobEventPayload captures job registration updates from Nomad.
 type NomadJobEventPayload struct {
 	Job struct {

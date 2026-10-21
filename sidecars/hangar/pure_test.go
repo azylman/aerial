@@ -118,7 +118,6 @@ func TestCalculateSyncStatus_TableDriven(t *testing.T) {
 	}
 }
 
-
 func TestScrubComposeEnv_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1130,7 +1129,7 @@ func TestFindJobDefinitionInRepos(t *testing.T) {
 	jobsDirEdge := filepath.Join(repoEdge, "jobs")
 
 	for _, d := range []string{jobsDirA, nomadJobsDirB, jobsDirEdge, filepath.Join(jobsDirEdge, "subdir.nomad")} {
-		if err := os.MkdirAll(d, 0755); err != nil {
+		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1139,11 +1138,11 @@ func TestFindJobDefinitionInRepos(t *testing.T) {
 	jobSpecPostgres := `job "postgres" { type = "service" }`
 	jobSpecOther := `job "other" { type = "service" }`
 
-	_ = os.WriteFile(filepath.Join(jobsDirA, "brain.nomad"), []byte(jobSpecBrain), 0644)
-	_ = os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(jobSpecBrain), 0644)
-	_ = os.WriteFile(filepath.Join(nomadJobsDirB, "postgres.nomad"), []byte(jobSpecPostgres), 0644)
-	_ = os.WriteFile(filepath.Join(jobsDirEdge, "notes.txt"), []byte("not a nomad job"), 0644)
-	_ = os.WriteFile(filepath.Join(jobsDirEdge, "other.nomad"), []byte(jobSpecOther), 0644)
+	_ = os.WriteFile(filepath.Join(jobsDirA, "brain.nomad"), []byte(jobSpecBrain), 0o644)
+	_ = os.WriteFile(filepath.Join(nomadJobsDirB, "brain.nomad"), []byte(jobSpecBrain), 0o644)
+	_ = os.WriteFile(filepath.Join(nomadJobsDirB, "postgres.nomad"), []byte(jobSpecPostgres), 0o644)
+	_ = os.WriteFile(filepath.Join(jobsDirEdge, "notes.txt"), []byte("not a nomad job"), 0o644)
+	_ = os.WriteFile(filepath.Join(jobsDirEdge, "other.nomad"), []byte(jobSpecOther), 0o644)
 
 	repos := []string{repoA, repoB}
 	edgeRepos := []string{"", repoEdge}

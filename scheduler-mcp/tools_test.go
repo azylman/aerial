@@ -19,31 +19,42 @@ func TestMain_Execution(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	testCfg := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\n"), 0644)
+	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\n"), 0o644)
 	configPath = testCfg
 	t.Setenv("CONFIG_PATH", testCfg)
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
 
 	runCalled := false
-	runAppFn = func(ctx context.Context, cfg *Config) error { runCalled = true; return nil }
+	runAppFn = func(ctx context.Context, cfg *Config) error {
+		runCalled = true
+		return nil
+	}
 	main()
-	if !runCalled { t.Error("expected runAppFn called") }
+	if !runCalled {
+		t.Error("expected runAppFn called")
+	}
 
 	exitCalled := false
 	exitFn = func(string, ...interface{}) { exitCalled = true }
 	runAppFn = func(ctx context.Context, cfg *Config) error { return http.ErrServerClosed }
 	main()
-	if exitCalled { t.Error("did not expect exitFn on http.ErrServerClosed") }
+	if exitCalled {
+		t.Error("did not expect exitFn on http.ErrServerClosed")
+	}
 
 	runAppFn = func(ctx context.Context, cfg *Config) error { return context.DeadlineExceeded }
 	main()
-	if !exitCalled { t.Error("expected exitFn on server error") }
+	if !exitCalled {
+		t.Error("expected exitFn on server error")
+	}
 
 	exitCalled = false
 	configPath = filepath.Join(tmpDir, "nonexistent.yaml")
 	t.Setenv("CONFIG_PATH", configPath)
 	main()
-	if !exitCalled { t.Error("expected exitFn on config load error") }
+	if !exitCalled {
+		t.Error("expected exitFn on config load error")
+	}
 }
 
 func TestRunApp_Lifecycle(t *testing.T) {

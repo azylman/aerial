@@ -90,4 +90,3 @@ func main() {
 		exitFn("Server failure: %v", err)
 	}
 }
-

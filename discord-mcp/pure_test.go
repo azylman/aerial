@@ -353,11 +353,11 @@ func TestIsToolNameBlocked_MixedCase(t *testing.T) {
 func TestResolveConfigPath_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	localFile := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(localFile, []byte("port: '4001'\nupstream_port: '4025'\n"), 0644); err != nil {
+	if err := os.WriteFile(localFile, []byte("port: '4001'\nupstream_port: '4025'\n"), 0o644); err != nil {
 		t.Fatalf("failed to write temp local config: %v", err)
 	}
 	emptyFile := filepath.Join(tmpDir, "empty.yaml")
-	if err := os.WriteFile(emptyFile, []byte(""), 0644); err != nil {
+	if err := os.WriteFile(emptyFile, []byte(""), 0o644); err != nil {
 		t.Fatalf("failed to write empty local config: %v", err)
 	}
 
