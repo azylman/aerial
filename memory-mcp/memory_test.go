@@ -282,18 +282,91 @@ func (m *TestMemStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneF
 	if pruneFloor <= 0 {
 		pruneFloor = 0.15
 	}
+	if pruneAgeDays <= 0 {
+		pruneAgeDays = 14
+	}
 	var decayed, pruned int64
+	now := time.Now().UTC()
+	decayCutoff := now.Add(-24 * time.Hour)
+	pruneCutoff := now.AddDate(0, 0, -pruneAgeDays)
+
 	for id, f := range m.facts {
-		f.Importance = max(0.0, f.Importance-decayStep)
-		f.LastDecayedAt = time.Now().UTC()
-		decayed++
-		if f.Importance <= pruneFloor {
+		floor := 0.0
+		switch f.Category {
+		case "user_preference":
+			floor = 0.75
+		case "system_config":
+			floor = 0.60
+		case "routine":
+			floor = 0.50
+		}
+
+		if (f.LastDecayedAt.IsZero() || f.LastDecayedAt.Before(decayCutoff)) &&
+			(f.LastReinforcedAt.IsZero() || f.LastReinforcedAt.Before(decayCutoff)) &&
+			f.Importance > floor {
+			f.Importance = math.Max(floor, math.Round((f.Importance-decayStep)*100)/100)
+			f.LastDecayedAt = now
+			decayed++
+		}
+		if f.Importance <= pruneFloor && (f.LastReinforcedAt.IsZero() || f.LastReinforcedAt.Before(pruneCutoff)) {
 			delete(m.facts, id)
 			delete(m.embeddings, id)
 			pruned++
 		}
 	}
 	return decayed, pruned, nil
+}
+
+func (m *TestMemStore) TouchRetrievedFacts(ctx context.Context, ids []int64, boost float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "TouchRetrievedFacts" {
+		return m.failErr
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if boost <= 0 {
+		boost = 0.02
+	}
+	now := time.Now().UTC()
+	cutoff := now.Add(-24 * time.Hour)
+	for _, id := range ids {
+		if f, ok := m.facts[id]; ok {
+			if f.LastReinforcedAt.IsZero() || f.LastReinforcedAt.Before(cutoff) {
+				f.Importance = math.Min(1.0, math.Round((f.Importance+boost)*100)/100)
+				f.LastReinforcedAt = now
+				if f.ReinforceCount == 0 {
+					f.ReinforceCount = 1
+				}
+				f.ReinforceCount++
+			}
+		}
+	}
+	return nil
+}
+
+func (m *TestMemStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetAllFactsWithEmbeddings" {
+		return nil, m.failErr
+	}
+	var res []ScoredFactWithEmbedding
+	var ids []int64
+	for id := range m.facts {
+		if emb, ok := m.embeddings[id]; ok && len(emb) > 0 {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		res = append(res, ScoredFactWithEmbedding{
+			Fact:      *m.facts[id],
+			Embedding: m.embeddings[id],
+		})
+	}
+	return res, nil
 }
 
 func (m *TestMemStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
@@ -4685,6 +4758,954 @@ func TestWorker_Start(t *testing.T) {
 			err := w.Start(tc.ctx)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Start() err = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestSQLStore_TouchRetrievedFacts(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		ids          []int64
+		boost        float64
+		execErr      error
+		rowsAffected int64
+		wantErr      bool
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			ids:     []int64{1},
+			wantErr: true,
+		},
+		{
+			name:    "EmptyIDsNoop",
+			ids:     nil,
+			wantErr: false,
+		},
+		{
+			name:    "ExecError",
+			ids:     []int64{1},
+			execErr: errors.New("exec touch failed"),
+			wantErr: true,
+		},
+		{
+			name:         "SuccessDefaults",
+			ids:          []int64{1, 2},
+			boost:        -1,
+			rowsAffected: 2,
+			wantErr:      false,
+		},
+		{
+			name:         "SuccessCustomBoost",
+			ids:          []int64{3},
+			boost:        0.05,
+			rowsAffected: 1,
+			wantErr:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					execErr:       tc.execErr,
+					rowsAffected:  tc.rowsAffected,
+					capturedQuery: &captured,
+				})
+			}
+			err := store.TouchRetrievedFacts(ctx, tc.ids, tc.boost)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("TouchRetrievedFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		nilDB     bool
+		queryErr  error
+		rowSQL    string
+		wantErr   bool
+		wantCount int
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			wantErr: true,
+		},
+		{
+			name:     "QueryError",
+			queryErr: errors.New("query error"),
+			wantErr:  true,
+		},
+		{
+			name:    "RowScanError",
+			rowSQL:  "SELECT 'invalid' AS id",
+			wantErr: true,
+		},
+		{
+			name:      "SuccessEmpty",
+			wantCount: 0,
+			wantErr:   false,
+		},
+		{
+			name:      "SuccessRow",
+			rowSQL:    "SELECT 1, 'routine', 'Morning run', 0.8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, '[0.1,0.2]'",
+			wantCount: 1,
+			wantErr:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:    dbMem,
+					queryErr: tc.queryErr,
+					rowSQL:   tc.rowSQL,
+				})
+			}
+			facts, err := store.GetAllFactsWithEmbeddings(ctx)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetAllFactsWithEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantCount > 0 && len(facts) != tc.wantCount {
+				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestMemStore_TouchRetrievedFacts(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		storeFail      string
+		ids            []int64
+		boost          float64
+		initImportance float64
+		lastReinforced time.Time
+		reinforceCount int
+		wantErr        bool
+		wantImportance float64
+		wantCount      int
+	}{
+		{
+			name:      "StoreFail",
+			storeFail: "TouchRetrievedFacts",
+			ids:       []int64{1},
+			wantErr:   true,
+		},
+		{
+			name:    "EmptyIDsNoop",
+			ids:     nil,
+			wantErr: false,
+		},
+		{
+			name:           "BoostsUnreinforcedFactWithDefault",
+			ids:            []int64{1},
+			boost:          0,
+			initImportance: 0.70,
+			reinforceCount: 0,
+			wantErr:        false,
+			wantImportance: 0.72,
+			wantCount:      2,
+		},
+		{
+			name:           "BoostsUnreinforcedFactWithCustomBoost",
+			ids:            []int64{1},
+			boost:          0.05,
+			initImportance: 0.70,
+			reinforceCount: 1,
+			wantErr:        false,
+			wantImportance: 0.75,
+			wantCount:      2,
+		},
+		{
+			name:           "ThrottledWithin24Hours",
+			ids:            []int64{1},
+			boost:          0.05,
+			initImportance: 0.70,
+			lastReinforced: time.Now().UTC().Add(-2 * time.Hour),
+			reinforceCount: 3,
+			wantErr:        false,
+			wantImportance: 0.70,
+			wantCount:      3,
+		},
+		{
+			name:           "BoostClampedToOne",
+			ids:            []int64{1},
+			boost:          0.10,
+			initImportance: 0.95,
+			reinforceCount: 1,
+			wantErr:        false,
+			wantImportance: 1.0,
+			wantCount:      2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			if tc.storeFail != "" {
+				mem.SetFail(tc.storeFail, errors.New("touch fail"))
+			}
+			fID, _ := mem.InsertFact(ctx, "user_preference", "Dark theme preference", tc.initImportance, []float32{1, 0})
+			if f, ok := mem.facts[fID]; ok {
+				f.LastReinforcedAt = tc.lastReinforced
+				f.ReinforceCount = tc.reinforceCount
+			}
+
+			ids := tc.ids
+			if len(ids) > 0 && ids[0] == 1 {
+				ids = []int64{fID}
+			}
+
+			err := mem.TouchRetrievedFacts(ctx, ids, tc.boost)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("TouchRetrievedFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && len(ids) > 0 {
+				f := mem.facts[fID]
+				if math.Abs(f.Importance-tc.wantImportance) > 0.001 {
+					t.Errorf("f.Importance = %f, want %f", f.Importance, tc.wantImportance)
+				}
+				if f.ReinforceCount != tc.wantCount {
+					t.Errorf("f.ReinforceCount = %d, want %d", f.ReinforceCount, tc.wantCount)
+				}
+			}
+		})
+	}
+}
+
+func TestMemStore_GetAllFactsWithEmbeddings(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		storeFail string
+		addFacts  bool
+		wantErr   bool
+		wantCount int
+	}{
+		{
+			name:      "StoreFail",
+			storeFail: "GetAllFactsWithEmbeddings",
+			wantErr:   true,
+		},
+		{
+			name:      "EmptyStore",
+			addFacts:  false,
+			wantErr:   false,
+			wantCount: 0,
+		},
+		{
+			name:      "ReturnsOnlyFactsWithEmbeddings",
+			addFacts:  true,
+			wantErr:   false,
+			wantCount: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			if tc.storeFail != "" {
+				mem.SetFail(tc.storeFail, errors.New("get fail"))
+			}
+			if tc.addFacts {
+				_, _ = mem.InsertFact(ctx, "routine", "Fact with emb 1", 0.8, []float32{1, 0})
+				_, _ = mem.InsertFact(ctx, "routine", "Fact without emb", 0.8, nil)
+				_, _ = mem.InsertFact(ctx, "routine", "Fact with emb 2", 0.8, []float32{0, 1})
+			}
+			facts, err := mem.GetAllFactsWithEmbeddings(ctx)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetAllFactsWithEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantCount > 0 && len(facts) != tc.wantCount {
+				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestStore_DecayAndPruneFacts_CategoryFloors(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		category       string
+		importance     float64
+		lastDecayed    time.Time
+		lastReinforced time.Time
+		decayStep      float64
+		pruneFloor     float64
+		pruneAgeDays   int
+		wantDecayed    int64
+		wantPruned     int64
+		wantImportance float64
+		wantRemaining  bool
+	}{
+		{
+			name:           "UserPreferenceAboveFloorDecaysToFloor",
+			category:       "user_preference",
+			importance:     0.78,
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    1,
+			wantPruned:     0,
+			wantImportance: 0.75,
+			wantRemaining:  true,
+		},
+		{
+			name:           "UserPreferenceAtFloorDoesNotDecay",
+			category:       "user_preference",
+			importance:     0.75,
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    0,
+			wantPruned:     0,
+			wantImportance: 0.75,
+			wantRemaining:  true,
+		},
+		{
+			name:           "UserPreferenceBelowFloorDoesNotDecayOrPromote",
+			category:       "user_preference",
+			importance:     0.50,
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    0,
+			wantPruned:     0,
+			wantImportance: 0.50,
+			wantRemaining:  true,
+		},
+		{
+			name:           "SystemConfigAboveFloorDecaysToFloor",
+			category:       "system_config",
+			importance:     0.63,
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    1,
+			wantPruned:     0,
+			wantImportance: 0.60,
+			wantRemaining:  true,
+		},
+		{
+			name:           "SystemConfigAtFloorDoesNotDecay",
+			category:       "system_config",
+			importance:     0.60,
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    0,
+			wantPruned:     0,
+			wantImportance: 0.60,
+			wantRemaining:  true,
+		},
+		{
+			name:           "RoutineAboveFloorDecaysToFloor",
+			category:       "routine",
+			importance:     0.52,
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    1,
+			wantPruned:     0,
+			wantImportance: 0.50,
+			wantRemaining:  true,
+		},
+		{
+			name:           "RoutineAtFloorDoesNotDecay",
+			category:       "routine",
+			importance:     0.50,
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    0,
+			wantPruned:     0,
+			wantImportance: 0.50,
+			wantRemaining:  true,
+		},
+		{
+			name:           "GeneralCategoryDecaysToZero",
+			category:       "general",
+			importance:     0.20,
+			decayStep:      0.05,
+			pruneFloor:     0.10,
+			pruneAgeDays:   14,
+			wantDecayed:    1,
+			wantPruned:     0,
+			wantImportance: 0.15,
+			wantRemaining:  true,
+		},
+		{
+			name:           "StaleFactPrunedWhenBelowPruneFloor",
+			category:       "general",
+			importance:     0.10,
+			lastReinforced: time.Now().UTC().AddDate(0, 0, -20),
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    1,
+			wantPruned:     1,
+			wantRemaining:  false,
+		},
+		{
+			name:           "RecentlyDecayedSkippedByThrottle",
+			category:       "general",
+			importance:     0.80,
+			lastDecayed:    time.Now().UTC().Add(-2 * time.Hour),
+			decayStep:      0.05,
+			pruneFloor:     0.15,
+			pruneAgeDays:   14,
+			wantDecayed:    0,
+			wantPruned:     0,
+			wantImportance: 0.80,
+			wantRemaining:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			fID, _ := mem.InsertFact(ctx, tc.category, "Test fact for decay", tc.importance, []float32{1, 0})
+			if f, ok := mem.facts[fID]; ok {
+				f.LastDecayedAt = tc.lastDecayed
+				f.LastReinforcedAt = tc.lastReinforced
+			}
+
+			decayed, pruned, err := mem.DecayAndPruneFacts(ctx, tc.decayStep, tc.pruneFloor, tc.pruneAgeDays)
+			if err != nil {
+				t.Fatalf("DecayAndPruneFacts() err = %v", err)
+			}
+			if decayed != tc.wantDecayed {
+				t.Errorf("decayed = %d, want %d", decayed, tc.wantDecayed)
+			}
+			if pruned != tc.wantPruned {
+				t.Errorf("pruned = %d, want %d", pruned, tc.wantPruned)
+			}
+			f, exists := mem.facts[fID]
+			if exists != tc.wantRemaining {
+				t.Errorf("fact exists = %v, want %v", exists, tc.wantRemaining)
+			}
+			if exists && math.Abs(f.Importance-tc.wantImportance) > 0.001 {
+				t.Errorf("f.Importance = %f, want %f", f.Importance, tc.wantImportance)
+			}
+		})
+	}
+}
+
+func makePairwiseSimilarVectors(n int, targetSim float64) [][]float32 {
+	// Component 0 has sqrt(targetSim), each vector has sqrt(1 - targetSim) at component i+1
+	s := float32(math.Sqrt(targetSim))
+	rem := float32(math.Sqrt(1.0 - targetSim))
+	vecs := make([][]float32, n)
+	for i := 0; i < n; i++ {
+		v := make([]float32, n+1)
+		v[0] = s
+		v[i+1] = rem
+		vecs[i] = v
+	}
+	return vecs
+}
+
+func makeScoredFactFixture(id int64, cat, text string, emb []float32) ScoredFactWithEmbedding {
+	return ScoredFactWithEmbedding{
+		Fact: Fact{
+			ID:         id,
+			Category:   cat,
+			FactText:   text,
+			Importance: 0.8,
+		},
+		Embedding: emb,
+	}
+}
+
+func TestFindConsolidationCliques(t *testing.T) {
+	vecs := makePairwiseSimilarVectors(8, 0.75) // Pairwise similarity = 0.75 (in [0.70, 0.88])
+	orthogonalVec := make([]float32, 9)
+	orthogonalVec[8] = 1.0 // Orthogonal to vecs[0..7]
+
+	tests := []struct {
+		name      string
+		facts     []ScoredFactWithEmbedding
+		minSim    float64
+		maxSim    float64
+		minSize   int
+		maxSize   int
+		wantCount int
+		wantSizes []int
+	}{
+		{
+			name:      "EmptyFacts",
+			facts:     nil,
+			wantCount: 0,
+		},
+		{
+			name: "FactsWithoutEmbeddingsIgnored",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "routine", "Fact 1", nil),
+				makeScoredFactFixture(2, "routine", "Fact 2", []float32{}),
+			},
+			wantCount: 0,
+		},
+		{
+			name: "DifferentCategoriesFormSeparateCliques",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
+				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
+				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
+				makeScoredFactFixture(4, "catB", "B1", vecs[0]),
+				makeScoredFactFixture(5, "catB", "B2", vecs[1]),
+				makeScoredFactFixture(6, "catB", "B3", vecs[2]),
+			},
+			wantCount: 2,
+			wantSizes: []int{3, 3},
+		},
+		{
+			name: "MinSizeThresholdEnforced",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
+				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
+			},
+			minSize:   3,
+			wantCount: 0,
+		},
+		{
+			name: "MaxSizeCapEnforced",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
+				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
+				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
+				makeScoredFactFixture(4, "catA", "A4", vecs[3]),
+				makeScoredFactFixture(5, "catA", "A5", vecs[4]),
+				makeScoredFactFixture(6, "catA", "A6", vecs[5]),
+				makeScoredFactFixture(7, "catA", "A7", vecs[6]),
+			},
+			minSize:   3,
+			maxSize:   5,
+			wantCount: 1,
+			wantSizes: []int{5},
+		},
+		{
+			name: "NonCliqueOrthogonalMemberExcluded",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
+				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
+				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
+				makeScoredFactFixture(4, "catA", "A4", orthogonalVec),
+			},
+			minSize:   3,
+			maxSize:   6,
+			wantCount: 1,
+			wantSizes: []int{3},
+		},
+		{
+			name: "DefaultsAppliedForInvalidArgs",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "catA", "A1", vecs[0]),
+				makeScoredFactFixture(2, "catA", "A2", vecs[1]),
+				makeScoredFactFixture(3, "catA", "A3", vecs[2]),
+			},
+			minSim:    -1,
+			maxSim:    -1,
+			minSize:   -1,
+			maxSize:   -1,
+			wantCount: 1,
+			wantSizes: []int{3},
+		},
+		{
+			name: "EmptyCategoryDefaultsToGeneralAndMaxSizeLessThanMinSize",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "", "A1", vecs[0]),
+				makeScoredFactFixture(2, "", "A2", vecs[1]),
+				makeScoredFactFixture(3, "", "A3", vecs[2]),
+			},
+			minSize:   3,
+			maxSize:   2,
+			wantCount: 1,
+			wantSizes: []int{3},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cliques := FindConsolidationCliques(tc.facts, tc.minSim, tc.maxSim, tc.minSize, tc.maxSize)
+			if len(cliques) != tc.wantCount {
+				t.Fatalf("FindConsolidationCliques() len = %d, want %d", len(cliques), tc.wantCount)
+			}
+			for i, size := range tc.wantSizes {
+				if len(cliques[i]) != size {
+					t.Errorf("clique %d size = %d, want %d", i, len(cliques[i]), size)
+				}
+			}
+		})
+	}
+}
+
+func TestConsolidateFactClusters(t *testing.T) {
+	ctx := context.Background()
+	vecs := makePairwiseSimilarVectors(4, 0.75)
+	validJSON := `{"facts":[{"category":"pref","fact_text":"User prefers dark mode everywhere","importance_score":0.85}]}`
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name          string
+		ctx           context.Context
+		nilStore      bool
+		nilOllama     bool
+		nilLLM        bool
+		storeFail     string
+		lockMutex     bool
+		addFacts      bool
+		llmResp       string
+		llmErr        error
+		ollamaErr     error
+		wantErr       bool
+		wantCount     int
+		wantRemaining int
+	}{
+		{
+			name:     "NilStoreError",
+			ctx:      ctx,
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:      "NilOllamaError",
+			ctx:       ctx,
+			nilOllama: true,
+			wantErr:   true,
+		},
+		{
+			name:    "NilLLMError",
+			ctx:     ctx,
+			nilLLM:  true,
+			wantErr: true,
+		},
+		{
+			name:      "LockContentionSkipped",
+			ctx:       ctx,
+			lockMutex: true,
+			wantErr:   false,
+			wantCount: 0,
+		},
+		{
+			name:      "StoreGetAllFactsError",
+			ctx:       ctx,
+			storeFail: "GetAllFactsWithEmbeddings",
+			wantErr:   true,
+		},
+		{
+			name:      "NoFactsInStore",
+			ctx:       ctx,
+			addFacts:  false,
+			wantErr:   false,
+			wantCount: 0,
+		},
+		{
+			name:          "LLMErrorContinuesWithoutDeletion",
+			ctx:           ctx,
+			addFacts:      true,
+			llmErr:        errors.New("llm down"),
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
+		},
+		{
+			name:          "ParseErrorContinuesWithoutDeletion",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       "not-valid-json",
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
+		},
+		{
+			name:          "OllamaEmbeddingErrorContinuesWithoutDeletion",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       validJSON,
+			ollamaErr:     errors.New("ollama embed down"),
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
+		},
+		{
+			name:          "StoreInsertFactErrorContinuesWithoutDeletion",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       validJSON,
+			storeFail:     "InsertFact",
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
+		},
+		{
+			name:          "SuccessConsolidation",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       validJSON,
+			wantErr:       false,
+			wantCount:     1,
+			wantRemaining: 1, // 3 deleted, 1 inserted
+		},
+		{
+			name:          "CandidateFactsWithEmptyTextAndClampedImportanceAndFallbackCategory",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       `{"facts":[{"fact_text":"","category":"","importance_score":0},{"fact_text":"Valid synthesized fact","category":"","importance_score":1.5}]}`,
+			wantErr:       false,
+			wantCount:     1,
+			wantRemaining: 1,
+		},
+		{
+			name:          "StoreDeleteFactErrorLoggedGracefully",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       validJSON,
+			storeFail:     "DeleteFact",
+			wantErr:       false,
+			wantCount:     1,
+			wantRemaining: 4, // 3 not deleted + 1 inserted
+		},
+		{
+			name:     "ContextCanceled",
+			ctx:      canceledCtx,
+			addFacts: true,
+			llmResp:  validJSON,
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			if tc.addFacts {
+				_, _ = mem.InsertFact(ctx, "pref", "Fact A", 0.70, vecs[0])
+				_, _ = mem.InsertFact(ctx, "pref", "Fact B", 0.80, vecs[1])
+				_, _ = mem.InsertFact(ctx, "pref", "Fact C", 0.75, vecs[2])
+			}
+			if tc.storeFail != "" {
+				mem.SetFail(tc.storeFail, errors.New("store failed"))
+			}
+
+			var store Store = mem
+			if tc.nilStore {
+				store = nil
+			}
+			var client OllamaClient = &MockOllamaClient{embedding: vecs[0], err: tc.ollamaErr}
+			if tc.nilOllama {
+				client = nil
+			}
+			var llm LLMClientFunc = func(c context.Context, p string) (string, error) {
+				if tc.llmErr != nil {
+					return "", tc.llmErr
+				}
+				return tc.llmResp, nil
+			}
+			if tc.nilLLM {
+				llm = nil
+			}
+
+			if tc.lockMutex {
+				extractionMutex.Lock()
+				defer extractionMutex.Unlock()
+			}
+
+			count, err := ConsolidateFactClusters(tc.ctx, store, client, llm)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ConsolidateFactClusters() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if count != tc.wantCount {
+				t.Errorf("count = %d, want %d", count, tc.wantCount)
+			}
+			if tc.wantRemaining > 0 && len(mem.facts) != tc.wantRemaining {
+				t.Errorf("len(mem.facts) = %d, want %d", len(mem.facts), tc.wantRemaining)
+			}
+		})
+	}
+}
+
+func TestToolHandler_MemoryStore_AdmissionGate(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		args       MemoryStoreArgs
+		wantErr    bool
+		wantAction string
+	}{
+		{
+			name:    "TooShortFactRejected",
+			args:    MemoryStoreArgs{FactText: "short", Category: "general"},
+			wantErr: true,
+		},
+		{
+			name:    "EphemeralTelemetryRejected",
+			args:    MemoryStoreArgs{FactText: "PR #100 was merged with auto-merge armed", Category: "general"},
+			wantErr: true,
+		},
+		{
+			name:       "DurableTelemetryAdmitted",
+			args:       MemoryStoreArgs{FactText: "Auto-merge armed must always remain active for all PRs", Category: "general"},
+			wantErr:    false,
+			wantAction: "inserted",
+		},
+		{
+			name:    "SupersedesBypassesAdmissionGate",
+			args:    MemoryStoreArgs{FactText: "short", SupersedesID: 999},
+			wantErr: true, // Fails because ID 999 doesn't exist, NOT admission gate
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			h := NewToolHandler(&Config{}, mem, &MockOllamaClient{embedding: []float32{1, 0}})
+			out, err := h.MemoryStore(ctx, tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("MemoryStore() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantAction != "" && out.Action != tc.wantAction {
+				t.Errorf("out.Action = %s, want %s", out.Action, tc.wantAction)
+			}
+		})
+	}
+}
+
+func TestToolHandler_GetContext_TouchRetrieved(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		storeFail      string
+		wantReinforced bool
+	}{
+		{
+			name:           "TouchRetrievedSuccess",
+			wantReinforced: true,
+		},
+		{
+			name:           "TouchRetrievedStoreErrorGraceful",
+			storeFail:      "TouchRetrievedFacts",
+			wantReinforced: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			fID, _ := mem.InsertFact(ctx, "routine", "Evening walk with dog", 0.80, []float32{1, 0})
+			if tc.storeFail != "" {
+				mem.SetFail(tc.storeFail, errors.New("touch fail"))
+			}
+
+			h := NewToolHandler(&Config{}, mem, &MockOllamaClient{embedding: []float32{1, 0}})
+			res, err := h.GetContext(ctx, "Evening walk", 5)
+			if err != nil {
+				t.Fatalf("GetContext() unexpected error: %v", err)
+			}
+			if len(res.Facts) == 0 {
+				t.Fatalf("expected retrieved facts, got none")
+			}
+			if tc.wantReinforced {
+				f := mem.facts[fID]
+				if f.LastReinforcedAt.IsZero() {
+					t.Errorf("expected LastReinforcedAt to be non-zero")
+				}
+			}
+		})
+	}
+}
+
+func TestWorker_RunDaily_Dreaming(t *testing.T) {
+	ctx := context.Background()
+	vecs := makePairwiseSimilarVectors(3, 0.75)
+
+	tests := []struct {
+		name         string
+		nilOllama    bool
+		nilLLM       bool
+		llmErr       error
+		dreamSuccess bool
+	}{
+		{
+			name:         "DailyDecayAndDreamingSuccess",
+			dreamSuccess: true,
+		},
+		{
+			name:   "DailyDecayWithDreamingErrorHandled",
+			llmErr: errors.New("dreaming llm error"),
+		},
+		{
+			name:      "NilOllamaSkipsDreaming",
+			nilOllama: true,
+		},
+		{
+			name:   "NilLLMSkipsDreaming",
+			nilLLM: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			_, _ = mem.InsertFact(ctx, "pref", "Fact 1", 0.70, vecs[0])
+			_, _ = mem.InsertFact(ctx, "pref", "Fact 2", 0.80, vecs[1])
+			_, _ = mem.InsertFact(ctx, "pref", "Fact 3", 0.75, vecs[2])
+
+			var ollama OllamaClient = &MockOllamaClient{embedding: vecs[0]}
+			if tc.nilOllama {
+				ollama = nil
+			}
+			var llm LLMClientFunc = func(c context.Context, p string) (string, error) {
+				if tc.llmErr != nil {
+					return "", tc.llmErr
+				}
+				return `{"facts":[{"category":"pref","fact_text":"Consolidated fact","importance_score":0.85}]}`, nil
+			}
+			if tc.nilLLM {
+				llm = nil
+			}
+
+			w := NewWorker(WorkerConfig{
+				Store:     mem,
+				Ollama:    ollama,
+				LLMClient: llm,
+			})
+
+			// Tick 60 is daily decay + dreaming
+			w.Tick(ctx, 60)
+
+			if tc.dreamSuccess {
+				if len(mem.facts) != 1 {
+					t.Errorf("len(mem.facts) = %d, want 1 consolidated fact", len(mem.facts))
+				}
 			}
 		})
 	}
