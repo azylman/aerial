@@ -204,7 +204,7 @@ func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, at
 		return fmt.Errorf("channelID cannot be empty")
 	}
 
-	chunks := SplitMessage(text, MaxDiscordMessageLength)
+	chunks := SplitMessage(FormatDiscordLatex(text), MaxDiscordMessageLength)
 	if len(chunks) == 0 && len(attachments) == 0 {
 		return nil
 	}
@@ -372,7 +372,7 @@ func EditMessage(s *discordgo.Session, channelID, messageID, text string) error 
 	if messageID == "" {
 		return fmt.Errorf("messageID cannot be empty")
 	}
-	trimmed := strings.TrimSpace(text)
+	trimmed := strings.TrimSpace(FormatDiscordLatex(text))
 	if trimmed == "" {
 		return fmt.Errorf("text cannot be empty")
 	}

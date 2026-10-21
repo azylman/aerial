@@ -127,6 +127,7 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 
 	cleanedText := strings.Join(processedLines, "\n")
 	cleanedText = SanitizeIntermediateStatus(cleanedText)
+	cleanedText = FormatDiscordLatex(cleanedText)
 	cleanedText = cleanDuplicateBlankLines(cleanedText)
 
 	return cleanedText, attachments

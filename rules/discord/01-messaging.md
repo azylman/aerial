@@ -31,8 +31,8 @@
 9. **Background Command & Tool Yield Trap (Option B Prompt Rejection)**:
    - When any command backgrounds, NEVER take CLI harness Option B ("update the user with a short message that you have launched the command and will wait for it to finish"). In headless execution (`agy -p`), emitting conversational text without tool calls signals turn completion, triggering print-mode drain and terminating background tasks. Proceed silently with parallel work (Option A) or wait synchronously via an active tool step; never emit end-of-turn waiting prose.
 
-10. **No Markdown Tables or LaTeX Math**:
-    - NEVER format responses using Markdown tables or raw LaTeX math notation (`$...$`, `$$...$$`, `\text{}`, `\frac{}`) as Discord does not support table or LaTeX rendering; use plain Unicode symbols (`λ`, `×`, `≤`) and inline code blocks (`...`) for equations instead.
+10. **No Markdown Tables**:
+    - NEVER format responses using Markdown tables as Discord does not support table rendering.
 
 11. **Discord Message Length & Verbosity Ceiling**:
     - Discord enforces a 2,000-character limit per message. Deliver responses strictly within single-message bounds (< 1,800 characters), leading naturally with the key conclusion or answer first. Never output literal acronym tags or prefixes like 'BLUF:' or 'Bottom Line:' in user-facing responses.
