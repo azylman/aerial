@@ -69,8 +69,8 @@ apk add --no-cache postgresql-client curl >/dev/null 2>&1
 
 COVERAGE_DIR="/share/coverage"
 
-mkdir -p "$COVERAGE_DIR/coven" "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" "$COVERAGE_DIR/aura-farming" "$COVERAGE_DIR/photos-api" "$COVERAGE_DIR/photos-sync" "$COVERAGE_DIR/scratch-service" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
-find "$COVERAGE_DIR/brain" -maxdepth 1 -type f -name "covmeta.*" -size -100 -delete 2>/dev/null || true
+mkdir -p "$COVERAGE_DIR/coven" "$COVERAGE_DIR/eri" "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" "$COVERAGE_DIR/aura-farming" "$COVERAGE_DIR/photos-api" "$COVERAGE_DIR/photos-sync" "$COVERAGE_DIR/scratch-service" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
+find "$COVERAGE_DIR/brain" "$COVERAGE_DIR/eri" -maxdepth 1 -type f -name "covmeta.*" -size -100 -delete 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covcounters.*" -mtime +2 -delete 2>/dev/null || true
 find "$COVERAGE_DIR" -type f -name "covmeta.*" -mtime +7 -delete 2>/dev/null || true
 
@@ -90,6 +90,7 @@ for flush_url in \
   "http://memory-mcp.aerial/debug/coverage/flush" \
   "http://discord-mcp.aerial/debug/coverage/flush" \
   "http://dashboard.aerial/debug/coverage/flush" \
+  "http://eri.aerial/debug/coverage/flush" \
   "http://brain.aerial/debug/coverage/flush" \
   "http://mirrormere-core.aerial/debug/coverage/flush" \
   "http://mirrormere-hass-proxy.aerial/debug/coverage/flush" \
@@ -138,7 +139,7 @@ for svc_path in "$COVERAGE_DIR"/*; do
     [ -f "$meta_file" ] || continue
     meta_base="$(basename "$meta_file")"
     hash="$${meta_base#covmeta.}"
-    if [ "$svc_name" = "brain" ] && [ "$(wc -c < "$meta_file")" -lt 50000 ]; then
+    if { [ "$svc_name" = "brain" ] || [ "$svc_name" = "eri" ]; } && [ "$(wc -c < "$meta_file")" -lt 50000 ]; then
       rm -f "$meta_file" && find "$svc_path" -maxdepth 1 -type f -name "covcounters.$${hash}.*" -delete
       continue
     fi

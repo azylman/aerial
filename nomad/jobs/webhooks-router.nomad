@@ -47,7 +47,7 @@ job "webhooks-router" {
         CONFIG_PATH = "/local/webhooks-router.yaml"
         NOMAD_ADDR  = "http://${attr.unique.network.ip-address}:4646"
         HANGAR_URL    = "http://hangar.aerial"
-        BRAIN_URL     = "http://brain.aerial"
+        BRAIN_URL     = "http://eri.aerial"
         INFISICAL_URL = "http://infisical.aerial"
         PORT          = "4020"
         GOCOVERDIR  = "/coverage"

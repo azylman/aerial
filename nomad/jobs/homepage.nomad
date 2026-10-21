@@ -36,7 +36,7 @@ job "homepage" {
         entrypoint   = ["/bin/sh", "/app/core-homepage/entrypoint.sh"]
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock:ro",
-          "/mnt/data/supervisor/share/aerial/homepage:/app/core-homepage:ro",
+          "/mnt/data/supervisor/share/aerial/services/homepage:/app/core-homepage:ro",
           "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro"
         ]
       }

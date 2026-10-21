@@ -28,7 +28,7 @@ Options:
   --check               Exit with status 1 if any coverage threshold is violated
   --summary             Output Markdown summary table (also written to \$GITHUB_STEP_SUMMARY if set)
   --gaps                Print top uncovered functions and statement deficit for below-target packages
-  --service <name>      Target a specific microservice (brain, mcp/scheduler-mcp, mcp/discord-mcp, dashboard, sidecars/hangar, vanadis, webhooks-router, services/coven)
+  --service <name>      Target a specific microservice (services/eri, eri, brain, mcp/scheduler-mcp, mcp/discord-mcp, services/dashboard, dashboard, services/hangar, hangar, services/vanadis, vanadis, services/webhooks-router, webhooks-router, services/coven, coven)
   --profile-dir <dir>   Store intermediate coverage profiles in the specified directory
   -h, --help            Show this help message
 EOF
@@ -118,10 +118,15 @@ if [ -n "$TARGET_SERVICE" ]; then
         scheduler-mcp) TARGET_SERVICE="mcp/scheduler-mcp" ;;
         discord-mcp) TARGET_SERVICE="mcp/discord-mcp" ;;
         memory-mcp|coven) TARGET_SERVICE="services/coven" ;;
+        brain|eri) TARGET_SERVICE="services/eri" ;;
+        dashboard) TARGET_SERVICE="services/dashboard" ;;
+        hangar) TARGET_SERVICE="services/hangar" ;;
+        vanadis) TARGET_SERVICE="services/vanadis" ;;
+        webhooks-router) TARGET_SERVICE="services/webhooks-router" ;;
     esac
     ALL_GO_SERVICES="$TARGET_SERVICE"
 else
-    ALL_GO_SERVICES="brain mcp/scheduler-mcp mcp/discord-mcp dashboard sidecars/hangar vanadis webhooks-router services/coven"
+    ALL_GO_SERVICES="services/eri mcp/scheduler-mcp mcp/discord-mcp services/dashboard services/hangar services/vanadis services/webhooks-router services/coven"
 fi
 
 # Target Minimum Monorepo Coverage Threshold (Uniform 95.0% floor)
@@ -311,10 +316,10 @@ FRONTEND_BRANCH_PCT="0.0"
 FRONTEND_FUNCS_PCT="0.0"
 FRONTEND_STATUS="SKIPPED"
 
-if [ -f "dashboard/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SERVICE" = "dashboard" ]; }; then
+if [ -f "services/dashboard/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SERVICE" = "services/dashboard" ] || [ "$TARGET_SERVICE" = "dashboard" ]; }; then
     if command -v node >/dev/null 2>&1; then
         node_exit=0
-        node_out=$( (cd dashboard && node --test --experimental-test-coverage *.test.js 2>&1) ) || node_exit=$?
+        node_out=$( (cd services/dashboard && node --test --experimental-test-coverage *.test.js 2>&1) ) || node_exit=$?
         if [ "$node_exit" -ne 0 ]; then
             echo "$node_out" >&2
             record_violation "Permet HUD frontend tests failed during coverage collection"

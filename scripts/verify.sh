@@ -83,7 +83,7 @@ check_gofmt() {
 # Check that tests never execute main() directly
 check_no_main_in_tests() {
     if has_cmd git; then
-        MAIN_CALLS=$(git grep -E '\bmain\(\)' 'brain/*_test.go' 2>/dev/null || true)
+        MAIN_CALLS=$(git grep -E '\bmain\(\)' 'services/eri/*_test.go' 2>/dev/null || true)
         if [ -n "$MAIN_CALLS" ]; then
             echo "🚨 [Aerial Verify] Error: Direct execution of main() detected in test files:" >&2
             echo "$MAIN_CALLS" | sed 's/^/   • /' >&2
@@ -113,7 +113,7 @@ check_rule_file_sizes() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="brain mcp/scheduler-mcp mcp/discord-mcp dashboard sidecars/hangar webhooks-router vanadis services/coven"
+GO_SERVICES="services/eri mcp/scheduler-mcp mcp/discord-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven"
 
 run_go_vet() {
     svc="$1"
@@ -415,21 +415,21 @@ if [ "$MODE" = "staged" ]; then
     fi
 
     # Check dashboard JS syntax
-    if echo "$STAGED_FILES" | grep -q "^dashboard/"; then
-        run_node_syntax "dashboard/static/app.js"
+    if echo "$STAGED_FILES" | grep -q -E "^(services/)?dashboard/"; then
+        run_node_syntax "services/dashboard/static/app.js"
     fi
 
     # Check docs service JS syntax
-    if echo "$STAGED_FILES" | grep -q "^docs-service/"; then
-        run_node_syntax "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+    if echo "$STAGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
+        run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
     fi
 
     # Check homepage JS syntax & unit tests
-    if echo "$STAGED_FILES" | grep -q "^homepage/"; then
-        run_node_syntax "homepage/lib/merge.js"
-        run_node_syntax "homepage/prepare-config.js"
-        if [ -d "homepage/test" ]; then
-            run_node_test "homepage" "test/*.test.js"
+    if echo "$STAGED_FILES" | grep -q -E "^(services/)?homepage/"; then
+        run_node_syntax "services/homepage/lib/merge.js"
+        run_node_syntax "services/homepage/prepare-config.js"
+        if [ -d "services/homepage/test" ]; then
+            run_node_test "services/homepage" "test/*.test.js"
         fi
     fi
 
@@ -465,10 +465,10 @@ check_no_imperative_ddl
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
-run_node_syntax "dashboard/static/app.js"
-run_node_syntax "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
-run_node_syntax "homepage/lib/merge.js"
-run_node_syntax "homepage/prepare-config.js"
+run_node_syntax "services/dashboard/static/app.js"
+run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+run_node_syntax "services/homepage/lib/merge.js"
+run_node_syntax "services/homepage/prepare-config.js"
 for jf in nomad/grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done
@@ -479,12 +479,12 @@ for svc in $GO_SERVICES; do
     run_go_test "$svc"
 done
 
-if [ -f "dashboard/app.test.js" ]; then
-    run_node_test "dashboard" "*.test.js"
+if [ -f "services/dashboard/app.test.js" ]; then
+    run_node_test "services/dashboard" "*.test.js"
 fi
 
-if [ -d "homepage/test" ]; then
-    run_node_test "homepage" "test/*.test.js"
+if [ -d "services/homepage/test" ]; then
+    run_node_test "services/homepage" "test/*.test.js"
 fi
 
 echo "=== 4. Test Coverage Gating ==="

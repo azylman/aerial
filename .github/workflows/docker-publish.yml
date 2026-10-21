@@ -25,7 +25,7 @@ jobs:
     name: Detect Changed Microservices
     runs-on: ubuntu-latest
     outputs:
-      brain: ${{ steps.filter.outputs.brain }}
+      eri: ${{ steps.filter.outputs.eri }}
       scheduler-mcp: ${{ steps.filter.outputs.scheduler-mcp }}
       coven: ${{ steps.filter.outputs.coven }}
       discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
@@ -48,8 +48,8 @@ jobs:
         id: filter
         with:
           filters: |
-            brain:
-              - 'brain/**'
+            eri:
+              - 'services/eri/**'
             scheduler-mcp:
               - 'mcp/scheduler-mcp/**'
             coven:
@@ -65,26 +65,26 @@ jobs:
             infisical-mcp:
               - 'mcp/infisical-mcp/**'
             dashboard:
-              - 'dashboard/**'
+              - 'services/dashboard/**'
             docs:
-              - 'docs-service/**'
+              - 'services/docs-service/**'
             proxy:
-              - 'proxy/**'
+              - 'services/proxy/**'
             hangar:
-              - 'sidecars/hangar/**'
+              - 'services/hangar/**'
             webhooks-router:
-              - 'webhooks-router/**'
+              - 'services/webhooks-router/**'
             vanadis:
-              - 'vanadis/**'
+              - 'services/vanadis/**'
             roborev-runner:
-              - 'roborev-runner/**'
+              - 'services/roborev-runner/**'
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
         run: |
           node -e '
             const filter = {
-              brain: "${{ steps.filter.outputs.brain }}",
+              eri: "${{ steps.filter.outputs.eri }}",
               "scheduler-mcp": "${{ steps.filter.outputs.scheduler-mcp }}",
               coven: "${{ steps.filter.outputs.coven }}",
               "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
@@ -102,7 +102,7 @@ jobs:
             };
 
             const catalog = [
-              { service: "brain", context: ".", file: "./brain/Dockerfile", image_name: "aerial-brain" },
+              { service: "eri", context: ".", file: "./services/eri/Dockerfile", image_name: "aerial-eri" },
               { service: "scheduler-mcp", context: "./mcp/scheduler-mcp", file: "./mcp/scheduler-mcp/Dockerfile", image_name: "aerial-scheduler-mcp" },
               { service: "coven", context: "./services/coven", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
               { service: "discord-mcp", context: "./mcp/discord-mcp", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
@@ -110,13 +110,13 @@ jobs:
               { service: "github-mcp", context: "./mcp/github-mcp", file: "./mcp/github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
               { service: "nomad-mcp", context: "./mcp/nomad-mcp", file: "./mcp/nomad-mcp/Dockerfile", image_name: "aerial-nomad-mcp" },
               { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
-              { service: "dashboard", context: "./dashboard", file: "./dashboard/Dockerfile", image_name: "aerial-dashboard" },
-              { service: "docs", context: "./docs-service", file: "./docs-service/Dockerfile", image_name: "aerial-docs" },
-              { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },
-              { service: "hangar", context: ".", file: "./sidecars/hangar/Dockerfile", image_name: "aerial-hangar" },
-              { service: "webhooks-router", context: "./webhooks-router", file: "./webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" },
-              { service: "vanadis", context: "./vanadis", file: "./vanadis/Dockerfile", image_name: "aerial-vanadis" },
-              { service: "roborev-runner", context: ".", file: "./roborev-runner/Dockerfile", image_name: "aerial-roborev-runner" }
+              { service: "dashboard", context: "./services/dashboard", file: "./services/dashboard/Dockerfile", image_name: "aerial-dashboard" },
+              { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
+              { service: "proxy", context: "./services/proxy", file: "./services/proxy/Dockerfile", image_name: "aerial-proxy" },
+              { service: "hangar", context: ".", file: "./services/hangar/Dockerfile", image_name: "aerial-hangar" },
+              { service: "webhooks-router", context: "./services/webhooks-router", file: "./services/webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" },
+              { service: "vanadis", context: "./services/vanadis", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
+              { service: "roborev-runner", context: ".", file: "./services/roborev-runner/Dockerfile", image_name: "aerial-roborev-runner" }
             ];
 
             const forceAll = "${{ inputs.force_all }}" === "true";
@@ -156,13 +156,13 @@ jobs:
       - name: Test Webhooks Router
         if: needs.changes.outputs.webhooks-router == 'true'
         run: |
-          cd webhooks-router
+          cd services/webhooks-router
           go test -v -race ./...
 
       - name: Test Vanadis
         if: needs.changes.outputs.vanadis == 'true'
         run: |
-          cd vanadis
+          cd services/vanadis
           go test -v -race ./...
 
   lint:
@@ -199,7 +199,7 @@ jobs:
           fi
 
           # 2. Direct execution of main() in test files
-          MAIN_CALLS=$(git grep -E '\bmain\(\)' 'brain/*_test.go' 2>/dev/null || true)
+          MAIN_CALLS=$(git grep -E '\bmain\(\)' 'services/eri/*_test.go' 2>/dev/null || true)
           if [ -n "$MAIN_CALLS" ]; then
             echo "::error::Direct execution of main() detected in test files:"
             echo "$MAIN_CALLS" | sed 's/^/   • /'
@@ -225,19 +225,19 @@ jobs:
         run: |
           go install golang.org/x/tools/cmd/deadcode@v0.50.0
 
-      - name: Lint Brain
-        if: needs.changes.outputs.brain == 'true'
+      - name: Lint Eri
+        if: needs.changes.outputs.eri == 'true'
         run: |
-          cd brain
-          golangci-lint run --path-prefix=brain/ ./...
+          cd services/eri
+          golangci-lint run --path-prefix=services/eri/ ./...
 
-      - name: Check Dead Code in Brain
-        if: needs.changes.outputs.brain == 'true'
+      - name: Check Dead Code in Eri
+        if: needs.changes.outputs.eri == 'true'
         run: |
-          cd brain
+          cd services/eri
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in brain:"
+            echo "::error::Unreachable dead code detected in eri:"
             echo "$DEAD"
             exit 1
           fi
@@ -296,13 +296,13 @@ jobs:
       - name: Lint Status Dashboard Go Backend
         if: needs.changes.outputs.dashboard == 'true'
         run: |
-          cd dashboard
-          golangci-lint run --path-prefix=dashboard/ ./...
+          cd services/dashboard
+          golangci-lint run --path-prefix=services/dashboard/ ./...
 
       - name: Check Dead Code in Status Dashboard
         if: needs.changes.outputs.dashboard == 'true'
         run: |
-          cd dashboard
+          cd services/dashboard
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in dashboard:"
@@ -310,19 +310,19 @@ jobs:
             exit 1
           fi
 
-      - name: Lint Sidecars Hangar
+      - name: Lint Hangar
         if: needs.changes.outputs.hangar == 'true'
         run: |
-          cd sidecars/hangar
-          golangci-lint run --path-prefix=sidecars/hangar/ ./...
+          cd services/hangar
+          golangci-lint run --path-prefix=services/hangar/ ./...
 
-      - name: Check Dead Code in Sidecars Hangar
+      - name: Check Dead Code in Hangar
         if: needs.changes.outputs.hangar == 'true'
         run: |
-          cd sidecars/hangar
+          cd services/hangar
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in sidecars/hangar:"
+            echo "::error::Unreachable dead code detected in hangar:"
             echo "$DEAD"
             exit 1
           fi
@@ -330,13 +330,13 @@ jobs:
       - name: Lint Webhooks Router
         if: needs.changes.outputs.webhooks-router == 'true'
         run: |
-          cd webhooks-router
-          golangci-lint run --path-prefix=webhooks-router/ ./...
+          cd services/webhooks-router
+          golangci-lint run --path-prefix=services/webhooks-router/ ./...
 
       - name: Check Dead Code in Webhooks Router
         if: needs.changes.outputs.webhooks-router == 'true'
         run: |
-          cd webhooks-router
+          cd services/webhooks-router
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in webhooks-router:"
@@ -347,13 +347,13 @@ jobs:
       - name: Lint Vanadis
         if: needs.changes.outputs.vanadis == 'true'
         run: |
-          cd vanadis
-          golangci-lint run --path-prefix=vanadis/ ./...
+          cd services/vanadis
+          golangci-lint run --path-prefix=services/vanadis/ ./...
 
       - name: Check Dead Code in Vanadis
         if: needs.changes.outputs.vanadis == 'true'
         run: |
-          cd vanadis
+          cd services/vanadis
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in vanadis:"
@@ -364,12 +364,12 @@ jobs:
       - name: Lint Permet HUD Frontend Syntax
         if: needs.changes.outputs.dashboard == 'true'
         run: |
-          node --check dashboard/static/app.js
+          node --check services/dashboard/static/app.js
 
       - name: Lint Docsify Custom Plugins
         if: needs.changes.outputs.docs == 'true'
         run: |
-          node --check docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js
+          node --check services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js
 
   build-and-push:
     name: Build & Push Images to GHCR (${{ matrix.service }})
@@ -496,8 +496,8 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Promote non-brain dependencies before brain to prevent RPC skew on Watchtower restart
-          echo "$MATRIX_JSON" | jq -c 'sort_by(.service == "brain") | .[]' | while read -r entry; do
+          # Promote non-eri dependencies before eri to prevent RPC skew on Watchtower restart
+          echo "$MATRIX_JSON" | jq -c 'sort_by(.service == "eri") | .[]' | while read -r entry; do
             IMG=$(echo "$entry" | jq -r '.image_name')
             SRC="ghcr.io/${OWNER}/${IMG}:${SHA}"
             DST="ghcr.io/${OWNER}/${IMG}:latest"

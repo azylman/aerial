@@ -45,7 +45,7 @@ job "vanadis" {
 
       env {
         CONFIG_PATH   = "/local/vanadis.yaml"
-        BRAIN_URL     = "http://brain.aerial"
+        BRAIN_URL     = "http://eri.aerial"
         PORT          = "4025"
         GOCOVERDIR    = "/coverage"
       }

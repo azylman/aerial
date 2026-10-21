@@ -12,7 +12,7 @@ $mode = if ($Staged) { "staged" } else { "full" }
 Write-Host "⚡ [Aerial Verify] Running $mode verification checks on Windows..." -ForegroundColor Cyan
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$goServices = @("brain", "mcp/scheduler-mcp", "mcp/discord-mcp", "dashboard", "sidecars/hangar", "webhooks-router", "vanadis", "services/coven")
+$goServices = @("services/eri", "mcp/scheduler-mcp", "mcp/discord-mcp", "services/dashboard", "services/hangar", "services/webhooks-router", "services/vanadis", "services/coven")
 
 $gitCmd = if (Get-Command "git" -ErrorAction SilentlyContinue) { "git" }
           elseif (Test-Path "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe") { 
@@ -295,12 +295,12 @@ if ($Staged) {
         }
     }
 
-    if ($stagedFiles | Where-Object { $_ -like "dashboard/*" }) {
-        Run-NodeCheck "dashboard/static/app.js"
+    if ($stagedFiles | Where-Object { $_ -like "services/dashboard/*" -or $_ -like "dashboard/*" }) {
+        Run-NodeCheck "services/dashboard/static/app.js"
     }
 
-    if ($stagedFiles | Where-Object { $_ -like "docs-service/*" }) {
-        Run-NodeCheck "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+    if ($stagedFiles | Where-Object { $_ -like "services/docs-service/*" -or $_ -like "docs-service/*" }) {
+        Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
     }
 
     Write-Host "✅ [Aerial Verify] Fast pre-commit checks passed cleanly." -ForegroundColor Green
@@ -319,16 +319,16 @@ foreach ($svc in $goServices) {
 }
 
 Write-Host "=== 2. Frontend & Script Syntax Checks ===" -ForegroundColor Yellow
-Run-NodeCheck "dashboard/static/app.js"
-Run-NodeCheck "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+Run-NodeCheck "services/dashboard/static/app.js"
+Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 
 Write-Host "=== 3. Unit Test Suites ===" -ForegroundColor Yellow
 foreach ($svc in $goServices) {
     Run-GoTest $svc
 }
 
-if (Test-Path (Join-Path $repoRoot "dashboard/app.test.js")) {
-    Run-NodeTest "dashboard" "*.test.js"
+if (Test-Path (Join-Path $repoRoot "services/dashboard/app.test.js")) {
+    Run-NodeTest "services/dashboard" "*.test.js"
 }
 
 Write-Host "=== 4. Test Coverage Gating ===" -ForegroundColor Yellow
