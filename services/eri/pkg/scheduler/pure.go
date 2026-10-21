@@ -56,14 +56,6 @@ func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, err
 	return next.UTC(), nil
 }
 
-// IsScheduleDue returns true if the current time has reached or passed nextRunAt.
-func IsScheduleDue(nextRunAt, now time.Time) bool {
-	if nextRunAt.IsZero() || now.IsZero() {
-		return false
-	}
-	return !now.Before(nextRunAt)
-}
-
 // EvaluateCronStaleness returns true if the scheduled trigger is overdue by more than 24 hours.
 func EvaluateCronStaleness(nextRunAt, now time.Time) bool {
 	if nextRunAt.IsZero() || now.IsZero() {

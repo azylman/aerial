@@ -194,12 +194,6 @@ func isTestFile(path string) bool {
 	return false
 }
 
-// ScanDiff parses a unified diff line-by-line and inspects added lines for violations.
-// If checkTestFiles is false, test files and fixtures are skipped so tests don't self-block.
-func ScanDiff(diff string, checkTestFiles bool) []Violation {
-	return ScanDiffWithPatterns(diff, checkTestFiles, GetActivePatterns())
-}
-
 // ScanDiffWithPatterns parses a unified diff and checks added lines against the supplied patterns.
 func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
 	var violations []Violation

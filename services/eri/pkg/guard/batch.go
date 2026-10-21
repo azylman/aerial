@@ -26,26 +26,15 @@ const (
 var (
 	gcMu        sync.Mutex
 	lastGCTime  time.Time
-	batchDirMu  sync.RWMutex
-	batchDir    = DefaultBatchDir
 	pytestRegex = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
 )
-
-// SetBatchDir overrides the directory used for batch guard state persistence (primarily for testing).
-func SetBatchDir(dir string) {
-	batchDirMu.Lock()
-	defer batchDirMu.Unlock()
-	batchDir = dir
-}
 
 // GetBatchDir returns the active directory for batch guard state persistence.
 func GetBatchDir() string {
 	if env := os.Getenv("AERIAL_BATCH_GUARD_DIR"); env != "" {
 		return env
 	}
-	batchDirMu.RLock()
-	defer batchDirMu.RUnlock()
-	return batchDir
+	return DefaultBatchDir
 }
 
 // ToolInvocation tracks a single tool execution for batch and thrash detection.

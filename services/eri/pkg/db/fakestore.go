@@ -187,10 +187,6 @@ func cloneSessionSummary(s *SessionSummary) *SessionSummary {
 	return &cp
 }
 
-func cloneTranscriptSteps(steps []TranscriptStep) []TranscriptStep {
-	return cloneSlice(steps)
-}
-
 func cloneSliceNonNil[T any](s []T) []T {
 	if s == nil {
 		return []T{}
@@ -358,26 +354,6 @@ func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string
 		}
 		slices.Reverse(matches)
 		return matches, nil
-	})
-}
-
-func (f *FakeStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
-	return withFakeLock(f, "GetMaxMessageRowID", func() (int64, error) {
-		var maxID int64
-		for _, id := range f.messageOrder {
-			if m := f.messages[id]; m != nil && m.ThreadID == threadID && m.Status == StatusCompleted && m.RowID > maxID {
-				maxID = m.RowID
-			}
-		}
-		return maxID, nil
-	})
-}
-
-func (f *FakeStore) SetMessageUpdatedAt(id string, t time.Time) {
-	f.withLock(func() {
-		if m := f.messages[id]; m != nil {
-			m.UpdatedAt = t
-		}
 	})
 }
 

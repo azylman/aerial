@@ -1,7 +1,6 @@
 package notifier
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -66,83 +65,16 @@ func TestStaticFallback(t *testing.T) {
 		t.Errorf("Expected auth failure message for invalid api key, got: %q", msgAuthKey)
 	}
 
+	// Exhausted retries
+	msgExhausted := StaticFallback("Execution failed after exhausting all retry attempts")
+	if !strings.Contains(msgExhausted, "exhausting retry attempts") {
+		t.Errorf("Expected exhausted fallback message, got: %q", msgExhausted)
+	}
+
 	// General error
 	msgGeneral := StaticFallback("Fatal unknown error")
 	if !strings.Contains(msgGeneral, "unexpected error occurred") {
 		t.Errorf("Expected general fallback message, got: %q", msgGeneral)
-	}
-}
-
-func TestGenerateDynamicNotificationWithMock(t *testing.T) {
-	// Using echo as the agy binary simulator (fails JSON parse and returns fallback)
-	res := GenerateDynamicNotification("echo", "test-api-key", "Test description")
-	if res == "" {
-		t.Error("Expected non-empty dynamic notification from mock")
-	}
-	if !strings.Contains(res, "unexpected error occurred") {
-		t.Errorf("Expected neutral fallback notification, got: %q", res)
-	}
-}
-
-func TestGenerateDynamicNotification_SuccessfulAgyRun(t *testing.T) {
-	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return `{"response": "Hey bestie! ✨ Everything is running smoothly now! 🌸"}`, "", 0, nil
-	}
-
-	res := GenerateDynamicNotification("agy", "valid_key", "session reset due to context corruption", mockRunner)
-	if !strings.Contains(res, "bestie") {
-		t.Errorf("Expected dynamic notification from mock agy, got: %q", res)
-	}
-
-	// Test with poison pill context description
-	resPoison := GenerateDynamicNotification("agy", "valid_key", "a message caused repeated crashes and had to be dropped", mockRunner)
-	if !strings.Contains(resPoison, "bestie") {
-		t.Errorf("Expected dynamic notification for poison pill, got: %q", resPoison)
-	}
-
-	// Test with watchdog timeout context description
-	resWatchdog := GenerateDynamicNotification("agy", "valid_key", "execution timed out while working on the request", mockRunner)
-	if !strings.Contains(resWatchdog, "bestie") {
-		t.Errorf("Expected dynamic notification for watchdog timeout, got: %q", resWatchdog)
-	}
-
-	// Test with non-transient execution error context description
-	resNonTransient := GenerateDynamicNotification("agy", "valid_key", "execution failed with non-transient error", mockRunner)
-	if !strings.Contains(resNonTransient, "bestie") {
-		t.Errorf("Expected dynamic notification for non-transient error, got: %q", resNonTransient)
-	}
-
-	// Test with 503 outage context description: must bypass dynamic generation and return neutral fallback
-	res503 := GenerateDynamicNotification("agy", "valid_key", "Error 503: unavailable", mockRunner)
-	if res503 != ModelUnavailableMessage() {
-		t.Errorf("Expected neutral ModelUnavailableMessage for 503 outage, got: %q", res503)
-	}
-
-	// Test with auth failure context description: must bypass dynamic generation and return neutral auth fallback
-	resAuth := GenerateDynamicNotification("agy", "valid_key", "authentication failed or timed out", mockRunner)
-	if !strings.Contains(resAuth, "Authentication failed") {
-		t.Errorf("Expected neutral auth failure fallback, got: %q", resAuth)
-	}
-	if strings.Contains(resAuth, "bestie") {
-		t.Errorf("Auth failure should bypass dynamic runner and return static fallback, got: %q", resAuth)
-	}
-
-	// Test OAuth environment: apiKey is empty, runner still succeeds
-	resOAuth := GenerateDynamicNotification("agy", "", "session reset due to context corruption", mockRunner)
-	if !strings.Contains(resOAuth, "bestie") {
-		t.Errorf("Expected dynamic notification in OAuth mode with empty apiKey, got: %q", resOAuth)
-	}
-
-	// Test mention neutralization: @everyone and @here are defanged
-	mentionRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return `{"response": "Attention @everyone and @here: server broke 💀"}`, "", 0, nil
-	}
-	resMention := GenerateDynamicNotification("agy", "valid_key", "session reset due to context corruption", mentionRunner)
-	if strings.Contains(resMention, "@everyone") || strings.Contains(resMention, "@here") {
-		t.Errorf("Expected @everyone and @here to be neutralized, got: %q", resMention)
-	}
-	if !strings.Contains(resMention, "@\u200beveryone") {
-		t.Errorf("Expected zero-width space in mention, got: %q", resMention)
 	}
 }
 
@@ -245,25 +177,5 @@ func TestFormatQuotaPauseMessage(t *testing.T) {
 	msgZeroTime := FormatQuotaPauseMessage(durCap, time.Time{}, true, false)
 	if strings.Contains(msgZeroTime, "<t:") {
 		t.Errorf("Did not expect timestamp tag when runAt is zero, got: %s", msgZeroTime)
-	}
-}
-
-func TestGenerateDynamicNotification_FailureCases(t *testing.T) {
-	// 1. Runner returns failure output classified by ClassifyError
-	mockFailRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return "Error: model is overloaded with error 503", "Service Unavailable", 1, nil
-	}
-	res := GenerateDynamicNotification("agy", "test-key", "some context", mockFailRunner)
-	if !strings.Contains(res, "unexpected error occurred") && !strings.Contains(res, "Apologies") {
-		t.Errorf("Expected static fallback on failure classification, got %q", res)
-	}
-
-	// 2. Runner returns empty response in parsed output
-	mockEmptyRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return `{"response": "   "}`, "", 0, nil
-	}
-	resEmpty := GenerateDynamicNotification("agy", "test-key", "some context", mockEmptyRunner)
-	if !strings.Contains(resEmpty, "unexpected error occurred") && !strings.Contains(resEmpty, "Apologies") {
-		t.Errorf("Expected static fallback on empty response, got %q", resEmpty)
 	}
 }

@@ -29,67 +29,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
-func TestWorker_WatchTaskCompletion(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		preWrite   bool
-		delayWrite bool
-		taskID     string
-		timeout    time.Duration
-		wantCode   int
-		wantErr    bool
-	}{
-		{name: "YieldTrapAutoResume_PreWritten", preWrite: true, taskID: "task-test-1", wantCode: 0},
-		{name: "ContextTimeout_NonExistent", taskID: "non-existent-task", timeout: 50 * time.Millisecond, wantCode: -1, wantErr: true},
-		{name: "TickerTrigger_DelayedWrite", delayWrite: true, taskID: "delayed-task", wantCode: 0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tempDir := t.TempDir()
-			taskDir := filepath.Join(tempDir, ".system_generated", "tasks")
-			_ = os.MkdirAll(taskDir, 0o755)
-			logFile := filepath.Join(taskDir, tc.taskID+".log")
-			if tc.preWrite {
-				_ = os.WriteFile(logFile, []byte("Task output\n"), 0o644)
-			}
-			var done chan struct{}
-			if tc.delayWrite {
-				done = make(chan struct{})
-				go func() {
-					defer close(done)
-					<-time.After(15 * time.Millisecond)
-					_ = os.WriteFile(logFile, []byte("finished"), 0o644)
-				}()
-			}
-			ctx := context.Background()
-			if tc.timeout > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
-				defer cancel()
-			}
-			code, logPath, err := watchTaskCompletion(ctx, tempDir, tc.taskID)
-			if tc.wantErr && err == nil {
-				t.Errorf("expected error, got nil")
-			} else if !tc.wantErr {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if logPath != logFile {
-					t.Errorf("expected log path %s, got %s", logFile, logPath)
-				}
-			}
-			if code != tc.wantCode {
-				t.Errorf("expected code %d, got %d", tc.wantCode, code)
-			}
-			if done != nil {
-				<-done
-			}
-		})
-	}
-}
-
 func TestWorker_PoolDaemonAccessors(t *testing.T) {
 	mockSpawner := runner.NewMockDaemonSpawner()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
@@ -187,95 +126,6 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	}
 	if capturedConfigs[1].SessionID != "" {
 		t.Errorf("expected DaemonConfig.SessionID empty, got %q", capturedConfigs[1].SessionID)
-	}
-}
-
-func TestWorker_ActiveTasksPreventReap(t *testing.T) {
-	tests := []struct {
-		name, threadID, msgID, taskID, effort, wantScopeKey string
-		isLowPool                                           bool
-	}{
-		{name: "PrimaryPool", threadID: "thread-active-tasks-reap", msgID: "msg-reap-1", taskID: "task-busy-prevent-reap", wantScopeKey: "thread-active-tasks-reap"},
-		{name: "LowEffortPool", threadID: "thread-low-reap-test", msgID: "msg-low-reap-1", taskID: "task-low-busy-prevent-reap", effort: "low", isLowPool: true, wantScopeKey: "low_effort:thread-low-reap-test"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
-			sessID := "b1111111-2222-3333-4444-555555555555"
-			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newScriptedDaemonSpawner(sessID, `{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}`+"\n"))
-			defer primaryPool.Close()
-			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, newScriptedDaemonSpawner("e1111111-2222-3334-4444-555555555555", `{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}`+"\n"))
-			defer lowPool.Close()
-
-			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
-			_ = store.SaveSessionID(context.Background(), tc.threadID, sessID)
-			sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0o755)
-			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
-
-			doneCh := make(chan struct{})
-			pool := New(cfg, WorkerPoolConfig{
-				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
-				SessionManager: session.New(tmpHome, tempData), Store: store,
-				TimeoutMinutes: 1, MaxAttempts: 1, IdleTimeout: 20 * time.Millisecond,
-				OnMessageCompleted: func(msg db.Message, status string) {
-					select {
-					case <-doneCh:
-					default:
-						close(doneCh)
-					}
-				},
-			})
-			defer pool.Stop()
-
-			ctx := context.Background()
-			targetPool := pool.ProcessPool()
-			if tc.isLowPool {
-				targetPool = pool.LowEffortProcessPool()
-			}
-			daemon, err := targetPool.GetOrCreate(ctx, tc.threadID, "")
-			if err != nil {
-				t.Fatalf("failed to create daemon: %v", err)
-			}
-			daemon.TaskTracker().Add(runner.TaskMetadata{TaskID: tc.taskID, StartedAt: time.Now()})
-
-			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, Content: "Hello reap test", Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now()}
-			_ = store.InsertMessage(context.Background(), msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("timed out waiting for message completion")
-			}
-
-			<-time.After(50 * time.Millisecond)
-			pool.mu.Lock()
-			_, workerStillActive := pool.threadChs[tc.wantScopeKey]
-			pool.mu.Unlock()
-			if !workerStillActive {
-				t.Errorf("expected worker active for scope %s", tc.wantScopeKey)
-			}
-
-			if !tc.isLowPool {
-				daemon.TaskTracker().Remove(tc.taskID)
-				reaped, ticker, timeout := false, time.NewTicker(10*time.Millisecond), time.After(2*time.Second)
-				defer ticker.Stop()
-				for !reaped {
-					select {
-					case <-timeout:
-						t.Fatalf("expected worker to be reaped")
-					case <-ticker.C:
-						pool.mu.Lock()
-						_, active := pool.threadChs[tc.wantScopeKey]
-						pool.mu.Unlock()
-						if !active {
-							reaped = true
-						}
-					}
-				}
-			}
-		})
 	}
 }
 
@@ -719,7 +569,7 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 			pool.Start()
 			defer pool.Stop()
 
-			msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "test message"}
+			msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "<@aerial> test message"}
 			_ = insertMessage(store, msg)
 			pool.Enqueue(msg)
 
@@ -746,11 +596,14 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 	tests := []struct {
 		name, runnerErr, wantFinalStatus, wantErrContains, wantDeliveryContains string
 		maxAttempts, wantAttempts                                               int
+		presetGlobalLockSec                                                     int64
+		deliveryErr                                                             error
 		checkGlobalLockZero, checkNoSchedules                                   bool
 	}{
 		{name: "LocalRetry_Success", maxAttempts: 2, runnerErr: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
 		{name: "Exhaustion_LocalFailure", maxAttempts: 1, runnerErr: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", wantAttempts: 1, wantFinalStatus: db.StatusFailed, wantErrContains: "[CAPACITY_EXHAUSTED", wantDeliveryContains: "capacity", checkGlobalLockZero: true, checkNoSchedules: true},
 		{name: "WithoutCountdown_Fallback70s", maxAttempts: 1, runnerErr: "API error: RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model.", wantAttempts: 1, wantFinalStatus: db.StatusFailed, wantErrContains: "[CAPACITY_EXHAUSTED", wantDeliveryContains: "capacity", checkGlobalLockZero: true, checkNoSchedules: true},
+		{name: "GlobalQuotaLockout_PreCheckFailFast", maxAttempts: 2, presetGlobalLockSec: 300, wantAttempts: 0, wantFinalStatus: db.StatusFailed, wantErrContains: "global quota pause active", wantDeliveryContains: "quota", deliveryErr: errors.New("discord delivery error"), checkNoSchedules: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -778,7 +631,7 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 					mu.Lock()
 					deliveredText = text
 					mu.Unlock()
-					return nil
+					return tt.deliveryErr
 				},
 				TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
 				OnMessageCompleted: func(msg db.Message, finalStatus string) {
@@ -790,6 +643,10 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 			})
 			pool.Start()
 			defer pool.Stop()
+
+			if tt.presetGlobalLockSec > 0 {
+				pool.quotaLockedUntil.Store(time.Now().Add(time.Duration(tt.presetGlobalLockSec) * time.Second).Unix())
+			}
 
 			threadID, msgID := "thread-"+strings.ToLower(tt.name), "msg-"+strings.ToLower(tt.name)
 			msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name}
@@ -1413,11 +1270,9 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	defer pool.Stop()
 
 	ctx := context.Background()
-	lowDaemon, err := lowPool.GetOrCreate(ctx, threadID, "")
-	if err != nil {
+	if _, err := lowPool.GetOrCreate(ctx, threadID, ""); err != nil {
 		t.Fatalf("failed to create low daemon: %v", err)
 	}
-	lowDaemon.TaskTracker().Add(runner.TaskMetadata{TaskID: "bg-task-in-low-pool", StartedAt: time.Now()})
 
 	msg := db.Message{ID: "msg-yield-fb-1", ThreadID: threadID, Content: "run command and wait", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), msg)
@@ -1660,10 +1515,10 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 		HistoryFetcher: func(ctx context.Context, tid, beforeID string, limit int) ([]HistoryMessage, error) {
 			return []HistoryMessage{{ID: "msg-hist-1", AuthorName: "test-user", Content: "pre-rotation message", CreatedAt: time.Now().Add(-10 * time.Minute)}}, nil
 		},
+		LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
+			return "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>", nil
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			if strings.Contains(prompt, "Synthesize the following") {
-				return mockJSONResponse(sessionID, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>"), "", 0, nil
-			}
 			mu.Lock()
 			capturedPrompts = append(capturedPrompts, prompt)
 			mu.Unlock()
@@ -1799,22 +1654,18 @@ func TestWorker_SilentBurst_Execution(t *testing.T) {
 
 func TestYieldTrap_Scenarios(t *testing.T) {
 	tests := []struct {
-		name, threadID, sessionID, msgID, yieldType, metricOutcome, metricSignature, expectDeliveredText, expectedSecondPrompt string
-		maxYields                                                                                                              int
-		expectInvocations                                                                                                      int32
-		verifyPromptsSeen                                                                                                      bool
+		name, threadID, sessionID, msgID, metricOutcome, metricSignature, expectDeliveredText, expectedSecondPrompt string
+		maxYields                                                                                                   int
+		expectInvocations                                                                                           int32
+		verifyPromptsSeen                                                                                           bool
 	}{
 		{
 			name: "auto-resumption on stderr signature success", threadID: "thread-yield-auto", sessionID: "f2222222-3333-4444-5555-666666666666", msgID: "msg-yield-1",
-			yieldType: "stderr", maxYields: 1, expectInvocations: 2, expectDeliveredText: "Job completed after resumption!", metricOutcome: "resumed", metricSignature: "stderr_signature", verifyPromptsSeen: true, expectedSecondPrompt: YieldTrapResumePrompt,
+			maxYields: 1, expectInvocations: 2, expectDeliveredText: "Job completed after resumption!", metricOutcome: "resumed", metricSignature: "stderr_signature", verifyPromptsSeen: true, expectedSecondPrompt: YieldTrapResumePrompt,
 		},
 		{
 			name: "circuit breaker trips after max resumes", threadID: "thread-yield-cb", sessionID: "f3333333-4444-5555-6666-777777777777", msgID: "msg-circuit-1",
-			yieldType: "stderr", maxYields: 99, expectInvocations: 3, expectDeliveredText: "Still waiting turn 3", metricOutcome: "circuit_breaker", metricSignature: "stderr_signature",
-		},
-		{
-			name: "daemon tracker triggers auto-resumption", threadID: "thread-yield-dt", sessionID: "f4444444-5555-6666-7777-888888888888", msgID: "msg-audit-1",
-			yieldType: "daemon_tracker", maxYields: 1, expectInvocations: 2, expectDeliveredText: "Recovered via daemon tracker!", metricOutcome: "resumed", metricSignature: "daemon_tracker",
+			maxYields: 99, expectInvocations: 3, expectDeliveredText: "Still waiting turn 3", metricOutcome: "circuit_breaker", metricSignature: "stderr_signature",
 		},
 	}
 	for _, tc := range tests {
@@ -1833,19 +1684,8 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			now := time.Now()
 			_ = os.Chtimes(sessDir, now, now)
 
-			var procPool runner.AgentPool
-			var daemon *runner.StreamingDaemon
-			if tc.yieldType == "daemon_tracker" {
-				tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
-				_ = os.MkdirAll(tasksDir, 0o755)
-				_ = os.WriteFile(filepath.Join(tasksDir, "task-999.log"), []byte("Task output\n"), 0o644)
-				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockDaemonSpawner())
-				defer pPool.Close()
-				procPool = pPool
-			}
-
 			pool := NewWorkerPool(WorkerPoolConfig{
-				ProcessPool: procPool, SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+				SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					inv := runnerInvocations.Add(1)
 					promptsSeenMu.Lock()
@@ -1853,17 +1693,11 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 					promptsSeenMu.Unlock()
 					_ = os.Chtimes(sessDir, time.Now(), time.Now())
 					if int(inv) <= tc.maxYields {
-						if tc.yieldType == "daemon_tracker" {
-							return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Waiting on background task task-999 to complete.","usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID), "", 0, nil
-						}
 						msg := fmt.Sprintf("Still waiting turn %d", inv)
 						if tc.maxYields == 1 {
 							msg = "Waiting on background task task-444"
 						}
 						return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID, msg), "terminating 1 background task(s) on exit\n", 0, nil
-					}
-					if daemon != nil {
-						daemon.TaskTracker().Remove("task-999")
 					}
 					return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":150,"output_tokens":35,"total_tokens":185}}`, tc.sessionID, tc.expectDeliveredText), "", 0, nil
 				},
@@ -1878,12 +1712,6 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			})
 			pool.Start()
 			defer pool.Stop()
-
-			if tc.yieldType == "daemon_tracker" {
-				d, _ := pool.ProcessPool().GetOrCreate(context.Background(), tc.threadID, tc.sessionID)
-				daemon = d
-				daemon.TaskTracker().Add(runner.TaskMetadata{TaskID: "task-999", StartedAt: time.Now()})
-			}
 
 			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "test-user", Content: "Run task", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 			_ = insertMessage(store, msg)

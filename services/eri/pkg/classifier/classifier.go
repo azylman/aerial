@@ -21,8 +21,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
-	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/google/uuid"
 )
 
 // DefaultAGYClassifierModel is the default canonical agy model used for classification.
@@ -123,8 +121,8 @@ func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, err
 // WithModel sets the LLM model identifier.
 func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
 
-// New constructs a Classifier with pure *config.Config dependency injection and an optional runnerFunc.
-func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classifier {
+// New constructs a Classifier with pure *config.Config dependency injection.
+func New(cfg *config.Config, opts ...Option) *Classifier {
 	if cfg == nil {
 		cfg = config.NewFromData(config.DefaultConfigData())
 	}
@@ -140,7 +138,7 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 		if c.primaryLLMFunc != nil {
 			return c.primaryLLMFunc(ctx, model, prompt)
 		}
-		return c.invokeDefaultRunner(ctx, runnerFn, model, prompt)
+		return "", errors.New("no LLM function configured")
 	}
 	c.TitleLLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		cur := c.cfg.Current()
@@ -150,7 +148,7 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 		if c.LLMFunc != nil && (cur == nil || !strings.EqualFold(cur.ClassifierProtocol, "systemone")) {
 			return c.LLMFunc(ctx, model, prompt)
 		}
-		return c.invokeDefaultRunner(ctx, runnerFn, model, prompt)
+		return "", errors.New("no LLM function configured")
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -158,24 +156,9 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 	return c
 }
 
-func (c *Classifier) invokeDefaultRunner(ctx context.Context, runnerFn runner.RunnerFunc, model, prompt string) (string, error) {
-	if runnerFn == nil {
-		return "", errors.New("no runner function configured")
-	}
-	agyBin := "agy"
-	apiKey := ""
-	if cur := c.cfg.Current(); cur != nil {
-		if cur.AgyBin != "" {
-			agyBin = cur.AgyBin
-		}
-		apiKey = cur.APIKey
-	}
-	return NewAgyLLMFunc(agyBin, apiKey, runnerFn)(ctx, model, prompt)
-}
-
 // NewClassifier constructs a Classifier with defaults (compatibility wrapper for New).
 func NewClassifier(opts ...Option) *Classifier {
-	return New(nil, nil, opts...)
+	return New(nil, opts...)
 }
 
 func (c *Classifier) recordFailure() {
@@ -403,30 +386,6 @@ func IsHeuristicSkip(content string) bool {
 	}
 
 	return false
-}
-
-// NewAgyLLMFunc constructs an LLMFunc that executes agy in stateless single-turn mode.
-// It runs under the user's subscription profile and purges any created ephemeral conversation folder
-// upon completion to prevent disk bloat.
-func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error), searchRoots ...string) func(ctx context.Context, model, prompt string) (string, error) {
-	return func(ctx context.Context, model, prompt string) (string, error) {
-		if runnerFn == nil {
-			return "", fmt.Errorf("no runner function configured")
-		}
-
-		ephemeralID := "ambient-eval-" + uuid.New().String()
-		defer session.CleanupEphemeralSession(ephemeralID, searchRoots...)
-
-		stdout, stderr, exitCode, err := runnerFn(ctx, agyBin, prompt, ephemeralID, apiKey, model, 1)
-		if err != nil || exitCode != 0 {
-			return "", fmt.Errorf("agy classification failed (exit %d): %w, stderr: %s", exitCode, err, stderr)
-		}
-		resp, parseErr := runner.ParseAgyOutput(stdout)
-		if parseErr != nil {
-			return "", fmt.Errorf("failed to parse agy json output in classifier: %w (raw: %q)", parseErr, stdout)
-		}
-		return resp.Response, nil
-	}
 }
 
 func (c *Classifier) fallbackModel(cur *config.ConfigData) string {

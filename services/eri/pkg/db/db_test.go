@@ -199,9 +199,6 @@ func TestMessageLifecycle(t *testing.T) {
 	if pending, err := store.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
 		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
 	}
-	if maxRow, err := store.GetMaxMessageRowID(ctx, "th-1"); err != nil || maxRow != 1 {
-		t.Errorf("GetMaxMessageRowID = %d, %v, want 1", maxRow, err)
-	}
 	if threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 || threadIDs[0] != "th-1" {
 		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
 	}
@@ -226,9 +223,6 @@ func TestMessageLifecycle(t *testing.T) {
 	}
 	if claimed, err := store.ClaimPendingMessage(ctx, ""); err != nil || claimed {
 		t.Errorf("expected false, nil on empty ID ClaimPendingMessage")
-	}
-	if maxID, err := store.GetMaxMessageRowID(ctx, ""); err != nil || maxID != 0 {
-		t.Errorf("expected 0, nil on empty ID GetMaxMessageRowID")
 	}
 }
 

@@ -5,14 +5,12 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -1169,9 +1167,6 @@ func (te *turnExecution) buildColdStartLookback(snap ChannelSnapshot, isColdStar
 				if llmFn == nil && te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.LLMFunc != nil {
 					llmFn = te.pool.cfg.Classifier.LLMFunc
 				}
-				if llmFn == nil {
-					llmFn = classifier.NewAgyLLMFunc(cfg.agyBin, cfg.apiKey, te.pool.cfg.RunnerFunc)
-				}
 				flashModel := cfg.model
 				if te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.Model != "" {
 					flashModel = te.pool.cfg.Classifier.Model
@@ -1373,28 +1368,15 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	return false
 }
 
-func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, activePool runner.AgentPool, exitCode int, stdout, stderr string, autoResumeCount *int, accumulatedUsage *runner.TokenUsage, promptToSend *string, currentModel string) bool {
+func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, exitCode int, stdout, stderr string, autoResumeCount *int, accumulatedUsage *runner.TokenUsage, promptToSend *string, currentModel string) bool {
 	isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
-	var unfinishedTaskID string
-	detectionSource := "stderr_signature"
-	var trackerDaemon *runner.StreamingDaemon
-	if !isYield && te.pool != nil {
-		for _, candidatePool := range []runner.AgentPool{activePool, te.pool.processPool, te.pool.mediumEffortProcessPool, te.pool.lowEffortProcessPool} {
-			if candidatePool == nil {
-				continue
-			}
-			if d := getStreamingDaemon(candidatePool, te.threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
-				isYield, taskCount, detectionSource, trackerDaemon = true, 1, "daemon_tracker", d
-				break
-			}
-		}
-	}
 	if !isYield {
 		return false
 	}
+	detectionSource := "stderr_signature"
 	if *autoResumeCount >= MaxYieldTrapAutoResumes {
-		log.Printf("[YieldTrap] Circuit breaker tripped for thread %s in session %s after %d auto-resumptions (source=%s, taskID=%s). Delivering final output.",
-			te.threadID, te.currentSessionID, *autoResumeCount, detectionSource, unfinishedTaskID)
+		log.Printf("[YieldTrap] Circuit breaker tripped for thread %s in session %s after %d auto-resumptions (source=%s). Delivering final output.",
+			te.threadID, te.currentSessionID, *autoResumeCount, detectionSource)
 		metrics.RecordYieldTrap("circuit_breaker", detectionSource, currentModel)
 		metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
 		return false
@@ -1406,37 +1388,11 @@ func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, activePool ru
 	accumulatedUsage.CacheReadTokens += resp.Usage.CacheReadTokens
 	accumulatedUsage.TotalTokens += resp.Usage.TotalTokens
 
-	if detectionSource == "daemon_tracker" && trackerDaemon != nil {
-		tasks := trackerDaemon.TaskTracker().ActiveTasks()
-		if len(tasks) > 0 {
-			activeTask := tasks[0]
-			unfinishedTaskID = activeTask.TaskID
-			targetSessID := trackerDaemon.SessionID()
-			if targetSessID == "" {
-				targetSessID = te.currentSessionID
-			}
-			if te.pool.sessionMgr != nil && targetSessID != "" {
-				if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(targetSessID); sErr == nil && sessDir != "" {
-					waitCtx, waitCancel := context.WithTimeout(te.poolCtx(), 2*time.Second)
-					exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
-					waitCancel()
-					if wErr == nil {
-						trackerDaemon.TaskTracker().Remove(activeTask.TaskID)
-						*promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, exitCode, logPath)
-					}
-				}
-			}
-		}
-	}
 	if *promptToSend == te.turnPrompt || *promptToSend == "" {
-		if unfinishedTaskID != "" {
-			*promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, 0, "")
-		} else {
-			*promptToSend = YieldTrapResumePrompt
-		}
+		*promptToSend = YieldTrapResumePrompt
 	}
-	log.Printf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d, taskID=%s): suppressing intermediate waiting output and auto-resuming turn.",
-		te.threadID, te.currentSessionID, *autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount, unfinishedTaskID)
+	log.Printf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d): suppressing intermediate waiting output and auto-resuming turn.",
+		te.threadID, te.currentSessionID, *autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount)
 	metrics.RecordYieldTrap("resumed", detectionSource, currentModel)
 	metrics.RecordRunnerError("yield_trap_intercepted", currentModel)
 	return true
@@ -1673,7 +1629,7 @@ func (te *turnExecution) executeWithRetries() {
 					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
 				} else {
 					te.resolveAndPersistSessionID(extSess, stdout, stderr, true)
-					if te.handleYieldTrap(resp, activePool, exitCode, stdout, stderr, &autoResumeCount, &accumulatedUsage, &promptToSend, currentModel) {
+					if te.handleYieldTrap(resp, exitCode, stdout, stderr, &autoResumeCount, &accumulatedUsage, &promptToSend, currentModel) {
 						attempt--
 						continue
 					}
@@ -1765,27 +1721,6 @@ func (te *turnExecution) executeWithRetries() {
 	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
 	te.failBurstWithStatus("failed", lastErrDetail, currentModel)
 	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(te.burst), te.threadID, maxAttempts)
-}
-
-// watchTaskCompletion polls for background task completion logs in .system_generated/tasks/<taskID>.log.
-func watchTaskCompletion(ctx context.Context, sessionDir, taskID string) (int, string, error) {
-	logPath := filepath.Join(sessionDir, ".system_generated", "tasks", taskID+".log")
-	if _, err := os.Stat(logPath); err == nil {
-		return 0, logPath, nil
-	}
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return -1, logPath, ctx.Err()
-		case <-ticker.C:
-			if _, err := os.Stat(logPath); err == nil {
-				return 0, logPath, nil
-			}
-		}
-	}
 }
 
 func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink {

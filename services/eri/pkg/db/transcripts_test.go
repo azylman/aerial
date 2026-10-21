@@ -287,15 +287,6 @@ func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
 	}
 }
 
-func TestCloneTranscriptSteps(t *testing.T) {
-	if cloneTranscriptSteps(nil) != nil {
-		t.Errorf("expected nil for cloneTranscriptSteps(nil)")
-	}
-	if cp := cloneTranscriptSteps([]TranscriptStep{{SessionID: "s", StepIndex: 0, Content: "c"}}); len(cp) != 1 || cp[0].Content != "c" {
-		t.Errorf("unexpected clone result: %+v", cp)
-	}
-}
-
 type testCustomResult struct {
 	rows int64
 	err  error

@@ -46,7 +46,7 @@ func TestScanDiff(t *testing.T) {
 	for _, tt := range patternTests {
 		t.Run("pattern_"+tt.name, func(t *testing.T) {
 			t.Parallel()
-			violations := ScanDiff(tt.diff, false)
+			violations := ScanDiffWithPatterns(tt.diff, false, GetActivePatterns())
 			if len(violations) == 0 {
 				t.Fatalf("expected violation for %s, got none", tt.name)
 			}
@@ -87,9 +87,9 @@ func TestScanDiff(t *testing.T) {
 	for _, tc := range ignoredDiffs {
 		t.Run("ignored_"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			v := ScanDiff(tc.diff, tc.checkTests)
+			v := ScanDiffWithPatterns(tc.diff, tc.checkTests, GetActivePatterns())
 			if len(v) != tc.wantCount {
-				t.Fatalf("ScanDiff(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
+				t.Fatalf("ScanDiffWithPatterns(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
 			}
 		})
 	}

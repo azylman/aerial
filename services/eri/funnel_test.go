@@ -453,9 +453,9 @@ channels:
 		t.Errorf("expected chan-threads-555 with allowSummarize=false")
 	}
 
-	clsErr := classifier.New(currentFunnelConfig(), func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		return "", "", 1, errors.New("summarizer forced failure")
-	})
+	clsErr := classifier.New(currentFunnelConfig(), classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return "", errors.New("summarizer forced failure")
+	}))
 	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: db.NewFakeStore()})
 	SetFunnelPool(pool)
 	defer SetFunnelPool(nil)

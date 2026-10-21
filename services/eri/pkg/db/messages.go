@@ -337,17 +337,3 @@ func (s *SQLStore) GetRecentThreadMessages(ctx context.Context, threadID string,
 	}
 	return msgs, nil
 }
-
-func (s *SQLStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
-	if err := s.checkDB(); err != nil || threadID == "" {
-		return 0, err
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	var maxRowID sql.NullInt64
-	err := s.db.QueryRowContext(queryCtx, `SELECT MAX(row_id) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED'`, threadID).Scan(&maxRowID)
-	if err != nil && err != sql.ErrNoRows {
-		return 0, err
-	}
-	return maxRowID.Int64, nil
-}

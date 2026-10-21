@@ -32,7 +32,7 @@ func TestClassifier_DefaultsAndOptions(t *testing.T) {
 	tests := []struct {
 		name           string
 		cfg            *config.Config
-		runnerStdout   string
+		llmOut         string
 		customModel    string
 		customThresh   int
 		customCooldown time.Duration
@@ -47,23 +47,22 @@ func TestClassifier_DefaultsAndOptions(t *testing.T) {
 		wantTitle      string
 		wantErr        bool
 	}{
-		{name: "nil config defaults with nil runner", wantModel: DefaultAGYClassifierModel, wantThresh: 3, wantCooldown: 60 * time.Second, wantTimeout: 12 * time.Second, wantErr: true},
-		{name: "custom options with mock runner", cfg: config.NewFromData(&config.ConfigData{AgyBin: "/usr/bin/agy", APIKey: "key-123"}), runnerStdout: `{"status":"completed","response":"runner-ok"}`, customModel: "custom-model", customThresh: 5, customCooldown: 30 * time.Second, customTimeout: 5 * time.Second, titleOut: "title-fn", wantModel: "custom-model", wantThresh: 5, wantCooldown: 30 * time.Second, wantTimeout: 5 * time.Second, wantOutput: "runner-ok", wantTitle: "title-fn"},
+		{name: "nil config defaults with nil llm", wantModel: DefaultAGYClassifierModel, wantThresh: 3, wantCooldown: 60 * time.Second, wantTimeout: 12 * time.Second, wantErr: true},
+		{name: "custom options with mock llm", cfg: config.NewFromData(&config.ConfigData{AgyBin: "/usr/bin/agy", APIKey: "key-123"}), llmOut: "runner-ok", customModel: "custom-model", customThresh: 5, customCooldown: 30 * time.Second, customTimeout: 5 * time.Second, titleOut: "title-fn", wantModel: "custom-model", wantThresh: 5, wantCooldown: 30 * time.Second, wantTimeout: 5 * time.Second, wantOutput: "runner-ok", wantTitle: "title-fn"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var rFn runner.RunnerFunc
-			if tc.runnerStdout != "" {
-				rFn = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return tc.runnerStdout, "", 0, nil
-				}
-			}
 			var opts []Option
 			if tc.customModel != "" {
 				opts = append(opts, WithModel(tc.customModel))
 			}
-			c := New(tc.cfg, rFn, opts...)
+			if tc.llmOut != "" {
+				opts = append(opts, WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					return tc.llmOut, nil
+				}))
+			}
+			c := New(tc.cfg, opts...)
 			if tc.customThresh > 0 {
 				c.FailureThreshold = tc.customThresh
 				c.CooldownDuration = tc.customCooldown
@@ -404,43 +403,6 @@ func TestCircuitBreaker(t *testing.T) {
 	wg.Wait()
 }
 
-func TestNewAgyLLMFunc(t *testing.T) {
-	tests := []struct {
-		name       string
-		nilRunner  bool
-		stdout     string
-		stderr     string
-		exitCode   int
-		wantSub    string
-		wantErrSub string
-	}{
-		{name: "success with response field", stdout: `{"conversation_id":"ambient-eval-123","status":"SUCCESS","response":"{\"confidence\": 0.95}"}`, wantSub: "0.95"},
-		{name: "nil runner error", nilRunner: true, wantErrSub: "no runner function configured"},
-		{name: "runner returns non-zero exit code", stderr: "process died", exitCode: 1, wantErrSub: "agy classification failed (exit 1)"},
-		{name: "runner returns bad JSON stdout", stdout: "not valid json", wantErrSub: "failed to parse agy json output"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var rFn runner.RunnerFunc
-			if !tc.nilRunner {
-				rFn = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return tc.stdout, tc.stderr, tc.exitCode, nil
-				}
-			}
-			fn := NewAgyLLMFunc("agy", "key", rFn)
-			out, err := fn(context.Background(), "gemini-3.8-flash-low", "prompt")
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
-				}
-			} else if err != nil || !strings.Contains(out, tc.wantSub) {
-				t.Fatalf("expected output containing %q, got (%q, %v)", tc.wantSub, out, err)
-			}
-		})
-	}
-}
-
 func TestResolveModelAndTitleModel(t *testing.T) {
 	t.Parallel()
 	defaultLow := config.DefaultConfigData().LowEffortModel
@@ -534,7 +496,7 @@ func TestSummarizeThreadTitle(t *testing.T) {
 		{name: "SuccessfulViaLLMFunc", llmOut: `"Database Latency Investigation."`, ctx: context.Background(), q: "why is db slow?", wantTitle: "Database Latency Investigation"},
 		{name: "SuccessfulViaTitleLLMFunc", titleOut: "Title From TitleLLM", ctx: context.Background(), q: "why is db slow?", wantTitle: "Title From TitleLLM"},
 		{name: "PrimaryTitleLLMFunc", primaryOut: "Primary Title Result", ctx: context.Background(), q: "question", wantTitle: "Primary Title Result"},
-		{name: "SystemOneFallbackToRunnerFn", sysOneOut: `{"status":"completed","response":"Generated Title"}`, ctx: context.Background(), q: "question", wantTitle: "Generated Title"},
+		{name: "SystemOneWithoutPrimaryTitleErrors", sysOneOut: "systemone", ctx: context.Background(), q: "question", wantErr: true},
 		{name: "PreExistingContextDeadlinePreserved", checkDL: true, ctx: ctxWithDL, q: "question", wantTitle: "Title With DL"},
 	}
 	for _, tc := range tests {
@@ -547,12 +509,10 @@ func TestSummarizeThreadTitle(t *testing.T) {
 			case tc.nilLLM:
 				cls = &Classifier{Model: "m"}
 			case tc.primaryOut != "":
-				cls = New(nil, nil)
+				cls = New(nil)
 				cls.primaryTitleLLMFunc = func(ctx context.Context, model, prompt string) (string, error) { return tc.primaryOut, nil }
 			case tc.sysOneOut != "":
-				cls = New(config.NewFromData(&config.ConfigData{ClassifierProtocol: "systemone", AgyBin: "echo", APIKey: "secret"}), func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return tc.sysOneOut, "", 0, nil
-				})
+				cls = New(config.NewFromData(&config.ConfigData{ClassifierProtocol: "systemone", AgyBin: "echo", APIKey: "secret"}))
 			case tc.checkDL:
 				cls = &Classifier{Model: "gemini", LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
 					if gotDL, ok := ctx.Deadline(); !ok || !gotDL.Equal(dl) {
@@ -574,12 +534,12 @@ func TestSummarizeThreadTitle(t *testing.T) {
 }
 
 func TestClassifier_ProcessPools(t *testing.T) {
-	if cNil := New(nil, nil, WithProcessPool(nil)); cNil == nil {
+	if cNil := New(nil, WithProcessPool(nil)); cNil == nil {
 		t.Fatal("expected non-nil classifier for WithProcessPool(nil)")
 	}
 
 	var calledPrimary bool
-	clsPrimary := New(nil, nil)
+	clsPrimary := New(nil)
 	clsPrimary.primaryLLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		calledPrimary = true
 		return `{"confidence":0.7,"reason":"from primary"}`, nil
@@ -613,7 +573,7 @@ func TestClassifier_ProcessPools(t *testing.T) {
 	pool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "test-model"}, mockSpawner)
 	defer pool.Close()
 
-	clsPool := New(nil, nil, WithProcessPool(pool))
+	clsPool := New(nil, WithProcessPool(pool))
 	resPool := clsPool.Classify(context.Background(), db.Message{Content: "Help needed"}, nil)
 	if resPool.Confidence != 0.85 || resPool.Reason != "needs help" {
 		t.Fatalf("unexpected pool classification: %+v", resPool)
@@ -626,7 +586,7 @@ func TestClassifier_ProcessPools(t *testing.T) {
 	interPool := runner.NewInterchangeablePool(pool, runner.InterchangeablePoolConfig{WorkerCount: 1})
 	defer interPool.Close()
 
-	clsInter := New(nil, nil, WithProcessPool(interPool))
+	clsInter := New(nil, WithProcessPool(interPool))
 	resInter := clsInter.Classify(context.Background(), db.Message{Content: "Help needed"}, nil)
 	if resInter.Confidence != 0.85 {
 		t.Fatalf("unexpected interchangeable pool result: %+v", resInter)
@@ -732,7 +692,7 @@ func TestClassify_SystemOne(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			cls := New(cfg, nil)
+			cls := New(cfg)
 			cls.systemOneHTTPClient = ts.Client()
 			cls.retryDelayFunc = func(attempt int) time.Duration { return 0 }
 			cls.retrySleepFunc = func(c context.Context, d time.Duration) error {
