@@ -4731,8 +4731,8 @@ func makeScoredFactFixture(id int64, text string, emb []float32) ScoredFactWithE
 }
 
 func TestFindConsolidationCliques(t *testing.T) {
-	vecs := makePairwiseSimilarVectors(8, 0.78) // Pairwise similarity = 0.78 (in [0.70, 1.0])
-	looseVecs := makePairwiseSimilarVectors(3, 0.65)
+	vecs := makePairwiseSimilarVectors(8, 0.78) // Pairwise similarity = 0.78 (in [0.75, 1.0])
+	looseVecs := makePairwiseSimilarVectors(3, 0.72)
 	orthogonalVec := make([]float32, ExpectedEmbeddingDim)
 	orthogonalVec[ExpectedEmbeddingDim-1] = 1.0 // Orthogonal to vecs[0..7]
 
@@ -4754,7 +4754,7 @@ func TestFindConsolidationCliques(t *testing.T) {
 	tightVec[1] = float32(math.Sqrt(1.0 - 0.95*0.95))
 
 	hijackVec := make([]float32, ExpectedEmbeddingDim)
-	hijackVec[0], hijackVec[1] = 0.72, float32(math.Sqrt(1.0-0.72*0.72))
+	hijackVec[0], hijackVec[1] = 0.76, float32(math.Sqrt(1.0-0.76*0.76))
 	emailVec1 := make([]float32, ExpectedEmbeddingDim)
 	emailVec1[0] = 1.0
 	emailVec2 := make([]float32, ExpectedEmbeddingDim)

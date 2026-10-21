@@ -497,8 +497,9 @@ func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
 
 // DefaultConsolidationMinSim is the minimum pairwise cosine similarity for fact consolidation cliques.
 const (
-	DefaultConsolidationMinSim = 0.70
-	MaxConsolidationPasses     = 3
+	DefaultConsolidationMinSim  = 0.75
+	DefaultConsolidationMaxSize = 4
+	MaxConsolidationPasses      = 3
 )
 
 // FindConsolidationCliques finds complete-linkage cliques of size [minSize, maxSize]
@@ -514,7 +515,7 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		minSize = 2
 	}
 	if maxSize < minSize {
-		maxSize = max(6, minSize)
+		maxSize = max(DefaultConsolidationMaxSize, minSize)
 	}
 
 	var group []ScoredFactWithEmbedding
@@ -640,8 +641,8 @@ Output strictly a JSON object matching this schema:
   ]
 }
 Rules:
-1. Produce 1 consolidated fact (or 2 facts ONLY when a cluster of 3+ facts spans two genuinely distinct sub-topics). If a 2-fact cluster already consists of two distinct, non-redundant facts that should not be merged into 1, return {"facts": []}.
-2. Keep each consolidated fact strictly atomic (one single topic/predicate and one sentence per fact). If the cluster spans two distinct sub-topics (e.g. household composition vs. dietary restrictions), emit 2 separate facts rather than merging them into a multi-sentence compound fact.
+1. Produce 1 consolidated fact (or 2 facts ONLY when a cluster of 3+ facts spans two genuinely distinct sub-topics). If a cluster already consists of distinct, non-redundant facts that should not be merged, return {"facts": []}.
+2. Keep each consolidated fact strictly atomic and concise (one single topic/predicate, one sentence under 280 characters). Never cram multiple loosely related details into a long semicolon or participial run-on sentence; if a cluster of 3+ facts spans two distinct sub-topics (e.g. household composition vs. dietary restrictions), emit 2 separate concise facts.
 3. Facts are ordered by ascending ID (higher ID = newer state). When facts in a cluster contain conflicting numbers, thresholds, versions, ports, or status values, preserve the newer (higher-ID) state and discard the outdated value.
 4. Output nothing else outside the JSON object.`
 
@@ -681,7 +682,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 		}
 
 		var cliques [][]ScoredFactWithEmbedding
-		for _, c := range FindConsolidationCliques(allFacts, DefaultConsolidationMinSim, 1.0, 2, 6) {
+		for _, c := range FindConsolidationCliques(allFacts, DefaultConsolidationMinSim, 1.0, 2, DefaultConsolidationMaxSize) {
 			if sig := cliqueSignature(c); !triedCliques[sig] {
 				triedCliques[sig] = true
 				cliques = append(cliques, c)
