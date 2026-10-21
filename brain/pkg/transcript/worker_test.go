@@ -341,7 +341,7 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 			if tc.wantSummaries != 0 && stats.SummariesGenerated != tc.wantSummaries {
 				t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
 			}
-			if tc.wantErrors != 0 && stats.Errors != tc.wantErrors {
+			if stats.Errors != tc.wantErrors {
 				t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantErrors)
 			}
 
@@ -371,24 +371,29 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 				if err != nil {
 					t.Fatalf("GetSessionSyncStates: %v", err)
 				}
-				if st, ok := states[primarySession]; ok {
+				expectedLastIndexed := tc.wantLastIndexed
+				if tc.secondPassLastIndexed != 0 {
+					expectedLastIndexed = tc.secondPassLastIndexed
+				}
+				if tc.wantSettled != nil || expectedLastIndexed != 0 {
+					st, ok := states[primarySession]
+					if !ok {
+						t.Fatalf("session %q missing from sync states", primarySession)
+					}
 					if tc.wantSettled != nil && st.IsSettled != *tc.wantSettled {
 						t.Errorf("IsSettled = %v, want %v", st.IsSettled, *tc.wantSettled)
-					}
-					expectedLastIndexed := tc.wantLastIndexed
-					if tc.secondPassLastIndexed != 0 {
-						expectedLastIndexed = tc.secondPassLastIndexed
 					}
 					if expectedLastIndexed != 0 && st.LastIndexedStep != expectedLastIndexed {
 						t.Errorf("LastIndexedStep = %d, want %d", st.LastIndexedStep, expectedLastIndexed)
 					}
 				}
 				if tc.wantSummaryText != "" {
-					res, err := SearchTranscripts(ctx, store, embedder, primarySession, "sessions", "", "", 10)
-					if err == nil && len(res.Sessions) > 0 {
-						if res.Sessions[0].Summary != tc.wantSummaryText {
-							t.Errorf("summary = %q, want %q", res.Sessions[0].Summary, tc.wantSummaryText)
-						}
+					res, err := SearchTranscripts(ctx, store, embedder, tc.wantSummaryText, "sessions", "", "", 10)
+					if err != nil || len(res.Sessions) == 0 {
+						t.Fatalf("SearchTranscripts(%q) err=%v, sessions=%d", tc.wantSummaryText, err, len(res.Sessions))
+					}
+					if res.Sessions[0].Summary != tc.wantSummaryText {
+						t.Errorf("summary = %q, want %q", res.Sessions[0].Summary, tc.wantSummaryText)
 					}
 				}
 			}
@@ -641,21 +646,24 @@ func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if tc.wantSweepErrors != 0 && stats.Errors != tc.wantSweepErrors {
+			if stats.Errors != tc.wantSweepErrors {
 				t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantSweepErrors)
 			}
 			if tc.wantSynced != 0 && stats.Synced != tc.wantSynced {
 				t.Errorf("Synced = %d, want %d", stats.Synced, tc.wantSynced)
 			}
-			if tc.wantSummaries != 0 && stats.SummariesGenerated != tc.wantSummaries {
+			if (tc.wantSummaries != 0 || tc.failUpsertSummary) && stats.SummariesGenerated != tc.wantSummaries {
 				t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
 			}
-			if tc.wantStepsInserted != 0 && stats.StepsInserted != tc.wantStepsInserted {
+			if (tc.wantStepsInserted != 0 || tc.failBatchInsert) && stats.StepsInserted != tc.wantStepsInserted {
 				t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
 			}
 
 			if tc.wantLastIndexed != 0 && store != nil {
-				states, _ := store.GetSessionSyncStates(context.Background())
+				states, err := store.GetSessionSyncStates(context.Background())
+				if err != nil {
+					t.Fatalf("GetSessionSyncStates: %v", err)
+				}
 				if tc.emptyFile {
 					if states["sess-empty-file"].LastIndexedStep != tc.wantLastIndexed {
 						t.Errorf("LastIndexedStep = %d, want %d", states["sess-empty-file"].LastIndexedStep, tc.wantLastIndexed)
