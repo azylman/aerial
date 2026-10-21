@@ -749,7 +749,7 @@ func newHTTPMemoryRetriever(baseURL string) runner.MemoryRetriever {
 		baseURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
 	}
 	if baseURL == "" {
-		baseURL = "http://memory-mcp.aerial"
+		baseURL = "http://coven.aerial"
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	return func(ctx context.Context, query string) (string, error) {
@@ -767,7 +767,7 @@ func newHTTPMemoryRetriever(baseURL string) runner.MemoryRetriever {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("memory-mcp returned status %d", resp.StatusCode)
+			return "", fmt.Errorf("coven returned status %d", resp.StatusCode)
 		}
 		var out struct {
 			Context string `json:"context"`

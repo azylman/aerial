@@ -28,7 +28,7 @@ Options:
   --check               Exit with status 1 if any coverage threshold is violated
   --summary             Output Markdown summary table (also written to \$GITHUB_STEP_SUMMARY if set)
   --gaps                Print top uncovered functions and statement deficit for below-target packages
-  --service <name>      Target a specific microservice (brain, scheduler-mcp, discord-mcp, dashboard, sidecars/hangar, vanadis, webhooks-router, memory-mcp)
+  --service <name>      Target a specific microservice (brain, mcp/scheduler-mcp, mcp/discord-mcp, dashboard, sidecars/hangar, vanadis, webhooks-router, services/coven)
   --profile-dir <dir>   Store intermediate coverage profiles in the specified directory
   -h, --help            Show this help message
 EOF
@@ -114,9 +114,14 @@ echo "${CYAN}⚡ [Aerial Coverage] Starting monorepo coverage measurement...${NC
 
 # Define Services to Check
 if [ -n "$TARGET_SERVICE" ]; then
+    case "$TARGET_SERVICE" in
+        scheduler-mcp) TARGET_SERVICE="mcp/scheduler-mcp" ;;
+        discord-mcp) TARGET_SERVICE="mcp/discord-mcp" ;;
+        memory-mcp|coven) TARGET_SERVICE="services/coven" ;;
+    esac
     ALL_GO_SERVICES="$TARGET_SERVICE"
 else
-    ALL_GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar vanadis webhooks-router memory-mcp"
+    ALL_GO_SERVICES="brain mcp/scheduler-mcp mcp/discord-mcp dashboard sidecars/hangar vanadis webhooks-router services/coven"
 fi
 
 # Target Minimum Monorepo Coverage Threshold (Uniform 95.0% floor)

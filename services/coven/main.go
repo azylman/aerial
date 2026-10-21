@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// RunApp bootstraps the memory MCP HTTP server with graceful shutdown.
+// RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
 func RunApp(ctx context.Context, cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("app: config cannot be nil")
@@ -47,7 +47,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	go func() {
 		if err := worker.Start(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[Memory Worker] Background worker exited: %v", err)
+			log.Printf("[Coven Worker] Background worker exited: %v", err)
 		}
 	}()
 
@@ -58,7 +58,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Memory MCP Server listening on port %s", port)
+		log.Printf("Coven MCP Server listening on port %s", port)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
@@ -71,7 +71,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		return err
 	}
 
-	log.Println("Shutting down Memory MCP server gracefully...")
+	log.Println("Shutting down Coven MCP server gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
@@ -79,7 +79,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		log.Printf("HTTP server shutdown error: %v", err)
 		return err
 	}
-	log.Println("Memory MCP server stopped cleanly")
+	log.Println("Coven MCP server stopped cleanly")
 	return nil
 }
 

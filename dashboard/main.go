@@ -1348,7 +1348,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 			services = []ServiceStatus{
 				{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "memory-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "coven", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
@@ -1989,7 +1989,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		memoryURL = strings.TrimSpace(ycfg.MemoryURL)
 	}
 	if memoryURL == "" {
-		memoryURL = "http://memory-mcp.aerial"
+		memoryURL = "http://coven.aerial"
 	}
 
 	var ghRepos []string

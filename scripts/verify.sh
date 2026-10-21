@@ -113,7 +113,7 @@ check_rule_file_sizes() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar webhooks-router vanadis memory-mcp"
+GO_SERVICES="brain mcp/scheduler-mcp mcp/discord-mcp dashboard sidecars/hangar webhooks-router vanadis services/coven"
 
 run_go_vet() {
     svc="$1"
@@ -434,15 +434,15 @@ if [ "$MODE" = "staged" ]; then
     fi
 
     # Check grafana dashboard JSON syntax
-    if echo "$STAGED_FILES" | grep -q "^grafana/dashboards/"; then
-        for jf in grafana/dashboards/*.json; do
+    if echo "$STAGED_FILES" | grep -q -E "^(nomad/)?grafana/dashboards/"; then
+        for jf in nomad/grafana/dashboards/*.json; do
             run_json_syntax "$jf"
         done
     fi
 
     # Check Vector configuration syntax
-    if echo "$STAGED_FILES" | grep -q "^vector/"; then
-        run_vector_syntax "vector/vector.yaml"
+    if echo "$STAGED_FILES" | grep -q -E "^(nomad/)?vector/"; then
+        run_vector_syntax "nomad/vector/vector.yaml"
     fi
 
     echo "✅ [Aerial Verify] Fast pre-commit checks passed cleanly."
@@ -469,10 +469,10 @@ run_node_syntax "dashboard/static/app.js"
 run_node_syntax "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 run_node_syntax "homepage/lib/merge.js"
 run_node_syntax "homepage/prepare-config.js"
-for jf in grafana/dashboards/*.json; do
+for jf in nomad/grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done
-run_vector_syntax "vector/vector.yaml"
+run_vector_syntax "nomad/vector/vector.yaml"
 
 echo "=== 3. Unit Test Suites ==="
 for svc in $GO_SERVICES; do

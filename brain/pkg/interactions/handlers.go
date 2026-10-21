@@ -33,7 +33,7 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 		memURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
 	}
 	if memURL == "" {
-		memURL = "http://memory-mcp.aerial"
+		memURL = "http://coven.aerial"
 	}
 	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, memURL+"/facts?limit=1", nil); err == nil {
 		if resp, err := http.DefaultClient.Do(req); err == nil {
