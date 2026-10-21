@@ -867,17 +867,34 @@ job "raw-exec-job" {
 	}
 }
 
-func TestJobUsesRepoImage_TableDriven(t *testing.T) {
-	specAerial := `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`
+func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
+	specVanadis := `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`
+	specDocs := `job "docs" { task "docs" { config { image = "ghcr.io/azylman/aerial-docs:${var.image_tag}" } } }`
+	specMCP := `job "discord-mcp" { task "mcp" { config { image = "ghcr.io/azylman/aerial-discord-mcp:${var.image_tag}" } } }`
 	specExternal := `job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`
-	if !JobUsesRepoImage(specAerial, "azylman/aerial") {
-		t.Errorf("expected JobUsesRepoImage true for aerial-vanadis")
+
+	tests := []struct {
+		name    string
+		jobSpec string
+		files   []string
+		want    bool
+	}{
+		{"matching services dir", specVanadis, []string{"services/vanadis/main.go"}, true},
+		{"matching legacy root dir", specVanadis, []string{"vanadis/Dockerfile"}, true},
+		{"matching mcp dir", specMCP, []string{"mcp/discord-mcp/main.go"}, true},
+		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
+		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
+		{"unmatched other service dir", specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
+		{"external image never matches", specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
+		{"empty changed files", specVanadis, nil, false},
 	}
-	if JobUsesRepoImage(specExternal, "azylman/aerial") {
-		t.Errorf("expected JobUsesRepoImage false for golang:1.27.1-alpine")
-	}
-	if JobUsesRepoImage(specAerial, "") {
-		t.Errorf("expected JobUsesRepoImage false for empty targetRepo")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := JobHasContainerBuildChanges(tc.jobSpec, tc.files); got != tc.want {
+				t.Errorf("JobHasContainerBuildChanges() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

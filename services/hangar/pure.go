@@ -576,15 +576,28 @@ func ExtractNomadJobImages(content string) []string {
 	return images
 }
 
-// JobUsesRepoImage returns true if any container image referenced in jobSpec belongs to targetRepo (e.g. "azylman/aerial").
-func JobUsesRepoImage(jobSpec, targetRepo string) bool {
-	target := strings.TrimSpace(strings.ToLower(targetRepo))
-	if target == "" {
-		return false
-	}
+// JobHasContainerBuildChanges returns true if any azylman/aerial container image referenced
+// in jobSpec has matching source file modifications in changedFiles.
+func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
 	for _, img := range ExtractNomadJobImages(jobSpec) {
-		if strings.EqualFold(ImageSourceRepo(img), target) {
-			return true
+		if !strings.EqualFold(ImageSourceRepo(img), "azylman/aerial") {
+			continue
+		}
+		svc := strings.TrimPrefix(path.Base(stripImageTag(strings.ToLower(strings.TrimSpace(img)))), "aerial-")
+		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/", svc + "/"}
+		if svc == "docs" {
+			prefixes = append(prefixes, "services/docs-service/", "docs-service/")
+		}
+		for _, f := range changedFiles {
+			clean := strings.TrimPrefix(path.Clean(strings.ReplaceAll(strings.TrimSpace(f), "\\", "/")), "/")
+			if clean == "Dockerfile" || clean == ".dockerignore" {
+				return true
+			}
+			for _, p := range prefixes {
+				if strings.HasPrefix(clean, p) {
+					return true
+				}
+			}
 		}
 	}
 	return false

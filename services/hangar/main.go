@@ -2445,7 +2445,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 				deferred := false
 				if content, readErr := os.ReadFile(fullPath); readErr == nil {
 					jobSpec := string(content)
-					if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
+					if (containersBuilding && JobHasContainerBuildChanges(jobSpec, changedFiles)) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
 						deferred = true
 					}
 				}
