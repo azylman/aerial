@@ -102,21 +102,15 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_id ON schedule_runs(schedu
 -- Facts Table
 CREATE TABLE IF NOT EXISTS facts (
     id BIGSERIAL PRIMARY KEY,
-    category TEXT NOT NULL DEFAULT 'general',
-    fact_text TEXT NOT NULL,
-    importance REAL NOT NULL DEFAULT 1.0,
-    embedding vector(384),
+    fact_text TEXT NOT NULL CHECK (btrim(fact_text) <> ''),
+    embedding vector(384) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     reinforce_count INTEGER NOT NULL DEFAULT 1,
     fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', fact_text)) STORED
 );
 
-CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
-CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC);
+CREATE INDEX IF NOT EXISTS idx_facts_activity ON facts (reinforce_count DESC, last_reinforced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_facts_fts ON facts USING gin(fts_tokens);
 
