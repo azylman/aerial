@@ -207,12 +207,6 @@ func (d *StreamingDaemon) TurnCount() int {
 	return d.turnCount
 }
 
-func (d *StreamingDaemon) StepCount() int {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.stepCount
-}
-
 func (d *StreamingDaemon) LastUsed() time.Time {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

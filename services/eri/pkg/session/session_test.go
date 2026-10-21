@@ -214,14 +214,16 @@ func TestEnsureSessionDirAndBaseDir(t *testing.T) {
 
 func TestGetLastStepIndex(t *testing.T) {
 	tests := []struct {
-		name      string
-		isMissing bool
-		isDir     bool
-		content   string
-		wantIdx   int
-		wantErr   bool
+		name         string
+		isMissing    bool
+		isDir        bool
+		isParentFile bool
+		content      string
+		wantIdx      int
+		wantErr      bool
 	}{
 		{name: "nonexistent file", isMissing: true, wantIdx: -1, wantErr: false},
+		{name: "parent is regular file", isParentFile: true, wantIdx: -1, wantErr: true},
 		{name: "empty file", content: "", wantIdx: -1, wantErr: false},
 		{name: "directory path", isDir: true, wantIdx: -1, wantErr: true},
 		{name: "invalid json", content: "invalid json line\n", wantIdx: -1, wantErr: false},
@@ -236,6 +238,10 @@ func TestGetLastStepIndex(t *testing.T) {
 			p := filepath.Join(tmp, "transcript.jsonl")
 			if tc.isDir {
 				p = tmp
+			} else if tc.isParentFile {
+				parentFile := filepath.Join(tmp, "not-a-dir")
+				_ = os.WriteFile(parentFile, []byte("file"), 0o644)
+				p = filepath.Join(parentFile, "transcript.jsonl")
 			} else if !tc.isMissing {
 				_ = os.WriteFile(p, []byte(tc.content), 0o644)
 			}
@@ -247,33 +253,6 @@ func TestGetLastStepIndex(t *testing.T) {
 				t.Fatalf("getLastStepIndex=%d, want %d", idx, tc.wantIdx)
 			}
 		})
-	}
-}
-
-func TestFormatStepError(t *testing.T) {
-	var typedNil *int
-	formatTests := []struct {
-		name     string
-		val      any
-		expected string
-	}{
-		{"nil", nil, ""},
-		{"string", "some error", "some error"},
-		{"map", map[string]interface{}{"msg": "fail"}, `{"msg":"fail"}`},
-		{"typed nil", typedNil, ""},
-		{"int", 500, "500"},
-	}
-	for _, ft := range formatTests {
-		t.Run(ft.name, func(t *testing.T) {
-			got := formatStepError(ft.val)
-			if got != ft.expected {
-				t.Fatalf("formatStepError(%v)=%q, want %q", ft.val, got, ft.expected)
-			}
-		})
-	}
-	gotUnm := formatStepError(map[string]interface{}{"bad": make(chan int)})
-	if !strings.HasPrefix(gotUnm, "map[bad:") {
-		t.Fatalf("expected map[bad prefix, got %q", gotUnm)
 	}
 }
 
@@ -481,21 +460,22 @@ func TestExtractResponseSince(t *testing.T) {
 
 func TestSessionStorageAndRotationMetrics(t *testing.T) {
 	tests := []struct {
-		name       string
-		isNilMgr   bool
-		sessionID  string
-		dbSize     int
-		pbSize     int
-		transSize  int
-		fullSize   int
-		stepCount  int
-		turnCount  int
-		rtDir      bool
-		wantDBSize int64
-		wantTrSize int64
-		wantSteps  int
-		wantTurns  int
-		wantExists bool
+		name        string
+		isNilMgr    bool
+		sessionID   string
+		dbSize      int
+		pbSize      int
+		transSize   int
+		fullSize    int
+		stepCount   int
+		turnCount   int
+		rtDir       bool
+		statErrFile bool
+		wantDBSize  int64
+		wantTrSize  int64
+		wantSteps   int
+		wantTurns   int
+		wantExists  bool
 	}{
 		{name: "nil manager", isNilMgr: true, sessionID: "s1", wantExists: false},
 		{name: "empty session ID", sessionID: "", wantExists: false},
@@ -544,6 +524,12 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 			transSize:  0,
 			wantExists: false,
 		},
+		{
+			name:        "stat non-not-exist error when candidate dir is a file",
+			sessionID:   "s-stat-err",
+			statErrFile: true,
+			wantExists:  false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -552,6 +538,12 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 			if !tc.isNilMgr {
 				mgr = New(tmp, tmp)
 				convDir := filepath.Join(tmp, "conversations")
+				if tc.statErrFile {
+					_ = os.WriteFile(convDir, []byte("file"), 0o644)
+					sessDir := filepath.Join(tmp, "brain", tc.sessionID)
+					_ = os.MkdirAll(sessDir, 0o755)
+					_ = os.WriteFile(filepath.Join(sessDir, ".system_generated"), []byte("file"), 0o644)
+				}
 				if tc.rtDir {
 					rtDir := filepath.Join(tmp, "runtimes", "discord", ".gemini", "antigravity-cli", "conversations")
 					writeConversationFile(t, rtDir, tc.sessionID, ".db", 200)

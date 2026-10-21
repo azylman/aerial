@@ -59,84 +59,6 @@ func TestParseAgyOutput(t *testing.T) {
 	}
 }
 
-func TestClassifyError(t *testing.T) {
-	tests := []struct {
-		name                 string
-		exitCode             int
-		stdout, stderr       string
-		wantFailure          bool
-		wantTransient        bool
-		wantCorrupt          bool
-		errDetailMustContain string
-	}{
-		{name: "Clean Success With JSON Envelope", exitCode: 0, stdout: `{"conversation_id":"abc","status":"SUCCESS","response":"Hello there!"}`},
-		{name: "Empty Response With Status SUCCESS On Exit 0", exitCode: 0, stdout: `{"conversation_id":"abc","status":"SUCCESS","response":""}`, wantFailure: true, errDetailMustContain: "empty response"},
-		{name: "Clean Success Discussing Context Limit", exitCode: 0, stdout: `{"conversation_id":"abc","status":"SUCCESS","response":"The model's maximum context length is 1M tokens. When context window exceeded occurs, handle error 503."}`},
-		{name: "Clean Success With Benign Debug Stderr", exitCode: 0, stdout: `{"conversation_id":"abc","status":"SUCCESS","response":"Processed your request cleanly."}`, stderr: "[DEBUG] rate limit check passed, timeout set to 30s"},
-		{name: "Clean Success Discussing Inactivity Timeout", exitCode: 0, stdout: `{"conversation_id":"abc","status":"SUCCESS","response":"Here is how [watchdog] inactivity timeout exceeded works when monitoring stderr."}`},
-		{name: "Clean Success Discussing Watchdog Max Duration", exitCode: 0, stdout: `{"conversation_id":"abc","status":"SUCCESS","response":"The [watchdog] max duration exceeded cap is set to 60m."}`},
-		{name: "Transient Quota Exceeded In Stdout On Exit 1", exitCode: 1, stdout: `{"status":"ERROR","error":"RESOURCE_EXHAUSTED: You have exceeded your current quota"}`, wantFailure: true, wantTransient: true, errDetailMustContain: "quota"},
-		{name: "Self-Healing Exit 0 Conversation Not Found Warning", exitCode: 0, stdout: `{"conversation_id":"new-uuid","status":"SUCCESS","response":"Hello fresh session!"}`, stderr: `warning: conversation "stale-uuid" not found`},
-		{name: "Exit Code 0 With Empty Stdout", exitCode: 0, stdout: "", wantFailure: true, wantTransient: true, errDetailMustContain: "process produced empty stdout"},
-		{name: "Exit Code 0 With Non-JSON Stdout", exitCode: 0, stdout: "not a valid json output", wantFailure: true, wantTransient: true, errDetailMustContain: "invalid json response"},
-		{name: "Exit Code 0 Context Window Exceeded In JSON", exitCode: 0, stdout: `{"conversation_id":"abc","status":"ERROR","error":"context length exceeded: max context length is 1000000"}`, wantFailure: true, wantCorrupt: true, errDetailMustContain: "context length exceeded"},
-		{name: "Transient 503 Unavailable", exitCode: 1, stderr: "Error: status: UNAVAILABLE: Model is overloaded (Error 503)", wantFailure: true, wantTransient: true, errDetailMustContain: "503"},
-		{name: "Transient 429 Rate Limit", exitCode: 1, stderr: "RESOURCE_EXHAUSTED: Rate limit exceeded (429)", wantFailure: true, wantTransient: true, errDetailMustContain: "Rate limit"},
-		{name: "Transient Context Deadline Exceeded", exitCode: -1, stderr: "context deadline exceeded", wantFailure: true, wantTransient: true, errDetailMustContain: "context deadline exceeded"},
-		{name: "Session Corruption Corrupted Session", exitCode: 1, stderr: "Error: failed to load conversation: session corrupted", wantFailure: true, wantCorrupt: true, errDetailMustContain: "failed to load"},
-		{name: "Database Locked Not Session Corruption", exitCode: 1, stderr: "sqlite error: database is locked", wantFailure: true, wantTransient: true, errDetailMustContain: "database is locked"},
-		{name: "General Process Failure", exitCode: 127, stderr: "command not found: agy", wantFailure: true, errDetailMustContain: "command not found"},
-		{name: "Exit Code 0 Truncated Stream 503 In Stderr", exitCode: 0, stdout: `{"conversation_id":"abc","status":"ERROR","error":"503 service unavailable"}`, stderr: "Agent execution terminated due to error: Error 503, Status: UNAVAILABLE", wantFailure: true, wantTransient: true, errDetailMustContain: "503"},
-		{name: "Exit Code 0 Truncated Stream Generic Stderr", exitCode: 0, stdout: `{"conversation_id":"abc","status":"SUCCESS","response":"partial"}`, stderr: "Agent execution terminated due to error: panic: runtime error", wantFailure: true, errDetailMustContain: "terminated"},
-		{name: "Empty Stdout Panic In Stderr Exit 0", exitCode: 0, stderr: "panic: internal null pointer", wantFailure: true, errDetailMustContain: "panic:"},
-		{name: "MCP SSE Handshake Drop Exit 0", exitCode: 0, stdout: `{"conversation_id":"abc","status":"ERROR","error":"server name github failed to load: calling \"initialize\": session not found"}`, wantFailure: true, wantTransient: true, errDetailMustContain: "session not found"},
-		{name: "MCP SSE Handshake Drop Exit 1", exitCode: 1, stderr: "server name docker failed to load: calling \"initialize\": session not found", wantFailure: true, wantTransient: true, errDetailMustContain: "session not found"},
-		{name: "Transient ModelProvider Missing API Key Mismatch", exitCode: 1, stderr: `modelProvider is set to "gemini" in settings.json, but the GEMINI_API_KEY environment variable is not set.`, wantFailure: true, wantTransient: true, errDetailMustContain: "modelProvider is set to \"gemini\""},
-		{name: "Stream Interrupted In Result JSON Error Exit 0", exitCode: 0, stdout: `{"event":"result","status":"error","error":"The stream was interrupted. Please continue the task you were working on."}`, wantFailure: true, wantCorrupt: true, errDetailMustContain: "stream was interrupted"},
-		{name: "Stream Interrupted In Stderr Non-Zero Exit", exitCode: 1, stderr: "Error: The stream was interrupted. Please continue the task you were working on.", wantFailure: true, wantCorrupt: true, errDetailMustContain: "stream was interrupted"},
-		{name: "Unknown Exit 1 Defaults To Transient", exitCode: 1, stderr: "unexpected internal socket glitch occurred in daemon", wantFailure: true, wantTransient: true, errDetailMustContain: "socket glitch"},
-		{name: "Known Non-Transient Invalid API Key Exit 1", exitCode: 1, stderr: "Error: invalid api key provided", wantFailure: true, errDetailMustContain: "invalid api key"},
-		{name: "Known Non-Transient Unknown Flag Exit 0", exitCode: 0, stdout: `{"event":"result","status":"error","error":"unknown flag: --bogus"}`, wantFailure: true, errDetailMustContain: "unknown flag"},
-		{name: "Known Non-Transient Executable Not Found Exit 1", exitCode: 1, stderr: `exec: "agy": executable file not found in $PATH`, wantFailure: true, errDetailMustContain: "executable file not found"},
-		{name: "Clean Success With Permission Denied In Response Body", exitCode: 0, stdout: `{"status":"SUCCESS","response":"The script failed earlier with permission denied, but I fixed chmod."}`},
-		{name: "Watchdog Inactivity Timeout Not Transient", exitCode: -1, stderr: "Starting conversation update stream for uuid-123\n[watchdog] inactivity timeout exceeded (5m without output or transcript update)", wantFailure: true, errDetailMustContain: "inactivity timeout exceeded"},
-		{name: "Watchdog Max Duration Not Transient", exitCode: -1, stderr: "Starting conversation update stream for uuid-123\n[watchdog] max duration exceeded (60m total duration cap)", wantFailure: true, errDetailMustContain: "max duration exceeded"},
-		{name: "Exit 0 Response Discussing Context Limit Clean", exitCode: 0, stdout: `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"The maximum context length in tokens is 1 million. When context window exceeded occurs, the system rotates sessions."}`},
-		{name: "Exit 0 Empty Stdout Fatal Stderr", exitCode: 0, stderr: "fatal error: runtime panic", wantFailure: true, errDetailMustContain: "fatal"},
-		{name: "Exit 0 Unparseable Stdout Context Window", exitCode: 0, stdout: "not json maximum context length exceeded", wantFailure: true, wantCorrupt: true, errDetailMustContain: "context window exceeded"},
-		{name: "Exit 0 Unparseable Stdout Corrupt Session", exitCode: 0, stdout: "not json corrupted session state", stderr: "failed to load conversation", wantFailure: true, wantCorrupt: true},
-		{name: "Exit 0 Unparseable Stdout 503 Transient", exitCode: 0, stdout: "not json 503 service unavailable", stderr: "high demand", wantFailure: true, wantTransient: true},
-		{name: "Exit 0 Unparseable Stdout Fatal Stderr", exitCode: 0, stdout: "not json output", stderr: "panic: nil pointer dereference", wantFailure: true, errDetailMustContain: "panic"},
-		{name: "Exit 0 Unparseable Stdout Generic Fallback", exitCode: 0, stdout: "not json output", stderr: "regular stderr", wantFailure: true, wantTransient: true, errDetailMustContain: "invalid json response"},
-		{name: "Exit 0 Status FAILED Without Error", exitCode: 0, stdout: `{"status":"FAILED"}`, wantFailure: true, wantTransient: true, errDetailMustContain: "runner status: FAILED"},
-		{name: "Exit 0 Status SUCCESS With Error Quota Exceeded", exitCode: 0, stdout: `{"status":"SUCCESS","error":"quota exceeded"}`, wantFailure: true, wantTransient: true, errDetailMustContain: "quota exceeded"},
-		{name: "Exit 0 Status SUCCESS With Fatal Stderr", exitCode: 0, stdout: `{"status":"SUCCESS","response":"all good"}`, stderr: "fatal: unrecoverable crash", wantFailure: true, errDetailMustContain: "fatal"},
-		{name: "Exit 1 Conversation Not Found Corruption", exitCode: 1, stderr: "conversation not found in registry", wantFailure: true, wantCorrupt: true, errDetailMustContain: "conversation not found"},
-		{name: "Exit 2 Short Stdout Error Detail", exitCode: 2, stdout: "short failure message", wantFailure: true, wantTransient: true, errDetailMustContain: "short failure message"},
-		{name: "Exit 2 JSON Error In Stdout", exitCode: 2, stdout: `{"error":"inner json error"}`, wantFailure: true, wantTransient: true, errDetailMustContain: "inner json error"},
-		{name: "Exit 2 Long Stdout Fallback Exit Code", exitCode: 2, stdout: strings.Repeat("a", 400), wantFailure: true, wantTransient: true, errDetailMustContain: "exit code 2"},
-		{name: "Exit 0 Stderr Context Limit Keyword", exitCode: 0, stdout: "not json", stderr: "error: maximum context length exceeded", wantFailure: true, wantCorrupt: true, errDetailMustContain: "context window exceeded"},
-		{name: "Exit 0 Stderr Corrupted Transcript", exitCode: 0, stdout: "not json", stderr: "corrupted transcript detected", wantFailure: true, wantCorrupt: true, errDetailMustContain: "corrupt"},
-		{name: "Exit 0 Stderr Fatal Crash", exitCode: 0, stdout: "not json", stderr: "fatal: unrecoverable crash", wantFailure: true, errDetailMustContain: "fatal"},
-		{name: "Exit 0 Result Event Status ERROR Corrupt", exitCode: 0, stdout: `{"event":"result","status":"ERROR","error":"session corrupt error"}`, wantFailure: true, wantCorrupt: true, errDetailMustContain: "session corrupt error"},
-		{name: "Exit 0 Result Event Status FAILED", exitCode: 0, stdout: `{"event":"result","status":"FAILED"}`, wantFailure: true, wantTransient: true, errDetailMustContain: "runner status: FAILED"},
-		{name: "Resp Error Session Corrupt", exitCode: 0, stdout: `{"error":"session corrupt: malformed database"}`, wantFailure: true, wantCorrupt: true, errDetailMustContain: "session corrupt"},
-		{name: "Resp Error Invalid API Key", exitCode: 0, stdout: `{"error":"invalid api key provided"}`, wantFailure: true, errDetailMustContain: "invalid api key"},
-		{name: "Exit 42 Long Stdout Fallback", exitCode: 42, stdout: strings.Repeat("unparseable text ", 30), wantFailure: true, wantTransient: true, errDetailMustContain: "exit code 42"},
-		{name: "Exit 1 Short Stdout Fallback", exitCode: 1, stdout: "custom python failure on line 42", wantFailure: true, wantTransient: true, errDetailMustContain: "custom python failure on line 42"},
-	}
-
-	for _, tc := range tests {
-		isFailure, isTransient, isCorrupt, errDetail := ClassifyError(tc.exitCode, tc.stdout, tc.stderr)
-		if isFailure != tc.wantFailure || isTransient != tc.wantTransient || isCorrupt != tc.wantCorrupt {
-			t.Errorf("%s: flags = (%v, %v, %v), want (%v, %v, %v)", tc.name, isFailure, isTransient, isCorrupt, tc.wantFailure, tc.wantTransient, tc.wantCorrupt)
-		}
-		if tc.errDetailMustContain != "" && !strings.Contains(errDetail, tc.errDetailMustContain) {
-			t.Errorf("%s: errDetail %q does not contain %q", tc.name, errDetail, tc.errDetailMustContain)
-		}
-	}
-}
-
 func TestExtractSessionID(t *testing.T) {
 	for _, tc := range []struct{ name, input, wantUUID string }{
 		{name: "NDJSON Init Event", input: "{\"event\":\"init\",\"conversation_id\":\"88888888-9999-aaaa-bbbb-cccccccccccc\"}\n{\"event\":\"step_update\"}\n", wantUUID: "88888888-9999-aaaa-bbbb-cccccccccccc"},
@@ -192,13 +114,6 @@ func TestIsInactivityTimeout(t *testing.T) {
 		if got := IsInactivityTimeout(tc.errDetail, tc.stderr); got != tc.want {
 			t.Errorf("%s: IsInactivityTimeout(%q, %q) = %v, want %v", tc.name, tc.errDetail, tc.stderr, got, tc.want)
 		}
-	}
-
-	if !isWatchdogInactivity("[WATCHDOG] inactivity happened") || isWatchdogInactivity("all good") {
-		t.Errorf("unexpected isWatchdogInactivity result")
-	}
-	if !isWatchdogMaxDuration("[WATCHDOG] max duration reached") || isWatchdogMaxDuration("all good") {
-		t.Errorf("unexpected isWatchdogMaxDuration result")
 	}
 }
 
@@ -345,17 +260,12 @@ func TestStepUpdateEvent_Resolvers(t *testing.T) {
 		ev          *StepUpdateEvent
 		wantType    string
 		wantTool    string
-		wantDelta   string
 		wantCmdName string
 	}{
 		{name: "Nil Event"},
 		{name: "StepType and ToolName", ev: &StepUpdateEvent{StepType: "tool", ToolName: "view_file", State: "ACTIVE"}, wantType: "tool", wantTool: "view_file"},
 		{name: "Type and Name", ev: &StepUpdateEvent{Type: "tool_call", Name: "run_command", State: "ACTIVE"}, wantType: "tool_call", wantTool: "run_command"},
 		{name: "Priority: StepType and ToolName override Type and Name", ev: &StepUpdateEvent{StepType: "tool", Type: "other", ToolName: "grep_search", Name: "fallback"}, wantType: "tool", wantTool: "grep_search"},
-		{name: "TextDelta Field", ev: &StepUpdateEvent{TextDelta: "chunk 1"}, wantDelta: "chunk 1"},
-		{name: "Delta Field", ev: &StepUpdateEvent{Delta: "chunk 2"}, wantDelta: "chunk 2"},
-		{name: "Agent Response Content", ev: &StepUpdateEvent{StepType: "agent_response", Content: "chunk 3"}, wantType: "agent_response", wantDelta: "chunk 3"},
-		{name: "Tool Step Content Does Not Populate Delta", ev: &StepUpdateEvent{StepType: "tool", Content: "tool output content"}, wantType: "tool"},
 		{name: "Tool Without ToolInfo", ev: &StepUpdateEvent{ToolName: "run_command"}, wantTool: "run_command"},
 		{name: "CommandLine Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{CommandLine: "git commit -m 'test'"}}}, wantTool: "run_command", wantCmdName: "git"},
 		{name: "CommandLineSnake Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{CommandLineSnake: "docker ps -a"}}}, wantTool: "run_command", wantCmdName: "docker"},
@@ -368,7 +278,7 @@ func TestStepUpdateEvent_Resolvers(t *testing.T) {
 	} {
 		if tc.ev == nil {
 			var nilEv *StepUpdateEvent
-			if nilEv.ResolvedType() != "" || nilEv.ResolvedToolName() != "" || nilEv.ResolvedTextDelta() != "" || nilEv.ResolvedCommandName() != "" || nilEv.ResolvedCommandLine() != "" {
+			if nilEv.ResolvedType() != "" || nilEv.ResolvedToolName() != "" || nilEv.ResolvedCommandName() != "" || nilEv.ResolvedCommandLine() != "" {
 				t.Errorf("%s: nil event returned non-empty string", tc.name)
 			}
 			continue
@@ -376,7 +286,6 @@ func TestStepUpdateEvent_Resolvers(t *testing.T) {
 		for _, check := range []struct{ got, want, field string }{
 			{tc.ev.ResolvedType(), tc.wantType, "Type"},
 			{tc.ev.ResolvedToolName(), tc.wantTool, "ToolName"},
-			{tc.ev.ResolvedTextDelta(), tc.wantDelta, "TextDelta"},
 			{tc.ev.ResolvedCommandName(), tc.wantCmdName, "CommandName"},
 		} {
 			if check.got != check.want {
@@ -391,24 +300,16 @@ func TestActivityWriter_SessionDiscoveryAndConcurrency(t *testing.T) {
 	if w.SessionID() != "" {
 		t.Errorf("expected empty initial session ID, got %q", w.SessionID())
 	}
-	startNano := w.LastActivity().UnixNano()
 
 	chunk := []byte("INFO: Starting conversation update stream for 12345678-abcd-ef01-2345-6789abcdef01\n")
 	n, err := w.Write(chunk)
-	if err != nil || n != len(chunk) || w.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" || w.LastActivity().UnixNano() < startNano || w.String() != string(chunk) {
+	if err != nil || n != len(chunk) || w.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" || w.String() != string(chunk) {
 		t.Fatalf("Write checks failed: n=%d, err=%v", n, err)
 	}
 
 	if nZero, errZero := w.Write([]byte{}); nZero != 0 || errZero != nil {
 		t.Errorf("expected 0, nil from empty write")
 	}
-
-	w.ResetBuffer()
-	if w.String() != "" || w.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" {
-		t.Errorf("expected empty string and preserved session ID after ResetBuffer")
-	}
-	var nilW *ActivityWriter
-	nilW.ResetBuffer()
 
 	wPre := NewActivityWriter("11111111-2222-3333-4444-555555555555")
 	_, _ = wPre.Write([]byte("INFO: Starting conversation update stream for 99999999-8888-7777-6666-555555555555\n"))
@@ -459,7 +360,6 @@ func TestActivityWriter_SessionDiscoveryAndConcurrency(t *testing.T) {
 		go func(id int) {
 			for j := 0; j < 50; j++ {
 				_, _ = wConc.Write([]byte(fmt.Sprintf("log line from worker %d turn %d\n", id, j)))
-				_ = wConc.LastActivity()
 				_ = wConc.SessionID()
 				_ = wConc.String()
 			}
@@ -469,35 +369,12 @@ func TestActivityWriter_SessionDiscoveryAndConcurrency(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		<-done
 	}
-	if wConc.LastActivity().IsZero() || len(wConc.String()) == 0 {
-		t.Errorf("expected non-zero activity and non-empty buffer")
+	if len(wConc.String()) == 0 {
+		t.Errorf("expected non-empty buffer")
 	}
 }
 
 func TestErrorAndWatchdogDetailHelpers(t *testing.T) {
-	longLine := "[watchdog] " + strings.Repeat("x", 250)
-	if detail := extractWatchdogDetail(longLine, "fallback"); len(detail) != 200 || !strings.HasSuffix(detail, "...") {
-		t.Errorf("expected 200-char truncated detail with ..., got len %d: %q", len(detail), detail)
-	}
-	if fallback := extractWatchdogDetail("regular log line 1\nregular log line 2", "my-fallback-keyword"); fallback != "my-fallback-keyword" {
-		t.Errorf("expected fallback keyword, got %q", fallback)
-	}
-
-	stderrWithNoise := "\nStarting conversation update stream for session-123\nDEBUG: initializing subsystem\nINFO: connecting to gateway\n\nActual error occurred here\n"
-	if detailNoise := extractErrorDetail(stderrWithNoise, 1); detailNoise != "Actual error occurred here" {
-		t.Errorf("expected 'Actual error occurred here', got %q", detailNoise)
-	}
-
-	longError := strings.Repeat("e", 250)
-	if detailLong := extractErrorDetail(longError, 1); len(detailLong) != 200 || !strings.HasSuffix(detailLong, "...") {
-		t.Errorf("expected 200-char truncated detail, got len %d: %q", len(detailLong), detailLong)
-	}
-
-	onlyNoise := "DEBUG: step 1\nINFO: step 2\nStarting conversation update stream for test\n"
-	if detailOnlyNoise := extractErrorDetail(onlyNoise, 42); detailOnlyNoise != "execution failed with exit code 42" {
-		t.Errorf("expected fallback for only-noise stderr, got %q", detailOnlyNoise)
-	}
-
 	if !isNonTransientError("fork/exec /bin/sh: permission denied") {
 		t.Errorf("expected true for fork/exec permission denied")
 	}

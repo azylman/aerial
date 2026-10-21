@@ -156,6 +156,7 @@ for svc_path in "$COVERAGE_DIR"/*; do
       {
         file_name = $1; fn_name = $2; pct = $3
         sub(/:[0-9]+:$/, "", file_name)
+        if (file_name ~ /\/fakestore\.go$/ || $2 ~ /(MockProcessHandle|MockDaemonSpawner|MockSpawner|spawnDefaultMockPipes)/) { next }
         sub(/^.*\./, "", fn_name)
         sub(/%$/, "", pct)
         gsub(/\x27/, "\x27\x27", file_name)

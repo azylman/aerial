@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+func (s *BufferingTurnSink) AccumulatedText() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.builder.String()
+}
+
 func TestThrowawayTurnSink(t *testing.T) {
 	s := NewThrowawayTurnSink()
 	s.OnTurnStarted()

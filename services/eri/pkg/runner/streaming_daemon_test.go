@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+func (d *StreamingDaemon) StepCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.stepCount
+}
+
 type mockCompletedTool struct {
 	ToolName, MCPServer, Status string
 	Duration                    time.Duration

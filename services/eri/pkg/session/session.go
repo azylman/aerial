@@ -287,30 +287,6 @@ func (m *Manager) getTargetDirs(convID string) []string {
 	return targetDirs
 }
 
-// formatStepError safely formats a deserialized JSON error field (string or object)
-// without fragile string comparisons to "null".
-func formatStepError(errVal any) string {
-	if errVal == nil {
-		return ""
-	}
-	switch v := errVal.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	case map[string]interface{}:
-		b, err := json.Marshal(v)
-		if err == nil {
-			return string(b)
-		}
-		return fmt.Sprintf("%v", v)
-	default:
-		s := strings.TrimSpace(fmt.Sprintf("%v", v))
-		if s == "<nil>" {
-			return ""
-		}
-		return s
-	}
-}
-
 // ExtractLastTurnError parses transcript files to extract any error step specifically occurring
 // during the active turn (strictly after 'since' or after the latest non-ambient USER_INPUT).
 func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since time.Time) (string, error) {

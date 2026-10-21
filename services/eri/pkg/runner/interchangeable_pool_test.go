@@ -13,6 +13,24 @@ import (
 	"time"
 )
 
+func (p *InterchangeablePool) Workers() []string {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.workers))
+	copy(out, p.workers)
+	return out
+}
+
+func (p *InterchangeablePool) AvailableCount() int {
+	if p == nil {
+		return 0
+	}
+	return len(p.available)
+}
+
 // Helper mock spawner that generates deterministic sequential session UUIDs
 // and responds to user prompts with structured result events.
 func createTestSpawner(onPrompt ...func(prompt string)) *MockDaemonSpawner {
