@@ -84,9 +84,6 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	if pending, err := s.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
 		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
 	}
-	if maxRow, err := s.GetMaxMessageRowID(ctx, "th-1"); err != nil || maxRow != 1 {
-		t.Errorf("GetMaxMessageRowID = %d, %v, want 1, nil", maxRow, err)
-	}
 	if threadIDs, err := s.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 {
 		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
 	}
@@ -94,13 +91,6 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
 	}
 	_, _ = s.GetRecentThreadMessages(ctx, "th-1", 0)
-
-	customTime := now.Add(-30 * time.Minute)
-	s.SetMessageUpdatedAt("msg-1", customTime)
-	s.SetMessageUpdatedAt("non-existent", customTime)
-	if m, _ := s.GetMessage(ctx, "msg-1"); m == nil || !m.UpdatedAt.Equal(customTime) {
-		t.Errorf("SetMessageUpdatedAt failed: m=%+v", m)
-	}
 
 	if tasks, err := s.GetActiveTasks(ctx); err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
 		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
@@ -322,7 +312,7 @@ func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
 
 func TestFakeStoreCloneNil(t *testing.T) {
 	if cloneMessage(nil) != nil || clonePtr[SessionInfo](nil) != nil || cloneRun(nil) != nil ||
-		cloneSessionSummary(nil) != nil || cloneTranscriptSteps(nil) != nil {
+		cloneSessionSummary(nil) != nil {
 		t.Errorf("expected nil clones for nil inputs")
 	}
 	if got := cloneSliceNonNil[string](nil); got == nil || len(got) != 0 {

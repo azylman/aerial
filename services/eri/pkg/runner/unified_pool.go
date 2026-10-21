@@ -525,7 +525,7 @@ const (
 
 // ShouldRotate evaluates whether a daemon has reached its session lifetime thresholds.
 func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
-	if d == nil || d.InflightCount() > 0 || (d.TaskTracker() != nil && d.TaskTracker().ActiveCount() > 0) {
+	if d == nil || d.InflightCount() > 0 {
 		return false, ""
 	}
 	if d.IsDirty() {
@@ -986,8 +986,7 @@ func (l *unifiedSessionLease) Release() error {
 	var releaseErr error
 	l.releaseOnce.Do(func() {
 		defer l.pool.releaseTargetLock(l.targetKey, l.lock, true)
-		if l.cancelRotation || strings.Contains(l.targetKey, "-ondemand-") ||
-			(l.daemon != nil && l.daemon.TaskTracker() != nil && l.daemon.TaskTracker().ActiveCount() > 0) {
+		if l.cancelRotation || strings.Contains(l.targetKey, "-ondemand-") {
 			return
 		}
 		shouldRotate, reason := l.pool.ShouldRotate(l.daemon)

@@ -70,7 +70,6 @@ type StreamingDaemon struct {
 	stdout         io.ReadCloser
 	stderrCloser   io.Closer
 	stderr         *ActivityWriter
-	taskTracker    *TaskTracker
 	mu             sync.RWMutex
 	stdinMu        sync.Mutex
 	state          DaemonState
@@ -129,7 +128,7 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	d := &StreamingDaemon{
 		cfg: cfg, spawner: spawner, handle: handle, stdin: stdin,
 		stdout: stdout, stderrCloser: stderr, stderr: actWriter,
-		taskTracker: NewTaskTracker(), state: StateStarting, lastUsed: time.Now(),
+		state: StateStarting, lastUsed: time.Now(),
 		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
 	}
 
@@ -219,7 +218,7 @@ func (d *StreamingDaemon) LastUsed() time.Time {
 	defer d.mu.RUnlock()
 	return d.lastUsed
 }
-func (d *StreamingDaemon) TaskTracker() *TaskTracker { return d.taskTracker }
+
 func (d *StreamingDaemon) InflightCount() int {
 	d.inflightMu.Lock()
 	defer d.inflightMu.Unlock()
@@ -634,11 +633,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		d.turnCount++
 		d.lastUsed = time.Now()
 		if !hasMoreInflight && d.state != StateClosed {
-			if d.taskTracker != nil && d.taskTracker.ActiveCount() > 0 {
-				d.state = StateYieldWaiting
-			} else {
-				d.state = StateReady
-			}
+			d.state = StateReady
 		}
 		var turnFinishedCb func(d *StreamingDaemon)
 		if !hasMoreInflight {

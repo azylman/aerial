@@ -141,15 +141,16 @@ func TestCheckBatch(t *testing.T) {
 	}
 
 	// Wrapper and Env checks
+	if defDir := GetBatchDir(); defDir != DefaultBatchDir {
+		t.Fatalf("GetBatchDir() default = %q, want %q", defDir, DefaultBatchDir)
+	}
 	t.Setenv("AERIAL_BATCH_GUARD_DIR", "/tmp/custom-batch-guard-dir")
 	if envDir := GetBatchDir(); envDir != "/tmp/custom-batch-guard-dir" {
 		t.Fatalf("GetBatchDir() = %q, want /tmp/custom-batch-guard-dir", envDir)
 	}
-	os.Unsetenv("AERIAL_BATCH_GUARD_DIR")
 
 	customDir := t.TempDir()
-	SetBatchDir(customDir)
-	defer SetBatchDir(DefaultBatchDir)
+	t.Setenv("AERIAL_BATCH_GUARD_DIR", customDir)
 	dDefault := CheckBatch(Payload{ConversationID: "custom-batch-session", StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/fresh.txt"})
 	if dDefault == nil || dDefault.Decision != DecisionAllow {
 		t.Fatalf("expected allow from CheckBatch, got %v", dDefault)

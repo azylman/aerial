@@ -59,7 +59,6 @@ type MessageStore interface {
 	ClaimPendingMessage(ctx context.Context, id string) (bool, error)
 	GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error)
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
-	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
 	GetActiveTasks(ctx context.Context) ([]ActiveTask, error)
 }
 

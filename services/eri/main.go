@@ -1884,7 +1884,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	PrewarmProcessPoolsSequentially(ctx, discordPrimaryPool, ephemeralPool, discordLowEffortPool, discordMediumEffortPool, voicePool)
 	metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
 
-	cls := classifier.New(cfg, nil, classifier.WithProcessPool(ephemeralPool))
+	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
 
 	var ambientProviders sync.Map
 	ambientResolver := func(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {

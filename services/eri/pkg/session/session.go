@@ -42,14 +42,6 @@ const DefaultMaxQuotaPauseDBBytes = 3 * 1024 * 1024
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 
-// TaskMetadata contains execution details for a running background task.
-type TaskMetadata struct {
-	TaskID      string    `json:"task_id"`
-	ToolName    string    `json:"tool_name"`
-	CommandLine string    `json:"command_line,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-}
-
 // Manager manages session directories, transcripts, and activity tracking
 // with explicitly injected homeDir and dataDir paths.
 type Manager struct {
@@ -686,32 +678,6 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 	return false
 }
 
-// CleanupEphemeralSession purges throwaway session directories from disk.
-// If searchRoots are provided, it deletes convID subdirectories within those roots.
-func CleanupEphemeralSession(convID string, searchRoots ...string) {
-	cleanConvID, ok := cleanSessionID(convID)
-	if !ok {
-		return
-	}
-	for _, root := range searchRoots {
-		cleanRoot := strings.TrimSpace(root)
-		if cleanRoot == "" {
-			continue
-		}
-		dirs := []string{
-			filepath.Join(cleanRoot, cleanConvID),
-			filepath.Join(cleanRoot, ".gemini", "antigravity-cli", "brain", cleanConvID),
-			filepath.Join(cleanRoot, ".gemini", "antigravity", "brain", cleanConvID),
-			filepath.Join(cleanRoot, "brain", cleanConvID),
-		}
-		for _, d := range dirs {
-			if rmErr := os.RemoveAll(d); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-				log.Printf("[Session] Warning removing session dir %s: %v", d, rmErr)
-			}
-		}
-	}
-}
-
 // GetTranscriptSize returns the maximum file size across transcript.jsonl and transcript_full.jsonl
 // for the given session ID across configured session roots.
 // Returns 0 if manager is nil, sessionID is empty/invalid, or files do not exist.
@@ -838,25 +804,4 @@ func (m *Manager) CountTranscriptTurns(sessionID string) int {
 		}
 	}
 	return maxTurns
-}
-
-// GetSessionDir returns the canonical directory path for a session ID.
-func (m *Manager) GetSessionDir(sessionID string) (string, error) {
-	if m == nil {
-		return "", errors.New("session manager is nil")
-	}
-	cleanID, ok := cleanSessionID(sessionID)
-	if !ok {
-		return "", fmt.Errorf("invalid session ID: %q", sessionID)
-	}
-	for _, dir := range m.getTargetDirs(cleanID) {
-		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-			return dir, nil
-		}
-	}
-	baseDir := m.resolveBaseDir(cleanID)
-	if baseDir == "" {
-		return "", errors.New("no session roots configured")
-	}
-	return filepath.Join(baseDir, cleanID), nil
 }

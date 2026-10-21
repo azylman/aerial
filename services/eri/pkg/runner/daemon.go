@@ -8,11 +8,10 @@ import (
 type DaemonState string
 
 const (
-	StateStarting     DaemonState = "STARTING"
-	StateReady        DaemonState = "READY"
-	StateExecuting    DaemonState = "EXECUTING"
-	StateYieldWaiting DaemonState = "YIELD_WAITING"
-	StateClosed       DaemonState = "CLOSED"
+	StateStarting  DaemonState = "STARTING"
+	StateReady     DaemonState = "READY"
+	StateExecuting DaemonState = "EXECUTING"
+	StateClosed    DaemonState = "CLOSED"
 )
 
 type DaemonConfig struct {
@@ -35,7 +34,6 @@ type TurnResult struct {
 	Response       string
 	Stderr         string
 	Usage          AgyUsage
-	ActiveTasks    []TaskMetadata
 	IsYieldTrap    bool
 	Duration       time.Duration
 }

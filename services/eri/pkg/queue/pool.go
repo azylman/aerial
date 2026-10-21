@@ -39,7 +39,6 @@ const (
 	ContinuationPromptTemplate  = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 	MaxYieldTrapAutoResumes     = 2
 	YieldTrapResumePrompt       = "[SYSTEM NOTICE]: Your previous turn yielded prematurely while background task(s) were still running, causing the runtime to terminate them. Inspect current status (check git status, PR state, or process logs) and continue your workflow to completion. Do NOT end the turn with waiting text."
-	TaskCompletionResumePrompt  = "[SYSTEM NOTICE]: Background task %s has finished with exit code %d. Logs are available at %s. Continue your workflow to completion. Do NOT end the turn with waiting text."
 )
 
 func sanitizeErrorText(errStr string) string {
@@ -63,7 +62,6 @@ type WorkerPoolConfig struct {
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
 	RunnerWithOptionsFunc       func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
-	NotifierRunnerFunc          runner.RunnerFunc
 	NotifierFunc                func(agyBin, apiKey, contextDescription string) string
 	DeliveryFunc                func(s *discordgo.Session, channelID, text string) error
 	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
@@ -244,17 +242,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 	}
 	if cfg.NotifierFunc == nil {
-		notifierRunner := cfg.NotifierRunnerFunc
-		if notifierRunner == nil && isExplicitAppCfg {
-			notifierRunner = cfg.RunnerFunc
-		}
-		if notifierRunner != nil {
-			cfg.NotifierFunc = func(agyBin, apiKey, desc string) string {
-				return notifier.GenerateDynamicNotification(agyBin, apiKey, desc, notifierRunner)
-			}
-		} else {
-			cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return notifier.StaticFallback(desc) }
-		}
+		cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return notifier.StaticFallback(desc) }
 	}
 	if cfg.DeliveryWithAttachmentsFunc == nil {
 		if cfg.DeliveryFunc != nil {
@@ -282,18 +270,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	cfg.SessionManager = sessMgr
 
 	if cfg.Classifier == nil {
-		agyBin, apiKey := cfg.AgyBin, cfg.APIKey
-		if appCfg != nil {
-			if cur := appCfg.Current(); cur != nil {
-				if cur.APIKey != "" {
-					apiKey = cur.APIKey
-				}
-				if cur.AgyBin != "" {
-					agyBin = cur.AgyBin
-				}
-			}
-		}
-		cfg.Classifier = classifier.NewClassifier(classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, cfg.RunnerFunc)))
+		cfg.Classifier = classifier.NewClassifier()
 	}
 	if cfg.LLMFunc == nil {
 		for _, candidate := range []runner.AgentPool{cfg.LowEffortProcessPool, cfg.ProcessPool} {

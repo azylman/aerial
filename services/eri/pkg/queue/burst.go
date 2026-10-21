@@ -10,7 +10,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 )
 
@@ -103,7 +102,6 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 
 func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) {
 	defer p.wg.Done()
-	threadID := strings.TrimPrefix(strings.TrimPrefix(scopeKey, "low_effort:"), "medium_effort:")
 
 	idleTimeout := p.cfg.IdleTimeout
 	if idleTimeout <= 0 {
@@ -167,18 +165,6 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 		case <-idleTimer.C:
 			p.mu.Lock()
 			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
-				hasActiveTasks := false
-				for _, pool := range []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool} {
-					if d := getStreamingDaemon(pool, threadID); d != nil && d.TaskTracker().ActiveCount() > 0 {
-						hasActiveTasks = true
-						break
-					}
-				}
-				if hasActiveTasks {
-					p.mu.Unlock()
-					idleTimer.Reset(idleTimeout)
-					continue
-				}
 				delete(p.threadChs, scopeKey)
 				p.scopeLocks.Delete(scopeKey)
 				p.mu.Unlock()

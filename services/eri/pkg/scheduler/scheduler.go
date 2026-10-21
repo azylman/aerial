@@ -50,28 +50,17 @@ type MessageEnqueuer interface {
 }
 
 type Scheduler struct {
-	cfg                *config.Config
-	store              db.Store
-	enqueuer           MessageEnqueuer
-	threadCreator      ThreadCreator
-	runnerFn           runner.RunnerFunc
-	llmFn              runner.LLMFunc
-	sessionRoots       []string
-	brainDir           string
-	transcriptEmbedder transcript.EmbedderFunc
-	transcriptLLMFunc  transcript.LLMClientFunc
-	wg                 sync.WaitGroup
+	cfg           *config.Config
+	store         db.Store
+	enqueuer      MessageEnqueuer
+	threadCreator ThreadCreator
+	llmFn         runner.LLMFunc
+	sessionRoots  []string
+	wg            sync.WaitGroup
 }
 
 // Option configures Scheduler options.
 type Option func(*Scheduler)
-
-// WithRunnerFunc sets the runner.RunnerFunc used by Scheduler for LLM fact extraction.
-func WithRunnerFunc(fn runner.RunnerFunc) Option {
-	return func(s *Scheduler) {
-		s.runnerFn = fn
-	}
-}
 
 // WithLLMFunc sets the runner.LLMFunc used by Scheduler for LLM fact extraction.
 func WithLLMFunc(fn runner.LLMFunc) Option {
@@ -90,27 +79,6 @@ func WithSessionRoots(roots ...string) Option {
 			}
 		}
 		s.sessionRoots = clean
-	}
-}
-
-// WithBrainDir sets the brain directory used for transcript synchronization.
-func WithBrainDir(dir string) Option {
-	return func(s *Scheduler) {
-		s.brainDir = strings.TrimSpace(dir)
-	}
-}
-
-// WithTranscriptEmbedder sets the embedder function used for transcript synchronization.
-func WithTranscriptEmbedder(fn transcript.EmbedderFunc) Option {
-	return func(s *Scheduler) {
-		s.transcriptEmbedder = fn
-	}
-}
-
-// WithTranscriptLLMFunc sets the LLM summarization function used for transcript synchronization.
-func WithTranscriptLLMFunc(fn transcript.LLMClientFunc) Option {
-	return func(s *Scheduler) {
-		s.transcriptLLMFunc = fn
 	}
 }
 
@@ -348,24 +316,21 @@ func (s *Scheduler) runPruneRetention(ctx context.Context) {
 
 func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 	s.spawnBg(func() {
-		brainDir := s.brainDir
-		if brainDir == "" && len(s.sessionRoots) > 0 {
-			brainDir = s.sessionRoots[0]
-		}
-		if brainDir == "" {
+		if len(s.sessionRoots) == 0 || s.sessionRoots[0] == "" {
 			return
 		}
+		brainDir := s.sessionRoots[0]
 
-		embedder := s.transcriptEmbedder
-		if embedder == nil && s.cfg != nil {
+		var embedder transcript.EmbedderFunc
+		if s.cfg != nil {
 			embedClient := transcript.NewEmbedder(s.cfg, s.sessionRoots...)
 			embedder = func(eCtx context.Context, text string) ([]float32, error) {
 				return embedClient.GenerateEmbedding(eCtx, text, false, 1)
 			}
 		}
 
-		llmFunc := s.transcriptLLMFunc
-		if llmFunc == nil && s.llmFn != nil && s.cfg != nil && s.cfg.Current() != nil {
+		var llmFunc transcript.LLMClientFunc
+		if s.llmFn != nil && s.cfg != nil && s.cfg.Current() != nil {
 			cur := s.cfg.Current()
 			model := cur.LowEffortModel
 			if model == "" {
@@ -374,9 +339,6 @@ func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 			llmFunc = func(lCtx context.Context, prompt string) (string, error) {
 				return s.llmFn(lCtx, model, prompt)
 			}
-		}
-		if s.runnerFn != nil && llmFunc == nil {
-			_ = s.runnerFn
 		}
 
 		for {

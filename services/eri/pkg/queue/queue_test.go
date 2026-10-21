@@ -648,7 +648,7 @@ func TestProcessBurst_SessionContinuityAndRotationMatrix(t *testing.T) {
 		{name: "ThreadsMode_WarmTurnSuppressesChannelHistory", channelID: "thread-history-suppress", seedTranscripts: []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, historyMessages: histMessages[:1], policy: config.ChannelPolicy{Mode: "threads"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"}}, messages: []db.Message{{ID: "msg-thread-turn-1", AuthorName: "Charlie", Content: "Hey Aerial, turn 1 thread question"}, {ID: "msg-thread-turn-2", AuthorName: "Charlie", Content: "Hey Aerial, turn 2 follow-up question"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantTurnPromptContains: map[int][]string{0: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{1: {"<CHANNEL_HISTORY>"}}},
 		{name: "SessionRotation_ResetsToColdState", channelID: "chan-rotation-cold", seedTranscripts: []string{"c9b5e679-7425-40de-944b-e07fc1f90ae7"}, historyMessages: []HistoryMessage{{ID: "hist-boot-1", AuthorName: "Alice", Role: "User", Content: "Historical message before bootstrap", CreatedAt: time.Now().UTC().Add(-5 * time.Minute)}}, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Turn 1 answer"}, {convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Subsequent turn answer"}}, messages: []db.Message{{ID: "msg-turn-1", AuthorName: "Alice", Content: "<@aerial> Turn 1"}, {ID: "msg-turn-2", AuthorName: "Alice", Content: "<@aerial> Turn 2"}, {ID: "msg-turn-3", AuthorName: "Alice", Content: "<@aerial> Turn 3"}}, wantRunnerCalls: 3, wantTurnCount: 3, wantSavedSession: "c9b5e679-7425-40de-944b-e07fc1f90ae7", checkSavedSession: true, wantPassedSessions: []string{"", "c9b5e679-7425-40de-944b-e07fc1f90ae7", "c9b5e679-7425-40de-944b-e07fc1f90ae7"}, wantTurnPromptContains: map[int][]string{2: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{0: {"<PREVIOUS_SESSION>"}, 2: {"<PREVIOUS_SESSION>"}}},
 		{name: "SessionRotation_SeedsPreviousSessionID", channelID: "chan-rotation-seed-test", seedTranscripts: []string{"22222222-2222-2222-2222-222222222222"}, enableHistoryFetcher: true, maxAttempts: 1, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, rotateBeforeTurn: 3, runnerSteps: []mockRunnerStep{{convID: "11111111-1111-1111-1111-111111111111", response: "Hello from turn"}, {convID: "11111111-1111-1111-1111-111111111111", response: "Hello from turn"}, {convID: "22222222-2222-2222-2222-222222222222", response: "Hello from turn"}, {convID: "22222222-2222-2222-2222-222222222222", response: "Hello from turn"}}, messages: []db.Message{{ID: "msg-seed-1", AuthorName: "Alice", Content: "<@aerial> Turn 1"}, {ID: "msg-seed-2", AuthorName: "Alice", Content: "<@aerial> Turn 2"}, {ID: "msg-seed-3", AuthorName: "Alice", Content: "<@aerial> Turn 1 of Session 2"}, {ID: "msg-seed-4", AuthorName: "Alice", Content: "<@aerial> Turn 2 of Session 2"}}, wantRunnerCalls: 4, wantTurnCount: 2, wantSavedSession: "22222222-2222-2222-2222-222222222222", checkSavedSession: true, wantTurnPromptContains: map[int][]string{2: {"<PREVIOUS_SESSION>"}}, wantTurnPromptExcludes: map[int][]string{0: {"<PREVIOUS_SESSION>"}, 1: {"<PREVIOUS_SESSION>"}, 2: {"11111111-1111-1111-1111-111111111111", "transcript.jsonl"}, 3: {"<PREVIOUS_SESSION>"}}},
-		{name: "Turn1Crash_DoesNotPersistGhostUUID", channelID: "chan-crash", maxAttempts: 1, policy: config.ChannelPolicy{Mode: "channel"}, runnerSteps: []mockRunnerStep{{stderr: "Starting conversation update stream for crash-uuid-999\nError: fatal process crash\n", exitCode: 1, errMsg: "exit status 1"}}, messages: []db.Message{{ID: "msg-crash-1", AuthorName: "Alice", Content: "Hey Aerial, please do something risky"}}, wantRunnerCalls: 1, wantTurnCount: 0, wantSavedSession: "", checkSavedSession: true},
+		{name: "Turn1Crash_DoesNotPersistGhostUUID", channelID: "chan-crash", maxAttempts: 1, policy: config.ChannelPolicy{Mode: "channel"}, runnerSteps: []mockRunnerStep{{stderr: "Starting conversation update stream for crash-uuid-999\nError: fatal process crash\n", exitCode: 1, errMsg: "exit status 1"}}, messages: []db.Message{{ID: "msg-crash-1", AuthorName: "Alice", Content: "<@aerial> please do something risky"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantFinalStatus: db.StatusFailed, wantSavedSession: "", checkSavedSession: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1747,17 +1747,6 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 				t.Errorf("delivered=%q, want %q", deliveredNotif, notifier.ModelUnavailableMessage())
 			}
 		})
-	}
-
-	runnerCalled := false
-	poolWrapped := New(nil, WorkerPoolConfig{
-		NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			runnerCalled = true
-			return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
-		},
-	})
-	if poolWrapped.cfg.NotifierFunc == nil || poolWrapped.cfg.NotifierFunc("agy", "key", "desc") != "DYNAMIC FALLBACK NOTICE" || !runnerCalled {
-		t.Errorf("failed dynamic notifier wrapping: called=%v", runnerCalled)
 	}
 }
 
@@ -3020,21 +3009,22 @@ func TestResolveStore(t *testing.T) {
 func TestWorkerPool_Accessors(t *testing.T) {
 	t.Parallel()
 	fake, realDB := setupTestStore(t), &sql.DB{}
+	noopLLM := func(context.Context, string, string) (string, error) { return "", nil }
 	tests := []struct {
-		name                                           string
-		pool                                           *WorkerPool
-		wantStoreNil, wantSummaryNil, wantAgentPoolNil bool
+		name                                                           string
+		pool                                                           *WorkerPool
+		wantStoreNil, wantSummaryNil, wantAgentPoolNil, wantLLMFuncNil bool
 	}{
-		{"nil", nil, true, true, true},
-		{"empty", &WorkerPool{}, true, false, true},
-		{"with_fake_and_agentpool", &WorkerPool{cfg: WorkerPoolConfig{Store: fake}, processPool: &testRunnerAgentPool{}}, false, false, false},
-		{"with_sqldb", &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}, false, false, true},
+		{"nil", nil, true, true, true, true},
+		{"empty", &WorkerPool{}, true, false, true, true},
+		{"with_fake_and_agentpool", &WorkerPool{cfg: WorkerPoolConfig{Store: fake, LLMFunc: noopLLM}, processPool: &testRunnerAgentPool{}}, false, false, false, false},
+		{"with_sqldb", &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}, false, false, true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if (tc.pool.Store() == nil) != tc.wantStoreNil || (tc.pool.SummaryGroup() == nil) != tc.wantSummaryNil || (tc.pool.AgentPool() == nil) != tc.wantAgentPoolNil {
-				t.Errorf("accessor mismatch: store=%v summary=%v agent=%v", tc.pool.Store() == nil, tc.pool.SummaryGroup() == nil, tc.pool.AgentPool() == nil)
+			if (tc.pool.Store() == nil) != tc.wantStoreNil || (tc.pool.SummaryGroup() == nil) != tc.wantSummaryNil || (tc.pool.AgentPool() == nil) != tc.wantAgentPoolNil || (tc.pool.LLMFunc() == nil) != tc.wantLLMFuncNil {
+				t.Errorf("accessor mismatch: store=%v summary=%v agent=%v llm=%v", tc.pool.Store() == nil, tc.pool.SummaryGroup() == nil, tc.pool.AgentPool() == nil, tc.pool.LLMFunc() == nil)
 			}
 		})
 	}

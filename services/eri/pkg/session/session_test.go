@@ -176,7 +176,7 @@ func TestEnsureSessionDirAndBaseDir(t *testing.T) {
 		}
 	})
 
-	t.Run("resolveBaseDir and GetSessionDir branches", func(t *testing.T) {
+	t.Run("resolveBaseDir and EnsureSessionDir branches", func(t *testing.T) {
 		tmp := t.TempDir()
 		mgr := New(filepath.Join(tmp, "nonexistent-root-1"), filepath.Join(tmp, "nonexistent-root-2"))
 		if base := mgr.resolveBaseDir("s1"); base == "" {
@@ -186,33 +186,24 @@ func TestEnsureSessionDirAndBaseDir(t *testing.T) {
 		if nilMgr.resolveBaseDir("s1") != "" {
 			t.Fatalf("expected empty for nil manager")
 		}
-		if _, err := nilMgr.GetSessionDir("s1"); err == nil {
-			t.Fatalf("expected error for nil manager GetSessionDir")
-		}
-		if _, err := (&Manager{}).GetSessionDir("s1"); err == nil {
-			t.Fatalf("expected error for empty roots GetSessionDir")
-		}
-		if _, err := mgr.GetSessionDir("../invalid"); err == nil {
-			t.Fatalf("expected error for invalid session ID")
-		}
 		existingRoot := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain")
 		_ = os.MkdirAll(existingRoot, 0o755)
 		mgrWithExisting := New(filepath.Join(tmp, "home"), "")
 		preDir := filepath.Join(existingRoot, "sess-pre")
 		_ = os.MkdirAll(preDir, 0o755)
-		if got, err := mgrWithExisting.GetSessionDir("sess-pre"); err != nil || got != preDir {
-			t.Fatalf("expected existing dir %q, got %q (err=%v)", preDir, got, err)
+		if base := mgrWithExisting.resolveBaseDir("sess-pre"); base != existingRoot {
+			t.Fatalf("expected existing parent %q, got %q", existingRoot, base)
 		}
 		if base := mgrWithExisting.resolveBaseDir("s1"); base != existingRoot {
 			t.Fatalf("expected existing root %q, got %q", existingRoot, base)
 		}
 		blockMgr := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-		sessDir, _ := blockMgr.GetSessionDir("sess-block")
+		sessDir := filepath.Join(existingRoot, "sess-block")
 		_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), 0o755)
 		if _, err := blockMgr.EnsureSessionDir("sess-block"); err == nil {
 			t.Fatalf("expected OpenFile error when transcript.jsonl is a directory")
 		}
-		mkdirBlockDir, _ := blockMgr.GetSessionDir("sess-mkdir-block")
+		mkdirBlockDir := filepath.Join(existingRoot, "sess-mkdir-block")
 		_ = os.MkdirAll(mkdirBlockDir, 0o755)
 		_ = os.WriteFile(filepath.Join(mkdirBlockDir, ".system_generated"), []byte("file"), 0o644)
 		if _, err := blockMgr.EnsureSessionDir("sess-mkdir-block"); err == nil {
@@ -630,35 +621,10 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 		})
 	}
 
-	cleanupTests := []struct {
-		name      string
-		sessionID string
-	}{
-		{"cleanup valid and invalid sessions", "sess-ephemeral"},
-	}
-	for _, tc := range cleanupTests {
-		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
-			targetDir := filepath.Join(tmp, tc.sessionID)
-			_ = os.MkdirAll(targetDir, 0o755)
-			_ = os.MkdirAll(filepath.Join(tmp, ".gemini", "antigravity-cli", "brain", tc.sessionID), 0o755)
-			_ = os.MkdirAll(filepath.Join(tmp, ".gemini", "antigravity", "brain", tc.sessionID), 0o755)
-			_ = os.MkdirAll(filepath.Join(tmp, "brain", tc.sessionID), 0o755)
-
-			CleanupEphemeralSession("")
-			CleanupEphemeralSession("../bad", tmp)
-			CleanupEphemeralSession(tc.sessionID, "", tmp)
-
-			if _, err := os.Stat(targetDir); !os.IsNotExist(err) {
-				t.Fatalf("expected targetDir to be deleted")
-			}
-
-			if DefaultMinSessionTurns != 3 || DefaultEmergencyRotationMultiplier != 3 ||
-				DefaultMaxSessionTurns != 8 || DefaultMaxSessionSteps != 180 ||
-				DefaultMaxTranscriptBytes != 1024*1024 || DefaultMaxSessionTranscriptBytes != 2*1024*1024 ||
-				DefaultMaxSessionDBBytes != 4*1024*1024 || DefaultMaxQuotaPauseDBBytes != 3*1024*1024 {
-				t.Fatalf("unexpected session rotation constant values")
-			}
-		})
+	if DefaultMinSessionTurns != 3 || DefaultEmergencyRotationMultiplier != 3 ||
+		DefaultMaxSessionTurns != 8 || DefaultMaxSessionSteps != 180 ||
+		DefaultMaxTranscriptBytes != 1024*1024 || DefaultMaxSessionTranscriptBytes != 2*1024*1024 ||
+		DefaultMaxSessionDBBytes != 4*1024*1024 || DefaultMaxQuotaPauseDBBytes != 3*1024*1024 {
+		t.Fatalf("unexpected session rotation constant values")
 	}
 }

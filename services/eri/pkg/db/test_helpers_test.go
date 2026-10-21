@@ -57,7 +57,6 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, c1(s.ClaimPendingMessage(ctx, "id")), "ClaimPendingMessage")
 	requireErr(t, c1(s.GetActiveRecentThreadIDs(ctx, time.Hour)), "GetActiveRecentThreadIDs")
 	requireErr(t, c1(s.GetRecentThreadMessages(ctx, "t", 10)), "GetRecentThreadMessages")
-	requireErr(t, c1(s.GetMaxMessageRowID(ctx, "t")), "GetMaxMessageRowID")
 	requireErr(t, c1(s.GetActiveTasks(ctx)), "GetActiveTasks")
 	requireErr(t, c1(s.GetSessionID(ctx, "t")), "GetSessionID")
 	requireErr(t, s.SaveSessionID(ctx, "t", "s"), "SaveSessionID")

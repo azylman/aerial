@@ -217,7 +217,7 @@ func TestStreamingDaemon_HandshakeSuccessAndDefaults(t *testing.T) {
 	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Timeout: 2 * time.Second}
 	h := startTestStreamingDaemon(t, cfg, "", false)
 	d := h.daemon
-	if d.State() != StateReady || d.SessionID() != cfg.SessionID || d.TurnCount() != 0 || d.StepCount() != 0 || d.TaskTracker() == nil || time.Since(d.LastUsed()) > 5*time.Second {
+	if d.State() != StateReady || d.SessionID() != cfg.SessionID || d.TurnCount() != 0 || d.StepCount() != 0 || time.Since(d.LastUsed()) > 5*time.Second {
 		t.Errorf("unexpected initial state: state=%s, session=%s, turns=%d, steps=%d", d.State(), d.SessionID(), d.TurnCount(), d.StepCount())
 	}
 	if DefaultHandshakeTimeout != 30*time.Second {
@@ -306,18 +306,6 @@ func TestStreamingDaemon_DispatchEvents(t *testing.T) {
 	if thinking != 1 || len(deltas) != 2 || deltas[0] != "chunk1" || deltas[1] != "chunk2" || len(toolCalls) != 1 || toolCalls[0] != "bash:ls -la" ||
 		h.daemon.StepCount() != 4 || h.daemon.TurnCount() != 1 || h.daemon.State() != StateReady {
 		t.Errorf("unexpected events: thinking=%d, deltas=%v, tools=%v", thinking, deltas, toolCalls)
-	}
-}
-
-func TestStreamingDaemon_DispatchResultYieldWaiting(t *testing.T) {
-	hYield := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000002"), "", false)
-	hYield.daemon.TaskTracker().Add(TaskMetadata{TaskID: "bg-1", CommandLine: "run long task", StartedAt: time.Now()})
-	sinkYield := newMockTurnSink()
-	enqueueInflightTurn(hYield.daemon, "turn-1", sinkYield, func(tc *TurnContext) { tc.Prompt = "start background task" })
-	_, _ = hYield.outW.Write([]byte(`{"event":"result","response":"task started"}` + "\n"))
-	waitAndAssertSinkResult(t, "YieldWaiting", sinkYield, "task started", "", "")
-	if hYield.daemon.State() != StateYieldWaiting {
-		t.Errorf("expected StateYieldWaiting, got %s", hYield.daemon.State())
 	}
 }
 

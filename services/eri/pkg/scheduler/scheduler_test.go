@@ -164,34 +164,20 @@ func TestNew_AndOptions(t *testing.T) {
 		withOpts  bool
 		wantErr   bool
 		wantRoots int
-		wantBrain string
 	}{
-		{"nil config returns error", nil, false, true, 0, ""},
-		{"valid config standard", newTestConfig(), false, false, 0, ""},
-		{"options runner and roots and brain", newTestConfig(), true, false, 2, "/tmp/brain"},
+		{"nil config returns error", nil, false, true, 0},
+		{"valid config standard", newTestConfig(), false, false, 0},
+		{"options llm and roots", newTestConfig(), true, false, 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var opts []Option
-			var embedderCalled, llmCalled bool
 			if tc.withOpts {
 				opts = []Option{
-					WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-						return "", "", 0, nil
-					}),
 					WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
 						return "llm", nil
 					}),
 					WithSessionRoots(" /root1 ", "", " /root2 "),
-					WithBrainDir(tc.wantBrain),
-					WithTranscriptEmbedder(func(ctx context.Context, text string) ([]float32, error) {
-						embedderCalled = true
-						return make([]float32, db.ExpectedEmbeddingDim), nil
-					}),
-					WithTranscriptLLMFunc(func(ctx context.Context, prompt string) (string, error) {
-						llmCalled = true
-						return "summary", nil
-					}),
 					nil,
 				}
 			}
@@ -206,13 +192,8 @@ func TestNew_AndOptions(t *testing.T) {
 				if len(s.sessionRoots) != tc.wantRoots || s.sessionRoots[0] != "/root1" || s.sessionRoots[1] != "/root2" {
 					t.Errorf("roots mismatch: got %v", s.sessionRoots)
 				}
-				if s.brainDir != tc.wantBrain {
-					t.Errorf("brainDir: got %q, want %q", s.brainDir, tc.wantBrain)
-				}
-				_, _ = s.transcriptEmbedder(context.Background(), "t")
-				_, _ = s.transcriptLLMFunc(context.Background(), "p")
-				if !embedderCalled || !llmCalled {
-					t.Errorf("expected transcript functions to be wired and callable")
+				if s.llmFn == nil {
+					t.Errorf("expected llmFn to be wired")
 				}
 			}
 		})
@@ -666,7 +647,7 @@ func TestMaintenanceJobs_RetentionAndTranscript(t *testing.T) {
 	emptySched.wg.Wait()
 
 	cfg := newTestConfig()
-	schedMethod, _ := New(cfg, store, nil, nil, WithBrainDir(tempBrain), WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+	schedMethod, _ := New(cfg, store, nil, nil, WithSessionRoots(tempBrain), WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
 		return "summary", nil
 	}))
 	schedMethod.runTranscriptSync(context.Background())

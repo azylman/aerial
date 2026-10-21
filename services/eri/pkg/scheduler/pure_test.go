@@ -88,29 +88,6 @@ func TestFormatThreadTitle_TableDriven(t *testing.T) {
 	}
 }
 
-func TestIsScheduleDue_TableDriven(t *testing.T) {
-	now := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name      string
-		nextRunAt time.Time
-		now       time.Time
-		expected  bool
-	}{
-		{"zero nextRunAt", time.Time{}, now, false},
-		{"zero now", now, time.Time{}, false},
-		{"future nextRunAt", now.Add(5 * time.Minute), now, false},
-		{"exact match", now, now, true},
-		{"past nextRunAt", now.Add(-5 * time.Minute), now, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsScheduleDue(tc.nextRunAt, tc.now); got != tc.expected {
-				t.Errorf("expected %v, got %v", tc.expected, got)
-			}
-		})
-	}
-}
-
 func TestEvaluateCronStaleness_TableDriven(t *testing.T) {
 	now := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
