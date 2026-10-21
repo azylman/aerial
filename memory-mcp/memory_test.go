@@ -4717,6 +4717,15 @@ func TestFindConsolidationCliques(t *testing.T) {
 		vecsB[i] = v
 	}
 
+	seedVec := make([]float32, ExpectedEmbeddingDim)
+	seedVec[0] = 1.0
+	borderlineVec := make([]float32, ExpectedEmbeddingDim)
+	borderlineVec[0] = 0.80
+	borderlineVec[1] = -0.60
+	tightVec := make([]float32, ExpectedEmbeddingDim)
+	tightVec[0] = 0.95
+	tightVec[1] = float32(math.Sqrt(1.0 - 0.95*0.95))
+
 	tests := []struct {
 		name      string
 		facts     []ScoredFactWithEmbedding
@@ -4825,6 +4834,27 @@ func TestFindConsolidationCliques(t *testing.T) {
 				makeScoredFactFixture(3, "L3", looseVecs[2]),
 			},
 			wantCount: 0,
+		},
+		{
+			name: "Size2PairAndHighSimIncludedByDefault",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "P1", tightVec),
+				makeScoredFactFixture(2, "P2", tightVec),
+			},
+			wantCount: 1,
+			wantSizes: []int{2},
+		},
+		{
+			name: "SimilaritySortedPrefersTighterCliqueAndRejectsInconsistentMember",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "Seed", seedVec),
+				makeScoredFactFixture(2, "BorderlineIncompatibleWithTight", borderlineVec),
+				makeScoredFactFixture(3, "Tight1", tightVec),
+				makeScoredFactFixture(4, "Tight2", tightVec),
+			},
+			minSize:   3,
+			wantCount: 1,
+			wantSizes: []int{3},
 		},
 	}
 
@@ -4957,10 +4987,19 @@ func TestConsolidateFactClusters(t *testing.T) {
 			name:          "CandidateFactsWithEmptyTextAndClampedImportanceAndFallbackCategory",
 			ctx:           ctx,
 			addFacts:      true,
-			llmResp:       `{"facts":[{"fact_text":"","category":"","importance_score":0},{"fact_text":"Valid synthesized fact","category":"","importance_score":1.5}]}`,
+			llmResp:       `{"facts":[{"fact_text":"","category":"","importance_score":0},{"fact_text":"Valid synthesized fact 1"},{"fact_text":"Valid synthesized fact 2"},{"fact_text":"Extra third fact capped"}]}`,
 			wantErr:       false,
 			wantCount:     1,
-			wantRemaining: 1,
+			wantRemaining: 2,
+		},
+		{
+			name:          "AllEmptyCandidateFactsSkippedWithoutDeletion",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       `{"facts":[{"fact_text":"   "}]}`,
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
 		},
 		{
 			name:          "StoreDeleteFactErrorLoggedGracefully",
