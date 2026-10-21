@@ -114,4 +114,13 @@ func (w *Worker) runDaily(ctx context.Context) {
 		return
 	}
 	log.Printf("[Memory Worker] Decay and prune completed: decayed=%d, pruned=%d", decayed, pruned)
+
+	if w.ollama != nil && w.llmClient != nil {
+		consolidated, err := ConsolidateFactClusters(ctx, w.store, w.ollama, w.llmClient)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[Memory Worker] Fact consolidation dreaming failed: %v", err)
+		} else {
+			log.Printf("[Memory Worker] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
+		}
+	}
 }

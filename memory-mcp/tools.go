@@ -158,6 +158,18 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 		importance = 1.0
 	}
 
+	if args.SupersedesID == 0 {
+		admit, adjustedImportance, reason := EvaluateCandidateAdmission(ExtractedFactItem{
+			Category:   category,
+			FactText:   factText,
+			Importance: importance,
+		})
+		if !admit {
+			return MemoryStoreOutput{}, fmt.Errorf("fact rejected by admission gate (%s)", reason)
+		}
+		importance = adjustedImportance
+	}
+
 	var emb []float32
 	if h.ollama != nil {
 		vec, err := h.ollama.GenerateEmbedding(ctx, factText, false, 1)
@@ -291,6 +303,16 @@ func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (
 	facts := make([]Fact, len(scored))
 	for i, s := range scored {
 		facts[i] = s.Fact
+	}
+
+	if len(facts) > 0 {
+		ids := make([]int64, len(facts))
+		for i, f := range facts {
+			ids[i] = f.ID
+		}
+		if err := h.store.TouchRetrievedFacts(ctx, ids, 0.02); err != nil {
+			log.Printf("[Memory] Warning: TouchRetrievedFacts failed: %v", err)
+		}
 	}
 
 	return &ContextResponse{

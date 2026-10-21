@@ -183,6 +183,8 @@ type Store interface {
 	GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error)
 	UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error
 	DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (decayedCount, prunedCount int64, err error)
+	TouchRetrievedFacts(ctx context.Context, ids []int64, boost float64) error
+	GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error)
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
 	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
@@ -782,7 +784,7 @@ func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding 
 	return nil
 }
 
-// DecayAndPruneFacts applies decay to untouched facts and removes stale facts.
+// DecayAndPruneFacts applies decay to untouched facts down to category-specific floors and removes stale facts.
 func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (decayedCount, prunedCount int64, err error) {
 	if err = s.checkDB(); err != nil {
 		return 0, 0, err
@@ -801,8 +803,15 @@ func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor
 	defer cancel()
 
 	now := time.Now().UTC()
-	decayQuery := `UPDATE facts SET importance = GREATEST(0.0, ROUND((importance - $1)::numeric, 2)), last_decayed_at = $2
-		WHERE (last_decayed_at IS NULL OR last_decayed_at < $3) AND (last_reinforced_at IS NULL OR last_reinforced_at < $3) AND importance > 0.0`
+	decayQuery := `UPDATE facts SET importance = CASE
+  WHEN category = 'user_preference' AND importance > 0.75 THEN GREATEST(0.75, ROUND((importance - $1)::numeric, 2))
+  WHEN category = 'system_config' AND importance > 0.60 THEN GREATEST(0.60, ROUND((importance - $1)::numeric, 2))
+  WHEN category = 'routine' AND importance > 0.50 THEN GREATEST(0.50, ROUND((importance - $1)::numeric, 2))
+  ELSE GREATEST(0.0, ROUND((importance - $1)::numeric, 2))
+END, last_decayed_at = $2
+WHERE (last_decayed_at IS NULL OR last_decayed_at < $3)
+  AND (last_reinforced_at IS NULL OR last_reinforced_at < $3)
+  AND importance > CASE category WHEN 'user_preference' THEN 0.75 WHEN 'system_config' THEN 0.60 WHEN 'routine' THEN 0.50 ELSE 0.0 END`
 	resDecay, err := s.db.ExecContext(queryCtx, decayQuery, decayStep, now, now.Add(-24*time.Hour))
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
@@ -1068,6 +1077,83 @@ func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, li
 		facts[i] = sf.Fact
 	}
 	return facts, nil
+}
+
+// TouchRetrievedFacts reinforces facts retrieved in prompt context, throttled to at most once per 24 hours.
+func (s *SQLStore) TouchRetrievedFacts(ctx context.Context, ids []int64, boost float64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if boost <= 0 {
+		boost = 0.02
+	}
+	queryCtx, cancel := withTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	now := time.Now().UTC()
+	query := `UPDATE facts
+		SET importance = LEAST(1.0, ROUND((importance + $1)::numeric, 2)),
+		    last_reinforced_at = $2,
+		    reinforce_count = COALESCE(reinforce_count, 1) + 1
+		WHERE id = ANY($3) AND (last_reinforced_at IS NULL OR last_reinforced_at < $4)`
+
+	_, err := s.db.ExecContext(queryCtx, query, boost, now, ids, now.Add(-24*time.Hour))
+	if err != nil {
+		return fmt.Errorf("failed to touch retrieved facts: %w", err)
+	}
+	return nil
+}
+
+// GetAllFactsWithEmbeddings retrieves all facts that possess a vector embedding for clustering and consolidation.
+func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	query := `SELECT id, category, fact_text, importance, created_at,
+		       COALESCE(last_reinforced_at, created_at),
+		       COALESCE(last_decayed_at, created_at),
+		       COALESCE(reinforce_count, 1),
+		       embedding
+		FROM facts
+		WHERE embedding IS NOT NULL
+		ORDER BY id ASC`
+
+	rows, err := s.db.QueryContext(queryCtx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query facts with embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	var results []ScoredFactWithEmbedding
+	for rows.Next() {
+		var f Fact
+		var nv NullVector
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(
+			&f.ID, &f.Category, &f.FactText, &f.Importance,
+			&createdAt, &lastReinforced, &lastDecayed,
+			&f.ReinforceCount, &nv,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan fact with embedding: %w", err)
+		}
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
+		f.LastDecayedAt = lastDecayed.Time
+		results = append(results, ScoredFactWithEmbedding{
+			Fact:      f,
+			Embedding: nv.Vector,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read facts with embeddings rows: %w", err)
+	}
+	return results, nil
 }
 
 // InitDB initializes database connection based on config.
