@@ -1036,7 +1036,7 @@ func TestFormatMemoryContext(t *testing.T) {
 
 func TestToolHandler_MemorySearch(t *testing.T) {
 	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "user", "User lives in Oakland", 0.9, []float32{1, 0})
+	_, _ = store.InsertFact(context.Background(), "user", "User lives in Metropolis", 0.9, []float32{1, 0})
 	_, _ = store.InsertFact(context.Background(), "work", "User works in tech", 0.8, []float32{0, 1})
 
 	tests := []struct {
@@ -1049,18 +1049,18 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 	}{
 		{
 			name:      "SuccessfulSearch",
-			args:      MemorySearchArgs{Query: "Oakland", Limit: 5},
+			args:      MemorySearchArgs{Query: "Metropolis", Limit: 5},
 			wantCount: 1,
 		},
 		{
 			name:      "NegativeLimitAndOllamaWarningFallback",
-			args:      MemorySearchArgs{Query: "Oakland", Limit: -1},
+			args:      MemorySearchArgs{Query: "Metropolis", Limit: -1},
 			ollamaErr: errors.New("ollama offline"),
 			wantCount: 1,
 		},
 		{
 			name:      "HighLimitClamped",
-			args:      MemorySearchArgs{Query: "Oakland", Limit: 100},
+			args:      MemorySearchArgs{Query: "Metropolis", Limit: 100},
 			wantCount: 1,
 		},
 		{
@@ -1070,7 +1070,7 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 		},
 		{
 			name:      "StoreSearchFails",
-			args:      MemorySearchArgs{Query: "Oakland"},
+			args:      MemorySearchArgs{Query: "Metropolis"},
 			storeFail: true,
 			wantErr:   true,
 		},
@@ -2488,7 +2488,7 @@ func TestMessageMetadata_ValueScan(t *testing.T) {
 		},
 		{
 			name:      "NonEmptyValue",
-			meta:      MessageMetadata{IsAdmin: true, ChannelID: "c1", AuthorUsername: "alex"},
+			meta:      MessageMetadata{IsAdmin: true, ChannelID: "c1", AuthorUsername: "user1"},
 			wantAdmin: true,
 		},
 		{
@@ -3589,7 +3589,7 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 			name:        "ExistingFactsIncludedInPrompt",
 			ctx:         ctx,
 			threads:     []string{"th-existing"},
-			turns:       []Message{{Content: "Alex lives in Oakland", ResponseText: "Recorded.", RowID: 28}},
+			turns:       []Message{{Content: "User lives in Metropolis", ResponseText: "Recorded.", RowID: 28}},
 			seedNearest: true,
 			llmResp:     `{"facts":[]}`,
 			wantErr:     false,
@@ -3599,11 +3599,11 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 			ctx:     ctx,
 			threads: []string{"th-full"},
 			turns: []Message{
-				{Content: "Alex's address is 6388 Shepherd Canyon Rd", ResponseText: "Got it.", RowID: 30},
+				{Content: "User's address is 123 Example St", ResponseText: "Got it.", RowID: 30},
 			},
 			llmResp: `{"facts":[
-				{"action":"ADD","category":"user_preference","fact_text":"Alex loves matcha latte","importance_score":0.9},
-				{"action":"UPDATE","supersedes_id":1,"category":"user_preference","fact_text":"Alex updated preference","importance_score":0.8},
+				{"action":"ADD","category":"user_preference","fact_text":"User loves espresso","importance_score":0.9},
+				{"action":"UPDATE","supersedes_id":1,"category":"user_preference","fact_text":"User updated preference","importance_score":0.8},
 				{"action":"DELETE","delete_id":2,"category":"general","fact_text":"Obsolete fact"},
 				{"action":"NOOP"}
 			]}`,
