@@ -1,0 +1,94 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// RunApp bootstraps the memory MCP HTTP server with graceful shutdown.
+func RunApp(ctx context.Context, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("app: config cannot be nil")
+	}
+	port := strings.TrimSpace(cfg.Port)
+	if port == "" {
+		port = DefaultPort
+	}
+
+	database, err := InitDB(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeWarn(database, "database on shutdown")
+
+	store := NewSQLStore(database)
+	ollama := NewOllamaClient(&cfg.Ollama)
+	toolHandler := NewToolHandler(cfg, store, ollama)
+	server := NewServer(toolHandler)
+
+	httpServer := &http.Server{
+		Addr:    ":" + port,
+		Handler: server.Routes(),
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		log.Printf("Memory MCP Server listening on port %s", port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- err
+		}
+		close(errChan)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case err := <-errChan:
+		return err
+	}
+
+	log.Println("Shutting down Memory MCP server gracefully...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+		return err
+	}
+	log.Println("Memory MCP server stopped cleanly")
+	return nil
+}
+
+var (
+	configPath = DefaultConfigPath
+	runAppFn   = RunApp
+	exitFn     = log.Fatalf
+)
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
+	resolvedPath := ResolveConfigPath(configPath)
+	cfg, err := LoadConfigFile(resolvedPath, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		exitFn("Fatal configuration error: %v", err)
+		return
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		exitFn("Server failure: %v", err)
+	}
+}

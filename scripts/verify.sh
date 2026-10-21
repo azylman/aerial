@@ -113,7 +113,7 @@ check_rule_file_sizes() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar webhooks-router vanadis"
+GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar webhooks-router vanadis memory-mcp"
 
 run_go_vet() {
     svc="$1"
