@@ -52,7 +52,7 @@ func (p *Provisioner) SyncHooks() error {
 	// 3. Provision hooks into each target root
 	for _, targetGemini := range targetRoots {
 		configDir := filepath.Join(targetGemini, "config")
-		if err := os.MkdirAll(configDir, 0755); err != nil {
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
 			log.Printf("[Env] Warning: failed to mkdir %s for hooks: %v", configDir, err)
 			continue
 		}
@@ -66,7 +66,7 @@ func (p *Provisioner) SyncHooks() error {
 		// Copy hook scripts if source directory exists
 		if hooksDir != "" {
 			targetHooksScriptsDir := filepath.Join(configDir, "hooks")
-			if err := os.MkdirAll(targetHooksScriptsDir, 0755); err != nil {
+			if err := os.MkdirAll(targetHooksScriptsDir, 0o755); err != nil {
 				log.Printf("[Env] Warning: failed to mkdir %s for hook scripts: %v", targetHooksScriptsDir, err)
 				continue
 			}
@@ -87,7 +87,7 @@ func (p *Provisioner) SyncHooks() error {
 					if wErr := p.writeAtomic(dstPath, string(scriptData)); wErr != nil {
 						log.Printf("[Env] Warning: failed to write hook script %s: %v", dstPath, wErr)
 					} else {
-						ignore(os.Chmod(dstPath, 0755))
+						ignore(os.Chmod(dstPath, 0o755))
 					}
 				}
 			}

@@ -17,10 +17,10 @@ import (
 
 func writeTestFile(t *testing.T, path, content string) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
 	return path
@@ -295,7 +295,7 @@ func TestSyncSettings(t *testing.T) {
 				targetPath := filepath.Join(tmpDir, "replace_dir")
 				if tc.atomicNonEmptyDir {
 					writeTestFile(t, filepath.Join(targetPath, "child.txt"), "child")
-				} else if err := os.Mkdir(targetPath, 0755); err != nil {
+				} else if err := os.Mkdir(targetPath, 0o755); err != nil {
 					t.Fatalf("mkdir: %v", err)
 				}
 				err := p.writeAtomic(targetPath, "new content")
@@ -311,23 +311,22 @@ func TestSyncSettings(t *testing.T) {
 				return
 			}
 
-
 			tmpHome := t.TempDir()
 			p := New(tmpHome, "")
 			settingsPath := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "settings.json")
 
 			if tc.preSeedOAuth {
-				_ = os.MkdirAll(filepath.Dir(settingsPath), 0755)
-				_ = os.WriteFile(settingsPath, []byte(`{"apiKey":"old","modelProvider":"gemini"}`), 0644)
+				_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
+				_ = os.WriteFile(settingsPath, []byte(`{"apiKey":"old","modelProvider":"gemini"}`), 0o644)
 			}
 			if tc.corruptedInput {
-				_ = os.MkdirAll(filepath.Dir(settingsPath), 0755)
-				_ = os.WriteFile(settingsPath, []byte("{broken json:"), 0644)
+				_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
+				_ = os.WriteFile(settingsPath, []byte("{broken json:"), 0o644)
 			}
 			if tc.blockFile {
 				// Block parent dir so MkdirAll fails
-				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini"), 0755)
-				_ = os.WriteFile(filepath.Join(tmpHome, ".gemini", "antigravity-cli"), []byte("file-blocker"), 0644)
+				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini"), 0o755)
+				_ = os.WriteFile(filepath.Join(tmpHome, ".gemini", "antigravity-cli"), []byte("file-blocker"), 0o644)
 			}
 
 			err := p.SyncSettings(tc.apiKey, tc.model)
@@ -402,7 +401,7 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 			if tc.statErrorSubfolder {
 				tmpDir := t.TempDir()
 				blocker := filepath.Join(tmpDir, "file_blocker")
-				_ = os.WriteFile(blocker, []byte("f"), 0644)
+				_ = os.WriteFile(blocker, []byte("f"), 0o644)
 				_, err := discoverRuleFiles(blocker, "subfolder", "00_")
 				if err == nil {
 					t.Fatalf("expected error from ENOTDIR stat on subfolder")
@@ -420,9 +419,9 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 				// 2. discoverRuleFiles with subdirs and non-md files
 				tmpDir := t.TempDir()
 				commonDir := filepath.Join(tmpDir, "common")
-				_ = os.MkdirAll(filepath.Join(commonDir, "nested_dir"), 0755)
-				_ = os.WriteFile(filepath.Join(commonDir, "notes.txt"), []byte("not a rule"), 0644)
-				_ = os.WriteFile(filepath.Join(commonDir, "01.md"), []byte("valid rule"), 0644)
+				_ = os.MkdirAll(filepath.Join(commonDir, "nested_dir"), 0o755)
+				_ = os.WriteFile(filepath.Join(commonDir, "notes.txt"), []byte("not a rule"), 0o644)
+				_ = os.WriteFile(filepath.Join(commonDir, "01.md"), []byte("valid rule"), 0o644)
 				files, err := discoverRuleFiles(tmpDir, "common", "00_")
 				if err != nil || len(files) != 1 {
 					t.Errorf("expected 1 file discovered, got %d, err: %v", len(files), err)
@@ -433,7 +432,7 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 			if tc.testResolve {
 				tmpDir := t.TempDir()
 				candDir := filepath.Join(tmpDir, "cand")
-				_ = os.Mkdir(candDir, 0755)
+				_ = os.Mkdir(candDir, 0o755)
 
 				// 1. Configured exists
 				if r := resolveDir(candDir, nil); r != candDir {
@@ -480,7 +479,7 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 			} {
 				if p.cond {
 					_ = os.RemoveAll(p.path)
-					_ = os.WriteFile(p.path, []byte("file-not-dir"), 0644)
+					_ = os.WriteFile(p.path, []byte("file-not-dir"), 0o644)
 				}
 			}
 
@@ -513,15 +512,15 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 
 func TestAtomicSwapRulesDir(t *testing.T) {
 	tests := []struct {
-		name              string
-		emptyStaging      bool
-		targetIsFile      bool
-		parentIsFile      bool
-		stagingWriteFail  bool
-		backupFail        bool
-		stagingMoveFail   bool
-		restoreFail       bool
-		wantErr           bool
+		name             string
+		emptyStaging     bool
+		targetIsFile     bool
+		parentIsFile     bool
+		stagingWriteFail bool
+		backupFail       bool
+		stagingMoveFail  bool
+		restoreFail      bool
+		wantErr          bool
 	}{
 		{name: "successful directory swap"},
 		{name: "abort when staging has zero rules", emptyStaging: true, wantErr: true},
@@ -779,7 +778,7 @@ func TestProvisionRuntimeSharedAssetsAndStorage(t *testing.T) {
 			}
 			if tc.existingSymlink {
 				targetCliBrain := filepath.Join(runtimeGemini, "antigravity-cli", "brain")
-				_ = os.MkdirAll(filepath.Dir(targetCliBrain), 0755)
+				_ = os.MkdirAll(filepath.Dir(targetCliBrain), 0o755)
 				_ = os.Symlink(t.TempDir(), targetCliBrain)
 			}
 
@@ -1096,7 +1095,7 @@ func TestSkillsProvisioning(t *testing.T) {
 				writeTestFile(t, targetSkillsDir, "file blocker")
 			}
 			if tc.legacySymlinkDir {
-				_ = os.MkdirAll(filepath.Dir(targetSkillsDir), 0755)
+				_ = os.MkdirAll(filepath.Dir(targetSkillsDir), 0o755)
 				_ = os.Symlink(t.TempDir(), targetSkillsDir)
 			}
 			if tc.pruneUnauthorized {
@@ -1104,16 +1103,18 @@ func TestSkillsProvisioning(t *testing.T) {
 				writeTestFile(t, filepath.Join(targetSkillsDir, "stale-skill.tmp"), "tmp")
 			}
 			if tc.legacyCleanup {
-				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0755)
-				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "config", "plugins", "superpowers"), 0755)
+				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0o755)
+				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "config", "plugins", "superpowers"), 0o755)
 			}
 			if tc.legacyCleanupErr {
 				removeAllSkills = func(path string) error { return errors.New("simulated removeAll error") }
-				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0755)
+				_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0o755)
 			}
 			if tc.symlinkTmpFallback {
 				symlinkSkill = func(oldname, newname string) error {
-					if strings.HasSuffix(newname, ".tmp") { return errors.New("simulated tmp symlink error") }
+					if strings.HasSuffix(newname, ".tmp") {
+						return errors.New("simulated tmp symlink error")
+					}
 					return origSymlink(oldname, newname)
 				}
 			}
@@ -1125,7 +1126,9 @@ func TestSkillsProvisioning(t *testing.T) {
 				renameCalls := 0
 				renameSkill = func(oldpath, newpath string) error {
 					renameCalls++
-					if renameCalls == 1 { return errors.New("simulated initial rename error") }
+					if renameCalls == 1 {
+						return errors.New("simulated initial rename error")
+					}
 					return origRename(oldpath, newpath)
 				}
 			}
@@ -1250,7 +1253,7 @@ func TestSyncHooks(t *testing.T) {
 				origPaths := DefaultHooksSearchPaths
 				defer func() { DefaultHooksSearchPaths = origPaths }()
 				DefaultHooksSearchPaths = []string{sourceDir}
-				_ = os.MkdirAll(filepath.Join(sourceDir, "subfolder"), 0755)
+				_ = os.MkdirAll(filepath.Join(sourceDir, "subfolder"), 0o755)
 				_ = os.Symlink(filepath.Join(sourceDir, "nonexistent"), filepath.Join(sourceDir, "broken.sh"))
 				p.SetHooksDir("")
 			}
@@ -1277,7 +1280,7 @@ func TestSyncHooks(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expected copied script at %s: %v", scriptPath, err)
 				}
-				if fi.Mode().Perm()&0111 == 0 {
+				if fi.Mode().Perm()&0o111 == 0 {
 					t.Errorf("expected executable script permissions, got %v", fi.Mode().Perm())
 				}
 				// Verify idempotency

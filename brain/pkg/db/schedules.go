@@ -253,11 +253,21 @@ func (s *SQLStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRun
 		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)+1))
 		args = append(args, val)
 	}
-	if params.Status != "" { addSet("status", params.Status) }
-	if params.MessageID != "" { addSet("message_id", params.MessageID) }
-	if !params.CompletedAt.IsZero() { addSet("completed_at", params.CompletedAt) }
-	if params.DurationMs != 0 { addSet("duration_ms", params.DurationMs) }
-	if params.Model != "" { addSet("model", params.Model) }
+	if params.Status != "" {
+		addSet("status", params.Status)
+	}
+	if params.MessageID != "" {
+		addSet("message_id", params.MessageID)
+	}
+	if !params.CompletedAt.IsZero() {
+		addSet("completed_at", params.CompletedAt)
+	}
+	if params.DurationMs != 0 {
+		addSet("duration_ms", params.DurationMs)
+	}
+	if params.Model != "" {
+		addSet("model", params.Model)
+	}
 	if params.Error != "" {
 		addSet("error", params.Error)
 	} else if params.Status == "completed" {

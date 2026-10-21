@@ -452,5 +452,3 @@ func IsPermissionError(err error) bool {
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "50001") || strings.Contains(errStr, "50013") || strings.Contains(errStr, "missing access") || strings.Contains(errStr, "missing permissions") || strings.Contains(errStr, "403 forbidden")
 }
-
-

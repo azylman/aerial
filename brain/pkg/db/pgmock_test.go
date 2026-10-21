@@ -109,12 +109,15 @@ func handlePgConn(conn net.Conn) {
 	}
 }
 
-type dummyDBTX struct{ d driver.Driver }
-type dummyDBTXNoDriver = dummyDBTX
-type dummyDBTXWithNilDriver = dummyDBTX
+type (
+	dummyDBTX              struct{ d driver.Driver }
+	dummyDBTXNoDriver      = dummyDBTX
+	dummyDBTXWithNilDriver = dummyDBTX
+)
 
 func (d dummyDBTX) Driver() driver.Driver                                           { return d.d }
 func (d dummyDBTX) ExecContext(context.Context, string, ...any) (sql.Result, error) { return nil, nil }
+
 func (d dummyDBTX) QueryContext(context.Context, string, ...any) (*sql.Rows, error) { return nil, nil }
 func (d dummyDBTX) QueryRowContext(context.Context, string, ...any) *sql.Row        { return nil }
 

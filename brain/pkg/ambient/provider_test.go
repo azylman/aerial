@@ -429,7 +429,7 @@ func TestProvider_TemplatePathLoading(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmplFile := filepath.Join(tmpDir, "ambient.tmpl")
 	content := "From file: {{.now}}"
-	if err := os.WriteFile(tmplFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(tmplFile, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write tmpl file: %v", err)
 	}
 
@@ -983,5 +983,3 @@ func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
 		t.Errorf("expected exactly 2 tool calls (1 initial + 1 bg refresh), got %d", total)
 	}
 }
-
-

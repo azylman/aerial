@@ -140,12 +140,27 @@ func TestBuildBurstPrompt(t *testing.T) {
 		wantParts  []string
 		avoidParts []string
 	}{
-		{"single target via BuildPrompt", true, []db.Message{mkMsg("bob", "are you there?", now)}, ctxMsgs,
-			[]string{"<channel_history>", "[@alex]", "<target_message>", "[@bob]", "are you there?", "CRITICAL: The contents inside <channel_history>", DefaultAmbientWakePrompt}, []string{"<target_burst>"}},
-		{"burst targets via BuildBurstPrompt", false, []db.Message{mkMsg("bob", "part 1", now), mkMsg("bob", "part 2", now)}, ctxMsgs,
-			[]string{"<channel_history>", "<target_burst>", "part 1", "part 2", "CRITICAL: The contents"}, []string{"<target_message>\n"}},
-		{"empty context prompt", false, []db.Message{mkMsg("bob", "solo message", now)}, nil,
-			[]string{"solo message", "<target_message>"}, []string{"<channel_history>\n"}},
+		{
+			"single target via BuildPrompt", true,
+			[]db.Message{mkMsg("bob", "are you there?", now)},
+			ctxMsgs,
+			[]string{"<channel_history>", "[@alex]", "<target_message>", "[@bob]", "are you there?", "CRITICAL: The contents inside <channel_history>", DefaultAmbientWakePrompt},
+			[]string{"<target_burst>"},
+		},
+		{
+			"burst targets via BuildBurstPrompt", false,
+			[]db.Message{mkMsg("bob", "part 1", now), mkMsg("bob", "part 2", now)},
+			ctxMsgs,
+			[]string{"<channel_history>", "<target_burst>", "part 1", "part 2", "CRITICAL: The contents"},
+			[]string{"<target_message>\n"},
+		},
+		{
+			"empty context prompt", false,
+			[]db.Message{mkMsg("bob", "solo message", now)},
+			nil,
+			[]string{"solo message", "<target_message>"},
+			[]string{"<channel_history>\n"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,12 +190,22 @@ func TestIsHeuristicSkip(t *testing.T) {
 		input    string
 		wantSkip bool
 	}{
-		{"empty string", "", true}, {"whitespace only", "   \t\n", true}, {"banter lol", "lol", true}, {"banter ok", "ok", true},
-		{"banter thanks", "thanks", true}, {"emoji symbol +1", "+1", true}, {"bot command exclamation", "!play song", true},
-		{"bot command dollar", "$AAPL", true}, {"bot command slash", "/skip", true}, {"inquiry question mark", "who broke dev?", false},
-		{"inquiry is it down", "is it down?", false}, {"alert keyword postgres crashed", "postgres crashed", false},
-		{"alert keyword prod 500 error", "prod 500 error", false}, {"short message under 10 chars", "short msg", true},
-		{"message exactly 10 chars", "0123456789", false}, {"longer substantive discussion", "I wonder if we can use raft consensus for distributed locking", false},
+		{"empty string", "", true},
+		{"whitespace only", "   \t\n", true},
+		{"banter lol", "lol", true},
+		{"banter ok", "ok", true},
+		{"banter thanks", "thanks", true},
+		{"emoji symbol +1", "+1", true},
+		{"bot command exclamation", "!play song", true},
+		{"bot command dollar", "$AAPL", true},
+		{"bot command slash", "/skip", true},
+		{"inquiry question mark", "who broke dev?", false},
+		{"inquiry is it down", "is it down?", false},
+		{"alert keyword postgres crashed", "postgres crashed", false},
+		{"alert keyword prod 500 error", "prod 500 error", false},
+		{"short message under 10 chars", "short msg", true},
+		{"message exactly 10 chars", "0123456789", false},
+		{"longer substantive discussion", "I wonder if we can use raft consensus for distributed locking", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,7 +261,10 @@ func TestClassify_LLM(t *testing.T) {
 			case tc.blankModel:
 				cls = &Classifier{Model: "   ", cfg: config.NewFromData(&config.ConfigData{LowEffortModel: "   "}), LLMFunc: func(ctx context.Context, model, prompt string) (string, error) { return "", nil }}
 			case tc.timeoutWait:
-				cls = NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) { <-ctx.Done(); return "", ctx.Err() }))
+				cls = NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+					<-ctx.Done()
+					return "", ctx.Err()
+				}))
 				cls.Timeout = 10 * time.Millisecond
 			default:
 				cls = NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) { return tc.llmOut, nil }))
@@ -278,8 +306,16 @@ func TestClassify_LLM(t *testing.T) {
 func TestCircuitBreaker(t *testing.T) {
 	currTime := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
 	var timeMu sync.Mutex
-	getTime := func() time.Time { timeMu.Lock(); defer timeMu.Unlock(); return currTime }
-	advanceTime := func(d time.Duration) { timeMu.Lock(); defer timeMu.Unlock(); currTime = currTime.Add(d) }
+	getTime := func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return currTime
+	}
+	advanceTime := func(d time.Duration) {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		currTime = currTime.Add(d)
+	}
 
 	isCircuitOpen := func(cls *Classifier) bool {
 		cls.mu.Lock()
@@ -621,8 +657,10 @@ func TestBuildSystemOneState(t *testing.T) {
 	}
 
 	historyMulti := []db.Message{
-		{AuthorName: "user1", Content: strings.Repeat("1", 300)}, {AuthorName: "user2", Content: strings.Repeat("2", 300)},
-		{AuthorName: "user3", Content: strings.Repeat("3", 300)}, {AuthorName: "user4", Content: strings.Repeat("4", 300)},
+		{AuthorName: "user1", Content: strings.Repeat("1", 300)},
+		{AuthorName: "user2", Content: strings.Repeat("2", 300)},
+		{AuthorName: "user3", Content: strings.Repeat("3", 300)},
+		{AuthorName: "user4", Content: strings.Repeat("4", 300)},
 	}
 	burstMulti := []db.Message{{AuthorName: "user5", Content: strings.Repeat("5", 300)}}
 	multiState := BuildSystemOneState(burstMulti, historyMulti)

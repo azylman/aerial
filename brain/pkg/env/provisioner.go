@@ -110,7 +110,7 @@ func (p *Provisioner) SyncSettings(apiKey, model string) error {
 		return nil
 	}
 	configDir := filepath.Join(p.homeDir, ".gemini", "antigravity-cli")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -186,7 +186,7 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 
 func (p *Provisioner) writeAtomic(targetPath, content string) error {
 	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	pattern := fmt.Sprintf(".%s.tmp.*", filepath.Base(targetPath))
@@ -200,7 +200,7 @@ func (p *Provisioner) writeAtomic(targetPath, content string) error {
 	}()
 
 	if _, err := f.WriteString(content); err != nil {
-ignore(f.Close())
+		ignore(f.Close())
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -208,7 +208,7 @@ ignore(f.Close())
 	}
 
 	if err := os.Rename(tmpName, targetPath); err != nil {
-ignore(os.Remove(targetPath))
+		ignore(os.Remove(targetPath))
 		return os.Rename(tmpName, targetPath)
 	}
 	return nil

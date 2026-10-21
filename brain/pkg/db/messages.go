@@ -221,12 +221,15 @@ func (s *SQLStore) execMessageUpdate(ctx context.Context, id, query string, args
 func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
 	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`, status, errorMsg, time.Now().UTC(), id)
 }
+
 func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
 	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', updated_at = $3 WHERE id = $4`, StatusCompleted, responseText, time.Now().UTC(), id)
 }
+
 func (s *SQLStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
 	return s.execMessageUpdate(ctx, id, `UPDATE messages SET retry_count = retry_count + 1, error_message = $1, updated_at = $2 WHERE id = $3`, errorMsg, time.Now().UTC(), id)
 }
+
 func (s *SQLStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
 	return s.execMessageUpdate(ctx, id, `UPDATE messages SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2 WHERE id = $3 AND status = 'PROCESSING'`, reason, time.Now().UTC(), id)
 }

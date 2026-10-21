@@ -199,7 +199,7 @@ func (p *Provisioner) EnsureTargetMcpConfig(targetGeminiDir string, rawConfig js
 	}
 
 	configDir := filepath.Join(targetGeminiDir, "config")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %w", configDir, err)
 	}
 	targetPath := filepath.Join(configDir, "mcp_config.json")

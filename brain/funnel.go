@@ -526,22 +526,34 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		}
 	}
 	dg.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelCreate) {
-		if c != nil { handleCacheEvent("channel_create", c.Channel, false) }
+		if c != nil {
+			handleCacheEvent("channel_create", c.Channel, false)
+		}
 	})
 	dg.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelUpdate) {
-		if c != nil { handleCacheEvent("channel_update", c.Channel, false) }
+		if c != nil {
+			handleCacheEvent("channel_update", c.Channel, false)
+		}
 	})
 	dg.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) {
-		if c != nil { handleCacheEvent("channel_delete", c.Channel, true) }
+		if c != nil {
+			handleCacheEvent("channel_delete", c.Channel, true)
+		}
 	})
 	dg.AddHandler(func(_ *discordgo.Session, t *discordgo.ThreadCreate) {
-		if t != nil { handleCacheEvent("thread_create", t.Channel, false) }
+		if t != nil {
+			handleCacheEvent("thread_create", t.Channel, false)
+		}
 	})
 	dg.AddHandler(func(_ *discordgo.Session, t *discordgo.ThreadUpdate) {
-		if t != nil { handleCacheEvent("thread_update", t.Channel, false) }
+		if t != nil {
+			handleCacheEvent("thread_update", t.Channel, false)
+		}
 	})
 	dg.AddHandler(func(_ *discordgo.Session, t *discordgo.ThreadDelete) {
-		if t != nil { handleCacheEvent("thread_delete", t.Channel, true) }
+		if t != nil {
+			handleCacheEvent("thread_delete", t.Channel, true)
+		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {

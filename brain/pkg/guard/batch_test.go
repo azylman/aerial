@@ -260,11 +260,11 @@ func TestBatchHelpers(t *testing.T) {
 	}
 
 	categoryTests := []struct {
-		name     string
-		tool     string
-		args     ToolArgs
-		wantCat  string
-		wantTgt  string
+		name    string
+		tool    string
+		args    ToolArgs
+		wantCat string
+		wantTgt string
 	}{
 		{"view file", "view_file", ToolArgs{TargetFile: "/tmp/a.go"}, "read", "/tmp/a.go"},
 		{"replace content", "replace_file_content", ToolArgs{TargetFile: "/tmp/a.go"}, "edit", "/tmp/a.go"},

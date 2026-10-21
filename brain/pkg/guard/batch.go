@@ -205,12 +205,12 @@ func isSameStep(rec ToolInvocation, currentStep int, currentTS int64) bool {
 }
 
 func withStateLock(dir, safeID string, fn func() error) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fn()
 	}
 
 	lockPath := filepath.Join(dir, fmt.Sprintf("state-%s.lock", safeID))
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fn()
 	}
@@ -259,7 +259,7 @@ func saveState(dir, safeID string, state BatchState) error {
 		return err
 	}
 
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return err
 	}
 

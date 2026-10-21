@@ -56,7 +56,6 @@ var ChannelInstructionsDirs = []string{
 	"./channels",
 }
 
-
 type WebhookEndpoint struct {
 	URL             string `yaml:"url" json:"url"`
 	TimeoutMs       int    `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
@@ -105,7 +104,6 @@ func (p ChannelPolicy) IsIgnored() bool {
 	return m == "ignore" || m == "disabled"
 }
 
-
 // GetWakeMode returns the effective wake mode for this channel policy.
 // Supported canonical values: "mention", "classifier", "all".
 func (p ChannelPolicy) GetWakeMode() string {
@@ -146,7 +144,6 @@ func (p ChannelPolicy) GetAmbientWakeThreshold() float64 {
 	return 0.0
 }
 
-
 // IsBotIgnored reports whether bot messages should be ignored for this channel policy.
 func (p ChannelPolicy) IsBotIgnored() bool {
 	if p.IgnoreBots != nil {
@@ -154,7 +151,6 @@ func (p ChannelPolicy) IsBotIgnored() bool {
 	}
 	return false
 }
-
 
 // GetTimeout returns the configured timeout duration, defaulting to 3000ms if unspecified or non-positive.
 func (e *WebhookEndpoint) GetTimeout() time.Duration {
@@ -195,39 +191,39 @@ type VoiceConfig struct {
 }
 
 type ConfigData struct {
-	Model           string                     `yaml:"model" json:"model"`
-	Timezone        string                     `yaml:"timezone" json:"timezone"`
-	SystemChannel   string                     `yaml:"system_channel" json:"system_channel"`
-	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
-	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
-	McpServers      TargetMcpConfig            `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
-	Voice           VoiceConfig                `yaml:"voice,omitempty" json:"voice,omitempty"`
-	DatabaseURL     string                     `yaml:"database_url" json:"database_url"`
-	Port            string                     `yaml:"port" json:"port"`
-	AgyBin          string                     `yaml:"agy_bin" json:"agy_bin"`
-	APIKey          string                     `yaml:"api_key" json:"api_key"`
-	HarnessAPIKey   string                     `yaml:"harness_api_key,omitempty" json:"harness_api_key,omitempty"`
-	SystemPrompt    string                     `yaml:"system_prompt" json:"system_prompt"`
-	DiscordToken    string                     `yaml:"discord_token" json:"discord_token"`
-	GitHubPAT       string                     `yaml:"github_pat" json:"github_pat"`
-	OpenObserveURL  string                     `yaml:"openobserve_url,omitempty" json:"openobserve_url,omitempty"`
-	OpenObserveOrg  string                     `yaml:"openobserve_org,omitempty" json:"openobserve_org,omitempty"`
-	OpenObserveUser string                     `yaml:"openobserve_user,omitempty" json:"openobserve_user,omitempty"`
-	OpenObservePassword string                     `yaml:"openobserve_password,omitempty" json:"openobserve_password,omitempty"`
-	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
-	LowEffortModel    string                   `yaml:"low_effort_model" json:"low_effort_model"`
-	MediumEffortModel string                   `yaml:"medium_effort_model" json:"medium_effort_model"`
-	ClassifierURL   string                     `yaml:"classifier_url,omitempty" json:"classifier_url,omitempty"`
-	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"`
-	ClassifierProtocol string                 `yaml:"classifier_protocol,omitempty" json:"classifier_protocol,omitempty"`
-	ThreadTitleURL   string                     `yaml:"thread_title_url,omitempty" json:"thread_title_url,omitempty"`
-	ThreadTitleModel string                     `yaml:"thread_title_model,omitempty" json:"thread_title_model,omitempty"`
-	GeminiHomeDir       string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
-	DataDir             string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
-	MCPConfig           string                     `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
-	DaemonIdleTimeout   time.Duration              `yaml:"daemon_idle_timeout,omitempty" json:"daemon_idle_timeout,omitempty"`
-	MaxConcurrentDaemons int                       `yaml:"max_concurrent_daemons,omitempty" json:"max_concurrent_daemons,omitempty"`
-	MaxBackgroundTaskDuration time.Duration        `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
+	Model                     string                   `yaml:"model" json:"model"`
+	Timezone                  string                   `yaml:"timezone" json:"timezone"`
+	SystemChannel             string                   `yaml:"system_channel" json:"system_channel"`
+	AdminUsers                []string                 `yaml:"admin_users" json:"admin_users"`
+	Channels                  map[string]ChannelPolicy `yaml:"channels" json:"channels"`
+	McpServers                TargetMcpConfig          `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	Voice                     VoiceConfig              `yaml:"voice,omitempty" json:"voice,omitempty"`
+	DatabaseURL               string                   `yaml:"database_url" json:"database_url"`
+	Port                      string                   `yaml:"port" json:"port"`
+	AgyBin                    string                   `yaml:"agy_bin" json:"agy_bin"`
+	APIKey                    string                   `yaml:"api_key" json:"api_key"`
+	HarnessAPIKey             string                   `yaml:"harness_api_key,omitempty" json:"harness_api_key,omitempty"`
+	SystemPrompt              string                   `yaml:"system_prompt" json:"system_prompt"`
+	DiscordToken              string                   `yaml:"discord_token" json:"discord_token"`
+	GitHubPAT                 string                   `yaml:"github_pat" json:"github_pat"`
+	OpenObserveURL            string                   `yaml:"openobserve_url,omitempty" json:"openobserve_url,omitempty"`
+	OpenObserveOrg            string                   `yaml:"openobserve_org,omitempty" json:"openobserve_org,omitempty"`
+	OpenObserveUser           string                   `yaml:"openobserve_user,omitempty" json:"openobserve_user,omitempty"`
+	OpenObservePassword       string                   `yaml:"openobserve_password,omitempty" json:"openobserve_password,omitempty"`
+	Ollama                    OllamaConfig             `yaml:"ollama" json:"ollama"`
+	LowEffortModel            string                   `yaml:"low_effort_model" json:"low_effort_model"`
+	MediumEffortModel         string                   `yaml:"medium_effort_model" json:"medium_effort_model"`
+	ClassifierURL             string                   `yaml:"classifier_url,omitempty" json:"classifier_url,omitempty"`
+	ClassifierModel           string                   `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"`
+	ClassifierProtocol        string                   `yaml:"classifier_protocol,omitempty" json:"classifier_protocol,omitempty"`
+	ThreadTitleURL            string                   `yaml:"thread_title_url,omitempty" json:"thread_title_url,omitempty"`
+	ThreadTitleModel          string                   `yaml:"thread_title_model,omitempty" json:"thread_title_model,omitempty"`
+	GeminiHomeDir             string                   `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
+	DataDir                   string                   `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
+	MCPConfig                 string                   `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
+	DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout,omitempty" json:"daemon_idle_timeout,omitempty"`
+	MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons,omitempty" json:"max_concurrent_daemons,omitempty"`
+	MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
 }
 
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
@@ -259,8 +255,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		ClassifierURL             string                   `yaml:"classifier_url"`
 		ClassifierModel           string                   `yaml:"classifier_model"`
 		ClassifierProtocol        string                   `yaml:"classifier_protocol"`
-		ThreadTitleURL             string                   `yaml:"thread_title_url"`
-		ThreadTitleModel           string                   `yaml:"thread_title_model"`
+		ThreadTitleURL            string                   `yaml:"thread_title_url"`
+		ThreadTitleModel          string                   `yaml:"thread_title_model"`
 		MCPConfig                 interface{}              `yaml:"mcp_config"`
 		DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout"`
 		MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons"`
@@ -531,17 +527,17 @@ func DefaultConfigData() *ConfigData {
 			PrewarmedTargets: []string{"kiosk"},
 			AllowedTools:     nil,
 		},
-		Port:            "8080",
-		AgyBin:          "agy",
-		LowEffortModel:    "gemini-3.8-flash-low",
-		MediumEffortModel: "gemini-3.8-flash-medium",
+		Port:               "8080",
+		AgyBin:             "agy",
+		LowEffortModel:     "gemini-3.8-flash-low",
+		MediumEffortModel:  "gemini-3.8-flash-medium",
 		ClassifierURL:      "",
 		ClassifierModel:    "",
 		ClassifierProtocol: "",
-		ThreadTitleURL:   "",
-		ThreadTitleModel: "",
-		DataDir:         "",
-		GeminiHomeDir:   "",
+		ThreadTitleURL:     "",
+		ThreadTitleModel:   "",
+		DataDir:            "",
+		GeminiHomeDir:      "",
 		Ollama: OllamaConfig{
 			BaseURL:     "http://ollama:11434",
 			Model:       "all-minilm",
@@ -676,7 +672,6 @@ func (c *Config) Clone() *Config {
 	return NewFromData(c.Current())
 }
 
-
 // GeminiHomeDir returns the configured base directory for .gemini files.
 func (c *Config) GeminiHomeDir() string {
 	return c.Current().GeminiHomeDir
@@ -733,7 +728,6 @@ func NewFromData(data *ConfigData) *Config {
 func New() (*Config, error) {
 	return LoadConfigFromPaths(ConfigSearchPaths...)
 }
-
 
 func ReloadWithSupplier(activeCfg *Config, supplier func() (*Config, error)) error {
 	if activeCfg == nil {
@@ -870,7 +864,6 @@ func GetTimezone() string {
 	return "America/Los_Angeles"
 }
 
-
 func isContainerColdBoot(paths ...string) bool {
 	for _, p := range paths {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
@@ -967,7 +960,6 @@ func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config,
 		loadedPath, data.Model, data.Timezone, data.SystemChannel)
 	return NewFromData(data), nil
 }
-
 
 func LoadConfigFromPaths(paths ...string) (*Config, error) {
 	if isContainerColdBoot(paths...) {
@@ -1236,7 +1228,6 @@ func getEnvFromLookup(lookup func(string) string, key, defaultVal string) string
 	return defaultVal
 }
 
-
 // NormalizeChannelName standardizes channel names for config key and file lookups.
 // It trims whitespace, strips any leading '#', lowercases, and strictly blocks directory traversal.
 func NormalizeChannelName(channelName string) string {
@@ -1328,5 +1319,3 @@ func LoadScopeInstructions(scopeName string) string {
 	}
 	return ""
 }
-
-

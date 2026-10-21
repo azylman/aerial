@@ -315,4 +315,3 @@ func TestNormalizeRotationReason(t *testing.T) {
 		}
 	}
 }
-

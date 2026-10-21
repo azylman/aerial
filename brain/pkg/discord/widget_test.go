@@ -562,5 +562,3 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 		t.Errorf("unexpected chunk 3 text: %q", c3Text.Content)
 	}
 }
-
-

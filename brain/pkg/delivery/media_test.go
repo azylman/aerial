@@ -26,7 +26,7 @@ func createTestPNG(t *testing.T, dir, filename string) string {
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatalf("failed to encode test png: %v", err)
 	}
-	if err := os.WriteFile(imgPath, buf.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(imgPath, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("failed to write test png: %v", err)
 	}
 	return imgPath
@@ -90,7 +90,7 @@ func TestResolveAndValidateLocalImage_SecuritySandboxing(t *testing.T) {
 
 	// 1. Non-image file masquerading as png
 	fakeImg := filepath.Join(tempDir, "fake.png")
-	_ = os.WriteFile(fakeImg, []byte("NOT_A_PNG_HEADER_DATA_SECRET_KEY=12345"), 0600)
+	_ = os.WriteFile(fakeImg, []byte("NOT_A_PNG_HEADER_DATA_SECRET_KEY=12345"), 0o600)
 
 	_, err := ResolveAndValidateLocalImage(fakeImg, tempDir)
 	if err == nil {
@@ -113,7 +113,7 @@ func TestResolveAndValidateLocalImage_SecuritySandboxing(t *testing.T) {
 
 	// 4. Zero byte file
 	zeroFile := filepath.Join(tempDir, "zero.png")
-	_ = os.WriteFile(zeroFile, []byte{}, 0600)
+	_ = os.WriteFile(zeroFile, []byte{}, 0o600)
 	_, err = ResolveAndValidateLocalImage(zeroFile, tempDir)
 	if err == nil {
 		t.Errorf("Expected error for 0-byte file, got nil")
@@ -251,7 +251,7 @@ func TestSanitizeIntermediateStatus_ComplexCodeFences(t *testing.T) {
 func TestAutoAttachNewMedia(t *testing.T) {
 	tempDir := t.TempDir()
 	scratchDir := filepath.Join(tempDir, "scratch")
-	if err := os.MkdirAll(scratchDir, 0755); err != nil {
+	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
 		t.Fatalf("failed to create scratch dir: %v", err)
 	}
 
@@ -291,14 +291,14 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 
 	// Empty file
 	emptyFile := filepath.Join(tmpDir, "empty.png")
-	_ = os.WriteFile(emptyFile, []byte(""), 0644)
+	_ = os.WriteFile(emptyFile, []byte(""), 0o644)
 	if _, err := ResolveAndValidateLocalImage(emptyFile, tmpDir); err == nil {
 		t.Error("expected error for empty file")
 	}
 
 	// Non-regular file (directory)
 	subDir := filepath.Join(tmpDir, "dir.png")
-	_ = os.MkdirAll(subDir, 0755)
+	_ = os.MkdirAll(subDir, 0o755)
 	if _, err := ResolveAndValidateLocalImage(subDir, tmpDir); err == nil {
 		t.Error("expected error for directory")
 	}
@@ -306,7 +306,7 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 	// Octet stream extensions (.png, .jpg, .gif, .webp)
 	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp"} {
 		f := filepath.Join(tmpDir, "sample"+ext)
-		_ = os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0644)
+		_ = os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644)
 		att, err := ResolveAndValidateLocalImage(f, tmpDir)
 		if err != nil {
 			t.Errorf("unexpected error for %s: %v", ext, err)
@@ -318,7 +318,7 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 
 	// Octet stream unsupported extension (.bin)
 	unsupportedFile := filepath.Join(tmpDir, "sample.bin")
-	_ = os.WriteFile(unsupportedFile, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0644)
+	_ = os.WriteFile(unsupportedFile, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644)
 	if _, err := ResolveAndValidateLocalImage(unsupportedFile, tmpDir); err == nil {
 		t.Error("expected error for unsupported bin MIME type")
 	}
@@ -354,9 +354,9 @@ func TestAutoAttachNewMedia_EdgeCases(t *testing.T) {
 
 	// 3. Scan directory with hidden file and non-image file
 	tmpDir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tmpDir, ".hidden.png"), []byte("data"), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("data"), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "zero.png"), []byte(""), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".hidden.png"), []byte("data"), 0o644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("data"), 0o644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "zero.png"), []byte(""), 0o644)
 	res2 := AutoAttachNewMedia(tmpDir, time.Now().Add(-1*time.Minute), nil)
 	if len(res2) != 0 {
 		t.Errorf("expected 0 attachments for hidden, txt, and empty files, got %d", len(res2))
@@ -380,13 +380,13 @@ func TestAutoAttachNewMedia_BreakLimitsAndErrors(t *testing.T) {
 
 	// 2. Old image with ModTime before cutoff
 	oldFile := filepath.Join(tmpDir, "old.png")
-	_ = os.WriteFile(oldFile, []byte("pngdata"), 0644)
+	_ = os.WriteFile(oldFile, []byte("pngdata"), 0o644)
 	oldTime := now.Add(-10 * time.Minute)
 	_ = os.Chtimes(oldFile, oldTime, oldTime)
 
 	// 3. Corrupt image that fails ResolveAndValidateLocalImage
 	badImg := filepath.Join(tmpDir, "bad.png")
-	_ = os.WriteFile(badImg, []byte("not really a png"), 0644)
+	_ = os.WriteFile(badImg, []byte("not really a png"), 0o644)
 
 	res := AutoAttachNewMedia(tmpDir, now.Add(-5*time.Second), nil)
 	if len(res) != MaxAttachmentsPerMessage {
@@ -434,5 +434,3 @@ Handled, boss—PR #225 is merged and synced! 🍵`
 		t.Errorf("expected code block line preserved, got %q", gotCode)
 	}
 }
-
-

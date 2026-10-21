@@ -78,7 +78,7 @@ func setupTestConfig(t *testing.T, yamlContent string) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("Failed to write test config.yaml: %v", err)
 	}
 	cfg, err := config.LoadConfigFromPaths(yamlPath)

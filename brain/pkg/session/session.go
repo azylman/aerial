@@ -541,13 +541,13 @@ func (m *Manager) EnsureSessionDir(sessionID string) (string, error) {
 	sessionDir := filepath.Join(baseDir, cleanID)
 	logsDir := filepath.Join(sessionDir, ".system_generated", "logs")
 
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
 		return "", fmt.Errorf("failed to create session logs directory: %w", err)
 	}
 
 	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
 		filePath := filepath.Join(logsDir, name)
-		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			return "", fmt.Errorf("failed to ensure %s: %w", name, err)
 		}
@@ -860,4 +860,3 @@ func (m *Manager) GetSessionDir(sessionID string) (string, error) {
 	}
 	return filepath.Join(baseDir, cleanID), nil
 }
-

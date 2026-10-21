@@ -144,18 +144,18 @@ func TestFormatSearchResults(t *testing.T) {
 			},
 			Steps: []db.TranscriptStep{
 				{
-					SessionID:  "11112222-3333-4444-5555-666677778888",
-					StepIndex:  5,
-					ToolName:   "run_command",
-					Content:    "docker logs aerial-brain --tail 50\nline 2 of logs",
-					CreatedAt:  now,
+					SessionID: "11112222-3333-4444-5555-666677778888",
+					StepIndex: 5,
+					ToolName:  "run_command",
+					Content:   "docker logs aerial-brain --tail 50\nline 2 of logs",
+					CreatedAt: now,
 				},
 				{
-					SessionID:  "short",
-					StepIndex:  12,
-					StepType:   "PLANNER_RESPONSE",
-					Content:    strings.Repeat("a", 400),
-					CreatedAt:  now,
+					SessionID: "short",
+					StepIndex: 12,
+					StepType:  "PLANNER_RESPONSE",
+					Content:   strings.Repeat("a", 400),
+					CreatedAt: now,
 				},
 			},
 		}
