@@ -4044,7 +4044,7 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 		},
 		{
 			name:           "DefaultImportanceAndPrefersBoost",
-			item:           ExtractedFactItem{Category: "general", FactText: "Alex prefers dark roast coffee every day", Importance: 0},
+			item:           ExtractedFactItem{Category: "general", FactText: "User prefers dark roast coffee every day", Importance: 0},
 			wantAdmit:      true,
 			wantImportance: 0.70,
 			wantReason:     "admitted",
@@ -4072,7 +4072,7 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 		},
 		{
 			name:           "NoopActionCaseInsensitiveWithWhitespace",
-			item:           ExtractedFactItem{Action: "  noop  ", FactText: "Alex mentioned something ephemeral yesterday", Importance: 0.8},
+			item:           ExtractedFactItem{Action: "  noop  ", FactText: "User mentioned something ephemeral yesterday", Importance: 0.8},
 			wantAdmit:      false,
 			wantImportance: 0,
 			wantReason:     "noop_action",
@@ -4481,11 +4481,11 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 					}
 				}
 				if tc.withSummary {
-					mem.threadSummaries[threadID] = "User name is Alex"
+					mem.threadSummaries[threadID] = "User name is Bob"
 				}
 				if tc.withPriorTurns {
 					mem.threadPriorTurns[threadID] = []Message{
-						{RowID: 5, ThreadID: threadID, Content: "My name is Alex", ResponseText: "Hello Alex", Status: "COMPLETED", Metadata: MessageMetadata{IsAdmin: true}},
+						{RowID: 5, ThreadID: threadID, Content: "My name is Bob", ResponseText: "Hello Bob", Status: "COMPLETED", Metadata: MessageMetadata{IsAdmin: true}},
 					}
 				}
 				if tc.storeFailOp != "" {
@@ -4520,14 +4520,14 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 						{"category":"general","fact_text":"Candidate fact text number 7","importance_score":0.6}
 					]}`, nil
 				}
-				return `{"facts":[{"category":"user_preference","fact_text":"Alex likes matcha tea in the afternoon","importance_score":0.8}]}`, nil
+				return `{"facts":[{"category":"user_preference","fact_text":"Bob likes matcha tea in the afternoon","importance_score":0.8}]}`, nil
 			}
 
 			err := processThreadFacts(ctx, store, client, llm, "th-test")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.withSummary && !strings.Contains(capturedPrompt, "PRIOR THREAD SUMMARY:\nUser name is Alex") {
+			if tc.withSummary && !strings.Contains(capturedPrompt, "PRIOR THREAD SUMMARY:\nUser name is Bob") {
 				t.Errorf("captured prompt missing summary: %s", capturedPrompt)
 			}
 			if tc.withPriorTurns && !strings.Contains(capturedPrompt, "PRIOR TURNS (FOR COREFERENCE RESOLUTION ONLY") {
