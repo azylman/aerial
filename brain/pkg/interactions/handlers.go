@@ -272,7 +272,7 @@ func (r *Router) handleMode(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	go r.trackDeployProgress(s, i.Interaction, "mode", targetChannelID, modeVal)
+	r.spawnDeployProgress(s, i.Interaction, "mode", targetChannelID, modeVal)
 }
 
 func (r *Router) handleIgnoreBots(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
@@ -314,7 +314,15 @@ func (r *Router) handleIgnoreBots(s *discordgo.Session, i *discordgo.Interaction
 
 	enabledVal := getBoolOption(data.Options, "enabled", false)
 	valStr := fmt.Sprintf("%v", enabledVal)
-	go r.trackDeployProgress(s, i.Interaction, "ignore_bots", targetChannelID, valStr)
+	r.spawnDeployProgress(s, i.Interaction, "ignore_bots", targetChannelID, valStr)
+}
+
+func (r *Router) spawnDeployProgress(s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {
+	r.bgWg.Add(1)
+	go func() {
+		defer r.bgWg.Done()
+		r.trackDeployProgress(s, interaction, key, channelID, val)
+	}()
 }
 
 func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {

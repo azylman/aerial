@@ -552,10 +552,7 @@ func TestRouter_ConfigMutationCommands(t *testing.T) {
 				chID = "chan-2"
 			}
 			router.Handle(session, mkCmd("int-"+tc.name, chID, "admin-123", tc.cmdName, tc.opts...))
-
-			if len(tc.opts) > 0 {
-				time.Sleep(60 * time.Millisecond)
-			}
+			router.bgWg.Wait()
 
 			reqs := transport.Requests()
 			for _, want := range tc.wantSubstrs {
