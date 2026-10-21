@@ -205,6 +205,10 @@ var (
 
 // EvaluateCandidateAdmission deterministically evaluates an extracted fact candidate.
 func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, adjustedImportance float64, reason string) {
+	if strings.EqualFold(strings.TrimSpace(item.Action), "NOOP") {
+		return false, 0, "noop_action"
+	}
+
 	trimmedText := strings.TrimSpace(item.FactText)
 	if len(trimmedText) < 10 {
 		return false, 0, "too_short"

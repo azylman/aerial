@@ -4059,6 +4059,20 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 			wantImportance: 0.10,
 			wantReason:     "admitted",
 		},
+		{
+			name:           "NoopActionRejected",
+			item:           ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail", Importance: 0.6},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "noop_action",
+		},
+		{
+			name:           "NoopActionCaseInsensitiveWithWhitespace",
+			item:           ExtractedFactItem{Action: "  noop  ", FactText: "Alex mentioned something ephemeral yesterday", Importance: 0.8},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "noop_action",
+		},
 	}
 
 	for _, tc := range tests {
@@ -4154,6 +4168,10 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 		{
 			name: "UnadmittedTooShort",
 			item: ExtractedFactItem{FactText: "short"},
+		},
+		{
+			name: "UnadmittedNoopAction",
+			item: ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"},
 		},
 		{
 			name:      "EmbeddingErrorLogged",
