@@ -1346,10 +1346,16 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 			if !hasEnv(seen[target].Env, "HOME="+expectedEphemeralHome) {
 				t.Errorf("%s expected HOME=%q, got %v", target, expectedEphemeralHome, seen[target].Env)
 			}
+			if seen[target].MemoryRetriever != nil {
+				t.Errorf("%s expected nil MemoryRetriever, got non-nil", target)
+			}
 		}
-		for _, target := range []string{"discord:worker-0", "discord:worker-1"} {
+		for _, target := range []string{"discord:worker-0", "discord:worker-1", "discord:medium-worker-0", "discord:medium-worker-1"} {
 			if !hasEnv(seen[target].Env, "HOME="+expectedDiscordHome) {
 				t.Errorf("%s expected HOME=%q, got %v", target, expectedDiscordHome, seen[target].Env)
+			}
+			if seen[target].MemoryRetriever == nil {
+				t.Errorf("%s expected non-nil MemoryRetriever, got nil", target)
 			}
 		}
 		if seen["discord:medium-worker-0"].ThreadID == "" || seen["discord:medium-worker-1"].ThreadID == "" {

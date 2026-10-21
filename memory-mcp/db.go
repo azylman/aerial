@@ -187,6 +187,8 @@ type Store interface {
 	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
+	GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error)
+	FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error)
 	FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error)
 	Close() error
 }
@@ -924,8 +926,69 @@ func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID
 	return err
 }
 
-// FindNearestFacts returns top-K facts with cosine similarity >= minSim.
-func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
+// GetThreadContextBeforeWatermark returns the thread summary and up to priorTurnLimit prior admin turns before the extraction watermark.
+func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error) {
+	if err := s.checkDB(); err != nil {
+		return "", nil, err
+	}
+	if threadID = strings.TrimSpace(threadID); threadID == "" {
+		return "", nil, nil
+	}
+	if priorTurnLimit <= 0 {
+		priorTurnLimit = 2
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var summary string
+	var lastExtractedRowID int64
+	sessQuery := `SELECT COALESCE(summary, ''), COALESCE(last_extracted_rowid, 0) FROM sessions WHERE thread_id = $1`
+	err := s.db.QueryRowContext(queryCtx, sessQuery, threadID).Scan(&summary, &lastExtractedRowID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil, nil
+		}
+		return "", nil, fmt.Errorf("failed to query session context: %w", err)
+	}
+
+	if lastExtractedRowID <= 0 {
+		return summary, nil, nil
+	}
+
+	msgQuery := `SELECT id, row_id, thread_id, content, COALESCE(response_text, ''), status, metadata
+	FROM messages
+	WHERE thread_id = $1 AND row_id <= $2 AND status = 'COMPLETED'
+	  AND COALESCE(TRIM(response_text), '') != '' AND TRIM(response_text) NOT LIKE '[%'
+	  AND (metadata->>'is_admin')::boolean IS TRUE
+	ORDER BY row_id DESC LIMIT $3`
+
+	rows, err := s.db.QueryContext(queryCtx, msgQuery, threadID, lastExtractedRowID, priorTurnLimit)
+	if err != nil {
+		return summary, nil, fmt.Errorf("failed to query prior turns: %w", err)
+	}
+	defer rows.Close()
+
+	var priorTurns []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.Content, &m.ResponseText, &m.Status, &m.Metadata); err != nil {
+			return summary, nil, fmt.Errorf("failed to scan prior turn: %w", err)
+		}
+		priorTurns = append(priorTurns, m)
+	}
+	if err := rows.Err(); err != nil {
+		return summary, nil, fmt.Errorf("failed to read prior turns rows: %w", err)
+	}
+
+	for i, j := 0, len(priorTurns)-1; i < j; i, j = i+1, j-1 {
+		priorTurns[i], priorTurns[j] = priorTurns[j], priorTurns[i]
+	}
+
+	return summary, priorTurns, nil
+}
+
+// FindNearestScoredFacts returns top-K facts with cosine similarity >= minSim along with their scores.
+func (s *SQLStore) FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
@@ -956,7 +1019,7 @@ func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, li
 		ORDER BY embedding <=> $1
 		LIMIT $2
 	)
-	SELECT id, category, fact_text, importance, created_at, last_reinforced_at, last_decayed_at, reinforce_count
+	SELECT id, category, fact_text, importance, created_at, last_reinforced_at, last_decayed_at, reinforce_count, similarity
 	FROM candidates
 	WHERE similarity >= $3
 	ORDER BY similarity DESC
@@ -964,13 +1027,45 @@ func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, li
 
 	rows, err := s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, minSim, limit)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find nearest facts: %w", err)
+		return nil, fmt.Errorf("failed to find nearest scored facts: %w", err)
 	}
 	defer rows.Close()
 
-	facts, err := scanFacts(rows)
+	var results []ScoredFact
+	for rows.Next() {
+		var f Fact
+		var sim float64
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(
+			&f.ID, &f.Category, &f.FactText, &f.Importance,
+			&createdAt, &lastReinforced, &lastDecayed,
+			&f.ReinforceCount, &sim,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan nearest scored fact: %w", err)
+		}
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
+		f.LastDecayedAt = lastDecayed.Time
+		results = append(results, ScoredFact{
+			Fact:  f,
+			Score: sim,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read nearest scored facts rows: %w", err)
+	}
+	return results, nil
+}
+
+// FindNearestFacts returns top-K facts with cosine similarity >= minSim.
+func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
+	scored, err := s.FindNearestScoredFacts(ctx, embedding, limit, minSim)
 	if err != nil {
-		return nil, fmt.Errorf("failed to scan nearest fact: %w", err)
+		return nil, err
+	}
+	facts := make([]Fact, len(scored))
+	for i, sf := range scored {
+		facts[i] = sf.Fact
 	}
 	return facts, nil
 }

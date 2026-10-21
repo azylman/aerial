@@ -1840,7 +1840,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	memoryRetriever := newHTTPMemoryRetriever("")
 
 	basePoolCfg := func(home, model string, prewarmed []string) runner.PoolConfig {
-		return runner.PoolConfig{
+		pcfg := runner.PoolConfig{
 			GeminiHomeDir:     home,
 			Model:             model,
 			AgyBin:            cur.AgyBin,
@@ -1851,10 +1851,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			SessionManager:    sessionMgr,
 			PrewarmedTargets:  prewarmed,
 		}
+		if home == discordHome {
+			pcfg.MemoryRetriever = memoryRetriever
+		}
+		return pcfg
 	}
 
 	primaryCfg := basePoolCfg(discordHome, cur.Model, nil)
-	primaryCfg.MemoryRetriever = memoryRetriever
 	discordPrimaryPool := runner.NewUnifiedProcessPool(primaryCfg, appOpts.processSpawner)
 	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), appOpts.processSpawner, "ephemeral:worker")
 	discordLowEffortPool := newWorkerInterchangeablePool(basePoolCfg(discordHome, lowEffortModel, []string{"discord:worker-0", "discord:worker-1"}), appOpts.processSpawner, "discord:worker")
