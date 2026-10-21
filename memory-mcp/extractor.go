@@ -203,18 +203,21 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		return fmt.Errorf("database is nil")
 	}
 
-	maxRowID, err := store.GetMaxMessageRowID(ctx, threadID)
-	if err != nil {
-		return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
-	}
-
 	turns, err := store.GetUnextractedAdminTurns(ctx, threadID)
 	if err != nil {
 		return fmt.Errorf("failed to get unextracted turns for thread %s: %w", threadID, err)
 	}
+
+	var maxRowID int64
 	for _, t := range turns {
 		if t.RowID > maxRowID {
 			maxRowID = t.RowID
+		}
+	}
+	if maxRowID == 0 {
+		maxRowID, err = store.GetMaxMessageRowID(ctx, threadID)
+		if err != nil {
+			return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
 		}
 	}
 

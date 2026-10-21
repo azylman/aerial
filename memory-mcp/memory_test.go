@@ -3488,6 +3488,7 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 		nilLLM        bool
 		threads       []string
 		turns         []Message
+		threadMaxID   int64
 		storeFailOp   string
 		llmResp       string
 		llmErr        error
@@ -3556,6 +3557,24 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 			},
 			wantErr:       false,
 			wantWatermark: 15,
+		},
+		{
+			name:          "EmptyTurnsSliceFallsBackToThreadMaxRowID",
+			ctx:           ctx,
+			threads:       []string{"th-fallback-max"},
+			threadMaxID:   42,
+			wantErr:       false,
+			wantWatermark: 42,
+		},
+		{
+			name:          "WatermarkCappedToExtractedTurnsMaxRowID",
+			ctx:           ctx,
+			threads:       []string{"th-capped"},
+			turns:         []Message{{Content: "Turn 50", ResponseText: "Resp 50", RowID: 50}},
+			threadMaxID:   100,
+			llmResp:       `{"facts":[]}`,
+			wantErr:       false,
+			wantWatermark: 50,
 		},
 		{
 			name:        "EmptyTranscriptWatermarkErrorContinues",
@@ -3635,6 +3654,9 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 						if trn.RowID > memStore.maxRowIDs[tid] {
 							memStore.maxRowIDs[tid] = trn.RowID
 						}
+					}
+					if tc.threadMaxID > memStore.maxRowIDs[tid] {
+						memStore.maxRowIDs[tid] = tc.threadMaxID
 					}
 				}
 				memStore.facts[1] = &Fact{ID: 1, Category: "user_preference", FactText: "Old preference"}
