@@ -1494,7 +1494,8 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "pull_request synchronize transitions registry", event: "pull_request", delivery: "del-pr-sync",
 			payload: `{"action":"synchronize","number":517,"pull_request":{"number":517,"head":{"ref":"feat/update","sha":"newhead333"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{syncTargetID: "target-sync-1"},
+			reg:     &mockPRRegistry{syncTargetID: "target-sync-1", resolveTargetID: "target-sync-1", resolveBranch: "feat/update"},
+			disp:    &mockOutboundDispatcher{widgetErr: errors.New("widget sync err")},
 			wantPR:  517, wantHeadSHA: "newhead333", wantTargetID: "target-sync-1", wantSyncCalls: 1,
 		},
 		{
@@ -3305,6 +3306,8 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		wantPrompts         int
 		wantPromptSubs      []string
 		wantDMs             int
+		wantWidgets         int
+		widgetErr           error
 	}{
 		{
 			name:           "ResolveThreadForPR nil registry returns empty",
@@ -3331,6 +3334,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 				{AuthorName: "arcane103", Content: "Wrap up the deployment", ResponseText: "Done!"},
 			},
 			wantPrompts: 1,
+			wantWidgets: 1,
 			wantPromptSubs: []string{
 				"Continuous Delivery deployment completed for job brain on azylman/aerial",
 				"[arcane103]: Wrap up the deployment",
@@ -3342,6 +3346,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			isDeploymentSuccess: true,
 			targetID:            "invalid-snowflake",
 			wantPrompts:         0,
+			wantWidgets:         0,
 		},
 		{
 			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression true",
@@ -3350,6 +3355,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			suppressVanadis:     true,
 			wantPrompts:         0,
 			wantDMs:             0,
+			wantWidgets:         1,
 		},
 		{
 			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error fallback",
@@ -3357,7 +3363,9 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			targetID:            validSnowflake,
 			suppressVanadisErr:  errors.New("db check err"),
 			channelContextErr:   errors.New("ctx err"),
+			widgetErr:           errors.New("widget err"),
 			wantPrompts:         1,
+			wantWidgets:         1,
 		},
 	}
 
@@ -3379,7 +3387,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 				}
 				mockReg = mReg
 			}
-			mockDisp := &mockOutboundDispatcher{}
+			mockDisp := &mockOutboundDispatcher{widgetErr: tc.widgetErr}
 			srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
 
 			if !tc.isDeploymentSuccess {
@@ -3408,6 +3416,12 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			}
 			if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
 				t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
+			}
+			wCalls := mockDisp.WidgetCalls()
+			if len(wCalls) != tc.wantWidgets {
+				t.Errorf("got %d widgets, want %d", len(wCalls), tc.wantWidgets)
+			} else if tc.wantWidgets > 0 && wCalls[0].Status != "deployed" {
+				t.Errorf("got widget status %q, want \"deployed\"", wCalls[0].Status)
 			}
 		})
 	}

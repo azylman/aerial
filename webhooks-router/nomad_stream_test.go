@@ -949,9 +949,11 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 		desc             string
 		dmErr            error
 		promptErr        error
+		widgetErr        error
 		wantCrashJobs    int
 		wantDMs          int
 		wantPrompts      int
+		wantWidgets      int
 		wantMetricSubstr string
 		wantErr          bool
 	}{
@@ -963,6 +965,7 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 		{name: "HandleUnmanagedJobCrash direct execution prompt error returns error", noRiver: true, jobID: "openobserve", allocID: "alloc-5", status: "failed", desc: "crash", promptErr: errors.New("prompt fail"), wantDMs: 1, wantPrompts: 1, wantErr: true},
 		{name: "HandleUnmanagedJobCrash empty job ID no-op", noRiver: true, jobID: ""},
 		{name: "HandleNomadJobFailure untracked in registry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobUpdated: false}, jobID: "openobserve", allocID: "alloc-99", status: "failed", desc: "Task OOM killed", wantDMs: 1, wantPrompts: 1},
+		{name: "HandleNomadJobFailure tracked syncs widget", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "1555405874565091380", deployFailedJobPRNum: 613, deployFailedJobMergeSHA: "sha613", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true, resolveTargetID: "1555405874565091380", resolveBranch: "feat/x"}, jobID: "brain", allocID: "alloc-613", status: "failed", desc: "Task OOM killed", widgetErr: errors.New("widget err"), wantDMs: 1, wantPrompts: 1, wantWidgets: 1},
 		{name: "HandleNomadJobFailure nil registry", useFailure: true, noRiver: true, reg: nil, jobID: "cadvisor", allocID: "alloc-99", status: "failed", desc: "Docker daemon died", wantDMs: 1, wantPrompts: 1},
 		{name: "HandleNomadJobFailure empty job ID no-op", useFailure: true, noRiver: true, jobID: "", allocID: "alloc-1", status: "failed", desc: "oom"},
 		{name: "HandleNomadJobFailure registry error", useFailure: true, noRiver: true, reg: &mockPRRegistry{err: errors.New("registry failure")}, jobID: "vector", allocID: "alloc-99", status: "failed", desc: "Config parse failed", wantErr: true},
@@ -977,7 +980,7 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 				mockRiver = &mockRiverInserter{skipDuplicate: tc.skipDuplicate, err: tc.riverErr}
 				riverArgs = append(riverArgs, mockRiver)
 			}
-			mockDisp := &mockOutboundDispatcher{directMessageErr: tc.dmErr, promptErr: tc.promptErr}
+			mockDisp := &mockOutboundDispatcher{directMessageErr: tc.dmErr, promptErr: tc.promptErr, widgetErr: tc.widgetErr}
 			srv := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil, riverArgs...)
 			srv.SetRegistry(tc.reg)
 			srv.SetDispatcher(mockDisp)
@@ -997,6 +1000,9 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 			}
 			if len(mockDisp.PromptCalls()) != tc.wantPrompts {
 				t.Errorf("Prompt calls = %d, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
+			}
+			if len(mockDisp.WidgetCalls()) != tc.wantWidgets {
+				t.Errorf("Widget calls = %d, want %d", len(mockDisp.WidgetCalls()), tc.wantWidgets)
 			}
 			if mockRiver != nil && len(mockRiver.insertedCrashAlertJobs) != tc.wantCrashJobs {
 				t.Errorf("insertedCrashAlertJobs = %d, want %d", len(mockRiver.insertedCrashAlertJobs), tc.wantCrashJobs)
