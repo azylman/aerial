@@ -1755,7 +1755,7 @@ func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
 }
 
 func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber int, statusOverride string, banner string, deployingJobs []string) error {
-	if s == nil || s.dispatcher == nil || repo == "" || prNumber <= 0 {
+	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
 		return nil
 	}
 	repo = normalizeRepo(repo)
@@ -2233,11 +2233,14 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		return nil
 	}
 
+	if prNum > 0 {
+		if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing deploy_success widget: %v", err)
+		}
+	}
+
 	if s.isVanadisPR(ctx, repo, prNum) {
 		log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
-		if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing suppressed deploy_success widget: %v", err)
-		}
 		return nil
 	}
 
@@ -3005,6 +3008,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					return nil, err
 				}
 				res.TargetID = firstNonEmpty(res.TargetID, targetID)
+				if res.TargetID != "" {
+					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "open", "", nil); err != nil {
+						log.Printf("[webhooks-router] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+					}
+				}
 			case "auto_merge_disabled":
 				if res.HeadSHA != "" {
 					s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
