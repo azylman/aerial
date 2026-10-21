@@ -77,11 +77,11 @@ func (w *Worker) Start(ctx context.Context) error {
 
 // Tick performs scheduled maintenance operations for the given tick count.
 func (w *Worker) Tick(ctx context.Context, tick int64) {
-	// Hourly: fact extraction + backfill (tick % 120 == 0)
+	// Hourly: fact extraction (tick % 120 == 0)
 	if tick%120 == 0 {
 		w.runHourly(ctx)
 	}
-	// Daily: decay and pruning (tick % 2880 == 60)
+	// Daily: fact consolidation dreaming (tick % 2880 == 60)
 	if tick%2880 == 60 {
 		w.runDaily(ctx)
 	}
@@ -91,12 +91,6 @@ func (w *Worker) runHourly(ctx context.Context) {
 	if w.store == nil || w.ollama == nil {
 		return
 	}
-	// 1. Backfill missing embeddings
-	if _, err := BackfillMissingEmbeddings(ctx, w.store, w.ollama); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("[Memory Worker] Backfill missing embeddings failed: %v", err)
-	}
-
-	// 2. Fact extraction
 	if w.llmClient != nil {
 		if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("[Memory Worker] Fact extraction failed: %v", err)
@@ -108,13 +102,6 @@ func (w *Worker) runDaily(ctx context.Context) {
 	if w.store == nil {
 		return
 	}
-	decayed, pruned, err := w.store.DecayAndPruneFacts(ctx, 0.05, 0.15, 14)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("[Memory Worker] Decay and prune failed: %v", err)
-		return
-	}
-	log.Printf("[Memory Worker] Decay and prune completed: decayed=%d, pruned=%d", decayed, pruned)
-
 	if w.ollama != nil && w.llmClient != nil {
 		consolidated, err := ConsolidateFactClusters(ctx, w.store, w.ollama, w.llmClient)
 		if err != nil && !errors.Is(err, context.Canceled) {

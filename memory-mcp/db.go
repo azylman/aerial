@@ -41,12 +41,9 @@ func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) {
 // Fact represents a stored piece of semantic knowledge.
 type Fact struct {
 	ID               int64     `json:"id"`
-	Category         string    `json:"category"`
 	FactText         string    `json:"fact_text"`
-	Importance       float64   `json:"importance"`
 	CreatedAt        time.Time `json:"created_at"`
 	LastReinforcedAt time.Time `json:"last_reinforced_at"`
-	LastDecayedAt    time.Time `json:"last_decayed_at"`
 	ReinforceCount   int       `json:"reinforce_count"`
 }
 
@@ -65,10 +62,9 @@ type ScoredFactWithEmbedding struct {
 
 // FactsFilter defines filtering options for paginated fact queries.
 type FactsFilter struct {
-	Category string `json:"category"`
-	Query    string `json:"query"`
-	Limit    int    `json:"limit"`
-	Offset   int    `json:"offset"`
+	Query  string `json:"query"`
+	Limit  int    `json:"limit"`
+	Offset int    `json:"offset"`
 }
 
 // FactsResult represents the paginated facts response contract.
@@ -173,17 +169,13 @@ type DBTX interface {
 
 // Store defines persistent storage operations for facts.
 type Store interface {
-	InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error)
-	UpdateFact(ctx context.Context, id int64, category, factText string, importance float64, embedding []float32) error
-	ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error
+	InsertFact(ctx context.Context, factText string, embedding []float32) (int64, error)
+	UpdateFact(ctx context.Context, id int64, factText string, embedding []float32) error
+	ReinforceFact(ctx context.Context, id int64) error
 	DeleteFact(ctx context.Context, id int64) error
 	FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error)
-	SearchCandidateFacts(ctx context.Context, embedding []float32, queryText, category string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error)
+	SearchCandidateFacts(ctx context.Context, embedding []float32, queryText string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
-	GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error)
-	UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error
-	DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (decayedCount, prunedCount int64, err error)
-	TouchRetrievedFacts(ctx context.Context, ids []int64, boost float64) error
 	GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error)
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
 	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
@@ -237,48 +229,11 @@ func closeWarn(c io.Closer, resource string) {
 	}
 }
 
-func optionalVectorArg(emb []float32) any {
-	if len(emb) == ExpectedEmbeddingDim {
-		return pgvector.NewVector(emb)
-	}
-	return nil
-}
-
 // EscapeSQLLike escapes characters with special meaning in SQL LIKE clauses.
 func EscapeSQLLike(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "%", "\\%")
 	return strings.ReplaceAll(s, "_", "\\_")
-}
-
-// NullVector provides sql.Scanner support for pgvector nullable embedding columns.
-type NullVector struct {
-	Vector []float32
-	Valid  bool
-}
-
-func (nv *NullVector) Scan(src any) error {
-	if src == nil {
-		nv.Vector, nv.Valid = nil, false
-		return nil
-	}
-	switch v := src.(type) {
-	case pgvector.Vector:
-		nv.Vector, nv.Valid = v.Slice(), true
-		return nil
-	case string, []byte:
-		var vec pgvector.Vector
-		if err := vec.Scan(v); err == nil {
-			nv.Vector, nv.Valid = vec.Slice(), true
-			return nil
-		}
-	}
-	var vec pgvector.Vector
-	if err := vec.Scan(src); err != nil {
-		return err
-	}
-	nv.Vector, nv.Valid = vec.Slice(), true
-	return nil
 }
 
 // FactTime scans timestamps cleanly across drivers.
@@ -321,7 +276,7 @@ func (ft *FactTime) Scan(src any) error {
 }
 
 // InsertFact persists a new fact into the database.
-func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
+func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []float32) (int64, error) {
 	if err := s.checkDB(); err != nil {
 		return 0, err
 	}
@@ -329,25 +284,21 @@ func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, im
 	if factText == "" {
 		return 0, fmt.Errorf("fact text cannot be empty")
 	}
-	category = strings.TrimSpace(category)
-	if category == "" {
-		category = "general"
-	}
-	if importance <= 0 {
-		importance = 0.5
+	if len(embedding) != ExpectedEmbeddingDim {
+		return 0, fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
 	now := time.Now().UTC()
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO facts (category, fact_text, importance, embedding, created_at, last_reinforced_at, last_decayed_at, reinforce_count) VALUES ($1, $2, $3, $4, $5, $5, $5, 1) RETURNING id`
+	query := `INSERT INTO facts (fact_text, embedding, created_at, last_reinforced_at, reinforce_count) VALUES ($1, $2, $3, $3, 1) RETURNING id`
 	var id int64
-	err := s.db.QueryRowContext(queryCtx, query, category, factText, importance, optionalVectorArg(embedding), now).Scan(&id)
+	err := s.db.QueryRowContext(queryCtx, query, factText, pgvector.NewVector(embedding), now).Scan(&id)
 	return id, err
 }
 
 // UpdateFact updates an existing fact with new values and increments reinforce_count.
-func (s *SQLStore) UpdateFact(ctx context.Context, id int64, category, factText string, importance float64, embedding []float32) error {
+func (s *SQLStore) UpdateFact(ctx context.Context, id int64, factText string, embedding []float32) error {
 	if err := s.checkDB(); err != nil {
 		return err
 	}
@@ -355,18 +306,14 @@ func (s *SQLStore) UpdateFact(ctx context.Context, id int64, category, factText 
 	if factText == "" {
 		return fmt.Errorf("fact text cannot be empty")
 	}
-	category = strings.TrimSpace(category)
-	if category == "" {
-		category = "general"
-	}
-	if importance <= 0 {
-		importance = 0.5
+	if len(embedding) != ExpectedEmbeddingDim {
+		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `UPDATE facts SET fact_text = $1, category = $2, importance = $3, embedding = $4, last_reinforced_at = NOW(), reinforce_count = reinforce_count + 1 WHERE id = $5`
-	res, err := s.db.ExecContext(queryCtx, query, factText, category, importance, optionalVectorArg(embedding), id)
+	query := `UPDATE facts SET fact_text = $1, embedding = $2, last_reinforced_at = NOW(), reinforce_count = COALESCE(reinforce_count, 1) + 1 WHERE id = $3`
+	res, err := s.db.ExecContext(queryCtx, query, factText, pgvector.NewVector(embedding), id)
 	if err != nil {
 		return fmt.Errorf("failed to update fact: %w", err)
 	}
@@ -380,19 +327,17 @@ func (s *SQLStore) UpdateFact(ctx context.Context, id int64, category, factText 
 	return nil
 }
 
-// ReinforceFact strengthens an existing fact's importance and updates its text/embedding if provided.
-func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error {
+// ReinforceFact strengthens an existing fact by updating last_reinforced_at and incrementing reinforce_count.
+func (s *SQLStore) ReinforceFact(ctx context.Context, id int64) error {
 	if err := s.checkDB(); err != nil {
 		return err
-	}
-	if boost <= 0 {
-		boost = 0.15
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `UPDATE facts SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))), last_reinforced_at = $2, reinforce_count = reinforce_count + 1, fact_text = CASE WHEN $3 != '' THEN $3 ELSE fact_text END, embedding = COALESCE($4, embedding) WHERE id = $5`
-	res, err := s.db.ExecContext(queryCtx, query, boost, time.Now().UTC(), strings.TrimSpace(newText), optionalVectorArg(newEmbedding), id)
+	now := time.Now().UTC()
+	query := `UPDATE facts SET last_reinforced_at = $1, reinforce_count = COALESCE(reinforce_count, 1) + 1 WHERE id = $2`
+	res, err := s.db.ExecContext(queryCtx, query, now, id)
 	if err != nil {
 		return fmt.Errorf("failed to reinforce fact: %w", err)
 	}
@@ -442,13 +387,12 @@ func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, m
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1), (1.0 - (embedding <=> $1)) AS similarity FROM facts WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT 1;`
+	query := `SELECT id, fact_text, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(reinforce_count, 1), (1.0 - (embedding <=> $1)) AS similarity FROM facts WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT 1;`
 	var f Fact
 	var sim float64
-	var createdAt, lastReinforced, lastDecayed FactTime
+	var createdAt, lastReinforced FactTime
 	err := s.db.QueryRowContext(queryCtx, query, pgvector.NewVector(embedding)).Scan(
-		&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt,
-		&lastReinforced, &lastDecayed, &f.ReinforceCount, &sim,
+		&f.ID, &f.FactText, &createdAt, &lastReinforced, &f.ReinforceCount, &sim,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, 0, nil
@@ -456,24 +400,20 @@ func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, m
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to find duplicate fact: %w", err)
 	}
-	f.CreatedAt, f.LastReinforcedAt, f.LastDecayedAt = createdAt.Time, lastReinforced.Time, lastDecayed.Time
+	f.CreatedAt, f.LastReinforcedAt = createdAt.Time, lastReinforced.Time
 	if sim >= minSim {
 		return &f, sim, nil
 	}
 	return nil, sim, nil
 }
 
-// SearchCandidateFacts performs 70/30 Hybrid RRF retrieval over stored facts with an optional category filter.
-func (s *SQLStore) SearchCandidateFacts(ctx context.Context, embedding []float32, queryText, category string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error) {
+// SearchCandidateFacts performs Hybrid RRF retrieval over stored facts with read-time power-law activation scoring.
+func (s *SQLStore) SearchCandidateFacts(ctx context.Context, embedding []float32, queryText string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	queryText = strings.TrimSpace(queryText)
-	category = strings.TrimSpace(category)
-	hasEmbedding := len(embedding) == ExpectedEmbeddingDim
-	hasText := queryText != ""
-
-	if !hasEmbedding && !hasText {
+	if len(embedding) != ExpectedEmbeddingDim || queryText == "" {
 		return nil, nil
 	}
 	if candidateLimit <= 0 {
@@ -486,129 +426,31 @@ func (s *SQLStore) SearchCandidateFacts(ctx context.Context, embedding []float32
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var rows *sql.Rows
-	var err error
+	query := `WITH vector_hits AS (
+	SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
+	FROM facts
+	ORDER BY embedding <=> $1 LIMIT $2
+), text_hits AS (
+	SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $3)) DESC) AS rank
+	FROM facts
+	WHERE fts_tokens @@ websearch_to_tsquery('simple', $3)
+	LIMIT $2
+), rrf AS (
+	SELECT f.id, f.fact_text, f.created_at,
+	       COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
+	       COALESCE(f.reinforce_count, 1) AS reinforce_count,
+	       f.embedding,
+	       ((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8)
+	       * (1.0 + 0.15 * LN(1.0 + COALESCE(f.reinforce_count, 1)::float8))
+	       * POWER(1.0 + GREATEST(0.0, EXTRACT(EPOCH FROM (NOW() - COALESCE(f.last_reinforced_at, f.created_at))) / 86400.0) / 14.0, -0.35) AS score
+	FROM vector_hits v FULL OUTER JOIN text_hits t ON v.id = t.id JOIN facts f ON f.id = COALESCE(v.id, t.id)
+)
+SELECT id, fact_text, created_at, last_reinforced_at, reinforce_count, embedding, score
+FROM rrf
+WHERE score >= $7
+ORDER BY score DESC LIMIT $2;`
 
-	if hasEmbedding && hasText {
-		if category != "" {
-			query := `WITH vector_hits AS (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
-				FROM facts
-				WHERE embedding IS NOT NULL AND category = $2
-				ORDER BY embedding <=> $1 LIMIT $3
-			), text_hits AS (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $4)) DESC) AS rank
-				FROM facts
-				WHERE fts_tokens @@ websearch_to_tsquery('simple', $4) AND category = $2
-				LIMIT $3
-			)
-			SELECT f.id, f.category, f.fact_text, f.importance, f.created_at,
-			       COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
-			       COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
-			       COALESCE(f.reinforce_count, 1) AS reinforce_count,
-			       f.embedding,
-			       (((COALESCE($5::float8 / ($7::float8 + v.rank::float8), 0.0) + COALESCE($6::float8 / ($7::float8 + t.rank::float8), 0.0)) * $7::float8) * f.importance) AS score
-			FROM vector_hits v FULL OUTER JOIN text_hits t ON v.id = t.id JOIN facts f ON f.id = COALESCE(v.id, t.id)
-			WHERE (((COALESCE($5::float8 / ($7::float8 + v.rank::float8), 0.0) + COALESCE($6::float8 / ($7::float8 + t.rank::float8), 0.0)) * $7::float8) * f.importance) >= $8
-			ORDER BY score DESC LIMIT $3;`
-			rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), category, candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore)
-		} else {
-			query := `WITH vector_hits AS (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
-				FROM facts
-				WHERE embedding IS NOT NULL
-				ORDER BY embedding <=> $1 LIMIT $2
-			), text_hits AS (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $3)) DESC) AS rank
-				FROM facts
-				WHERE fts_tokens @@ websearch_to_tsquery('simple', $3)
-				LIMIT $2
-			)
-			SELECT f.id, f.category, f.fact_text, f.importance, f.created_at,
-			       COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
-			       COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
-			       COALESCE(f.reinforce_count, 1) AS reinforce_count,
-			       f.embedding,
-			       (((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8) * f.importance) AS score
-			FROM vector_hits v FULL OUTER JOIN text_hits t ON v.id = t.id JOIN facts f ON f.id = COALESCE(v.id, t.id)
-			WHERE (((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8) * f.importance) >= $7
-			ORDER BY score DESC LIMIT $2;`
-			rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore)
-		}
-	} else if hasEmbedding {
-		if category != "" {
-			query := `WITH candidates AS (
-				SELECT id, category, fact_text, importance, created_at,
-				       COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
-				       COALESCE(last_decayed_at, created_at) AS last_decayed_at,
-				       COALESCE(reinforce_count, 1) AS reinforce_count,
-				       embedding,
-				       (1.0 - (embedding <=> $1)) AS similarity
-				FROM facts
-				WHERE embedding IS NOT NULL AND category = $2
-				ORDER BY embedding <=> $1 LIMIT $3
-			)
-			SELECT id, category, fact_text, importance, created_at, last_reinforced_at, last_decayed_at, reinforce_count, embedding, (similarity * importance) AS score
-			FROM candidates
-			WHERE (similarity * importance) >= $4
-			ORDER BY score DESC LIMIT $3;`
-			rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), category, candidateLimit, minScore)
-		} else {
-			query := `WITH candidates AS (
-				SELECT id, category, fact_text, importance, created_at,
-				       COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
-				       COALESCE(last_decayed_at, created_at) AS last_decayed_at,
-				       COALESCE(reinforce_count, 1) AS reinforce_count,
-				       embedding,
-				       (1.0 - (embedding <=> $1)) AS similarity
-				FROM facts
-				WHERE embedding IS NOT NULL
-				ORDER BY embedding <=> $1 LIMIT $2
-			)
-			SELECT id, category, fact_text, importance, created_at, last_reinforced_at, last_decayed_at, reinforce_count, embedding, (similarity * importance) AS score
-			FROM candidates
-			WHERE (similarity * importance) >= $3
-			ORDER BY score DESC LIMIT $2;`
-			rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, minScore)
-		}
-	} else {
-		if category != "" {
-			query := `WITH text_hits AS (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank
-				FROM facts
-				WHERE fts_tokens @@ websearch_to_tsquery('simple', $1) AND category = $2
-				LIMIT $3
-			)
-			SELECT f.id, f.category, f.fact_text, f.importance, f.created_at,
-			       COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
-			       COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
-			       COALESCE(f.reinforce_count, 1) AS reinforce_count,
-			       f.embedding,
-			       ((($4::float8 / ($5::float8 + t.rank::float8)) * $5::float8) * f.importance) AS score
-			FROM text_hits t JOIN facts f ON f.id = t.id
-			WHERE ((($4::float8 / ($5::float8 + t.rank::float8)) * $5::float8) * f.importance) >= $6
-			ORDER BY score DESC LIMIT $3;`
-			rows, err = s.db.QueryContext(queryCtx, query, queryText, category, candidateLimit, 1.0, DefaultRRFK, minScore)
-		} else {
-			query := `WITH text_hits AS (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank
-				FROM facts
-				WHERE fts_tokens @@ websearch_to_tsquery('simple', $1)
-				LIMIT $2
-			)
-			SELECT f.id, f.category, f.fact_text, f.importance, f.created_at,
-			       COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
-			       COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
-			       COALESCE(f.reinforce_count, 1) AS reinforce_count,
-			       f.embedding,
-			       ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) AS score
-			FROM text_hits t JOIN facts f ON f.id = t.id
-			WHERE ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) >= $5
-			ORDER BY score DESC LIMIT $2;`
-			rows, err = s.db.QueryContext(queryCtx, query, queryText, candidateLimit, 1.0, DefaultRRFK, minScore)
-		}
-	}
-
+	rows, err := s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore)
 	if err != nil {
 		return nil, fmt.Errorf("candidate search failed: %w", err)
 	}
@@ -617,20 +459,20 @@ func (s *SQLStore) SearchCandidateFacts(ctx context.Context, embedding []float32
 	var results []ScoredFactWithEmbedding
 	for rows.Next() {
 		var f Fact
-		var nv NullVector
+		var vec pgvector.Vector
 		var score float64
-		var createdAt, lastReinforced, lastDecayed FactTime
+		var createdAt, lastReinforced FactTime
 		if err := rows.Scan(
-			&f.ID, &f.Category, &f.FactText, &f.Importance,
-			&createdAt, &lastReinforced, &lastDecayed,
-			&f.ReinforceCount, &nv, &score,
+			&f.ID, &f.FactText, &createdAt, &lastReinforced,
+			&f.ReinforceCount, &vec, &score,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan candidate fact: %w", err)
 		}
-		f.CreatedAt, f.LastReinforcedAt, f.LastDecayedAt = createdAt.Time, lastReinforced.Time, lastDecayed.Time
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
 		results = append(results, ScoredFactWithEmbedding{
 			Fact:      f,
-			Embedding: nv.Vector,
+			Embedding: vec.Slice(),
 			Score:     score,
 		})
 	}
@@ -648,11 +490,6 @@ func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*
 	var whereClauses []string
 	var args []any
 	argIdx := 1
-	if cat := strings.TrimSpace(filter.Category); cat != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("category = $%d", argIdx))
-		args = append(args, cat)
-		argIdx++
-	}
 	if q := strings.TrimSpace(filter.Query); q != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("LOWER(fact_text) LIKE LOWER($%d) ESCAPE '\\'", argIdx))
 		args = append(args, "%"+EscapeSQLLike(q)+"%")
@@ -678,26 +515,16 @@ func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*
 		paginationSQL = fmt.Sprintf(" OFFSET %d", filter.Offset)
 	}
 
-	selectQuery := fmt.Sprintf(`SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, created_at, COALESCE(last_reinforced_at, created_at) AS last_reinforced_at, COALESCE(last_decayed_at, created_at) AS last_decayed_at, COALESCE(reinforce_count, 1) AS reinforce_count FROM facts %s ORDER BY COALESCE(importance, 1.0) DESC, created_at DESC, id DESC %s`, whereSQL, paginationSQL)
+	selectQuery := fmt.Sprintf(`SELECT id, fact_text, created_at, COALESCE(last_reinforced_at, created_at) AS last_reinforced_at, COALESCE(reinforce_count, 1) AS reinforce_count FROM facts%s ORDER BY COALESCE(reinforce_count, 1) DESC, COALESCE(last_reinforced_at, created_at) DESC, id DESC%s`, whereSQL, paginationSQL)
 	rows, err := s.db.QueryContext(queryCtx, selectQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query facts: %w", err)
 	}
 	defer rows.Close()
 
-	facts := make([]Fact, 0)
-	for rows.Next() {
-		var f Fact
-		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(
-			&f.ID, &f.Category, &f.FactText, &f.Importance,
-			&createdAt, &lastReinforced, &lastDecayed,
-			&f.ReinforceCount,
-		); err != nil {
-			return nil, fmt.Errorf("failed to scan fact: %w", err)
-		}
-		f.CreatedAt, f.LastReinforcedAt, f.LastDecayedAt = createdAt.Time, lastReinforced.Time, lastDecayed.Time
-		facts = append(facts, f)
+	facts, err := scanFacts(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan fact: %w", err)
 	}
 
 	return &FactsResult{
@@ -706,129 +533,31 @@ func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*
 		Limit:  filter.Limit,
 		Offset: filter.Offset,
 		Status: "ok",
-	}, rows.Err()
+	}, nil
 }
 
 func scanFacts(rows *sql.Rows) ([]Fact, error) {
 	if rows == nil {
 		return nil, nil
 	}
-	var facts []Fact
+	facts := make([]Fact, 0)
 	for rows.Next() {
 		var f Fact
-		var createdAt, lastReinforced, lastDecayed FactTime
+		var createdAt, lastReinforced FactTime
 		if err := rows.Scan(
-			&f.ID, &f.Category, &f.FactText, &f.Importance,
-			&createdAt, &lastReinforced, &lastDecayed,
+			&f.ID, &f.FactText,
+			&createdAt, &lastReinforced,
 			&f.ReinforceCount,
 		); err != nil {
 			return nil, err
 		}
-		f.CreatedAt, f.LastReinforcedAt, f.LastDecayedAt = createdAt.Time, lastReinforced.Time, lastDecayed.Time
+		f.CreatedAt, f.LastReinforcedAt = createdAt.Time, lastReinforced.Time
 		facts = append(facts, f)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return facts, nil
-}
-
-// GetFactsMissingEmbeddings retrieves facts lacking vector embeddings.
-func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	query := "SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts WHERE embedding IS NULL ORDER BY id ASC"
-	if limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", limit)
-	}
-	rows, err := s.db.QueryContext(queryCtx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	facts, err := scanFacts(rows)
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan fact missing embedding: %w", err)
-	}
-	return facts, nil
-}
-
-// UpdateFactEmbedding updates the vector embedding for an existing fact.
-func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	if len(embedding) != ExpectedEmbeddingDim {
-		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	vec := pgvector.NewVector(embedding)
-	res, err := s.db.ExecContext(queryCtx, "UPDATE facts SET embedding = $1 WHERE id = $2", vec, id)
-	if err != nil {
-		return err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrFactNotFound
-	}
-	return nil
-}
-
-// DecayAndPruneFacts applies decay to untouched facts down to category-specific floors and removes stale facts.
-func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (decayedCount, prunedCount int64, err error) {
-	if err = s.checkDB(); err != nil {
-		return 0, 0, err
-	}
-	if decayStep <= 0 {
-		decayStep = 0.05
-	}
-	if pruneFloor <= 0 {
-		pruneFloor = 0.15
-	}
-	if pruneAgeDays <= 0 {
-		pruneAgeDays = 14
-	}
-
-	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	now := time.Now().UTC()
-	decayQuery := `UPDATE facts SET importance = CASE
-  WHEN category = 'user_preference' AND importance > 0.75 THEN GREATEST(0.75, ROUND((importance - $1)::numeric, 2))
-  WHEN category = 'system_config' AND importance > 0.60 THEN GREATEST(0.60, ROUND((importance - $1)::numeric, 2))
-  WHEN category = 'routine' AND importance > 0.50 THEN GREATEST(0.50, ROUND((importance - $1)::numeric, 2))
-  ELSE GREATEST(0.0, ROUND((importance - $1)::numeric, 2))
-END, last_decayed_at = $2
-WHERE (last_decayed_at IS NULL OR last_decayed_at < $3)
-  AND (last_reinforced_at IS NULL OR last_reinforced_at < $3)
-  AND importance > CASE category WHEN 'user_preference' THEN 0.75 WHEN 'system_config' THEN 0.60 WHEN 'routine' THEN 0.50 ELSE 0.0 END`
-	resDecay, err := s.db.ExecContext(queryCtx, decayQuery, decayStep, now, now.Add(-24*time.Hour))
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
-	}
-	if n, err := resDecay.RowsAffected(); err == nil {
-		decayedCount = n
-	}
-
-	pruneQuery := `DELETE FROM facts WHERE importance <= $1 AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)`
-	resPrune, err := s.db.ExecContext(queryCtx, pruneQuery, pruneFloor, now.AddDate(0, 0, -pruneAgeDays))
-	if err != nil {
-		return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
-	}
-	if n, err := resPrune.RowsAffected(); err == nil {
-		prunedCount = n
-	}
-	return decayedCount, prunedCount, nil
 }
 
 // GetActiveConversationsForExtraction finds threads with unextracted admin turns in the past activeHours.
@@ -1018,9 +747,8 @@ func (s *SQLStore) FindNearestScoredFacts(ctx context.Context, embedding []float
 	defer cancel()
 
 	query := `WITH candidates AS (
-		SELECT id, category, fact_text, importance, created_at,
+		SELECT id, fact_text, created_at,
 		       COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
-		       COALESCE(last_decayed_at, created_at) AS last_decayed_at,
 		       COALESCE(reinforce_count, 1) AS reinforce_count,
 		       (1.0 - (embedding <=> $1)) AS similarity
 		FROM facts
@@ -1028,7 +756,7 @@ func (s *SQLStore) FindNearestScoredFacts(ctx context.Context, embedding []float
 		ORDER BY embedding <=> $1
 		LIMIT $2
 	)
-	SELECT id, category, fact_text, importance, created_at, last_reinforced_at, last_decayed_at, reinforce_count, similarity
+	SELECT id, fact_text, created_at, last_reinforced_at, reinforce_count, similarity
 	FROM candidates
 	WHERE similarity >= $3
 	ORDER BY similarity DESC
@@ -1044,17 +772,16 @@ func (s *SQLStore) FindNearestScoredFacts(ctx context.Context, embedding []float
 	for rows.Next() {
 		var f Fact
 		var sim float64
-		var createdAt, lastReinforced, lastDecayed FactTime
+		var createdAt, lastReinforced FactTime
 		if err := rows.Scan(
-			&f.ID, &f.Category, &f.FactText, &f.Importance,
-			&createdAt, &lastReinforced, &lastDecayed,
+			&f.ID, &f.FactText,
+			&createdAt, &lastReinforced,
 			&f.ReinforceCount, &sim,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan nearest scored fact: %w", err)
 		}
 		f.CreatedAt = createdAt.Time
 		f.LastReinforcedAt = lastReinforced.Time
-		f.LastDecayedAt = lastDecayed.Time
 		results = append(results, ScoredFact{
 			Fact:  f,
 			Score: sim,
@@ -1079,34 +806,6 @@ func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, li
 	return facts, nil
 }
 
-// TouchRetrievedFacts reinforces facts retrieved in prompt context, throttled to at most once per 24 hours.
-func (s *SQLStore) TouchRetrievedFacts(ctx context.Context, ids []int64, boost float64) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	if boost <= 0 {
-		boost = 0.02
-	}
-	queryCtx, cancel := withTimeout(ctx, 500*time.Millisecond)
-	defer cancel()
-
-	now := time.Now().UTC()
-	query := `UPDATE facts
-		SET importance = LEAST(1.0, ROUND((importance + $1)::numeric, 2)),
-		    last_reinforced_at = $2,
-		    reinforce_count = COALESCE(reinforce_count, 1) + 1
-		WHERE id = ANY($3) AND (last_reinforced_at IS NULL OR last_reinforced_at < $4)`
-
-	_, err := s.db.ExecContext(queryCtx, query, boost, now, ids, now.Add(-24*time.Hour))
-	if err != nil {
-		return fmt.Errorf("failed to touch retrieved facts: %w", err)
-	}
-	return nil
-}
-
 // GetAllFactsWithEmbeddings retrieves all facts that possess a vector embedding for clustering and consolidation.
 func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error) {
 	if err := s.checkDB(); err != nil {
@@ -1115,9 +814,8 @@ func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactW
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	query := `SELECT id, category, fact_text, importance, created_at,
+	query := `SELECT id, fact_text, created_at,
 		       COALESCE(last_reinforced_at, created_at),
-		       COALESCE(last_decayed_at, created_at),
 		       COALESCE(reinforce_count, 1),
 		       embedding
 		FROM facts
@@ -1133,21 +831,20 @@ func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactW
 	var results []ScoredFactWithEmbedding
 	for rows.Next() {
 		var f Fact
-		var nv NullVector
-		var createdAt, lastReinforced, lastDecayed FactTime
+		var vec pgvector.Vector
+		var createdAt, lastReinforced FactTime
 		if err := rows.Scan(
-			&f.ID, &f.Category, &f.FactText, &f.Importance,
-			&createdAt, &lastReinforced, &lastDecayed,
-			&f.ReinforceCount, &nv,
+			&f.ID, &f.FactText,
+			&createdAt, &lastReinforced,
+			&f.ReinforceCount, &vec,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan fact with embedding: %w", err)
 		}
 		f.CreatedAt = createdAt.Time
 		f.LastReinforcedAt = lastReinforced.Time
-		f.LastDecayedAt = lastDecayed.Time
 		results = append(results, ScoredFactWithEmbedding{
 			Fact:      f,
-			Embedding: nv.Vector,
+			Embedding: vec.Slice(),
 		})
 	}
 	if err := rows.Err(); err != nil {

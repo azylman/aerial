@@ -133,7 +133,6 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query().Get("q")
-	category := r.URL.Query().Get("category")
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
 	if err != nil {
 		limit = 0
@@ -144,10 +143,9 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filter := FactsFilter{
-		Category: category,
-		Query:    q,
-		Limit:    limit,
-		Offset:   offset,
+		Query:  q,
+		Limit:  limit,
+		Offset: offset,
 	}
 
 	res, err := s.handler.GetFacts(r.Context(), filter)

@@ -104,53 +104,6 @@ Requirements:
 5. Do NOT include markdown text formatting outside the JSON block.
 `
 
-// BackfillMissingEmbeddings generates embeddings for legacy facts lacking vector representation.
-func BackfillMissingEmbeddings(ctx context.Context, store Store, client OllamaClient) (int, error) {
-	if store == nil || client == nil {
-		return 0, fmt.Errorf("nil database or ollama client")
-	}
-
-	missingFacts, err := store.GetFactsMissingEmbeddings(ctx, 0)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query facts missing embeddings: %w", err)
-	}
-
-	if len(missingFacts) == 0 {
-		return 0, nil
-	}
-
-	log.Printf("[Memory] Backfilling vector embeddings for %d legacy fact(s)...", len(missingFacts))
-	backfilled := 0
-
-	for _, item := range missingFacts {
-		select {
-		case <-ctx.Done():
-			return backfilled, ctx.Err()
-		default:
-		}
-
-		if strings.TrimSpace(item.FactText) == "" {
-			continue
-		}
-
-		emb, err := client.GenerateEmbedding(ctx, item.FactText, false, 1)
-		if err != nil {
-			log.Printf("[Memory] Warning: Failed to generate embedding for fact ID %d: %v", item.ID, err)
-			continue
-		}
-		if len(emb) == 0 {
-			continue
-		}
-
-		if err := store.UpdateFactEmbedding(ctx, item.ID, emb); err != nil {
-			log.Printf("[Memory] Error updating embedding for fact ID %d: %v", item.ID, err)
-		} else {
-			backfilled++
-		}
-	}
-	return backfilled, nil
-}
-
 // ExtractActiveConversationFacts queries conversations modified in the last activeHours,
 // extracts facts via the primary LLM, generates vector embeddings via Ollama, and reconciles them into persistent DB.
 // Single-flight protected via extractionMutex.
@@ -252,10 +205,10 @@ Importance: `)
 	b.WriteString(fmt.Sprintf("%.2f", item.Importance))
 	b.WriteString(`
 
-EXISTING CANDIDATE NEIGHBORS (id, similarity, category, text):
+EXISTING CANDIDATE NEIGHBORS (id, similarity, text):
 `)
 	for _, n := range neighbors {
-		b.WriteString(fmt.Sprintf("- ID %d (similarity %.2f) [%s]: %s\n", n.Fact.ID, n.Score, n.Fact.Category, n.Fact.FactText))
+		b.WriteString(fmt.Sprintf("- ID %d (similarity %.2f): %s\n", n.Fact.ID, n.Score, n.Fact.FactText))
 	}
 	b.WriteString(`
 Requirements:
@@ -372,19 +325,18 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	if strings.EqualFold(strings.TrimSpace(item.Action), "DELETE") {
 		return
 	}
-	admit, adjustedImportance, _ := EvaluateCandidateAdmission(item)
+	admit, _, _ := EvaluateCandidateAdmission(item)
 	if !admit {
 		return
-	}
-	item.Importance = adjustedImportance
-	category := strings.TrimSpace(item.Category)
-	if category == "" {
-		category = "general"
 	}
 
 	emb, err := client.GenerateEmbedding(ctx, item.FactText, false, 1)
 	if err != nil {
 		log.Printf("[Memory] Warning: Failed to generate embedding for candidate fact %q: %v", item.FactText, err)
+		return
+	}
+	if len(emb) != ExpectedEmbeddingDim {
+		log.Printf("[Memory] Warning: Candidate fact embedding dimension %d != %d", len(emb), ExpectedEmbeddingDim)
 		return
 	}
 
@@ -396,7 +348,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	// Tier 1: len(neighbors) == 0 (maxSim < 0.60)
 	if len(neighbors) == 0 {
-		if _, err := store.InsertFact(ctx, category, item.FactText, item.Importance, emb); err != nil {
+		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting Tier 1 fact: %v", err)
 		}
 		return
@@ -404,7 +356,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	// Tier 2: neighbors[0].Score > 0.88
 	if neighbors[0].Score > 0.88 {
-		if err := store.ReinforceFact(ctx, neighbors[0].Fact.ID, item.FactText, emb, 0.15); err != nil {
+		if err := store.ReinforceFact(ctx, neighbors[0].Fact.ID); err != nil {
 			log.Printf("[Memory] Error reinforcing Tier 2 fact id=%d: %v", neighbors[0].Fact.ID, err)
 		}
 		return
@@ -412,7 +364,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	// Tier 3: 0.60 <= neighbors[0].Score <= 0.88
 	if llmFunc == nil {
-		if _, err := store.InsertFact(ctx, category, item.FactText, item.Importance, emb); err != nil {
+		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact: %v", err)
 		}
 		return
@@ -422,7 +374,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	resp, err := llmFunc(ctx, reconcilePrompt)
 	if err != nil {
 		log.Printf("[Memory] Tier 3 reconciliation LLM error: %v", err)
-		if _, err := store.InsertFact(ctx, category, item.FactText, item.Importance, emb); err != nil {
+		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact on LLM error: %v", err)
 		}
 		return
@@ -431,7 +383,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	decisionPayload, err := parseFactsJSON(resp)
 	if err != nil || len(decisionPayload.Facts) == 0 {
 		log.Printf("[Memory] Tier 3 parse error (%v); falling back to ADD", err)
-		if _, err := store.InsertFact(ctx, category, item.FactText, item.Importance, emb); err != nil {
+		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact on parse error: %v", err)
 		}
 		return
@@ -467,27 +419,19 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 			if strings.TrimSpace(factText) == "" {
 				factText = item.FactText
 			}
-			decCat := strings.TrimSpace(dec.Category)
-			if decCat == "" {
-				decCat = category
-			}
-			decImp := dec.Importance
-			if decImp <= 0 {
-				decImp = item.Importance
-			}
-			if err := store.UpdateFact(ctx, targetID, decCat, factText, decImp, emb); err != nil {
+			if err := store.UpdateFact(ctx, targetID, factText, emb); err != nil {
 				log.Printf("[Memory] Error updating fact %d: %v", targetID, err)
 			}
 		} else {
 			log.Printf("[Memory] Tier 3 update rejected: ID %d not in whitelisted neighbors; falling back to ADD", targetID)
-			if _, err := store.InsertFact(ctx, category, item.FactText, item.Importance, emb); err != nil {
+			if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 				log.Printf("[Memory] Error inserting fallback fact: %v", err)
 			}
 		}
 	case "NOOP":
 		// Do nothing
 	default: // "ADD" or fallback
-		if _, err := store.InsertFact(ctx, category, item.FactText, item.Importance, emb); err != nil {
+		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting fact: %v", err)
 		}
 	}
@@ -540,7 +484,7 @@ func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
 	return &payload, nil
 }
 
-// FindConsolidationCliques groups facts by category and finds complete-linkage cliques of size [minSize, maxSize]
+// FindConsolidationCliques finds complete-linkage cliques of size [minSize, maxSize]
 // where every pair of facts (u, v) in the clique satisfies minSim <= CosineSimilarity(u.Embedding, v.Embedding) <= maxSim.
 func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int) [][]ScoredFactWithEmbedding {
 	if minSim <= 0 {
@@ -559,64 +503,50 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		}
 	}
 
-	catGroups := make(map[string][]ScoredFactWithEmbedding)
+	var group []ScoredFactWithEmbedding
 	for _, f := range facts {
 		if len(f.Embedding) == 0 {
 			continue
 		}
-		cat := strings.TrimSpace(f.Fact.Category)
-		if cat == "" {
-			cat = "general"
-		}
-		catGroups[cat] = append(catGroups[cat], f)
+		group = append(group, f)
 	}
 
-	cats := make([]string, 0, len(catGroups))
-	for c := range catGroups {
-		cats = append(cats, c)
-	}
-	sort.Strings(cats)
+	sort.Slice(group, func(i, j int) bool {
+		return group[i].Fact.ID < group[j].Fact.ID
+	})
 
 	var cliques [][]ScoredFactWithEmbedding
-
-	for _, cat := range cats {
-		group := catGroups[cat]
-		sort.Slice(group, func(i, j int) bool {
-			return group[i].Fact.ID < group[j].Fact.ID
-		})
-
-		used := make(map[int64]bool, len(group))
-		for i := 0; i < len(group); i++ {
-			if used[group[i].Fact.ID] {
+	used := make(map[int64]bool, len(group))
+	for i := 0; i < len(group); i++ {
+		if used[group[i].Fact.ID] {
+			continue
+		}
+		clique := []ScoredFactWithEmbedding{group[i]}
+		for j := i + 1; j < len(group); j++ {
+			if used[group[j].Fact.ID] {
 				continue
 			}
-			clique := []ScoredFactWithEmbedding{group[i]}
-			for j := i + 1; j < len(group); j++ {
-				if used[group[j].Fact.ID] {
-					continue
-				}
-				if len(clique) >= maxSize {
+			if len(clique) >= maxSize {
+				break
+			}
+			cand := group[j]
+			matchesAll := true
+			for _, member := range clique {
+				sim := CosineSimilarity(member.Embedding, cand.Embedding)
+				if sim < minSim || sim > maxSim {
+					matchesAll = false
 					break
 				}
-				cand := group[j]
-				matchesAll := true
-				for _, member := range clique {
-					sim := CosineSimilarity(member.Embedding, cand.Embedding)
-					if sim < minSim || sim > maxSim {
-						matchesAll = false
-						break
-					}
-				}
-				if matchesAll {
-					clique = append(clique, cand)
-				}
 			}
-			if len(clique) >= minSize {
-				for _, member := range clique {
-					used[member.Fact.ID] = true
-				}
-				cliques = append(cliques, clique)
+			if matchesAll {
+				clique = append(clique, cand)
 			}
+		}
+		if len(clique) >= minSize {
+			for _, member := range clique {
+				used[member.Fact.ID] = true
+			}
+			cliques = append(cliques, clique)
 		}
 	}
 
@@ -631,9 +561,7 @@ Output strictly a JSON object matching this schema:
 {
   "facts": [
     {
-      "category": "category_name",
-      "fact_text": "Consolidated canonical fact text.",
-      "importance_score": 0.8
+      "fact_text": "Consolidated canonical fact text."
     }
   ]
 }
@@ -641,12 +569,12 @@ Rules:
 1. Produce at most 2 consolidated facts.
 2. Output nothing else outside the JSON object.`
 
-func buildConsolidationPrompt(category string, clique []ScoredFactWithEmbedding) string {
+func buildConsolidationPrompt(clique []ScoredFactWithEmbedding) string {
 	var b strings.Builder
 	b.WriteString(FactConsolidationPrompt)
-	b.WriteString(fmt.Sprintf("\n\nCATEGORY: %s\nCLUSTER FACTS TO CONSOLIDATE:\n", category))
+	b.WriteString("\n\nCLUSTER FACTS TO CONSOLIDATE:\n")
 	for _, item := range clique {
-		b.WriteString(fmt.Sprintf("- (ID: %d, Importance: %.2f) %s\n", item.Fact.ID, item.Fact.Importance, item.Fact.FactText))
+		b.WriteString(fmt.Sprintf("- (ID: %d) %s\n", item.Fact.ID, item.Fact.FactText))
 	}
 	return b.String()
 }
@@ -688,21 +616,10 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 		default:
 		}
 
-		maxImportance := 0.0
-		category := clique[0].Fact.Category
-		for _, f := range clique {
-			if f.Fact.Importance > maxImportance {
-				maxImportance = f.Fact.Importance
-			}
-		}
-		if maxImportance <= 0 {
-			maxImportance = 0.70
-		}
-
-		prompt := buildConsolidationPrompt(category, clique)
+		prompt := buildConsolidationPrompt(clique)
 		resp, err := llmFunc(ctx, prompt)
 		if err != nil {
-			log.Printf("[Memory] Warning: Fact consolidation LLM synthesis failed for cluster in category %q: %v", category, err)
+			log.Printf("[Memory] Warning: Fact consolidation LLM synthesis failed for cluster: %v", err)
 			continue
 		}
 
@@ -723,28 +640,17 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 			if text == "" {
 				continue
 			}
-			cat := strings.TrimSpace(c.Category)
-			if cat == "" {
-				cat = category
-			}
-			imp := c.Importance
-			if imp <= 0 || imp < maxImportance {
-				imp = maxImportance
-			}
-			if imp > 1.0 {
-				imp = 1.0
-			}
 
 			emb, err := client.GenerateEmbedding(ctx, text, false, 1)
 			if err != nil {
 				log.Printf("[Memory] Warning: Failed to generate embedding for consolidated fact %q: %v", text, err)
 				continue
 			}
-			if len(emb) == 0 {
+			if len(emb) != ExpectedEmbeddingDim {
 				continue
 			}
 
-			_, err = store.InsertFact(ctx, cat, text, imp, emb)
+			_, err = store.InsertFact(ctx, text, emb)
 			if err != nil {
 				log.Printf("[Memory] Warning: Failed to insert consolidated fact: %v", err)
 				continue
