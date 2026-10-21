@@ -91,6 +91,12 @@ EOH
         }
       }
 
+      service {
+        name     = "coven"
+        port     = "http"
+        provider = "nomad"
+      }
+
       resources {
         cpu        = 100
         memory     = 64

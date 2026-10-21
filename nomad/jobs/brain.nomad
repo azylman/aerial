@@ -181,6 +181,12 @@ EOH
         }
       }
 
+      service {
+        name     = "eri"
+        port     = "http"
+        provider = "nomad"
+      }
+
       resources {
         cpu        = 2000
         memory     = 4096

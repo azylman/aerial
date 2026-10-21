@@ -11,3 +11,4 @@ coverage.out
 PR_DESCRIPTION.md
 .pr_description.md
 *.pr_description.*
+.cache/

@@ -562,6 +562,40 @@ func (d *SyncDaemon) drainPendingNomadChanges() []NomadChangeEvent {
 	return out
 }
 
+// drainPendingNomadDeletes extracts and returns only delete actions from pendingNomadChanges,
+// leaving any non-delete actions (add, modify, apply) intact in the queue.
+func (d *SyncDaemon) drainPendingNomadDeletes() []NomadChangeEvent {
+	d.pendingNomadMu.Lock()
+	defer d.pendingNomadMu.Unlock()
+
+	var deleteEvents []NomadChangeEvent
+	var remainingEvents []NomadChangeEvent
+
+	for _, evt := range d.pendingNomadChanges {
+		var deletes []NomadFileChange
+		var keeps []NomadFileChange
+		for _, ch := range evt.Changes {
+			if ch.Action == "delete" {
+				deletes = append(deletes, ch)
+			} else {
+				keeps = append(keeps, ch)
+			}
+		}
+		if len(deletes) > 0 {
+			evtCopy := evt
+			evtCopy.Changes = deletes
+			deleteEvents = append(deleteEvents, evtCopy)
+		}
+		if len(keeps) > 0 {
+			evtCopy := evt
+			evtCopy.Changes = keeps
+			remainingEvents = append(remainingEvents, evtCopy)
+		}
+	}
+	d.pendingNomadChanges = remainingEvents
+	return deleteEvents
+}
+
 // getComposeArgs constructs the compose CLI flags with base docker-compose.yml and any present overrides.
 func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []string {
 	baseFile := filepath.Join(composeDir, "docker-compose.yml")
@@ -1600,7 +1634,7 @@ func readAndValidateYAML(filePath, label string, out any) ([]byte, error) {
 	return raw, nil
 }
 
-// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML).
+// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML) and nomad/jobs/eri (CONFIG_YAML).
 func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	configPath := filepath.Join(configDir, "config.yaml")
 	var parsed struct {
@@ -1633,12 +1667,15 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 	isChangedInGit := !diffGated || fileInChangedList("config.yaml", syncCtx[0].ChangedFiles)
 
-	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/brain:CONFIG_YAML", "nomad/jobs/brain", "brain", configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
-	if err != nil {
-		return err
-	}
-	if pushed {
-		log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/brain")
+	for _, job := range []string{"brain", "eri"} {
+		nomadVar := "nomad/jobs/" + job
+		pushed, err := d.pushNomadConfigVar(ctx, nomadVar+":CONFIG_YAML", nomadVar, job, configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
+		if err != nil {
+			return err
+		}
+		if pushed {
+			log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to %s", nomadVar)
+		}
 	}
 	return nil
 }
@@ -2390,21 +2427,55 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			var immediateChanges []NomadFileChange
+
+			type classifiedChange struct {
+				change   NomadFileChange
+				deferred bool
+			}
+			classified := make([]classifiedChange, 0, len(nomadChanges))
+			hasDeferredApply := false
+
 			for _, ch := range nomadChanges {
-				if ch.Action != "delete" {
-					fullPath := filepath.Join(repoPath, ch.Path)
-					if content, readErr := os.ReadFile(fullPath); readErr == nil {
-						jobSpec := string(content)
-						if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
-							resp.ContainersBuilding = true
-							log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
-							continue
-						}
+				if ch.Action == "delete" {
+					classified = append(classified, classifiedChange{change: ch})
+					continue
+				}
+
+				fullPath := filepath.Join(repoPath, ch.Path)
+				deferred := false
+				if content, readErr := os.ReadFile(fullPath); readErr == nil {
+					jobSpec := string(content)
+					if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
+						deferred = true
 					}
 				}
-				immediateChanges = append(immediateChanges, ch)
+				if deferred {
+					hasDeferredApply = true
+					resp.ContainersBuilding = true
+					log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
+				}
+				classified = append(classified, classifiedChange{change: ch, deferred: deferred})
 			}
+
+			var immediateChanges []NomadFileChange
+			var deferredDeletes []NomadFileChange
+			for _, item := range classified {
+				if item.change.Action == "delete" {
+					if hasDeferredApply || containersBuilding {
+						deferredDeletes = append(deferredDeletes, item.change)
+					} else {
+						immediateChanges = append(immediateChanges, item.change)
+					}
+				} else if !item.deferred {
+					immediateChanges = append(immediateChanges, item.change)
+				}
+			}
+
+			if len(deferredDeletes) > 0 {
+				resp.ContainersBuilding = true
+				d.recordPendingNomadChanges(repoPath, deferredDeletes, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			}
+
 			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, false, true, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			resp.AppliedJobs = applied
 			if len(deferred) > 0 {
@@ -2529,6 +2600,11 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	defer d.nomadMu.Unlock()
 
 	SortMatchedJobsHangarLast(matches)
+
+	pendingTeardowns := d.drainPendingNomadDeletes()
+	if len(pendingTeardowns) > 0 {
+		d.ExecuteNomadTeardowns(ctx, pendingTeardowns)
+	}
 
 	digest := req.Digest
 	if digest == "" {

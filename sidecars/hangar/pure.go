@@ -623,7 +623,7 @@ type NomadFileChange struct {
 	JobName string
 }
 
-// IsMigrationFile returns true if p is a file residing under brain/pkg/db/migrations/.
+// IsMigrationFile returns true if p is a file residing under brain/pkg/db/migrations/, eri/pkg/db/migrations/, or services/eri/pkg/db/migrations/.
 func IsMigrationFile(p string) bool {
 	trimmed := strings.TrimSpace(p)
 	if trimmed == "" {
@@ -633,7 +633,9 @@ func IsMigrationFile(p string) bool {
 	clean = path.Clean(clean)
 	clean = strings.TrimPrefix(clean, "/")
 	clean = strings.TrimPrefix(clean, "./")
-	return strings.HasPrefix(clean, "brain/pkg/db/migrations/") && clean != "brain/pkg/db/migrations/"
+	return (strings.HasPrefix(clean, "services/eri/pkg/db/migrations/") && clean != "services/eri/pkg/db/migrations/") ||
+		(strings.HasPrefix(clean, "eri/pkg/db/migrations/") && clean != "eri/pkg/db/migrations/") ||
+		(strings.HasPrefix(clean, "brain/pkg/db/migrations/") && clean != "brain/pkg/db/migrations/")
 }
 
 // HasMigrationChanges returns true if any changed file in changedFiles resides under brain/pkg/db/migrations/.
@@ -850,6 +852,10 @@ type PendingImageRollout struct {
 
 // CoreBuildPaths contains path prefixes in azylman/aerial that trigger container builds in CI.
 var CoreBuildPaths = []string{
+	"services/",
+	"mcp/",
+	"coven/",
+	"eri/",
 	"brain/",
 	"scheduler-mcp/",
 	"memory-mcp/",
