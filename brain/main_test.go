@@ -388,6 +388,17 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		{"stats nil store", handleTranscriptStats(nil), http.MethodGet, "/api/transcripts/stats", http.StatusInternalServerError},
 		{"stats store error", handleTranscriptStats(errStore), http.MethodGet, "/api/transcripts/stats", http.StatusInternalServerError},
 		{"search query param alias", handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?query=fallback-query&limit=abc", http.StatusOK},
+		{"steps method not allowed", handleTranscriptSteps(fake), http.MethodPost, "/api/transcripts/steps?session=sess-1&step=0", http.StatusMethodNotAllowed},
+		{"steps nil store", handleTranscriptSteps(nil), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=0", http.StatusInternalServerError},
+		{"steps missing session", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?step=0", http.StatusBadRequest},
+		{"steps empty session", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=%20%20&step=0", http.StatusBadRequest},
+		{"steps missing step", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1", http.StatusBadRequest},
+		{"steps invalid step non-integer", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=xyz", http.StatusBadRequest},
+		{"steps invalid step negative", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=-1", http.StatusBadRequest},
+		{"steps invalid context non-integer", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=0&context=abc", http.StatusBadRequest},
+		{"steps store error", handleTranscriptSteps(errStore), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=0", http.StatusInternalServerError},
+		{"steps success default context", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-mux-1&step=0", http.StatusOK},
+		{"steps success custom context", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-mux-1&step=0&context=5", http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if w := runHTTP(tc.handler, tc.method, tc.target, nil); w.Code != tc.wantStatus {
@@ -423,7 +434,7 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 
 	t.Run("mux endpoints", func(t *testing.T) {
 		mux := SetupBrainMuxWithEmbedder(fake, nil, nil)
-		for _, path := range []string{"/api/transcripts/search?q=test", "/api/transcripts/stats"} {
+		for _, path := range []string{"/api/transcripts/search?q=test", "/api/transcripts/stats", "/api/transcripts/steps?session=sess-mux-1&step=0"} {
 			if w := runHTTP(mux.ServeHTTP, http.MethodGet, path, nil); w.Code != http.StatusOK {
 				t.Errorf("expected 200 for %s, got %d", path, w.Code)
 			}
@@ -445,6 +456,10 @@ func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, query, s
 
 func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
 	return nil, errors.New("simulated search session summaries error")
+}
+
+func (e *errTranscriptStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
+	return nil, errors.New("simulated get transcript step range error")
 }
 
 func TestSchedulesEndpoints(t *testing.T) {
@@ -704,6 +719,8 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/prompt", "/prompt"},
 		{"/transcripts", "/transcripts"},
 		{"/transcripts/abc-123", "/transcripts"},
+		{"/api/transcripts/steps", "/transcripts"},
+		{"/api/transcripts/search", "/transcripts"},
 		{"/tasks", "/tasks"},
 		{"/tasks/456", "/tasks"},
 		{"/facts", "/facts"},

@@ -42,6 +42,14 @@ type SearchResult struct {
 	Total    int                 `json:"total"`
 }
 
+// StepWindowResult contains the centered step and surrounding context window.
+type StepWindowResult struct {
+	SessionID  string              `json:"session_id"`
+	CenterStep int                 `json:"step"`
+	Context    int                 `json:"context"`
+	Steps      []db.TranscriptStep `json:"steps"`
+}
+
 const (
 	// DefaultBatchLimit is the default maximum number of sessions processed per sync sweep.
 	DefaultBatchLimit = 1000

@@ -136,6 +136,7 @@ type TranscriptStore interface {
 	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
 	SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
 	SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error)
+	GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
 }
 
 // PRRecord encapsulates a tracked Pull Request and deployment lifecycle state.

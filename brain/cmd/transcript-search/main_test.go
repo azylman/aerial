@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,56 @@ func TestParseCLIArgs(t *testing.T) {
 			cfg.Tool != "run_command" || cfg.Session != "sess-123" || cfg.Limit != 25 ||
 			!cfg.JSON || !cfg.DirectDB {
 			t.Errorf("unexpected cfg: %+v", cfg)
+		}
+	})
+
+	t.Run("SubcommandGetWithFlags", func(t *testing.T) {
+		cfg, err := parseCLIArgs([]string{
+			"get",
+			"--session", "sess-123",
+			"--step", "4",
+			"--context", "5",
+			"--json",
+			"--direct-db",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Command != "get" || cfg.Session != "sess-123" || cfg.Step != 4 ||
+			cfg.Context != 5 || !cfg.JSON || !cfg.DirectDB {
+			t.Errorf("unexpected cfg: %+v", cfg)
+		}
+	})
+
+	t.Run("SubcommandGetShorthandAndPositional", func(t *testing.T) {
+		cfg, err := parseCLIArgs([]string{
+			"get",
+			"-s", "sess-abc",
+			"-i", "2",
+			"-C", "1",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Command != "get" || cfg.Session != "sess-abc" || cfg.Step != 2 || cfg.Context != 1 {
+			t.Errorf("unexpected cfg: %+v", cfg)
+		}
+
+		cfgPos, errPos := parseCLIArgs([]string{"get", "sess-xyz", "-i", "3"})
+		if errPos != nil || cfgPos.Session != "sess-xyz" || cfgPos.Step != 3 {
+			t.Errorf("unexpected positional get cfg: %+v, err: %v", cfgPos, errPos)
+		}
+	})
+
+	t.Run("SubcommandGetValidationErrors", func(t *testing.T) {
+		if _, err := parseCLIArgs([]string{"get", "--step", "2"}); err == nil {
+			t.Error("expected error for get with missing session")
+		}
+		if _, err := parseCLIArgs([]string{"get", "--session", "sess-1"}); err == nil {
+			t.Error("expected error for get with missing step")
+		}
+		if _, err := parseCLIArgs([]string{"get", "--session", "sess-1", "--step", "-5"}); err == nil {
+			t.Error("expected error for get with negative step")
 		}
 	})
 
@@ -175,6 +226,211 @@ func TestFormatSearchResults(t *testing.T) {
 		}
 		if !strings.Contains(out, "... [truncated]") {
 			t.Errorf("expected truncation for long content: %s", out)
+		}
+	})
+}
+
+func TestFormatStepWindow(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name        string
+		res         transcript.StepWindowResult
+		wantSubstrs []string
+	}{
+		{
+			name: "empty steps",
+			res: transcript.StepWindowResult{
+				SessionID:  "sess-empty",
+				CenterStep: 3,
+				Context:    2,
+				Steps:      nil,
+			},
+			wantSubstrs: []string{
+				"Transcript Step Window for Session [sess-emp...](conversation://sess-empty)",
+				"*(No matching steps found in range)*",
+			},
+		},
+		{
+			name: "single line and multiline steps with center marker",
+			res: transcript.StepWindowResult{
+				SessionID:  "12345678-abcd-ef01-2345-6789abcdef01",
+				CenterStep: 5,
+				Context:    2,
+				Steps: []db.TranscriptStep{
+					{
+						SessionID: "12345678-abcd-ef01-2345-6789abcdef01",
+						StepIndex: 4,
+						ToolName:  "run_command",
+						Content:   "single line command",
+						CreatedAt: now,
+					},
+					{
+						SessionID: "12345678-abcd-ef01-2345-6789abcdef01",
+						StepIndex: 5,
+						StepType:  "tool_call",
+						Content:   "line 1\nline 2",
+						CreatedAt: now,
+					},
+				},
+			},
+			wantSubstrs: []string{
+				"Transcript Step Window for Session [12345678...](conversation://12345678-abcd-ef01-2345-6789abcdef01)",
+				"  **[run_command]** Step #4",
+				"*Content:* single line command",
+				"▶ **[tool_call]** Step #5",
+				"line 1\n  line 2",
+			},
+		},
+		{
+			name: "short session id and default step badge",
+			res: transcript.StepWindowResult{
+				SessionID:  "short",
+				CenterStep: 1,
+				Context:    1,
+				Steps: []db.TranscriptStep{
+					{
+						SessionID: "short",
+						StepIndex: 1,
+						CreatedAt: now,
+					},
+				},
+			},
+			wantSubstrs: []string{
+				"[short](conversation://short)",
+				"▶ **[STEP]** Step #1",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := formatStepWindow(tc.res)
+			for _, want := range tc.wantSubstrs {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestRunCLI_HTTPGet(t *testing.T) {
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/transcripts/steps" {
+			http.NotFound(w, r)
+			return
+		}
+		sess := r.URL.Query().Get("session")
+		if sess == "error" {
+			http.Error(w, "internal database failure", http.StatusInternalServerError)
+			return
+		}
+
+		step, _ := strconv.Atoi(r.URL.Query().Get("step"))
+		ctxWindow, _ := strconv.Atoi(r.URL.Query().Get("context"))
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(transcript.StepWindowResult{
+			SessionID:  sess,
+			CenterStep: step,
+			Context:    ctxWindow,
+			Steps: []db.TranscriptStep{
+				{
+					SessionID: sess,
+					StepIndex: step,
+					ToolName:  "run_command",
+					Content:   "go test ./...",
+					CreatedAt: now,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	t.Run("GetSuccessText", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "2", "--url", server.URL}, &buf)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "go test ./...") || !strings.Contains(out, "Step #2") {
+			t.Errorf("unexpected output: %s", out)
+		}
+	})
+
+	t.Run("GetSuccessJSON", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "2", "--json", "--url", server.URL}, &buf)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var parsed transcript.StepWindowResult
+		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+			t.Fatalf("failed unmarshaling get json: %v", err)
+		}
+		if parsed.SessionID != "sess-123" || parsed.CenterStep != 2 || len(parsed.Steps) != 1 {
+			t.Errorf("unexpected parsed result: %+v", parsed)
+		}
+	})
+
+	t.Run("DirectDBFallbackErrorWhenNoPostgres", func(t *testing.T) {
+		t.Setenv("POSTGRES_URL", "unsupported://localhost/invalid")
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"get", "--session", "error", "--step", "0", "--url", server.URL}, &buf)
+		if err == nil {
+			t.Fatal("expected direct DB fallback error")
+		}
+	})
+
+	t.Run("DirectDBSuccessWithMock", func(t *testing.T) {
+		fake := db.NewFakeStore()
+		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{SessionID: "sess-direct"})
+		_ = fake.BatchInsertTranscriptSteps(context.Background(), []db.TranscriptStep{
+			{SessionID: "sess-direct", StepIndex: 1, Content: "direct step content", CreatedAt: now},
+		})
+
+		oldFn := newDirectStoreFn
+		defer func() { newDirectStoreFn = oldFn }()
+		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+			return fake, func() {}, nil
+		}
+
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"get", "--session", "sess-direct", "--step", "1", "--direct-db"}, &buf)
+		if err != nil {
+			t.Fatalf("unexpected error on direct DB get: %v", err)
+		}
+		if !strings.Contains(buf.String(), "direct step content") {
+			t.Errorf("expected direct step content, got: %s", buf.String())
+		}
+	})
+
+	t.Run("DirectDBErrorWithMock", func(t *testing.T) {
+		oldFn := newDirectStoreFn
+		defer func() { newDirectStoreFn = oldFn }()
+		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+			return nil, nil, errors.New("simulated store open failure")
+		}
+
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"get", "--session", "sess-direct", "--step", "1", "--direct-db"}, &buf)
+		if err == nil || !strings.Contains(err.Error(), "direct DB get failed") {
+			t.Fatalf("expected direct DB error, got: %v", err)
+		}
+	})
+
+	t.Run("GetWriterErrors", func(t *testing.T) {
+		badWriter := &failingWriter{}
+		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "0", "--url", server.URL}, badWriter)
+		if err == nil {
+			t.Errorf("expected error on failing writer for get text")
+		}
+
+		err = runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "0", "--json", "--url", server.URL}, badWriter)
+		if err == nil {
+			t.Errorf("expected error on failing writer for get json")
 		}
 	})
 }
@@ -395,6 +651,38 @@ func TestHTTPErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("ExecuteGetHTTP_InvalidURL", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: "://bad-url", Session: "s", Step: 0}
+		_, err := executeGetHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on invalid URL")
+		}
+	})
+
+	t.Run("ExecuteGetHTTP_BadJSON", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: badJSONServer.URL, Session: "s", Step: 0}
+		_, err := executeGetHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on bad JSON")
+		}
+	})
+
+	t.Run("ExecuteGetHTTP_Status500", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: errServer.URL, Session: "s", Step: 0}
+		_, err := executeGetHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on 500 status")
+		}
+	})
+
+	t.Run("ExecuteGetHTTP_NetworkError", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: "http://127.0.0.1:59996", Session: "s", Step: 0}
+		_, err := executeGetHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected network error")
+		}
+	})
+
 	t.Run("ExecuteSearchHTTP_NetworkError", func(t *testing.T) {
 		cfg := CLIConfig{BaseURL: "http://127.0.0.1:59996", Query: "test"}
 		_, err := executeSearchHTTP(context.Background(), cfg)
@@ -549,6 +837,41 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 			t.Errorf("unexpected query in res: %+v", res)
 		}
 	})
+
+	t.Run("ExecuteGetDirectDB_DefaultEnv", func(t *testing.T) {
+		oldFn := newDirectStoreFn
+		defer func() { newDirectStoreFn = oldFn }()
+
+		calledWithURL := ""
+		closedCalled := false
+		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+			calledWithURL = pgURL
+			fake := db.NewFakeStore()
+			return fake, func() { closedCalled = true }, nil
+		}
+
+		t.Setenv("POSTGRES_URL", "")
+		cfg := CLIConfig{
+			Command:  "get",
+			Session:  "sess-direct-get",
+			Step:     1,
+			Context:  2,
+			DirectDB: true,
+		}
+		res, err := executeGetDirectDB(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !closedCalled {
+			t.Errorf("expected closeFn to be called")
+		}
+		if res.SessionID != "sess-direct-get" {
+			t.Errorf("expected session sess-direct-get, got %s", res.SessionID)
+		}
+		if !strings.Contains(calledWithURL, "aerial-postgres:5432") {
+			t.Errorf("expected default postgres url, got %s", calledWithURL)
+		}
+	})
 }
 
 type failingWriter struct{}
@@ -609,6 +932,14 @@ func TestNewRequestWithContextErrors(t *testing.T) {
 			t.Fatalf("expected simulated error, got %v", err)
 		}
 	})
+
+	t.Run("ExecuteGetHTTP_NewRequestError", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: "http://localhost:8080", Session: "s", Step: 0}
+		_, err := executeGetHTTP(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
+			t.Fatalf("expected simulated error, got %v", err)
+		}
+	})
 }
 
 func TestJSONMarshalIndentErrors(t *testing.T) {
@@ -616,6 +947,8 @@ func TestJSONMarshalIndentErrors(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "stats") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_sessions": 10, "status": "ok"})
+		} else if strings.Contains(r.URL.Path, "steps") {
+			_ = json.NewEncoder(w).Encode(transcript.StepWindowResult{SessionID: "s", CenterStep: 0})
 		} else {
 			_ = json.NewEncoder(w).Encode(transcript.SearchResult{Query: "test", Mode: "auto"})
 		}
@@ -642,6 +975,14 @@ func TestJSONMarshalIndentErrors(t *testing.T) {
 		err := runCLI(context.Background(), []string{"search", "test", "--json", "--url", server.URL}, &buf)
 		if err == nil || !strings.Contains(err.Error(), "simulated json marshal indent error") {
 			t.Fatalf("expected marshal error in search json, got %v", err)
+		}
+	})
+
+	t.Run("RunCLI_GetJSONMarshalError", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "0", "--json", "--url", server.URL}, &buf)
+		if err == nil || !strings.Contains(err.Error(), "simulated json marshal indent error") {
+			t.Fatalf("expected marshal error in get json, got %v", err)
 		}
 	})
 }

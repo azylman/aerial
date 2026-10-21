@@ -27,6 +27,7 @@ Aerial installs the native Go `transcript-search` binary at `/usr/local/bin/tran
 ### Basic Syntax
 ```bash
 transcript-search search "<query>" [options]
+transcript-search get --session <id> --step <N> [options]
 transcript-search stats [options]
 ```
 
@@ -43,9 +44,32 @@ transcript-search stats [options]
 - `--url <url>`: Override the Aerial brain daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
 - `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
 
+### Get Subcommand Flags (Step-Window Zoom)
+- `-s, --session <id>`: Session / conversation ID to inspect (required).
+- `-i, --step <int>`: Target step index to zoom into (required, non-negative).
+- `-C, --context <int>`: Number of surrounding context steps before and after the target step (default: `2`, range: 0–20).
+- `--json`: Output raw JSON containing `{session_id, step, context, steps: [...]}`.
+- `--url <url>`: Override the Aerial brain daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
+- `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
+
 ---
 
-## 3. Recommended Search Workflows
+## 3. Recommended Search & Zoom Workflows
+
+### Two-Phase Workflow: Search -> Step-Window Zoom
+Never scrape or grep raw `transcript.jsonl` files on disk when investigating historical sessions. Instead, follow the two-phase indexed search and zoom protocol:
+
+1. **Phase 1: Discover candidate steps with `transcript-search search`**:
+   ```bash
+   transcript-search search "atlas migration validate" --mode steps -n 5
+   ```
+   Identify the target `session_id` and `step_index` from the search results snippet.
+
+2. **Phase 2: Zoom into untruncated step window with `transcript-search get`**:
+   ```bash
+   transcript-search get --session "d3a1a377-e199-426d-8588-fc3083131264" --step 14 -C 2
+   ```
+   This retrieves the centered target step (marked with `▶`) along with 2 preceding and 2 succeeding execution steps, displaying full untruncated content, tool outputs, and exact timestamps.
 
 ### Scenario A: Architectural / High-Level Historical Solutions
 When looking for how a feature was designed or how a past incident was resolved:
@@ -79,6 +103,6 @@ transcript-search search "atlas migration validate" --json | jq '.steps[] | {ste
 
 ## 4. Invariants & Best Practices
 
-- **Zero Arbitrary Transcript Scrapes**: Avoid running heavy `find` or `grep` loops against `/data/runtimes/discord/.gemini/antigravity-cli/brain/*/transcript.jsonl`. Always prefer `transcript-search` for fast, indexed queries.
+- **Zero Arbitrary Transcript Scrapes**: Avoid running heavy `find` or `grep` loops against `/data/runtimes/discord/.gemini/antigravity-cli/brain/*/transcript.jsonl`. Always prefer `transcript-search` for fast, indexed queries and step-window zoom (`transcript-search get`).
 - **Link Navigation**: Results include `[conv_id](conversation://<conv_id>)` links. Use these IDs directly if you need to read the full transcript file on disk (`<appDataDir>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`).
 - **Daemon-First Resilience**: `transcript-search` communicates with the local `aerial-brain` daemon over HTTP (`/api/transcripts/search`). If the daemon is temporarily unavailable or restarting, it automatically falls back to direct PostgreSQL queries.
