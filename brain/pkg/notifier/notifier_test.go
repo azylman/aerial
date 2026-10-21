@@ -73,24 +73,6 @@ func TestStaticFallback(t *testing.T) {
 	}
 }
 
-func TestGenerateSessionResetAndPoisonPillFallback(t *testing.T) {
-	// Nil runner should immediately return fallback
-	resReset := GenerateSessionResetMessage("agy", "")
-	if !strings.Contains(resReset, "became corrupted and has been reset") {
-		t.Errorf("Expected reset fallback when runner is nil, got: %q", resReset)
-	}
-
-	resPoison := GeneratePoisonPillMessage("agy", "", "SELECT * FROM huge_table")
-	if !strings.Contains(resPoison, "repeated process crashes") {
-		t.Errorf("Expected poison fallback when runner is nil, got: %q", resPoison)
-	}
-
-	resPoisonEmpty := GeneratePoisonPillMessage("agy", "", "")
-	if !strings.Contains(resPoisonEmpty, "repeated process crashes") {
-		t.Errorf("Expected poison fallback when snippet is empty, got: %q", resPoisonEmpty)
-	}
-}
-
 func TestGenerateDynamicNotificationWithMock(t *testing.T) {
 	// Using echo as the agy binary simulator (fails JSON parse and returns fallback)
 	res := GenerateDynamicNotification("echo", "test-api-key", "Test description")
@@ -283,16 +265,5 @@ func TestGenerateDynamicNotification_FailureCases(t *testing.T) {
 	resEmpty := GenerateDynamicNotification("agy", "test-key", "some context", mockEmptyRunner)
 	if !strings.Contains(resEmpty, "unexpected error occurred") && !strings.Contains(resEmpty, "Apologies") {
 		t.Errorf("Expected static fallback on empty response, got %q", resEmpty)
-	}
-
-	// 3. Fallback descriptions triggers
-	resPoison := GeneratePoisonPillMessage("agy", "test-key", "crash prompt", mockFailRunner)
-	if !strings.Contains(resPoison, "repeated process crashes and was skipped") {
-		t.Errorf("Expected poison pill fallback, got %q", resPoison)
-	}
-
-	resSession := GenerateSessionResetMessage("agy", "test-key", mockFailRunner)
-	if !strings.Contains(resSession, "context became corrupted and has been reset") {
-		t.Errorf("Expected session reset fallback, got %q", resSession)
 	}
 }

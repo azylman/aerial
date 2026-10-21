@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -283,7 +284,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 		}
 
 		// Check if error is 404 / Unknown Message (code 10008)
-		if isMessageNotFound(editErr) {
+		if delivery.IsMessageNotFoundError(editErr) {
 			// Fall back to sending a new message
 			send := &discordgo.MessageSend{
 				Flags:      discordgo.MessageFlagsIsComponentsV2,
@@ -309,21 +310,4 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 		return "", fmt.Errorf("failed to send status widget message: %w", sendErr)
 	}
 	return created.ID, nil
-}
-
-func isMessageNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	var restErr *discordgo.RESTError
-	if errors.As(err, &restErr) {
-		if restErr.Response != nil && restErr.Response.StatusCode == 404 {
-			return true
-		}
-		if restErr.Message != nil && restErr.Message.Code == 10008 {
-			return true
-		}
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "10008") || strings.Contains(errStr, "unknown message") || strings.Contains(errStr, "404 not found")
 }

@@ -467,26 +467,6 @@ func TestDeliverStatusWidget_ValidationAndErrors(t *testing.T) {
 	})
 }
 
-func TestIsMessageNotFound(t *testing.T) {
-	if isMessageNotFound(nil) {
-		t.Error("expected false for nil error")
-	}
-	if !isMessageNotFound(errors.New("Error 10008: Unknown Message")) {
-		t.Error("expected true for 10008 string")
-	}
-	if !isMessageNotFound(errors.New("404 not found")) {
-		t.Error("expected true for 404 string")
-	}
-	if isMessageNotFound(errors.New("internal server error")) {
-		t.Error("expected false for 500 error")
-	}
-	if !isMessageNotFound(&discordgo.RESTError{
-		Message: &discordgo.APIErrorMessage{Code: 10008},
-	}) {
-		t.Error("expected true for RESTError code 10008")
-	}
-}
-
 func TestFormatChunkDuration(t *testing.T) {
 	tests := []struct {
 		dur  time.Duration

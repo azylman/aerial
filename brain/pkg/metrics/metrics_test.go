@@ -33,8 +33,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordWebhookDispatch("on_wake", "success", 25*time.Millisecond)
 	RecordSessionRotation("pre_flight", "channel", "turns")
 	RecordYieldTrap("resumed", "stderr_signature", "gemini-2.5-pro")
-	RecordDaemonAcquisition("warm_hit", 2*time.Millisecond)
-	RecordDaemonAcquisition("cold_start", 450*time.Millisecond)
 	RecordVoiceTTFR("sse", "success", 380*time.Millisecond)
 	RecordVoiceTTFR("json", "success", 1200*time.Millisecond)
 
@@ -111,7 +109,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_webhook_duration_seconds",
 		"aerial_brain_session_rotations_total",
 		"aerial_brain_yield_trap_total",
-		"aerial_brain_daemon_acquisition_duration_seconds",
 		"aerial_brain_voice_ttfr_duration_seconds",
 		"aerial_brain_build_info",
 	}
@@ -144,8 +141,6 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordWebhookDispatch("", "", 10*time.Millisecond)
 	RecordSessionRotation("", "", "")
 	RecordYieldTrap("", "", "")
-	RecordDaemonAcquisition("", 10*time.Millisecond)
-	RecordDaemonAcquisition("", -5*time.Millisecond)
 	RecordVoiceTTFR("", "", 10*time.Millisecond)
 	RecordVoiceTTFR("", "", -5*time.Millisecond)
 }
@@ -228,8 +223,7 @@ func TestRecordRunnerExecution_SourceLabelAndBuckets(t *testing.T) {
 	}
 }
 
-func TestRecordDaemonAcquisitionAndVoiceTTFR(t *testing.T) {
-	RecordDaemonAcquisition("warm_hit", 5*time.Millisecond)
+func TestRecordVoiceTTFR(t *testing.T) {
 	RecordVoiceTTFR("sse", "success", 250*time.Millisecond)
 
 	handler := Handler()
@@ -242,9 +236,6 @@ func TestRecordDaemonAcquisitionAndVoiceTTFR(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `aerial_brain_daemon_acquisition_duration_seconds_bucket{status="warm_hit"`) {
-		t.Errorf("expected daemon acquisition metric, got:\n%s", body)
-	}
 	if !strings.Contains(body, `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="success"`) {
 		t.Errorf("expected voice ttfr metric, got:\n%s", body)
 	}
@@ -257,9 +248,6 @@ func TestRecordToolAndSkillExecution(t *testing.T) {
 
 	RecordSkillActivation("self-improvement", "discord")
 	RecordSkillActivation("", "")
-
-	RecordSubagentInvocation("research", "TheGirlGangReviewer")
-	RecordSubagentInvocation("", "")
 
 	handler := Handler()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -294,13 +282,6 @@ func TestRecordToolAndSkillExecution(t *testing.T) {
 	}
 	if !strings.Contains(body, `aerial_brain_skill_invocations_total{skill="unknown",source="unknown"}`) {
 		t.Errorf("expected skill_invocations_total for unknown fallback, got:\n%s", body)
-	}
-
-	if !strings.Contains(body, `aerial_brain_subagent_invocations_total{role="TheGirlGangReviewer",type_name="research"}`) {
-		t.Errorf("expected subagent_invocations_total for TheGirlGangReviewer, got:\n%s", body)
-	}
-	if !strings.Contains(body, `aerial_brain_subagent_invocations_total{role="unknown",type_name="unknown"}`) {
-		t.Errorf("expected subagent_invocations_total for unknown fallback, got:\n%s", body)
 	}
 }
 
