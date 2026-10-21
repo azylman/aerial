@@ -434,11 +434,11 @@ func TestPostgresVanadisStore(t *testing.T) {
 	okGetStore := newMockStore(mockDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row { return &mockRow{b: popBuild} },
 		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			return &mockRows{items: []VanadisChunk{cGet0, mkChunk("c-2", "b-1", 1, "T2", "I2", "", "")}}, nil
+			return &mockRows{items: []VanadisChunk{cGet0, mkChunk("c-2", "b-1", 1, "T2", "I2", "low", "")}}, nil
 		},
 	})
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
-	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || len(gotC) != 2 || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
+	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || len(gotC) != 2 || gotC[0].Effort != "medium" || gotC[1].Effort != "low" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
 	}
 	for _, err := range []error{store.UpdateChunkStatus(ctx, "", "running"), store.UpdateChunkStatus(ctx, "c-1", ""), store.UpdateBuildStatus(ctx, "", "completed"), store.UpdateBuildStatus(ctx, "b-1", ""), store.UpdateBuildStatusMessageID(ctx, "", "msg-1")} {
@@ -630,7 +630,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if err := worker.Work(ctx, job); err != nil {
 		t.Fatalf("unexpected worker error: %v", err)
 	}
-	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "high" || gotPrompts[0].ChannelID != "thread-777" || gotPrompts[0].VanadisChunkID != "c-1" {
+	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "medium" || gotPrompts[0].ChannelID != "thread-777" || gotPrompts[0].VanadisChunkID != "c-1" {
 		t.Fatalf("unexpected dispatched prompts: %+v", gotPrompts)
 	}
 	brainStatus = http.StatusBadGateway
@@ -701,7 +701,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	} {
 		checkCode(http.MethodPost, "/builds", strings.NewReader(p), http.StatusBadRequest)
 	}
-	validPayload := `{"repo":"aerial","thread_id":"1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"title":"Part 1","instructions":"Do part 1","effort":"low"},{"id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"medium","acceptance_criteria":["All green"]}]}`
+	validPayload := `{"repo":"aerial","thread_id":"1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"title":"Part 1","instructions":"Do part 1","effort":"low"},{"id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"]}]}`
 	memStore.createErr = errors.New("create failed")
 	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	memStore.createErr = nil
