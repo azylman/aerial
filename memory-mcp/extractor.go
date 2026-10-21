@@ -91,22 +91,15 @@ Requirements:
 {
   "facts": [
     {
-      "action": "ADD|UPDATE|DELETE|NOOP",
-      "supersedes_id": 123,
-      "delete_id": 456,
       "category": "user_preference|system_config|routine|general",
       "fact_text": "1-2 concise sentences stating the fact clearly",
       "importance_score": 0.6
     }
   ]
 }
-2. Actions:
-- "ADD": New durable atomic fact not covered by existing facts.
-- "UPDATE": Fact updates, modifies, or replaces an existing fact. Set "supersedes_id" to the existing fact's ID and provide the updated fact_text and importance_score.
-- "DELETE": Fact explicitly invalidates or contradicts an existing fact that is no longer true. Set "delete_id" to the existing fact's ID.
-- "NOOP": Information is already accurately captured by existing facts or is ephemeral.
+2. Extract only durable, atomic facts not ephemeral details.
 3. Score importance_score on a 0.1 to 1.0 scale (0.8-1.0 for permanent user preferences/identity, 0.5-0.7 for durable system architecture/routines). Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
-4. If no new facts or updates are needed, return {"facts": []}.
+4. If no durable facts are present in the conversation, return {"facts": []}.
 5. Do NOT include markdown text formatting outside the JSON block.
 `
 
@@ -205,8 +198,12 @@ var (
 
 // EvaluateCandidateAdmission deterministically evaluates an extracted fact candidate.
 func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, adjustedImportance float64, reason string) {
-	if strings.EqualFold(strings.TrimSpace(item.Action), "NOOP") {
+	action := strings.ToUpper(strings.TrimSpace(item.Action))
+	if action == "NOOP" {
 		return false, 0, "noop_action"
+	}
+	if action == "DELETE" {
+		return false, 0, "delete_action"
 	}
 
 	trimmedText := strings.TrimSpace(item.FactText)
@@ -369,6 +366,9 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 
 func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, item ExtractedFactItem) {
 	if store == nil || client == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Action), "DELETE") {
 		return
 	}
 	admit, adjustedImportance, _ := EvaluateCandidateAdmission(item)

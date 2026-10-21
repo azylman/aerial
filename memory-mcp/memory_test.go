@@ -3944,6 +3944,10 @@ func TestReconcileExtractedFact(t *testing.T) {
 			item: ExtractedFactItem{Action: "DELETE", SupersedesID: 2},
 		},
 		{
+			name: "DeleteActionIgnored",
+			item: ExtractedFactItem{Action: "DELETE", DeleteID: 1, FactText: "Obsolete fact with sufficient length"},
+		},
+		{
 			name: "UpdateEmptyTextSkipped",
 			item: ExtractedFactItem{Action: "UPDATE", SupersedesID: 4, FactText: "  "},
 		},
@@ -4073,6 +4077,20 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 			wantImportance: 0,
 			wantReason:     "noop_action",
 		},
+		{
+			name:           "DeleteActionRejected",
+			item:           ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact about favorite drinks", Importance: 0.6},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "delete_action",
+		},
+		{
+			name:           "DeleteActionCaseInsensitiveWithWhitespace",
+			item:           ExtractedFactItem{Action: "  delete  ", FactText: "Old preference that is no longer active", Importance: 0.8},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "delete_action",
+		},
 	}
 
 	for _, tc := range tests {
@@ -4172,6 +4190,10 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 		{
 			name: "UnadmittedNoopAction",
 			item: ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"},
+		},
+		{
+			name: "UnadmittedDeleteAction",
+			item: ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact text should not be inserted or reinforced"},
 		},
 		{
 			name:      "EmbeddingErrorLogged",
