@@ -1600,7 +1600,7 @@ func readAndValidateYAML(filePath, label string, out any) ([]byte, error) {
 	return raw, nil
 }
 
-// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML).
+// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML) and nomad/jobs/eri (CONFIG_YAML).
 func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	configPath := filepath.Join(configDir, "config.yaml")
 	var parsed struct {
@@ -1633,12 +1633,15 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 	isChangedInGit := !diffGated || fileInChangedList("config.yaml", syncCtx[0].ChangedFiles)
 
-	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/brain:CONFIG_YAML", "nomad/jobs/brain", "brain", configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
-	if err != nil {
-		return err
-	}
-	if pushed {
-		log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/brain")
+	for _, job := range []string{"brain", "eri"} {
+		nomadVar := "nomad/jobs/" + job
+		pushed, err := d.pushNomadConfigVar(ctx, nomadVar+":CONFIG_YAML", nomadVar, job, configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
+		if err != nil {
+			return err
+		}
+		if pushed {
+			log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to %s", nomadVar)
+		}
 	}
 	return nil
 }
@@ -2390,21 +2393,50 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			var immediateChanges []NomadFileChange
+
+			hasDeferredApply := false
 			for _, ch := range nomadChanges {
 				if ch.Action != "delete" {
 					fullPath := filepath.Join(repoPath, ch.Path)
 					if content, readErr := os.ReadFile(fullPath); readErr == nil {
 						jobSpec := string(content)
 						if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
-							resp.ContainersBuilding = true
-							log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
-							continue
+							hasDeferredApply = true
+							break
 						}
+					}
+				}
+			}
+
+			var immediateChanges []NomadFileChange
+			var deferredDeletes []NomadFileChange
+			for _, ch := range nomadChanges {
+				if ch.Action == "delete" {
+					if hasDeferredApply || containersBuilding {
+						deferredDeletes = append(deferredDeletes, ch)
+					} else {
+						immediateChanges = append(immediateChanges, ch)
+					}
+					continue
+				}
+
+				fullPath := filepath.Join(repoPath, ch.Path)
+				if content, readErr := os.ReadFile(fullPath); readErr == nil {
+					jobSpec := string(content)
+					if (containersBuilding && JobUsesRepoImage(jobSpec, "azylman/aerial")) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
+						resp.ContainersBuilding = true
+						log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
+						continue
 					}
 				}
 				immediateChanges = append(immediateChanges, ch)
 			}
+
+			if len(deferredDeletes) > 0 {
+				resp.ContainersBuilding = true
+				d.recordPendingNomadChanges(repoPath, deferredDeletes, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			}
+
 			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, false, true, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			resp.AppliedJobs = applied
 			if len(deferred) > 0 {
@@ -2529,6 +2561,25 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	defer d.nomadMu.Unlock()
 
 	SortMatchedJobsHangarLast(matches)
+
+	pending := d.drainPendingNomadChanges()
+	var pendingTeardowns []NomadChangeEvent
+	for _, evt := range pending {
+		var deletes []NomadFileChange
+		for _, ch := range evt.Changes {
+			if ch.Action == "delete" {
+				deletes = append(deletes, ch)
+			}
+		}
+		if len(deletes) > 0 {
+			evtCopy := evt
+			evtCopy.Changes = deletes
+			pendingTeardowns = append(pendingTeardowns, evtCopy)
+		}
+	}
+	if len(pendingTeardowns) > 0 {
+		d.ExecuteNomadTeardowns(ctx, pendingTeardowns)
+	}
 
 	digest := req.Digest
 	if digest == "" {

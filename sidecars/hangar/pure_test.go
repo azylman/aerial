@@ -935,10 +935,19 @@ R100	jobs/old.nomad	jobs/new.nomad
 		t.Errorf("expected 0 changes when migration file is deleted only")
 	}
 	if !IsMigrationFile("brain/pkg/db/migrations/20261016_init.sql") || !IsMigrationFile("/brain/pkg/db/migrations/atlas.sum") || IsMigrationFile("brain/pkg/db/schema.sql") || IsMigrationFile("") || IsMigrationFile("brain/pkg/db/migrations") {
-		t.Errorf("unexpected IsMigrationFile classification")
+		t.Errorf("unexpected IsMigrationFile classification for brain")
+	}
+	if !IsMigrationFile("services/eri/pkg/db/migrations/20261021_init.sql") || !IsMigrationFile("/services/eri/pkg/db/migrations/atlas.sum") || IsMigrationFile("services/eri/pkg/db/schema.sql") || IsMigrationFile("services/eri/pkg/db/migrations") {
+		t.Errorf("unexpected IsMigrationFile classification for services/eri")
+	}
+	if !IsMigrationFile("eri/pkg/db/migrations/20261021_init.sql") || !IsMigrationFile("/eri/pkg/db/migrations/atlas.sum") || IsMigrationFile("eri/pkg/db/schema.sql") || IsMigrationFile("eri/pkg/db/migrations") {
+		t.Errorf("unexpected IsMigrationFile classification for eri")
 	}
 	if !HasMigrationChanges([]string{"README.md", "brain/pkg/db/migrations/20261016_init.sql"}) || HasMigrationChanges([]string{"brain/pkg/db/schema.sql"}) {
-		t.Errorf("unexpected HasMigrationChanges result")
+		t.Errorf("unexpected HasMigrationChanges result for brain")
+	}
+	if !HasMigrationChanges([]string{"README.md", "services/eri/pkg/db/migrations/20261021_init.sql"}) || !HasMigrationChanges([]string{"eri/pkg/db/migrations/20261021_init.sql"}) {
+		t.Errorf("unexpected HasMigrationChanges result for services/eri and eri")
 	}
 	if ren := ParseNomadGitStatus("R100\tbrain/pkg/db/old.sql\tbrain/pkg/db/migrations/20261016_new.sql\n"); len(ren) != 1 || ren[0].JobName != "db-migrate" {
 		t.Errorf("expected db-migrate when file renamed into migrations dir, got %+v", ren)
@@ -958,6 +967,10 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 	}{
 		{"aerial-config always false", "/share/aerial-config", []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"}, false},
 		{"aerial core brain touched", "/share/aerial", []string{"brain/main.go"}, true},
+		{"aerial core services touched", "/share/aerial", []string{"services/coven/main.go"}, true},
+		{"aerial core mcp touched", "/share/aerial", []string{"mcp/github-mcp/main.go"}, true},
+		{"aerial core coven touched", "/share/aerial", []string{"coven/main.go"}, true},
+		{"aerial core eri touched", "/share/aerial", []string{"eri/main.go"}, true},
 		{"aerial core webhooks-router touched", "/share/aerial", []string{"webhooks-router/main.go"}, true},
 		{"aerial core vanadis touched", "/share/aerial", []string{"vanadis/main.go"}, true},
 		{"aerial core roborev-runner touched", "/share/aerial", []string{"roborev-runner/Dockerfile"}, true},
