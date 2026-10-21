@@ -14,23 +14,29 @@ import (
 
 const (
 	DefaultStatusTickerInterval    = 1500 * time.Millisecond
-	DefaultStatusDebounceDelay      = 1500 * time.Millisecond
+	DefaultStatusDebounceDelay     = 1500 * time.Millisecond
 	DefaultStatusToolLatchDuration = 2000 * time.Millisecond
 	DefaultStatusMinEditInterval   = 1000 * time.Millisecond
-	MaxStatusTextLength             = 100
+	MaxStatusTextLength            = 100
 )
 
 // FormatToolStatus dynamically formats an active tool status badge.
 func FormatToolStatus(toolName, commandName string, elapsed time.Duration) string {
 	clean := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_"), "call_mcp_tool_")
-	if clean == "" { clean = "tool" }
+	if clean == "" {
+		clean = "tool"
+	}
 	sec := max(elapsed.Seconds(), 0.1)
 
 	var text string
 	if clean == "run_command" || clean == "execute_command" || clean == "bash" || clean == "sh" || commandName != "" {
 		cmd := strings.TrimSpace(commandName)
-		if cmd == "" { cmd = "command" }
-		if len([]rune(cmd)) > 24 { cmd = string([]rune(cmd)[:24]) }
+		if cmd == "" {
+			cmd = "command"
+		}
+		if len([]rune(cmd)) > 24 {
+			cmd = string([]rune(cmd)[:24])
+		}
 		text = fmt.Sprintf("⚡ Executing `%s`... (%.1fs)", cmd, sec)
 	} else {
 		text = fmt.Sprintf("⚡ Running `%s`... (%.1fs)", clean, sec)
@@ -85,7 +91,9 @@ type StatusUpdaterOption func(*StatusUpdater)
 // WithStatusInterval sets a custom ticker flush interval.
 func WithStatusInterval(interval time.Duration) StatusUpdaterOption {
 	return func(u *StatusUpdater) {
-		if interval > 0 { u.tickerInterval = interval }
+		if interval > 0 {
+			u.tickerInterval = interval
+		}
 	}
 }
 
@@ -102,23 +110,35 @@ func NewStatusUpdater(s *discordgo.Session, threadID string, enabled bool, opts 
 		toolLatchDuration: DefaultStatusToolLatchDuration, minEditInterval: DefaultStatusMinEditInterval,
 		turnStart: time.Now(), done: make(chan struct{}), flushNotify: make(chan struct{}, 1),
 		sendFunc: func(channelID, text string) (string, error) {
-			if s == nil { return "", fmt.Errorf("discord session is nil") }
+			if s == nil {
+				return "", fmt.Errorf("discord session is nil")
+			}
 			msg, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{Content: text, Flags: discordgo.MessageFlagsSuppressEmbeds})
-			if err != nil { return "", err }
+			if err != nil {
+				return "", err
+			}
 			return msg.ID, nil
 		},
-		editFunc:   func(channelID, messageID, text string) error { return delivery.EditMessage(s, channelID, messageID, text) },
+		editFunc: func(channelID, messageID, text string) error {
+			return delivery.EditMessage(s, channelID, messageID, text)
+		},
 		deleteFunc: func(channelID, messageID string) error { return delivery.DeleteMessage(s, channelID, messageID) },
 	}
 	for _, opt := range opts {
-		if opt != nil { opt(u) }
+		if opt != nil {
+			opt(u)
+		}
 	}
-	if u.enabled { u.Start() }
+	if u.enabled {
+		u.Start()
+	}
 	return u
 }
 
 func (u *StatusUpdater) triggerFlush() {
-	if !u.enabled { return }
+	if !u.enabled {
+		return
+	}
 	select {
 	case u.flushNotify <- struct{}{}:
 	default:
@@ -127,7 +147,9 @@ func (u *StatusUpdater) triggerFlush() {
 
 // HandleStep processes incoming intermediate events from runner.activityTap.
 func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
-	if u == nil || !u.enabled { return }
+	if u == nil || !u.enabled {
+		return
+	}
 	u.mu.Lock()
 	if u.disabled {
 		u.mu.Unlock()
@@ -158,12 +180,16 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 		}
 	}
 	u.mu.Unlock()
-	if shouldTriggerFlush { u.triggerFlush() }
+	if shouldTriggerFlush {
+		u.triggerFlush()
+	}
 }
 
 // MarkTurnStarted sets the turn start timestamp to when the runner actually begins execution.
 func (u *StatusUpdater) MarkTurnStarted() {
-	if u == nil { return }
+	if u == nil {
+		return
+	}
 	u.mu.Lock()
 	u.turnStart = time.Now()
 	u.mu.Unlock()
@@ -171,7 +197,9 @@ func (u *StatusUpdater) MarkTurnStarted() {
 
 // Start launches the background ticker goroutine with idempotency protection.
 func (u *StatusUpdater) Start() {
-	if !u.enabled { return }
+	if !u.enabled {
+		return
+	}
 	u.startOnce.Do(func() {
 		u.wg.Add(1)
 		go func() {
@@ -188,7 +216,9 @@ func (u *StatusUpdater) Start() {
 					u.mu.Lock()
 					canFlush := u.statusMessageID == "" || u.minEditInterval <= 0 || time.Since(u.lastEditAt) >= u.minEditInterval
 					u.mu.Unlock()
-					if canFlush { u.flush() }
+					if canFlush {
+						u.flush()
+					}
 				}
 			}
 		}()
@@ -289,13 +319,17 @@ func (u *StatusUpdater) flush() {
 
 // Stop terminates the ticker loop and blocks until any active in-flight edit returns.
 func (u *StatusUpdater) Stop() {
-	if u == nil { return }
+	if u == nil {
+		return
+	}
 	u.stopOnce.Do(func() { close(u.done) })
 	u.wg.Wait()
 }
 
 func (u *StatusUpdater) resetState(deleteRemote, disable bool, warnSuffix string) {
-	if u == nil { return }
+	if u == nil {
+		return
+	}
 	u.mu.Lock()
 	msgID := u.statusMessageID
 	u.statusMessageID, u.activeTool, u.activeCommand, u.lastCompletedTool, u.lastCompletedCommand = "", "", "", "", ""

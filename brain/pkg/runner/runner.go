@@ -15,14 +15,14 @@ import (
 )
 
 var (
-	reStrictUUID     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	reUUIDInText     = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	reUpdateStream   = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
-	reGeneralSession = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
-	reQuotaResetIn   = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
-	reWhitespace     = regexp.MustCompile(`\s+`)
-	reFatalError     = regexp.MustCompile(`(?i)(?:fatal|panic|traceback|terminated due to error|error:\s+[^\n\r]+)`)
-	safeCmdRegex     = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+	reStrictUUID                 = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reUUIDInText                 = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	reUpdateStream               = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
+	reGeneralSession             = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
+	reQuotaResetIn               = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
+	reWhitespace                 = regexp.MustCompile(`\s+`)
+	reFatalError                 = regexp.MustCompile(`(?i)(?:fatal|panic|traceback|terminated due to error|error:\s+[^\n\r]+)`)
+	safeCmdRegex                 = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 	reTerminatingBackgroundTasks = regexp.MustCompile(`(?i)terminating\s+([1-9]\d*)\s+background\s+task\(s\)`)
 
 	quotaUnitReplacer = strings.NewReplacer(
@@ -323,7 +323,9 @@ func (e *StepUpdateEvent) ResolvedCommandLine() string {
 	return firstNonEmpty(p.CommandLine, p.CommandLineSnake, p.Command, p.Cmd)
 }
 
-func (e *StepUpdateEvent) ResolvedCommandName() string { return ExtractCommandName(e.ResolvedCommandLine()) }
+func (e *StepUpdateEvent) ResolvedCommandName() string {
+	return ExtractCommandName(e.ResolvedCommandLine())
+}
 
 func ExtractCommandName(cmdLine string) string {
 	tokens, ok := tokenizeCommandLine(strings.TrimSpace(cmdLine))
@@ -477,7 +479,7 @@ func IsInactivityTimeout(errDetail, stderr string) bool {
 	return isWatchdogMatch(c, "inactivity timeout") || isWatchdogMatch(c, "inactivity")
 }
 
-func isWatchdogInactivity(s string) bool { return isWatchdogMatch(s, "inactivity") }
+func isWatchdogInactivity(s string) bool  { return isWatchdogMatch(s, "inactivity") }
 func isWatchdogMaxDuration(s string) bool { return isWatchdogMatch(s, "max duration") }
 
 func extractWatchdogDetail(source, fallbackKeyword string) string {
@@ -608,7 +610,9 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	return true, isTransient, isSessionCorruption, errDetail
 }
 
-func containsFatalStderrError(stderr string) bool { return stderr != "" && reFatalError.MatchString(stderr) }
+func containsFatalStderrError(stderr string) bool {
+	return stderr != "" && reFatalError.MatchString(stderr)
+}
 
 func extractErrorDetail(stderr string, exitCode int) string {
 	fallback := fmt.Sprintf("execution failed with exit code %d", exitCode)

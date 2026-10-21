@@ -34,13 +34,13 @@ type WakeResponse struct {
 
 // PreTurnRequest contains execution gate details sent to the pre_turn webhook.
 type PreTurnRequest struct {
-	ChannelID   string        `json:"channel_id"`
-	ThreadID    string        `json:"thread_id"`
-	BurstCount  int           `json:"burst_count"`
-	Messages    []*db.Message `json:"messages"`
-	Prompt      string        `json:"prompt"`
-	RetryCount  int           `json:"retry_count"`
-	Timestamp   time.Time     `json:"timestamp"`
+	ChannelID  string        `json:"channel_id"`
+	ThreadID   string        `json:"thread_id"`
+	BurstCount int           `json:"burst_count"`
+	Messages   []*db.Message `json:"messages"`
+	Prompt     string        `json:"prompt"`
+	RetryCount int           `json:"retry_count"`
+	Timestamp  time.Time     `json:"timestamp"`
 }
 
 // PreTurnResponse contains execution permission and context from the pre_turn webhook.

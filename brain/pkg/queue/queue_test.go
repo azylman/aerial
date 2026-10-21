@@ -209,16 +209,26 @@ func TestRecoverInterrupted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := setupTestStore(t)
-			for _, m := range tc.seedMessages { _ = insertMessage(store, m) }
-			for _, r := range tc.seedRuns { _ = createScheduleRun(store, r) }
-			if tc.seedCompletedMsg != nil { _ = insertMessage(store, *tc.seedCompletedMsg) }
+			for _, m := range tc.seedMessages {
+				_ = insertMessage(store, m)
+			}
+			for _, r := range tc.seedRuns {
+				_ = createScheduleRun(store, r)
+			}
+			if tc.seedCompletedMsg != nil {
+				_ = insertMessage(store, *tc.seedCompletedMsg)
+			}
 
 			var mu sync.Mutex
 			var completedIDs, deliveredNotifs []string
 			doneCh := make(chan struct{})
-			if len(tc.wantCompletedIDs) == 0 { close(doneCh) }
+			if len(tc.wantCompletedIDs) == 0 {
+				close(doneCh)
+			}
 			maxAttempts := tc.maxAttempts
-			if maxAttempts <= 0 { maxAttempts = 3 }
+			if maxAttempts <= 0 {
+				maxAttempts = 3
+			}
 
 			pool := New(tc.appCfg, WorkerPoolConfig{
 				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: maxAttempts, StalenessTTL: tc.stalenessTTL,
@@ -226,23 +236,35 @@ func TestRecoverInterrupted(t *testing.T) {
 					return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "OK"), "", 0, nil
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					mu.Lock(); deliveredNotifs = append(deliveredNotifs, text); mu.Unlock(); return nil
+					mu.Lock()
+					deliveredNotifs = append(deliveredNotifs, text)
+					mu.Unlock()
+					return nil
 				},
 				TypingFunc: noopTyping,
 				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					mu.Lock(); completedIDs = append(completedIDs, msg.ID)
-					if len(completedIDs) == len(tc.wantCompletedIDs) && len(tc.wantCompletedIDs) > 0 { close(doneCh) }
+					mu.Lock()
+					completedIDs = append(completedIDs, msg.ID)
+					if len(completedIDs) == len(tc.wantCompletedIDs) && len(tc.wantCompletedIDs) > 0 {
+						close(doneCh)
+					}
 					mu.Unlock()
 				},
 			})
-			pool.Start(); defer pool.Stop()
-			if tc.withSess { pool.SetDiscordSession(&discordgo.Session{}) }
+			pool.Start()
+			defer pool.Stop()
+			if tc.withSess {
+				pool.SetDiscordSession(&discordgo.Session{})
+			}
 
 			RecoverInterrupted(store, pool)
 			waitForCompletion(t, doneCh, 3*time.Second, tc.name)
 
-			mu.Lock(); defer mu.Unlock()
-			if !slices.Equal(completedIDs, tc.wantCompletedIDs) { t.Fatalf("completedIDs = %v, want %v", completedIDs, tc.wantCompletedIDs) }
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(completedIDs, tc.wantCompletedIDs) {
+				t.Fatalf("completedIDs = %v, want %v", completedIDs, tc.wantCompletedIDs)
+			}
 			for msgID, wantStatus := range tc.wantMsgStatuses {
 				if m, err := getMessage(store, msgID); err != nil || m == nil || m.Status != wantStatus {
 					t.Errorf("msg %s status=%v, want %s", msgID, m, wantStatus)
@@ -253,7 +275,9 @@ func TestRecoverInterrupted(t *testing.T) {
 					t.Errorf("run %s status=%v, want %q", runID, r, wantStatus)
 				}
 			}
-			if len(deliveredNotifs) < tc.wantMinDeliveries { t.Errorf("delivered count=%d, want >= %d", len(deliveredNotifs), tc.wantMinDeliveries) }
+			if len(deliveredNotifs) < tc.wantMinDeliveries {
+				t.Errorf("delivered count=%d, want >= %d", len(deliveredNotifs), tc.wantMinDeliveries)
+			}
 		})
 	}
 }
@@ -355,14 +379,22 @@ func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 			cfg := WorkerPoolConfig{
 				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1, Classifier: cls,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					mu.Lock(); runnerCalls++; mu.Unlock()
+					mu.Lock()
+					runnerCalls++
+					mu.Unlock()
 					return mockJSONResponse("", "HTTP prompt execution response"), "", 0, nil
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					mu.Lock(); deliveryCalls++; mu.Unlock(); return nil
+					mu.Lock()
+					deliveryCalls++
+					mu.Unlock()
+					return nil
 				},
 				TypingFunc: func(s *discordgo.Session, channelID string) func() {
-					mu.Lock(); typingCalls++; mu.Unlock(); return func() {}
+					mu.Lock()
+					typingCalls++
+					mu.Unlock()
+					return func() {}
 				},
 				ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
 					if tc.ignoredTargetID != "" && (threadID == tc.ignoredTargetID || channelName == "spam") {
@@ -371,7 +403,9 @@ func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 					return tc.policy
 				},
 			}
-			if !tc.nilOnMessageCompleted { cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh) } }
+			if !tc.nilOnMessageCompleted {
+				cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh) }
+			}
 			pool := NewWorkerPool(cfg)
 			if tc.seedSpamThread {
 				dg := &discordgo.Session{State: discordgo.NewState()}
@@ -382,25 +416,38 @@ func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 			}
 
 			msg := tc.message
-			if msg.CreatedAt.IsZero() { msg.CreatedAt = time.Now().UTC() }
+			if msg.CreatedAt.IsZero() {
+				msg.CreatedAt = time.Now().UTC()
+			}
 			_ = insertMessage(store, msg)
 
 			if tc.nilOnMessageCompleted {
 				pool.processBurst([]db.Message{msg})
 			} else {
-				pool.Start(); defer pool.Stop()
-				pool.Enqueue(msg); waitForCompletion(t, doneCh, 5*time.Second, tc.name)
+				pool.Start()
+				defer pool.Stop()
+				pool.Enqueue(msg)
+				waitForCompletion(t, doneCh, 5*time.Second, tc.name)
 			}
 
-			mu.Lock(); defer mu.Unlock()
+			mu.Lock()
+			defer mu.Unlock()
 			if runnerCalls != tc.expectRunnerCalls || deliveryCalls != tc.expectDeliveryCalls || typingCalls != tc.expectTypingCalls {
 				t.Errorf("calls mismatch: runner=%d (want %d), delivery=%d (want %d), typing=%d (want %d)", runnerCalls, tc.expectRunnerCalls, deliveryCalls, tc.expectDeliveryCalls, typingCalls, tc.expectTypingCalls)
 			}
 			savedMsg, err := getMessage(store, msg.ID)
-			if err != nil || savedMsg == nil { t.Fatalf("getMessage: %v", err) }
-			if savedMsg.Status != tc.expectStatus { t.Errorf("status=%s, want %s", savedMsg.Status, tc.expectStatus) }
-			if tc.expectErrorMessage != "" && savedMsg.ErrorMessage != tc.expectErrorMessage { t.Errorf("err=%q, want %q", savedMsg.ErrorMessage, tc.expectErrorMessage) }
-			if tc.expectResponseText != "" && savedMsg.ResponseText != tc.expectResponseText { t.Errorf("resp=%q, want %q", savedMsg.ResponseText, tc.expectResponseText) }
+			if err != nil || savedMsg == nil {
+				t.Fatalf("getMessage: %v", err)
+			}
+			if savedMsg.Status != tc.expectStatus {
+				t.Errorf("status=%s, want %s", savedMsg.Status, tc.expectStatus)
+			}
+			if tc.expectErrorMessage != "" && savedMsg.ErrorMessage != tc.expectErrorMessage {
+				t.Errorf("err=%q, want %q", savedMsg.ErrorMessage, tc.expectErrorMessage)
+			}
+			if tc.expectResponseText != "" && savedMsg.ResponseText != tc.expectResponseText {
+				t.Errorf("resp=%q, want %q", savedMsg.ResponseText, tc.expectResponseText)
+			}
 		})
 	}
 }
@@ -729,7 +776,10 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 
 			waitForCompletion(t, stageStarted, 3*time.Second, "stage started")
 			stopDone := make(chan struct{})
-			go func() { pool.Stop(); close(stopDone) }()
+			go func() {
+				pool.Stop()
+				close(stopDone)
+			}()
 			close(releaseRunner)
 			waitForCompletion(t, stopDone, 5*time.Second, "pool stop")
 
@@ -855,7 +905,11 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 			restCooldownMu.Lock()
 			delete(restCooldown, sfKey)
 			restCooldownMu.Unlock()
-			t.Cleanup(func() { restCooldownMu.Lock(); delete(restCooldown, sfKey); restCooldownMu.Unlock() })
+			t.Cleanup(func() {
+				restCooldownMu.Lock()
+				delete(restCooldown, sfKey)
+				restCooldownMu.Unlock()
+			})
 
 			if tc.checkNilSession && ResolveBotRoleIDs(nil, tc.guildID, tc.botID) != nil {
 				t.Errorf("Expected nil for nil session")
@@ -1055,7 +1109,10 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 		msg := db.Message{ID: fmt.Sprintf("msg-scope-%d", i), ThreadID: "thread-scope-test", Content: fmt.Sprintf("Msg %d", i)}
 		_ = insertMessage(store, msg)
 		wg.Add(1)
-		go func(m db.Message) { defer wg.Done(); pool.processBurst([]db.Message{m}) }(msg)
+		go func(m db.Message) {
+			defer wg.Done()
+			pool.processBurst([]db.Message{m})
+		}(msg)
 	}
 	wg.Wait()
 	if maxActiveWorkers > 1 {
@@ -1174,8 +1231,8 @@ func TestProcessBurst_ErrorClassificationMatrix(t *testing.T) {
 			if tt.seedPBFile {
 				validUUID = uuid.New().String()
 				pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
-				_ = os.MkdirAll(filepath.Dir(pbPath), 0755)
-				_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
+				_ = os.MkdirAll(filepath.Dir(pbPath), 0o755)
+				_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0o644)
 			}
 			if tt.existingSession {
 				_ = saveSessionID(store, tt.threadID, uuid.New().String())
@@ -1275,10 +1332,10 @@ func TestGetSessionLastActivity_Suite(t *testing.T) {
 			}
 			if tc.diskLogAge > 0 {
 				tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tc.sessionID, ".system_generated", "tasks")
-				_ = os.MkdirAll(tasksDir, 0755)
+				_ = os.MkdirAll(tasksDir, 0o755)
 				tDisk := now.Add(-tc.diskLogAge)
 				taskLog := filepath.Join(tasksDir, "task-1.log")
-				_ = os.WriteFile(taskLog, []byte("build output\n"), 0644)
+				_ = os.WriteFile(taskLog, []byte("build output\n"), 0o644)
 				_ = os.Chtimes(taskLog, tDisk, tDisk)
 			}
 			if tc.closeStore {
@@ -1334,10 +1391,10 @@ func TestProcessBurst_StalenessMatrix(t *testing.T) {
 			if tt.diskLogAge > 0 {
 				_ = saveSessionID(store, tt.threadID, tt.sessionID)
 				tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tt.sessionID, ".system_generated", "tasks")
-				_ = os.MkdirAll(tasksDir, 0755)
+				_ = os.MkdirAll(tasksDir, 0o755)
 				tDisk := now.Add(-tt.diskLogAge)
 				taskLog := filepath.Join(tasksDir, "task-1.log")
-				_ = os.WriteFile(taskLog, []byte("running build"), 0644)
+				_ = os.WriteFile(taskLog, []byte("running build"), 0o644)
 				_ = os.Chtimes(taskLog, tDisk, tDisk)
 			}
 			if tt.sessionAge > 0 {
@@ -1591,14 +1648,22 @@ func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 		errDetail, extra string
 		want             bool
 	}{
-		{errDetail: "Error 503", want: true}, {errDetail: "rate limit exceeded", want: true},
-		{errDetail: "RESOURCE_EXHAUSTED", want: true}, {errDetail: "HTTP 429", want: true},
-		{errDetail: "high demand, please wait", want: true}, {errDetail: "Daily quota exceeded", want: true},
-		{errDetail: "Too Many Requests", want: true}, {errDetail: "model is overloaded", want: true},
-		{errDetail: "503 Service Unavailable", want: true}, {errDetail: "resource has been exhausted by caller", want: true},
-		{errDetail: "Individual quota reached for user", want: true}, {errDetail: "Please upgrade your subscription to continue", want: true},
+		{errDetail: "Error 503", want: true},
+		{errDetail: "rate limit exceeded", want: true},
+		{errDetail: "RESOURCE_EXHAUSTED", want: true},
+		{errDetail: "HTTP 429", want: true},
+		{errDetail: "high demand, please wait", want: true},
+		{errDetail: "Daily quota exceeded", want: true},
+		{errDetail: "Too Many Requests", want: true},
+		{errDetail: "model is overloaded", want: true},
+		{errDetail: "503 Service Unavailable", want: true},
+		{errDetail: "resource has been exhausted by caller", want: true},
+		{errDetail: "Individual quota reached for user", want: true},
+		{errDetail: "Please upgrade your subscription to continue", want: true},
 		{errDetail: "generic error", extra: "upstream returned 429 Too Many Requests", want: true},
-		{errDetail: "write: disk quota exceeded", want: false}, {errDetail: "syntax error on line 42", want: false}, {errDetail: "", want: false},
+		{errDetail: "write: disk quota exceeded", want: false},
+		{errDetail: "syntax error on line 42", want: false},
+		{errDetail: "", want: false},
 	}
 	for _, tt := range tests {
 		if got := isRateLimitError(tt.errDetail, tt.extra); got != tt.want {
@@ -1758,11 +1823,17 @@ func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
 			}
 			msgID := "msg-" + tt.name
 			msg := db.Message{ID: msgID, ThreadID: tt.threadID, Content: "cancel test", ScheduleRunID: tt.scheduleRunID}
-			_ = insertMessage(store, msg); pool.Enqueue(msg); waitPoolWorkersDone(t, pool, 2*time.Second)
+			_ = insertMessage(store, msg)
+			pool.Enqueue(msg)
+			waitPoolWorkersDone(t, pool, 2*time.Second)
 
 			if tt.expectDeliveredCheck {
-				mu.Lock(); called := deliveredCalled; mu.Unlock()
-				if called { t.Errorf("DeliveryFunc should not be called when pool is cancelled") }
+				mu.Lock()
+				called := deliveredCalled
+				mu.Unlock()
+				if called {
+					t.Errorf("DeliveryFunc should not be called when pool is cancelled")
+				}
 			}
 			if dbMsg, _ := getMessage(store, msgID); dbMsg != nil && dbMsg.Status != db.StatusPending {
 				t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
@@ -1778,17 +1849,23 @@ type mockWebhookDispatcher struct {
 }
 
 func (m *mockWebhookDispatcher) CallWakeHook(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
-	if m.callWakeHookFunc != nil { return m.callWakeHookFunc(ctx, endpoint, req) }
+	if m.callWakeHookFunc != nil {
+		return m.callWakeHookFunc(ctx, endpoint, req)
+	}
 	return nil, nil
 }
 
 func (m *mockWebhookDispatcher) CallPreTurnHook(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-	if m.callPreTurnHookFunc != nil { return m.callPreTurnHookFunc(ctx, endpoint, req) }
+	if m.callPreTurnHookFunc != nil {
+		return m.callPreTurnHookFunc(ctx, endpoint, req)
+	}
 	return nil, nil
 }
 
 func (m *mockWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-	if m.callPostTurnHookFunc != nil { return m.callPostTurnHookFunc(ctx, endpoint, req) }
+	if m.callPostTurnHookFunc != nil {
+		return m.callPostTurnHookFunc(ctx, endpoint, req)
+	}
 	return nil, nil
 }
 
@@ -2240,9 +2317,16 @@ func TestPostTurnHook_SerializedRelease(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); pool.processBurst([]db.Message{msg1}) }()
+	go func() {
+		defer wg.Done()
+		pool.processBurst([]db.Message{msg1})
+	}()
 	<-turn1PostStarted
-	go func() { defer wg.Done(); close(turn2Launched); pool.processBurst([]db.Message{msg2}) }()
+	go func() {
+		defer wg.Done()
+		close(turn2Launched)
+		pool.processBurst([]db.Message{msg2})
+	}()
 	wg.Wait()
 
 	mu.Lock()
@@ -2308,8 +2392,8 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 			t.Parallel()
 			store, tempDir := setupTestStore(t), t.TempDir()
 			sessDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", tc.convID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0755)
-			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0644)
+			_ = os.MkdirAll(sessDir, 0o755)
+			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0o644)
 
 			var deliveredText string
 			var mu sync.Mutex
@@ -2372,10 +2456,10 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 		_, _ = incrementSessionTurnCount(store, tc.threadID)
 	}
 	if tc.preTranscriptSteps > 0 {
-		_ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.preTranscriptSteps)), 0644)
+		_ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.preTranscriptSteps)), 0o644)
 	}
 	if tc.preTranscriptBytes > 0 {
-		_ = os.WriteFile(tPath, bytes.Repeat([]byte("A"), tc.preTranscriptBytes), 0644)
+		_ = os.WriteFile(tPath, bytes.Repeat([]byte("A"), tc.preTranscriptBytes), 0o644)
 	}
 
 	var mu sync.Mutex
@@ -2387,41 +2471,68 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: 2,
 		DeliveryFunc: noopDelivery, TypingFunc: noopTyping,
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			select { case doneCh <- struct{}{}: default: }
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
 		},
 	}
 
 	if tc.useWatchdog {
 		poolCfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			mu.Lock(); attempts = append(attempts, sID); curAttempt := len(attempts); mu.Unlock()
+			mu.Lock()
+			attempts = append(attempts, sID)
+			curAttempt := len(attempts)
+			mu.Unlock()
 			if curAttempt == 1 {
-				if tc.watchdogTranscriptSteps > 0 { _ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.watchdogTranscriptSteps)), 0644) }
-				if tc.watchdogTranscriptBytes > 0 { _ = os.WriteFile(tPath, make([]byte, tc.watchdogTranscriptBytes), 0644) }
+				if tc.watchdogTranscriptSteps > 0 {
+					_ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.watchdogTranscriptSteps)), 0o644)
+				}
+				if tc.watchdogTranscriptBytes > 0 {
+					_ = os.WriteFile(tPath, make([]byte, tc.watchdogTranscriptBytes), 0o644)
+				}
 				return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
 			}
 			return mockJSONResponse(sID, "Recovered on warm retry"), "", 0, nil
 		}
 	} else {
 		poolCfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock(); attempts = append(attempts, sID); mu.Unlock()
-			if tc.postTranscriptSteps > 0 { _ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.postTranscriptSteps)), 0644) }
-			if tc.postTranscriptBytes > 0 { _ = os.WriteFile(tPath, make([]byte, tc.postTranscriptBytes), 0644) }
+			mu.Lock()
+			attempts = append(attempts, sID)
+			mu.Unlock()
+			if tc.postTranscriptSteps > 0 {
+				_ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.postTranscriptSteps)), 0o644)
+			}
+			if tc.postTranscriptBytes > 0 {
+				_ = os.WriteFile(tPath, make([]byte, tc.postTranscriptBytes), 0o644)
+			}
 			retID := sID
-			if retID == "" { retID = sessionID }
+			if retID == "" {
+				retID = sessionID
+			}
 			return mockJSONResponse(retID, "OK"), "", 0, nil
 		}
 	}
 
-	pool := New(appCfg, poolCfg); pool.Start(); defer pool.Stop()
+	pool := New(appCfg, poolCfg)
+	pool.Start()
+	defer pool.Stop()
 	msg := db.Message{ID: "msg-rot-" + tc.name, ThreadID: tc.threadID, Content: "<@aerial> run"}
-	_ = insertMessage(store, msg); pool.Enqueue(msg)
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
 	waitForCompletion(t, doneCh, 3*time.Second, tc.name)
 
-	mu.Lock(); attCopy := append([]string(nil), attempts...); mu.Unlock()
+	mu.Lock()
+	attCopy := append([]string(nil), attempts...)
+	mu.Unlock()
 	if tc.wantAttempts > 0 {
-		if len(attCopy) != tc.wantAttempts { t.Fatalf("len(attempts) = %d (%v), want %d", len(attCopy), attCopy, tc.wantAttempts) }
+		if len(attCopy) != tc.wantAttempts {
+			t.Fatalf("len(attempts) = %d (%v), want %d", len(attCopy), attCopy, tc.wantAttempts)
+		}
 		for i, got := range attCopy {
-			if got != sessionID { t.Errorf("attempts[%d] = %q, want %q", i, got, sessionID) }
+			if got != sessionID {
+				t.Errorf("attempts[%d] = %q, want %q", i, got, sessionID)
+			}
 		}
 	}
 	if tc.checkStoreSession {
@@ -2468,7 +2579,9 @@ func TestWorkerPool_DeliverDirect(t *testing.T) {
 			t.Parallel()
 			if tc.nilPool || tc.nilSession {
 				var p *WorkerPool
-				if !tc.nilPool { p = &WorkerPool{} }
+				if !tc.nilPool {
+					p = &WorkerPool{}
+				}
 				if err := p.DeliverDirect(tc.channelID, tc.text); err == nil || err.Error() != tc.expectErrContains {
 					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
 				}
@@ -2479,12 +2592,15 @@ func TestWorkerPool_DeliverDirect(t *testing.T) {
 			p := &WorkerPool{cfg: WorkerPoolConfig{
 				DiscordSession: dummySession,
 				DeliveryFunc: func(s *discordgo.Session, cID, txt string) error {
-					gotSess, gotChan, gotText = s, cID, txt; return tc.funcErr
+					gotSess, gotChan, gotText = s, cID, txt
+					return tc.funcErr
 				},
 			}}
 			err := p.DeliverDirect(tc.channelID, tc.text)
 			if tc.expectErr != nil {
-				if !errors.Is(err, tc.expectErr) { t.Fatalf("expected error %v, got %v", tc.expectErr, err) }
+				if !errors.Is(err, tc.expectErr) {
+					t.Fatalf("expected error %v, got %v", tc.expectErr, err)
+				}
 				return
 			}
 			if err != nil || gotSess != dummySession || gotChan != tc.channelID || gotText != tc.text {
@@ -2510,7 +2626,9 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			t.Parallel()
 			if tc.nilPool || tc.nilSession {
 				var p *WorkerPool
-				if !tc.nilPool { p = &WorkerPool{} }
+				if !tc.nilPool {
+					p = &WorkerPool{}
+				}
 				if _, err := p.DeliverStatusWidget(tc.req); err == nil || err.Error() != tc.expectErrContains {
 					t.Fatalf("expected error %q, got %v", tc.expectErrContains, err)
 				}
@@ -2561,30 +2679,47 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 			}
 			if tc.interchangeable {
 				spawner := runner.NewMockDaemonSpawner()
-				u1 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner); defer func() { _ = u1.Close() }()
-				i1 := runner.NewInterchangeablePool(u1, runner.InterchangeablePoolConfig{WorkerCount: 2}); defer func() { _ = i1.Close() }()
-				u2 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, spawner); defer func() { _ = u2.Close() }()
-				i2 := runner.NewInterchangeablePool(u2, runner.InterchangeablePoolConfig{WorkerCount: 2}); defer func() { _ = i2.Close() }()
-				p := New(nil, WorkerPoolConfig{LowEffortProcessPool: i1, MediumEffortProcessPool: i2}); defer p.Stop()
-				if p.LowEffortProcessPool() != u1 || p.MediumEffortProcessPool() != u2 { t.Fatalf("expected underlying pools returned") }
+				u1 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
+				defer func() { _ = u1.Close() }()
+				i1 := runner.NewInterchangeablePool(u1, runner.InterchangeablePoolConfig{WorkerCount: 2})
+				defer func() { _ = i1.Close() }()
+				u2 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, spawner)
+				defer func() { _ = u2.Close() }()
+				i2 := runner.NewInterchangeablePool(u2, runner.InterchangeablePoolConfig{WorkerCount: 2})
+				defer func() { _ = i2.Close() }()
+				p := New(nil, WorkerPoolConfig{LowEffortProcessPool: i1, MediumEffortProcessPool: i2})
+				defer p.Stop()
+				if p.LowEffortProcessPool() != u1 || p.MediumEffortProcessPool() != u2 {
+					t.Fatalf("expected underlying pools returned")
+				}
 				return
 			}
 			if tc.cleanAllThree {
-				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, runner.NewMockSpawner()); defer func() { _ = pPool.Close() }()
+				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, runner.NewMockSpawner())
+				defer func() { _ = pPool.Close() }()
 				lSpawner := runner.NewMockSpawner()
-				lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner); defer func() { _ = lPool.Close() }()
-				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, runner.NewMockSpawner()); defer func() { _ = vPool.Close() }()
+				lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner)
+				defer func() { _ = lPool.Close() }()
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, runner.NewMockSpawner())
+				defer func() { _ = vPool.Close() }()
 				pool := NewWorkerPool(WorkerPoolConfig{ProcessPool: pPool, LowEffortProcessPool: lPool, VoiceProcessPool: vPool})
 				_, _ = pool.cfg.LLMFunc(context.Background(), "", "summarize")
-				if got := lSpawner.LastSpawnCfg().Model; got != "gemini-3.8-flash-low" { t.Fatalf("expected LowEffortProcessPool model, got %q", got) }
-				pool.MarkDirty(); pool.Stop()
+				if got := lSpawner.LastSpawnCfg().Model; got != "gemini-3.8-flash-low" {
+					t.Fatalf("expected LowEffortProcessPool model, got %q", got)
+				}
+				pool.MarkDirty()
+				pool.Stop()
 				return
 			}
 			if tc.reconcilePrewarmed {
-				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash", PrewarmedTargets: tc.prewarmedTargets}, runner.NewMockDaemonSpawner()); defer func() { _ = vPool.Close() }()
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash", PrewarmedTargets: tc.prewarmedTargets}, runner.NewMockDaemonSpawner())
+				defer func() { _ = vPool.Close() }()
 				appCfg := config.NewTestConfig(func(d *config.ConfigData) { d.Voice.PrewarmedTargets = tc.expectedVoiceTargets })
-				pool := New(appCfg, WorkerPoolConfig{VoiceProcessPool: vPool}); defer pool.Stop()
-				pool.MarkDirty(); vPool.WaitBackground(); targets := vPool.PrewarmedTargets()
+				pool := New(appCfg, WorkerPoolConfig{VoiceProcessPool: vPool})
+				defer pool.Stop()
+				pool.MarkDirty()
+				vPool.WaitBackground()
+				targets := vPool.PrewarmedTargets()
 				if len(targets) != len(tc.expectedVoiceTargets) || targets[0] != tc.expectedVoiceTargets[0] || !vPool.HasDaemon(tc.expectedVoiceTargets[0]) {
 					t.Fatalf("prewarmed targets mismatch: %v", targets)
 				}
@@ -2731,39 +2866,69 @@ func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T)
 	var alertCalls int
 	var lastTitle, lastBody string
 	recordAlert := func(s *discordgo.Session, ch, title, body string) error {
-		mu.Lock(); alertCalls++; lastTitle, lastBody = title, body; mu.Unlock(); return nil
+		mu.Lock()
+		alertCalls++
+		lastTitle, lastBody = title, body
+		mu.Unlock()
+		return nil
 	}
 	p := &WorkerPool{cfg: WorkerPoolConfig{Store: fake, SystemAlertFunc: recordAlert}}
 	lastReported := make(map[string]int)
 
 	_ = fake.SaveSessionID(ctx, "th-test", "sess-1")
-	for i := 0; i < 5; i++ { _, _ = fake.IncrementSessionTurnCount(ctx, "th-test") }
+	for i := 0; i < 5; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
+	}
 	p.checkUnrotatedSessions(ctx, lastReported)
-	mu.Lock(); calls := alertCalls; mu.Unlock()
-	if calls != 0 || len(lastReported) != 0 { t.Fatalf("expected 0 alerts, got %d", calls) }
+	mu.Lock()
+	calls := alertCalls
+	mu.Unlock()
+	if calls != 0 || len(lastReported) != 0 {
+		t.Fatalf("expected 0 alerts, got %d", calls)
+	}
 
-	for i := 0; i < 4; i++ { _, _ = fake.IncrementSessionTurnCount(ctx, "th-test") }
+	for i := 0; i < 4; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
+	}
 	p.checkUnrotatedSessions(ctx, lastReported)
-	mu.Lock(); calls, body, title := alertCalls, lastBody, lastTitle; mu.Unlock()
+	mu.Lock()
+	calls, body, title := alertCalls, lastBody, lastTitle
+	mu.Unlock()
 	if calls != 1 || !strings.Contains(body, "th-test") || !strings.Contains(body, "**9** turns") || title != "Unrotated Runaway Sessions" {
 		t.Fatalf("unexpected alert: calls=%d body=%s title=%s", calls, body, title)
 	}
-	if lastReported["th-test"] != 9 { t.Errorf("expected 9, got %d", lastReported["th-test"]) }
+	if lastReported["th-test"] != 9 {
+		t.Errorf("expected 9, got %d", lastReported["th-test"])
+	}
 
 	p.checkUnrotatedSessions(ctx, lastReported)
-	mu.Lock(); calls = alertCalls; mu.Unlock()
-	if calls != 1 { t.Fatalf("expected 1 call, got %d", calls) }
+	mu.Lock()
+	calls = alertCalls
+	mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected 1 call, got %d", calls)
+	}
 
 	_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
 	p.checkUnrotatedSessions(ctx, lastReported)
-	mu.Lock(); calls, body = alertCalls, lastBody; mu.Unlock()
-	if calls != 2 || !strings.Contains(body, "**10** turns") { t.Fatalf("expected 2 calls, got %d body=%s", calls, body) }
+	mu.Lock()
+	calls, body = alertCalls, lastBody
+	mu.Unlock()
+	if calls != 2 || !strings.Contains(body, "**10** turns") {
+		t.Fatalf("expected 2 calls, got %d body=%s", calls, body)
+	}
 
 	_ = fake.RotateSessionID(ctx, "th-test", "sess-fresh")
 	p.checkUnrotatedSessions(ctx, lastReported)
-	mu.Lock(); calls = alertCalls; mu.Unlock()
-	if calls != 2 { t.Fatalf("expected 2 calls, got %d", calls) }
-	if _, exists := lastReported["th-test"]; exists { t.Errorf("expected pruned: %v", lastReported) }
+	mu.Lock()
+	calls = alertCalls
+	mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("expected 2 calls, got %d", calls)
+	}
+	if _, exists := lastReported["th-test"]; exists {
+		t.Errorf("expected pruned: %v", lastReported)
+	}
 }
 
 func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
@@ -2772,20 +2937,27 @@ func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
 	defer func() { _ = fake.Close() }()
 	ctx := context.Background()
 	_ = fake.SaveSessionID(ctx, "th-ticker-test", "sess-ticker")
-	for i := 0; i < 11; i++ { _, _ = fake.IncrementSessionTurnCount(ctx, "th-ticker-test") }
+	for i := 0; i < 11; i++ {
+		_, _ = fake.IncrementSessionTurnCount(ctx, "th-ticker-test")
+	}
 
 	alertCh := make(chan string, 5)
 	p := NewWorkerPool(WorkerPoolConfig{
 		Store: fake, MaintenanceInterval: 10 * time.Millisecond,
 		SystemAlertFunc: func(s *discordgo.Session, ch, title, body string) error {
-			select { case alertCh <- body: default: }
+			select {
+			case alertCh <- body:
+			default:
+			}
 			return nil
 		},
 	})
 	p.Start()
 	select {
 	case body := <-alertCh:
-		if !strings.Contains(body, "th-ticker-test") || !strings.Contains(body, "**11** turns") { t.Errorf("unexpected alert body: %s", body) }
+		if !strings.Contains(body, "th-ticker-test") || !strings.Contains(body, "**11** turns") {
+			t.Errorf("unexpected alert body: %s", body)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for maintenance ticker")
 	}
@@ -2827,9 +2999,13 @@ func TestResolveStore(t *testing.T) {
 		input   any
 		wantNil bool
 	}{
-		{"nil", nil, true}, {"str", "unsupported", true},
-		{"typed_nil_fake", (*db.FakeStore)(nil), true}, {"typed_nil_sql", (*db.SQLStore)(nil), true}, {"typed_nil_db", (*sql.DB)(nil), true},
-		{"valid_fake", fake, false}, {"valid_db", realDB, false},
+		{"nil", nil, true},
+		{"str", "unsupported", true},
+		{"typed_nil_fake", (*db.FakeStore)(nil), true},
+		{"typed_nil_sql", (*db.SQLStore)(nil), true},
+		{"typed_nil_db", (*sql.DB)(nil), true},
+		{"valid_fake", fake, false},
+		{"valid_db", realDB, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2884,7 +3060,9 @@ func TestWorkerPool_ClassifierAlertDebouncing(t *testing.T) {
 			pool := New(appCfg, WorkerPoolConfig{
 				DiscordSession: dg,
 				SystemAlertFunc: func(s *discordgo.Session, ch, title, text string) error {
-					mu.Lock(); alerts = append(alerts, text); mu.Unlock()
+					mu.Lock()
+					alerts = append(alerts, text)
+					mu.Unlock()
 					alertCh <- struct{}{}
 					return nil
 				},
@@ -2898,10 +3076,17 @@ func TestWorkerPool_ClassifierAlertDebouncing(t *testing.T) {
 			waitForCompletion(t, alertCh, time.Second, tc.name+"/sys")
 			pool.cfg.Classifier.OnSystemAlert(tc.endpoint, errors.New("refused 2"))
 
-			mu.Lock(); defer mu.Unlock()
-			if len(alerts) != 2 { t.Fatalf("expected 2 debounced alerts, got %d", len(alerts)) }
-			if !strings.Contains(alerts[0], tc.wantParseSubstr) { t.Errorf("parse alert missing %q", tc.wantParseSubstr) }
-			if !strings.Contains(alerts[1], tc.wantSysSubstr) { t.Errorf("sys alert missing %q", tc.wantSysSubstr) }
+			mu.Lock()
+			defer mu.Unlock()
+			if len(alerts) != 2 {
+				t.Fatalf("expected 2 debounced alerts, got %d", len(alerts))
+			}
+			if !strings.Contains(alerts[0], tc.wantParseSubstr) {
+				t.Errorf("parse alert missing %q", tc.wantParseSubstr)
+			}
+			if !strings.Contains(alerts[1], tc.wantSysSubstr) {
+				t.Errorf("sys alert missing %q", tc.wantSysSubstr)
+			}
 		})
 	}
 }

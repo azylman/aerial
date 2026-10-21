@@ -317,7 +317,7 @@ func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *runner
 				if cfg.writeTranscriptLogsDir != "" {
 					now := time.Now().UTC().Format(time.RFC3339Nano)
 					transcript := fmt.Sprintf("{\"type\":\"USER_INPUT\",\"source\":\"USER_EXPLICIT\",\"content\":\"What is the status?\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":%q,\"created_at\":%q}\n", now, cfg.resultResponse, now)
-					_ = os.WriteFile(filepath.Join(cfg.writeTranscriptLogsDir, "transcript.jsonl"), []byte(transcript), 0644)
+					_ = os.WriteFile(filepath.Join(cfg.writeTranscriptLogsDir, "transcript.jsonl"), []byte(transcript), 0o644)
 				}
 				status := cfg.resultStatus
 				if status == "" {
@@ -417,7 +417,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolTranscriptRecovery(t *testing.T)
 	t.Parallel()
 	targetSess, tempDir := "550e8400-e29b-41d4-a716-446655449999", t.TempDir()
 	logsDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", targetSess, ".system_generated", "logs")
-	_ = os.MkdirAll(logsDir, 0755)
+	_ = os.MkdirAll(logsDir, 0o755)
 	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
 		initSessionID: targetSess, resultStatus: "ERROR", resultError: "RESOURCE_EXHAUSTED (code 429)",
 		resultResponse: "All systems operational and nominal.", writeTranscriptLogsDir: logsDir,
@@ -497,11 +497,16 @@ func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targ
 	p.sessions[targetKey] = sess
 	return sess, nil
 }
+
 func (p *queueMockVoiceProcessPool) Initialize(ctx context.Context) error {
 	p.initCalled = true
 	return nil
 }
-func (p *queueMockVoiceProcessPool) Close() error                  { p.closeCalled = true; return nil }
+
+func (p *queueMockVoiceProcessPool) Close() error {
+	p.closeCalled = true
+	return nil
+}
 func (p *queueMockVoiceProcessPool) EvictSession(targetKey string) { delete(p.sessions, targetKey) }
 
 func (p *queueMockVoiceProcessPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
@@ -540,9 +545,11 @@ func (l *mockVoiceSessionLease) Execute(ctx context.Context, turn *runner.TurnCo
 	return &runner.TurnResult{ConversationID: l.SessionID(), Response: "Hello from mock voice."}, nil
 }
 
-var _ runner.AgentPool = (*queueMockVoiceProcessPool)(nil)
-var _ runner.LeasedAgentPool = (*queueMockVoiceProcessPool)(nil)
-var _ runner.AgentSession = (*queueMockVoiceSession)(nil)
+var (
+	_ runner.AgentPool       = (*queueMockVoiceProcessPool)(nil)
+	_ runner.LeasedAgentPool = (*queueMockVoiceProcessPool)(nil)
+	_ runner.AgentSession    = (*queueMockVoiceSession)(nil)
+)
 
 func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 	t.Parallel()

@@ -48,56 +48,82 @@ func NewDynamicVoicePoolWithInitial(initialPool AgentPool, initialKey string, fa
 }
 
 func (p *DynamicVoicePool) activePool() (AgentPool, error) {
-	if p == nil { return nil, errors.New("dynamic voice pool is nil") }
-	p.mu.RLock(); defer p.mu.RUnlock()
-	if p.closed { return nil, errors.New("dynamic voice pool is closed") }
-	if p.currentPool == nil { return nil, errors.New("no active voice pool") }
+	if p == nil {
+		return nil, errors.New("dynamic voice pool is nil")
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		return nil, errors.New("dynamic voice pool is closed")
+	}
+	if p.currentPool == nil {
+		return nil, errors.New("no active voice pool")
+	}
 	return p.currentPool, nil
 }
 
 // GetOrCreateSession captures currentPool and delegates unlocked.
 func (p *DynamicVoicePool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
 	pool, err := p.activePool()
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return pool.GetOrCreateSession(ctx, targetKey, sessionID)
 }
 
 // ShouldRotateSession delegates rotation check to the current pool if it implements SessionRotator.
 func (p *DynamicVoicePool) ShouldRotateSession(sess AgentSession) (bool, string) {
 	pool, err := p.activePool()
-	if err != nil { return false, "" }
-	if rotator, ok := pool.(SessionRotator); ok { return rotator.ShouldRotateSession(sess) }
+	if err != nil {
+		return false, ""
+	}
+	if rotator, ok := pool.(SessionRotator); ok {
+		return rotator.ShouldRotateSession(sess)
+	}
 	return false, ""
 }
 
 // RotateSession delegates session rotation to the current pool if it implements SessionRotator.
 func (p *DynamicVoicePool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
 	pool, err := p.activePool()
-	if err != nil { return nil, err }
-	if rotator, ok := pool.(SessionRotator); ok { return rotator.RotateSession(ctx, targetKey) }
+	if err != nil {
+		return nil, err
+	}
+	if rotator, ok := pool.(SessionRotator); ok {
+		return rotator.RotateSession(ctx, targetKey)
+	}
 	return nil, nil
 }
 
 // Initialize pre-warms the currently active pool.
 func (p *DynamicVoicePool) Initialize(ctx context.Context) error {
 	pool, err := p.activePool()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	return pool.Initialize(ctx)
 }
 
 // Close acquires the write Lock, sets closed=true, closes the active pool,
 // and blocks until all retiring background pools complete their shutdown.
 func (p *DynamicVoicePool) Close() error {
-	if p == nil { return nil }
+	if p == nil {
+		return nil
+	}
 	p.mu.Lock()
-	if p.closed { p.mu.Unlock(); return nil }
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
 	p.closed = true
 	pool := p.currentPool
 	p.currentPool = nil
 	p.mu.Unlock()
 
 	var err error
-	if pool != nil { err = pool.Close() }
+	if pool != nil {
+		err = pool.Close()
+	}
 	p.retiringWg.Wait()
 	return err
 }
@@ -105,15 +131,21 @@ func (p *DynamicVoicePool) Close() error {
 // Model returns the active pool's model identifier if available.
 func (p *DynamicVoicePool) Model() string {
 	pool, err := p.activePool()
-	if err != nil { return "" }
-	if m, ok := pool.(interface{ Model() string }); ok { return m.Model() }
+	if err != nil {
+		return ""
+	}
+	if m, ok := pool.(interface{ Model() string }); ok {
+		return m.Model()
+	}
 	return ""
 }
 
 // UpdatePrewarmedTargets forwards the prewarmed targets list to the active pool if supported.
 func (p *DynamicVoicePool) UpdatePrewarmedTargets(targets []string) {
 	pool, err := p.activePool()
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	if u, ok := pool.(interface{ UpdatePrewarmedTargets([]string) }); ok {
 		u.UpdatePrewarmedTargets(targets)
 	}
@@ -121,16 +153,24 @@ func (p *DynamicVoicePool) UpdatePrewarmedTargets(targets []string) {
 
 // MarkDirty serializes reloads using reloadMu.
 func (p *DynamicVoicePool) MarkDirty() {
-	if p == nil { return }
-	p.reloadMu.Lock(); defer p.reloadMu.Unlock()
+	if p == nil {
+		return
+	}
+	p.reloadMu.Lock()
+	defer p.reloadMu.Unlock()
 
 	p.mu.RLock()
-	if p.closed { p.mu.RUnlock(); return }
+	if p.closed {
+		p.mu.RUnlock()
+		return
+	}
 	currentPool, currentKey, factory := p.currentPool, p.currentKey, p.factory
 	p.mu.RUnlock()
 
 	if factory == nil {
-		if dm, ok := currentPool.(interface{ MarkDirty() }); ok { dm.MarkDirty() }
+		if dm, ok := currentPool.(interface{ MarkDirty() }); ok {
+			dm.MarkDirty()
+		}
 		return
 	}
 
@@ -141,7 +181,9 @@ func (p *DynamicVoicePool) MarkDirty() {
 	}
 
 	if newKey == currentKey {
-		if dm, ok := currentPool.(interface{ MarkDirty() }); ok { dm.MarkDirty() }
+		if dm, ok := currentPool.(interface{ MarkDirty() }); ok {
+			dm.MarkDirty()
+		}
 		if candidatePool != nil && candidatePool != currentPool {
 			if cErr := candidatePool.Close(); cErr != nil {
 				log.Printf("[DynamicVoicePool] Warning closing unused candidate pool: %v", cErr)
@@ -176,7 +218,9 @@ func (p *DynamicVoicePool) MarkDirty() {
 	}
 	oldPool := p.currentPool
 	p.currentPool, p.currentKey = candidatePool, newKey
-	if oldPool != nil { p.retiringWg.Add(1) }
+	if oldPool != nil {
+		p.retiringWg.Add(1)
+	}
 	p.mu.Unlock()
 
 	if oldPool != nil {
@@ -191,22 +235,32 @@ func (p *DynamicVoicePool) MarkDirty() {
 
 // CurrentPool returns the active AgentPool under RLock.
 func (p *DynamicVoicePool) CurrentPool() AgentPool {
-	if p == nil { return nil }
-	p.mu.RLock(); defer p.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.currentPool
 }
 
 // Fingerprint returns the current configuration fingerprint under RLock.
 func (p *DynamicVoicePool) Fingerprint() string {
-	if p == nil { return "" }
-	p.mu.RLock(); defer p.mu.RUnlock()
+	if p == nil {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.currentKey
 }
 
 // AcquireLease delegates lease acquisition to the underlying pool if supported.
 func (p *DynamicVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
 	pool, err := p.activePool()
-	if err != nil { return nil, err }
-	if lp, ok := pool.(LeasedAgentPool); ok { return lp.AcquireLease(ctx, targetKey) }
+	if err != nil {
+		return nil, err
+	}
+	if lp, ok := pool.(LeasedAgentPool); ok {
+		return lp.AcquireLease(ctx, targetKey)
+	}
 	return nil, errors.New("underlying pool does not support leasing")
 }

@@ -18,7 +18,9 @@ type mockVoiceSession struct {
 
 func (s *mockVoiceSession) SessionID() string { return s.sessID }
 func (s *mockVoiceSession) Send(p string, t *TurnContext) error {
-	if s.sendFn != nil { return s.sendFn(p, t) }
+	if s.sendFn != nil {
+		return s.sendFn(p, t)
+	}
 	return nil
 }
 
@@ -38,10 +40,17 @@ func newMockVoicePool(m string) *mockVoicePool {
 }
 
 func (m *mockVoicePool) GetOrCreateSession(ctx context.Context, targetKey, sessionID string) (AgentSession, error) {
-	m.mu.Lock(); defer m.mu.Unlock()
-	if m.getErr != nil { return nil, m.getErr }
-	if sess, ok := m.sessions[targetKey]; ok { return sess, nil }
-	if sessionID == "" { sessionID = targetKey }
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	if sess, ok := m.sessions[targetKey]; ok {
+		return sess, nil
+	}
+	if sessionID == "" {
+		sessionID = targetKey
+	}
 	s := &mockVoiceSession{sessID: sessionID, targetKey: targetKey}
 	m.sessions[targetKey] = s
 	return s, nil
@@ -49,20 +58,25 @@ func (m *mockVoicePool) GetOrCreateSession(ctx context.Context, targetKey, sessi
 
 func (m *mockVoicePool) Initialize(ctx context.Context) error {
 	atomic.AddInt32(&m.initCalled, 1)
-	if m.onInit != nil { m.onInit() }
+	if m.onInit != nil {
+		m.onInit()
+	}
 	return m.initErr
 }
 
 func (m *mockVoicePool) Close() error {
 	atomic.AddInt32(&m.closeCalled, 1)
-	if m.closeGate != nil { <-m.closeGate }
+	if m.closeGate != nil {
+		<-m.closeGate
+	}
 	return m.closeErr
 }
 
 func (m *mockVoicePool) Model() string { return m.model }
 func (m *mockVoicePool) MarkDirty()    { atomic.AddInt32(&m.markDirtyCalled, 1) }
 func (m *mockVoicePool) UpdatePrewarmedTargets(t []string) {
-	m.mu.Lock(); defer m.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.prewarmedTargets = append([]string(nil), t...)
 }
 
@@ -77,6 +91,7 @@ type mockRotatorVoicePool struct {
 func (m *mockRotatorVoicePool) ShouldRotateSession(AgentSession) (bool, string) {
 	return m.shouldRotate, m.rotReason
 }
+
 func (m *mockRotatorVoicePool) RotateSession(context.Context, string) (AgentSession, error) {
 	return m.rotatedSess, m.rotateErr
 }
@@ -121,10 +136,15 @@ type swappablePoolFactory struct {
 }
 
 func (f *swappablePoolFactory) set(p AgentPool, fp string, err error) {
-	f.mu.Lock(); defer f.mu.Unlock(); f.pool, f.fp, f.err = p, fp, err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pool, f.fp, f.err = p, fp, err
 }
+
 func (f *swappablePoolFactory) factory() (AgentPool, string, error) {
-	f.mu.Lock(); defer f.mu.Unlock(); return f.pool, f.fp, f.err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pool, f.fp, f.err
 }
 
 func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
@@ -161,7 +181,8 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 		t.Fatalf("unexpected delegation/passthrough behavior")
 	}
 
-	dyn.Close(); dyn.MarkDirty()
+	dyn.Close()
+	dyn.MarkDirty()
 	_, csErr := dyn.GetOrCreateSession(ctx, "k", "")
 	_, crErr := dyn.RotateSession(ctx, "k")
 	_, clErr := dyn.AcquireLease(ctx, "k")
@@ -173,7 +194,10 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	fakeSess, fakeL := &mockVoiceSession{sessID: "rot-s", targetKey: "k"}, &fakeSessionLease{sessID: "lease-123"}
 	dynRot := NewDynamicVoicePoolWithInitial(&mockRotatorVoicePool{mockVoicePool: newMockVoicePool("m2"), shouldRotate: true, rotReason: "test reason", rotatedSess: fakeSess}, "fp-2", nil)
 	dynLeased := NewDynamicVoicePoolWithInitial(&mockLeasedVoicePool{mockVoicePool: newMockVoicePool("m3"), lease: fakeL}, "fp-3", nil)
-	defer func() { _ = dynRot.Close(); _ = dynLeased.Close() }()
+	defer func() {
+		_ = dynRot.Close()
+		_ = dynLeased.Close()
+	}()
 
 	should, reason := dynRot.ShouldRotateSession(fakeSess)
 	rotSess, rotErr2 := dynRot.RotateSession(ctx, "k")
@@ -240,7 +264,9 @@ func TestDynamicVoicePool_ConcurrentAccessDuringReload(t *testing.T) {
 	mockA, mockB := newMockVoicePool("model-A"), newMockVoicePool("model-B")
 	var toggle atomic.Int32
 	dyn := NewDynamicVoicePool(func() (AgentPool, string, error) {
-		if toggle.Load()%2 == 0 { return mockA, "fp-A", nil }
+		if toggle.Load()%2 == 0 {
+			return mockA, "fp-A", nil
+		}
 		return mockB, "fp-B", nil
 	})
 	defer dyn.Close()
@@ -263,7 +289,9 @@ func TestDynamicVoicePool_ConcurrentAccessDuringReload(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for j := 0; j < 20; j++ {
-			toggle.Add(1); dyn.MarkDirty(); runtime.Gosched()
+			toggle.Add(1)
+			dyn.MarkDirty()
+			runtime.Gosched()
 		}
 	}()
 	wg.Wait()
@@ -275,7 +303,8 @@ func TestDynamicVoicePool_SerializedReloadsAndDrain(t *testing.T) {
 	dyn := NewDynamicVoicePool(func() (AgentPool, string, error) {
 		cur := atomic.AddInt32(&active, 1)
 		defer atomic.AddInt32(&active, -1)
-		for old := atomic.LoadInt32(&maxConc); cur > old && !atomic.CompareAndSwapInt32(&maxConc, old, cur); old = atomic.LoadInt32(&maxConc) {}
+		for old := atomic.LoadInt32(&maxConc); cur > old && !atomic.CompareAndSwapInt32(&maxConc, old, cur); old = atomic.LoadInt32(&maxConc) {
+		}
 		runtime.Gosched()
 		return newMockVoicePool("pool"), fmt.Sprintf("fp-%d", time.Now().UnixNano()), nil
 	})
@@ -283,9 +312,16 @@ func TestDynamicVoicePool_SerializedReloadsAndDrain(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(10)
-	for i := 0; i < 10; i++ { go func() { defer wg.Done(); dyn.MarkDirty() }() }
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer wg.Done()
+			dyn.MarkDirty()
+		}()
+	}
 	wg.Wait()
-	if maxConc > 1 { t.Fatalf("expected serialized reloads (max 1), got %d concurrent reloads", maxConc) }
+	if maxConc > 1 {
+		t.Fatalf("expected serialized reloads (max 1), got %d concurrent reloads", maxConc)
+	}
 
 	mock1, mock2 := newMockVoicePool("model-v1"), newMockVoicePool("model-v2")
 	mock1.closeGate = make(chan struct{})
@@ -295,7 +331,10 @@ func TestDynamicVoicePool_SerializedReloadsAndDrain(t *testing.T) {
 	dyn2.MarkDirty()
 
 	closeStarted, closeDone := make(chan struct{}), make(chan error, 1)
-	go func() { close(closeStarted); closeDone <- dyn2.Close() }()
+	go func() {
+		close(closeStarted)
+		closeDone <- dyn2.Close()
+	}()
 	<-closeStarted
 	runtime.Gosched()
 	close(mock1.closeGate)

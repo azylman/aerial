@@ -177,26 +177,84 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	return d, nil
 }
 
-func (d *StreamingDaemon) State() DaemonState       { d.mu.RLock(); defer d.mu.RUnlock(); return d.state }
-func (d *StreamingDaemon) SessionID() string        { if d == nil { return "" }; d.mu.RLock(); defer d.mu.RUnlock(); return d.sessionID }
-func (d *StreamingDaemon) SetTranscriptRescuer(r func(string, time.Time) string) {
-	if d == nil { return }
-	d.mu.Lock(); defer d.mu.Unlock(); d.cfg.TranscriptRescuer = r
+func (d *StreamingDaemon) State() DaemonState {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.state
 }
-func (d *StreamingDaemon) TurnCount() int           { d.mu.RLock(); defer d.mu.RUnlock(); return d.turnCount }
-func (d *StreamingDaemon) StepCount() int           { d.mu.RLock(); defer d.mu.RUnlock(); return d.stepCount }
-func (d *StreamingDaemon) LastUsed() time.Time      { d.mu.RLock(); defer d.mu.RUnlock(); return d.lastUsed }
+
+func (d *StreamingDaemon) SessionID() string {
+	if d == nil {
+		return ""
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.sessionID
+}
+
+func (d *StreamingDaemon) SetTranscriptRescuer(r func(string, time.Time) string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.TranscriptRescuer = r
+}
+
+func (d *StreamingDaemon) TurnCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.turnCount
+}
+
+func (d *StreamingDaemon) StepCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.stepCount
+}
+
+func (d *StreamingDaemon) LastUsed() time.Time {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lastUsed
+}
 func (d *StreamingDaemon) TaskTracker() *TaskTracker { return d.taskTracker }
-func (d *StreamingDaemon) InflightCount() int       { d.inflightMu.Lock(); defer d.inflightMu.Unlock(); return len(d.inflight) }
-func (d *StreamingDaemon) IsDirty() bool            { d.mu.RLock(); defer d.mu.RUnlock(); return d.dirty }
-func (d *StreamingDaemon) SetSessionID(id string)   { d.mu.Lock(); defer d.mu.Unlock(); d.sessionID = id; if d.stderr != nil { d.stderr.SetSessionID(id) } }
-func (d *StreamingDaemon) MarkDirty()               { d.mu.Lock(); defer d.mu.Unlock(); d.dirty = true }
+func (d *StreamingDaemon) InflightCount() int {
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	return len(d.inflight)
+}
+
+func (d *StreamingDaemon) IsDirty() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.dirty
+}
+
+func (d *StreamingDaemon) SetSessionID(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sessionID = id
+	if d.stderr != nil {
+		d.stderr.SetSessionID(id)
+	}
+}
+
+func (d *StreamingDaemon) MarkDirty() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dirty = true
+}
+
 func (d *StreamingDaemon) SetOnTurnFinished(fn func(d *StreamingDaemon)) {
-	d.mu.Lock(); defer d.mu.Unlock(); d.onTurnFinished = fn
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onTurnFinished = fn
 }
 
 func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
-	d.stdinMu.Lock(); defer d.stdinMu.Unlock()
+	d.stdinMu.Lock()
+	defer d.stdinMu.Unlock()
 	d.mu.RLock()
 	if d.state == StateClosed || d.closed.Load() {
 		d.mu.RUnlock()
@@ -205,10 +263,14 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.mu.RUnlock()
 
 	ctx := context.Background()
-	if turnCtx != nil && turnCtx.Ctx != nil { ctx = turnCtx.Ctx }
+	if turnCtx != nil && turnCtx.Ctx != nil {
+		ctx = turnCtx.Ctx
+	}
 	payloadPrompt := injectRetrievedContext(ctx, prompt, d.cfg.AmbientContextRetriever, 500*time.Millisecond, d.cfg.MemoryRetriever, 2*time.Second, "[StreamingDaemon]")
 	encoded, err := json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
-	if err != nil { return fmt.Errorf("failed to marshal turn prompt: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to marshal turn prompt: %w", err)
+	}
 	encoded = append(encoded, '\n')
 
 	d.inflightMu.Lock()
@@ -219,7 +281,9 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.state, d.lastUsed = StateExecuting, time.Now()
 	d.mu.Unlock()
 
-	if turnCtx != nil && turnCtx.Sink != nil { turnCtx.Sink.OnTurnStarted() }
+	if turnCtx != nil && turnCtx.Sink != nil {
+		turnCtx.Sink.OnTurnStarted()
+	}
 
 	if _, err := d.stdin.Write(encoded); err != nil {
 		d.inflightMu.Lock()
@@ -227,7 +291,9 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 			d.inflight = d.inflight[:len(d.inflight)-1]
 		}
 		d.inflightMu.Unlock()
-		d.mu.Lock(); d.dirty, d.state = true, StateClosed; d.mu.Unlock()
+		d.mu.Lock()
+		d.dirty, d.state = true, StateClosed
+		d.mu.Unlock()
 		return fmt.Errorf("failed writing prompt to daemon stdin: %w", err)
 	}
 	return nil
@@ -237,7 +303,9 @@ func (d *StreamingDaemon) Close() error {
 	var closeErr error
 	d.closeOnce.Do(func() {
 		d.closed.Store(true)
-		d.mu.Lock(); d.state = StateClosed; d.mu.Unlock()
+		d.mu.Lock()
+		d.state = StateClosed
+		d.mu.Unlock()
 
 		closeStreamQuietly(d.stdin, "stdin")
 		closeStreamQuietly(d.stdout, "stdout")
@@ -268,9 +336,13 @@ func (d *StreamingDaemon) Close() error {
 }
 
 func (d *StreamingDaemon) drainInFlightToolsLocked() []inFlightToolCall {
-	if len(d.inFlightTools) == 0 { return nil }
+	if len(d.inFlightTools) == 0 {
+		return nil
+	}
 	dangling := make([]inFlightToolCall, 0, len(d.inFlightTools))
-	for _, rec := range d.inFlightTools { dangling = append(dangling, rec) }
+	for _, rec := range d.inFlightTools {
+		dangling = append(dangling, rec)
+	}
 	d.inFlightTools = make(map[int]inFlightToolCall)
 	return dangling
 }
@@ -281,7 +353,9 @@ func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			if !d.closed.Load() {
-				d.mu.Lock(); d.state = StateClosed; d.mu.Unlock()
+				d.mu.Lock()
+				d.state = StateClosed
+				d.mu.Unlock()
 				d.inflightMu.Lock()
 				remaining, dangling := d.inflight, d.drainInFlightToolsLocked()
 				d.inflight = nil
@@ -313,7 +387,9 @@ func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 
 func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" { return }
+	if trimmed == "" {
+		return
+	}
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 		log.Printf("[StreamingDaemon] Malformed NDJSON line: %v", err)
@@ -326,50 +402,82 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	}
 	d.inflightMu.Lock()
 	var activeTurn *TurnContext
-	if len(d.inflight) > 0 { activeTurn = d.inflight[0] }
+	if len(d.inflight) > 0 {
+		activeTurn = d.inflight[0]
+	}
 	d.inflightMu.Unlock()
-	if activeTurn == nil { return }
+	if activeTurn == nil {
+		return
+	}
 
 	switch event {
 	case "step_update":
-		d.mu.Lock(); d.stepCount++; d.mu.Unlock()
-		if activeTurn.Sink == nil { return }
+		d.mu.Lock()
+		d.stepCount++
+		d.mu.Unlock()
+		if activeTurn.Sink == nil {
+			return
+		}
 
 		var (
 			toolName, canonicalTool, mcpServer, cmdName, activatedSkill string
-			stepIdx int; hasStepIdx, isToolStart, isToolEnd, hasSkill bool
-			toolEndStatus string; completedRecord inFlightToolCall; hasCompletedRecord bool
-			toolParams map[string]any
+			stepIdx                                                     int
+			hasStepIdx, isToolStart, isToolEnd, hasSkill                bool
+			toolEndStatus                                               string
+			completedRecord                                             inFlightToolCall
+			hasCompletedRecord                                          bool
+			toolParams                                                  map[string]any
 		)
 
 		if tc, ok := raw["tool_call"].(map[string]any); ok {
-			if n, ok := tc["name"].(string); ok { toolName = n }
-			if c, ok := tc["command"].(string); ok { cmdName = c }
+			if n, ok := tc["name"].(string); ok {
+				toolName = n
+			}
+			if c, ok := tc["command"].(string); ok {
+				cmdName = c
+			}
 			isToolStart = true
 		}
 		var su map[string]any
 		if m, ok := raw["step_update"].(map[string]any); ok && m != nil {
 			su = m
 			var state, typ string
-			if s, ok := su["state"].(string); ok { state = strings.ToUpper(s)
-			} else if s, ok := su["status"].(string); ok { state = strings.ToUpper(s) }
-			if t, ok := su["type"].(string); ok { typ = strings.ToLower(t)
-			} else if t, ok := su["step_type"].(string); ok { typ = strings.ToLower(t) }
-			if idx, ok := su["step_index"].(float64); ok { stepIdx, hasStepIdx = int(idx), true
-			} else if idx, ok := su["step_index"].(int); ok { stepIdx, hasStepIdx = idx, true }
-			if tn, ok := su["tool_name"].(string); ok && tn != "" { toolName = tn }
+			if s, ok := su["state"].(string); ok {
+				state = strings.ToUpper(s)
+			} else if s, ok := su["status"].(string); ok {
+				state = strings.ToUpper(s)
+			}
+			if t, ok := su["type"].(string); ok {
+				typ = strings.ToLower(t)
+			} else if t, ok := su["step_type"].(string); ok {
+				typ = strings.ToLower(t)
+			}
+			if idx, ok := su["step_index"].(float64); ok {
+				stepIdx, hasStepIdx = int(idx), true
+			} else if idx, ok := su["step_index"].(int); ok {
+				stepIdx, hasStepIdx = idx, true
+			}
+			if tn, ok := su["tool_name"].(string); ok && tn != "" {
+				toolName = tn
+			}
 			if info, ok := su["tool_info"].(map[string]any); ok {
 				if params, ok := info["parameters"].(map[string]any); ok {
 					toolParams = params
-					if cl, ok := params["CommandLine"].(string); ok && cl != "" { cmdName = cl }
+					if cl, ok := params["CommandLine"].(string); ok && cl != "" {
+						cmdName = cl
+					}
 				}
 			}
 			if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
 				if firstTc, ok := tcs[0].(map[string]any); ok {
-					if n, ok := firstTc["name"].(string); ok && toolName == "" { toolName = n }
+					if n, ok := firstTc["name"].(string); ok && toolName == "" {
+						toolName = n
+					}
 					if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
 						toolParams = args
-						if cl, ok := args["CommandLine"].(string); ok && cl != "" { cmdName = cl }
+						if cl, ok := args["CommandLine"].(string); ok && cl != "" {
+							cmdName = cl
+						}
 					}
 				}
 			}
@@ -378,23 +486,34 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 					isToolStart = true
 				} else {
 					isToolStart, isToolEnd = false, true
-					if state == "DONE" { toolEndStatus = "ok" } else { toolEndStatus = "error" }
+					if state == "DONE" {
+						toolEndStatus = "ok"
+					} else {
+						toolEndStatus = "error"
+					}
 				}
 			}
 		}
 
 		if !hasStepIdx {
-			if idx, ok := raw["step_index"].(float64); ok { stepIdx, hasStepIdx = int(idx), true
-			} else if idx, ok := raw["step_index"].(int); ok { stepIdx, hasStepIdx = idx, true }
+			if idx, ok := raw["step_index"].(float64); ok {
+				stepIdx, hasStepIdx = int(idx), true
+			} else if idx, ok := raw["step_index"].(int); ok {
+				stepIdx, hasStepIdx = idx, true
+			}
 		}
 
 		if hasStepIdx {
 			d.inflightMu.Lock()
 			isNewStep := !activeTurn.hasSeenStep || stepIdx != activeTurn.lastStepIndex
-			if isNewStep { activeTurn.hasSeenStep, activeTurn.lastStepIndex = true, stepIdx }
+			if isNewStep {
+				activeTurn.hasSeenStep, activeTurn.lastStepIndex = true, stepIdx
+			}
 			d.inflightMu.Unlock()
 			if isNewStep {
-				if sa, ok := activeTurn.Sink.(StepAwareSink); ok { sa.OnStepStarted(stepIdx) }
+				if sa, ok := activeTurn.Sink.(StepAwareSink); ok {
+					sa.OnStepStarted(stepIdx)
+				}
 			}
 		}
 
@@ -403,15 +522,21 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			canonicalTool, mcpServer = ExtractMCPToolInfo(toolName, toolParams)
 			if toolParams != nil {
 				if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
-					if skill, ok := ExtractSkillFromTarget(path); ok { activatedSkill, hasSkill = skill, true }
+					if skill, ok := ExtractSkillFromTarget(path); ok {
+						activatedSkill, hasSkill = skill, true
+					}
 				}
 			}
 			if !hasSkill && cmdName != "" {
-				if skill, ok := ExtractSkillFromTarget(cmdName); ok { activatedSkill, hasSkill = skill, true }
+				if skill, ok := ExtractSkillFromTarget(cmdName); ok {
+					activatedSkill, hasSkill = skill, true
+				}
 			}
 
 			d.inflightMu.Lock()
-			if d.inFlightTools == nil { d.inFlightTools = make(map[int]inFlightToolCall) }
+			if d.inFlightTools == nil {
+				d.inFlightTools = make(map[int]inFlightToolCall)
+			}
 			if hasStepIdx {
 				if _, exists := d.inFlightTools[stepIdx]; !exists {
 					d.inFlightTools[stepIdx] = inFlightToolCall{stepIndex: stepIdx, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
@@ -420,7 +545,10 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			} else {
 				alreadyInFlight := false
 				for _, rec := range d.inFlightTools {
-					if rec.toolName == canonicalTool { alreadyInFlight = true; break }
+					if rec.toolName == canonicalTool {
+						alreadyInFlight = true
+						break
+					}
 				}
 				if !alreadyInFlight {
 					d.inFlightTools[-1] = inFlightToolCall{stepIndex: -1, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
@@ -454,22 +582,33 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		if isNewToolStart && (canonicalTool != "" || cmdName != "") {
 			activeTurn.Sink.OnToolCall(canonicalTool, cmdName)
 		}
-		if hasSkill { activeTurn.Sink.OnSkillActivated(activatedSkill, "discord") }
+		if hasSkill {
+			activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
+		}
 		if isToolEnd && hasCompletedRecord {
 			activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), toolEndStatus)
 		}
 		var delta string
 		for _, m := range []map[string]any{raw, su} {
-			if m == nil || delta != "" { continue }
+			if m == nil || delta != "" {
+				continue
+			}
 			for _, k := range []string{"delta", "text_delta"} {
-				if d, ok := m[k].(string); ok && d != "" { delta = d; break }
+				if d, ok := m[k].(string); ok && d != "" {
+					delta = d
+					break
+				}
 			}
 		}
-		if delta != "" { activeTurn.Sink.OnTextDelta(delta) }
+		if delta != "" {
+			activeTurn.Sink.OnTextDelta(delta)
+		}
 		if _, ok := raw["thinking"]; ok {
 			activeTurn.Sink.OnThinking()
 		} else if su != nil {
-			if _, ok := su["thinking"]; ok { activeTurn.Sink.OnThinking() }
+			if _, ok := su["thinking"]; ok {
+				activeTurn.Sink.OnThinking()
+			}
 		}
 
 	case "result":
@@ -497,17 +636,25 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			}
 		}
 		var turnFinishedCb func(d *StreamingDaemon)
-		if !hasMoreInflight { turnFinishedCb = d.onTurnFinished }
+		if !hasMoreInflight {
+			turnFinishedCb = d.onTurnFinished
+		}
 		d.mu.Unlock()
 
-		if turnFinishedCb != nil { go turnFinishedCb(d) }
-		if activeTurn == nil || activeTurn.Sink == nil { return }
+		if turnFinishedCb != nil {
+			go turnFinishedCb(d)
+		}
+		if activeTurn == nil || activeTurn.Sink == nil {
+			return
+		}
 
 		currentModel := d.cfg.Model
 		if activeTurn != nil && strings.TrimSpace(activeTurn.Model) != "" {
 			currentModel = strings.TrimSpace(activeTurn.Model)
 		}
-		if currentModel == "" { currentModel = "default" }
+		if currentModel == "" {
+			currentModel = "default"
+		}
 
 		respStr := extractResponseString(raw)
 		var status, errMsg string
@@ -516,12 +663,18 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			resObj = r
 		}
 		for _, m := range []map[string]any{resObj, raw} {
-			if m == nil { continue }
+			if m == nil {
+				continue
+			}
 			if status == "" {
-				if s, ok := m["status"].(string); ok { status = s }
+				if s, ok := m["status"].(string); ok {
+					status = s
+				}
 			}
 			if errMsg == "" {
-				if em, ok := m["error"].(string); ok { errMsg = em }
+				if em, ok := m["error"].(string); ok {
+					errMsg = em
+				}
 			}
 		}
 
@@ -540,7 +693,9 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			if strings.EqualFold(status, "ERROR") {
 				if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
 					recordStreamErrorMetric(errMsg, currentModel, true)
-					if errMsg == "" { errMsg = "daemon execution failed" }
+					if errMsg == "" {
+						errMsg = "daemon execution failed"
+					}
 					activeTurn.Sink.OnError(errors.New(errMsg))
 					return
 				}
@@ -561,27 +716,39 @@ func extractResponseString(raw map[string]any) string {
 	keys := []string{"response", "result", "content", "text"}
 	if resObj, ok := raw["result"].(map[string]any); ok {
 		for _, k := range keys {
-			if resp, ok := resObj[k].(string); ok && strings.TrimSpace(resp) != "" { return resp }
+			if resp, ok := resObj[k].(string); ok && strings.TrimSpace(resp) != "" {
+				return resp
+			}
 		}
 	}
 	for _, k := range []string{"response", "content", "text"} {
-		if resp, ok := raw[k].(string); ok && strings.TrimSpace(resp) != "" { return resp }
+		if resp, ok := raw[k].(string); ok && strings.TrimSpace(resp) != "" {
+			return resp
+		}
 	}
 	return ""
 }
 
 func populateUsage(res *TurnResult, raw map[string]any) {
-	if res == nil || raw == nil { return }
+	if res == nil || raw == nil {
+		return
+	}
 	var usageObj map[string]any
 	if u, ok := raw["usage"].(map[string]any); ok {
 		usageObj = u
 	}
 	if resObj, ok := raw["result"].(map[string]any); ok {
-		if u, ok := resObj["usage"].(map[string]any); ok { usageObj = u }
+		if u, ok := resObj["usage"].(map[string]any); ok {
+			usageObj = u
+		}
 	}
-	if usageObj == nil { return }
+	if usageObj == nil {
+		return
+	}
 	getInt := func(k string, dst *int) {
-		if v, ok := usageObj[k].(float64); ok { *dst = int(v) }
+		if v, ok := usageObj[k].(float64); ok {
+			*dst = int(v)
+		}
 	}
 	getInt("input_tokens", &res.Usage.InputTokens)
 	getInt("output_tokens", &res.Usage.OutputTokens)
@@ -591,7 +758,9 @@ func populateUsage(res *TurnResult, raw map[string]any) {
 }
 
 func recordStreamErrorMetric(errMsg, model string, recordProcessErr bool) {
-	if errMsg == "" && !recordProcessErr { return }
+	if errMsg == "" && !recordProcessErr {
+		return
+	}
 	if IsCapacityBlip(errMsg, "") {
 		metrics.RecordRunnerError("capacity_throttle", model)
 	} else if IsQuotaPause(errMsg, "") {

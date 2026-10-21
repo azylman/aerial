@@ -2,8 +2,10 @@ package runner
 
 import "context"
 
-type MemoryRetriever func(ctx context.Context, query string) (string, error)
-type AmbientContextRetriever func(ctx context.Context) (string, error)
+type (
+	MemoryRetriever         func(ctx context.Context, query string) (string, error)
+	AmbientContextRetriever func(ctx context.Context) (string, error)
+)
 
 type SessionRecord struct {
 	ActiveSessionID   string

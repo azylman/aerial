@@ -54,8 +54,14 @@ func TestIsSubstantiveResponse(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"", false}, {"   \t\n  ", false}, {"[Tool Call Requested]: ha_call_service", false}, {"   [Tool Call Requested]: bash   ", false},
-		{"<turn>unclosed content", false}, {"<turn>content</turn>", true}, {"Hello, I am Aerial.", true}, {"```go\nfmt.Println(1)\n```", true},
+		{"", false},
+		{"   \t\n  ", false},
+		{"[Tool Call Requested]: ha_call_service", false},
+		{"   [Tool Call Requested]: bash   ", false},
+		{"<turn>unclosed content", false},
+		{"<turn>content</turn>", true},
+		{"Hello, I am Aerial.", true},
+		{"```go\nfmt.Println(1)\n```", true},
 	} {
 		if got := IsSubstantiveResponse(tc.in); got != tc.want {
 			t.Errorf("IsSubstantiveResponse(%q) = %v, want %v", tc.in, got, tc.want)
@@ -112,9 +118,13 @@ func TestBufferingTurnSink_OnResultPrecedence(t *testing.T) {
 		incoming *TurnResult
 		wantResp string
 	}{
-		{[]string{"Clean terminal output."}, &TurnResult{Response: "Concatenated multi-step noise"}, "Clean terminal output."}, {nil, &TurnResult{Response: "Non-streaming fallback response"}, "Non-streaming fallback response"},
-		{[]string{"   \n\t  "}, &TurnResult{Response: "Fallback for whitespace buffer"}, "Fallback for whitespace buffer"}, {[]string{"Delta text"}, nil, "Delta text"},
-		{nil, &TurnResult{Response: ""}, ""}, {[]string{"Streamed delta message."}, &TurnResult{Response: ""}, "Streamed delta message."}, {[]string{"Streamed delta for nil result."}, nil, "Streamed delta for nil result."},
+		{[]string{"Clean terminal output."}, &TurnResult{Response: "Concatenated multi-step noise"}, "Clean terminal output."},
+		{nil, &TurnResult{Response: "Non-streaming fallback response"}, "Non-streaming fallback response"},
+		{[]string{"   \n\t  "}, &TurnResult{Response: "Fallback for whitespace buffer"}, "Fallback for whitespace buffer"},
+		{[]string{"Delta text"}, nil, "Delta text"},
+		{nil, &TurnResult{Response: ""}, ""},
+		{[]string{"Streamed delta message."}, &TurnResult{Response: ""}, "Streamed delta message."},
+		{[]string{"Streamed delta for nil result."}, nil, "Streamed delta for nil result."},
 	} {
 		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 		for _, d := range tc.deltas {
@@ -135,7 +145,8 @@ func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
 		call, done     bool
 		res, want      string
 	}{
-		{pre: []string{"Pre-tool commentary."}, call: true, res: "Pre-tool commentary.", want: ""}, {pre: []string{"Stray delta."}, done: true, res: "", want: ""},
+		{pre: []string{"Pre-tool commentary."}, call: true, res: "Pre-tool commentary.", want: ""},
+		{pre: []string{"Stray delta."}, done: true, res: "", want: ""},
 		{pre: []string{"Let me run tests..."}, mid: []string{"chunk..."}, post: []string{"All tests passed! ", "Ready."}, call: true, done: true, res: "Noise. All tests passed! Ready.", want: "All tests passed! Ready."},
 		{call: true, done: true, res: "Completed task output.", want: "Completed task output."},
 	} {
@@ -174,7 +185,8 @@ func TestBufferingTurnSink_StepResetPurgesBuffer(t *testing.T) {
 		wantHooks     []int
 	}{
 		{[][]string{{"wait..."}, {"check..."}, {"Clean! ", "Ready."}}, []int{348, 349, 352}, "wait... check... Clean! Ready.", "Clean! Ready.", []int{348, 349, 352}},
-		{[][]string{{"Waiting commentary."}, nil}, []int{1, 2}, "Waiting commentary.", "", nil}, {[][]string{{"Clean direct response."}}, []int{1}, "Clean direct response.", "Clean direct response.", nil},
+		{[][]string{{"Waiting commentary."}, nil}, []int{1, 2}, "Waiting commentary.", "", nil},
+		{[][]string{{"Clean direct response."}}, []int{1}, "Clean direct response.", "Clean direct response.", nil},
 	} {
 		var hooks []int
 		cfg := BufferingTurnSinkConfig{}

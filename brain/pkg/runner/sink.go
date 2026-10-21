@@ -123,8 +123,10 @@ type BufferingTurnSink struct {
 	once               sync.Once
 }
 
-var _ TurnSink = (*BufferingTurnSink)(nil)
-var _ StepAwareSink = (*BufferingTurnSink)(nil)
+var (
+	_ TurnSink      = (*BufferingTurnSink)(nil)
+	_ StepAwareSink = (*BufferingTurnSink)(nil)
+)
 
 func NewBufferingTurnSink(cfg BufferingTurnSinkConfig) *BufferingTurnSink {
 	return &BufferingTurnSink{cfg: cfg, resCh: make(chan *TurnResult, 1), errCh: make(chan error, 1)}
