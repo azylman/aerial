@@ -36,24 +36,16 @@ type mockTransport struct {
 func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	var bodyBytes []byte
 	if req.Body != nil {
 		bodyBytes, _ = io.ReadAll(req.Body)
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
-
-	m.requests = append(m.requests, capturedRequest{
-		Method: req.Method,
-		URL:    req.URL.String(),
-		Body:   bodyBytes,
-	})
-
-	code := m.respCode
+	m.requests = append(m.requests, capturedRequest{Method: req.Method, URL: req.URL.String(), Body: bodyBytes})
+	code, body := m.respCode, m.respBody
 	if code == 0 {
 		code = http.StatusOK
 	}
-	body := m.respBody
 	if body == "" {
 		if strings.Contains(req.URL.Path, "commands") {
 			body = `[]`
@@ -61,21 +53,16 @@ func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			body = `{"id":"dummy-id"}`
 		}
 	}
-
-	header := make(http.Header)
-	header.Set("Content-Type", "application/json")
-
 	if code >= 400 {
 		return &http.Response{
 			StatusCode: code,
-			Header:     header,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
 			Body:       io.NopCloser(strings.NewReader(`{"message":"simulated error","code":500}`)),
 		}, nil
 	}
-
 	return &http.Response{
 		StatusCode: code,
-		Header:     header,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}, nil
 }
@@ -92,1234 +79,588 @@ func newMockDiscordSession(transport *mockTransport) *discordgo.Session {
 	s, _ := discordgo.New("Bot mock-token")
 	s.Client = &http.Client{Transport: transport}
 	s.State = discordgo.NewState()
-	s.State.User = &discordgo.User{
-		ID:       "bot-123",
-		Username: "Aerial",
-	}
+	s.State.User = &discordgo.User{ID: "bot-123", Username: "Aerial"}
 	return s
 }
 
-func TestCommandDefinitions(t *testing.T) {
-	t.Parallel()
-
-	cmds := CommandDefinitions()
-	if len(cmds) != 5 {
-		t.Fatalf("expected 5 command definitions, got %d", len(cmds))
-	}
-
-	expectedCmds := map[string]int{
-		"status":      0,
-		"rotate":      2,
-		"interrupt":   2,
-		"mode":        2,
-		"ignore_bots": 2,
-	}
-
-	for _, cmd := range cmds {
-		expOpts, ok := expectedCmds[cmd.Name]
-		if !ok {
-			t.Errorf("unexpected command: %s", cmd.Name)
-			continue
-		}
-		if len(cmd.Options) != expOpts {
-			t.Errorf("command %s: expected %d options, got %d", cmd.Name, expOpts, len(cmd.Options))
-		}
-	}
-}
-
-func TestHelpers(t *testing.T) {
-	t.Parallel()
-
-	// getBoolOption
-	opts := []*discordgo.ApplicationCommandInteractionDataOption{
-		{Name: "opt_true", Type: discordgo.ApplicationCommandOptionBoolean, Value: true},
-		{Name: "opt_false", Type: discordgo.ApplicationCommandOptionBoolean, Value: false},
-		{Name: "opt_str", Type: discordgo.ApplicationCommandOptionString, Value: "hello"},
-		{Name: "opt_ch", Type: discordgo.ApplicationCommandOptionChannel, Value: "channel-999"},
-		{Name: "opt_val_str", Type: discordgo.ApplicationCommandOptionChannel, Value: "channel-raw-val"},
-	}
-
-	if !getBoolOption(opts, "opt_true", false) {
-		t.Errorf("expected opt_true to be true")
-	}
-	if getBoolOption(opts, "opt_false", true) {
-		t.Errorf("expected opt_false to be false")
-	}
-	if !getBoolOption(opts, "missing", true) {
-		t.Errorf("expected fallback true for missing")
-	}
-
-	// getStringOption
-	if got := getStringOption(opts, "opt_str", ""); got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
-	}
-	if got := getStringOption(opts, "missing", "default"); got != "default" {
-		t.Errorf("expected 'default', got %q", got)
-	}
-
-	// getChannelOption
-	if got := getChannelOption(opts, "opt_ch", "fallback"); got != "channel-999" {
-		t.Errorf("expected 'channel-999', got %q", got)
-	}
-	if got := getChannelOption(opts, "opt_val_str", "fallback"); got != "channel-raw-val" {
-		t.Errorf("expected 'channel-raw-val', got %q", got)
-	}
-	if got := getChannelOption(opts, "missing", "fallback"); got != "fallback" {
-		t.Errorf("expected 'fallback', got %q", got)
-	}
-
-	// hasOption
-	if !hasOption(opts, "opt_true") {
-		t.Errorf("expected hasOption opt_true to be true")
-	}
-	if hasOption(opts, "nonexistent") {
-		t.Errorf("expected hasOption nonexistent to be false")
-	}
-
-	// truncateRunes
-	if got := truncateRunes("hello world", 5); got != "hello..." {
-		t.Errorf("expected 'hello...', got %q", got)
-	}
-	if got := truncateRunes("hi", 5); got != "hi" {
-		t.Errorf("expected 'hi', got %q", got)
-	}
-
-	// formatRelativeDuration
-	if got := formatRelativeDuration(-10 * time.Second); got != "10s" {
-		t.Errorf("expected '10s' for negative, got %q", got)
-	}
-	if got := formatRelativeDuration(45 * time.Second); got != "45s" {
-		t.Errorf("expected '45s', got %q", got)
-	}
-	if got := formatRelativeDuration(5*time.Minute + 30*time.Second); got != "5m" {
-		t.Errorf("expected '5m', got %q", got)
-	}
-	if got := formatRelativeDuration(2*time.Hour + 10*time.Minute); got != "2h 10m" {
-		t.Errorf("expected '2h 10m', got %q", got)
-	}
-	if got := formatRelativeDuration(25 * time.Hour); got != "1d 1h" {
-		t.Errorf("expected '1d 1h', got %q", got)
-	}
-
-	// formatRelativeTime
-	if got := formatRelativeTime(10 * time.Second); got != "just now" {
-		t.Errorf("expected 'just now', got %q", got)
-	}
-	if got := formatRelativeTime(5 * time.Minute); got != "5m" {
-		t.Errorf("expected '5m', got %q", got)
-	}
-	if got := formatRelativeTime(3 * time.Hour); got != "3h" {
-		t.Errorf("expected '3h', got %q", got)
-	}
-	if got := formatRelativeTime(48 * time.Hour); got != "2d" {
-		t.Errorf("expected '2d', got %q", got)
-	}
-}
-
-func setupTestRouter(adminID string) (*Router, *config.Config, *mockTransport) {
-	transport := &mockTransport{}
-	cfgData := &config.ConfigData{
+func setupTestRouter(adminID string, httpStatus int) (*Router, *config.Config, *mockTransport, *discordgo.Session) {
+	transport := &mockTransport{respCode: httpStatus}
+	cfg := config.NewFromData(&config.ConfigData{
 		AdminUsers: []string{adminID},
-		Channels: map[string]config.ChannelPolicy{
-			"chan-1": {
-				Mode: "thread",
-			},
-			"chan-2": {
-				Mode: "mention",
-			},
-		},
-	}
-	cfg := config.NewFromData(cfgData)
-	router := NewRouter(InteractionDeps{
-		Config: cfg,
+		Channels:   map[string]config.ChannelPolicy{"chan-1": {Mode: "thread"}, "chan-2": {Mode: "mention"}},
 	})
-	return router, cfg, transport
+	return NewRouter(InteractionDeps{Config: cfg}), cfg, transport, newMockDiscordSession(transport)
 }
 
-func TestRouter_Auth_NonAdmin(t *testing.T) {
-	t.Parallel()
+func mkOpt(name string, optType discordgo.ApplicationCommandOptionType, val any) *discordgo.ApplicationCommandInteractionDataOption {
+	return &discordgo.ApplicationCommandInteractionDataOption{Name: name, Type: optType, Value: val}
+}
 
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	// Case 1: Member user is not admin
-	interaction := &discordgo.InteractionCreate{
+func mkCmd(id, channelID, userID, name string, opts ...*discordgo.ApplicationCommandInteractionDataOption) *discordgo.InteractionCreate {
+	ic := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
-			ID:    "int-1",
-			Type:  discordgo.InteractionApplicationCommand,
-			Token: "token-1",
-			Member: &discordgo.Member{
-				User: &discordgo.User{
-					ID:       "attacker-999",
-					Username: "attacker",
-				},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "status",
-			},
+			ID: id, ChannelID: channelID, Type: discordgo.InteractionApplicationCommand, Token: "token-" + id,
+			Data: discordgo.ApplicationCommandInteractionData{Name: name, Options: opts},
 		},
 	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
+	if userID != "" {
+		ic.Member = &discordgo.Member{User: &discordgo.User{ID: userID, Username: "user-" + userID}}
 	}
-	if !strings.Contains(string(reqs[0].Body), "Unauthorized") {
-		t.Errorf("expected response body to contain Unauthorized, got: %s", string(reqs[0].Body))
-	}
+	return ic
+}
 
-	// Case 2: DM User is not admin
-	interactionDM := &discordgo.InteractionCreate{
+func mkDMCmd(id, userID, name string, opts ...*discordgo.ApplicationCommandInteractionDataOption) *discordgo.InteractionCreate {
+	return &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
-			ID:    "int-2",
-			Type:  discordgo.InteractionApplicationCommand,
-			Token: "token-2",
-			User: &discordgo.User{
-				ID:       "attacker-888",
-				Username: "attacker_dm",
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "status",
-			},
+			ID: id, Type: discordgo.InteractionApplicationCommand, Token: "token-" + id,
+			User: &discordgo.User{ID: userID, Username: "user-" + userID},
+			Data: discordgo.ApplicationCommandInteractionData{Name: name, Options: opts},
 		},
-	}
-
-	router.Handle(session, interactionDM)
-
-	reqs = transport.Requests()
-	if len(reqs) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(reqs))
-	}
-	if !strings.Contains(string(reqs[1].Body), "Unauthorized") {
-		t.Errorf("expected DM response body to contain Unauthorized, got: %s", string(reqs[1].Body))
 	}
 }
 
-func TestRouter_UnrecognizedCommand(t *testing.T) {
-	t.Parallel()
-
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "int-1",
-			Type:  discordgo.InteractionApplicationCommand,
-			Token: "token-1",
-			Member: &discordgo.Member{
-				User: &discordgo.User{
-					ID: "admin-123",
-				},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "nonexistent_cmd",
-			},
-		},
+func newMockProcessPools(threadID string) *queue.WorkerPool {
+	spawner := runner.NewMockDaemonSpawner()
+	mk := func(m string) *runner.UnifiedProcessPool {
+		p := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: m}, spawner)
+		_, _ = p.GetOrCreate(context.Background(), threadID, "")
+		return p
 	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	if !strings.Contains(string(reqs[0].Body), "Unrecognized command") {
-		t.Errorf("expected response to mention Unrecognized command, got: %s", string(reqs[0].Body))
-	}
-}
-
-func TestRouter_HandleStatus(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	store := db.NewFakeStore()
-	ctx := context.Background()
-
-	// Seed facts
-	_, err := store.InsertFact(ctx, "architecture", "Aerial runs on PostgreSQL 16 with pgvector", 0.9, nil)
-	if err != nil {
-		t.Fatalf("InsertFact failed: %v", err)
-	}
-
-	// Seed cron
-	now := time.Now().UTC()
-	err = store.CreateCronSchedule(ctx, db.CronSchedule{
-		ID:          "cron-1",
-		CronExpr:    "0 9 * * *",
-		Prompt:      "Morning system briefing",
-		TitlePrefix: "Morning briefing",
-		NextRunAt:   now.Add(2 * time.Hour),
+	return queue.NewWorkerPool(queue.WorkerPoolConfig{
+		ProcessPool:             mk("gemini-2.5-flash"),
+		LowEffortProcessPool:    mk("gemini-2.5-flash"),
+		MediumEffortProcessPool: mk("gemini-3.8-flash-medium"),
 	})
-	if err != nil {
-		t.Fatalf("CreateCronSchedule failed: %v", err)
-	}
-
-	router.deps.Store = store
-	router.deps.DeployStatusProvider = func() string {
-		return "`aerial@bfed897` (Live, healthy)"
-	}
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-status",
-			ChannelID: "chan-1",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-status",
-			Member: &discordgo.Member{
-				User: &discordgo.User{
-					ID: "admin-123",
-				},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "status",
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	body := string(reqs[0].Body)
-	if !strings.Contains(body, "**Runtime**:") {
-		t.Errorf("expected **Runtime**: in response, got %s", body)
-	}
-	if !strings.Contains(body, "`aerial@bfed897`") {
-		t.Errorf("expected deploy status in response, got %s", body)
-	}
-	if !strings.Contains(body, "1 facts recorded") {
-		t.Errorf("expected '1 facts recorded' in response, got %s", body)
-	}
-	if !strings.Contains(body, "Morning briefing") {
-		t.Errorf("expected 'Morning briefing' in response, got %s", body)
-	}
 }
 
-func TestRouter_HandleStatus_FallbackAndEnv(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	os.Setenv("GIT_COMMIT", "abcdef123456")
-	defer os.Unsetenv("GIT_COMMIT")
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-status-fallback",
-			ChannelID: "chan-fallback",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-fallback",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "status",
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	body := string(reqs[0].Body)
-	if !strings.Contains(body, "`aerial@abcdef1`") {
-		t.Errorf("expected GIT_COMMIT env in status, got %s", body)
-	}
-	if !strings.Contains(body, "`Idle`") {
-		t.Errorf("expected Idle runtime in status, got %s", body)
-	}
-}
-
-func TestRouter_HandleRotate(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-	store := db.NewFakeStore()
-	router.deps.Store = store
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-rotate",
-			ChannelID: "chan-rotate",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-rotate",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "rotate",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "bare", Type: discordgo.ApplicationCommandOptionBoolean, Value: true},
-					{Name: "topic", Type: discordgo.ApplicationCommandOptionString, Value: "refactor queue"},
-				},
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	// Should have 1 response (deferred) and 1 edit
-	if len(reqs) != 2 {
-		t.Fatalf("expected 2 requests (deferred + edit), got %d", len(reqs))
-	}
-
-	// Verify deferred response type
-	var deferredResp discordgo.InteractionResponse
-	if err := json.Unmarshal(reqs[0].Body, &deferredResp); err != nil {
-		t.Fatalf("failed to unmarshal deferred response: %v", err)
-	}
-	if deferredResp.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
-		t.Errorf("expected deferred response type, got %d", deferredResp.Type)
-	}
-
-	// Verify edited content
-	editBody := string(reqs[1].Body)
-	if !strings.Contains(editBody, "Bare session wipe complete") {
-		t.Errorf("expected bare wipe message, got %s", editBody)
-	}
-	if !strings.Contains(editBody, "refactor queue") {
-		t.Errorf("expected topic in edit message, got %s", editBody)
-	}
-}
-
-func TestRouter_HandleInterrupt(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-	store := db.NewFakeStore()
-	ctx := context.Background()
-
-	// Seed pending message in thread
-	err := store.InsertMessage(ctx, db.Message{
-		ID:        "msg-pending-1",
-		ThreadID:  "chan-interrupt",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatalf("InsertMessage failed: %v", err)
-	}
-
-	router.deps.Store = store
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-interrupt",
-			ChannelID: "chan-interrupt",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-interrupt",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "interrupt",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "drain_queue", Type: discordgo.ApplicationCommandOptionBoolean, Value: true},
-					{Name: "reset", Type: discordgo.ApplicationCommandOptionBoolean, Value: true},
-				},
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	body := string(reqs[0].Body)
-	if !strings.Contains(body, "Interrupted active turn execution") {
-		t.Errorf("expected Interrupted text, got %s", body)
-	}
-	if !strings.Contains(body, "Pending message backlog purged") {
-		t.Errorf("expected backlog purged text, got %s", body)
-	}
-	if !strings.Contains(body, "Session rotated") {
-		t.Errorf("expected session rotated text, got %s", body)
-	}
-
-	// Verify message in store was updated to failed
-	msg, err := store.GetMessage(ctx, "msg-pending-1")
-	if err != nil {
-		t.Fatalf("GetMessage failed: %v", err)
-	}
-	if msg.Status != db.StatusFailed {
-		t.Errorf("expected message status failed, got %s", msg.Status)
-	}
-}
-
-func TestRouter_HandleMode_BareAndSet(t *testing.T) {
-	oldDelay := deployProgressDelay
-	deployProgressDelay = 10 * time.Millisecond
-	defer func() { deployProgressDelay = oldDelay }()
-
-	router, cfg, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	// 1. Bare query
-	bareInteraction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-mode-bare",
-			ChannelID: "chan-1",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-mode-bare",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "mode",
-			},
-		},
-	}
-
-	router.Handle(session, bareInteraction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 immediate response, got %d", len(reqs))
-	}
-	if !strings.Contains(string(reqs[0].Body), "**Mode**: `thread`") {
-		t.Errorf("expected Mode thread, got %s", string(reqs[0].Body))
-	}
-
-	// 2. Set mode with GitOps updater
-	var gitOpsCalled bool
-	var gitOpsKey string
-	router.deps.GitOpsChannelUpdater = func(ctx context.Context, channelKey string, mutateFn func(p *config.ChannelPolicy)) (string, error) {
-		gitOpsCalled = true
-		gitOpsKey = channelKey
+func mockGitOpsUpdater(cfg *config.Config, shouldErr bool) GitOpsChannelUpdater {
+	return func(ctx context.Context, channelKey string, mutateFn func(p *config.ChannelPolicy)) (string, error) {
+		if shouldErr {
+			return "", errors.New("gitops commit failed: branch protected")
+		}
 		p := cfg.Current().Channels[channelKey]
 		mutateFn(&p)
 		cfg.Current().Channels[channelKey] = p
 		return "gitops-sha-123", nil
 	}
-
-	setInteraction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-mode-set",
-			ChannelID: "chan-1",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-mode-set",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "mode",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "mode", Type: discordgo.ApplicationCommandOptionString, Value: "classifier"},
-				},
-			},
-		},
-	}
-
-	router.Handle(session, setInteraction)
-
-	// Wait for background goroutine to finish 5 stages
-	time.Sleep(100 * time.Millisecond)
-
-	if !gitOpsCalled {
-		t.Errorf("expected GitOpsChannelUpdater to be called")
-	}
-	if gitOpsKey != "chan-1" {
-		t.Errorf("expected channel chan-1, got %s", gitOpsKey)
-	}
-
-	// Verify channel mode updated in config
-	pol := cfg.ResolveChannelPolicy("chan-1", "")
-	if pol.Mode != "classifier" {
-		t.Errorf("expected mode classifier, got %s", pol.Mode)
-	}
 }
 
-func TestRouter_HandleIgnoreBots_BareAndSet(t *testing.T) {
-	oldDelay := deployProgressDelay
-	deployProgressDelay = 10 * time.Millisecond
-	defer func() { deployProgressDelay = oldDelay }()
-
-	router, cfg, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	// 1. Bare query
-	bareInteraction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-ignorebots-bare",
-			ChannelID: "chan-2",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-ignorebots-bare",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "ignore_bots",
-			},
-		},
+func seedStatusFixtures(store *db.FakeStore, facts, crons, oneShots, active bool) {
+	ctx, now := context.Background(), time.Now().UTC()
+	if facts {
+		_, _ = store.InsertFact(ctx, "architecture", "Aerial runs on PostgreSQL 16 with pgvector", 0.9, nil)
 	}
-
-	router.Handle(session, bareInteraction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 immediate response, got %d", len(reqs))
-	}
-	if !strings.Contains(string(reqs[0].Body), "**Ignore Bots**:") {
-		t.Errorf("expected Ignore Bots in body, got %s", string(reqs[0].Body))
-	}
-
-	// 2. Set ignore_bots
-	setInteraction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-ignorebots-set",
-			ChannelID: "chan-2",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-ignorebots-set",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "ignore_bots",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "enabled", Type: discordgo.ApplicationCommandOptionBoolean, Value: true},
-				},
-			},
-		},
-	}
-
-	router.Handle(session, setInteraction)
-
-	// Wait for background goroutine to finish stages
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify channel ignore_bots updated in config
-	pol := cfg.ResolveChannelPolicy("chan-2", "")
-	if !pol.IsBotIgnored() {
-		t.Errorf("expected IsBotIgnored to be true after update")
-	}
-}
-
-func TestRegisterGuildCommands_And_Once(t *testing.T) {
-	ResetRegisteredGuilds()
-	defer ResetRegisteredGuilds()
-
-	transport := &mockTransport{}
-	session := newMockDiscordSession(transport)
-
-	// First registration call
-	cmds, err := RegisterGuildCommandsOnce(session, "app-123", "guild-456")
-	if err != nil {
-		t.Fatalf("RegisterGuildCommandsOnce failed: %v", err)
-	}
-	if len(cmds) != 0 { // discordgo dummy response is empty array or mocked
-		// That's fine
-	}
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 HTTP request for bulk overwrite, got %d", len(reqs))
-	}
-	if reqs[0].Method != http.MethodPut {
-		t.Errorf("expected PUT method, got %s", reqs[0].Method)
-	}
-
-	// Second registration call should be a no-op due to sync.Map caching
-	_, err = RegisterGuildCommandsOnce(session, "app-123", "guild-456")
-	if err != nil {
-		t.Fatalf("Second RegisterGuildCommandsOnce failed: %v", err)
-	}
-	if len(transport.Requests()) != 1 {
-		t.Errorf("expected still 1 request, got %d", len(transport.Requests()))
-	}
-
-	// Reset cache and call again
-	ResetRegisteredGuilds()
-	_, err = RegisterGuildCommandsOnce(session, "app-123", "guild-456")
-	if err != nil {
-		t.Fatalf("Third RegisterGuildCommandsOnce failed: %v", err)
-	}
-	if len(transport.Requests()) != 2 {
-		t.Errorf("expected 2 requests after reset, got %d", len(transport.Requests()))
-	}
-}
-
-func TestRegisterGuildCommands_Errors(t *testing.T) {
-	t.Parallel()
-
-	// nil session
-	if _, err := RegisterGuildCommands(nil, "app", "guild"); err == nil {
-		t.Errorf("expected error for nil session")
-	}
-
-	// session without ratelimiter
-	bareSession := &discordgo.Session{}
-	if _, err := RegisterGuildCommands(bareSession, "app", "guild"); err == nil {
-		t.Errorf("expected error for bare session without ratelimiter")
-	}
-
-	// session with empty appID and nil State
-	sNoState, _ := discordgo.New("Bot test")
-	if _, err := RegisterGuildCommands(sNoState, "", "guild"); err == nil {
-		t.Errorf("expected error for empty appID with nil State")
-	}
-
-	// empty guildID
-	transport := &mockTransport{}
-	sValid := newMockDiscordSession(transport)
-	if _, err := RegisterGuildCommands(sValid, "app", ""); err == nil {
-		t.Errorf("expected error for empty guildID")
-	}
-
-	// HTTP error response
-	errTransport := &mockTransport{respCode: http.StatusInternalServerError}
-	sErr := newMockDiscordSession(errTransport)
-	if _, err := RegisterGuildCommands(sErr, "app", "guild"); err == nil {
-		t.Errorf("expected error on HTTP 500")
-	}
-
-	// session with empty appID and valid State user
-	if _, err := RegisterGuildCommands(sValid, "", "guild-valid"); err != nil {
-		t.Errorf("expected success for empty appID with valid State user: %v", err)
-	}
-
-	// RegisterGuildCommandsOnce error handling & cache deletion
-	ResetRegisteredGuilds()
-	if _, err := RegisterGuildCommandsOnce(sErr, "app", "guild-err"); err == nil {
-		t.Errorf("expected error from RegisterGuildCommandsOnce on HTTP 500")
-	}
-}
-
-func TestRouter_EdgeCases_NilAndMalformed(t *testing.T) {
-	t.Parallel()
-
-	router, cfg, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	// Handle nil session
-	router.Handle(nil, &discordgo.InteractionCreate{})
-
-	// Handle session with nil ratelimiter
-	router.Handle(&discordgo.Session{}, &discordgo.InteractionCreate{})
-
-	// Handle nil interaction
-	router.Handle(session, nil)
-
-	// Handle interaction with nil inner interaction
-	router.Handle(session, &discordgo.InteractionCreate{})
-
-	// Handle non-application command type
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			Type: discordgo.InteractionMessageComponent,
-		},
-	})
-
-	// Handle interaction with nil User and nil Member
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			Type: discordgo.InteractionApplicationCommand,
-		},
-	})
-
-	// Test dynamic ConfigProvider and PoolProvider getters
-	var customCfgCalled bool
-	router.deps.ConfigProvider = func() *config.Config {
-		customCfgCalled = true
-		return cfg
-	}
-	if got := router.getConfig(); got != cfg || !customCfgCalled {
-		t.Errorf("expected getConfig to invoke ConfigProvider")
-	}
-
-	var customPoolCalled bool
-	mockPool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
-	router.deps.PoolProvider = func() *queue.WorkerPool {
-		customPoolCalled = true
-		return mockPool
-	}
-	if got := router.getPool(); got != mockPool || !customPoolCalled {
-		t.Errorf("expected getPool to invoke PoolProvider")
-	}
-}
-
-func TestRouter_HandleStatus_AdvancedBranches(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	store := db.NewFakeStore()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	// 1. Cron without TitlePrefix (uses c.Prompt)
-	err := store.CreateCronSchedule(ctx, db.CronSchedule{
-		ID:        "cron-noprefix",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Hourly health check",
-		NextRunAt: now.Add(30 * time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("CreateCronSchedule failed: %v", err)
-	}
-
-	// 2. Past Cron (ignored)
-	err = store.CreateCronSchedule(ctx, db.CronSchedule{
-		ID:        "cron-past",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Past cron",
-		NextRunAt: now.Add(-10 * time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("CreateCronSchedule failed: %v", err)
-	}
-
-	// 3. OneShot schedule in future (earlier than cron)
-	err = store.CreateOneShotSchedule(ctx, db.OneShotSchedule{
-		ID:     "oneshot-1",
-		Prompt: "Follow up on PR deployment",
-		RunAt:  now.Add(15 * time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("CreateOneShotSchedule failed: %v", err)
-	}
-
-	// 4. Past OneShot (ignored)
-	err = store.CreateOneShotSchedule(ctx, db.OneShotSchedule{
-		ID:     "oneshot-past",
-		Prompt: "Past oneshot",
-		RunAt:  now.Add(-15 * time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("CreateOneShotSchedule failed: %v", err)
-	}
-
-	// 5. Active Task
-	_ = store.InsertMessage(ctx, db.Message{
-		ID:        "task-12345",
-		Status:    db.StatusProcessing,
-		CreatedAt: now.Add(-45 * time.Second),
-	})
-
-	router.deps.Store = store
-	router.deps.DeployStatusProvider = func() string {
-		return "" // Fallback to default
-	}
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-status-adv",
-			ChannelID: "chan-1",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-status-adv",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "status",
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	body := string(reqs[0].Body)
-	if !strings.Contains(body, "Follow up on PR deployment") {
-		t.Errorf("expected oneshot prompt in next action, got %s", body)
-	}
-}
-
-func TestRouter_HandleStatus_StoreFailures(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	store := db.NewFakeStore()
-	store.FailNext("GetFactsPaginated", errors.New("db error"))
-	store.FailNext("GetAllCronSchedules", errors.New("db error"))
-	store.FailNext("GetAllOneShotSchedules", errors.New("db error"))
-	store.FailNext("GetActiveTasks", errors.New("db error"))
-
-	router.deps.Store = store
-	mockPool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
-	router.deps.Pool = mockPool
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-status-fail",
-			ChannelID: "chan-1",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-status-fail",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "status",
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	body := string(reqs[0].Body)
-	if !strings.Contains(body, "0 facts recorded") {
-		t.Errorf("expected 0 facts on error, got %s", body)
-	}
-}
-
-func TestRouter_HandleRotate_StoreFailure_And_Pool(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	store := db.NewFakeStore()
-	store.FailNext("RotateSessionID", errors.New("db error"))
-	router.deps.Store = store
-
-	mockSpawner := runner.NewMockDaemonSpawner()
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	medPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-3.8-flash-medium"}, mockSpawner)
-	_, _ = procPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
-	_, _ = lowPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
-	_, _ = medPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
-
-	router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{
-		ProcessPool:             procPool,
-		LowEffortProcessPool:    lowPool,
-		MediumEffortProcessPool: medPool,
-	})
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-rotate-err",
-			ChannelID: "chan-rotate-err",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-rotate-err",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "rotate",
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(reqs))
-	}
-}
-
-func TestRouter_HandleInterrupt_AllFlagsAndFailures(t *testing.T) {
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	store := db.NewFakeStore()
-	store.FailNext("GetPendingOrProcessingMessages", errors.New("db error"))
-	store.FailNext("RotateSessionID", errors.New("db error"))
-
-	mockSpawner := runner.NewMockDaemonSpawner()
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	medPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-3.8-flash-medium"}, mockSpawner)
-	_, _ = procPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
-	_, _ = lowPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
-	_, _ = medPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
-
-	router.deps.Store = store
-	router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{
-		ProcessPool:             procPool,
-		LowEffortProcessPool:    lowPool,
-		MediumEffortProcessPool: medPool,
-	})
-
-	interaction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-interrupt-noflags",
-			ChannelID: "chan-interrupt-noflags",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-interrupt-noflags",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "interrupt",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "drain_queue", Type: discordgo.ApplicationCommandOptionBoolean, Value: false},
-					{Name: "reset", Type: discordgo.ApplicationCommandOptionBoolean, Value: false},
-				},
-			},
-		},
-	}
-
-	router.Handle(session, interaction)
-
-	reqs := transport.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	body := string(reqs[0].Body)
-	if strings.Contains(body, "Pending message backlog purged") {
-		t.Errorf("expected no backlog purge when drain_queue=false")
-	}
-	if strings.Contains(body, "Session rotated") {
-		t.Errorf("expected no session rotated when reset=false")
-	}
-}
-
-func TestRouter_HandleMode_And_IgnoreBots_GitOpsErrors(t *testing.T) {
-	oldDelay := deployProgressDelay
-	deployProgressDelay = 10 * time.Millisecond
-	defer func() { deployProgressDelay = oldDelay }()
-
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	router.deps.GitOpsChannelUpdater = func(ctx context.Context, channelKey string, mutateFn func(p *config.ChannelPolicy)) (string, error) {
-		return "", errors.New("gitops commit failed: branch protected")
-	}
-
-	// Test Mode with GitOps error
-	modeInteraction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-mode-err",
-			ChannelID: "chan-1",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-mode-err",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "mode",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "mode", Type: discordgo.ApplicationCommandOptionString, Value: "mention"},
-				},
-			},
-		},
-	}
-
-	router.Handle(session, modeInteraction)
-	time.Sleep(50 * time.Millisecond)
-
-	reqs := transport.Requests()
-	var foundError bool
-	for _, req := range reqs {
-		if strings.Contains(string(req.Body), "Failed to apply GitOps update") {
-			foundError = true
-			break
+	if crons {
+		if facts {
+			_ = store.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-1", CronExpr: "0 9 * * *", Prompt: "Morning system briefing", TitlePrefix: "Morning briefing", NextRunAt: now.Add(2 * time.Hour)})
+		} else {
+			_ = store.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-noprefix", CronExpr: "0 * * * *", Prompt: "Hourly health check", NextRunAt: now.Add(30 * time.Minute)})
+			_ = store.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-past", CronExpr: "0 * * * *", Prompt: "Past cron", NextRunAt: now.Add(-10 * time.Minute)})
 		}
 	}
-	if !foundError {
-		t.Errorf("expected GitOps error message in mode response")
+	if oneShots {
+		_ = store.CreateOneShotSchedule(ctx, db.OneShotSchedule{ID: "oneshot-1", Prompt: "Follow up on PR deployment", RunAt: now.Add(15 * time.Minute)})
+		_ = store.CreateOneShotSchedule(ctx, db.OneShotSchedule{ID: "oneshot-past", Prompt: "Past oneshot", RunAt: now.Add(-15 * time.Minute)})
 	}
-
-	// Test IgnoreBots with GitOps error
-	ignoreInteraction := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:        "int-ignore-err",
-			ChannelID: "chan-2",
-			Type:      discordgo.InteractionApplicationCommand,
-			Token:     "token-ignore-err",
-			Member: &discordgo.Member{
-				User: &discordgo.User{ID: "admin-123"},
-			},
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "ignore_bots",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "enabled", Type: discordgo.ApplicationCommandOptionBoolean, Value: true},
-				},
-			},
-		},
-	}
-
-	router.Handle(session, ignoreInteraction)
-	time.Sleep(50 * time.Millisecond)
-
-	reqs = transport.Requests()
-	foundError = false
-	for _, req := range reqs {
-		if strings.Contains(string(req.Body), "Failed to apply GitOps update") {
-			foundError = true
-			break
-		}
-	}
-	if !foundError {
-		t.Errorf("expected GitOps error message in ignore_bots response")
+	if active {
+		_ = store.InsertMessage(ctx, db.Message{ID: "task-12345", Status: db.StatusProcessing, CreatedAt: now.Add(-45 * time.Second)})
 	}
 }
 
-func TestRouter_ErrorLoggingBranches(t *testing.T) {
-	// Set transport to return HTTP 500 error to test all error-logging branches
-	errTransport := &mockTransport{respCode: http.StatusInternalServerError}
-	session := newMockDiscordSession(errTransport)
+func boolPtr(b bool) *bool { return &b }
 
-	router, _, _ := setupTestRouter("admin-123")
+func TestApplicationCommandsAndHelpers(t *testing.T) {
+	sampleOpts := []*discordgo.ApplicationCommandInteractionDataOption{
+		mkOpt("opt_true", discordgo.ApplicationCommandOptionBoolean, true),
+		mkOpt("opt_false", discordgo.ApplicationCommandOptionBoolean, false),
+		mkOpt("opt_str", discordgo.ApplicationCommandOptionString, "hello"),
+		mkOpt("opt_ch", discordgo.ApplicationCommandOptionChannel, "channel-999"),
+		mkOpt("opt_val_str", discordgo.ApplicationCommandOptionChannel, "channel-raw-val"),
+	}
 
-	// 1. Non-admin response failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-1",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "non-admin"},
-			Data:  discordgo.ApplicationCommandInteractionData{Name: "status"},
-		},
-	})
+	tests := []struct {
+		name       string
+		helperType string
+		strInput   string
+		intInput   int
+		durInput   time.Duration
+		wantStr    string
+		wantBool   bool
+		wantInt    int
+	}{
+		{"CmdDefCount", "cmd_len", "", 0, 0, "", false, 5},
+		{"CmdDef_status", "cmd_opts", "status", 0, 0, "", false, 0},
+		{"CmdDef_rotate", "cmd_opts", "rotate", 0, 0, "", false, 2},
+		{"CmdDef_interrupt", "cmd_opts", "interrupt", 0, 0, "", false, 2},
+		{"CmdDef_mode", "cmd_opts", "mode", 0, 0, "", false, 2},
+		{"CmdDef_ignore_bots", "cmd_opts", "ignore_bots", 0, 0, "", false, 2},
+		{"GetBool_True", "bool", "opt_true", 0, 0, "", true, 0},
+		{"GetBool_False", "bool", "opt_false", 0, 0, "", false, 0},
+		{"GetBool_MissingFallback", "bool", "missing", 0, 0, "", true, 0},
+		{"GetString_Found", "string", "opt_str", 0, 0, "hello", false, 0},
+		{"GetString_MissingFallback", "string", "missing", 0, 0, "default", false, 0},
+		{"GetChannel_Found", "channel", "opt_ch", 0, 0, "channel-999", false, 0},
+		{"GetChannel_RawVal", "channel", "opt_val_str", 0, 0, "channel-raw-val", false, 0},
+		{"GetChannel_MissingFallback", "channel", "missing", 0, 0, "fallback", false, 0},
+		{"HasOption_True", "has_opt", "opt_true", 0, 0, "", true, 0},
+		{"HasOption_False", "has_opt", "nonexistent", 0, 0, "", false, 0},
+		{"Truncate_Long", "truncate", "hello world", 5, 0, "hello...", false, 0},
+		{"Truncate_Short", "truncate", "hi", 5, 0, "hi", false, 0},
+		{"FormatDur_Negative", "duration", "", 0, -10 * time.Second, "10s", false, 0},
+		{"FormatDur_Seconds", "duration", "", 0, 45 * time.Second, "45s", false, 0},
+		{"FormatDur_Minutes", "duration", "", 0, 5*time.Minute + 30*time.Second, "5m", false, 0},
+		{"FormatDur_HoursMinutes", "duration", "", 0, 2*time.Hour + 10*time.Minute, "2h 10m", false, 0},
+		{"FormatDur_DaysHours", "duration", "", 0, 25 * time.Hour, "1d 1h", false, 0},
+		{"FormatRel_JustNow", "relative_time", "", 0, 10 * time.Second, "just now", false, 0},
+		{"FormatRel_Minutes", "relative_time", "", 0, 5 * time.Minute, "5m", false, 0},
+		{"FormatRel_Hours", "relative_time", "", 0, 3 * time.Hour, "3h", false, 0},
+		{"FormatRel_Days", "relative_time", "", 0, 48 * time.Hour, "2d", false, 0},
+	}
 
-	// 2. Unrecognized command failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-2",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{Name: "unknown_xyz"},
-		},
-	})
+	cmds := CommandDefinitions()
+	cmdMap := make(map[string]int)
+	for _, c := range cmds {
+		cmdMap[c.Name] = len(c.Options)
+	}
 
-	// 3. Status response failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-3",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{Name: "status"},
-		},
-	})
-
-	// 4. Rotate defer failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-4",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{Name: "rotate"},
-		},
-	})
-
-	// 5. Interrupt response failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-5",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{Name: "interrupt"},
-		},
-	})
-
-	// 6. Mode bare failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-6",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{Name: "mode"},
-		},
-	})
-
-	// 7. Mode defer failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-7",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{
-				Name: "mode",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "mode", Type: discordgo.ApplicationCommandOptionString, Value: "mention"},
-				},
-			},
-		},
-	})
-
-	// 8. IgnoreBots bare failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-8",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{Name: "ignore_bots"},
-		},
-	})
-
-	// 9. IgnoreBots defer failure
-	router.Handle(session, &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			ID:    "err-9",
-			Type:  discordgo.InteractionApplicationCommand,
-			User:  &discordgo.User{ID: "admin-123"},
-			Data:  discordgo.ApplicationCommandInteractionData{
-				Name: "ignore_bots",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{Name: "enabled", Type: discordgo.ApplicationCommandOptionBoolean, Value: true},
-				},
-			},
-		},
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			switch tc.helperType {
+			case "cmd_len":
+				if len(cmds) != tc.wantInt {
+					t.Fatalf("expected %d commands, got %d", tc.wantInt, len(cmds))
+				}
+			case "cmd_opts":
+				if opts, ok := cmdMap[tc.strInput]; !ok || opts != tc.wantInt {
+					t.Fatalf("cmd %s: expected %d options, got %d (found=%v)", tc.strInput, tc.wantInt, opts, ok)
+				}
+			case "bool":
+				if got := getBoolOption(sampleOpts, tc.strInput, tc.strInput == "missing"); got != tc.wantBool {
+					t.Errorf("getBoolOption(%s)=%v, want %v", tc.strInput, got, tc.wantBool)
+				}
+			case "string":
+				def := ""
+				if tc.strInput == "missing" {
+					def = "default"
+				}
+				if got := getStringOption(sampleOpts, tc.strInput, def); got != tc.wantStr {
+					t.Errorf("getStringOption(%s)=%q, want %q", tc.strInput, got, tc.wantStr)
+				}
+			case "channel":
+				if got := getChannelOption(sampleOpts, tc.strInput, "fallback"); got != tc.wantStr {
+					t.Errorf("getChannelOption(%s)=%q, want %q", tc.strInput, got, tc.wantStr)
+				}
+			case "has_opt":
+				if got := hasOption(sampleOpts, tc.strInput); got != tc.wantBool {
+					t.Errorf("hasOption(%s)=%v, want %v", tc.strInput, got, tc.wantBool)
+				}
+			case "truncate":
+				if got := truncateRunes(tc.strInput, tc.intInput); got != tc.wantStr {
+					t.Errorf("truncateRunes(%s, %d)=%q, want %q", tc.strInput, tc.intInput, got, tc.wantStr)
+				}
+			case "duration":
+				if got := formatRelativeDuration(tc.durInput); got != tc.wantStr {
+					t.Errorf("formatRelativeDuration(%v)=%q, want %q", tc.durInput, got, tc.wantStr)
+				}
+			case "relative_time":
+				if got := formatRelativeTime(tc.durInput); got != tc.wantStr {
+					t.Errorf("formatRelativeTime(%v)=%q, want %q", tc.durInput, got, tc.wantStr)
+				}
+			}
+		})
+	}
 }
 
-func TestRouter_TrackDeployProgress_TimeoutAndEditErrors(t *testing.T) {
+func TestRouter_AuthAndDispatch(t *testing.T) {
+	mockPool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
+
+	tests := []struct {
+		name          string
+		interaction   *discordgo.InteractionCreate
+		nilSession    bool
+		bareSession   bool
+		httpStatus    int
+		withProviders bool
+		wantSubstr    string
+		wantRequests  int
+	}{
+		{"NonAdminMember", mkCmd("1", "chan-1", "attacker-999", "status"), false, false, 0, false, "Unauthorized", 1},
+		{"NonAdminDM", mkDMCmd("2", "attacker-888", "status"), false, false, 0, false, "Unauthorized", 1},
+		{"UnrecognizedCommand", mkCmd("3", "chan-1", "admin-123", "nonexistent_cmd"), false, false, 0, false, "Unrecognized command", 1},
+		{"NilSession", mkCmd("4", "chan-1", "admin-123", "status"), true, false, 0, false, "", 0},
+		{"BareSessionNoRatelimiter", mkCmd("5", "chan-1", "admin-123", "status"), false, true, 0, false, "", 0},
+		{"NilInteraction", nil, false, false, 0, false, "", 0},
+		{"NilInnerInteraction", &discordgo.InteractionCreate{}, false, false, 0, false, "", 0},
+		{"NonApplicationCommandType", &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{ID: "6", Type: discordgo.InteractionMessageComponent}}, false, false, 0, false, "", 0},
+		{"NilUserAndMember", &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{ID: "7", Type: discordgo.InteractionApplicationCommand, Token: "tok-7", Data: discordgo.ApplicationCommandInteractionData{Name: "status"}}}, false, false, 0, false, "", 0},
+		{"DynamicConfigAndPoolProviders", mkCmd("8", "chan-1", "admin-123", "nonexistent_cmd"), false, false, 0, true, "Unrecognized command", 1},
+		{"ErrorLogging_NonAdminHttp500", mkDMCmd("err-1", "non-admin", "status"), false, false, http.StatusInternalServerError, false, "", 1},
+		{"ErrorLogging_UnknownCmdHttp500", mkCmd("err-2", "chan-1", "admin-123", "unknown_xyz"), false, false, http.StatusInternalServerError, false, "", 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router, cfg, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			if tc.nilSession {
+				session = nil
+			} else if tc.bareSession {
+				session = &discordgo.Session{}
+			}
+
+			if tc.withProviders {
+				var cfgCalled, poolCalled bool
+				router.deps.ConfigProvider = func() *config.Config { cfgCalled = true; return cfg }
+				router.deps.PoolProvider = func() *queue.WorkerPool { poolCalled = true; return mockPool }
+				if got := router.getConfig(); got != cfg || !cfgCalled {
+					t.Fatalf("expected getConfig to invoke ConfigProvider")
+				}
+				if got := router.getPool(); got != mockPool || !poolCalled {
+					t.Fatalf("expected getPool to invoke PoolProvider")
+				}
+			}
+			router.Handle(session, tc.interaction)
+
+			reqs := transport.Requests()
+			if len(reqs) != tc.wantRequests {
+				t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
+			}
+			if tc.wantSubstr != "" && len(reqs) > 0 {
+				if !strings.Contains(string(reqs[0].Body), tc.wantSubstr) {
+					t.Errorf("expected response to contain %q, got: %s", tc.wantSubstr, string(reqs[0].Body))
+				}
+			}
+		})
+	}
+}
+
+func TestRouter_HandleStatus(t *testing.T) {
+	tests := []struct {
+		name         string
+		gitCommitEnv string
+		deployStatus string
+		hasDeployFn  bool
+		seedFacts    bool
+		seedCrons    bool
+		seedOneShots bool
+		seedActive   bool
+		failStore    bool
+		httpStatus   int
+		wantSubstrs  []string
+	}{
+		{"StandardWithFactsAndCron", "", "`aerial@bfed897` (Live, healthy)", true, true, true, false, false, false, 0, []string{"**Runtime**:", "`aerial@bfed897`", "1 facts recorded", "Morning briefing"}},
+		{"FallbackEnvAndIdle", "abcdef123456", "", false, false, false, false, false, false, 0, []string{"`aerial@abcdef1`", "`Idle`"}},
+		{"AdvancedBranchesAndSchedules", "", "", true, false, true, true, true, false, 0, []string{"Follow up on PR deployment"}},
+		{"StoreFailuresHandledGracefully", "", "", false, false, false, false, false, true, 0, []string{"0 facts recorded"}},
+		{"ErrorLoggingHttp500", "", "", false, false, false, false, false, false, http.StatusInternalServerError, nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.gitCommitEnv != "" {
+				os.Setenv("GIT_COMMIT", tc.gitCommitEnv)
+				defer os.Unsetenv("GIT_COMMIT")
+			}
+
+			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			store := db.NewFakeStore()
+			seedStatusFixtures(store, tc.seedFacts, tc.seedCrons, tc.seedOneShots, tc.seedActive)
+
+			if tc.failStore {
+				store.FailNext("GetFactsPaginated", errors.New("db error"))
+				store.FailNext("GetAllCronSchedules", errors.New("db error"))
+				store.FailNext("GetAllOneShotSchedules", errors.New("db error"))
+				store.FailNext("GetActiveTasks", errors.New("db error"))
+				router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{})
+			}
+
+			router.deps.Store = store
+			if tc.hasDeployFn {
+				ds := tc.deployStatus
+				router.deps.DeployStatusProvider = func() string { return ds }
+			}
+
+			router.Handle(session, mkCmd("int-status", "chan-1", "admin-123", "status"))
+
+			reqs := transport.Requests()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request, got %d", len(reqs))
+			}
+			body := string(reqs[0].Body)
+			for _, want := range tc.wantSubstrs {
+				if !strings.Contains(body, want) {
+					t.Errorf("expected response to contain %q, got: %s", want, body)
+				}
+			}
+		})
+	}
+}
+
+func TestRouter_SessionAndQueueCommands(t *testing.T) {
+	tests := []struct {
+		name         string
+		cmdName      string
+		opts         []*discordgo.ApplicationCommandInteractionDataOption
+		seedPending  bool
+		failStore    bool
+		withPools    bool
+		httpStatus   int
+		wantRequests int
+		wantSubstrs  []string
+		avoidSubstrs []string
+	}{
+		{"Rotate_BareAndTopic", "rotate", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("bare", discordgo.ApplicationCommandOptionBoolean, true), mkOpt("topic", discordgo.ApplicationCommandOptionString, "refactor queue")}, false, false, false, 0, 2, []string{"Bare session wipe complete", "refactor queue"}, nil},
+		{"Rotate_NormalFresh", "rotate", nil, false, false, false, 0, 2, []string{"Fresh context initialized"}, nil},
+		{"Rotate_StoreFailureAndPools", "rotate", nil, false, true, true, 0, 2, nil, nil},
+		{"Interrupt_DrainAndReset", "interrupt", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("drain_queue", discordgo.ApplicationCommandOptionBoolean, true), mkOpt("reset", discordgo.ApplicationCommandOptionBoolean, true)}, true, false, false, 0, 1, []string{"Interrupted active turn execution", "Pending message backlog purged", "Session rotated"}, nil},
+		{"Interrupt_NoFlagsAndFailures", "interrupt", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("drain_queue", discordgo.ApplicationCommandOptionBoolean, false), mkOpt("reset", discordgo.ApplicationCommandOptionBoolean, false)}, false, true, true, 0, 1, []string{"Interrupted active turn execution"}, []string{"Pending message backlog purged", "Session rotated"}},
+		{"ErrorLogging_RotateHttp500", "rotate", nil, false, false, false, http.StatusInternalServerError, 1, nil, nil},
+		{"ErrorLogging_InterruptHttp500", "interrupt", nil, false, false, false, http.StatusInternalServerError, 1, nil, nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			store := db.NewFakeStore()
+			targetChan := "chan-" + tc.name
+
+			if tc.seedPending {
+				_ = store.InsertMessage(context.Background(), db.Message{ID: "msg-pending-1", ThreadID: targetChan, Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+			}
+			if tc.failStore {
+				store.FailNext("RotateSessionID", errors.New("db error"))
+				store.FailNext("GetPendingOrProcessingMessages", errors.New("db error"))
+				store.FailNext("RotateSessionID", errors.New("db error"))
+			}
+			router.deps.Store = store
+
+			if tc.withPools {
+				router.deps.Pool = newMockProcessPools(targetChan)
+			}
+
+			router.Handle(session, mkCmd("int-"+tc.name, targetChan, "admin-123", tc.cmdName, tc.opts...))
+
+			reqs := transport.Requests()
+			if len(reqs) != tc.wantRequests {
+				t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
+			}
+
+			body := ""
+			if len(reqs) == 2 {
+				var deferredResp discordgo.InteractionResponse
+				_ = json.Unmarshal(reqs[0].Body, &deferredResp)
+				if deferredResp.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+					t.Errorf("expected deferred response type, got %d", deferredResp.Type)
+				}
+				body = string(reqs[1].Body)
+			} else if len(reqs) == 1 {
+				body = string(reqs[0].Body)
+			}
+
+			for _, want := range tc.wantSubstrs {
+				if !strings.Contains(body, want) {
+					t.Errorf("expected body to contain %q, got: %s", want, body)
+				}
+			}
+			for _, avoid := range tc.avoidSubstrs {
+				if strings.Contains(body, avoid) {
+					t.Errorf("expected body NOT to contain %q, got: %s", avoid, body)
+				}
+			}
+
+			if tc.seedPending {
+				msg, err := store.GetMessage(context.Background(), "msg-pending-1")
+				if err != nil || msg.Status != db.StatusFailed {
+					t.Errorf("expected message status failed, got %v (err=%v)", msg.Status, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRouter_ConfigMutationCommands(t *testing.T) {
 	oldDelay := deployProgressDelay
-	oldTimeout := pollerTimeout
-	deployProgressDelay = 100 * time.Millisecond
-	pollerTimeout = 5 * time.Millisecond
-	defer func() {
-		deployProgressDelay = oldDelay
-		pollerTimeout = oldTimeout
-	}()
-
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	interaction := &discordgo.Interaction{
-		ID:    "int-timeout",
-		Token: "tok-timeout",
-	}
-
-	// Normal timeout
-	router.trackDeployProgress(session, interaction, "mode", "chan-1", "thread")
-
-	// Edit failure in timeout branch
-	errTransport := &mockTransport{respCode: http.StatusInternalServerError}
-	errSession := newMockDiscordSession(errTransport)
-	router.trackDeployProgress(errSession, interaction, "mode", "chan-1", "thread")
-}
-
-func TestRouter_TrackDeployProgress_MutateFnBranches(t *testing.T) {
-	oldDelay := deployProgressDelay
-	deployProgressDelay = 1 * time.Millisecond
+	deployProgressDelay = 5 * time.Millisecond
 	defer func() { deployProgressDelay = oldDelay }()
 
-	router, _, transport := setupTestRouter("admin-123")
-	session := newMockDiscordSession(transport)
-
-	var capturedPolicy config.ChannelPolicy
-	router.deps.GitOpsChannelUpdater = func(ctx context.Context, channelKey string, mutateFn func(p *config.ChannelPolicy)) (string, error) {
-		mutateFn(&capturedPolicy)
-		return "sha", nil
+	tests := []struct {
+		name            string
+		cmdName         string
+		opts            []*discordgo.ApplicationCommandInteractionDataOption
+		withGitOps      bool
+		gitOpsErr       bool
+		noGitOpsUpdater bool
+		httpStatus      int
+		wantSubstrs     []string
+		wantModeVal     string
+		wantIgnoreBots  *bool
+		runDeployFnTest bool
+		testTimeout     bool
+		testMutateKey   string
+		testMutateVal   string
+	}{
+		{"Mode_BareQuery", "mode", nil, false, false, false, 0, []string{"**Mode**: `thread`"}, "", nil, false, false, "", ""},
+		{"Mode_SetWithGitOps", "mode", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("mode", discordgo.ApplicationCommandOptionString, "classifier")}, true, false, false, 0, nil, "classifier", nil, false, false, "", ""},
+		{"Mode_SetInMemoryFallback", "mode", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("mode", discordgo.ApplicationCommandOptionString, "mention")}, false, false, true, 0, nil, "mention", nil, false, false, "", ""},
+		{"Mode_GitOpsError", "mode", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("mode", discordgo.ApplicationCommandOptionString, "mention")}, true, true, false, 0, []string{"Failed to apply GitOps update"}, "", nil, false, false, "", ""},
+		{"IgnoreBots_BareQuery", "ignore_bots", nil, false, false, false, 0, []string{"**Ignore Bots**:"}, "", nil, false, false, "", ""},
+		{"IgnoreBots_SetWithGitOps", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, true, false, false, 0, nil, "", boolPtr(true), false, false, "", ""},
+		{"IgnoreBots_SetInMemoryFallback", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, false, false, true, 0, nil, "", boolPtr(true), false, false, "", ""},
+		{"IgnoreBots_GitOpsError", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, true, true, false, 0, []string{"Failed to apply GitOps update"}, "", nil, false, false, "", ""},
+		{"DeployProgress_TimeoutAndEditErrors", "", nil, false, false, false, 0, nil, "", nil, true, true, "", ""},
+		{"DeployProgress_MutateFnMode", "", nil, false, false, false, 0, nil, "", nil, true, false, "mode", "mention"},
+		{"DeployProgress_MutateFnIgnoreBots", "", nil, false, false, false, 0, nil, "", nil, true, false, "ignore_bots", "true"},
+		{"ErrorLogging_ModeBareHttp500", "mode", nil, false, false, false, http.StatusInternalServerError, nil, "", nil, false, false, "", ""},
+		{"ErrorLogging_ModeDeferHttp500", "mode", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("mode", discordgo.ApplicationCommandOptionString, "mention")}, false, false, false, http.StatusInternalServerError, nil, "", nil, false, false, "", ""},
+		{"ErrorLogging_IgnoreBotsBareHttp500", "ignore_bots", nil, false, false, false, http.StatusInternalServerError, nil, "", nil, false, false, "", ""},
+		{"ErrorLogging_IgnoreBotsDeferHttp500", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, false, false, false, http.StatusInternalServerError, nil, "", nil, false, false, "", ""},
 	}
 
-	interaction := &discordgo.Interaction{
-		ID:    "int-mutate",
-		Token: "tok-mutate",
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router, cfg, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			if tc.withGitOps {
+				router.deps.GitOpsChannelUpdater = mockGitOpsUpdater(cfg, tc.gitOpsErr)
+			}
+
+			if tc.runDeployFnTest {
+				interaction := &discordgo.Interaction{ID: "int-deploy", Token: "tok-deploy"}
+				if tc.testTimeout {
+					oldTimeout, oldD := pollerTimeout, deployProgressDelay
+					pollerTimeout, deployProgressDelay = 5*time.Millisecond, 100*time.Millisecond
+					router.trackDeployProgress(session, interaction, "mode", "chan-1", "thread")
+					router.trackDeployProgress(newMockDiscordSession(&mockTransport{respCode: http.StatusInternalServerError}), interaction, "mode", "chan-1", "thread")
+					pollerTimeout, deployProgressDelay = oldTimeout, oldD
+					return
+				}
+				var captured config.ChannelPolicy
+				router.deps.GitOpsChannelUpdater = func(ctx context.Context, key string, fn func(p *config.ChannelPolicy)) (string, error) {
+					fn(&captured)
+					return "sha", nil
+				}
+				router.trackDeployProgress(session, interaction, tc.testMutateKey, "chan-1", tc.testMutateVal)
+				if tc.testMutateKey == "mode" && captured.Mode != tc.testMutateVal {
+					t.Errorf("expected Mode %q, got %q", tc.testMutateVal, captured.Mode)
+				}
+				if tc.testMutateKey == "ignore_bots" && (captured.IgnoreBots == nil || !*captured.IgnoreBots) {
+					t.Errorf("expected IgnoreBots true")
+				}
+				return
+			}
+
+			chID := "chan-1"
+			if tc.cmdName == "ignore_bots" {
+				chID = "chan-2"
+			}
+			router.Handle(session, mkCmd("int-"+tc.name, chID, "admin-123", tc.cmdName, tc.opts...))
+			router.bgWg.Wait()
+
+			reqs := transport.Requests()
+			for _, want := range tc.wantSubstrs {
+				var found bool
+				for _, req := range reqs {
+					if strings.Contains(string(req.Body), want) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected request body to contain %q", want)
+				}
+			}
+
+			if tc.wantModeVal != "" {
+				if pol := cfg.ResolveChannelPolicy("chan-1", ""); pol.Mode != tc.wantModeVal {
+					t.Errorf("expected mode %q, got %q", tc.wantModeVal, pol.Mode)
+				}
+			}
+			if tc.wantIgnoreBots != nil {
+				if pol := cfg.ResolveChannelPolicy("chan-2", ""); pol.IsBotIgnored() != *tc.wantIgnoreBots {
+					t.Errorf("expected ignore_bots %v, got %v", *tc.wantIgnoreBots, pol.IsBotIgnored())
+				}
+			}
+		})
+	}
+}
+
+func TestRouter_HandleSync(t *testing.T) {
+	tests := []struct {
+		name         string
+		appID        string
+		guildID      string
+		nilSession   bool
+		bareSession  bool
+		noStateUser  bool
+		httpStatus   int
+		testOnce     bool
+		wantErr      bool
+		wantRequests int
+		wantMethod   string
+	}{
+		{"RegisterGuildCommands_Success", "app-123", "guild-456", false, false, false, 0, false, false, 1, http.MethodPut},
+		{"RegisterGuildCommands_EmptyAppIDUsesState", "", "guild-valid", false, false, false, 0, false, false, 1, http.MethodPut},
+		{"RegisterGuildCommands_NilSession", "", "", true, false, false, 0, false, true, 0, ""},
+		{"RegisterGuildCommands_BareSessionNoRatelimiter", "", "", false, true, false, 0, false, true, 0, ""},
+		{"RegisterGuildCommands_EmptyAppIDNoStateUser", "", "guild-nostate", false, false, true, 0, false, true, 0, ""},
+		{"RegisterGuildCommands_EmptyGuildID", "app-123", "", false, false, false, 0, false, true, 0, ""},
+		{"RegisterGuildCommands_Http500", "app-123", "guild-err", false, false, false, http.StatusInternalServerError, false, true, 1, ""},
+		{"RegisterGuildCommandsOnce_CachingAndReset", "app-123", "guild-once", false, false, false, 0, true, false, 1, ""},
+		{"RegisterGuildCommandsOnce_ErrorCleansCache", "app-123", "guild-once-err", false, false, false, http.StatusInternalServerError, true, true, 0, ""},
 	}
 
-	// Test mutate with ignore_bots
-	router.trackDeployProgress(session, interaction, "ignore_bots", "chan-1", "true")
-	if capturedPolicy.IgnoreBots == nil || !*capturedPolicy.IgnoreBots {
-		t.Errorf("expected IgnoreBots to be true in mutateFn")
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetRegisteredGuilds()
+			defer ResetRegisteredGuilds()
 
-	// Test mutate with mode
-	router.trackDeployProgress(session, interaction, "mode", "chan-1", "mention")
-	if capturedPolicy.Mode != "mention" {
-		t.Errorf("expected Mode to be mention in mutateFn")
+			transport := &mockTransport{respCode: tc.httpStatus}
+			var session *discordgo.Session
+			if !tc.nilSession {
+				if tc.bareSession {
+					session = &discordgo.Session{}
+				} else {
+					session = newMockDiscordSession(transport)
+					if tc.noStateUser {
+						session.State = nil
+					}
+				}
+			}
+
+			if tc.testOnce {
+				cmds, err := RegisterGuildCommandsOnce(session, tc.appID, tc.guildID)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("RegisterGuildCommandsOnce() error = %v, wantErr %v", err, tc.wantErr)
+				}
+				if !tc.wantErr {
+					if _, err = RegisterGuildCommandsOnce(session, tc.appID, tc.guildID); err != nil {
+						t.Fatalf("second RegisterGuildCommandsOnce() failed: %v", err)
+					}
+					if len(transport.Requests()) != 1 {
+						t.Errorf("expected 1 request due to cache, got %d", len(transport.Requests()))
+					}
+					ResetRegisteredGuilds()
+					if _, err = RegisterGuildCommandsOnce(session, tc.appID, tc.guildID); err != nil {
+						t.Fatalf("third RegisterGuildCommandsOnce() failed: %v", err)
+					}
+					if len(transport.Requests()) != 2 {
+						t.Errorf("expected 2 requests after reset, got %d", len(transport.Requests()))
+					}
+				}
+				_ = cmds
+				return
+			}
+
+			cmds, err := RegisterGuildCommands(session, tc.appID, tc.guildID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RegisterGuildCommands() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			reqs := transport.Requests()
+			if len(reqs) != tc.wantRequests {
+				t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
+			}
+			if tc.wantMethod != "" && len(reqs) > 0 && reqs[0].Method != tc.wantMethod {
+				t.Errorf("expected method %s, got %s", tc.wantMethod, reqs[0].Method)
+			}
+			_ = cmds
+		})
 	}
 }

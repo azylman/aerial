@@ -14,6 +14,7 @@ import (
 type Router struct {
 	deps           InteractionDeps
 	configCommitMu sync.Mutex
+	bgWg           sync.WaitGroup
 }
 
 // NewRouter creates a new interaction Router with injected dependencies.
