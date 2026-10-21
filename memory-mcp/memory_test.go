@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,19 +26,26 @@ import (
 // --- Test Fixtures & Mocks ---
 
 type TestMemStore struct {
-	mu         sync.Mutex
-	facts      map[int64]*Fact
-	embeddings map[int64][]float32
-	nextID     int64
-	failOp     string
-	failErr    error
+	mu               sync.Mutex
+	facts            map[int64]*Fact
+	embeddings       map[int64][]float32
+	nextID           int64
+	failOp           string
+	failErr          error
+	unextractedTurns map[string][]Message
+	activeThreads    []string
+	watermarks       map[string]int64
+	maxRowIDs        map[string]int64
 }
 
 func newTestMemStore() *TestMemStore {
 	return &TestMemStore{
-		facts:      make(map[int64]*Fact),
-		embeddings: make(map[int64][]float32),
-		nextID:     1,
+		facts:            make(map[int64]*Fact),
+		embeddings:       make(map[int64][]float32),
+		nextID:           1,
+		unextractedTurns: make(map[string][]Message),
+		watermarks:       make(map[string]int64),
+		maxRowIDs:        make(map[string]int64),
 	}
 }
 
@@ -224,6 +232,138 @@ func (m *TestMemStore) GetFactsPaginated(ctx context.Context, filter FactsFilter
 		Offset: filter.Offset,
 		Status: "ok",
 	}, nil
+}
+
+func (m *TestMemStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetFactsMissingEmbeddings" {
+		return nil, m.failErr
+	}
+	var res []Fact
+	for id, f := range m.facts {
+		if len(m.embeddings[id]) == 0 {
+			res = append(res, *f)
+			if limit > 0 && len(res) >= limit {
+				break
+			}
+		}
+	}
+	return res, nil
+}
+
+func (m *TestMemStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "UpdateFactEmbedding" {
+		return m.failErr
+	}
+	if _, ok := m.facts[id]; !ok {
+		return ErrFactNotFound
+	}
+	m.embeddings[id] = append([]float32(nil), embedding...)
+	return nil
+}
+
+func (m *TestMemStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "DecayAndPruneFacts" {
+		return 0, 0, m.failErr
+	}
+	if decayStep <= 0 {
+		decayStep = 0.05
+	}
+	if pruneFloor <= 0 {
+		pruneFloor = 0.15
+	}
+	var decayed, pruned int64
+	for id, f := range m.facts {
+		f.Importance = max(0.0, f.Importance-decayStep)
+		f.LastDecayedAt = time.Now().UTC()
+		decayed++
+		if f.Importance <= pruneFloor {
+			delete(m.facts, id)
+			delete(m.embeddings, id)
+			pruned++
+		}
+	}
+	return decayed, pruned, nil
+}
+
+func (m *TestMemStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetActiveConversationsForExtraction" {
+		return nil, m.failErr
+	}
+	return append([]string(nil), m.activeThreads...), nil
+}
+
+func (m *TestMemStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetUnextractedAdminTurns" {
+		return nil, m.failErr
+	}
+	return append([]Message(nil), m.unextractedTurns[threadID]...), nil
+}
+
+func (m *TestMemStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetMaxMessageRowID" {
+		return 0, m.failErr
+	}
+	return m.maxRowIDs[threadID], nil
+}
+
+func (m *TestMemStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "UpdateConversationFactWatermark" {
+		return m.failErr
+	}
+	m.watermarks[threadID] = maxRowID
+	return nil
+}
+
+func (m *TestMemStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "FindNearestFacts" {
+		return nil, m.failErr
+	}
+	if len(embedding) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	type pair struct {
+		fact Fact
+		sim  float64
+	}
+	var pairs []pair
+	for id, emb := range m.embeddings {
+		if len(emb) == 0 {
+			continue
+		}
+		sim := CosineSimilarity(embedding, emb)
+		if sim >= minSim {
+			if f, ok := m.facts[id]; ok {
+				pairs = append(pairs, pair{fact: *f, sim: sim})
+			}
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].sim > pairs[j].sim
+	})
+	var res []Fact
+	for i := 0; i < len(pairs) && i < limit; i++ {
+		res = append(res, pairs[i].fact)
+	}
+	return res, nil
 }
 
 func (m *TestMemStore) Close() error {
@@ -2327,6 +2467,1449 @@ func TestIsClientDisconnect(t *testing.T) {
 			got := isClientDisconnect(tc.req, tc.err)
 			if got != tc.want {
 				t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMessageMetadata_ValueScan(t *testing.T) {
+	tests := []struct {
+		name      string
+		meta      MessageMetadata
+		src       any
+		wantErr   bool
+		wantEmpty bool
+		wantAdmin bool
+	}{
+		{
+			name:      "EmptyValue",
+			meta:      MessageMetadata{},
+			wantEmpty: true,
+		},
+		{
+			name:      "NonEmptyValue",
+			meta:      MessageMetadata{IsAdmin: true, ChannelID: "c1", AuthorUsername: "alex"},
+			wantAdmin: true,
+		},
+		{
+			name:      "ScanNil",
+			src:       nil,
+			wantEmpty: true,
+		},
+		{
+			name:      "ScanBytes",
+			src:       []byte(`{"is_admin":true,"channel_id":"c2"}`),
+			wantAdmin: true,
+		},
+		{
+			name:      "ScanString",
+			src:       `{"is_admin":true,"channel_id":"c3"}`,
+			wantAdmin: true,
+		},
+		{
+			name:      "ScanEmptyString",
+			src:       `{}`,
+			wantEmpty: true,
+		},
+		{
+			name:      "ScanNullString",
+			src:       `null`,
+			wantEmpty: true,
+		},
+		{
+			name:    "ScanInvalidJSON",
+			src:     `{not-valid-json`,
+			wantErr: true,
+		},
+		{
+			name:    "ScanUnsupportedType",
+			src:     12345,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.src != nil || tc.wantErr {
+				var target MessageMetadata
+				err := target.Scan(tc.src)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("Scan() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if !tc.wantErr && target.IsEmpty() != tc.wantEmpty {
+					t.Fatalf("Scan() IsEmpty = %v, wantEmpty = %v", target.IsEmpty(), tc.wantEmpty)
+				}
+				if !tc.wantErr && target.IsAdmin != tc.wantAdmin {
+					t.Fatalf("Scan() IsAdmin = %v, wantAdmin = %v", target.IsAdmin, tc.wantAdmin)
+				}
+				return
+			}
+			val, err := tc.meta.Value()
+			if err != nil {
+				t.Fatalf("Value() unexpected err: %v", err)
+			}
+			if tc.wantEmpty && val != "{}" {
+				t.Fatalf("Value() = %v, want {}", val)
+			}
+			if tc.wantAdmin && !strings.Contains(val.(string), `"is_admin":true`) {
+				t.Fatalf("Value() = %v, want is_admin:true", val)
+			}
+		})
+	}
+}
+
+func TestIsExtractableAdminTurn(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Message
+		want bool
+	}{
+		{
+			name: "CompletedAdminNormalText",
+			msg: Message{
+				Status:       "COMPLETED",
+				ResponseText: "Here is your answer.",
+				Metadata:     MessageMetadata{IsAdmin: true},
+			},
+			want: true,
+		},
+		{
+			name: "NotCompleted",
+			msg: Message{
+				Status:       "PENDING",
+				ResponseText: "Here is your answer.",
+				Metadata:     MessageMetadata{IsAdmin: true},
+			},
+			want: false,
+		},
+		{
+			name: "NotAdmin",
+			msg: Message{
+				Status:       "COMPLETED",
+				ResponseText: "Here is your answer.",
+				Metadata:     MessageMetadata{IsAdmin: false},
+			},
+			want: false,
+		},
+		{
+			name: "BracketPrefix",
+			msg: Message{
+				Status:       "COMPLETED",
+				ResponseText: "[SILENT_TURN]",
+				Metadata:     MessageMetadata{IsAdmin: true},
+			},
+			want: false,
+		},
+		{
+			name: "EmptyResponseText",
+			msg: Message{
+				Status:       "COMPLETED",
+				ResponseText: "   ",
+				Metadata:     MessageMetadata{IsAdmin: true},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsExtractableAdminTurn(tc.msg)
+			if got != tc.want {
+				t.Fatalf("IsExtractableAdminTurn() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSQLStore_GetFactsMissingEmbeddings(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		limit        int
+		queryErr     error
+		rowSQL       string
+		wantErr      bool
+		wantCount    int
+		wantPatterns []string
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			wantErr: true,
+		},
+		{
+			name:     "QueryError",
+			queryErr: errors.New("query failed"),
+			wantErr:  true,
+		},
+		{
+			name:    "RowScanError",
+			rowSQL:  "SELECT 'not-an-int' AS id",
+			wantErr: true,
+		},
+		{
+			name:         "SuccessWithLimit",
+			limit:        5,
+			wantPatterns: []string{"SELECT id", "embedding IS NULL", "LIMIT 5"},
+		},
+		{
+			name:         "SuccessNoLimit",
+			limit:        0,
+			wantPatterns: []string{"SELECT id", "embedding IS NULL"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
+			}
+			facts, err := store.GetFactsMissingEmbeddings(ctx, tc.limit)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetFactsMissingEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			for _, pat := range tc.wantPatterns {
+				if !strings.Contains(captured, pat) {
+					t.Errorf("captured query missing %q: %s", pat, captured)
+				}
+			}
+			if tc.wantCount > 0 && len(facts) != tc.wantCount {
+				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestSQLStore_UpdateFactEmbedding(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		emb          []float32
+		execErr      error
+		rowsAffected int64
+		wantErr      bool
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			emb:     validEmb,
+			wantErr: true,
+		},
+		{
+			name:    "InvalidDimension",
+			emb:     []float32{1.0, 2.0},
+			wantErr: true,
+		},
+		{
+			name:    "ExecError",
+			emb:     validEmb,
+			execErr: errors.New("exec error"),
+			wantErr: true,
+		},
+		{
+			name:         "NotFoundZeroRows",
+			emb:          validEmb,
+			rowsAffected: 0,
+			wantErr:      true,
+		},
+		{
+			name:         "Success",
+			emb:          validEmb,
+			rowsAffected: 1,
+			wantErr:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:        dbMem,
+					execErr:      tc.execErr,
+					rowsAffected: tc.rowsAffected,
+				})
+			}
+			err := store.UpdateFactEmbedding(ctx, 42, tc.emb)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("UpdateFactEmbedding() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSQLStore_DecayAndPruneFacts(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		decayStep    float64
+		pruneFloor   float64
+		pruneAgeDays int
+		execErr      error
+		rowsAffected int64
+		wantErr      bool
+		wantDecayed  int64
+		wantPruned   int64
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			wantErr: true,
+		},
+		{
+			name:    "DecayExecError",
+			execErr: errors.New("decay failed"),
+			wantErr: true,
+		},
+		{
+			name:         "SuccessDefaults",
+			decayStep:    -1,
+			pruneFloor:   -1,
+			pruneAgeDays: -1,
+			rowsAffected: 3,
+			wantErr:      false,
+			wantDecayed:  3,
+			wantPruned:   3,
+		},
+		{
+			name:         "SuccessCustom",
+			decayStep:    0.1,
+			pruneFloor:   0.2,
+			pruneAgeDays: 30,
+			rowsAffected: 2,
+			wantErr:      false,
+			wantDecayed:  2,
+			wantPruned:   2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:        dbMem,
+					execErr:      tc.execErr,
+					rowsAffected: tc.rowsAffected,
+				})
+			}
+			decayed, pruned, err := store.DecayAndPruneFacts(ctx, tc.decayStep, tc.pruneFloor, tc.pruneAgeDays)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DecayAndPruneFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if decayed != tc.wantDecayed || pruned != tc.wantPruned {
+					t.Errorf("DecayAndPruneFacts() = (%d, %d), want (%d, %d)", decayed, pruned, tc.wantDecayed, tc.wantPruned)
+				}
+			}
+		})
+	}
+}
+
+func TestSQLStore_GetActiveConversationsForExtraction(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		activeHours  int
+		queryErr     error
+		rowSQL       string
+		wantErr      bool
+		wantPatterns []string
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			wantErr: true,
+		},
+		{
+			name:     "QueryError",
+			queryErr: errors.New("query failed"),
+			wantErr:  true,
+		},
+		{
+			name:    "RowScanError",
+			rowSQL:  "SELECT 12345 AS not_a_string",
+			wantErr: false,
+		},
+		{
+			name:         "SuccessDefaultHours",
+			activeHours:  -1,
+			wantPatterns: []string{"SELECT DISTINCT m.thread_id FROM messages m", "is_admin"},
+		},
+		{
+			name:         "SuccessCustomHours",
+			activeHours:  48,
+			wantPatterns: []string{"SELECT DISTINCT m.thread_id FROM messages m"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
+			}
+			threads, err := store.GetActiveConversationsForExtraction(ctx, tc.activeHours)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetActiveConversationsForExtraction() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			for _, pat := range tc.wantPatterns {
+				if !strings.Contains(captured, pat) {
+					t.Errorf("captured query missing %q: %s", pat, captured)
+				}
+			}
+			_ = threads
+		})
+	}
+}
+
+func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		threadID     string
+		queryErr     error
+		rowSQL       string
+		wantErr      bool
+		wantEmpty    bool
+		wantPatterns []string
+	}{
+		{
+			name:     "NilDBError",
+			nilDB:    true,
+			threadID: "th-1",
+			wantErr:  true,
+		},
+		{
+			name:      "EmptyThreadID",
+			threadID:  "   ",
+			wantErr:   false,
+			wantEmpty: true,
+		},
+		{
+			name:     "QueryError",
+			threadID: "th-1",
+			queryErr: errors.New("query error"),
+			wantErr:  true,
+		},
+		{
+			name:     "RowScanError",
+			threadID: "th-1",
+			rowSQL:   "SELECT 'id-only' AS id",
+			wantErr:  true,
+		},
+		{
+			name:         "Success",
+			threadID:     "th-1",
+			wantPatterns: []string{"m.thread_id = $1", "m.status = 'COMPLETED'", "is_admin"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
+			}
+			turns, err := store.GetUnextractedAdminTurns(ctx, tc.threadID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetUnextractedAdminTurns() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantEmpty && len(turns) != 0 {
+				t.Errorf("expected empty turns, got %d", len(turns))
+			}
+			for _, pat := range tc.wantPatterns {
+				if !strings.Contains(captured, pat) {
+					t.Errorf("captured query missing %q: %s", pat, captured)
+				}
+			}
+		})
+	}
+}
+
+func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		threadID     string
+		queryErr     error
+		rowSQL       string
+		wantErr      bool
+		wantPatterns []string
+		wantID       int64
+	}{
+		{
+			name:     "NilDBError",
+			nilDB:    true,
+			threadID: "th-1",
+			wantErr:  true,
+		},
+		{
+			name:     "EmptyThreadID",
+			threadID: "",
+			wantErr:  false,
+			wantID:   0,
+		},
+		{
+			name:     "QueryError",
+			threadID: "th-1",
+			queryErr: errors.New("scan error"),
+			wantErr:  true,
+		},
+		{
+			name:         "SuccessWithRow",
+			threadID:     "th-1",
+			rowSQL:       "SELECT 42 AS max_row_id",
+			wantPatterns: []string{"SELECT MAX(row_id) FROM messages WHERE thread_id = $1"},
+			wantID:       42,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
+			}
+			id, err := store.GetMaxMessageRowID(ctx, tc.threadID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetMaxMessageRowID() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && id != tc.wantID {
+				t.Errorf("GetMaxMessageRowID() = %d, want %d", id, tc.wantID)
+			}
+			for _, pat := range tc.wantPatterns {
+				if !strings.Contains(captured, pat) {
+					t.Errorf("captured query missing %q: %s", pat, captured)
+				}
+			}
+		})
+	}
+}
+
+func TestSQLStore_UpdateConversationFactWatermark(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		threadID     string
+		maxRowID     int64
+		execErr      error
+		wantErr      bool
+		wantPatterns []string
+	}{
+		{
+			name:     "NilDBError",
+			nilDB:    true,
+			threadID: "th-1",
+			wantErr:  true,
+		},
+		{
+			name:     "EmptyThreadID",
+			threadID: "",
+			wantErr:  false,
+		},
+		{
+			name:     "ExecError",
+			threadID: "th-1",
+			execErr:  errors.New("exec error"),
+			wantErr:  true,
+		},
+		{
+			name:         "Success",
+			threadID:     "th-1",
+			maxRowID:     99,
+			wantPatterns: []string{"INSERT INTO sessions (thread_id", "ON CONFLICT(thread_id) DO UPDATE"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					execErr:       tc.execErr,
+					capturedQuery: &captured,
+				})
+			}
+			err := store.UpdateConversationFactWatermark(ctx, tc.threadID, tc.maxRowID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("UpdateConversationFactWatermark() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			for _, pat := range tc.wantPatterns {
+				if !strings.Contains(captured, pat) {
+					t.Errorf("captured query missing %q: %s", pat, captured)
+				}
+			}
+		})
+	}
+}
+
+func TestSQLStore_FindNearestFacts(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+	emb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		emb          []float32
+		limit        int
+		minSim       float64
+		queryErr     error
+		rowSQL       string
+		wantErr      bool
+		wantPatterns []string
+		wantCount    int
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			emb:     emb,
+			wantErr: true,
+		},
+		{
+			name:      "InvalidEmbeddingDim",
+			emb:       []float32{1.0, 2.0},
+			wantErr:   false,
+			wantCount: 0,
+		},
+		{
+			name:     "QueryError",
+			emb:      emb,
+			queryErr: errors.New("nearest query error"),
+			wantErr:  true,
+		},
+		{
+			name:    "RowScanError",
+			emb:     emb,
+			rowSQL:  "SELECT 'invalid' AS id",
+			wantErr: true,
+		},
+		{
+			name:         "SuccessDefaults",
+			emb:          emb,
+			limit:        -1,
+			minSim:       -1,
+			wantPatterns: []string{"WITH candidates AS", "ORDER BY embedding <=> $1", "similarity >="},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
+			}
+			facts, err := store.FindNearestFacts(ctx, tc.emb, tc.limit, tc.minSim)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("FindNearestFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			for _, pat := range tc.wantPatterns {
+				if !strings.Contains(captured, pat) {
+					t.Errorf("captured query missing %q: %s", pat, captured)
+				}
+			}
+			if tc.wantCount > 0 && len(facts) != tc.wantCount {
+				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestHTTPBrainLLMClient(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		prompt     string
+		rawURL     string
+		wantErr    bool
+		wantResp   string
+	}{
+		{
+			name:       "Success200",
+			statusCode: http.StatusOK,
+			body:       `{"response":"extracted fact output"}`,
+			prompt:     "hello",
+			wantResp:   "extracted fact output",
+		},
+		{
+			name:       "Non200Status",
+			statusCode: http.StatusBadRequest,
+			body:       `error prompt too long`,
+			prompt:     "hello",
+			wantErr:    true,
+		},
+		{
+			name:       "InvalidJSONResponse",
+			statusCode: http.StatusOK,
+			body:       `not-json`,
+			prompt:     "hello",
+			wantErr:    true,
+		},
+		{
+			name:       "DefaultURLFallback",
+			statusCode: http.StatusOK,
+			rawURL:     "http://127.0.0.1:0/bad",
+			prompt:     "hello",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *httptest.Server
+			if tc.statusCode != 0 {
+				srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Content-Type") != "application/json" {
+						http.Error(w, "bad content type", http.StatusBadRequest)
+						return
+					}
+					var req brainLLMRequest
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					w.WriteHeader(tc.statusCode)
+					_, _ = w.Write([]byte(tc.body))
+				}))
+				defer srv.Close()
+			}
+
+			targetURL := tc.rawURL
+			if srv != nil {
+				targetURL = srv.URL
+			}
+			fn := HTTPBrainLLMClient(targetURL, nil)
+			resp, err := fn(ctx, tc.prompt)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HTTPBrainLLMClient() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && resp != tc.wantResp {
+				t.Errorf("resp = %q, want %q", resp, tc.wantResp)
+			}
+		})
+	}
+}
+
+func TestFormatExtractableTurns(t *testing.T) {
+	tests := []struct {
+		name      string
+		turns     []Message
+		wantEmpty bool
+		wantSub   string
+	}{
+		{
+			name:      "EmptyTurns",
+			turns:     nil,
+			wantEmpty: true,
+		},
+		{
+			name: "SkipEmptyContentAndResponse",
+			turns: []Message{
+				{Content: "   ", ResponseText: "   "},
+			},
+			wantEmpty: true,
+		},
+		{
+			name: "NormalTurns",
+			turns: []Message{
+				{Content: "What is my favorite tea?", ResponseText: "You love matcha latte."},
+			},
+			wantSub: "User: What is my favorite tea?\nAssistant: You love matcha latte.",
+		},
+		{
+			name: "TruncationOver20000Chars",
+			turns: []Message{
+				{Content: strings.Repeat("A", 15000), ResponseText: strings.Repeat("B", 10000)},
+			},
+			wantSub: "Assistant: ",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatExtractableTurns(tc.turns)
+			if tc.wantEmpty && got != "" {
+				t.Fatalf("expected empty, got %q", got)
+			}
+			if tc.wantSub != "" && !strings.Contains(got, tc.wantSub) {
+				t.Fatalf("expected output to contain %q, got length %d", tc.wantSub, len(got))
+			}
+		})
+	}
+}
+
+func TestParseFactsJSON(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		wantErr   bool
+		wantCount int
+	}{
+		{
+			name:    "EmptyRaw",
+			raw:     "   ",
+			wantErr: true,
+		},
+		{
+			name:    "NoJSONBrace",
+			raw:     "Just some plain text without braces",
+			wantErr: true,
+		},
+		{
+			name:    "InvalidJSON",
+			raw:     "Here is: {invalid_json}",
+			wantErr: true,
+		},
+		{
+			name:      "ValidJSON",
+			raw:       `{"facts":[{"action":"ADD","category":"user_preference","fact_text":"User likes green tea","importance_score":0.8}]}`,
+			wantErr:   false,
+			wantCount: 1,
+		},
+		{
+			name:      "ValidJSONWithPreamble",
+			raw:       "Sure, here are the extracted facts:\n```json\n{\"facts\":[{\"action\":\"DELETE\",\"delete_id\":10,\"category\":\"user_preference\",\"fact_text\":\"old fact\",\"importance_score\":0.5}]}\n```",
+			wantErr:   false,
+			wantCount: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := parseFactsJSON(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseFactsJSON() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && len(payload.Facts) != tc.wantCount {
+				t.Errorf("len(Facts) = %d, want %d", len(payload.Facts), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestBackfillMissingEmbeddings(t *testing.T) {
+	ctx := context.Background()
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
+		name         string
+		ctx          context.Context
+		nilStore     bool
+		nilClient    bool
+		storeFailOp  string
+		ollamaFail   bool
+		facts        []Fact
+		wantBackfill int
+		wantErr      bool
+	}{
+		{
+			name:     "NilStoreFails",
+			ctx:      ctx,
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:      "NilClientFails",
+			ctx:       ctx,
+			nilClient: true,
+			wantErr:   true,
+		},
+		{
+			name:        "StoreQueryFails",
+			ctx:         ctx,
+			storeFailOp: "GetFactsMissingEmbeddings",
+			wantErr:     true,
+		},
+		{
+			name:         "EmptyMissingList",
+			ctx:          ctx,
+			wantBackfill: 0,
+			wantErr:      false,
+		},
+		{
+			name: "SuccessBackfilling",
+			ctx:  ctx,
+			facts: []Fact{
+				{ID: 1, FactText: "Fact without embedding 1"},
+				{ID: 2, FactText: "   "},
+				{ID: 3, FactText: "Fact without embedding 2"},
+			},
+			wantBackfill: 2,
+		},
+		{
+			name:       "OllamaFailsContinues",
+			ctx:        ctx,
+			ollamaFail: true,
+			facts: []Fact{
+				{ID: 4, FactText: "Fact with failing ollama"},
+			},
+			wantBackfill: 0,
+		},
+		{
+			name:        "StoreUpdateFailsContinues",
+			ctx:         ctx,
+			storeFailOp: "UpdateFactEmbedding",
+			facts: []Fact{
+				{ID: 5, FactText: "Fact with failing store update"},
+			},
+			wantBackfill: 0,
+		},
+		{
+			name: "ContextCanceledAborts",
+			ctx:  canceledCtx,
+			facts: []Fact{
+				{ID: 6, FactText: "Fact canceled"},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store Store
+			if !tc.nilStore {
+				mem := newTestMemStore()
+				for _, f := range tc.facts {
+					mem.facts[f.ID] = &Fact{ID: f.ID, FactText: f.FactText}
+				}
+				if tc.storeFailOp != "" {
+					mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
+				}
+				store = mem
+			}
+
+			var client OllamaClient
+			if !tc.nilClient {
+				mockOllama := &MockOllamaClient{embedding: validEmb}
+				if tc.ollamaFail {
+					mockOllama.err = errors.New("ollama err")
+				}
+				client = mockOllama
+			}
+
+			count, err := BackfillMissingEmbeddings(tc.ctx, store, client)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("BackfillMissingEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && count != tc.wantBackfill {
+				t.Errorf("BackfillMissingEmbeddings() = %d, want %d", count, tc.wantBackfill)
+			}
+		})
+	}
+}
+
+func TestExtractActiveConversationFacts(t *testing.T) {
+	ctx := context.Background()
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
+		name          string
+		ctx           context.Context
+		nilStore      bool
+		nilClient     bool
+		nilLLM        bool
+		threads       []string
+		turns         []Message
+		storeFailOp   string
+		llmResp       string
+		llmErr        error
+		lockMutex     bool
+		seedNearest   bool
+		wantErr       bool
+		wantWatermark int64
+	}{
+		{
+			name:      "OverlappingExecutionSkipped",
+			ctx:       ctx,
+			threads:   []string{"th-overlap"},
+			lockMutex: true,
+			wantErr:   false,
+		},
+		{
+			name:     "NilStoreFails",
+			ctx:      ctx,
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:      "NilClientFails",
+			ctx:       ctx,
+			nilClient: true,
+			wantErr:   true,
+		},
+		{
+			name:    "NilLLMFails",
+			ctx:     ctx,
+			nilLLM:  true,
+			wantErr: true,
+		},
+		{
+			name:    "NoActiveThreads",
+			ctx:     ctx,
+			threads: nil,
+			wantErr: false,
+		},
+		{
+			name:        "GetActiveConversationsError",
+			ctx:         ctx,
+			storeFailOp: "GetActiveConversationsForExtraction",
+			wantErr:     true,
+		},
+		{
+			name:        "GetMaxMessageRowIDErrorContinues",
+			ctx:         ctx,
+			threads:     []string{"th-1"},
+			storeFailOp: "GetMaxMessageRowID",
+			wantErr:     false,
+		},
+		{
+			name:        "GetUnextractedAdminTurnsErrorContinues",
+			ctx:         ctx,
+			threads:     []string{"th-1"},
+			storeFailOp: "GetUnextractedAdminTurns",
+			wantErr:     false,
+		},
+		{
+			name:    "EmptyTranscriptMarksWatermark",
+			ctx:     ctx,
+			threads: []string{"th-empty"},
+			turns: []Message{
+				{Content: "   ", ResponseText: "   ", RowID: 15},
+			},
+			wantErr:       false,
+			wantWatermark: 15,
+		},
+		{
+			name:        "EmptyTranscriptWatermarkErrorContinues",
+			ctx:         ctx,
+			threads:     []string{"th-empty-err"},
+			turns:       []Message{{Content: " ", ResponseText: " ", RowID: 16}},
+			storeFailOp: "UpdateConversationFactWatermark",
+			wantErr:     false,
+		},
+		{
+			name:    "LLMCallFailsContinues",
+			ctx:     ctx,
+			threads: []string{"th-llm-fail"},
+			turns: []Message{
+				{Content: "turn 1", ResponseText: "resp 1", RowID: 20},
+			},
+			llmErr:  errors.New("llm down"),
+			wantErr: false,
+		},
+		{
+			name:    "ParseJSONFailsContinues",
+			ctx:     ctx,
+			threads: []string{"th-bad-json"},
+			turns: []Message{
+				{Content: "turn 1", ResponseText: "resp 1", RowID: 25},
+			},
+			llmResp: "invalid json string",
+			wantErr: false,
+		},
+		{
+			name:        "ExistingFactsIncludedInPrompt",
+			ctx:         ctx,
+			threads:     []string{"th-existing"},
+			turns:       []Message{{Content: "Alex lives in Oakland", ResponseText: "Recorded.", RowID: 28}},
+			seedNearest: true,
+			llmResp:     `{"facts":[]}`,
+			wantErr:     false,
+		},
+		{
+			name:    "FullReconciliationSuccess",
+			ctx:     ctx,
+			threads: []string{"th-full"},
+			turns: []Message{
+				{Content: "Alex's address is 6388 Shepherd Canyon Rd", ResponseText: "Got it.", RowID: 30},
+			},
+			llmResp: `{"facts":[
+				{"action":"ADD","category":"user_preference","fact_text":"Alex loves matcha latte","importance_score":0.9},
+				{"action":"UPDATE","supersedes_id":1,"category":"user_preference","fact_text":"Alex updated preference","importance_score":0.8},
+				{"action":"DELETE","delete_id":2,"category":"general","fact_text":"Obsolete fact"},
+				{"action":"NOOP"}
+			]}`,
+			wantErr:       false,
+			wantWatermark: 30,
+		},
+		{
+			name:    "ContextCanceledAborts",
+			ctx:     canceledCtx,
+			threads: []string{"th-cancel-1", "th-cancel-2"},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.lockMutex {
+				extractionMutex.Lock()
+				defer extractionMutex.Unlock()
+			}
+			var store Store
+			var memStore *TestMemStore
+			if !tc.nilStore {
+				memStore = newTestMemStore()
+				memStore.activeThreads = tc.threads
+				for _, tid := range tc.threads {
+					memStore.unextractedTurns[tid] = tc.turns
+					for _, trn := range tc.turns {
+						if trn.RowID > memStore.maxRowIDs[tid] {
+							memStore.maxRowIDs[tid] = trn.RowID
+						}
+					}
+				}
+				memStore.facts[1] = &Fact{ID: 1, Category: "user_preference", FactText: "Old preference"}
+				memStore.facts[2] = &Fact{ID: 2, Category: "general", FactText: "Obsolete fact"}
+				if tc.seedNearest {
+					memStore.facts[99] = &Fact{ID: 99, Category: "system_config", FactText: "Existing nearest fact"}
+					memStore.embeddings[99] = validEmb
+				}
+				if tc.storeFailOp != "" {
+					memStore.SetFail(tc.storeFailOp, errors.New("simulated error"))
+				}
+				store = memStore
+			}
+
+			var client OllamaClient
+			if !tc.nilClient {
+				client = &MockOllamaClient{embedding: validEmb}
+			}
+
+			var llm LLMClientFunc
+			if !tc.nilLLM {
+				llm = func(ctx context.Context, prompt string) (string, error) {
+					if tc.llmErr != nil {
+						return "", tc.llmErr
+					}
+					return tc.llmResp, nil
+				}
+			}
+
+			err := ExtractActiveConversationFacts(tc.ctx, store, client, llm, 24)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ExtractActiveConversationFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantWatermark > 0 && memStore != nil {
+				for _, tid := range tc.threads {
+					if memStore.watermarks[tid] != tc.wantWatermark {
+						t.Errorf("watermark for %s = %d, want %d", tid, memStore.watermarks[tid], tc.wantWatermark)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileExtractedFact(t *testing.T) {
+	ctx := context.Background()
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
+		name        string
+		item        ExtractedFactItem
+		ollamaErr   error
+		storeFailOp string
+		seedDup     bool
+	}{
+		{
+			name: "NOOPAction",
+			item: ExtractedFactItem{Action: "NOOP"},
+		},
+		{
+			name: "DeleteByDeleteID",
+			item: ExtractedFactItem{Action: "DELETE", DeleteID: 1},
+		},
+		{
+			name: "DeleteBySupersedesIDFallback",
+			item: ExtractedFactItem{Action: "DELETE", SupersedesID: 2},
+		},
+		{
+			name:        "DeleteErrorLogged",
+			item:        ExtractedFactItem{Action: "DELETE", DeleteID: 3},
+			storeFailOp: "DeleteFact",
+		},
+		{
+			name: "UpdateEmptyTextSkipped",
+			item: ExtractedFactItem{Action: "UPDATE", SupersedesID: 4, FactText: "  "},
+		},
+		{
+			name:      "UpdateEmbeddingErrorLogged",
+			item:      ExtractedFactItem{Action: "UPDATE", SupersedesID: 4, FactText: "Text"},
+			ollamaErr: errors.New("embedding failed"),
+		},
+		{
+			name: "UpdateNotFoundFallsBackToInsert",
+			item: ExtractedFactItem{Action: "UPDATE", SupersedesID: 999, FactText: "New text"},
+		},
+		{
+			name:        "UpdateStoreErrorLogged",
+			item:        ExtractedFactItem{Action: "UPDATE", SupersedesID: 5, FactText: "New text"},
+			storeFailOp: "UpdateFact",
+		},
+		{
+			name: "AddEmptyTextSkipped",
+			item: ExtractedFactItem{Action: "ADD", FactText: "  "},
+		},
+		{
+			name:      "AddEmbeddingErrorLogged",
+			item:      ExtractedFactItem{Action: "ADD", FactText: "New fact"},
+			ollamaErr: errors.New("embedding error"),
+		},
+		{
+			name:    "AddDuplicateReinforces",
+			item:    ExtractedFactItem{Action: "ADD", FactText: "Duplicate text"},
+			seedDup: true,
+		},
+		{
+			name:        "AddInsertErrorLogged",
+			item:        ExtractedFactItem{Action: "ADD", FactText: "Failing insert"},
+			storeFailOp: "InsertFact",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			mem.facts[1] = &Fact{ID: 1, FactText: "F1"}
+			mem.facts[2] = &Fact{ID: 2, FactText: "F2"}
+			mem.facts[4] = &Fact{ID: 4, FactText: "F4"}
+			mem.facts[5] = &Fact{ID: 5, FactText: "F5"}
+
+			if tc.seedDup {
+				mem.facts[10] = &Fact{ID: 10, FactText: "Duplicate text", Importance: 0.8}
+				mem.embeddings[10] = validEmb
+			}
+			if tc.storeFailOp != "" {
+				mem.SetFail(tc.storeFailOp, errors.New("fail"))
+			}
+
+			mockClient := &MockOllamaClient{embedding: validEmb, err: tc.ollamaErr}
+			reconcileExtractedFact(ctx, mem, mockClient, tc.item)
+		})
+	}
+}
+
+func TestWorker_LifecycleAndTick(t *testing.T) {
+	ctx := context.Background()
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
+		name       string
+		tick       int64
+		nilStore   bool
+		nilOllama  bool
+		nilLLM     bool
+		storeFail  string
+		wantDecay  bool
+		wantHourly bool
+	}{
+		{
+			name:       "Tick0HourlyExtractionAndBackfill",
+			tick:       0,
+			wantHourly: true,
+		},
+		{
+			name:       "Tick120HourlyExtractionAndBackfill",
+			tick:       120,
+			wantHourly: true,
+		},
+		{
+			name:      "Tick60DailyDecay",
+			tick:      60,
+			wantDecay: true,
+		},
+		{
+			name:      "Tick2940DailyDecay",
+			tick:      2940,
+			wantDecay: true,
+		},
+		{
+			name: "Tick1Noop",
+			tick: 1,
+		},
+		{
+			name:     "NilStoreSafe",
+			tick:     0,
+			nilStore: true,
+		},
+		{
+			name:      "NilOllamaSafe",
+			tick:      0,
+			nilOllama: true,
+		},
+		{
+			name:   "NilLLMSafe",
+			tick:   0,
+			nilLLM: true,
+		},
+		{
+			name:      "DecayErrorHandled",
+			tick:      60,
+			storeFail: "DecayAndPruneFacts",
+			wantDecay: true,
+		},
+		{
+			name:     "DailyDecayNilStore",
+			tick:     60,
+			nilStore: true,
+		},
+		{
+			name:       "HourlyBackfillErrorHandled",
+			tick:       0,
+			storeFail:  "GetFactsMissingEmbeddings",
+			wantHourly: true,
+		},
+		{
+			name:       "HourlyExtractionErrorHandled",
+			tick:       0,
+			storeFail:  "GetActiveConversationsForExtraction",
+			wantHourly: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			if tc.storeFail != "" {
+				mem.SetFail(tc.storeFail, errors.New("store err"))
+			}
+			var store Store = mem
+			if tc.nilStore {
+				store = nil
+			}
+			var client OllamaClient = &MockOllamaClient{embedding: validEmb}
+			if tc.nilOllama {
+				client = nil
+			}
+			var llm LLMClientFunc = func(ctx context.Context, prompt string) (string, error) {
+				return `{"facts":[]}`, nil
+			}
+			if tc.nilLLM {
+				llm = nil
+			}
+
+			w := NewWorker(WorkerConfig{
+				Store:        store,
+				Ollama:       client,
+				LLMClient:    llm,
+				InitialDelay: 0,
+				TickInterval: -1,
+			})
+
+			w.Tick(ctx, tc.tick)
+		})
+	}
+}
+
+func TestWorker_Start(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name         string
+		initialDelay time.Duration
+		ctx          context.Context
+	}{
+		{
+			name:         "CancelDuringInitialDelay",
+			initialDelay: 10 * time.Minute,
+			ctx:          canceledCtx,
+		},
+		{
+			name:         "CancelWithZeroDelay",
+			initialDelay: 0,
+			ctx:          canceledCtx,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewWorker(WorkerConfig{
+				InitialDelay: tc.initialDelay,
+				TickInterval: 10 * time.Millisecond,
+			})
+			err := w.Start(tc.ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Start() err = %v, want context.Canceled", err)
 			}
 		})
 	}

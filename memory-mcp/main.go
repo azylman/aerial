@@ -35,6 +35,22 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	toolHandler := NewToolHandler(cfg, store, ollama)
 	server := NewServer(toolHandler)
 
+	worker := NewWorker(WorkerConfig{
+		Store:        store,
+		Ollama:       ollama,
+		LLMClient:    HTTPBrainLLMClient(cfg.BrainLLMURL, nil),
+		InitialDelay: DefaultWorkerInitialDelay,
+		TickInterval: DefaultWorkerTickInterval,
+	})
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
+
+	go func() {
+		if err := worker.Start(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[Memory Worker] Background worker exited: %v", err)
+		}
+	}()
+
 	httpServer := &http.Server{
 		Addr:    ":" + port,
 		Handler: server.Routes(),
