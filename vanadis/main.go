@@ -142,12 +142,19 @@ type RiverInserter interface {
 	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
 }
 
+func capChunkEffort(effort string) string {
+	if strings.EqualFold(strings.TrimSpace(effort), "low") {
+		return "low"
+	}
+	return "medium"
+}
+
 func normalizeChunkEffort(effort string) (string, error) {
-	switch t := strings.ToLower(strings.TrimSpace(effort)); t {
-	case "", "medium":
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "", "medium", "high":
 		return "medium", nil
-	case "low", "high":
-		return t, nil
+	case "low":
+		return "low", nil
 	default:
 		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
 	}
@@ -376,7 +383,7 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 			c.StartedAt = startedAt.Time
 		}
 		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
-		c.Effort = firstNonEmpty(c.Effort, "medium")
+		c.Effort = capChunkEffort(c.Effort)
 		chunks = append(chunks, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -731,7 +738,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return fmt.Errorf("format chunk prompt: %w", err)
 	}
 	reqPayload := BrainPromptRequest{
-		ChannelID: build.ThreadID, Prompt: prompt, Effort: firstNonEmpty(strings.TrimSpace(chunk.Effort), "medium"),
+		ChannelID: build.ThreadID, Prompt: prompt, Effort: capChunkEffort(chunk.Effort),
 		Silent: true, VanadisChunkID: strings.TrimSpace(chunk.ID),
 	}
 	if err := s.dispatchBrainPrompt(ctx, reqPayload); err != nil {
