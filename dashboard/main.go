@@ -234,7 +234,7 @@ type FactItem struct {
 	ID               int64     `json:"id"`
 	FactText         string    `json:"fact_text"`
 	ReinforceCount   int       `json:"reinforce_count"`
-	LastReinforcedAt time.Time `json:"last_reinforced_at,omitempty"`
+	LastReinforcedAt time.Time `json:"last_reinforced_at,omitzero"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 

@@ -264,6 +264,28 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
         });
     });
 
+    describe('formatTimeAgo(dateStr)', () => {
+        it('formats valid relative time for recent timestamps', () => {
+            const now = Date.now();
+            assert.equal(formatTimeAgo(new Date(now - 10 * 1000).toISOString()), '10s AGO');
+            assert.equal(formatTimeAgo(new Date(now - 120 * 1000).toISOString()), '2m AGO');
+            assert.equal(formatTimeAgo(new Date(now - 7200 * 1000).toISOString()), '2h AGO');
+            assert.equal(formatTimeAgo(new Date(now - 172800 * 1000).toISOString()), '2d AGO');
+        });
+
+        it('returns RECENT for Go zero-time and pre-2020 dates', () => {
+            assert.equal(formatTimeAgo('0001-01-01T00:00:00Z'), 'RECENT');
+            assert.equal(formatTimeAgo('1970-01-01T00:00:00Z'), 'RECENT');
+        });
+
+        it('returns RECENT for null, undefined, empty, or invalid date', () => {
+            assert.equal(formatTimeAgo(null), 'RECENT');
+            assert.equal(formatTimeAgo(undefined), 'RECENT');
+            assert.equal(formatTimeAgo(''), 'RECENT');
+            assert.equal(formatTimeAgo('invalid-date'), 'RECENT');
+        });
+    });
+
     describe('Deployment Pipeline Link & Header Invariants', () => {
         it('verifies app.js no longer renders deploy-service-name header', () => {
             assert.equal(appJsCode.includes('deploy-service-name'), false, 'Found deploy-service-name in app.js');
@@ -677,13 +699,15 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 const facts = [
                     { id: 1, fact_text: 'older', reinforce_count: 3, created_at: '2026-09-04T12:00:00Z' },
                     { id: 2, fact_text: 'newer reinforced', reinforce_count: 3, last_reinforced_at: '2026-09-06T12:00:00Z', created_at: '2026-09-01T12:00:00Z' },
-                    { id: 3, fact_text: 'newer created', reinforce_count: 3, created_at: '2026-09-05T12:00:00Z' }
+                    { id: 3, fact_text: 'newer created', reinforce_count: 3, created_at: '2026-09-05T12:00:00Z' },
+                    { id: 4, fact_text: 'zero reinforced time falls back to created_at', reinforce_count: 3, last_reinforced_at: '0001-01-01T00:00:00Z', created_at: '2026-09-07T12:00:00Z' }
                 ];
 
                 const sorted = facts.slice().sort(compareFactsImportanceDesc);
-                assert.equal(sorted[0].id, 2);
-                assert.equal(sorted[1].id, 3);
-                assert.equal(sorted[2].id, 1);
+                assert.equal(sorted[0].id, 4);
+                assert.equal(sorted[1].id, 2);
+                assert.equal(sorted[2].id, 3);
+                assert.equal(sorted[3].id, 1);
             });
 
             it('applies tertiary tie-breaking by numeric and alphanumeric ID (id DESC)', () => {
@@ -731,14 +755,14 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
                 const filtered = vm.runInContext(`
                     memoryState.facts = [
-                        { id: 10, fact_text: 'Alex prefers dark mode', reinforce_count: 2 },
-                        { id: 20, fact_text: 'Alex loves matcha latte', reinforce_count: 5 },
+                        { id: 10, fact_text: 'User prefers dark mode', reinforce_count: 2 },
+                        { id: 20, fact_text: 'User loves matcha latte', reinforce_count: 5 },
                         { id: 30, fact_text: 'Ollama model setting', reinforce_count: 1 },
-                        { id: 40, fact_text: 'Alex drinks espresso', reinforce_count: 3 }
+                        { id: 40, fact_text: 'User drinks espresso', reinforce_count: 3 }
                     ].sort(compareFactsImportanceDesc);
 
                     memoryState.selectedCategory = 'REINFORCED';
-                    memoryState.searchQuery = 'alex';
+                    memoryState.searchQuery = 'user';
                     applyFilters();
                     memoryState.filteredFacts;
                 `, sandbox);

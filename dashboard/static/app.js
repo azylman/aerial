@@ -794,8 +794,8 @@ function compareFactsImportanceDesc(a, b) {
     const countB = parseFactReinforceCount(b ? (b.reinforce_count !== undefined ? b.reinforce_count : b.importance) : null);
     if (countB !== countA) return countB - countA;
 
-    const timeA = a ? (a.last_reinforced_at || a.created_at) : null;
-    const timeB = b ? (b.last_reinforced_at || b.created_at) : null;
+    const timeA = (a && parseValidTimestampMs(a.last_reinforced_at)) ? a.last_reinforced_at : (a ? a.created_at : null);
+    const timeB = (b && parseValidTimestampMs(b.last_reinforced_at)) ? b.last_reinforced_at : (b ? b.created_at : null);
     const dateA = timeA ? (parseValidTimestampMs(timeA) || 0) : 0;
     const dateB = timeB ? (parseValidTimestampMs(timeB) || 0) : 0;
     if (dateB !== dateA) return dateB - dateA;
@@ -999,7 +999,8 @@ function renderFactCards() {
     grid.innerHTML = memoryState.filteredFacts.map((f, idx) => {
         const reinforceCount = parseFactReinforceCount(f ? (f.reinforce_count !== undefined ? f.reinforce_count : f.importance) : null);
         const isHigh = reinforceCount >= 2;
-        const timeAgo = formatTimeAgo(f.last_reinforced_at || f.created_at);
+        const effectiveTime = (f && parseValidTimestampMs(f.last_reinforced_at)) ? f.last_reinforced_at : (f ? f.created_at : null);
+        const timeAgo = formatTimeAgo(effectiveTime);
         const rawText = f.fact_text || '';
         const highlightedText = query ? highlightSearch(rawText, query) : escapeHtml(rawText);
 
@@ -1033,9 +1034,9 @@ function highlightSearch(text, query) {
 
 function formatTimeAgo(dateStr) {
     if (!dateStr) return 'RECENT';
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) return 'RECENT';
-    const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+    const validMs = parseValidTimestampMs(typeof dateStr === 'string' ? dateStr : (dateStr.toISOString ? dateStr.toISOString() : String(dateStr)));
+    if (!validMs) return 'RECENT';
+    const sec = Math.max(0, Math.floor((Date.now() - validMs) / 1000));
     if (sec < 60) return `${sec}s AGO`;
     const min = Math.floor(sec / 60);
     if (min < 60) return `${min}m AGO`;

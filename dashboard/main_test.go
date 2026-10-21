@@ -450,6 +450,7 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 		target             string
 		wantStatus         int
 		wantBodySubstr     []string
+		wantBodyNotSubstr  []string
 		wantForwardedLimit string
 		wantMaxQRunes      int
 	}{
@@ -459,7 +460,7 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			method:         http.MethodGet,
 			target:         "/api/facts?limit=25&q=dark%20mode",
 			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"User prefers dark mode"},
+			wantBodySubstr: []string{"User prefers dark mode", `"last_reinforced_at":`},
 		},
 		{
 			name:               "Success_UnlimitedDefault",
@@ -467,6 +468,7 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			method:             http.MethodGet,
 			target:             "/api/facts",
 			wantStatus:         http.StatusOK,
+			wantBodyNotSubstr:  []string{`"last_reinforced_at"`},
 			wantForwardedLimit: "none",
 		},
 		{
@@ -537,6 +539,11 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			for _, sub := range tt.wantBodySubstr {
 				if !strings.Contains(bodyStr, sub) {
 					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+				}
+			}
+			for _, sub := range tt.wantBodyNotSubstr {
+				if strings.Contains(bodyStr, sub) {
+					t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
 				}
 			}
 			if tt.wantForwardedLimit != "" {
