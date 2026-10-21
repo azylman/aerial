@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -78,6 +80,90 @@ type FactsResult struct {
 	Status string `json:"status,omitempty"`
 }
 
+// MessageMetadata stores structured Discord and source metadata preserved throughout the lifecycle.
+type MessageMetadata struct {
+	ChannelID         string   `json:"channel_id,omitempty"`
+	ChannelName       string   `json:"channel_name,omitempty"`
+	TargetThreadID    string   `json:"target_thread_id,omitempty"`
+	ThreadName        string   `json:"thread_name,omitempty"`
+	GuildID           string   `json:"guild_id,omitempty"`
+	AuthorUsername    string   `json:"author_username,omitempty"`
+	AuthorGlobalName  string   `json:"author_global_name,omitempty"`
+	AuthorBot         bool     `json:"author_bot,omitempty"`
+	IsAdmin           bool     `json:"is_admin,omitempty"`
+	Mentions          []string `json:"mentions,omitempty"`
+	MentionUserIDs    []string `json:"mention_user_ids,omitempty"`
+	MentionRoleIDs    []string `json:"mention_role_ids,omitempty"`
+	ReplyingToAuthor  string   `json:"replying_to_author,omitempty"`
+	ReplyingToContent string   `json:"replying_to_content,omitempty"`
+	Attachments       []string `json:"attachments,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	Silent            bool     `json:"silent,omitempty"`
+	VanadisChunkID    string   `json:"vanadis_chunk_id,omitempty"`
+}
+
+// IsEmpty returns true if all metadata fields are zero/empty.
+func (m MessageMetadata) IsEmpty() bool {
+	return m.ChannelID == "" && m.ChannelName == "" && m.TargetThreadID == "" && m.ThreadName == "" &&
+		m.GuildID == "" && m.AuthorUsername == "" && m.AuthorGlobalName == "" && !m.AuthorBot && !m.IsAdmin &&
+		len(m.Mentions) == 0 && len(m.MentionUserIDs) == 0 && len(m.MentionRoleIDs) == 0 &&
+		m.ReplyingToAuthor == "" && m.ReplyingToContent == "" && len(m.Attachments) == 0 &&
+		m.Model == "" && !m.Silent && m.VanadisChunkID == ""
+}
+
+// Value implements driver.Valuer for PostgreSQL JSONB.
+func (m MessageMetadata) Value() (driver.Value, error) {
+	if m.IsEmpty() {
+		return "{}", nil
+	}
+	bytes, err := json.Marshal(m)
+	return string(bytes), err
+}
+
+// Scan implements sql.Scanner for PostgreSQL JSONB.
+func (m *MessageMetadata) Scan(src any) error {
+	if src == nil {
+		*m = MessageMetadata{}
+		return nil
+	}
+	var data []byte
+	switch v := src.(type) {
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	default:
+		return fmt.Errorf("cannot scan type %T into MessageMetadata", src)
+	}
+	if len(data) == 0 || string(data) == "{}" || string(data) == "null" {
+		*m = MessageMetadata{}
+		return nil
+	}
+	return json.Unmarshal(data, m)
+}
+
+// Message represents a stored turn message.
+type Message struct {
+	ID           string          `json:"id"`
+	RowID        int64           `json:"row_id,omitempty"`
+	ThreadID     string          `json:"thread_id"`
+	Content      string          `json:"content"`
+	ResponseText string          `json:"response_text,omitempty"`
+	Status       string          `json:"status"`
+	Metadata     MessageMetadata `json:"metadata"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+// IsExtractableAdminTurn returns true if the message is completed, from an admin, and has non-empty, non-bracket response text.
+func IsExtractableAdminTurn(m Message) bool {
+	if m.Status != "COMPLETED" || !m.Metadata.IsAdmin {
+		return false
+	}
+	resp := strings.TrimSpace(m.ResponseText)
+	return resp != "" && !strings.HasPrefix(resp, "[")
+}
+
 // DBTX abstracts common SQL execution methods shared by *sql.DB and *sql.Tx.
 type DBTX interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -94,6 +180,14 @@ type Store interface {
 	FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error)
 	SearchCandidateFacts(ctx context.Context, embedding []float32, queryText, category string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
+	GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error)
+	UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error
+	DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (decayedCount, prunedCount int64, err error)
+	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
+	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
+	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
+	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
+	FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error)
 	Close() error
 }
 
@@ -609,6 +703,276 @@ func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*
 		Offset: filter.Offset,
 		Status: "ok",
 	}, rows.Err()
+}
+
+func scanFacts(rows *sql.Rows) ([]Fact, error) {
+	if rows == nil {
+		return nil, nil
+	}
+	var facts []Fact
+	for rows.Next() {
+		var f Fact
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(
+			&f.ID, &f.Category, &f.FactText, &f.Importance,
+			&createdAt, &lastReinforced, &lastDecayed,
+			&f.ReinforceCount,
+		); err != nil {
+			return nil, err
+		}
+		f.CreatedAt, f.LastReinforcedAt, f.LastDecayedAt = createdAt.Time, lastReinforced.Time, lastDecayed.Time
+		facts = append(facts, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return facts, nil
+}
+
+// GetFactsMissingEmbeddings retrieves facts lacking vector embeddings.
+func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	query := "SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts WHERE embedding IS NULL ORDER BY id ASC"
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := s.db.QueryContext(queryCtx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	facts, err := scanFacts(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan fact missing embedding: %w", err)
+	}
+	return facts, nil
+}
+
+// UpdateFactEmbedding updates the vector embedding for an existing fact.
+func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if len(embedding) != ExpectedEmbeddingDim {
+		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	vec := pgvector.NewVector(embedding)
+	res, err := s.db.ExecContext(queryCtx, "UPDATE facts SET embedding = $1 WHERE id = $2", vec, id)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrFactNotFound
+	}
+	return nil
+}
+
+// DecayAndPruneFacts applies decay to untouched facts and removes stale facts.
+func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep, pruneFloor float64, pruneAgeDays int) (decayedCount, prunedCount int64, err error) {
+	if err = s.checkDB(); err != nil {
+		return 0, 0, err
+	}
+	if decayStep <= 0 {
+		decayStep = 0.05
+	}
+	if pruneFloor <= 0 {
+		pruneFloor = 0.15
+	}
+	if pruneAgeDays <= 0 {
+		pruneAgeDays = 14
+	}
+
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	decayQuery := `UPDATE facts SET importance = GREATEST(0.0, ROUND((importance - $1)::numeric, 2)), last_decayed_at = $2
+		WHERE (last_decayed_at IS NULL OR last_decayed_at < $3) AND (last_reinforced_at IS NULL OR last_reinforced_at < $3) AND importance > 0.0`
+	resDecay, err := s.db.ExecContext(queryCtx, decayQuery, decayStep, now, now.Add(-24*time.Hour))
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
+	}
+	if n, err := resDecay.RowsAffected(); err == nil {
+		decayedCount = n
+	}
+
+	pruneQuery := `DELETE FROM facts WHERE importance <= $1 AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)`
+	resPrune, err := s.db.ExecContext(queryCtx, pruneQuery, pruneFloor, now.AddDate(0, 0, -pruneAgeDays))
+	if err != nil {
+		return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
+	}
+	if n, err := resPrune.RowsAffected(); err == nil {
+		prunedCount = n
+	}
+	return decayedCount, prunedCount, nil
+}
+
+// GetActiveConversationsForExtraction finds threads with unextracted admin turns in the past activeHours.
+func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	if activeHours <= 0 {
+		activeHours = 24
+	}
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	query := `SELECT DISTINCT m.thread_id FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id
+	WHERE m.thread_id != '' AND m.created_at >= $1 AND m.status = 'COMPLETED' AND COALESCE(TRIM(m.response_text), '') != '' AND TRIM(m.response_text) NOT LIKE '[%%'
+	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid) AND (m.metadata->>'is_admin')::boolean IS TRUE ORDER BY m.thread_id LIMIT 20`
+	rows, err := s.db.QueryContext(queryCtx, query, time.Now().UTC().Add(-time.Duration(activeHours)*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var threadIDs []string
+	for rows.Next() {
+		var tid string
+		if err := rows.Scan(&tid); err != nil {
+			return nil, err
+		}
+		if tid = strings.TrimSpace(tid); tid != "" {
+			threadIDs = append(threadIDs, tid)
+		}
+	}
+	return threadIDs, rows.Err()
+}
+
+// GetUnextractedAdminTurns retrieves completed admin turns for threadID that haven't been extracted.
+func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	if threadID = strings.TrimSpace(threadID); threadID == "" {
+		return nil, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `SELECT m.id, m.row_id, m.thread_id, m.content, COALESCE(m.response_text, ''), m.status, m.metadata FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id
+	WHERE m.thread_id = $1 AND m.status = 'COMPLETED' AND COALESCE(TRIM(m.response_text), '') != '' AND TRIM(m.response_text) NOT LIKE '[%%'
+	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid) AND (m.metadata->>'is_admin')::boolean IS TRUE ORDER BY m.row_id ASC LIMIT 50`
+
+	rows, err := s.db.QueryContext(queryCtx, query, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var turns []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.Content, &m.ResponseText, &m.Status, &m.Metadata); err != nil {
+			return nil, err
+		}
+		if IsExtractableAdminTurn(m) {
+			turns = append(turns, m)
+		}
+	}
+	return turns, rows.Err()
+}
+
+// GetMaxMessageRowID returns the maximum row ID of completed messages for a thread.
+func (s *SQLStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, err
+	}
+	if threadID == "" {
+		return 0, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var maxRowID sql.NullInt64
+	err := s.db.QueryRowContext(queryCtx, `SELECT MAX(row_id) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED'`, threadID).Scan(&maxRowID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	return maxRowID.Int64, nil
+}
+
+// UpdateConversationFactWatermark updates or inserts watermark for thread fact extraction.
+func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if threadID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `INSERT INTO sessions (thread_id, internal_session_id, last_extracted_rowid, fact_extracted_at, created_at, updated_at) VALUES ($1, '', $2, $3, $4, $5)
+	ON CONFLICT(thread_id) DO UPDATE SET last_extracted_rowid = CASE WHEN EXCLUDED.last_extracted_rowid > sessions.last_extracted_rowid THEN EXCLUDED.last_extracted_rowid ELSE sessions.last_extracted_rowid END, fact_extracted_at = EXCLUDED.fact_extracted_at, updated_at = EXCLUDED.updated_at`
+	_, err := s.db.ExecContext(queryCtx, query, threadID, maxRowID, now, now, now)
+	return err
+}
+
+// FindNearestFacts returns top-K facts with cosine similarity >= minSim.
+func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	if len(embedding) != ExpectedEmbeddingDim {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if minSim <= 0 {
+		minSim = 0.60
+	}
+	candidateLimit := limit * 3
+	if candidateLimit < 15 {
+		candidateLimit = 15
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `WITH candidates AS (
+		SELECT id, category, fact_text, importance, created_at,
+		       COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
+		       COALESCE(last_decayed_at, created_at) AS last_decayed_at,
+		       COALESCE(reinforce_count, 1) AS reinforce_count,
+		       (1.0 - (embedding <=> $1)) AS similarity
+		FROM facts
+		WHERE embedding IS NOT NULL
+		ORDER BY embedding <=> $1
+		LIMIT $2
+	)
+	SELECT id, category, fact_text, importance, created_at, last_reinforced_at, last_decayed_at, reinforce_count
+	FROM candidates
+	WHERE similarity >= $3
+	ORDER BY similarity DESC
+	LIMIT $4;`
+
+	rows, err := s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, minSim, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find nearest facts: %w", err)
+	}
+	defer rows.Close()
+
+	facts, err := scanFacts(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan nearest fact: %w", err)
+	}
+	return facts, nil
 }
 
 // InitDB initializes database connection based on config.
